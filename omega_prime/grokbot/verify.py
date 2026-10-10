@@ -33,6 +33,8 @@ from mcp.client import Client
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 
+from omega_prime.grokbot.audit import redact_sensitive
+from omega_prime.grokbot.secret_guard import SecretLeakError, assert_no_secrets
 from omega_prime.grokbot.telemetry import parse_traceparent
 from omega_prime.tooling.fs import read_secret_file
 
@@ -50,6 +52,12 @@ _TRANSPORT_STEPS: tuple[tuple[str, str], ...] = (
 )
 _SSE_ACCEPT = "application/json, text/event-stream"
 _PRE_RUN_MARKERS = ("missing required arguments", "unexpected arguments")
+#: Fixed artifact-guard label for every verifier diagnostic publication.
+_VERIFIER_GUARD_LABEL = "verifier"
+
+#: Fixed safe detail published when the secret gate trips. A short literal
+#: with no excerpts, so it carries no secret bytes by construction.
+_VERIFIER_SAFE_DETAIL = "verifier: diagnostic withheld (secret gate tripped)"
 
 
 class _UsageError(Exception):
@@ -130,6 +138,130 @@ def _one_line(text: str, limit: int = _DETAIL_LIMIT) -> str:
     return flat[: limit - 3] + "..."
 
 
+def _scrub_detail(detail: str, secrets: Sequence[str]) -> tuple[str, bool]:
+    """Redact and gate the FULL `detail` before any flatten/clip.
+
+    Known-minted secrets and audit-shaped credentials are scrubbed from the
+    FULL text first; the unchanged ``assert_no_secrets`` gate then runs on
+    that FULL redacted text BEFORE ``_one_line`` flattens/clips, so a
+    scanner-only fragment (generic high-entropy token, short ``omk_`` form,
+    PEM armour) straddling the clip edge cannot be truncated into a
+    publishable fragment the gate would no longer recognise. Returns the
+    publishable text and whether the gate tripped: on a trip only the fixed
+    safe label is published and the caller must retain a failed/non-success
+    outcome. The same unchanged gate still runs on the clipped result as
+    defense in depth.
+    """
+    text = detail
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    redacted = redact_sensitive(text)
+    try:
+        assert_no_secrets(redacted, _VERIFIER_GUARD_LABEL)
+    except SecretLeakError:
+        return _VERIFIER_SAFE_DETAIL, True
+    clipped = _one_line(redacted)
+    try:
+        assert_no_secrets(clipped, _VERIFIER_GUARD_LABEL)
+    except SecretLeakError:
+        return _VERIFIER_SAFE_DETAIL, True
+    return clipped, False
+
+
+def _gate_metadata(value: str, secrets: Sequence[str]) -> tuple[str, bool]:
+    """Gate a metadata string on its FULL value without clipping.
+
+    Metadata (``base_url``, ``server_version``) is published verbatim on the
+    success path, so unlike check details it is never clipped; on a gate
+    trip only the fixed safe label is published.
+    """
+    text = value
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    redacted = redact_sensitive(text)
+    try:
+        assert_no_secrets(redacted, _VERIFIER_GUARD_LABEL)
+    except SecretLeakError:
+        return _VERIFIER_SAFE_DETAIL, True
+    return redacted, False
+
+
+def _safe_error_text(text: str, secrets: Sequence[str]) -> str:
+    """Gate a CLI error diagnostic on its FULL text before printing.
+
+    Usage/transport errors echo the offending URL or env-var label; when the
+    unchanged ``assert_no_secrets`` gate trips on that FULL text, only the
+    fixed safe label is published. Clean diagnostics are returned unchanged
+    (never clipped), so usage errors keep their exact wording.
+    """
+    cleaned = text
+    for secret in secrets:
+        if secret:
+            cleaned = cleaned.replace(secret, "[redacted]")
+    redacted = redact_sensitive(cleaned)
+    try:
+        assert_no_secrets(redacted, _VERIFIER_GUARD_LABEL)
+    except SecretLeakError:
+        return _VERIFIER_SAFE_DETAIL
+    return redacted
+
+
+def sanitize_report_for_publication(
+    report: VerifyReport, secrets: Sequence[str] = ()
+) -> VerifyReport:
+    """Return a publishable copy of `report` with every field gated on its FULL value.
+
+    Each check detail is re-gated on its FULL stored value (defense in depth
+    behind ``_Runner._add``); ``base_url``/``server_version`` metadata is
+    gated verbatim. A gate trip publishes only the fixed safe label and
+    coerces the outcome to failed -- a metadata trip appends a ``fail`` gate
+    check so ``ok`` cannot stay true. Clean reports are returned unchanged in
+    shape and content.
+    """
+    known = list(secrets)
+    checks: list[Check] = []
+    for check in report.checks:
+        cleaned, tripped = _scrub_detail(check.detail, known)
+        status = check.status
+        if tripped and status != "fail":
+            status = "fail"
+        checks.append(Check(check.id, check.title, status, cleaned, check.duration_ms))
+    base_url = report.base_url
+    server_version = report.server_version
+    metadata_tripped = False
+    gated_base, tripped = _gate_metadata(base_url, known)
+    if tripped:
+        base_url = _VERIFIER_SAFE_DETAIL
+        metadata_tripped = True
+    else:
+        base_url = gated_base
+    if server_version is not None:
+        gated_version, tripped = _gate_metadata(server_version, known)
+        if tripped:
+            server_version = _VERIFIER_SAFE_DETAIL
+            metadata_tripped = True
+        else:
+            server_version = gated_version
+    if metadata_tripped:
+        checks.append(
+            Check(
+                "verifier:publication_gate",
+                "Publication gate",
+                "fail",
+                _VERIFIER_SAFE_DETAIL,
+                0.0,
+            )
+        )
+    return VerifyReport(
+        base_url=base_url,
+        checks=checks,
+        server_version=server_version,
+        reachable=report.reachable,
+    )
+
+
 def _result_text(result: Any) -> str:
     parts: list[str] = []
     for part in getattr(result, "content", ()) or ():
@@ -201,10 +333,8 @@ class _Runner:
         self._secrets = _secret_values(token, admin_token)
 
     def _clean(self, detail: str) -> str:
-        text = detail
-        for secret in self._secrets:
-            text = text.replace(secret, "[redacted]")
-        return _one_line(text)
+        cleaned, _tripped = _scrub_detail(detail, self._secrets)
+        return cleaned
 
     def _add(
         self, check_id: str, title: str, status: str, detail: str, started: float
@@ -212,8 +342,11 @@ class _Runner:
         if status not in ("pass", "fail", "skip"):
             detail = f"bad status {status}: {detail}"
             status = "fail"
+        cleaned, tripped = _scrub_detail(detail, self._secrets)
+        if tripped and status != "fail":
+            status = "fail"
         elapsed = float(round((time.perf_counter() - started) * 1000.0, 3))
-        self.checks.append(Check(check_id, title, status, self._clean(detail), elapsed))
+        self.checks.append(Check(check_id, title, status, cleaned, elapsed))
 
     async def _step(
         self,
@@ -631,7 +764,7 @@ class _Runner:
                 return "fail", f"refusing to call {name}"
             closed, closed_text = await self._probe(client, name)
             if not _mentions_approval(closed, closed_text):
-                return "fail", "gate was not closed: " + closed_text[:120]
+                return "fail", "gate was not closed: " + closed_text
             if not required:
                 return (
                     "fail",
@@ -660,7 +793,7 @@ class _Runner:
                     return (
                         "fail",
                         "gate probe was not rejected before the tool ran: "
-                        + opened_text[:120],
+                        + opened_text,
                     )
                 revoked = await self._revoke(name)
                 granted = False
@@ -813,7 +946,8 @@ def _load_secret(env_name: str | None, path: Path | None) -> str | None:
 
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
-        print(f"{self.prog}: error: {message}", file=sys.stderr)
+        raw = f"{self.prog}: error: {message}"
+        print(_safe_error_text(raw, []), file=sys.stderr)
         raise _UsageError(message)
 
 
@@ -885,7 +1019,10 @@ def main(argv: list[str] | None = None) -> int:
         token = _load_secret(args.token_env, args.token_file)
         admin_token = _load_secret(args.admin_token_env, args.admin_token_file)
     except ValueError as exc:
-        print(f"omega-prime-grokbot-verify: {exc}", file=sys.stderr)
+        print(
+            f"omega-prime-grokbot-verify: {_safe_error_text(str(exc), [])}",
+            file=sys.stderr,
+        )
         return 2
     transports: tuple[str, ...] = (
         _TRANSPORTS if args.transport == "both" else (args.transport,)
@@ -901,15 +1038,24 @@ def main(argv: list[str] | None = None) -> int:
             require_auth=args.require_auth,
         )
     except ValueError as exc:
-        print(f"omega-prime-grokbot-verify: {exc}", file=sys.stderr)
+        print(
+            "omega-prime-grokbot-verify: "
+            + _safe_error_text(
+                str(exc), [secret for secret in (token, admin_token) if secret]
+            ),
+            file=sys.stderr,
+        )
         return 2
+    safe = sanitize_report_for_publication(
+        report, [secret for secret in (token, admin_token) if secret]
+    )
     if args.json:
-        print(json.dumps(report.to_dict(), sort_keys=True), flush=True)
+        print(json.dumps(safe.to_dict(), sort_keys=True), flush=True)
     else:
-        print(format_report(report), file=sys.stderr, flush=True)
-    if not report.reachable:
+        print(format_report(safe), file=sys.stderr, flush=True)
+    if not safe.reachable:
         return 2
-    return 0 if report.ok else 1
+    return 0 if safe.ok else 1
 
 
 if __name__ == "__main__":

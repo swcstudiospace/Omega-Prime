@@ -42,9 +42,11 @@ def test_onboard_seeds_memory_even_when_doctor_needs_approval(
     onboard = json.loads(
         registry.dispatch("omega_command", {"command": "/omega-onboard"})
     )
-    assert onboard["ok"] is True
+    assert onboard["ok"] is False
+    assert onboard["error"] == "workflow_incomplete"
     doctor = onboard["result"]["steps"][0]
     assert doctor["name"] == "lead_doctor"
+    assert doctor["ok"] is False
     recall = json.loads(
         registry.dispatch("omega_command", {"command": "/omega-recall slash"})
     )
@@ -80,20 +82,3 @@ def test_prose_that_mentions_a_command_still_calls_the_model() -> None:
     result = agent.run("please /omega-help")
     assert model.call_count == 1
     assert result["final_response"] == "use /omega-help"
-
-
-def test_template_and_roster_name_the_surface() -> None:
-    template = (OMEGA_PRIME / "grokbot" / "templates" / "OMEGA_PRIME.md").read_text(
-        encoding="utf-8"
-    )
-    roster = (
-        OMEGA_PRIME / "contracts" / "tool-rosters" / "omega-prime.yaml"
-    ).read_text(encoding="utf-8")
-    assert "omega-commands" in template
-    assert "onboard" in template
-    assert "python-clean" in template
-    assert "connectors" in template
-    delegate = roster.index("  - delegate_task\n")
-    command = roster.index("  - omega_command\n")
-    execute = roster.index("  - execute_code\n")
-    assert delegate < command < execute

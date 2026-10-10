@@ -37,7 +37,7 @@ linking all nine crates does not import Prime's entire application runtime.
         |    -> receipts                                        |
         +-------------------------------------------------------+
                  |                        |
-        omega_prime/prime/        prime-agent/ (ignored checkout)
+        prime-agent/ (tracked submodule)
         typed connector           imported in-process when
         adapters                  prime.kernel.enabled is on
 ```
@@ -65,14 +65,35 @@ and
 ## Quickstart
 
 ```bash
-git clone https://github.com/swcstudiospace/omes-bot.git omega-prime
+git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git omega-prime
 cd omega-prime
 python -m venv .venv && .venv/bin/pip install -e '.[dev]'
-git clone --no-checkout https://github.com/PrimeIntellect-ai/prime-agent.git prime-agent
-git -C prime-agent checkout "$(.venv/bin/python -c 'import json; print(json.load(open("omega_prime/contracts/prime-agent.pin.json"))["commit"])')"
 .venv/bin/python -m pytest omega_prime/tests -q
 .venv/bin/python -m omega_prime.setup_check --root .
 ```
+
+An ordinary `git clone` does not populate the child checkouts. Either
+clone with `--recurse-submodules` as above, or populate afterwards:
+
+```bash
+git submodule update --init --recursive
+```
+
+When the optional Red Team backend is not needed, init only Prime:
+
+```bash
+git submodule update --init prime-agent
+```
+
+Never `git clone` a Prime checkout manually into the populated
+`prime-agent/` submodule path. `prime-agent/` is a tracked gitlink
+preserved as-is; the new root `redteam/` gitlink (T3MP3ST, pinned in
+[VENDOR.md](VENDOR.md)) sits alongside it. The Python package, the
+typed adapters, and the vendored 14-skill / five-seat Red Team pack
+under `omega_prime/redteam/pack/` are ordinary parent content. The
+TypeScript backend is separate upstream source reached through the
+`redteam/` gitlink and started separately — it is not ported into the
+Python package and Omega Prime never auto-launches it.
 
 The full Python suite exercises the pinned Prime Python runtime even when the
 product's optional Prime flags are off. Provision that read-only checkout before
@@ -167,8 +188,9 @@ See [docs/agent-loop.md](docs/agent-loop.md) and
 
 ## Build from source (both toolchains)
 
-The Python package is the product. `prime-agent/` remains an ignored, read-only
-checkout pinned in [VENDOR.md](VENDOR.md). It supplies both the parity oracle and
+The Python package is the product. `prime-agent/` is a tracked
+submodule (gitlink) pinned in [VENDOR.md](VENDOR.md), not an ignored
+scratch checkout. It supplies both the parity oracle and
 the libraries loaded by the optional in-process runtime. Build the PyO3 bridge
 from the repository root before selecting native providers or kernel tools:
 
@@ -257,11 +279,15 @@ resolve, generated pages stay current.
 | `.planning/` | Milestone history (v1–v10) and the audit trail |
 | `VENDOR.md` | Upstream pins and licenses for the ported runtimes |
 
-`hermes-agent/`, `oh-my-pi/`, and `prime-agent/` are local read-only
-checkouts. They are gitignored. Hermes and Omp are not imported.
-`prime-agent/` stays unmodified; with `prime.kernel.enabled` the process
-imports its `rlm` package and can load the crate extension built from that
-checkout.
+`hermes-agent/` and `oh-my-pi/` are local read-only checkouts. They are
+gitignored. Hermes and Omp are not imported. `prime-agent/` and
+`redteam/` are tracked submodules (gitlinks) pinned in
+[VENDOR.md](VENDOR.md). `prime-agent/` stays unmodified; with
+`prime.kernel.enabled` the process imports its `rlm` package and can
+load the crate extension built from that checkout. `redteam/` is the
+separately versioned T3MP3ST backend source, started separately per
+[docs/red-team.md](docs/red-team.md) — never auto-launched, never
+ported into the Python package.
 
 ## Contributing
 

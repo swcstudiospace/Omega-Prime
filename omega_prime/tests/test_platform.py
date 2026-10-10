@@ -200,87 +200,139 @@ def test_execute_code_runs_python_and_refuses_empty_code(
         os.kill(pid, 0)
 
 
-def test_mcp_call_reads_one_json_line_and_refuses_a_string_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+_PLATFORM_FIXTURE_SERVER = """\
+import asyncio
+import os
+import sys
+
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+
+home = sys.argv[1]
+server = MCPServer("phase75-platform-fixture")
+
+
+@server.tool()
+def write_note(name: str, text: str) -> str:
+    with open(os.path.join(home, name), "w", encoding="utf-8") as handle:
+        handle.write(text)
+    return text
+
+
+@server.tool()
+def read_note(name: str) -> str:
+    with open(os.path.join(home, name), encoding="utf-8") as handle:
+        return handle.read()
+
+
+@server.tool()
+def oops_note() -> str:
+    raise ToolError("note says nope")
+
+
+asyncio.run(server.run_stdio_async())
+"""
+
+
+def _platform_server(home: Path) -> list[str]:
+    script = home / "platform_server.py"
+    script.write_text(_PLATFORM_FIXTURE_SERVER, encoding="utf-8")
+    return [sys.executable, str(script), str(home)]
+
+
+def test_mcp_call_runs_the_initialized_session_with_a_real_file_effect(
+    tmp_path: Path,
 ):
     home = tmp_path / "home"
     home.mkdir()
-    fixture = home / "mcp_echo.py"
-    fixture.write_text(
-        "import json\n"
-        "import sys\n"
-        "request = json.loads(sys.stdin.readline())\n"
-        "params = request.get('params') or {}\n"
-        "ok = (\n"
-        "    request.get('jsonrpc') == '2.0'\n"
-        "    and request.get('method') == 'tools/call'\n"
-        "    and params.get('name') == 'echo'\n"
-        "    and params.get('arguments') == {'text': 'ping'}\n"
-        ")\n"
-        "if not ok:\n"
-        "    sys.stderr.write('bad request\\n')\n"
-        "    sys.exit(2)\n"
-        'sys.stdout.write(\'{"jsonrpc":"2.0","id":1,"result":{"text":"ping"}}\\n\')\n',
-        encoding="utf-8",
-    )
+    command = _platform_server(home)
     registry = ToolRegistry()
     register_platform_tools(registry, home=home)
 
-    def fail_popen(*_args, **_kwargs):
-        raise AssertionError("string command started a process")
-
-    with monkeypatch.context() as patch:
-        patch.setattr("omega_prime.tools.mcp_client.subprocess.Popen", fail_popen)
-        refused = _load(
-            registry.dispatch(
-                "mcp_call",
-                {
-                    "command": sys.executable,
-                    "tool": "echo",
-                    "arguments": {"text": "ping"},
-                },
-            )
-        )
-    assert "error" in refused
-
-    called = _load(
+    written = _load(
         registry.dispatch(
             "mcp_call",
             {
-                "command": [sys.executable, str(fixture)],
-                "tool": "echo",
-                "arguments": {"text": "ping"},
+                "command": command,
+                "tool": "write_note",
+                "arguments": {"name": "note.txt", "text": "platform file effect"},
             },
         )
     )
-    assert called == {"result": {"text": "ping"}}
+    assert written["result"]["content"] == [
+        {"type": "text", "text": "platform file effect"}
+    ]
+    assert (home / "note.txt").read_bytes() == b"platform file effect"
 
-    sleeper = home / "sleep_mcp.py"
-    sleeper.write_text(
-        "import os\n"
-        "import time\n"
-        "from pathlib import Path\n"
-        "Path('mcp.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
-        "time.sleep(30)\n",
-        encoding="utf-8",
-    )
-    timed = _load(
+    read = _load(
         registry.dispatch(
             "mcp_call",
             {
-                "command": [sys.executable, str(sleeper)],
-                "tool": "echo",
-                "arguments": {},
-                "timeout": 1,
+                "command": command,
+                "tool": "read_note",
+                "arguments": {"name": "note.txt"},
             },
         )
     )
-    assert "error" in timed
-    assert timed["exit_code"] != 0
-    assert "stdout" in timed and "stderr" in timed
-    pid = int((home / "mcp.pid").read_text(encoding="utf-8"))
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert read["result"]["content"] == [
+        {"type": "text", "text": "platform file effect"}
+    ]
+
+
+def test_mcp_call_refuses_a_string_command_and_a_missing_cwd(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    probe = home / "spawned"
+    registry = ToolRegistry()
+    register_platform_tools(registry, home=home)
+
+    refused = _load(
+        registry.dispatch(
+            "mcp_call",
+            {
+                "command": (
+                    f"{sys.executable} -c \"open({str(probe)!r}, 'w').write('x')\""
+                ),
+                "tool": "write_note",
+                "arguments": {"name": "note.txt", "text": "x"},
+            },
+        )
+    )
+    assert refused["error"] == "command must be an argv list, not a string"
+    assert not probe.exists()
+
+    absent_home = tmp_path / "absent-home"
+    absent_registry = ToolRegistry()
+    register_platform_tools(absent_registry, home=absent_home)
+    missing = _load(
+        absent_registry.dispatch(
+            "mcp_call",
+            {
+                "command": _platform_server(home),
+                "tool": "read_note",
+                "arguments": {"name": "note.txt"},
+            },
+        )
+    )
+    assert "cwd is not a directory" in missing["error"]
+    assert "result" not in missing
+
+
+def test_mcp_call_surfaces_a_tool_error_with_its_result(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    command = _platform_server(home)
+    registry = ToolRegistry()
+    register_platform_tools(registry, home=home)
+
+    outcome = _load(
+        registry.dispatch(
+            "mcp_call", {"command": command, "tool": "oops_note", "arguments": {}}
+        )
+    )
+    assert outcome["error"] == "Error executing tool oops_note: note says nope"
+    result = outcome["result"]
+    assert result.get("is_error", result.get("isError")) is True
 
 
 def test_browser_navigate_and_snapshot_use_the_injected_transport(

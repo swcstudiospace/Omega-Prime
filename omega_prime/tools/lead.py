@@ -9,6 +9,7 @@ seams that default to unconfigured. No live calls in tests.
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -18,18 +19,29 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from types import ModuleType
 from typing import Any
 
 from omega_prime.credentials.redact import redact_text, redact_value
 from omega_prime.memory.hindsight import Hindsight
 from omega_prime.memory.store import MemoryStore
 from omega_prime.receipts import ReceiptError, load_executions, validate_receipt
+from omega_prime.tooling.fs import atomic_write_text, ensure_private_dir
 from omega_prime.tools.registry import ToolRegistry
+
+_fcntl: ModuleType | None
+try:
+    import fcntl as _fcntl_module
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    _fcntl = None
+else:
+    _fcntl = _fcntl_module
 
 LEAD_TOOL_NAMES = (
     "lead_brief",
@@ -101,12 +113,67 @@ def _absorbed_seats(root: Path) -> list[dict[str, Any]]:
 
 
 class IntakeStore:
-    """JSON work-order queue. Claims are exclusive per order."""
+    """JSON work-order queue. Claims are exclusive per order.
+
+    The persisted file is authoritative at every public operation. Reads
+    reload the file first; mutations run as serialized
+    reload-mutate-atomic-replace transactions under the instance thread
+    lock plus an exclusive `flock` on the stable `intake.json.lock`
+    sidecar, so concurrent stores and processes never lose each other's
+    committed orders, claims, or field updates. The sidecar is never
+    unlinked: replacing it would split writers into different lock
+    domains. A corrupt existing file raises instead of being treated as
+    empty. Stale-lease completion is not fenced: `ack` remains an
+    ordered merge write with no expected-claim condition.
+    """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.orders: list[dict] = []
+        self._thread_lock = threading.Lock()
         self._load()
+
+    @property
+    def _lock_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".lock")
+
+    @contextlib.contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """Hold the thread lock and the sidecar `flock` for one transaction."""
+        with self._thread_lock:
+            ensure_private_dir(self.path.parent)
+            fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                if _fcntl is not None:
+                    _fcntl.flock(fd, _fcntl.LOCK_EX)
+                yield
+            finally:
+                os.close(fd)
+
+    def _find(self, intake_id: str) -> dict | None:
+        """One order by id from the current snapshot, or None."""
+        for record in self.orders:
+            if record.get("intake_id") == intake_id:
+                return record
+        return None
+
+    def _reclaim_locked(self, max_age_seconds: float, current: float) -> list[str]:
+        """Release expired `in_progress` claims in the current snapshot."""
+        released: list[str] = []
+        for record in self.orders:
+            if record.get("status") != "in_progress":
+                continue
+            claimed = record.get("claimed_at")
+            if (
+                isinstance(claimed, (int, float))
+                and current - claimed <= max_age_seconds
+            ):
+                continue
+            record["status"] = "open"
+            record["by"] = None
+            record["claimed_at"] = None
+            released.append(str(record.get("intake_id")))
+        return released
 
     def submit(
         self, ask: str, origin: str = "local", links: list | None = None
@@ -122,8 +189,10 @@ class IntakeStore:
             "message": None,
             "by": None,
         }
-        self.orders.append(record)
-        self._save()
+        with self._exclusive():
+            self._load()
+            self.orders.append(record)
+            self._save()
         return record
 
     def next(
@@ -138,31 +207,40 @@ class IntakeStore:
 
         Orders stuck `in_progress` past `reclaim_after` seconds are
         released first, so a crashed dispatcher never strands the
-        queue. Pass `now` (epoch seconds) in tests.
+        queue. Pass `now` (epoch seconds) in tests. Reclamation,
+        selection, and the claim commit as one transaction; reclaimed
+        orders persist even when no open order matches `origin`.
         """
         current = time.time() if now is None else now
-        self.reclaim_stale(max_age_seconds=reclaim_after, now=current)
-        for record in self.orders:
-            if record.get("status") != "open":
-                continue
-            if origin is not None and record.get("origin") != origin:
-                continue
-            record["status"] = "in_progress"
-            record["by"] = by
-            record["claimed_at"] = current
-            self._save()
-            return record
-        return None
+        with self._exclusive():
+            self._load()
+            released = self._reclaim_locked(reclaim_after, current)
+            selected: dict | None = None
+            for record in self.orders:
+                if record.get("status") != "open":
+                    continue
+                if origin is not None and record.get("origin") != origin:
+                    continue
+                record["status"] = "in_progress"
+                record["by"] = by
+                record["claimed_at"] = current
+                selected = record
+                break
+            if released or selected is not None:
+                self._save()
+            return selected
 
     def release(self, intake_id: str) -> bool:
         """Return one order to open. False when missing."""
-        record = self.get(intake_id)
-        if record is None:
-            return False
-        record["status"] = "open"
-        record["by"] = None
-        record["claimed_at"] = None
-        self._save()
+        with self._exclusive():
+            self._load()
+            record = self._find(intake_id)
+            if record is None:
+                return False
+            record["status"] = "open"
+            record["by"] = None
+            record["claimed_at"] = None
+            self._save()
         return True
 
     def reclaim_stale(
@@ -170,47 +248,39 @@ class IntakeStore:
     ) -> list[str]:
         """Release `in_progress` orders older than the lease. Returns ids."""
         current = time.time() if now is None else now
-        released: list[str] = []
-        for record in self.orders:
-            if record.get("status") != "in_progress":
-                continue
-            claimed = record.get("claimed_at")
-            if (
-                isinstance(claimed, (int, float))
-                and current - claimed <= max_age_seconds
-            ):
-                continue
-            record["status"] = "open"
-            record["by"] = None
-            record["claimed_at"] = None
-            released.append(str(record.get("intake_id")))
-        if released:
-            self._save()
-        return released
+        with self._exclusive():
+            self._load()
+            released = self._reclaim_locked(max_age_seconds, current)
+            if released:
+                self._save()
+            return released
 
     def get(self, intake_id: str) -> dict | None:
-        """One order by id, or None."""
-        for record in self.orders:
-            if record.get("intake_id") == intake_id:
-                return record
-        return None
+        """One order by id, or None. Reloads the file first."""
+        with self._thread_lock:
+            self._load()
+            return self._find(intake_id)
 
     def ack(self, intake_id: str, ack: dict) -> dict | None:
         """Merge `ack` into the order. None when missing."""
-        record = self.get(intake_id)
-        if record is None:
-            return None
-        record.update(ack)
-        self._save()
-        return record
+        with self._exclusive():
+            self._load()
+            record = self._find(intake_id)
+            if record is None:
+                return None
+            record.update(ack)
+            self._save()
+            return record
 
     def counts(self) -> dict[str, int]:
-        """Orders per status."""
-        totals: dict[str, int] = {}
-        for record in self.orders:
-            status = str(record.get("status", "open"))
-            totals[status] = totals.get(status, 0) + 1
-        return totals
+        """Orders per status. Reloads the file first."""
+        with self._thread_lock:
+            self._load()
+            totals: dict[str, int] = {}
+            for record in self.orders:
+                status = str(record.get("status", "open"))
+                totals[status] = totals.get(status, 0) + 1
+            return totals
 
     def _load(self) -> None:
         if not self.path.exists():
@@ -223,11 +293,8 @@ class IntakeStore:
         self.orders = orders
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         text = json.dumps({"orders": self.orders}, ensure_ascii=False, indent=2) + "\n"
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, self.path)
+        atomic_write_text(self.path, text)
 
 
 class RosterStore:
@@ -521,23 +588,21 @@ class LeadClient:
             return _error("not_configured", "assemble-prompts.sh is not in this root")
         with tempfile.TemporaryDirectory(prefix="omega-prime-render-") as tmp:
             tree = Path(tmp)
-            for rel in (
-                "omega_prime/prompts",
-                "omega_prime/contracts",
-                "omega_prime/grokbot/rosters",
-                "omega_prime/scripts",
-                "omega_prime/ownership.yaml",
-                "omega_prime/assemble.py",
-            ):
-                src = root / rel
-                dst = tree / rel
-                if not src.exists():
-                    continue
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if src.is_dir():
-                    shutil.copytree(src, dst)
-                else:
-                    shutil.copy2(src, dst)
+            # Copy the whole package: assemble.py imports tool-name constants
+            # from omega_prime.tools, and the shadowing namespace package here
+            # bypasses any installed editable finder, so a partial allowlist
+            # breaks on the first transitive import (receipts, offer, ...).
+            shutil.copytree(
+                root / "omega_prime",
+                tree / "omega_prime",
+                ignore=shutil.ignore_patterns("__pycache__"),
+            )
+            venv = root / ".venv"
+            if venv.is_dir():
+                # The script resolves its interpreter as $REPO/.venv/bin/python;
+                # without this link it falls back to system python3, which lacks
+                # the package dependencies the assembler imports.
+                os.symlink(venv, tree / ".venv", target_is_directory=True)
             try:
                 run = subprocess.run(
                     [
@@ -774,10 +839,18 @@ class LeadClient:
         }
         green = all(c["green"] for c in checks.values())
         if self.ctx.roster is not None:
-            self.ctx.roster.doctor_result(
-                "lead",
-                {"green": green, "checks": {k: v["green"] for k, v in checks.items()}},
-            )
+            outcome: dict[str, Any] = {
+                "green": green,
+                "checks": {k: v["green"] for k, v in checks.items()},
+            }
+            # Preserve the installed expected prompt digest: a check must
+            # never erase its own prerequisite, and the expected value is
+            # only ever set by install_prompt/repair from rendered bytes —
+            # never derived from a caller-supplied claim.
+            prior_expected = expected.get("expected_prompt_sha256")
+            if prior_expected is not None:
+                outcome["expected_prompt_sha256"] = prior_expected
+            self.ctx.roster.doctor_result("lead", outcome)
         return {"green": green, "seat": "Omega Prime", "checks": checks}
 
     def intake_next(self, origin: str | None = None) -> dict[str, Any]:
@@ -809,9 +882,9 @@ class LeadClient:
             raise ValueError(f"status must be one of {', '.join(ACK_STATUSES)}")
         if self.ctx.intake is None:
             return _error("not_configured", "intake store is missing")
-        record = self.ctx.intake.get(intake_id)
-        if record is None:
-            return _error("not_found", f"no intake {intake_id}")
+        # One transactional merge against the freshly loaded row; a missing
+        # row is the existing not_found result. Notification stays outside
+        # the store lock.
         ack: dict[str, Any] = {"status": status, "by": self.ctx.bot_id}
         if graph_id is not None:
             ack["graph_id"] = graph_id
@@ -820,7 +893,8 @@ class LeadClient:
         if links is not None:
             ack["links"] = list(links)
         updated = self.ctx.intake.ack(intake_id, ack)
-        assert updated is not None
+        if updated is None:
+            return _error("not_found", f"no intake {intake_id}")
         notify: dict[str, Any] = {
             "delivered": False,
             "reason": "origin has no callback",

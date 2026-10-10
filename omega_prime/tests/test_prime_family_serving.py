@@ -24,6 +24,7 @@ ROSTER = ROOT / "omega_prime" / "contracts" / "tool-rosters" / "omega-prime.yaml
 def _flags(monkeypatch, **enabled: str) -> None:
     for family in PRIME_FAMILIES:
         monkeypatch.setenv(f"OMEGA_PRIME_PRIME_{family.upper()}_ENABLED", "0")
+    monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ENABLED", "0")
     for family, value in enabled.items():
         monkeypatch.setenv(f"OMEGA_PRIME_PRIME_{family.upper()}_ENABLED", value)
 
@@ -82,8 +83,9 @@ def test_messaging_flag_registers_on_the_host(tmp_path: Path, monkeypatch) -> No
 
 def test_all_prime_flags_serve_the_roster(tmp_path: Path, monkeypatch) -> None:
     _flags(monkeypatch, **{family: "1" for family in PRIME_FAMILIES})
+    monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ENABLED", "1")
     registry = default_registry(ROOT, tmp_path)
     served = _names(registry)
     roster = set(load_roster_names(ROSTER))
     assert served == roster
-    assert len(roster) == 154
+    assert len(roster) == 165

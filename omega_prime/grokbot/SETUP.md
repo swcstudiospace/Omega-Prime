@@ -46,6 +46,17 @@ roster or seat policy stops startup (exit 2), and it never accepts a token in
 the URL. The operator reference is `docs/grok-bot-native.md`. Deploying the
 same process is `docs/deploy.md`.
 
+The host runs from a checkout whose submodules are populated. An
+ordinary `git clone` leaves `prime-agent/` and `redteam/` empty —
+either clone with `--recurse-submodules` or run
+`git submodule update --init --recursive` first (targeted
+`git submodule update --init prime-agent` suffices when the optional
+Red Team backend is not needed; never `git clone` a checkout manually
+into those submodule paths). The Red Team backend itself is separate
+upstream source started per `docs/red-team.md` — the host never
+auto-launches it, and Grok's own recursive-clone behavior is not
+attested by these instructions.
+
 ### Option A: Turnkey 1-click launcher (recommended)
 
 ```bash

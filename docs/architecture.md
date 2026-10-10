@@ -1,9 +1,11 @@
 # Architecture
 
 How Omega Prime is put together: one process, one loop, one registry, and the
-planes around them. Counts below are exact at release time (154 tools on the
-roster — 117 served by default with the Prime families gated off — 27 skills,
-7 routines, 980 tests, 26 evals).
+planes around them. Tool membership follows the roster contract
+(`omega_prime/contracts/tool-rosters/omega-prime.yaml`) and the generated
+[tool catalog](tool-catalog.md); skills are `SKILL.md` files under
+`omega_prime/skills/` and routines are prompt flows. For current suite/eval
+results, run the commands under Verification and require a clean result.
 
 ## The shape
 
@@ -29,10 +31,11 @@ the turn when they appear as standalone prose.
 
 ## The registry
 
-`omega_prime/tools/registry.py` maps 154 tool names to handlers across 28 families
+`omega_prime/tools/registry.py` maps 165 tool names to handlers across 29 families
 (coding, growth, delegate, omega command, platform, IDE, connectors, seven desk packs, app packs,
-ultrathink, substrate, cron, learning, durable, and the seven config-gated Prime families: RLM, harness,
-goals, heartbeat, autonomous, messaging, kernel). Dispatch always returns JSON; unknown names are
+ultrathink, substrate, cron, learning, durable, the seven config-gated Prime families: RLM, harness,
+goals, heartbeat, autonomous, messaging, kernel, and the default-off Red Team family). Dispatch always
+returns JSON; unknown names are
 errors, never exceptions. Three gates wrap every call, in order: the seat
 policy (allowed tools/hosts/paths), the approval log (mutating tools wait
 for a person), and the audit + tracer (one verdict and span per dispatch).
@@ -47,7 +50,7 @@ generated from the live registry so docs cannot drift.
 Two file-backed stores (`MEMORY.md`, `USER.md`) plus bank-tagged episodic
 recall serve every call shape: Hermes learn/recall, Omp mnemopi, and the
 Hindsight `retain`/`recall` pair. Skills are `SKILL.md` files under
-`omega_prime/skills/` (26); routines are prompt flows (`sweep`, `nightly`,
+`omega_prime/skills/`; routines are prompt flows (`sweep`, `nightly`,
 `ultrathink_turn`) plus the desk lead routines. The curator folds nightly
 learnings back into memory.
 
@@ -86,8 +89,8 @@ and a test fails the build if one appears.
 
 | Gate | Command | Current |
 | --- | --- | --- |
-| Suite | `pytest omega_prime/tests -q` | 310 passed |
-| Evals | `omega_prime.evals.runner omega_prime/evals/cases` | 23 passed |
+| Suite | `pytest omega_prime/tests -q` | must pass (exit 0) |
+| Evals | `omega_prime.evals.runner omega_prime/evals/cases` | must pass (exit 0) |
 | Assembly | `assemble-prompts.sh --check` | clean |
 | Setup | `omega_prime.setup_check --root .` | clean |
 | Docs | catalog `--check` + link tests | clean |

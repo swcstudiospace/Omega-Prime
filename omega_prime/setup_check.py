@@ -79,13 +79,15 @@ def check_registry(root: Path) -> tuple[bool, str]:
     missing = [name for name in roster if name not in served]
     # Prime families are config-gated (default off), including rlm and
     # messaging. With a flag on, default_registry serves that family. This
-    # check still treats a disabled family as an expected absence.
+    # check still treats a disabled family as an expected absence. The Red
+    # Team family joins them through its top-level redteam.enabled gate.
     from omega_prime.tools.agent_message import MESSAGING_TOOL_NAMES
     from omega_prime.tools.autonomous import AUTONOMOUS_TOOL_NAMES
     from omega_prime.tools.goals import GOAL_TOOL_NAMES
     from omega_prime.tools.harness import HARNESS_TOOL_NAMES
     from omega_prime.tools.heartbeat import HEARTBEAT_TOOL_NAMES
     from omega_prime.tools.prime_runtime import KERNEL_TOOL_NAMES
+    from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
     from omega_prime.tools.rlm import RLM_TOOL_NAMES
 
     gated = (
@@ -96,6 +98,7 @@ def check_registry(root: Path) -> tuple[bool, str]:
         | set(AUTONOMOUS_TOOL_NAMES)
         | set(MESSAGING_TOOL_NAMES)
         | set(KERNEL_TOOL_NAMES)
+        | set(REDTEAM_TOOL_NAMES)
     )
     missing = [name for name in missing if name not in gated]
     if missing:

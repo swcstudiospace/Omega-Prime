@@ -54,6 +54,7 @@ ACCOUNT_MARKERS = (
     "DeleteAccount",
 )
 PACKAGE_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$")
+ISSUE_TAG_PATTERN = re.compile(r"<issue(?=[\s/>])")
 
 
 def _error(code: str, reason: str, **extra: Any) -> dict[str, Any]:
@@ -277,8 +278,8 @@ class MobileClient:
         head = show(head_ref, baseline_path) or ""
         base_ids = set(re.findall(r'id="([^"]+)"', base))
         head_ids = set(re.findall(r'id="([^"]+)"', head))
-        base_issues = base.count("<issue")
-        head_issues = head.count("<issue")
+        base_issues = len(ISSUE_TAG_PATTERN.findall(base))
+        head_issues = len(ISSUE_TAG_PATTERN.findall(head))
         return {
             "baseline": baseline_path,
             "issues_before": base_issues,

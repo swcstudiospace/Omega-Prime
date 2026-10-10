@@ -1,7 +1,7 @@
 # Vendored behavior
 
 Hermes and Omp remain behavior ports: their ignored checkouts are not imported
-at runtime. Prime is also a read-only, ignored pin, but optional kernel tools
+at runtime. Prime is also a read-only pin, but as a tracked submodule, and optional kernel tools
 import its Python `rlm` runtime in-process, and the product's PyO3 bridge links
 its Rust libraries. The checkout is not patched or copied into Omega's source
 tree. Ported modules retain their upstream MIT notices.
@@ -60,7 +60,7 @@ tree. Ported modules retain their upstream MIT notices.
 
 ### Linked crates
 
-The sources are read from `prime-agent/crates/<name>/`, the ignored checkout.
+The sources are read from `prime-agent/crates/<name>/`, the tracked submodule checkout.
 `native/omega-prime-prime/` is the only Rust Omega Prime authors: a PyO3 library
 that links all nine crates. Its built output is
 `prime-agent/target/debug/libomega_prime_prime.so`. A running tool host reports
@@ -78,6 +78,17 @@ the link through `prime_crates`. "Probe only" means the sole caller is
 | `pa-daemon` | Session supervisor, workers, wire protocol | Probe only (frame encoding, durable-create command). There is no process model. |
 | `pa-tui` | Terminal UI | Probe only (session-search scoring). |
 | `pa-cli` | The `prime-agent` binary | Probe only (mode names, missing-subsystem text). |
+
+## T3MP3ST red team pack
+
+- Remote: https://github.com/swcstudiospace/purple-team.git
+- Commit: `831a6b0ee09f12c0f069f51d62b2f0945d505980`
+- Root `redteam/` submodule: tracked gitlink at the same pin, alongside the preserved `prime-agent/` gitlink. An ordinary `git clone` leaves it empty; populate with `git clone --recurse-submodules` or `git submodule update --init redteam`.
+- License: MIT
+- Copyright: 2026 SWC Studio Space
+- What is vendored: the declarative Grok Bot pack — the seat templates, the roster, and the 14 saved skills — copied verbatim under `omega_prime/redteam/pack/`, plus a registry tool family (`omega_prime/tools/redteam.py`) that mirrors the upstream MCP gateway proxy surface against the upstream loopback HTTP API. The Python package, the adapter, and the vendored pack are ordinary parent content.
+- What is not adapted: the TypeScript runtime (agent loop, arsenal execution, server), the War Room UI, and the `bench/` benchmark corpora. The backend is separately versioned upstream source (its own `t3mp3st` package contract), reached through the `redteam/` gitlink and started separately — never ported, never auto-launched. The corpora carry upstream and per-challenge licenses (upstream `THIRD-PARTY.md`) and are excluded from the vendored pack; nothing here implies benchmark content becomes Omega-licensed (AGPL-3.0-only). A later phase may pull a piece in only if that phase cannot pass its own tests without it.
+- Authorized use only: the pack and its tools exist for engagements against systems you own or have explicit written permission to test; nothing here authorizes testing anyone else's systems.
 
 ## Merge rule
 

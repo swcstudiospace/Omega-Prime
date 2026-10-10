@@ -95,6 +95,12 @@ from omega_prime.tools.quality import (
     QualityContext,
     register_quality_tools,
 )
+from omega_prime.tools.redteam import (
+    REDTEAM_TOOL_NAMES,
+    RedteamClient,
+    RedteamContext,
+    register_redteam_tools,
+)
 from omega_prime.tools.registry import ToolRegistry
 from omega_prime.tools.rlm import RLM_TOOL_NAMES, register_rlm_tools
 from omega_prime.tools.substrate_tools import (
@@ -630,6 +636,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
     register_prime_kernel_tools(
         registry, tmp_path, run_child=lambda prompt, model=None, thinking=None: "ok"
     )
+    register_redteam_tools(registry, RedteamClient(RedteamContext()))
     registry.register(
         "not_on_roster",
         "Registered but not offered.",
@@ -666,6 +673,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
         + AUTONOMOUS_TOOL_NAMES
         + MESSAGING_TOOL_NAMES
         + KERNEL_TOOL_NAMES
+        + REDTEAM_TOOL_NAMES
     )
     offered = offered_schemas(registry, roster)
     names = [item["function"]["name"] for item in offered]

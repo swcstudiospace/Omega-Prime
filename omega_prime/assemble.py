@@ -56,8 +56,11 @@ def disabled_family_tools(config: dict[str, Any] | None) -> set[str]:
 
     ``None`` is the canonical default-off assembly: every Prime family is
     disabled without reading user config, HOME, or process environment.
+    The Red Team family joins the same filter through its top-level
+    ``redteam.enabled`` config key, so the default artifact omits it too.
     """
-    from omega_prime.config import PRIME_FAMILIES, prime_enabled
+    from omega_prime.config import PRIME_FAMILIES, prime_enabled, redteam_enabled
+    from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
 
     mapping = _prime_family_tools()
     if set(mapping) != set(PRIME_FAMILIES):
@@ -66,12 +69,15 @@ def disabled_family_tools(config: dict[str, Any] | None) -> set[str]:
         )
     if config is None:
         config = {}
-    return {
+    disabled = {
         name
         for family, names in mapping.items()
         for name in names
         if not prime_enabled(config, family)
     }
+    if not redteam_enabled(config):
+        disabled.update(REDTEAM_TOOL_NAMES)
+    return disabled
 
 
 def filter_disabled_tools(text: str, disabled: set[str]) -> str:

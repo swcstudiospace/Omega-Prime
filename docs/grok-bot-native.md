@@ -240,7 +240,11 @@ New files are mode 0600.
 Argument values are not stored. A tool-call record keeps the argument key
 names (`arg_keys`) and a SHA-256 of the canonical arguments (`args_sha256`).
 `details` is redacted before it is hashed (bearer tokens, `omk_` tokens,
-API-key assignments, `Authorization` and `Cookie` values).
+API-key assignments, `Authorization` and `Cookie` values). Literal text and
+file paths are different inputs to the secret gate, and a token-shaped path
+gets no exemption: `assert_no_secrets` scans a `str` inline as text — even
+when the string names a file — while any `os.PathLike` is treated as a file
+whose 0600 mode is enforced before its bytes are read.
 
 ```bash
 python -m omega_prime.grokbot.audit verify
@@ -451,13 +455,18 @@ opens and closes the gate. The gated tool is not run for its side effects.
 python -m omega_prime.grokbot.oneclick --self-test
 ```
 
-`--self-test` picks a free loopback port, mints a token into a mode-0600
-temp file, starts
-`python -m omega_prime.mcp_server --transport sse` on that port, waits for
-`/readyz`, runs the verifier on both transports with auth required, sends
-SIGTERM, and requires exit 0 within the drain grace plus five seconds. It
-conflicts with `--dry-run` (usage error), never prints the token, removes
-its temp files, and exits 0 only when every check passed.
+`--self-test` runs in the same disposable layout as the readiness profile:
+a free loopback port, a token minted into a mode-0600 temp file, and
+`python -m omega_prime.mcp_server --transport sse` on that port. The child
+consumes the one frozen layout allowlist and nothing else — no
+parent-locale copy, no credential blacklist, no extra forwarding — with
+host roots travelling as argv. It waits for `/readyz`, runs the verifier
+on both transports with auth required, sends SIGTERM, and requires exit 0
+within the drain grace plus five seconds. No source-install schedule is
+ticked and no live credential is inherited: the fixture schedules start
+empty and the child environment is built fresh, so this is a seat check,
+never live attestation. Failure diagnostics are bounded and curated, not
+excerpted: complete text reaches known-secret replacement plus audit redaction and then the unchanged secret gate BEFORE any tail/clip window — known-token replacement alone and final-only scanning do not close the leak. The gate recognizes only its documented patterns (audit credential shapes, `omk_` tokens with 8+ suffix chars, PEM armour, 32+ mixed-class runs at 4.2+ bits/char entropy with hex/UUIDs excluded), not every possible secret. A trip publishes only the fixed safe label with no classified fragment and stays failed, and the final self-test publication re-verifies complete report data including metadata the same way. It conflicts with `--dry-run` (usage error), never prints the token, removes its temp files, and exits 0 only when every check passed.
 
 ## Deployment
 

@@ -33,12 +33,14 @@ it never claims a skill that isn't a file on disk.
 
 ## Tools and approvals
 
-The roster lists 154 tools across coding, growth, platform, IDE,
+The roster lists 165 tools across coding, growth, platform, IDE,
 messaging, seven domain packs (lead, systems, web, mobile,
 infra, quality, app packs), substrate plus ultrathink bridge
-tools, and the seven Prime families (RLM, harness, goals, heartbeat,
-autonomous, agent messaging, kernel) — those are config-gated and default
-off, so a default install serves the roster intersection `setup_check`
+tools, the seven Prime families (RLM, harness, goals, heartbeat,
+autonomous, agent messaging, kernel), and the Red Team family
+(tempest_* proxies for the local T3MP3ST loopback gateway) — those are
+config-gated and default off, so a default install serves the roster
+intersection `setup_check`
 reports (117 today). `delegate_task` is served; without a provider env it
 returns `not_configured: provider`. Most reads run free; writes,
 deploys, publishes, and merges

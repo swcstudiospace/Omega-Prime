@@ -3,6 +3,7 @@
 import itertools
 import json
 import os
+import signal
 import stat
 from pathlib import Path
 from typing import Any
@@ -956,3 +957,390 @@ def test_lock_cancel_during_flock_closes_fd(
     with pytest.raises(OSError):
         os.fstat(opened[0])
     assert "proceeding without lock" not in capsys.readouterr().err
+
+
+# --- 75-03: self-test isolation effects --------------------------------------
+# These prove isolation observationally through the frozen layout contract and
+# the real run_self_test path. Only the process-execution cost boundary is
+# stubbed (subprocess.Popen, readiness polling, verification transport):
+# isolation, env construction, schedule routing, cleanup, and redaction all
+# run for real. No case reads implementation source, asserts a mock call as
+# proof of isolation, or depends on timing sleeps.
+
+
+def _self_test_cmd_value(cmd: list[str], flag: str) -> str:
+    return cmd[cmd.index(flag) + 1]
+
+
+def _stub_self_test_host(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict[str, Any],
+    *,
+    log_bytes: bytes = b"",
+    ready_reason: str | None = None,
+    verify_error: BaseException | None = None,
+) -> None:
+    """Stand in for the loopback host at the process-spawn seam only.
+
+    Only the host argv (``omega_prime.mcp_server``) is intercepted; every
+    other spawn — notably Core's legitimate ``git``/tool subprocesses inside
+    the shared layout helper — delegates to the real Popen untouched.
+    """
+
+    real_popen = oneclick.subprocess.Popen
+
+    class _FakeProc:
+        def __init__(self, cmd: list[str], **kwargs: Any) -> None:
+            captured["cmd"] = list(cmd)
+            captured["kwargs"] = kwargs
+            install = _self_test_cmd_value(list(cmd), "--root")
+            schedule = Path(install) / "cron" / "jobs.json"
+            captured["schedule_present"] = schedule.is_file()
+            captured["schedule_bytes"] = (
+                schedule.read_bytes() if schedule.is_file() else None
+            )
+            handle = kwargs.get("stdout")
+            if handle is not None and log_bytes:
+                handle.write(log_bytes)
+                handle.flush()
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def send_signal(self, sig: int) -> None:
+            captured.setdefault("signals", []).append(sig)
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            captured["killed"] = True
+            self.returncode = -9
+
+    def _dispatch_popen(cmd: Any, **kwargs: Any) -> Any:
+        argv = list(cmd) if isinstance(cmd, (list, tuple)) else []
+        if "omega_prime.mcp_server" in argv:
+            return _FakeProc(cmd, **kwargs)
+        return real_popen(cmd, **kwargs)
+
+    from omega_prime.grokbot.verify import Check, VerifyReport
+
+    monkeypatch.setattr(oneclick.subprocess, "Popen", _dispatch_popen)
+    if ready_reason is None:
+        monkeypatch.setattr(
+            oneclick, "_wait_until_ready", lambda url, proc, timeout: None
+        )
+    else:
+        monkeypatch.setattr(
+            oneclick, "_wait_until_ready", lambda url, proc, timeout: ready_reason
+        )
+    if verify_error is not None:
+
+        def _raise(*args: Any, **kwargs: Any) -> Any:
+            raise verify_error
+
+        monkeypatch.setattr("omega_prime.grokbot.verify.run_verification", _raise)
+    else:
+        report = VerifyReport(
+            base_url="http://127.0.0.1:1",
+            checks=[
+                Check(
+                    id="self-test-probe",
+                    title="probe",
+                    status="pass",
+                    detail="ok",
+                    duration_ms=1.0,
+                )
+            ],
+        )
+        monkeypatch.setattr(
+            "omega_prime.grokbot.verify.run_verification",
+            lambda *args, **kwargs: report,
+        )
+
+
+def test_self_test_leaves_caller_environment_untouched(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The run only reads the parent env; caller globals are byte-identical."""
+    monkeypatch.setenv("GREPTILE_API_KEY", "LIVE-SENTINEL-9z8y7x6w")
+    monkeypatch.setenv("OMEGA_PRIME_PRIME_RLM_ENABLED", "1")
+    before = dict(os.environ)
+    captured: dict[str, Any] = {}
+    _stub_self_test_host(monkeypatch, captured)
+    assert oneclick.run_self_test(find_repo_root()) == 0
+    assert dict(os.environ) == before
+    capsys.readouterr()
+
+
+def test_self_test_leaves_source_schedules_untouched(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Source schedule bytes are identical; the fixture schedule starts empty.
+
+    The writable source is a real public export: an outer isolated layout of
+    the repository, seeded with schedule bytes in its owned install, on which
+    run_self_test then builds its own inner fresh layout.
+    """
+    from omega_prime.grokbot.local_validation import isolated_layout
+
+    with isolated_layout(find_repo_root()) as export:
+        schedule = export.install / "cron" / "jobs.json"
+        schedule.parent.mkdir(parents=True, exist_ok=True)
+        sentinel = b'{"jobs": [{"id": "source-sentinel", "schedule": "live"}]}'
+        schedule.write_bytes(sentinel)
+        captured: dict[str, Any] = {}
+        _stub_self_test_host(monkeypatch, captured)
+        assert oneclick.run_self_test(export.install) == 0
+        assert schedule.read_bytes() == sentinel
+        observed = captured["schedule_bytes"]
+        assert observed in (None, b"") or b"source-sentinel" not in observed
+        if observed not in (None, b""):
+            assert json.loads(observed.decode("utf-8")).get("jobs", []) == []
+    capsys.readouterr()
+
+
+def test_self_test_not_ready_rejection_is_fixed_and_secret_free(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A dead host publishes only fixed safe metadata with a nonzero exit."""
+    fragment = "MIIBSpikeKey4192"
+    log_canary = (
+        b"host output before failure\n"
+        b"-----BEGIN RSA PRIVATE KEY-----\n" + fragment.encode() + b"\n"
+    )
+    captured: dict[str, Any] = {}
+    _stub_self_test_host(
+        monkeypatch,
+        captured,
+        log_bytes=log_canary,
+        ready_reason="timed out waiting for /readyz",
+    )
+    assert oneclick.run_self_test(find_repo_root()) == 1
+    err = capsys.readouterr().err
+    assert fragment not in err
+    assert "PRIVATE KEY" not in err
+    assert oneclick._SELF_TEST_SAFE_DIAGNOSTIC in err
+    assert signal.SIGTERM in captured.get("signals", [])
+
+
+def test_self_test_verification_failure_is_bounded_and_secret_free(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A verification exception publishes only fixed safe metadata, exit nonzero."""
+    fragment = "Q9mz4vLp8Wx3Rt6Yb1Nc5Ad0SeGhJkD"
+    captured: dict[str, Any] = {}
+    _stub_self_test_host(
+        monkeypatch,
+        captured,
+        verify_error=RuntimeError(f"verify blew up on K7f2/{fragment}"),
+    )
+    assert oneclick.run_self_test(find_repo_root()) == 1
+    err = capsys.readouterr().err
+    assert fragment not in err
+    assert oneclick._SELF_TEST_SAFE_DIAGNOSTIC in err
+
+
+def test_bounded_diagnostic_redacts_full_text_before_clipping() -> None:
+    """A secret spanning the old clip window cannot survive redact-first."""
+    secret = "boundary-secret-000000001"
+    raw = "A" * 1320 + secret + "B" * 1480
+    out = oneclick._bounded_diagnostic(raw, [secret])
+    assert "[redacted]" in out
+    assert secret not in out
+    assert "000000001" not in out
+    assert len(out) <= 500
+
+
+@pytest.mark.parametrize(
+    ("raw", "fragments"),
+    [
+        (
+            "key block -----BEGIN RSA PRIVATE KEY----- MIIB leak",
+            ("PRIVATE KEY", "MIIB"),
+        ),
+        (
+            "generic slash token K7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad0SeGhJkD in output",
+            ("Q9mz4vLp8Wx3Rt6Yb1Nc5Ad0SeGhJkD",),
+        ),
+    ],
+)
+def test_bounded_diagnostic_withholds_secret_shaped_text(
+    raw: str, fragments: tuple[str, ...]
+) -> None:
+    """PEM and slash-bearing canaries yield only fixed metadata."""
+    out = oneclick._bounded_diagnostic(raw, [])
+    assert out == oneclick._SELF_TEST_SAFE_DIAGNOSTIC
+    for fragment in fragments:
+        assert fragment not in out
+
+
+def _clip_filler(length: int) -> str:
+    """Gate-clean single-space filler of exactly `length` chars."""
+    unit = "log entry ok "
+    return (unit * (length // len(unit) + 1))[:length]
+
+
+def test_bounded_diagnostic_withholds_scanner_only_generic_across_clip() -> None:
+    """A 64-char scanner-only token split by the clip edge leaves no fragment.
+
+    The candidate sits so its head survives the old tail+clip windows as a
+    sub-32-char fragment the post-clip gate would accept; the pre-clip gate
+    must withhold it instead.
+    """
+    candidate = "K7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad0SeGhJkDK7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad"
+    after = (
+        oneclick._DIAGNOSTIC_TAIL_CHARS
+        - oneclick._DIAGNOSTIC_CLIP_CHARS
+        + 20
+        - len(candidate)
+    )
+    raw = f"{_clip_filler(2000)} {candidate} {_clip_filler(after)}"
+    out = oneclick._bounded_diagnostic(raw, [])
+    assert candidate not in out
+    assert candidate[:18] not in out
+    assert candidate[2:20] not in out
+
+
+def test_bounded_diagnostic_withholds_short_omk_across_tail() -> None:
+    """A short `omk_` form split by the tail edge leaves no fragment.
+
+    Only the bare suffix survives the old tail window, matching neither the
+    audit `omk_` rule (which needs a longer suffix) nor the post-clip guard;
+    the pre-clip gate must withhold it instead.
+    """
+    token = "omk_aB3dEf7hI2jK4"
+    # Tail starts 4 chars into the token, keeping only the bare suffix.
+    after = oneclick._DIAGNOSTIC_TAIL_CHARS + 4 - len(token) - 2
+    raw = f"{_clip_filler(2000)} {token} {_clip_filler(after)}"
+    out = oneclick._bounded_diagnostic(raw, [])
+    assert token not in out
+    assert token[4:] not in out
+    assert token[6:] not in out
+
+
+def test_bounded_diagnostic_withholds_pem_header_across_clip() -> None:
+    """A PEM header split by the clip edge leaves no fragment.
+
+    Only the head of the armour survives the old tail+clip windows, so the
+    post-clip PEM rule would accept it; the pre-clip gate must withhold it.
+    """
+    header = "-----BEGIN RSA PRIVATE KEY-----"
+    after = (
+        oneclick._DIAGNOSTIC_TAIL_CHARS
+        - oneclick._DIAGNOSTIC_CLIP_CHARS
+        + 20
+        - len(header)
+    )
+    raw = f"{_clip_filler(2000)} {header} {_clip_filler(after)}"
+    out = oneclick._bounded_diagnostic(raw, [])
+    assert header not in out
+    assert header[:18] not in out
+    assert "-----BEGIN" not in out
+
+
+def test_log_tail_missing_file_is_empty(tmp_path: Path) -> None:
+    assert oneclick._log_tail(tmp_path / "no-host.log", []) == ""
+
+
+def test_self_test_withholds_secret_bearing_report(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A poisoned verification report publishes no fragment and stays failed.
+
+    The stubbed host is clean and shuts down 0; failure comes only from the
+    final publication gate coercing the secret-bearing detail and metadata
+    to the fixed safe label.
+    """
+    from omega_prime.grokbot.verify import Check, VerifyReport
+
+    candidate = "K7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad0SeGhJkDK7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad"
+    version_canary = "omk_aB3dEf7hI2jK4"
+    poisoned = VerifyReport(
+        base_url="http://127.0.0.1:1",
+        checks=[
+            Check(
+                id="probe",
+                title="Probe",
+                status="pass",
+                detail=f"all good {candidate}",
+                duration_ms=1.0,
+            )
+        ],
+        server_version=version_canary,
+    )
+    captured: dict[str, Any] = {}
+    _stub_self_test_host(monkeypatch, captured)
+    monkeypatch.setattr(
+        "omega_prime.grokbot.verify.run_verification",
+        lambda *args, **kwargs: poisoned,
+    )
+    assert oneclick.run_self_test(find_repo_root()) == 1
+    streams = capsys.readouterr()
+    combined = streams.out + streams.err
+    assert candidate not in combined
+    assert candidate[:18] not in combined
+    assert version_canary not in combined
+    assert version_canary[6:] not in combined
+    assert "diagnostic withheld" in streams.out
+    assert "shutdown=0" in streams.out
+
+
+# --- parser-guard regressions --------------------------------------------------
+# The launcher parser echoes offending values into its stderr diagnostic
+# (invalid choice, ``type=`` rejection, unrecognized arguments). A recognized
+# synthetic canary in any of those positions must publish only the fixed safe
+# metadata with argparse exit 2 and no host started. These call the real
+# ``main`` and assert on the real streams; no mock stands in for the echo.
+
+_PARSER_GUARD_CANARY = "omk_cAnArY9192"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--transport", _PARSER_GUARD_CANARY],
+        ["--port", _PARSER_GUARD_CANARY],
+        [_PARSER_GUARD_CANARY],
+    ],
+    ids=["choice", "typed-value", "unknown-argument"],
+)
+def test_parser_guard_withholds_recognized_canary(
+    argv: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each argparse rejection echoes its canary; the guard withholds it."""
+
+    def _must_not_start(*args: Any, **kwargs: Any) -> int:
+        raise AssertionError("parser rejection started the host")
+
+    monkeypatch.setattr(oneclick, "run_oneclick", _must_not_start)
+    monkeypatch.setattr(oneclick, "run_self_test", _must_not_start)
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    combined = captured.out + captured.err
+    assert _PARSER_GUARD_CANARY not in combined
+    assert _PARSER_GUARD_CANARY[4:] not in combined
+    assert oneclick._SELF_TEST_SAFE_DIAGNOSTIC in captured.err
+
+
+def test_parser_guard_keeps_clean_choice_helpful(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A canary-free invalid choice keeps argparse wording and real options."""
+    with pytest.raises(SystemExit) as exc:
+        main(["--transport", "bogus"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "usage:" in captured.err
+    assert "invalid choice" in captured.err
+    assert "stdio" in captured.err and "sse" in captured.err
+    assert oneclick._SELF_TEST_SAFE_DIAGNOSTIC not in captured.err

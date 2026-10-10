@@ -9,6 +9,7 @@ the work root, roster/ownership lookups on the install root), and
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -29,7 +30,8 @@ from omega_prime.mcp_server import (
     load_runtime,
     resolve_work_root,
 )
-from omega_prime.routines.desk_lead import desk_intake_path
+from omega_prime.receipts import validate_receipt
+from omega_prime.routines.desk_lead import desk_intake_path, run_lead_pass
 from omega_prime.tools.approvals import ApprovalLog
 from omega_prime.tools.lead import IntakeStore
 
@@ -274,3 +276,130 @@ def test_desk_driver_runs_due_passes_without_manual_calls(tmp_path):
     driver.start()
     driver.stop(wait=True)
     driver.stop(wait=True)
+
+
+def test_warm_registry_consumes_independent_intake_and_acks(tmp_path):
+    """75-01: a runtime built before the producer commit still serves it.
+
+    The registry (and its warm IntakeStore) is constructed first; a
+    separate producer then commits an open order to the same
+    state/intake.json. Dispatching /omega-desk on the original runtime
+    with real caller doctor context must run a fully healthy workflow
+    that returns that order with its original ask plus a persisted
+    in-progress claim — never null/empty while the file holds the order.
+    """
+    state = tmp_path / "state"
+    env = {"OMEGA_PRIME_STATE_DIR": str(state)}
+    runtime = load_runtime(
+        ROOT,
+        tmp_path / "home",
+        no_roster=True,
+        approvals=[
+            ("lead_doctor", "host"),
+            ("lead_intake_next", "host"),
+            ("lead_intake_ack", "host"),
+        ],
+        env=env,
+    )
+    registry = runtime.registry
+    intake_path = state / "intake.json"
+    assert desk_intake_path(ROOT, state_dir=str(state)) == intake_path
+    # Prepare the real disposable seat: registration plus installed
+    # prompt bytes and their digest, through the public handlers.
+    registered = json.loads(
+        registry.dispatch(
+            "lead_doctor", {"action": "register", "agent_uuid": "warm-test-seat"}
+        )
+    )
+    assert registered["registered"] == ["lead"]
+    installed = json.loads(
+        registry.dispatch("lead_doctor", {"action": "install_prompt"})
+    )
+    assert installed["prompt"] and isinstance(installed["sha256"], str)
+    assert (
+        installed["sha256"] == hashlib.sha256(installed["prompt"].encode()).hexdigest()
+    )
+    probe = json.loads(registry.dispatch("lead_doctor", {"action": "check"}))
+    declared = probe["checks"]["skills"]["declared"]
+    assert declared  # the real seat prompt names real skills
+    doctor_context = {
+        "prompt_sha256": installed["sha256"],
+        "installed_skills": declared,
+    }
+    # The producer commits after the warm store exists; the runtime is
+    # never rebuilt between producer and consumer.
+    submitted = IntakeStore(intake_path).submit("warm desk order", origin="local")
+    payload = json.loads(
+        registry.dispatch(
+            "omega_command",
+            {"command": "/omega-desk", "doctor_context": doctor_context},
+        )
+    )
+    assert payload["ok"] is True
+    steps = {step["name"]: step for step in payload["result"]["steps"]}
+    doctor_result = steps["lead_doctor"]["result"]
+    assert doctor_result["green"] is True  # real seat, real context: healthy
+    assert all(step["ok"] for step in payload["result"]["steps"])
+    assert steps["lead_roster_status"]["result"]["intake_queue"] == {"open": 1}
+    claimed = steps["lead_intake_next"]["result"]
+    assert claimed["work_order"]["intake_id"] == submitted["intake_id"]
+    assert claimed["work_order"]["ask"] == "warm desk order"
+    assert claimed["work_order"]["status"] == "in_progress"
+    assert claimed["queue"] == {"in_progress": 1}  # sparse map: no zero keys
+    persisted = IntakeStore(intake_path).get(submitted["intake_id"])
+    assert persisted is not None and persisted["status"] == "in_progress"
+    # A real local effect, then acknowledgement through the public
+    # registered handler — visible to an independent observer.
+    scratch = tmp_path / "scratch" / "desk-proof.txt"
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text(f"{submitted['intake_id']}: did the thing\n", encoding="utf-8")
+    acked = json.loads(
+        registry.dispatch(
+            "lead_intake_ack",
+            {
+                "intake_id": submitted["intake_id"],
+                "status": "done",
+                "message": "did the thing",
+            },
+        )
+    )
+    assert acked["ok"] is True
+    assert acked["intake"]["status"] == "done"
+    assert acked["intake"]["message"] == "did the thing"
+    observer = IntakeStore(intake_path)
+    done = observer.get(submitted["intake_id"])
+    assert done is not None and done["status"] == "done"
+    assert done["message"] == "did the thing"
+    assert observer.counts() == {"done": 1}
+    assert scratch.read_text(encoding="utf-8").startswith(submitted["intake_id"])
+    # Reverse direction: a desk pass through a separately constructed
+    # store completes the next order while this registry stays warm.
+    second = IntakeStore(intake_path).submit("second desk order")
+    separate = IntakeStore(intake_path)
+
+    def _dispatch(ticket):
+        with scratch.open("a", encoding="utf-8") as handle:
+            handle.write(f"{ticket['ticket_id']}:{ticket['ask']}\n")
+        receipt = {
+            "commands": [{"cmd": "true", "exit_code": 0}],
+            "claims": [{"claim": "done", "evidence_command_index": 0}],
+            "unverified": [],
+        }
+        validate_receipt(receipt)
+        return {"receipt": receipt}
+
+    outcome = run_lead_pass(separate, _dispatch)
+    assert [t["status"] for t in outcome["tickets"]] == ["done"]
+    assert outcome["tickets"][0]["intake_id"] == second["intake_id"]
+    roster = json.loads(registry.dispatch("lead_roster_status", {}))
+    assert roster["intake_queue"] == {"done": 2}
+    third = IntakeStore(intake_path).submit("third desk order")
+    nxt = json.loads(registry.dispatch("lead_intake_next", {}))
+    assert nxt["work_order"]["intake_id"] == third["intake_id"]
+    assert nxt["work_order"]["ask"] == "third desk order"
+    claimed_third = IntakeStore(intake_path).get(third["intake_id"])
+    assert claimed_third is not None and claimed_third["status"] == "in_progress"
+    lines = scratch.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[0] == f"{submitted['intake_id']}: did the thing"
+    assert lines[1].startswith("t-") and lines[1].endswith(":second desk order")

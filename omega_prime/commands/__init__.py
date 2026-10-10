@@ -19,6 +19,7 @@ from omega_prime.commands.workflows import (
     connector_requests,
     dispatch_tool,
     run_workflow,
+    validated_doctor_context,
 )
 
 _COMMAND_RE = re.compile(
@@ -135,8 +136,20 @@ def parse_omega_command(text: str) -> tuple[str, str] | None:
     return name, args.strip()
 
 
-def execute_command(text: str, registry: Any, env: Mapping[str, str]) -> dict[str, Any]:
-    """Run one command. A bad command is a dict, not an exception."""
+def execute_command(
+    text: str,
+    registry: Any,
+    env: Mapping[str, str],
+    *,
+    doctor_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run one command. A bad command is a dict, not an exception.
+
+    ``doctor_context`` carries explicit caller state (``prompt_sha256`` and
+    ``installed_skills`` only) into direct and workflow doctor steps. It is
+    validated once with the shared strict convention: any other shape is
+    treated as missing, never healthy and never fatal.
+    """
     parsed = parse_omega_command(text)
     if parsed is None:
         return {
@@ -168,7 +181,8 @@ def execute_command(text: str, registry: Any, env: Mapping[str, str]) -> dict[st
             "error": "secret_refused",
             "reason": "Do not put a secret in chat or memory.",
         }
-    return _run(name, args, registry, env)
+    context = validated_doctor_context(doctor_context)
+    return _run(name, args, registry, env, context)
 
 
 def command_catalog() -> list[dict[str, str]]:
@@ -184,22 +198,29 @@ def command_catalog() -> list[dict[str, str]]:
     ]
 
 
-def _run(name: str, args: str, registry: Any, env: Mapping[str, str]) -> dict[str, Any]:
+def _run(
+    name: str,
+    args: str,
+    registry: Any,
+    env: Mapping[str, str],
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    doctor_context = dict(context or {})
     if name == "omega-help":
         return _ok(name, {"commands": command_catalog()})
     if name == "omega-connectors":
         return _ok(name, connector_requests(env))
     if name == "omega-python":
-        return _workflow("omega-python", "python-clean", registry, env)
+        return _workflow("omega-python", "python-clean", registry, env, doctor_context)
     if name == "omega-onboard":
-        return _workflow("omega-onboard", "onboard", registry, env)
+        return _workflow("omega-onboard", "onboard", registry, env, doctor_context)
     if name == "omega-desk":
-        return _workflow("omega-desk", "desk", registry, env)
+        return _workflow("omega-desk", "desk", registry, env, doctor_context)
     if name == "omega-workflow":
         if args not in WORKFLOW_NAMES:
-            body = run_workflow(args, registry, env)
+            body = run_workflow(args, registry, env, doctor_context=doctor_context)
             return _fail(name, "unknown_workflow", body)
-        return _workflow(name, args, registry, env)
+        return _workflow(name, args, registry, env, doctor_context)
     if name == "omega-recall":
         return _tool(name, registry, "lead_memory_recall", {"query": args})
     if name == "omega-retain":
@@ -213,7 +234,7 @@ def _run(name: str, args: str, registry: Any, env: Mapping[str, str]) -> dict[st
     if name == "omega-delegate":
         return _tool(name, registry, "delegate_task", {"goal": args})
     if name == "omega-doctor":
-        return _tool(name, registry, "lead_doctor", {"action": "check"})
+        return _doctor(name, registry, doctor_context)
     if name == "omega-roster":
         return _tool(name, registry, "lead_roster_status", {})
     if name == "omega-gates":
@@ -223,10 +244,42 @@ def _run(name: str, args: str, registry: Any, env: Mapping[str, str]) -> dict[st
     )
 
 
-def _workflow(
-    command: str, workflow: str, registry: Any, env: Mapping[str, str]
+def _doctor(
+    command: str, registry: Any, doctor_context: Mapping[str, Any]
 ) -> dict[str, Any]:
-    body = run_workflow(workflow, registry, env)
+    """Run the direct doctor check with explicit caller context.
+
+    Only validated ``prompt_sha256``/``installed_skills`` values reach the
+    check; absent or invalid fields stay omitted so the seat evaluates them
+    as missing. An explicit ``green`` false or ``ok`` false payload is a
+    failed command that keeps its result, never a success.
+    """
+    payload = dispatch_tool(
+        registry, "lead_doctor", {"action": "check", **doctor_context}
+    )
+    if payload.get("error") == "dispatch_failed":
+        return {
+            "ok": False,
+            "command": command,
+            "error": "dispatch_failed",
+            "reason": payload.get("reason"),
+            "result": payload,
+        }
+    if payload.get("error"):
+        return _fail(command, str(payload["error"]), payload)
+    if payload.get("green") is False or payload.get("ok") is False:
+        return _fail(command, "doctor_failed", payload)
+    return _ok(command, payload)
+
+
+def _workflow(
+    command: str,
+    workflow: str,
+    registry: Any,
+    env: Mapping[str, str],
+    doctor_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    body = run_workflow(workflow, registry, env, doctor_context=doctor_context)
     if body.get("ok"):
         return _ok(command, body)
     return _fail(command, str(body.get("error") or "workflow_failed"), body)

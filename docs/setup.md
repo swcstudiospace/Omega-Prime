@@ -34,9 +34,9 @@ Skip what you don't use: every unconfigured client reports
 ## 3. Optional: attach the tool host
 
 Without this step Omega Prime still answers from its prompt, skills, and
-routines. With it, the bot also calls the real Omega Prime tools (154 on
-the roster; 117 served by default — the Prime families are config-gated,
-default off). `delegate_task` is served; without a provider env it returns
+routines. With it, the bot also calls the real Omega Prime tools (165 on
+the roster; 117 served by default — the Prime families and the Red Team
+family are config-gated, default off). `delegate_task` is served; without a provider env it returns
 `not_configured: provider`.
 
 On a machine you control (Linux, Mac, or WSL2, Python 3.11+):

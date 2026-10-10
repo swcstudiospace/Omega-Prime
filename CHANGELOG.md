@@ -78,6 +78,62 @@ All notable changes to this project are documented here. Format follows
   preflight failure). `/admin/approvals` requires `admin`. Argument values
   are not written to the audit log.
 
+### Local readiness
+
+#### Added
+
+- Isolated readiness CLI `python -m omega_prime.grokbot.readiness --root
+  SOURCE --json --output REPORT`, with `--include-prime` for the safe local
+  Prime lifecycles. Exit 0 only when the validated report has `ok` true, 1
+  on readiness failure, 2 on usage errors. The JSON v1 report carries every
+  roster name exactly once with `exercised` / `feature_disabled` / `blocked`
+  / `failed` status, evidence, and named prerequisites. Documented in
+  `docs/local-validation.md` and linked from `docs/SUMMARY.md`.
+- `IntakeStore` serializes cooperating writers: every public operation
+  reloads `intake.json` first, and mutations run as reload–mutate–atomic
+  replace under the thread lock plus an exclusive `flock` on the stable
+  `intake.json.lock` sidecar. A corrupt file raises. Stale-lease completion
+  is not fenced and the queue is not globally transactional with other
+  stores.
+- Slash doctor steps take explicit caller state only: keyword-only
+  `doctor_context` with `prompt_sha256` and `installed_skills`. Missing or
+  incomplete context never implies healthy, a workflow past a failed
+  optional step stays `workflow_incomplete`, and the doctor check preserves
+  the installed expected prompt digest when saving its outcome.
+- The public `mcp_call` tool runs through the canonical initializing SDK
+  session client; the obsolete uninitialized one-line client is removed.
+  Inside an active loop the call moves to a joined non-daemon thread owning
+  its loop, bounded by a deadline with the child tree reaped on timeout.
+- `assert_no_secrets` treats `str` as literal text and any `os.PathLike` as
+  a file with 0600 enforced before reading; token-shaped paths get no
+  exemption. The readiness self-test runs in the disposable isolated layout,
+  so no source-install schedule ticks and no live credential is inherited.
+
+#### Fixed
+
+- The disposable export routes regular entries, aliases, and resolved
+  targets through one complete admission predicate: pruned and excluded
+  shape first — including `.planning` ancestors by component equality —
+  then provenance. Excluded-state aliases fail closed on both ends,
+  regular Prime `.env` files are never exported, and untracked learned
+  `SKILL.md` and helper scripts cannot ship on re-export. Fresh safe
+  ordinary product Python stays Git-ungated, while private-named product
+  Python is admitted only with verified Git-tracked or inherited-inventory
+  membership — a deliberate trusted public-code distinction, not an
+  exemption for credential data or untracked private Python. Optional
+  Prime directories filter per entry by submodule-tracked or
+  inherited-inventory membership, and every vetted export writes
+  `.omega-readiness-inventory.json` so Git-less Docker and source-archive
+  distributions carry trusted provenance or fail closed on the absent
+  resource; missing Git or a malformed inventory never vouches.
+- Published diagnostics are curated after full-text gating: complete text reaches known-minted-secret replacement plus audit redaction and then the unchanged secret gate before any clip — known-token replacement alone and final-only scanning do not close the leak. The gate recognizes only its documented patterns (audit credential shapes, `omk_` 8+ suffix, PEM armour, 32+ mixed-class runs at 4.2+ bits/char entropy with hex/UUIDs excluded), not every possible secret. A trip publishes only fixed safe metadata with no classified fragment and stays failed; readiness fragments are no longer published, self-test fragments reach the same full-input gate before any tail/clip window, raw loopback error slicing is removed, Prime producers
+  pass complete raw error text to the same shared gate with no extra
+  scanner or entropy relaxation, and the final verifier human/JSON/self-test publication re-verifies complete report data including metadata with the same failed-and-safe behavior.
+- Verifier, self-test launcher and readiness CLI usage diagnostics are guarded
+  before stderr publication. Recognized secret-shaped rejected arguments and
+  missing-root paths produce only fixed safe labels; usage failures retain
+  exit2 and clean argument/path guidance remains informative.
+
 ### v10 — Prime merge
 
 #### Added

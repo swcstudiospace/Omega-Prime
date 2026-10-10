@@ -1,7 +1,10 @@
 """Register the local platform tools on one registry.
 
 ``execute_code`` and ``mcp_call`` close over ``home``. The browser tools close
-over ``browser`` and do not open a socket when it is missing.
+over ``browser`` and do not open a socket when it is missing. ``mcp_call``
+keeps its roster name and argv/timeout contract while delegating to the
+canonical initialized SDK session client (initialize handshake plus
+tools/call over stdio); the obsolete uninitialized one-line client is gone.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from typing import Any
 from omega_prime.receipts import append_execution
 from omega_prime.tools.browser import BrowserSession
 from omega_prime.tools.execute import execute_code as run_execute_code
-from omega_prime.tools.mcp_client import mcp_call as run_mcp_call
+from omega_prime.tools.mcp_session import mcp_session_call as run_mcp_call
 from omega_prime.tools.registry import ToolRegistry
 
 # Offered after delegate_task. omega_prime/contracts/tool-rosters/omega-prime.yaml lists these.
@@ -111,7 +114,8 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
         ),
     ),
     "mcp_call": (
-        "Call one MCP tool by spawning an argv and exchanging a single JSON-RPC line. "
+        "Call one MCP tool over an initialized SDK session: the server is spawned from an argv, "
+        "reached with the initialize handshake plus tools/call over stdio, and reaped on timeout. "
         "command is an argument list, not a shell string.",
         _object(
             {

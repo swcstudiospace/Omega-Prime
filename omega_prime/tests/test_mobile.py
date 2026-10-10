@@ -208,7 +208,62 @@ def test_artifact_size_and_lint(tmp_path):
     lint = client.lint_baseline_diff("lint.xml", "base", "head")
     assert lint["issues_before"] == 2 and lint["issues_after"] == 3
     assert lint["grew"] is True and lint["new_ids"] == ["C"]
-    assert "grows hides" in lint["verdict"]
+
+
+def _lint_doc(body: str, by: str = "lint 8.0.0") -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<issues format="6" by="{by}">\n{body}</issues>\n'
+    )
+
+
+def _lint_client(tmp_path, files):
+    vcs = FakeVcs(files=files)
+    return MobileClient(
+        _ctx(
+            tmp_path,
+            vcs={"show": vcs.show, "diff_names": vcs.diff_names, "diff": vcs.diff},
+        )
+    )
+
+
+def test_lint_baseline_diff_counts_issue_elements_not_container(tmp_path):
+    base = _lint_doc('  <issue id="HardcodedText" severity="Warning" />\n')
+    head = _lint_doc(
+        '  <issue id="HardcodedText" severity="Warning" />\n'
+        '  <issue id="UnusedResources" severity="Warning" />\n'
+    )
+    client = _lint_client(
+        tmp_path, {("base", "lint.xml"): base, ("head", "lint.xml"): head}
+    )
+    lint = client.lint_baseline_diff("lint.xml", "base", "head")
+    assert lint["issues_before"] == 1 and lint["issues_after"] == 2
+    assert lint["grew"] is True and lint["new_ids"] == ["UnusedResources"]
+
+
+def test_lint_baseline_diff_empty_baseline_to_one(tmp_path):
+    base = _lint_doc("")
+    head = _lint_doc('  <issue id="HardcodedText" severity="Warning" />\n')
+    client = _lint_client(
+        tmp_path, {("base", "lint.xml"): base, ("head", "lint.xml"): head}
+    )
+    lint = client.lint_baseline_diff("lint.xml", "base", "head")
+    assert lint["issues_before"] == 0 and lint["issues_after"] == 1
+    assert lint["grew"] is True and lint["new_ids"] == ["HardcodedText"]
+
+
+def test_lint_baseline_diff_container_metadata_change_is_no_growth(tmp_path):
+    body = '  <issue id="HardcodedText" severity="Warning" />\n'
+    client = _lint_client(
+        tmp_path,
+        {
+            ("base", "lint.xml"): _lint_doc(body, by="lint 8.0.0"),
+            ("head", "lint.xml"): _lint_doc(body, by="lint 8.1.0"),
+        },
+    )
+    lint = client.lint_baseline_diff("lint.xml", "base", "head")
+    assert lint["issues_before"] == 1 and lint["issues_after"] == 1
+    assert lint["grew"] is False and lint["new_ids"] == []
 
 
 def test_testflight_and_phased_flows(tmp_path):

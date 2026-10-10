@@ -15,9 +15,42 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+_DOCTOR_CONTEXT_KEYS = ("prompt_sha256", "installed_skills")
+
 SEED_PATH = Path(__file__).resolve().parent / "seeds" / "memory.txt"
 HINDSIGHT_PREFIX = "[hindsight:omega-prime-lead] "
 WORKFLOW_NAMES = ("onboard", "python-clean", "connectors", "desk")
+
+
+def validated_doctor_context(value: Any) -> dict[str, Any]:
+    """Return the strict caller-supplied doctor context, or ``{}`` when missing.
+
+    Only ``prompt_sha256`` (a ``str``) and ``installed_skills`` (a list of
+    ``str``) pass through. Any other shape — a non-mapping, an extra key, or
+    a mistyped value — is treated as missing, never healthy and never fatal.
+    The result never carries ``action``, registration, or approval fields.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    for key in value:
+        if key not in _DOCTOR_CONTEXT_KEYS:
+            return {}
+    prompt = value.get("prompt_sha256")
+    if prompt is not None and not isinstance(prompt, str):
+        return {}
+    skills = value.get("installed_skills")
+    if skills is not None and (
+        not isinstance(skills, list)
+        or not all(isinstance(item, str) for item in skills)
+    ):
+        return {}
+    context: dict[str, Any] = {}
+    if prompt is not None:
+        context["prompt_sha256"] = prompt
+    if skills is not None:
+        context["installed_skills"] = list(skills)
+    return context
+
 
 _CONNECTORS: tuple[dict[str, Any], ...] = (
     {
@@ -137,9 +170,23 @@ def seed_memory(registry: Any) -> dict[str, Any]:
     )
 
 
-def run_workflow(name: str, registry: Any, env: Mapping[str, str]) -> dict[str, Any]:
-    """Run one named workflow. Unknown names list the catalog."""
-    steps = _workflows().get(name)
+def run_workflow(
+    name: str,
+    registry: Any,
+    env: Mapping[str, str],
+    *,
+    doctor_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run one named workflow. Unknown names list the catalog.
+
+    ``doctor_context`` carries explicit caller state (``prompt_sha256`` and
+    ``installed_skills`` only) into the ``lead_doctor`` steps of ``onboard``
+    and ``desk``. A workflow that runs every step but saw a failed optional
+    step stays ``ok`` false with ``workflow_incomplete``; every step result
+    is preserved.
+    """
+    context = validated_doctor_context(doctor_context)
+    steps = _workflows(context).get(name)
     if steps is None:
         return {
             "ok": False,
@@ -160,10 +207,20 @@ def run_workflow(name: str, registry: Any, env: Mapping[str, str]) -> dict[str, 
                 "error": "workflow_failed",
                 "steps": ran,
             }
+    if any(not row["ok"] for row in ran):
+        return {
+            "ok": False,
+            "workflow": name,
+            "error": "workflow_incomplete",
+            "steps": ran,
+        }
     return {"ok": True, "workflow": name, "steps": ran}
 
 
-def _workflows() -> dict[str, tuple[Step, ...]]:
+def _workflows(
+    doctor_context: Mapping[str, Any] | None = None,
+) -> dict[str, tuple[Step, ...]]:
+    context = validated_doctor_context(doctor_context)
     exe = sys.executable
     ruff = {
         "argv": [exe, "-m", "ruff", "check", "."],
@@ -173,6 +230,7 @@ def _workflows() -> dict[str, tuple[Step, ...]]:
         "argv": [exe, "-m", "compileall", "-q", "."],
         "timeout": 120,
     }
+    doctor_arguments = {"action": "check", **context}
     return {
         "python-clean": (
             Step("run_terminal", True, tool="run_terminal", arguments=ruff),
@@ -183,7 +241,7 @@ def _workflows() -> dict[str, tuple[Step, ...]]:
                 "lead_doctor",
                 False,
                 tool="lead_doctor",
-                arguments={"action": "check"},
+                arguments=dict(doctor_arguments),
             ),
             Step("lead_roster_status", False, tool="lead_roster_status", arguments={}),
             Step("seed_memory", False, local="seed"),
@@ -194,7 +252,7 @@ def _workflows() -> dict[str, tuple[Step, ...]]:
                 "lead_doctor",
                 False,
                 tool="lead_doctor",
-                arguments={"action": "check"},
+                arguments=dict(doctor_arguments),
             ),
             Step("lead_roster_status", False, tool="lead_roster_status", arguments={}),
             Step("lead_intake_next", False, tool="lead_intake_next", arguments={}),
@@ -252,6 +310,10 @@ def dispatch_tool(
 def _step_ok(payload: dict[str, Any]) -> bool:
     if payload.get("error"):
         return False
+    if payload.get("green") is False:
+        return False
+    if payload.get("ok") is False:
+        return False
     if "exit_code" not in payload:
         return True
     code = payload["exit_code"]
@@ -278,4 +340,5 @@ __all__ = [
     "dispatch_tool",
     "run_workflow",
     "seed_memory",
+    "validated_doctor_context",
 ]

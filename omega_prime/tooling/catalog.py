@@ -36,6 +36,7 @@ from omega_prime.tools.packs import PACKS_TOOL_NAMES
 from omega_prime.tools.platform import PLATFORM_TOOL_NAMES
 from omega_prime.tools.prime_runtime import KERNEL_TOOL_NAMES
 from omega_prime.tools.quality import QUALITY_TOOL_NAMES
+from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
 from omega_prime.tools.rlm import RLM_TOOL_NAMES
 from omega_prime.tools.substrate_tools import SUBSTRATE_TOOL_NAMES
 from omega_prime.tools.systems import SYS_TOOL_NAMES
@@ -73,6 +74,7 @@ FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Autonomous", AUTONOMOUS_TOOL_NAMES),
     ("Messaging", MESSAGING_TOOL_NAMES),
     ("Kernel", KERNEL_TOOL_NAMES),
+    ("Red Team", REDTEAM_TOOL_NAMES),
 )
 
 HEADER = """# Tool catalog
@@ -102,6 +104,11 @@ def full_inventory_registry(root: Path, home: Path):
     from omega_prime.tools.harness import register_harness_tools
     from omega_prime.tools.heartbeat import register_heartbeat_tools
     from omega_prime.tools.prime_runtime import register_prime_kernel_tools
+    from omega_prime.tools.redteam import (
+        RedteamClient,
+        RedteamContext,
+        register_redteam_tools,
+    )
     from omega_prime.tools.rlm import register_rlm_tools
 
     registry = default_registry(root, home)
@@ -112,6 +119,7 @@ def full_inventory_registry(root: Path, home: Path):
     register_messaging_tools(registry, "catalog", session_registry=SessionRegistry())
     register_rlm_tools(registry, None)
     register_prime_kernel_tools(registry, root)
+    register_redteam_tools(registry, RedteamClient(RedteamContext()))
     return registry
 
 

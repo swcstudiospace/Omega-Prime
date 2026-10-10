@@ -148,6 +148,22 @@ The Prime families write under `--root`, and the repository ignores these paths:
 
 An autonomous run is held in the host process and is not written to disk.
 
+### Intake queue
+
+The intake queue (`intake.json`, resolved from the state directory) is the
+authoritative work-order list the desk tools and cron passes share. Every
+public operation reloads the file first, and mutations run as serialized
+reload–mutate–atomic-replace transactions under the instance thread lock
+plus an exclusive `flock` on the stable `intake.json.lock` sidecar, so
+cooperating POSIX writers never lose each other's committed orders, claims,
+or field updates. A corrupt file raises instead of reading as empty.
+Stale-lease completion is not fenced: `ack` is an ordered merge with no
+expected-claim condition, and the queue is not globally transactional with
+any other store. A warm host sees orders an independent producer appended
+without needing a rebuild. The readiness disposable export excludes the
+live queue, schedules, and session state — [Local
+validation](local-validation.md#isolation) re-seeds its own fixture queue.
+
 ## Build the effective prompt
 
 The bot calls a tool only when its prompt lists it, and the shipped prompt
@@ -191,7 +207,9 @@ tests, so confirm it with the checks below.
 
    Look for `[ok] registry: registry serves 117 roster tools` on a default
    host. With every `OMEGA_PRIME_PRIME_<FAMILY>_ENABLED=1`, the served set
-   equals the 154 roster names.
+   equals the 154 roster names outside the default-off Red Team family;
+   `OMEGA_PRIME_REDTEAM_ENABLED=1` adds its eleven tempest_* tools for the
+   full 165.
 
 2. Call a tool over real MCP stdio. `prime_crates` is read-only, so it needs no
    approval:

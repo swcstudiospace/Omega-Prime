@@ -15,7 +15,9 @@
 - [Migration to v10](migration.md)
 - [Tool host](tool-host.md)
 - [Grok Bot native host](grok-bot-native.md)
+- [Red team module](red-team.md)
 - [Deploying the tool host](deploy.md)
+- [Local validation](local-validation.md)
 - [Substrate surface](substrate.md)
 - [FAQ](faq.md)
 

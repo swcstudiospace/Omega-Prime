@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from typing import Any
 
 from omega_prime.commands import execute_command
 from omega_prime.tools.registry import ToolRegistry
@@ -28,7 +29,21 @@ _PARAMETERS = {
         "command": {
             "type": "string",
             "description": "The slash command, including the leading /omega-.",
-        }
+        },
+        "doctor_context": {
+            "type": "object",
+            "description": (
+                "Optional caller context for the doctor check: "
+                "prompt_sha256 and installed_skills only."
+            ),
+            "properties": {
+                "prompt_sha256": {"type": "string"},
+                "installed_skills": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+        },
     },
     "required": ["command"],
 }
@@ -40,9 +55,11 @@ def register_omega_command_tools(
     """Register ``omega_command``. ``env`` is read for connector requests, not logged."""
     mapping: Mapping[str, str] = {} if env is None else env
 
-    def omega_command(command: str) -> str:
+    def omega_command(command: str, doctor_context: Any = None) -> str:
         text = command if isinstance(command, str) else ""
-        payload = execute_command(text, registry, mapping)
+        payload = execute_command(
+            text, registry, mapping, doctor_context=doctor_context
+        )
         return json.dumps(payload, ensure_ascii=False)
 
     registry.register("omega_command", _DESCRIPTION, _PARAMETERS, omega_command)

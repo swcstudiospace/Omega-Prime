@@ -210,6 +210,17 @@
     <tool name="prime_crates"/>
     <tool name="prime_goal"/>
     <tool name="prime_autonomous"/>
+    <tool name="tempest_status"/>
+    <tool name="tempest_mission_start"/>
+    <tool name="tempest_mission_stop"/>
+    <tool name="tempest_report"/>
+    <tool name="tempest_operators_list"/>
+    <tool name="tempest_operator_task"/>
+    <tool name="tempest_findings"/>
+    <tool name="tempest_providers"/>
+    <tool name="tempest_purple_synthesize"/>
+    <tool name="tempest_hats_list"/>
+    <tool name="tempest_hat_dispatch"/>
   </tools>
 
   <prompts root="prompts">
