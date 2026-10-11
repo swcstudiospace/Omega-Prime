@@ -90,7 +90,19 @@ snapshot contents and the fixed base prompt are not rewritten.
 ## For downstream redistributors
 
 - The pinned Rust checkout remains ignored and read-only. Default-off installs
-  remain the Python product; selecting optional native providers or kernel
-  tools requires the bridge build described in the [README](../README.md#build-from-source-both-toolchains).
+  remain the Python product (package floor `>=3.11`; see
+  [Setup](setup.md) for the exercised and CI interpreters); selecting
+  optional native providers or kernel tools requires the bridge build
+  described in the [README](../README.md#build-from-source-both-toolchains).
 - If you pinned the MIT license for compliance, pin the pre-v10 release;
-  v10 and later are AGPL-3.0-only.
+  v10 and later are AGPL-3.0-only. Upstream MIT notices stay intact
+  (`VENDOR.md`): inclusion here relicenses nothing upstream.
+
+## Further reading
+
+Typed adapter contracts live in [Connectors](connectors.md); execution and
+security boundaries live in [Architecture](architecture.md); the hand-run
+checks live in [Local validation](local-validation.md). The
+Greptile-synthesized history is a separately labelled untrusted archive —
+see [Greptile](greptile.md) — never current migration truth. Nothing here
+asserts a deployment, a live provider attachment, or a signed approval.

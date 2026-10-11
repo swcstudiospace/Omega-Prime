@@ -14,7 +14,8 @@ and units: [Deploying the tool host](deploy.md).
 
 `--root` is the repo checkout (default: cwd). Without
 `--no-roster` the server exposes the shipped roster's default set — the
-intersection `setup_check` reports (117 today). Prime families stay off by
+intersection `setup_check` reports (the count moves with the roster; read it
+from `/healthz` `rostered_tools`). Prime families stay off by
 default. `delegate_task` is served; without a provider env it returns
 `not_configured: provider`. All seven Prime families (harness, goals,
 heartbeat, autonomous, kernel, rlm, messaging) join when their
@@ -96,3 +97,19 @@ Rivet AgentOS VMs run Wasm/V8 and do not run CPython, so the
 host does not execute inside an AgentOS actor. Run the host on a
 VM, VPS, or sandbox and have the actor reach it over MCP or
 HTTP. Details: `omega_prime/hosting/agentos/NOTES.md`.
+
+## Runtime and further reading
+
+The host is the same in-process Python product (package floor `>=3.11`;
+see [Setup](setup.md) for the exercised and CI interpreters) served over
+MCP. Stdio is a local process; the SSE listener serves legacy SSE and
+Streamable HTTP on one port. Optional native Prime providers and kernel
+tools need the bridge build and stay off by default; separately started
+backends (a Node red-team backend, external stores) are outside this
+process. Approval-gated tools stay gated — pre-approve in the host process
+or approve from a session that approves; see
+[Grok Bot native host](grok-bot-native.md) for the exact approval API.
+Execution and security boundaries live in [Architecture](architecture.md);
+the hand-run checks live in [Local validation](local-validation.md). No
+page here asserts a deployment, a live provider attachment, or any signed
+approval beyond the host's own approval log.

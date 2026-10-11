@@ -12,6 +12,12 @@ gate (`prime.kernel.enabled`); see
 [ADR 0001](adr/0001-prime-merge-architecture.md) and
 [ADR 0002](adr/0002-prime-runtime-integration.md).
 
+The default product is in-process Python in one process with no sidecar;
+the crate link and native kernel import are opt-in behind
+`prime.kernel.enabled` and need the bridge build. Optional separately
+started services (a Node red-team backend, external stores) stay outside
+this boundary — see [Architecture](architecture.md).
+
 The typed **request** boundary applies to every registered tool of the seven
 families and to the declared keys of the kernel RLM bridge. Loop-internal
 capability calls (per-turn goal accrual, the continuation prompt, the
@@ -214,3 +220,12 @@ registered public agent's error rows; those are covered by
 `tests/test_prime_failure_injection.py` and the boundary tests. The unmodified
 historical suite separately recorded 376 passes and two obsolete
 source/inventory-pin failures; it is not claimed fully green.
+
+## Further reading
+
+Execution and security boundaries live in [Architecture](architecture.md);
+contribution seams and the extension contract live in
+[Build aesthetics](build-aesthetics.md); the hand-run workflow lives in
+[Local validation](local-validation.md). The Greptile-synthesized history is
+a separately labelled untrusted archive — see [Greptile](greptile.md) —
+and is never quoted here as current interface truth.

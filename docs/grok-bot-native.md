@@ -11,10 +11,13 @@ running host. Container, compose, systemd, and Kubernetes installs are
 bot is [Driving the bot](driving-the-bot.md). Sandbox notes stay on
 [Tool host](tool-host.md).
 
-The default roster serves the intersection `setup_check` reports (117 today).
+The default roster serves the intersection `setup_check` reports (the count
+moves with the roster; read it from `/healthz` `rostered_tools`).
 `delegate_task` is served; without a provider env it returns
 `not_configured: provider`. Prime families stay off until
-`omega-prime.json` turns them on.
+`omega-prime.json` turns them on. Preparing the template and running the
+checks below is local preparation on a machine you control: it does not
+attach a Grok account, reach a live provider, or prove a cloud deployment.
 
 ## One-command start
 
@@ -496,3 +499,15 @@ with one writable state volume.
   after a restart unless you pass `--approve` again.
 - Streamable HTTP sessions live in the process (at most `--max-sessions`,
   default 64). One replica, unless a proxy pins a session to it.
+- Python floor `>=3.11` (see [Setup](setup.md) for the exercised and CI
+  interpreters). The verifier, emulator self-test, and sync checks above
+  are local seat checks: they never print tokens, never inherit live
+  credentials, and never assert a deployment or a signed approval beyond
+  this host's own approval log.
+
+## Further reading
+
+Execution and security boundaries live in [Architecture](architecture.md);
+the hand-run checks live in [Local validation](local-validation.md). The
+Greptile-synthesized history is a separately labelled untrusted archive —
+see [Greptile](greptile.md) — never current operator truth.
