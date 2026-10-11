@@ -8,7 +8,7 @@ install and secrets; this page starts after it.
 
 | Piece | What it is | Who runs it |
 | --- | --- | --- |
-| The bot | Your Grok Bot copy of the template. It runs on Grok's cloud computer with Grok's default model, so Grok owns the conversation loop. | Grok |
+| The bot | Your Grok Bot seat loaded with the Omega Prime template (`omega_prime/grokbot/templates/OMEGA_PRIME.md`). The conversation loop belongs to the seat, not to this checkout — how a seat takes a prompt file is a Grok Bot setting this repository neither controls nor tests. | who operates the seat |
 | The tool host | `python -m omega_prime.mcp_server`: one process serving the tool registry over MCP stdio, behind the roster, the seat policy, and approvals. | You, on a machine you control |
 | The effective prompt | The assembled system prompt. The bot calls a tool only when its prompt lists it. | You, with the assembler |
 
@@ -114,12 +114,16 @@ cargo build --locked --manifest-path native/omega-prime-prime/Cargo.toml \
 | Flag | Meaning |
 | --- | --- |
 | `--root DIR` | Repository checkout holding `omega_prime/` and `omega-prime.json` (default: the current directory). |
+| `--work-root DIR` | Directory the desk tools act on (default: `OMEGA_PRIME_WORK_ROOT`, else `--root`). |
 | `--home DIR` | The bot's home: the working directory of the `execute_code` and `mcp_call` tools (default: `~`). |
 | `--no-roster` | Serve every registered tool instead of the roster's default set. |
 | `--approve TOOL:APPROVER` | Pre-approve one gated tool. Repeatable. A malformed value, or an approver equal to the bot's own id, exits 2. |
 
-Export the secrets from [Setup](setup.md#2-secrets) in the host's environment,
-then add the command as a custom MCP server in your Grok Bot's settings.
+Desk state (including the `intake.json` work-order queue) is stored under
+`OMEGA_PRIME_STATE_DIR`. Export the secrets from [Setup](setup.md#4-secrets-go-in-the-private-environment-never-in-examples) in the host's environment,
+then register the command with your seat. How a Grok Bot seat takes a custom
+MCP server is a Grok Bot setting this repository neither controls nor tests —
+confirm it with the checks below.
 
 ### Approvals
 
@@ -227,13 +231,17 @@ tests, so confirm it with the checks below.
    EOF
    ```
 
-   Expect `"loaded": true`, `"error": null`, and the nine crate names.
+   Expect `"loaded": true`, `"error": null`, and the nine crate names — once
+   the native extension is built per the `cargo build` command above. Without
+   it, `prime_crates` reports `loaded: false`; that is the honest
+   unbuilt-extension state, not a failure of the host.
 
-3. In the bot, send the smoke prompt from [Setup](setup.md#4-smoke-prompt). The
+3. In the bot, send the smoke prompt from [Setup](setup.md#7-smoke-prompt-needs-a-bot-seat). The
    tool list should now include the Prime tools in your effective prompt. Then
    ask it to call `prime_crates`; it should return the payload from step 2.
    The prompt does not mark which tools are gated; the
-   [tool catalog](tool-catalog.md) does.
+   [tool catalog](tool-catalog.md) does. Seat-side behavior is preparation to
+   confirm, not a repository-run proof — the repository proof is steps 1–2.
 
 ## Asking for things
 

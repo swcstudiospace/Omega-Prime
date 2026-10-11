@@ -69,10 +69,10 @@ The tools speak the upstream loopback HTTP API, not MCP:
   contract), or from the file named by `redteam.bearer_token_file` in
   `omega-prime.json`.
 - The sidecar is T3MP3ST itself, checked out as the tracked root
-  `redteam/` submodule (pin in `VENDOR.md`) and started separately —
-  Omega Prime does not start, supervise, install, or auto-launch it.
-  See [Backend checkout and start](#backend-checkout-and-start).
-
+  `redteam/` submodule (remote `https://github.com/swcstudiospace/purple-team.git`,
+  commit `831a6b0ee09f12c0f069f51d62b2f0945d505980` per `VENDOR.md`) and
+  started separately — Omega Prime does not start, supervise, install, or
+  auto-launch it. See [Backend checkout and start](#backend-checkout-and-start).
 ## Backend checkout and start
 
 The TypeScript backend is separate upstream source reached through the

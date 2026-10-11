@@ -1,91 +1,200 @@
 # Setup
 
-Get Omega Prime running in Grok in about ten minutes. Only the
-optional tool-host step needs a machine of yours.
+Install Omega Prime from source, configure secrets privately, and verify the
+checkout locally. The no-credential validation route below uses owned local
+fixtures. Optional provider, authenticated-host and bot-seat routes need the
+prerequisites stated in their sections; preparation is not attachment proof.
 
-## 1. Install from the template
+## 1. Prerequisites
 
-Open the Omega Prime share link in Grok and choose **Add to Grok Bot**.
-This creates an independent copy on your account — your chats,
-secrets, and settings stay yours. The bot runs on Grok's cloud
-computer with Grok's default model.
+Python floor, recommendation, and CI matrix are three separate facts —
+do not collapse them:
 
-What the template carries: Omega Prime instructions, skills, routines,
-and first-party plugins. What it never carries: secrets, custom
-MCP servers, scripts, or private skills. The steps below re-add
-the ones you want.
+- **Formal package floor:** `>=3.11`, declared in
+  [`pyproject.toml`](../pyproject.toml) (`requires-python = ">=3.11"`,
+  classifiers `3.11`–`3.14`).
+- **Recommended and exercised interpreter:** 3.12. Use 3.12 for onboarding
+  unless you have a reason not to.
+- **Retained CI matrix:** 3.12–3.14 (`.github/workflows/ci.yml`). The matrix
+  passing on 3.13 or 3.14 is not a claim that every dependency is pinned
+  identically there; the recorded resolution is `requirements-lock.txt`.
 
-## 2. Secrets
+You also need `git`. The optional prerequisites below are only needed for
+the lanes that use them — the default Python-only path needs none of them:
 
-Omega Prime never asks for secrets in chat. Add each value where its
-connector asks for it:
+| Optional prerequisite | Needed for | Source |
+| --- | --- | --- |
+| `prime-agent/` submodule checkout at the pin | Full test suite, native extension, kernel tools | `omega_prime/contracts/prime-agent.pin.json`, `VENDOR.md` |
+| Rust toolchain per `VENDOR.md` + `cargo` | Building the native extension | `README.md#build-from-source-both-toolchains` |
+| Node `>= 22.19.0` | Red Team backend only | `redteam/package.json` `engines`, `docs/red-team.md` |
+| Browser backend / device executable / provider key | The tools that need them | They report `blocked` with the gap named; see `docs/local-validation.md` |
+
+## 2. Clone
+
+The repository is `swcstudiospace/omes-bot` (see `[project.urls]` in
+`pyproject.toml`). An ordinary clone leaves the tracked submodule checkouts
+empty, so clone recursively:
+
+```bash
+git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git omega-prime
+cd omega-prime
+```
+
+Inside an existing checkout, populate afterwards instead:
+
+```bash
+git submodule update --init --recursive
+```
+
+When the optional Red Team backend is not needed, initializing only Prime
+suffices:
+
+```bash
+git submodule update --init prime-agent
+```
+
+Never `git clone` a checkout manually into the `prime-agent/` or `redteam/`
+submodule paths; both are tracked gitlinks pinned in `VENDOR.md`.
+
+## 3. Install
+
+From the repository root, with Python 3.12:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+```
+
+For the recorded dependency resolution instead of fresh floors:
+
+```bash
+.venv/bin/pip install -r requirements-lock.txt
+.venv/bin/pip install --no-deps -e .
+```
+
+## 4. Secrets go in the private environment, never in examples
+
+Omega Prime never asks for secrets in chat. Supply each value privately in
+the host process environment (or a `0600` token file where the tool supports
+one). Never put a credential in `argv`, a config example, shell tracing, or
+saved output — `--token` exists only as a deprecated flag that warns because
+`argv` is visible to other users on the machine.
 
 | Secret | Needed for | Where it goes |
 | --- | --- | --- |
-| `XAI_API_KEY` | Grok model calls outside Grok Bot | host env, resolved via the credential broker |
+| `XAI_API_KEY` | Grok model calls outside a Grok Bot seat | host env, resolved via the credential broker |
 | `X_API_TOKEN` | X connector tools | host env, read by the tool host |
 | `TELEGRAM_BOT_TOKEN` | Telegram connector tools | host env, read by the tool host |
 | `DISCORD_BOT_TOKEN` | Discord connector tools | host env, read by the tool host |
 | GitHub token | Reviews, ship PRs | host via `gh auth` |
+| `SUBSTRATE_TOKEN` | Substrate brief/events/memory | host env, resolved via the credential broker |
+| `HINDSIGHT_API_KEY` | Shared Hindsight episodic memory | host env, resolved via the credential broker |
+| `MCP_AUTH_TOKEN` or `--token-file` | Bearer token a remote tool host requires | host env or a `0600` file (never `argv`) |
 
-Skip what you don't use: every unconfigured client reports
-`not_configured` instead of failing.
+Configure only the integrations you intend to use. Availability and failure
+behavior are tool-specific: some tools return `not_configured`, readiness
+accounts for named prerequisites, and some clients raise or degrade reads.
+See [substrate](substrate.md) and [connectors](connectors.md) for those contracts.
+`SUBSTRATE_URL` (default `http://127.0.0.1:7410`) and `HINDSIGHT_URL` override
+the respective peers; `omega_prime/grokbot/SETUP.md` has the full secret table.
 
-## 3. Optional: attach the tool host
+## 5. Verify locally with no credentials
 
-Without this step Omega Prime still answers from its prompt, skills, and
-routines. With it, the bot also calls the real Omega Prime tools (165 on
-the roster; 117 served by default — the Prime families and the Red Team
-family are config-gated, default off). `delegate_task` is served; without a provider env it returns
-`not_configured: provider`.
-
-On a machine you control (Linux, Mac, or WSL2, Python 3.11+):
+These run with an empty credential surface and prove only this checkout:
 
 ```bash
-git clone https://github.com/swcstudiospace/omes-bot.git omega-prime
-cd omega-prime
-python3 -m venv .venv
-.venv/bin/pip install -e .
+.venv/bin/python -m omega_prime.setup_check --root .
+```
+
+`setup_check` runs the roster, template, assembly, registry, ultrathink, and
+substrate checks and exits 0 only when every required check passes. Skips
+(ultrathink/substrate unconfigured) are reported, never failures — only
+`FAIL` fails.
+
+The isolated readiness profile accounts for every roster tool, actually
+calling eligible local handlers and classifying the rest with named
+prerequisites or disabled features. It writes one JSON report:
+
+```bash
+.venv/bin/python -m omega_prime.grokbot.readiness --root . --json --output readiness-local.json
+```
+
+Exit 0 only when the validated report has `ok` true. Each tool row carries a
+`status` of `exercised`, `feature_disabled`, `blocked` (with `prerequisites`
+naming the real gap), or `failed`. The profile proves only this seat — a
+disposable fixture on loopback — not live provider, device, browser, or
+remote-service behavior. Operator reference:
+`docs/local-validation.md`.
+
+Preflight doctor for host/transport readiness:
+
+```bash
+.venv/bin/python -m omega_prime.grokbot.doctor --host 127.0.0.1 --json
+```
+
+Add `--auth --strict` when checking a remote authenticated bind; exit 1 on
+any failure (with `--strict`, on any warning too).
+
+## 6. Optional: start the tool host
+
+Without this step the checked-out code still answers every local command
+above. With it, a bot seat can also call the real tools over MCP. Stdio is a
+local process; the remote listener serves legacy SSE and Streamable HTTP on
+one port with bearer auth:
+
+```bash
 .venv/bin/python -m omega_prime.mcp_server --root .
 ```
 
-For the exact verified dependency set instead of fresh floors:
-`.venv/bin/pip install -r requirements-lock.txt`.
+`--root` is the repository checkout (default: cwd). `--work-root` selects the
+directory the desk tools act on (default: `OMEGA_PRIME_WORK_ROOT`, else
+`--root`). `--home` is the working directory of the `execute_code` and
+`mcp_call` tools (default: `~`). Desk state is stored under
+`OMEGA_PRIME_STATE_DIR`. Without `--no-roster` the server exposes the shipped
+roster's default set — the intersection `setup_check` reports. Prime families
+stay off by default. `delegate_task` is served; without a provider env it
+returns `not_configured: provider`.
 
-Then add it as a **custom MCP** server in your Grok Bot's
-settings, pointing at that command. Prefer a sandbox: see
-[Tool host](tool-host.md) for the OpenShell profile and AgentOS
-notes.
+Prefer the 1-click launcher, which runs the preflight doctor first and
+refuses an unauthenticated non-loopback bind:
 
-## 4. Smoke prompt
+```bash
+./scripts/grokbot-1click.sh --transport stdio
+./scripts/grokbot-1click.sh --transport stdio --dry-run
+```
 
-Send the bot exactly this:
+`--dry-run` does everything except serve. `--self-test` starts a throwaway
+loopback host and runs the live verifier. Operator references:
+`docs/tool-host.md` (server), `docs/grok-bot-native.md` (remote host),
+`docs/deploy.md` (deploying it).
+
+Sandbox the host whether or not any Prime flag is on: the default host
+already serves ungated tools that run code and write files. See
+`docs/tool-host.md#openshell`.
+
+## 7. Smoke prompt (needs a bot seat)
+
+This step is preparation only — it does not attach any live model, account,
+or provider. With the host running and registered on your seat, send the bot
+exactly this:
 
 > `ultrathink` what tools do you have, and which need approval?
 
 Expect back:
 
 1. A short plan of how it will answer (the ultrathink notice fired).
-2. A tool list matching the roster — with the tool host attached;
-   without it, the bot says which tools live behind the host
-   instead of inventing results.
+2. A tool list matching `contracts/tool-rosters/omega-prime.yaml` — with
+   the tool host attached; without it, the bot says which tools
+   live behind the host instead of inventing results.
 3. The approval-gated tools named as needing approval.
 4. No secrets, ids, or tokens quoted back.
-
-## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
 | No plan, just an answer | The word must be lowercase standalone prose, not in code |
-| Tool list is vague | Tool host not attached — see step 3 |
-| `not_configured` on a connector | Its secret is missing — see step 2 |
+| Tool list is vague | Tool host not attached — see step 6 |
+| `not_configured` on a connector | Its secret is missing — see step 4 |
 | Smoke prompt quotes a secret | Report it; that must never happen |
-
-Builders can also run the local verification:
-
-```bash
-.venv/bin/python -m omega_prime.setup_check --root .
-```
 
 The Prime capability families are off by default. To turn them on and drive
 the bot with them, see [Driving the bot](driving-the-bot.md).
@@ -102,3 +211,13 @@ missing-library guard in the suite's JUnit report.
 Receipt summaries run even after an earlier step fails. Missing, skipped,
 cancelled, or failed required evidence prevents a passing summary; a green
 summary is not a replacement for the underlying job results.
+
+## Claim limits
+
+- No step above attaches a live Grok account, model, or provider. A local
+  model double (for example the `ScriptedModel` used by readiness and
+  workflow checks) proves local composition only — never live attachment.
+- Missing-key, skipped, and `not_configured` outcomes are unexecuted
+  prerequisites, not successful runs.
+- No time estimate is given: completion time depends on your machine and
+  network, and this page does not measure it.
