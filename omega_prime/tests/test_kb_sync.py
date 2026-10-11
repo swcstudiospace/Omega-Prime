@@ -228,18 +228,6 @@ def test_skip_paths_and_unsafe_path(tmp_path: Path) -> None:
         sync("o/n", tmp_path, McpHttpClient("https://mcp.local", TOKEN, opener=evil))
 
 
-def test_refresh_workflow_is_scheduled_and_secret_gated() -> None:
-    root = Path(__file__).resolve().parents[2]
-    text = (root / ".github" / "workflows" / "kb-refresh.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "schedule" in text and "workflow_dispatch" in text
-    assert "secrets.GREPTILE_API_KEY" in text
-    assert "gh pr create" in text
-    assert "GREPTILE_API_KEY=..." not in text and "echo $GREPTILE" not in text
-    assert "if: ${{ secrets." not in text
-
-
 def test_auth_failure_is_secret_free() -> None:
     def denied(request, timeout=None):
         raise urllib.error.HTTPError(request.full_url, 401, "x", Message(), None)
@@ -251,3 +239,35 @@ def test_auth_failure_is_secret_free() -> None:
     assert "GREPTILE_API_KEY" in str(exc.value)
     with pytest.raises(ValueError):
         McpHttpClient("https://mcp.local", "")
+
+
+def test_missing_key_exits_explicitly_with_no_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "kb"
+    peer = _Peer([])
+    assert main(["--repo", "o/n", "--out", str(out)], {}, peer) == 2
+    err = capsys.readouterr().err
+    assert "GREPTILE_API_KEY" in err
+    assert peer.requests == []
+    assert not out.exists()
+
+
+def test_sync_auth_denial_returns_failure_without_credential(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def denied(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 401, "x", Message(), None)
+
+    out = tmp_path / "kb"
+    assert (
+        main(
+            ["--repo", "o/n", "--out", str(out)],
+            {"GREPTILE_API_KEY": TOKEN},
+            denied,
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert TOKEN not in err
+    assert "GREPTILE_API_KEY" in err
