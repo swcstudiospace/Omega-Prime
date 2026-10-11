@@ -24,10 +24,19 @@ is cut, and credit reporters who want credit.
 
 Omega Prime is built to keep secrets out of reach:
 
-- Keys resolve from the environment through the credential broker and are
-  redacted from transcripts, events, errors, and eval output.
+- Keys resolve from the environment through the credential broker
+  (`omega_prime/credentials/broker.py::CredentialBroker.key_for`, scoped per
+  host via `allows_host`) and are redacted from transcripts, events, errors,
+  and eval output (`credentials/redact.py::redact_text`, `SecretLeakError`
+  via `grokbot/secret_guard.py::assert_no_secrets`).
+- A private token file IS supported alongside the environment: `--token-file`
+  beats `--token` beats `--token-env` (default `MCP_AUTH_TOKEN`), read via
+  `tooling/fs.py::read_secret_file`. The hashed token store is mode 0600 and
+  holds SHA-256 digests; `grokbot/tokens.py revoke` takes effect on the next
+  check without a restart. Never paste a credential value into an example,
+  diagnostic, log, or saved output — pass the file path or variable name.
 - Tool arguments are never logged and never leave the process in event
-  summaries.
+  summaries (the audit log stores key names and a digest, never values).
 - Tests are hermetic — no live credentials exist in CI.
 - If you find a secret committed anywhere in history, report it as above
   so it can be rotated and purged; do not quote it in an issue or PR.
@@ -83,3 +92,18 @@ is a PKCE timing oracle in oauthlib's authorization-server grant
 does not host that grant. The supply-chain workflow ignores only that
 advisory, against the lockfile, until a tweepy release accepts `oauthlib>=4`.
 The runner's own `pip` is not part of the audit.
+
+## Approvals and authorization boundaries
+
+- Mutating tools wait for a person: `ToolRegistry.dispatch` refuses with
+  `approval required` unless `ApprovalLog.is_approved` holds for that tool
+  name (`omega_prime/tools/registry.py`, `omega_prime/tools/approvals.py`).
+  No diagram or page in this repo grants automatic approval — a green arrow
+  is never an authorization decision.
+- The `/admin/approvals` surface requires the `admin` scope and is not
+  mounted when authentication is off. The approver recorded on a grant is
+  the token's label or id, never the bot seat.
+- Native GSD authorization is NOT signed Swarm approval. Protected `.swarm/`
+  writes keep their own approval path; nothing in these docs claims a
+  protected write or deployment occurred. Do not present local
+  registry approval as Swarm signing.

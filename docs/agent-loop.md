@@ -1,8 +1,39 @@
 # The agent loop
 
 Omega Prime runs the Hermes conversation loop with the Omp harness behavior
-ports. `OmegaPrimeAgent` composes that same loop with a `ToolRegistry` and a
-model adapter; it does not create a second agent or loop.
+ports. `OmegaPrimeAgent` (`omega_prime/agent/runtime.py`) composes that same
+loop (`omega_prime/agent/conversation_loop.py::run_conversation`) with a
+`ToolRegistry` (`omega_prime/tools/registry.py`) and a model adapter; it does
+not create a second agent or loop.
+
+```mermaid
+flowchart TB
+    SYS["_install_system_prompt (once)"] --> HOOKS["_run_extension_hooks, then legacy before_model"]
+    HOOKS -- stop verdict --> STOPP["Stop with verdict reason; no model call"]
+    HOOKS -- continue --> CALL["model.complete via registered schemas"]
+    CALL --> ROUND{"tool calls?"}
+    ROUND -- calls --> DISP["turn_tool_round → ToolRegistry.dispatch"]
+    DISP --> ROWS["Policy/approval checked; append handler result or refusal rows"]
+    ROWS --> NEXT{"Tool-round verdict and output budget"}
+    NEXT -- continue --> HOOKS
+    NEXT -- break --> END["finalize_turn; emit/journal final rows; finish journal"]
+    ROUND -- no calls --> TEXT["finish_text_response; emit/journal response rows"]
+    TEXT --> PRIME{"Prime hooks present?"}
+    PRIME -- no --> END
+    PRIME -- yes --> GOAL["_prime_text_boundary: accounting and precedence gates"]
+    GOAL -- continuation rows --> HOOKS
+    GOAL -- stop --> END
+    STOPP --> END
+```
+
+Interception order is fixed: `ExtensionHooks` callbacks first (registration
+order, first `{"stop": True}` verdict wins, later hooks do not run), then the
+single legacy `Agent.before_model` hook. A refusal (`approval_refused`,
+`policy_refused`) describes only the most recent tool round — a refusal the
+model recovered from in a later round does not make the turn terminal. See
+[architecture](architecture.md#the-loop) for the matching state view and
+[build-aesthetics](build-aesthetics.md#extension-contract) for the
+registration contract.
 
 ## Native Prime provider
 
