@@ -249,6 +249,16 @@ def _retention_effective(observed_exit):
     return observed_exit if observed_exit != 0 else 1
 
 
+def _retention_json_object(pairs):
+    """Reject ambiguous member names before canonical report validation."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON member")
+        result[key] = value
+    return result
+
+
 def decide_retention(
     stage,
     observed_exit,
@@ -334,7 +344,7 @@ def decide_retention(
             _retention_effective(observed_exit),
         )
     try:
-        report = json.loads(candidate_text)
+        report = json.loads(candidate_text, object_pairs_hook=_retention_json_object)
     except (ValueError, RecursionError):
         return (
             False,

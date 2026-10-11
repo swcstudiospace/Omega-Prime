@@ -493,3 +493,31 @@ def test_retention_partial_roster_refused(tmp_path: Path) -> None:
     assert metadata["reason"] == _RETENTION_INCOMPLETE_REASON
     assert metadata["interpreter"] == _RETENTION_INTERPRETER
     assert _github_exit_codes(github_output) == ["1"]
+
+
+def test_retention_duplicate_members_refuse_without_losing_observed_exit(
+    tmp_path: Path,
+) -> None:
+    report = _canonical_retention_report(ok=True)
+    candidate = json.dumps(report)
+    summary = json.dumps(report["summary"])
+    ambiguous = {
+        "top": '{"ok": false, ' + candidate[1:],
+        "nested": candidate.replace(summary, '{"total": -1, ' + summary[1:], 1),
+    }
+    for scope, text in ambiguous.items():
+        for observed in ("0", "7"):
+            completed, output, github_output = _run_retention_producer(
+                tmp_path / f"{scope}-{observed}",
+                observed_exit=observed,
+                candidate_text=text,
+            )
+            effective = "1" if observed == "0" else observed
+            assert completed.returncode == int(effective)
+            metadata = json.loads(output.read_text(encoding="utf-8"))
+            assert metadata["exit_code"] == int(observed)
+            assert "ok" not in metadata
+            assert "schema_version" not in metadata
+            assert output.read_text(encoding="utf-8") != text
+            assert _github_exit_codes(github_output) == [effective]
+            assert stat.S_IMODE(output.stat().st_mode) == 0o600

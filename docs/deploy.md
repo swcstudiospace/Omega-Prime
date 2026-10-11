@@ -232,8 +232,10 @@ promotion marker or manual trigger alone is not publication authorization.
 
 The [main CI](../.github/workflows/ci.yml) preserves Python3.12–3.14 verification/lint/type matrices. Its three verify
 legs run the maintained `python -m omega_prime.grokbot.readiness` command through existing identity/exit receipts;
-always-run retention admits a canonical report or private fixed-safe failure metadata alongside JUnit. Nonzero
-observed exits stay nonzero, rejected evidence after observed0 becomes non-success, and an unobserved run records
+always-run retention admits a canonical report or private fixed-safe failure metadata alongside JUnit.
+Duplicate JSON members at any nesting level are refused before canonical validation rather than silently collapsed
+to the last value. Nonzero observed exits stay nonzero, rejected evidence after observed0 becomes non-success,
+and an unobserved run records
 null rather than inventing exit0. Raw candidate output is never uploaded as a fallback. Independent lock audit and
 pinned native/parity/license jobs remain separate. KB refresh reports missing-key **skipped/not-run**, and updates
 only `kb/` through a human-reviewed PR: skip, no-change and generated PR are not completed reviewed retrieval.

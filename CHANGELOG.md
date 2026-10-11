@@ -54,8 +54,9 @@ All notable changes to this project are documented here. Format follows
 - CI keeps Python3.12–3.14 verification/lint/type matrices and independent
   lock/native/license gates with least permissions, concurrency and job bounds.
   Verify legs run maintained isolated readiness and retain only guarded canonical
-  reports or private failure metadata alongside receipts/JUnit; failures and
-  unobserved runs are not relabelled green. Image validation exercises both
+  reports or private failure metadata alongside receipts/JUnit; duplicate JSON
+  members refuse before admission, and failures/unobserved runs never become green.
+  Image validation exercises both
   transports/admin transitions under hardening and SIGTERM, with SPDX plus the
   unchanged blocking fixed-CRITICAL scan. An optional default-off manual publisher
   binds protected environment/ref/source/run/artifact and exact transferred bytes,
