@@ -95,11 +95,13 @@ The runner's own `pip` is not part of the audit.
 
 ## Approvals and authorization boundaries
 
-- Mutating tools wait for a person: `ToolRegistry.dispatch` refuses with
-  `approval required` unless `ApprovalLog.is_approved` holds for that tool
-  name (`omega_prime/tools/registry.py`, `omega_prime/tools/approvals.py`).
-  No diagram or page in this repo grants automatic approval — a green arrow
-  is never an authorization decision.
+- Approval is registration-specific: `ToolRegistry.dispatch` checks
+  `ApprovalLog.is_approved` only for tools registered with
+  `requires_approval=True`. A gated tool cannot self-approve.
+  Local coding `write_file`, `patch_file`, `edit_file` and `run_terminal`
+  are not approval-gated by that flag; they can mutate files or run code as
+  the host user. Sandbox the host and constrain workspace/policy access.
+  No diagram or page grants approval, and not every mutation waits for a person.
 - The `/admin/approvals` surface requires the `admin` scope and is not
   mounted when authentication is off. The approver recorded on a grant is
   the token's label or id, never the bot seat.
