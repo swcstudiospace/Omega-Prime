@@ -2,20 +2,29 @@
 
 ![Omega Prime banner](../assets/banner.svg)
 
-One Grok programming bot: a single agent that writes and changes
-code using checked-in skills, tools, and prompts. Install it from
-the Add-Bot template, talk to it in Grok, and optionally attach
-the Omega Prime tool host so it can call real tools.
+Canonical guidance for the Python agent, registry-gated tools and MCP host.
+The repository includes a Grok Bot template and a repeatable local validation
+route. Account/model attachment, optional services and privileged operations
+still require their actual prerequisites and authorization.
 
-**Start here by audience:**
+## Start by audience
 
-- **Installing?** → [Setup](setup.md): install, secrets, optional
-  tool host, and the smoke prompt that proves it works.
-- **Using it?** → [User guide](user-guide.md): magic words,
-  ultrathink turns, skills, tools, and approvals.
-- **Running tools?** → [Tool host](tool-host.md): the MCP server,
-  OpenShell profile, and AgentOS notes.
-- **Building on it?** → [Build aesthetics](build-aesthetics.md):
-  how Omega Prime is put together.
-- **Publishing these docs?** → [GitBook sync](gitbook-sync.md):
-  connect this repo to GitBook.
+- **Install and check locally:** [Setup](setup.md) and [local validation](local-validation.md).
+  These distinguish exercised local effects from disabled features and missing prerequisites.
+- **Use the agent and workflows:** [User guide](user-guide.md), [driving the bot](driving-the-bot.md)
+  and [FAQ](faq.md), with configuration, work/state roots and approval boundaries.
+- **Run or integrate tools:** [Tool host](tool-host.md), [remote MCP host](grok-bot-native.md),
+  [connectors](connectors.md), [substrate](substrate.md) and the optional [Red Team module](red-team.md).
+- **Understand or extend the source:** [Architecture](architecture.md), [agent loop](agent-loop.md)
+  and [design/extension patterns](build-aesthetics.md). The [catalog](tool-catalog.md)
+  lists definitions; it is not proof that every handler executed.
+- **Review release or publishing boundaries:** [Deployment/rollback](deploy.md) and
+  [GitBook sync](gitbook-sync.md). Configuration and local proof do not establish remote publication.
+- **Read the historical knowledge base:** [Greptile](greptile.md) links one complete,
+  visibly untrusted mirror outside this content root. Historical synthesis is not current truth or authority.
+
+[SUMMARY.md](SUMMARY.md) lists each canonical page once. Native Prime helpers
+are optional in-process capabilities; the optional Node Red Team gateway is
+separately started and default-off. No full upstream application import,
+automatic backend launch, live-account proof or deployment is implied by these
+pages. Source links and explicit proof limits govern each guide.

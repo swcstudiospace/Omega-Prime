@@ -6,11 +6,30 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Documentation and knowledge base
+
+#### Changed
+
+- Import all 21 full exposed Greptile documents, including index, into one
+  visibly historical/untrusted mirror with canonical namespace, complete
+  path/version/count/hash provenance and actual observation clocks. Refresh
+  admits the full before/get/after candidate before publication, restores
+  handled failures through same-filesystem backups, and performs no writes
+  for unchanged editions; it is not crash-safe or parallel-writer coordination.
+  Direct transport exceptions and tracebacks withhold credential-bearing
+  diagnostics without weakening the shared detector or rewriting source bodies.
+  Reconcile canonical architecture/state/security diagrams, extension patterns,
+  runnable setup/usage, repository URLs, Python/prerequisite distinctions and
+  repository/GitBook navigation. Keep generated catalog behavior consumers,
+  not source-wording/default/schema copies. Local proof and readable historical
+  publication do not establish live Grok/provider/backend operation, account
+  enrollment, vendor redistribution rights or remote publication/deployment.
+
 ### Slash commands
 
 #### Added
 
-- Served tool `omega_command` (154 on the roster, 117 served by default; Prime families stay off). A user message that is only `/omega-...` runs that command and does not call the model. `/omega-help` lists the catalog. `/omega-onboard` is first run. `/omega-python` is ruff and compileall. `/omega-connectors` names missing env vars and does not ask for a secret in chat.
+- Served tool `omega_command` is on the canonical roster; the effective default/configured subset follows registration and flags. A user message that is only `/omega-...` runs that command and does not call the model. `/omega-help` lists the catalog. `/omega-onboard` is first run. `/omega-python` is ruff and compileall. `/omega-connectors` names missing env vars and does not ask for a secret in chat.
 - Cron admin (`cron_jobs_list`, `cron_job_create`, `cron_job_remove`), learning (`autolearn_turn`, `advisor_note`, `advisor_render`), and `durable_status`. Mutating cron and autolearn calls require approval.
 - `rlm` and `messaging` register when `OMEGA_PRIME_PRIME_RLM_ENABLED` or `OMEGA_PRIME_PRIME_MESSAGING_ENABLED` is on. Without a child-model provider, `rlm_spawn` returns `not_configured: provider`.
 - Nested tool calls from a host `omega_command` re-enter that call's roster and interceptor chain.
@@ -43,8 +62,8 @@ All notable changes to this project are documented here. Format follows
   SIGTERM). The 1-click launcher also accepts `--token-store` and
   `--log-format`.
 - Operator guide `docs/grok-bot-native.md`. Deployment stays in
-  `docs/deploy.md` (the image is about 2 GB because the dependency tree
-  includes PyRIT and transformers).
+  `docs/deploy.md`; dependency manifests describe the PyRIT/transformers tree
+  without an unmeasured image-size claim.
 
 #### Changed
 
