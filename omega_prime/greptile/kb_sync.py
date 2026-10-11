@@ -62,6 +62,20 @@ NOTICE = (
 class GreptileError(Exception):
     """The KB call failed and the caller must know."""
 
+    def __init__(self, message: str = "") -> None:
+        # Single API boundary: every constructed failure gates its full text
+        # through the unchanged shared scanner before it can reach an API
+        # caller, stderr, or a formatted traceback. Benign diagnostics pass
+        # through byte-identical; recognized material (or an unavailable
+        # gate) yields one fixed safe diagnostic. Archival document bodies
+        # never enter this path; they stay exact and separately labeled.
+        if isinstance(message, str) and _gate_clean(message, "kb-sync-error"):
+            super().__init__(message)
+        else:
+            super().__init__(
+                "knowledge base operation failed (detail withheld: secret gate tripped)"
+            )
+
 
 class McpHttpClient:
     """Minimal streamable-HTTP MCP client: initialize once, then tools/call."""
@@ -105,8 +119,8 @@ class McpHttpClient:
         text = _content_text(result)
         try:
             return json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise GreptileError(f"tool {name} returned unparsable content") from exc
+        except json.JSONDecodeError:
+            raise GreptileError(f"tool {name} returned unparsable content") from None
 
     def _initialize(self) -> None:
         body = self._request(
@@ -134,6 +148,17 @@ class McpHttpClient:
         body = _parse_response(data, self._rpc_id)
         if not isinstance(body, dict):
             raise GreptileError("MCP server returned no JSON-RPC body")
+        response_id = body.get("id")
+        # Strict admission like the SSE path: only the reply correlating to
+        # this request's integer id and JSON-RPC 2.0 version is consumed. A
+        # malformed, incomplete, or wrong-request reply fails bounded here;
+        # no retries, reconnects, or transport feature expansion follow.
+        if (
+            body.get("jsonrpc") != "2.0"
+            or type(response_id) is not int
+            or response_id != self._rpc_id
+        ):
+            raise GreptileError("MCP server returned a mismatched response")
         if body.get("error"):
             raise GreptileError(_remote_failure("MCP error", body["error"]))
         return body
@@ -153,6 +178,9 @@ class McpHttpClient:
         )
         try:
             response = self._opener(request, timeout=self._timeout)
+            # The body transfer is part of the transport: a read failure is
+            # a network read failure, not a local file-operation failure.
+            raw = response.read() if hasattr(response, "read") else b""
         except urllib.error.HTTPError as exc:
             if exc.code == 401:
                 raise GreptileError("unauthorized: check GREPTILE_API_KEY") from None
@@ -165,7 +193,6 @@ class McpHttpClient:
         session = _header(headers, "mcp-session-id")
         if session:
             self._session_id = session
-        raw = response.read() if hasattr(response, "read") else b""
         return raw if isinstance(raw, bytes) else b"", headers
 
 
@@ -271,18 +298,28 @@ def main(argv: list[str] | None = None, env: Any = None, opener: Any = None) -> 
         )
         return 1
     if report["status"] == "unenrolled":
-        print(
+        _print_safe_status(
             f"kb-sync: {args.repo} has no readable knowledge base (unenrolled?)",
-            file=sys.stderr,
+            "kb-sync: repository is unenrolled (detail withheld: secret gate tripped)",
+            err=True,
         )
         return 3
     if report["status"] == "empty":
-        print(f"kb-sync: {args.repo} has nothing published yet")
+        _print_safe_status(
+            f"kb-sync: {args.repo} has nothing published yet",
+            "kb-sync: nothing published (detail withheld: secret gate tripped)",
+        )
         return 0
     if report["status"] == "unchanged":
-        print(f"kb-sync: already up to date ({report['documents']} documents in {out})")
+        _print_safe_status(
+            f"kb-sync: already up to date ({report['documents']} documents in {out})",
+            f"kb-sync: already up to date ({report['documents']} documents)",
+        )
         return 0
-    print(f"kb-sync: mirrored {report['documents']} documents to {out}")
+    _print_safe_status(
+        f"kb-sync: mirrored {report['documents']} documents to {out}",
+        f"kb-sync: mirrored {report['documents']} documents",
+    )
     return 0
 
 
@@ -315,6 +352,8 @@ def _find_namespace(client: McpHttpClient, repo: str) -> str | None:
             raise GreptileError(
                 "knowledge base discovery count does not match its page"
             )
+        if offset + returned > total:
+            raise GreptileError("knowledge base discovery count exceeds its total")
         if total_seen is None:
             total_seen = total
         elif total != total_seen:
@@ -338,7 +377,9 @@ def _find_namespace(client: McpHttpClient, repo: str) -> str | None:
                 raise GreptileError(
                     f"knowledge base discovery has no namespace for {repo}"
                 )
-            if found is not None and namespace != found:
+            if found is not None:
+                # Any second sighting of the wanted repo is ambiguous, even
+                # with the same namespace: it masks a server-side anomaly.
                 raise GreptileError(f"knowledge base discovery is ambiguous for {repo}")
             found = namespace
         offset += returned
@@ -411,6 +452,8 @@ def _collect_listing(client: McpHttpClient, namespace: str, repo: str) -> dict:
         returned = _require_count(payload["returned"], "listing returned count")
         if returned != len(batch):
             raise GreptileError("knowledge base listing count does not match its page")
+        if offset + returned > total:
+            raise GreptileError("knowledge base listing count exceeds its total")
         for item in batch:
             if not isinstance(item, str) or item == "":
                 raise GreptileError("knowledge base listing dropped a document path")
@@ -441,6 +484,9 @@ def _collect_listing(client: McpHttpClient, namespace: str, repo: str) -> dict:
         raise GreptileError("knowledge base listing dropped a document page")
     if index_present != ("index.md" in seen):
         raise GreptileError("knowledge base index flag disagrees with its path set")
+    if total > 0 and "index.md" not in seen:
+        # Only the valid-empty publication (R06, total == 0) may be index-less.
+        raise GreptileError("knowledge base publication is missing index.md")
     paths.sort(key=lambda path: (path != "index.md", path))
     listing = {
         "namespaceId": listed_namespace,
@@ -505,8 +551,8 @@ def _fetch_document(client: McpHttpClient, listing: dict, path: str) -> dict:
         raise GreptileError(f"document {path} count does not match its body")
     try:
         encoded = content.encode("utf-8")
-    except UnicodeError as exc:
-        raise GreptileError("knowledge base body is not valid UTF-8 text") from exc
+    except UnicodeError:
+        raise GreptileError("knowledge base body is not valid UTF-8 text") from None
     return {
         "path": path,
         "section": section,
@@ -705,16 +751,16 @@ def _commit(out: Path, staged: dict, manifest: dict, prior: dict) -> None:
                         "knowledge base publication failed and prior-mirror restore failed",
                         f"{exc} / {restore_exc}",
                     )
-                ) from exc
+                ) from None
             raise GreptileError(
                 _remote_failure(
                     "knowledge base publication failed; prior mirror restored", str(exc)
                 )
-            ) from exc
+            ) from None
     except OSError as exc:
         raise GreptileError(
             _remote_failure("knowledge base backup failed before publication", str(exc))
-        ) from exc
+        ) from None
     finally:
         if remove_backup:
             shutil.rmtree(backup)
@@ -736,7 +782,7 @@ def _remove_stale(out: Path, prior: dict, fresh: set) -> None:
         if not isinstance(entry, dict):
             continue
         rel = entry.get("path")
-        if not isinstance(rel, str) or rel in fresh or rel == "README.md":
+        if not isinstance(rel, str) or rel in fresh:
             continue
         try:
             _check_doc_path(rel)
@@ -814,6 +860,20 @@ def _print_safe_error(text: str) -> None:
         print("kb-sync: failed (detail withheld: secret gate tripped)", file=sys.stderr)
 
 
+def _print_safe_status(text: str, fallback: str, *, err: bool = False) -> None:
+    """Print a final status line without tainting it with operator repo/out.
+
+    Exit codes and truthful valid outcomes (unenrolled 3, empty/unchanged/
+    synced 0) are unchanged; only a marker-bearing label falls back to fixed
+    status plus validated integer counts. Benign labels print byte-identical.
+    """
+    target = sys.stderr if err else sys.stdout
+    if _gate_clean(text, "kb-sync-status"):
+        print(text, file=target)
+    else:
+        print(fallback, file=target)
+
+
 def _stamped(content: str, path: str, version: str, fetched_at: str) -> str:
     manifest_link = "../" * (len(PurePosixPath(path).parts) - 1) + "manifest.json"
     header = (
@@ -833,15 +893,17 @@ def _parse_response(data: tuple[bytes, Any], rpc_id: int) -> Any:
         return _parse_sse(raw, rpc_id)
     try:
         return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise GreptileError(f"MCP server returned unparsable body: {exc}") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        # Fixed diagnostic with no parser source echo: decoder text may
+        # carry rejected body excerpts, and the cause chain stays suppressed.
+        raise GreptileError("MCP server returned unparsable body") from None
 
 
 def _parse_sse(raw: bytes, rpc_id: int) -> Any:
     try:
         text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise GreptileError(f"MCP SSE body is not text: {exc}") from exc
+    except UnicodeDecodeError:
+        raise GreptileError("MCP SSE body is not text") from None
     saw_data = False
     for block in text.split("\n\n"):
         payload = "\n".join(
@@ -854,7 +916,11 @@ def _parse_sse(raw: bytes, rpc_id: int) -> Any:
         except json.JSONDecodeError:
             continue
         saw_data = True
-        if isinstance(decoded, dict) and decoded.get("id") == rpc_id:
+        if (
+            isinstance(decoded, dict)
+            and type(decoded.get("id")) is int
+            and decoded.get("id") == rpc_id
+        ):
             return decoded
     if not saw_data:
         raise GreptileError("MCP SSE stream carried no data")
