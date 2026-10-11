@@ -51,6 +51,18 @@ All notable changes to this project are documented here. Format follows
 - `omega_prime/grokbot/SETUP.md` section 3, `docs/tool-host.md`, the README
   Grok Bot pointers, and `SECURITY.md` describe the remote host that ships:
   header-only bearer auth, both transports, and the admin approval API.
+- CI keeps Python3.12–3.14 verification/lint/type matrices and independent
+  lock/native/license gates with least permissions, concurrency and job bounds.
+  Verify legs run maintained isolated readiness and retain only guarded canonical
+  reports or private failure metadata alongside receipts/JUnit; failures and
+  unobserved runs are not relabelled green. Image validation exercises both
+  transports/admin transitions under hardening and SIGTERM, with SPDX plus the
+  unchanged blocking fixed-CRITICAL scan. An optional default-off manual publisher
+  binds protected environment/ref/source/run/artifact and exact transferred bytes,
+  never a rebuild; KB refresh keeps missing-key skips truthful and updates PR-only.
+  Release/rollback guidance distinguishes these controls from authorization and
+  uses the prior validated artifact/digest. No image publication, deployment,
+  cluster operation or live Grok/provider/Red Team backend proof was performed.
 
 #### Fixed
 

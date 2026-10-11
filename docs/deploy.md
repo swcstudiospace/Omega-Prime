@@ -1,10 +1,10 @@
 # Deploying the tool host
 
 The Grok Bot tool host (`python -m omega_prime.mcp_server --transport sse`) ships with a deployment kit: a hardened
-image definition, a renderer for four deployment targets, a checker, and an image CI workflow. Every target runs the
-host as a non-root user on a read-only root filesystem with one writable state volume and `/tmp`, reads its bearer
-token from a file the platform mounts, and exposes `/healthz` and `/readyz` for health probes. No artifact ever contains
-a secret.
+image definition, a renderer for four deployment targets, a checker, and an image CI workflow. Rendered defaults use
+a non-root user, read-only root filesystem, writable state and `/tmp`, mounted token files, and `/healthz`/`/readyz`
+probes. Generated configuration references credential files rather than embedding their values. The checker rejects
+recognized inline credentials; it is not a guarantee that every possible secret has been detected.
 
 ```bash
 python -m omega_prime.grokbot.deploy render --target k8s --out deploy/k8s
@@ -43,11 +43,13 @@ docker run -d --name omega-prime-mcp \
   -p 127.0.0.1:8000:8000 omega-prime-mcp
 ```
 
-The committed `Dockerfile` and `.dockerignore` are byte-identical to `render --target docker` with default arguments (a
-test enforces it). Change the generator, then regenerate; a Dependabot bump of the base image must be mirrored in
-`BASE_IMAGE` in `omega_prime/grokbot/deploy.py`. The build installs `requirements-lock.txt` into `/opt/venv`, copies the
-`omega_prime/` package (minus tests and caches) to `/app/omega_prime`, and runs with `--root /app`. The image runs as
-numeric user `10001:10001`, has a stdlib-only `HEALTHCHECK` against `/healthz`, and uses `STOPSIGNAL SIGTERM`.
+The generator owns the committed `Dockerfile` and `.dockerignore`. After a change, regenerate and compare a fresh
+`render --target docker`; the exercised default projections match byte-for-byte. A base-image update must be mirrored
+in `BASE_IMAGE` in [the generator](../omega_prime/grokbot/deploy.py). The build installs `requirements-lock.txt` into
+`/opt/venv` and copies `omega_prime/` (minus tests and caches) to `/app/omega_prime`, with `--root /app`. The root
+`redteam/` upstream submodule is excluded from the context; ordinary Python adapter and pack resources under
+`omega_prime/redteam/` are retained. This does not start the optional Node backend or enable Red Team tooling.
+The image uses numeric user `10001:10001`, a stdlib `/healthz` `HEALTHCHECK`, and `STOPSIGNAL SIGTERM`.
 
 ## Compose
 
@@ -171,6 +173,25 @@ name (case-insensitive) starts with `promot` (i.e. `promotion*`, `promot*`) or w
    (`promotion*`, `promot*`, `prod-*`, `prod_*` or `prod.*`) present. Never re-render with different options
    between staging and production.
 
+These marker findings are warnings, not authorization. A staging/approval filename cannot grant a tool approval,
+approve a GitHub environment, or authorize a registry push. Publication controls belong to the workflow below.
+
+### Rollback to a validated version
+
+Before a release, retain the prior successful validation run, its immutable artifact IDs, source SHA, archive
+SHA-256, local image ID, both transport reports, SBOM and scan result. If an authorized push occurred, also retain
+the separately observed registry `RepoDigest`. A local image ID, tar checksum and registry manifest digest are
+different identities; do not substitute one for another.
+
+Rollback uses that prior validated version, not a rebuild at its tag or commit. For an unpublished image, retrieve
+the exact `validated-image-bytes` archive plus `validated-image-evidence` from the recorded run, verify the archive
+checksum **before** `docker load`, then compare the loaded image ID and source/run/artifact bindings with the
+receipt. For a previously published image, select its retained registry digest and matching reviewed deployment
+artifacts. Do not resolve a moving tag, re-render with changed options, or call freshly rebuilt bytes the prior
+validated image. Apply only through the deployment platform's separately approved procedure; this guide is not
+evidence that a release or rollback was performed.
+
+
 ## Stop and drain
 
 On SIGTERM the host stops accepting new calls, drains in-flight tool calls for up to `--shutdown-grace` seconds
@@ -182,18 +203,56 @@ a margin.
 
 ## Image CI
 
-`.github/workflows/grokbot-image.yml` builds the committed `Dockerfile`, starts it with the production hardening flags
-(`--read-only`, tmpfs state, `--cap-drop ALL`, `no-new-privileges`, a generated throwaway token file), waits for the
-`healthy` status, runs `python -m omega_prime.grokbot.verify` inside the container, requires `docker stop -t 30` to exit
-0, then writes an SPDX SBOM and scans the image with Trivy (critical, fixed vulnerabilities fail the job). It never
-pushes an image and uses no secrets beyond the default token. The workflow also runs weekly to catch new
-vulnerabilities in the pinned base image and lock file.
+The [image workflow](../.github/workflows/grokbot-image.yml) validates by default; it does not publish on push,
+pull request, schedule, or a dispatch with `publish=false`. One locally loaded image starts two hardened containers
+with the same supported server command (`--transport sse`). The verifier selects `--transport sse` for one and
+`--transport http` for the other, each with `--require-auth` and owned call/admin token files. The listener exposes
+both `/sse` and `/mcp`; there is no server `--transport http` flag.
+
+Validation observes the running uid, read-only rootfs, dropped capabilities and no-new-privileges. Every required
+transport/admin check must pass once with coherent counts and observed exit0; a skipped admin roundtrip is not
+complete approval proof. Each container must exit0 after SIGTERM. Sanitized reports are retained on success/failure;
+diagnostic text reaches the full-input secret gate before clipping, with private fixed-safe withholding on rejection.
+The existing SPDX SBOM upload and Trivy `scanners=vuln`, `severity=CRITICAL`, `ignore-unfixed=true`, `exit-code=1`
+remain blocking. This policy does not attest all severity levels, secret scanning or license clearance.
+
+Only after those controls pass does CI save the exact image bytes and record their archive checksum, image ID,
+source/ref/event/run, immutable upload artifact ID and actual validation/SBOM/scan outcomes. The separate `publish`
+job is default-off and requires explicit `workflow_dispatch` opt-in plus exact `confirm_ref`, a protected ref and the
+`grokbot-image-publish` environment's approval gate. Declaring an environment name alone is insufficient: the workflow
+reads actual required-reviewer protection and refuses missing/unreadable/ambiguous configuration. No publication
+environment existed at the 2026-10-11 local inventory check. Configuring it with named required reviewers and
+prohibiting self-review/admin bypass is a separately authorized operator prerequisite, not an observed approval.
+
+The publisher downloads the same run's immutable artifacts, gates strict complete evidence, verifies ref/event/run/
+source/artifact identity, compares the archive checksum before loading and the loaded image ID before any tag/login/
+push. It never rebuilds. Package-write permission is confined to that job; its artifact-API read is read-only.
+Publication runs use a noncancelling group separate from cancellable validation. A successful check, warning-only
+promotion marker or manual trigger alone is not publication authorization.
+
+The [main CI](../.github/workflows/ci.yml) preserves Python3.12–3.14 verification/lint/type matrices. Its three verify
+legs run the maintained `python -m omega_prime.grokbot.readiness` command through existing identity/exit receipts;
+always-run retention admits a canonical report or private fixed-safe failure metadata alongside JUnit. Nonzero
+observed exits stay nonzero, rejected evidence after observed0 becomes non-success, and an unobserved run records
+null rather than inventing exit0. Raw candidate output is never uploaded as a fallback. Independent lock audit and
+pinned native/parity/license jobs remain separate. KB refresh reports missing-key **skipped/not-run**, and updates
+only `kb/` through a human-reviewed PR: skip, no-change and generated PR are not completed reviewed retrieval.
 
 ## What was verified
 
-Verified when this kit was written: the four targets render deterministically and `check` reports nothing on them; the
-image builds from `requirements-lock.txt`, starts with the exact flags above, reports `healthy`, serves `/healthz` and
-`/readyz`, rejects an unauthenticated `/sse`, runs as uid 10001 and exits 0 on `docker stop`; `docker build --check`
-reports no warnings; `docker compose config` accepts the compose file; `systemd-analyze verify` reports only the
-missing `ExecStart` binary on a machine without the install layout; `actionlint` accepts the workflow. The Kubernetes
-manifest was parsed and checked but not applied to a live cluster, and the systemd unit was not started.
+Historical kit checks at initial authorship included deterministic rendering/checking of all four targets, an image
+health/unauthenticated-SSE/SIGTERM probe, `docker build --check`, Compose configuration and systemd unit analysis.
+Those are historical results, not repeated platform deployment evidence.
+
+The 2026-10-11 phase76 local exercise built the current generated image, observed the hardening above, passed both
+SSE and Streamable HTTP conformance including call-token admin refusal and genuine approval grant/revoke transitions,
+and observed clean SIGTERM for each. The safe verifier omits required handler arguments after granting approval:
+it proves admin-state/gate effects, not arbitrary gated handler execution. Actual SPDX generation and the configured
+fixed-CRITICAL Trivy scan passed. Deleting the owned image tag and loading the retained tar preserved the exact image
+ID, without rebuild. Current generator render/check, actual Docker-context exclusions and consumer/quality gates
+also passed. Hosted CI matrix legs, artifact upload and environment approval were not exercised locally.
+
+This milestone performed **no live image publication, deployment, rollback, cluster operation or live Grok/provider/
+Red Team backend validation**. Kubernetes artifacts were not applied to a live cluster and no systemd service was
+started. Keep those prerequisites separate from local proof; use [local validation](local-validation.md) for the
+maintained isolated dry run, not as a live-service attestation.
