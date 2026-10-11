@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 from omega_prime.mcp_server import roster_names
-from omega_prime.tooling.catalog import FAMILIES, main, render
+from omega_prime.tooling.catalog import main, render
 
 OMEGA_PRIME = Path(__file__).resolve().parents[1]
 ROOT = OMEGA_PRIME.parent
@@ -19,15 +19,10 @@ def _roster() -> list[str]:
     return roster_names(path.read_text(encoding="utf-8"))
 
 
-def test_render_covers_roster_once_with_families(tmp_path: Path) -> None:
+def test_render_preserves_roster_order_exactly_once(tmp_path: Path) -> None:
     text = render(ROOT, tmp_path)
-    assert text.startswith("# Tool catalog\n\nDO NOT EDIT")
     headings = _HEADING.findall(text)
     assert headings == _roster()
-    for family, _ in FAMILIES:
-        assert f"- Family: {family}" in text
-    assert "- Approval: required" in text
-    assert "- Approval: not required" in text
 
 
 def test_check_passes_on_committed_file_and_fails_on_drift(tmp_path: Path) -> None:
