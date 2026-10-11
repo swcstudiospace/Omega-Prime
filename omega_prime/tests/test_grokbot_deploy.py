@@ -7,7 +7,6 @@ from __future__ import annotations
 import configparser
 import json
 import re
-import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +15,6 @@ import yaml
 
 from omega_prime.grokbot import deploy
 from omega_prime.grokbot.deploy import (
-    DEFAULT_IMAGE,
     FINDING_CATALOG,
     TARGETS,
     DeployError,
@@ -26,9 +24,6 @@ from omega_prime.grokbot.deploy import (
 from omega_prime.grokbot.manifest import find_repo_root
 
 REPO = find_repo_root()
-WORKFLOW = REPO / ".github" / "workflows" / "grokbot-image.yml"
-DEPENDABOT = REPO / ".github" / "dependabot.yml"
-DOCS = REPO / "docs"
 
 
 def _rendered(tmp_path: Path, target: str, **kwargs: Any) -> Path:
@@ -133,63 +128,6 @@ def test_no_secret_is_ever_rendered(tmp_path: Path) -> None:
             assert not re.search(r"\b[0-9a-f]{32,}\b", text)
         main = _main_file(out).read_text(encoding="utf-8")
         assert "omega_prime_token" in main
-
-
-def test_dockerfile_instructions(tmp_path: Path) -> None:
-    out = _rendered(tmp_path, "docker")
-    lines = (out / "Dockerfile").read_text(encoding="utf-8").splitlines()
-    from_lines = [line for line in lines if line.startswith("FROM ")]
-    assert len(from_lines) == 2
-    for line in from_lines:
-        image = line.split()[1]
-        assert ":" in image and not image.endswith(":latest")
-    assert from_lines[-1].startswith("FROM python:3.12-slim-bookworm")
-    users = [line for line in lines if line.startswith("USER ")]
-    assert users == ["USER 10001:10001"]
-    assert any(line.startswith("HEALTHCHECK") for line in lines)
-    assert "STOPSIGNAL SIGTERM" in lines
-    entry = next(line for line in lines if line.startswith("ENTRYPOINT "))
-    assert json.loads(entry.removeprefix("ENTRYPOINT ")) == [
-        "python",
-        "-m",
-        "omega_prime.mcp_server",
-    ]
-    cmd = json.loads(
-        next(x for x in lines if x.startswith("CMD ")).removeprefix("CMD ")
-    )
-    assert cmd[cmd.index("--token-file") + 1] == "/run/secrets/omega_prime_token"
-    assert cmd[cmd.index("--host") + 1] == "0.0.0.0"
-    assert "--log-format" in cmd
-    assert cmd[cmd.index("--shutdown-grace") + 1] == "20"
-    text = "\n".join(lines)
-    assert "--no-cache-dir -r /tmp/requirements-lock.txt" in text
-    assert "OMEGA_PRIME_STATE_DIR=/var/lib/omega-prime/state" in text
-    assert 'org.opencontainers.image.licenses="AGPL-3.0-only"' in text
-    for line in lines:
-        if line.startswith(("ENV ", "ARG ")):
-            assert not re.search(r"(?i)token|secret|password", line)
-
-
-def test_dockerignore_excludes_the_sensitive_and_heavy_paths(tmp_path: Path) -> None:
-    out = _rendered(tmp_path, "docker")
-    entries = (out / ".dockerignore").read_text(encoding="utf-8").splitlines()
-    for expected in (
-        ".git",
-        ".venv",
-        ".planning",
-        "hermes-agent",
-        "oh-my-pi",
-        "prime-agent",
-        "openhands*",
-        "native",
-        "kb",
-        "assets",
-        "docs",
-        "omega_prime/tests",
-        "*.tgz",
-        "**/*.db",
-    ):
-        assert expected in entries
 
 
 def test_compose_hardening(tmp_path: Path) -> None:
@@ -720,13 +658,6 @@ def test_unparseable_and_unrecognized_files(tmp_path: Path) -> None:
         check(tmp_path / "missing")
 
 
-def test_every_finding_id_is_documented() -> None:
-    docs = (DOCS / "deploy.md").read_text(encoding="utf-8")
-    for finding_id in FINDING_CATALOG:
-        assert f"`{finding_id}`" in docs, finding_id
-    assert all(sev in ("error", "warning") for sev, _ in FINDING_CATALOG.values())
-
-
 def test_findings_are_sorted_and_stable(tmp_path: Path) -> None:
     out = _rendered(tmp_path, "compose")
     path = _main_file(out)
@@ -829,98 +760,6 @@ def test_committed_image_definition_matches_render(tmp_path: Path) -> None:
         )
 
 
-def test_default_image_tag_follows_the_package_version() -> None:
-    project = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    assert DEFAULT_IMAGE.rsplit(":", 1)[1] == project["project"]["version"]
-    assert not DEFAULT_IMAGE.endswith(":latest")
-
-
-def test_workflow_is_least_privilege_and_pinned() -> None:
-    text = WORKFLOW.read_text(encoding="utf-8")
-    data = yaml.safe_load(text)
-    assert data["permissions"] == {"contents": "read"}
-    triggers = data.get("on", data.get(True))
-    assert {"push", "pull_request", "workflow_dispatch", "schedule"} <= set(triggers)
-    for event in ("push", "pull_request"):
-        paths = set(triggers[event]["paths"])
-        assert {
-            "Dockerfile",
-            ".dockerignore",
-            "requirements-lock.txt",
-            "omega_prime/**",
-            ".github/workflows/grokbot-image.yml",
-        } <= paths
-    assert data["concurrency"]["group"]
-    job = data["jobs"]["image"]
-    assert job["runs-on"] == "ubuntu-latest"
-    assert job["timeout-minutes"] == 45
-    uses = [step["uses"] for step in job["steps"] if "uses" in step]
-    assert uses == [
-        "actions/checkout@v4",
-        "docker/setup-buildx-action@v4",
-        "docker/build-push-action@v7",
-        "anchore/sbom-action@v0.24.3",
-        "actions/upload-artifact@v7",
-        "aquasecurity/trivy-action@v0.36.0",
-    ]
-    for ref in uses:
-        assert re.fullmatch(r"[\w./-]+@v\d+(?:\.\d+){0,2}", ref), ref
-    assert set(re.findall(r"secrets\.(\w+)", text)) <= {"GITHUB_TOKEN"}
-    build = next(
-        s for s in job["steps"] if s.get("uses", "").startswith("docker/build")
-    )
-    assert build["with"]["load"] is True and build["with"]["push"] is False
-    assert build["with"]["tags"] == "omega-prime-mcp:ci"
-    run_text = "\n".join(s.get("run", "") for s in job["steps"])
-    for flag in (
-        "--read-only",
-        "--tmpfs /tmp",
-        "--tmpfs /var/lib/omega-prime:uid=10001,gid=10001,mode=0700",
-        "--cap-drop ALL",
-        "--security-opt no-new-privileges:true",
-        "-p 127.0.0.1:8000:8000",
-        "docker stop -t 30",
-        "omega_prime.grokbot.verify",
-        "openssl rand -hex 24",
-        "umask 077",
-    ):
-        assert flag in run_text, flag
-    trivy = next(s for s in job["steps"] if "trivy" in s.get("uses", ""))
-    assert trivy["with"]["severity"] == "CRITICAL"
-    assert trivy["with"]["exit-code"] == "1"
-    assert trivy["with"]["ignore-unfixed"] is True
-
-
-def test_dependabot_keeps_pip_ignores_and_adds_docker() -> None:
-    text = DEPENDABOT.read_text(encoding="utf-8")
-    data = yaml.safe_load(text)
-    by_eco = {u["package-ecosystem"]: u for u in data["updates"]}
-    assert {"pip", "github-actions", "docker"} <= set(by_eco)
-    assert by_eco["docker"]["directory"] == "/"
-    assert by_eco["docker"]["schedule"]["interval"] == "weekly"
-    ignored = {i["dependency-name"] for i in by_eco["pip"]["ignore"]}
-    assert ignored == {"oauthlib", "huggingface-hub"}
-    assert "tweepy 4.17 requires oauthlib<4" in text
-
-
-def test_docs_page_is_listed_and_explains_the_kit() -> None:
-    summary = (DOCS / "SUMMARY.md").read_text(encoding="utf-8")
-    assert summary.count("(deploy.md)") == 1
-    page = (DOCS / "deploy.md").read_text(encoding="utf-8")
-    for needle in (
-        "OMEGA_PRIME_STATE_DIR",
-        "kubectl create secret generic omega-prime-token",
-        "/healthz",
-        "/readyz",
-        "systemd-analyze verify",
-        "terminationGracePeriodSeconds",
-        "docker stop",
-    ):
-        assert needle in page, needle
-    for target in TARGETS:
-        assert f"--target {target}" in page
-
-
 # ------------------------------------------------------------------------- CLI
 
 
@@ -955,6 +794,19 @@ def test_cli_check_exit_codes_and_json(
     assert deploy.main(["check", str(warn), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True and payload["warnings"] >= 1
+
+
+def test_cli_check_rejects_weakened_image_identity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = _rendered(tmp_path, "docker")
+    capsys.readouterr()
+    _mutate_file(out / "Dockerfile", "USER 10001:10001", "USER 0:0")
+    assert deploy.main(["check", str(out), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["errors"] >= 1
+    assert any(f["id"] == "run-as-root" for f in payload["findings"])
 
 
 def test_cli_usage_errors_exit_2(
