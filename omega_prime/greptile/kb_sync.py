@@ -155,10 +155,12 @@ class McpHttpClient:
             response = self._opener(request, timeout=self._timeout)
         except urllib.error.HTTPError as exc:
             if exc.code == 401:
-                raise GreptileError("unauthorized: check GREPTILE_API_KEY") from exc
-            raise GreptileError(f"MCP HTTP {exc.code}") from exc
+                raise GreptileError("unauthorized: check GREPTILE_API_KEY") from None
+            raise GreptileError(f"MCP HTTP {exc.code}") from None
         except OSError as exc:
-            raise GreptileError(f"MCP request failed: {exc}") from exc
+            raise GreptileError(
+                _remote_failure("MCP request failed", str(exc))
+            ) from None
         headers = getattr(response, "headers", {}) or {}
         session = _header(headers, "mcp-session-id")
         if session:

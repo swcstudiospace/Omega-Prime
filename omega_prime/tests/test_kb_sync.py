@@ -645,3 +645,24 @@ def test_sync_auth_denial_returns_failure_without_credential(
     err = capsys.readouterr().err
     assert TOKEN not in err
     assert "GREPTILE_API_KEY" in err
+
+
+@pytest.mark.parametrize("failure_kind", ["http", "os"])
+def test_direct_transport_error_and_traceback_withhold_credentials(
+    failure_kind: str,
+) -> None:
+    import traceback
+
+    marker = "omk_" + "A" * 64
+    detail = "owned diagnostic padding " * 20 + marker
+
+    def broken(request, timeout=None):
+        if failure_kind == "http":
+            raise urllib.error.HTTPError(request.full_url, 401, detail, Message(), None)
+        raise OSError(detail)
+
+    client = McpHttpClient("https://mcp.local", TOKEN, opener=broken)
+    with pytest.raises(GreptileError) as caught:
+        client.call_tool("list_knowledge_bases", {})
+    assert marker not in str(caught.value)
+    assert marker not in "".join(traceback.format_exception(caught.value))
