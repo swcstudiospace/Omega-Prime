@@ -114,6 +114,9 @@ the cross-agent plane with accepted/quarantined/denied verdicts.
 ## Docs and reviews
 
 **How do docs stay current?**
-Generated pages (tool catalog) are rebuilt by script and CI fails on
-drift. Every page is link-checked by the suite. Greptile reviews each PR
-against the repo's review standards in `.greptile/`.
+Generated catalog output is rebuilt through its generator; drift fails the
+consumer check. The navigation suite checks that canonical pages are listed
+once and their paths resolve. `.greptile/config.json` requests repository-side
+review standards; it does not prove that every PR or branch received a remote
+review. See [Greptile](greptile.md) for the authorized connection/trigger and
+historical-publication boundaries.

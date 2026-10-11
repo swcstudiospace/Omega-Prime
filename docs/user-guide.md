@@ -37,9 +37,13 @@ The roster (`omega_prime/contracts/tool-rosters/omega-prime.yaml`) is the
 truth: the bot claims only tools on it. The default host serves the roster
 intersection `setup_check` reports; the Prime families and the Red Team
 family are config-gated and default off. `delegate_task` is served; without
-a provider env it returns `not_configured: provider`. Most reads run free;
-writes, deploys, publishes, and merges need your approval first — the bot
-asks, you approve, then it runs. Nothing approval-gated ever self-approves.
+a provider env it returns `not_configured: provider`. Approval depends on the
+tool's actual registration, not whether its name sounds like a read or write.
+Tools marked `requires_approval=True` wait for an approved grant and cannot
+self-approve. Local `write_file`, `patch_file`, `edit_file` and `run_terminal`
+are not gated by that flag; they run with host-user authority. Use an owned,
+policy-constrained workspace and sandbox the host. The generated
+[catalog](tool-catalog.md) records the actual per-tool approval flag.
 
 How approval works on a running host: a gated tool answers
 `{"error": "approval required", "tool": "<name>"}` unless the host was
