@@ -729,7 +729,13 @@ class LeadClient:
                 bits.append(f"[{label}:{value}]")
         for tag in tags or []:
             bits.append(f"[{tag}]")
-        kept = Hindsight(self.ctx.memory, "omega-prime-lead").retain(" ".join(bits))
+        joined = " ".join(bits)
+        if redact_text(joined) != joined:
+            return _error(
+                "secret_refused",
+                "content contains a credential shape; remove it and retry",
+            )
+        kept = Hindsight(self.ctx.memory, "omega-prime-lead").retain(joined)
         if not kept.get("ok"):
             return _error("store_refused", str(kept.get("reason", "store refused")))
         return {"ok": True, "bank": "omega-prime-lead"}

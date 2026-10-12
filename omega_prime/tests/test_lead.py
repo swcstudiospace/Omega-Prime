@@ -893,3 +893,46 @@ def test_event_store_raises_on_earlier_corrupt_line(tmp_path: Path):
     store.append({"kind": "two"})
     with pytest.raises(ValueError):
         EventStore(path).records()
+
+
+# -- Phase 75 re-review WR-06: secret refusal covers retained metadata ------
+# The same detector that gates `content` also gates the assembled entry, so
+# a credential in tags/source/graph metadata is refused, not retained.
+
+
+def test_memory_retain_refuses_secrets_in_metadata(tmp_path: Path):
+    client = LeadClient(_ctx(tmp_path))
+    assert (
+        "secret_refused"
+        in client.memory_retain(
+            "clean note", source="chat", tags=["sk-abcdefgh1234"]
+        )["error"]
+    )
+    assert (
+        "secret_refused"
+        in client.memory_retain(
+            "clean note", source="chat sk-abcdefgh1234"
+        )["error"]
+    )
+    assert (
+        "secret_refused"
+        in client.memory_retain(
+            "clean note", source="chat", graph_id="g-sk-abcdefgh1234"
+        )["error"]
+    )
+    assert (
+        "secret_refused"
+        in client.memory_retain(
+            "clean note", source="chat", task_id="t-sk-abcdefgh1234"
+        )["error"]
+    )
+    assert (
+        "secret_refused"
+        in client.memory_retain(
+            "clean note", receipt_path="r-sk-abcdefgh1234.json"
+        )["error"]
+    )
+    kept = client.memory_retain(
+        "clean note", source="chat", tags=["core"], graph_id="g-1"
+    )
+    assert kept == {"ok": True, "bank": "omega-prime-lead"}
