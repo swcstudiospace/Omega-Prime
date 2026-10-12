@@ -163,23 +163,21 @@ def lint_template(root: Path | str | None = None) -> TemplateLint:
     checked-in skill and routine (git-tracked when `root` is a checkout, else
     on disk; the same set the generated `/omega-<name>` commands use) must be
     listed. One provenance serves both directions, so a listed entry with no
-    checked-in file behind it — including one present on disk but untracked —
-    is missing.
+    checked-in file behind it — including one present on disk but untracked,
+    or one tracked but deleted from disk — is missing.
     """
     repo = Path(root) if root is not None else find_repo_root()
     data = _read_template(repo)
-    base = repo / "omega_prime"
     tracked = tracked_paths(repo)
 
+    def _present(rel: str) -> bool:
+        return (tracked is None or rel in tracked) and (repo / rel).is_file()
+
     def _skill_present(name: str) -> bool:
-        if tracked is not None:
-            return f"omega_prime/skills/{name}/SKILL.md" in tracked
-        return (base / "skills" / name / "SKILL.md").is_file()
+        return _present(f"omega_prime/skills/{name}/SKILL.md")
 
     def _routine_present(name: str) -> bool:
-        if tracked is not None:
-            return f"omega_prime/routines/{name}.md" in tracked
-        return (base / "routines" / f"{name}.md").is_file()
+        return _present(f"omega_prime/routines/{name}.md")
 
     skill_names = [_entry_name(entry) for entry in data["skills"]]
     routine_names = [_entry_name(entry) for entry in data["routines"]]

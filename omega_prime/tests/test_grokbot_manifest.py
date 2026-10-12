@@ -3,12 +3,14 @@
 import json
 import shlex
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
 import omega_prime
 from omega_prime.config import PRIME_FAMILIES
+from omega_prime.grokbot.doctor import GrokBotDoctor
 from omega_prime.grokbot.manifest import (
     find_repo_root,
     generate_manifest,
@@ -284,6 +286,30 @@ def test_integrity_reports_a_skill_the_template_omits(tree: Path, tmp_path: Path
     assert "zz-unlisted" in integrity["unlisted_skills"]
     assert "zz-unlisted" in integrity["unlisted_routines"]
     assert integrity["ok"] is False
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs a git client")
+def test_tracked_skill_and_routine_deleted_from_disk_are_missing(tree: Path):
+    for argv in (["init", "-q"], ["add", "omega_prime"]):
+        subprocess.run(["git", "-C", str(tree), *argv], check=True)
+    sections = parse_template_sections(
+        tree / "omega_prime/grokbot/templates/OMEGA_PRIME.md"
+    )
+    skill = sections["skills"][0].split(" — ", 1)[0].strip()
+    routine = sections["routines"][0].split(" — ", 1)[0].strip()
+    assert lint_template(tree).ok is True
+    (tree / f"omega_prime/skills/{skill}/SKILL.md").unlink()
+    (tree / f"omega_prime/routines/{routine}.md").unlink()
+
+    lint = lint_template(tree)
+    assert lint.missing_skills == [skill]
+    assert lint.missing_routines == [routine]
+    assert lint.ok is False
+    check = GrokBotDoctor(tree, env={})._check_template()
+    assert check.id == "template_integrity"
+    assert check.status == "FAIL"
+    assert skill in check.message
+    assert routine in check.message
 
 
 def test_shipped_template_lints_clean():
