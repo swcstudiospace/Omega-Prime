@@ -100,6 +100,9 @@ deterministic path order prevents harmless listing reorder from causing churn.
 Same-filesystem inode backups provide single-writer exception rollback, not
 atomic visibility across readers, SIGKILL/crash safety or concurrent-writer
 coordination. Preserve a recoverable backup if restoration itself fails.
+A backup-cleanup failure after successful publication still returns failure:
+the complete new edition remains in place, with the private old backup retained.
+It does not claim the old edition was restored.
 Unowned collisions and symlink traversal are refused; the guide/unrelated
 files are not removed as stale generated pages. Full diagnostic input is
 gated before clipping/echo using the unchanged shared detector. Literal

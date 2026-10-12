@@ -207,68 +207,73 @@ def sync(repo: str, out_dir: str | Path, client: McpHttpClient) -> dict:
     """
     if not isinstance(repo, str) or repo == "":
         raise ValueError("repo must be a non-empty owner/name string")
-    namespace = _find_namespace(client, repo)
-    if namespace is None:
-        return {"status": "unenrolled", "repo": repo}
-    before = _collect_listing(client, namespace, repo)
-    if not before["paths"]:
-        return {"status": "empty", "repo": repo}
-    out = Path(out_dir)
-    _check_out_root(out)
-    for path in before["paths"]:
-        _check_target(out, path)
-    fetched_at = datetime.datetime.now(datetime.UTC).isoformat()
-    documents = [_fetch_document(client, before, path) for path in before["paths"]]
-    after = _collect_listing(client, namespace, repo)
-    _require_stable(before, after)
-    completed_at = datetime.datetime.now(datetime.UTC).isoformat()
-    staged = {
-        document["path"]: _stamped(
-            document["content"], document["path"], document["version"], fetched_at
-        )
-        for document in documents
-    }
-    manifest = {
-        "repo": repo,
-        "repoName": before["repoName"],
-        "namespaceId": namespace,
-        "sectionVersions": dict(before["sectionVersions"]),
-        "indexPresent": before["indexPresent"],
-        "total": before["total"],
-        "complete": True,
-        "retrieved_documents": len(documents),
-        "fetch_completed_at": completed_at,
-        "fetched_at": fetched_at,
-        "notice": NOTICE,
-        "documents": [
-            {
-                "path": document["path"],
-                "section": document["section"],
-                "version": document["version"],
-                "chars": document["chars"],
-                "sha256": document["sha256"],
-                "utf8_bytes": document["utf8_bytes"],
-                "request_started_at": document["request_started_at"],
-                "fetched_at": document["fetched_at"],
-            }
+    try:
+        namespace = _find_namespace(client, repo)
+        if namespace is None:
+            return {"status": "unenrolled", "repo": repo}
+        before = _collect_listing(client, namespace, repo)
+        if not before["paths"]:
+            return {"status": "empty", "repo": repo}
+        out = Path(out_dir)
+        _check_out_root(out)
+        for path in before["paths"]:
+            _check_target(out, path)
+        fetched_at = datetime.datetime.now(datetime.UTC).isoformat()
+        documents = [_fetch_document(client, before, path) for path in before["paths"]]
+        after = _collect_listing(client, namespace, repo)
+        _require_stable(before, after)
+        completed_at = datetime.datetime.now(datetime.UTC).isoformat()
+        staged = {
+            document["path"]: _stamped(
+                document["content"], document["path"], document["version"], fetched_at
+            )
             for document in documents
-        ],
-    }
-    prior = _read_prior(out)
-    if _is_unchanged(prior, repo, manifest, documents):
+        }
+        manifest = {
+            "repo": repo,
+            "repoName": before["repoName"],
+            "namespaceId": namespace,
+            "sectionVersions": dict(before["sectionVersions"]),
+            "indexPresent": before["indexPresent"],
+            "total": before["total"],
+            "complete": True,
+            "retrieved_documents": len(documents),
+            "fetch_completed_at": completed_at,
+            "fetched_at": fetched_at,
+            "notice": NOTICE,
+            "documents": [
+                {
+                    "path": document["path"],
+                    "section": document["section"],
+                    "version": document["version"],
+                    "chars": document["chars"],
+                    "sha256": document["sha256"],
+                    "utf8_bytes": document["utf8_bytes"],
+                    "request_started_at": document["request_started_at"],
+                    "fetched_at": document["fetched_at"],
+                }
+                for document in documents
+            ],
+        }
+        prior = _read_prior(out)
+        if _is_unchanged(prior, repo, manifest, documents):
+            return {
+                "status": "unchanged",
+                "repo": repo,
+                "documents": len(documents),
+                "namespaceId": namespace,
+            }
+        _commit(out, staged, manifest, prior)
         return {
-            "status": "unchanged",
+            "status": "synced",
             "repo": repo,
             "documents": len(documents),
             "namespaceId": namespace,
         }
-    _commit(out, staged, manifest, prior)
-    return {
-        "status": "synced",
-        "repo": repo,
-        "documents": len(documents),
-        "namespaceId": namespace,
-    }
+    except OSError as exc:
+        raise GreptileError(
+            _remote_failure("knowledge base operation failed", str(exc))
+        ) from None
 
 
 def main(argv: list[str] | None = None, env: Any = None, opener: Any = None) -> int:

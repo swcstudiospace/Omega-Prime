@@ -14,10 +14,12 @@ All notable changes to this project are documented here. Format follows
   visibly historical/untrusted mirror with canonical namespace, complete
   path/version/count/hash provenance and actual observation clocks. Refresh
   admits the full before/get/after candidate before publication, restores
-  handled failures through same-filesystem backups, and performs no writes
-  for unchanged editions; it is not crash-safe or parallel-writer coordination.
-  Direct transport exceptions and tracebacks withhold credential-bearing
-  diagnostics without weakening the shared detector or rewriting source bodies.
+  handled publication failures through same-filesystem backups, and performs no
+  writes for unchanged editions; it is not crash-safe or parallel-writer
+  coordination. Direct transport, validation and filesystem exceptions and
+  tracebacks withhold credential-bearing diagnostics without weakening the
+  shared detector or rewriting source bodies. A cleanup failure after successful
+  publication reports failure without claiming the new edition was rolled back.
   Reconcile canonical architecture/state/security diagrams, extension patterns,
   runnable setup/usage, repository URLs, Python/prerequisite distinctions and
   repository/GitBook navigation. Keep generated catalog behavior consumers,

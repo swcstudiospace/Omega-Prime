@@ -1894,3 +1894,79 @@ def _assert_document_observations(out: Path, peer: _Peer) -> None:
         response = request["response"]
         assert response.read_at is not None
         assert started <= request["received_at"] <= response.read_at <= fetched
+
+
+@pytest.mark.parametrize(
+    "edge",
+    [
+        "prior-manifest-read",
+        "prior-document-read",
+        "root-preparation",
+        "backup-creation",
+        "cleanup-after-rollback",
+        "cleanup-after-commit",
+    ],
+)
+def test_direct_filesystem_failures_withhold_credentials_and_preserve_truthful_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edge: str,
+) -> None:
+    out, before = _prior(tmp_path)
+    bodies = {"index.md": "# New index\n", "docs/new.md": "# New document\n"}
+    failed_cleanup: list[Path] = []
+
+    def faulty(*args, **kwargs):
+        raise OSError(_SECRET_DETAIL)
+
+    with monkeypatch.context() as patched:
+        if edge.startswith("prior-"):
+            target = (
+                out / "manifest.json"
+                if edge == "prior-manifest-read"
+                else out / "docs/a.md"
+            )
+            read_bytes = Path.read_bytes
+
+            def fail_prior_read(path):
+                if path == target:
+                    raise OSError(_SECRET_DETAIL)
+                return read_bytes(path)
+
+            patched.setattr(Path, "read_bytes", fail_prior_read)
+        elif edge == "root-preparation":
+            patched.setattr(kb_sync_module, "ensure_private_dir", faulty)
+        elif edge == "backup-creation":
+            patched.setattr(kb_sync_module.tempfile, "mkdtemp", faulty)
+        else:
+
+            def fail_cleanup(path):
+                failed_cleanup.append(Path(path))
+                raise OSError(_SECRET_DETAIL)
+
+            patched.setattr(kb_sync_module.shutil, "rmtree", fail_cleanup)
+            if edge == "cleanup-after-rollback":
+                patched.setattr(kb_sync_module, "atomic_write_json", faulty)
+        with pytest.raises(GreptileError) as caught:
+            sync(REPO, out, _client(_publication_peer(bodies)))
+        _assert_secret_free(caught.value)
+
+    if not edge.startswith("cleanup-"):
+        assert _snapshot(tmp_path) == before
+        return
+    assert len(failed_cleanup) == 1
+    backup = failed_cleanup[0]
+    assert backup.parent == tmp_path
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o700
+    if edge == "cleanup-after-commit":
+        # Cleanup failure is not a rollback: the complete new edition is published.
+        _assert_edition(out, bodies)
+        _assert_unowned_preserved(tmp_path, before)
+        assert (backup / "manifest.json").read_bytes() == before["kb/manifest.json"][1]
+        assert (backup / "index.md").read_bytes() == before["kb/index.md"][1]
+        assert (backup / "docs/a.md").read_bytes() == before["kb/docs/a.md"][1]
+    else:
+        after = _snapshot(tmp_path)
+        for rel, observation in before.items():
+            assert after[rel] == observation
+        assert not (out / "docs/new.md").exists()
