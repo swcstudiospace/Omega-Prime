@@ -26,13 +26,22 @@ v9 milestone: SOTA upgrade — the same one-agent product brought to state-of-th
 
 v10 milestone: Prime merge — the third agent joins. Prime Agent (`prime-agent/`, PrimeIntellect, MIT, pinned `967eb13f`) contributes its differentiating logic — RLM subagent recursion (`rlm.spawn`/`collect`), the continual harness (`/refine` with snapshots and rollback), goals/heartbeats/autonomous mode, and agent-to-agent messaging — behavior-ported into the one Python agent per the v1–v9 precedent. The Rust workspace stays as an ignored read-only checkout and CI-built parity oracle. The repo relicenses to AGPL-3.0 (Spectrum Web Co 2026) and hardens to enterprise open-source standards. User decisions (2026-10-08): behavior-port architecture (no PyO3 boundary exists upstream; one-Python-process rule stands), capability-merge loop design, AGPL-3.0 relicense, degrade-with-warning for Prime capability failures.
 
-## Current Milestone
+## Current Milestone: v15 Integrated Readiness and Repository Delivery
 
-None. v14 shipped 2026-10-10. The next milestone is not scoped.
+**Goal:** Prove integrated local tools and workflows without Grok credentials, then deliver truthful documentation, a complete maintained Greptile mirror, safe CI/CD and polished repository marketing.
+
+**Target features:**
+- Isolated production-dispatch readiness command, complete roster accounting and real local workflow effects.
+- Fresh transactional intake persistence and deterministic secret-guard boundary coverage without weakened detection.
+- Both MCP transports, authentication, approvals, lifecycle and explicit live Grok prerequisites.
+- Supported verification/security matrices, retained integration evidence and manually gated validated artifacts.
+- All 21 published Greptile documents with provenance, complete refresh and canonical-document separation.
+- Source-linked architecture, design patterns, runnable usage and consistent repository/GitBook navigation.
+- Verified positioning, demonstration and accessible branded marketing collateral.
 
 ## Last Milestone: v14 Boundary alignment (shipped 2026-10-10)
 
-**Status:** Shipped. Audit passed 10/10 with no exceptions (`.planning/v14-MILESTONE-AUDIT.md`). Phase directories are in `milestones/v14-phases/`. The tree is uncommitted on `v14-boundary-alignment`.
+**Status:** Shipped. Audit passed 10/10 with no exceptions (`.planning/v14-MILESTONE-AUDIT.md`). Phase directories are in `milestones/v14-phases/`. Application changes were merged through PR #17 at `027dc76e9b1bed61b74bd4704f9c45c1e299234e`; v15 continues on `v15-integrated-readiness`.
 
 **Goal:** The agent loop and harness core are the center. The Grok Bot boundary makes every ported logic usable (slash commands, nested dispatch, `rlm`, `messaging`, cron, learning, durable), and the core imports nothing from the boundary.
 
@@ -79,12 +88,15 @@ user-approved exceptions for LOOP-07 and REPO-04), `prime-agent` registered as a
 - ✓ Programming Desk merge: configured desk, work root, served `delegate_task`, lead pass, receipts, target gates, service clients behind env tokens; audit passed 13/13 — v12
 - ✓ Grok Bot specialisation: `/omega-*` via `omega_command`, fixed workflows, named routines, one seeded memory, connector requests that never copy a token; audit passed 10/10 — v13
 - ✓ Boundary alignment: slash engine in core, nested host gates, `rlm` and `messaging` served behind flags, cron/learning/durable surfaces; audit passed 10/10 — v14
+- ✓ v15 phases 75–77: isolated local readiness (LOCAL-01..03, FLOW-01..02, GROK-01..02), clean CI/CD (CI-01..03), and maintained docs with one complete historical Greptile mirror (KB-01..03, DOC-01..05). Fresh canonical verification passed 46/46, 28/28 and 34/34 on 2026-10-12; the user accepted Phase 76 UAT 9/9 and Phase 77 UAT 12/12 — v15 (in progress)
 - Prime behavior-port baseline and Rust parity-oracle CI are inherited archival evidence. Phase 61 loop wiring, typed boundary (all seven Prime families), durable RLM, config-derived prompt and the pre-v10 transcript comparison are exercised and independently reviewed (full suite 980 passed).
 - AGPL repository and current native bridge license/build coverage — verified locally. Cargo Dependabot is a user-approved exception (2026-10-09): the Cargo path dependencies live in the ignored read-only prime-agent checkout; cargo-deny and pip-audit run.
 
 ### Active
 
-- None open. v14 shipped 2026-10-10. Dormant seeds remain visible and were not acknowledged.
+- v15 requirements: LOCAL-01..03, FLOW-01..02, GROK-01..03, CI-01..03, KB-01..03, DOC-01..05 and MKT-01..03. All 22 are approved and mapped in REQUIREMENTS.md to phases 75–78 (GROK-03 to inserted Phase 77.1, approved 2026-10-12). 18 are validated through phases 75–77; GROK-03 (Phase 77.1) and MKT-01..03 (Phase 78) remain active.
+- The user explicitly authorized native GSD execution instead of the blocked Swarm-only contract. Parallel disjoint workers implement; parent runs runtime/project/visual checks; independent review and security verify. No `.swarm/` writes or signed Swarm approvals.
+- No live provider/Grok claim, remote push/PR/merge/tag, publication, deployment, unrelated seed work or unapproved cleanup.
 
 ### Out of Scope
 
@@ -170,6 +182,8 @@ Pinned reads (see `VENDOR.md`): Hermes `1a4508e2aff2db5f50409893a2115be777bd5643
 | v10 ignores PYSEC-2026-4114 instead of forcing oauthlib 4 | tweepy 4.17 pins `oauthlib<4`; the advisory is an authorization-server PKCE timing oracle this process does not host (2026-10-08) | ✓ Good |
 | v11 hardens the Python MCP host and adds seven improvements instead of a new bridge | The ultrathink graph assumed a TypeScript gateway; this repo's Grok Bot surface is the MCP tool host in `omega_prime/grokbot/`. Static scoped bearer tokens replace HMAC webhooks; per-principal scopes replace tenant sandboxes (2026-10-09) | — Pending |
 | v14 keeps the slash engine in core and serves every flagged family from the default host | Core must not import the boundary. `rlm` reuses the desk parent. `messaging` uses the seat session. Plane tools are always on. Families stay default-off (2026-10-10) | ✓ Good |
+| v15 verifies integration before repository delivery | User approved all 21 requirements and phases 75–78; existing real intake and secret-guard test failures remain evidence until corrected and exercised | — Pending |
+| v15 uses native GSD instead of signed AgentSwarm | User explicitly selected native GSD on continuation; preserve independent review/security and parent-run checks, leave `.swarm/` untouched | ✓ Good |
 
 ## Evolution
 
@@ -189,4 +203,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-10 after v14 Boundary alignment audit passed 10/10*
+*Last updated: 2026-10-12 after Phase 77 (phases 75–77 complete with fresh verification; Phase 77.1 inserted for GROK-03)*

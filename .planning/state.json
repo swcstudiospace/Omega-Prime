@@ -1,13 +1,38 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v14 - Boundary alignment",
+  "milestone": "v15 — Integrated Readiness and Repository Delivery",
   "phases": [
-    { "id": 71, "name": "Core/boundary inversion repair", "status": "complete" },
-    { "id": 72, "name": "Family reachability", "status": "complete" },
-    { "id": 73, "name": "Plane surfaces", "status": "complete" },
-    { "id": 74, "name": "Milestone audit + closeout", "status": "complete" }
+    {
+      "number": "75",
+      "name": "Integrated local readiness",
+      "status": "complete"
+    },
+    {
+      "number": "76",
+      "name": "Clean CI/CD",
+      "status": "complete"
+    },
+    {
+      "number": "77",
+      "name": "Maintained docs and knowledge base",
+      "status": "complete"
+    },
+    {
+      "number": "77.1",
+      "name": "Grok Bot import packaging",
+      "status": "pending"
+    },
+    {
+      "number": "78",
+      "name": "Repository marketing",
+      "status": "pending"
+    }
   ],
-  "next": { "command": "", "label": "Milestone complete", "reason": "v14 audit passed 10/10; no next milestone scoped" },
-  "updated_at": "2026-10-10T01:40:00.000Z"
+  "next": {
+    "command": "/gsd:progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 77.1 of 5 · 60% · executing"
+  },
+  "updated_at": "2026-10-12T12:18:37.010Z"
 }
