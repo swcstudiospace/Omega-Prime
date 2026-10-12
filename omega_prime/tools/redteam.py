@@ -326,12 +326,16 @@ class RedteamClient:
             return {"ok": False, "error": "task required"}
         spawned = self._post("/api/operators/spawn", {"archetype": hat})
         if not spawned.get("ok"):
-            return {
-                "tool": "tempest_hat_dispatch",
-                "ok": False,
-                "stage": "spawn",
-                "result": spawned,
-            }
+            detail = spawned.get("error") or f"HTTP {spawned.get('status')}"
+            return _error(
+                "spawn_failed",
+                f"spawning hat {hat!r} failed ({detail}); no task was sent",
+                tool="tempest_hat_dispatch",
+                ok=False,
+                stage="spawn",
+                hat=hat,
+                result=spawned,
+            )
         data = spawned.get("data")
         data = data if isinstance(data, dict) else {}
         operator = data.get("operator")
@@ -354,6 +358,19 @@ class RedteamClient:
             f"/api/operators/{urllib.parse.quote(operator_id, safe='')}/task",
             {"taskName": task[:120], "taskDescription": quoted},
         )
+        if not tasked.get("ok"):
+            detail = tasked.get("error") or f"HTTP {tasked.get('status')}"
+            return _error(
+                "task_failed",
+                f"spawned operator {operator_id} but the task request failed "
+                f"({detail}); the operator is idle and may need cleanup",
+                tool="tempest_hat_dispatch",
+                ok=False,
+                stage="task",
+                hat=hat,
+                operatorId=operator_id,
+                result=tasked,
+            )
         return {
             "tool": "tempest_hat_dispatch",
             "ok": True,

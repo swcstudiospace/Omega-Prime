@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import json
 from typing import Any
 
 from omega_prime.config import load_config, redteam_enabled
+from omega_prime.grokbot.interceptors import ToolCall, run_tool_call
 from omega_prime.tools.approvals import ApprovalLog
 from omega_prime.tools.redteam import (
     REDTEAM_TOOL_NAMES,
@@ -303,21 +305,33 @@ def test_hat_dispatch_truncates_task_name_and_skips_the_mission_note():
 def test_hat_dispatch_reports_a_spawn_failure_without_tasking():
     routes = _routes()
     routes[("POST", "/api/operators/spawn")] = (500, {"error": "unknown hat"})
-    client, transport = _client(FakeTransport(routes))
-    log = ApprovalLog()
-    log.approve("tempest_hat_dispatch", "tester")
-    registry = ToolRegistry(approval_log=log)
-    register_redteam_tools(registry, client)
-    body = json.loads(
-        registry.dispatch("tempest_hat_dispatch", {"hat": "ghost", "task": "go"})
+    transports = (
+        FakeTransport(routes),
+        FakeTransport(_routes(), error=TimeoutError("slow")),
+        FakeTransport(_routes(), error=ConnectionRefusedError("refused")),
     )
-    assert body == {
-        "tool": "tempest_hat_dispatch",
-        "ok": False,
-        "stage": "spawn",
-        "result": {"ok": False, "status": 500, "data": {"error": "unknown hat"}},
-    }
-    assert transport.calls == [("POST", "/api/operators/spawn", {"archetype": "ghost"})]
+    for transport in transports:
+        client, _ = _client(transport)
+        log = ApprovalLog()
+        log.approve("tempest_hat_dispatch", "tester")
+        registry = ToolRegistry(approval_log=log)
+        register_redteam_tools(registry, client)
+        arguments = {"hat": "ghost", "task": "go"}
+        call = ToolCall("tempest_hat_dispatch", arguments, None)
+        payload, outcome = run_tool_call(
+            (),
+            call,
+            functools.partial(registry.dispatch, "tempest_hat_dispatch", arguments),
+        )
+        body = json.loads(payload)
+        assert body["ok"] is False
+        assert body["stage"] == "spawn"
+        assert body["error"].startswith("spawn_failed:")
+        assert body["result"]["ok"] is False
+        assert outcome.is_error is True
+        assert transport.calls == [
+            ("POST", "/api/operators/spawn", {"archetype": "ghost"})
+        ]
     bare = client.hat_dispatch(task="go")
     assert bare == {"ok": False, "error": "hat required"}
     assert client.hat_dispatch(hat="recon") == {"ok": False, "error": "task required"}
@@ -336,6 +350,45 @@ def test_hat_dispatch_reports_a_spawn_without_an_operator_id():
         "result": {"ok": True, "status": 200, "data": {}},
     }
     assert len(transport.calls) == 1
+
+
+class _TaskStageTimeout(FakeTransport):
+    """Answers the spawn, then times out on the operator task request."""
+
+    def __call__(self, base_url, method, path, payload, headers, timeout):
+        if path.endswith("/task"):
+            self.calls.append((method, path, payload))
+            raise TimeoutError("slow")
+        return super().__call__(base_url, method, path, payload, headers, timeout)
+
+
+def test_hat_dispatch_surfaces_a_task_failure_after_a_successful_spawn():
+    http_routes = _routes()
+    http_routes[("POST", "/api/operators/op-1/task")] = (502, {"error": "busy"})
+    for transport in (FakeTransport(http_routes), _TaskStageTimeout(_routes())):
+        client, _ = _client(transport)
+        log = ApprovalLog()
+        log.approve("tempest_hat_dispatch", "tester")
+        registry = ToolRegistry(approval_log=log)
+        register_redteam_tools(registry, client)
+        arguments = {"hat": "recon", "task": "scan the edge"}
+        call = ToolCall("tempest_hat_dispatch", arguments, None)
+        payload, outcome = run_tool_call(
+            (),
+            call,
+            functools.partial(registry.dispatch, "tempest_hat_dispatch", arguments),
+        )
+        body = json.loads(payload)
+        assert body["ok"] is False
+        assert body["stage"] == "task"
+        assert body["error"].startswith("task_failed:")
+        assert body["operatorId"] == "op-1"
+        assert body["result"]["ok"] is False
+        assert outcome.is_error is True
+        assert [path for _, path, _ in transport.calls] == [
+            "/api/operators/spawn",
+            "/api/operators/op-1/task",
+        ]
 
 
 def test_non_loopback_gateway_is_refused_without_a_bearer():
