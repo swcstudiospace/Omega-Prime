@@ -71,18 +71,15 @@ def _safe_shot_name(name: str) -> str | None:
     return stem + ".png"
 
 
-_REF_RE = re.compile(r"[A-Za-z0-9_./~^:{}?*\[\]-]+")
-
-
 def _check_ref(ref: Any) -> None:
-    """Reject refs git could parse as options or invalid revision syntax."""
+    """Reject refs git could parse as options; git owns revision syntax."""
     if (
         not isinstance(ref, str)
         or not ref
         or ref.startswith("-")
-        or _REF_RE.fullmatch(ref) is None
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in ref)
     ):
-        raise ValueError("ref must be a plain git revision")
+        raise ValueError("ref must be a git revision, not an option")
 
 
 def _git_vcs(root: str):

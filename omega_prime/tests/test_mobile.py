@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 
 import pytest
 
@@ -414,9 +417,9 @@ def test_adb_simctl_parsers_and_approvals(tmp_path):
 
 
 # -- Phase 75 re-review WR-03: git ref validation in the real VCS seam --------
-# Caller-supplied refs reach git argv, so a leading-dash ref must be refused
-# before any subprocess spawns, and valid revisions must travel behind an
-# explicit end-of-options marker so git never parses them as flags.
+# Caller-supplied refs reach git argv, so a leading-dash or control-character
+# ref must be refused before any subprocess spawns, while every revision git
+# itself supports must still resolve.
 
 
 def test_git_vcs_rejects_option_like_refs_without_spawning(tmp_path, monkeypatch):
@@ -430,6 +433,9 @@ def test_git_vcs_rejects_option_like_refs_without_spawning(tmp_path, monkeypatch
     for call in (
         lambda: vcs["show"]("--help", "a.txt"),
         lambda: vcs["show"]("-h", "a.txt"),
+        lambda: vcs["show"]("", "a.txt"),
+        lambda: vcs["show"]("HEAD\n--help", "a.txt"),
+        lambda: vcs["show"]("HEAD\x00", "a.txt"),
         lambda: vcs["diff_names"]("--output=/tmp/x", "HEAD"),
         lambda: vcs["diff_names"]("HEAD", "--upload-pack=t"),
         lambda: vcs["diff"]("--output=/tmp/x", "HEAD", []),
@@ -439,30 +445,46 @@ def test_git_vcs_rejects_option_like_refs_without_spawning(tmp_path, monkeypatch
             call()
 
 
-def test_git_vcs_rejects_malformed_refs_and_separates_options(tmp_path, monkeypatch):
+@pytest.fixture
+def git_repo(tmp_path, monkeypatch):
+    """Two-commit repo: branch `release+hotfix` at the first, `@` at the second."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "Test")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "test@example.invalid")
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    git("init", "-q")
+    (tmp_path / "a.txt").write_text("v1\n")
+    git("add", "a.txt")
+    git("commit", "-q", "-m", "one")
+    git("branch", "release+hotfix")
+    (tmp_path / "a.txt").write_text("v2\n")
+    (tmp_path / "ios").mkdir()
+    (tmp_path / "ios" / "App.entitlements").write_text("<key>aps-environment</key>\n")
+    git("add", "a.txt", "ios/App.entitlements")
+    git("commit", "-q", "-m", "two")
+    return tmp_path
+
+
+def test_git_vcs_resolves_valid_revision_syntax(git_repo):
     from omega_prime.tools.mobile import _git_vcs
 
-    seen: list[list[str]] = []
-
-    class _Done:
-        returncode = 0
-        stdout = ""
-
-    def _capture(argv, **kwargs):
-        seen.append(list(argv))
-        return _Done()
-
-    monkeypatch.setattr("subprocess.run", _capture)
-    vcs = _git_vcs(str(tmp_path))
-    for bad in ("", "has space", "semi;colon", "tick`", "dollar$e", "paren(x)"):
-        with pytest.raises(ValueError):
-            vcs["show"](bad, "a.txt")
-    assert seen == []
-    assert vcs["show"]("HEAD", "a.txt") == ""
-    vcs["diff_names"]("v1", "v2")
-    vcs["diff"]("v1", "v2", ["ios/App.entitlements"])
-    assert seen == [
-        ["git", "show", "--end-of-options", "HEAD:a.txt"],
-        ["git", "diff", "--name-only", "--end-of-options", "v1...v2"],
-        ["git", "diff", "--end-of-options", "v1...v2", "--", "ios/App.entitlements"],
+    vcs = _git_vcs(str(git_repo))
+    assert vcs["show"]("release+hotfix", "a.txt") == "v1\n"
+    assert vcs["show"]("@", "a.txt") == "v2\n"
+    assert vcs["show"]("@~1", "a.txt") == "v1\n"
+    assert sorted(vcs["diff_names"]("release+hotfix", "@")) == [
+        "a.txt",
+        "ios/App.entitlements",
     ]
+    patch = vcs["diff"]("release+hotfix", "@", ["ios/App.entitlements"])
+    assert "+<key>aps-environment</key>" in patch
+    assert "a.txt" not in patch
