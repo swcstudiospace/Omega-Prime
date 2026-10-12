@@ -1,0 +1,20 @@
+{
+  "name": "omega-prime",
+  "version": "0.1.0",
+  "description": "One Grok programming bot. Hermes, oh-my-pi, and Prime agent logic in one Python process.",
+  "author": {
+    "name": "Spectrum Web Co"
+  },
+  "homepage": "https://github.com/swcstudiospace/omes-bot",
+  "repository": "https://github.com/swcstudiospace/omes-bot",
+  "license": "AGPL-3.0-only",
+  "keywords": [
+    "grok",
+    "agent",
+    "programming-bot",
+    "mcp"
+  ],
+  "skills": "omega_prime/skills",
+  "commands": "omega_prime/grokbot/plugin/commands",
+  "mcpServers": "mcp.json"
+}

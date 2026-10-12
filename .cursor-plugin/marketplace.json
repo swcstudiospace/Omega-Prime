@@ -1,0 +1,17 @@
+{
+  "name": "omega-prime-marketplace",
+  "owner": {
+    "name": "Spectrum Web Co"
+  },
+  "metadata": {
+    "description": "One Grok programming bot. Hermes, oh-my-pi, and Prime agent logic in one Python process.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "omega-prime",
+      "source": "./",
+      "description": "One Grok programming bot. Hermes, oh-my-pi, and Prime agent logic in one Python process."
+    }
+  ]
+}

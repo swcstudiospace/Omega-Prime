@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "omega-prime": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "${CURSOR_PLUGIN_ROOT}/omega_prime/scripts/grokbot-1click.sh",
+        "--bootstrap",
+        "--transport",
+        "stdio"
+      ]
+    }
+  }
+}
