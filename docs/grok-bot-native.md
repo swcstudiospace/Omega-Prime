@@ -4,8 +4,9 @@ Run the Omega Prime tool host on a machine you control and point a Grok Bot
 at it. The same process serves legacy MCP SSE and Streamable HTTP, with one
 roster, one seat policy, and one approval log.
 
-The ten-minute path is section 3 of
-`omega_prime/grokbot/SETUP.md`. This page is the operator reference for the
+The source-preparation and client-specific attachment guidance is in
+[grokbot/SETUP.md](../omega_prime/grokbot/SETUP.md); completion time and live
+account attachment remain unverified. This page is the operator reference for the
 running host. Container, compose, systemd, and Kubernetes installs are
 [Deploying the tool host](deploy.md). What each Prime family does behind a
 bot is [Driving the bot](driving-the-bot.md). Sandbox notes stay on
