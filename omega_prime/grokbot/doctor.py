@@ -408,22 +408,38 @@ class GrokBotDoctor:
                 category="GrokBot",
                 title="Bot Template Integrity",
                 status="PASS",
-                message="Every skill and routine in the bot template resolves",
+                message=(
+                    "Every skill and routine in the bot template resolves, and "
+                    "every checked-in skill and routine is listed"
+                ),
             )
         parts = []
         if lint.missing_skills:
-            parts.append("skills: " + ", ".join(lint.missing_skills[:_MAX_LISTED]))
+            parts.append(
+                "missing skills: " + ", ".join(lint.missing_skills[:_MAX_LISTED])
+            )
         if lint.missing_routines:
-            parts.append("routines: " + ", ".join(lint.missing_routines[:_MAX_LISTED]))
+            parts.append(
+                "missing routines: " + ", ".join(lint.missing_routines[:_MAX_LISTED])
+            )
+        if lint.unlisted_skills:
+            parts.append(
+                "unlisted skills: " + ", ".join(lint.unlisted_skills[:_MAX_LISTED])
+            )
+        if lint.unlisted_routines:
+            parts.append(
+                "unlisted routines: " + ", ".join(lint.unlisted_routines[:_MAX_LISTED])
+            )
         return DiagnosticCheck(
             id="template_integrity",
             category="GrokBot",
             title="Bot Template Integrity",
             status="FAIL",
-            message="Bot template references missing items (" + "; ".join(parts) + ")",
+            message="Bot template and disk disagree (" + "; ".join(parts) + ")",
             remediation=(
-                "Add the missing skills/routines or remove them from "
-                "omega_prime/grokbot/templates/OMEGA_PRIME.md"
+                "List every checked-in skill and routine in "
+                "omega_prime/grokbot/templates/OMEGA_PRIME.md and remove entries "
+                "with no file behind them"
             ),
         )
 

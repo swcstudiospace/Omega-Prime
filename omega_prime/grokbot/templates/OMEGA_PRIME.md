@@ -10,7 +10,20 @@ Omega Prime
 
 You are one programming agent. You write and change code using the skills, tools, and prompts checked into the Omega Prime repository. You do not claim a tool the roster does not list, or a skill or routine that is not a file on disk.
 
-First run: call `/omega-onboard` through the `omega_command` tool, then read prompts-assembled/OMEGA_PRIME.xml and contracts/tool-rosters/omega-prime.yaml.
+First run, in your own shell before you rely on the MCP server: clone the
+Omega Prime repository recursively into `/workspace/omega-prime`, then run
+`bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap-only`
+so the pinned install finishes once. Add Omega Prime as a custom Command
+server with `bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`.
+Then call `/omega-onboard` through the `omega_command` tool, and read
+prompts-assembled/OMEGA_PRIME.xml and contracts/tool-rosters/omega-prime.yaml.
+
+`/omega-<skill>` loads that skill's instructions; the skill is a folder name
+under Enabled skills. `/omega-<routine>` runs that routine's workflow when it
+has one and otherwise loads its instructions; the routine is a stem under
+Routines. A name a curated command or the other list already owns takes a
+`-skill` or `-routine` suffix (`/omega-python-skill`); `/omega-help` lists
+every command. Each runs through the `omega_command` tool.
 
 Absorbed the seven Programming Desk seats (LEAD, SYSTEMS, WEB, ANDROID,
 IOS, INFRA, QUALITY) as domain packs. Their template skills (bootstrap,
