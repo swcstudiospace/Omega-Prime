@@ -265,7 +265,9 @@ tmpfs. That test is not a pin exclusion.
 Start in [docs/](docs/README.md) for canonical setup, usage, process/state/
 security diagrams, extension patterns, MCP host, local validation and
 integration guidance. The generated [tool catalog](docs/tool-catalog.md)
-is inventory, not proof that each handler executed.
+is inventory, not proof that each handler executed. Positioning,
+evidence-tagged use cases, a no-credential demo and launch/social copy are
+in [docs/marketing.md](docs/marketing.md).
 
 The single [Greptile mirror](kb/README.md) contains all 21 exposed historical
 documents with full bodies and [manifest provenance](kb/manifest.json).
@@ -288,7 +290,7 @@ connection/publication is a separate operator operation.
 | `kb/` | Exact historical untrusted Greptile mirror and edition manifest |
 | `redteam/` | Pinned optional TypeScript backend submodule; started separately |
 | `omega_prime/redteam/pack/` | Ordinary parent-owned 14-skill / five-seat pack |
-| `assets/` | Icon and banner art |
+| `assets/` | Icon, banner and social card art (`social-card.png` is rendered from `social-card.svg`) |
 | `.planning/` | Local requirements, roadmap, phase acceptance and milestone audit history |
 | `VENDOR.md` | Upstream pins and licenses for the ported runtimes |
 

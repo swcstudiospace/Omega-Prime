@@ -20,6 +20,7 @@
 - [Deploying the tool host](deploy.md)
 - [Substrate surface](substrate.md)
 - [FAQ](faq.md)
+- [Marketing](marketing.md)
 
 ## Build
 
