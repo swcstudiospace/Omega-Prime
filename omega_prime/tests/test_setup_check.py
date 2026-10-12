@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from omega_prime.setup_check import CHECKS, check_plugin, check_template, main, run_checks
+from omega_prime.setup_check import (
+    CHECKS,
+    check_plugin,
+    check_template,
+    main,
+    run_checks,
+)
 
 OMEGA_PRIME = Path(__file__).resolve().parents[1]
 ROOT = OMEGA_PRIME.parent

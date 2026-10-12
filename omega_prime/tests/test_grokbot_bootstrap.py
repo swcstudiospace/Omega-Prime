@@ -18,6 +18,8 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -410,9 +412,7 @@ def test_plugin_check_crash_exits_11_naming_the_step(
 ) -> None:
     """WR-03: an interpreter/import crash is 11 with step plugin_check."""
     tree = _tree(tmp_path)
-    proc = _run(
-        tree, "--bootstrap", "--transport", "stdio", STUB_CHECK_EXIT=check_exit
-    )
+    proc = _run(tree, "--bootstrap", "--transport", "stdio", STUB_CHECK_EXIT=check_exit)
     line = _assert_failed(proc, 11, "install_failed")
     assert line["step"] == "plugin_check"
     assert proc.stdout == b""
@@ -542,19 +542,16 @@ def test_killed_first_start_leaves_no_stamp_and_the_next_start_completes(
     assert not (tree.root / ".venv.build").exists()
 
 
-def _hold_in_use_shared(path: Path) -> object:
-    """Hold a shared flock like a serving launcher; the caller must close it."""
+@contextmanager
+def _in_use_shared(path: Path) -> Iterator[None]:
+    """Hold a shared flock on ``path`` like a serving launcher, for the block."""
     fcntl = pytest.importorskip("fcntl")
-    handle = open(path, "a", encoding="utf-8")
-    fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-    return handle
-
-
-def _release_in_use(holder: object) -> None:
-    fcntl = pytest.importorskip("fcntl")
-    assert hasattr(holder, "fileno") and hasattr(holder, "close")
-    fcntl.flock(holder.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
-    holder.close()  # type: ignore[attr-defined]
+    with open(path, "a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def test_stale_stamp_rebuild_refuses_while_a_server_is_running(
@@ -567,11 +564,8 @@ def test_stale_stamp_rebuild_refuses_while_a_server_is_running(
     marker.write_text("old\n", encoding="utf-8")
     (tree.root / "requirements-lock.txt").write_text("stub==2.0\n", encoding="utf-8")
     before = _tree_files(tree.venv)
-    holder = _hold_in_use_shared(tree.root / ".venv.in-use.lock")
-    try:
+    with _in_use_shared(tree.root / ".venv.in-use.lock"):
         proc = _run(tree, "--bootstrap-only")
-    finally:
-        _release_in_use(holder)
     line = _assert_failed(proc, 11, "install_failed")
     assert line["step"] == "venv_in_use"
     assert proc.stdout == b""
@@ -587,11 +581,8 @@ def test_warm_start_is_not_blocked_by_a_running_server(tmp_path: Path) -> None:
     tree = _tree(tmp_path)
     assert _run(tree, "--bootstrap-only").returncode == 0
     tree.clear_log()
-    holder = _hold_in_use_shared(tree.root / ".venv.in-use.lock")
-    try:
+    with _in_use_shared(tree.root / ".venv.in-use.lock"):
         proc = _run(tree, "--bootstrap-only")
-    finally:
-        _release_in_use(holder)
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
     assert proc.stdout == b""
     assert tree.calls_of("pip") == [] and tree.calls_of("venv") == []
@@ -601,11 +592,8 @@ def test_plain_serve_is_not_blocked_by_a_running_server(tmp_path: Path) -> None:
     """IN-05: the non-bootstrap serve path shares the lock, never races swap."""
     tree = _tree(tmp_path)
     assert _run(tree, "--bootstrap-only").returncode == 0
-    holder = _hold_in_use_shared(tree.root / ".venv.in-use.lock")
-    try:
+    with _in_use_shared(tree.root / ".venv.in-use.lock"):
         proc = _run(tree, "--transport", "stdio", stdin=FRAME)
-    finally:
-        _release_in_use(holder)
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
     assert proc.stdout == REPLY
 
@@ -688,6 +676,7 @@ def test_bootstrap_ignores_hostile_modules_in_the_callers_cwd(
     assert not marker.exists()
     assert tree.stamp.is_file()
     assert sorted(p.name for p in hostile.iterdir()) == before
+
 
 @pytest.mark.parametrize("via", ["script", "symlink", "relative-symlink"])
 def test_root_comes_from_the_script_location_not_the_cwd(

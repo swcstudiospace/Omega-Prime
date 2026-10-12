@@ -117,7 +117,9 @@ def test_listed_but_untracked_skill_and_routine_are_missing(tmp_path: Path):
         subprocess.run(["git", "-C", str(root), *argv], check=True)
     pkg = root / "omega_prime"
     (pkg / "skills" / "learned").mkdir()
-    (pkg / "skills" / "learned" / "SKILL.md").write_text("# learned\n", encoding="utf-8")
+    (pkg / "skills" / "learned" / "SKILL.md").write_text(
+        "# learned\n", encoding="utf-8"
+    )
     (pkg / "routines" / "learned.md").write_text("# learned\n", encoding="utf-8")
     template = pkg / "grokbot" / "templates" / "OMEGA_PRIME.md"
     text = template.read_text(encoding="utf-8")
@@ -130,6 +132,7 @@ def test_listed_but_untracked_skill_and_routine_are_missing(tmp_path: Path):
     assert lint.unlisted_skills == []
     assert lint.unlisted_routines == []
     assert lint.ok is False
+
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs a git client")
 def test_untracked_skill_in_a_checkout_is_not_unlisted(tmp_path: Path):
