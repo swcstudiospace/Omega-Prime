@@ -6,11 +6,11 @@
 
 # Omega Prime
 
-One Grok programming bot that runs three agents' logic in a single Python
-process: the Hermes Agent conversation loop, the oh-my-pi agent harness,
-and Prime Agent's recursion and continual-learning capabilities — hardened
-enterprise-style, shipped as a Grok Bot Add-Bot product, and wired into the
-agent substrate.
+One Python programming agent combines Hermes conversation-loop and oh-my-pi
+harness behavior ports with selected, default-off Prime capabilities. It
+ships an MCP tool host and a Grok Bot template, not proof of a connected
+Grok account or a whole upstream-runtime port. Provider/service operations
+need their actual credentials, authorization and runtime prerequisites.
 
 ## Architecture
 
@@ -20,32 +20,11 @@ runtime tools and native crate helpers. `OmegaPrimeAgent.from_prime` separately
 selects the native `pa-ai` provider path for that same loop. No sidecar daemon;
 linking all nine crates does not import Prime's entire application runtime.
 
-```
-        +-------------------------------------------------------+
-        |                Omega Prime (one process)              |
-        |                                                       |
-        |  conversation loop .................. Hermes Agent    |
-        |    +- events, steering, budget, compaction ... Omp    |
-        |    +- goals, heartbeats, autonomous mode,             |
-        |    |  agent messaging .................. Prime (gated)|
-        |    +- RLM recursion (spawn/collect) .... Prime (gated)|
-        |    +- continual harness (/refine) ...... Prime (gated)|
-        |    +- pinned rlm factory / repl / bash / skills       |
-        |    |  and the nine pa-* crates ......... Prime kernel |
-        |                                                       |
-        |  tool registry -> roster -> policy -> approvals       |
-        |    -> receipts                                        |
-        +-------------------------------------------------------+
-                 |                        |
-        omega_prime/prime/        prime-agent/ (ignored checkout)
-        typed connector           imported in-process when
-        adapters                  prime.kernel.enabled is on
-```
 
-The merge architecture is
-[docs/adr/0001-prime-merge-architecture.md](docs/adr/0001-prime-merge-architecture.md)
-and
-[docs/adr/0002-prime-runtime-integration.md](docs/adr/0002-prime-runtime-integration.md).
+Current process, execution, storage and authorization boundaries are in
+[architecture](docs/architecture.md), the [agent loop](docs/agent-loop.md)
+and [design/extension patterns](docs/build-aesthetics.md). The two merge
+ADRs record historical decisions, not a substitute for current source.
 
 - **One agent, one process** — registry-backed tools and the existing conversation
   loop, with an explicitly selectable native Prime provider.
@@ -54,61 +33,103 @@ and
   Enabled registrations and policy/approval checks determine availability.
   Disabled Prime families are absent from the effective tools and assembled
   tool list; the policy contract remains an allowlist superset.
-- **27 skills, 7 routines** — prompt-native flows (sweep, nightly learning,
-  ultrathink turns, onboard, python check, connectors) plus the desk's review and intake routines.
+- **Shipped skills and routines** — prompt-native coding, review, intake,
+  sweep and learning flows, with an optional Red Team pack kept distinct.
 - **Substrate surface** — briefs on open, reports its tool trail with graph
   provenance, shares memory, recalls Hindsight episodes, answers docs from
   RAGflow. Unwired installs run fully local.
-- **Verified claims** — the full test suite, deterministic eval cases,
-  assembled-prompt checks, and a setup smoke check, all enforced in CI.
+- **Repeatable local proof** — a maintained isolated readiness command
+  exercises eligible handlers and classifies every remaining roster member.
+  [Local validation](docs/local-validation.md) separates exercised effects
+  from disabled features, named prerequisites and unproven live integrations.
 
 ## Quickstart
 
+Use Python 3.12 for this documented route. Package metadata declares
+`>=3.11`; the retained CI verification/lint/type matrices target 3.12–3.14.
+Those are distinct compatibility claims. The full Python suite also needs
+the pinned Prime submodule; Node/Rust are optional capability prerequisites,
+not requirements to run the core Python tool host.
+
 ```bash
-git clone https://github.com/swcstudiospace/omes-bot.git omega-prime
+git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git omega-prime
 cd omega-prime
-python -m venv .venv && .venv/bin/pip install -e '.[dev]'
-git clone --no-checkout https://github.com/PrimeIntellect-ai/prime-agent.git prime-agent
-git -C prime-agent checkout "$(.venv/bin/python -c 'import json; print(json.load(open("omega_prime/contracts/prime-agent.pin.json"))["commit"])')"
+python3.12 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest omega_prime/tests -q
 .venv/bin/python -m omega_prime.setup_check --root .
 ```
+
+An ordinary `git clone` does not populate the child checkouts. Either
+clone with `--recurse-submodules` as above, or populate afterwards:
+
+```bash
+git submodule update --init --recursive
+```
+
+When the optional Red Team backend is not needed, init only Prime:
+
+```bash
+git submodule update --init prime-agent
+```
+
+Never `git clone` a Prime checkout manually into the populated
+`prime-agent/` submodule path. `prime-agent/` is a tracked gitlink
+preserved as-is; the new root `redteam/` gitlink (T3MP3ST, pinned in
+[VENDOR.md](VENDOR.md)) sits alongside it. The Python package, the
+typed adapters, and the vendored 14-skill / five-seat Red Team pack
+under `omega_prime/redteam/pack/` are ordinary parent content. The
+TypeScript backend is separate upstream source reached through the
+`redteam/` gitlink and started separately — it is not ported into the
+Python package and Omega Prime never auto-launches it.
 
 The full Python suite exercises the pinned Prime Python runtime even when the
 product's optional Prime flags are off. Provision that read-only checkout before
 running the suite; it does not require running the retained failing Rust tests.
 
-Using it as a Grok Bot? Follow [grokbot/SETUP.md](omega_prime/grokbot/SETUP.md):
-install, secrets, optional tool host, then the smoke prompt. The remote host
-(SSE and Streamable HTTP, scoped tokens, approvals) is
-[docs/grok-bot-native.md](docs/grok-bot-native.md); deploying it is
-[docs/deploy.md](docs/deploy.md). The Add-Bot
-template is [omega_prime/grokbot/templates/OMEGA_PRIME.md](omega_prime/grokbot/templates/OMEGA_PRIME.md).
+Preparing a Grok Bot seat? Follow [setup](docs/setup.md) and the operator
+reference [grokbot/SETUP.md](omega_prime/grokbot/SETUP.md). Its section 1 is
+the primary route: a copy-paste prompt that asks the default Grok Bot to
+clone this repository recursively into `/workspace/omega-prime`, run
+`bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap-only`,
+and add a custom Command MCP server running
+`bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`.
+A Cursor Teams/Enterprise team marketplace can import the repository as a
+secondary route (`.cursor-plugin/`, root `mcp.json`). Live import on a Grok
+Bot or Cursor account is unproven until you run the
+[user UAT](docs/grok-bot-native.md#user-uat) rows. The template is
+[OMEGA_PRIME.md](omega_prime/grokbot/templates/OMEGA_PRIME.md). Registering a
+host and actually attaching an authorized account/model remain seat-side
+operations; a local smoke prompt or template check does not prove them.
+The authenticated SSE/Streamable HTTP host and the Remote HTTPS alternative
+are described in [remote host guidance](docs/grok-bot-native.md), with the
+separate manual release/rollback boundary in [deployment](docs/deploy.md).
 
 To turn the Prime capability families on and drive the bot with them, see
 [docs/driving-the-bot.md](docs/driving-the-bot.md).
 
-### Program a repo through Grok Bot
+### Prepare an owned workspace for Grok Bot
 
-Keep the install steps above. From this checkout:
+From this checkout, in the installed environment:
 
 ```bash
-pip install -r requirements-lock.txt
-git submodule update --init --recursive
-python -m omega_prime.setup_check --root .
-python -m omega_prime.tooling.catalog --check
+.venv/bin/python -m omega_prime.setup_check --root .
+.venv/bin/python -m omega_prime.tooling.catalog --check
+.venv/bin/python -m omega_prime.tooling.plugin --check
 bash omega_prime/scripts/assemble-prompts.sh --check
-python -m omega_prime.grokbot.oneclick --work-root <repo> --dry-run
+OMEGA_PRIME_WORK_ROOT="$PWD" .venv/bin/python -m omega_prime.grokbot.oneclick --dry-run
 ```
 
-A real attach is `python -m omega_prime.grokbot.oneclick --work-root <repo>`
-on loopback with a generated token (`--transport sse --generate-token`).
-`OMEGA_PRIME_WORK_ROOT` is the repo the desk tools act on.
-`OMEGA_PRIME_STATE_DIR` is where desk state is stored. Railway, Greptile,
-Vercel, Play, and ASC stay `not_configured` until their tokens are set.
-The served tool count is the roster intersection `setup_check` reports
-(117 today). Prime families stay off by default. `delegate_task` is served;
-without a provider env it returns `not_configured: provider`.
+The last command is preflight, not account attachment. Select the owned
+workspace with `OMEGA_PRIME_WORK_ROOT` or the launcher's `--work-root`,
+which is forwarded to the stdio and SSE host alike; the direct
+`omega_prime.mcp_server` accepts `--work-root` for both transports too.
+`OMEGA_PRIME_STATE_DIR` selects desk state. Starting an authenticated
+loopback host can use `--transport sse --generate-token` without exposing a
+credential in argv; see [tool-host guidance](docs/tool-host.md).
+Tool availability is operation-specific. The effective count comes from
+the roster/configuration intersection, not a fixed prose total.
+`delegate_task` without a configured provider returns `not_configured: provider`.
 
 To call the real tools from outside the bot:
 
@@ -116,15 +137,18 @@ To call the real tools from outside the bot:
 .venv/bin/python -m omega_prime.mcp_server --root .
 ```
 
-`--root` is the repository root; coding-tool paths are relative to its
-`omega_prime/` directory, matching the shipped seat policy.
+Source checkout, working workspace and persistent state may be separate.
+The registry's effective roster, seat policy and approval gates still
+control calls; see [root/configuration guidance](docs/user-guide.md).
 
 ## Configuration
 
-Omega Prime runs with zero configuration; every Prime capability family is
-off by default. Recorded, source-executed pre-v10 transcripts verify bounded
-default-off loop compatibility; this is not a claim of byte-for-byte installation
-identity or a fully green unmodified historical suite. Opt in per family via
+The core host/local validation route needs no live-account configuration.
+Every Prime capability family and the Red Team gateway family are off by
+default. Model calls and external service effects need their named
+prerequisites. Recorded pre-v10 transcripts verify bounded default-off loop
+compatibility, not byte-for-byte installation identity or a fully green
+unmodified historical suite. Opt in per family via
 `omega-prime.json` at the repo root (or
 `OMEGA_PRIME_PRIME_<FAMILY>_ENABLED=1` env vars):
 
@@ -167,8 +191,9 @@ See [docs/agent-loop.md](docs/agent-loop.md) and
 
 ## Build from source (both toolchains)
 
-The Python package is the product. `prime-agent/` remains an ignored, read-only
-checkout pinned in [VENDOR.md](VENDOR.md). It supplies both the parity oracle and
+The Python package is the product. `prime-agent/` is a tracked
+submodule (gitlink) pinned in [VENDOR.md](VENDOR.md), not an ignored
+scratch checkout. It supplies both the parity oracle and
 the libraries loaded by the optional in-process runtime. Build the PyO3 bridge
 from the repository root before selecting native providers or kernel tools:
 
@@ -192,7 +217,7 @@ See [the native provider usage](docs/agent-loop.md#native-prime-provider).
 (cd prime-agent && cargo build --locked)
 ```
 
-The ignored `prime-agent/` checkout must be at the commit recorded in
+The tracked `prime-agent/` submodule must be at the commit recorded in
 `omega_prime/contracts/prime-agent.pin.json`. The separate `native` job in
 `rust-parity.yml` checks out that pin, builds the product bridge, and checks
 its dependency graph against the tracked `deny.toml`. It runs independently
@@ -237,11 +262,18 @@ tmpfs. That test is not a pin exclusion.
 
 ## Docs
 
-Start in [docs/](docs/README.md): setup, user guide, tool host, the
-[Grok Bot native host](docs/grok-bot-native.md), substrate
-surface, the agent loop, connector contracts, migration from pre-v10, the
-merge ADR, and the GitBook sync guide. Docs are verified in CI — links
-resolve, generated pages stay current.
+Start in [docs/](docs/README.md) for canonical setup, usage, process/state/
+security diagrams, extension patterns, MCP host, local validation and
+integration guidance. The generated [tool catalog](docs/tool-catalog.md)
+is inventory, not proof that each handler executed.
+
+The single [Greptile mirror](kb/README.md) contains all 21 exposed historical
+documents with full bodies and [manifest provenance](kb/manifest.json).
+It is synthesized, untrusted reference outside the GitBook content root;
+use [current guidance](docs/greptile.md) rather than promoting historical
+claims or embedded commands into authority.
+Navigation and generated-output consumers run in CI; remote GitBook
+connection/publication is a separate operator operation.
 
 ## Layout
 
@@ -251,17 +283,24 @@ resolve, generated pages stay current.
 | `omega_prime/prime/` | Typed connector adapters over the ported Prime capabilities |
 | `omega_prime/prime_kernel/` | In-process loader for the pinned `rlm` runtime, skills, and crate extension |
 | `native/omega-prime-prime/` | PyO3 bindings that call all nine Prime crates: goals, autonomous limits, `/goal` and `/autonomous`, the REPL protocol, heartbeats, refinement, plus telemetry, types, providers, the model catalog, tool-argument validation, daemon frames, session search, and CLI modes |
-| `omega_prime/grokbot/` | Add-Bot template, setup guide, remote tool host |
-| `docs/` | GitBook docs set (`SUMMARY.md` is the nav) |
+| `omega_prime/grokbot/` | Grok template/preparation and authenticated MCP tool host |
+| `docs/` | Canonical guidance; `SUMMARY.md` is the GitBook navigation |
+| `kb/` | Exact historical untrusted Greptile mirror and edition manifest |
+| `redteam/` | Pinned optional TypeScript backend submodule; started separately |
+| `omega_prime/redteam/pack/` | Ordinary parent-owned 14-skill / five-seat pack |
 | `assets/` | Icon and banner art |
-| `.planning/` | Milestone history (v1–v10) and the audit trail |
+| `.planning/` | Local requirements, roadmap, phase acceptance and milestone audit history |
 | `VENDOR.md` | Upstream pins and licenses for the ported runtimes |
 
-`hermes-agent/`, `oh-my-pi/`, and `prime-agent/` are local read-only
-checkouts. They are gitignored. Hermes and Omp are not imported.
-`prime-agent/` stays unmodified; with `prime.kernel.enabled` the process
-imports its `rlm` package and can load the crate extension built from that
-checkout.
+`hermes-agent/` and `oh-my-pi/` are local read-only checkouts. They are
+gitignored. Hermes and Omp are not imported. `prime-agent/` and
+`redteam/` are tracked submodules (gitlinks) pinned in
+[VENDOR.md](VENDOR.md). `prime-agent/` stays unmodified; with
+`prime.kernel.enabled` the process imports its `rlm` package and can
+load the crate extension built from that checkout. `redteam/` is the
+separately versioned T3MP3ST backend source, started separately per
+[docs/red-team.md](docs/red-team.md) — never auto-launched, never
+ported into the Python package.
 
 ## Contributing
 

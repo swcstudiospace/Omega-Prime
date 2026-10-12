@@ -31,6 +31,7 @@ from omega_prime.tools.packs import PACKS_TOOL_NAMES
 from omega_prime.tools.platform import PLATFORM_TOOL_NAMES
 from omega_prime.tools.prime_runtime import KERNEL_TOOL_NAMES
 from omega_prime.tools.quality import QUALITY_TOOL_NAMES
+from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
 from omega_prime.tools.registry import ToolRegistry
 from omega_prime.tools.rlm import RLM_TOOL_NAMES
 from omega_prime.tools.substrate_tools import SUBSTRATE_TOOL_NAMES
@@ -443,4 +444,5 @@ def test_roster_lists_exactly_the_names_register_coding_tools_registers(tmp_path
         + AUTONOMOUS_TOOL_NAMES
         + MESSAGING_TOOL_NAMES
         + KERNEL_TOOL_NAMES
+        + REDTEAM_TOOL_NAMES
     )

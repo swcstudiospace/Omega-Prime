@@ -54,6 +54,7 @@ ACCOUNT_MARKERS = (
     "DeleteAccount",
 )
 PACKAGE_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$")
+ISSUE_TAG_PATTERN = re.compile(r"<issue(?=[\s/>])")
 
 
 def _error(code: str, reason: str, **extra: Any) -> dict[str, Any]:
@@ -70,10 +71,22 @@ def _safe_shot_name(name: str) -> str | None:
     return stem + ".png"
 
 
+def _check_ref(ref: Any) -> None:
+    """Reject refs git could parse as options; git owns revision syntax."""
+    if (
+        not isinstance(ref, str)
+        or not ref
+        or ref.startswith("-")
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in ref)
+    ):
+        raise ValueError("ref must be a git revision, not an option")
+
+
 def _git_vcs(root: str):
     def show(ref: str, path: str) -> str | None:
+        _check_ref(ref)
         run = subprocess.run(
-            ["git", "show", f"{ref}:{path}"],
+            ["git", "show", "--end-of-options", f"{ref}:{path}"],
             cwd=root,
             capture_output=True,
             text=True,
@@ -82,8 +95,10 @@ def _git_vcs(root: str):
         return run.stdout if run.returncode == 0 else None
 
     def diff_names(base: str, head: str) -> list[str]:
+        _check_ref(base)
+        _check_ref(head)
         run = subprocess.run(
-            ["git", "diff", "--name-only", f"{base}...{head}"],
+            ["git", "diff", "--name-only", "--end-of-options", f"{base}...{head}"],
             cwd=root,
             capture_output=True,
             text=True,
@@ -92,8 +107,10 @@ def _git_vcs(root: str):
         return run.stdout.splitlines() if run.returncode == 0 else []
 
     def diff(base: str, head: str, paths: list[str]) -> str:
+        _check_ref(base)
+        _check_ref(head)
         run = subprocess.run(
-            ["git", "diff", f"{base}...{head}", "--", *paths],
+            ["git", "diff", "--end-of-options", f"{base}...{head}", "--", *paths],
             cwd=root,
             capture_output=True,
             text=True,
@@ -277,8 +294,8 @@ class MobileClient:
         head = show(head_ref, baseline_path) or ""
         base_ids = set(re.findall(r'id="([^"]+)"', base))
         head_ids = set(re.findall(r'id="([^"]+)"', head))
-        base_issues = base.count("<issue")
-        head_issues = head.count("<issue")
+        base_issues = len(ISSUE_TAG_PATTERN.findall(base))
+        head_issues = len(ISSUE_TAG_PATTERN.findall(head))
         return {
             "baseline": baseline_path,
             "issues_before": base_issues,

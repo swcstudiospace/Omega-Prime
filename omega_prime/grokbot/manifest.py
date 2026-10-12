@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Spectrum Web Co
-"""Grok Bot 1-Click Manifest Generator.
+"""Grok Bot manifest: a description of what the Omega Prime tool host serves.
 
-Produces a self-contained manifest describing exactly what the Omega Prime tool
-host serves, for direct import into Grok Bot settings. The tool list, the
-approval-gated list and the capability flags come from the same runtime the host
-builds (`load_runtime`), never from a static copy. The manifest never holds a
+The manifest records the served tool list, the approval-gated list, the
+capability flags, the transports the host offers (stdio, SSE at `/sse` and
+Streamable HTTP at `/mcp`) and the declared stdio launcher command. The tool
+lists and flags come from the same runtime the host builds (`load_runtime`),
+never from a static copy. The SSE host serves it at `/manifest.json`, and `sync`
+compares a saved copy with what is served. The manifest never holds a
 secret: a supplied token only decides `auth.type`.
 """
 
@@ -24,7 +26,13 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from omega_prime import __version__ as PACKAGE_VERSION
+from omega_prime.commands.generated import (
+    checked_in_routines,
+    checked_in_skills,
+    tracked_paths,
+)
 from omega_prime.config import PRIME_FAMILIES, load_config, prime_enabled
+from omega_prime.grokbot.streamable import MCP_PATH
 from omega_prime.mcp_server import (
     SERVER_VERSION,
     Runtime,
@@ -40,7 +48,12 @@ WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", ""})
 WILDCARD_URL_NOTE = (
     "wildcard bind rewritten to loopback; pass --public-url for remote clients"
 )
-STDIO_COMMAND = ".venv/bin/python -m omega_prime.mcp_server --root ."
+# The declared stdio entry, relative to the repository root. The launcher
+# resolves the root from its own location, never from the working directory.
+STDIO_COMMAND = (
+    "bash omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio"
+)
+TRANSPORTS = ("stdio", "sse", "streamable-http")
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _TRUTHY = ("1", "true", "yes", "on")
@@ -116,14 +129,26 @@ def _read_template(repo: Path) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class TemplateLint:
-    """Template entries that name a skill or routine with no file behind it."""
+    """Template ↔ disk drift, in both directions.
+
+    `missing_*` are template entries with no file behind them. `unlisted_*` are
+    checked-in skills (folders holding `SKILL.md`) and routines the template
+    does not list.
+    """
 
     missing_skills: list[str] = field(default_factory=list)
     missing_routines: list[str] = field(default_factory=list)
+    unlisted_skills: list[str] = field(default_factory=list)
+    unlisted_routines: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not self.missing_skills and not self.missing_routines
+        return not (
+            self.missing_skills
+            or self.missing_routines
+            or self.unlisted_skills
+            or self.unlisted_routines
+        )
 
 
 def _entry_name(line: str) -> str:
@@ -132,23 +157,51 @@ def _entry_name(line: str) -> str:
 
 
 def lint_template(root: Path | str | None = None) -> TemplateLint:
-    """Check every template skill and routine resolves to a file under `root`."""
+    """Check the template against the checked-in skills and routines.
+
+    Every template entry must resolve to a checked-in file, and every
+    checked-in skill and routine (git-tracked when `root` is a checkout, else
+    on disk; the same set the generated `/omega-<name>` commands use) must be
+    listed. One provenance serves both directions, so a listed entry with no
+    checked-in file behind it — including one present on disk but untracked,
+    or one tracked but deleted from disk — is missing.
+    """
     repo = Path(root) if root is not None else find_repo_root()
     data = _read_template(repo)
-    base = repo / "omega_prime"
-    missing_skills: list[str] = []
-    for entry in data["skills"]:
-        name = _entry_name(entry)
-        skill_file = base / "skills" / name / "SKILL.md"
-        if not _NAME_RE.match(name) or not skill_file.is_file():
-            missing_skills.append(name)
-    missing_routines: list[str] = []
-    for entry in data["routines"]:
-        name = _entry_name(entry)
-        routine_file = base / "routines" / f"{name}.md"
-        if not _NAME_RE.match(name) or not routine_file.is_file():
-            missing_routines.append(name)
-    return TemplateLint(missing_skills, missing_routines)
+    tracked = tracked_paths(repo)
+
+    def _present(rel: str) -> bool:
+        return (tracked is None or rel in tracked) and (repo / rel).is_file()
+
+    def _skill_present(name: str) -> bool:
+        return _present(f"omega_prime/skills/{name}/SKILL.md")
+
+    def _routine_present(name: str) -> bool:
+        return _present(f"omega_prime/routines/{name}.md")
+
+    skill_names = [_entry_name(entry) for entry in data["skills"]]
+    routine_names = [_entry_name(entry) for entry in data["routines"]]
+    missing_skills = [
+        name
+        for name in skill_names
+        if not _NAME_RE.match(name) or not _skill_present(name)
+    ]
+    missing_routines = [
+        name
+        for name in routine_names
+        if not _NAME_RE.match(name) or not _routine_present(name)
+    ]
+    listed_skills = set(skill_names)
+    listed_routines = set(routine_names)
+    unlisted_skills = [
+        name for name in checked_in_skills(repo) if name not in listed_skills
+    ]
+    unlisted_routines = [
+        name for name in checked_in_routines(repo) if name not in listed_routines
+    ]
+    return TemplateLint(
+        missing_skills, missing_routines, unlisted_skills, unlisted_routines
+    )
 
 
 # --- served state ----------------------------------------------------------
@@ -222,7 +275,12 @@ def _endpoints(url: str) -> dict[str, str]:
     parts = urlsplit(url)
     path = parts.path[:-4] if parts.path.endswith("/sse") else ""
     base = urlunsplit((parts.scheme, parts.netloc, path.rstrip("/"), "", ""))
-    return {"sse": url, "healthz": f"{base}/healthz", "readyz": f"{base}/readyz"}
+    return {
+        "sse": url,
+        "mcp": f"{base}{MCP_PATH}",
+        "healthz": f"{base}/healthz",
+        "readyz": f"{base}/readyz",
+    }
 
 
 # --- manifest --------------------------------------------------------------
@@ -315,6 +373,8 @@ def generate_manifest(
             "integrity": {
                 "missing_skills": lint.missing_skills,
                 "missing_routines": lint.missing_routines,
+                "unlisted_skills": lint.unlisted_skills,
+                "unlisted_routines": lint.unlisted_routines,
                 "ok": lint.ok,
             },
         },
@@ -327,7 +387,7 @@ def generate_manifest(
             "ultrathink_orchestration": True,
             "substrate_telemetry": _substrate_wired(env),
             "prime_families": flags,
-            "transports": ["stdio", "sse"],
+            "transports": list(TRANSPORTS),
         },
     }
     manifest["digest"] = manifest_digest(manifest)

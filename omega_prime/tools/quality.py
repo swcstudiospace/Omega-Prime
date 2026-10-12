@@ -460,7 +460,7 @@ class QualityClient:
             "git_dependencies": git_deps,
             "verdict": "review" if (lockfiles or manifests) else "no dependency change",
             "unverified": [
-                "licence and CVE lookup is not wired; run the supply-chain skill's audit commands"
+                "licence and CVE lookup is not wired; run the security-supply-chain skill's audit commands"
             ],
         }
 

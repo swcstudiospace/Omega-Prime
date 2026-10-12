@@ -1,6 +1,6 @@
 ---
 name: hindsight-memory
-description: Retain and recall discipline for the seat memory banks: what to keep, what never to keep, and the receipt-path rule.
+description: "Retain and recall discipline for the seat memory banks: what to keep, what never to keep, and the receipt-path rule."
 bots: [bot-00-omega-prime]
 gates: [G-2, G-3]
 ---

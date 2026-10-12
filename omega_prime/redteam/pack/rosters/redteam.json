@@ -1,0 +1,23 @@
+{
+  "team": "redteam",
+  "gateway_url": "http://127.0.0.1:3333",
+  "gateway_url_note": "Loopback default. A non-loopback T3MP3ST_URL requires T3MP3ST_BEARER_TOKEN (or T3MP3ST_BEARER_TOKEN_FILE) on both the proxy and the server. Never commit the token.",
+  "roster_version": 1,
+  "seats": {
+    "commander": {
+      "id": ""
+    },
+    "red": {
+      "id": ""
+    },
+    "black": {
+      "id": ""
+    },
+    "blue": {
+      "id": ""
+    },
+    "white": {
+      "id": ""
+    }
+  }
+}

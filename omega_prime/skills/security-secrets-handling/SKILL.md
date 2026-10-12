@@ -1,5 +1,5 @@
 ---
-name: secrets-handling
+name: security-secrets-handling
 description: Detecting, preventing and responding to secret exposure. Use when handling credentials, reviewing for secrets, or responding to an exposure.
 bots: [bot-00-omega-prime]
 gates: [G-3]

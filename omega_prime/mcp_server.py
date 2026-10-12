@@ -701,7 +701,13 @@ def default_registry(
     # ``not_configured: provider``. Messaging registers on the seat session
     # name when its flag is on. Harness, goals, heartbeat, autonomous, and
     # kernel are self-contained and register here when their flags are on.
-    from omega_prime.config import family_config, load_config, prime_enabled
+    # The red team family registers from its own top-level `redteam` key.
+    from omega_prime.config import (
+        family_config,
+        load_config,
+        prime_enabled,
+        redteam_enabled,
+    )
     from omega_prime.tools.autonomous import register_autonomous_tools
     from omega_prime.tools.goals import register_goal_tools
     from omega_prime.tools.harness import register_harness_tools
@@ -738,6 +744,37 @@ def default_registry(
         from omega_prime.tools.agent_message import register_messaging_tools
 
         register_messaging_tools(registry, "bot-00-omega-prime")
+    # The red team family is a top-level config key (`redteam`), not a Prime
+    # family. Off by default, so the default registry is unchanged; when on,
+    # the T3MP3ST loopback tools register against the configured gateway with
+    # the upstream bearer contract (T3MP3ST_BEARER_TOKEN / _FILE, else the
+    # configured bearer_token_file).
+    if redteam_enabled(config):
+        from omega_prime.tools.redteam import (
+            DEFAULT_GATEWAY_URL,
+            RedteamClient,
+            RedteamContext,
+            register_redteam_tools,
+            resolve_bearer_token,
+        )
+
+        redteam_node = config.get("redteam", {})
+        redteam_node = redteam_node if isinstance(redteam_node, dict) else {}
+        register_redteam_tools(
+            registry,
+            RedteamClient(
+                RedteamContext(
+                    gateway_url=str(
+                        redteam_node.get("gateway_url") or DEFAULT_GATEWAY_URL
+                    ),
+                    bearer_token=resolve_bearer_token(
+                        env,
+                        read_secret_file,
+                        str(redteam_node.get("bearer_token_file") or ""),
+                    ),
+                )
+            ),
+        )
     # DESK-04: the production desk-pass driver ticks due ``desk_lead_pass``
     # jobs against the shared JobStore on a background thread, serialized.
     # It holds the runtime's parent shim — None without a provider env never

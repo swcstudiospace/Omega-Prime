@@ -145,7 +145,7 @@ Delegate one goal, or a batch of goals, to a child agent. The result is the chil
 - Approval: not required
 - Required params: command
 
-Run one Omega Prime slash command. Pass the user's /omega-... text. Use this instead of the underlying tools when the user typed a slash command or asked for onboard, connectors, a Python check, desk status, doctor, roster, recall, retain, gates, or delegate. /omega-help lists every command.
+Run one Omega Prime slash command. Pass the user's /omega-... text exactly. Use this instead of the underlying tools when the user typed a slash command or asked for onboard, connectors, a Python check, desk status, doctor, roster, recall, retain, gates, or delegate. Generated commands run here too: /omega-<skill> loads that skill's instructions, and /omega-<routine> runs that routine's workflow or loads its instructions. A generated name that matches a curated command or another generated name takes a -skill or -routine suffix (/omega-python-skill loads the python skill; /omega-python runs the check). /omega-help lists every command.
 
 ## execute_code
 
@@ -161,7 +161,7 @@ Run Python source in a short-lived local process whose working directory is the 
 - Approval: not required
 - Required params: command, tool, arguments
 
-Call one MCP tool by spawning an argv and exchanging a single JSON-RPC line. command is an argument list, not a shell string.
+Call one MCP tool over an initialized SDK session: the server is spawned from an argv, reached with the initialize handshake plus tools/call over stdio, and reaped on timeout. command is an argument list, not a shell string.
 
 ## browser_navigate
 
@@ -1234,3 +1234,91 @@ Apply a Prime /goal command in this process. pa-core parses the arguments and up
 - Required params: args
 
 Apply a Prime /autonomous command in this process. pa-core parses the arguments, updates the live run, and formats the status block.
+
+## tempest_status
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Mission + provider status from the loopback gateway (GET /api/mission/status + /api/llm/status). Read-only.
+
+## tempest_mission_start
+
+- Family: Red Team
+- Approval: required
+- Required params: none
+
+Start a mission on the loopback gateway (POST /api/mission/start). Requires approval.
+
+## tempest_mission_stop
+
+- Family: Red Team
+- Approval: required
+- Required params: none
+
+Stop the active mission on the loopback gateway (POST /api/mission/stop). Requires approval.
+
+## tempest_report
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Engagement report for a mission (GET /api/mission/report). Read-only.
+
+## tempest_operators_list
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+List backend operators and their states (GET /api/operators/list). Read-only.
+
+## tempest_operator_task
+
+- Family: Red Team
+- Approval: required
+- Required params: operatorId
+
+Dispatch a task to one backend operator (POST /api/operators/:id/task). Requires approval.
+
+## tempest_findings
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Ledger findings, optionally for one mission (GET /api/findings). Read-only.
+
+## tempest_providers
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Provider + subscription-session state (GET /api/llm/status + /api/oauth/status). Read-only.
+
+## tempest_purple_synthesize
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Purple posture synthesis from red findings + blue detection gaps (POST /api/teams/purple/synthesize). Read-only.
+
+## tempest_hats_list
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Specialist hats with parent teams and live tool grants (GET /api/teams/tool-grants + /api/operators/prompts). Read-only.
+
+## tempest_hat_dispatch
+
+- Family: Red Team
+- Approval: required
+- Required params: hat, task
+
+Spawn one specialist hat and dispatch a task to it (POST /api/operators/spawn {archetype} then POST /api/operators/:id/task). Requires approval.

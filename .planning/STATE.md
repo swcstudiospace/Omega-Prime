@@ -1,20 +1,22 @@
 ---
 gsd_state_version: "1.0"
-milestone: v14
-milestone_name: Boundary alignment
-current_phase: none
-current_phase_name: none
-status: complete
-stopped_at: "v14 complete: 4/4 phases, 10/10 requirements, audit passed. Uncommitted on v14-boundary-alignment. Archive is in milestones/v14-phases/."
-last_updated: "2026-10-10T01:40:00.000Z"
-last_activity: 2026-10-10
-last_activity_desc: v14 audit passed 10/10. Phase directories archived. No commit or tag.
+milestone: v15
+milestone_name: Integrated Readiness and Repository Delivery
+current_phase: "77.1"
+current_phase_name: Grok Bot import packaging
+status: verifying
+stopped_at: User chose to ship the v15 work to main ahead of the live 77.1 UAT; ultrathink-ship PR and Greptile review in progress
+last_updated: "2026-10-12T15:10:00.000Z"
+last_activity: 2026-10-12
+last_activity_desc: User decided "ship to main branch and I'll test after"; planning docs committed for the ship gate; ultrathink-ship run with --ignore-gsd on that explicit decision
+state_head: a1280007fe49b0f4ea6d0d1e9b6fa1f15e1f3ca2
 progress:
-  total_phases: 4
-  completed_phases: 4
-  total_plans: 4
-  completed_plans: 4
-  percent: 100
+  total_phases: 5
+  completed_phases: 3
+  total_plans: 31
+  completed_plans: 31
+  percent: 60
+current_plan: "08"
 ---
 
 # Project State
@@ -24,15 +26,14 @@ progress:
 See: .planning/PROJECT.md
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** None. v14 is complete; no next milestone is scoped.
+**Current focus:** Phase 77.1 Grok Bot import packaging (GROK-03): human UAT on the user's live Grok Bot. All 8 plans are implemented and committed (50b621a..a128000). Canonical verification is human_needed with 42/42 must-haves and 5/5 success criteria. A fresh-clone LOCAL-PROOF on the final source passed: cold bootstrap 93 s; the declared stdio command served /omega-help (46 commands); exit classes 10–13; HTTPS loopback 22/0. Review open 0; security threats open 0/19; Nyquist compliant. Full suite 2508 passed. Phases 75–77 complete. Phase 78 and the milestone lifecycle follow 77.1 acceptance.
 
 ## Current Position
 
-Phase: none
-Status: v14 audit passed 10/10 (`.planning/v14-MILESTONE-AUDIT.md`)
-Last activity: 2026-10-10 — v14 closed
-
-Phase completion: 4 of 4.
+Phase: 77.1 (Grok Bot import packaging): verifying, live human UAT
+Plan: 8 of 8. All plans are summarized; the UAT checkpoint in plan 08 is open.
+Status: Shipping to main by user decision, ahead of the live UAT. After the merge, 77.1-UAT.md tests 1–6 run against `main` with the canonical SETUP.md prompt (no `--branch`).
+Last activity: 2026-10-12. The user chose to ship to main now and test after. The ship flow runs `assess --ignore-gsd` because of that explicit decision; the PR body records the exclusion. Branch `v15-integrated-readiness` (pre-squash head a128000 plus the planning-doc commit) goes through a Greptile 5/5 review, then a squash merge and branch deletion per the ultrathink ship config.
 
 ## Accumulated Context
 
@@ -47,16 +48,52 @@ Phase completion: 4 of 4.
 
 ### Blockers
 
-None.
+Live 77.1 UAT (tests 1–6) is deferred until after the merge, by the user's decision. After the merge it uses the canonical SETUP.md prompt from `main` (Cursor Teams/Enterprise for rows 2–3; an operator HTTPS host for row 6, which may be skipped with a reason). 77.1 stays human_needed and GROK-03 stays Pending until those results are recorded. Phase 78 and the milestone audit/complete/cleanup follow 77.1 acceptance; phases 75–77 need a freshness re-verification before the audit. The squash merge rewrites per-plan commit SHAs out of main's history: later verify-work commit reconciliation must recount from the preserved pre-squash objects (head a128000) instead of treating them as missing. Cleanup still needs separate approval. Not yet executed: final-source image publication, deployment and live Grok operations.
 
 ### Roadmap Evolution
 
 - v14 Boundary alignment shipped 2026-10-10: phases 71–74, audit passed 10/10.
 - Count text in BND-05 and BND-06 moved from 110/147 to 117/154 with the phase 73 tools.
-- Open: the v14 tree is uncommitted on `v14-boundary-alignment` (`commit_docs` and `git.create_tag` are false).
+- v14 application updates were merged through PR #17; v15 continues on `v15-integrated-readiness`.
+- v15 has phases 75–78 and 21 approved requirements, with no unrelated seeds or upstream changes.
+- User explicitly chose native GSD over the blocked signed Swarm execution contract. No `.swarm/` writes or signed Swarm approvals.
+- Baseline evidence retains the warm intake failure and accidental arbitrary-path-clean secret-guard test failure; unchanged failures were not rerun.
+- Phase 77.1 inserted after Phase 77: Grok Bot import packaging (GROK-03): plugin/MCP import manifest, stdio host on the Bot cloud computer by default plus documented HTTPS host, generated /omega-<name> commands per skill and routine, idempotent bootstrap/verify; user decisions 2026-10-12 (URGENT)
+
+## Latest continuation decisions and evidence
+
+- Deliverable: this Omega Prime repository, `https://github.com/swcstudiospace/omes-bot.git`; no Grok parent repository was identified.
+- User approved including T3MP3ST as a submodule inside Omega Prime. Local source commit `a3dcadba4d95b9a7376297f839519801ba7c15e3` includes `redteam/` at conservative pack-matching pin `831a6b0ee09f12c0f069f51d62b2f0945d505980`, HTTPS source `https://github.com/swcstudiospace/purple-team.git`. Independently cloned child detached/clean, no nested .gitmodules; Prime pin preserved `967eb13fd488507af5f590e9c6ea8b2672f1fc05`. No remote publication; dirty sibling untouched and Python adapter/pack ordinary tracked content retained.
+- User authorized publication to the established branch after verification, through the required Ultrathink shipping/review flow. No push, PR, merge, tag, container publication or deployment has occurred; no red tree may be committed or published.
+- The earlier run selected the trusted Swarm route and recorded its missing signed assignment. The current user again invoked gsd-autonomous, so this continuation uses the established native GSD workflow instead. This is not a signer bypass or a signed-Swarm execution claim. Keep the no-worktree boundary and `.swarm/` untouched.
+- 2026-10-12 continuation (session 01a12fb2): stale 75/76 reports were re-verified at 3208b9b (75 passed 46/46; 76 passed 28/28, with human items covered by 76-UAT). The user passed Phase 77 UAT Tests 3–10 (12/12), and the 77 report was canonicalized to passed. `phase.complete` ran for 75, 76, 77. Phase 75 re-review: WR-03..07 are being fixed with tests; WR-01/02/08 and IN-01 are deferred to 77.1 (launcher/stdio/HTTPS rework); infos skipped. Phase 76 WR-01 is deferred under the user-accepted UAT 8.7 boundary. Tracking graph `ut-mv54kfik-a13c87a9`; spec `/root/.omp/agent/ultrathink/sessions/01a12fb2-ba67-7772-a8ad-f5a01005f5a2.xml`.
+- 2026-10-12 user decision (session 01a12fb2): "ship to main branch and I'll test after". `ultrathink-ship assess` had reported not done (77.1 human_needed, roadmap incomplete, dirty planning docs). On this explicit instruction the ship proceeds with `--ignore-gsd`. The tracked planning docs (PROJECT, REQUIREMENTS, ROADMAP, STATE, state.json) are committed to clear the dirty-tree rule; `.planning/phases/` stays untracked under commit_docs=false. Live UAT, Phase 78 and the milestone lifecycle continue after the merge on a new branch from `main`.
+
+### Historical failed-before evidence
+
+- Actual local profile: exit 1, ok=false; 165 roster / 117 offered / 50 exercised / 67 blocked / 37 feature-disabled / 11 failed.
+- Actual include-prime profile: exit 1, ok=false; 165 roster / 154 offered / 82 exercised / 72 blocked / 0 feature-disabled / 11 failed.
+- Both reports contain zero failed check rows; all eleven failed tool rows are `absent-from-offered:tempest_*`. `local_validation.py:1561-1570` only derives disabled rows from Prime families. Do not mask unexplained absences, enable the backend to hide this gap, or claim those handlers executed. A repair must derive Red Team disabled status from the actual flag and verified runtime absence in both profiles, retaining failures for genuine accounting gaps.
+- Complete sanitized failed reports: `local://v15-01a125ac-readiness-local-blocked.json` and `local://v15-01a125ac-readiness-prime-blocked.json`. Current source/receipt evidence supersedes stale 154-tool and blanket-green claims for this continuation; prior evidence remains historical.
+- Tracking graph: `ut-mv2hk8ob-0d649c48`; all eight Linear node issues and 56 sub-issues and Notion rows exist. Specification: `/root/.omp/agent/ultrathink/sessions/01a125ac-8539-71ba-93a6-1378c2c2d997.xml`. Phase requirements, audit, completion and cleanup are not marked complete.
+
+### Current exercised acceptance evidence
+
+- Actual local and include-prime profiles: both exit0/oktrue,165 canonical tools, zero failed rows and zero accounting problems. Local117 offered/50 exercised/67 blocked/48 feature-disabled; Prime154 offered/82 exercised/72 blocked/11 feature-disabled. Default-off Red Team remains uncalled.
+- Complete post-guard profile receipts: `local://v15-native-phase75-usage-local.json`, `local://v15-native-phase75-usage-prime.json`; current final union/preservation receipt: `local://v15-native-phase75-usage-verification.json` (2129 passed,0 failed,0 skipped). Earlier2116/2122 receipts remain historical. Canonical75-VERIFICATION passed46/46; freshness owner passed and phase.complete75 accepted all seven phase75 requirements.
+- Actual eligible handler failure and unexplained canonical absence each force complete CLI exit1/okfalse: `local://v15-native-negative-readiness-cli.json`; parent negativeCLI regression command passed2 tests. Later successful calls may truthfully exercise read_file but cannot erase its retained failed check/global failure.
+- Synthetic real verifier publication and actual parser rejection before/after proofs: `local://v15-native-verifier-publication-before.json` / `local://v15-native-verifier-publication-after.json`, `local://v15-native-verifier-parser-before.json` / `local://v15-native-verifier-parser-after.json`. Full-input classification now precedes clipping/argparse stderr; detector unchanged, no arbitrary-secret-recognition claim.
+- Real loopback child environment observation and rejecting mutation: `local://v15-native-loopback-env-observed-mutation.json`. Current host self-test passed22 checks across both transports, auth/approval boundaries and shutdown0. No live Grok/model/provider/device/browser/mission evidence is claimed.
+- Phase75 reviewed source-only local commit: `a3dcadba4d95b9a7376297f839519801ba7c15e3`,88 explicit paths including the approved pinned Red Team gitlink and obsolete MCP-client deletion. Planning artifacts and unrelated `uv.lock` were not staged; no remote publication. Mandatory phase76 AI/pattern planning preflights retain the existing custom Python validation stack.
+- Phase76 planning converged with mandatory AI/pattern preflights and independent checker PASS. Lower-wave217focused/2134full, Ruff399/mypy337/actionlint and real readiness/retention/generator/Docker-context proof passed at their snapshots; retain historical limits. Final new-source proof is not inferred from those older receipts.
+- Lower-wave current full suite2134 passed/16warnings/150.50s (`artifact://365`), three bounded source reviews PASS and actual commits01=`31ed79d24d5c7587fd94d2ca3118c772d87633b4`,02=`b1dbd14ea2c0bd1286164f6b8ed5a1028a466aff`,03=`463b1357650ed8b50bcf85f52f596c8729f5ebef`. Source-scope UI and three plan scopes now exit0/resolved: `local://v15-native-phase76-wave1-commits.json`, `...wave1-scope-gates.json`.
+- Phase76 all5 source commits completed through image `2bb3dfd747670ed659cb3c1f47b4e22ca99e4d69` and docs `9ec6ab779ee05a4f60bbd02364ad0414f270346e`. Actual same image: both17pass/0skip/cleanSIGTERM, uid10001/RO/capdropALL/NNP, SPDX273packages, configured fixed-CRITICAL scan0, own-tag-deleted archive load restores exact image ID; `local://v15-native-phase76-image-runtime-verification.json`. Docs consumers158pass; full2160/evals26/assembly pass is historical after the strict retention correction. Hosted workflow, artifact upload, protected approval, image publication/deployment remain unexecuted.
+- Phase76 APIseal reasoned37-capability matrix passed21integrate/16optout withoutoverride. Nyquist actualduplicate ambiguity fixed; currentCLI15cases passed. Final current source2161/evals26/assembly and post-repair image `sha256:32158495ccf6ce8ed9678d5f480201f67122f42528bf7cc506aaec3b73e89185` both17pass/0skip/cleanSIGTERM, SPDX273packages, configured fixed-CRITICAL0 and exactarchive reload passed; `local://v15-native-phase76-post-repair-image-verification.json`. Independent13threatsclosed/Nyquist14mapped/prior254regressionpassed. Actual user UAT9/9 and canonical28/28accepted; no hosted upload/approval/publication/deployment proof.
+- Phase 77.1 final-source LOCAL-PROOF: a fresh `file://` recursive clone of fcd5edb passed a cold bootstrap (93 s, 0 stdout bytes), a warm no-op, and the declared mcp.json stdio command (initialize, /omega-help 46 commands, /omega-code-review skill, all stdout JSON-RPC). Exit classes 10/11 (operator_venv, sentinel kept)/12/13 were each observed with 0 stdout bytes. `plugin --verify` passed both entries (HTTPS loopback bearer 22/0) from the clone root and through the launcher from a polluted /tmp. The real repo .venv was untouched. Receipts: `/tmp/v15-771-localproof-1791815817/`. A foreign `/tmp/mcp.py` from an unrelated process shadowed `mcp` only for a direct `python -m` run from /tmp; this is an environment observation, not a product defect.
+- Real GitHub delivery path: branch `v15-integrated-readiness` was pushed to origin at a128000 (no PR, no merge). `git clone --recurse-submodules --branch v15-integrated-readiness https://github.com/swcstudiospace/omes-bot.git` succeeded with prime-agent 967eb13 and redteam 831a6b0 pinned. `--bootstrap-only` exited 0 in 90 s with 0 stdout bytes, and the declared stdio command served /omega-help (46 commands) and /omega-code-review with all stdout JSON-RPC (`/tmp/v15-771-ghclone-1791816624/`). This proves the clone step from this machine, not on the user's Bot computer; live Bot rows stay UNPROVEN until the user reports them.
 
 ## Session
 
-**Last session:** 2026-10-10
-**Stopped at:** v14 closeout
-**Resume file:** .planning/v14-MILESTONE-AUDIT.md
+**Last session:** 2026-10-12
+**Stopped at:** Phase 77.1 live UAT test 1 of 6 (Bot clone plus Command server) awaiting the user's result; ultrathink-ship assess not done (no PR)
+**Resume file:** .planning/phases/77.1-grok-bot-import-packaging/77.1-UAT.md

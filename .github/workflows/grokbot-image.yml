@@ -1,9 +1,25 @@
 name: grokbot-image
 
 # Builds the hardened Grok Bot tool host image from the committed Dockerfile,
-# boots it with the production hardening flags, proves it with the live verifier,
-# checks graceful SIGTERM, then produces an SBOM and a vulnerability scan. The
-# image is never pushed; the only credential is a throwaway token generated here.
+# proves the same bytes on both MCP transports (SSE and Streamable HTTP) with
+# the live verifier, checks graceful SIGTERM on each container, then produces
+# an SBOM and a vulnerability scan. Validation never pushes: the image is
+# loaded locally only. The only credential material is throwaway and minted in
+# this workflow (a call token plus an owned hashed admin token store); no
+# pre-existing external credential is used or mutated, and plaintext tokens are
+# never printed.
+#
+# The isolated `publish` job is the only path that can push, and it is
+# default-off: it runs solely on explicit workflow_dispatch with
+# `publish: true`, an environment approval gate, an observed protected ref,
+# and a same-source-commit/same-run binding over the transferred validated
+# bytes. It executes no publication in the normal push/pull_request/schedule
+# runs. Declaring `environment:` alone proves no approval: GitHub auto-creates
+# an unprotected environment on first use, so the publish job fails closed
+# unless the trusted environments API reports required-reviewer protection for
+# it. No protected publication environment currently exists, so the gate
+# refuses until one is explicitly configured (a separately authorized future
+# prerequisite); that refusal is the safe behavior, not a misconfiguration.
 
 on:
   push:
@@ -21,15 +37,30 @@ on:
       - omega_prime/**
       - .github/workflows/grokbot-image.yml
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the already-validated image (requires environment approval, protected ref, same-commit evidence)"
+        type: boolean
+        default: false
+        required: true
+      confirm_ref:
+        description: "Type the full ref to publish from; must equal the workflow ref"
+        type: string
+        default: ""
+        required: false
   schedule:
     - cron: "23 5 * * 1"
 
 permissions:
   contents: read
 
+# Validation stays cancellable, but an explicit manual publication run must
+# never be cancelled by newer validation pushes: it runs in its own
+# non-cancelling group. The publish job below keeps its own non-cancelling
+# group as well.
 concurrency:
-  group: grokbot-image-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: grokbot-image-${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && inputs.publish == true && '-publish' || '' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs.publish != true }}
 
 jobs:
   image:
@@ -37,7 +68,8 @@ jobs:
     timeout-minutes: 45
     env:
       IMAGE_TAG: omega-prime-mcp:ci
-      CONTAINER: omega-prime-mcp-ci
+      SSE_CONTAINER: omega-prime-mcp-ci-sse
+      HTTP_CONTAINER: omega-prime-mcp-ci-http
     steps:
       - uses: actions/checkout@v4
 
@@ -53,66 +85,344 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Bind the checkout to the event commit
+        run: |
+          set -euo pipefail
+          # Bind the checkout to the event commit. On pull_request the event
+          # SHA is the merge commit, which is what checkout produces, so this
+          # binds merge versus head identity instead of assuming they match.
+          # Later steps read the trusted GITHUB_SHA/GITHUB_RUN_ID/GITHUB_REF
+          # runner variables directly; nothing is laundered through new env.
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "${{ github.sha }}" ]; then
+            echo "source identity mismatch: checkout is not the event commit" >&2
+            exit 1
+          fi
+
       - name: Create a throwaway token file
         run: |
           umask 077
-          openssl rand -hex 24 > "$RUNNER_TEMP/omega_prime_token"
+          # Owned credential directory so the image (uid 10001) can mint the
+          # admin store into it without ever broadening temp-dir permissions.
+          # The runner creates the directory and the call token while it still
+          # owns them, then hands both to uid 10001; from then on the runner
+          # reaches them only through sudo.
+          mkdir -p "$RUNNER_TEMP/ci-creds"
+          chmod 700 "$RUNNER_TEMP/ci-creds"
+          openssl rand -hex 24 > "$RUNNER_TEMP/ci-creds/omega_prime_token"
           # The image runs as uid 10001; the host rejects group/world-readable token files.
-          sudo chown 10001:10001 "$RUNNER_TEMP/omega_prime_token"
-
-      - name: Start the hardened container
+          sudo chown -R 10001:10001 "$RUNNER_TEMP/ci-creds"
+      - name: Mint the owned admin token store
         run: |
-          docker run -d --name "$CONTAINER" \
+          set -euo pipefail
+          umask 077
+          # Hashed multi-token store plus its admin plaintext, both minted here
+          # with the existing product code inside the just-built image. Nothing
+          # pre-existing is read or mutated, and the plaintext never prints.
+          # The plaintext file is written with the existing private atomic
+          # writer, so there is no world-readable interval before chmod.
+          # Single-line -c: a YAML multiline single-quoted scalar would fold
+          # newlines into spaces and corrupt the script.
+          docker run --rm --entrypoint python \
+            -v "$RUNNER_TEMP/ci-creds:/credentials" \
+            "$IMAGE_TAG" -c 'from pathlib import Path; from omega_prime.grokbot.tokens import create_token; from omega_prime.tooling.fs import atomic_write_text; plaintext, _record = create_token(Path("/credentials/omega_prime_tokens.json"), scopes=["admin"], label="ci-admin", ttl_days=1); atomic_write_text(Path("/credentials/omega_prime_admin_token"), plaintext + "\n")'
+          sudo chmod 700 "$RUNNER_TEMP/ci-creds"
+
+      - name: Start the hardened SSE container
+        run: |
+          docker run -d --name "$SSE_CONTAINER" \
             --read-only \
             --tmpfs /tmp \
             --tmpfs /var/lib/omega-prime:uid=10001,gid=10001,mode=0700 \
             --cap-drop ALL \
             --security-opt no-new-privileges:true \
-            -v "$RUNNER_TEMP/omega_prime_token:/run/secrets/omega_prime_token:ro" \
+            -v "$RUNNER_TEMP/ci-creds/omega_prime_token:/run/secrets/omega_prime_token:ro" \
+            -v "$RUNNER_TEMP/ci-creds/omega_prime_tokens.json:/run/secrets/omega_prime_tokens.json:ro" \
+            -v "$RUNNER_TEMP/ci-creds/omega_prime_admin_token:/run/secrets/omega_prime_admin_token:ro" \
             -p 127.0.0.1:8000:8000 \
-            "$IMAGE_TAG"
+            "$IMAGE_TAG" \
+            --root /app --transport sse --host 0.0.0.0 --port 8000 \
+            --token-file /run/secrets/omega_prime_token \
+            --token-store /run/secrets/omega_prime_tokens.json \
+            --audit-log /var/lib/omega-prime/audit/audit.jsonl \
+            --home /var/lib/omega-prime --shutdown-grace 20 --log-format json
 
-      - name: Wait for the healthcheck
+      - name: Start the hardened HTTP container
         run: |
-          for _ in $(seq 1 60); do
-            running=$(docker inspect -f '{{.State.Running}}' "$CONTAINER")
-            status=$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER")
-            if [ "$status" = "healthy" ]; then
-              exit 0
-            fi
-            if [ "$running" != "true" ]; then
-              echo "container exited before becoming healthy" >&2
-              docker logs "$CONTAINER" >&2
+          docker run -d --name "$HTTP_CONTAINER" \
+            --read-only \
+            --tmpfs /tmp \
+            --tmpfs /var/lib/omega-prime:uid=10001,gid=10001,mode=0700 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            -v "$RUNNER_TEMP/ci-creds/omega_prime_token:/run/secrets/omega_prime_token:ro" \
+            -v "$RUNNER_TEMP/ci-creds/omega_prime_tokens.json:/run/secrets/omega_prime_tokens.json:ro" \
+            -v "$RUNNER_TEMP/ci-creds/omega_prime_admin_token:/run/secrets/omega_prime_admin_token:ro" \
+            -p 127.0.0.1:8001:8000 \
+            "$IMAGE_TAG" \
+            --root /app --transport sse --host 0.0.0.0 --port 8000 \
+            --token-file /run/secrets/omega_prime_token \
+            --token-store /run/secrets/omega_prime_tokens.json \
+            --audit-log /var/lib/omega-prime/audit/audit.jsonl \
+            --home /var/lib/omega-prime --shutdown-grace 20 --log-format json
+
+      - name: Wait for the healthchecks
+        run: |
+          set -euo pipefail
+          for container in "$SSE_CONTAINER" "$HTTP_CONTAINER"; do
+            status=""
+            for _ in $(seq 1 60); do
+              running=$(docker inspect -f '{{.State.Running}}' "$container")
+              status=$(docker inspect -f '{{.State.Health.Status}}' "$container")
+              if [ "$status" = "healthy" ]; then
+                break
+              fi
+              if [ "$running" != "true" ]; then
+                echo "container exited before becoming healthy" >&2
+                exit 1
+              fi
+              sleep 2
+            done
+            if [ "$status" != "healthy" ]; then
+              echo "container did not become healthy" >&2
               exit 1
             fi
-            sleep 2
           done
-          echo "container did not become healthy (last status: $status)" >&2
-          docker logs "$CONTAINER" >&2
-          exit 1
 
-      - name: Verify the live host
+      - name: Observe the hardened runtime
         run: |
-          docker exec "$CONTAINER" python -m omega_prime.grokbot.verify \
+          set -euo pipefail
+          for container in "$SSE_CONTAINER" "$HTTP_CONTAINER"; do
+            # Observe the running identity; never assume it from source text.
+            uid="$(docker exec "$container" id -u)"
+            if [ "$uid" != "10001" ]; then
+              echo "unexpected runtime uid" >&2
+              exit 1
+            fi
+            readonly="$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$container")"
+            if [ "$readonly" != "true" ]; then
+              echo "root filesystem is not read-only" >&2
+              exit 1
+            fi
+            caps="$(docker inspect -f '{{json .HostConfig.CapDrop}}' "$container")"
+            case "$caps" in
+              *ALL*) ;;
+              *)
+                echo "capabilities were not dropped" >&2
+                exit 1
+                ;;
+            esac
+            opts="$(docker inspect -f '{{json .HostConfig.SecurityOpt}}' "$container")"
+            case "$opts" in
+              *no-new-privileges*) ;;
+              *)
+                echo "no-new-privileges is not set" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Verify the live host over SSE
+        id: verify_sse
+        run: |
+          # The verifier prints the sanitized report (already gated) to stdout
+          # even when checks fail; the observed exit is recorded alongside so
+          # admission binds the report to a passing run instead of a stale file.
+          code=0
+          docker exec "$SSE_CONTAINER" python -m omega_prime.grokbot.verify \
             --url http://127.0.0.1:8000 \
             --token-file /run/secrets/omega_prime_token \
-            --json
+            --admin-token-file /run/secrets/omega_prime_admin_token \
+            --transport sse \
+            --require-auth \
+            --json > "$RUNNER_TEMP/verify-sse.json" || code=$?
+          echo "$code" > "$RUNNER_TEMP/verify-sse.exit"
+          exit "$code"
+
+      - name: Verify the live host over Streamable HTTP
+        id: verify_http
+        run: |
+          code=0
+          docker exec "$HTTP_CONTAINER" python -m omega_prime.grokbot.verify \
+            --url http://127.0.0.1:8000 \
+            --token-file /run/secrets/omega_prime_token \
+            --admin-token-file /run/secrets/omega_prime_admin_token \
+            --transport http \
+            --require-auth \
+            --json > "$RUNNER_TEMP/verify-http.json" || code=$?
+          echo "$code" > "$RUNNER_TEMP/verify-http.exit"
+          exit "$code"
+
+      - name: Admit the SSE conformance evidence
+        id: admit_sse
+        run: |
+          python3 - "$RUNNER_TEMP/verify-sse.json" "$RUNNER_TEMP/verify-sse.exit" sse <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          from omega_prime.grokbot.image_gates import admit_conformance_report
+
+          report_path, exit_path, transport = (
+              Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+          )
+          try:
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+              exit_code = int(exit_path.read_text(encoding="utf-8").strip())
+              decision = admit_conformance_report(
+                  report, transport=transport, verifier_exit=exit_code
+              )
+          except (OSError, ValueError):
+              print("conformance refused: incomplete evidence", file=sys.stderr)
+              raise SystemExit(1) from None
+          if not decision.allowed:
+              print(decision.detail, file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
+      - name: Admit the HTTP conformance evidence
+        id: admit_http
+        run: |
+          python3 - "$RUNNER_TEMP/verify-http.json" "$RUNNER_TEMP/verify-http.exit" http <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          from omega_prime.grokbot.image_gates import admit_conformance_report
+
+          report_path, exit_path, transport = (
+              Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+          )
+          try:
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+              exit_code = int(exit_path.read_text(encoding="utf-8").strip())
+              decision = admit_conformance_report(
+                  report, transport=transport, verifier_exit=exit_code
+              )
+          except (OSError, ValueError):
+              print("conformance refused: incomplete evidence", file=sys.stderr)
+              raise SystemExit(1) from None
+          if not decision.allowed:
+              print(decision.detail, file=sys.stderr)
+              raise SystemExit(1)
+          PY
 
       - name: Stop gracefully
+        id: stop
         run: |
-          docker stop -t 30 "$CONTAINER"
-          code=$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER")
-          if [ "$code" != "0" ]; then
-            echo "expected exit code 0 after SIGTERM, got $code" >&2
-            docker logs "$CONTAINER" >&2
-            exit 1
-          fi
+          set -euo pipefail
+          for container in "$SSE_CONTAINER" "$HTTP_CONTAINER"; do
+            docker stop -t 30 "$container"
+            code=$(docker inspect -f '{{.State.ExitCode}}' "$container")
+            if [ "$code" != "0" ]; then
+              echo "expected exit code 0 after SIGTERM" >&2
+              exit 1
+            fi
+          done
 
-      - name: Remove the container
+      - name: Retain sanitized diagnostics
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import sys
+          from os import environ
+          from pathlib import Path
+          from omega_prime.grokbot.secret_guard import SecretLeakError, assert_no_secrets
+          from omega_prime.tooling.fs import atomic_write_text
+
+          runner_temp = Path(environ["RUNNER_TEMP"])
+          out_dir = runner_temp / "image-diagnostics"
+          out_dir.mkdir(parents=True, exist_ok=True)
+          secrets: list[str] = []
+          creds = runner_temp / "ci-creds"
+          for name in ("omega_prime_token", "omega_prime_admin_token"):
+              # The credential directory belongs to uid 10001 (the image
+              # user), so the runner reads the values through sudo.
+              read = subprocess.run(
+                  ["sudo", "cat", str(creds / name)],
+                  capture_output=True,
+                  text=True,
+              )
+              if read.returncode != 0:
+                  continue
+              value = read.stdout.strip()
+              if value:
+                  secrets.append(value)
+
+          def redacted_full(text: str) -> str:
+              for secret in secrets:
+                  text = text.replace(secret, "[redacted]")
+              return text
+
+          for container in (
+              environ.get("SSE_CONTAINER", ""),
+              environ.get("HTTP_CONTAINER", ""),
+          ):
+              if not container:
+                  continue
+              target = out_dir / f"{container}.log"
+              try:
+                  raw = subprocess.run(
+                      ["docker", "logs", container],
+                      capture_output=True,
+                      text=True,
+                      timeout=60,
+                  )
+              except Exception:
+                  atomic_write_text(
+                      target, "diagnostic withheld: logs unavailable\n"
+                  )
+                  continue
+              full = redacted_full(raw.stdout + raw.stderr)
+              try:
+                  assert_no_secrets(full, "image-diagnostic")
+              except SecretLeakError:
+                  atomic_write_text(
+                      target, "diagnostic withheld: secret gate tripped\n"
+                  )
+                  continue
+              clipped = "\n".join(full.splitlines()[-200:])
+              if clipped:
+                  clipped += "\n"
+              else:
+                  clipped = "diagnostic withheld: logs unavailable\n"
+              try:
+                  assert_no_secrets(clipped, "image-diagnostic")
+              except SecretLeakError:
+                  atomic_write_text(
+                      target, "diagnostic withheld: secret gate tripped\n"
+                  )
+                  continue
+              atomic_write_text(target, clipped)
+          PY
+
+      - name: Upload sanitized diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: grokbot-image-diagnostics
+          path: ${{ runner.temp }}/image-diagnostics
+          if-no-files-found: warn
+
+      - name: Remove the containers
         if: always()
-        run: docker rm -f "$CONTAINER"
+        run: docker rm -f "$SSE_CONTAINER" "$HTTP_CONTAINER"
+
+      - name: Retain the sanitized verifier reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          # The verifier already gates its JSON output before printing, so
+          # these retained reports are publishable on success and on failure.
+          name: grokbot-image-verify-reports
+          path: |
+            ${{ runner.temp }}/verify-sse.json
+            ${{ runner.temp }}/verify-sse.exit
+            ${{ runner.temp }}/verify-http.json
+            ${{ runner.temp }}/verify-http.exit
+          if-no-files-found: warn
 
       - name: Generate the SBOM
+        id: sbom
         uses: anchore/sbom-action@v0.24.3
         with:
           image: omega-prime-mcp:ci
@@ -121,6 +431,7 @@ jobs:
           upload-artifact: false
 
       - name: Upload the SBOM
+        id: sbom_upload
         uses: actions/upload-artifact@v7
         with:
           name: omega-prime-mcp-sbom
@@ -128,6 +439,7 @@ jobs:
           if-no-files-found: error
 
       - name: Scan the image
+        id: scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: omega-prime-mcp:ci
@@ -137,3 +449,367 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+
+      - name: Save the validated bytes
+        id: save_bytes
+        run: |
+          set -euo pipefail
+          umask 077
+          # Runs only after both transports, SIGTERM, SBOM upload and the
+          # blocking scan succeeded, so the receipt below binds actual
+          # outcomes instead of successful-looking guesses.
+          docker save "$IMAGE_TAG" -o "$RUNNER_TEMP/omega-prime-mcp-ci.tar"
+          (cd "$RUNNER_TEMP" && sha256sum omega-prime-mcp-ci.tar > omega-prime-mcp-ci.tar.sha256)
+          docker inspect --format='{{.Id}}' "$IMAGE_TAG" > "$RUNNER_TEMP/omega-prime-mcp-ci.image-id"
+          head="$(git rev-parse HEAD)"
+          {
+            echo "archive-sha256=$(cut -d' ' -f1 "$RUNNER_TEMP/omega-prime-mcp-ci.tar.sha256")"
+            echo "loaded-image-id=$(cat "$RUNNER_TEMP/omega-prime-mcp-ci.image-id")"
+            echo "checkout-sha=$head"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload the validated bytes
+        id: upload_bytes
+        uses: actions/upload-artifact@v7
+        with:
+          name: validated-image-bytes
+          path: |
+            ${{ runner.temp }}/omega-prime-mcp-ci.tar
+            ${{ runner.temp }}/omega-prime-mcp-ci.tar.sha256
+            ${{ runner.temp }}/omega-prime-mcp-ci.image-id
+          if-no-files-found: error
+
+      - name: Write the validation evidence
+        run: |
+          python3 - <<'PY'
+          import sys
+          from os import environ
+          from pathlib import Path
+          from omega_prime.grokbot.image_gates import EvidenceError, dump_evidence_json
+
+          # Actual per-check outcomes observed in this run. Anything other than
+          # an exact "success" stays non-success and refuses at the publish
+          # gate; skips and missing steps are never success.
+          admit_sse = environ.get("ADMIT_SSE_OUTCOME", "")
+          admit_http = environ.get("ADMIT_HTTP_OUTCOME", "")
+          stopped = environ.get("STOP_OUTCOME", "")
+          validation = (
+              "success"
+              if (admit_sse, admit_http, stopped) == ("success",) * 3
+              else "failure"
+          )
+          try:
+              head = environ["GITHUB_SHA"].strip()
+              observed = environ["CHECKOUT_SHA"].strip()
+              if not head or head != observed:
+                  raise EvidenceError("publish refused: ambiguous evidence")
+              dump_evidence_json(
+                  Path(environ["RUNNER_TEMP"]) / "omega-prime-mcp-ci.evidence.json",
+                  {
+                      "artifact": "validated-image-bytes",
+                      "archive_sha256": environ["ARCHIVE_SHA256"].strip(),
+                      "bytes_artifact": "validated-image-bytes",
+                      "bytes_artifact_id": environ["BYTES_ARTIFACT_ID"].strip(),
+                      "checks": {
+                          "validation": validation,
+                          "sbom": environ.get("SBOM_OUTCOME", ""),
+                          "scan": environ.get("SCAN_OUTCOME", ""),
+                      },
+                      "event": environ.get("GITHUB_EVENT_NAME", ""),
+                      "image_id": environ["LOADED_IMAGE_ID"].strip(),
+                      "ref": environ.get("GITHUB_REF", ""),
+                      "run_id": environ.get("GITHUB_RUN_ID", ""),
+                      "source_sha": head,
+                  },
+              )
+          except (KeyError, EvidenceError) as exc:
+              message = (
+                  str(exc)
+                  if isinstance(exc, EvidenceError)
+                  else "publish refused: missing evidence"
+              )
+              print(message, file=sys.stderr)
+              raise SystemExit(1) from None
+          PY
+        env:
+          ADMIT_SSE_OUTCOME: ${{ steps.admit_sse.outcome }}
+          ADMIT_HTTP_OUTCOME: ${{ steps.admit_http.outcome }}
+          STOP_OUTCOME: ${{ steps.stop.outcome }}
+          SBOM_OUTCOME: ${{ steps.sbom_upload.outcome }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          BYTES_ARTIFACT_ID: ${{ steps.upload_bytes.outputs.artifact-id }}
+          ARCHIVE_SHA256: ${{ steps.save_bytes.outputs.archive-sha256 }}
+          LOADED_IMAGE_ID: ${{ steps.save_bytes.outputs.loaded-image-id }}
+          CHECKOUT_SHA: ${{ steps.save_bytes.outputs.checkout-sha }}
+
+      - name: Upload the validation evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: validated-image-evidence
+          path: ${{ runner.temp }}/omega-prime-mcp-ci.evidence.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish the validated image
+    needs: [image]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The environment name alone authorizes nothing: GitHub auto-creates an
+    # unprotected environment on first use, so the observation step below fails
+    # closed unless the trusted environments API reports required-reviewer
+    # protection for this exact environment.
+    environment: grokbot-image-publish
+    permissions:
+      contents: read
+      packages: write
+      # Read-only access for the same-run artifact identity binding below.
+      actions: read
+    concurrency:
+      group: grokbot-image-publish-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      IMAGE_TAG: omega-prime-mcp:ci
+      PUBLISH_ENVIRONMENT: grokbot-image-publish
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bind the manual input to this ref
+        env:
+          # Manual inputs are untrusted data: they enter only as environment
+          # values compared as quoted shell variables, never interpolated
+          # into code.
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_CONFIRM_REF: ${{ inputs.confirm_ref }}
+        run: |
+          set -euo pipefail
+          # Explicit manual intent must name the exact ref being published.
+          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "publish refused: manual dispatch required" >&2
+            exit 1
+          fi
+          if [ "$INPUT_PUBLISH" != "true" ]; then
+            echo "publish refused: explicit opt-in required" >&2
+            exit 1
+          fi
+          if [ -z "$INPUT_CONFIRM_REF" ] || [ "$INPUT_CONFIRM_REF" != "$GITHUB_REF" ]; then
+            echo "publish refused: ref confirmation mismatch" >&2
+            exit 1
+          fi
+
+      - name: Observe environment protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Fail closed when the required approval protection metadata is
+          # absent: a missing environment, an auto-created unprotected one, an
+          # unreadable API response, or an ambiguous policy all refuse. Only an
+          # explicitly configured required-reviewer rule naming at least one
+          # reviewer counts as approval protection; self-review and bypass
+          # allowances stay prohibited by policy and are never inferred here.
+          reviewers="$(gh api "repos/${GITHUB_REPOSITORY}/environments/${PUBLISH_ENVIRONMENT}" \
+            --jq '[.protection_rules[]? | select(.type == "required_reviewers" and ((.reviewers // []) | length > 0))] | length' 2>/dev/null)" || {
+            echo "publish refused: environment protection unavailable" >&2
+            exit 1
+          }
+          case "$reviewers" in
+            '' | *[!0-9]* | 0)
+              echo "publish refused: environment protection unavailable" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Refuse unless the ref is protected
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_protected }}" != "true" ]; then
+            echo "publish refused: unprotected ref" >&2
+            exit 1
+          fi
+
+      - name: Bind the validation result
+        run: |
+          set -euo pipefail
+          # The transferred bytes are only publishable when the validation job
+          # in this run fully passed, including SBOM upload and the blocking
+          # critical scan. Any other outcome refuses here.
+          if [ "${{ needs.image.result }}" != "success" ]; then
+            echo "publish refused: validation did not pass" >&2
+            exit 1
+          fi
+
+      - name: Download the validated bytes
+        uses: actions/download-artifact@v7
+        with:
+          name: validated-image-bytes
+          path: ${{ runner.temp }}/validated-image-bytes
+
+      - name: Download the validation evidence
+        uses: actions/download-artifact@v7
+        with:
+          name: validated-image-evidence
+          path: ${{ runner.temp }}/validated-image-evidence
+
+      - name: Transfer and verify the validated bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REF_PROTECTED: "${{ github.ref_protected }}"
+        run: |
+          set -euo pipefail
+          umask 077
+          # The helper is imported from the checkout (the default working
+          # directory), so plain host python resolves the package with no
+          # install and no PYTHONPATH shim. Artifact bytes are addressed by
+          # explicit owned paths; the step never cds into the artifact dir.
+          bytes_dir="${{ runner.temp }}/validated-image-bytes"
+          evidence_dir="${{ runner.temp }}/validated-image-evidence"
+          for file in \
+            "$bytes_dir/omega-prime-mcp-ci.tar" \
+            "$evidence_dir/omega-prime-mcp-ci.evidence.json"; do
+            if [ ! -s "$file" ]; then
+              echo "publish refused: missing evidence" >&2
+              exit 1
+            fi
+          done
+          python3 - <<'PY'
+          import subprocess
+          import sys
+          from os import environ
+          from pathlib import Path
+          from typing import NoReturn
+          from omega_prime.grokbot.image_gates import (
+              ArchiveChecksum,
+              EvidenceError,
+              ImageId,
+              PublishGateEvidence,
+              evaluate_publish_gate,
+              load_evidence_json,
+              write_decision_json,
+          )
+
+          def _refuse(detail: str) -> NoReturn:
+              print(detail, file=sys.stderr)
+              raise SystemExit(1)
+
+          runner_temp = Path(environ["RUNNER_TEMP"])
+          try:
+              record = load_evidence_json(
+                  runner_temp / "validated-image-evidence"
+                  / "omega-prime-mcp-ci.evidence.json"
+              )
+          except EvidenceError as exc:
+              _refuse(str(exc))
+          # Trusted current bindings versus the recorded values: exact ref,
+          # event, run, source commit, and artifact identity. The recorded
+          # artifact name is consumed here, so a wrong artifact refuses.
+          if record["artifact"] != "validated-image-bytes":
+              _refuse("publish refused: ambiguous evidence")
+          if record["bytes_artifact"] != "validated-image-bytes":
+              _refuse("publish refused: ambiguous evidence")
+          if record["ref"] != environ.get("GITHUB_REF", ""):
+              _refuse("publish refused: ambiguous evidence")
+          if record["event"] != "workflow_dispatch":
+              _refuse("publish refused: ambiguous evidence")
+          if record["run_id"] != environ.get("GITHUB_RUN_ID", ""):
+              _refuse("publish refused: workflow run mismatch")
+          if record["source_sha"] != environ.get("GITHUB_SHA", ""):
+              _refuse("publish refused: source commit mismatch")
+          # Same-run immutable artifact identity: the recorded upload
+          # artifact id must be the id the trusted API reports for this exact
+          # artifact name in the current run. API errors refuse closed.
+          try:
+              listed = subprocess.run(
+                  [
+                      "gh", "api",
+                      f"repos/{environ['GITHUB_REPOSITORY']}/actions"
+                      f"/runs/{environ['GITHUB_RUN_ID']}/artifacts",
+                      "--paginate", "-q",
+                      '.artifacts[] | select(.name == "validated-image-bytes") | .id',
+                  ],
+                  capture_output=True, text=True, check=True, timeout=120,
+              )
+              seen = {
+                  line.strip()
+                  for line in listed.stdout.splitlines()
+                  if line.strip()
+              }
+          except (KeyError, subprocess.SubprocessError):
+              _refuse("publish refused: ambiguous evidence")
+          if seen != {str(record["bytes_artifact_id"])}:
+              _refuse("publish refused: ambiguous evidence")
+          # The archive checksum is observed from the transferred bytes before
+          # any load, tag, or push; a second build or cached fallback is never
+          # consulted here.
+          work = runner_temp / "validated-image-bytes"
+          try:
+              observed_archive = subprocess.run(
+                  ["sha256sum", str(work / "omega-prime-mcp-ci.tar")],
+                  capture_output=True, text=True, check=True, timeout=600,
+              ).stdout.split()[0]
+              if observed_archive != record["archive_sha256"]:
+                  _refuse("publish refused: archive identity mismatch")
+              subprocess.run(
+                  ["docker", "load", "-i", str(work / "omega-prime-mcp-ci.tar")],
+                  capture_output=True, text=True, check=True, timeout=600,
+              )
+              loaded_image_id = subprocess.run(
+                  ["docker", "inspect", "--format={{.Id}}", environ["IMAGE_TAG"]],
+                  capture_output=True, text=True, check=True, timeout=60,
+              ).stdout.strip()
+              checkout_sha = subprocess.run(
+                  ["git", "-C", environ["GITHUB_WORKSPACE"], "rev-parse", "HEAD"],
+                  capture_output=True, text=True, check=True, timeout=60,
+              ).stdout.strip()
+          except (KeyError, subprocess.SubprocessError, IndexError):
+              _refuse("publish refused: ambiguous evidence")
+          gate = PublishGateEvidence(
+              ref_protected=environ.get("GITHUB_REF_PROTECTED") == "true",
+              source_sha_expected=str(record["source_sha"]),
+              source_sha_observed=checkout_sha,
+              archive_expected=ArchiveChecksum(str(record["archive_sha256"])),
+              archive_observed=ArchiveChecksum(observed_archive),
+              image_expected=ImageId(str(record["image_id"])),
+              image_observed=ImageId(loaded_image_id),
+              run_id_expected=str(record["run_id"]),
+              run_id_observed=environ.get("GITHUB_RUN_ID", ""),
+              checks=record["checks"],
+          )
+          decision = evaluate_publish_gate(gate)
+          write_decision_json(runner_temp / "publish-decision.json", decision)
+          if not decision.allowed:
+              print(decision.detail, file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
+      - name: Push the validated image
+        run: |
+          set -euo pipefail
+          # Reached only after the gate above allowed: the loaded local image
+          # ID and the transferred archive checksum both matched the retained
+          # validation evidence for this run's source commit. No rebuild runs
+          # anywhere in this job.
+          registry="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tag="${registry}:validated-${{ github.sha }}"
+          docker tag "$IMAGE_TAG" "$tag"
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$tag"
+          # The registry manifest digest is a third, distinct identity: it
+          # describes the pushed manifest, never the local image or the
+          # archive, and is recorded here without being equated to either.
+          digest="$(docker image inspect --format='{{index .RepoDigests 0}}' "$tag")"
+          if [ -z "$digest" ]; then
+            echo "manifest digest unavailable" >&2
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$digest" > "$RUNNER_TEMP/published-manifest-digest.txt"
+
+      - name: Upload the publication record
+        uses: actions/upload-artifact@v7
+        with:
+          name: publication-record
+          path: |
+            ${{ runner.temp }}/publish-decision.json
+            ${{ runner.temp }}/published-manifest-digest.txt
+          if-no-files-found: error

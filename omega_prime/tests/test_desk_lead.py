@@ -9,6 +9,8 @@ model call, mirroring the heartbeat test patterns).
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -304,3 +306,86 @@ def test_run_due_jobs_leaves_desk_jobs_to_the_desk_tick(tmp_path):
     # The desk driver still owns it.
     desk_ran = tick_desk_lead_passes(store, 1000, lambda job: {})
     assert [job["id"] for job in desk_ran] == [desk_id]
+
+
+def test_interleaved_producer_and_claim_survive_dispatch(tmp_path):
+    """75-01: writes committed mid-dispatch are never lost or reverted.
+
+    Dispatch pauses at a deterministic boundary while a separate store
+    submits an order and claims/updates another. Resuming must complete
+    the dispatched tickets without deleting the new order or reverting
+    the foreign claim — verified through both the original warm store
+    and a fresh observer, plus the real scratch artifact.
+    """
+    intake_path = tmp_path / "intake.json"
+    intake = IntakeStore(intake_path)  # warm store held across the pass
+    first = intake.submit("first ticket")
+    second = intake.submit("second ticket")
+    scratch = tmp_path / "scratch.txt"
+    entered = threading.Event()
+    release = threading.Event()
+    calls = {"n": 0}
+
+    def _dispatch(ticket):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            entered.set()
+            assert release.wait(timeout=30)
+        with scratch.open("a", encoding="utf-8") as handle:
+            handle.write(f"{ticket['ticket_id']}:{ticket['ask']}\n")
+        return {"receipt": _receipt()}
+
+    holder: dict = {}
+    errors: list = []
+
+    def _run() -> None:
+        try:
+            holder["outcome"] = run_lead_pass(intake, _dispatch)
+        except Exception as exc:  # pragma: no cover - failure marker only
+            errors.append(exc)
+
+    worker = threading.Thread(target=_run)
+    worker.start()
+    try:
+        assert entered.wait(timeout=30)
+        # Interleave while the first ticket's dispatch is paused: the
+        # oldest open order is the second ticket (the first is claimed).
+        # The foreign claim carries a fresh wall-clock timestamp so the
+        # pass's own legitimate reclamation (which runs on real time)
+        # keeps it: age stays far under the lease, no fencing involved.
+        foreign = IntakeStore(intake_path)
+        third = foreign.submit("third ticket")
+        foreign_now = time.time()
+        claimed_second = foreign.next(None, "foreign-worker", now=foreign_now)
+        assert claimed_second is not None
+        assert claimed_second["intake_id"] == second["intake_id"]
+        foreign.ack(second["intake_id"], {"message": "foreign progress"})
+        release.set()
+    finally:
+        worker.join(timeout=60)
+    assert errors == []
+    assert not worker.is_alive()
+    outcome = holder["outcome"]
+    assert [t["status"] for t in outcome["tickets"]] == ["done", "done"]
+    assert outcome["invalid"] == []
+    assert {t["intake_id"] for t in outcome["tickets"]} == {
+        first["intake_id"],
+        third["intake_id"],
+    }
+    for row in outcome["receipts"]:
+        validate_receipt(row["receipt"])
+    for observer in (intake, IntakeStore(intake_path)):
+        done_first = observer.get(first["intake_id"])
+        assert done_first is not None and done_first["status"] == "done"
+        done_third = observer.get(third["intake_id"])
+        assert done_third is not None and done_third["status"] == "done"
+        kept = observer.get(second["intake_id"])
+        assert kept is not None and kept["status"] == "in_progress"
+        assert kept["by"] == "foreign-worker"
+        assert kept["claimed_at"] == foreign_now
+        assert kept["message"] == "foreign progress"
+        assert observer.counts() == {"done": 2, "in_progress": 1}
+    lines = scratch.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[0].endswith(":first ticket")
+    assert lines[1].endswith(":third ticket")

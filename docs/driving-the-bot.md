@@ -8,7 +8,7 @@ install and secrets; this page starts after it.
 
 | Piece | What it is | Who runs it |
 | --- | --- | --- |
-| The bot | Your Grok Bot copy of the template. It runs on Grok's cloud computer with Grok's default model, so Grok owns the conversation loop. | Grok |
+| The bot | Your Grok Bot seat loaded with the Omega Prime template (`omega_prime/grokbot/templates/OMEGA_PRIME.md`). The conversation loop belongs to the seat, not to this checkout — how a seat takes a prompt file is a Grok Bot setting this repository neither controls nor tests. | who operates the seat |
 | The tool host | `python -m omega_prime.mcp_server`: one process serving the tool registry over MCP stdio, behind the roster, the seat policy, and approvals. | You, on a machine you control |
 | The effective prompt | The assembled system prompt. The bot calls a tool only when its prompt lists it. | You, with the assembler |
 
@@ -114,12 +114,16 @@ cargo build --locked --manifest-path native/omega-prime-prime/Cargo.toml \
 | Flag | Meaning |
 | --- | --- |
 | `--root DIR` | Repository checkout holding `omega_prime/` and `omega-prime.json` (default: the current directory). |
+| `--work-root DIR` | Directory the desk tools act on (default: `OMEGA_PRIME_WORK_ROOT`, else `--root`). |
 | `--home DIR` | The bot's home: the working directory of the `execute_code` and `mcp_call` tools (default: `~`). |
 | `--no-roster` | Serve every registered tool instead of the roster's default set. |
 | `--approve TOOL:APPROVER` | Pre-approve one gated tool. Repeatable. A malformed value, or an approver equal to the bot's own id, exits 2. |
 
-Export the secrets from [Setup](setup.md#2-secrets) in the host's environment,
-then add the command as a custom MCP server in your Grok Bot's settings.
+Desk state (including the `intake.json` work-order queue) is stored under
+`OMEGA_PRIME_STATE_DIR`. Export the secrets from [Setup](setup.md#4-secrets-go-in-the-private-environment-never-in-examples) in the host's environment,
+then register the command with your seat. How a Grok Bot seat takes a custom
+MCP server is a Grok Bot setting this repository neither controls nor tests —
+confirm it with the checks below.
 
 ### Approvals
 
@@ -147,6 +151,22 @@ The Prime families write under `--root`, and the repository ignores these paths:
 | `prime-kernel/`, `prime-agent-dir/` | Kernel state, including `prime_goal`'s record. `prime-agent-dir/` appears with the first `prime_factory_run`. |
 
 An autonomous run is held in the host process and is not written to disk.
+
+### Intake queue
+
+The intake queue (`intake.json`, resolved from the state directory) is the
+authoritative work-order list the desk tools and cron passes share. Every
+public operation reloads the file first, and mutations run as serialized
+reload–mutate–atomic-replace transactions under the instance thread lock
+plus an exclusive `flock` on the stable `intake.json.lock` sidecar, so
+cooperating POSIX writers never lose each other's committed orders, claims,
+or field updates. A corrupt file raises instead of reading as empty.
+Stale-lease completion is not fenced: `ack` is an ordered merge with no
+expected-claim condition, and the queue is not globally transactional with
+any other store. A warm host sees orders an independent producer appended
+without needing a rebuild. The readiness disposable export excludes the
+live queue, schedules, and session state — [Local
+validation](local-validation.md#isolation) re-seeds its own fixture queue.
 
 ## Build the effective prompt
 
@@ -191,7 +211,9 @@ tests, so confirm it with the checks below.
 
    Look for `[ok] registry: registry serves 117 roster tools` on a default
    host. With every `OMEGA_PRIME_PRIME_<FAMILY>_ENABLED=1`, the served set
-   equals the 154 roster names.
+   equals the 154 roster names outside the default-off Red Team family;
+   `OMEGA_PRIME_REDTEAM_ENABLED=1` adds its eleven tempest_* tools for the
+   full 165.
 
 2. Call a tool over real MCP stdio. `prime_crates` is read-only, so it needs no
    approval:
@@ -209,13 +231,17 @@ tests, so confirm it with the checks below.
    EOF
    ```
 
-   Expect `"loaded": true`, `"error": null`, and the nine crate names.
+   Expect `"loaded": true`, `"error": null`, and the nine crate names — once
+   the native extension is built per the `cargo build` command above. Without
+   it, `prime_crates` reports `loaded: false`; that is the honest
+   unbuilt-extension state, not a failure of the host.
 
-3. In the bot, send the smoke prompt from [Setup](setup.md#4-smoke-prompt). The
+3. In the bot, send the smoke prompt from [Setup](setup.md#7-smoke-prompt-needs-a-bot-seat). The
    tool list should now include the Prime tools in your effective prompt. Then
    ask it to call `prime_crates`; it should return the payload from step 2.
    The prompt does not mark which tools are gated; the
-   [tool catalog](tool-catalog.md) does.
+   [tool catalog](tool-catalog.md) does. Seat-side behavior is preparation to
+   confirm, not a repository-run proof — the repository proof is steps 1–2.
 
 ## Asking for things
 
@@ -229,12 +255,45 @@ expect.
 | "Try `import json; json.dumps({'a': 1})` in the Prime REPL." | `prime_cell` | Gated. Variables persist between cells. |
 | "Which Prime crates are linked in?" | `prime_crates` | Free. |
 | "Run the tests through Prime's bash." | `prime_bash` | Gated. Runs as the host's user. |
+| `/omega-help` | `omega_command` with `/omega-help` | Free. Lists every curated and generated command. |
+| `/omega-code-review` | `omega_command` with `/omega-code-review` | Free. Returns the code-review skill's instructions; the bot then follows them. |
+| `/omega-onboard-routine` | `omega_command` with `/omega-onboard-routine` | Runs the onboard routine's workflow, the same doctor, roster, memory-seed and connector steps as `/omega-onboard`. Gated tools inside it stay gated. |
+| `/omega-python` | `omega_command` with `/omega-python` | Runs ruff and compileall. Not the same as native `/python` or `/omega-python-skill`. |
+
+### Slash commands
+
+Send `/omega-<name>` as the whole message, with any arguments after a space
+(`/omega-code-review src/app.py`). The `omega_command` tool description and
+the `omega-commands` skill tell the Bot to pass that exact text to the
+`omega_command` tool of the `omega-prime` server. A sentence that only
+mentions a command is ordinary prose, not a command. `/omega-help` lists
+every name: the 12 curated commands, one `/omega-<skill>` per checked-in
+skill and one `/omega-<routine>` per routine (46 today). A generated name
+that matches a curated command or another generated name takes a `-skill`
+or `-routine` suffix: `/omega-python-skill`, `/omega-onboard-routine`,
+`/omega-connectors-routine`, `/omega-ultrathink-skill` and
+`/omega-ultrathink-routine`. A host that surfaces skills natively may also
+show `/python`: native `/python` shows the python skill's instructions and
+runs nothing, `/omega-python` runs ruff and compileall through
+`omega_command`, and `/omega-python-skill` loads the python skill's
+instructions through `omega_command`. Two skills now match their folder
+names: `secrets-handling` is `security-secrets-handling` and `supply-chain`
+is `security-supply-chain`. A copy saved under an old name in a private Bot
+skill library may persist until you remove it (UNPROVEN, user UAT row 4).
+Whether a live Bot follows this contract, and whether `/omega-*` entries
+appear natively in its `/` menu, is user UAT row 4.
+
+The user UAT rows are listed in
+[Grok Bot native host](grok-bot-native.md#user-uat); attaching the server to
+a Bot is section 1 of
+[grokbot/SETUP.md](../omega_prime/grokbot/SETUP.md).
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | A Prime tool is missing from the host's tool list | The family's flag is off in the host process, `--root` points where your `omega-prime.json` is not, or the host was not restarted after the change. | Run `setup_check --root <the same root>`, then restart the host. |
+| `unknown_command` from `omega_command` | The name is not in the catalog, or a generated name lost its `-skill`/`-routine` suffix. | Send `/omega-help` and use a listed name. |
 | `approval required` | The tool is gated and the host was not started with `--approve` for it. | Add `--approve TOOL:YOU` and restart. |
 | `policy forbids <tool>` | The name is not on the roster, or the seat policy (`omega_prime/contracts/policies/omega-prime.json`) forbids it. | Only rostered tools are served. |
 | `Unknown tool: <name>` | The tool is on the roster but the host did not register it: its Prime family is off, including `rlm` and `messaging`, or the host was not restarted after the flag change. | Turn the family on and restart the host. `delegate_task` is served and returns `not_configured: provider` without a provider env. |

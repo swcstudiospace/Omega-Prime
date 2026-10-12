@@ -20,6 +20,8 @@
 # register_autonomous_tools, then Messaging names from
 # register_messaging_tools, then Kernel names from
 # register_prime_kernel_tools (each gated: prime.<family>.enabled, default
+# off — registered only when enabled), then Red Team names from
+# register_redteam_tools (gated: the top-level redteam.enabled key, default
 # off — registered only when enabled). The kernel family loads the pinned
 # Prime rlm package and the nine pa-* crates in-process.
 # This list is exactly those names, in that order.
@@ -184,3 +186,15 @@ tools:
   - prime_crates
   - prime_goal
   - prime_autonomous
+  # Red Team names from register_redteam_tools
+  - tempest_status
+  - tempest_mission_start
+  - tempest_mission_stop
+  - tempest_report
+  - tempest_operators_list
+  - tempest_operator_task
+  - tempest_findings
+  - tempest_providers
+  - tempest_purple_synthesize
+  - tempest_hats_list
+  - tempest_hat_dispatch

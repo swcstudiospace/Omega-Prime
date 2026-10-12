@@ -6,11 +6,97 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Grok Bot import packaging
+
+#### Added
+
+- Root `mcp.json` declares one stdio server, `omega-prime`:
+  `bash ${CURSOR_PLUGIN_ROOT}/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`,
+  with no `env` and nothing credential-shaped. `.cursor-plugin/marketplace.json`
+  and `.cursor-plugin/plugin.json` describe the repository as one Cursor
+  plugin for a Teams/Enterprise team marketplace (secondary route). The
+  HTTPS alternative ships only as the non-referenced
+  `omega_prime/grokbot/plugin/mcp.https.example.json` with a `${VAR}`
+  placeholder.
+- One generated `/omega-<name>` command per checked-in skill and routine
+  beside the 12 curated commands (46 today), routed through the existing
+  `omega_command` tool; a generated name that collides takes a `-skill` or
+  `-routine` suffix (`/omega-python-skill`, `/omega-onboard-routine`,
+  `/omega-connectors-routine`, `/omega-ultrathink-skill`,
+  `/omega-ultrathink-routine`). No new tool joins the roster.
+- `python -m omega_prime.tooling.plugin --write|--check|--verify` renders 46
+  command files plus the manifests deterministically, fails `--check` on any
+  drift, frontmatter, collision or secret-shape problem, and `--verify`
+  spawns the declared stdio command and a loopback bearer host. `setup_check`
+  gained a `plugin` row and CI a plugin currency step.
+- The launcher gained `--bootstrap`, `--bootstrap-only` and
+  `--verify [--json]`: a stamp-gated, `flock`-serialized install from
+  `requirements-lock.txt` that resumes after an interrupted start, never
+  replaces an operator-managed `.venv`, initializes only `prime-agent`, and
+  exits 10 `missing_prerequisite`, 11 `install_failed`, 12 `catalog_drift`
+  or 13 `host_unreachable` with one stderr JSON line and empty stdout.
+
+#### Changed
+
+- The launcher resolves the repository from its own location, never the
+  caller's working directory. Its `--work-root` now reaches the stdio host
+  as well as SSE, and an SSE serve no longer exports the bearer token into
+  the launcher's process environment, which serve children inherit.
+- `security-secrets-handling` and `security-supply-chain` skill names now
+  match their folders (were `secrets-handling` and `supply-chain`); four
+  other skills' frontmatter parses as YAML and `lead-pack` gained
+  frontmatter. Copies under the old names in a private Bot skill library are
+  not touched.
+- The host manifest no longer claims a Grok Bot settings import and lists
+  Streamable HTTP at `/mcp`. The Bot template's first run uses the
+  Bot-driven setup.
+- `grokbot/SETUP.md`, `docs/grok-bot-native.md`, `docs/setup.md`,
+  `docs/driving-the-bot.md` and the README document the Bot-driven setup
+  prompt as the primary route, the Cursor Teams/Enterprise Import from Repo
+  as secondary, the Remote HTTPS alternative with per-consumer placeholder
+  syntax, the whole-message prompting contract, an evidence ledger and a
+  six-row user UAT list. `--json` is documented on stderr under served
+  stdio.
+
+Live import on a Grok Bot or Cursor account is unproven: Grok Bot loading
+plugin skills and commands, a marketplace-declared stdio launch,
+`${CURSOR_PLUGIN_ROOT}` on the Bot's computer and its MCP startup timeout
+remain user UAT. Local proof is the generator `--check`/`--verify`, real
+stdio through the declared command and a loopback bearer host. No
+marketplace listing, hosted deployment or image publication.
+
+### Documentation and knowledge base
+
+#### Changed
+
+- Import all 21 full exposed Greptile documents, including index, into one
+  visibly historical/untrusted mirror with canonical namespace, complete
+  path/version/count/hash provenance and actual observation clocks. Refresh
+  admits the full before/get/after candidate before publication, restores
+  handled publication failures through same-filesystem backups, and performs no
+  writes for unchanged editions; it is not crash-safe or parallel-writer
+  coordination. Direct transport, validation and filesystem exceptions and
+  tracebacks withhold credential-bearing diagnostics without weakening the
+  shared detector or rewriting source bodies. A cleanup failure after successful
+  publication reports failure without claiming the new edition was rolled back.
+  Reconcile canonical architecture/state/security diagrams, extension patterns,
+  runnable setup/usage, repository URLs, Python/prerequisite distinctions and
+  repository/GitBook navigation.
+  Correct the linked operator setup's unproved share-link/time/universal-failure
+  claims and distinguish launcher stdio environment roots, SSE-only workspace
+  forwarding and adapter errors from readiness classifications. Actual served
+  stdio now reserves stdout for JSON-RPC; diagnostics and optional JSON reports
+  remain visible on stderr, with real initialized owned-file consumers.
+  Keep generated catalog behavior consumers, not source-wording/default/schema
+  copies. Local proof and readable historical
+  publication do not establish live Grok/provider/backend operation, account
+  enrollment, vendor redistribution rights or remote publication/deployment.
+
 ### Slash commands
 
 #### Added
 
-- Served tool `omega_command` (154 on the roster, 117 served by default; Prime families stay off). A user message that is only `/omega-...` runs that command and does not call the model. `/omega-help` lists the catalog. `/omega-onboard` is first run. `/omega-python` is ruff and compileall. `/omega-connectors` names missing env vars and does not ask for a secret in chat.
+- Served tool `omega_command` is on the canonical roster; the effective default/configured subset follows registration and flags. A user message that is only `/omega-...` runs that command and does not call the model. `/omega-help` lists the catalog. `/omega-onboard` is first run. `/omega-python` is ruff and compileall. `/omega-connectors` names missing env vars and does not ask for a secret in chat.
 - Cron admin (`cron_jobs_list`, `cron_job_create`, `cron_job_remove`), learning (`autolearn_turn`, `advisor_note`, `advisor_render`), and `durable_status`. Mutating cron and autolearn calls require approval.
 - `rlm` and `messaging` register when `OMEGA_PRIME_PRIME_RLM_ENABLED` or `OMEGA_PRIME_PRIME_MESSAGING_ENABLED` is on. Without a child-model provider, `rlm_spawn` returns `not_configured: provider`.
 - Nested tool calls from a host `omega_command` re-enter that call's roster and interceptor chain.
@@ -43,14 +129,27 @@ All notable changes to this project are documented here. Format follows
   SIGTERM). The 1-click launcher also accepts `--token-store` and
   `--log-format`.
 - Operator guide `docs/grok-bot-native.md`. Deployment stays in
-  `docs/deploy.md` (the image is about 2 GB because the dependency tree
-  includes PyRIT and transformers).
+  `docs/deploy.md`; dependency manifests describe the PyRIT/transformers tree
+  without an unmeasured image-size claim.
 
 #### Changed
 
 - `omega_prime/grokbot/SETUP.md` section 3, `docs/tool-host.md`, the README
   Grok Bot pointers, and `SECURITY.md` describe the remote host that ships:
   header-only bearer auth, both transports, and the admin approval API.
+- CI keeps Python3.12–3.14 verification/lint/type matrices and independent
+  lock/native/license gates with least permissions, concurrency and job bounds.
+  Verify legs run maintained isolated readiness and retain only guarded canonical
+  reports or private failure metadata alongside receipts/JUnit; duplicate JSON
+  members refuse before admission, and failures/unobserved runs never become green.
+  Image validation exercises both
+  transports/admin transitions under hardening and SIGTERM, with SPDX plus the
+  unchanged blocking fixed-CRITICAL scan. An optional default-off manual publisher
+  binds protected environment/ref/source/run/artifact and exact transferred bytes,
+  never a rebuild; KB refresh keeps missing-key skips truthful and updates PR-only.
+  Release/rollback guidance distinguishes these controls from authorization and
+  uses the prior validated artifact/digest. No image publication, deployment,
+  cluster operation or live Grok/provider/Red Team backend proof was performed.
 
 #### Fixed
 
@@ -77,6 +176,62 @@ All notable changes to this project are documented here. Format follows
   non-loopback bind (exit 2 without a credential; exit 3 on a strict
   preflight failure). `/admin/approvals` requires `admin`. Argument values
   are not written to the audit log.
+
+### Local readiness
+
+#### Added
+
+- Isolated readiness CLI `python -m omega_prime.grokbot.readiness --root
+  SOURCE --json --output REPORT`, with `--include-prime` for the safe local
+  Prime lifecycles. Exit 0 only when the validated report has `ok` true, 1
+  on readiness failure, 2 on usage errors. The JSON v1 report carries every
+  roster name exactly once with `exercised` / `feature_disabled` / `blocked`
+  / `failed` status, evidence, and named prerequisites. Documented in
+  `docs/local-validation.md` and linked from `docs/SUMMARY.md`.
+- `IntakeStore` serializes cooperating writers: every public operation
+  reloads `intake.json` first, and mutations run as reload–mutate–atomic
+  replace under the thread lock plus an exclusive `flock` on the stable
+  `intake.json.lock` sidecar. A corrupt file raises. Stale-lease completion
+  is not fenced and the queue is not globally transactional with other
+  stores.
+- Slash doctor steps take explicit caller state only: keyword-only
+  `doctor_context` with `prompt_sha256` and `installed_skills`. Missing or
+  incomplete context never implies healthy, a workflow past a failed
+  optional step stays `workflow_incomplete`, and the doctor check preserves
+  the installed expected prompt digest when saving its outcome.
+- The public `mcp_call` tool runs through the canonical initializing SDK
+  session client; the obsolete uninitialized one-line client is removed.
+  Inside an active loop the call moves to a joined non-daemon thread owning
+  its loop, bounded by a deadline with the child tree reaped on timeout.
+- `assert_no_secrets` treats `str` as literal text and any `os.PathLike` as
+  a file with 0600 enforced before reading; token-shaped paths get no
+  exemption. The readiness self-test runs in the disposable isolated layout,
+  so no source-install schedule ticks and no live credential is inherited.
+
+#### Fixed
+
+- The disposable export routes regular entries, aliases, and resolved
+  targets through one complete admission predicate: pruned and excluded
+  shape first — including `.planning` ancestors by component equality —
+  then provenance. Excluded-state aliases fail closed on both ends,
+  regular Prime `.env` files are never exported, and untracked learned
+  `SKILL.md` and helper scripts cannot ship on re-export. Fresh safe
+  ordinary product Python stays Git-ungated, while private-named product
+  Python is admitted only with verified Git-tracked or inherited-inventory
+  membership — a deliberate trusted public-code distinction, not an
+  exemption for credential data or untracked private Python. Optional
+  Prime directories filter per entry by submodule-tracked or
+  inherited-inventory membership, and every vetted export writes
+  `.omega-readiness-inventory.json` so Git-less Docker and source-archive
+  distributions carry trusted provenance or fail closed on the absent
+  resource; missing Git or a malformed inventory never vouches.
+- Published diagnostics are curated after full-text gating: complete text reaches known-minted-secret replacement plus audit redaction and then the unchanged secret gate before any clip — known-token replacement alone and final-only scanning do not close the leak. The gate recognizes only its documented patterns (audit credential shapes, `omk_` 8+ suffix, PEM armour, 32+ mixed-class runs at 4.2+ bits/char entropy with hex/UUIDs excluded), not every possible secret. A trip publishes only fixed safe metadata with no classified fragment and stays failed; readiness fragments are no longer published, self-test fragments reach the same full-input gate before any tail/clip window, raw loopback error slicing is removed, Prime producers
+  pass complete raw error text to the same shared gate with no extra
+  scanner or entropy relaxation, and the final verifier human/JSON/self-test publication re-verifies complete report data including metadata with the same failed-and-safe behavior.
+- Verifier, self-test launcher and readiness CLI usage diagnostics are guarded
+  before stderr publication. Recognized secret-shaped rejected arguments and
+  missing-root paths produce only fixed safe labels; usage failures retain
+  exit2 and clean argument/path guidance remains informative.
 
 ### v10 — Prime merge
 

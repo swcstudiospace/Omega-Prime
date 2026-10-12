@@ -28,7 +28,7 @@ import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from types import ModuleType
-from typing import Any, TextIO
+from typing import TYPE_CHECKING, Any, NoReturn, TextIO
 from urllib.parse import urlsplit
 
 from omega_prime.grokbot import doctor as _doctor
@@ -47,6 +47,9 @@ from omega_prime.tooling.fs import (
     ensure_private_dir,
     read_secret_file,
 )
+
+if TYPE_CHECKING:
+    from omega_prime.grokbot.local_validation import LocalLayout
 
 EXIT_OK = 0
 EXIT_SELF_TEST = 1
@@ -210,18 +213,6 @@ def _run_preflight(
     return results
 
 
-def run_preflight_doctor(
-    root: Path,
-    *,
-    port: int = 8000,
-    host: str = "127.0.0.1",
-    auth_enabled: bool = False,
-) -> bool:
-    """Run doctor checks, print them, and return whether none failed."""
-    results = _run_preflight(root, port, host, auth_enabled, sys.stdout)
-    return bool(results.get("passed", True))
-
-
 def _url_host(host: str) -> str:
     """Host usable in a client URL: wildcard binds become loopback."""
     name = host.strip()
@@ -265,23 +256,6 @@ def _resolve_token(
     return token, source
 
 
-@contextlib.contextmanager
-def _exported_token(name: str, token: str | None) -> Iterator[None]:
-    """Expose `token` as env var `name` for this process only."""
-    if token is None:
-        yield
-        return
-    previous = os.environ.get(name)
-    os.environ[name] = token
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = previous
-
-
 def _announce_generated_token(token: str, token_file: Path | None) -> None:
     _err(f"Generated bearer token (shown only once): {token}")
     _err(
@@ -293,8 +267,8 @@ def _announce_generated_token(token: str, token_file: Path | None) -> None:
         _err(f"Token also written to {token_file} (mode 0600).")
 
 
-def _emit_json(payload: dict[str, Any]) -> None:
-    print(json.dumps(payload, sort_keys=True), flush=True)
+def _emit_json(payload: dict[str, Any], file: TextIO) -> None:
+    print(json.dumps(payload, sort_keys=True), file=file, flush=True)
 
 
 def run_oneclick(
@@ -326,7 +300,10 @@ def run_oneclick(
     """Execute the 1-click workflow."""
     sse = transport == "sse"
     strict = sse if strict is None else strict
-    say = sys.stderr if json_output else sys.stdout
+    protocol_stdio = not sse and not dry_run
+    # A served stdio process reserves stdout for the child's JSON-RPC frames.
+    say = sys.stderr if json_output or protocol_stdio else sys.stdout
+    json_sink = sys.stderr if protocol_stdio else sys.stdout
     # --- Resume-safe re-run guard (SSE serve only): stdio spawns a fresh
     # --- subprocess pipe and never binds TCP, so no port conflict is possible;
     # --- dry-run must always validate and report, never no-op.
@@ -369,7 +346,8 @@ def run_oneclick(
                             "host": host,
                             "port": port,
                             "manifest_digest": _verdict.manifest_digest,
-                        }
+                        },
+                        json_sink,
                     )
                 return EXIT_OK
             if _verdict == _rerun.VERDICT_ALREADY_RUNNING and not resume:
@@ -384,7 +362,8 @@ def run_oneclick(
                             "transport": transport,
                             "host": host,
                             "port": port,
-                        }
+                        },
+                        json_sink,
                     )
                 return EXIT_OK
         if _verdict == _rerun.VERDICT_ALREADY_RUNNING and resume:
@@ -484,7 +463,7 @@ def run_oneclick(
                         flush=True,
                     )
                     if json_output:
-                        _emit_json(report(None))
+                        _emit_json(report(None), json_sink)
                     return EXIT_PREFLIGHT
                 print(
                     "WARNING: Some preflight checks failed. Continuing launch...",
@@ -516,7 +495,7 @@ def run_oneclick(
         if dry_run:
             print("✓ Dry run requested. Exiting without launching tool host.", file=say)
             if json_output:
-                _emit_json(report(manifest_path))
+                _emit_json(report(manifest_path), json_sink)
             return EXIT_OK
 
     def _finish(status: str, exit_code: int) -> None:
@@ -548,7 +527,7 @@ def run_oneclick(
     # STATUS_FAILED (never complete), so check_rerun treats the next attempt
     # as fresh and retries instead of wedging on already-complete.
     if json_output:
-        _emit_json(report(manifest_path))
+        _emit_json(report(manifest_path), json_sink)
 
     if generated and token is not None:
         _announce_generated_token(token, token_file)
@@ -558,6 +537,8 @@ def run_oneclick(
         cmd = [sys.executable, "-m", "omega_prime.mcp_server", "--root", str(root)]
         if audit_log is not None:
             cmd += ["--audit-log", str(audit_log)]
+        if work_root is not None:
+            cmd += ["--work-root", str(work_root)]
         try:
             code = subprocess.call(cmd)
         except (KeyboardInterrupt, Exception):
@@ -573,27 +554,28 @@ def run_oneclick(
         from omega_prime.grokbot.audit import GrokBotAuditTracer
 
         audit = GrokBotAuditTracer(audit_log)
-    with _exported_token(token_env, token):
-        try:
-            code = serve_sse(
-                root=root,
-                host=host,
-                port=port,
-                token=token,
-                public_url=public_url,
-                allowed_hosts=tuple(allowed_hosts),
-                allowed_origins=tuple(allowed_origins),
-                allow_insecure_no_auth=allow_insecure_no_auth,
-                audit=audit,
-                token_store_path=token_store_path,
-                log_format=log_format,
-                work_root=work_root,
-            )
-        except (KeyboardInterrupt, Exception):
-            _finish("interrupted", 130)
-            raise
-        _finish("complete", code)
-        return code
+    # The bearer token reaches the host only through `token`; it is never
+    # exported into this process environment, which serve children inherit.
+    try:
+        code = serve_sse(
+            root=root,
+            host=host,
+            port=port,
+            token=token,
+            public_url=public_url,
+            allowed_hosts=tuple(allowed_hosts),
+            allowed_origins=tuple(allowed_origins),
+            allow_insecure_no_auth=allow_insecure_no_auth,
+            audit=audit,
+            token_store_path=token_store_path,
+            log_format=log_format,
+            work_root=work_root,
+        )
+    except (KeyboardInterrupt, Exception):
+        _finish("interrupted", 130)
+        raise
+    _finish("complete", code)
+    return code
 
 
 def _redact_secrets(text: str, secrets: Sequence[str]) -> str:
@@ -602,6 +584,65 @@ def _redact_secrets(text: str, secrets: Sequence[str]) -> str:
         if secret:
             cleaned = cleaned.replace(secret, "[redacted]")
     return " ".join(cleaned.split())
+
+
+#: Fixed artifact-guard label for every self-test diagnostic publication.
+_SELF_TEST_GUARD_LABEL = "self-test"
+
+#: Fixed safe metadata published when the secret gate trips. A short literal
+#: with no excerpts, so it carries no secret bytes by construction.
+_SELF_TEST_SAFE_DIAGNOSTIC = "self-test: diagnostic withheld (secret gate tripped)"
+
+#: Publication bound for failure diagnostics: keep the tail window, then clip.
+_DIAGNOSTIC_TAIL_CHARS = 1500
+_DIAGNOSTIC_CLIP_CHARS = 500
+
+#: The self-test child consumes the ONE frozen layout allowlist and nothing
+#: else: ``dict(layout.env)`` is the whole ambient environment, so the caller
+#: adds no parent-locale copy, no credential blacklist, and no
+#: args/env-forwarding-only pins here. Host roots travel as argv
+#: (``--root``/``--work-root``/``--home``/``--audit-log``); ``python -m``
+#: resolves the install from the child cwd, and state follows ``--root``.
+
+
+def _bounded_diagnostic(raw: str, secrets: Sequence[str]) -> str:
+    """Redact and gate the FULL `raw` text before any clip for publication.
+
+    Known-minted secrets and audit-shaped credentials are scrubbed from the
+    FULL text first; the unchanged ``assert_no_secrets`` gate under the fixed
+    ``self-test`` label then runs on that FULL redacted text BEFORE the
+    tail/clip window is taken, so a scanner-only fragment (generic
+    high-entropy token, short ``omk_`` form, PEM armour) straddling a window
+    edge cannot be truncated into a publishable fragment the gate would no
+    longer recognise. On a trip only the fixed safe metadata is published
+    with no raw excerpts. The same unchanged gate still runs on the clipped
+    result as defense in depth.
+    """
+    from omega_prime.grokbot.audit import redact_sensitive
+    from omega_prime.grokbot.secret_guard import SecretLeakError, assert_no_secrets
+
+    redacted = redact_sensitive(_redact_secrets(raw, secrets))
+    try:
+        assert_no_secrets(redacted, _SELF_TEST_GUARD_LABEL)
+    except SecretLeakError:
+        return _SELF_TEST_SAFE_DIAGNOSTIC
+    clipped = redacted[-_DIAGNOSTIC_TAIL_CHARS:][:_DIAGNOSTIC_CLIP_CHARS]
+    try:
+        assert_no_secrets(clipped, _SELF_TEST_GUARD_LABEL)
+    except SecretLeakError:
+        return _SELF_TEST_SAFE_DIAGNOSTIC
+    return clipped
+
+
+def _self_test_audit_log(layout: LocalLayout) -> Path:
+    """Audit-log file inside the disposable layout.
+
+    ``LocalLayout.audit`` names the audit sink: a directory yields the
+    conventional file inside it, otherwise it is already the log file.
+    """
+    if layout.audit.is_dir():
+        return layout.audit / "audit.jsonl"
+    return layout.audit
 
 
 def _free_port() -> int:
@@ -654,48 +695,59 @@ def _terminate(proc: subprocess.Popen[bytes], grace: float) -> int | None:
 
 
 def _log_tail(path: Path, secrets: Sequence[str]) -> str:
+    """Read the full log text, then redact before any clipping.
+
+    The raw bytes are never clipped pre-redaction: clipping happens inside
+    :func:`_bounded_diagnostic` only after the full text is scrubbed and
+    gated.
+    """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    return _redact_secrets(text[-1500:], secrets)[:500]
+    return _bounded_diagnostic(text, secrets)
 
 
 def run_self_test(root: Path) -> int:
     """Start a loopback host, verify it, and require a clean SIGTERM.
 
-    Mints a call token into a 0600 file and an admin token into a temp store.
-    Neither token is printed. Exit 0 only when verification passes and the host
-    exits 0 after SIGTERM within the grace window.
+    The host runs from a disposable isolated install (never the source
+    checkout): ``--root``/home/audit/tokens resolve inside the frozen shared
+    layout, the child env is exactly the frozen layout allowlist with no
+    inherited live credentials or config roots, and fixture schedules start
+    empty so source-install schedules are never ticked. The parent
+    ``os.environ`` is never consulted.
+
+    Mints a call token into a 0600 file and an admin token into a 0600 store.
+    Neither token is printed. Exit 0 only when verification passes and the
+    host exits 0 after SIGTERM within the grace window.
     """
+    from omega_prime.grokbot.local_validation import isolated_layout
     from omega_prime.grokbot.tokens import create_token
-    from omega_prime.grokbot.verify import format_report, run_verification
+    from omega_prime.grokbot.verify import (
+        format_report,
+        run_verification,
+        sanitize_report_for_publication,
+    )
 
     secrets: list[str] = []
     proc: subprocess.Popen[bytes] | None = None
-    with tempfile.TemporaryDirectory(prefix="omega-self-test-") as tmp_name:
-        tmp = Path(tmp_name)
-        log_path = tmp / "host.log"
+    with isolated_layout(root) as layout:
+        log_path = layout.base / "self-test-host.log"
+        audit_log = _self_test_audit_log(layout)
         try:
             token = generate_token()
             secrets.append(token)
-            token_file = tmp / "caller.token"
+            token_file = layout.state / "self-test-caller.token"
             atomic_write_text(token_file, token + "\n")
-            store = tmp / "tokens.json"
+            store = layout.state / "self-test-tokens.json"
             admin_token, _record = create_token(
                 store, scopes=["admin"], label="self-test"
             )
             del _record
             secrets.append(admin_token)
-            home = tmp / "home"
-            home.mkdir()
-            audit_log = tmp / "audit.jsonl"
             port = _free_port()
-            env = dict(os.environ)
-            previous = env.get("PYTHONPATH")
-            env["PYTHONPATH"] = (
-                str(root) if not previous else str(root) + os.pathsep + previous
-            )
+            env = dict(layout.env)
             cmd = [
                 sys.executable,
                 "-m",
@@ -707,7 +759,9 @@ def run_self_test(root: Path) -> int:
                 "--port",
                 str(port),
                 "--root",
-                str(root),
+                str(layout.install),
+                "--work-root",
+                str(layout.work),
                 "--token-file",
                 str(token_file),
                 "--token-store",
@@ -715,7 +769,7 @@ def run_self_test(root: Path) -> int:
                 "--audit-log",
                 str(audit_log),
                 "--home",
-                str(home),
+                str(layout.home),
                 "--log-format",
                 "json",
                 "--shutdown-grace",
@@ -724,7 +778,7 @@ def run_self_test(root: Path) -> int:
             with log_path.open("wb") as log_handle:
                 proc = subprocess.Popen(
                     cmd,
-                    cwd=str(root),
+                    cwd=str(layout.install),
                     env=env,
                     stdin=subprocess.DEVNULL,
                     stdout=log_handle,
@@ -738,7 +792,7 @@ def run_self_test(root: Path) -> int:
                 if proc.poll() is not None:
                     proc = None
                 print(
-                    f"{_PREFIX}: self-test: {reason}",
+                    f"{_PREFIX}: self-test: {_bounded_diagnostic(reason, secrets)}",
                     file=sys.stderr,
                 )
                 tail = _log_tail(log_path, secrets)
@@ -755,17 +809,18 @@ def run_self_test(root: Path) -> int:
                 )
             except Exception as exc:
                 print(
-                    f"{_PREFIX}: self-test: {_redact_secrets(str(exc), secrets)}",
+                    f"{_PREFIX}: self-test: {_bounded_diagnostic(str(exc), secrets)}",
                     file=sys.stderr,
                 )
                 return EXIT_SELF_TEST
             shutdown = _terminate(proc, _SELF_TEST_GRACE)
             if proc.poll() is not None:
                 proc = None
-            print(format_report(report), flush=True)
+            safe = sanitize_report_for_publication(report, secrets)
+            print(format_report(safe), flush=True)
             shown = "timeout" if shutdown is None else str(shutdown)
             print(f"shutdown={shown}", flush=True)
-            if shutdown != 0 or not report.ok or not report.reachable:
+            if shutdown != 0 or not safe.ok or not safe.reachable:
                 return EXIT_SELF_TEST
             return EXIT_OK
         finally:
@@ -775,8 +830,27 @@ def run_self_test(root: Path) -> int:
                     proc.wait(timeout=5)
 
 
+class _GuardedParser(argparse.ArgumentParser):
+    """Argument parser that withholds secret-shaped CLI diagnostics.
+
+    The FULL ``"<prog>: error: <message>"`` text is passed through the
+    unchanged ``_bounded_diagnostic`` gate with an empty known-secret
+    sequence BEFORE anything is written to stderr, so a recognized canary
+    echoed by argparse (invalid choice, ``type=`` rejection, unrecognized
+    arguments) can only publish the fixed safe metadata. Clean diagnostics
+    are short enough to pass through unchanged, preserving argparse
+    usage/exit-2 semantics.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        raw = f"{self.prog}: error: {message}\n"
+        gated = _bounded_diagnostic(raw, [])
+        self.print_usage(sys.stderr)
+        self.exit(2, gated if gated.endswith("\n") else gated + "\n")
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="omega-prime-grokbot-oneclick")
+    parser = _GuardedParser(prog="omega-prime-grokbot-oneclick")
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument(
         "--transport",
@@ -892,7 +966,7 @@ def main(argv: list[str] | None = None) -> int:
         "--work-root",
         type=Path,
         default=None,
-        help="Repo the desk tools act on (forwarded to the SSE host; "
+        help="Repo the desk tools act on (forwarded to the stdio and SSE host; "
         "default: OMEGA_PRIME_WORK_ROOT, else the install root)",
     )
     args = parser.parse_args(argv)

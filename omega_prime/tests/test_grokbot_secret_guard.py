@@ -2,10 +2,8 @@
 # Copyright (C) 2026 Spectrum Web Co
 """Tests for the Grok Bot secret-redaction gate."""
 
-import hashlib
 import json
 import os
-import secrets
 import string
 from pathlib import Path
 
@@ -17,65 +15,70 @@ from omega_prime.grokbot.secret_guard import (
     enforce_token_file_mode,
 )
 
-
-def _generic_token() -> str:
-    from omega_prime.grokbot.secret_guard import _shannon_entropy
-
-    alphabet = string.ascii_letters + string.digits
-    for _ in range(1000):
-        candidate = "".join(secrets.choice(alphabet) for _ in range(36))
-        if not (
-            any(char.islower() for char in candidate)
-            and any(char.isupper() for char in candidate)
-            and any(char.isdigit() for char in candidate)
-        ):
-            continue
-        if _shannon_entropy(candidate) >= 4.5:
-            return candidate
-    raise AssertionError("could not draw generic token with entropy >= 4.5")
+#: Token alphabet for synthetic credential bodies. Bodies are generated at
+#: runtime so no complete credential shape is ever committed to source.
+_TOKEN_ALPHABET = string.ascii_letters + string.digits
 
 
-def _pem_block() -> str:
-    header = "-----BEGIN " + "RSA PRIVATE " + "KEY-----"
-    footer = "-----END " + "RSA PRIVATE " + "KEY-----"
-    body = "MIIB" + secrets.token_urlsafe(24)
-    return f"{header}\n{body}\n{footer}"
+def _synthetic_body(length: int, start: int = 0) -> str:
+    """Deterministic mixed-class body; stride 17 is coprime with 62, so the
+    first 62 characters are all distinct (maximal entropy, no randomness)."""
+    return "".join(
+        _TOKEN_ALPHABET[(start + 17 * index) % len(_TOKEN_ALPHABET)]
+        for index in range(length)
+    )
 
 
-_SK_TOKEN = "sk-" + secrets.token_hex(14)
-_OMK_TOKEN = "omk_" + secrets.token_hex(9)
-_BEARER_TOKEN = "Bearer " + secrets.token_urlsafe(21)
-_GENERIC_TOKEN = _generic_token()
-_PRIVATE_KEY_BLOCK = _pem_block()
+#: Recognized-prefix fixture, assembled at runtime from a fixed suffix so the
+#: suite never depends on randomness. Trips the ``omk`` pattern (suffix >= 8).
+_FIXED_OMK_SUFFIX = _synthetic_body(17, start=3)
+_FIXED_OMK_TOKEN = "omk_" + _FIXED_OMK_SUFFIX
+
+#: Fixed diverse lowercase-plus-digit run (all 26 letters + 10 digits).
+#: Trips the generic high-entropy heuristic deterministically:
+#: length 36, not hex/UUID, >4 distinct chars, two classes, high entropy.
+_GENERIC_RUN = string.ascii_lowercase + string.digits
+_GENERIC_PATH = "/cache/" + _GENERIC_RUN + "/manifest.json"
+
+#: Fixed known-shape credentials (no randomness, no committed live values).
+_FIXED_SK_TOKEN = "sk-" + _synthetic_body(23, start=5)
+_FIXED_BEARER_TOKEN = "Bearer " + _synthetic_body(23, start=11)
+_PEM_LABEL = "RSA PRIVATE " + "KEY"
+_FIXED_PEM_BLOCK = (
+    f"-----BEGIN {_PEM_LABEL}-----\n"
+    f"{_synthetic_body(48, start=7)} fixed body\n"
+    f"-----END {_PEM_LABEL}-----"
+)
+
+#: Integrity metadata the gate must never flag.
+_FIXED_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+_FIXED_UUID = "123e4567-e89b-12d3-a456-426614174000"
 
 
-def _clean_manifest_text() -> str:
-    manifest = {
-        "manifest_version": "1.0.0",
-        "bot": {
-            "name": "Omega Prime",
-            "skills": ["programming_desk_run_terminal_approval_flow"],
-        },
-        "mcp_server": {
-            "transport": "sse",
-            "url": "/sse",
-            "auth": {"type": "none", "token_env": "MCP_AUTH_TOKEN"},
-            "rostered_tool_count": 128,
-            "tools": ["read_file", "run_terminal", "supervisor_status"],
-        },
-        "digest": hashlib.sha256(b"manifest-fixture").hexdigest(),
-        "run_id": "123e4567-e89b-12d3-a456-426614174000",
-    }
-    return json.dumps(manifest, sort_keys=True)
+def test_clean_text_passes():
+    assert_no_secrets("manifest.json", "manifest")
+    assert_no_secrets("diag bundle body: all checks passed", "diag")
+    assert_no_secrets(
+        "skill programming_desk_run_terminal_approval_flow ready",
+        "diag",
+    )
+    assert_no_secrets(f"artifact digest {_FIXED_SHA256}", "manifest")
+    assert_no_secrets(f"run id {_FIXED_UUID}", "manifest")
 
 
 def test_clean_manifest_passes():
-    assert_no_secrets(_clean_manifest_text(), "manifest")
+    manifest = {
+        "manifest_version": "1.0.0",
+        "bot": {"name": "Omega Prime"},
+        "digest": _FIXED_SHA256,
+        "run_id": _FIXED_UUID,
+    }
+    assert_no_secrets(json.dumps(manifest, sort_keys=True), "manifest")
 
 
 def test_clean_0600_file_passes(tmp_path: Path):
     target = tmp_path / "manifest.json"
-    target.write_text(_clean_manifest_text(), encoding="utf-8")
+    target.write_text("nothing secret here\n", encoding="utf-8")
     target.chmod(0o600)
     assert_no_secrets(target, "manifest")
 
@@ -83,13 +86,13 @@ def test_clean_0600_file_passes(tmp_path: Path):
 @pytest.mark.parametrize(
     "secret",
     [
-        _SK_TOKEN,
-        _OMK_TOKEN,
-        _BEARER_TOKEN,
-        "Authorization: " + "Bearer " + secrets.token_hex(10),
-        "api_" + "key=" + secrets.token_hex(8),
-        _PRIVATE_KEY_BLOCK,
-        f"session resumed with {_GENERIC_TOKEN} aboard",
+        _FIXED_SK_TOKEN,
+        _FIXED_OMK_TOKEN,
+        _FIXED_BEARER_TOKEN,
+        "Authorization: " + _FIXED_BEARER_TOKEN,
+        "api_key=" + _synthetic_body(16, start=13),
+        _FIXED_PEM_BLOCK,
+        _GENERIC_RUN,
     ],
 )
 def test_token_bearing_text_raises_without_echo(secret: str):
@@ -103,21 +106,72 @@ def test_token_bearing_text_raises_without_echo(secret: str):
             assert fragment not in message
 
 
-def test_token_bearing_file_raises_without_echo(tmp_path: Path):
-    target = tmp_path / "bundle.txt"
-    target.write_text(f"clean header\n{_SK_TOKEN}\n", encoding="utf-8")
+@pytest.mark.parametrize(
+    "secret",
+    [_FIXED_OMK_TOKEN, _FIXED_SK_TOKEN, _FIXED_BEARER_TOKEN, _GENERIC_RUN],
+)
+def test_token_bearing_file_contents_raise_despite_clean_name(
+    tmp_path: Path, secret: str
+):
+    """Contents are scanned; a benign filename cannot launder secret bytes."""
+    target = tmp_path / "notes.txt"
+    target.write_text(f"clean header\n{secret}\n", encoding="utf-8")
     target.chmod(0o600)
     with pytest.raises(SecretLeakError) as excinfo:
         assert_no_secrets(target, "diag")
     message = str(excinfo.value)
     assert "token-pattern" in message
-    assert _SK_TOKEN not in message
+    for fragment in secret.split():
+        if len(fragment) >= 8:
+            assert fragment not in message
 
 
-def test_wrong_mode_file_raises(tmp_path: Path):
-    target = tmp_path / "token.env"
+def test_same_file_str_rejects_token_pattern_while_path_accepts(tmp_path: Path):
+    """The same real file discriminates str-as-text from Path-as-file."""
+    target = tmp_path / (f"bundle-{_FIXED_OMK_TOKEN}.json")
+    target.write_text("nothing secret here\n", encoding="utf-8")
+    target.chmod(0o600)
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(os.fspath(target), "manifest")
+    message = str(excinfo.value)
+    assert "token-pattern" in message
+    assert "manifest" in message
+    assert _FIXED_OMK_TOKEN not in message
+    assert os.fspath(target) not in message
+    # Same file as Path: clean contents, not filename spelling, are scanned.
+    assert_no_secrets(target, "manifest")
+
+
+def test_same_file_mode_change_keeps_str_token_pattern(tmp_path: Path):
+    target = tmp_path / (f"bundle-{_FIXED_OMK_TOKEN}.json")
     target.write_text("nothing secret here\n", encoding="utf-8")
     target.chmod(0o644)
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(target, "manifest")
+    assert "0600-violation" in str(excinfo.value)
+    # The str form still classifies text; it never reports a filesystem mode.
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(os.fspath(target), "manifest")
+    assert "token-pattern" in str(excinfo.value)
+
+
+def test_str_never_mode_checks_and_path_does(tmp_path: Path):
+    """Str classifies fixed text without touching disk; Path enforces 0600."""
+    target = tmp_path / "manifest.json"
+    target.write_text("nothing secret here\n", encoding="utf-8")
+    target.chmod(0o644)
+    # Fixed text control: no tmp_dir bytes, no mode check, scanned as data.
+    assert_no_secrets("manifest.json", "manifest")
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(target, "manifest")
+    assert "0600-violation" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("mode", [0o400, 0o640, 0o644])
+def test_wrong_mode_path_rejects(tmp_path: Path, mode: int):
+    target = tmp_path / "token.env"
+    target.write_text("nothing secret here\n", encoding="utf-8")
+    target.chmod(mode)
     with pytest.raises(SecretLeakError) as excinfo:
         assert_no_secrets(target, "token-file")
     assert "0600-violation" in str(excinfo.value)
@@ -128,30 +182,102 @@ def test_wrong_mode_file_raises(tmp_path: Path):
 
 def test_wrong_mode_message_hides_contents(tmp_path: Path):
     target = tmp_path / "token.env"
-    target.write_text(_SK_TOKEN + "\n", encoding="utf-8")
+    target.write_text(_FIXED_OMK_TOKEN + "\n", encoding="utf-8")
     target.chmod(0o640)
     with pytest.raises(SecretLeakError) as excinfo:
         enforce_token_file_mode(target)
     message = str(excinfo.value)
     assert "0600-violation" in message
-    assert _SK_TOKEN not in message
+    assert _FIXED_OMK_TOKEN not in message
 
 
-def test_directory_is_not_a_token_file(tmp_path: Path):
-    with pytest.raises(SecretLeakError, match="0600-violation"):
+def test_directory_and_missing_path_reject(tmp_path: Path):
+    with pytest.raises(SecretLeakError) as excinfo:
         enforce_token_file_mode(tmp_path)
+    assert "0600-violation" in str(excinfo.value)
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(tmp_path / "absent.env", "token-file")
+    assert "0600-violation" in str(excinfo.value)
 
 
 def test_enforce_0600_returns_path(tmp_path: Path):
     target = tmp_path / "token.env"
-    target.write_text("opaque-secret\n", encoding="utf-8")
+    target.write_text("nothing secret here\n", encoding="utf-8")
     target.chmod(0o600)
     assert enforce_token_file_mode(target) == target
 
 
-def test_str_path_is_scanned_as_text_not_opened(tmp_path: Path):
-    target = tmp_path / "manifest.json"
-    target.write_text(_clean_manifest_text(), encoding="utf-8")
+class _FspathWrapper(os.PathLike):
+    """Minimal non-Path ``os.PathLike[str]`` around a real file."""
+
+    def __init__(self, inner: Path):
+        self._inner = inner
+
+    def __fspath__(self) -> str:
+        return os.fspath(self._inner)
+
+
+def test_non_path_pathlike_follows_file_contract(tmp_path: Path):
+    target = tmp_path / (f"bundle-{_FIXED_OMK_TOKEN}.json")
+    target.write_text("nothing secret here\n", encoding="utf-8")
+    target.chmod(0o600)
+    wrapper = _FspathWrapper(target)
+    # A PathLike wrapper scans contents/mode like Path ...
+    assert_no_secrets(wrapper, "manifest")
+    # ... while its str form classifies the token-shaped spelling as text.
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(os.fspath(wrapper), "manifest")
+    assert "token-pattern" in str(excinfo.value)
     target.chmod(0o644)
-    # A `str` payload is literal text: the 0644 file on disk is never mode-checked.
-    assert_no_secrets(os.fspath(target), "manifest")
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(_FspathWrapper(target), "manifest")
+    assert "0600-violation" in str(excinfo.value)
+
+
+def test_generic_slash_path_rejects_without_echo(tmp_path: Path):
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(_GENERIC_PATH, "diag")
+    message = str(excinfo.value)
+    assert "token-pattern" in message
+    assert "diag" in message
+    assert _GENERIC_RUN not in message
+    assert _GENERIC_PATH not in message
+
+
+def test_nonexistent_token_shaped_path_never_touches_disk(tmp_path: Path):
+    """A str payload is data: rejection needs no filesystem access."""
+    ghost = tmp_path / "cache" / _GENERIC_RUN / "manifest.json"
+    assert not ghost.exists()
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(os.fspath(ghost), "diag")
+    assert "token-pattern" in str(excinfo.value)
+    assert not ghost.exists()
+
+
+def test_serialized_path_field_rejects_without_echo():
+    payload = json.dumps({"path": _GENERIC_PATH, "status": "cached"}, sort_keys=True)
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(payload, "diag-bundle")
+    message = str(excinfo.value)
+    assert "token-pattern" in message
+    assert _GENERIC_RUN not in message
+    assert _GENERIC_PATH not in message
+
+
+def test_short_and_low_diversity_runs_pass():
+    # Short recognized-prefix form: below the minimum suffix length.
+    assert_no_secrets("provision omk_ab12 for review", "diag")
+    # Short diverse run: below the minimum candidate length.
+    assert_no_secrets("cache key abcdefgh0123456789", "diag")
+    # Long but low-diversity run: padding/repeats are excluded.
+    assert_no_secrets("filler " + "ab0123" * 8 + " end", "diag")
+
+
+def test_qualifying_short_omk_prefix_rejects_without_entropy():
+    """Recognized prefixes trip on shape alone, not on entropy."""
+    short_token = "omk_" + _synthetic_body(8, start=3)
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(f"diag bundle body: {short_token}", "diag")
+    message = str(excinfo.value)
+    assert "token-pattern" in message
+    assert short_token not in message

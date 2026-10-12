@@ -1,6 +1,6 @@
 ---
 name: desk-doctor
-description: Run and read the desk integrity report (desk_doctor check): prompt SHA, skills, memory bank, tool roster, connector, roster registration.
+description: "Run and read the desk integrity report (desk_doctor check): prompt SHA, skills, memory bank, tool roster, connector, roster registration."
 bots: [bot-00-omega-prime]
 gates: [G-7]
 ---

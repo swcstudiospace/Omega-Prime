@@ -45,7 +45,17 @@ _ENV_PREFIX = "OMEGA_PRIME_"
 
 
 def _defaults() -> dict[str, Any]:
-    return {"prime": {family: {"enabled": False} for family in PRIME_FAMILIES}}
+    return {
+        "prime": {family: {"enabled": False} for family in PRIME_FAMILIES},
+        # Red team family (T3MP3ST loopback gateway): a top-level key, not a
+        # Prime family. Off by default; the gateway and bearer file follow the
+        # upstream contract.
+        "redteam": {
+            "enabled": False,
+            "gateway_url": "http://127.0.0.1:3333",
+            "bearer_token_file": "",
+        },
+    }
 
 
 def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -79,14 +89,29 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
         if not key.startswith(_ENV_PREFIX):
             continue
         parts = key[len(_ENV_PREFIX) :].lower().split("_")
-        if not parts or parts[0] != "prime":
+        if not parts:
             continue
-        # prime_<family>_enabled — family names are single words today.
-        if len(parts) == 3 and parts[1] in PRIME_FAMILIES and parts[2] == "enabled":
-            enabled = value.strip().lower() in ("1", "true", "yes", "on")
-            overlay.setdefault("prime", {}).setdefault(parts[1], {})["enabled"] = (
-                enabled
-            )
+        if parts[0] == "prime":
+            # prime_<family>_enabled — family names are single words today.
+            if len(parts) == 3 and parts[1] in PRIME_FAMILIES and parts[2] == "enabled":
+                enabled = value.strip().lower() in ("1", "true", "yes", "on")
+                overlay.setdefault("prime", {}).setdefault(parts[1], {})["enabled"] = (
+                    enabled
+                )
+        elif parts[0] == "redteam":
+            # redteam_enabled / redteam_gateway_url.
+            if len(parts) == 2 and parts[1] == "enabled":
+                overlay.setdefault("redteam", {})["enabled"] = (
+                    value.strip().lower()
+                    in (
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    )
+                )
+            elif len(parts) == 3 and parts[1] == "gateway" and parts[2] == "url":
+                overlay.setdefault("redteam", {})["gateway_url"] = value.strip()
     return overlay
 
 
@@ -98,10 +123,22 @@ def prime_enabled(config: dict[str, Any], family: str) -> bool:
     return bool(isinstance(node, dict) and node.get("enabled") is True)
 
 
+def redteam_enabled(config: dict[str, Any]) -> bool:
+    """Whether the red team gateway family is enabled. Absent ⇒ False."""
+    node = config.get("redteam", {})
+    return bool(isinstance(node, dict) and node.get("enabled") is True)
+
+
 def family_config(config: dict[str, Any], family: str) -> dict[str, Any]:
     """The raw config subtree for one family (empty dict when absent)."""
     node = config.get("prime", {}).get(family, {})
     return node if isinstance(node, dict) else {}
 
 
-__all__ = ["PRIME_FAMILIES", "family_config", "load_config", "prime_enabled"]
+__all__ = [
+    "PRIME_FAMILIES",
+    "family_config",
+    "load_config",
+    "prime_enabled",
+    "redteam_enabled",
+]

@@ -24,6 +24,7 @@ from omega_prime.tools.harness import HARNESS_TOOL_NAMES
 from omega_prime.tools.heartbeat import HEARTBEAT_TOOL_NAMES
 from omega_prime.tools.infra import InfraClient, InfraContext, register_infra_tools
 from omega_prime.tools.prime_runtime import KERNEL_TOOL_NAMES
+from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
 from omega_prime.tools.registry import ToolRegistry
 from omega_prime.tools.rlm import RLM_TOOL_NAMES
 from omega_prime.tools.ultrathink import (
@@ -135,6 +136,7 @@ def test_default_registry_serves_the_roster(tmp_path: Path):
         | set(AUTONOMOUS_TOOL_NAMES)
         | set(MESSAGING_TOOL_NAMES)
         | set(KERNEL_TOOL_NAMES)
+        | set(REDTEAM_TOOL_NAMES)
     )
     assert served == [name for name in roster if name not in gated]
     # DESK-03: delegate_task is served on the in-process desk parent, even

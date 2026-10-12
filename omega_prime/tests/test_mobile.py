@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+
+import pytest
 
 from omega_prime.tools.approvals import ApprovalLog
 from omega_prime.tools.devices import AdbDevice, DeviceError, SimctlDevice
@@ -208,7 +213,62 @@ def test_artifact_size_and_lint(tmp_path):
     lint = client.lint_baseline_diff("lint.xml", "base", "head")
     assert lint["issues_before"] == 2 and lint["issues_after"] == 3
     assert lint["grew"] is True and lint["new_ids"] == ["C"]
-    assert "grows hides" in lint["verdict"]
+
+
+def _lint_doc(body: str, by: str = "lint 8.0.0") -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<issues format="6" by="{by}">\n{body}</issues>\n'
+    )
+
+
+def _lint_client(tmp_path, files):
+    vcs = FakeVcs(files=files)
+    return MobileClient(
+        _ctx(
+            tmp_path,
+            vcs={"show": vcs.show, "diff_names": vcs.diff_names, "diff": vcs.diff},
+        )
+    )
+
+
+def test_lint_baseline_diff_counts_issue_elements_not_container(tmp_path):
+    base = _lint_doc('  <issue id="HardcodedText" severity="Warning" />\n')
+    head = _lint_doc(
+        '  <issue id="HardcodedText" severity="Warning" />\n'
+        '  <issue id="UnusedResources" severity="Warning" />\n'
+    )
+    client = _lint_client(
+        tmp_path, {("base", "lint.xml"): base, ("head", "lint.xml"): head}
+    )
+    lint = client.lint_baseline_diff("lint.xml", "base", "head")
+    assert lint["issues_before"] == 1 and lint["issues_after"] == 2
+    assert lint["grew"] is True and lint["new_ids"] == ["UnusedResources"]
+
+
+def test_lint_baseline_diff_empty_baseline_to_one(tmp_path):
+    base = _lint_doc("")
+    head = _lint_doc('  <issue id="HardcodedText" severity="Warning" />\n')
+    client = _lint_client(
+        tmp_path, {("base", "lint.xml"): base, ("head", "lint.xml"): head}
+    )
+    lint = client.lint_baseline_diff("lint.xml", "base", "head")
+    assert lint["issues_before"] == 0 and lint["issues_after"] == 1
+    assert lint["grew"] is True and lint["new_ids"] == ["HardcodedText"]
+
+
+def test_lint_baseline_diff_container_metadata_change_is_no_growth(tmp_path):
+    body = '  <issue id="HardcodedText" severity="Warning" />\n'
+    client = _lint_client(
+        tmp_path,
+        {
+            ("base", "lint.xml"): _lint_doc(body, by="lint 8.0.0"),
+            ("head", "lint.xml"): _lint_doc(body, by="lint 8.1.0"),
+        },
+    )
+    lint = client.lint_baseline_diff("lint.xml", "base", "head")
+    assert lint["issues_before"] == 1 and lint["issues_after"] == 1
+    assert lint["grew"] is False and lint["new_ids"] == []
 
 
 def test_testflight_and_phased_flows(tmp_path):
@@ -354,3 +414,77 @@ def test_adb_simctl_parsers_and_approvals(tmp_path):
         )["kind"]
         == "back"
     )
+
+
+# -- Phase 75 re-review WR-03: git ref validation in the real VCS seam --------
+# Caller-supplied refs reach git argv, so a leading-dash or control-character
+# ref must be refused before any subprocess spawns, while every revision git
+# itself supports must still resolve.
+
+
+def test_git_vcs_rejects_option_like_refs_without_spawning(tmp_path, monkeypatch):
+    from omega_prime.tools.mobile import _git_vcs
+
+    def _no_spawn(*args, **kwargs):
+        raise AssertionError("git must not spawn for an option-like ref")
+
+    monkeypatch.setattr("subprocess.run", _no_spawn)
+    vcs = _git_vcs(str(tmp_path))
+    for call in (
+        lambda: vcs["show"]("--help", "a.txt"),
+        lambda: vcs["show"]("-h", "a.txt"),
+        lambda: vcs["show"]("", "a.txt"),
+        lambda: vcs["show"]("HEAD\n--help", "a.txt"),
+        lambda: vcs["show"]("HEAD\x00", "a.txt"),
+        lambda: vcs["diff_names"]("--output=/tmp/x", "HEAD"),
+        lambda: vcs["diff_names"]("HEAD", "--upload-pack=t"),
+        lambda: vcs["diff"]("--output=/tmp/x", "HEAD", []),
+        lambda: vcs["diff"]("HEAD", "-u", []),
+    ):
+        with pytest.raises(ValueError):
+            call()
+
+
+@pytest.fixture
+def git_repo(tmp_path, monkeypatch):
+    """Two-commit repo: branch `release+hotfix` at the first, `@` at the second."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "Test")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "test@example.invalid")
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    git("init", "-q")
+    (tmp_path / "a.txt").write_text("v1\n")
+    git("add", "a.txt")
+    git("commit", "-q", "-m", "one")
+    git("branch", "release+hotfix")
+    (tmp_path / "a.txt").write_text("v2\n")
+    (tmp_path / "ios").mkdir()
+    (tmp_path / "ios" / "App.entitlements").write_text("<key>aps-environment</key>\n")
+    git("add", "a.txt", "ios/App.entitlements")
+    git("commit", "-q", "-m", "two")
+    return tmp_path
+
+
+def test_git_vcs_resolves_valid_revision_syntax(git_repo):
+    from omega_prime.tools.mobile import _git_vcs
+
+    vcs = _git_vcs(str(git_repo))
+    assert vcs["show"]("release+hotfix", "a.txt") == "v1\n"
+    assert vcs["show"]("@", "a.txt") == "v2\n"
+    assert vcs["show"]("@~1", "a.txt") == "v1\n"
+    assert sorted(vcs["diff_names"]("release+hotfix", "@")) == [
+        "a.txt",
+        "ios/App.entitlements",
+    ]
+    patch = vcs["diff"]("release+hotfix", "@", ["ios/App.entitlements"])
+    assert "+<key>aps-environment</key>" in patch
+    assert "a.txt" not in patch

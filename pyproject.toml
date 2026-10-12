@@ -27,6 +27,7 @@ dependencies = [
   "discord.py>=2.7",
   "playwright>=1.63",
   "Appium-Python-Client>=6.0",
+  "PyYAML>=6.0.3",
 ]
 
 [project.optional-dependencies]

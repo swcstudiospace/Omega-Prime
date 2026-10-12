@@ -1,6 +1,10 @@
-"""Tests for the Grok Bot template lint (skills and routines resolve to files)."""
+"""Tests for the Grok Bot template lint (template and disk agree both ways)."""
 
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from omega_prime.grokbot.manifest import TemplateLint, find_repo_root, lint_template
 
@@ -57,17 +61,90 @@ def test_directory_without_skill_file_is_missing(tmp_path: Path):
     assert "beta" in lint_template(root).missing_skills
 
 
+COMPLETE = "# T\n\n## Enabled skills\n\n- alpha\n\n## Routines\n\n- one — first\n"
+
+
 def test_complete_tree_is_ok(tmp_path: Path):
-    root = _tree(
-        tmp_path,
-        template=(
-            "# T\n\n## Enabled skills\n\n- alpha\n\n## Routines\n\n- one — first\n"
-        ),
-    )
+    root = _tree(tmp_path, template=COMPLETE)
     lint = lint_template(root)
     assert lint.ok is True
     assert lint.missing_skills == []
     assert lint.missing_routines == []
+    assert lint.unlisted_skills == []
+    assert lint.unlisted_routines == []
+
+
+def test_skill_and_routine_on_disk_but_not_listed_are_unlisted(tmp_path: Path):
+    root = _tree(tmp_path, template=COMPLETE)
+    pkg = root / "omega_prime"
+    (pkg / "skills" / "gamma").mkdir()
+    (pkg / "skills" / "gamma" / "SKILL.md").write_text("# gamma\n", encoding="utf-8")
+    (pkg / "routines" / "four.md").write_text("# four\n", encoding="utf-8")
+    lint = lint_template(root)
+    assert lint == TemplateLint(unlisted_skills=["gamma"], unlisted_routines=["four"])
+    assert lint.ok is False
+
+
+def test_both_directions_are_reported_together(tmp_path: Path):
+    root = _tree(tmp_path)
+    (root / "omega_prime" / "skills" / "gamma").mkdir()
+    (root / "omega_prime" / "skills" / "gamma" / "SKILL.md").write_text(
+        "# gamma\n", encoding="utf-8"
+    )
+    lint = lint_template(root)
+    assert lint.missing_skills == ["beta", "../escape"]
+    assert lint.missing_routines == ["two", "three"]
+    assert lint.unlisted_skills == ["gamma"]
+    assert lint.ok is False
+
+
+def test_empty_directory_and_non_routine_files_are_not_unlisted(tmp_path: Path):
+    root = _tree(tmp_path, template=COMPLETE)
+    pkg = root / "omega_prime"
+    (pkg / "skills" / "delta").mkdir()
+    (pkg / "routines" / "helper.py").write_text("", encoding="utf-8")
+    lint = lint_template(root)
+    assert lint.unlisted_skills == []
+    assert lint.unlisted_routines == []
+    assert lint.ok is True
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs a git client")
+def test_listed_but_untracked_skill_and_routine_are_missing(tmp_path: Path):
+    """WR-04: one provenance both ways; disk presence without tracking hides nothing."""
+    root = _tree(tmp_path, template=COMPLETE)
+    for argv in (["init", "-q"], ["add", "omega_prime"]):
+        subprocess.run(["git", "-C", str(root), *argv], check=True)
+    pkg = root / "omega_prime"
+    (pkg / "skills" / "learned").mkdir()
+    (pkg / "skills" / "learned" / "SKILL.md").write_text(
+        "# learned\n", encoding="utf-8"
+    )
+    (pkg / "routines" / "learned.md").write_text("# learned\n", encoding="utf-8")
+    template = pkg / "grokbot" / "templates" / "OMEGA_PRIME.md"
+    text = template.read_text(encoding="utf-8")
+    text = text.replace("- alpha\n", "- alpha\n- learned\n", 1)
+    text = text.replace("- one — first\n", "- one — first\n- learned\n", 1)
+    template.write_text(text, encoding="utf-8")
+    lint = lint_template(root)
+    assert lint.missing_skills == ["learned"]
+    assert lint.missing_routines == ["learned"]
+    assert lint.unlisted_skills == []
+    assert lint.unlisted_routines == []
+    assert lint.ok is False
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs a git client")
+def test_untracked_skill_in_a_checkout_is_not_unlisted(tmp_path: Path):
+    root = _tree(tmp_path, template=COMPLETE)
+    for argv in (["init", "-q"], ["add", "omega_prime"]):
+        subprocess.run(["git", "-C", str(root), *argv], check=True)
+    learned = root / "omega_prime" / "skills" / "learned"
+    learned.mkdir()
+    (learned / "SKILL.md").write_text("# learned\n", encoding="utf-8")
+    lint = lint_template(root)
+    assert lint.unlisted_skills == []
+    assert lint.ok is True
 
 
 def test_missing_template_is_ok_and_empty(tmp_path: Path):
@@ -75,8 +152,7 @@ def test_missing_template_is_ok_and_empty(tmp_path: Path):
     assert lint.ok is True
 
 
-def test_shipped_template_resolves_every_entry():
+def test_shipped_template_matches_checked_in_skills_and_routines():
     lint = lint_template(find_repo_root())
-    assert lint.missing_skills == []
-    assert lint.missing_routines == []
+    assert lint == TemplateLint()
     assert lint.ok is True

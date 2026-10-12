@@ -6,12 +6,19 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+
+concurrency:
+  group: kb-refresh-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
@@ -24,6 +31,12 @@ jobs:
         env:
           KEY_SET: ${{ secrets.GREPTILE_API_KEY != '' }}
         run: echo "has_key=$KEY_SET" >> "$GITHUB_OUTPUT"
+      - name: report missing key skip
+        id: skip-notice
+        if: steps.gate.outputs.has_key != 'true'
+        run: |
+          echo "status=skipped" >> "$GITHUB_OUTPUT"
+          echo "kb-refresh: skipped — GREPTILE_API_KEY is not configured (not-run; not a completed refresh)"
       - name: sync knowledge base
         if: steps.gate.outputs.has_key == 'true'
         env:

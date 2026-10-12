@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "omega-prime": {
+      "url": "https://omega.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${OMEGA_PRIME_MCP_TOKEN}"
+      }
+    }
+  }
+}

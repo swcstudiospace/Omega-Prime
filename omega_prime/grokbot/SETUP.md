@@ -1,18 +1,135 @@
 # Omega Prime setup
 
-Four steps: install, secrets, optional tool host, smoke prompt.
-Takes about ten minutes; only step 3 needs a machine of yours.
+Four operator steps: set Omega Prime up on a Grok Bot, configure private
+secrets, attach or run the tool host, and inspect the client. Local
+preparation is not live Grok attachment: every platform behaviour this page
+relies on carries its evidence level, and live import stays a user-side
+check ([evidence ledger](../../docs/grok-bot-native.md#import-evidence-ledger),
+[user UAT](../../docs/grok-bot-native.md#user-uat)). Completion time is not
+measured.
 
-## 1. Install from the template
+## 1. Set up Omega Prime on a Grok Bot
 
-Open the Omega Prime share link in Grok and choose **Add to Grok Bot**.
-This creates an independent copy on your account — your chats,
-secrets, and settings stay yours.
+Push the repository to GitHub (or use `swcstudiospace/omes-bot`), then pick
+one route. The Bot-driven setup is primary; the Cursor team marketplace is
+a secondary route for Cursor Teams/Enterprise plans.
 
-What the template carries: the Omega Prime instructions, skills,
-routines, and first-party plugins. What it never carries:
-secrets, custom MCP servers, scripts, or private skills. Steps
-2–3 re-add the ones you want.
+### Primary: ask the default Grok Bot to set itself up
+
+The Bot runs Omega Prime on its own computer as a custom **Command** (stdio)
+MCP server. Send the default Grok Bot this prompt, replacing the URL if you
+pushed your own copy:
+
+```text
+Set up Omega Prime on your own computer. In your shell:
+
+1. git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git /workspace/omega-prime
+2. bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap-only
+   Wait for exit 0. On exit 10, 11 or 12, show me the JSON class line it
+   printed on stderr and stop.
+3. Add a custom MCP server of type Command, named omega-prime, with no
+   environment variables, running exactly:
+   bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio
+   If you cannot add MCP servers yourself, tell me that exact command so I
+   can add it in your settings.
+4. Check that the omega-prime server lists the omega_command tool, then call
+   omega_command with the command /omega-help and show me the result.
+
+Never ask me to paste a token, key or other secret in chat.
+```
+
+What each step does:
+
+1. A recursive clone into the Bot's durable `/workspace` populates the
+   pinned submodules. The launcher resolves the repository from its own
+   location, so the server command needs only the clone's absolute path.
+2. `--bootstrap-only` runs the bootstrap ahead of time and exits 0: a locked
+   install into `/workspace/omega-prime/.venv` from `requirements-lock.txt`,
+   the `prime-agent` submodule only, and the generated plugin `--check`.
+   Running it first means the MCP server's first start finds a matching
+   completion stamp and skips the install. Failures exit 10
+   (`missing_prerequisite`), 11 (`install_failed`) or 12 (`catalog_drift`)
+   with one JSON line on stderr: a plain 12 is drift `--write` repairs, while
+   a 12 with `"detail":"content_invalid"` names source files to fix by hand;
+   see [exit codes](../../docs/grok-bot-native.md#exit-codes).
+3. The server command is the root `mcp.json` entry,
+   `bash ${CURSOR_PLUGIN_ROOT}/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`,
+   with `${CURSOR_PLUGIN_ROOT}` replaced by the absolute path
+   `/workspace/omega-prime`. It carries no `env` and nothing credential-shaped,
+   because a Command server with environment variables or credential-looking
+   arguments runs only in the owner's own chat. `--bootstrap` reruns the
+   bootstrap on every start (only an import probe and the plugin `--check`
+   when the stamp matches; a full install under a lock, resuming safely
+   after an interrupted start, when it does not), then serves stdio with
+   stdout reserved for MCP frames.
+4. `/omega-help` through `omega_command` lists every command.
+
+Evidence: a custom Command server runs on the computer each Bot conversation
+uses (CONFIRMED, [team bots](https://docs.x.ai/grok-bot/team-bots)), and that
+computer runs Linux (CONFIRMED,
+[identity and access](https://docs.x.ai/grok-bot/identity-and-access)) with a
+durable `/workspace`
+(CONFIRMED, [computer and apps](https://docs.x.ai/grok-bot/computer-and-apps)).
+Whether the Bot itself can add the server, which Python it has, and whether
+its MCP client waits out a cold install are UNPROVEN (user UAT rows 1 and 5).
+A Bot template carries identity, description, skills and routines
+(CONFIRMED, [bots](https://docs.x.ai/grok-bot/bots)); that it never carries
+the Command server is UNPROVEN (row 1), so plan on running this setup on
+each Bot.
+
+The [Bot template](templates/OMEGA_PRIME.md) is instructions for an
+operator's authorized seat. Its presence does not prove a published share
+link, account isolation or a successful import. Never include private
+secrets, scripts or settings in a share/export to manufacture a working
+route.
+
+### Secondary: Cursor Teams/Enterprise Import from Repo
+
+On a Cursor **Teams or Enterprise** plan only, an admin can import the
+repository as a team marketplace: Cursor dashboard → **Plugins & MCPs** →
+**Team Marketplaces** → **Add Marketplace** → **Import from Repo**, with the
+GitHub URL. The import reads `.cursor-plugin/marketplace.json` (one plugin,
+`omega-prime`, at the repository root), `.cursor-plugin/plugin.json` (skills
+from `omega_prime/skills`, commands from
+`omega_prime/grokbot/plugin/commands`, servers from `mcp.json`), and the
+root `mcp.json` stdio entry above. Turn on **Enable Auto Refresh** only with
+the Cursor GitHub App installed on the repository; otherwise the marketplace
+stays at the imported commit until a manual **Refresh**.
+
+Evidence: Import from Repo and its Teams/Enterprise gating are PARTIAL —
+documented by Cursor ([plugins](https://cursor.com/docs/plugins.md)), with no
+docs.x.ai page naming it. Grok Bot inheriting a team marketplace as its
+plugin policy is CONFIRMED
+([teams and enterprises](https://docs.x.ai/grok-bot/teams-and-enterprises)).
+Whether the import accepts the repo-root plugin (`"source": "./"`), whether
+Grok Bot loads the plugin's skills and commands, whether it launches the
+plugin's stdio server, and whether `${CURSOR_PLUGIN_ROOT}` expands on the
+Bot's computer are all UNPROVEN (user UAT rows 2–4). Live import is
+unproven until you confirm it. If the route does not work, use the primary
+route; it needs no plan tier.
+
+### Prompting contract
+
+Send `/omega-<name>` as the whole message, with any arguments after a space
+(`/omega-code-review src/app.py`). The `omega_command` tool description and
+the `omega-commands` skill tell the Bot to pass that exact text to the
+`omega_command` tool of the `omega-prime` server. A sentence that only
+mentions a command is ordinary prose, not a command. `/omega-help` lists
+every name: the 12 curated commands, one `/omega-<skill>` per checked-in
+skill and one `/omega-<routine>` per routine (46 today). A generated name
+that matches a curated command or another generated name takes a `-skill`
+or `-routine` suffix: `/omega-python-skill`, `/omega-onboard-routine`,
+`/omega-connectors-routine`, `/omega-ultrathink-skill` and
+`/omega-ultrathink-routine`. A host that surfaces skills natively may also
+show `/python`: native `/python` shows the python skill's instructions and
+runs nothing, `/omega-python` runs ruff and compileall through
+`omega_command`, and `/omega-python-skill` loads the python skill's
+instructions through `omega_command`. Two skills now match their folder
+names: `secrets-handling` is `security-secrets-handling` and `supply-chain`
+is `security-supply-chain`. A copy saved under an old name in a private Bot
+skill library may persist until you remove it (UNPROVEN, user UAT row 4).
+Whether a live Bot follows this contract, and whether `/omega-*` entries
+appear natively in its `/` menu, is user UAT row 4.
 
 ## 2. Secrets
 
@@ -28,28 +145,54 @@ connector asks for it (Grok Bot settings or your host's env):
 | GitHub token | Greptile reviews, ship PRs | host via `gh auth` |
 | `SUBSTRATE_TOKEN` | Substrate brief/events/memory (surface grok-bot) | host env, resolved via the credential broker |
 | `HINDSIGHT_API_KEY` | Shared Hindsight episodic memory | host env, resolved via the credential broker |
-| `MCP_AUTH_TOKEN` | Bearer token Grok Bot presents to a remote tool host | host env or a 0600 `--token-file` (never argv) |
+| `MCP_AUTH_TOKEN` | Bearer token Grok Bot presents to a remote tool host (HTTPS alternative only; the stdio Command entry needs none) | host env or a 0600 `--token-file` (never argv); on the Bot, a Remote HTTPS Bot secret |
 
 `SUBSTRATE_URL` (default `http://127.0.0.1:7410`) and `HINDSIGHT_URL`
 (default the Railway hindsight-api) override where those two clients point.
 
-Skip what you don't use: every unconfigured client reports
-`not_configured` instead of failing.
+Configure only the integrations you intend to use. Failure behavior is
+operation-specific: some tools return `not_configured`, some refuse or return
+gateway errors, and some clients raise or degrade reads. Readiness's
+`feature_disabled` or prerequisite-blocked rows are separate classifications;
+see [connectors](../../docs/connectors.md) and [Red Team](../../docs/red-team.md).
 
 ## 3. Attach the tool host (1-Click Native Integration)
 
 The tool host speaks MCP over **stdio** (a local process) or a **remote
 listener** that serves legacy SSE (`/sse`, `/messages/`) and Streamable HTTP
-(`/mcp`) on the same port. The remote host fails closed: it refuses to start
-on a non-loopback address without a bearer token or a token store, an invalid
-roster or seat policy stops startup (exit 2), and it never accepts a token in
-the URL. The operator reference is `docs/grok-bot-native.md`. Deploying the
-same process is `docs/deploy.md`.
+(`/mcp`) on the same port. Both are one server identity, `omega-prime`, with
+one roster and one `omega_command` surface; the stdio Command entry in
+section 1 is the default, and an operator-run HTTPS host is the documented
+alternative ([HTTPS alternative](../../docs/grok-bot-native.md#https-alternative-remote-https)).
+The remote host fails closed: it refuses to start on a non-loopback address
+without a bearer token or a token store, an invalid roster or seat policy
+stops startup (exit 2), and it never accepts a token in the URL. The
+operator reference is `docs/grok-bot-native.md`. Deploying the same process
+is `docs/deploy.md`.
+
+The host runs from a checkout whose submodules are populated. An
+ordinary `git clone` leaves `prime-agent/` and `redteam/` empty —
+either clone with `--recurse-submodules` or run
+`git submodule update --init --recursive` first (targeted
+`git submodule update --init prime-agent` suffices when the optional
+Red Team backend is not needed; never `git clone` a checkout manually
+into those submodule paths). The launcher's bootstrap initializes only
+`prime-agent`, and only in a git checkout. The Red Team backend itself is
+separate upstream source started per `docs/red-team.md` — the host never
+auto-launches it, and a live Bot's recursive clone is user UAT row 1, not
+attested by these instructions.
 
 ### Option A: Turnkey 1-click launcher (recommended)
 
 ```bash
-# stdio (local IDE or sandbox)
+# the declared stdio entry: bootstrap once, then serve stdio
+bash omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio
+
+# bootstrap only (the setup prompt's pre-run), or bootstrap then verify
+bash omega_prime/scripts/grokbot-1click.sh --bootstrap-only
+bash omega_prime/scripts/grokbot-1click.sh --verify --json
+
+# stdio with an existing environment, no bootstrap
 ./scripts/grokbot-1click.sh --transport stdio
 
 # Remote: preflight, mint a token, export the manifest, serve SSE and /mcp
@@ -61,26 +204,45 @@ same process is `docs/deploy.md`.
   --export-manifest grokbot-manifest.json
 ```
 
-`./scripts/grokbot-1click.sh` and `python -m omega_prime.grokbot.oneclick` take
-the same flags. In order, the launcher runs the preflight doctor (a failed
-check aborts with exit 3; warnings never do; `--no-strict` continues anyway),
-refuses an unauthenticated non-loopback bind (exit 2), mints a bearer token
-with `--generate-token` (shown once on stderr and, with `--token-file`, saved
-there with mode 0600), exports the manifest (it never contains the token), and
-serves. Add `--dry-run` to do everything except serve. `--self-test` starts a
-throwaway loopback host, runs the live verifier, and requires a clean SIGTERM
-(it conflicts with `--dry-run` and never prints the token). To reuse a token,
-point `--token-file` at an existing 0600 file, set `MCP_AUTH_TOKEN`
-(`--token-env NAME` renames the variable), or pass `--token-store` (a hashed
-multi-token file; it counts as authentication). `--log-format` is `text` or
-`json`. `--token` also works but warns, because argv is visible to other users
+The launcher (`omega_prime/scripts/grokbot-1click.sh`, also reachable
+through the `scripts/` symlink) resolves the repository from its own
+location and never from the caller's working directory. `--bootstrap`,
+`--bootstrap-only` and `--verify [--json]` are its own flags; bootstrap
+details and exit classes 10–13 are in
+[One-command start](../../docs/grok-bot-native.md#one-command-start). Every
+other flag goes to `python -m omega_prime.grokbot.oneclick`. In order,
+oneclick runs the preflight doctor (a failed check aborts with exit 3;
+warnings never do; `--no-strict` continues anyway), refuses an
+unauthenticated non-loopback bind (exit 2), mints a bearer token with
+`--generate-token` (shown once on stderr and, with `--token-file`, saved
+there with mode 0600), exports the manifest (it never contains the token),
+and serves. Add `--dry-run` to do everything except serve. `--self-test`
+starts a throwaway loopback host, runs the live verifier, and requires a
+clean SIGTERM (it conflicts with `--dry-run` and never prints the token). To
+reuse a token, point `--token-file` at an existing 0600 file, set
+`MCP_AUTH_TOKEN` (`--token-env NAME` renames the variable), or pass
+`--token-store` (a hashed multi-token file; it counts as authentication).
+`--log-format` is `text` or `json`. Do not pass a token as an argument:
+`--token` is deprecated and warns, because argv is visible to other users
 on the machine. Rate limits and the circuit breaker stay on
 `python -m omega_prime.mcp_server`.
 
+The launcher's `--work-root` is forwarded to the stdio and SSE host alike.
+Without it, `OMEGA_PRIME_WORK_ROOT` applies; a bootstrap start defaults it
+to `/workspace` when that exists, else `$HOME`, and defaults
+`OMEGA_PRIME_STATE_DIR` outside the checkout, only when they are unset.
+`--root` remains the source/roster/policy root; workspace selection does not
+grant permission or bypass approvals.
+
 ### Option B: Remote MCP transport (SSE and Streamable HTTP)
 
-Grok Bot cloud instances connect to your host over SSE. Other MCP clients use
-`/mcp` on the same origin:
+An authorized client that supports SSE can connect to your host. Other MCP
+clients can use `/mcp` on the same origin; this is protocol support in the host,
+not proof that a Grok account has attached. For a Grok Bot, add the host as a
+**Remote HTTPS** custom server at `https://<your-host>/mcp` with the token in a
+Bot secret; the full route, the placeholder syntax per consumer and its
+evidence levels are in
+[HTTPS alternative](../../docs/grok-bot-native.md#https-alternative-remote-https):
 
 ```bash
 python -m omega_prime.mcp_server --transport sse --host 0.0.0.0 --port 8000 \
@@ -111,7 +273,8 @@ Useful flags: `--allow-origin ORIGIN` and `--allow-host HOST[:PORT]` (repeatable
 `--auth-failure-limit` (default 10 per 60 s), `--breaker-threshold` (default 5;
 `0` disables the breaker) and `--breaker-cooldown` (default 30 s). `0` also
 disables `--rate-limit`, `--tool-rate-limit`, and `--auth-failure-limit`.
-`--allow-insecure-no-auth` is the explicit opt-out of the token requirement.
+`--allow-insecure-no-auth` is the explicit opt-out of the token requirement;
+never use it for a host a Bot reaches.
 
 What the host guarantees:
 
@@ -151,9 +314,11 @@ curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" \
 default 24 h). `DELETE /admin/approvals/TOOL` revokes it. Full curl forms,
 metric names, and the verifier are in `docs/grok-bot-native.md`.
 
-### Option C: Grok Bot 1-click manifest export
+### Option C: Host manifest export
 
-Generate the JSON manifest to import into Grok Bot settings or a custom assistant profile:
+Write the manifest of what the host serves. No documented Grok Bot settings
+field imports this file; exporting it is not an account import, and the
+import routes are the ones in section 1:
 
 ```bash
 python -m omega_prime.grokbot.manifest --transport sse \
@@ -162,8 +327,11 @@ python -m omega_prime.grokbot.manifest --transport sse \
 
 The manifest lists exactly the tools the host serves (`mcp_server.tools`), which
 of them need approval (`approval_required`), capabilities derived from your
-configuration, any template problems (`bot.integrity`), and a content digest. It
-never contains a token.
+configuration plus the offered transports (`stdio`, `sse`,
+`streamable-http`), the Streamable HTTP endpoint under `endpoints.mcp`, any
+template problems
+(`bot.integrity`), and a content digest. It never contains a token. Use it
+with `python -m omega_prime.grokbot.sync --check` to detect drift.
 
 ### Enterprise operations and tooling
 
@@ -193,8 +361,8 @@ never contains a token.
    ```bash
    python -m omega_prime.grokbot.emulator --smoke
    ```
-   Drives the same runtime the server uses (roster, seat policy, approval gates,
-   scopes, audit), so a passing smoke run reflects what Grok Bot will see.
+   Exercises the local host runtime (roster, seat policy, approval gates,
+   scopes, audit). A passing local smoke is not a live Grok account/model result.
 
 4. **Capability and prompt synchronizer**:
    ```bash
@@ -204,27 +372,34 @@ never contains a token.
    routines, tools, approval-gated tools and capabilities. A manifest exported for
    another transport or URL is not drift.
 
-## 4. Smoke prompt
+## 4. Client-side smoke prompt
 
-Send the bot exactly this:
+Only after an operator has independently attached an authorized client, use
+this proposed acceptance prompt:
 
 > `ultrathink` what tools do you have, and which need approval?
 
-Expect back:
+Compare the response with the host's actual manifest and effective
+roster/configuration intersection, not a fixed full-roster count. Check that
+registration-specific approval requirements remain explicit and that no
+private credentials are echoed. Prompt text is a request, not a guarantee
+that a model lists tools correctly or that every handler executed. This
+repository's local preparation does not establish a successful live response.
+Then send `/omega-help` as the whole message and expect the `omega_command`
+catalog; record the result against
+[user UAT](../../docs/grok-bot-native.md#user-uat) rows 1 and 4.
 
-1. A short plan of how it will answer (the ultrathink notice fired).
-2. A tool list matching `contracts/tool-rosters/omega-prime.yaml` — with
-   the tool host attached; without it, the bot says which tools
-   live behind the host instead of inventing results.
-3. The approval-gated tools named as needing approval.
-4. No secrets, ids, or tokens quoted back.
-
-If any line is missing, re-check the step above it. Builders can
-also run the local verification:
+For source-local preparation checks, run the commands below. Their results do
+not attest that an account imported the template or attached to this host:
 
 ```bash
 .venv/bin/python -m omega_prime.setup_check --root .
+.venv/bin/python -m omega_prime.tooling.plugin --check
 ```
+
+`setup_check` includes a `plugin` row; `tooling.plugin --check` exits 1 when
+a generated plugin file (`.cursor-plugin/`, `mcp.json`, the command files or
+the HTTPS example) drifts from its sources. `--write` regenerates them.
 
 The Prime capability families are off by default. To turn them on and drive
 the bot with them, see `docs/driving-the-bot.md`.

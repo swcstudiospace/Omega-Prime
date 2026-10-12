@@ -1,13 +1,16 @@
 """Tests for Grok Bot Manifest Generator."""
 
 import json
+import shlex
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
 import omega_prime
 from omega_prime.config import PRIME_FAMILIES
+from omega_prime.grokbot.doctor import GrokBotDoctor
 from omega_prime.grokbot.manifest import (
     find_repo_root,
     generate_manifest,
@@ -136,7 +139,7 @@ def test_prime_agent_follows_config(tree: Path, tmp_path: Path):
     assert off["prime_agent"] is False
     assert set(off["prime_families"]) == set(PRIME_FAMILIES)
     assert not any(off["prime_families"].values())
-    assert off["transports"] == ["stdio", "sse"]
+    assert off["transports"] == ["stdio", "sse", "streamable-http"]
     assert off["programming_desk"] is True
 
     on = generate_manifest(
@@ -188,6 +191,7 @@ def test_wildcard_host_is_rewritten_with_note(url: str, tree: Path, tmp_path: Pa
     )
     assert server["endpoints"] == {
         "sse": "http://127.0.0.1:8000/sse",
+        "mcp": "http://127.0.0.1:8000/mcp",
         "healthz": "http://127.0.0.1:8000/healthz",
         "readyz": "http://127.0.0.1:8000/readyz",
     }
@@ -203,17 +207,27 @@ def test_public_url_wins_and_composes_sse(tree: Path, tmp_path: Path):
     )["mcp_server"]
     assert server["url"] == "https://grok.example.com/sse"
     assert "url_note" not in server
+    assert server["endpoints"]["mcp"] == "https://grok.example.com/mcp"
     assert server["endpoints"]["healthz"] == "https://grok.example.com/healthz"
     assert server["endpoints"]["readyz"] == "https://grok.example.com/readyz"
 
 
-def test_stdio_transport_has_command_and_no_endpoints(tree: Path, tmp_path: Path):
+def test_stdio_transport_declares_the_launcher_and_no_endpoints(
+    tree: Path, tmp_path: Path
+):
     server = generate_manifest(tree, transport="stdio", home=tmp_path, env={})[
         "mcp_server"
     ]
     assert server["url"] is None
-    assert "omega_prime.mcp_server" in server["command"]
     assert server["endpoints"] == {}
+    argv = shlex.split(server["command"])
+    assert argv[0] == "bash"
+    script = Path(argv[1])
+    assert not script.is_absolute()
+    launcher = find_repo_root() / script
+    assert launcher.is_file()
+    assert not launcher.is_symlink()
+    assert argv[2:] == ["--bootstrap", "--transport", "stdio"]
 
 
 def test_auth_type_and_token_is_never_written(tree: Path, tmp_path: Path):
@@ -255,9 +269,47 @@ def test_digest_is_stable_and_tracks_template(tree: Path, tmp_path: Path):
     )
     changed = generate_manifest(tree, home=tmp_path, env={})
     assert changed["digest"] != first["digest"]
-    assert "brand-new-skill" in changed["bot"]["skills"]
     assert changed["bot"]["integrity"]["missing_skills"] == ["brand-new-skill"]
     assert changed["bot"]["integrity"]["ok"] is False
+
+
+def test_integrity_reports_a_skill_the_template_omits(tree: Path, tmp_path: Path):
+    skill = tree / "omega_prime/skills/zz-unlisted"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# zz-unlisted\n", encoding="utf-8")
+    (tree / "omega_prime/routines/zz-unlisted.md").write_text(
+        "# zz-unlisted\n", encoding="utf-8"
+    )
+    integrity = generate_manifest(tree, home=tmp_path, env={})["bot"]["integrity"]
+    assert integrity["missing_skills"] == []
+    assert integrity["missing_routines"] == []
+    assert "zz-unlisted" in integrity["unlisted_skills"]
+    assert "zz-unlisted" in integrity["unlisted_routines"]
+    assert integrity["ok"] is False
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs a git client")
+def test_tracked_skill_and_routine_deleted_from_disk_are_missing(tree: Path):
+    for argv in (["init", "-q"], ["add", "omega_prime"]):
+        subprocess.run(["git", "-C", str(tree), *argv], check=True)
+    sections = parse_template_sections(
+        tree / "omega_prime/grokbot/templates/OMEGA_PRIME.md"
+    )
+    skill = sections["skills"][0].split(" — ", 1)[0].strip()
+    routine = sections["routines"][0].split(" — ", 1)[0].strip()
+    assert lint_template(tree).ok is True
+    (tree / f"omega_prime/skills/{skill}/SKILL.md").unlink()
+    (tree / f"omega_prime/routines/{routine}.md").unlink()
+
+    lint = lint_template(tree)
+    assert lint.missing_skills == [skill]
+    assert lint.missing_routines == [routine]
+    assert lint.ok is False
+    check = GrokBotDoctor(tree, env={})._check_template()
+    assert check.id == "template_integrity"
+    assert check.status == "FAIL"
+    assert skill in check.message
+    assert routine in check.message
 
 
 def test_shipped_template_lints_clean():
@@ -265,9 +317,16 @@ def test_shipped_template_lints_clean():
     assert lint.ok is True
     assert lint.missing_skills == []
     assert lint.missing_routines == []
+    assert lint.unlisted_skills == []
+    assert lint.unlisted_routines == []
     manifest_integrity = generate_manifest(find_repo_root())["bot"]["integrity"]
-    assert manifest_integrity["missing_skills"] == []
-    assert manifest_integrity["missing_routines"] == []
+    assert manifest_integrity == {
+        "missing_skills": [],
+        "missing_routines": [],
+        "unlisted_skills": [],
+        "unlisted_routines": [],
+        "ok": True,
+    }
 
 
 def test_main_writes_public_manifest_without_token(

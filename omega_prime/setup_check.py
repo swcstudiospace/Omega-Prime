@@ -1,9 +1,9 @@
 """Setup smoke check: verify an Omega Prime install end to end, locally.
 
 `python -m omega_prime.setup_check --root <repo>`: runs the roster, template,
-assembly, registry, ultrathink, and substrate checks and exits 0 only when
-every required check passes. Skips (ultrathink/substrate unconfigured) are
-reported, never failures.
+assembly, plugin, registry, ultrathink, and substrate checks and exits 0 only
+when every required check passes. Skips (ultrathink/substrate unconfigured)
+are reported, never failures.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from omega_prime.assemble import load_roster, template_gaps
+from omega_prime.assemble import load_roster
 from omega_prime.mcp_server import default_registry, roster_names
 
 
@@ -29,11 +29,29 @@ def check_roster(root: Path) -> tuple[bool, str]:
 
 
 def check_template(root: Path) -> tuple[bool, str]:
-    """Template sections stay empty and name nothing missing."""
-    gaps = template_gaps(root / "omega_prime")
-    if gaps:
-        return False, f"template gaps: {', '.join(gaps)}"
-    return True, "template ok (sections empty, no gaps)"
+    """Template entries resolve to checked-in files and list them all.
+
+    Both directions, like the doctor's `template_integrity` row: every entry
+    must resolve to a checked-in skill or routine file, and every checked-in
+    skill and routine must be listed.
+    """
+    from omega_prime.grokbot.manifest import lint_template
+
+    lint = lint_template(root)
+    if not lint.ok:
+        parts = []
+        if lint.missing_skills:
+            parts.append("missing skills: " + ", ".join(lint.missing_skills))
+        if lint.missing_routines:
+            parts.append("missing routines: " + ", ".join(lint.missing_routines))
+        if lint.unlisted_skills:
+            parts.append("unlisted skills: " + ", ".join(lint.unlisted_skills))
+        if lint.unlisted_routines:
+            parts.append("unlisted routines: " + ", ".join(lint.unlisted_routines))
+        return False, "template and disk disagree (" + "; ".join(parts) + ")"
+    return True, (
+        "template ok (every entry resolves and every checked-in file is listed)"
+    )
 
 
 def check_assembly(root: Path) -> tuple[bool, str]:
@@ -54,6 +72,23 @@ def check_assembly(root: Path) -> tuple[bool, str]:
     except OSError as exc:
         return False, f"cannot read {shipped}: {exc}"
     return True, "assembly up to date"
+
+
+def check_plugin(root: Path) -> tuple[bool, str]:
+    """Generated Cursor plugin set matches a fresh render (no subprocess)."""
+    from omega_prime.tooling import plugin
+
+    try:
+        fresh = plugin.render(root)
+    except plugin.PluginError as exc:
+        return False, f"plugin generation failed: {'; '.join(exc.problems)}"
+    problems = plugin.drift(root, fresh)
+    if problems:
+        return False, (
+            f"plugin set is stale: {'; '.join(problems)}; "
+            f"rerun {plugin.GENERATOR} --write"
+        )
+    return True, f"plugin up to date ({len(fresh)} generated files)"
 
 
 def check_registry(root: Path) -> tuple[bool, str]:
@@ -79,13 +114,15 @@ def check_registry(root: Path) -> tuple[bool, str]:
     missing = [name for name in roster if name not in served]
     # Prime families are config-gated (default off), including rlm and
     # messaging. With a flag on, default_registry serves that family. This
-    # check still treats a disabled family as an expected absence.
+    # check still treats a disabled family as an expected absence. The Red
+    # Team family joins them through its top-level redteam.enabled gate.
     from omega_prime.tools.agent_message import MESSAGING_TOOL_NAMES
     from omega_prime.tools.autonomous import AUTONOMOUS_TOOL_NAMES
     from omega_prime.tools.goals import GOAL_TOOL_NAMES
     from omega_prime.tools.harness import HARNESS_TOOL_NAMES
     from omega_prime.tools.heartbeat import HEARTBEAT_TOOL_NAMES
     from omega_prime.tools.prime_runtime import KERNEL_TOOL_NAMES
+    from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
     from omega_prime.tools.rlm import RLM_TOOL_NAMES
 
     gated = (
@@ -96,6 +133,7 @@ def check_registry(root: Path) -> tuple[bool, str]:
         | set(AUTONOMOUS_TOOL_NAMES)
         | set(MESSAGING_TOOL_NAMES)
         | set(KERNEL_TOOL_NAMES)
+        | set(REDTEAM_TOOL_NAMES)
     )
     missing = [name for name in missing if name not in gated]
     if missing:
@@ -157,6 +195,7 @@ CHECKS = (
     ("roster", check_roster),
     ("template", check_template),
     ("assembly", check_assembly),
+    ("plugin", check_plugin),
     ("registry", check_registry),
     ("ultrathink", check_ultrathink),
     ("substrate", check_substrate),

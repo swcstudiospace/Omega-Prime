@@ -9,9 +9,17 @@ on:
 # Python dependency audit. Pinned upstream and the product's native bridge
 # license gates run independently in rust-parity.yml.
 
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pip-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v5

@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import threading
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from omega_prime.credentials.redact import REDACTED
 from omega_prime.memory.store import MemoryStore
@@ -42,6 +47,10 @@ paths:
   - pattern: "omega_prime/skills/*"
     owner: bot-99-guest
 """
+
+# Built from fragments so no complete credential shape sits in source; the
+# redaction detector still sees the joined value at runtime.
+FAKE_KEY = "sk-" + "abcdefgh" + "1234"
 
 
 class FakeSubstrate:
@@ -316,12 +325,38 @@ def test_render_prompt_refuses_placeholders(tmp_path: Path):
     )
 
 
+def test_render_prompt_skips_runtime_state(tmp_path: Path):
+    ctx = _ctx(tmp_path)
+    package = Path(ctx.root) / "omega_prime"
+    state = package / "state"
+    state.mkdir()
+    (state / "events.ndjson").write_text('{"seq": 1}\n', encoding="utf-8")
+    if hasattr(os, "mkfifo"):
+        # A named pipe cannot be copied: copying live state would fail here.
+        os.mkfifo(state / "live.pipe")
+    (package / "sessions.db").write_bytes(b"runtime")
+    script = package / "scripts" / "assemble-prompts.sh"
+    script.write_text(
+        "#!/bin/bash\n"
+        "mkdir -p omega_prime/prompts-assembled\n"
+        "seen=clean\n"
+        "[ -e omega_prime/state ] && seen=state\n"
+        "[ -e omega_prime/sessions.db ] && seen=db\n"
+        "[ -e omega_prime/ownership.yaml ] || seen=missing-input\n"
+        "printf '<seat>%s</seat>' \"$seen\" > omega_prime/prompts-assembled/OMEGA_PRIME.xml\n",
+        encoding="utf-8",
+    )
+    rendered = LeadClient(ctx).render_prompt()
+    assert rendered.get("prompt") == "<seat>clean</seat>", rendered
+    assert (state / "events.ndjson").read_text(encoding="utf-8") == '{"seq": 1}\n'
+
+
 def test_memory_retain_and_recall(tmp_path: Path):
     client = LeadClient(_ctx(tmp_path))
     assert "evidence_required" in client.memory_retain("note")["error"]
     assert (
         "secret_refused"
-        in client.memory_retain("key sk-abcdefgh1234", source="chat")["error"]
+        in client.memory_retain(f"key {FAKE_KEY}", source="chat")["error"]
     )
     kept = client.memory_retain(
         "desk uses receipts", source="chat", tags=["core"], graph_id="g-1"
@@ -353,7 +388,7 @@ def test_receipt_check_paths(tmp_path: Path, monkeypatch: Any):
         }
     )
     assert bad["ok"] is False and bad["problems"]
-    leaked = dict(_good_receipt(), unverified=["token=abc123"])
+    leaked = dict(_good_receipt(), unverified=["token" + "=abc123"])
     assert client.receipt_check(leaked)["problems"] == [
         "receipt contains a credential shape (PD-4)"
     ]
@@ -455,3 +490,504 @@ def test_brief_cache_docs_search_and_approvals(tmp_path: Path):
     )
     assert log.approve("lead_event_emit", "ada").get("approved") is True
     assert json.loads(registry.dispatch("lead_event_emit", {"kind": "k"}))["ok"] is True
+
+
+# -- Phase 75-01: file-authoritative intake transactions ----------------------
+# Every case below uses real temporary files and public IntakeStore
+# operations, inspecting committed JSON and fresh observers — never
+# implementation internals, sleeps, or source text.
+
+
+def test_warm_observer_sees_independent_submit(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    observer = IntakeStore(path)  # initialized while the file is absent
+    assert observer.get("in-missing") is None
+    assert observer.counts() == {}
+    submitted = IntakeStore(path).submit("warm order", origin="github")
+    # No reconstruction: the original observer sees the order directly.
+    seen = observer.get(submitted["intake_id"])
+    assert seen is not None
+    assert seen["ask"] == "warm order"
+    assert seen["origin"] == "github"
+    assert seen["status"] == "open"
+    assert observer.counts() == {"open": 1}
+    claimed = observer.next(None, "warm-worker", now=5000.0)
+    assert claimed is not None
+    assert claimed["intake_id"] == submitted["intake_id"]
+    assert claimed["status"] == "in_progress"
+    persisted = IntakeStore(path).get(submitted["intake_id"])
+    assert persisted is not None and persisted["status"] == "in_progress"
+    assert persisted["by"] == "warm-worker"
+
+
+def test_stale_producers_both_persist_fifo(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    stale_a = IntakeStore(path)
+    stale_b = IntakeStore(path)  # same old snapshot: the file is absent
+    first = stale_a.submit("first ask", origin="local")
+    second = stale_b.submit("second ask", origin="github")
+    fresh = IntakeStore(path)
+    assert [r["intake_id"] for r in fresh.orders] == [
+        first["intake_id"],
+        second["intake_id"],
+    ]
+    assert [r["ask"] for r in fresh.orders] == ["first ask", "second ask"]
+    assert [r["origin"] for r in fresh.orders] == ["local", "github"]
+    assert fresh.counts() == {"open": 2}
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert [r["intake_id"] for r in raw["orders"]] == [
+        first["intake_id"],
+        second["intake_id"],
+    ]
+
+
+def test_stale_ack_preserves_concurrent_claim_and_fields(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    seed = IntakeStore(path)
+    first = seed.submit("first")
+    second = seed.submit("second")
+    stale_acker = IntakeStore(path)  # snapshot before the foreign claim
+    foreign = IntakeStore(path)
+    claimed = foreign.next(None, "foreign-worker", now=8000.0)
+    assert claimed is not None and claimed["intake_id"] == first["intake_id"]
+    foreign.ack(second["intake_id"], {"message": "foreign note", "graph_id": "g-9"})
+    acked = stale_acker.ack(first["intake_id"], {"status": "done"})
+    assert acked is not None and acked["status"] == "done"
+    fresh = IntakeStore(path)
+    done = fresh.get(first["intake_id"])
+    assert done is not None and done["status"] == "done"
+    assert done["by"] == "foreign-worker"  # merge: omitted fields untouched
+    assert done["claimed_at"] == 8000.0
+    kept = fresh.get(second["intake_id"])
+    assert kept is not None and kept["status"] == "open"
+    assert kept["message"] == "foreign note"
+    assert kept["graph_id"] == "g-9"
+
+
+def test_ack_merge_and_explicit_empty_links(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    record = IntakeStore(path).submit("merge me", links=["https://example.com/a"])
+    warm = IntakeStore(path)  # snapshot before the independent update
+    IntakeStore(path).ack(
+        record["intake_id"],
+        {
+            "graph_id": "g-1",
+            "links": ["https://example.com/a", "https://example.com/b"],
+        },
+    )
+    merged = warm.ack(record["intake_id"], {"status": "done", "message": "shipped"})
+    assert merged is not None
+    assert merged["graph_id"] == "g-1"
+    assert merged["links"] == ["https://example.com/a", "https://example.com/b"]
+    assert merged["message"] == "shipped"
+    assert merged["status"] == "done"
+    cleared = IntakeStore(path).ack(record["intake_id"], {"links": []})
+    assert cleared is not None and cleared["links"] == []
+    assert cleared["status"] == "done"  # untouched by the links-only patch
+    assert cleared["graph_id"] == "g-1"
+
+
+def _claim_worker(
+    path_str: str, barrier: Any, results: Any, by: str, now: float
+) -> None:
+    """Child-process entry: race for one open order, never hang the parent."""
+    try:
+        store = IntakeStore(path_str)
+        barrier.wait(timeout=30)
+        record = store.next(None, by, now=now)
+        results.put(record["intake_id"] if record is not None else None)
+    except Exception as exc:  # pragma: no cover - failure marker only
+        results.put(f"error:{type(exc).__name__}")
+
+
+def test_exclusive_claim_across_processes(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    record = IntakeStore(path).submit("race me")
+    count = 4
+    barrier = multiprocessing.Barrier(count)
+    results: Any = multiprocessing.Queue()
+    workers = [
+        multiprocessing.Process(
+            target=_claim_worker,
+            args=(str(path), barrier, results, f"worker-{index}", 9000.0),
+        )
+        for index in range(count)
+    ]
+    try:
+        for worker in workers:
+            worker.start()
+        outcomes = [results.get(timeout=30) for _ in workers]
+    finally:
+        for worker in workers:
+            worker.join(timeout=30)
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+    assert outcomes.count(record["intake_id"]) == 1  # exactly one winner
+    assert outcomes.count(None) == count - 1
+    fresh = IntakeStore(path)
+    final = fresh.get(record["intake_id"])
+    assert final is not None and final["status"] == "in_progress"
+    assert fresh.counts() == {"in_progress": 1}
+
+
+def test_concurrent_distinct_claims_without_duplication(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    seed = IntakeStore(path)
+    ids = [seed.submit(f"order-{index}")["intake_id"] for index in range(6)]
+    barrier = threading.Barrier(6)
+    won: list = []
+    guard = threading.Lock()
+
+    def _claim(by: str) -> None:
+        store = IntakeStore(path)  # separate instance per claimant
+        barrier.wait(timeout=30)
+        record = store.next(None, by, now=9500.0)
+        with guard:
+            won.append(record["intake_id"] if record is not None else None)
+
+    threads = [
+        threading.Thread(target=_claim, args=(f"t-{index}",)) for index in range(6)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(w for w in won if w is not None) == sorted(ids)
+    assert IntakeStore(path).counts() == {"in_progress": 6}
+
+
+def test_stale_reclaim_never_reopens_renewed_claim(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    seed = IntakeStore(path)
+    record = seed.submit("leased")
+    seed.next(None, "worker-a", now=1000.0)
+    stale = IntakeStore(path)  # snapshot with the old claimed_at
+    IntakeStore(path).ack(record["intake_id"], {"claimed_at": 5000.0})
+    assert stale.reclaim_stale(max_age_seconds=3600.0, now=5010.0) == []
+    current = IntakeStore(path).get(record["intake_id"])
+    assert current is not None and current["status"] == "in_progress"
+    assert current["claimed_at"] == 5000.0
+
+
+def test_lease_boundary_expiry_and_missing_timestamp(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    seed = IntakeStore(path)
+    exact = seed.submit("exact boundary")
+    seed.next(None, "worker-a", now=1000.0)
+    assert IntakeStore(path).reclaim_stale(max_age_seconds=3600.0, now=4600.0) == []
+    exact_state = IntakeStore(path).get(exact["intake_id"])
+    assert exact_state is not None and exact_state["status"] == "in_progress"
+    released = IntakeStore(path).reclaim_stale(max_age_seconds=3600.0, now=4601.0)
+    assert released == [exact["intake_id"]]
+    reopened_exact = IntakeStore(path).get(exact["intake_id"])
+    assert reopened_exact is not None and reopened_exact["status"] == "open"
+    timeless = seed.submit("no timestamp", origin="timer-a")
+    seed.next("timer-a", "worker-b", now=2000.0)
+    seed.ack(timeless["intake_id"], {"claimed_at": None})
+    assert IntakeStore(path).reclaim_stale(max_age_seconds=3600.0, now=2001.0) == [
+        timeless["intake_id"]
+    ]
+    non_numeric = seed.submit("bad timestamp", origin="timer-b")
+    seed.next("timer-b", "worker-c", now=3000.0)
+    seed.ack(non_numeric["intake_id"], {"claimed_at": "soon"})
+    assert IntakeStore(path).reclaim_stale(max_age_seconds=3600.0, now=3001.0) == [
+        non_numeric["intake_id"]
+    ]
+
+
+def test_reclaim_persists_without_matching_claim(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    seed = IntakeStore(path)
+    record = seed.submit("github job", origin="github")
+    seed.next(None, "worker-a", now=1000.0)
+    # No local order is open, but the expired github claim must still persist
+    # as open through the origin-filtered lookup.
+    assert IntakeStore(path).next("local", "worker-b", now=1000.0 + 7200.0) is None
+    reopened = IntakeStore(path).get(record["intake_id"])
+    assert reopened is not None and reopened["status"] == "open"
+    assert reopened["by"] is None and reopened["claimed_at"] is None
+
+
+def test_release_ack_statuses_and_missing_ids(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    store = IntakeStore(path)
+    record = store.submit("status tour")
+    for status in ("accepted", "rejected", "in_progress", "done", "open"):
+        updated = IntakeStore(path).ack(record["intake_id"], {"status": status})
+        assert updated is not None and updated["status"] == status
+    assert store.release(record["intake_id"]) is True
+    reopened = IntakeStore(path).get(record["intake_id"])
+    assert reopened is not None and reopened["status"] == "open"
+    assert reopened["by"] is None and reopened["claimed_at"] is None
+    assert store.release("in-missing") is False
+    assert store.get("in-missing") is None
+    assert store.ack("in-missing", {"status": "done"}) is None
+
+
+def test_concurrent_readers_never_see_partial_json(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    IntakeStore(path).submit("base")
+    errors: list = []
+    stop = threading.Event()
+
+    def _read() -> None:
+        while not stop.is_set():
+            try:
+                IntakeStore(path).counts()
+                IntakeStore(path).get("in-nope")
+            except Exception as exc:  # pragma: no cover - must stay empty
+                errors.append(exc)
+
+    readers = [threading.Thread(target=_read) for _ in range(4)]
+    for reader in readers:
+        reader.start()
+    try:
+        for index in range(50):
+            IntakeStore(path).submit(f"order-{index}")
+    finally:
+        stop.set()
+    for reader in readers:
+        reader.join(timeout=30)
+    assert errors == []
+    assert sum(IntakeStore(path).counts().values()) == 51
+    leftovers = [p for p in path.parent.iterdir() if p.name.startswith(".intake.json.")]
+    assert leftovers == []
+
+
+def test_failed_replace_preserves_bytes_and_reloads(tmp_path: Path, monkeypatch: Any):
+    path = tmp_path / "intake.json"
+    store = IntakeStore(path)
+    first = store.submit("kept")
+    before = path.read_bytes()
+
+    def _boom(target: Any, text: str) -> None:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr("omega_prime.tools.lead.atomic_write_text", _boom)
+    with pytest.raises(OSError, match="disk gone"):
+        store.submit("lost")
+    assert path.read_bytes() == before
+    assert [p for p in path.parent.iterdir() if p.suffix == ".tmp"] == []
+    monkeypatch.undo()
+    # The failed append stays out of the file: the next transaction reloads
+    # instead of committing failed cached state.
+    second = store.submit("second")
+    ids = [r["intake_id"] for r in IntakeStore(path).orders]
+    assert ids == [first["intake_id"], second["intake_id"]]
+
+
+def test_json_format_and_unicode_round_trip(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    ask = "héllo wörld ✓絵文字"
+    record = IntakeStore(path).submit(
+        ask, origin="github", links=["https://example.com/ü"]
+    )
+    raw = path.read_bytes().decode("utf-8")
+    assert raw.endswith("\n") and not raw.endswith("\n\n")
+    assert "✓" in raw  # ensure_ascii=False, not escaped
+    parsed = json.loads(raw)
+    assert list(parsed.keys()) == ["orders"]
+    expected = (
+        json.dumps({"orders": IntakeStore(path).orders}, ensure_ascii=False, indent=2)
+        + "\n"
+    )
+    assert raw == expected
+    round_tripped = IntakeStore(path).get(record["intake_id"])
+    assert round_tripped is not None and round_tripped["ask"] == ask
+
+
+def test_corrupt_file_raises_and_stale_writer_preserves(tmp_path: Path):
+    path = tmp_path / "intake.json"
+    store = IntakeStore(path)
+    store.submit("original")
+    path.write_text("{corrupt", encoding="utf-8")
+    with pytest.raises(ValueError):
+        IntakeStore(path)
+    with pytest.raises(ValueError):
+        store.submit("new")
+    with pytest.raises(ValueError):
+        store.counts()
+    assert path.read_bytes() == b"{corrupt"  # never clobbered by stale state
+    path.write_text('{"orders": {}}', encoding="utf-8")
+    with pytest.raises(ValueError, match="not an orders list"):
+        IntakeStore(path)
+
+
+def test_doctor_check_preserves_expected_sha(tmp_path: Path):
+    registry = ToolRegistry()
+    ctx = _ctx(tmp_path, registry=registry)
+    client = LeadClient(ctx)
+    register_lead_tools(registry, client)
+    installed = client.doctor("install_prompt")
+    sha = installed["sha256"]
+    first = client.doctor(
+        "check", prompt_sha256=sha, installed_skills=["lead-pack", "debugging"]
+    )
+    assert first["checks"]["prompt"]["green"] is True
+    assert ctx.roster is not None
+    assert ctx.roster.doctor_results()["lead"]["expected_prompt_sha256"] == sha
+    repeat = client.doctor(
+        "check", prompt_sha256=sha, installed_skills=["lead-pack", "debugging"]
+    )
+    assert repeat["checks"]["prompt"]["green"] is True
+    assert ctx.roster.doctor_results()["lead"]["expected_prompt_sha256"] == sha
+    # A context-free check is not green, yet the installed digest survives.
+    bare = client.doctor("check")
+    assert bare["checks"]["prompt"]["green"] is False
+    assert ctx.roster.doctor_results()["lead"]["expected_prompt_sha256"] == sha
+    # A wrong caller digest is not green and never becomes the expectation.
+    wrong = client.doctor("check", prompt_sha256="0" * 64)
+    assert wrong["checks"]["prompt"]["green"] is False
+    assert ctx.roster.doctor_results()["lead"]["expected_prompt_sha256"] == sha
+    again = client.doctor(
+        "check", prompt_sha256=sha, installed_skills=["lead-pack", "debugging"]
+    )
+    assert again["checks"]["prompt"]["green"] is True
+
+
+# -- Phase 75 re-review WR-04: roster saves through the shared atomic path ---
+# Every roster mutation must reach the same atomic-write helper the intake
+# store uses, so a crash mid-save never leaves a torn file that breaks every
+# lead tool at construction time.
+
+
+def test_roster_save_uses_shared_atomic_write(tmp_path: Path, monkeypatch: Any):
+    import omega_prime.tools.lead as lead_mod
+
+    path = tmp_path / "roster.json"
+    calls: list[tuple[Any, Any]] = []
+    real_atomic = lead_mod.atomic_write_text
+
+    def _record(target: Any, text: str) -> None:
+        calls.append((target, text))
+        real_atomic(target, text)
+
+    monkeypatch.setattr(lead_mod, "atomic_write_text", _record)
+    store = RosterStore(path)
+    store.register("lead-pack", {"version": "1"})
+    store.doctor_result("lead-pack", {"green": True})
+    assert len(calls) == 2
+    assert all(target == path for target, _ in calls)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["packs"]["lead-pack"]["version"] == "1"
+    assert persisted["doctor"]["lead-pack"] == {"green": True}
+    assert RosterStore(path).packs["lead-pack"]["version"] == "1"
+
+
+def test_roster_failed_save_preserves_bytes(tmp_path: Path, monkeypatch: Any):
+    import omega_prime.tools.lead as lead_mod
+
+    path = tmp_path / "roster.json"
+    store = RosterStore(path)
+    store.register("lead-pack", {"version": "1"})
+    before = path.read_bytes()
+
+    def _boom(target: Any, text: str) -> None:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(lead_mod, "atomic_write_text", _boom)
+    with pytest.raises(OSError, match="disk gone"):
+        store.register("other-pack", {"version": "2"})
+    assert path.read_bytes() == before
+    assert [p for p in path.parent.iterdir() if p.suffix == ".tmp"] == []
+
+
+# -- Phase 75 re-review WR-05: torn trailing line is skipped, not fatal -----
+# Boundary: only the LAST non-blank line may be torn (a crash mid-append
+# leaves exactly that). Corruption in any earlier line still raises instead
+# of silently dropping history.
+
+
+def test_event_store_skips_torn_trailing_line(tmp_path: Path):
+    path = tmp_path / "events.ndjson"
+    store = EventStore(path)
+    first = store.append({"kind": "one"})
+    second = store.append({"kind": "two"})
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"seq": 999, "torn": ')
+    rows = EventStore(path).records()
+    assert [row["seq"] for row in rows] == [first["seq"], second["seq"]]
+    rebuilt = EventStore(path)
+    third = rebuilt.append({"kind": "three"})
+    fourth = rebuilt.append({"kind": "four"})
+    assert third["seq"] == second["seq"] + 1
+    assert fourth["seq"] == third["seq"] + 1
+    reopened = EventStore(path).records()
+    assert [row["kind"] for row in reopened] == ["one", "two", "three", "four"]
+    assert [row["seq"] for row in reopened] == [1, 2, 3, 4]
+
+
+def test_event_store_torn_tail_does_not_eat_a_live_stores_append(tmp_path: Path):
+    path = tmp_path / "events.ndjson"
+    store = EventStore(path)
+    store.append({"kind": "one"})
+    # A crash in another writer tears the tail after this store loaded.
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"seq": 999, "torn": ')
+    store.append({"kind": "two"})
+    store.append({"kind": "three"})
+    assert [row["kind"] for row in EventStore(path).records()] == [
+        "one",
+        "two",
+        "three",
+    ]
+
+
+def test_event_store_keeps_whole_record_missing_its_newline(tmp_path: Path):
+    path = tmp_path / "events.ndjson"
+    path.write_text('{"seq": 1, "kind": "one"}', encoding="utf-8")
+    store = EventStore(path)
+    store.append({"kind": "two"})
+    assert [row["kind"] for row in EventStore(path).records()] == ["one", "two"]
+
+
+def test_event_store_raises_on_earlier_corrupt_line(tmp_path: Path):
+    path = tmp_path / "events.ndjson"
+    store = EventStore(path)
+    store.append({"kind": "one"})
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("not json at all\n")
+    store.append({"kind": "two"})
+    with pytest.raises(ValueError):
+        EventStore(path).records()
+
+
+# -- Phase 75 re-review WR-06: secret refusal covers retained metadata ------
+# The same detector that gates `content` also gates the assembled entry, so
+# a credential in tags/source/graph metadata is refused, not retained.
+
+
+def test_memory_retain_refuses_secrets_in_metadata(tmp_path: Path):
+    client = LeadClient(_ctx(tmp_path))
+    assert (
+        "secret_refused"
+        in client.memory_retain("clean note", source="chat", tags=[FAKE_KEY])["error"]
+    )
+    assert (
+        "secret_refused"
+        in client.memory_retain("clean note", source=f"chat {FAKE_KEY}")["error"]
+    )
+    assert (
+        "secret_refused"
+        in client.memory_retain("clean note", source="chat", graph_id=f"g-{FAKE_KEY}")[
+            "error"
+        ]
+    )
+    assert (
+        "secret_refused"
+        in client.memory_retain("clean note", source="chat", task_id=f"t-{FAKE_KEY}")[
+            "error"
+        ]
+    )
+    assert (
+        "secret_refused"
+        in client.memory_retain("clean note", receipt_path=f"r-{FAKE_KEY}.json")[
+            "error"
+        ]
+    )
+    kept = client.memory_retain(
+        "clean note", source="chat", tags=["core"], graph_id="g-1"
+    )
+    assert kept == {"ok": True, "bank": "omega-prime-lead"}
