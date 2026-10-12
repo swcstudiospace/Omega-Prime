@@ -904,15 +904,13 @@ def test_memory_retain_refuses_secrets_in_metadata(tmp_path: Path):
     client = LeadClient(_ctx(tmp_path))
     assert (
         "secret_refused"
-        in client.memory_retain(
-            "clean note", source="chat", tags=["sk-abcdefgh1234"]
-        )["error"]
+        in client.memory_retain("clean note", source="chat", tags=["sk-abcdefgh1234"])[
+            "error"
+        ]
     )
     assert (
         "secret_refused"
-        in client.memory_retain(
-            "clean note", source="chat sk-abcdefgh1234"
-        )["error"]
+        in client.memory_retain("clean note", source="chat sk-abcdefgh1234")["error"]
     )
     assert (
         "secret_refused"
@@ -928,9 +926,9 @@ def test_memory_retain_refuses_secrets_in_metadata(tmp_path: Path):
     )
     assert (
         "secret_refused"
-        in client.memory_retain(
-            "clean note", receipt_path="r-sk-abcdefgh1234.json"
-        )["error"]
+        in client.memory_retain("clean note", receipt_path="r-sk-abcdefgh1234.json")[
+            "error"
+        ]
     )
     kept = client.memory_retain(
         "clean note", source="chat", tags=["core"], graph_id="g-1"

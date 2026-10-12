@@ -439,9 +439,7 @@ def test_git_vcs_rejects_option_like_refs_without_spawning(tmp_path, monkeypatch
             call()
 
 
-def test_git_vcs_rejects_malformed_refs_and_separates_options(
-    tmp_path, monkeypatch
-):
+def test_git_vcs_rejects_malformed_refs_and_separates_options(tmp_path, monkeypatch):
     from omega_prime.tools.mobile import _git_vcs
 
     seen: list[list[str]] = []
