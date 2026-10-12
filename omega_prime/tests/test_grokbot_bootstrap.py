@@ -390,6 +390,36 @@ def test_owned_venv_with_an_interrupted_swap_stamp_is_rebuilt(tmp_path: Path) ->
     assert json.loads(tree.stamp.read_text(encoding="utf-8"))["lock_sha256"]
 
 
+def test_catalog_content_invalid_exits_12_with_detail_before_serving(
+    tmp_path: Path,
+) -> None:
+    """WR-03: content `--write` cannot repair is 12 with content_invalid."""
+    tree = _tree(tmp_path)
+    proc = _run(tree, "--bootstrap", "--transport", "stdio", STUB_CHECK_EXIT="3")
+    line = _assert_failed(proc, 12, "catalog_drift")
+    assert line["detail"] == "content_invalid"
+    assert proc.stdout == b""
+    assert b"fix the named source files" in proc.stderr
+    assert tree.calls_of("plugin") == [["--root", str(tree.root), "--check"]]
+    assert tree.calls_of("oneclick") == []
+
+
+@pytest.mark.parametrize("check_exit", ["4", "134"])
+def test_plugin_check_crash_exits_11_naming_the_step(
+    tmp_path: Path, check_exit: str
+) -> None:
+    """WR-03: an interpreter/import crash is 11 with step plugin_check."""
+    tree = _tree(tmp_path)
+    proc = _run(
+        tree, "--bootstrap", "--transport", "stdio", STUB_CHECK_EXIT=check_exit
+    )
+    line = _assert_failed(proc, 11, "install_failed")
+    assert line["step"] == "plugin_check"
+    assert proc.stdout == b""
+    assert tree.calls_of("plugin") == [["--root", str(tree.root), "--check"]]
+    assert tree.calls_of("oneclick") == []
+
+
 def test_catalog_drift_exits_12_naming_stale_paths_before_serving(
     tmp_path: Path,
 ) -> None:

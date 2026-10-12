@@ -49,8 +49,9 @@ What each step does:
    Running it first means the MCP server's first start finds a matching
    completion stamp and skips the install. Failures exit 10
    (`missing_prerequisite`), 11 (`install_failed`) or 12 (`catalog_drift`)
-   with one JSON line on stderr; see
-   [exit codes](../../docs/grok-bot-native.md#exit-codes).
+   with one JSON line on stderr: a plain 12 is drift `--write` repairs, while
+   a 12 with `"detail":"content_invalid"` names source files to fix by hand;
+   see [exit codes](../../docs/grok-bot-native.md#exit-codes).
 3. The server command is the root `mcp.json` entry,
    `bash ${CURSOR_PLUGIN_ROOT}/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`,
    with `${CURSOR_PLUGIN_ROOT}` replaced by the absolute path

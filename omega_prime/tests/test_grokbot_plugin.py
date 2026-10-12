@@ -32,6 +32,7 @@ from omega_prime.tooling.plugin import (
     MARKETPLACE,
     MCP_JSON,
     PLUGIN_MANIFEST,
+    PluginEnvError,
     PluginError,
     main,
     render,
@@ -506,15 +507,16 @@ def _https_extra_server(tree: Path) -> None:
 
 SKILL_SOURCE = "omega_prime/skills/code-review/SKILL.md"
 
-DRIFT_CASES: list[tuple[str, Callable[[Path], None], list[str], str | None]] = [
-    ("modified-file", _modified_file, [MCP_JSON], None),
-    ("modified-command", _modified_command, [f"{COMMANDS_DIR}/omega-help.md"], None),
-    ("orphan-command", _orphan, [f"{COMMANDS_DIR}/omega-orphan.md"], None),
-    ("unowned-command", _unowned, [f"{COMMANDS_DIR}/notes.txt"], None),
-    ("unregenerated-skill", _new_skill, [f"{COMMANDS_DIR}/omega-new-skill.md"], None),
-    ("yaml-invalid-skill", _yaml_invalid, [SKILL_SOURCE], None),
-    ("name-mismatched-skill", _name_mismatch, [SKILL_SOURCE], None),
-    ("empty-description", _empty_description, [SKILL_SOURCE], None),
+DRIFT_CASES: list[tuple[str, Callable[[Path], None], list[str], str | None, int]] = [
+    # `--check` exit 1: drift `--write` repairs. Exit 3: content it cannot.
+    ("modified-file", _modified_file, [MCP_JSON], None, 1),
+    ("modified-command", _modified_command, [f"{COMMANDS_DIR}/omega-help.md"], None, 1),
+    ("orphan-command", _orphan, [f"{COMMANDS_DIR}/omega-orphan.md"], None, 1),
+    ("unowned-command", _unowned, [f"{COMMANDS_DIR}/notes.txt"], None, 3),
+    ("unregenerated-skill", _new_skill, [f"{COMMANDS_DIR}/omega-new-skill.md"], None, 1),
+    ("yaml-invalid-skill", _yaml_invalid, [SKILL_SOURCE], None, 3),
+    ("name-mismatched-skill", _name_mismatch, [SKILL_SOURCE], None, 3),
+    ("empty-description", _empty_description, [SKILL_SOURCE], None, 3),
     (
         "collision",
         _collision,
@@ -523,52 +525,58 @@ DRIFT_CASES: list[tuple[str, Callable[[Path], None], list[str], str | None]] = [
             "omega_prime/skills/python-skill/SKILL.md",
         ],
         None,
+        3,
     ),
-    ("invalid-name", _invalid_name, ["omega_prime/skills/Bad_Name/SKILL.md"], None),
+    ("invalid-name", _invalid_name, ["omega_prime/skills/Bad_Name/SKILL.md"], None, 3),
     (
         "template-missing-skill",
         _template_missing_skill,
         [TEMPLATE, "ghost-skill"],
         None,
+        3,
     ),
     (
         "template-missing-routine",
         _template_missing_routine,
         [TEMPLATE, "ghost-routine"],
         None,
+        3,
     ),
     (
         "template-unlisted-skill",
         _template_unlisted_skill,
         [TEMPLATE, SKILL_SOURCE],
         None,
+        3,
     ),
     (
         "template-unlisted-routine",
         _template_unlisted_routine,
         [TEMPLATE, "omega_prime/routines/sweep.md"],
         None,
+        3,
     ),
-    ("no-routines", _no_routines, ["omega_prime/routines: no checked-in"], None),
-    ("no-skills", _no_skills, ["omega_prime/skills: no checked-in"], None),
+    ("no-routines", _no_routines, ["omega_prime/routines: no checked-in"], None, 3),
+    ("no-skills", _no_skills, ["omega_prime/skills: no checked-in"], None, 3),
     (
         "secret-in-skill",
         _secret_in_skill,
         [f"{COMMANDS_DIR}/omega-code-review.md"],
         TOKEN,
+        3,
     ),
-    ("secret-in-mcp-json", _secret_in_mcp_json, [MCP_JSON], TOKEN),
-    ("https-literal-token", _https_literal_token, [HTTPS_EXAMPLE], TOKEN),
-    ("https-bearer-40", _https_bearer_40, [HTTPS_EXAMPLE], BEARER_40[7:]),
-    ("https-plain-http", _https_plain_http, [HTTPS_EXAMPLE], None),
-    ("https-sse-path", _https_sse_path, [HTTPS_EXAMPLE], None),
-    ("https-extra-server", _https_extra_server, [HTTPS_EXAMPLE], None),
+    ("secret-in-mcp-json", _secret_in_mcp_json, [MCP_JSON], TOKEN, 3),
+    ("https-literal-token", _https_literal_token, [HTTPS_EXAMPLE], TOKEN, 3),
+    ("https-bearer-40", _https_bearer_40, [HTTPS_EXAMPLE], BEARER_40[7:], 3),
+    ("https-plain-http", _https_plain_http, [HTTPS_EXAMPLE], None, 3),
+    ("https-sse-path", _https_sse_path, [HTTPS_EXAMPLE], None, 3),
+    ("https-extra-server", _https_extra_server, [HTTPS_EXAMPLE], None, 3),
 ]
 
 
 @pytest.mark.parametrize(
-    ("mutate", "paths", "secret"),
-    [pytest.param(m, p, s, id=i) for i, m, p, s in DRIFT_CASES],
+    ("mutate", "paths", "secret", "code"),
+    [pytest.param(m, p, s, c, id=i) for i, m, p, s, c in DRIFT_CASES],
 )
 def test_each_drift_class_fails_check_naming_paths_and_writing_nothing(
     tmp_path: Path,
@@ -576,13 +584,14 @@ def test_each_drift_class_fails_check_naming_paths_and_writing_nothing(
     mutate: Callable[[Path], None],
     paths: list[str],
     secret: str | None,
+    code: int,
 ) -> None:
     tree = _copy_tree(tmp_path)
     mutate(tree)
     before = _snapshot(tree)
     capsys.readouterr()
 
-    assert main(["--root", str(tree), "--check"]) == 1
+    assert main(["--root", str(tree), "--check"]) == code
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -620,7 +629,7 @@ def test_failed_write_leaves_outputs_untouched(
     _collision(tree)
     before = _snapshot(tree)
 
-    assert main(["--root", str(tree), "--write"]) == 1
+    assert main(["--root", str(tree), "--write"]) == 3
 
     assert "nothing written" in capsys.readouterr().err
     assert _snapshot(tree) == before
@@ -651,9 +660,35 @@ def test_write_regenerates_and_removes_only_owned_orphans(
 
 def test_absent_pyyaml_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "yaml", None)
-    with pytest.raises(PluginError) as caught:
+    with pytest.raises(PluginEnvError) as caught:
         render(ROOT)
     assert "PyYAML" in str(caught.value)
+
+
+def test_absent_pyyaml_check_exits_environment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-03: missing PyYAML is environment breakage (exit 4), not drift."""
+    tree = _copy_tree(tmp_path)
+    monkeypatch.setitem(sys.modules, "yaml", None)
+    assert main(["--root", str(tree), "--check"]) == 4
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "PyYAML" in captured.err
+
+
+def test_check_crash_exits_environment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-03: an interpreter/import crash is environment breakage (exit 4)."""
+    tree = _copy_tree(tmp_path)
+
+    def _boom(root: Path) -> dict[str, str]:
+        raise ImportError("hostile import crash")
+
+    monkeypatch.setattr(plugin, "render", _boom)
+    assert main(["--root", str(tree), "--check"]) == 4
+    assert capsys.readouterr().out == ""
 
 
 # --- verify (D-02) ----------------------------------------------------------

@@ -35,6 +35,10 @@
 #   10 missing_prerequisite  11 install_failed  12 catalog_drift
 #   13 host_unreachable (verify mode: any non-zero verifier exit)
 # 2 is usage. oneclick's own codes 1 and 3 are never produced here.
+# The plugin `--check` maps to classes: its exit 1 (drift `--write` repairs)
+# is 12; its exit 3 (content `--write` cannot repair) is 12 with
+# `"detail":"content_invalid"`; any other exit (crash or environment
+# breakage) is 11 with `"step":"plugin_check"`.
 
 set -euo pipefail
 
@@ -328,8 +332,22 @@ bootstrap() {
     fi
 
     log "checking the generated plugin catalog"
+    local check_rc=0
     "$VENV_PY" -m omega_prime.tooling.plugin --root "$ROOT" --check </dev/null ||
-        classify 12 catalog_drift
+        check_rc=$?
+    case "$check_rc" in
+        0) ;;
+        # Drift `--write` repairs: stale, missing or owned-orphan files.
+        1) classify 12 catalog_drift ;;
+        # Content `--write` cannot repair: fix the named sources by hand.
+        3)
+            log "error: the generated plugin catalog is invalid; fix the named source files, then rerun"
+            classify 12 catalog_drift '"detail":"content_invalid"'
+            ;;
+        # Anything else is environment breakage: a crash, a missing
+        # interpreter or dependency, or a usage error in our own invocation.
+        *) classify 11 install_failed '"step":"plugin_check"' ;;
+    esac
 
     # A rebuild held the in-use lock exclusively through the swap; a warm
     # start already holds it shared. Serve shared from here so the fd the

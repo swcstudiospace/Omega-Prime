@@ -142,8 +142,8 @@ MCP frames; text diagnostics always on stderr).
 | 2 | usage / configuration | Bad token, unsafe bind, bad public URL, `--generate-token` without SSE, or a launcher usage error (`--bootstrap-only` with other arguments, `--verify` with anything but `--json`) |
 | 3 | preflight | A failed doctor check while strict |
 | 10 | `missing_prerequisite` | Bash older than 4, or no `git`, `flock`, Python 3.11+, `venv`, `pyproject.toml` or `requirements-lock.txt`; the line lists them under `missing` |
-| 11 | `install_failed` | Lock, venv, `pip`, import probe, swap or stamp failed, or an unstamped `.venv` fails the probe; `step` names it and nothing is stamped |
-| 12 | `catalog_drift` | `python -m omega_prime.tooling.plugin --check` failed; regenerate with `--write` |
+| 11 | `install_failed` | Lock, venv, `pip`, import probe, swap, stamp or the plugin `--check` itself failed, or an unstamped `.venv` fails the probe; `step` names it and nothing is stamped (`"step":"plugin_check"` means the check crashed or the interpreter broke: fix the environment, not the catalog) |
+| 12 | `catalog_drift` | `python -m omega_prime.tooling.plugin --check` failed: a plain 12 is drift that `python -m omega_prime.tooling.plugin --write` repairs; a 12 with `"detail":"content_invalid"` names source files `--write` cannot repair — fix them by hand, then rerun `--check` |
 | 13 | `host_unreachable` | `--verify` only: the plugin verifier exited non-zero (`verifier_exit`) |
 
 Classes 10–13 come from the shell launcher and print one JSON line on

@@ -12,11 +12,14 @@ commands plus the checked-in skills and routines:
 - `omega_prime/grokbot/plugin/mcp.https.example.json`: the documented HTTPS
   alternative, which `plugin.json` never references.
 
-`--check` exits 1 when a committed file differs from a fresh render, a command
-file has no catalog entry, a skill fails the platform's YAML frontmatter rules,
-names collide, the template and disk disagree, or generated text looks like a
-secret. `--verify` spawns the declared stdio command and a loopback HTTPS host
-and exits 0 only when both entries answer. No network.
+`--check` exits 1 when committed files merely differ from a fresh render
+(stale, missing or owned-orphan files that `--write` repairs); 3 when the
+content itself is invalid (a skill fails the platform's YAML frontmatter
+rules, names collide, the template and disk disagree, generated text looks
+like a secret, or a committed file is otherwise not what `--write` repairs);
+and 4 when the generator cannot run in this interpreter (a missing PyYAML or
+an import crash). `--verify` spawns the declared stdio command and a loopback
+HTTPS host and exits 0 only when both entries answer. No network.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import traceback
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -109,6 +113,14 @@ class PluginError(ValueError):
     def __init__(self, problems: Sequence[str]) -> None:
         self.problems = tuple(problems)
         super().__init__("; ".join(self.problems))
+
+
+class PluginEnvError(PluginError):
+    """The generator cannot run in this interpreter (missing PyYAML, and kin).
+
+    A subclass of `PluginError` so callers that only distinguish failure from
+    success keep working; `--check` maps it to its own environment exit.
+    """
 
 
 # --- catalog ----------------------------------------------------------------
@@ -332,7 +344,7 @@ def _yaml() -> Any:
     try:
         import yaml
     except ImportError:
-        raise PluginError(
+        raise PluginEnvError(
             [
                 "PyYAML is required for the frontmatter conformance check; "
                 "install requirements-lock.txt"
@@ -612,6 +624,22 @@ def drift(root: Path, fresh: Mapping[str, str]) -> list[str]:
     return problems
 
 
+# Reports `--write` repairs, by construction site in `drift()`: a missing or
+# stale generated file, or an owned orphan with no catalog entry. Anything
+# else (unreadable or non-UTF-8 bytes, a secret or shape problem in a
+# committed file, a foreign command file) needs the operator's hand.
+_WRITE_FIXABLE_TAILS = (
+    " is missing; rerun with --write",
+    " is stale; rerun with --write",
+    " is an orphan with no catalog entry; rerun with --write",
+)
+
+
+def has_content_problems(problems: Iterable[str]) -> bool:
+    """True when `drift()` problems include content `--write` cannot repair."""
+    return any(not problem.endswith(_WRITE_FIXABLE_TAILS) for problem in problems)
+
+
 def write(root: Path, fresh: Mapping[str, str]) -> tuple[list[str], list[str]]:
     """Write changed files (mode 0644) and remove owned orphans only."""
     written: list[str] = []
@@ -883,7 +911,16 @@ def _report(problems: Iterable[str], prefix: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Check, write or verify the generated plugin set. Exit 0 on success."""
+    """Check, write or verify the generated plugin set.
+
+    Exit 0 when the tree is up to date (or `--write`/`--verify` succeeded).
+    `--check` exits 1 when committed files merely differ from a fresh render
+    (stale, missing or owned-orphan files that `--write` repairs); 3 when the
+    content itself is invalid (a `--write` run would fail the same way); and 4
+    when the generator cannot run in this interpreter (a missing PyYAML or an
+    import crash). Usage errors exit 2 via argparse. Diagnostics go to stderr;
+    stdout stays empty outside `--verify --json`.
+    """
     parser = argparse.ArgumentParser(prog="omega-prime-plugin")
     parser.add_argument("--root", type=Path, default=None)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -902,14 +939,32 @@ def main(argv: list[str] | None = None) -> int:
     label = "plugin --check" if args.check else "plugin --write"
     try:
         fresh = render(root)
+    except PluginEnvError as exc:
+        _report(exc.problems, label)
+        print(f"{label}: environment breakage; nothing written", file=sys.stderr)
+        return 4
     except PluginError as exc:
         _report(exc.problems, label)
         print(f"{label}: generation failed; nothing written", file=sys.stderr)
-        return 1
+        return 3
+    except Exception:
+        traceback.print_exc()
+        return 4
     if args.check:
-        problems = drift(root, fresh)
+        try:
+            problems = drift(root, fresh)
+        except Exception:
+            traceback.print_exc()
+            return 4
         if problems:
             _report(problems, label)
+            if has_content_problems(problems):
+                print(
+                    f"{label}: content invalid; fix the named source files, "
+                    "then rerun --check (--write cannot repair content errors)",
+                    file=sys.stderr,
+                )
+                return 3
             return 1
         print(f"{label}: {len(fresh)} generated files up to date")
         return 0
@@ -941,10 +996,11 @@ __all__ = [
     "MARKETPLACE",
     "MCP_JSON",
     "PLUGIN_MANIFEST",
+    "PluginEnvError",
     "PluginError",
     "catalog",
     "drift",
-    "https_example_problems",
+    "has_content_problems",
     "main",
     "mcp_json_problems",
     "plugin_manifest_problems",
