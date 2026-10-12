@@ -22,8 +22,14 @@ All notable changes to this project are documented here. Format follows
   publication reports failure without claiming the new edition was rolled back.
   Reconcile canonical architecture/state/security diagrams, extension patterns,
   runnable setup/usage, repository URLs, Python/prerequisite distinctions and
-  repository/GitBook navigation. Keep generated catalog behavior consumers,
-  not source-wording/default/schema copies. Local proof and readable historical
+  repository/GitBook navigation.
+  Correct the linked operator setup's unproved share-link/time/universal-failure
+  claims and distinguish launcher stdio environment roots, SSE-only workspace
+  forwarding and adapter errors from readiness classifications. Actual served
+  stdio now reserves stdout for JSON-RPC; diagnostics and optional JSON reports
+  remain visible on stderr, with real initialized owned-file consumers.
+  Keep generated catalog behavior consumers, not source-wording/default/schema
+  copies. Local proof and readable historical
   publication do not establish live Grok/provider/backend operation, account
   enrollment, vendor redistribution rights or remote publication/deployment.
 

@@ -3,8 +3,12 @@
 import itertools
 import json
 import os
+import select
 import signal
 import stat
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1344,3 +1348,115 @@ def test_parser_guard_keeps_clean_choice_helpful(
     assert "invalid choice" in captured.err
     assert "stdio" in captured.err and "sse" in captured.err
     assert oneclick._SELF_TEST_SAFE_DIAGNOSTIC not in captured.err
+
+
+@pytest.mark.parametrize("json_report", [False, True])
+def test_served_stdio_is_protocol_only_and_reads_the_owned_workspace(
+    tmp_path: Path, json_report: bool
+) -> None:
+    root = find_repo_root()
+    home, work, state = (tmp_path / name for name in ("home", "work", "state"))
+    for path in (home, work, state):
+        path.mkdir()
+    expected = {"path": "owned-proof.txt", "content": "owned stdio workspace\n"}
+    (work / expected["path"]).write_text(expected["content"], encoding="utf-8")
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(home),
+        "PYTHONPATH": str(root),
+        "XDG_CONFIG_HOME": str(home / "config"),
+        "XDG_CACHE_HOME": str(home / "cache"),
+        "OMEGA_PRIME_CREDENTIAL_STORE": str(home / "absent-credentials.json"),
+        "OMEGA_PRIME_STATE_DIR": str(state),
+        "OMEGA_PRIME_WORK_ROOT": str(work),
+    }
+    args = [
+        sys.executable,
+        "-m",
+        "omega_prime.grokbot.oneclick",
+        "--root",
+        str(root),
+        "--transport",
+        "stdio",
+        # The transport regression must not touch the install-root doctor audit file.
+        # Separate owned runtime smoke covers default preflight output routing.
+        "--skip-doctor",
+    ]
+    if json_report:
+        args.append("--json")
+    with (tmp_path / "stderr.log").open("wb") as stderr:
+        proc = subprocess.Popen(
+            args,
+            cwd=tmp_path,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            start_new_session=True,
+        )
+        assert proc.stdin is not None and proc.stdout is not None
+        pending = b""
+
+        def exchange(message: dict[str, Any]) -> dict[str, Any]:
+            nonlocal pending
+            assert proc.stdin is not None and proc.stdout is not None
+            proc.stdin.write(json.dumps(message).encode() + b"\n")
+            proc.stdin.flush()
+            deadline = time.monotonic() + 30
+            while True:
+                while b"\n" not in pending:
+                    readable, _, _ = select.select(
+                        [proc.stdout], [], [], max(0, deadline - time.monotonic())
+                    )
+                    assert readable, "stdio host did not reply before deadline"
+                    chunk = os.read(proc.stdout.fileno(), 4096)
+                    assert chunk, "stdio host closed before replying"
+                    pending += chunk
+                line, _, pending = pending.partition(b"\n")
+                # A real protocol consumer rejects banners, blank lines and CLI reports.
+                reply = json.loads(line)
+                assert reply["jsonrpc"] == "2.0"
+                if reply.get("id") == message["id"]:
+                    assert "error" not in reply
+                    return reply["result"]
+
+        try:
+            initialized = exchange(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "owned-stdio-consumer", "version": "1"},
+                    },
+                }
+            )
+            assert "tools" in initialized["capabilities"]
+            proc.stdin.write(
+                b'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n'
+            )
+            proc.stdin.flush()
+            result = exchange(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "read_file",
+                        "arguments": {"path": expected["path"]},
+                    },
+                }
+            )
+            assert result.get("isError") is not True
+            assert len(result["content"]) == 1
+            assert json.loads(result["content"][0]["text"]) == expected
+        finally:
+            proc.stdin.close()
+            proc.stdin = None
+            try:
+                proc.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.communicate(timeout=15)

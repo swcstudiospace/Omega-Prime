@@ -125,14 +125,16 @@ Prime capability families (`harness`, `goals`, `heartbeat`, `autonomous`,
 family is not registered and is absent from the offered roster
 (`omega_prime/mcp_server.py::default_registry` with
 `omega_prime/config.py::prime_enabled`). The Red Team family
-(`tempest_*` loopback gateway proxies, `omega_prime/tools/redteam.py`) is a
+(gateway proxies named `tempest_*`, `omega_prime/tools/redteam.py`) is a
 top-level `redteam` config key, not a Prime family, also default off: when
 on, `register_redteam_tools` binds a `RedteamClient` to the configured
-gateway (`DEFAULT_GATEWAY_URL = "http://127.0.0.1:3333"`, loopback only)
-under the upstream bearer contract (`T3MP3ST_BEARER_TOKEN` /
-`T3MP3ST_BEARER_TOKEN_FILE` via `resolve_bearer_token`). It is an external
-gateway reached over loopback HTTP — not a native port, not an auto-started
-loop, and its tools return explicit blocked receipts without a gateway.
+gateway (default `http://127.0.0.1:3333`). Non-loopback URLs require a bearer
+under the upstream contract (`T3MP3ST_BEARER_TOKEN` /
+`T3MP3ST_BEARER_TOKEN_FILE` via `resolve_bearer_token`); otherwise the adapter
+returns `non_loopback_refused`. This is an external HTTP gateway, not a native
+port or auto-started loop. Connection failures return `gateway_unreachable`
+error rows. Those adapter errors are distinct from readiness's default-off
+`feature_disabled` classification or named prerequisite-blocked rows.
 
 ## Memory and skills
 

@@ -1,18 +1,19 @@
 # Omega Prime setup
 
-Four steps: install, secrets, optional tool host, smoke prompt.
-Takes about ten minutes; only step 3 needs a machine of yours.
+Four operator steps: prepare source, configure private secrets, start an optional
+tool host, and inspect the client. Local preparation is not live Grok attachment;
+completion time and account-side template/share-link availability are unverified.
 
-## 1. Install from the template
+## 1. Prepare the source and template
 
-Open the Omega Prime share link in Grok and choose **Add to Grok Bot**.
-This creates an independent copy on your account — your chats,
-secrets, and settings stay yours.
-
-What the template carries: the Omega Prime instructions, skills,
-routines, and first-party plugins. What it never carries:
-secrets, custom MCP servers, scripts, or private skills. Steps
-2–3 re-add the ones you want.
+Follow [the source setup route](../../docs/setup.md) to install the Python
+environment and populate the pinned submodules. The repository's
+[OMEGA_PRIME.md](templates/OMEGA_PRIME.md) is instructions for an operator's
+authorized seat; its presence does not prove a published share link, an
+**Add to Grok Bot** flow, account isolation or a successful import.
+If your client exposes an authorized import/attachment route, verify that
+client's prerequisites separately. Never include private secrets, scripts or
+settings in a share/export to manufacture a working route.
 
 ## 2. Secrets
 
@@ -33,8 +34,11 @@ connector asks for it (Grok Bot settings or your host's env):
 `SUBSTRATE_URL` (default `http://127.0.0.1:7410`) and `HINDSIGHT_URL`
 (default the Railway hindsight-api) override where those two clients point.
 
-Skip what you don't use: every unconfigured client reports
-`not_configured` instead of failing.
+Configure only the integrations you intend to use. Failure behavior is
+operation-specific: some tools return `not_configured`, some refuse or return
+gateway errors, and some clients raise or degrade reads. Readiness's
+`feature_disabled` or prerequisite-blocked rows are separate classifications;
+see [connectors](../../docs/connectors.md) and [Red Team](../../docs/red-team.md).
 
 ## 3. Attach the tool host (1-Click Native Integration)
 
@@ -88,10 +92,17 @@ multi-token file; it counts as authentication). `--log-format` is `text` or
 on the machine. Rate limits and the circuit breaker stay on
 `python -m omega_prime.mcp_server`.
 
+The launcher's `--work-root` is forwarded only to SSE. For stdio use
+`OMEGA_PRIME_WORK_ROOT` in the child environment, or run
+`python -m omega_prime.mcp_server --root . --work-root /path/to/owned/workspace`
+directly. `--root` remains the source/roster/policy root; workspace selection
+does not grant permission or bypass approvals.
+
 ### Option B: Remote MCP transport (SSE and Streamable HTTP)
 
-Grok Bot cloud instances connect to your host over SSE. Other MCP clients use
-`/mcp` on the same origin:
+An authorized client that supports SSE can connect to your host. Other MCP
+clients can use `/mcp` on the same origin; this is protocol support in the host,
+not proof that a Grok account has attached:
 
 ```bash
 python -m omega_prime.mcp_server --transport sse --host 0.0.0.0 --port 8000 \
@@ -164,7 +175,8 @@ metric names, and the verifier are in `docs/grok-bot-native.md`.
 
 ### Option C: Grok Bot 1-click manifest export
 
-Generate the JSON manifest to import into Grok Bot settings or a custom assistant profile:
+Generate the host manifest for a client-side import route if your authorized
+client supports one; export alone is not an observed account import:
 
 ```bash
 python -m omega_prime.grokbot.manifest --transport sse \
@@ -204,8 +216,8 @@ never contains a token.
    ```bash
    python -m omega_prime.grokbot.emulator --smoke
    ```
-   Drives the same runtime the server uses (roster, seat policy, approval gates,
-   scopes, audit), so a passing smoke run reflects what Grok Bot will see.
+   Exercises the local host runtime (roster, seat policy, approval gates,
+   scopes, audit). A passing local smoke is not a live Grok account/model result.
 
 4. **Capability and prompt synchronizer**:
    ```bash
@@ -215,23 +227,22 @@ never contains a token.
    routines, tools, approval-gated tools and capabilities. A manifest exported for
    another transport or URL is not drift.
 
-## 4. Smoke prompt
+## 4. Client-side smoke prompt
 
-Send the bot exactly this:
+Only after an operator has independently attached an authorized client, use
+this proposed acceptance prompt:
 
 > `ultrathink` what tools do you have, and which need approval?
 
-Expect back:
+Compare the response with the host's actual manifest and effective
+roster/configuration intersection, not a fixed full-roster count. Check that
+registration-specific approval requirements remain explicit and that no
+private credentials are echoed. Prompt text is a request, not a guarantee
+that a model lists tools correctly or that every handler executed. This
+repository's local preparation does not establish a successful live response.
 
-1. A short plan of how it will answer (the ultrathink notice fired).
-2. A tool list matching `contracts/tool-rosters/omega-prime.yaml` — with
-   the tool host attached; without it, the bot says which tools
-   live behind the host instead of inventing results.
-3. The approval-gated tools named as needing approval.
-4. No secrets, ids, or tokens quoted back.
-
-If any line is missing, re-check the step above it. Builders can
-also run the local verification:
+For source-local preparation checks, run the command below. Its result does not
+attest that an account imported the template or attached to this host:
 
 ```bash
 .venv/bin/python -m omega_prime.setup_check --root .

@@ -107,11 +107,13 @@ From this checkout, in the installed environment:
 .venv/bin/python -m omega_prime.setup_check --root .
 .venv/bin/python -m omega_prime.tooling.catalog --check
 bash omega_prime/scripts/assemble-prompts.sh --check
-.venv/bin/python -m omega_prime.grokbot.oneclick --work-root "$PWD" --dry-run
+OMEGA_PRIME_WORK_ROOT="$PWD" .venv/bin/python -m omega_prime.grokbot.oneclick --dry-run
 ```
 
-The last command is preflight, not account attachment. Choose an owned
-workspace through `--work-root` or `OMEGA_PRIME_WORK_ROOT`;
+The last command is preflight, not account attachment. For the launcher's
+default stdio transport, select the owned workspace through
+`OMEGA_PRIME_WORK_ROOT`; launcher `--work-root` is forwarded only to SSE.
+The direct `omega_prime.mcp_server` accepts `--work-root` for both transports.
 `OMEGA_PRIME_STATE_DIR` selects desk state. Starting an authenticated
 loopback host can use `--transport sse --generate-token` without exposing a
 credential in argv; see [tool-host guidance](docs/tool-host.md).

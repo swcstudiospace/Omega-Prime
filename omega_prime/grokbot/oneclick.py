@@ -296,8 +296,8 @@ def _announce_generated_token(token: str, token_file: Path | None) -> None:
         _err(f"Token also written to {token_file} (mode 0600).")
 
 
-def _emit_json(payload: dict[str, Any]) -> None:
-    print(json.dumps(payload, sort_keys=True), flush=True)
+def _emit_json(payload: dict[str, Any], file: TextIO) -> None:
+    print(json.dumps(payload, sort_keys=True), file=file, flush=True)
 
 
 def run_oneclick(
@@ -329,7 +329,10 @@ def run_oneclick(
     """Execute the 1-click workflow."""
     sse = transport == "sse"
     strict = sse if strict is None else strict
-    say = sys.stderr if json_output else sys.stdout
+    protocol_stdio = not sse and not dry_run
+    # A served stdio process reserves stdout for the child's JSON-RPC frames.
+    say = sys.stderr if json_output or protocol_stdio else sys.stdout
+    json_sink = sys.stderr if protocol_stdio else sys.stdout
     # --- Resume-safe re-run guard (SSE serve only): stdio spawns a fresh
     # --- subprocess pipe and never binds TCP, so no port conflict is possible;
     # --- dry-run must always validate and report, never no-op.
@@ -372,7 +375,8 @@ def run_oneclick(
                             "host": host,
                             "port": port,
                             "manifest_digest": _verdict.manifest_digest,
-                        }
+                        },
+                        json_sink,
                     )
                 return EXIT_OK
             if _verdict == _rerun.VERDICT_ALREADY_RUNNING and not resume:
@@ -387,7 +391,8 @@ def run_oneclick(
                             "transport": transport,
                             "host": host,
                             "port": port,
-                        }
+                        },
+                        json_sink,
                     )
                 return EXIT_OK
         if _verdict == _rerun.VERDICT_ALREADY_RUNNING and resume:
@@ -487,7 +492,7 @@ def run_oneclick(
                         flush=True,
                     )
                     if json_output:
-                        _emit_json(report(None))
+                        _emit_json(report(None), json_sink)
                     return EXIT_PREFLIGHT
                 print(
                     "WARNING: Some preflight checks failed. Continuing launch...",
@@ -519,7 +524,7 @@ def run_oneclick(
         if dry_run:
             print("✓ Dry run requested. Exiting without launching tool host.", file=say)
             if json_output:
-                _emit_json(report(manifest_path))
+                _emit_json(report(manifest_path), json_sink)
             return EXIT_OK
 
     def _finish(status: str, exit_code: int) -> None:
@@ -551,7 +556,7 @@ def run_oneclick(
     # STATUS_FAILED (never complete), so check_rerun treats the next attempt
     # as fresh and retries instead of wedging on already-complete.
     if json_output:
-        _emit_json(report(manifest_path))
+        _emit_json(report(manifest_path), json_sink)
 
     if generated and token is not None:
         _announce_generated_token(token, token_file)
