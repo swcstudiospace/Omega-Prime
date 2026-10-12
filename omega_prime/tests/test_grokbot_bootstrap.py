@@ -464,6 +464,7 @@ def test_warm_start_skips_install_and_a_changed_lock_rebuilds(tmp_path: Path) ->
     assert stat.S_IMODE(tree.stamp.stat().st_mode) == 0o600
     assert sorted(p.name for p in tree.root.glob(".venv*")) == [
         ".venv",
+        ".venv.in-use.lock",
         ".venv.lock",
         ".venv.omega-prime-bootstrap.json",
     ]
@@ -509,6 +510,74 @@ def test_killed_first_start_leaves_no_stamp_and_the_next_start_completes(
     assert tree.stamp.is_file()
     assert (tree.venv / "bin" / "python").is_file()
     assert not (tree.root / ".venv.build").exists()
+
+
+def _hold_in_use_shared(path: Path) -> object:
+    """Hold a shared flock like a serving launcher; the caller must close it."""
+    fcntl = pytest.importorskip("fcntl")
+    handle = open(path, "a", encoding="utf-8")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+    return handle
+
+
+def _release_in_use(holder: object) -> None:
+    fcntl = pytest.importorskip("fcntl")
+    assert hasattr(holder, "fileno") and hasattr(holder, "close")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+    holder.close()  # type: ignore[attr-defined]
+
+
+def test_stale_stamp_rebuild_refuses_while_a_server_is_running(
+    tmp_path: Path,
+) -> None:
+    """WR-02: a rebuild never swaps the venv a running server serves from."""
+    tree = _tree(tmp_path)
+    assert _run(tree, "--bootstrap-only").returncode == 0
+    marker = tree.venv / "previous-marker"
+    marker.write_text("old\n", encoding="utf-8")
+    (tree.root / "requirements-lock.txt").write_text("stub==2.0\n", encoding="utf-8")
+    before = _tree_files(tree.venv)
+    holder = _hold_in_use_shared(tree.root / ".venv.in-use.lock")
+    try:
+        proc = _run(tree, "--bootstrap-only")
+    finally:
+        _release_in_use(holder)
+    line = _assert_failed(proc, 11, "install_failed")
+    assert line["step"] == "venv_in_use"
+    assert proc.stdout == b""
+    assert b"stop running Omega Prime servers" in proc.stderr
+    assert _tree_files(tree.venv) == before
+    assert marker.is_file()
+    assert not (tree.root / ".venv.build").exists()
+    assert list(tree.root.glob(".venv.old.*")) == []
+
+
+def test_warm_start_is_not_blocked_by_a_running_server(tmp_path: Path) -> None:
+    """WR-02: a matching stamp serves warm while a server holds the lock."""
+    tree = _tree(tmp_path)
+    assert _run(tree, "--bootstrap-only").returncode == 0
+    tree.clear_log()
+    holder = _hold_in_use_shared(tree.root / ".venv.in-use.lock")
+    try:
+        proc = _run(tree, "--bootstrap-only")
+    finally:
+        _release_in_use(holder)
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    assert proc.stdout == b""
+    assert tree.calls_of("pip") == [] and tree.calls_of("venv") == []
+
+
+def test_plain_serve_is_not_blocked_by_a_running_server(tmp_path: Path) -> None:
+    """IN-05: the non-bootstrap serve path shares the lock, never races swap."""
+    tree = _tree(tmp_path)
+    assert _run(tree, "--bootstrap-only").returncode == 0
+    holder = _hold_in_use_shared(tree.root / ".venv.in-use.lock")
+    try:
+        proc = _run(tree, "--transport", "stdio", stdin=FRAME)
+    finally:
+        _release_in_use(holder)
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    assert proc.stdout == REPLY
 
 
 def test_concurrent_cold_starts_serialize_on_one_install(tmp_path: Path) -> None:

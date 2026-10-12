@@ -17,7 +17,11 @@
 # pyproject, interpreter and prime-agent commit. A matching stamp skips the
 # install and runs only the import probe. Otherwise a fresh venv is built in
 # ROOT/.venv.build from requirements-lock.txt plus `--no-deps -e .`, probed,
-# renamed into place, and stamped last. The stamp also marks ownership: an
+# renamed into place, and stamped last. A server started by this launcher
+# holds a shared flock on ROOT/.venv.in-use.lock for its lifetime; a rebuild
+# takes it exclusively before any swap and refuses with 11/venv_in_use while
+# a server still runs, so the live tree is never moved under it. The stamp
+# also marks ownership: an
 # existing ROOT/.venv without a stamp is operator-managed and is never moved,
 # deleted or rebuilt; it is used when the import probe passes, else exit 11.
 # Only the prime-agent submodule is ever initialized (D-04). The plugin
@@ -52,6 +56,7 @@ VENV="$ROOT/.venv"
 VENV_PY="$VENV/bin/python"
 BUILD="$VENV.build"
 LOCK="$VENV.lock"
+IN_USE_LOCK="$VENV.in-use.lock"
 STAMP="$VENV.omega-prime-bootstrap.json"
 
 log() {
@@ -201,6 +206,32 @@ probe() {
     "$1" -I -c "$PROBE_CODE" </dev/null
 }
 
+# WR-02/IN-05: the in-use lock guards the swap window. A launcher that goes
+# on to serve holds it shared for its whole lifetime (fd 8 stays open across
+# the final exec, so the lock clears only when the server exits). A rebuild
+# takes it exclusively and non-blocking before any swap: while a server the
+# launcher started is still running, the rebuild refuses with 11/venv_in_use
+# instead of moving the live tree. Shared takes never block each other, so a
+# warm start or a plain serve is never blocked by running servers; a plain
+# serve blocks only behind a rebuild's exclusive hold, waiting out the swap
+# instead of running from a half-moved tree.
+hold_in_use_shared() {
+    if ! exec 8>>"$IN_USE_LOCK"; then
+        classify 11 install_failed '"step":"in_use_lock"'
+    fi
+    flock -s 8 || classify 11 install_failed '"step":"in_use_lock"'
+}
+
+claim_in_use_exclusive() {
+    if ! exec 8>>"$IN_USE_LOCK"; then
+        classify 11 install_failed '"step":"in_use_lock"'
+    fi
+    if ! flock -n 8; then
+        log "error: $VENV is in use by a running Omega Prime server; stop running Omega Prime servers, then restart"
+        classify 11 install_failed '"step":"venv_in_use"'
+    fi
+}
+
 fail_build() {
     rm -rf -- "$BUILD"
     classify 11 install_failed "\"step\":\"$1\""
@@ -288,14 +319,22 @@ bootstrap() {
         fi
     fi
     if ((!warm)); then
+        claim_in_use_exclusive
         build_venv
         write_stamp "$want"
         log "environment ready"
+    else
+        hold_in_use_shared
     fi
 
     log "checking the generated plugin catalog"
     "$VENV_PY" -m omega_prime.tooling.plugin --root "$ROOT" --check </dev/null ||
         classify 12 catalog_drift
+
+    # A rebuild held the in-use lock exclusively through the swap; a warm
+    # start already holds it shared. Serve shared from here so the fd the
+    # final exec inherits keeps the lock until the server exits.
+    flock -s 8 || classify 11 install_failed '"step":"in_use_lock"'
 
     exec 9>&-
 
@@ -343,6 +382,11 @@ else
     PYTHON_BIN="$(command -v python3 || command -v python || true)"
 fi
 [ -n "$PYTHON_BIN" ] || classify 10 missing_prerequisite '"missing":["python3>=3.11"]'
+
+# IN-05: only --bootstrap entry points are concurrency-safe. A plain serve
+# waits here on a shared take while a bootstrap rebuild holds the in-use
+# lock exclusively mid-swap, instead of running from a half-moved tree.
+hold_in_use_shared
 
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 cd "$ROOT"
