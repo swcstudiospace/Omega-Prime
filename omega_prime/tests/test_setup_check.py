@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
-from omega_prime.setup_check import main, run_checks
+import pytest
+
+from omega_prime.setup_check import CHECKS, check_plugin, main, run_checks
 
 OMEGA_PRIME = Path(__file__).resolve().parents[1]
 ROOT = OMEGA_PRIME.parent
@@ -16,6 +20,22 @@ def _mirror(root: Path) -> Path:
     """Copy the repo's omega_prime/ tree into a fixture root."""
     dest = root / "omega_prime"
     shutil.copytree(OMEGA_PRIME, dest, ignore=shutil.ignore_patterns("__pycache__"))
+    return root
+
+
+# Repo-level generator inputs and outputs that `_mirror` leaves out.
+_PLUGIN_ROOT_FILES = ("pyproject.toml", "mcp.json", ".cursor-plugin")
+
+
+def _plugin_tree(root: Path) -> Path:
+    """`_mirror` plus the root files the plugin generator reads and writes."""
+    _mirror(root)
+    for rel in _PLUGIN_ROOT_FILES:
+        source = ROOT / rel
+        if source.is_dir():
+            shutil.copytree(source, root / rel)
+        else:
+            shutil.copy2(source, root / rel)
     return root
 
 
@@ -35,6 +55,8 @@ def test_checks_pass_on_repo_root(monkeypatch):
     assert report["roster"]["ok"] is True
     assert report["template"]["ok"] is True
     assert report["assembly"]["ok"] is True
+    assert report["plugin"]["ok"] is True
+    assert "up to date" in report["plugin"]["detail"]
     assert report["registry"]["ok"] is True
     assert report["ultrathink"]["ok"] is None
     assert report["substrate"]["ok"] is None
@@ -99,3 +121,84 @@ def test_each_failure_trips_its_check(tmp_path: Path, monkeypatch):
     assert substrate["ok"] is True
     assert "fake-value" not in substrate["detail"]
     assert "SUBSTRATE_TOKEN" in substrate["detail"]
+
+
+def test_plugin_row_is_function_backed() -> None:
+    assert ("plugin", check_plugin) in CHECKS
+
+
+def test_plugin_check_runs_in_process(tmp_path: Path, monkeypatch) -> None:
+    # No `.git` in the fixture, so the generator's optional `git ls-files`
+    # never runs; any spawn here would be the row shelling out.
+    fixture = _plugin_tree(tmp_path / "clean")
+
+    def no_spawn(*args, **kwargs):
+        raise AssertionError("setup_check plugin row must not spawn a process")
+
+    monkeypatch.setattr(subprocess, "Popen", no_spawn)
+    ok, detail = check_plugin(fixture)
+    assert ok is True, detail
+    assert "up to date" in detail
+
+
+COMMANDS = "omega_prime/grokbot/plugin/commands"
+
+
+def _write(rel: str, text: str) -> Callable[[Path], object]:
+    return lambda root: (root / rel).write_text(text, encoding="utf-8")
+
+
+def _remove(rel: str) -> Callable[[Path], object]:
+    return lambda root: (root / rel).unlink()
+
+
+@pytest.mark.parametrize(
+    ("drift", "expected"),
+    [
+        pytest.param(
+            _write(f"{COMMANDS}/omega-help.md", "hand edited\n"),
+            f"{COMMANDS}/omega-help.md is stale",
+            id="edited-command",
+        ),
+        pytest.param(
+            _write(f"{COMMANDS}/omega-x.md", "orphan\n"),
+            f"{COMMANDS}/omega-x.md is an orphan",
+            id="orphan-command",
+        ),
+        pytest.param(
+            _remove("mcp.json"),
+            "mcp.json is missing",
+            id="missing-mcp-json",
+        ),
+        pytest.param(
+            _write(".cursor-plugin/plugin.json", "{}\n"),
+            ".cursor-plugin/plugin.json is stale",
+            id="stale-manifest",
+        ),
+        pytest.param(
+            _remove("pyproject.toml"),
+            "plugin generation failed: pyproject.toml",
+            id="generation-failure",
+        ),
+    ],
+)
+def test_plugin_drift_fails_the_plugin_row(
+    tmp_path: Path, drift: Callable[[Path], object], expected: str
+) -> None:
+    fixture = _plugin_tree(tmp_path / "drift")
+    drift(fixture)
+    ok, detail = check_plugin(fixture)
+    assert ok is False
+    assert expected in detail
+
+
+def test_plugin_drift_fails_setup_check(tmp_path: Path, capsys) -> None:
+    fixture = _plugin_tree(tmp_path / "drift")
+    _write(f"{COMMANDS}/omega-help.md", "hand edited\n")(fixture)
+    report = run_checks(fixture)
+    assert report["plugin"]["ok"] is False
+    detail = report["plugin"]["detail"]
+    assert "rerun python -m omega_prime.tooling.plugin --write" in detail
+    assert report["passed"] is False
+    assert main(["--root", str(fixture)]) == 1
+    assert "[FAIL] plugin: plugin set is stale" in capsys.readouterr().out

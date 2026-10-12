@@ -1,9 +1,9 @@
 """Setup smoke check: verify an Omega Prime install end to end, locally.
 
 `python -m omega_prime.setup_check --root <repo>`: runs the roster, template,
-assembly, registry, ultrathink, and substrate checks and exits 0 only when
-every required check passes. Skips (ultrathink/substrate unconfigured) are
-reported, never failures.
+assembly, plugin, registry, ultrathink, and substrate checks and exits 0 only
+when every required check passes. Skips (ultrathink/substrate unconfigured)
+are reported, never failures.
 """
 
 from __future__ import annotations
@@ -54,6 +54,23 @@ def check_assembly(root: Path) -> tuple[bool, str]:
     except OSError as exc:
         return False, f"cannot read {shipped}: {exc}"
     return True, "assembly up to date"
+
+
+def check_plugin(root: Path) -> tuple[bool, str]:
+    """Generated Cursor plugin set matches a fresh render (no subprocess)."""
+    from omega_prime.tooling import plugin
+
+    try:
+        fresh = plugin.render(root)
+    except plugin.PluginError as exc:
+        return False, f"plugin generation failed: {'; '.join(exc.problems)}"
+    problems = plugin.drift(root, fresh)
+    if problems:
+        return False, (
+            f"plugin set is stale: {'; '.join(problems)}; "
+            f"rerun {plugin.GENERATOR} --write"
+        )
+    return True, f"plugin up to date ({len(fresh)} generated files)"
 
 
 def check_registry(root: Path) -> tuple[bool, str]:
@@ -160,6 +177,7 @@ CHECKS = (
     ("roster", check_roster),
     ("template", check_template),
     ("assembly", check_assembly),
+    ("plugin", check_plugin),
     ("registry", check_registry),
     ("ultrathink", check_ultrathink),
     ("substrate", check_substrate),

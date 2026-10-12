@@ -215,3 +215,5 @@ jobs:
         run: python3 -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q
       - name: tool catalog currency
         run: python3 -m omega_prime.tooling.catalog --check
+      - name: plugin manifest currency
+        run: python3 -m omega_prime.tooling.plugin --check
