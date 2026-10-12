@@ -274,7 +274,8 @@ def test_https_example_rejects_a_foreign_placeholder_variable(
 ) -> None:
     """N-01: only the documented token variable is sentinel-masked."""
     tree = _copy_tree(tmp_path)
-    foreign = "Bearer ${AKIAIOSFODNN7EXAMPLE}"
+    foreign_var = "AKIA" + "IOSFODNN7" + "EXAMPLE"
+    foreign = f"Bearer ${{{foreign_var}}}"
     _edit_json(
         tree,
         HTTPS_EXAMPLE,
@@ -284,7 +285,7 @@ def test_https_example_rejects_a_foreign_placeholder_variable(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert HTTPS_EXAMPLE in captured.err
-    assert "AKIAIOSFODNN7EXAMPLE" not in captured.out + captured.err
+    assert foreign_var not in captured.out + captured.err
 
 
 def test_https_example_accepts_the_env_form_of_the_token_variable() -> None:

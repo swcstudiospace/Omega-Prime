@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import socket
+import string
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Iterator
@@ -353,8 +354,26 @@ def test_oneclick_self_test_exits_0() -> None:
 # a scanner-only fragment straddling the old clip edge must never reach the
 # public human/JSON renderers, and a trip stays failed, never passing.
 
-_GENERIC_CANDIDATE = "K7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad0SeGhJkDK7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad"
-_SHORT_OMK = "omk_aB3dEf7hI2jK4"
+#: Synthetic canaries are assembled at runtime so no complete credential shape
+#: is committed to source.
+_TOKEN_ALPHABET = string.ascii_letters + string.digits
+
+
+def _synthetic_body(length: int, start: int = 0) -> str:
+    """Deterministic mixed-class body; stride 17 is coprime with 62, so the
+    first 62 characters are all distinct (maximal entropy, no randomness)."""
+    return "".join(
+        _TOKEN_ALPHABET[(start + 17 * index) % len(_TOKEN_ALPHABET)]
+        for index in range(length)
+    )
+
+
+#: 64-char scanner-only generic token: a slash-bearing 36-char run, repeated.
+_SLASH_TOKEN = _synthetic_body(4, start=1) + "/" + _synthetic_body(31, start=9)
+_GENERIC_CANDIDATE = (_SLASH_TOKEN * 2)[:64]
+#: Short ``omk_`` form: the 13-char suffix is below the audit rule's minimum.
+_SHORT_OMK = "omk_" + _synthetic_body(13, start=21)
+_PEM_HEADER = "-----BEGIN " + "RSA PRIVATE KEY-----"
 
 
 def _boundary_runner(token: str | None = None, admin_token: str | None = None) -> Any:
@@ -451,7 +470,7 @@ def test_pem_exception_diagnostic_is_withheld() -> None:
     runner = cast(_Runner, _boundary_runner())
 
     async def factory() -> tuple[str, str]:
-        raise RuntimeError("key block -----BEGIN RSA PRIVATE KEY----- MIIB leak")
+        raise RuntimeError(f"key block {_PEM_HEADER} MIIB leak")
 
     asyncio.run(runner._step("probe", "Probe", factory))
     check = runner.checks[0]

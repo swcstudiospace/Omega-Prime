@@ -6,6 +6,7 @@ import os
 import select
 import signal
 import stat
+import string
 import subprocess
 import sys
 import time
@@ -1132,6 +1133,29 @@ def test_self_test_leaves_source_schedules_untouched(
     capsys.readouterr()
 
 
+#: Synthetic credential-shaped canaries are assembled at runtime so no complete
+#: credential shape is committed to source.
+_TOKEN_ALPHABET = string.ascii_letters + string.digits
+
+
+def _synthetic_body(length: int, start: int = 0) -> str:
+    """Deterministic mixed-class body; stride 17 is coprime with 62, so the
+    first 62 characters are all distinct (maximal entropy, no randomness)."""
+    return "".join(
+        _TOKEN_ALPHABET[(start + 17 * index) % len(_TOKEN_ALPHABET)]
+        for index in range(length)
+    )
+
+
+_PEM_HEADER = "-----BEGIN " + "RSA PRIVATE KEY-----"
+#: 36-char scanner-only generic token: 4-char head, slash, 31-char body.
+_SLASH_TOKEN = _synthetic_body(4, start=1) + "/" + _synthetic_body(31, start=9)
+#: 64-char scanner-only generic token built from the slash token.
+_GENERIC_CANDIDATE = (_SLASH_TOKEN * 2)[:64]
+#: Short ``omk_`` form: the 13-char suffix is below the audit rule's minimum.
+_SHORT_OMK = "omk_" + _synthetic_body(13, start=21)
+
+
 def test_self_test_not_ready_rejection_is_fixed_and_secret_free(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
@@ -1139,7 +1163,10 @@ def test_self_test_not_ready_rejection_is_fixed_and_secret_free(
     fragment = "MIIBSpikeKey4192"
     log_canary = (
         b"host output before failure\n"
-        b"-----BEGIN RSA PRIVATE KEY-----\n" + fragment.encode() + b"\n"
+        + _PEM_HEADER.encode()
+        + b"\n"
+        + fragment.encode()
+        + b"\n"
     )
     captured: dict[str, Any] = {}
     _stub_self_test_host(
@@ -1160,12 +1187,12 @@ def test_self_test_verification_failure_is_bounded_and_secret_free(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     """A verification exception publishes only fixed safe metadata, exit nonzero."""
-    fragment = "Q9mz4vLp8Wx3Rt6Yb1Nc5Ad0SeGhJkD"
+    fragment = _SLASH_TOKEN[5:]
     captured: dict[str, Any] = {}
     _stub_self_test_host(
         monkeypatch,
         captured,
-        verify_error=RuntimeError(f"verify blew up on K7f2/{fragment}"),
+        verify_error=RuntimeError(f"verify blew up on {_SLASH_TOKEN}"),
     )
     assert oneclick.run_self_test(find_repo_root()) == 1
     err = capsys.readouterr().err
@@ -1188,12 +1215,12 @@ def test_bounded_diagnostic_redacts_full_text_before_clipping() -> None:
     ("raw", "fragments"),
     [
         (
-            "key block -----BEGIN RSA PRIVATE KEY----- MIIB leak",
+            f"key block {_PEM_HEADER} MIIB leak",
             ("PRIVATE KEY", "MIIB"),
         ),
         (
-            "generic slash token K7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad0SeGhJkD in output",
-            ("Q9mz4vLp8Wx3Rt6Yb1Nc5Ad0SeGhJkD",),
+            f"generic slash token {_SLASH_TOKEN} in output",
+            (_SLASH_TOKEN[5:],),
         ),
     ],
 )
@@ -1220,7 +1247,7 @@ def test_bounded_diagnostic_withholds_scanner_only_generic_across_clip() -> None
     sub-32-char fragment the post-clip gate would accept; the pre-clip gate
     must withhold it instead.
     """
-    candidate = "K7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad0SeGhJkDK7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad"
+    candidate = _GENERIC_CANDIDATE
     after = (
         oneclick._DIAGNOSTIC_TAIL_CHARS
         - oneclick._DIAGNOSTIC_CLIP_CHARS
@@ -1241,7 +1268,7 @@ def test_bounded_diagnostic_withholds_short_omk_across_tail() -> None:
     audit `omk_` rule (which needs a longer suffix) nor the post-clip guard;
     the pre-clip gate must withhold it instead.
     """
-    token = "omk_aB3dEf7hI2jK4"
+    token = _SHORT_OMK
     # Tail starts 4 chars into the token, keeping only the bare suffix.
     after = oneclick._DIAGNOSTIC_TAIL_CHARS + 4 - len(token) - 2
     raw = f"{_clip_filler(2000)} {token} {_clip_filler(after)}"
@@ -1257,7 +1284,7 @@ def test_bounded_diagnostic_withholds_pem_header_across_clip() -> None:
     Only the head of the armour survives the old tail+clip windows, so the
     post-clip PEM rule would accept it; the pre-clip gate must withhold it.
     """
-    header = "-----BEGIN RSA PRIVATE KEY-----"
+    header = _PEM_HEADER
     after = (
         oneclick._DIAGNOSTIC_TAIL_CHARS
         - oneclick._DIAGNOSTIC_CLIP_CHARS
@@ -1286,8 +1313,8 @@ def test_self_test_withholds_secret_bearing_report(
     """
     from omega_prime.grokbot.verify import Check, VerifyReport
 
-    candidate = "K7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad0SeGhJkDK7f2/Q9mz4vLp8Wx3Rt6Yb1Nc5Ad"
-    version_canary = "omk_aB3dEf7hI2jK4"
+    candidate = _GENERIC_CANDIDATE
+    version_canary = _SHORT_OMK
     poisoned = VerifyReport(
         base_url="http://127.0.0.1:1",
         checks=[
@@ -1325,7 +1352,7 @@ def test_self_test_withholds_secret_bearing_report(
 # metadata with argparse exit 2 and no host started. These call the real
 # ``main`` and assert on the real streams; no mock stands in for the echo.
 
-_PARSER_GUARD_CANARY = "omk_cAnArY9192"
+_PARSER_GUARD_CANARY = "omk_" + _synthetic_body(10, start=33)
 
 
 @pytest.mark.parametrize(

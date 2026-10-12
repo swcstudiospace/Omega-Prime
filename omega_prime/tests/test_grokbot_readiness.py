@@ -638,7 +638,7 @@ def test_unexplained_absence_remains_failed() -> None:
 
 def test_publication_canaries_blocked_from_evidence() -> None:
     recognized = "xai-" + "aB3dE5fG7hJ9kL2mN4pQ6"
-    assignment = "api_secret=Sup3rS3cretValue99"
+    assignment = "api_secret=" + "Sup3rS3cret" + "Value99"
     cross_tail = "x" * 186 + "omk_" + "qW8eR4tY2uI6oP0aS3dF"
     for canary in (recognized, assignment):
         assert redact_sensitive(f"evidence {canary} end") != f"evidence {canary} end"
@@ -646,14 +646,15 @@ def test_publication_canaries_blocked_from_evidence() -> None:
         assert canary not in out
     out = lv._curate(f"prefix {cross_tail}", redact_sensitive, limit=200)
     assert "omk_" not in out
-    pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBmock\n-----END RSA PRIVATE KEY-----"
+    pem_label = "RSA PRIVATE " + "KEY"
+    pem = f"-----BEGIN {pem_label}-----\nMIIBmock\n-----END {pem_label}-----"
     with pytest.raises(SecretLeakError):
         assert_no_secrets(f"bundle {pem}", "probe")
     with pytest.raises(SecretLeakError):
         assert_no_secrets(f"bundle {recognized}", "probe")
 
 
-_SPANNING_TOKEN = "aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY2zZ4"
+_SPANNING_TOKEN = "aB3dE5fG7hJ9kL2mN4" + "pQ6rS8tU0vW1xY2zZ4"
 """Scanner-only generic token: audit-clean, high-entropy, mixed classes."""
 
 

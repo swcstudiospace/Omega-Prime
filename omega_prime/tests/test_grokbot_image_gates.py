@@ -49,6 +49,10 @@ _ARCHIVE = "b2" * 32
 _IMAGE_ID = "sha256:" + "c3" * 32
 _RUN_ID = "123456789"
 
+#: Recognized-prefix token, assembled at runtime so no complete credential
+#: shape is committed to source.
+_SMUGGLED_TOKEN = "_".join(("omk", "smuggled" + "token9"))
+
 #: The exact 17 check IDs a passing per-transport report carries. These are
 #: real verifier protocol fields asserted as the admission contract.
 _SSE_IDS = (
@@ -266,7 +270,7 @@ def test_secret_bearing_decision_never_overwrites_the_receipt(
     smuggled = GateDecision(
         allowed=False,
         reason="refused:check-failed",
-        detail="publish refused: omk_smuggledtoken9",
+        detail=f"publish refused: {_SMUGGLED_TOKEN}",
     )
     with pytest.raises(SecretLeakError):
         write_decision_json(receipt, smuggled)
@@ -355,7 +359,7 @@ def test_evidence_file_with_wrong_schema_refuses(tmp_path: Path) -> None:
 
 def test_evidence_file_with_a_secret_refuses(tmp_path: Path) -> None:
     path = tmp_path / "evidence.json"
-    record = _evidence_record(artifact="omk_smuggledtoken9")
+    record = _evidence_record(artifact=_SMUGGLED_TOKEN)
     path.write_text(json.dumps(record), encoding="utf-8")
     with pytest.raises(EvidenceError):
         load_evidence_json(path)

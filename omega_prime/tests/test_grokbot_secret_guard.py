@@ -4,6 +4,7 @@
 
 import json
 import os
+import string
 from pathlib import Path
 
 import pytest
@@ -14,24 +15,39 @@ from omega_prime.grokbot.secret_guard import (
     enforce_token_file_mode,
 )
 
+#: Token alphabet for synthetic credential bodies. Bodies are generated at
+#: runtime so no complete credential shape is ever committed to source.
+_TOKEN_ALPHABET = string.ascii_letters + string.digits
+
+
+def _synthetic_body(length: int, start: int = 0) -> str:
+    """Deterministic mixed-class body; stride 17 is coprime with 62, so the
+    first 62 characters are all distinct (maximal entropy, no randomness)."""
+    return "".join(
+        _TOKEN_ALPHABET[(start + 17 * index) % len(_TOKEN_ALPHABET)]
+        for index in range(length)
+    )
+
+
 #: Recognized-prefix fixture, assembled at runtime from a fixed suffix so the
 #: suite never depends on randomness. Trips the ``omk`` pattern (suffix >= 8).
-_FIXED_OMK_SUFFIX = "9f2Kd7QwX4mZ8VbN1"
+_FIXED_OMK_SUFFIX = _synthetic_body(17, start=3)
 _FIXED_OMK_TOKEN = "omk_" + _FIXED_OMK_SUFFIX
 
 #: Fixed diverse lowercase-plus-digit run (all 26 letters + 10 digits).
 #: Trips the generic high-entropy heuristic deterministically:
 #: length 36, not hex/UUID, >4 distinct chars, two classes, high entropy.
-_GENERIC_RUN = "abcdefghijklmnopqrstuvwxyz0123456789"
+_GENERIC_RUN = string.ascii_lowercase + string.digits
 _GENERIC_PATH = "/cache/" + _GENERIC_RUN + "/manifest.json"
 
 #: Fixed known-shape credentials (no randomness, no committed live values).
-_FIXED_SK_TOKEN = "sk-" + "K7mQ2vX9bN4pL8wR6sT3yU1"
-_FIXED_BEARER_TOKEN = "Bearer " + "C7fK9mQ2vXb4NpL8wRsT6yU"
+_FIXED_SK_TOKEN = "sk-" + _synthetic_body(23, start=5)
+_FIXED_BEARER_TOKEN = "Bearer " + _synthetic_body(23, start=11)
+_PEM_LABEL = "RSA PRIVATE " + "KEY"
 _FIXED_PEM_BLOCK = (
-    "-----BEGIN RSA PRIVATE KEY-----\n"
-    "MIIBOgIBAAJBAK7mQ2vX9bN4pL8wR6sT3yU1vXb4NpL8wRsT6yU fixed body\n"
-    "-----END RSA PRIVATE KEY-----"
+    f"-----BEGIN {_PEM_LABEL}-----\n"
+    f"{_synthetic_body(48, start=7)} fixed body\n"
+    f"-----END {_PEM_LABEL}-----"
 )
 
 #: Integrity metadata the gate must never flag.
@@ -73,8 +89,8 @@ def test_clean_0600_file_passes(tmp_path: Path):
         _FIXED_SK_TOKEN,
         _FIXED_OMK_TOKEN,
         _FIXED_BEARER_TOKEN,
-        "Authorization: Bearer C7fK9mQ2vXb4NpL8wRsT6yU",
-        "api_key=abcdefgh12345678",
+        "Authorization: " + _FIXED_BEARER_TOKEN,
+        "api_key=" + _synthetic_body(16, start=13),
         _FIXED_PEM_BLOCK,
         _GENERIC_RUN,
     ],
@@ -259,7 +275,7 @@ def test_short_and_low_diversity_runs_pass():
 
 def test_qualifying_short_omk_prefix_rejects_without_entropy():
     """Recognized prefixes trip on shape alone, not on entropy."""
-    short_token = "omk_" + "9f2Kd7Qw"
+    short_token = "omk_" + _synthetic_body(8, start=3)
     with pytest.raises(SecretLeakError) as excinfo:
         assert_no_secrets(f"diag bundle body: {short_token}", "diag")
     message = str(excinfo.value)

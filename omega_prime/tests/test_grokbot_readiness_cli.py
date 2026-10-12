@@ -104,10 +104,10 @@ def test_cli_unexplained_canonical_absence_fails(tmp_path: Path) -> None:
         assert stat.S_IMODE(report_path.stat().st_mode) == 0o600
 
 
-_USAGE_CANARY = "omk_testcanary123"
+_USAGE_CANARY = "omk_" + "testcanary123"
 """Synthetic recognized-shaped unknown argument (matches the omk gate)."""
 
-_SECRET_SHAPED_ROOT = "/tmp/omk_shortcanary1"
+_SECRET_SHAPED_ROOT = "/tmp/" + "omk_" + "shortcanary1"
 """Nonexistent secret-shaped root: no roster lives under it."""
 
 _BENIGN_MISSING_ROOT = "/tmp/omega-benign-missing-seat"
@@ -172,7 +172,7 @@ def test_cli_benign_missing_root_stays_helpful() -> None:
 _RETENTION_STAGE = "readiness"
 _RETENTION_INTERPRETER = "requested 3.12, setup 3.12.7, path /opt/hostedtoolcache/Python/3.12.7/x64/bin/python3"
 _RETENTION_SOURCE_COMMIT = "retention-test-source-commit"
-_RETENTION_CANARY = "omk_retentioncanary9"
+_RETENTION_CANARY = "omk_" + "retentioncanary9"
 """Distinct recognized-shaped token: trips only the retention secret gate."""
 
 _RETENTION_MISSING_REASON = "candidate report missing"
@@ -188,10 +188,10 @@ _RETENTION_METADATA_KEYS = {
 }
 
 
-_RETENTION_STAGE_CANARY = "omk_retentionstage7"
+_RETENTION_STAGE_CANARY = "omk_" + "retentionstage7"
 """Recognized-shaped token poisoning the --stage identity label."""
 
-_RETENTION_INTERPRETER_CANARY = "omk_retentioninterp8"
+_RETENTION_INTERPRETER_CANARY = "omk_" + "retentioninterp8"
 """Recognized-shaped token poisoning the --interpreter identity label."""
 
 _RETENTION_SAFE_STAGE = "withheld"

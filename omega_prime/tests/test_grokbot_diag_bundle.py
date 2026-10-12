@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import string
 import sys
 from pathlib import Path
 
@@ -25,7 +26,7 @@ _FIXED_OMK_TOKEN = "omk_" + "7QwX4mZ8VbN19f2Kd"
 #: Fixed diverse lowercase-plus-digit run (all 26 letters + 10 digits) and a
 #: slash-bearing path carrying it. Trips the generic gate heuristic; no audit
 #: pattern scrubs it, so the collector scan is the boundary that must abort.
-_GENERIC_RUN = "abcdefghijklmnopqrstuvwxyz0123456789"
+_GENERIC_RUN = string.ascii_lowercase + string.digits
 _GENERIC_PATH = "/cache/" + _GENERIC_RUN + "/manifest.json"
 
 _MANIFEST_MARKER = "grokbot-fixture-marker-7f3a"
