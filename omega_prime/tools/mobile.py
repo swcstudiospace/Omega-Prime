@@ -71,10 +71,25 @@ def _safe_shot_name(name: str) -> str | None:
     return stem + ".png"
 
 
+_REF_RE = re.compile(r"[A-Za-z0-9_./~^:{}?*\[\]-]+")
+
+
+def _check_ref(ref: Any) -> None:
+    """Reject refs git could parse as options or invalid revision syntax."""
+    if (
+        not isinstance(ref, str)
+        or not ref
+        or ref.startswith("-")
+        or _REF_RE.fullmatch(ref) is None
+    ):
+        raise ValueError("ref must be a plain git revision")
+
+
 def _git_vcs(root: str):
     def show(ref: str, path: str) -> str | None:
+        _check_ref(ref)
         run = subprocess.run(
-            ["git", "show", f"{ref}:{path}"],
+            ["git", "show", "--end-of-options", f"{ref}:{path}"],
             cwd=root,
             capture_output=True,
             text=True,
@@ -83,8 +98,10 @@ def _git_vcs(root: str):
         return run.stdout if run.returncode == 0 else None
 
     def diff_names(base: str, head: str) -> list[str]:
+        _check_ref(base)
+        _check_ref(head)
         run = subprocess.run(
-            ["git", "diff", "--name-only", f"{base}...{head}"],
+            ["git", "diff", "--name-only", "--end-of-options", f"{base}...{head}"],
             cwd=root,
             capture_output=True,
             text=True,
@@ -93,8 +110,10 @@ def _git_vcs(root: str):
         return run.stdout.splitlines() if run.returncode == 0 else []
 
     def diff(base: str, head: str, paths: list[str]) -> str:
+        _check_ref(base)
+        _check_ref(head)
         run = subprocess.run(
-            ["git", "diff", f"{base}...{head}", "--", *paths],
+            ["git", "diff", "--end-of-options", f"{base}...{head}", "--", *paths],
             cwd=root,
             capture_output=True,
             text=True,

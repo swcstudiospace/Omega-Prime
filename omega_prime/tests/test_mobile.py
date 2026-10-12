@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from omega_prime.tools.approvals import ApprovalLog
 from omega_prime.tools.devices import AdbDevice, DeviceError, SimctlDevice
 from omega_prime.tools.mobile import MobileClient, MobileContext, register_mobile_tools
@@ -409,3 +411,60 @@ def test_adb_simctl_parsers_and_approvals(tmp_path):
         )["kind"]
         == "back"
     )
+
+
+# -- Phase 75 re-review WR-03: git ref validation in the real VCS seam --------
+# Caller-supplied refs reach git argv, so a leading-dash ref must be refused
+# before any subprocess spawns, and valid revisions must travel behind an
+# explicit end-of-options marker so git never parses them as flags.
+
+
+def test_git_vcs_rejects_option_like_refs_without_spawning(tmp_path, monkeypatch):
+    from omega_prime.tools.mobile import _git_vcs
+
+    def _no_spawn(*args, **kwargs):
+        raise AssertionError("git must not spawn for an option-like ref")
+
+    monkeypatch.setattr("subprocess.run", _no_spawn)
+    vcs = _git_vcs(str(tmp_path))
+    for call in (
+        lambda: vcs["show"]("--help", "a.txt"),
+        lambda: vcs["show"]("-h", "a.txt"),
+        lambda: vcs["diff_names"]("--output=/tmp/x", "HEAD"),
+        lambda: vcs["diff_names"]("HEAD", "--upload-pack=t"),
+        lambda: vcs["diff"]("--output=/tmp/x", "HEAD", []),
+        lambda: vcs["diff"]("HEAD", "-u", []),
+    ):
+        with pytest.raises(ValueError):
+            call()
+
+
+def test_git_vcs_rejects_malformed_refs_and_separates_options(
+    tmp_path, monkeypatch
+):
+    from omega_prime.tools.mobile import _git_vcs
+
+    seen: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+
+    def _capture(argv, **kwargs):
+        seen.append(list(argv))
+        return _Done()
+
+    monkeypatch.setattr("subprocess.run", _capture)
+    vcs = _git_vcs(str(tmp_path))
+    for bad in ("", "has space", "semi;colon", "tick`", "dollar$e", "paren(x)"):
+        with pytest.raises(ValueError):
+            vcs["show"](bad, "a.txt")
+    assert seen == []
+    assert vcs["show"]("HEAD", "a.txt") == ""
+    vcs["diff_names"]("v1", "v2")
+    vcs["diff"]("v1", "v2", ["ios/App.entitlements"])
+    assert seen == [
+        ["git", "show", "--end-of-options", "HEAD:a.txt"],
+        ["git", "diff", "--name-only", "--end-of-options", "v1...v2"],
+        ["git", "diff", "--end-of-options", "v1...v2", "--", "ios/App.entitlements"],
+    ]
