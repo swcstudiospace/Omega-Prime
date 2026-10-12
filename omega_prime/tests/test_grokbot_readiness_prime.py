@@ -24,9 +24,12 @@ ROOT = Path(__file__).resolve().parents[2]
 # Parent ACTUAL repro shape: low-entropy repeat prefix plus a high-entropy
 # tail. The prefix alone is scanner-clean (4 distinct chars); the full
 # candidate trips the unchanged strong gate.
+# Fragments stay below the 32-char scanner run so no complete token-shaped
+# literal is committed; the full candidate is assembled at runtime.
 _CANDIDATE = (
     "bA3c" * 100
-    + ("aB0dE2fG4hI6jK8mN0pQ2rS4tU6vW8xY0zA2bC4dE6fG8hI0jK2lM4nO6pQ8rS0tU") * 10
+    + ("aB0dE2fG4hI6jK8mN0pQ2" + "rS4tU6vW8xY0zA2bC4dE6" + "fG8hI0jK2lM4nO6pQ8rS0tU")
+    * 10
 )
 
 
@@ -110,7 +113,7 @@ def test_prime_trailing_secret_preserves_prior_and_withholds(
     probe.record("owned-prior-safe", (), "prior safe evidence")
     prior = probe.checks[-1]["detail"]
     assert "prior safe evidence" in prior
-    token = "aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY2zZ4"
+    token = "aB3dE5fG7hJ9kL2mN4" + "pQ6rS8tU0vW1xY2zZ4"
     trailing = "owned diagnostic " + "q " * 40 + token
     assert redact_sensitive(trailing) == trailing
     with pytest.raises(SecretLeakError):
@@ -130,3 +133,55 @@ def test_prime_trailing_secret_preserves_prior_and_withholds(
     assert token[-12:] not in detail
     assert token not in json.dumps(probe.checks)
     assert_no_secrets(json.dumps(probe.checks), "readiness-report")
+
+
+def test_prime_rlm_refused_tools_stay_blocked_with_prerequisites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model-double composition never credits refused roster RLM tools."""
+    from omega_prime.tools.rlm import RLM_TOOL_NAMES
+
+    probe = _prime_probe(tmp_path, monkeypatch)
+    prime._rlm_lifecycle(probe)
+
+    checks = {row["name"]: row for row in probe.checks}
+    composition = checks["prime_rlm_lifecycle"]
+    assert composition["status"] == "passed"
+    assert composition["tools"] == []
+
+    refused = {
+        "rlm_spawn",
+        "rlm_create_session",
+        "rlm_progress_note",
+        "rlm_rename",
+        "rlm_delete_subagent",
+    }
+    assert refused.isdisjoint(probe.exercised)
+
+    blocked: dict[str, tuple[list[str], list[str]]] = {}
+    for check in probe.checks:
+        if check["status"] != "blocked":
+            continue
+        for tool in check["tools"]:
+            entry = blocked.setdefault(tool, ([], []))
+            entry[0].append(f"check:{check['name']}")
+            entry[1].extend(check["prerequisites"])
+    rows, problems = lv.account_roster(
+        canonical=list(RLM_TOOL_NAMES),
+        offered=list(RLM_TOOL_NAMES),
+        evidence={
+            tool: [f"check:{name}" for name in names]
+            for tool, names in probe.exercised.items()
+        },
+        disabled={},
+        blocked=blocked,
+        family_of=lambda _name: "RLM",
+    )
+    assert problems == []
+    by_name = {row["name"]: row for row in rows}
+    for tool in refused:
+        assert by_name[tool]["status"] == "blocked", tool
+        assert by_name[tool]["prerequisites"], tool
+    # Effect-free reads that genuinely ran on the registered host stay credited.
+    for tool in set(RLM_TOOL_NAMES) - refused:
+        assert by_name[tool]["status"] == "exercised", tool

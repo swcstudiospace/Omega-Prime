@@ -503,7 +503,8 @@ def _rlm_lifecycle(probe: ReadinessProbe) -> None:
     The full persisted lifecycle runs through a real ``RlmHost`` plus the
     real ``RlmConnector`` with a configured runner backed by the existing
     ``ScriptedModel`` seam. That composition is a labeled model-double: it
-    proves local persistence and handler wiring, never provider/Grok proof.
+    proves local persistence and handler wiring, never provider/Grok proof,
+    and is recorded control-only so it never credits the refused roster names.
     """
     from omega_prime.prime.rlm import (
         CollectRequest,
@@ -740,21 +741,17 @@ def _rlm_direct_lifecycle(
         )
     finally:
         reopened.shutdown()
+    # Control-only: this direct RlmHost/RlmConnector composition never
+    # dispatched the registered roster handlers, which refused above on the
+    # missing provider/child. Crediting their names here would let roster
+    # accounting hide those blocked prerequisites.
     probe.record(
         "prime_rlm_lifecycle",
-        (
-            "rlm_spawn",
-            "rlm_collect",
-            "rlm_create_session",
-            "rlm_progress_note",
-            "rlm_list_subagents",
-            "rlm_rename",
-            "rlm_delete_subagent",
-        ),
+        (),
         "real RlmHost+RlmConnector spawn/collect/create/progress/list/rename/"
         "delete with a ScriptedModel-backed runner (labeled model-double, not "
         "provider); metadata reopened from disposable STATE/rlm-direct after "
-        "shutdown, then deleted",
+        "shutdown, then deleted; registered rlm_* handlers not credited",
     )
 
 
