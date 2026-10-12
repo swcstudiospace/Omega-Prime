@@ -21,9 +21,10 @@ repeat `unchanged` observation.
 To establish import behavior for that scope, an operator runs the
 [maintained refresh](#maintained-refresh) with a private key:
 `python -m omega_prime.greptile.kb_sync --repo swcstudiospace/omes-bot --out kb`
-is expected to exit 0 with `synced` or `unchanged`, and an immediate second run
-is expected to exit 0 with `already up to date` while
-`git status --porcelain kb/` stays empty. Cite those commands and their
+is expected to exit 0 with `synced` or `unchanged`. An immediate second run
+is expected to exit 0 with `already up to date` and leave `kb/` as the first
+run left it: `git status --porcelain kb/` prints the same output before and
+after the second run. Cite those commands and their
 observed exit codes when claiming the result. Even a passing refresh does
 **not** prove a hosted `kb-refresh` job, automatic PR reviews, a live
 provider/model connection, or publication.
