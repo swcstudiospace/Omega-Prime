@@ -104,12 +104,14 @@ jobs:
           umask 077
           # Owned credential directory so the image (uid 10001) can mint the
           # admin store into it without ever broadening temp-dir permissions.
+          # The runner creates the directory and the call token while it still
+          # owns them, then hands both to uid 10001; from then on the runner
+          # reaches them only through sudo.
           mkdir -p "$RUNNER_TEMP/ci-creds"
-          sudo chown 10001:10001 "$RUNNER_TEMP/ci-creds"
           chmod 700 "$RUNNER_TEMP/ci-creds"
           openssl rand -hex 24 > "$RUNNER_TEMP/ci-creds/omega_prime_token"
           # The image runs as uid 10001; the host rejects group/world-readable token files.
-          sudo chown 10001:10001 "$RUNNER_TEMP/ci-creds/omega_prime_token"
+          sudo chown -R 10001:10001 "$RUNNER_TEMP/ci-creds"
       - name: Mint the owned admin token store
         run: |
           set -euo pipefail
@@ -124,7 +126,7 @@ jobs:
           docker run --rm --entrypoint python \
             -v "$RUNNER_TEMP/ci-creds:/credentials" \
             "$IMAGE_TAG" -c 'from pathlib import Path; from omega_prime.grokbot.tokens import create_token; from omega_prime.tooling.fs import atomic_write_text; plaintext, _record = create_token(Path("/credentials/omega_prime_tokens.json"), scopes=["admin"], label="ci-admin", ttl_days=1); atomic_write_text(Path("/credentials/omega_prime_admin_token"), plaintext + "\n")'
-          chmod 700 "$RUNNER_TEMP/ci-creds"
+          sudo chmod 700 "$RUNNER_TEMP/ci-creds"
 
       - name: Start the hardened SSE container
         run: |
@@ -333,11 +335,16 @@ jobs:
           secrets: list[str] = []
           creds = runner_temp / "ci-creds"
           for name in ("omega_prime_token", "omega_prime_admin_token"):
-              candidate = creds / name
-              try:
-                  value = candidate.read_text(encoding="utf-8").strip()
-              except OSError:
+              # The credential directory belongs to uid 10001 (the image
+              # user), so the runner reads the values through sudo.
+              read = subprocess.run(
+                  ["sudo", "cat", str(creds / name)],
+                  capture_output=True,
+                  text=True,
+              )
+              if read.returncode != 0:
                   continue
+              value = read.stdout.strip()
               if value:
                   secrets.append(value)
 
