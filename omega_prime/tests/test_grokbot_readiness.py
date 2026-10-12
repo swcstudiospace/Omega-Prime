@@ -1012,6 +1012,34 @@ def test_validate_report_rejects_malformed_summary_and_checks() -> None:
             cli.validate_report(dict(good, checks=bad_check), ["a-tool"])
 
 
+def test_validate_report_requires_summary_problems_to_be_strings() -> None:
+    """Child-derived ``summary.problems`` must be a list of strings when present."""
+    tool = {
+        "name": "a-tool",
+        "family": "Fam",
+        "status": "exercised",
+        "evidence": ["check:x"],
+        "prerequisites": [],
+    }
+    good: dict[str, Any] = {
+        "schema_version": 1,
+        "ok": False,
+        "scope": "isolated-local",
+        "checks": [],
+        "tools": [tool],
+        "summary": {},
+        "limitations": [],
+    }
+    bad_problems: list[object] = [5, None, "x", {}, [1]]
+    for bad in bad_problems:
+        with pytest.raises(ValueError):
+            cli.validate_report(dict(good, summary={"problems": bad}), ["a-tool"])
+    valid = dict(good, summary={"problems": ["missing prerequisite", "slow"]})
+    assert cli.validate_report(valid, ["a-tool"]) is valid
+    assert cli.validate_report(dict(good, summary={"problems": []}), ["a-tool"])
+    assert cli.validate_report(good, ["a-tool"]) is good
+
+
 def test_cli_rejects_bad_root(tmp_path: Path) -> None:
     assert cli.main(["--root", str(tmp_path / "nope"), "--json"]) == 2
 
