@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,10 @@ paths:
   - pattern: "omega_prime/skills/*"
     owner: bot-99-guest
 """
+
+# Built from fragments so no complete credential shape sits in source; the
+# redaction detector still sees the joined value at runtime.
+FAKE_KEY = "sk-" + "abcdefgh" + "1234"
 
 
 class FakeSubstrate:
@@ -320,12 +325,38 @@ def test_render_prompt_refuses_placeholders(tmp_path: Path):
     )
 
 
+def test_render_prompt_skips_runtime_state(tmp_path: Path):
+    ctx = _ctx(tmp_path)
+    package = Path(ctx.root) / "omega_prime"
+    state = package / "state"
+    state.mkdir()
+    (state / "events.ndjson").write_text('{"seq": 1}\n', encoding="utf-8")
+    if hasattr(os, "mkfifo"):
+        # A named pipe cannot be copied: copying live state would fail here.
+        os.mkfifo(state / "live.pipe")
+    (package / "sessions.db").write_bytes(b"runtime")
+    script = package / "scripts" / "assemble-prompts.sh"
+    script.write_text(
+        "#!/bin/bash\n"
+        "mkdir -p omega_prime/prompts-assembled\n"
+        "seen=clean\n"
+        "[ -e omega_prime/state ] && seen=state\n"
+        "[ -e omega_prime/sessions.db ] && seen=db\n"
+        "[ -e omega_prime/ownership.yaml ] || seen=missing-input\n"
+        "printf '<seat>%s</seat>' \"$seen\" > omega_prime/prompts-assembled/OMEGA_PRIME.xml\n",
+        encoding="utf-8",
+    )
+    rendered = LeadClient(ctx).render_prompt()
+    assert rendered.get("prompt") == "<seat>clean</seat>", rendered
+    assert (state / "events.ndjson").read_text(encoding="utf-8") == '{"seq": 1}\n'
+
+
 def test_memory_retain_and_recall(tmp_path: Path):
     client = LeadClient(_ctx(tmp_path))
     assert "evidence_required" in client.memory_retain("note")["error"]
     assert (
         "secret_refused"
-        in client.memory_retain("key sk-abcdefgh1234", source="chat")["error"]
+        in client.memory_retain(f"key {FAKE_KEY}", source="chat")["error"]
     )
     kept = client.memory_retain(
         "desk uses receipts", source="chat", tags=["core"], graph_id="g-1"
@@ -357,7 +388,7 @@ def test_receipt_check_paths(tmp_path: Path, monkeypatch: Any):
         }
     )
     assert bad["ok"] is False and bad["problems"]
-    leaked = dict(_good_receipt(), unverified=["token=abc123"])
+    leaked = dict(_good_receipt(), unverified=["token" + "=abc123"])
     assert client.receipt_check(leaked)["problems"] == [
         "receipt contains a credential shape (PD-4)"
     ]
@@ -879,9 +910,37 @@ def test_event_store_skips_torn_trailing_line(tmp_path: Path):
     rows = EventStore(path).records()
     assert [row["seq"] for row in rows] == [first["seq"], second["seq"]]
     rebuilt = EventStore(path)
-    assert rebuilt._seq == second["seq"]
     third = rebuilt.append({"kind": "three"})
+    fourth = rebuilt.append({"kind": "four"})
     assert third["seq"] == second["seq"] + 1
+    assert fourth["seq"] == third["seq"] + 1
+    reopened = EventStore(path).records()
+    assert [row["kind"] for row in reopened] == ["one", "two", "three", "four"]
+    assert [row["seq"] for row in reopened] == [1, 2, 3, 4]
+
+
+def test_event_store_torn_tail_does_not_eat_a_live_stores_append(tmp_path: Path):
+    path = tmp_path / "events.ndjson"
+    store = EventStore(path)
+    store.append({"kind": "one"})
+    # A crash in another writer tears the tail after this store loaded.
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"seq": 999, "torn": ')
+    store.append({"kind": "two"})
+    store.append({"kind": "three"})
+    assert [row["kind"] for row in EventStore(path).records()] == [
+        "one",
+        "two",
+        "three",
+    ]
+
+
+def test_event_store_keeps_whole_record_missing_its_newline(tmp_path: Path):
+    path = tmp_path / "events.ndjson"
+    path.write_text('{"seq": 1, "kind": "one"}', encoding="utf-8")
+    store = EventStore(path)
+    store.append({"kind": "two"})
+    assert [row["kind"] for row in EventStore(path).records()] == ["one", "two"]
 
 
 def test_event_store_raises_on_earlier_corrupt_line(tmp_path: Path):
@@ -904,29 +963,27 @@ def test_memory_retain_refuses_secrets_in_metadata(tmp_path: Path):
     client = LeadClient(_ctx(tmp_path))
     assert (
         "secret_refused"
-        in client.memory_retain("clean note", source="chat", tags=["sk-abcdefgh1234"])[
+        in client.memory_retain("clean note", source="chat", tags=[FAKE_KEY])["error"]
+    )
+    assert (
+        "secret_refused"
+        in client.memory_retain("clean note", source=f"chat {FAKE_KEY}")["error"]
+    )
+    assert (
+        "secret_refused"
+        in client.memory_retain("clean note", source="chat", graph_id=f"g-{FAKE_KEY}")[
             "error"
         ]
     )
     assert (
         "secret_refused"
-        in client.memory_retain("clean note", source="chat sk-abcdefgh1234")["error"]
+        in client.memory_retain("clean note", source="chat", task_id=f"t-{FAKE_KEY}")[
+            "error"
+        ]
     )
     assert (
         "secret_refused"
-        in client.memory_retain(
-            "clean note", source="chat", graph_id="g-sk-abcdefgh1234"
-        )["error"]
-    )
-    assert (
-        "secret_refused"
-        in client.memory_retain(
-            "clean note", source="chat", task_id="t-sk-abcdefgh1234"
-        )["error"]
-    )
-    assert (
-        "secret_refused"
-        in client.memory_retain("clean note", receipt_path="r-sk-abcdefgh1234.json")[
+        in client.memory_retain("clean note", receipt_path=f"r-{FAKE_KEY}.json")[
             "error"
         ]
     )

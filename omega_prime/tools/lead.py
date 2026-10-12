@@ -352,25 +352,95 @@ class RosterStore:
 
 
 class EventStore:
-    """Append-only NDJSON event mirror."""
+    """Append-only NDJSON event mirror.
+
+    A torn final record (a crash mid-append leaves one) is cut back to the
+    end of the last complete record before this store counts or appends,
+    so a later append never fuses onto the fragment. Repair and append run
+    under the instance thread lock plus an exclusive `flock` on the stable
+    `events.ndjson.lock` sidecar, so a repair never truncates another
+    store's in-flight append.
+    """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self._thread_lock = threading.Lock()
         self._seq = 0
+        if self.path.is_file():
+            with self._exclusive():
+                self._repair_tail()
         for _ in self.records():
             self._seq += 1
 
+    @property
+    def _lock_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".lock")
+
+    @contextlib.contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """Hold the thread lock and the sidecar `flock` for one write."""
+        with self._thread_lock:
+            ensure_private_dir(self.path.parent)
+            fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                if _fcntl is not None:
+                    _fcntl.flock(fd, _fcntl.LOCK_EX)
+                yield
+            finally:
+                os.close(fd)
+
+    def _repair_tail(self) -> None:
+        """Durably settle bytes after the last newline (a torn append).
+
+        A whole record missing only its newline gets one; anything else is
+        truncated back to the end of the last complete line. Caller holds
+        `_exclusive`. Newline-terminated lines are never touched, so a
+        corrupt earlier line still makes `records` raise.
+        """
+        try:
+            handle = self.path.open("r+b")
+        except FileNotFoundError:
+            return
+        with handle:
+            size = handle.seek(0, os.SEEK_END)
+            if size == 0:
+                return
+            handle.seek(size - 1)
+            if handle.read(1) == b"\n":
+                return
+            cut = 0
+            pos = size
+            while pos > 0:
+                step = min(pos, 65536)
+                pos -= step
+                handle.seek(pos)
+                index = handle.read(step).rfind(b"\n")
+                if index != -1:
+                    cut = pos + index + 1
+                    break
+            handle.seek(cut)
+            try:
+                json.loads(handle.read())
+            except ValueError:
+                handle.truncate(cut)
+            else:
+                handle.seek(0, os.SEEK_END)
+                handle.write(b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
     def append(self, event: dict) -> dict:
         """Append one event with seq + timestamp. Payloads stay redacted."""
-        self._seq += 1
-        record = {
-            "seq": self._seq,
-            "ts": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            **{k: redact_value(v) for k, v in event.items()},
-        }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with self._exclusive():
+            self._repair_tail()
+            self._seq += 1
+            record = {
+                "seq": self._seq,
+                "ts": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                **{k: redact_value(v) for k, v in event.items()},
+            }
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         return record
 
     def records(self) -> list[dict]:
@@ -382,11 +452,7 @@ class EventStore:
         """
         if not self.path.is_file():
             return []
-        lines = [
-            line
-            for line in self.path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        lines = [line for line in self.path.read_bytes().split(b"\n") if line.strip()]
         rows = []
         for index, line in enumerate(lines):
             try:
@@ -395,6 +461,34 @@ class EventStore:
                 if index != len(lines) - 1:
                     raise
         return rows
+
+
+# Never assembler inputs: live desk state (the default `omega_prime/state`
+# store root), tests, the previous render, and runtime databases/logs.
+_RENDER_SKIP_TOP = frozenset({"state", "tests", "prompts-assembled"})
+_RENDER_SKIP_ANY = shutil.ignore_patterns(
+    "__pycache__",
+    "*.pyc",
+    "*.db",
+    "*.sqlite",
+    "*.sqlite3",
+    "*-wal",
+    "*-shm",
+    "*-journal",
+    "*.log",
+)
+
+
+def _render_ignore(package: Path) -> Callable[[str, list[str]], set[str]]:
+    """`copytree` ignore: runtime data anywhere, plus top-level non-inputs."""
+
+    def ignore(src: str, names: list[str]) -> set[str]:
+        skipped = set(_RENDER_SKIP_ANY(src, names))
+        if Path(src) == package:
+            skipped.update(_RENDER_SKIP_TOP.intersection(names))
+        return skipped
+
+    return ignore
 
 
 @dataclass
@@ -600,14 +694,16 @@ class LeadClient:
             return _error("not_configured", "assemble-prompts.sh is not in this root")
         with tempfile.TemporaryDirectory(prefix="omega-prime-render-") as tmp:
             tree = Path(tmp)
-            # Copy the whole package: assemble.py imports tool-name constants
+            # Copy the package's inputs: assemble.py imports tool-name constants
             # from omega_prime.tools, and the shadowing namespace package here
             # bypasses any installed editable finder, so a partial allowlist
             # breaks on the first transitive import (receipts, offer, ...).
+            # Runtime state, tests, prior output and databases are not inputs.
+            package = root / "omega_prime"
             shutil.copytree(
-                root / "omega_prime",
+                package,
                 tree / "omega_prime",
-                ignore=shutil.ignore_patterns("__pycache__"),
+                ignore=_render_ignore(package),
             )
             venv = root / ".venv"
             if venv.is_dir():
