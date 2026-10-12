@@ -29,6 +29,7 @@ from omega_prime.tooling import plugin
 from omega_prime.tooling.plugin import (
     COMMANDS_DIR,
     HTTPS_EXAMPLE,
+    HTTPS_TOKEN_VAR,
     MARKETPLACE,
     MCP_JSON,
     PLUGIN_MANIFEST,
@@ -266,6 +267,33 @@ def test_https_example_is_https_mcp_with_only_placeholders() -> None:
     assert text.count(member) == 1
     assert_no_secrets(text.replace(member, plugin.HEADER_SENTINEL), name=HTTPS_EXAMPLE)
     assert plugin.secret_problems(HTTPS_EXAMPLE, text) == []
+
+
+def test_https_example_rejects_a_foreign_placeholder_variable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N-01: only the documented token variable is sentinel-masked."""
+    tree = _copy_tree(tmp_path)
+    foreign = "Bearer ${AKIAIOSFODNN7EXAMPLE}"
+    _edit_json(
+        tree,
+        HTTPS_EXAMPLE,
+        lambda doc: _server(doc)["headers"].update(Authorization=foreign),
+    )
+    assert main(["--root", str(tree), "--check"]) == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert HTTPS_EXAMPLE in captured.err
+    assert "AKIAIOSFODNN7EXAMPLE" not in captured.out + captured.err
+
+
+def test_https_example_accepts_the_env_form_of_the_token_variable() -> None:
+    """N-01 guard: pinning the variable must not reject its `env:` form."""
+    text = (ROOT / HTTPS_EXAMPLE).read_text(encoding="utf-8")
+    plain = f"Bearer ${{{HTTPS_TOKEN_VAR}}}"
+    env_form = text.replace(plain, f"Bearer ${{env:{HTTPS_TOKEN_VAR}}}", 1)
+    assert env_form != text
+    assert plugin.secret_problems(HTTPS_EXAMPLE, env_form) == []
 
 
 def test_injected_token_is_caught_by_the_unchanged_gate() -> None:

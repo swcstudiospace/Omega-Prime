@@ -89,8 +89,10 @@ COMMAND_EXTENSIONS = (".md", ".mdc", ".markdown", ".txt")
 PLUGIN_NAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
 # Agent Skills and command names: lowercase letters, digits, single hyphens.
 COMPONENT_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-# The only accepted Authorization value in the HTTPS example (AS-07).
-HEADER_PLACEHOLDER_RE = re.compile(r"Bearer \$\{(?:env:)?[A-Z][A-Z0-9_]*\}")
+# The only accepted Authorization value in the HTTPS example (AS-07): exactly
+# the documented token variable, with the `env:` form allowed. Any other
+# `${VAR}` fails the shape check instead of being sentinel-masked.
+HEADER_PLACEHOLDER_RE = re.compile(r"Bearer \$\{(?:env:)?" + HTTPS_TOKEN_VAR + r"\}")
 # Every `$` in the HTTPS example must open one of these placeholders.
 PLACEHOLDER_RE = re.compile(r"\$\{(?:env:)?[A-Z][A-Z0-9_]*\}")
 # Fixed stand-in for the one validated header member, scanned instead of it.
