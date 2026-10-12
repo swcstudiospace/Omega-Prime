@@ -81,6 +81,22 @@ jobs:
           arguments: --locked --config prime-agent/deny.toml
           manifest-path: prime-agent/Cargo.toml
 
+      # pa-daemon's kernel suites (for example
+      # goal_turn_end_loop_runs_to_completion) run the ipython tool against the
+      # ambient kernel venv and fail without it. Upstream's own CI
+      # (prime-agent .github/workflows/ci.yml, test-shard job) installs uv and
+      # bootstraps that venv before its tests; these two steps mirror it.
+      # ~/.local/bin gains uv only, never a prime-agent binary (see the PATH
+      # note on the test step).
+      - name: install uv (the kernel venv bootstrap uses it)
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: bootstrap the kernel venv
+        working-directory: prime-agent
+        run: ./target/debug/prime-agent --prime-agent-bootstrap
+
       # The --skip set is the Phase 53 baseline's documented exclusions:
       # three pa-cli acp_mode_e2e tests whose ACP-stdio settle assertions are
       # timing-sensitive on shared runners (reproduced locally under full
