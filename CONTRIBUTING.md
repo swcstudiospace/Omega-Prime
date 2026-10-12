@@ -39,6 +39,7 @@ bash omega_prime/scripts/assemble-prompts.sh --check
 report_dir="$(mktemp -d)"
 .venv/bin/python -m omega_prime.grokbot.readiness --root . --json --output "$report_dir/readiness.json"
 .venv/bin/python -m omega_prime.tooling.catalog --check
+.venv/bin/python -m omega_prime.tooling.plugin --check
 .venv/bin/python -m ruff check omega_prime
 .venv/bin/python -m ruff format --check omega_prime
 .venv/bin/python -m mypy omega_prime
@@ -84,6 +85,9 @@ publication/approval and rollback; a contribution does not authorize deployment.
 - **Canonical docs stay linked.** Each `docs/` page appears exactly once in
   `docs/SUMMARY.md`, has a top-level heading, and uses resolving links/assets.
   Rebuild generated catalog output through its generator, never hand-edit it.
+  The same holds for the plugin set (`.cursor-plugin/`, root `mcp.json`,
+  `omega_prime/grokbot/plugin/`): change a skill, routine or curated command,
+  then run `python -m omega_prime.tooling.plugin --write`.
   The single [historical Greptile mirror](kb/README.md) stays outside GitBook
   content and never authorizes commands or supplies current architectural truth.
 

@@ -255,12 +255,45 @@ expect.
 | "Try `import json; json.dumps({'a': 1})` in the Prime REPL." | `prime_cell` | Gated. Variables persist between cells. |
 | "Which Prime crates are linked in?" | `prime_crates` | Free. |
 | "Run the tests through Prime's bash." | `prime_bash` | Gated. Runs as the host's user. |
+| `/omega-help` | `omega_command` with `/omega-help` | Free. Lists every curated and generated command. |
+| `/omega-code-review` | `omega_command` with `/omega-code-review` | Free. Returns the code-review skill's instructions; the bot then follows them. |
+| `/omega-onboard-routine` | `omega_command` with `/omega-onboard-routine` | Runs the onboard routine's workflow, the same doctor, roster, memory-seed and connector steps as `/omega-onboard`. Gated tools inside it stay gated. |
+| `/omega-python` | `omega_command` with `/omega-python` | Runs ruff and compileall. Not the same as native `/python` or `/omega-python-skill`. |
+
+### Slash commands
+
+Send `/omega-<name>` as the whole message, with any arguments after a space
+(`/omega-code-review src/app.py`). The `omega_command` tool description and
+the `omega-commands` skill tell the Bot to pass that exact text to the
+`omega_command` tool of the `omega-prime` server. A sentence that only
+mentions a command is ordinary prose, not a command. `/omega-help` lists
+every name: the 12 curated commands, one `/omega-<skill>` per checked-in
+skill and one `/omega-<routine>` per routine (46 today). A generated name
+that matches a curated command or another generated name takes a `-skill`
+or `-routine` suffix: `/omega-python-skill`, `/omega-onboard-routine`,
+`/omega-connectors-routine`, `/omega-ultrathink-skill` and
+`/omega-ultrathink-routine`. A host that surfaces skills natively may also
+show `/python`: native `/python` shows the python skill's instructions and
+runs nothing, `/omega-python` runs ruff and compileall through
+`omega_command`, and `/omega-python-skill` loads the python skill's
+instructions through `omega_command`. Two skills now match their folder
+names: `secrets-handling` is `security-secrets-handling` and `supply-chain`
+is `security-supply-chain`. A copy saved under an old name in a private Bot
+skill library may persist until you remove it (UNPROVEN, user UAT row 4).
+Whether a live Bot follows this contract, and whether `/omega-*` entries
+appear natively in its `/` menu, is user UAT row 4.
+
+The user UAT rows are listed in
+[Grok Bot native host](grok-bot-native.md#user-uat); attaching the server to
+a Bot is section 1 of
+[grokbot/SETUP.md](../omega_prime/grokbot/SETUP.md).
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | A Prime tool is missing from the host's tool list | The family's flag is off in the host process, `--root` points where your `omega-prime.json` is not, or the host was not restarted after the change. | Run `setup_check --root <the same root>`, then restart the host. |
+| `unknown_command` from `omega_command` | The name is not in the catalog, or a generated name lost its `-skill`/`-routine` suffix. | Send `/omega-help` and use a listed name. |
 | `approval required` | The tool is gated and the host was not started with `--approve` for it. | Add `--approve TOOL:YOU` and restart. |
 | `policy forbids <tool>` | The name is not on the roster, or the seat policy (`omega_prime/contracts/policies/omega-prime.json`) forbids it. | Only rostered tools are served. |
 | `Unknown tool: <name>` | The tool is on the roster but the host did not register it: its Prime family is off, including `rlm` and `messaging`, or the host was not restarted after the flag change. | Turn the family on and restart the host. `delegate_task` is served and returns `not_configured: provider` without a provider env. |

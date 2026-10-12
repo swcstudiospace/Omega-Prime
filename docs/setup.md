@@ -104,12 +104,19 @@ These run with an empty credential surface and prove only this checkout:
 
 ```bash
 .venv/bin/python -m omega_prime.setup_check --root .
+.venv/bin/python -m omega_prime.tooling.catalog --check
+.venv/bin/python -m omega_prime.tooling.plugin --check
 ```
 
-`setup_check` runs the roster, template, assembly, registry, ultrathink, and
-substrate checks and exits 0 only when every required check passes. Skips
-(ultrathink/substrate unconfigured) are reported, never failures — only
-`FAIL` fails.
+`setup_check` runs the roster, template, assembly, plugin, registry,
+ultrathink, and substrate checks and exits 0 only when every required check
+passes. Skips (ultrathink/substrate unconfigured) are reported, never
+failures — only `FAIL` fails. `tooling.catalog --check` fails when
+[the tool catalog](tool-catalog.md) is stale. `tooling.plugin --check` fails
+when a generated plugin file (`.cursor-plugin/`, `mcp.json`,
+`omega_prime/grokbot/plugin/commands/omega-*.md`, the HTTPS example) drifts
+from the checked-in skills, routines and curated commands, or when a skill's
+frontmatter breaks the platform rules; `--write` regenerates the set.
 
 The isolated readiness profile accounts for every roster tool, actually
 calling eligible local handlers and classifying the rest with named
@@ -155,18 +162,33 @@ roster's default set — the intersection `setup_check` reports. Prime families
 stay off by default. `delegate_task` is served; without a provider env it
 returns `not_configured: provider`.
 
-Prefer the 1-click launcher, which runs the preflight doctor first and
-refuses an unauthenticated non-loopback bind:
+Prefer the 1-click launcher. It resolves the repository from its own
+location, runs the preflight doctor before a plain serve, and refuses an
+unauthenticated non-loopback bind:
 
 ```bash
+bash omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio
+bash omega_prime/scripts/grokbot-1click.sh --bootstrap-only
+bash omega_prime/scripts/grokbot-1click.sh --verify --json
 ./scripts/grokbot-1click.sh --transport stdio
 ./scripts/grokbot-1click.sh --transport stdio --dry-run
 ```
 
-`--dry-run` does everything except serve. `--self-test` starts a throwaway
-loopback host and runs the live verifier. Operator references:
-`docs/tool-host.md` (server), `docs/grok-bot-native.md` (remote host),
-`docs/deploy.md` (deploying it).
+`--bootstrap` builds `.venv` from `requirements-lock.txt` once, or reuses it
+when its completion stamp matches (an unstamped operator `.venv` is used
+unchanged or refused, never replaced), runs the plugin `--check`, then
+serves stdio without the doctor; it is the command the root `mcp.json`
+declares. `--bootstrap-only` stops after the bootstrap.
+`--verify` bootstraps, then runs `python -m omega_prime.tooling.plugin --verify`
+against the declared stdio entry and a loopback HTTPS host. Bootstrap
+failures exit 10 (`missing_prerequisite`), 11 (`install_failed`), 12
+(`catalog_drift`) or 13 (`host_unreachable`, verify only) with one JSON
+line on stderr. `--dry-run` does everything except serve. `--self-test`
+starts a throwaway loopback host and runs the live verifier. Setting
+Omega Prime up on a Grok Bot is section 1 of
+[grokbot/SETUP.md](../omega_prime/grokbot/SETUP.md). Operator references:
+`docs/tool-host.md` (server), `docs/grok-bot-native.md` (launcher, remote
+host, HTTPS alternative, evidence ledger), `docs/deploy.md` (deploying it).
 
 Sandbox the host whether or not any Prime flag is on: the default host
 already serves ungated tools that run code and write files. See

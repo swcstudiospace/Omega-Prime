@@ -88,13 +88,22 @@ product's optional Prime flags are off. Provision that read-only checkout before
 running the suite; it does not require running the retained failing Rust tests.
 
 Preparing a Grok Bot seat? Follow [setup](docs/setup.md) and the operator
-reference [grokbot/SETUP.md](omega_prime/grokbot/SETUP.md). The template is
+reference [grokbot/SETUP.md](omega_prime/grokbot/SETUP.md). Its section 1 is
+the primary route: a copy-paste prompt that asks the default Grok Bot to
+clone this repository recursively into `/workspace/omega-prime`, run
+`bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap-only`,
+and add a custom Command MCP server running
+`bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`.
+A Cursor Teams/Enterprise team marketplace can import the repository as a
+secondary route (`.cursor-plugin/`, root `mcp.json`). Live import on a Grok
+Bot or Cursor account is unproven until you run the
+[user UAT](docs/grok-bot-native.md#user-uat) rows. The template is
 [OMEGA_PRIME.md](omega_prime/grokbot/templates/OMEGA_PRIME.md). Registering a
 host and actually attaching an authorized account/model remain seat-side
 operations; a local smoke prompt or template check does not prove them.
-The authenticated SSE/Streamable HTTP host is described in
-[remote host guidance](docs/grok-bot-native.md), with the separate manual
-release/rollback boundary in [deployment](docs/deploy.md).
+The authenticated SSE/Streamable HTTP host and the Remote HTTPS alternative
+are described in [remote host guidance](docs/grok-bot-native.md), with the
+separate manual release/rollback boundary in [deployment](docs/deploy.md).
 
 To turn the Prime capability families on and drive the bot with them, see
 [docs/driving-the-bot.md](docs/driving-the-bot.md).
@@ -106,14 +115,15 @@ From this checkout, in the installed environment:
 ```bash
 .venv/bin/python -m omega_prime.setup_check --root .
 .venv/bin/python -m omega_prime.tooling.catalog --check
+.venv/bin/python -m omega_prime.tooling.plugin --check
 bash omega_prime/scripts/assemble-prompts.sh --check
 OMEGA_PRIME_WORK_ROOT="$PWD" .venv/bin/python -m omega_prime.grokbot.oneclick --dry-run
 ```
 
-The last command is preflight, not account attachment. For the launcher's
-default stdio transport, select the owned workspace through
-`OMEGA_PRIME_WORK_ROOT`; launcher `--work-root` is forwarded only to SSE.
-The direct `omega_prime.mcp_server` accepts `--work-root` for both transports.
+The last command is preflight, not account attachment. Select the owned
+workspace with `OMEGA_PRIME_WORK_ROOT` or the launcher's `--work-root`,
+which is forwarded to the stdio and SSE host alike; the direct
+`omega_prime.mcp_server` accepts `--work-root` for both transports too.
 `OMEGA_PRIME_STATE_DIR` selects desk state. Starting an authenticated
 loopback host can use `--transport sse --generate-token` without exposing a
 credential in argv; see [tool-host guidance](docs/tool-host.md).

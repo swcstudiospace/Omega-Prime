@@ -6,6 +6,65 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Grok Bot import packaging
+
+#### Added
+
+- Root `mcp.json` declares one stdio server, `omega-prime`:
+  `bash ${CURSOR_PLUGIN_ROOT}/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`,
+  with no `env` and nothing credential-shaped. `.cursor-plugin/marketplace.json`
+  and `.cursor-plugin/plugin.json` describe the repository as one Cursor
+  plugin for a Teams/Enterprise team marketplace (secondary route). The
+  HTTPS alternative ships only as the non-referenced
+  `omega_prime/grokbot/plugin/mcp.https.example.json` with a `${VAR}`
+  placeholder.
+- One generated `/omega-<name>` command per checked-in skill and routine
+  beside the 12 curated commands (46 today), routed through the existing
+  `omega_command` tool; a generated name that collides takes a `-skill` or
+  `-routine` suffix (`/omega-python-skill`, `/omega-onboard-routine`,
+  `/omega-connectors-routine`, `/omega-ultrathink-skill`,
+  `/omega-ultrathink-routine`). No new tool joins the roster.
+- `python -m omega_prime.tooling.plugin --write|--check|--verify` renders 46
+  command files plus the manifests deterministically, fails `--check` on any
+  drift, frontmatter, collision or secret-shape problem, and `--verify`
+  spawns the declared stdio command and a loopback bearer host. `setup_check`
+  gained a `plugin` row and CI a plugin currency step.
+- The launcher gained `--bootstrap`, `--bootstrap-only` and
+  `--verify [--json]`: a stamp-gated, `flock`-serialized install from
+  `requirements-lock.txt` that resumes after an interrupted start, never
+  replaces an operator-managed `.venv`, initializes only `prime-agent`, and
+  exits 10 `missing_prerequisite`, 11 `install_failed`, 12 `catalog_drift`
+  or 13 `host_unreachable` with one stderr JSON line and empty stdout.
+
+#### Changed
+
+- The launcher resolves the repository from its own location, never the
+  caller's working directory. Its `--work-root` now reaches the stdio host
+  as well as SSE, and an SSE serve no longer exports the bearer token into
+  the launcher's process environment, which serve children inherit.
+- `security-secrets-handling` and `security-supply-chain` skill names now
+  match their folders (were `secrets-handling` and `supply-chain`); four
+  other skills' frontmatter parses as YAML and `lead-pack` gained
+  frontmatter. Copies under the old names in a private Bot skill library are
+  not touched.
+- The host manifest no longer claims a Grok Bot settings import and lists
+  Streamable HTTP at `/mcp`. The Bot template's first run uses the
+  Bot-driven setup.
+- `grokbot/SETUP.md`, `docs/grok-bot-native.md`, `docs/setup.md`,
+  `docs/driving-the-bot.md` and the README document the Bot-driven setup
+  prompt as the primary route, the Cursor Teams/Enterprise Import from Repo
+  as secondary, the Remote HTTPS alternative with per-consumer placeholder
+  syntax, the whole-message prompting contract, an evidence ledger and a
+  six-row user UAT list. `--json` is documented on stderr under served
+  stdio.
+
+Live import on a Grok Bot or Cursor account is unproven: Grok Bot loading
+plugin skills and commands, a marketplace-declared stdio launch,
+`${CURSOR_PLUGIN_ROOT}` on the Bot's computer and its MCP startup timeout
+remain user UAT. Local proof is the generator `--check`/`--verify`, real
+stdio through the declared command and a loopback bearer host. No
+marketplace listing, hosted deployment or image publication.
+
 ### Documentation and knowledge base
 
 #### Changed
