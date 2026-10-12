@@ -15,8 +15,9 @@ editable-install finder is not loaded, so ``omega_prime`` always imports from
 the overlay. The stamp is the launcher's own ``STAMP_CODE``, read from the
 overlaid script and run with the same base interpreter the launcher selects (a
 private ``python3.12`` shim first on ``PATH``). A matching stamp means no pip,
-no network and no rebuild; the cold network install is the opt-in
-``slow_bootstrap`` case.
+no network and no rebuild. No case here installs over the network; the cold
+install is the operator observation in ``docs/grok-bot-native.md`` (Bootstrap
+modes).
 
 The spawned argv is exactly the overlay's ``mcp.json`` ``command`` plus
 ``args`` with ``${CURSOR_PLUGIN_ROOT}`` substituted. ``initialize`` is written
@@ -27,7 +28,7 @@ LOCAL-PROOF pointer (parent-executed; this module runs none of it):
   1. ``.venv/bin/python -m omega_prime.tooling.plugin --check``: exit 0.
   2. ``.venv/bin/python -m omega_prime.tooling.catalog --check``: exit 0.
   3. ``.venv/bin/python -m pytest omega_prime/tests/test_grokbot_plugin_stdio.py
-     -q -rA``: every case passes, and the ``slow_bootstrap`` case is deselected.
+     -q -rA``: every case passes.
   4. Second-run no-op: in a tmp fresh-clone tree (never the developer
      checkout), run ``bash omega_prime/scripts/grokbot-1click.sh
      --bootstrap-only`` twice. Pass: stamp bytes and mtime unchanged, "stamp
@@ -40,9 +41,6 @@ LOCAL-PROOF pointer (parent-executed; this module runs none of it):
   7. ``.venv/bin/python -m omega_prime.setup_check --root .``: exit 0.
   8. The full CONTRIBUTING gate list is green, with tests at or above the 2352
      baseline plus the new tests, and evals at 26.
-  Opt-in once: ``.venv/bin/python -m pytest -m slow_bootstrap
-  omega_prime/tests/test_grokbot_plugin_stdio.py -q -rA`` records one
-  cold-install duration observation.
 Live Grok Bot or Cursor import, attachment, palette entries and timing stay
 human UAT. Nothing here is a live-attachment claim.
 """
@@ -100,24 +98,9 @@ SKILL_COMMAND = "omega-code-review"
 GITLINK, SYMLINK = "160000", "120000"
 FIRST_REPLY_TIMEOUT = 300.0
 REPLY_TIMEOUT = 120.0
-COLD_FIRST_REPLY_TIMEOUT = 3600.0
 SHUTDOWN_TIMEOUT = 15.0
 WARM_LOG = "environment is up to date (stamp matches)"
 BUILD_LOG = "building a fresh environment"
-# Network settings the opt-in cold install may need; nothing else is inherited.
-NETWORK_ENV = (
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-    "PIP_INDEX_URL",
-    "PIP_EXTRA_INDEX_URL",
-    "PIP_CERT",
-    "SSL_CERT_FILE",
-    "REQUESTS_CA_BUNDLE",
-)
 INITIALIZE_ID = 1
 INITIALIZE: dict[str, Any] = {
     "jsonrpc": "2.0",
@@ -258,7 +241,7 @@ class FreshClone:
         ).stdout
 
 
-def _fresh_clone(layout: LocalLayout, *, warm: bool) -> FreshClone:
+def _fresh_clone(layout: LocalLayout) -> FreshClone:
     root = layout.install.resolve()
     for directory in (layout.base / "tmp", layout.audit / "run"):
         directory.mkdir(parents=True, exist_ok=True)
@@ -282,8 +265,7 @@ def _fresh_clone(layout: LocalLayout, *, warm: bool) -> FreshClone:
     assert usable.returncode == 0, (
         "the base interpreter lacks venv/ensurepip; the launcher would exit 10"
     )
-    if warm:
-        _warm_venv(tree)
+    _warm_venv(tree)
     return tree
 
 
@@ -324,7 +306,7 @@ def _warm_venv(tree: FreshClone) -> None:
 @pytest.fixture(scope="module")
 def fresh_clone() -> Iterator[FreshClone]:
     with isolated_layout(REPO) as layout:
-        yield _fresh_clone(layout, warm=True)
+        yield _fresh_clone(layout)
 
 
 # --- raw JSON-RPC session ---------------------------------------------------
@@ -368,7 +350,6 @@ class Session:
                 stderr=stderr,
                 start_new_session=True,
             )
-        self.started = time.monotonic()
 
     def stderr(self) -> str:
         return self.log.read_text(encoding="utf-8", errors="replace")
@@ -598,45 +579,3 @@ def test_declared_command_serves_the_work_root_flag(fresh_clone: FreshClone) -> 
         session.close()
 
     _assert_protocol_only(bytes(session.raw))
-
-
-@pytest.mark.slow_bootstrap
-def test_cold_bootstrap_observation(record_property: Any) -> None:
-    """R30, opt-in: real network install from no venv; one duration observation.
-
-    The duration is recorded, never bounded. A failed install must be a
-    classified exit 10 or 11 with empty stdout, never a hang.
-    """
-    with isolated_layout(REPO) as layout:
-        tree = _fresh_clone(layout, warm=False)
-        assert not tree.venv.exists() and not tree.stamp.exists()
-        env = tree.env()
-        env.update({key: os.environ[key] for key in NETWORK_ENV if key in os.environ})
-        _, argv = tree.declared()
-
-        session = _spawn(tree, argv, env)
-        try:
-            assert session.proc.args == argv
-            try:
-                _handshake(session, COLD_FIRST_REPLY_TIMEOUT)
-            except StdoutClosed:
-                code = session.close()
-                assert bytes(session.raw) == b""
-                assert code in (10, 11), session.stderr()[-4000:]
-                assert f'"exit":{code}' in session.stderr()
-                pytest.fail(f"cold bootstrap did not complete: classified exit {code}")
-            elapsed = time.monotonic() - session.started
-            _assert_help(tree, session.command(2, "/omega-help"))
-        finally:
-            session.close()
-
-        _assert_protocol_only(bytes(session.raw))
-        assert BUILD_LOG in session.stderr()
-        assert tree.stamp.read_bytes() == tree.launcher_stamp()
-        assert (tree.venv / "bin" / "python").exists()
-        assert not tree.build.exists()
-        record_property("cold_bootstrap_seconds", round(elapsed, 1))
-        print(
-            f"cold bootstrap observation: {elapsed:.1f}s from spawn to the "
-            "initialize reply (one observation, not a bound)"
-        )

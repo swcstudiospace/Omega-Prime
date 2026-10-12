@@ -96,6 +96,15 @@ state stays outside a replaceable checkout. Bootstrap progress goes to
 stderr, every bootstrap child reads `/dev/null`, and stdout carries nothing
 until the final serve, whose stdout is MCP frames only.
 
+The test suite never installs over the network. To observe a cold install,
+run `bash omega_prime/scripts/grokbot-1click.sh --bootstrap-only` once in a
+fresh `git clone --recurse-submodules` with no `.venv`. Success is exit 0
+with nothing on stdout: stderr logs `building a fresh environment` and ends
+with `bootstrap complete`, and `.venv` plus the stamp exist. A second run is
+a no-op that logs `environment is up to date (stamp matches)` and leaves the
+stamp unchanged. A failed install exits 10 or 11 with one JSON class line on
+stderr.
+
 ### oneclick flags
 
 `--transport` is `stdio` (the default) or `sse`. On SSE the launcher, in

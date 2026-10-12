@@ -54,10 +54,6 @@ omega_prime = ["**/*.md", "**/*.yaml", "**/*.yml", "**/*.json", "**/*.xml", "**/
 [tool.pytest.ini_options]
 testpaths = ["omega_prime/tests"]
 pythonpath = ["."]
-addopts = "-m 'not slow_bootstrap'"
-markers = [
-  "slow_bootstrap: real network cold bootstrap (pip install -r requirements-lock.txt into an empty venv); explicitly opt-in, deselected by default, run with -m slow_bootstrap",
-]
 
 [tool.ruff]
 target-version = "py311"
