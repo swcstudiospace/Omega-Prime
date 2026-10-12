@@ -983,6 +983,32 @@ def test_validate_report_rejects_gaps() -> None:
         cli.validate_report(dict(good, scope="elsewhere"), ["a-tool"])
 
 
+def test_validate_report_rejects_malformed_summary_and_checks() -> None:
+    """Child-derived summary/checks shapes fail validation, never crash."""
+    tool = {
+        "name": "a-tool",
+        "family": "Fam",
+        "status": "exercised",
+        "evidence": ["check:x"],
+        "prerequisites": [],
+    }
+    good: dict[str, Any] = {
+        "schema_version": 1,
+        "ok": True,
+        "scope": "isolated-local",
+        "checks": [],
+        "tools": [tool],
+        "summary": {},
+        "limitations": [],
+    }
+    for bad_summary in ([], "total", None, 0):
+        with pytest.raises(ValueError):
+            cli.validate_report(dict(good, summary=bad_summary), ["a-tool"])
+    for bad_checks in ({}, "none", None, ["ok"], [None], [[]]):
+        with pytest.raises(ValueError):
+            cli.validate_report(dict(good, checks=bad_checks), ["a-tool"])
+
+
 def test_cli_rejects_bad_root(tmp_path: Path) -> None:
     assert cli.main(["--root", str(tmp_path / "nope"), "--json"]) == 2
 

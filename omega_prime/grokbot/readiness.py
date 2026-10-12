@@ -175,6 +175,14 @@ def validate_report(report: Any, canonical: list[str]) -> dict[str, Any]:
         )
     if len(set(seen)) != len(seen):
         raise ValueError("roster names are duplicated")
+    if not isinstance(report["summary"], dict):
+        raise ValueError("report summary is not an object")
+    checks = report["checks"]
+    if not isinstance(checks, list):
+        raise ValueError("report checks is not a list")
+    for row in checks:
+        if not isinstance(row, dict):
+            raise ValueError("report check row is not an object")
     return report
 
 
