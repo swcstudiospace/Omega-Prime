@@ -610,6 +610,19 @@ def test_plain_serve_is_not_blocked_by_a_running_server(tmp_path: Path) -> None:
     assert proc.stdout == REPLY
 
 
+def test_lock_open_failure_exits_11_with_empty_stdout(tmp_path: Path) -> None:
+    """N-03: a lock that cannot be opened fails closed, never serves."""
+    tree = _tree(tmp_path)
+    (tree.root / ".venv.lock").mkdir()
+    proc = _run(tree, "--bootstrap-only")
+    line = _assert_failed(proc, 11, "install_failed")
+    assert line["step"] == "lock"
+    assert proc.stdout == b""
+    assert tree.calls_of("oneclick") == []
+    assert not tree.stamp.exists()
+    assert not tree.venv.exists()
+
+
 def test_concurrent_cold_starts_serialize_on_one_install(tmp_path: Path) -> None:
     assert BASH is not None
     tree = _tree(tmp_path)
