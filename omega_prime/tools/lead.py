@@ -340,7 +340,6 @@ class RosterStore:
         self.doctor = doctor if isinstance(doctor, dict) else {}
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         text = (
             json.dumps(
                 {"packs": self.packs, "doctor": self.doctor},
@@ -349,7 +348,7 @@ class RosterStore:
             )
             + "\n"
         )
-        self.path.write_text(text, encoding="utf-8")
+        atomic_write_text(self.path, text)
 
 
 class EventStore:

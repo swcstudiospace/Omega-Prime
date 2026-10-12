@@ -814,3 +814,50 @@ def test_doctor_check_preserves_expected_sha(tmp_path: Path):
         "check", prompt_sha256=sha, installed_skills=["lead-pack", "debugging"]
     )
     assert again["checks"]["prompt"]["green"] is True
+
+
+# -- Phase 75 re-review WR-04: roster saves through the shared atomic path ---
+# Every roster mutation must reach the same atomic-write helper the intake
+# store uses, so a crash mid-save never leaves a torn file that breaks every
+# lead tool at construction time.
+
+
+def test_roster_save_uses_shared_atomic_write(tmp_path: Path, monkeypatch: Any):
+    import omega_prime.tools.lead as lead_mod
+
+    path = tmp_path / "roster.json"
+    calls: list[tuple[Any, Any]] = []
+    real_atomic = lead_mod.atomic_write_text
+
+    def _record(target: Any, text: str) -> None:
+        calls.append((target, text))
+        real_atomic(target, text)
+
+    monkeypatch.setattr(lead_mod, "atomic_write_text", _record)
+    store = RosterStore(path)
+    store.register("lead-pack", {"version": "1"})
+    store.doctor_result("lead-pack", {"green": True})
+    assert len(calls) == 2
+    assert all(target == path for target, _ in calls)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["packs"]["lead-pack"]["version"] == "1"
+    assert persisted["doctor"]["lead-pack"] == {"green": True}
+    assert RosterStore(path).packs["lead-pack"]["version"] == "1"
+
+
+def test_roster_failed_save_preserves_bytes(tmp_path: Path, monkeypatch: Any):
+    import omega_prime.tools.lead as lead_mod
+
+    path = tmp_path / "roster.json"
+    store = RosterStore(path)
+    store.register("lead-pack", {"version": "1"})
+    before = path.read_bytes()
+
+    def _boom(target: Any, text: str) -> None:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(lead_mod, "atomic_write_text", _boom)
+    with pytest.raises(OSError, match="disk gone"):
+        store.register("other-pack", {"version": "2"})
+    assert path.read_bytes() == before
+    assert [p for p in path.parent.iterdir() if p.suffix == ".tmp"] == []
