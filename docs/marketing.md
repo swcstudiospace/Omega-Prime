@@ -128,7 +128,8 @@ Source: [grokbot/SETUP.md](../omega_prime/grokbot/SETUP.md), section 1.
 
 **Evidence: unproven external.** The secondary route imports the repository
 as a team marketplace on Cursor Teams or Enterprise plans. Its ledger rows
-are PARTIAL or UNPROVEN, and live behavior is [user UAT](grok-bot-native.md#user-uat)
+range from CONFIRMED (stated by platform documentation, not exercised here)
+to PARTIAL and UNPROVEN, and live behavior is [user UAT](grok-bot-native.md#user-uat)
 rows 2 to 4. The Remote HTTPS alternative is user UAT row 6.
 
 Source: [grokbot/SETUP.md](../omega_prime/grokbot/SETUP.md), "Secondary:

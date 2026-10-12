@@ -112,7 +112,7 @@ default-off behind `redteam.enabled` in both profiles: its eleven
 Current owned-fixture runs exit 0 with `ok: true` and all 165 canonical
 roster names accounted exactly once. The default profile offers 117
 tools: 50 exercised, 67 blocked, and 48 feature-disabled. The
-`--include-prime` profile offers 154: 82 exercised, 72 blocked, and 11
+`--include-prime` profile offers 154: 77 exercised, 77 blocked, and 11
 feature-disabled. Both report zero failed tools, zero failed checks,
 and no accounting problems. The Red Team backend was not called.
 

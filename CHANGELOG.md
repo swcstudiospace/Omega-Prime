@@ -86,6 +86,14 @@ publication or social-preview upload.
   six-row user UAT list. `--json` is documented on stderr under served
   stdio.
 
+#### Fixed
+
+- The Bot template's first run told the Bot to read
+  `prompts-assembled/OMEGA_PRIME.xml` and
+  `contracts/tool-rosters/omega-prime.yaml`, which do not exist at the clone
+  root; it now names `/workspace/omega-prime/omega_prime/...`, like the
+  launcher commands beside them.
+
 Live import on a Grok Bot or Cursor account is unproven: Grok Bot loading
 plugin skills and commands, a marketplace-declared stdio launch,
 `${CURSOR_PLUGIN_ROOT}` on the Bot's computer and its MCP startup timeout
@@ -119,6 +127,14 @@ marketplace listing, hosted deployment or image publication.
   copies. Local proof and readable historical
   publication do not establish live Grok/provider/backend operation, account
   enrollment, vendor redistribution rights or remote publication/deployment.
+
+#### Fixed
+
+- `docs/local-validation.md` states the current `--include-prime` counts
+  (77 exercised, 77 blocked, 11 feature-disabled; the five refused RLM tools
+  are no longer credited as exercised). `docs/setup.md` says `--verify`
+  starts a loopback bearer host, not an HTTPS host, and documents the CI
+  `docs` job.
 
 ### Slash commands
 

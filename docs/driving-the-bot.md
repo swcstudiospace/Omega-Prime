@@ -193,7 +193,7 @@ kernel add 28 tools. `rlm` adds seven and `messaging` adds two. The command
 above turns all seven on (154 tools). The host serves each family only when
 its flag is on.
 
-The template tells the bot to read `prompts-assembled/OMEGA_PRIME.xml` on first
+The template tells the bot to read `omega_prime/prompts-assembled/OMEGA_PRIME.xml` on first
 run. Give your bot the effective file instead. This repository builds the file;
 how Grok takes it is a Grok Bot setting this repository neither controls nor
 tests, so confirm it with the checks below.

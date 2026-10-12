@@ -180,7 +180,8 @@ unchanged or refused, never replaced), runs the plugin `--check`, then
 serves stdio without the doctor; it is the command the root `mcp.json`
 declares. `--bootstrap-only` stops after the bootstrap.
 `--verify` bootstraps, then runs `python -m omega_prime.tooling.plugin --verify`
-against the declared stdio entry and a loopback HTTPS host. Bootstrap
+against the declared stdio entry and, for the HTTPS example, a loopback
+bearer host at `/mcp` (a public HTTPS host is not provable locally). Bootstrap
 failures exit 10 (`missing_prerequisite`), 11 (`install_failed`), 12
 (`catalog_drift`) or 13 (`host_unreachable`, verify only) with one JSON
 line on stderr. `--dry-run` does everything except serve. `--self-test`
@@ -233,6 +234,13 @@ missing-library guard in the suite's JUnit report.
 Receipt summaries run even after an earlier step fails. Missing, skipped,
 cancelled, or failed required evidence prevents a passing summary; a green
 summary is not a replacement for the underlying job results.
+
+The `docs` job runs on Python 3.12 from a base install
+(`pip install -e . pytest`). It runs the documentation and asset tests
+(`omega_prime/tests/test_docs.py`, `omega_prime/tests/test_public_repo.py`),
+then `python -m omega_prime.tooling.catalog --check` and
+`python -m omega_prime.tooling.plugin --check`, so a stale tool catalog or
+plugin set fails CI.
 
 ## Claim limits
 

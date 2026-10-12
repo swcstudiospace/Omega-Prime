@@ -16,7 +16,8 @@ Omega Prime repository recursively into `/workspace/omega-prime`, then run
 so the pinned install finishes once. Add Omega Prime as a custom Command
 server with `bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`.
 Then call `/omega-onboard` through the `omega_command` tool, and read
-prompts-assembled/OMEGA_PRIME.xml and contracts/tool-rosters/omega-prime.yaml.
+`/workspace/omega-prime/omega_prime/prompts-assembled/OMEGA_PRIME.xml` and
+`/workspace/omega-prime/omega_prime/contracts/tool-rosters/omega-prime.yaml`.
 
 `/omega-<skill>` loads that skill's instructions; the skill is a folder name
 under Enabled skills. `/omega-<routine>` runs that routine's workflow when it
