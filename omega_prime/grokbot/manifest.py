@@ -26,7 +26,11 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from omega_prime import __version__ as PACKAGE_VERSION
-from omega_prime.commands.generated import checked_in_routines, checked_in_skills
+from omega_prime.commands.generated import (
+    checked_in_routines,
+    checked_in_skills,
+    tracked_paths,
+)
 from omega_prime.config import PRIME_FAMILIES, load_config, prime_enabled
 from omega_prime.grokbot.streamable import MCP_PATH
 from omega_prime.mcp_server import (
@@ -155,26 +159,39 @@ def _entry_name(line: str) -> str:
 def lint_template(root: Path | str | None = None) -> TemplateLint:
     """Check the template against the checked-in skills and routines.
 
-    Every template entry must resolve to a file under `root`, and every
+    Every template entry must resolve to a checked-in file, and every
     checked-in skill and routine (git-tracked when `root` is a checkout, else
     on disk; the same set the generated `/omega-<name>` commands use) must be
-    listed.
+    listed. One provenance serves both directions, so a listed entry with no
+    checked-in file behind it — including one present on disk but untracked —
+    is missing.
     """
     repo = Path(root) if root is not None else find_repo_root()
     data = _read_template(repo)
     base = repo / "omega_prime"
+    tracked = tracked_paths(repo)
+
+    def _skill_present(name: str) -> bool:
+        if tracked is not None:
+            return f"omega_prime/skills/{name}/SKILL.md" in tracked
+        return (base / "skills" / name / "SKILL.md").is_file()
+
+    def _routine_present(name: str) -> bool:
+        if tracked is not None:
+            return f"omega_prime/routines/{name}.md" in tracked
+        return (base / "routines" / f"{name}.md").is_file()
+
     skill_names = [_entry_name(entry) for entry in data["skills"]]
     routine_names = [_entry_name(entry) for entry in data["routines"]]
     missing_skills = [
         name
         for name in skill_names
-        if not _NAME_RE.match(name)
-        or not (base / "skills" / name / "SKILL.md").is_file()
+        if not _NAME_RE.match(name) or not _skill_present(name)
     ]
     missing_routines = [
         name
         for name in routine_names
-        if not _NAME_RE.match(name) or not (base / "routines" / f"{name}.md").is_file()
+        if not _NAME_RE.match(name) or not _routine_present(name)
     ]
     listed_skills = set(skill_names)
     listed_routines = set(routine_names)

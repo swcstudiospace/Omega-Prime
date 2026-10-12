@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from omega_prime.setup_check import CHECKS, check_plugin, main, run_checks
+from omega_prime.setup_check import CHECKS, check_plugin, check_template, main, run_checks
 
 OMEGA_PRIME = Path(__file__).resolve().parents[1]
 ROOT = OMEGA_PRIME.parent
@@ -121,6 +121,17 @@ def test_each_failure_trips_its_check(tmp_path: Path, monkeypatch):
     assert substrate["ok"] is True
     assert "fake-value" not in substrate["detail"]
     assert "SUBSTRATE_TOKEN" in substrate["detail"]
+
+
+def test_template_row_reports_unlisted_skills_like_the_doctor(tmp_path: Path) -> None:
+    """IN-04: the row covers both directions, not just template gaps."""
+    fixture = _mirror(tmp_path / "unlisted")
+    skill = fixture / "omega_prime" / "skills" / "zz-unlisted"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# zz-unlisted\n", encoding="utf-8")
+    ok, detail = check_template(fixture)
+    assert ok is False
+    assert "zz-unlisted" in detail
 
 
 def test_plugin_row_is_function_backed() -> None:

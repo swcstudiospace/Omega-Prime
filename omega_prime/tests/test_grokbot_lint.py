@@ -110,6 +110,28 @@ def test_empty_directory_and_non_routine_files_are_not_unlisted(tmp_path: Path):
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs a git client")
+def test_listed_but_untracked_skill_and_routine_are_missing(tmp_path: Path):
+    """WR-04: one provenance both ways; disk presence without tracking hides nothing."""
+    root = _tree(tmp_path, template=COMPLETE)
+    for argv in (["init", "-q"], ["add", "omega_prime"]):
+        subprocess.run(["git", "-C", str(root), *argv], check=True)
+    pkg = root / "omega_prime"
+    (pkg / "skills" / "learned").mkdir()
+    (pkg / "skills" / "learned" / "SKILL.md").write_text("# learned\n", encoding="utf-8")
+    (pkg / "routines" / "learned.md").write_text("# learned\n", encoding="utf-8")
+    template = pkg / "grokbot" / "templates" / "OMEGA_PRIME.md"
+    text = template.read_text(encoding="utf-8")
+    text = text.replace("- alpha\n", "- alpha\n- learned\n", 1)
+    text = text.replace("- one — first\n", "- one — first\n- learned\n", 1)
+    template.write_text(text, encoding="utf-8")
+    lint = lint_template(root)
+    assert lint.missing_skills == ["learned"]
+    assert lint.missing_routines == ["learned"]
+    assert lint.unlisted_skills == []
+    assert lint.unlisted_routines == []
+    assert lint.ok is False
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs a git client")
 def test_untracked_skill_in_a_checkout_is_not_unlisted(tmp_path: Path):
     root = _tree(tmp_path, template=COMPLETE)
     for argv in (["init", "-q"], ["add", "omega_prime"]):

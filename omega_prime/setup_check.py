@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from omega_prime.assemble import load_roster, template_gaps
+from omega_prime.assemble import load_roster
 from omega_prime.mcp_server import default_registry, roster_names
 
 
@@ -29,11 +29,29 @@ def check_roster(root: Path) -> tuple[bool, str]:
 
 
 def check_template(root: Path) -> tuple[bool, str]:
-    """Template sections stay empty and name nothing missing."""
-    gaps = template_gaps(root / "omega_prime")
-    if gaps:
-        return False, f"template gaps: {', '.join(gaps)}"
-    return True, "template ok (sections empty, no gaps)"
+    """Template entries resolve to checked-in files and list them all.
+
+    Both directions, like the doctor's `template_integrity` row: every entry
+    must resolve to a checked-in skill or routine file, and every checked-in
+    skill and routine must be listed.
+    """
+    from omega_prime.grokbot.manifest import lint_template
+
+    lint = lint_template(root)
+    if not lint.ok:
+        parts = []
+        if lint.missing_skills:
+            parts.append("missing skills: " + ", ".join(lint.missing_skills))
+        if lint.missing_routines:
+            parts.append("missing routines: " + ", ".join(lint.missing_routines))
+        if lint.unlisted_skills:
+            parts.append("unlisted skills: " + ", ".join(lint.unlisted_skills))
+        if lint.unlisted_routines:
+            parts.append("unlisted routines: " + ", ".join(lint.unlisted_routines))
+        return False, "template and disk disagree (" + "; ".join(parts) + ")"
+    return True, (
+        "template ok (every entry resolves and every checked-in file is listed)"
+    )
 
 
 def check_assembly(root: Path) -> tuple[bool, str]:
