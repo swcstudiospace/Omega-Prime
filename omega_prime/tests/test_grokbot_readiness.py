@@ -1001,12 +1001,14 @@ def test_validate_report_rejects_malformed_summary_and_checks() -> None:
         "summary": {},
         "limitations": [],
     }
-    for bad_summary in ([], "total", None, 0):
+    bad_summaries: list[object] = [[], "total", None, 0]
+    for bad_summary in bad_summaries:
         with pytest.raises(ValueError):
             cli.validate_report(dict(good, summary=bad_summary), ["a-tool"])
-    for bad_checks in ({}, "none", None, ["ok"], [None], [[]]):
+    bad_checks: list[object] = [{}, "none", None, ["ok"], [None], [[]]]
+    for bad_check in bad_checks:
         with pytest.raises(ValueError):
-            cli.validate_report(dict(good, checks=bad_checks), ["a-tool"])
+            cli.validate_report(dict(good, checks=bad_check), ["a-tool"])
 
 
 def test_cli_rejects_bad_root(tmp_path: Path) -> None:
