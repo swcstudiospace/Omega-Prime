@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import struct
+import subprocess
+import sys
+import zlib
 from itertools import pairwise
 from pathlib import Path
 from xml.dom import minidom
@@ -424,9 +429,26 @@ def _png_size(path: Path) -> tuple[int, int]:
     return width, height
 
 
-def test_png_rasters_match_their_svg_source_canvas() -> None:
-    """A committed raster has an SVG source and was rendered at that canvas size,
-    so a resized source with a stale raster fails."""
+def _png_texts(data: bytes) -> dict[bytes, list[bytes]]:
+    """Every ``tEXt`` chunk of a PNG, keyword to texts, CRC checked."""
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    texts: dict[bytes, list[bytes]] = {}
+    pos = 8
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        kind, body = data[pos + 4 : pos + 8], data[pos + 8 : pos + 8 + length]
+        (crc,) = struct.unpack(">I", data[pos + 8 + length : pos + 12 + length])
+        assert crc == zlib.crc32(kind + body), f"bad CRC on {kind!r}"
+        if kind == b"tEXt":
+            keyword, _, text = body.partition(b"\x00")
+            texts.setdefault(keyword, []).append(text)
+        pos += 12 + length
+    return texts
+
+
+def test_png_rasters_were_rendered_from_their_current_svg() -> None:
+    """A committed raster has an SVG source, its canvas size, and the digest of
+    that exact SVG, so editing the art without re-rendering fails."""
     rasters = sorted((ROOT / "assets").glob("*.png"))
     assert rasters
     for raster in rasters:
@@ -434,5 +456,52 @@ def test_png_rasters_match_their_svg_source_canvas() -> None:
         assert source.is_file(), f"{raster.name} has no SVG source"
         root = minidom.parse(str(source)).documentElement
         assert root is not None
-        declared = _canvas(root, source.name)
-        assert _png_size(raster) == declared, raster.name
+        assert _png_size(raster) == _canvas(root, source.name), raster.name
+        digest = hashlib.sha256(source.read_bytes()).hexdigest().encode()
+        assert _png_texts(raster.read_bytes()).get(b"omega-source-sha256") == [
+            digest
+        ], (
+            f"{raster.name} was not rendered from the current {source.name}; run "
+            f"python3 omega_prime/scripts/render_raster.py assets/{source.name}"
+        )
+
+
+_FAKE_CAIROSVG = """#!{python}
+import struct, sys, zlib
+if "--fail" in open(sys.argv[1]).read():
+    sys.exit(3)
+def chunk(kind, data):
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+png = b"\\x89PNG\\r\\n\\x1a\\n" + chunk(b"IHDR", ihdr)
+png += chunk(b"IDAT", zlib.compress(b"\\x00\\x00\\x00\\x00")) + chunk(b"IEND", b"")
+open(sys.argv[sys.argv.index("-o") + 1], "wb").write(png)
+"""
+
+
+def test_render_script_stamps_the_svg_digest_and_keeps_renderer_failures(
+    tmp_path: Path,
+) -> None:
+    """The render script records the SVG it rendered, replaces an older record
+    on re-render, and passes a renderer failure through unstamped."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "cairosvg"
+    fake.write_text(_FAKE_CAIROSVG.format(python=sys.executable), encoding="utf-8")
+    fake.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    script = ROOT / "omega_prime" / "scripts" / "render_raster.py"
+    svg, png = tmp_path / "card.svg", tmp_path / "card.png"
+
+    def render() -> int:
+        argv = [sys.executable, str(script), str(svg)]
+        return subprocess.run(argv, env=env, check=False).returncode
+
+    for art in ("<svg>first</svg>", "<svg>second</svg>"):
+        svg.write_text(art, encoding="utf-8")
+        assert render() == 0
+        digest = hashlib.sha256(art.encode()).hexdigest().encode()
+        assert _png_texts(png.read_bytes())[b"omega-source-sha256"] == [digest]
+
+    svg.write_text("<svg>--fail</svg>", encoding="utf-8")
+    assert render() == 3

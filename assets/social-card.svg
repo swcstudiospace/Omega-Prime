@@ -1,4 +1,4 @@
-<!-- Raster derivative assets/social-card.png is generated from this file, run from the repository root with system CairoSVG 2.9.0: /usr/local/bin/cairosvg assets/social-card.svg -o assets/social-card.png -->
+<!-- Raster derivative assets/social-card.png is generated from this file, run from the repository root with system CairoSVG 2.9.0 on PATH: python3 omega_prime/scripts/render_raster.py assets/social-card.svg (it records this file's SHA-256 in the PNG) -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Omega Prime social card" aria-labelledby="card-title card-desc">
   <title id="card-title">Omega Prime social card</title>
   <desc id="card-desc">Teal-to-violet hexagonal node mark beside the words OMEGA PRIME, the tagline One Grok programming bot., the line Repeatable local readiness, no live credentials., and the repository path github.com/swcstudiospace/omes-bot.</desc>

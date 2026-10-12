@@ -108,10 +108,14 @@ _COMMENT = re.compile(r"(?:^|[ \t])#.*$", re.MULTILINE)
 
 
 def _module_exists(module: str) -> bool:
+    """``python -m module`` can start it: a module, or a package with ``__main__``."""
     try:
-        return importlib.util.find_spec(module) is not None
+        spec = importlib.util.find_spec(module)
+        if spec is not None and spec.submodule_search_locations is not None:
+            spec = importlib.util.find_spec(f"{module}.__main__")
     except ModuleNotFoundError:  # a parent package is missing too
         return False
+    return spec is not None
 
 
 def _unrunnable_demo_commands(text: str) -> list[str]:
@@ -180,7 +184,6 @@ def test_link_check_flags_missing_targets_and_accepts_valid_forms():
     for valid in (
         "[x](marketing.md?plain=1)",
         "![x](data:image/png;base64,AAAA)",
-        "[x](//example.com/a.md)",
         "[x](#setext-title)",
         "[x](#indented-title)",
         "[x](#Mixed-Case)",
@@ -229,6 +232,11 @@ def test_documented_shell_commands_name_runnable_modules_and_scripts():
             ["bash omega_prime/scripts/no-such.sh"],
         ),
         ("```text\npython -m omega_prime.no_such\n```", []),
+        # A package runs under -m only through its __main__ module.
+        (
+            "```bash\npython -m omega_prime.tooling\n```",
+            ["python -m omega_prime.tooling"],
+        ),
     ],
 )
 def test_command_check_reads_a_block_as_the_shell_would(

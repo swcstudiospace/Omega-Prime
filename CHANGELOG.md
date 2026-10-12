@@ -20,10 +20,12 @@ All notable changes to this project are documented here. Format follows
   ports, one Python process." and moved from `#6b7484` to `#9aa4b2` for
   readable contrast; `<title>`, `<desc>` and `aria-labelledby` were added.
 - `assets/social-card.svg` (1280x640) and its raster
-  `assets/social-card.png`, generated from the repository root with system
-  CairoSVG 2.9.0 by
-  `/usr/local/bin/cairosvg assets/social-card.svg -o assets/social-card.png`,
-  the command recorded in the SVG header comment. The SVG validity test
+  `assets/social-card.png`, rendered from the repository root with system
+  CairoSVG 2.9.0 on PATH by
+  `python3 omega_prime/scripts/render_raster.py assets/social-card.svg`
+  (exit 0), the command recorded in the SVG header comment. The script
+  stamps the SVG's SHA-256 into the PNG, and the asset test fails when an
+  SVG no longer matches the digest its PNG carries. The SVG validity test
   covers the card, and banner and card must each carry a `<title>`.
 
 Marketing copy claims no live Grok Bot or Cursor import: the Bot-driven

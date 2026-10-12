@@ -978,6 +978,28 @@ def test_event_store_counts_records_when_last_lacks_a_seq(tmp_path: Path):
     assert record["seq"] == 3
 
 
+def test_event_store_never_reuses_a_number_from_a_legacy_log(tmp_path: Path):
+    # The previous writer numbered per store, so two stores sharing one file
+    # could leave a repeated number behind (1, 2, 3, 1).
+    path = tmp_path / "events.ndjson"
+    legacy_seqs = [1, 2, 3, 1]
+    rows = (
+        json.dumps({"seq": seq, "kind": f"old-{n}"})
+        for n, seq in enumerate(legacy_seqs)
+    )
+    path.write_text("".join(row + "\n" for row in rows), encoding="utf-8")
+    first = EventStore(path)
+    second = EventStore(path)
+    appended = [
+        first.append({"kind": "a"}),
+        second.append({"kind": "b"}),
+        first.append({"kind": "c"}),
+    ]
+    seqs = [row["seq"] for row in appended]
+    assert seqs == sorted(set(seqs))
+    assert min(seqs) > max(legacy_seqs)
+
+
 # -- Phase 75 re-review WR-06: secret refusal covers retained metadata ------
 # The same detector that gates `content` also gates the assembled entry, so
 # a credential in tags/source/graph metadata is refused, not retained.

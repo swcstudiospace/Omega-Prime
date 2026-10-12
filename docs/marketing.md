@@ -332,21 +332,25 @@ Visual assets, all repository brand art rather than screenshots:
 | [`assets/social-card.svg`](../assets/social-card.svg) | 1280x640 | Social card source |
 | [`assets/social-card.png`](../assets/social-card.png) | 1280x640 | Raster for sites that need PNG |
 
-`assets/social-card.png` is generated from the SVG, run from the repository
-root with system CairoSVG 2.9.0:
-`/usr/local/bin/cairosvg assets/social-card.svg -o assets/social-card.png`.
-The SVG's header comment records the same command. Using the card as a
+`assets/social-card.png` is rendered from the SVG, run from the repository
+root with system CairoSVG 2.9.0 on PATH:
+`python3 omega_prime/scripts/render_raster.py assets/social-card.svg`
+(exit 0 on 2026-10-12; the result was pixel-identical to the previous
+raster). The script records the SVG's SHA-256 in the PNG, so the asset test
+fails when the SVG changes without a re-render. The SVG's header comment
+records the same command. Using the card as a
 repository social preview is a manual operator setting; this page does not
 claim it was set or published anywhere.
 
 ## Receipts
 
 A completion claim cites its evidence: the commands run and their exit
-codes. This page makes no completion claim of its own; the demo states each
-command's exit-code contract so you can collect your own receipts. A
-readiness row of `blocked` or `feature_disabled` is an honest unexecuted
-prerequisite, not a pass; only `exercised` with a verified effect counts as
-run.
+codes. Apart from the social-card render above (its command and exit code
+are stated beside it), this page makes no completion claim of its own; the
+demo states each command's exit-code contract so you can collect your own
+receipts. A readiness row of `blocked` or `feature_disabled` is an honest
+unexecuted prerequisite, not a pass; only `exercised` with a verified effect
+counts as run.
 
 Source: [User guide](user-guide.md), "Receipts".
 
