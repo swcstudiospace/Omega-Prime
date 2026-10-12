@@ -43,10 +43,12 @@ docker run -d --name omega-prime-mcp \
   -p 127.0.0.1:8000:8000 omega-prime-mcp
 ```
 
-The generator owns the committed `Dockerfile` and `.dockerignore`. After a change, regenerate and compare a fresh
-`render --target docker`; the exercised default projections match byte-for-byte. A base-image update must be mirrored
-in `BASE_IMAGE` in [the generator](../omega_prime/grokbot/deploy.py). The build installs `requirements-lock.txt` into
-`/opt/venv` and copies `omega_prime/` (minus tests and caches) to `/app/omega_prime`, with `--root /app`. The root
+The generator owns the committed `Dockerfile` and `.dockerignore`. After a change, regenerate with
+`render --target docker --out "$OUT"`; `cmp Dockerfile "$OUT/Dockerfile"` and
+`cmp .dockerignore "$OUT/.dockerignore"` must each exit 0 (see [What was verified](#what-was-verified) for the
+recorded receipt). A base-image update must be mirrored in `BASE_IMAGE` in
+[the generator](../omega_prime/grokbot/deploy.py). The build installs `requirements-lock.txt` into `/opt/venv` and
+copies `omega_prime/` (minus tests and caches) to `/app/omega_prime`, with `--root /app`. The root
 `redteam/` upstream submodule is excluded from the context; ordinary Python adapter and pack resources under
 `omega_prime/redteam/` are retained. This does not start the optional Node backend or enable Red Team tooling.
 The image uses numeric user `10001:10001`, a stdlib `/healthz` `HEALTHCHECK`, and `STOPSIGNAL SIGTERM`.
@@ -220,9 +222,11 @@ Only after those controls pass does CI save the exact image bytes and record the
 source/ref/event/run, immutable upload artifact ID and actual validation/SBOM/scan outcomes. The separate `publish`
 job is default-off and requires explicit `workflow_dispatch` opt-in plus exact `confirm_ref`, a protected ref and the
 `grokbot-image-publish` environment's approval gate. Declaring an environment name alone is insufficient: the workflow
-reads actual required-reviewer protection and refuses missing/unreadable/ambiguous configuration. No publication
-environment existed at the 2026-10-11 local inventory check. Configuring it with named required reviewers and
-prohibiting self-review/admin bypass is a separately authorized operator prerequisite, not an observed approval.
+reads actual required-reviewer protection and refuses missing/unreadable/ambiguous configuration. Before any publish
+attempt, an operator confirms the environment with `gh api repos/swcstudiospace/omes-bot/environments/grokbot-image-publish`:
+it exits 0 only when the environment exists (a missing one returns HTTP 404 and a nonzero exit), and its
+`protection_rules` must name the required reviewers. Configuring it and prohibiting self-review/admin bypass is a
+separately authorized operator prerequisite; this page records no observed approval.
 
 The publisher downloads the same run's immutable artifacts, gates strict complete evidence, verifies ref/event/run/
 source/artifact identity, compares the archive checksum before loading and the loaded image ID before any tag/login/
@@ -242,17 +246,35 @@ only `kb/` through a human-reviewed PR: skip, no-change and generated PR are not
 
 ## What was verified
 
-Historical kit checks at initial authorship included deterministic rendering/checking of all four targets, an image
-health/unauthenticated-SSE/SIGTERM probe, `docker build --check`, Compose configuration and systemd unit analysis.
-Those are historical results, not repeated platform deployment evidence.
+Receipts recorded on 2026-10-12 from a local checkout of this branch (`.venv/bin/python`, outputs written only to a
+throwaway temporary directory `$TMP`; `T` is each of `docker`, `compose`, `systemd` and `k8s`):
 
-The 2026-10-11 phase76 local exercise built the current generated image, observed the hardening above, passed both
-SSE and Streamable HTTP conformance including call-token admin refusal and genuine approval grant/revoke transitions,
-and observed clean SIGTERM for each. The safe verifier omits required handler arguments after granting approval:
-it proves admin-state/gate effects, not arbitrary gated handler execution. Actual SPDX generation and the configured
-fixed-CRITICAL Trivy scan passed. Deleting the owned image tag and loading the retained tar preserved the exact image
-ID, without rebuild. Current generator render/check, actual Docker-context exclusions and consumer/quality gates
-also passed. Hosted CI matrix legs, artifact upload and environment approval were not exercised locally.
+| Command | Observed exit |
+| --- | --- |
+| `python -m omega_prime.grokbot.deploy render --target T --out "$TMP/T"` | 0 for each `T` |
+| `python -m omega_prime.grokbot.deploy check "$TMP/T"` | 0 for each `T` (`0 error(s), 0 warning(s)`) |
+| `cmp Dockerfile "$TMP/docker/Dockerfile"` | 0 |
+| `cmp .dockerignore "$TMP/docker/.dockerignore"` | 0 |
+
+No tracked receipt in this repository records a container build, conformance run, SBOM, vulnerability scan or
+archive restore, so none of them is claimed as passed here. They are checks still to run, each with its expected exit:
+
+1. Build: `docker build -t omega-prime-mcp .` exits 0.
+2. Conformance: inside each hardened container (flags as in [Docker](#docker)),
+   `python -m omega_prime.grokbot.verify --url http://127.0.0.1:8000 --token-file /run/secrets/omega_prime_token
+   --admin-token-file /run/secrets/omega_prime_admin_token --transport sse --require-auth --json` exits 0, and the same
+   command with `--transport http` exits 0 against the second container. The verifier omits required handler
+   arguments after granting approval: a pass proves admin-state/gate effects, not arbitrary gated handler execution.
+3. Drain: `docker stop -t 30 <container>` exits 0 and `docker inspect -f '{{.State.ExitCode}}' <container>` prints `0`.
+4. SBOM and scan: the [image workflow](../.github/workflows/grokbot-image.yml) `sbom`, `sbom_upload` and `scan` steps
+   (SPDX JSON; Trivy `scanners=vuln`, `severity=CRITICAL`, `ignore-unfixed=true`, `exit-code=1`) each end with
+   outcome `success`; the scan step fails the job on a fixed critical vulnerability.
+5. Restore: record `sha256sum image.tar > image.tar.sha256` when the archive is saved with
+   `docker save omega-prime-mcp -o image.tar`; before `docker load -i image.tar` (exit 0), `sha256sum -c image.tar.sha256`
+   exits 0, and the loaded `docker inspect --format='{{.Id}}'` equals the recorded image ID.
+
+Hosted CI matrix legs, artifact upload and environment approval are exercised only by hosted runs; cite the run URL
+and the step outcomes when claiming them.
 
 This milestone performed **no live image publication, deployment, rollback, cluster operation or live Grok/provider/
 Red Team backend validation**. Kubernetes artifacts were not applied to a live cluster and no systemd service was

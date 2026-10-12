@@ -149,8 +149,10 @@ shape: Hermes learn/recall, Omp mnemopi, and the Hindsight
 `ultrathink_turn`) plus the desk lead routines. The curator
 (`agent/curator.py`) folds nightly learnings back into memory. Intake for
 the desk lead runs behind an injected seam (`tools/lead.py`:
-`lead_intake_next` / `lead_intake_ack` over a local NDJSON store with an
-exclusive `flock` on `intake.json.lock`).
+`lead_intake_next` / `lead_intake_ack` over `IntakeStore`, a local
+`intake.json` file holding one JSON object with an `orders` list, rewritten
+by atomic replace under an exclusive `flock` on `intake.json.lock`; the
+NDJSON file is the separate `events.ndjson` event mirror).
 
 ```mermaid
 flowchart TB

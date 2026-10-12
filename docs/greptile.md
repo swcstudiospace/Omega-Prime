@@ -7,17 +7,26 @@ connected for every branch, or that a GitBook space is published.
 
 ## Connection and observed scope
 
-The Phase 77 import obtained the full exposed publication for
-`swcstudiospace/omes-bot` through authenticated mounted read tools, using
-canonical namespace `3b0877f2-8580-4305-b246-a1cf4cfb31f3` and the production
-refresh function. All 21 documents, including the index, were admitted;
-a second fresh read returned `unchanged` with no document/manifest byte or
-modification-time change. The publication version
-`2026-10-08-1791571202911-c82b36` is historical and predates v14.
+No tracked receipt in this repository records the command and exit code of
+the import that produced `kb/`, so this page does not claim that import
+passed. What can be read locally is the edition the importer wrote: the
+tracked [manifest](https://github.com/swcstudiospace/omes-bot/blob/main/kb/manifest.json)
+records repository `swcstudiospace/omes-bot`, namespace
+`3b0877f2-8580-4305-b246-a1cf4cfb31f3`, `total` and `retrieved_documents`
+of 21, `indexPresent: true`, `complete: true` and publication version
+`2026-10-08-1791571202911-c82b36`, which is historical and predates v14. A
+manifest is importer output, not a receipt of a successful run or of a
+repeat `unchanged` observation.
 
-This proves readable publication/import behavior for that scope. It does
-**not** prove a hosted `kb-refresh` job, the direct CLI with an environment API
-key, automatic PR reviews, a live provider/model connection, or publication.
+To establish import behavior for that scope, an operator runs the
+[maintained refresh](#maintained-refresh) with a private key:
+`python -m omega_prime.greptile.kb_sync --repo swcstudiospace/omes-bot --out kb`
+is expected to exit 0 with `synced` or `unchanged`, and an immediate second run
+is expected to exit 0 with `already up to date` while
+`git status --porcelain kb/` stays empty. Cite those commands and their
+observed exit codes when claiming the result. Even a passing refresh does
+**not** prove a hosted `kb-refresh` job, automatic PR reviews, a live
+provider/model connection, or publication.
 An old v8 `greptile init` failure is historical evidence, not today's connection
 status. App/repository selection and review triggers live in the authorized
 Greptile workspace; inspect them there if reviews are missing. Do not change
@@ -51,10 +60,11 @@ its full original body as historical, synthesized and untrusted.
 The manifest binds the complete edition to repository/namespace, paths,
 versions, declared/retrieved totals, index/completion state, actual batch and
 per-document observation clocks, character/UTF-8 counts and body hashes.
-The initial import's 239,020 UTF-8 bytes and 238,985 declared characters are
-observations, not interchangeable units or fixed future publication sizes.
-The earlier capture's unavailable before-listing time remains unknown in its
-receipt; new actual fetch clocks are not replacements for that missing fact.
+Summed from the manifest's per-document `utf8_bytes` and `chars`, the
+recorded edition holds 239,020 UTF-8 bytes and 238,985 declared characters;
+these are observations, not interchangeable units or fixed future publication
+sizes. The manifest records no before-listing time for the earlier capture,
+so that time is unknown; later fetch clocks are not replacements for it.
 
 Historical text may contain commands, URLs and obsolete claims. Archive it
 literally as data; do not execute it, choose tenancy/credentials from it,
@@ -119,12 +129,15 @@ so they cannot open timestamp-only PRs. The workflow does not auto-merge,
 enroll an account, deploy, publish images or prove live Grok attachment.
 
 These existing local consumers exercise refresh boundaries and navigation;
-they are not remote account checks:
+they are not remote account checks. Each is expected to exit 0:
 
 ```bash
 python -m pytest omega_prime/tests/test_kb_sync.py omega_prime/tests/test_docs.py -q
 python -m omega_prime.tooling.catalog --check
 ```
+
+Receipt recorded on 2026-10-12 from a local checkout of this branch:
+`python -m omega_prime.tooling.catalog --check` exited 0 (`up to date`).
 
 See [GitBook sync](gitbook-sync.md) for the separate space-connection boundary
 and [deployment](deploy.md) for the manual release/rollback policy.
