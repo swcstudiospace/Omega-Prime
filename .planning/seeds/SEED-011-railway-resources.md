@@ -5,6 +5,10 @@ planted: 2026-10-07
 planted_during: v9 SOTA-upgrade phase 46/48 gap closure
 trigger_when: when planning the Omega milestone (v10) after v9 closure and the verified prior-branch push
 scope: Medium
+audit_acknowledged:
+  milestone: v15
+  at: 2026-10-12
+  status: dormant
 ---
 
 # SEED-011: Omega access to Railway RAGFlow, Hindsight, GreptimeDB, TimescaleDB and DragonflyDB
