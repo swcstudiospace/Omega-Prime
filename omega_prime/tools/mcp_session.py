@@ -49,6 +49,13 @@ _SDK_LOGGER_NAME = "mcp"
 #: Upper bound on buffered SDK log records per call; the buffer is discarded.
 _LOG_RECORD_BOUND = 32
 
+#: Shared ownership of the process-wide ``propagate`` change on the SDK logger:
+#: overlapping calls (e.g. a background desk turn beside a foreground request)
+#: may exit in any order, so only the last exit restores the original value.
+_CONTAINMENT_LOCK = threading.Lock()
+_containment_depth = 0
+_original_propagate = True
+
 #: TMPDIR-style keys pointed at the owned child temp dir.
 _TMP_ENV_KEYS = ("TMPDIR", "TEMP", "TMP")
 
@@ -233,17 +240,24 @@ def _contained_sdk_logging() -> Iterator[None]:
     disabled so they never reach host handlers; the buffer is cleared on
     exit. Nothing buffered is ever attached to results.
     """
+    global _containment_depth, _original_propagate
     logger = logging.getLogger(_SDK_LOGGER_NAME)
     records: list[str] = []
     handler = _DiscardBuffer(records)
-    previous_propagate = logger.propagate
-    logger.addHandler(handler)
-    logger.propagate = False
+    with _CONTAINMENT_LOCK:
+        if _containment_depth == 0:
+            _original_propagate = logger.propagate
+            logger.propagate = False
+        _containment_depth += 1
+        logger.addHandler(handler)
     try:
         yield
     finally:
-        logger.removeHandler(handler)
-        logger.propagate = previous_propagate
+        with _CONTAINMENT_LOCK:
+            logger.removeHandler(handler)
+            _containment_depth -= 1
+            if _containment_depth == 0:
+                logger.propagate = _original_propagate
         records.clear()
 
 

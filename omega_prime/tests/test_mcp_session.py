@@ -24,7 +24,7 @@ from omega_prime.tools.mcp_session import mcp_session_call
 _CANARY_RECOGNIZED = "omk" + "_test-canary-9f2c7a41d3e84b"
 _CANARY_PEM = "-----BEGIN " + "RSA PRIVATE KEY-----"
 _CANARY_PATH = os.path.join("canary-root-7f3a", "nested", "leave.txt")
-_CANARY_GENERIC = "Gx7" + "Q2mZ9pL4vX8nB6cD3fH5jK1wE0Rt5YuI"
+_CANARY_GENERIC = "Gx7" + "Q2mZ9pL4vX8nB6c" + "D3fH5jK1wE0Rt5YuI"
 _GROK_CANARY = "grok-test-value-" + "c41d9e27b"
 _OPENAI_CANARY = "openai-test-value-" + "d52e8f38c"
 _AWS_CANARY = "aws-test-value-" + "e63f9a49d"
@@ -280,6 +280,35 @@ def test_stderr_and_malformed_diagnostics_stay_private(
     captured = caplog.text
     for canary in _ALL_CANARIES:
         assert canary not in captured
+
+
+def test_overlapping_containments_restore_logging_after_last_exit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from omega_prime.tools.mcp_session import _contained_sdk_logging
+
+    logger = logging.getLogger("mcp")
+    original = logger.propagate
+    first = _contained_sdk_logging()
+    second = _contained_sdk_logging()
+    first.__enter__()
+    try:
+        second.__enter__()
+        try:
+            assert logger.propagate is False
+        finally:
+            # Non-LIFO: the first entrant exits while the second is still live.
+            first.__exit__(None, None, None)
+        assert logger.propagate is False
+        with caplog.at_level(logging.WARNING, logger="mcp"):
+            logger.warning("still-contained-between-exits")
+        assert "still-contained-between-exits" not in caplog.text
+    finally:
+        second.__exit__(None, None, None)
+    assert logger.propagate is original
+    with caplog.at_level(logging.WARNING, logger="mcp"):
+        logger.warning("visible-after-last-exit")
+    assert "visible-after-last-exit" in caplog.text
 
 
 def test_child_env_is_restricted(
