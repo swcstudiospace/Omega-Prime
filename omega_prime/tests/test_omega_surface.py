@@ -27,6 +27,8 @@ def test_default_registry_serves_help(tmp_path: Path) -> None:
     body = json.loads(raw)
     names = [row["name"] for row in body["result"]["commands"]]
     assert body["ok"] is True
+    assert "omega-code-review" in names
+    assert names.index("omega-desk") < names.index("omega-code-review")
     assert "omega-onboard" in names
 
 
@@ -74,6 +76,24 @@ def test_agent_runs_a_slash_command_without_the_model() -> None:
     assert body["command"] == "omega-help"
 
 
+def test_agent_runs_a_generated_command_without_the_model() -> None:
+    class Boom:
+        def complete(self, _messages: list, _tools: object = None) -> dict:
+            raise AssertionError("model called")
+
+    registry = ToolRegistry()
+    register_omega_command_tools(registry, {})
+    agent = OmegaPrimeAgent(Boom(), registry=registry)
+    result = agent.run("/omega-code-review the parser change")
+    body = json.loads(result["final_response"])
+    assert result["turn_exit_reason"] == "omega_command"
+    assert result["api_call_count"] == 0
+    assert body["ok"] is True, body
+    assert body["command"] == "omega-code-review"
+    assert body["result"]["kind"] == "skill"
+    assert body["result"]["args"] == "the parser change"
+
+
 def test_prose_that_mentions_a_command_still_calls_the_model() -> None:
     registry = ToolRegistry()
     register_omega_command_tools(registry, {})
@@ -82,3 +102,13 @@ def test_prose_that_mentions_a_command_still_calls_the_model() -> None:
     result = agent.run("please /omega-help")
     assert model.call_count == 1
     assert result["final_response"] == "use /omega-help"
+
+
+def test_prose_that_mentions_a_generated_command_still_calls_the_model() -> None:
+    registry = ToolRegistry()
+    register_omega_command_tools(registry, {})
+    model = ScriptedModel([{"role": "assistant", "content": "try /omega-code-review"}])
+    agent = OmegaPrimeAgent(model, registry=registry)
+    result = agent.run("should I run /omega-code-review here?")
+    assert model.call_count == 1
+    assert result["final_response"] == "try /omega-code-review"

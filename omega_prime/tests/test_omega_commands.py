@@ -38,12 +38,25 @@ def test_parse_accepts_only_a_whole_command() -> None:
     assert parse_omega_command("/OMEGA-Doctor") == ("omega-doctor", "")
 
 
+def test_parse_accepts_multi_segment_generated_names() -> None:
+    assert parse_omega_command("/omega-code-review") == ("omega-code-review", "")
+    assert parse_omega_command("/omega-python-clean  src  ") == (
+        "omega-python-clean",
+        "src",
+    )
+    assert parse_omega_command("/OMEGA-Desk-Lead") == ("omega-desk-lead", "")
+    assert parse_omega_command("please /omega-code-review") is None
+    assert parse_omega_command("/omega-code-review-") is None
+
+
 def test_unknown_command_does_not_dispatch() -> None:
     registry = RecordingRegistry()
     body = execute_command("/omega-nope", registry, {})
     assert body["ok"] is False
     assert body["error"] == "unknown_command"
     assert "omega-help" in body["commands"]
+    assert "omega-code-review" in body["commands"]
+    assert "omega-onboard-routine" in body["commands"]
     assert registry.calls == []
 
 
