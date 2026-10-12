@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from urllib.parse import unquote
 
+import pytest
+
 OMEGA_PRIME = Path(__file__).resolve().parents[1]
 ROOT = OMEGA_PRIME.parent
 DOCS = ROOT / "docs"
@@ -26,8 +28,19 @@ _TARGETS = (
     re.compile(r"^[ \t]*\[[^\]]+\]:[ \t]*<?(\S+?)>?(?:[ \t].*)?$", re.MULTILINE),
     re.compile(r"""\b(?:src|href)=["']([^"']+)["']"""),  # raw HTML
 )
-_HEADING = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t#]*$", re.MULTILINE)
-_HTML_ANCHOR = re.compile(r"""<a\s+(?:id|name)=["']([^"']+)["']""")
+_FRONT_MATTER = re.compile(r"\A---[ \t]*\n.*?\n---[ \t]*\n", re.DOTALL)
+_ATX = re.compile(r"^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$", re.MULTILINE)
+# A paragraph line underlined with = or -- is a heading too; a list item,
+# quote, table row or ATX heading above a rule is not.
+_SETEXT = re.compile(
+    r"^ {0,3}(?![#>|]|[-*+][ \t]|\d+[.)][ \t])(\S[^\n]*?)[ \t]*\n {0,3}(?:=+|-{2,})[ \t]*$",
+    re.MULTILINE,
+)
+_HTML_ANCHOR = re.compile(
+    r"""<a\b[^>]*?\s(?:id|name)\s*=\s*["']([^"']+)["']""", re.IGNORECASE
+)
+# External, protocol-relative, mailto:, data: and other scheme targets.
+_SCHEME = re.compile(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//)")
 
 
 def _prose(text: str) -> str:
@@ -42,32 +55,38 @@ def _slug(heading: str) -> str:
     return text.replace(" ", "-")
 
 
-def _anchors(text: str) -> set[str]:
-    """Heading anchors (with GitHub's -1, -2 duplicate suffixes) and HTML ids."""
-    body = _FENCE.sub("", text)
-    anchors = {match.lower() for match in _HTML_ANCHOR.findall(body)}
+def _anchors(text: str) -> tuple[set[str], set[str]]:
+    """GitHub heading slugs (with -1, -2 duplicate suffixes) and HTML anchor ids."""
+    body = _FENCE.sub("", _FRONT_MATTER.sub("", text, count=1))
+    headings = sorted(
+        [(match.start(), match.group(1)) for match in _ATX.finditer(body)]
+        + [(match.start(), match.group(1)) for match in _SETEXT.finditer(body)]
+    )
+    slugs: set[str] = set()
     seen: dict[str, int] = {}
-    for heading in _HEADING.findall(body):
+    for _, heading in headings:
         slug = _slug(heading)
         count = seen.get(slug, 0)
         seen[slug] = count + 1
-        anchors.add(slug if count == 0 else f"{slug}-{count}")
-    return anchors
+        slugs.add(slug if count == 0 else f"{slug}-{count}")
+    return slugs, set(_HTML_ANCHOR.findall(body))
 
 
 def _broken_links(page: Path, text: str) -> list[str]:
     """Relative link, image and anchor targets in ``text`` that do not resolve.
 
     ``text`` is the page's content, so a same-page anchor is checked against
-    it rather than against the file on disk.
+    it rather than against the file on disk. Heading slugs match without
+    regard to case; HTML ids match exactly, as browsers compare them.
     """
     prose = _prose(text)
     broken = []
     for pattern in _TARGETS:
         for target in pattern.findall(prose):
-            if "://" in target or target.startswith(("mailto:", "tel:")):
+            if _SCHEME.match(target):
                 continue
             path_part, _, anchor = target.partition("#")
+            path_part = path_part.split("?", 1)[0]
             resolved = (page.parent / unquote(path_part)) if path_part else page
             if not resolved.exists():
                 broken.append(f"{target} (no file {resolved})")
@@ -75,30 +94,41 @@ def _broken_links(page: Path, text: str) -> list[str]:
             if not anchor or resolved.suffix != ".md":
                 continue
             source = resolved.read_text(encoding="utf-8") if path_part else text
-            if unquote(anchor).lower() not in _anchors(source):
+            slugs, ids = _anchors(source)
+            wanted = unquote(anchor)
+            if wanted not in ids and wanted.lower() not in slugs:
                 broken.append(f"{target} (no heading anchor #{anchor})")
     return broken
 
 
+_SHELL_FENCES = {"bash", "sh", "shell", "zsh", "console", "shell-session", "sh-session"}
 _PY_MODULE = re.compile(r"(?:^|[\s/])python[\d.]*\s+-m\s+(omega_prime(?:\.\w+)+)")
-_SCRIPT = re.compile(r"(?:^|\s)(?:bash|sh)\s+(omega_prime/\S+\.sh)\b")
+_SCRIPT = re.compile(r"""(?:^|\s)(?:bash|sh|zsh)\s+["']?(omega_prime/[^\s"']+\.sh)\b""")
+_COMMENT = re.compile(r"(?:^|[ \t])#.*$", re.MULTILINE)
+
+
+def _module_exists(module: str) -> bool:
+    try:
+        return importlib.util.find_spec(module) is not None
+    except ModuleNotFoundError:  # a parent package is missing too
+        return False
 
 
 def _unrunnable_demo_commands(text: str) -> list[str]:
     """``python -m omega_prime.*`` modules and repo scripts in shell fences
-    that a reader running the block from the repository root could not start."""
+    that a reader running the block from the repository root could not start.
+
+    Continued lines are joined and comments dropped first, as the shell reads
+    them, so a command split over lines is checked and a commented-out one is not.
+    """
     missing = []
     for match in _FENCE.finditer(text):
-        if match.group(2).strip().split(" ")[0] not in (
-            "bash",
-            "sh",
-            "shell",
-            "console",
-        ):
+        info = match.group(2).split()
+        if not info or info[0] not in _SHELL_FENCES:
             continue
-        block = match.group(3)
+        block = _COMMENT.sub("", re.sub(r"\\\n", " ", match.group(3)))
         for module in _PY_MODULE.findall(block):
-            if importlib.util.find_spec(module) is None:
+            if not _module_exists(module):
                 missing.append(f"python -m {module}")
         for script in _SCRIPT.findall(block):
             if not (ROOT / script).is_file():
@@ -129,16 +159,35 @@ def test_relative_links_images_and_anchors_resolve():
     assert not broken, broken
 
 
-def test_link_check_rejects_a_missing_anchor_file_and_image():
-    """The resolver itself fails closed, so the docs-wide check cannot pass vacuously."""
+def test_link_check_flags_missing_targets_and_accepts_valid_forms():
+    """The resolver fails closed on a missing target, so the docs-wide check
+    cannot pass vacuously, and accepts every form a reader's link can take."""
     page = DOCS / "marketing.md"
     text = page.read_text(encoding="utf-8")
     assert _broken_links(page, text) == []
-    assert _broken_links(page, text + "\n[x](grok-bot-native.md#no-such-row)\n")
-    assert _broken_links(page, text + "\n[x](#no-such-section)\n")
-    assert _broken_links(page, text + "\n[x](no-such-page.md)\n")
-    assert _broken_links(page, text + "\n![x](../assets/no-such-art.svg)\n")
-    assert _broken_links(page, text + '\n<img src="../assets/no-such-art.png">\n')
+    for missing in (
+        "[x](grok-bot-native.md#no-such-row)",
+        "[x](#no-such-section)",
+        "[x](no-such-page.md)",
+        "![x](../assets/no-such-art.svg)",
+        '<img src="../assets/no-such-art.png">',
+    ):
+        assert _broken_links(page, f"{text}\n{missing}\n"), missing
+    extra = (
+        "\n\nSetext title\n------------\n\n   ### Indented title\n\n"
+        '<a class="k" id="Mixed-Case"></a>\n'
+    )
+    for valid in (
+        "[x](marketing.md?plain=1)",
+        "![x](data:image/png;base64,AAAA)",
+        "[x](//example.com/a.md)",
+        "[x](#setext-title)",
+        "[x](#indented-title)",
+        "[x](#Mixed-Case)",
+    ):
+        assert _broken_links(page, f"{text}{extra}\n{valid}\n") == [], valid
+    # An HTML id is case-sensitive, unlike a heading slug.
+    assert _broken_links(page, f"{text}{extra}\n[x](#mixed-case)\n")
     # A link quoted inside a code block is not a link.
     assert _broken_links(page, text + "\n```text\n[x](no-such-page.md)\n```\n") == []
 
@@ -161,6 +210,31 @@ def test_documented_shell_commands_name_runnable_modules_and_scripts():
     assert "bash omega_prime/scripts/grokbot-2click.sh" in _unrunnable_demo_commands(
         moved
     )
+
+
+@pytest.mark.parametrize(
+    ("block", "missing"),
+    [
+        ("```bash\n# python -m omega_prime.no_such\n```", []),
+        (
+            "```bash\n.venv/bin/python \\\n  -m omega_prime.no_such --json\n```",
+            ["python -m omega_prime.no_such"],
+        ),
+        (
+            "```zsh\npython3 -m omega_prime.no_such.deeper\n```",
+            ["python -m omega_prime.no_such.deeper"],
+        ),
+        (
+            '```bash\nbash "omega_prime/scripts/no-such.sh"\n```',
+            ["bash omega_prime/scripts/no-such.sh"],
+        ),
+        ("```text\npython -m omega_prime.no_such\n```", []),
+    ],
+)
+def test_command_check_reads_a_block_as_the_shell_would(
+    block: str, missing: list[str]
+) -> None:
+    assert _unrunnable_demo_commands(block) == missing
 
 
 def test_summary_links_resolve_exactly_once():
@@ -188,7 +262,12 @@ def test_setup_prompts_run_the_declared_stdio_command():
     declared = " ".join([server["command"], *server["args"]])
     assert "${CURSOR_PLUGIN_ROOT}" in declared
     on_bot = declared.replace("${CURSOR_PLUGIN_ROOT}", "/workspace/omega-prime")
-    for doc in ("omega_prime/grokbot/SETUP.md", "README.md"):
+    for doc in (
+        "omega_prime/grokbot/SETUP.md",
+        "omega_prime/grokbot/templates/OMEGA_PRIME.md",
+        "README.md",
+        "docs/marketing.md",
+    ):
         assert on_bot in (ROOT / doc).read_text(encoding="utf-8"), doc
     for doc in ("omega_prime/grokbot/SETUP.md", "docs/grok-bot-native.md"):
         assert declared in (ROOT / doc).read_text(encoding="utf-8"), doc
