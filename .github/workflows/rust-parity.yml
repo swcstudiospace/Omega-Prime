@@ -90,7 +90,8 @@ jobs:
       # note on the test step).
       - name: install uv (the kernel venv bootstrap uses it)
         run: |
-          python3 -m pip install --user uv
+          # Pinned: the version this job last ran green with. Bump deliberately.
+          python3 -m pip install --user uv==0.13.0
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: bootstrap the kernel venv
