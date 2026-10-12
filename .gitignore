@@ -24,6 +24,7 @@ __pycache__/
 .venv/
 # grokbot-1click.sh bootstrap sidecars (lock, ownership stamp, build and swap dirs)
 .venv.lock
+.venv.in-use.lock
 .venv.build/
 .venv.old.*/
 .venv.omega-prime-bootstrap.json
