@@ -2,38 +2,68 @@
 gsd_state_version: "1.0"
 milestone: v15
 milestone_name: Integrated Readiness and Repository Delivery
-current_phase: "77.1"
-current_phase_name: Grok Bot import packaging
-status: verifying
-stopped_at: User chose to ship the v15 work to main ahead of the live 77.1 UAT; ultrathink-ship PR and Greptile review in progress
-last_updated: "2026-10-12T15:10:00.000Z"
+status: Awaiting next milestone
+stopped_at: Milestone v15 completed and archived; the close-out PR from v15-milestone-close is next
+last_updated: "2026-10-12T21:44:13.706Z"
 last_activity: 2026-10-12
-last_activity_desc: User decided "ship to main branch and I'll test after"; planning docs committed for the ship gate; ultrathink-ship run with --ignore-gsd on that explicit decision
-state_head: a1280007fe49b0f4ea6d0d1e9b6fa1f15e1f3ca2
+last_activity_desc: Milestone v15 completed and archived
+state_head: 2ccb3e8bd4449b23c10c36ac4ba55a6ece1e13cc
 progress:
   total_phases: 5
-  completed_phases: 3
-  total_plans: 31
-  completed_plans: 31
-  percent: 60
-current_plan: "08"
+  completed_phases: 4
+  total_plans: 33
+  completed_plans: 33
+  percent: 80
+current_phase: "77.1"
+current_phase_name: Grok Bot import packaging
+current_plan: 08
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md
+See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** Phase 77.1 Grok Bot import packaging (GROK-03): human UAT on the user's live Grok Bot. All 8 plans are implemented and committed (50b621a..a128000). Canonical verification is human_needed with 42/42 must-haves and 5/5 success criteria. A fresh-clone LOCAL-PROOF on the final source passed: cold bootstrap 93 s; the declared stdio command served /omega-help (46 commands); exit classes 10–13; HTTPS loopback 22/0. Review open 0; security threats open 0/19; Nyquist compliant. Full suite 2508 passed. Phases 75–77 complete. Phase 78 and the milestone lifecycle follow 77.1 acceptance.
+**Current focus:** No milestone in progress. v15 is complete and archived (audit 21/22; GROK-03 live import UAT deferred by the user). Next: ship the close-out PR from `v15-milestone-close`, then `/gsd:new-milestone`. Deferred: the six live 77.1 Grok Bot import UAT rows on `main` (`/gsd:verify-work 77.1`).
 
 ## Current Position
 
-Phase: 77.1 (Grok Bot import packaging): verifying, live human UAT
-Plan: 8 of 8. All plans are summarized; the UAT checkpoint in plan 08 is open.
-Status: Shipping to main by user decision, ahead of the live UAT. After the merge, 77.1-UAT.md tests 1–6 run against `main` with the canonical SETUP.md prompt (no `--branch`).
-Last activity: 2026-10-12. The user chose to ship to main now and test after. The ship flow runs `assess --ignore-gsd` because of that explicit decision; the PR body records the exclusion. Branch `v15-integrated-readiness` (pre-squash head a128000 plus the planning-doc commit) goes through a Greptile 5/5 review, then a squash merge and branch deletion per the ultrathink ship config.
+Phase: Milestone v15 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-10-12 — Milestone v15 completed and archived
+
+## Deferred Verification
+
+| Phase | State | Resume |
+|-------|-------|--------|
+| 77.1 | verification_deferred_human | /gsd:verify-work 77.1 |
+
+## Deferred Items
+
+Items acknowledged and deferred at milestone close, most recent first:
+
+| Category | Item | Status | Deferred At | Milestone |
+|----------|------|--------|-------------|-----------|
+| verification_gaps | 77.1/77.1-VERIFICATION.md | human_needed | 2026-10-12 | v15 |
+| uat_gaps | 77.1/77.1-UAT.md | testing | 2026-10-12 | v15 |
+| uat_gaps | 48/48-UAT.md | testing | 2026-10-12 | v15 |
+| seeds | SEED-001 | dormant | 2026-10-12 | v15 |
+| seeds | SEED-002 | dormant | 2026-10-12 | v15 |
+| seeds | SEED-003 | dormant | 2026-10-12 | v15 |
+| seeds | SEED-004 | dormant | 2026-10-12 | v15 |
+| seeds | SEED-006 | dormant | 2026-10-12 | v15 |
+| seeds | SEED-007 | dormant | 2026-10-12 | v15 |
+| seeds | SEED-008 | dormant | 2026-10-12 | v15 |
+| seeds | SEED-009 | dormant | 2026-10-12 | v15 |
+| seeds | SEED-010 | dormant | 2026-10-12 | v15 |
+| seeds | SEED-011 | dormant | 2026-10-12 | v15 |
+| seeds | SEED-012 | dormant | 2026-10-12 | v15 |
+| seeds | SEED-013 | dormant | 2026-10-12 | v15 |
+
+Closeout type: override_closeout (user-approved 2026-10-12). Known verification overrides: 15 newly acknowledged, 0 carried forward from a prior close.
 
 ## Accumulated Context
 
@@ -48,7 +78,7 @@ Last activity: 2026-10-12. The user chose to ship to main now and test after. Th
 
 ### Blockers
 
-Live 77.1 UAT (tests 1–6) is deferred until after the merge, by the user's decision. After the merge it uses the canonical SETUP.md prompt from `main` (Cursor Teams/Enterprise for rows 2–3; an operator HTTPS host for row 6, which may be skipped with a reason). 77.1 stays human_needed and GROK-03 stays Pending until those results are recorded. Phase 78 and the milestone audit/complete/cleanup follow 77.1 acceptance; phases 75–77 need a freshness re-verification before the audit. The squash merge rewrites per-plan commit SHAs out of main's history: later verify-work commit reconciliation must recount from the preserved pre-squash objects (head a128000) instead of treating them as missing. Cleanup still needs separate approval. Not yet executed: final-source image publication, deployment and live Grok operations.
+Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the canonical SETUP.md prompt (Cursor Teams/Enterprise for rows 2–3; an operator HTTPS host for row 6, which may be skipped with a reason). 77.1 stays human_needed and GROK-03 stays Pending until those results are recorded. The user chose to close the milestone first ("continue with our phases and merge once completed the milestones"): every phase was re-verified at 2ccb3e8 (75, 76, 77, 78 passed; 77.1 human_needed), the audit recorded GROK-03 as the one accepted gap, and v15 was archived to `milestones/v15-phases/` with the user's approval. `find-phase 77.1` resolves the archived directory; its report reads stale there because archiving moved the files it covers, so recording the UAT results must end with a fresh verifier run for 77.1. The squash merge (c26305f) rewrote per-plan commit SHAs out of main's history: later verify-work commit reconciliation must recount from the preserved pre-squash objects (final head dbde6da) instead of treating them as missing. Not yet executed: final-source image publication, deployment and live Grok operations.
 
 ### Roadmap Evolution
 
@@ -79,7 +109,7 @@ Live 77.1 UAT (tests 1–6) is deferred until after the merge, by the user's dec
 
 ### Current exercised acceptance evidence
 
-- Actual local and include-prime profiles: both exit0/oktrue,165 canonical tools, zero failed rows and zero accounting problems. Local117 offered/50 exercised/67 blocked/48 feature-disabled; Prime154 offered/82 exercised/72 blocked/11 feature-disabled. Default-off Red Team remains uncalled.
+- Actual local and include-prime profiles: both exit0/oktrue,165 canonical tools, zero failed rows and zero accounting problems. Local117 offered/50 exercised/67 blocked/48 feature-disabled; Prime154 offered/77 exercised/77 blocked/11 feature-disabled (82/72 before 43f69ae stopped crediting the five refused RLM tools; regression gate at 08cf459). Default-off Red Team remains uncalled.
 - Complete post-guard profile receipts: `local://v15-native-phase75-usage-local.json`, `local://v15-native-phase75-usage-prime.json`; current final union/preservation receipt: `local://v15-native-phase75-usage-verification.json` (2129 passed,0 failed,0 skipped). Earlier2116/2122 receipts remain historical. Canonical75-VERIFICATION passed46/46; freshness owner passed and phase.complete75 accepted all seven phase75 requirements.
 - Actual eligible handler failure and unexplained canonical absence each force complete CLI exit1/okfalse: `local://v15-native-negative-readiness-cli.json`; parent negativeCLI regression command passed2 tests. Later successful calls may truthfully exercise read_file but cannot erase its retained failed check/global failure.
 - Synthetic real verifier publication and actual parser rejection before/after proofs: `local://v15-native-verifier-publication-before.json` / `local://v15-native-verifier-publication-after.json`, `local://v15-native-verifier-parser-before.json` / `local://v15-native-verifier-parser-after.json`. Full-input classification now precedes clipping/argparse stderr; detector unchanged, no arbitrary-secret-recognition claim.
@@ -95,5 +125,9 @@ Live 77.1 UAT (tests 1–6) is deferred until after the merge, by the user's dec
 ## Session
 
 **Last session:** 2026-10-12
-**Stopped at:** Phase 77.1 live UAT test 1 of 6 (Bot clone plus Command server) awaiting the user's result; ultrathink-ship assess not done (no PR)
-**Resume file:** .planning/phases/77.1-grok-bot-import-packaging/77.1-UAT.md
+**Stopped at:** Milestone v15 completed and archived; the close-out PR from `v15-milestone-close` is next
+**Resume file:** .planning/milestones/v15-phases/77.1-grok-bot-import-packaging/77.1-UAT.md
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone

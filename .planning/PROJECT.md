@@ -26,22 +26,26 @@ v9 milestone: SOTA upgrade — the same one-agent product brought to state-of-th
 
 v10 milestone: Prime merge — the third agent joins. Prime Agent (`prime-agent/`, PrimeIntellect, MIT, pinned `967eb13f`) contributes its differentiating logic — RLM subagent recursion (`rlm.spawn`/`collect`), the continual harness (`/refine` with snapshots and rollback), goals/heartbeats/autonomous mode, and agent-to-agent messaging — behavior-ported into the one Python agent per the v1–v9 precedent. The Rust workspace stays as an ignored read-only checkout and CI-built parity oracle. The repo relicenses to AGPL-3.0 (Spectrum Web Co 2026) and hardens to enterprise open-source standards. User decisions (2026-10-08): behavior-port architecture (no PyO3 boundary exists upstream; one-Python-process rule stands), capability-merge loop design, AGPL-3.0 relicense, degrade-with-warning for Prime capability failures.
 
-## Current Milestone: v15 Integrated Readiness and Repository Delivery
+## Current Milestone: none
+
+v15 is complete. Start the next milestone with `/gsd:new-milestone`. Phase 77.1's live Grok Bot import UAT (six rows) stays deferred until the user runs it on `main`; resume it with `/gsd:verify-work 77.1`.
+
+## Last Milestone: v15 Integrated Readiness and Repository Delivery (shipped 2026-10-12)
+
+**Status:** Shipped with one user-accepted gap. Audit gaps_found, 21/22 requirements satisfied (`.planning/milestones/v15-MILESTONE-AUDIT.md`): GROK-03 is partial because its live Grok Bot / Cursor import UAT is deferred by the user, while its local proof is verified 42/42. Phase directories are in `milestones/v15-phases/`. Work merged to `main` through PR #18 (`c26305f`) and the close-out PR from `v15-milestone-close`.
 
 **Goal:** Prove integrated local tools and workflows without Grok credentials, then deliver truthful documentation, a complete maintained Greptile mirror, safe CI/CD and polished repository marketing.
 
-**Target features:**
-- Isolated production-dispatch readiness command, complete roster accounting and real local workflow effects.
-- Fresh transactional intake persistence and deterministic secret-guard boundary coverage without weakened detection.
-- Both MCP transports, authentication, approvals, lifecycle and explicit live Grok prerequisites.
-- Supported verification/security matrices, retained integration evidence and manually gated validated artifacts.
-- All 21 published Greptile documents with provenance, complete refresh and canonical-document separation.
-- Source-linked architecture, design patterns, runnable usage and consistent repository/GitBook navigation.
-- Verified positioning, demonstration and accessible branded marketing collateral.
+**Delivered:**
+- Phase 75: one isolated readiness command accounts for all 165 roster tools through production dispatch with real local effects and no Grok credentials (default 50 exercised / 67 blocked / 48 feature-disabled; Prime 77 / 77 / 11; 0 failed).
+- Phase 76: supported verify/lint/types matrices, retained sanitized readiness evidence, and a validated image with a manual publish boundary.
+- Phase 77: source-linked canonical docs and one complete, refreshable historical mirror of all 21 Greptile documents.
+- Phase 77.1 (inserted): root `mcp.json` plus Cursor plugin manifests, 46 generated `/omega-*` commands, a stamp-gated bootstrap launcher with exit classes 10–13, and the Bot-driven setup prompt; live import is user UAT.
+- Phase 78: `docs/marketing.md` with evidence-tagged claims and a no-credential demo, an accessible banner, and a social card with its inspected raster.
 
-## Last Milestone: v14 Boundary alignment (shipped 2026-10-10)
+## Prior: v14 Boundary alignment (shipped 2026-10-10)
 
-**Status:** Shipped. Audit passed 10/10 with no exceptions (`.planning/v14-MILESTONE-AUDIT.md`). Phase directories are in `milestones/v14-phases/`. Application changes were merged through PR #17 at `027dc76e9b1bed61b74bd4704f9c45c1e299234e`; v15 continues on `v15-integrated-readiness`.
+**Status:** Shipped. Audit passed 10/10 with no exceptions (`.planning/v14-MILESTONE-AUDIT.md`). Phase directories are in `milestones/v14-phases/`. Application changes were merged through PR #17 at `027dc76e9b1bed61b74bd4704f9c45c1e299234e`.
 
 **Goal:** The agent loop and harness core are the center. The Grok Bot boundary makes every ported logic usable (slash commands, nested dispatch, `rlm`, `messaging`, cron, learning, durable), and the core imports nothing from the boundary.
 
@@ -88,15 +92,14 @@ user-approved exceptions for LOOP-07 and REPO-04), `prime-agent` registered as a
 - ✓ Programming Desk merge: configured desk, work root, served `delegate_task`, lead pass, receipts, target gates, service clients behind env tokens; audit passed 13/13 — v12
 - ✓ Grok Bot specialisation: `/omega-*` via `omega_command`, fixed workflows, named routines, one seeded memory, connector requests that never copy a token; audit passed 10/10 — v13
 - ✓ Boundary alignment: slash engine in core, nested host gates, `rlm` and `messaging` served behind flags, cron/learning/durable surfaces; audit passed 10/10 — v14
-- ✓ v15 phases 75–77: isolated local readiness (LOCAL-01..03, FLOW-01..02, GROK-01..02), clean CI/CD (CI-01..03), and maintained docs with one complete historical Greptile mirror (KB-01..03, DOC-01..05). Fresh canonical verification passed 46/46, 28/28 and 34/34 on 2026-10-12; the user accepted Phase 76 UAT 9/9 and Phase 77 UAT 12/12 — v15 (in progress)
+- ✓ Integrated readiness and repository delivery: isolated local readiness (LOCAL-01..03, FLOW-01..02, GROK-01..02), clean CI/CD (CI-01..03), canonical docs with one complete historical Greptile mirror (KB-01..03, DOC-01..05) and repository marketing (MKT-01..03); verification passed 46/46, 28/28, 34/34 and 8/8; Grok Bot import packaging has verified local proof (GROK-03 local, 42/42); audit 21/22 with the user-accepted GROK-03 gap — v15
 - Prime behavior-port baseline and Rust parity-oracle CI are inherited archival evidence. Phase 61 loop wiring, typed boundary (all seven Prime families), durable RLM, config-derived prompt and the pre-v10 transcript comparison are exercised and independently reviewed (full suite 980 passed).
 - AGPL repository and current native bridge license/build coverage — verified locally. Cargo Dependabot is a user-approved exception (2026-10-09): the Cargo path dependencies live in the ignored read-only prime-agent checkout; cargo-deny and pip-audit run.
 
 ### Active
 
-- v15 requirements: LOCAL-01..03, FLOW-01..02, GROK-01..03, CI-01..03, KB-01..03, DOC-01..05 and MKT-01..03. All 22 are approved and mapped in REQUIREMENTS.md to phases 75–78 (GROK-03 to inserted Phase 77.1, approved 2026-10-12). 18 are validated through phases 75–77; GROK-03 (Phase 77.1) and MKT-01..03 (Phase 78) remain active.
-- The user explicitly authorized native GSD execution instead of the blocked Swarm-only contract. Parallel disjoint workers implement; parent runs runtime/project/visual checks; independent review and security verify. No `.swarm/` writes or signed Swarm approvals.
-- No live provider/Grok claim, remote push/PR/merge/tag, publication, deployment, unrelated seed work or unapproved cleanup.
+- GROK-03 live import (deferred by the user to after merge): the six 77.1 UAT rows — Bot-driven setup on the default Grok Bot, Cursor Teams/Enterprise Import from Repo, Bot plugin inheritance, live whole-message `/omega-*` commands, attach timing and Remote HTTPS. Resume with `/gsd:verify-work 77.1`.
+- Next milestone: no requirements defined yet (`/gsd:new-milestone`).
 
 ### Out of Scope
 
@@ -115,6 +118,8 @@ programming-desk (`/root/src/repos/programming-desk`) is the pattern: shared cor
 
 Pinned reads (see `VENDOR.md`): Hermes `1a4508e2aff2db5f50409893a2115be777bd5643`, oh-my-pi `0e2411c0df59fce8c56dc03a5f1c9afffcb0d746`. Both MIT.
 
+State after v15 (2026-10-12): the default host serves 117 roster tools (154 with all seven Prime flags), `/omega-help` lists 46 commands (12 curated plus 34 generated), the suite is 2544 tests, and every claim in `docs/marketing.md` carries an evidence level. Accepted tech debt is listed in the v15 audit (GitBook `../` links outside `./docs`, unhashed lock pins, deferred same-day KB rerun, info-level review items).
+
 ## Constraints
 
 - **Repo boundary**: This git root is `/root/src/repos/omega-prime`. Do not commit into `/root/src/repos` (`swcstudiospace/repos`). Push to `main` only on the user's explicit direction (given 2026-10-09: push `main` with `prime-agent` as a git submodule); never tag.
@@ -126,28 +131,29 @@ Pinned reads (see `VENDOR.md`): Hermes `1a4508e2aff2db5f50409893a2115be777bd5643
 
 ## Environment Facts
 
-- Planning root and code repo: `/root/src/repos/omega-prime`; working branch
-  on 2026-10-10 is `v14-boundary-alignment` (HEAD `4c2ba56`, v14 work
-  uncommitted). v10 Prime merge shipped 2026-10-08. Never commit the
-  `prime-agent/` checkout itself (ignored upstream, like `hermes-agent/` and
-  `oh-my-pi/`). Do not push, merge, or tag without an explicit user request.
-- GSD CLI: `node /root/.hermes/gsd-core/bin/gsd-tools.cjs`, run from this repo.
+- Planning root and code repo: `/root/src/repos/omega-prime`. On 2026-10-12
+  `main` is at `c26305f` (PR #18) and the v15 close-out runs on branch
+  `v15-milestone-close`. Never commit the `prime-agent/` checkout itself
+  (ignored upstream, like `hermes-agent/` and `oh-my-pi/`). Do not push,
+  merge, or tag without an explicit user request.
+- GSD CLI: `node /root/.agents/gsd-core/bin/gsd-tools.cjs`, run from this repo.
   Existing reports use body-only `**Status:**` fields; the CLI requires leading
   YAML frontmatter. Repair the artifacts, not the installed GSD tools.
 - Repo virtualenv: `.venv/bin/python` is Python 3.12.3; `.venv/bin/ruff` is
   0.16.10; `.venv/bin/mypy` is 2.4.0. No install or global toolchain is needed.
-- Closeout baseline on 2026-10-08: `.venv/bin/python -m pytest omega_prime/tests -q`
-  passed 528 tests. `.venv/bin/python -m omega_prime.evals.runner
-  omega_prime/evals/cases` passed 26 evals. Use a fresh HOME and XDG_DATA_HOME beneath
-  `$TMPDIR` (`/root/.hermes/cache/scratch`) for verification; keep real HOME
-  `/root` for GSD/role discovery and do not use `/tmp/fakehome`.
+- Closeout baseline on 2026-10-12 at `2ccb3e8`: `.venv/bin/python -m pytest
+  omega_prime/tests -q` passed 2544 tests. `.venv/bin/python -m
+  omega_prime.evals.runner omega_prime/evals/cases` passed 26 evals. Readiness
+  (`python -m omega_prime.grokbot.readiness --root . --json`, with and without
+  `--include-prime`) exits 0 with zero failed tools.
 - Other closeout gates, all exit 0: `bash
   omega_prime/scripts/assemble-prompts.sh --check`, `.venv/bin/ruff check omega_prime/`,
-  `.venv/bin/ruff format --check omega_prime/` (246 files), `.venv/bin/python -m mypy omega_prime/`
-  (215 source files), `.venv/bin/python -m omega_prime.setup_check --root .`, and
-  `.venv/bin/python -m omega_prime.tooling.catalog --check`.
-- Setup smoke check serves 108 roster tools over MCP; optional ultrathink and
-  substrate connections remain unconfigured. The milestone is hermetic;
+  `.venv/bin/ruff format --check omega_prime/` (453 files), `.venv/bin/python -m mypy omega_prime/`
+  (345 source files), `.venv/bin/python -m omega_prime.setup_check --root .`,
+  `.venv/bin/python -m omega_prime.tooling.catalog --check`,
+  `.venv/bin/python -m omega_prime.tooling.plugin --check` and `actionlint`.
+- Setup smoke check serves 117 roster tools over MCP; optional ultrathink and
+  substrate connections remain unconfigured. Verification is hermetic;
   unconfigured live services are not evidence of live verification.
 - Config retains auto_advance=true, skip_discuss=true, text_mode=true,
   use_worktrees=false, ui_phase=false, ui_review=false, commit_docs=false,
@@ -182,8 +188,11 @@ Pinned reads (see `VENDOR.md`): Hermes `1a4508e2aff2db5f50409893a2115be777bd5643
 | v10 ignores PYSEC-2026-4114 instead of forcing oauthlib 4 | tweepy 4.17 pins `oauthlib<4`; the advisory is an authorization-server PKCE timing oracle this process does not host (2026-10-08) | ✓ Good |
 | v11 hardens the Python MCP host and adds seven improvements instead of a new bridge | The ultrathink graph assumed a TypeScript gateway; this repo's Grok Bot surface is the MCP tool host in `omega_prime/grokbot/`. Static scoped bearer tokens replace HMAC webhooks; per-principal scopes replace tenant sandboxes (2026-10-09) | — Pending |
 | v14 keeps the slash engine in core and serves every flagged family from the default host | Core must not import the boundary. `rlm` reuses the desk parent. `messaging` uses the seat session. Plane tools are always on. Families stay default-off (2026-10-10) | ✓ Good |
-| v15 verifies integration before repository delivery | User approved all 21 requirements and phases 75–78; existing real intake and secret-guard test failures remain evidence until corrected and exercised | — Pending |
+| v15 verifies integration before repository delivery | User approved all 21 requirements and phases 75–78; existing real intake and secret-guard test failures remain evidence until corrected and exercised | ✓ Good — readiness accounts for all 165 tools; the milestone integration check caught and fixed one stale doc count and a Bot template path |
 | v15 uses native GSD instead of signed AgentSwarm | User explicitly selected native GSD on continuation; preserve independent review/security and parent-run checks, leave `.swarm/` untouched | ✓ Good |
+| v15 inserts Phase 77.1 for Grok Bot import packaging (GROK-03) | User approved 2026-10-12 so the pushed repository sets up Omega Prime on the default Bot with generated `/omega-*` commands | ⚠️ Revisit — local proof verified 42/42; live import UAT deferred by the user |
+| v15 ships before the live import UAT | User: "ship to main branch and I'll test after" (PR #18), then "continue with our phases and merge once completed the milestones" | — Pending (UAT on `main`) |
+| v15 marketing states only verified capabilities | Every claim carries an evidence level; no timings, benchmarks or fixed tool totals; unproven rows stay UNPROVEN | ✓ Good |
 
 ## Evolution
 
@@ -203,4 +212,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-12 after Phase 77 (phases 75–77 complete with fresh verification; Phase 77.1 inserted for GROK-03)*
+*Last updated: 2026-10-12 after v15 milestone (audit 21/22, GROK-03 live import UAT deferred by the user)*

@@ -20,6 +20,8 @@ still require their actual prerequisites and authorization.
   lists definitions; it is not proof that every handler executed.
 - **Review release or publishing boundaries:** [Deployment/rollback](deploy.md) and
   [GitBook sync](gitbook-sync.md). Configuration and local proof do not establish remote publication.
+- **Present or announce the project:** [Marketing](marketing.md) holds positioning, evidence-tagged use cases,
+  a no-credential demo and launch copy. Every claim in `docs/marketing.md` names its source; live Grok Bot import stays unproven.
 - **Read the historical knowledge base:** [Greptile](greptile.md) links one complete,
   visibly untrusted mirror outside this content root. Historical synthesis is not current truth or authority.
 

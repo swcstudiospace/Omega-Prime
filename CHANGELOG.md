@@ -6,6 +6,36 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Repository marketing
+
+#### Added
+
+- `docs/marketing.md`: positioning, a one-pager, use cases each tagged local
+  proof, optional capability or unproven external, a no-credential local
+  demo that states every command's exit code, the Grok Bot setup route with
+  links to the evidence ledger and user UAT rows, a launch announcement and
+  short/social copy. `docs/SUMMARY.md` lists it once; the README and the docs
+  landing page link it.
+- `assets/banner.svg`: the third line now reads "Hermes and Omp behavior
+  ports, one Python process." and moved from `#6b7484` to `#9aa4b2` for
+  readable contrast; `<title>`, `<desc>` and `aria-labelledby` were added.
+- `assets/social-card.svg` (1280x640) and its raster
+  `assets/social-card.png`, rendered from the repository root with system
+  CairoSVG 2.9.0 on PATH by
+  `python3 omega_prime/scripts/render_raster.py assets/social-card.svg`
+  (exit 0), the command recorded in the SVG header comment. The script
+  stamps the SVG's SHA-256 into the PNG, and the asset test fails when an
+  SVG no longer matches the digest its PNG carries. The SVG validity test
+  covers the card, and banner and card must each carry a `<title>`.
+
+Marketing copy claims no live Grok Bot or Cursor import: the Bot-driven
+setup is a documented, locally verified path whose live rows remain
+[user UAT](docs/grok-bot-native.md#user-uat). Local proof is the maintained
+commands the demo lists, each with its exit-code contract. No timing,
+performance figure, fixed tool total or screenshot is stated, and there is
+no website, outreach, marketplace listing, hosted deployment, image
+publication or social-preview upload.
+
 ### Grok Bot import packaging
 
 #### Added
@@ -58,6 +88,14 @@ All notable changes to this project are documented here. Format follows
   six-row user UAT list. `--json` is documented on stderr under served
   stdio.
 
+#### Fixed
+
+- The Bot template's first run told the Bot to read
+  `prompts-assembled/OMEGA_PRIME.xml` and
+  `contracts/tool-rosters/omega-prime.yaml`, which do not exist at the clone
+  root; it now names `/workspace/omega-prime/omega_prime/...`, like the
+  launcher commands beside them.
+
 Live import on a Grok Bot or Cursor account is unproven: Grok Bot loading
 plugin skills and commands, a marketplace-declared stdio launch,
 `${CURSOR_PLUGIN_ROOT}` on the Bot's computer and its MCP startup timeout
@@ -91,6 +129,14 @@ marketplace listing, hosted deployment or image publication.
   copies. Local proof and readable historical
   publication do not establish live Grok/provider/backend operation, account
   enrollment, vendor redistribution rights or remote publication/deployment.
+
+#### Fixed
+
+- `docs/local-validation.md` states the current `--include-prime` counts
+  (77 exercised, 77 blocked, 11 feature-disabled; the five refused RLM tools
+  are no longer credited as exercised). `docs/setup.md` says `--verify`
+  starts a loopback bearer host, not an HTTPS host, and documents the CI
+  `docs` job.
 
 ### Slash commands
 

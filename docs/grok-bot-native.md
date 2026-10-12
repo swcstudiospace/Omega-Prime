@@ -102,8 +102,8 @@ fresh `git clone --recurse-submodules` with no `.venv`. Success is exit 0
 with nothing on stdout: stderr logs `building a fresh environment` and ends
 with `bootstrap complete`, and `.venv` plus the stamp exist. A second run is
 a no-op that logs `environment is up to date (stamp matches)` and leaves the
-stamp unchanged. A failed install exits 10 or 11 with one JSON class line on
-stderr.
+stamp unchanged. Any failure exits 10, 11 or 12 with one JSON class line on
+stderr; see [Exit codes](#exit-codes).
 
 ### oneclick flags
 

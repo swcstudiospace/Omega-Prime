@@ -1,3 +1,12 @@
+# Requirements Archive: v15 Integrated Readiness and Repository Delivery
+
+**Archived:** 2026-10-12
+**Status:** SHIPPED
+
+For current requirements, see `.planning/REQUIREMENTS.md`.
+
+---
+
 # Requirements: v15 Integrated Readiness and Repository Delivery
 
 Approved 2026-10-10. Execution: explicitly authorized native GSD workers, parallel disjoint files, parent-owned checks and independent review/security. No signed Swarm approval is claimed.
@@ -41,9 +50,9 @@ Approved 2026-10-10. Execution: explicitly authorized native GSD workers, parall
 
 ## Repository marketing
 
-- [ ] **MKT-01**: User receives polished positioning, repository overview/one-pager and concrete use cases based on verified capabilities.
-- [ ] **MKT-02**: User receives a reproducible demo narrative, launch announcement and short/social copy.
-- [ ] **MKT-03**: User receives accessible self-contained branded repository visuals that were rendered and inspected, without invented features or benchmarks.
+- [x] **MKT-01**: User receives polished positioning, repository overview/one-pager and concrete use cases based on verified capabilities.
+- [x] **MKT-02**: User receives a reproducible demo narrative, launch announcement and short/social copy.
+- [x] **MKT-03**: User receives accessible self-contained branded repository visuals that were rendered and inspected, without invented features or benchmarks.
 
 ## Out of scope
 
@@ -76,8 +85,8 @@ Approved 2026-10-10. Execution: explicitly authorized native GSD workers, parall
 | DOC-04 | 77 | Complete |
 | DOC-05 | 77 | Complete |
 | GROK-03 | 77.1 | Pending |
-| MKT-01 | 78 | Pending |
-| MKT-02 | 78 | Pending |
-| MKT-03 | 78 | Pending |
+| MKT-01 | 78 | Complete |
+| MKT-02 | 78 | Complete |
+| MKT-03 | 78 | Complete |
 
-Coverage: 22 requirements (21 original plus GROK-03, user-approved 2026-10-12), each mapped once; none deferred.
+Coverage: 22 requirements (21 original plus GROK-03, user-approved 2026-10-12), each mapped once. GROK-03 stays Pending: its local proof passed, and its live Grok Bot import UAT is deferred by the user until after merge (STATE.md Deferred Verification).

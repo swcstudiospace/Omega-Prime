@@ -1,5 +1,22 @@
 # Milestones
 
+## v15 — Integrated Readiness and Repository Delivery (2026-10-12)
+
+**Status:** Complete with one user-accepted gap. 5 phases (75, 76, 77, inserted 77.1, 78), 33 plans. Audit gaps_found: 21/22 requirements satisfied; GROK-03 is partial. Closeout type: override_closeout, approved by the user on 2026-10-12.
+
+**Core value delivered:** One isolated readiness command accounts for all 165 roster tools through production dispatch with real local effects and no Grok credentials (default 50 exercised / 67 blocked / 48 feature-disabled; Prime 77 / 77 / 11; 0 failed). CI keeps the supported verify/lint/types matrices, retains sanitized readiness evidence and validates the image behind a manual publish boundary. Canonical docs are source-linked beside one complete, refreshable historical mirror of all 21 Greptile documents. The pushed repository carries a root `mcp.json`, Cursor plugin manifests, 46 generated `/omega-*` commands and a stamp-gated bootstrap launcher (exit classes 10–13), and the docs lead with a Bot-driven setup prompt. `docs/marketing.md`, an accessible banner and a social card state only verified capabilities, each tagged with its evidence level.
+
+**Verification:** Final tree `2ccb3e8`: pytest 2544 passed. `mypy omega_prime/` exit 0 (345 files). `ruff check` and `ruff format --check` exit 0 (453 files). Evals 26 passed. `setup_check` serves 117 roster tools. `catalog --check`, `plugin --check`, `assemble --check`, `actionlint` and both readiness profiles exit 0. Phase verification: 75 passed 46/46, 76 passed 28/28, 77 passed 34/34, 78 passed 8/8, 77.1 human_needed 42/42 automated. Every phase has `SECURITY.md` (threats_open 0) and a validated, Nyquist-compliant `VALIDATION.md`. The milestone integration check fixed one blocker (stale include-prime counts in `docs/local-validation.md`) and five warnings, including the Bot template's first-run read paths.
+
+**Known gaps:** GROK-03 — the user can push the repository and import it into Grok Bot so the default Bot sets up Omega Prime with the Python core attached. Local proof is verified; the six live import rows (77.1-UAT) are deferred by the user until after merge. Resume with `/gsd:verify-work 77.1`.
+
+**Known verification overrides:** 15 newly acknowledged, 0 carried forward from a prior close (see STATE.md Deferred Items): the 77.1 UAT and verification gap, the archived v9 phase 48 UAT and 12 dormant seeds. Unlike v13 and v14, the seeds and the phase 48 UAT were acknowledged at the user's choice; the marker only suppresses close-out scans and lapses when an artifact changes or a seed is re-triggered.
+
+**Limits:** no live Grok account, Cursor account, model or provider call. No image publication, deployment, tag, marketplace listing or hosted HTTPS host. Tech debt is listed in the audit (GitBook `../` links outside `./docs`, unhashed lock pins, deferred same-day KB rerun, info-level review items).
+
+**Archive:** `milestones/v15-phases/`. `milestones/v15-MILESTONE-AUDIT.md`. Requirements `milestones/v15-REQUIREMENTS.md`. Roadmap `milestones/v15-ROADMAP.md`. Merged to `main` through PR #18 (`c26305f`) and the close-out PR from `v15-milestone-close`.
+
+---
 
 ## v14 — Boundary alignment (2026-10-10)
 

@@ -1,0 +1,43 @@
+<!-- Raster derivative assets/social-card.png is generated from this file, run from the repository root with system CairoSVG 2.9.0 on PATH: python3 omega_prime/scripts/render_raster.py assets/social-card.svg (it records this file's SHA-256 in the PNG) -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Omega Prime social card" aria-labelledby="card-title card-desc">
+  <title id="card-title">Omega Prime social card</title>
+  <desc id="card-desc">Teal-to-violet hexagonal node mark beside the words OMEGA PRIME, the tagline One Grok programming bot., the line Repeatable local readiness, no live credentials., and the repository path github.com/swcstudiospace/omes-bot.</desc>
+  <defs>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <radialGradient id="ground" cx="0.28" cy="0.45" r="0.9">
+      <stop offset="0" stop-color="#161d27"/>
+      <stop offset="1" stop-color="#0b0e13"/>
+    </radialGradient>
+    <pattern id="dots" width="36" height="36" patternUnits="userSpaceOnUse">
+      <circle cx="3" cy="3" r="2.2" fill="#ffffff" opacity="0.05"/>
+    </pattern>
+  </defs>
+  <rect x="0" y="0" width="1280" height="640" rx="28" fill="url(#ground)"/>
+  <rect x="0" y="0" width="1280" height="640" rx="28" fill="url(#dots)"/>
+  <rect x="0" y="0" width="1280" height="640" rx="28" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="2"/>
+  <g transform="translate(96,150) scale(1.25)">
+    <g fill="none" stroke="url(#edge)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M136 8 L247 72 L247 200 L136 264 L25 200 L25 72 Z"/>
+    </g>
+    <g fill="#0d1117" stroke="url(#edge)" stroke-width="9">
+      <circle cx="136" cy="8" r="22"/>
+      <circle cx="247" cy="72" r="22"/>
+      <circle cx="247" cy="200" r="22"/>
+      <circle cx="136" cy="264" r="22"/>
+      <circle cx="25" cy="200" r="22"/>
+      <circle cx="25" cy="72" r="22"/>
+    </g>
+    <g fill="none" stroke="#2dd4bf" stroke-opacity="0.55" stroke-width="7" stroke-linecap="round">
+      <path d="M136 76 L188 106 L188 166 L136 196 L84 166 L84 106 Z"/>
+    </g>
+    <circle cx="136" cy="136" r="26" fill="url(#edge)"/>
+  </g>
+  <text x="496" y="282" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="88" font-weight="800" letter-spacing="5" fill="#f0f3f6">OMEGA PRIME</text>
+  <rect x="500" y="312" width="200" height="8" rx="4" fill="url(#edge)"/>
+  <text x="496" y="384" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="40" font-weight="400" fill="#9aa4b2">One Grok programming bot.</text>
+  <text x="496" y="440" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="28" font-weight="400" fill="#9aa4b2">Repeatable local readiness, no live credentials.</text>
+  <text x="496" y="548" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="26" font-weight="600" fill="#2dd4bf">github.com/swcstudiospace/omes-bot</text>
+</svg>

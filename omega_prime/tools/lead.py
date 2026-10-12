@@ -351,6 +351,11 @@ class RosterStore:
         atomic_write_text(self.path, text)
 
 
+def _is_seq(value: object) -> bool:
+    """An event sequence number: an int that is not a bool."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 class EventStore:
     """Append-only NDJSON event mirror.
 
@@ -369,8 +374,13 @@ class EventStore:
         if self.path.is_file():
             with self._exclusive():
                 self._repair_tail()
-        for _ in self.records():
-            self._seq += 1
+        rows = self.records()
+        # The highest number already used. An older writer could repeat
+        # numbers when two stores shared a file (1, 2, 3, 1), so the last
+        # row alone is not a safe base for the next seq.
+        self._floor = max(
+            [len(rows), *(row["seq"] for row in rows if _is_seq(row.get("seq")))]
+        )
 
     @property
     def _lock_path(self) -> Path:
@@ -429,11 +439,48 @@ class EventStore:
             handle.flush()
             os.fsync(handle.fileno())
 
+    def _next_seq(self) -> int:
+        """The seq after every number seen so far. Caller holds `_exclusive`.
+
+        The base is the larger of the floor recovered when this store opened
+        and the file's last complete record. The floor keeps a legacy log
+        with repeated numbers from being reused; the last record is read
+        backwards from the end only as far as one line, so the cost stays
+        bounded as the log grows, and it keeps stores sharing a path from
+        minting duplicates. A last record without an integer `seq` falls back
+        to counting.
+        """
+        try:
+            handle = self.path.open("rb")
+        except FileNotFoundError:
+            return self._floor + 1
+        with handle:
+            pos = handle.seek(0, os.SEEK_END)
+            tail = b""
+            while pos > 0:
+                step = min(pos, 65536)
+                pos -= step
+                handle.seek(pos)
+                tail = handle.read(step) + tail
+                body = tail.rstrip()
+                if body and (pos == 0 or b"\n" in body):
+                    break
+        last = tail.rstrip().rsplit(b"\n", 1)[-1]
+        if not last.strip():
+            return self._floor + 1
+        try:
+            seq = json.loads(last).get("seq")
+        except (ValueError, AttributeError):
+            seq = None
+        if not _is_seq(seq):
+            seq = len(self.records())
+        return max(self._floor, seq) + 1
+
     def append(self, event: dict) -> dict:
         """Append one event with seq + timestamp. Payloads stay redacted."""
         with self._exclusive():
             self._repair_tail()
-            self._seq += 1
+            self._seq = self._next_seq()
             record = {
                 "seq": self._seq,
                 "ts": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
