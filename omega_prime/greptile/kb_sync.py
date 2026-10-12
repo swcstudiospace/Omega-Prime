@@ -202,8 +202,10 @@ def sync(repo: str, out_dir: str | Path, client: McpHttpClient) -> dict:
     Statuses: ``synced`` (validated changes published), ``unchanged``
     (validated input matches the prior mirror; zero writes),
     ``unenrolled`` (no readable knowledge base), ``empty`` (nothing
-    published yet; no writes). Anything else raises :class:`GreptileError`
-    with the whole prior mirror and manifest byte-identical.
+    published yet; no writes). Retrieval/admission failures leave the prior
+    edition untouched; handled publication faults restore it or retain a
+    recoverable backup if restoration fails. Cleanup failure after a commit
+    raises :class:`GreptileError` with the new complete edition still published.
     """
     if not isinstance(repo, str) or repo == "":
         raise ValueError("repo must be a non-empty owner/name string")
