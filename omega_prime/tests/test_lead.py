@@ -861,3 +861,35 @@ def test_roster_failed_save_preserves_bytes(tmp_path: Path, monkeypatch: Any):
         store.register("other-pack", {"version": "2"})
     assert path.read_bytes() == before
     assert [p for p in path.parent.iterdir() if p.suffix == ".tmp"] == []
+
+
+# -- Phase 75 re-review WR-05: torn trailing line is skipped, not fatal -----
+# Boundary: only the LAST non-blank line may be torn (a crash mid-append
+# leaves exactly that). Corruption in any earlier line still raises instead
+# of silently dropping history.
+
+
+def test_event_store_skips_torn_trailing_line(tmp_path: Path):
+    path = tmp_path / "events.ndjson"
+    store = EventStore(path)
+    first = store.append({"kind": "one"})
+    second = store.append({"kind": "two"})
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"seq": 999, "torn": ')
+    rows = EventStore(path).records()
+    assert [row["seq"] for row in rows] == [first["seq"], second["seq"]]
+    rebuilt = EventStore(path)
+    assert rebuilt._seq == second["seq"]
+    third = rebuilt.append({"kind": "three"})
+    assert third["seq"] == second["seq"] + 1
+
+
+def test_event_store_raises_on_earlier_corrupt_line(tmp_path: Path):
+    path = tmp_path / "events.ndjson"
+    store = EventStore(path)
+    store.append({"kind": "one"})
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("not json at all\n")
+    store.append({"kind": "two"})
+    with pytest.raises(ValueError):
+        EventStore(path).records()

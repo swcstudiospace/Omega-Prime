@@ -374,13 +374,26 @@ class EventStore:
         return record
 
     def records(self) -> list[dict]:
-        """Every record in file order."""
+        """Every record in file order.
+
+        A torn final line (a crash mid-append leaves one) is skipped; a
+        corrupt line anywhere else still raises instead of silently
+        dropping history.
+        """
         if not self.path.is_file():
             return []
+        lines = [
+            line
+            for line in self.path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
         rows = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
+        for index, line in enumerate(lines):
+            try:
                 rows.append(json.loads(line))
+            except ValueError:
+                if index != len(lines) - 1:
+                    raise
         return rows
 
 
