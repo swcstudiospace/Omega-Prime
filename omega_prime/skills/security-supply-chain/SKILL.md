@@ -1,5 +1,5 @@
 ---
-name: supply-chain
+name: security-supply-chain
 description: Assessing dependencies before adding them and responding to vulnerabilities. Use before adding any dependency and when a CVE affects the project.
 bots: [bot-00-omega-prime]
 ---

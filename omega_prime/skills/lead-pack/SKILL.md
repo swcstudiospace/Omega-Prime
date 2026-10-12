@@ -1,3 +1,9 @@
+---
+name: lead-pack
+description: "Run the desk Lead flow inside Omega Prime: claim intake, write tickets, dispatch to specialists, consolidate receipts into a report."
+bots: [bot-00-omega-prime]
+---
+
 # Lead pack
 
 Run the desk Lead flow inside Omega Prime: claim intake, write tickets, dispatch to

@@ -145,7 +145,7 @@ Delegate one goal, or a batch of goals, to a child agent. The result is the chil
 - Approval: not required
 - Required params: command
 
-Run one Omega Prime slash command. Pass the user's /omega-... text. Use this instead of the underlying tools when the user typed a slash command or asked for onboard, connectors, a Python check, desk status, doctor, roster, recall, retain, gates, or delegate. /omega-help lists every command.
+Run one Omega Prime slash command. Pass the user's /omega-... text exactly. Use this instead of the underlying tools when the user typed a slash command or asked for onboard, connectors, a Python check, desk status, doctor, roster, recall, retain, gates, or delegate. Generated commands run here too: /omega-<skill> loads that skill's instructions, and /omega-<routine> runs that routine's workflow or loads its instructions. A generated name that matches a curated command or another generated name takes a -skill or -routine suffix (/omega-python-skill loads the python skill; /omega-python runs the check). /omega-help lists every command.
 
 ## execute_code
 

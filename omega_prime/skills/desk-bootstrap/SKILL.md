@@ -1,6 +1,6 @@
 ---
 name: desk-bootstrap
-description: First-run procedure for a Bot created from a Programming Desk template: connect the seat endpoint, register, install the prompt, prove it with desk_doctor.
+description: "First-run procedure for a Bot created from a Programming Desk template: connect the seat endpoint, register, install the prompt, prove it with desk_doctor."
 bots: [bot-00-omega-prime]
 gates: [G-7]
 ---

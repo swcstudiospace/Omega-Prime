@@ -1,6 +1,6 @@
 ---
 name: desk-gateway
-description: How to use the per-seat gateway tools: rosters as contracts, fail-open reads and fail-closed writes, gate tags, deadlines, 403 and not_configured handling.
+description: "How to use the per-seat gateway tools: rosters as contracts, fail-open reads and fail-closed writes, gate tags, deadlines, 403 and not_configured handling."
 bots: [bot-00-omega-prime]
 gates: [G-5, G-6, G-7]
 ---
