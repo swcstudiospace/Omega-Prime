@@ -598,13 +598,15 @@ def drift(root: Path, fresh: Mapping[str, str]) -> list[str]:
         except OSError as exc:
             problems.append(f"{path}: cannot read ({type(exc).__name__})")
             continue
-        if current != text.encode("utf-8"):
-            problems.append(f"{path} is stale; rerun with --write")
         try:
             committed = current.decode("utf-8")
         except UnicodeDecodeError:
             problems.append(f"{path}: is not UTF-8")
             continue
+        # A `text=auto` checkout materializes CRLF; generated text is LF.
+        # Compare line-ending-normalized so `--check` converges on Windows.
+        if committed.replace("\r\n", "\n") != text:
+            problems.append(f"{path} is stale; rerun with --write")
         problems.extend(secret_problems(path, committed))
         if path == MCP_JSON:
             problems.extend(mcp_json_problems(committed))

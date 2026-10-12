@@ -382,6 +382,20 @@ def test_check_passes_on_a_clean_copy(
     assert "up to date" in capsys.readouterr().out
 
 
+def test_check_passes_when_a_checkout_materializes_crlf(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """WR-05: CRLF from a `text=auto` checkout equals LF; `--check` converges."""
+    tree = _copy_tree(tmp_path)
+    for rel in (MCP_JSON, f"{COMMANDS_DIR}/omega-help.md"):
+        path = tree / rel
+        text = path.read_text(encoding="utf-8")
+        assert "\r\n" not in text
+        path.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+    assert main(["--root", str(tree), "--check"]) == 0
+    assert "up to date" in capsys.readouterr().out
+
+
 def _modified_file(tree: Path) -> None:
     _edit(tree, MCP_JSON, lambda text: text + "\n")
 
