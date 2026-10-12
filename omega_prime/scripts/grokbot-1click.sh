@@ -69,6 +69,13 @@ usage() {
     exit 2
 }
 
+# WR-01: every bootstrap child runs with ROOT as its cwd. The caller's
+# directory stays on sys.path for `python -c`/`-m` (and for pip/venv), so a
+# hostile json.py, venv/, pip/ or omega_prime/ in the launch directory could
+# shadow stdlib or repo imports. ROOT holds the repo's own omega_prime, so
+# the catalog --check still resolves it after this cd.
+cd "$ROOT" || classify 11 install_failed '"step":"chdir"'
+
 BOOTSTRAP=0
 BOOTSTRAP_ONLY=0
 VERIFY=0

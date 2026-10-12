@@ -542,6 +542,41 @@ def test_concurrent_cold_starts_serialize_on_one_install(tmp_path: Path) -> None
     assert tree.stamp.is_file()
 
 
+def test_bootstrap_ignores_hostile_modules_in_the_callers_cwd(
+    tmp_path: Path,
+) -> None:
+    """WR-01: a hostile launch directory never shadows bootstrap imports."""
+    tree = _tree(tmp_path)
+    hostile = tmp_path / "hostile-cwd"
+    hostile.mkdir()
+    marker = hostile / "imported.txt"
+    (hostile / "json.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n"
+        "raise ImportError('hostile json')\n",
+        encoding="utf-8",
+    )
+    for package in ("venv", "pip"):
+        shadow = hostile / package
+        shadow.mkdir()
+        (shadow / "__init__.py").write_text(
+            f"raise ImportError('hostile {package}')\n", encoding="utf-8"
+        )
+    shadow_pkg = hostile / "omega_prime"
+    shadow_pkg.mkdir()
+    (shadow_pkg / "__init__.py").write_text(
+        "raise ImportError('hostile omega_prime')\n", encoding="utf-8"
+    )
+    before = sorted(p.name for p in hostile.iterdir())
+
+    proc = _run(tree, "--bootstrap-only", cwd=hostile)
+
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    assert proc.stdout == b""
+    assert not marker.exists()
+    assert tree.stamp.is_file()
+    assert sorted(p.name for p in hostile.iterdir()) == before
+
 @pytest.mark.parametrize("via", ["script", "symlink", "relative-symlink"])
 def test_root_comes_from_the_script_location_not_the_cwd(
     tmp_path: Path, via: str
