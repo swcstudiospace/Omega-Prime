@@ -1,4 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-label="Omega Prime banner">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-label="Omega Prime banner" aria-labelledby="banner-title banner-desc">
+  <title id="banner-title">Omega Prime banner</title>
+  <desc id="banner-desc">Teal-to-violet hexagonal node mark beside the words OMEGA PRIME, the tagline One Grok programming bot., and the line Hermes and Omp behavior ports, one Python process.</desc>
   <defs>
     <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#2dd4bf"/>
@@ -35,5 +37,5 @@
   <text x="400" y="168" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="84" font-weight="800" letter-spacing="5" fill="#f0f3f6">OMEGA PRIME</text>
   <rect x="404" y="196" width="180" height="8" rx="4" fill="url(#edge)"/>
   <text x="400" y="262" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="36" font-weight="400" fill="#9aa4b2">One Grok programming bot.</text>
-  <text x="400" y="318" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="26" font-weight="400" fill="#6b7484">Hermes loop + Omp harness + desk packs, one Python process.</text>
+  <text x="400" y="318" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="26" font-weight="400" fill="#9aa4b2">Hermes and Omp behavior ports, one Python process.</text>
 </svg>

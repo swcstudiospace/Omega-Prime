@@ -19,7 +19,7 @@ def test_readme_links_resolve() -> None:
 
 
 def test_svgs_valid_and_self_contained() -> None:
-    for name in ("assets/icon.svg", "assets/banner.svg"):
+    for name in ("assets/icon.svg", "assets/banner.svg", "assets/social-card.svg"):
         raw = (ROOT / name).read_text(encoding="utf-8")
         root = minidom.parseString(raw).documentElement
         assert root is not None
@@ -29,3 +29,9 @@ def test_svgs_valid_and_self_contained() -> None:
         assert "href" not in raw and "xlink" not in raw
         without_ns = raw.replace('xmlns="http://www.w3.org/2000/svg"', "")
         assert "http://" not in without_ns and "https://" not in without_ns
+    # assets/icon.svg stays byte-identical to the brand source and has no <title>.
+    for name in ("assets/banner.svg", "assets/social-card.svg"):
+        root = minidom.parse(str(ROOT / name)).documentElement
+        assert root is not None
+        title = root.getElementsByTagName("title")
+        assert title, f"{name} has no <title> for assistive tech"
