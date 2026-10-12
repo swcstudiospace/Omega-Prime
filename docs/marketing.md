@@ -30,8 +30,8 @@ template. It is not proof of a connected Grok account, and it is not a whole
 upstream-runtime port: Hermes and Omp are not imported.
 
 Source: [README.md](../README.md) (opening paragraph and the Layout notes on
-`hermes-agent/` and `oh-my-pi/`). Tagline "One Grok programming bot." is the
-package description in `pyproject.toml`.
+`hermes-agent/` and `oh-my-pi/`). The tagline "One Grok programming bot." is
+the opening sentence of the package description in `pyproject.toml`.
 
 ## One-pager
 
