@@ -308,7 +308,8 @@ def test_generate_token_shown_once_and_written_0600(
     assert captured.err.count(token) == 1
     assert token not in captured.out
     assert calls[0]["token"] == token
-    assert env_seen == [token]
+    # WR-02: the token travels only as the serve argument, never via environ.
+    assert env_seen == [None]
     assert "MCP_AUTH_TOKEN" not in os.environ
 
     # The saved file is reused: nothing is generated or printed again.
@@ -432,6 +433,30 @@ def test_stdio_launch_passes_audit_log(tmp_path: Path, monkeypatch: pytest.Monke
     assert main(["--skip-doctor", "--audit-log", str(audit_path)]) == 0
     assert seen[0][-2:] == ["--audit-log", str(audit_path)]
     assert seen[0][1:3] == ["-m", "omega_prime.mcp_server"]
+
+
+def test_stdio_launch_forwards_work_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    seen: list[list[str]] = []
+
+    def fake_call(cmd: list[str]) -> int:
+        seen.append(cmd)
+        return 0
+
+    monkeypatch.setattr(oneclick.subprocess, "call", fake_call)
+    audit_path = tmp_path / "audit.jsonl"
+    work = tmp_path / "work"
+    work.mkdir()
+    argv = ["--skip-doctor", "--audit-log", str(audit_path), "--work-root", str(work)]
+    assert main(argv) == 0
+    assert seen[0][1:3] == ["-m", "omega_prime.mcp_server"]
+    assert seen[0][-4:] == [
+        "--audit-log",
+        str(audit_path),
+        "--work-root",
+        str(work.resolve()),
+    ]
 
 
 def test_public_url_must_be_http(capsys: pytest.CaptureFixture):

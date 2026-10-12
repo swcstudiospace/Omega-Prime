@@ -213,18 +213,6 @@ def _run_preflight(
     return results
 
 
-def run_preflight_doctor(
-    root: Path,
-    *,
-    port: int = 8000,
-    host: str = "127.0.0.1",
-    auth_enabled: bool = False,
-) -> bool:
-    """Run doctor checks, print them, and return whether none failed."""
-    results = _run_preflight(root, port, host, auth_enabled, sys.stdout)
-    return bool(results.get("passed", True))
-
-
 def _url_host(host: str) -> str:
     """Host usable in a client URL: wildcard binds become loopback."""
     name = host.strip()
@@ -266,23 +254,6 @@ def _resolve_token(
     if token is not None:
         TokenStore.from_token(token)  # enforces the minimum length
     return token, source
-
-
-@contextlib.contextmanager
-def _exported_token(name: str, token: str | None) -> Iterator[None]:
-    """Expose `token` as env var `name` for this process only."""
-    if token is None:
-        yield
-        return
-    previous = os.environ.get(name)
-    os.environ[name] = token
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = previous
 
 
 def _announce_generated_token(token: str, token_file: Path | None) -> None:
@@ -566,6 +537,8 @@ def run_oneclick(
         cmd = [sys.executable, "-m", "omega_prime.mcp_server", "--root", str(root)]
         if audit_log is not None:
             cmd += ["--audit-log", str(audit_log)]
+        if work_root is not None:
+            cmd += ["--work-root", str(work_root)]
         try:
             code = subprocess.call(cmd)
         except (KeyboardInterrupt, Exception):
@@ -581,27 +554,28 @@ def run_oneclick(
         from omega_prime.grokbot.audit import GrokBotAuditTracer
 
         audit = GrokBotAuditTracer(audit_log)
-    with _exported_token(token_env, token):
-        try:
-            code = serve_sse(
-                root=root,
-                host=host,
-                port=port,
-                token=token,
-                public_url=public_url,
-                allowed_hosts=tuple(allowed_hosts),
-                allowed_origins=tuple(allowed_origins),
-                allow_insecure_no_auth=allow_insecure_no_auth,
-                audit=audit,
-                token_store_path=token_store_path,
-                log_format=log_format,
-                work_root=work_root,
-            )
-        except (KeyboardInterrupt, Exception):
-            _finish("interrupted", 130)
-            raise
-        _finish("complete", code)
-        return code
+    # The bearer token reaches the host only through `token`; it is never
+    # exported into this process environment, which serve children inherit.
+    try:
+        code = serve_sse(
+            root=root,
+            host=host,
+            port=port,
+            token=token,
+            public_url=public_url,
+            allowed_hosts=tuple(allowed_hosts),
+            allowed_origins=tuple(allowed_origins),
+            allow_insecure_no_auth=allow_insecure_no_auth,
+            audit=audit,
+            token_store_path=token_store_path,
+            log_format=log_format,
+            work_root=work_root,
+        )
+    except (KeyboardInterrupt, Exception):
+        _finish("interrupted", 130)
+        raise
+    _finish("complete", code)
+    return code
 
 
 def _redact_secrets(text: str, secrets: Sequence[str]) -> str:
@@ -992,7 +966,7 @@ def main(argv: list[str] | None = None) -> int:
         "--work-root",
         type=Path,
         default=None,
-        help="Repo the desk tools act on (forwarded to the SSE host; "
+        help="Repo the desk tools act on (forwarded to the stdio and SSE host; "
         "default: OMEGA_PRIME_WORK_ROOT, else the install root)",
     )
     args = parser.parse_args(argv)
