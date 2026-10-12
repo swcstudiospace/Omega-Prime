@@ -17,8 +17,11 @@
 # pyproject, interpreter and prime-agent commit. A matching stamp skips the
 # install and runs only the import probe. Otherwise a fresh venv is built in
 # ROOT/.venv.build from requirements-lock.txt plus `--no-deps -e .`, probed,
-# renamed into place, and stamped last. Only the prime-agent submodule is ever
-# initialized (D-04). The plugin catalog `--check` runs on every bootstrap.
+# renamed into place, and stamped last. The stamp also marks ownership: an
+# existing ROOT/.venv without a stamp is operator-managed and is never moved,
+# deleted or rebuilt; it is used when the import probe passes, else exit 11.
+# Only the prime-agent submodule is ever initialized (D-04). The plugin
+# catalog `--check` runs on every bootstrap.
 #
 # Stdout is protocol-only: fd 1 points at stderr until the final exec, and
 # every bootstrap child reads /dev/null. Verify mode may print the verifier's
@@ -198,7 +201,7 @@ fail_build() {
 
 build_venv() {
     local old
-    for old in "$VENV".old.*; do
+    for old in "$VENV".old.[0-9]*; do
         [ -e "$old" ] || [ -L "$old" ] || continue
         rm -rf -- "$old"
     done
@@ -212,7 +215,10 @@ build_venv() {
     probe "$BUILD/bin/python" || fail_build probe
     "$BASE_PY" -c "$RELOCATE_CODE" "$BUILD" "$VENV" </dev/null || fail_build relocate
 
-    rm -f -- "$STAMP" || fail_build stamp
+    # Swap only a bootstrap-owned venv. The stamp sidecar is the ownership
+    # marker, so a placeholder that never matches a real stamp replaces it
+    # first: a start killed mid-swap still sees an owned venv and rebuilds.
+    write_stamp '{"owner":"omega-prime-bootstrap","state":"swapping"}'
     old="$VENV.old.$$"
     if [ -e "$VENV" ] || [ -L "$VENV" ]; then
         mv -- "$VENV" "$old" || fail_build swap
@@ -257,7 +263,16 @@ bootstrap() {
     [ -f "$STAMP" ] && have="$(<"$STAMP")"
 
     local warm=0
-    if [ "$have" = "$want" ] && [ -x "$VENV_PY" ]; then
+    if [ ! -e "$STAMP" ] && { [ -e "$VENV" ] || [ -L "$VENV" ]; }; then
+        # No stamp: the bootstrap did not create this venv. Never move,
+        # delete or rebuild it.
+        if ! probe "$VENV_PY"; then
+            log "error: $VENV was not created by this bootstrap and fails the import probe; fix that venv or move it away, then rerun"
+            classify 11 install_failed '"step":"operator_venv"'
+        fi
+        warm=1
+        log "using operator-managed .venv (not created by bootstrap; left unchanged)"
+    elif [ "$have" = "$want" ] && [ -x "$VENV_PY" ]; then
         if probe "$VENV_PY"; then
             warm=1
             log "environment is up to date (stamp matches)"

@@ -320,6 +320,76 @@ def test_failed_rebuild_keeps_the_previous_venv(tmp_path: Path) -> None:
     assert not (tree.root / ".venv.build").exists()
 
 
+def _operator_venv(tree: Tree) -> dict[str, tuple[bytes, int]]:
+    """Hand-made ``.venv`` with no bootstrap stamp; returns its file snapshot."""
+    (tree.venv / "bin").mkdir(parents=True)
+    shutil.copy2(tree.venv_stub, tree.venv / "bin" / "python")
+    (tree.venv / "dev-extras-sentinel").write_text("mine\n", encoding="utf-8")
+    return _tree_files(tree.venv)
+
+
+def _tree_files(top: Path) -> dict[str, tuple[bytes, int]]:
+    return {
+        str(path.relative_to(top)): (path.read_bytes(), path.stat().st_mode)
+        for path in sorted(top.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_unstamped_operator_venv_is_used_unchanged(tmp_path: Path) -> None:
+    tree = _tree(tmp_path)
+    before = _operator_venv(tree)
+
+    proc = _run(tree, "--bootstrap", "--transport", "stdio")
+
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    assert proc.stdout == b""
+    assert b"operator-managed .venv" in proc.stderr
+    assert _tree_files(tree.venv) == before
+    assert tree.calls_of("pip") == [] and tree.calls_of("venv") == []
+    assert tree.calls_of("probe") == [[str(tree.venv / "bin" / "python")]]
+    assert tree.calls_of("plugin") == [["--root", str(tree.root), "--check"]]
+    assert len(tree.calls_of("oneclick")) == 1
+    # Ownership stays with the operator: the bootstrap never stamps it.
+    assert not tree.stamp.exists()
+    assert not (tree.root / ".venv.build").exists()
+
+
+def test_unstamped_operator_venv_failing_the_probe_exits_11_untouched(
+    tmp_path: Path,
+) -> None:
+    tree = _tree(tmp_path)
+    before = _operator_venv(tree)
+
+    proc = _run(tree, "--bootstrap", "--transport", "stdio", STUB_PROBE_EXIT="1")
+
+    line = _assert_failed(proc, 11, "install_failed")
+    assert line["step"] == "operator_venv"
+    assert str(tree.venv).encode() in proc.stderr
+    assert _tree_files(tree.venv) == before
+    assert tree.calls_of("pip") == [] and tree.calls_of("venv") == []
+    assert tree.calls_of("oneclick") == []
+    assert not tree.stamp.exists()
+
+
+def test_owned_venv_with_an_interrupted_swap_stamp_is_rebuilt(tmp_path: Path) -> None:
+    tree = _tree(tmp_path)
+    assert _run(tree, "--bootstrap-only").returncode == 0
+    marker = tree.venv / "previous-marker"
+    marker.write_text("old\n", encoding="utf-8")
+    # A start killed between the ownership placeholder and the final stamp.
+    tree.stamp.write_text('{"owner":"omega-prime-bootstrap"}\n', encoding="utf-8")
+    tree.clear_log()
+
+    proc = _run(tree, "--bootstrap-only")
+
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    assert proc.stdout == b""
+    assert len(_pip_lock_installs(tree)) == 1
+    assert not marker.exists()
+    assert json.loads(tree.stamp.read_text(encoding="utf-8"))["lock_sha256"]
+
+
 def test_catalog_drift_exits_12_naming_stale_paths_before_serving(
     tmp_path: Path,
 ) -> None:
