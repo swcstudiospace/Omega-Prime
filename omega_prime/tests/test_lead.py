@@ -954,6 +954,30 @@ def test_event_store_raises_on_earlier_corrupt_line(tmp_path: Path):
         EventStore(path).records()
 
 
+def test_event_stores_sharing_a_path_never_mint_duplicate_seqs(tmp_path: Path):
+    path = tmp_path / "events.ndjson"
+    first = EventStore(path)
+    second = EventStore(path)
+    appended = [
+        first.append({"kind": "a1"}),
+        second.append({"kind": "b1"}),
+        first.append({"kind": "a2"}),
+        second.append({"kind": "b2"}),
+    ]
+    seqs = [row["seq"] for row in appended]
+    assert len(set(seqs)) == len(seqs)
+    reopened = EventStore(path).records()
+    assert [row["kind"] for row in reopened] == ["a1", "b1", "a2", "b2"]
+    assert [row["seq"] for row in reopened] == [1, 2, 3, 4]
+
+
+def test_event_store_counts_records_when_last_lacks_a_seq(tmp_path: Path):
+    path = tmp_path / "events.ndjson"
+    path.write_text('{"kind": "one"}\n{"kind": "two"}\n', encoding="utf-8")
+    record = EventStore(path).append({"kind": "three"})
+    assert record["seq"] == 3
+
+
 # -- Phase 75 re-review WR-06: secret refusal covers retained metadata ------
 # The same detector that gates `content` also gates the assembled entry, so
 # a credential in tags/source/graph metadata is refused, not retained.

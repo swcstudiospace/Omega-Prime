@@ -429,11 +429,45 @@ class EventStore:
             handle.flush()
             os.fsync(handle.fileno())
 
+    def _next_seq(self) -> int:
+        """The seq after the file's last complete record. Caller holds `_exclusive`.
+
+        Reads backwards from the end only as far as the last record, so the
+        cost stays bounded as the log grows. Deriving it from the file, not
+        instance memory, keeps stores sharing a path from minting duplicates.
+        A last record without an integer `seq` falls back to counting.
+        """
+        try:
+            handle = self.path.open("rb")
+        except FileNotFoundError:
+            return 1
+        with handle:
+            pos = handle.seek(0, os.SEEK_END)
+            tail = b""
+            while pos > 0:
+                step = min(pos, 65536)
+                pos -= step
+                handle.seek(pos)
+                tail = handle.read(step) + tail
+                body = tail.rstrip()
+                if body and (pos == 0 or b"\n" in body):
+                    break
+        last = tail.rstrip().rsplit(b"\n", 1)[-1]
+        if not last.strip():
+            return 1
+        try:
+            seq = json.loads(last).get("seq")
+        except (ValueError, AttributeError):
+            seq = None
+        if isinstance(seq, int) and not isinstance(seq, bool):
+            return seq + 1
+        return len(self.records()) + 1
+
     def append(self, event: dict) -> dict:
         """Append one event with seq + timestamp. Payloads stay redacted."""
         with self._exclusive():
             self._repair_tail()
-            self._seq += 1
+            self._seq = self._next_seq()
             record = {
                 "seq": self._seq,
                 "ts": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
