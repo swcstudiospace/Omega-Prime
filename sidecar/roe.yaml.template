@@ -1,0 +1,35 @@
+# Purple-team sidecar rules-of-engagement template.
+#
+# The sidecar SHIPS BLOCKED: with default config (or any enabled-but-unsigned
+# setup) the harness exits 3 (BLOCKED), registers zero tempest_* tools, and
+# runs no engagement. It leaves BLOCKED only after the operator performs the
+# explicit signing act below. Live engagement additionally remains impossible
+# until the user signs (user decision 2026-10-13).
+#
+# To authorize (explicit operator act):
+#   1. Copy this template to a JSON artifact, e.g. /etc/omega-prime/roe.json,
+#      and fill in operator, authorized_targets (loopback hosts ONLY:
+#      127.0.0.1 or localhost), the effective window, and the case_classes
+#      subset you authorize. The validator reads JSON; this YAML file is the
+#      human-readable shape of that JSON document.
+#   2. Sign it with a detached HMAC-SHA256 (key provisioned out-of-band, never
+#      fetched at runtime):
+#        python3 -c "import sys; sys.path.insert(0, '.'); \
+#          from sidecar.roe import sign_artifact; \
+#          sign_artifact('/etc/omega-prime/roe.json', open('/run/secrets/roe-key','rb').read())"
+#      This writes roe.json.sig next to the artifact. Any edit to the JSON
+#      after signing invalidates the signature (fail closed).
+#   3. Point the sidecar at the artifact (key is config-supplied, never fetched):
+#        OMEGA_PRIME_REDTEAM_ENABLED=1 \
+#        OMEGA_PRIME_REDTEAM_ROE_FILE=/etc/omega-prime/roe.json \
+#        OMEGA_PRIME_REDTEAM_ROE_KEY="$(cat /run/secrets/roe-key)" \
+#        python sidecar/harness.py --check   # expect: IDLE, exit 0
+schema_version: 1
+operator: ""  # REQUIRED: accountable human, e.g. "ops-oncall"
+authorized_targets:  # REQUIRED, non-empty, loopback-only
+  - host: "127.0.0.1"
+    tools: []  # optional subset; empty means all 11 tempest_* tools
+effective_from: ""  # REQUIRED, RFC3339, e.g. "2026-10-13T00:00:00+00:00"
+effective_until: ""  # REQUIRED, RFC3339, e.g. "2026-10-20T00:00:00+00:00"
+case_classes:  # REQUIRED subset of the six simulation classes (79-02)
+  - "prompt-injection"

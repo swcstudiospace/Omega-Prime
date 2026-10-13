@@ -137,8 +137,8 @@
 | GAP-11 | Freshness (g) / dim 4: no detection-validation pass criteria, no expected-control-per-case comparison (R6) | P1 | Expected-control map per case; pass only on validated detection | 79 | scheduled-phase-79 |
 | GAP-12 | Freshness (g) / dim 5: no findings pipeline, dedupe, or tracked work items (R6) | P1 | Structured findings schema, dedupe keys, work-item export | 79 | scheduled-phase-79 |
 | GAP-13 | Freshness (g) / dim 6: no drift→DEGRADED reporting (R6) | P0 | Wire pin/drift signals to DEGRADED state and surfaced status | 79 | scheduled-phase-79 |
-| GAP-14 | Dim 1: no resource caps, dedicated sidecar identity, or own output area | P1 | Service identity; resource limits at gateway/sidecar boundary; isolated artifacts dir | 79 | scheduled-phase-79 |
-| GAP-15 | Dim 8: no dedicated sidecar credential lifecycle (TTL/rotation for tempest bearer); no egress restriction to bot's own endpoints (R4 rotation is manual) | P1 | Dedicated cred via token store pattern with TTL; egress allowlist; violation → ERROR | 79 | scheduled-phase-79 |
+| GAP-14 | Dim 1: no resource caps, dedicated sidecar identity, or own output area | P1 | Service identity; resource limits at gateway/sidecar boundary; isolated artifacts dir | 79 | deferred to RoE-unblock phase — unenforceable while BLOCKED (checker 2026-10-13); reports/-dir isolation ships in 79-03 |
+| GAP-15 | Dim 8: no dedicated sidecar credential lifecycle (TTL/rotation for tempest bearer); no egress restriction to bot's own endpoints (R4 rotation is manual) | P1 | Dedicated cred via token store pattern with TTL; egress allowlist; violation → ERROR | 79 | deferred to RoE-unblock phase — no live engagement while BLOCKED (checker 2026-10-13) |
 
 ## Ship decision
 

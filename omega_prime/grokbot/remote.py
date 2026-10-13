@@ -98,6 +98,7 @@ from omega_prime.mcp_server import (
     build_server,
     load_runtime,
 )
+from omega_prime.metrics import register_sidecar_state
 
 # uvicorn's logger is the one that is configured when this runs under `serve_sse`.
 logger = logging.getLogger("uvicorn.error")
@@ -430,6 +431,12 @@ def create_sse_app(
         register_build_info(
             metrics, version=SERVER_VERSION, package_version=PACKAGE_VERSION
         )
+        # Sidecar state gauge is a serve-time snapshot of the registration-time
+        # guard evaluation; with the sidecar shipped BLOCKED the value cannot
+        # advance to RUNNING mid-serve (kill transitions log to reports/).
+        _sidecar_state = getattr(runtime, "runtime_bindings", {}).get("sidecar_state")
+        if _sidecar_state:
+            register_sidecar_state(metrics, _sidecar_state)
     count_auth_failure = record_auth_failure(metrics) if metrics_enabled else None
 
     in_flight = InFlightInterceptor()

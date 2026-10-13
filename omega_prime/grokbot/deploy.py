@@ -272,6 +272,7 @@ _DOCKERIGNORE = (
     "venv",
     ".planning",
     "/redteam",
+    "/sidecar",
     "hermes-agent",
     "oh-my-pi",
     "prime-agent",

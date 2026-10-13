@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
@@ -494,6 +495,89 @@ class _DeskBusClient:
         return payload
 
 
+_SIDECAR_LOG = logging.getLogger(__name__)
+
+
+def _sidecar_import(name: str) -> Any:
+    """Import ``sidecar.<name>`` (stdlib-only harness module).
+
+    Works when the repo root is on ``sys.path`` (source checkout, tests)
+    and falls back to a file-location load from the install root otherwise.
+    Only ever loads ``sidecar/`` modules — never ``redteam/``.
+    """
+    try:
+        import importlib
+
+        return importlib.import_module(f"sidecar.{name}")
+    except ImportError:
+        pass
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    path = root / "sidecar" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"sidecar.{name}", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - missing tree
+        raise ImportError(f"cannot load sidecar module {name!r} from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _log_sidecar_transition(from_state: str, to_state: str, cause: str) -> None:
+    """Append one audit row. Best-effort: logging never breaks startup."""
+    try:
+        _sidecar_import("state").transition(from_state, to_state, cause)
+    except Exception as exc:
+        _SIDECAR_LOG.debug("sidecar transition log skipped: %s", exc)
+
+
+def _evaluate_redteam_guard(config: dict[str, Any]) -> tuple[str, str]:
+    """Fail-closed verdict for the red team family: ``(state, cause)``.
+
+    Evaluation order (GAP-08): kill switch first, then the default-off gate,
+    then signed-RoE resolution. Any guard error implies ``BLOCKED`` with
+    zero registrations. The default-off path (``redteam.enabled`` false,
+    kill unset) is silent — no audit row — so default behavior is unchanged.
+    """
+    from omega_prime.config import redteam_enabled, redteam_kill
+
+    try:
+        if redteam_kill(config):
+            _log_sidecar_transition("IDLE", "BLOCKED", "kill-switch-set")
+            _SIDECAR_LOG.warning(
+                "redteam sidecar BLOCKED (kill-switch-set): kill switch set"
+            )
+            return "BLOCKED", "kill-switch-set"
+        if not redteam_enabled(config):
+            return "BLOCKED", "disabled"
+        node = config.get("redteam", {})
+        node = node if isinstance(node, dict) else {}
+        required = node.get("roe_required", True)
+        if isinstance(required, str):
+            required = required.strip().lower() in ("1", "true", "yes", "on")
+        if not required:
+            _log_sidecar_transition("IDLE", "IDLE", "re-evaluated")
+            return "IDLE", "re-evaluated"
+        roe_file = node.get("roe_file") or ""
+        roe_key = node.get("roe_key") or ""
+        key = roe_key.encode("utf-8") if isinstance(roe_key, str) and roe_key else None
+        decision = _sidecar_import("roe").authorize(str(roe_file), key=key)
+        if decision.ok:
+            _log_sidecar_transition("IDLE", "IDLE", "re-evaluated")
+            return "IDLE", "re-evaluated"
+        _log_sidecar_transition("IDLE", "BLOCKED", decision.cause)
+        _SIDECAR_LOG.warning(
+            "redteam sidecar BLOCKED (%s): %s", decision.cause, decision.detail
+        )
+        return "BLOCKED", decision.cause
+    except Exception as exc:
+        _log_sidecar_transition("IDLE", "BLOCKED", "roe-invalid")
+        _SIDECAR_LOG.warning(
+            "redteam sidecar BLOCKED (roe-invalid): guard error (%s)", exc
+        )
+        return "BLOCKED", "roe-invalid"
+
+
 def default_registry(
     root: str | Path,
     home: str | Path,
@@ -706,7 +790,6 @@ def default_registry(
         family_config,
         load_config,
         prime_enabled,
-        redteam_enabled,
     )
     from omega_prime.tools.autonomous import register_autonomous_tools
     from omega_prime.tools.goals import register_goal_tools
@@ -748,8 +831,12 @@ def default_registry(
     # family. Off by default, so the default registry is unchanged; when on,
     # the T3MP3ST loopback tools register against the configured gateway with
     # the upstream bearer contract (T3MP3ST_BEARER_TOKEN / _FILE, else the
-    # configured bearer_token_file).
-    if redteam_enabled(config):
+    # configured bearer_token_file) — but only after the Phase 79 sidecar
+    # guard authorizes the run. Kill switch first, then default-off, then
+    # signed-RoE resolution; BLOCKED always means zero registrations.
+    sidecar_state, _sidecar_cause = _evaluate_redteam_guard(config)
+    registry.runtime_bindings["sidecar_state"] = sidecar_state
+    if sidecar_state == "IDLE":
         from omega_prime.tools.redteam import (
             DEFAULT_GATEWAY_URL,
             RedteamClient,
@@ -775,6 +862,12 @@ def default_registry(
                 )
             ),
         )
+        try:
+            from omega_prime.tools.redteam import sidecar_tracking_start
+
+            sidecar_tracking_start("IDLE")
+        except Exception:
+            _SIDECAR_LOG.debug("sidecar tracking not started")
     # DESK-04: the production desk-pass driver ticks due ``desk_lead_pass``
     # jobs against the shared JobStore on a background thread, serialized.
     # It holds the runtime's parent shim — None without a provider env never

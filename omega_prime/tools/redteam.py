@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -38,6 +39,58 @@ REDTEAM_TOOL_NAMES = (
 )
 
 DEFAULT_GATEWAY_URL = "http://127.0.0.1:3333"
+
+KILL_ENV_VAR = "OMEGA_PRIME_REDTEAM_KILL"
+
+# Tracked harness state for gateway-boundary hooks. ``None`` (the default)
+# means tracking is off: direct client users and unit tests see zero new
+# behavior. The registry guard enables it on the IDLE path via
+# :func:`sidecar_tracking_start`.
+_sidecar_current: str | None = None
+
+
+def _kill_switch_set(env: Mapping[str, str] | None = None) -> bool:
+    """Whether ``OMEGA_PRIME_REDTEAM_KILL`` aborts everything right now."""
+    source = env if env is not None else os.environ
+    return (source.get(KILL_ENV_VAR) or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def current_sidecar_state() -> str | None:
+    """Tracked harness state, or ``None`` when tracking is off."""
+    return _sidecar_current
+
+
+def sidecar_tracking_start(state: str = "IDLE") -> None:
+    """Enable gateway-boundary transition logging from ``state``."""
+    global _sidecar_current
+    _sidecar_current = state
+
+
+def sidecar_tracking_stop() -> None:
+    """Disable gateway-boundary transition logging."""
+    global _sidecar_current
+    _sidecar_current = None
+
+
+def _sidecar_note(to_state: str, cause: str) -> None:
+    """Best-effort transition from the tracked state. Never raises."""
+    global _sidecar_current
+    if _sidecar_current is None:
+        return
+    try:
+        from sidecar.state import transition
+    except ImportError:
+        return
+    try:
+        transition(_sidecar_current, to_state, cause)
+    except Exception:
+        return
+    _sidecar_current = to_state
 
 
 def _error(code: str, reason: str, **extra: Any) -> dict[str, Any]:
@@ -165,21 +218,37 @@ class RedteamClient:
     def _call(
         self, method: str, path: str, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        # Kill switch aborts in-flight runs at the gateway call boundary,
+        # before any transport I/O. Transition logging is best-effort and
+        # only active once the registry guard starts tracking.
+        if _kill_switch_set():
+            _sidecar_note("BLOCKED", "kill-switch-set")
+            return _error(
+                "killed",
+                "redteam kill switch set (OMEGA_PRIME_REDTEAM_KILL): "
+                "in-flight run aborted at the gateway call boundary",
+                ok=False,
+            )
         base, refusal = self._base_or_error()
         if refusal is not None:
             return refusal
         request = self.ctx.request or _http_request
+        if _sidecar_current == "IDLE":
+            _sidecar_note("RUNNING", "run-started")
         try:
             status, data = request(
                 base, method, path, payload, self._headers(), self.ctx.timeout
             )
         except (OSError, http.client.HTTPException, TimeoutError) as exc:
+            _sidecar_note("ERROR", "gateway-unreachable")
             return _error(
                 "gateway_unreachable",
                 f"t3mp3st backend unreachable at {base} — start it with "
                 f"npm run server ({type(exc).__name__}: {exc})",
                 ok=False,
             )
+        if _sidecar_current == "RUNNING":
+            _sidecar_note("IDLE", "run-completed")
         return {"ok": bool(200 <= status < 300), "status": status, "data": data}
 
     def _get(self, path: str) -> dict[str, Any]:
@@ -536,9 +605,13 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
 
 __all__ = [
     "DEFAULT_GATEWAY_URL",
+    "KILL_ENV_VAR",
     "REDTEAM_TOOL_NAMES",
     "RedteamClient",
     "RedteamContext",
+    "current_sidecar_state",
     "register_redteam_tools",
     "resolve_bearer_token",
+    "sidecar_tracking_start",
+    "sidecar_tracking_stop",
 ]

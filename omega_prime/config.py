@@ -54,6 +54,14 @@ def _defaults() -> dict[str, Any]:
             "enabled": False,
             "gateway_url": "http://127.0.0.1:3333",
             "bearer_token_file": "",
+            # Sidecar authorization (Phase 79). All restrictive by default:
+            # kill stops everything, RoE is required, and an empty roe_file
+            # means BLOCKED when enabled. roe_key is the detached-HMAC
+            # verification key (config-supplied, never fetched at runtime).
+            "kill": False,
+            "roe_required": True,
+            "roe_file": "",
+            "roe_key": "",
         },
     }
 
@@ -112,6 +120,35 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 )
             elif len(parts) == 3 and parts[1] == "gateway" and parts[2] == "url":
                 overlay.setdefault("redteam", {})["gateway_url"] = value.strip()
+            elif len(parts) == 2 and parts[1] == "kill":
+                # OMEGA_PRIME_REDTEAM_KILL — evaluated before every other
+                # redteam control; true implies BLOCKED (GAP-08).
+                overlay.setdefault("redteam", {})["kill"] = value.strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+            elif len(parts) == 3 and parts[1] == "roe" and parts[2] == "required":
+                # OMEGA_PRIME_REDTEAM_ROE_REQUIRED — default true (fail
+                # closed); explicit falsy opts out of the RoE requirement.
+                overlay.setdefault("redteam", {})["roe_required"] = (
+                    value.strip().lower()
+                    in (
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    )
+                )
+            elif len(parts) == 3 and parts[1] == "roe" and parts[2] == "file":
+                # OMEGA_PRIME_REDTEAM_ROE_FILE — path to the signed artifact;
+                # empty (the default) means BLOCKED when enabled.
+                overlay.setdefault("redteam", {})["roe_file"] = value.strip()
+            elif len(parts) == 3 and parts[1] == "roe" and parts[2] == "key":
+                # OMEGA_PRIME_REDTEAM_ROE_KEY — detached-HMAC verification
+                # key. Secret: never logged, never rendered to metrics.
+                overlay.setdefault("redteam", {})["roe_key"] = value.strip()
     return overlay
 
 
@@ -129,6 +166,12 @@ def redteam_enabled(config: dict[str, Any]) -> bool:
     return bool(isinstance(node, dict) and node.get("enabled") is True)
 
 
+def redteam_kill(config: dict[str, Any]) -> bool:
+    """Whether the red team kill switch is set. Absent ⇒ False."""
+    node = config.get("redteam", {})
+    return bool(isinstance(node, dict) and node.get("kill") is True)
+
+
 def family_config(config: dict[str, Any], family: str) -> dict[str, Any]:
     """The raw config subtree for one family (empty dict when absent)."""
     node = config.get("prime", {}).get(family, {})
@@ -141,4 +184,5 @@ __all__ = [
     "load_config",
     "prime_enabled",
     "redteam_enabled",
+    "redteam_kill",
 ]
