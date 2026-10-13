@@ -33,8 +33,6 @@ import types
 from typing import Any
 from urllib.parse import urlsplit
 
-from omega_prime.credentials.broker import CredentialBroker
-
 CREDENTIAL_ENV_VAR = "OMEGA_PRIME_EVALS_JUDGE_API_KEY"
 ENDPOINT_ENV_VAR = "OMEGA_PRIME_EVALS_JUDGE_ENDPOINT"
 
@@ -90,6 +88,10 @@ def _credential_value(environ: Any, endpoint: str | None = None) -> str:
     try:
         if not endpoint:
             return ""
+        # Lazy import: the credentials package pulls socket-capable modules,
+        # which must never load while the judge is disabled.
+        from omega_prime.credentials.broker import CredentialBroker
+
         host = urlsplit(endpoint).hostname or ""
         broker = CredentialBroker(_JudgeEndpointPolicy(host), env=env)
         provider = types.SimpleNamespace(
