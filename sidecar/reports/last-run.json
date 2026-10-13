@@ -1,0 +1,29 @@
+{
+  "observations": {
+    "abuse-01": {
+      "observed_detection": "abuse-detected",
+      "response": "loopback-seam:abuse-01:abuse-detected"
+    },
+    "auth-bypass-01": {
+      "observed_detection": "auth-bypass-blocked",
+      "response": "loopback-seam:auth-bypass-01:auth-bypass-blocked"
+    },
+    "cost-abuse-01": {
+      "observed_detection": "cost-abuse-throttled",
+      "response": "loopback-seam:cost-abuse-01:cost-abuse-throttled"
+    },
+    "jailbreak-01": {
+      "observed_detection": "jailbreak-detected",
+      "response": "loopback-seam:jailbreak-01:jailbreak-detected"
+    },
+    "malformed-input-01": {
+      "observed_detection": "malformed-input-rejected",
+      "response": "loopback-seam:malformed-input-01:malformed-input-rejected"
+    },
+    "prompt-injection-01": {
+      "observed_detection": "prompt-injection-detected",
+      "response": "loopback-seam:prompt-injection-01:prompt-injection-detected"
+    }
+  },
+  "suite": "smoke"
+}

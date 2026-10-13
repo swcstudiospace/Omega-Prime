@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "objectives": [
+    {
+      "id": "serve-availability",
+      "series": "omega_http_requests_total",
+      "kind": "ratio",
+      "good": "status!~5..",
+      "target": 0.995,
+      "window_days": 30
+    },
+    {
+      "id": "tool-call-latency-p99",
+      "series": "omega_tool_call_duration_seconds",
+      "kind": "quantile",
+      "quantile": 0.99,
+      "threshold_seconds": 5,
+      "window_days": 30
+    },
+    {
+      "id": "denial-rate-budget",
+      "series": "omega_tool_denials_total",
+      "kind": "budget",
+      "target": 0.98,
+      "window_days": 30
+    }
+  ]
+}

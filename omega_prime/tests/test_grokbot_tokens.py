@@ -89,6 +89,8 @@ def test_plaintext_never_in_file_and_mode_is_private(token_file: Path) -> None:
     assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
     document = json.loads(raw)
     assert document["version"] == 1
+    # Phase 82 adds rotated_from/rotated_to lineage fields alongside the
+    # original seven; plaintext/sha256-only/0600 guarantees are unchanged.
     assert set(document["tokens"][0]) == {
         "id",
         "sha256",
@@ -97,6 +99,8 @@ def test_plaintext_never_in_file_and_mode_is_private(token_file: Path) -> None:
         "created_at",
         "expires_at",
         "revoked_at",
+        "rotated_from",
+        "rotated_to",
     }
 
 

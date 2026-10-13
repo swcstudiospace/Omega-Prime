@@ -1,0 +1,70 @@
+name: nightly-readiness
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-readiness-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: pip install -e .
+      - name: run readiness profile
+        id: readiness
+        run: python -m omega_prime.grokbot.readiness --root . --json --output readiness-report.json
+      - name: attach report artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: readiness-report
+          path: readiness-report.json
+          if-no-files-found: warn
+      - name: compare against baseline
+        if: always()
+        run: python scripts/nightly_readiness_check.py check --baseline omega_prime/telemetry/readiness_baseline.json --report readiness-report.json
+      - name: track regression issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="[nightly-readiness] readiness regression"
+          BODY="Nightly readiness regressed (report ok:false or exercised-tool count below baseline). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. Artifact: readiness-report. Reproduce locally: python scripts/nightly_readiness_check.py check --baseline omega_prime/telemetry/readiness_baseline.json --report <report>. Resolve with a green nightly run or a reviewed --bless PR."
+          gh label create nightly-readiness --description "Nightly readiness regression tracking" --color B60205 2>/dev/null || true
+          NUM=$(gh issue list --label nightly-readiness --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -z "$NUM" ]; then
+            NUM=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          fi
+          if [ -z "$NUM" ]; then
+            gh issue create --title "$TITLE" --label nightly-readiness --body "$BODY" 2>/dev/null || gh issue create --title "$TITLE" --body "$BODY"
+          else
+            gh issue comment "$NUM" --body "Still regressing: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}."
+          fi
+      - name: close tracking issue on green
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="[nightly-readiness] readiness regression"
+          NUM=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh issue close "$NUM" --comment "Green nightly run ${{ github.run_id }}; closing."
+          else
+            echo "nightly-readiness: green, no open tracking issue"
+          fi

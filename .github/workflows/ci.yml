@@ -221,3 +221,59 @@ jobs:
         run: python3 -m omega_prime.tooling.catalog --check
       - name: plugin manifest currency
         run: python3 -m omega_prime.tooling.plugin --check
+  # Pin-freshness gate: proves the redteam submodule gitlink, the VENDOR.md
+  # pin, the provenance docstrings, the vendored pack, and the adapter tool
+  # surface all agree with upstream at the pin. Fail-closed: any mismatch
+  # fails the job naming the disagreeing pair (see sidecar/provenance.py).
+  redteam-provenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: provenance check
+        run: python3 sidecar/provenance.py check
+      - name: provenance pack-diff
+        run: python3 sidecar/provenance.py pack-diff
+      - name: provenance surface
+        run: python3 sidecar/provenance.py surface
+  # Sandbox-policy drift guard (Phase 83, SAND-01): the committed
+  # omega_prime/hosting/openshell/sandbox-policy.yaml is generated output.
+  # Regenerate from the canonical seat policy and diff; any hand-edit fails
+  # the job with the diff attached. Hermetic: stdlib only, no openshell
+  # binary, no network.
+  sandbox-policy-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: regenerate sandbox policy
+        run: python3 -m omega_prime.sandbox.policy_gen --seat omega_prime/contracts/policies/omega-prime.json --out /tmp/sandbox-policy.regen.yaml
+      - name: diff against committed policy
+        run: |
+          set -o pipefail
+          diff -u omega_prime/hosting/openshell/sandbox-policy.yaml /tmp/sandbox-policy.regen.yaml \
+            | tee /tmp/sandbox-policy.diff || {
+            echo "::error::sandbox-policy.yaml drifted from the generator output (see diff above). Regenerate with: python3 -m omega_prime.sandbox.policy_gen --seat omega_prime/contracts/policies/omega-prime.json --out omega_prime/hosting/openshell/sandbox-policy.yaml"
+            exit 1
+          }
+      - name: attach drift diff
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sandbox-policy-drift-${{ github.sha }}
+          path: |
+            /tmp/sandbox-policy.regen.yaml
+            /tmp/sandbox-policy.diff
+          if-no-files-found: warn

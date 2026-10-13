@@ -17,10 +17,11 @@
 - ✅ **v13 Grok Bot specialisation** — Phases 68-70 (shipped 2026-10-09; audit passed)
 - ✅ **v14 Boundary alignment** — Phases 71-74 (shipped 2026-10-10; audit passed)
 - ✅ **v15 Integrated Readiness and Repository Delivery** — Phases 75–78 (shipped 2026-10-12; audit 21/22, GROK-03 live import UAT deferred by the user)
+- ✅ **v16 Enterprise Hardening and Continuous Verification** — Phases 79–84 (shipped 2026-10-13; audit PASS 13/13, sidecar ships BLOCKED pending signed RoE)
 
-Archives: `milestones/v1-ROADMAP.md` through `milestones/v15-ROADMAP.md`
+Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
-`milestones/v15-phases/`.
+`milestones/v16-phases/`.
 
 ## Phases
 
@@ -35,4 +36,16 @@ with phase directories under `milestones/v1-phases/` through
 
 </details>
 
-No next milestone is scoped.
+<details>
+<summary>✅ v16 Enterprise Hardening and Continuous Verification (Phases 79–84) — SHIPPED 2026-10-13</summary>
+
+Seven evidence-grounded updates staged from the 2026-10-13 ultrathink run (Linear SPE-10591..10598, graph `ut-mv5xhkf8-8abb3c15`); full archive in `milestones/v16-ROADMAP.md` with phase directories under `milestones/v16-phases/`.
+
+- [x] Phase 79: Purple-team sidecar hardening (3/3 plans) — completed 2026-10-13; sidecar ships BLOCKED pending signed RoE
+- [x] Phase 80: Protected release pipeline (2/2 plans) — completed 2026-10-13; `grokbot-image-publish` environment live
+- [x] Phase 81: Telemetry export and SLO alerting (2/2 plans) — completed 2026-10-13
+- [x] Phase 82: Token rotation and usage quotas (2/2 plans) — completed 2026-10-13
+- [x] Phase 83: Sandboxed execution verification (2/2 plans) — completed 2026-10-13
+- [x] Phase 84: Live evals and regression tracking (1/1 plan) — completed 2026-10-13
+
+</details>

@@ -31,6 +31,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+otel = [
+  "opentelemetry-proto",
+  "opentelemetry-exporter-otlp-proto-http",
+]
 dev = [
   "ruff==0.16.10",
   "mypy==2.4.0",

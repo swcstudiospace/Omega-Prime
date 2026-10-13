@@ -385,3 +385,32 @@ def test_P46_R07_cancelled_operation_aborts_before_dispatch(tmp_path: Path):
         registry.dispatch("web_preview_check", {"url": "https://acme.test/"})
     )
     assert "operation was cancelled" in out.get("error", "")
+
+
+def test_quality_sandbox_default_policy_survives_work_root_change(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The default policy resolves to the packaged file, not the cwd."""
+    from omega_prime.mcp_server import (
+        _packaged_sandbox_policy,
+        _quality_sandbox_from_env,
+    )
+
+    packaged = Path(_packaged_sandbox_policy())
+    assert packaged.is_absolute()
+    assert packaged.is_file()
+    assert packaged == OMEGA_PRIME / "hosting" / "openshell" / "sandbox-policy.yaml"
+    monkeypatch.chdir(tmp_path)
+    node = _quality_sandbox_from_env({"OMEGA_PRIME_SANDBOX_ENABLED": "1"})
+    assert node is not None
+    assert node["policy"] == str(packaged)
+    assert node["scope"] == "gates"
+    explicit = _quality_sandbox_from_env(
+        {
+            "OMEGA_PRIME_SANDBOX_ENABLED": "1",
+            "OMEGA_PRIME_SANDBOX_POLICY": "/tmp/custom-policy.yaml",
+        }
+    )
+    assert explicit is not None
+    assert explicit["policy"] == "/tmp/custom-policy.yaml"
+    assert _quality_sandbox_from_env({}) is None

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
@@ -494,6 +495,205 @@ class _DeskBusClient:
         return payload
 
 
+_SIDECAR_LOG = logging.getLogger(__name__)
+
+
+def _sidecar_import(name: str) -> Any:
+    """Import ``sidecar.<name>`` (stdlib-only harness module).
+
+    Works when the repo root is on ``sys.path`` (source checkout, tests)
+    and falls back to a file-location load from the install root otherwise.
+    Only ever loads ``sidecar/`` modules — never ``redteam/``.
+    """
+    try:
+        import importlib
+
+        return importlib.import_module(f"sidecar.{name}")
+    except ImportError:
+        pass
+    import importlib.util
+
+    root = Path(__file__).resolve().parent.parent
+    path = root / "sidecar" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"sidecar.{name}", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - missing tree
+        raise ImportError(f"cannot load sidecar module {name!r} from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _packaged_sandbox_policy() -> str:
+    """Absolute path of the shipped OpenShell policy (work-root independent).
+
+    The host may launch with ``--work-root`` pointing at another project,
+    so a relative default would resolve against the wrong directory both
+    for ``digest_file()`` and for the ``--policy`` argument OpenShell
+    receives while running in the gate's work directory.
+    """
+    return str(
+        Path(__file__).resolve().parent
+        / "hosting"
+        / "openshell"
+        / "sandbox-policy.yaml"
+    )
+
+
+def _quality_sandbox_from_env(env: Mapping[str, str]) -> dict[str, Any] | None:
+    """Sandbox node for the served quality tools (Phase 83, SAND-02).
+
+    Reads the ``OMEGA_PRIME_SANDBOX_*`` overrides with the config.py
+    semantics: only an explicit truthy ``ENABLED`` routes gates through
+    :class:`SandboxRunner`; anything else returns None so gates run
+    exactly as today (byte-identical flag-off behavior). Scope validation
+    stays in ``quality._sandbox_cfg`` (bogus scope disables, never enables).
+    An explicit ``OMEGA_PRIME_SANDBOX_POLICY`` stays as given; the default
+    is the packaged absolute policy path.
+    """
+    get = env.get if isinstance(env, Mapping) else {}.get
+    enabled = str(get("OMEGA_PRIME_SANDBOX_ENABLED", "") or "").strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return None
+    policy = str(get("OMEGA_PRIME_SANDBOX_POLICY", "") or "").strip()
+    scope = str(get("OMEGA_PRIME_SANDBOX_SCOPE", "") or "").strip().lower()
+    return {
+        "enabled": True,
+        "policy": policy or _packaged_sandbox_policy(),
+        "scope": scope or "gates",
+    }
+
+
+def _log_sidecar_transition(from_state: str, to_state: str, cause: str) -> None:
+    """Append one audit row. Best-effort: logging never breaks startup."""
+    try:
+        _sidecar_import("state").transition(from_state, to_state, cause)
+    except Exception as exc:
+        _SIDECAR_LOG.debug("sidecar transition log skipped: %s", exc)
+
+
+def _resolve_roe_key(node: Mapping[str, Any], env: Mapping[str, str]) -> bytes | None:
+    """RoE verification key under the credential-broker rule.
+
+    ``OMEGA_PRIME_REDTEAM_ROE_KEY`` wins (passed env, then the process
+    environment, then the merged config value, which ``load_config``
+    overlays from that same variable); otherwise the file named by
+    ``redteam.roe_key_file`` (read with the secret-file permission gate,
+    mirroring ``bearer_token_file``). A missing or unreadable file
+    degrades to no key — the validator then fails closed to
+    ``roe-invalid``. A key value stored in the config *file* never
+    reaches here: ``load_config`` marks it and the guard rejects
+    fail-closed first.
+    """
+    get = env.get if isinstance(env, Mapping) else {}.get
+    candidates = (
+        get("OMEGA_PRIME_REDTEAM_ROE_KEY", ""),
+        os.environ.get("OMEGA_PRIME_REDTEAM_ROE_KEY", ""),
+        node.get("roe_key") or "",
+    )
+    for raw in candidates:
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip().encode("utf-8")
+    key_file = node.get("roe_key_file") or ""
+    if isinstance(key_file, str) and key_file.strip():
+        try:
+            text = read_secret_file(key_file.strip())
+        except (OSError, ValueError):
+            return None
+        text = text.strip()
+        return text.encode("utf-8") if text else None
+    return None
+
+
+def _evaluate_redteam_guard(
+    config: dict[str, Any], env: Mapping[str, str] | None = None
+) -> tuple[str, str]:
+    """Fail-closed verdict for the red team family: ``(state, cause)``.
+
+    Evaluation order (GAP-08): kill switch first, then the default-off gate,
+    then the broker-rule key check, then signed-RoE resolution. Any guard
+    error implies ``BLOCKED`` with zero registrations. The default-off path
+    (``redteam.enabled`` false, kill unset) is silent — no audit row — so
+    default behavior is unchanged.
+
+    The RoE helper is imported from :mod:`omega_prime.redteam.roe` (shipped
+    in the wheel and the image); the ``sidecar/`` tree is never on the
+    installed import path.
+    """
+    from omega_prime.config import redteam_enabled, redteam_kill
+    from omega_prime.redteam.roe import authorize
+
+    try:
+        if redteam_kill(config):
+            _log_sidecar_transition("IDLE", "BLOCKED", "kill-switch-set")
+            _SIDECAR_LOG.warning(
+                "redteam sidecar BLOCKED (kill-switch-set): kill switch set"
+            )
+            return "BLOCKED", "kill-switch-set"
+        if not redteam_enabled(config):
+            return "BLOCKED", "disabled"
+        node = config.get("redteam", {})
+        node = node if isinstance(node, dict) else {}
+        required = node.get("roe_required", True)
+        if isinstance(required, str):
+            required = required.strip().lower() in ("1", "true", "yes", "on")
+        if not required:
+            _log_sidecar_transition("IDLE", "IDLE", "re-evaluated")
+            return "IDLE", "re-evaluated"
+        if node.get("roe_key_in_file"):
+            _log_sidecar_transition("IDLE", "BLOCKED", "roe-key-in-file")
+            _SIDECAR_LOG.warning(
+                "redteam sidecar BLOCKED (roe-key-in-file): redteam.roe_key "
+                "must not hold a key value in omega-prime.json — remove it "
+                "and use OMEGA_PRIME_REDTEAM_ROE_KEY or "
+                "redteam.roe_key_file instead"
+            )
+            return "BLOCKED", "roe-key-in-file"
+        resolve_env: Mapping[str, str] = env if isinstance(env, Mapping) else os.environ
+        key = _resolve_roe_key(node, resolve_env)
+        decision = authorize(str(node.get("roe_file") or ""), key=key)
+        if decision.ok:
+            _log_sidecar_transition("IDLE", "IDLE", "re-evaluated")
+            return "IDLE", "re-evaluated"
+        _log_sidecar_transition("IDLE", "BLOCKED", decision.cause)
+        _SIDECAR_LOG.warning(
+            "redteam sidecar BLOCKED (%s): %s", decision.cause, decision.detail
+        )
+        return "BLOCKED", decision.cause
+    except Exception as exc:
+        _log_sidecar_transition("IDLE", "BLOCKED", "roe-invalid")
+        _SIDECAR_LOG.warning(
+            "redteam sidecar BLOCKED (roe-invalid): guard error (%s)", exc
+        )
+        return "BLOCKED", "roe-invalid"
+
+
+def _guard_grant(
+    config: dict[str, Any], env: Mapping[str, str] | None = None
+) -> dict[str, Any] | None:
+    """Parsed signed grant for the red team client, or ``None`` when absent.
+
+    Re-resolves the guard's ``authorize`` decision so the client keeps the
+    parsed grant (tool allowlist + window) for call-time enforcement. Any
+    failure means no grant — the client then keeps historical behavior and
+    registration stays filtered by the same absence.
+    """
+    try:
+        from omega_prime.redteam.roe import authorize
+
+        node = config.get("redteam", {})
+        node = node if isinstance(node, dict) else {}
+        if node.get("roe_key_in_file"):
+            return None
+        resolve_env: Mapping[str, str] = env if isinstance(env, Mapping) else os.environ
+        key = _resolve_roe_key(node, resolve_env)
+        decision = authorize(str(node.get("roe_file") or ""), key=key)
+        if decision.ok and isinstance(decision.roe, dict):
+            return decision.roe
+    except Exception:
+        pass
+    return None
+
+
 def default_registry(
     root: str | Path,
     home: str | Path,
@@ -671,7 +871,13 @@ def default_registry(
     )
     register_quality_tools(
         registry,
-        QualityClient(QualityContext(root=work, greptile=desk["greptile"])),
+        QualityClient(
+            QualityContext(
+                root=work,
+                greptile=desk["greptile"],
+                sandbox=_quality_sandbox_from_env(env),
+            )
+        ),
     )
     register_packs_tools(
         registry,
@@ -706,7 +912,6 @@ def default_registry(
         family_config,
         load_config,
         prime_enabled,
-        redteam_enabled,
     )
     from omega_prime.tools.autonomous import register_autonomous_tools
     from omega_prime.tools.goals import register_goal_tools
@@ -748,8 +953,13 @@ def default_registry(
     # family. Off by default, so the default registry is unchanged; when on,
     # the T3MP3ST loopback tools register against the configured gateway with
     # the upstream bearer contract (T3MP3ST_BEARER_TOKEN / _FILE, else the
-    # configured bearer_token_file).
-    if redteam_enabled(config):
+    # configured bearer_token_file) — but only after the Phase 79 sidecar
+    # guard authorizes the run. Kill switch first, then default-off, then
+    # signed-RoE resolution; BLOCKED always means zero registrations.
+    sidecar_state, _sidecar_cause = _evaluate_redteam_guard(config, env)
+    registry.runtime_bindings["sidecar_state"] = sidecar_state
+    if sidecar_state == "IDLE":
+        from omega_prime.redteam.roe import grant_tool_allowlist
         from omega_prime.tools.redteam import (
             DEFAULT_GATEWAY_URL,
             RedteamClient,
@@ -760,6 +970,10 @@ def default_registry(
 
         redteam_node = config.get("redteam", {})
         redteam_node = redteam_node if isinstance(redteam_node, dict) else {}
+        # The signed grant stays on the client: registration exposes only
+        # the grant's allowed tools, and the client re-enforces the
+        # allowlist plus the effective window at call time.
+        grant = _guard_grant(config, env)
         register_redteam_tools(
             registry,
             RedteamClient(
@@ -772,9 +986,17 @@ def default_registry(
                         read_secret_file,
                         str(redteam_node.get("bearer_token_file") or ""),
                     ),
+                    roe=grant,
                 )
             ),
+            allowed=grant_tool_allowlist(grant) if grant is not None else None,
         )
+        try:
+            from omega_prime.tools.redteam import sidecar_tracking_start
+
+            sidecar_tracking_start("IDLE")
+        except Exception:
+            _SIDECAR_LOG.debug("sidecar tracking not started")
     # DESK-04: the production desk-pass driver ticks due ``desk_lead_pass``
     # jobs against the shared JobStore on a background thread, serialized.
     # It holds the runtime's parent shim — None without a provider env never

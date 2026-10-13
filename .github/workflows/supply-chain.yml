@@ -35,3 +35,38 @@ jobs:
         # process does not host. Drop the ignore when tweepy accepts
         # oauthlib>=4. See SECURITY.md.
         run: python3 -m pip_audit --progress-spinner off -r requirements-lock.txt --ignore-vuln PYSEC-2026-4114
+  # CI-only supply-chain audit of the redteam sidecar backend's Node
+  # dependencies. Nothing Node-related enters the runtime path or the image:
+  # this job checks out the redteam submodule path only, installs with
+  # --ignore-scripts, and fails on any untriaged high-or-above advisory.
+  redteam-node-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: init redteam submodule only
+        run: git submodule update --init redteam
+      # Pinned major matches the mixed-major precedent in grokbot-image.yml
+      # (checkout@v4 alongside artifact@v7). Node 22 satisfies the upstream
+      # engines contract (redteam/package.json requires >=22.19.0).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: npm ci (no scripts)
+        working-directory: redteam
+        run: npm ci --ignore-scripts
+      - name: npm audit
+        working-directory: redteam
+        env:
+          AUDIT_JSON: ${{ runner.temp }}/redteam-audit.json
+        run: |
+          npm audit --omit=dev --audit-level=high --json > "$AUDIT_JSON" || audit_exit=$?
+          # npm audit exits nonzero when advisories exist; that output is the
+          # triage input below. Only bail here when it failed WITHOUT JSON.
+          if [ -n "${audit_exit:-}" ] && [ ! -s "$AUDIT_JSON" ]; then
+            echo "npm audit failed (exit $audit_exit) without usable JSON"
+            exit "$audit_exit"
+          fi
+          python3 ../scripts/redteam-audit-triage.py

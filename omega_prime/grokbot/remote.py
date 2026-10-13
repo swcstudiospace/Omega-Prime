@@ -60,9 +60,12 @@ from omega_prime.grokbot.metrics import (
     MetricsInterceptor,
     MetricsMiddleware,
     MetricsRegistry,
+    TokenMetrics,
     metrics_endpoint,
     record_auth_failure,
     register_build_info,
+    register_token_metrics,
+    token_label_hash,
 )
 from omega_prime.grokbot.ratelimit import (
     AuthFailureThrottle,
@@ -89,7 +92,11 @@ from omega_prime.grokbot.telemetry import (
     RequestContextMiddleware,
     configure_logging,
 )
-from omega_prime.grokbot.tokens import CompositeTokenStore, FileTokenStore
+from omega_prime.grokbot.tokens import (
+    CompositeTokenStore,
+    FileTokenStore,
+    observe_active_with_bearer,
+)
 from omega_prime.mcp_server import (
     SERVER_NAME,
     SERVER_VERSION,
@@ -98,6 +105,8 @@ from omega_prime.mcp_server import (
     build_server,
     load_runtime,
 )
+from omega_prime.metrics import register_sidecar_state
+from omega_prime.quotas import QuotaEngine, QuotasMaintenance
 
 # uvicorn's logger is the one that is configured when this runs under `serve_sse`.
 logger = logging.getLogger("uvicorn.error")
@@ -307,6 +316,44 @@ def _assemble_token_store(
     return CompositeTokenStore([file_store, base])
 
 
+def _token_file_records(
+    store: TokenStore, token_store_path: Path | str | None
+) -> list[Any] | None:
+    """Token records behind `store` for the metrics sync; None when unavailable.
+
+    Prefers `token_store_path` (the hashed file backing serve); otherwise walks
+    a composite store for file-backed children. Env-token-only deployments
+    have no records — the caller falls back to the principals snapshot.
+    A missing or unreadable file also returns None (fail closed, never raise).
+    """
+    from omega_prime.grokbot.tokens import list_tokens
+
+    paths: list[Path] = []
+    if token_store_path is not None:
+        paths.append(Path(token_store_path))
+    else:
+        seen: set[int] = set()
+        stack: list[Any] = [store]
+        while stack:
+            current = stack.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            path = getattr(current, "path", None)
+            if path is not None:
+                paths.append(Path(path))
+            stack.extend(getattr(current, "_stores", ()))
+    if not paths:
+        return None
+    records: list[Any] = []
+    for path in paths:
+        try:
+            records.extend(list_tokens(path))
+        except Exception:
+            return None
+    return records
+
+
 def _json_error(status: int, error: str) -> JSONResponse:
     headers = {"Cache-Control": "no-store"}
     if status == 401:
@@ -426,11 +473,81 @@ def create_sse_app(
             clock=clock,
         )
     metrics = MetricsRegistry()
+    token_metrics: TokenMetrics | None = None
     if metrics_enabled:
         register_build_info(
             metrics, version=SERVER_VERSION, package_version=PACKAGE_VERSION
         )
+        # Token rotation series (Phase 82): registered next to the existing
+        # registry construction; the serve-time snapshot syncs from the token
+        # records plus the single bearer/env caller, so the active gauge AND
+        # the expiry counter advance from entry states (label hashes only —
+        # raw labels never leave the process). Env-token-only deployments
+        # have no records, so the principals count is the fallback.
+        # A snapshot failure must never break serving.
+        token_metrics = register_token_metrics(metrics)
+        try:
+            _records = _token_file_records(store, token_store_path)
+            if _records is not None:
+                _now = clock() if clock is not None else time.time()
+                # File records PLUS the single bearer/env caller: a combined
+                # bearer-token + file store must count every live caller.
+                observe_active_with_bearer(token_metrics, store, _records, _now)
+            else:
+                counts: dict[str, int] = {}
+                for principal in store.principals():
+                    digest = token_label_hash(principal.label or "")
+                    counts[digest] = counts.get(digest, 0) + 1
+                for digest, count in counts.items():
+                    token_metrics.set_active(digest, count)
+        except Exception:
+            logger.warning("token active snapshot failed", exc_info=True)
+        # Sidecar state gauge is a serve-time snapshot of the registration-time
+        # guard evaluation; with the sidecar shipped BLOCKED the value cannot
+        # advance to RUNNING mid-serve (kill transitions log to reports/).
+        _sidecar_state = getattr(runtime, "runtime_bindings", {}).get("sidecar_state")
+        if _sidecar_state:
+            register_sidecar_state(metrics, _sidecar_state)
     count_auth_failure = record_auth_failure(metrics) if metrics_enabled else None
+
+    # Optional push-based telemetry (Phase 81). Off by default: started in
+    # the lifespan below, only when telemetry.otlp is enabled with a push
+    # target and the otel extra installed; otherwise serving proceeds
+    # exactly as before. The config node is read here (never started) so
+    # merely constructing the app starts no thread.
+    otlp_holder: dict[str, Any] = {"exporter": None}
+    try:
+        from omega_prime.config import load_config as _load_telemetry_config
+
+        _otlp_node = _load_telemetry_config(root).get("telemetry", {}).get("otlp", {})
+    except Exception:
+        logger.warning("telemetry config load failed; export disabled", exc_info=True)
+        _otlp_node = {}
+
+    # Per-caller usage quotas (Phase 82). Always constructed and always in
+    # the chain: with no document the engine is inert (pass-through hooks,
+    # no series, no counting), and the maintenance tick below activates it
+    # live when a document or mode appears — no restart. A load failure
+    # also leaves quotas off (never half-on). The mode was already
+    # allowlist-normalized by load_config.
+    quota_engine = QuotaEngine(metrics, mode="report", limits={})
+    try:
+        _quotas_node = _load_telemetry_config(root).get("quotas", {})
+    except Exception:
+        logger.warning("quota config load failed; quotas off", exc_info=True)
+        _quotas_node = {}
+    if isinstance(_quotas_node, dict):
+        try:
+            quota_engine.refresh_from_config({"quotas": _quotas_node})
+        except Exception:
+            logger.warning("quota engine start failed; quotas off", exc_info=True)
+    # Live reload + counters dump (Phase 82 maintenance tick): re-reads the
+    # `quotas` node and dumps `counters-<UTC-day>.json` into the rollup dir
+    # for the nightly rollup. The tick thread starts in the lifespan below
+    # (stopped in teardown) so constructing the app without running
+    # lifespan starts no thread; inert ticks only re-read config and write
+    # nothing.
+    quotas_maintenance = QuotasMaintenance(quota_engine, root=root)
 
     in_flight = InFlightInterceptor()
 
@@ -449,9 +566,16 @@ def create_sse_app(
     ]
     if metrics_enabled:
         observers.append(MetricsInterceptor(metrics, tool_names=served_tool_names))
+    # The quota check precedes dispatch (never partial) and follows the
+    # observers, so audit and the tool-denial metric see quota denials;
+    # it follows ScopeInterceptor so forbidden calls consume no quota. The
+    # engine is always present (inert when unconfigured) so live reload
+    # needs no restart and no chain rebuild.
+    quota_chain: tuple[ToolCallInterceptor, ...] = (quota_engine,)
     chain: tuple[ToolCallInterceptor, ...] = (
         *observers,
         ScopeInterceptor(),
+        *quota_chain,
         ToolRateLimitInterceptor(tool_limiter),
         breakers,
         *interceptors,
@@ -576,7 +700,6 @@ def create_sse_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
-        del app
         logger.info(
             "Omega Prime MCP host ready: %d tools, auth %s, audit %s",
             len(runtime.tool_names),
@@ -588,6 +711,22 @@ def create_sse_app(
                 "Host header validation is off (bearer auth is the control); "
                 "set a public URL or allowed hosts to enable it"
             )
+        # Background threads start here (not at construction) so merely
+        # building the app starts no thread; teardown stops them below.
+        quotas_maintenance.start()
+        if isinstance(_otlp_node, dict) and _otlp_node.get("enabled"):
+            try:
+                from omega_prime.telemetry.otlp_export import (
+                    maybe_start as _maybe_start_otlp,
+                )
+
+                otlp_holder["exporter"] = _maybe_start_otlp(_otlp_node, metrics)
+                app.state.otlp_exporter = otlp_holder["exporter"]
+            except Exception:
+                logger.warning(
+                    "telemetry push failed to start; export off", exc_info=True
+                )
+                otlp_holder["exporter"] = None
         try:
             async with streamable.lifespan():
                 try:
@@ -598,6 +737,18 @@ def create_sse_app(
             streamable_state["down"] = True
             raise
         finally:
+            try:
+                quotas_maintenance.stop()
+            except Exception:
+                logger.warning("quota maintenance stop failed", exc_info=True)
+            exporter = otlp_holder["exporter"]
+            otlp_holder["exporter"] = None
+            app.state.otlp_exporter = None
+            if exporter is not None:
+                try:
+                    exporter.stop()
+                except Exception:
+                    logger.warning("telemetry push stop failed", exc_info=True)
             tracer.close()
 
     # Outermost first. CORS only when an origin was named. Auth only when a
@@ -665,6 +816,12 @@ def create_sse_app(
     app.state.gate = gate
     app.state.shutting_down = False
     app.state.metrics = metrics
+    app.state.token_metrics = token_metrics
+    app.state.quota_engine = quota_engine
+    app.state.quotas_maintenance = quotas_maintenance
+    # The lifespan sets the live exporter on startup (and clears it on
+    # teardown); construction alone starts no push thread.
+    app.state.otlp_exporter = None
     app.state.token_store = store
     app.state.approval_log = runtime.approval_log
     app.state.rate_limiter = request_limiter

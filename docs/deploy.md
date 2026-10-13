@@ -193,6 +193,34 @@ artifacts. Do not resolve a moving tag, re-render with changed options, or call 
 validated image. Apply only through the deployment platform's separately approved procedure; this guide is not
 evidence that a release or rollback was performed.
 
+### Image-digest rollback (local exercise)
+
+Each successful `deploy.py promote` writes a promotion evidence file into the artifact directory recording
+`promoted_digest`, `previous_digest`, `approval`, and `timestamp`. A one-step rollback re-promotes the recorded
+`previous_digest` verbatim — no rebuild, no moving tag:
+
+1. Locate the newest promotion evidence file in the artifact directory (lexicographic order is chronological):
+   ```sh
+   ls <artifact-dir>/*promotion*evidence*.json | sort | tail -1
+   ```
+2. Read its `previous_digest` and re-run promote pinned to it, with the digest file updated to match:
+   ```sh
+   PREV="$(python3 -c "import json,glob; print(json.load(open(sorted(glob.glob('<artifact-dir>/*promotion*evidence*.json'))[-1]))['previous_digest'])")"
+   printf '%s\n' "$PREV" > <artifact-dir>/image.digest
+   python -m omega_prime.grokbot.deploy promote --digest "$PREV" --dir <artifact-dir> --approval <artifact-dir>/approval.json
+   ```
+   The rollback is recorded as a new evidence entry chaining the restored digest.
+3. Re-run the healthcheck against the same directory:
+   ```sh
+   python -m omega_prime.grokbot.deploy healthcheck --target k8s --dir <artifact-dir>
+   ```
+
+If the new image never promoted past staging, live needs no action: delete the staged target and the revert is
+complete. Rehearse with `bash scripts/image-rollback-drill.sh`, which performs promote → rollback → healthy
+entirely against local docker (imported local tags, save/load round-trip with checksum-before-load, stub probe
+server on the rendered port). The drill is local-only and never touches production: it contains no push, no ssh,
+and no remote-registry commands.
+
 
 ## Stop and drain
 
@@ -227,6 +255,35 @@ attempt, an operator confirms the environment with `gh api repos/swcstudiospace/
 it exits 0 only when the environment exists (a missing one returns HTTP 404 and a nonzero exit), and its
 `protection_rules` must name the required reviewers. Configuring it and prohibiting self-review/admin bypass is a
 separately authorized operator prerequisite; this page records no observed approval.
+
+### Protected publish environment
+
+Publication stays manual and default-off: `workflow_dispatch` with `publish: true`, exact `confirm_ref`, a protected ref, and approval on the `grokbot-image-publish` environment. Creating that environment is a parent-operator step (repo-admin rights plus network); this repository ships only the exact payload. A missing or unprotected environment keeps the workflow fail-closed — the publish job refuses, which is the safe behavior, never a misconfiguration to work around.
+
+1. Create the environment (parent-run; owner, repo, and environment name resolve from the checkout and the payload file, never hardcoded):
+   ```sh
+   OWNER="$(gh repo view --json owner --jq .owner.login)"
+   REPO="$(gh repo view --json name --jq .name)"
+   ENV_NAME="$(jq -r .environment_name .github/grokbot-image-publish-environment.json)"
+   REVIEWER_ID="$(gh api "users/${OWNER}" --jq .id)"
+   jq --argjson rid "${REVIEWER_ID}" \
+     '.wait_timer = 0
+      | .prevent_self_review = true
+      | .can_admins_bypass = false
+      | .reviewers = [{type: "User", id: $rid}]
+      | {wait_timer, prevent_self_review, can_admins_bypass, reviewers, deployment_branch_policy}' \
+     .github/grokbot-image-publish-environment.json > /tmp/grokbot-image-publish-put.json
+   gh api --method PUT "repos/${OWNER}/${REPO}/environments/${ENV_NAME}" \
+     --input /tmp/grokbot-image-publish-put.json
+   ```
+   The payload names the repo owner as the sole required reviewer with a zero wait timer, restricts the deployment branch policy to `main` (protected branches only, no custom policies), prohibits self-review, and sets `can_admins_bypass` false so the no-admin-bypass claim is sent, not just stated.
+2. Read back the protection (parent-run):
+   ```sh
+   gh api "repos/${OWNER}/${REPO}/environments/${ENV_NAME}" --jq '.protection_rules[].type'
+   jq -e '.can_admins_bypass == false' /tmp/grokbot-image-publish-put.json
+   ```
+   The output must contain `required_reviewers`; an empty, missing, or ambiguous rule set leaves the gate refusing. The second command proves the sent payload carried the no-admin-bypass flag — the environment readback has no `can_admins_bypass` field of its own, so the claim is checked against the exact PUT body (`/tmp/grokbot-image-publish-put.json`), which fails closed when the flag is absent or not false.
+3. Fallback when admin rights refuse: if the creation call fails (forbidden, or the reviewer type needs a Team instead of a User), record the refusal, stop, and keep the workflow gate unchanged and fail-closed. Never weaken a refusal, never auto-approve, and never publish without the protected environment. Configuring protection remains a separately authorized operator prerequisite; this page records no observed approval.
 
 The publisher downloads the same run's immutable artifacts, gates strict complete evidence, verifies ref/event/run/
 source/artifact identity, compares the archive checksum before loading and the loaded image ID before any tag/login/

@@ -222,6 +222,90 @@ Expect back:
 The Prime capability families are off by default. To turn them on and drive
 the bot with them, see [Driving the bot](driving-the-bot.md).
 
+## 8. Token rotation (scheduled host-token rotation)
+
+Host-token rotation replaces a live bearer token with a new one without an
+authentication outage. The old token stays valid for a configurable overlap
+window, then expires on the same expiry path `--ttl-days` uses; `revoke`
+stays immediate and is the break-glass path. Every rotation appends one
+hash-only `token_rotated` event to the audit chain. Manual minting, listing,
+revocation, and TTL behavior are unchanged.
+
+Manual rotation (works regardless of any flag):
+
+```bash
+.venv/bin/python -m omega_prime.grokbot.tokens new --file /run/secrets/omega_prime_tokens.json --label ci --ttl-days 30
+.venv/bin/python -m omega_prime.grokbot.tokens rotate --file /run/secrets/omega_prime_tokens.json --label ci --overlap-hours 1
+.venv/bin/python -m omega_prime.grokbot.tokens list --file /run/secrets/omega_prime_tokens.json --json
+.venv/bin/python -m omega_prime.grokbot.tokens revoke --file /run/secrets/omega_prime_tokens.json tok_1a2b3c4d
+```
+
+`rotate` takes `--label LABEL` or `--id ID` (exactly one), prints the new
+plaintext exactly once to stdout (the id goes to stderr), and links the two
+entries via `rotated_from`/`rotated_to` digests visible in `list --json`.
+Use `--dry-run` with `--label`/`--id` to preview without mutating.
+The audit event lands in `<store-dir>/grokbot_audit.jsonl` unless
+`--audit-file PATH` names the deployment's chain file.
+
+Scheduled rotation rides the existing cron heartbeat — no new scheduler.
+First do a dry run, then enable:
+
+```bash
+.venv/bin/python -m omega_prime.grokbot.tokens rotate --file /run/secrets/omega_prime_tokens.json --due-only --dry-run
+export OMEGA_PRIME_ROTATION_ENABLED=1
+export OMEGA_PRIME_ROTATION_OVERLAP_HOURS=24
+```
+
+The same two keys live in `omega-prime.json` as
+`{"rotation": {"enabled": false, "overlap_hours": 24}}` (off by default;
+file values merge under environment overrides). Invalid
+`OMEGA_PRIME_ROTATION_OVERLAP_HOURS` values warn on stderr and fall back to
+the default — config loading never crashes and never silently enables
+rotation.
+
+Create one heartbeat job (via `heartbeat_set`) whose prompt runs the
+explicit command on an explicit store path, for example:
+
+```text
+session: ops-token-rotation
+prompt: Run `.venv/bin/python -m omega_prime.grokbot.tokens rotate
+  --file /run/secrets/omega_prime_tokens.json --due-only` and report the
+  stderr summary. If it prints a disabled-configuration skip line, do
+  nothing. Never print a token plaintext anywhere except the command's own
+  stdout capture; restrict access to the job log the same way you restrict
+  the token file (0600, operators only).
+interval: daily (86400 seconds), or faster than the smallest token TTL you use.
+```
+
+With `rotation.enabled` false the job prints one skip line
+(`rotation disabled by configuration ...; skipping`) and mutates nothing —
+that is the expected output until the flag is on. `rotate --due-only`
+rotates only entries expiring within the window (default: the configured
+`rotation.overlap_hours`, or `--overlap-hours` when given), exits 0 with a
+`no tokens due for rotation` line when there is nothing to do (exit 1 is
+reserved for real errors), and treats an unreadable audit log as a stderr
+warning rather than a failure. Manage the job with `heartbeat_list` /
+`heartbeat_clear`.
+
+Overlap sizing: keep the CLI default (1h) for manual rotations and 24h for
+scheduled runs unless tokens live long enough to need more. Smaller windows
+bound the exposure when both tokens leak; either token can still be revoked
+immediately at any point inside the window.
+
+Rollback: set `OMEGA_PRIME_ROTATION_ENABLED=0` (or the node key false) — the
+heartbeat job skips and nothing rotates. Already-overlapping entries keep
+their horizon expiry; revoke either side immediately with the pre-existing
+`revoke` command.
+
+Visibility: `/metrics` (same scope-gated endpoint as before) exposes
+`omega_token_rotations_total` (completed rotations),
+`omega_token_expiry_total` (entries observed expired, overlap-close or TTL),
+and `omega_token_active{label_hash}` (live entries per SHA-256 label hash —
+never the raw label). Denials still surface on
+`omega_tool_denials_total{code}`. Verify the chain after one rotation with
+`python -m omega_prime.grokbot.audit verify` and confirm the newest record
+is `token_rotated` with no token material in the file.
+
 ## Contributor CI
 
 The `verify`, `lint`, and `types` jobs each run on Python 3.12, 3.13,

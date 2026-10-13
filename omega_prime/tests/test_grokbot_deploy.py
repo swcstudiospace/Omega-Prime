@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import configparser
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -894,3 +895,179 @@ def test_promotion_with_staging_and_approval_is_quiet(tmp_path: Path) -> None:
     (out / "staging-receipt.json").write_text('{"ok": true}\n', encoding="utf-8")
     (out / "approval.json").write_text('{"approver": "oncall"}\n', encoding="utf-8")
     assert check(out) == []
+
+
+# ------------------------------------------------- staged rollout and promotion
+
+_DRILL_DIGEST = "sha256:" + hashlib.sha256(b"omega-prime-80-02-drill").hexdigest()
+_OTHER_DIGEST = "sha256:" + hashlib.sha256(b"omega-prime-80-02-other").hexdigest()
+
+
+def _promotion_dir(tmp_path: Path, *, digest: str = _DRILL_DIGEST) -> Path:
+    out = _rendered(tmp_path, "k8s")
+    (out / "promotion.yaml").write_text("promotion: true\n", encoding="utf-8")
+    (out / "staging-receipt.json").write_text('{"ok": true}\n', encoding="utf-8")
+    (out / "approval.json").write_text('{"approver": "oncall"}\n', encoding="utf-8")
+    (out / "image.digest").write_text(digest + "\n", encoding="utf-8")
+    return out
+
+
+def _evidence(out: Path) -> list[dict[str, Any]]:
+    paths = sorted(out.glob("*promotion*evidence*.json"))
+    assert paths, "expected a promotion evidence file"
+    return [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+
+
+# NOTE: healthcheck tests use socket-free scripted probes only (no _free_port).
+
+
+def test_promote_staged_without_staging_evidence_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _rendered(tmp_path, "k8s")
+    (out / "promotion.yaml").write_text("promotion: true\n", encoding="utf-8")
+    approval = out / "approval.json"
+    approval.write_text('{"approver": "oncall"}\n', encoding="utf-8")
+    assert deploy.promote(_DRILL_DIGEST, out, approval) == 1
+    assert list(out.glob("*promotion*evidence*.json")) == []
+
+
+def test_promote_staged_success_writes_evidence_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _promotion_dir(tmp_path)
+    assert deploy.promote(_DRILL_DIGEST, out, out / "approval.json") == 0
+    first = _evidence(out)[-1]
+    assert first["promoted_digest"] == _DRILL_DIGEST
+    assert first["previous_digest"] is None
+    assert first["approval"]["content"]
+    assert "timestamp" in first
+    (out / "image.digest").write_text(_OTHER_DIGEST + "\n", encoding="utf-8")
+    assert deploy.promote(_OTHER_DIGEST, out, out / "approval.json") == 0
+    second = _evidence(out)[-1]
+    assert second["promoted_digest"] == _OTHER_DIGEST
+    assert second["previous_digest"] == _DRILL_DIGEST
+
+
+def test_promote_digest_mismatch_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _promotion_dir(tmp_path)
+    assert deploy.promote(_OTHER_DIGEST, out, out / "approval.json") == 1
+    assert list(out.glob("*promotion*evidence*.json")) == []
+
+
+def test_promote_empty_digest_file_refuses_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A present-but-empty .digest refuses instead of skipping the check."""
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _promotion_dir(tmp_path)
+    (out / "image.digest").write_text("\n", encoding="utf-8")
+    assert deploy.promote(_DRILL_DIGEST, out, out / "approval.json") == 1
+    assert list(out.glob("*promotion*evidence*.json")) == []
+
+
+def test_promote_malformed_digest_file_refuses_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A .digest with no digest token refuses instead of passing anything."""
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _promotion_dir(tmp_path)
+    (out / "image.digest").write_text("pending manual review\n", encoding="utf-8")
+    assert deploy.promote(_DRILL_DIGEST, out, out / "approval.json") == 1
+    assert list(out.glob("*promotion*evidence*.json")) == []
+
+
+def test_promote_unreadable_digest_file_refuses_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable .digest refuses instead of skipping the check."""
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _promotion_dir(tmp_path)
+    digest_file = out / "image.digest"
+    digest_file.write_text(_DRILL_DIGEST + "\n", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def _boom(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == digest_file:
+            raise OSError("EACCES: permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    assert deploy.promote(_DRILL_DIGEST, out, out / "approval.json") == 1
+    assert list(out.glob("*promotion*evidence*.json")) == []
+
+
+def test_promote_direct_requires_env_and_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = _promotion_dir(tmp_path)
+    approval = out / "approval.json"
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    assert deploy.promote(_DRILL_DIGEST, out, approval, direct=True) == 1
+    monkeypatch.setenv(deploy.ROLLOUT_ENV_VAR, "direct")
+    assert deploy.promote(_DRILL_DIGEST, out, approval) == 1
+    assert deploy.promote(_DRILL_DIGEST, out, approval, direct=True) == 0
+    assert _evidence(out)[-1]["rollout"] == "direct"
+
+
+def test_healthcheck_dead_port_fails(tmp_path: Path) -> None:
+    out = _rendered(tmp_path, "k8s")
+    seen: list[str] = []
+
+    def _refuse(url: str) -> bool:
+        seen.append(url)
+        return False
+
+    assert deploy.healthcheck("k8s", out, probe=_refuse) == 1
+    assert [url.split("/")[-1] for url in seen] == ["healthz"] * 3
+
+
+def test_healthcheck_passes_with_scripted_probe(tmp_path: Path) -> None:
+    out = _rendered(tmp_path, "k8s")
+    seen: list[str] = []
+
+    def _serve(url: str) -> bool:
+        seen.append(url)
+        return True
+
+    assert deploy.healthcheck("k8s", out, probe=_serve) == 0
+    assert [url.split("/")[-1] for url in seen] == ["healthz", "readyz"]
+
+
+def test_healthcheck_default_probe_is_stdlib_urlopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = _rendered(tmp_path, "k8s")
+    calls: list[str] = []
+
+    def _probe(url: str, **_: Any) -> bool:
+        calls.append(url)
+        return True
+
+    monkeypatch.setattr(deploy, "_probe_url", _probe)
+    assert deploy.healthcheck("k8s", out) == 0
+    assert [url.split("/")[-1] for url in calls] == ["healthz", "readyz"]
+
+
+def test_healthcheck_unresolvable_dir_exits_2(tmp_path: Path) -> None:
+    assert deploy.healthcheck("k8s", tmp_path / "missing") == 2
+    assert deploy.healthcheck("nope", tmp_path) == 2
+
+
+def test_promotion_warn_then_clear_evidence_sequence(tmp_path: Path) -> None:
+    out = _rendered(tmp_path, "k8s")
+    (out / "promotion.yaml").write_text("promotion: true\n", encoding="utf-8")
+    assert _ids(check(out), "warning") == {
+        "promote-without-staging-evidence",
+        "missing-promotion-approval-record",
+    }
+    assert deploy.main(["check", str(out)]) == 0
+    (out / "staging-receipt.json").write_text('{"ok": true}\n', encoding="utf-8")
+    (out / "approval.json").write_text('{"approver": "oncall"}\n', encoding="utf-8")
+    assert "promote-without-staging-evidence" not in _ids(check(out), "warning")
+    assert "missing-promotion-approval-record" not in _ids(check(out), "warning")

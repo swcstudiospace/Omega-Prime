@@ -7,6 +7,7 @@ tree; a receipt checked against that log must cite commands that actually ran.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -44,8 +45,32 @@ def command_log_path() -> Path:
     raise OSError("refusing to write the command log inside the repo tree")
 
 
-def append_execution(cmd: Any, exit_code: int, output_tail: str, *, cwd: str) -> None:
-    """Append one captured command as a single JSON line."""
+def command_digest(cmd: Any) -> str:
+    """Canonical SHA-256 hex of one cited command (argv-tamper binding).
+
+    The digest runs over the JSON encoding of the command exactly as
+    recorded, so a list argv and its joined-string form digest
+    differently — callers must cite the recorded shape verbatim.
+    """
+    return hashlib.sha256(
+        json.dumps(cmd, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def append_execution(
+    cmd: Any,
+    exit_code: int,
+    output_tail: str,
+    *,
+    cwd: str,
+    policy_sha256: str | None = None,
+) -> None:
+    """Append one captured command as a single JSON line.
+
+    ``policy_sha256`` is the digest of the sandbox policy file the command
+    ran under; recorded only for sandboxed executions (flag-off records
+    keep today's exact shape).
+    """
     path = command_log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -54,6 +79,8 @@ def append_execution(cmd: Any, exit_code: int, output_tail: str, *, cwd: str) ->
         "output_tail": output_tail,
         "cwd": str(cwd),
     }
+    if policy_sha256 is not None:
+        record["policy_sha256"] = policy_sha256
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -81,13 +108,101 @@ def _exit_equal(left: Any, right: Any) -> bool:
     return left == right
 
 
-def validate_receipt(receipt: dict, executions: list | None = None) -> None:
+def _check_sandbox_binding(
+    errors: list[str],
+    index: int,
+    command: dict,
+    matched_record: dict | None,
+    expected_policy_sha256: str | None,
+) -> None:
+    """Tamper-evidence for one sandboxed receipt command (additive).
+
+    Commands without sandbox fields pass untouched. A cited ``argv_sha256``
+    must equal the digest of the cited ``cmd``; a cited
+    ``sandbox_policy_sha256`` must equal the caller's expected digest and,
+    when a captured record matched, the record's ``policy_sha256``.
+    """
+    cited_argv = command.get("argv_sha256")
+    cited_policy = command.get("sandbox_policy_sha256")
+    if cited_argv is None and cited_policy is None:
+        return
+    if cited_argv is not None and (
+        not isinstance(cited_argv, str)
+        or command_digest(command.get("cmd")) != cited_argv
+    ):
+        errors.append(f"commands[{index}] argv_sha256 does not match the cited cmd")
+    if cited_policy is not None:
+        if not isinstance(cited_policy, str):
+            errors.append(
+                f"commands[{index}] sandbox_policy_sha256 is not a digest string"
+            )
+        else:
+            if (
+                expected_policy_sha256 is not None
+                and cited_policy != expected_policy_sha256
+            ):
+                errors.append(
+                    f"commands[{index}] sandbox_policy_sha256 "
+                    "does not match the expected policy"
+                )
+            if matched_record is not None:
+                captured_policy = matched_record.get("policy_sha256")
+                if not isinstance(captured_policy, str):
+                    errors.append(
+                        f"commands[{index}] cites a sandbox binding "
+                        "with no captured policy digest"
+                    )
+                elif cited_policy != captured_policy:
+                    errors.append(
+                        f"commands[{index}] sandbox_policy_sha256 "
+                        "does not match the captured execution"
+                    )
+
+
+def _select_policy_bound(
+    candidates: list[dict], expected_policy_sha256: str | None
+) -> dict | None:
+    """Pick the captured record a receipt command binds to.
+
+    Without an expected policy digest the first same command+exit record
+    wins (historical behavior). With one, records whose ``policy_sha256``
+    equals the expected digest win; digest-less records are only a
+    fallback when no policy-bound record exists, and records bound to a
+    *different* digest never match — an old run under policy A must not
+    approve a receipt expecting policy B.
+    """
+    if not candidates:
+        return None
+    if expected_policy_sha256 is None:
+        return candidates[0]
+    for record in candidates:
+        if record.get("policy_sha256") == expected_policy_sha256:
+            return record
+    for record in candidates:
+        if "policy_sha256" not in record or record.get("policy_sha256") is None:
+            return record
+    return None
+
+
+def validate_receipt(
+    receipt: dict,
+    executions: list | None = None,
+    expected_policy_sha256: str | None = None,
+) -> None:
     """Raise ReceiptError listing every problem. Return when the receipt holds.
 
     ``executions=None`` keeps the structural checks only. A list requires every
     ``commands[]`` entry to equal a captured record on both ``cmd`` and
     ``exit_code``. ``expects_failure`` is still judged on the receipt's own
     exit code.
+
+    Sandbox binding (additive): a command citing ``argv_sha256`` must digest
+    to it over the cited ``cmd`` exactly as recorded, or verification
+    rejects it naming the command index. A command citing
+    ``sandbox_policy_sha256`` must equal ``expected_policy_sha256`` when
+    the caller passes one, and must equal the matched captured record's
+    ``policy_sha256`` when executions are provided. Receipts without
+    sandbox fields validate exactly as before.
     """
     errors: list[str] = []
     commands = receipt.get("commands")
@@ -156,23 +271,41 @@ def validate_receipt(receipt: dict, executions: list | None = None) -> None:
                 continue
             cmd = command.get("cmd")
             exit_code = command.get("exit_code")
-            cmd_seen = False
-            matched = False
-            for record in captured:
-                if not isinstance(record, dict) or record.get("cmd") != cmd:
-                    continue
-                cmd_seen = True
-                if _exit_equal(record.get("exit_code"), exit_code):
-                    matched = True
-                    break
-            if matched:
+            cmd_candidates: list[dict] = [
+                record
+                for record in captured
+                if isinstance(record, dict) and record.get("cmd") == cmd
+            ]
+            if not cmd_candidates:
+                errors.append(f"commands[{index}] was not captured")
                 continue
-            if cmd_seen:
+            exit_candidates: list[dict] = [
+                record
+                for record in cmd_candidates
+                if _exit_equal(record.get("exit_code"), exit_code)
+            ]
+            if not exit_candidates:
                 errors.append(
                     f"commands[{index}] exit_code does not match a captured execution"
                 )
-            else:
-                errors.append(f"commands[{index}] was not captured")
+                continue
+            matched_record = _select_policy_bound(
+                exit_candidates, expected_policy_sha256
+            )
+            if matched_record is None:
+                errors.append(
+                    f"commands[{index}] matches only executions bound to "
+                    "a different policy digest"
+                )
+                continue
+            _check_sandbox_binding(
+                errors, index, command, matched_record, expected_policy_sha256
+            )
+    else:
+        for index, command in enumerate(commands):
+            if not isinstance(command, dict):
+                continue
+            _check_sandbox_binding(errors, index, command, None, expected_policy_sha256)
 
     if errors:
         raise ReceiptError(errors)

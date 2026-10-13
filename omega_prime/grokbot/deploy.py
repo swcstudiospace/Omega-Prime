@@ -13,18 +13,24 @@ platform's probes.
 stable ids (`FINDING_CATALOG`). It is text-based and stdlib-only: YAML files are
 read with a small block-YAML subset reader, so no PyYAML is needed at runtime.
 
-CLI: `python -m omega_prime.grokbot.deploy render|check ...`.
+CLI: `python -m omega_prime.grokbot.deploy render|check|healthcheck|promote ...`.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import json
+import os
 import re
 import shlex
+import shutil
 import sys
-from collections.abc import Iterator, Sequence
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -272,6 +278,7 @@ _DOCKERIGNORE = (
     "venv",
     ".planning",
     "/redteam",
+    "/sidecar",
     "hermes-agent",
     "oh-my-pi",
     "prime-agent",
@@ -1658,6 +1665,293 @@ def check(path: str | Path) -> list[Finding]:
     )
 
 
+# ------------------------------------------------- rollout, healthcheck, promote
+
+# Release rollout mode, read from the environment by `promote`. `staged` is the
+# default: the digest must first appear with staging evidence before it is
+# accepted. `direct` skips the staging wait but needs both the environment
+# variable AND the --direct flag, so one stray setting cannot skip staging.
+ROLLOUT_ENV_VAR = "OMEGA_PRIME_IMAGE_ROLLOUT"
+ROLLOUT_MODES = ("staged", "direct")
+
+# One identifier chains build -> approval -> promote: the publish job digest.
+_DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
+_DIGEST_SEARCH_RE = re.compile(r"sha256:[0-9a-f]{64}")
+
+# Probe paths served by every rendered target (see the k8s liveness/readiness
+# probes and the Docker/compose /healthz healthchecks).
+_HEALTH_PATHS = ("/healthz", "/readyz")
+_PROBE_TIMEOUT = 3.0
+_PROBE_DELAY = 0.1
+
+# Evidence files chain promotions: each one records the digest it promoted and
+# the digest it superseded, so a rollback re-promotes a recorded digest.
+_EVIDENCE_GLOB = "*promotion*evidence*.json"
+
+
+def _read_rollout_mode() -> str:
+    """Rollout mode from the environment; unknown values fall back to staged."""
+    mode = os.environ.get(ROLLOUT_ENV_VAR, "staged").strip().lower() or "staged"
+    return mode if mode in ROLLOUT_MODES else "staged"
+
+
+def _digest_tokens(text: str) -> set[str]:
+    """Every publish-digest token in a blob of text."""
+    return set(_DIGEST_SEARCH_RE.findall(text))
+
+
+def _newest_evidence(directory: Path) -> Path | None:
+    """Newest promotion evidence file in `directory`, or None on first promotion."""
+    matches = sorted(directory.glob(_EVIDENCE_GLOB))
+    return matches[-1] if matches else None
+
+
+def _resolve_probe_port(target: str, directory: Path) -> int:
+    """Port the rendered target serves probes on; DEFAULT_PORT when unresolvable."""
+    patterns = (
+        r"containerPort\s*:\s*(\d+)",
+        r"EXPOSE\s+(\d+)",
+        r"--port[= ](\d+)",
+        r"127\.0\.0\.1:(\d+):",
+    )
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    port = int(match.group(1))
+                except ValueError:
+                    continue
+                if 1 <= port <= 65535:
+                    return port
+    return DEFAULT_PORT
+
+
+def _probe_attempts(directory: Path) -> int:
+    """Per-probe attempts from the rendered retry budget (failureThreshold/retries).
+
+    The total per-probe time (attempts x timeout) stays inside the rendered
+    budget (k8s periodSeconds x failureThreshold, Docker interval x retries).
+    """
+    attempts = 0
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for pattern in (r"failureThreshold\s*:\s*(\d+)", r"--retries[= ](\d+)"):
+            for match in re.finditer(pattern, text):
+                with contextlib.suppress(ValueError):
+                    attempts = max(attempts, int(match.group(1)))
+    # Clamped to 3: the k8s startupProbe failureThreshold (30) is a slow-start
+    # allowance, not a per-probe retry count, so it must not inflate attempts.
+    return min(max(attempts or 3, 1), 3)
+
+
+def _probe_url(url: str, *, timeout: float = _PROBE_TIMEOUT) -> bool:
+    """True when one probe GET returns 200; any failure or other status is False."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.status == 200
+    except OSError:
+        return False
+
+
+def healthcheck(
+    target: str,
+    directory: str | Path,
+    *,
+    probe: Callable[[str], bool] | None = None,
+) -> int:
+    """Probe the rendered /healthz then /readyz paths; 0 only when both pass.
+
+    Returns 2 when the target is unknown or the directory cannot be resolved,
+    1 on the first failed probe after the rendered retry budget is spent.
+    `probe` is an injectable single-GET seam (takes the probe URL, returns
+    True on HTTP 200); the default is the stdlib urllib probe used in
+    production. Tests MUST pass a scripted probe — never a live socket.
+    """
+    if target not in TARGETS:
+        print(f"deploy: unknown target {target!r}", file=sys.stderr)
+        return 2
+    root = Path(directory)
+    if not root.is_dir():
+        print(f"deploy: no such directory: {root}", file=sys.stderr)
+        return 2
+    entries = [p for p in sorted(root.rglob("*")) if p.is_file()]
+    if not entries:
+        print(f"deploy: no files to resolve probes from: {root}", file=sys.stderr)
+        return 2
+    port = _resolve_probe_port(target, root)
+    attempts = _probe_attempts(root)
+    probe_fn = _probe_url if probe is None else probe
+    for probe_path in _HEALTH_PATHS:
+        url = f"http://127.0.0.1:{port}{probe_path}"
+        passed = False
+        for attempt in range(attempts):
+            if probe_fn(url):
+                passed = True
+                break
+            if attempt + 1 < attempts:
+                time.sleep(_PROBE_DELAY)
+        if not passed:
+            print(
+                f"deploy: healthcheck {target} {probe_path} failed "
+                f"(port {port}, {attempts} attempt(s))",
+                file=sys.stderr,
+            )
+            return 1
+    print(f"deploy: healthcheck {target} ok (port {port})")
+    return 0
+
+
+def promote(
+    digest: str,
+    directory: str | Path,
+    approval: str | Path,
+    *,
+    direct: bool = False,
+) -> int:
+    """Promote one publish digest with staging-first evidence; never rebuilds.
+
+    Staged (default) refuses without a staging receipt (*staging*) or image
+    digest (*.digest) file in the directory. Direct additionally requires BOTH
+    OMEGA_PRIME_IMAGE_ROLLOUT=direct and direct=True. A supplied digest that
+    does not match the .digest file content refuses. On success writes a
+    promotion evidence JSON chaining promoted/previous digest, approval, and
+    timestamp, and prints its path. Returns 0 on success, 1 on gate refusal,
+    2 on bad usage.
+    """
+    if not _DIGEST_RE.match(digest or ""):
+        print(
+            "deploy: digest must be a publish digest (sha256:<64 hex>)",
+            file=sys.stderr,
+        )
+        return 2
+    root = Path(directory)
+    if not root.is_dir():
+        print(f"deploy: no such directory: {root}", file=sys.stderr)
+        return 2
+    record = Path(approval)
+    if not record.is_file():
+        print(f"deploy: no such approval record: {record}", file=sys.stderr)
+        return 2
+    mode = _read_rollout_mode()
+    if direct and mode != "direct":
+        print(
+            f"deploy: --direct requires {ROLLOUT_ENV_VAR}=direct "
+            f"(current mode: {mode})",
+            file=sys.stderr,
+        )
+        return 1
+    if mode == "direct" and not direct:
+        print(
+            f"deploy: direct promotion requires both {ROLLOUT_ENV_VAR}=direct "
+            "and the --direct flag",
+            file=sys.stderr,
+        )
+        return 1
+    peers = [p for p in sorted(root.rglob("*")) if p.is_file()]
+    if not any(_is_staging_evidence(p.name) for p in peers):
+        print(
+            "deploy: staged promotion refused: no staging receipt (*staging*) "
+            "or image digest (*.digest) file in the directory",
+            file=sys.stderr,
+        )
+        return 1
+    approval_ok = any(_is_approval_record(p.name) for p in peers) or (
+        _is_approval_record(record.name)
+    )
+    if not approval_ok:
+        print(
+            "deploy: staged promotion refused: no approval (*approv*) or audit "
+            "(*audit*) record",
+            file=sys.stderr,
+        )
+        return 1
+    known: set[str] = set()
+    unreadable: list[str] = []
+    for path in peers:
+        if not path.name.lower().endswith(".digest"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            unreadable.append(path.name)
+            continue
+        tokens = _digest_tokens(text)
+        if not tokens:
+            # Present but empty or malformed: fail closed, never silently
+            # skip — otherwise any supplied digest would succeed.
+            unreadable.append(path.name)
+            continue
+        known |= tokens
+    if unreadable:
+        print(
+            "deploy: promotion refused: unreadable or malformed .digest file "
+            f"({', '.join(sorted(unreadable))}); refusing fail-closed rather "
+            "than promoting without digest evidence",
+            file=sys.stderr,
+        )
+        return 1
+    if known and digest not in known:
+        print(
+            "deploy: promotion refused: digest does not match the .digest file; "
+            "promote the approved digest verbatim, never rebuild",
+            file=sys.stderr,
+        )
+        return 1
+    previous: str | None = None
+    newest = _newest_evidence(root)
+    if newest is not None:
+        try:
+            prior = json.loads(newest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            prior = {}
+        if isinstance(prior, dict) and isinstance(prior.get("promoted_digest"), str):
+            previous = prior["promoted_digest"]
+    try:
+        approval_text = record.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"deploy: cannot read approval record: {exc}", file=sys.stderr)
+        return 2
+    if not any(p.name == record.name for p in peers if p.parent == root):
+        dest_name = (
+            record.name
+            if _is_approval_record(record.name)
+            else f"approval-{record.name}"
+        )
+        dest = root / dest_name
+        if not dest.exists():
+            with contextlib.suppress(OSError):
+                shutil.copyfile(record, dest)
+    stamp = datetime.datetime.now(datetime.UTC)
+    evidence = {
+        "promoted_digest": digest,
+        "previous_digest": previous,
+        "approval": {"record": record.name, "content": approval_text},
+        "rollout": "direct" if mode == "direct" else "staged",
+        "timestamp": stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    out_name = f"promotion-evidence-{stamp.strftime('%Y%m%dT%H%M%S%fZ')}.json"
+    out_path = root / out_name
+    try:
+        out_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        print(f"deploy: cannot write evidence: {exc}", file=sys.stderr)
+        return 2
+    print(str(out_path))
+    return 0
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -1682,6 +1976,22 @@ def _build_parser() -> argparse.ArgumentParser:
     check_cmd.add_argument("path", type=Path)
     check_cmd.add_argument(
         "--json", action="store_true", help="machine-readable output"
+    )
+    health_cmd = sub.add_parser(
+        "healthcheck", help="probe the rendered /healthz and /readyz paths"
+    )
+    health_cmd.add_argument("--target", required=True, choices=TARGETS)
+    health_cmd.add_argument("--dir", required=True, type=Path, metavar="DIR")
+    promote_cmd = sub.add_parser(
+        "promote", help="promote one publish digest with staging-first evidence"
+    )
+    promote_cmd.add_argument("--digest", required=True, metavar="sha256:...")
+    promote_cmd.add_argument("--dir", required=True, type=Path, metavar="DIR")
+    promote_cmd.add_argument("--approval", required=True, type=Path, metavar="RECORD")
+    promote_cmd.add_argument(
+        "--direct",
+        action="store_true",
+        help=f"allow direct promotion (also requires {ROLLOUT_ENV_VAR}=direct)",
     )
     return parser
 
@@ -1711,6 +2021,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         for path in paths:
             print(path)
         return 0
+    if args.command == "healthcheck":
+        return healthcheck(args.target, args.dir)
+    if args.command == "promote":
+        return promote(args.digest, args.dir, args.approval, direct=args.direct)
     try:
         findings = check(args.path)
     except OSError as exc:
@@ -1738,11 +2052,15 @@ __all__ = [
     "DEFAULT_PORT",
     "DEFAULT_UID",
     "FINDING_CATALOG",
+    "ROLLOUT_ENV_VAR",
+    "ROLLOUT_MODES",
     "TARGETS",
     "DeployError",
     "Finding",
     "check",
+    "healthcheck",
     "main",
+    "promote",
     "render",
 ]
 

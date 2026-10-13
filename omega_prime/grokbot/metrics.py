@@ -15,6 +15,7 @@ hostile client cannot grow memory by inventing label values.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import threading
@@ -603,6 +604,97 @@ def register_build_info(
     gauge.labels(version=version, package_version=package_version).set(1)
 
 
+# ------------------------------------------------- token rotation series (Phase 82)
+
+TOKEN_ROTATIONS_TOTAL = "omega_token_rotations_total"
+TOKEN_EXPIRY_TOTAL = "omega_token_expiry_total"
+TOKEN_ACTIVE = "omega_token_active"
+TOKEN_LABEL_HASH_LABEL = "label_hash"
+
+
+def token_label_hash(label: str) -> str:
+    """SHA-256 hex of a token label — the only label form metrics may carry."""
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+class TokenMetrics:
+    """Handles for the three token series (registered once per registry).
+
+    `omega_token_rotations_total` advances on every successful `rotate`;
+    `omega_token_expiry_total` advances when `observe` first sees an entry
+    expired (overlap-close or TTL); `omega_token_active{label_hash}` tracks
+    the live-entry count per label hash. Raw labels and token material never
+    become label values. Denial visibility stays on the existing
+    `omega_tool_denials_total{code}` — no denial series here.
+    """
+
+    def __init__(self, registry: MetricsRegistry) -> None:
+        self._rotations = registry.counter(
+            TOKEN_ROTATIONS_TOTAL, "Completed host-token rotations."
+        )
+        self._expiry = registry.counter(
+            TOKEN_EXPIRY_TOTAL,
+            "Token entries observed expired (overlap-close or TTL).",
+        )
+        self._active = registry.gauge(
+            TOKEN_ACTIVE,
+            "Live token entries by label hash.",
+            (TOKEN_LABEL_HASH_LABEL,),
+        )
+        self._known_hashes: set[str] = set()
+        self._expired_ids: set[str] = set()
+
+    def record_rotation(self, n: float = 1.0) -> None:
+        """Count `n` completed rotations (called once per successful rotate)."""
+        self._rotations.inc(n)
+
+    def record_expiry(self, n: float = 1.0) -> None:
+        """Count `n` entries that transitioned to expired."""
+        self._expiry.inc(n)
+
+    def set_active(self, label_hash_value: str, count: float) -> None:
+        """Set the live-entry gauge for one label hash."""
+        self._active.labels(label_hash=label_hash_value).set(count)
+        self._known_hashes.add(label_hash_value)
+
+    def observe(self, records: Sequence[Any], now: float) -> dict[str, Any]:
+        """Sync the gauge from token records; count newly-expired entries.
+
+        `records` are `TokenRecord`-shaped (duck-typed: `.id`, `.label`,
+        `.status(now)`). Stale label hashes reset to 0 so a fully-rotated
+        label does not pin a ghost series. Returns
+        `{"live": ..., "expired": ..., "newly_expired": [...]}`.
+        """
+        live: dict[str, int] = {}
+        expired_now: set[str] = set()
+        for record in records:
+            status = record.status(now)
+            if status == "active":
+                digest = token_label_hash(record.label)
+                live[digest] = live.get(digest, 0) + 1
+            elif status == "expired":
+                expired_now.add(record.id)
+        for known in self._known_hashes - live.keys():
+            self._active.labels(label_hash=known).set(0)
+        for digest, count in live.items():
+            self._active.labels(label_hash=digest).set(count)
+        self._known_hashes |= live.keys()
+        newly = sorted(expired_now - self._expired_ids)
+        if newly:
+            self._expiry.inc(len(newly))
+        self._expired_ids |= expired_now
+        return {
+            "live": sum(live.values()),
+            "expired": len(expired_now),
+            "newly_expired": newly,
+        }
+
+
+def register_token_metrics(registry: MetricsRegistry) -> TokenMetrics:
+    """Register (or fetch) the three token series; return their handles."""
+    return TokenMetrics(registry)
+
+
 class MetricsEndpoint:
     """Raw ASGI endpoint serving the registry; requires a principal with a scope.
 
@@ -659,6 +751,10 @@ __all__ = [
     "CONTENT_TYPE",
     "DEFAULT_BUCKETS",
     "DEFAULT_PATH_GROUPS",
+    "TOKEN_ACTIVE",
+    "TOKEN_EXPIRY_TOTAL",
+    "TOKEN_LABEL_HASH_LABEL",
+    "TOKEN_ROTATIONS_TOTAL",
     "Counter",
     "Gauge",
     "Histogram",
@@ -666,7 +762,10 @@ __all__ = [
     "MetricsInterceptor",
     "MetricsMiddleware",
     "MetricsRegistry",
+    "TokenMetrics",
     "metrics_endpoint",
     "record_auth_failure",
     "register_build_info",
+    "register_token_metrics",
+    "token_label_hash",
 ]

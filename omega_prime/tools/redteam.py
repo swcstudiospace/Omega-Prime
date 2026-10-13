@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import urllib.parse
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +39,58 @@ REDTEAM_TOOL_NAMES = (
 )
 
 DEFAULT_GATEWAY_URL = "http://127.0.0.1:3333"
+
+KILL_ENV_VAR = "OMEGA_PRIME_REDTEAM_KILL"
+
+# Tracked harness state for gateway-boundary hooks. ``None`` (the default)
+# means tracking is off: direct client users and unit tests see zero new
+# behavior. The registry guard enables it on the IDLE path via
+# :func:`sidecar_tracking_start`.
+_sidecar_current: str | None = None
+
+
+def _kill_switch_set(env: Mapping[str, str] | None = None) -> bool:
+    """Whether ``OMEGA_PRIME_REDTEAM_KILL`` aborts everything right now."""
+    source = env if env is not None else os.environ
+    return (source.get(KILL_ENV_VAR) or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def current_sidecar_state() -> str | None:
+    """Tracked harness state, or ``None`` when tracking is off."""
+    return _sidecar_current
+
+
+def sidecar_tracking_start(state: str = "IDLE") -> None:
+    """Enable gateway-boundary transition logging from ``state``."""
+    global _sidecar_current
+    _sidecar_current = state
+
+
+def sidecar_tracking_stop() -> None:
+    """Disable gateway-boundary transition logging."""
+    global _sidecar_current
+    _sidecar_current = None
+
+
+def _sidecar_note(to_state: str, cause: str) -> None:
+    """Best-effort transition from the tracked state. Never raises."""
+    global _sidecar_current
+    if _sidecar_current is None:
+        return
+    try:
+        from sidecar.state import transition
+    except ImportError:
+        return
+    try:
+        transition(_sidecar_current, to_state, cause)
+    except Exception:
+        return
+    _sidecar_current = to_state
 
 
 def _error(code: str, reason: str, **extra: Any) -> dict[str, Any]:
@@ -122,6 +175,7 @@ class RedteamContext:
     bearer_token: str = ""
     timeout: float = 30.0
     request: Any = None  # injected transport; default is the stdlib impl
+    roe: dict[str, Any] | None = None  # signed grant kept from the guard
 
 
 class RedteamClient:
@@ -163,30 +217,93 @@ class RedteamClient:
         return base, None
 
     def _call(
-        self, method: str, path: str, payload: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        tool: str | None = None,
     ) -> dict[str, Any]:
+        # Kill switch aborts in-flight runs at the gateway call boundary,
+        # before any transport I/O. Transition logging is best-effort and
+        # only active once the registry guard starts tracking.
+        if _kill_switch_set():
+            _sidecar_note("BLOCKED", "kill-switch-set")
+            return _error(
+                "killed",
+                "redteam kill switch set (OMEGA_PRIME_REDTEAM_KILL): "
+                "in-flight run aborted at the gateway call boundary",
+                ok=False,
+            )
         base, refusal = self._base_or_error()
         if refusal is not None:
             return refusal
+        grant_refusal = self._grant_or_error(tool)
+        if grant_refusal is not None:
+            return grant_refusal
         request = self.ctx.request or _http_request
+        if _sidecar_current == "IDLE":
+            _sidecar_note("RUNNING", "run-started")
         try:
             status, data = request(
                 base, method, path, payload, self._headers(), self.ctx.timeout
             )
         except (OSError, http.client.HTTPException, TimeoutError) as exc:
+            _sidecar_note("ERROR", "gateway-unreachable")
             return _error(
                 "gateway_unreachable",
                 f"t3mp3st backend unreachable at {base} — start it with "
                 f"npm run server ({type(exc).__name__}: {exc})",
                 ok=False,
             )
+        if _sidecar_current == "RUNNING":
+            _sidecar_note("IDLE", "run-completed")
         return {"ok": bool(200 <= status < 300), "status": status, "data": data}
 
-    def _get(self, path: str) -> dict[str, Any]:
-        return self._call("GET", path)
+    def _grant_or_error(self, tool: str | None) -> dict[str, Any] | None:
+        """Signed-grant enforcement at call time: window, then allowlist.
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._call("POST", path, payload)
+        No grant (direct client use, or the guard resolved none) keeps
+        historical behavior. The kill switch and the gateway refusal run
+        first — this check never precedes them.
+        """
+        from omega_prime.redteam.roe import grant_expired, grant_tool_allowlist
+
+        grant = self.ctx.roe
+        if grant is None:
+            return None
+        expired = grant_expired(grant)
+        if expired is None:
+            return _error(
+                "roe-invalid",
+                "BLOCKED: signed RoE grant has no parseable "
+                "effective_until — re-sign to renew",
+                ok=False,
+            )
+        if expired:
+            return _error(
+                "roe-expired",
+                "BLOCKED: signed RoE grant expired at "
+                f"{grant.get('effective_until')!r} — re-sign to renew",
+                ok=False,
+            )
+        if tool is not None:
+            allowed = grant_tool_allowlist(grant)
+            if allowed is not None and tool not in allowed:
+                return _error(
+                    "roe-tool-denied",
+                    f"BLOCKED: tool {tool!r} is outside the signed RoE "
+                    f"grant (allowed: {sorted(allowed)})",
+                    ok=False,
+                )
+        return None
+
+    def _get(self, path: str, tool: str | None = None) -> dict[str, Any]:
+        return self._call("GET", path, tool=tool)
+
+    def _post(
+        self, path: str, payload: dict[str, Any], tool: str | None = None
+    ) -> dict[str, Any]:
+        return self._call("POST", path, payload, tool=tool)
 
     def status(self) -> dict[str, Any]:
         """Mission + provider status; two GETs composed like the upstream case."""
@@ -195,8 +312,8 @@ class RedteamClient:
             return refusal
         return {
             "tool": "tempest_status",
-            "mission": self._get("/api/mission/status"),
-            "llm": self._get("/api/llm/status"),
+            "mission": self._get("/api/mission/status", tool="tempest_status"),
+            "llm": self._get("/api/llm/status", tool="tempest_status"),
         }
 
     def mission_start(
@@ -210,23 +327,25 @@ class RedteamClient:
         return self._post(
             "/api/mission/start",
             {key: value for key, value in payload.items() if value is not None},
+            tool="tempest_mission_start",
         )
 
     def mission_stop(self) -> dict[str, Any]:
         """Stop the active mission."""
-        return self._post("/api/mission/stop", {})
+        return self._post("/api/mission/stop", {}, tool="tempest_mission_stop")
 
     def report(self, mission_id: Any = None) -> dict[str, Any]:
         """Engagement report for one mission, or the active one."""
         if isinstance(mission_id, str) and mission_id:
             return self._get(
-                f"/api/mission/{urllib.parse.quote(mission_id, safe='')}/report"
+                f"/api/mission/{urllib.parse.quote(mission_id, safe='')}/report",
+                tool="tempest_report",
             )
-        return self._get("/api/mission/report")
+        return self._get("/api/mission/report", tool="tempest_report")
 
     def operators_list(self) -> dict[str, Any]:
         """Backend operators and their states."""
-        return self._get("/api/operators/list")
+        return self._get("/api/operators/list", tool="tempest_operators_list")
 
     def operator_task(
         self,
@@ -240,15 +359,17 @@ class RedteamClient:
         return self._post(
             f"/api/operators/{urllib.parse.quote(operator_id, safe='')}/task",
             {"taskName": task_name, "taskDescription": task_description},
+            tool="tempest_operator_task",
         )
 
     def findings(self, mission_id: Any = None) -> dict[str, Any]:
         """Ledger findings, optionally filtered to one mission."""
         if isinstance(mission_id, str) and mission_id:
             return self._get(
-                f"/api/findings?missionId={urllib.parse.quote(mission_id, safe='')}"
+                f"/api/findings?missionId={urllib.parse.quote(mission_id, safe='')}",
+                tool="tempest_findings",
             )
-        return self._get("/api/findings")
+        return self._get("/api/findings", tool="tempest_findings")
 
     def providers(self) -> dict[str, Any]:
         """Provider + subscription-session state; two GETs composed."""
@@ -257,8 +378,8 @@ class RedteamClient:
             return refusal
         return {
             "tool": "tempest_providers",
-            "llm": self._get("/api/llm/status"),
-            "oauth": self._get("/api/oauth/status"),
+            "llm": self._get("/api/llm/status", tool="tempest_providers"),
+            "oauth": self._get("/api/oauth/status", tool="tempest_providers"),
         }
 
     def purple_synthesize(
@@ -271,6 +392,7 @@ class RedteamClient:
                 "findings": findings if findings is not None else [],
                 "detections": detections if detections is not None else [],
             },
+            tool="tempest_purple_synthesize",
         )
 
     def hats_list(self) -> dict[str, Any]:
@@ -278,8 +400,8 @@ class RedteamClient:
         refusal = self._refusal()
         if refusal is not None:
             return refusal
-        grants = self._get("/api/teams/tool-grants")
-        prompts = self._get("/api/operators/prompts")
+        grants = self._get("/api/teams/tool-grants", tool="tempest_hats_list")
+        prompts = self._get("/api/operators/prompts", tool="tempest_hats_list")
         if not (grants.get("ok") and prompts.get("ok")):
             return {
                 "tool": "tempest_hats_list",
@@ -324,7 +446,9 @@ class RedteamClient:
             return {"ok": False, "error": "hat required"}
         if not isinstance(task, str) or not task:
             return {"ok": False, "error": "task required"}
-        spawned = self._post("/api/operators/spawn", {"archetype": hat})
+        spawned = self._post(
+            "/api/operators/spawn", {"archetype": hat}, tool="tempest_hat_dispatch"
+        )
         if not spawned.get("ok"):
             detail = spawned.get("error") or f"HTTP {spawned.get('status')}"
             return _error(
@@ -357,6 +481,7 @@ class RedteamClient:
         tasked = self._post(
             f"/api/operators/{urllib.parse.quote(operator_id, safe='')}/task",
             {"taskName": task[:120], "taskDescription": quoted},
+            tool="tempest_hat_dispatch",
         )
         if not tasked.get("ok"):
             detail = tasked.get("error") or f"HTTP {tasked.get('status')}"
@@ -380,8 +505,17 @@ class RedteamClient:
         }
 
 
-def register_redteam_tools(registry: ToolRegistry, client: RedteamClient) -> list[str]:
-    """Register the 11 red team tools. Start/stop/task/dispatch need approval."""
+def register_redteam_tools(
+    registry: ToolRegistry,
+    client: RedteamClient,
+    allowed: Collection[str] | None = None,
+) -> list[str]:
+    """Register the red team tools. Start/stop/task/dispatch need approval.
+
+    ``allowed`` is the signed grant's tool allowlist (``None`` means the
+    full eleven): a grant limited to a subset registers only that subset,
+    so a limited grant never enables tools outside the signed scope.
+    """
 
     def _wrap(fn, *args, **kwargs):
         try:
@@ -419,6 +553,8 @@ def register_redteam_tools(registry: ToolRegistry, client: RedteamClient) -> lis
         "tempest_hat_dispatch",
     }
     for name in REDTEAM_TOOL_NAMES:
+        if allowed is not None and name not in allowed:
+            continue
         description, parameters = _SCHEMAS[name]
         registry.register(
             name,
@@ -427,7 +563,7 @@ def register_redteam_tools(registry: ToolRegistry, client: RedteamClient) -> lis
             handlers[name],
             requires_approval=(name in approvals),
         )
-    return list(REDTEAM_TOOL_NAMES)
+    return [name for name in REDTEAM_TOOL_NAMES if allowed is None or name in allowed]
 
 
 def _object(properties: dict, required: list[str]) -> dict:
@@ -536,9 +672,13 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
 
 __all__ = [
     "DEFAULT_GATEWAY_URL",
+    "KILL_ENV_VAR",
     "REDTEAM_TOOL_NAMES",
     "RedteamClient",
     "RedteamContext",
+    "current_sidecar_state",
     "register_redteam_tools",
     "resolve_bearer_token",
+    "sidecar_tracking_start",
+    "sidecar_tracking_stop",
 ]

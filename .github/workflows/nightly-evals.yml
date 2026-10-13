@@ -1,0 +1,90 @@
+name: nightly-evals
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-evals-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: pip install -e .
+      - name: run deterministic suite
+        id: suite
+        run: python3 -m omega_prime.evals.runner omega_prime/evals/cases
+      - name: run rubric suite
+        id: rubric
+        run: python3 -m omega_prime.evals.runner --rubric omega_prime/evals/cases/rubric_cases.json --output rubric-report.json
+      - name: check for judge key
+        id: gate
+        env:
+          KEY_SET: ${{ secrets.OMEGA_PRIME_EVALS_JUDGE_API_KEY != '' }}
+        run: echo "has_key=$KEY_SET" >> "$GITHUB_OUTPUT"
+      - name: report judge skip
+        if: steps.gate.outputs.has_key != 'true'
+        run: echo "judge steps skipped - OMEGA_PRIME_EVALS_JUDGE_API_KEY is not configured (deterministic + rubric still run)"
+      - name: append history
+        if: always()
+        run: |
+          python3 -m omega_prime.evals.history --report rubric-report.json --history .omega-evals/history.ndjson
+      - name: trend check
+        if: always()
+        run: python3 -m omega_prime.evals.trend --history .omega-evals/history.ndjson
+      - name: compare against baseline
+        if: always()
+        run: python3 -m omega_prime.evals.trend check --baseline omega_prime/evals/history-baseline.json --report rubric-report.json
+      - name: attach report artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: evals-report
+          path: |
+            rubric-report.json
+            .omega-evals/history.ndjson
+          if-no-files-found: warn
+      - name: track regression issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="[nightly-evals] eval regression"
+          BODY="Nightly evals regressed (deterministic failure, rubric min_score breach, trend drop, or below history-baseline). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. Artifact: evals-report. Reproduce locally: python3 -m omega_prime.evals.runner --rubric omega_prime/evals/cases/rubric_cases.json --output <report> && python3 -m omega_prime.evals.trend check --baseline omega_prime/evals/history-baseline.json --report <report>. Resolve with a green nightly run or a reviewed --bless PR."
+          gh label create nightly-evals --description "Nightly eval regression tracking" --color B60205 2>/dev/null || true
+          NUM=$(gh issue list --label nightly-evals --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -z "$NUM" ]; then
+            NUM=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          fi
+          if [ -z "$NUM" ]; then
+            gh issue create --title "$TITLE" --label nightly-evals --body "$BODY" 2>/dev/null || gh issue create --title "$TITLE" --body "$BODY"
+          else
+            gh issue comment "$NUM" --body "Still regressing: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}."
+          fi
+      - name: close tracking issue on green
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="[nightly-evals] eval regression"
+          NUM=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh issue close "$NUM" --comment "Green nightly run ${{ github.run_id }}; closing."
+          else
+            echo "nightly-evals: green, no open tracking issue"
+          fi

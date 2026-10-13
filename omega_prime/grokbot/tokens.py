@@ -19,13 +19,14 @@ fails closed: a missing, unreadable, corrupt or wrong-version file denies EVERYO
 sets `degraded` and `degraded_reason` (never file contents), and `enabled` stays True
 so a bad file can never mean "no authentication". A later good file clears the state.
 
-CLI: `python -m omega_prime.grokbot.tokens {new,list,revoke}`.
+CLI: `python -m omega_prime.grokbot.tokens {new,list,revoke,rotate}`.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import hmac
 import json
 import os
@@ -68,6 +69,8 @@ FORMAT_VERSION = 1
 TOKEN_ID_PREFIX = "tok_"
 DEFAULT_RELOAD_INTERVAL = 1.0
 DEFAULT_CLI_SCOPES = (SCOPE_READ, SCOPE_CALL)
+DEFAULT_CLI_OVERLAP_HOURS = 1.0
+DEFAULT_SCHEDULED_OVERLAP_HOURS = 24.0
 
 STATUS_ACTIVE = "active"
 STATUS_EXPIRED = "expired"
@@ -120,6 +123,12 @@ class TokenRecord:
     created_at: str
     expires_at: str | None = None
     revoked_at: str | None = None
+    # Key versioning (Phase 82 rotation). Entry hashes, not token material:
+    # `rotated_from` is the predecessor entry's `sha256` digest (or null when
+    # this entry was minted by `new`), `rotated_to` the successor's digest
+    # (or null while this entry is the lineage head).
+    rotated_from: str | None = None
+    rotated_to: str | None = None
 
     def status(self, now: float) -> str:
         """`revoked`, `expired` (when `now >= expires_at`) or `active`."""
@@ -138,6 +147,8 @@ class TokenRecord:
             "created_at": self.created_at,
             "expires_at": self.expires_at,
             "revoked_at": self.revoked_at,
+            "rotated_from": self.rotated_from,
+            "rotated_to": self.rotated_to,
         }
 
     def public_json(self, now: float) -> dict[str, Any]:
@@ -158,6 +169,16 @@ def _optional_time(raw: dict[str, Any], key: str) -> str | None:
         _parse_time(value)
     except ValueError as exc:
         raise TokenFileError(f"token record field {key!r} is not ISO-8601") from exc
+    return value
+
+
+def _optional_str(raw: dict[str, Any], key: str) -> str | None:
+    """An optional string field; absent (pre-plan files) reads as null."""
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TokenFileError(f"token record field {key!r} must be a string or null")
     return value
 
 
@@ -195,6 +216,8 @@ def _record_from_json(raw: Any) -> TokenRecord:
         created_at=created,
         expires_at=_optional_time(raw, "expires_at"),
         revoked_at=_optional_time(raw, "revoked_at"),
+        rotated_from=_optional_str(raw, "rotated_from"),
+        rotated_to=_optional_str(raw, "rotated_to"),
     )
 
 
@@ -311,12 +334,283 @@ def revoke_token(path: Path | str, token_id: str, *, clock: Clock = time.time) -
                         created_at=record.created_at,
                         expires_at=record.expires_at,
                         revoked_at=_format_time(clock()),
+                        rotated_from=record.rotated_from,
+                        rotated_to=record.rotated_to,
                     )
                     changed = True
             updated.append(record)
         if changed:
             _write_records(target, updated)
     return found
+
+
+_SECONDS_PER_HOUR = 3600
+
+
+def label_hash(label: str) -> str:
+    """SHA-256 hex of a token label (the only label form that leaves the process)."""
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def default_audit_file_for(store_path: Path | str) -> Path:
+    """Where `rotate` writes its audit event when `--audit-file` is absent."""
+    return Path(store_path).parent / "grokbot_audit.jsonl"
+
+
+def _append_rotation_audit(
+    audit_path: Path | str | None,
+    *,
+    old: TokenRecord,
+    new: TokenRecord,
+    overlap_hours: float,
+) -> None:
+    """Append one hash-only `token_rotated` event; never raises.
+
+    A failing or read-only audit log must never block the rotation itself, so
+    every failure degrades to one stderr line. The plaintext token never
+    crosses this call — only digests and the label hash.
+    """
+    if audit_path is None:
+        return
+    try:
+        from omega_prime.grokbot.audit import GrokBotAuditTracer
+
+        tracer = GrokBotAuditTracer(audit_path)
+        tracer.log_event(
+            "token_rotated",
+            caller="tokens-cli",
+            status="ok",
+            details={
+                "label_hash": label_hash(old.label),
+                "old_entry_hash": old.sha256,
+                "new_entry_hash": new.sha256,
+                "overlap_hours": overlap_hours,
+            },
+        )
+    except Exception as exc:
+        print(
+            f"warning: rotation audit write failed ({exc}); continuing", file=sys.stderr
+        )
+
+
+def _select_rotation_target(
+    records: Sequence[TokenRecord],
+    *,
+    label: str | None,
+    token_id: str | None,
+) -> TokenRecord:
+    """The entry a manual `rotate` replaces (raises `TokenFileError` when none)."""
+    if token_id is not None:
+        for record in records:
+            if record.id == token_id:
+                return record
+        raise TokenFileError(f"unknown token id {token_id}")
+    assert label is not None
+    matching = [record for record in records if record.label == label]
+    if not matching:
+        raise TokenFileError(f"no token with label {label!r}")
+    # Prefer lineage heads (never superseded); newest wins. A fully-superseded
+    # label falls back to its newest entry so an explicit rotate still works.
+    heads = [record for record in matching if record.rotated_to is None]
+    pool = heads or matching
+    return max(pool, key=lambda record: (record.created_at, record.id))
+
+
+def _mint_replacement(
+    records: Sequence[TokenRecord],
+    old: TokenRecord,
+    now: float,
+    overlap_hours: float,
+) -> tuple[str, TokenRecord, TokenRecord, list[TokenRecord]]:
+    """Mint the successor for `old`; pure record surgery, no I/O or locking.
+
+    Returns `(plaintext, stamped_old, new, updated)`. The caller MUST hold the
+    store lock across select → mint → write so a concurrent run cannot mint a
+    second successor for the same entry.
+    """
+    horizon = now + overlap_hours * _SECONDS_PER_HOUR
+    plaintext = generate_token()
+    used = {record.id for record in records}
+    new_id = f"{TOKEN_ID_PREFIX}{secrets.token_hex(4)}"
+    while new_id in used:
+        new_id = f"{TOKEN_ID_PREFIX}{secrets.token_hex(4)}"
+    new = TokenRecord(
+        id=new_id,
+        sha256=hash_token(plaintext),
+        scopes=old.scopes,
+        label=old.label,
+        created_at=_format_time(now),
+        expires_at=None,
+        revoked_at=None,
+        rotated_from=old.sha256,
+    )
+    old_expires = None if old.expires_at is None else _parse_time(old.expires_at)
+    clamped = _format_time(horizon)
+    # The successor link is unconditional (first successor wins) so every
+    # rotation stays reconstructable and the old entry never stays due;
+    # the horizon only ever shortens expiry, never extends it.
+    stamped_old = TokenRecord(
+        id=old.id,
+        sha256=old.sha256,
+        scopes=old.scopes,
+        label=old.label,
+        created_at=old.created_at,
+        expires_at=(
+            clamped if old_expires is None or old_expires > horizon else old.expires_at
+        ),
+        revoked_at=old.revoked_at,
+        rotated_from=old.rotated_from,
+        rotated_to=old.rotated_to if old.rotated_to is not None else new.sha256,
+    )
+    updated = [stamped_old if record.id == old.id else record for record in records]
+    updated.append(new)
+    return plaintext, stamped_old, new, updated
+
+
+def _emit_rotation_effects(
+    store_path: Path,
+    audit_file: Any,
+    *,
+    old: TokenRecord,
+    new: TokenRecord,
+    overlap_hours: float,
+    metrics: Any | None,
+) -> None:
+    """Audit + metrics side effects of one rotation; runs outside the lock."""
+    resolved = default_audit_file_for(store_path) if audit_file is ... else audit_file
+    _append_rotation_audit(resolved, old=old, new=new, overlap_hours=overlap_hours)
+    if metrics is not None:
+        try:
+            metrics.record_rotation()
+        except Exception as exc:  # never block rotation on metrics
+            print(
+                f"warning: token metrics record_rotation failed: {exc}", file=sys.stderr
+            )
+
+
+def rotate_token(
+    path: Path | str,
+    *,
+    label: str | None = None,
+    token_id: str | None = None,
+    overlap_hours: float = DEFAULT_CLI_OVERLAP_HOURS,
+    clock: Clock = time.time,
+    audit_file: Any = ...,
+    metrics: Any | None = None,
+) -> tuple[str, TokenRecord, TokenRecord]:
+    """Mint a replacement for one entry, linked by `rotated_from`/`rotated_to`.
+
+    Returns `(plaintext, old_record, new_record)`. The plaintext is printed by
+    the caller exactly once and never stored or logged. The old entry keeps
+    authenticating until `mint_time + overlap_hours` — implemented by clamping
+    its `expires_at` down to that horizon on the same expiry path `--ttl-days`
+    uses — then reads as expired. Revocation bypasses the window entirely
+    (use `revoke_token` for break-glass). `audit_file=None` disables the audit
+    event; the default (`...`) resolves to the store's sibling chain file.
+    `metrics` is an optional `TokenMetrics`-shaped handle (duck-typed:
+    `.record_rotation()`); each successful rotation records exactly once.
+    A metrics failure never blocks rotation — it warns on stderr.
+    """
+    if (label is None) == (token_id is None):
+        raise ValueError("rotate needs exactly one of label= or token_id=")
+    if not (overlap_hours > 0 and overlap_hours != float("inf")):
+        raise ValueError("overlap_hours must be a positive finite number")
+    target = Path(path)
+    now = clock()
+    with _exclusive_lock(target):
+        records = _read_records(target)
+        old = _select_rotation_target(records, label=label, token_id=token_id)
+        plaintext, stamped_old, new, updated = _mint_replacement(
+            records, old, now, overlap_hours
+        )
+        _write_records(target, updated)
+    _emit_rotation_effects(
+        target,
+        audit_file,
+        old=stamped_old,
+        new=new,
+        overlap_hours=overlap_hours,
+        metrics=metrics,
+    )
+    return plaintext, stamped_old, new
+
+
+def due_for_rotation(
+    records: Sequence[TokenRecord], now: float, overlap_hours: float
+) -> list[TokenRecord]:
+    """Entries the scheduled job should replace: expiring within the window.
+
+    An entry is due when it is unrevoked, never superseded (`rotated_to` is
+    null), carries an `expires_at`, and `expires_at - now <= overlap_hours`.
+    Entries without expiry never come due; already-expired entries count as
+    due (negative remainder) so a stalled scheduler self-heals once per label.
+    """
+    window = overlap_hours * _SECONDS_PER_HOUR
+    due: list[TokenRecord] = []
+    for record in records:
+        if record.revoked_at is not None or record.rotated_to is not None:
+            continue
+        if record.expires_at is None:
+            continue
+        if _parse_time(record.expires_at) - now <= window:
+            due.append(record)
+    return due
+
+
+def rotate_due_tokens(
+    path: Path | str,
+    *,
+    overlap_hours: float,
+    clock: Clock = time.time,
+    audit_file: Any = ...,
+    metrics: Any | None = None,
+) -> list[tuple[str, TokenRecord, TokenRecord]]:
+    """Rotate every due entry once; a second run mints nothing (fresh entries
+    carry no expiry, superseded ones are excluded from `due_for_rotation`).
+    The due recheck and the mint share ONE lock per entry, so two concurrent
+    scheduled runs cannot both mint: the loser re-reads a superseded entry
+    and skips it. `metrics`, when given, is forwarded to each rotation so
+    every successful rotation records exactly once."""
+    target = Path(path)
+    now = clock()
+    with _exclusive_lock(target):
+        due_ids = {
+            record.id
+            for record in due_for_rotation(_read_records(target), now, overlap_hours)
+        }
+    rotated: list[tuple[str, TokenRecord, TokenRecord]] = []
+    for token_id in sorted(due_ids):
+        # Recheck AND rotate under one lock; a concurrent run that wins the
+        # race leaves this entry superseded, so the loser skips it here
+        # instead of minting a second successor.
+        with _exclusive_lock(target):
+            current = _read_records(target)
+            candidates = {record.id: record for record in current}
+            candidate = candidates.get(token_id)
+            if (
+                candidate is None
+                or candidate.revoked_at is not None
+                or candidate.rotated_to is not None
+            ):
+                continue
+            if token_id not in {
+                record.id for record in due_for_rotation(current, now, overlap_hours)
+            }:
+                continue
+            plaintext, stamped_old, new, updated = _mint_replacement(
+                current, candidate, now, overlap_hours
+            )
+            _write_records(target, updated)
+        _emit_rotation_effects(
+            target,
+            audit_file,
+            old=stamped_old,
+            new=new,
+            overlap_hours=overlap_hours,
+            metrics=metrics,
+        )
+        rotated.append((plaintext, stamped_old, new))
+    return rotated
 
 
 @dataclass(frozen=True)
@@ -483,6 +777,60 @@ class CompositeTokenStore(TokenStore):
         return [p for store in self._stores for p in store.principals()]
 
 
+def non_file_principals(store: TokenStore) -> list[Principal]:
+    """Principals behind `store` with no file backing (single bearer/env token).
+
+    Walks composite children; file-backed stores (anything with a `path`, e.g.
+    `FileTokenStore`) are skipped because the record-based snapshot already
+    counts them. Used by the serve-time active-token snapshot so a combined
+    bearer-token + file store still counts the bearer caller.
+    """
+    found: list[Principal] = []
+    seen: set[int] = set()
+    stack: list[Any] = [store]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        children = getattr(current, "_stores", ())
+        if children:
+            stack.extend(children)
+        elif getattr(current, "path", None) is None:
+            found.extend(current.principals())
+    return found
+
+
+def observe_active_with_bearer(
+    metrics_handle: Any,
+    store: TokenStore,
+    records: Sequence[TokenRecord],
+    now: float,
+) -> None:
+    """Sync the active-token gauge from file `records` plus bearer principals.
+
+    `metrics_handle` is duck-typed (`.observe(records, now)`, `.set_active()`).
+    File records go through `observe` unchanged; each non-file-backed
+    principal (label hash of its known label) is added on top so combined
+    deployments count every caller exactly once.
+    """
+    metrics_handle.observe(records, now)
+    extra = non_file_principals(store)
+    if not extra:
+        return
+    live: dict[str, int] = {}
+    for record in records:
+        if record.status(now) == STATUS_ACTIVE:
+            digest = label_hash(record.label)
+            live[digest] = live.get(digest, 0) + 1
+    counts: dict[str, int] = {}
+    for principal in extra:
+        digest = label_hash(principal.label or "")
+        counts[digest] = counts.get(digest, 0) + 1
+    for digest, count in counts.items():
+        metrics_handle.set_active(digest, live.get(digest, 0) + count)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m omega_prime.grokbot.tokens",
@@ -506,6 +854,39 @@ def _build_parser() -> argparse.ArgumentParser:
     revoke = sub.add_parser("revoke", help="revoke a token by id")
     revoke.add_argument("--file", required=True, help="token file path")
     revoke.add_argument("token_id", metavar="ID", help="token id, e.g. tok_1a2b3c4d")
+    rotate = sub.add_parser(
+        "rotate",
+        help="mint a replacement; the old entry stays live for the overlap window",
+    )
+    rotate.add_argument("--file", required=True, help="token file path")
+    target = rotate.add_mutually_exclusive_group()
+    target.add_argument(
+        "--label", default=None, help="rotate the head entry with this label"
+    )
+    target.add_argument("--id", default=None, help="rotate the entry with this id")
+    rotate.add_argument(
+        "--overlap-hours",
+        type=float,
+        default=None,
+        help="overlap window in hours (default: 1 for manual rotate, "
+        "rotation.overlap_hours for --due-only)",
+    )
+    rotate.add_argument(
+        "--due-only",
+        action="store_true",
+        help="rotate only entries expiring within the window; "
+        "takes no --label/--id and honors rotation.enabled",
+    )
+    rotate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would rotate without mutating the store",
+    )
+    rotate.add_argument(
+        "--audit-file",
+        default=None,
+        help="audit chain file (default: <store-dir>/grokbot_audit.jsonl)",
+    )
     return parser
 
 
@@ -574,6 +955,144 @@ def _cmd_revoke(args: argparse.Namespace, clock: Clock) -> int:
     return 0
 
 
+def _rotation_config() -> tuple[bool, float]:
+    """`(enabled, overlap_hours)` from config; bad values fall back loudly."""
+    try:
+        from omega_prime.config import load_config
+
+        config = load_config()
+    except Exception as exc:
+        print(
+            f"warning: rotation config unreadable ({exc}); scheduled rotation off",
+            file=sys.stderr,
+        )
+        return False, DEFAULT_SCHEDULED_OVERLAP_HOURS
+    node = config.get("rotation", {})
+    if not isinstance(node, dict):
+        node = {}
+    enabled = node.get("enabled") is True
+    overlap = node.get("overlap_hours", DEFAULT_SCHEDULED_OVERLAP_HOURS)
+    if (
+        isinstance(overlap, bool)
+        or not isinstance(overlap, (int, float))
+        or not (overlap > 0 and overlap != float("inf"))
+    ):
+        print(
+            "warning: rotation.overlap_hours invalid; using "
+            f"{DEFAULT_SCHEDULED_OVERLAP_HOURS}",
+            file=sys.stderr,
+        )
+        overlap = DEFAULT_SCHEDULED_OVERLAP_HOURS
+    return enabled, float(overlap)
+
+
+def _cmd_rotate(args: argparse.Namespace, clock: Clock) -> int:
+    # Stdout carries fresh token plaintext only (empty when nothing rotated);
+    # every status line goes to stderr so wrappers can capture stdout safely.
+    if args.overlap_hours is not None and not (
+        args.overlap_hours > 0 and args.overlap_hours != float("inf")
+    ):
+        print(
+            "error: --overlap-hours must be a positive finite number", file=sys.stderr
+        )
+        return 2
+    if args.due_only and (args.label is not None or args.id is not None):
+        print("error: --due-only takes no --label/--id", file=sys.stderr)
+        return 2
+    if not args.due_only and args.label is None and args.id is None:
+        print("error: rotate needs --label, --id, or --due-only", file=sys.stderr)
+        return 2
+    # `--audit-file` unset means the sibling chain file (the `rotate_token`
+    # sentinel default), NOT disabled auditing: only pass it when explicit.
+    audit_kwargs: dict[str, Any] = {}
+    if args.audit_file is not None:
+        audit_kwargs["audit_file"] = args.audit_file
+
+    if args.due_only:
+        enabled, configured = _rotation_config()
+        if not enabled:
+            print(
+                "rotation disabled by configuration (rotation.enabled is false); "
+                "skipping",
+                file=sys.stderr,
+            )
+            return 0
+        overlap = args.overlap_hours if args.overlap_hours is not None else configured
+        try:
+            records = list_tokens(args.file)
+        except (TokenFileError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        now = clock()
+        due = due_for_rotation(records, now, overlap)
+        if args.dry_run:
+            if not due:
+                print("no tokens due for rotation", file=sys.stderr)
+            for record in due:
+                remaining = (
+                    _parse_time(record.expires_at) - now if record.expires_at else 0
+                )
+                print(
+                    f"due {record.id} label={record.label!r} "
+                    f"remaining_seconds={max(0, int(remaining))}",
+                    file=sys.stderr,
+                )
+            return 0
+        if not due:
+            print("no tokens due for rotation", file=sys.stderr)
+            return 0
+        try:
+            rotated = rotate_due_tokens(
+                args.file,
+                overlap_hours=overlap,
+                clock=clock,
+                **audit_kwargs,
+            )
+        except (TokenFileError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for plaintext, old, new in rotated:
+            print(plaintext)
+            print(f"rotated {old.id} -> {new.id}", file=sys.stderr)
+        return 0
+    overlap = (
+        args.overlap_hours
+        if args.overlap_hours is not None
+        else DEFAULT_CLI_OVERLAP_HOURS
+    )
+    if args.dry_run:
+        try:
+            target = _select_rotation_target(
+                list_tokens(args.file), label=args.label, token_id=args.id
+            )
+        except (TokenFileError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"would rotate {target.id} label={target.label!r} overlap_hours={overlap}",
+            file=sys.stderr,
+        )
+        return 0
+    try:
+        plaintext, old, new = rotate_token(
+            args.file,
+            label=args.label,
+            token_id=args.id,
+            overlap_hours=overlap,
+            clock=clock,
+            **audit_kwargs,
+        )
+    except (TokenFileError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(plaintext)
+    print(f"rotated {old.id} -> {new.id}", file=sys.stderr)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, *, clock: Clock = time.time) -> int:
     """CLI entry point; returns the process exit code."""
     parser = _build_parser()
@@ -585,10 +1104,14 @@ def main(argv: Sequence[str] | None = None, *, clock: Clock = time.time) -> int:
         return _cmd_new(args, clock)
     if args.command == "list":
         return _cmd_list(args, clock)
+    if args.command == "rotate":
+        return _cmd_rotate(args, clock)
     return _cmd_revoke(args, clock)
 
 
 __all__ = [
+    "DEFAULT_CLI_OVERLAP_HOURS",
+    "DEFAULT_SCHEDULED_OVERLAP_HOURS",
     "FORMAT_VERSION",
     "STATUS_ACTIVE",
     "STATUS_EXPIRED",
@@ -598,9 +1121,16 @@ __all__ = [
     "TokenFileError",
     "TokenRecord",
     "create_token",
+    "default_audit_file_for",
+    "due_for_rotation",
+    "label_hash",
     "list_tokens",
     "main",
+    "non_file_principals",
+    "observe_active_with_bearer",
     "revoke_token",
+    "rotate_due_tokens",
+    "rotate_token",
 ]
 
 if __name__ == "__main__":

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from omega_prime.agent.messaging import SessionRegistry
@@ -16,6 +18,7 @@ from omega_prime.tools.agent_message import (
 from omega_prime.tools.approvals import ApprovalLog
 from omega_prime.tools.registry import ToolRegistry
 from omega_prime.tools.rlm import RLM_TOOL_NAMES
+from sidecar.roe import sign_artifact
 
 ROOT = Path(__file__).resolve().parents[2]
 ROSTER = ROOT / "omega_prime" / "contracts" / "tool-rosters" / "omega-prime.yaml"
@@ -83,7 +86,41 @@ def test_messaging_flag_registers_on_the_host(tmp_path: Path, monkeypatch) -> No
 
 def test_all_prime_flags_serve_the_roster(tmp_path: Path, monkeypatch) -> None:
     _flags(monkeypatch, **{family: "1" for family in PRIME_FAMILIES})
+    monkeypatch.setenv("OMEGA_PRIME_SIDECAR_REPORTS_DIR", str(tmp_path / "reports"))
     monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ENABLED", "1")
+    registry = default_registry(ROOT, tmp_path)
+    served = _names(registry)
+    roster = set(load_roster_names(ROSTER))
+    # The RoE gate ships BLOCKED: red-team enabled without a signed artifact
+    # registers nothing, so the served set is the roster minus the gated
+    # family (phase 79 SIDE-02; full-roster path is the next test).
+    from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
+
+    assert served == roster - set(REDTEAM_TOOL_NAMES)
+    assert len(roster) == 165
+
+
+def test_signed_roe_completes_the_roster(tmp_path: Path, monkeypatch) -> None:
+    _flags(monkeypatch, **{family: "1" for family in PRIME_FAMILIES})
+    monkeypatch.setenv("OMEGA_PRIME_SIDECAR_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ENABLED", "1")
+    fixture_key = (
+        hashlib.sha256(b"omega-prime fixture - not a secret").hexdigest().encode()
+    )
+    now = datetime.now(UTC)
+    document = {
+        "schema_version": 1,
+        "operator": "prime-family-fixture",
+        "authorized_targets": [{"host": "127.0.0.1"}],
+        "effective_from": (now - timedelta(days=1)).isoformat(timespec="seconds"),
+        "effective_until": (now + timedelta(days=1)).isoformat(timespec="seconds"),
+        "case_classes": ["prompt-injection"],
+    }
+    artifact = tmp_path / "roe.json"
+    artifact.write_text(json.dumps(document), encoding="utf-8")
+    sign_artifact(artifact, fixture_key)
+    monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ROE_FILE", str(artifact))
+    monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ROE_KEY", fixture_key.decode())
     registry = default_registry(ROOT, tmp_path)
     served = _names(registry)
     roster = set(load_roster_names(ROSTER))
