@@ -1,0 +1,601 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Spectrum Web Co
+"""Redteam pin-bump automation — the ``docs/red-team.md`` runbook as one CLI.
+
+The ``redteam/`` gitlink is the only moving part of the red-team module.
+This CLI performs the whole bump runbook in order and stops loudly on the
+first failure, leaving no partial pin records behind:
+
+1. **Move the pin.** Validate ``--to`` (a 40-hex SHA, or a ``v``-tag
+   resolved via ``git ls-remote``; anything else is a usage error),
+   fetch upstream inside ``redteam/``, check out the ref, and stage the
+   gitlink (``git add redteam``).
+2. **Re-vendor the pack.** Mirror ``redteam/grokbot/`` over
+   ``omega_prime/redteam/pack/`` byte-verbatim (same relative paths,
+   binary assets included), preserving ``pack/LICENSE`` (no upstream
+   counterpart, skipped by ``pack-diff``).
+3. **Rewrite the pin records and prove provenance.** Set the ``Commit:``
+   line under the ``T3MP3ST red team pack`` section of ``VENDOR.md`` and
+   the ``Upstream commit:`` docstring in
+   ``omega_prime/redteam/__init__.py`` to the resolved SHA, then run
+   ``check`` and ``pack-diff`` until both are green (re-copy loop, max 2
+   passes; still diverged is a hard failure). ``surface`` DRIFT is
+   reported and stops the bump — updating ``REDTEAM_TOOL_NAMES`` stays a
+   manual legitimacy decision.
+4. **Audit the new pin.** Run ``npm audit --omit=dev --audit-level=high
+   --json`` at the new pin (same chain as ``supply-chain.yml``) and
+   triage it with ``scripts/redteam-audit-triage.py::triage``. Untriaged
+   high-or-above advisories fail the bump. The CLI never writes the
+   ``TRIAGED`` block — triage stays a dated human entry.
+5. **Emit the delta report.** Diff the old-pin and new-pin audits with
+   ``scripts/redteam-audit-delta.py`` into ``report.md`` and quote the
+   single-word verdict (``improved`` / ``regressed`` / ``unchanged``) on
+   stdout. ``--old`` defaults to the pre-bump pin's saved audit artifact
+   (``omega_prime/tests/data/redteam-audit-<pin>.json``) when present,
+   else ``--old-audit`` is required. A ``regressed`` verdict fails the
+   bump and nothing is pushed.
+6. **Open the PR (``--open-pr`` only).** Create branch
+   ``pin-bump-<short-sha>``, commit exactly the bump set (gitlink +
+   ``VENDOR.md`` + ``__init__.py`` + pack), push, and run ``gh pr
+   create`` with the delta verdict and the ``report.md`` link in the
+   body. Pushing happens only after local green.
+7. **Exit codes.** ``0`` = bump complete, provenance green, audit
+   green-or-``--skip-audit``; ``1`` = audit regressed / untriaged high+
+   at the new pin / provenance still red after the re-copy loop; ``2`` =
+   usage error (bad ref, unresolvable tag, missing ``--old-audit`` when
+   no saved artifact, ``gh`` missing under ``--open-pr``); ``3`` =
+   degraded — ``node``/``npm`` absent or the submodule unreachable, with
+   the completed prefix steps named on stderr.
+
+``--skip-audit`` skips steps 4-5 (offline/provenance-only bump); stdout
+says ``audit-skipped`` so the PR body cannot quote a verdict. Rollback
+is a single revert: ``git reset --hard HEAD~1 && git submodule update
+--init redteam`` — the bump commit is atomic, so no partial pin records
+survive.
+
+All ``git``/``npm``/``node``/``gh`` calls go through the injectable
+``run(cmd, cwd)`` seam (default :func:`subprocess.run`) so tests stay
+hermetic. The CLI takes no ``OMEGA_PRIME_*`` env vars and reads no
+``omega-prime.json`` tree: bump pins are git state, not family flags.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from sidecar import provenance
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+_SCRIPTS_DIR = REPO_ROOT / "scripts"
+
+VENDOR_SECTION = "## T3MP3ST red team pack"
+VENDOR_PIN_LINE_RE = re.compile(
+    r"^(\s*-\s*Commit:\s*`)[0-9a-fA-F]{40}(`)", re.MULTILINE
+)
+SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+TAG_RE = re.compile(r"^v[0-9][0-9A-Za-z._-]*$")
+LS_REMOTE_SHA_RE = re.compile(r"\b([0-9a-f]{40})\b")
+UPSTREAM_REMOTE = "origin"
+
+EXIT_OK = 0
+EXIT_BUMP_FAILED = 1
+EXIT_USAGE = 2
+EXIT_DEGRADED = 3
+
+# Type of the subprocess seam: run(cmd, cwd=None) -> CompletedProcess-like.
+Runner = Callable[..., Any]
+
+
+def _default_run(cmd: list[str], cwd: Path | None = None) -> Any:
+    """Default subprocess seam (real ``git``/``npm``/``node``/``gh``)."""
+    return subprocess.run(list(cmd), cwd=cwd, capture_output=True, text=True)
+
+
+def _load_script(name: str) -> Any:
+    """Import a hyphen-named helper from ``scripts/`` (triage / delta)."""
+    path = _SCRIPTS_DIR / name
+    module_name = "pin_bump_" + path.stem.replace("-", "_")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load helper script {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _parse_ls_remote_tag(stdout: str, tag: str) -> str | None:
+    """Resolved commit SHA for ``tag`` from ``git ls-remote`` output.
+
+    Prefers the peeled ``refs/tags/<tag>^{}`` line (the commit) over the
+    tag-object line.
+    """
+    wanted = f"refs/tags/{tag}"
+    fallback: str | None = None
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        sha, ref = parts[0], parts[1]
+        if not SHA_RE.match(sha):
+            continue
+        if ref == wanted + "^{}":
+            return sha.lower()
+        if ref == wanted and fallback is None:
+            fallback = sha.lower()
+    return fallback
+
+
+def _vendor_section(text: str) -> str | None:
+    """The ``T3MP3ST red team pack`` section slice of ``VENDOR.md``."""
+    start = text.find(VENDOR_SECTION)
+    if start < 0:
+        return None
+    end = text.find("\n## ", start)
+    return text[start:] if end < 0 else text[start:end]
+
+
+def _default_old_audit(root: Path, old_pin: str | None) -> Path | None:
+    """Saved audit artifact for the pre-bump pin, when present."""
+    if not old_pin:
+        return None
+    candidate = (
+        root / "omega_prime" / "tests" / "data" / f"redteam-audit-{old_pin}.json"
+    )
+    return candidate if candidate.is_file() else None
+
+
+def revendor_pack(upstream_dir: Path, vendored_dir: Path) -> tuple[int, int]:
+    """Mirror the upstream pack tree over the vendored pack tree.
+
+    Copies every upstream file byte-verbatim to the same relative path
+    (binary assets included) and removes vendored files with no upstream
+    counterpart, except ``pack/LICENSE`` which has no upstream
+    counterpart by design and is never touched. Returns ``(copied,
+    removed)`` counts.
+    """
+    copied = 0
+    for src in sorted(upstream_dir.rglob("*")):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(upstream_dir).as_posix()
+        if rel in provenance.PACK_SKIP_REL:
+            continue
+        data = src.read_bytes()
+        dst = vendored_dir / rel
+        if dst.is_file() and dst.read_bytes() == data:
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(data)
+        copied += 1
+    removed = 0
+    for dst in sorted(vendored_dir.rglob("*")):
+        if dst.is_dir():
+            continue
+        rel = dst.relative_to(vendored_dir).as_posix()
+        if rel in provenance.PACK_SKIP_REL:
+            continue
+        if not os.path.lexists(upstream_dir / rel):
+            dst.unlink()
+            removed += 1
+    for empty in sorted(
+        (p for p in vendored_dir.rglob("*") if p.is_dir()),
+        key=lambda p: len(p.parts),
+        reverse=True,
+    ):
+        try:
+            empty.rmdir()
+        except OSError:
+            pass
+    return copied, removed
+
+
+def rewrite_pins(root: Path, sha: str) -> str | None:
+    """Rewrite both pin records to ``sha``. Returns an error, or None."""
+    vendor_path = root / "VENDOR.md"
+    try:
+        vendor_text = vendor_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"cannot read VENDOR.md ({exc})"
+    section = _vendor_section(vendor_text)
+    if section is None:
+        return f"no {VENDOR_SECTION!r} section in VENDOR.md"
+    rewritten, count = VENDOR_PIN_LINE_RE.subn(
+        r"\g<1>" + sha + r"\g<2>", section, count=1
+    )
+    if count == 0:
+        return "no `Commit:` pin line in the T3MP3ST section of VENDOR.md"
+    start = vendor_text.find(VENDOR_SECTION)
+    end = vendor_text.find("\n## ", start)
+    vendor_text = (
+        vendor_text[:start] + rewritten
+        if end < 0
+        else vendor_text[:start] + rewritten + vendor_text[end:]
+    )
+    docstring_path = root / provenance.DOCSTRING_FILE
+    try:
+        docstring_text = docstring_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"cannot read {provenance.DOCSTRING_FILE.as_posix()} ({exc})"
+    if not provenance.DOCSTRING_PIN_RE.search(docstring_text):
+        return f"no `Upstream commit:` pin in {provenance.DOCSTRING_FILE.as_posix()}"
+    docstring_text = provenance.DOCSTRING_PIN_RE.sub(
+        "Upstream commit: " + sha, docstring_text
+    )
+    try:
+        vendor_path.write_text(vendor_text, encoding="utf-8")
+        docstring_path.write_text(docstring_text, encoding="utf-8")
+    except OSError as exc:
+        return f"cannot rewrite pin records ({exc})"
+    return None
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """CLI parser (kept separate so tests can drive :func:`main`)."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Bump the redteam submodule pin: move the gitlink, re-vendor "
+            "the pack, rewrite the pin records, prove provenance, audit "
+            "the new pin, and report the audit delta."
+        ),
+        epilog=(
+            "exit codes: 0 = bump complete, provenance green, audit "
+            "green-or---skip-audit; 1 = audit regressed / untriaged high+ "
+            "at the new pin / provenance still red after the re-copy loop; "
+            "2 = usage error (bad ref, unresolvable tag, missing "
+            "--old-audit when no saved artifact, gh missing under "
+            "--open-pr); 3 = degraded — node/npm absent or the submodule "
+            "unreachable, with the completed prefix steps named on stderr."
+        ),
+    )
+    parser.add_argument(
+        "--to",
+        required=True,
+        help="New pin: a 40-hex upstream SHA or a v-tag (e.g. v1.4).",
+    )
+    parser.add_argument(
+        "--old-audit",
+        default=None,
+        help=(
+            "Old-pin npm audit JSON for the delta report. Defaults to the "
+            "pre-bump pin's saved artifact "
+            "(omega_prime/tests/data/redteam-audit-<pin>.json) when present."
+        ),
+    )
+    parser.add_argument(
+        "--skip-audit",
+        action="store_true",
+        help="Skip the npm audit and delta report (offline bump).",
+    )
+    parser.add_argument(
+        "--open-pr",
+        action="store_true",
+        help="Commit the bump set, push branch pin-bump-<short-sha>, run gh pr create.",
+    )
+    parser.add_argument(
+        "--json",
+        dest="json_mode",
+        action="store_true",
+        help="Print machine-readable {pin, verdict, report}.",
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="Repository root (default: parent of omega_prime/). Testing override.",
+    )
+    return parser
+
+
+def bump(
+    to: str,
+    *,
+    root: Path = REPO_ROOT,
+    run: Runner | None = None,
+    old_audit: str | None = None,
+    skip_audit: bool = False,
+    open_pr: bool = False,
+    json_mode: bool = False,
+) -> int:
+    """Run the pin-bump runbook against ``root``. Returns the exit code."""
+    if run is None:
+        run = _default_run
+    redteam_dir = root / "redteam"
+    done: list[str] = []
+    verdict: str | None = None
+    report_path: Path | None = None
+    sha: str | None = None
+
+    def finish(code: int) -> int:
+        if json_mode and sha is not None:
+            print(
+                json.dumps(
+                    {
+                        "pin": sha,
+                        "verdict": verdict,
+                        "report": str(report_path) if report_path else None,
+                    }
+                )
+            )
+        return code
+
+    def usage(message: str) -> int:
+        print(f"pin-bump usage error: {message}", file=sys.stderr)
+        return finish(EXIT_USAGE)
+
+    def degraded(message: str) -> int:
+        print(
+            f"pin-bump degraded: {message}; "
+            f"completed: {', '.join(done) if done else 'none'}",
+            file=sys.stderr,
+        )
+        return finish(EXIT_DEGRADED)
+
+    def failed(message: str) -> int:
+        print(f"pin-bump FAILED: {message}")
+        return finish(EXIT_BUMP_FAILED)
+
+    # Step 1: validate and resolve the ref.
+    if SHA_RE.match(to or ""):
+        sha = to.lower()
+    elif TAG_RE.match(to or ""):
+        if not redteam_dir.is_dir():
+            return degraded(
+                "submodule unreachable: redteam/ is missing "
+                "(run git submodule update --init redteam)"
+            )
+        try:
+            listed = run(["git", "ls-remote", UPSTREAM_REMOTE, to], cwd=redteam_dir)
+        except OSError as exc:
+            return degraded(f"submodule unreachable during ls-remote ({exc})")
+        if listed.returncode != 0:
+            return usage(
+                f"unresolvable tag {to!r}: "
+                f"git ls-remote failed: {listed.stderr.strip()}"
+            )
+        sha = _parse_ls_remote_tag(listed.stdout, to)
+        if sha is None:
+            return usage(f"unresolvable tag {to!r}: no such tag on {UPSTREAM_REMOTE}")
+    else:
+        return usage(f"bad ref {to!r}: expected a 40-hex SHA or a v-tag such as v1.4")
+    assert sha is not None
+
+    # Step 1 (cont.): fetch, checkout, stage the gitlink.
+    if not redteam_dir.is_dir():
+        return degraded(
+            "submodule unreachable: redteam/ is missing "
+            "(run git submodule update --init redteam)"
+        )
+    try:
+        fetched = run(["git", "fetch", UPSTREAM_REMOTE], cwd=redteam_dir)
+    except OSError as exc:
+        return degraded(f"submodule unreachable during fetch ({exc})")
+    if fetched.returncode != 0:
+        return degraded(
+            f"submodule unreachable: git fetch failed: {fetched.stderr.strip()}"
+        )
+    try:
+        checked_out = run(["git", "checkout", sha], cwd=redteam_dir)
+    except OSError as exc:
+        return degraded(f"submodule unreachable during checkout ({exc})")
+    if checked_out.returncode != 0:
+        return degraded(
+            f"submodule unreachable: git checkout {sha} failed: "
+            f"{checked_out.stderr.strip()}"
+        )
+    try:
+        staged = run(["git", "add", "redteam"], cwd=root)
+    except OSError as exc:
+        return degraded(f"git add redteam failed ({exc})")
+    if staged.returncode != 0:
+        return failed(f"git add redteam failed: {staged.stderr.strip()}")
+    done.append("pin-moved")
+
+    # Remember the pre-bump pin for the default --old lookup.
+    try:
+        old_vendor_text = (root / "VENDOR.md").read_text(encoding="utf-8")
+    except OSError as exc:
+        return failed(f"cannot read VENDOR.md ({exc})")
+    old_section = _vendor_section(old_vendor_text)
+    old_pin = (
+        provenance.parse_vendor_pin(old_section) if old_section is not None else None
+    )
+
+    # Step 2: re-vendor the pack.
+    upstream_dir = root / provenance.PACK_UPSTREAM
+    vendored_dir = root / provenance.PACK_VENDORED
+    if not upstream_dir.is_dir():
+        return failed(f"missing upstream pack {upstream_dir} after checkout {sha[:7]}")
+    if not vendored_dir.is_dir():
+        return failed(f"missing vendored pack {vendored_dir}")
+    copied, removed = revendor_pack(upstream_dir, vendored_dir)
+    print(f"pin-bump re-vendor: copied {copied}, removed {removed}")
+    done.append("pack-revendored")
+
+    # Step 3: rewrite the pin records, then prove provenance.
+    error = rewrite_pins(root, sha)
+    if error is not None:
+        return failed(error)
+    if provenance.cmd_check(root, gitlink_override=sha) != 0:
+        return failed("check still red after pin rewrite (pin records disagree)")
+    if provenance.cmd_pack_diff(root) != 0:
+        revendor_pack(upstream_dir, vendored_dir)
+        if (
+            provenance.cmd_check(root, gitlink_override=sha) != 0
+            or provenance.cmd_pack_diff(root) != 0
+        ):
+            return failed("pack-diff still diverged after 2 passes")
+    if provenance.cmd_surface(root) != 0:
+        return failed(
+            "surface DRIFT: upstream tool surface changed; updating "
+            "REDTEAM_TOOL_NAMES stays a manual legitimacy decision"
+        )
+    done.append("provenance-green")
+
+    # Steps 4-5: audit the new pin and report the delta (unless skipped).
+    if skip_audit:
+        verdict = "audit-skipped"
+        print("pin-bump OK: provenance green, audit-skipped (--skip-audit)")
+    else:
+        try:
+            node = run(["node", "--version"], cwd=root)
+        except OSError:
+            node = None
+        if node is None or node.returncode != 0:
+            return degraded("node is absent (node --version failed)")
+        try:
+            audit_proc = run(
+                [
+                    "npm",
+                    "audit",
+                    "--omit=dev",
+                    "--audit-level=high",
+                    "--json",
+                ],
+                cwd=redteam_dir,
+            )
+        except OSError as exc:
+            return degraded(f"npm is absent ({exc})")
+        try:
+            new_doc = json.loads(audit_proc.stdout)
+        except ValueError as exc:
+            return failed(f"cannot parse npm audit output ({exc})")
+        try:
+            triage_mod = _load_script("redteam-audit-triage.py")
+        except (OSError, RuntimeError) as exc:
+            return failed(f"cannot load audit triage helper ({exc})")
+        findings, triage_error = triage_mod.triage(new_doc)
+        if triage_error is not None:
+            return failed(f"audit triage refused output: {triage_error}")
+        untriaged = [
+            finding for finding in findings if finding[0] not in triage_mod.TRIAGED
+        ]
+        if untriaged:
+            print("pin-bump FAILED: untriaged high/critical advisories at new pin:")
+            for key, severity, name in untriaged:
+                print(f"  {severity} {name}: {key}")
+            return finish(EXIT_BUMP_FAILED)
+        done.append("audit-green")
+
+        old_path = Path(old_audit) if old_audit else _default_old_audit(root, old_pin)
+        if old_path is None:
+            return usage(
+                "no saved audit artifact for the pre-bump pin; pass --old-audit <path>"
+            )
+        if old_audit and not old_path.is_file():
+            return usage(f"--old-audit not found: {old_audit}")
+        try:
+            old_doc = json.loads(old_path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            return failed(f"cannot read old audit {old_path} ({exc})")
+        except ValueError as exc:
+            return failed(f"cannot parse old audit {old_path} ({exc})")
+        try:
+            delta_mod = _load_script("redteam-audit-delta.py")
+        except (OSError, RuntimeError) as exc:
+            return failed(f"cannot load audit delta helper ({exc})")
+        old_findings, _, old_error = delta_mod.parse_input(old_doc)
+        if old_error is not None:
+            return failed(f"old audit unusable: {old_error}")
+        new_findings, new_packages, new_error = delta_mod.parse_input(new_doc)
+        if new_error is not None:
+            return failed(f"new audit unusable: {new_error}")
+        new_keys, fixed, rescinded, drift, verdict = delta_mod.compute_delta(
+            old_findings, new_findings, new_packages
+        )
+        report = delta_mod.render_report(
+            str(old_path),
+            "new-pin npm audit",
+            old_findings,
+            new_findings,
+            new_keys,
+            fixed,
+            rescinded,
+            drift,
+            verdict,
+        )
+        report_path = root / "report.md"
+        try:
+            report_path.write_text(report, encoding="utf-8")
+        except OSError as exc:
+            return failed(f"cannot write report {report_path} ({exc})")
+        print(verdict)
+        print(f"pin-bump audit: {verdict} (report: {report_path})")
+        if verdict == "regressed":
+            return finish(EXIT_BUMP_FAILED)
+
+    # Step 6: open the PR (only after local green).
+    if open_pr:
+        try:
+            gh = run(["gh", "--version"], cwd=root)
+        except OSError:
+            gh = None
+        if gh is None or gh.returncode != 0:
+            return usage("gh is missing (install gh to use --open-pr)")
+        branch = f"pin-bump-{sha[:7]}"
+        checkout = run(["git", "checkout", "-b", branch], cwd=root)
+        if checkout.returncode != 0:
+            return failed(f"git checkout -b {branch} failed: {checkout.stderr.strip()}")
+        add = run(
+            [
+                "git",
+                "add",
+                "redteam",
+                "VENDOR.md",
+                provenance.DOCSTRING_FILE.as_posix(),
+                provenance.PACK_VENDORED.as_posix(),
+            ],
+            cwd=root,
+        )
+        if add.returncode != 0:
+            return failed(f"git add bump set failed: {add.stderr.strip()}")
+        title = f"chore(redteam): bump pin to {sha[:7]}"
+        if verdict == "audit-skipped":
+            audit_line = "Audit: skipped (--skip-audit; no verdict)."
+        else:
+            audit_line = f"Audit verdict: {verdict} (report: report.md)."
+        body = (
+            f"Redteam pin bump {old_pin or 'unknown'} -> {sha}.\n\n"
+            f"Provenance: check, pack-diff, surface green.\n{audit_line}"
+        )
+        committed = run(["git", "commit", "-m", title, "-m", body], cwd=root)
+        if committed.returncode != 0:
+            return failed(f"git commit failed: {committed.stderr.strip()}")
+        pushed = run(["git", "push", "-u", "origin", branch], cwd=root)
+        if pushed.returncode != 0:
+            return failed(f"git push {branch} failed: {pushed.stderr.strip()}")
+        created = run(
+            ["gh", "pr", "create", "--title", title, "--body", body], cwd=root
+        )
+        if created.returncode != 0:
+            return failed(f"gh pr create failed: {created.stderr.strip()}")
+        print(f"pin-bump PR: {created.stdout.strip()}")
+
+    print(f"pin-bump OK: pin {sha[:7]} complete")
+    return finish(EXIT_OK)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--open-pr] [--json]``."""
+    args = build_parser().parse_args(argv)
+    root = Path(args.root) if args.root is not None else REPO_ROOT
+    return bump(
+        args.to,
+        root=root,
+        old_audit=args.old_audit,
+        skip_audit=args.skip_audit,
+        open_pr=args.open_pr,
+        json_mode=args.json_mode,
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())
