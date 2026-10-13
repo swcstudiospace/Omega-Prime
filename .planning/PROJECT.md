@@ -26,9 +26,13 @@ v9 milestone: SOTA upgrade — the same one-agent product brought to state-of-th
 
 v10 milestone: Prime merge — the third agent joins. Prime Agent (`prime-agent/`, PrimeIntellect, MIT, pinned `967eb13f`) contributes its differentiating logic — RLM subagent recursion (`rlm.spawn`/`collect`), the continual harness (`/refine` with snapshots and rollback), goals/heartbeats/autonomous mode, and agent-to-agent messaging — behavior-ported into the one Python agent per the v1–v9 precedent. The Rust workspace stays as an ignored read-only checkout and CI-built parity oracle. The repo relicenses to AGPL-3.0 (Spectrum Web Co 2026) and hardens to enterprise open-source standards. User decisions (2026-10-08): behavior-port architecture (no PyO3 boundary exists upstream; one-Python-process rule stands), capability-merge loop design, AGPL-3.0 relicense, degrade-with-warning for Prime capability failures.
 
-## Current Milestone: v16 Enterprise Hardening and Continuous Verification
+## Current Milestone: none
 
-Started 2026-10-13 from the SPE-10591..10598 graph with phases 79-84 scaffolded and seven staged update plans in `.planning/updates/`. The purple-team sidecar ships BLOCKED: no live engagement until the user signs a rules-of-engagement artifact. Phase 77.1's live Grok Bot import UAT (six rows) stays deferred until the user runs it on `main`; resume it with `/gsd:verify-work 77.1`.
+v16 is complete and archived (audit PASS 13/13, `.planning/milestones/v16-MILESTONE-AUDIT.md`; run package `.planning/package/DELIVERABLE.md`). The purple-team sidecar ships BLOCKED: no live engagement until the user signs a rules-of-engagement artifact. Start the next milestone with `/gsd:new-milestone` (v17 candidates: SEED-010 native palette, SEED-003 swarm bridge, SEED-002 substrate fixes). Phase 77.1's live Grok Bot import UAT (six rows) stays deferred until the user runs it on `main`; resume it with `/gsd:verify-work 77.1`.
+
+## Last Milestone: v16 Enterprise Hardening and Continuous Verification (shipped 2026-10-13)
+
+**Status:** Shipped clean. Audit PASS, 13/13 requirements satisfied (`.planning/milestones/v16-MILESTONE-AUDIT.md`); full suite 2790 passed / 0 failed at close. Phase directories are in `milestones/v16-phases/`; the self-contained run package is `.planning/package/DELIVERABLE.md`. The purple-team sidecar ships BLOCKED pending the user-signed rules-of-engagement artifact; the first protected image publish awaits operator approval.
 
 ## Last Milestone: v15 Integrated Readiness and Repository Delivery (shipped 2026-10-12)
 
