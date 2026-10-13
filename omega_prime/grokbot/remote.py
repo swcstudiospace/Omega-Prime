@@ -60,9 +60,12 @@ from omega_prime.grokbot.metrics import (
     MetricsInterceptor,
     MetricsMiddleware,
     MetricsRegistry,
+    TokenMetrics,
     metrics_endpoint,
     record_auth_failure,
     register_build_info,
+    register_token_metrics,
+    token_label_hash,
 )
 from omega_prime.grokbot.ratelimit import (
     AuthFailureThrottle,
@@ -99,6 +102,7 @@ from omega_prime.mcp_server import (
     load_runtime,
 )
 from omega_prime.metrics import register_sidecar_state
+from omega_prime.quotas import QuotaEngine, load_quota_document
 
 # uvicorn's logger is the one that is configured when this runs under `serve_sse`.
 logger = logging.getLogger("uvicorn.error")
@@ -427,10 +431,25 @@ def create_sse_app(
             clock=clock,
         )
     metrics = MetricsRegistry()
+    token_metrics: TokenMetrics | None = None
     if metrics_enabled:
         register_build_info(
             metrics, version=SERVER_VERSION, package_version=PACKAGE_VERSION
         )
+        # Token rotation series (Phase 82): registered next to the existing
+        # registry construction; the active gauge snapshots the live store at
+        # build time (label hashes only — raw labels never leave the process).
+        # A snapshot failure must never break serving.
+        token_metrics = register_token_metrics(metrics)
+        try:
+            counts: dict[str, int] = {}
+            for principal in store.principals():
+                digest = token_label_hash(principal.label or "")
+                counts[digest] = counts.get(digest, 0) + 1
+            for digest, count in counts.items():
+                token_metrics.set_active(digest, count)
+        except Exception:
+            logger.warning("token active snapshot failed", exc_info=True)
         # Sidecar state gauge is a serve-time snapshot of the registration-time
         # guard evaluation; with the sidecar shipped BLOCKED the value cannot
         # advance to RUNNING mid-serve (kill transitions log to reports/).
@@ -446,9 +465,7 @@ def create_sse_app(
     try:
         from omega_prime.config import load_config as _load_telemetry_config
 
-        _otlp_node = (
-            _load_telemetry_config(root).get("telemetry", {}).get("otlp", {})
-        )
+        _otlp_node = _load_telemetry_config(root).get("telemetry", {}).get("otlp", {})
     except Exception:
         logger.warning("telemetry config load failed; export disabled", exc_info=True)
         _otlp_node = {}
@@ -462,6 +479,29 @@ def create_sse_app(
         except Exception:
             logger.warning("telemetry push failed to start; export off", exc_info=True)
             otlp_exporter = None
+
+    # Per-caller usage quotas (Phase 82). Inert unless quotas.document names
+    # a quota file; a load failure also leaves quotas off (never half-on).
+    # The mode was already allowlist-normalized by load_config.
+    quota_engine: QuotaEngine | None = None
+    try:
+        _quotas_node = _load_telemetry_config(root).get("quotas", {})
+    except Exception:
+        logger.warning("quota config load failed; quotas off", exc_info=True)
+        _quotas_node = {}
+    if isinstance(_quotas_node, dict) and str(_quotas_node.get("document") or ""):
+        try:
+            _quota_mode = _quotas_node.get("mode", "report")
+            if _quota_mode not in ("report", "soft", "hard"):
+                _quota_mode = "report"
+            quota_engine = QuotaEngine(
+                metrics,
+                mode=_quota_mode,
+                limits=load_quota_document(_quotas_node.get("document") or ""),
+            )
+        except Exception:
+            logger.warning("quota engine start failed; quotas off", exc_info=True)
+            quota_engine = None
 
     in_flight = InFlightInterceptor()
 
@@ -480,9 +520,16 @@ def create_sse_app(
     ]
     if metrics_enabled:
         observers.append(MetricsInterceptor(metrics, tool_names=served_tool_names))
+    # The quota check precedes dispatch (never partial) and follows the
+    # observers, so audit and the tool-denial metric see quota denials;
+    # it follows ScopeInterceptor so forbidden calls consume no quota.
+    quota_chain: tuple[ToolCallInterceptor, ...] = (
+        (quota_engine,) if quota_engine is not None else ()
+    )
     chain: tuple[ToolCallInterceptor, ...] = (
         *observers,
         ScopeInterceptor(),
+        *quota_chain,
         ToolRateLimitInterceptor(tool_limiter),
         breakers,
         *interceptors,
@@ -701,6 +748,8 @@ def create_sse_app(
     app.state.gate = gate
     app.state.shutting_down = False
     app.state.metrics = metrics
+    app.state.token_metrics = token_metrics
+    app.state.quota_engine = quota_engine
     app.state.otlp_exporter = otlp_exporter
     app.state.token_store = store
     app.state.approval_log = runtime.approval_log

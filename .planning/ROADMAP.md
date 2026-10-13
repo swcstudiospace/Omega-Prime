@@ -93,10 +93,9 @@ Seven evidence-grounded updates staged from the 2026-10-13 ultrathink run (Linea
 2. Quota enforcement is soft-then-hard per caller identity: report-only first (enforces nothing), then warnings, then hard caps; usage reporting is visible through `/metrics` series.
 3. Revocation, expiry and rotation behaviors keep `FileTokenStore` fail-closed semantics.
 
-**Plans:** 0 plans
-
-Plans:
-- [ ] TBD (run /gsd-plan-phase 82 to break down)
+**Plans:** 2/2 plans complete (sequential waves), executed and verified.
+- [x] 82-01 — Token rotation: lineage store, rotate subcommand, overlap window, audit events, metrics (wave1)
+- [x] 82-02 — Usage quotas: report/soft/hard ladder, token-identity caps, rollup CLI, docs (wave2)
 
 ### Phase 83: Sandboxed execution verification
 

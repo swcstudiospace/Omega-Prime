@@ -31,7 +31,7 @@ covered_digest: v3:sha256:f6c87646434e1a30840f85c9776757ee8ceb5743055085d869e442
 - Targeted: `test_slo.py test_zero_dep_metrics.py test_telemetry_otlp.py test_docs.py test_grokbot_integration.py` green after fixes (28 in the final four-file run; integration in the full run).
 - `slo check` exit 0; `slo_rules.py` deterministic (cmp identical); `nightly_readiness_check.py check --baseline … --report <(real run)` exit 0.
 - ruff + format clean on all changed files (parent pass: SIM102/SIM105/I001/RUF046 fixed); mypy clean on slo.py/otlp_export.py.
-- Full suite: recorded below in the final-run line (bg job at close).
+- Full suite: `pytest omega_prime/tests/ -q` → **2670 passed, 0 failed, 16 warnings** in 245.34s (definitive close-of-phase run).
 
 ## Known limits
 

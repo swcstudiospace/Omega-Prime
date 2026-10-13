@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,22 @@ def _defaults() -> dict[str, Any]:
                 "interval_seconds": 60,
             },
         },
+        # Host-token rotation (Phase 82). Off by default; the scheduled
+        # `rotate --due-only` job skips unless enabled. overlap_hours is the
+        # scheduled-run window (the manual CLI default stays 1h).
+        "rotation": {
+            "enabled": False,
+            "overlap_hours": 24,
+        },
+        # Per-caller usage quotas (Phase 82). Report-only by default and
+        # inert until `document` names a quota file: report mode enforces
+        # nothing (counts only), soft warns at >=80%, hard denies over-limit
+        # pre-dispatch. An empty document means unlimited for every caller.
+        "quotas": {
+            "mode": "report",
+            "document": "",
+            "rollup_dir": ".omega-quotas/",
+        },
     }
 
 
@@ -96,7 +113,30 @@ def load_config(root: str | Path | None = None) -> dict[str, Any]:
                 raise ValueError("omega-prime.json must contain a JSON object")
             _merge(config, loaded)
     _merge(config, _env_overrides(os.environ))
+    _normalize_quotas_mode(config)
     return config
+
+
+QUOTA_MODES = ("report", "soft", "hard")
+
+
+def _normalize_quotas_mode(config: dict[str, Any]) -> None:
+    """Fall back to `report` loudly when `quotas.mode` is unknown.
+
+    Config loading never crashes on a bogus mode and never silently
+    enables enforcement: anything outside {report, soft, hard} reads as
+    report (the enforcing-nothing default).
+    """
+    node = config.get("quotas")
+    if not isinstance(node, dict):
+        return
+    mode = node.get("mode", "report")
+    if mode not in QUOTA_MODES:
+        print(
+            f"warning: ignoring invalid quotas.mode={mode!r}; using 'report'",
+            file=sys.stderr,
+        )
+        node["mode"] = "report"
 
 
 def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
@@ -184,6 +224,39 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 overlay.setdefault("telemetry", {}).setdefault("otlp", {})[
                     "interval_seconds"
                 ] = interval
+        elif parts[0] == "rotation":
+            # OMEGA_PRIME_ROTATION_ENABLED — truthy enables scheduled
+            # rotation; anything else leaves the default (off) in place.
+            if len(parts) == 2 and parts[1] == "enabled":
+                overlay.setdefault("rotation", {})["enabled"] = (
+                    value.strip().lower() in ("1", "true", "yes", "on")
+                )
+            elif len(parts) == 3 and parts[1] == "overlap" and parts[2] == "hours":
+                # OMEGA_PRIME_ROTATION_OVERLAP_HOURS — scheduled-run window.
+                # Invalid values fall back to the default loudly; config
+                # loading never crashes and never silently enables rotation.
+                try:
+                    hours = float(value.strip())
+                except ValueError:
+                    hours = float("nan")
+                if not (hours > 0 and hours != float("inf")):
+                    print(
+                        "warning: ignoring invalid OMEGA_PRIME_ROTATION_OVERLAP_HOURS"
+                        f"={value.strip()!r}; using default",
+                        file=sys.stderr,
+                    )
+                    continue
+                overlay.setdefault("rotation", {})["overlap_hours"] = hours
+        elif parts[0] == "quotas":
+            # OMEGA_PRIME_QUOTAS_MODE — report/soft/hard; anything else
+            # falls back to report loudly in _normalize_quotas_mode
+            # (never crashes, never silently enables enforcement).
+            if len(parts) == 2 and parts[1] == "mode":
+                overlay.setdefault("quotas", {})["mode"] = value.strip().lower()
+            elif len(parts) == 2 and parts[1] == "document":
+                # OMEGA_PRIME_QUOTAS_DOCUMENT — path to the quota JSON;
+                # empty (the default) means the engine is inert.
+                overlay.setdefault("quotas", {})["document"] = value.strip()
     return overlay
 
 
@@ -215,6 +288,7 @@ def family_config(config: dict[str, Any], family: str) -> dict[str, Any]:
 
 __all__ = [
     "PRIME_FAMILIES",
+    "QUOTA_MODES",
     "family_config",
     "load_config",
     "prime_enabled",

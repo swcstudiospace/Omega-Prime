@@ -135,6 +135,79 @@ OTLP export stays opt-in: enable `telemetry.otlp.*` only with a collector
 endpoint configured (`telemetry.otlp.endpoint`); without it the process
 serves `/metrics` exactly as before.
 
+## Usage quotas
+
+Per-caller usage quotas close the "interceptors count but enforce nothing"
+gap with a fixed rollout ladder: `report` → `soft` → `hard` → back to
+`report`. Ship `report` everywhere first, collect one or two rollups, turn
+on `soft` (warnings visible, no denials), then `hard` only after the quota
+document holds real limits. Config lives in the `omega-prime.json`
+`quotas` node (`mode`, `document`, `rollup_dir`, defaulting to `report`,
+empty, and `.omega-quotas/`); the environment overrides are
+`OMEGA_PRIME_QUOTAS_MODE` and `OMEGA_PRIME_QUOTAS_DOCUMENT`. A bogus mode
+falls back to `report` loudly — config loading never crashes and never
+silently enables enforcement.
+
+The quota document is versioned JSON mapping token-store labels to daily
+limits; a caller missing from the document is unlimited, and a missing or
+empty document leaves the engine fully inert (no series, no counting):
+
+```json
+{"schema_version": 1, "callers": {"desk": {"requests_per_day": 1000, "tool_calls_per_day": 500}}}
+```
+
+Caller identity is the token-store label of the authenticating bearer
+token — never raw token material, which never appears in a label, a log
+line, or a series. Rotation preserves labels (the replacement is minted
+with the old entry's label), so a rotated caller keeps its quota bucket
+instead of appearing as a new unlimited caller. Callers without token
+identity (unauthenticated or local transports) are counted under the fixed
+safe bucket `caller="_unknown_"` and are NEVER denied in any mode: hard
+mode is token-identity-scoped. At most 64 distinct caller labels are
+exported; excess folds into `caller="_overflow_"`.
+
+Windows are UTC calendar days. The live counters enforce within the
+current day; the per-day rollup file is the audit source of truth.
+Per-caller series (all scope-gated behind `/metrics` exactly like the
+other series — unauthenticated scrapes still 401):
+
+| Series | Meaning |
+| --- | --- |
+| `omega_caller_requests_total{caller}` | Tool-call requests per caller per UTC day |
+| `omega_caller_tool_calls_total{caller}` | Completed tool calls per caller per UTC day |
+| `omega_caller_quota_limit{caller,kind}` | Configured daily limit (`kind` is `requests` or `tool_calls`) |
+| `omega_caller_quota_used_ratio{caller,kind}` | Used fraction of the daily limit |
+| `omega_caller_quota_warn{caller}` | Soft-mode warning gauge (1 once the caller passes 80% of any limit) |
+
+In `soft` mode the engine logs one warning per caller per kind per UTC
+day at ≥80% of any limit and sets the warn gauge; it never denies. In
+`hard` mode an over-limit request is refused pre-dispatch — never
+partially executed — with the standard denial shape and `code="quota"`,
+visible in the existing `omega_tool_denials_total{code="quota"}` series.
+In `report` mode (the default) nothing is enforced: no denial, no
+warning, no behavior change.
+
+The nightly rollup is an ordinary `heartbeat_set` job invoking the rollup
+CLI with explicit paths — no new scheduler, no new tool name:
+
+```json
+{"session": "ops-nightly", "prompt": "Run the quota rollup: .venv/bin/python -m omega_prime.quotas rollup --date <yesterday as YYYY-MM-DD> --rollup-dir /var/lib/omega-prime/.omega-quotas --document /etc/omega-prime/quotas.json", "interval_seconds": 86400}
+```
+
+```bash
+.venv/bin/python -m omega_prime.quotas rollup --date 2026-10-12 --rollup-dir .omega-quotas/ --document /etc/omega-prime/quotas.json
+```
+
+The CLI writes `rollup_dir/usage-YYYY-MM-DD.json` — one object per caller
+(`requests`, `tool_calls`, `limits`, `warn`, `denied`) with deterministic
+key ordering, so re-running is byte-identical and reconciles exactly with
+that day's `/metrics` counters. With quotas disabled (no document) the run
+logs one skip line and writes nothing.
+
+Escape hatch (T-82-06): flipping `quotas.mode` back to `report` stops
+warnings and denials on live-reload with no restart; callers are unlimited
+again exactly as before.
+
 ## Runtime and further reading
 
 The host is the same in-process Python product (package floor `>=3.11`;

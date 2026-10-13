@@ -20,8 +20,8 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 
 ## Token lifecycle and cost
 
-- [ ] **TOK-01**: Host-token rotation is automated: replacement minting with a configurable overlap window, cron-heartbeat scheduling, audit-chain rotation events, live-reload honored, old token dead at window end. (U4, plan-04)
-- [ ] **TOK-02**: Per-caller usage quotas are enforced soft-then-hard (report-only → warnings → hard caps) with usage reporting visible through `/metrics`; report-only mode enforces nothing. (U7, plan-07)
+- [x] **TOK-01**: Host-token rotation is automated: replacement minting with a configurable overlap window, cron-heartbeat scheduling, audit-chain rotation events, live-reload honored, old token dead at window end. (U4, plan-04)
+- [x] **TOK-02**: Per-caller usage quotas are enforced soft-then-hard (report-only → warnings → hard caps) with usage reporting visible through `/metrics`; report-only mode enforces nothing. (U7, plan-07)
 
 ## Sandboxed execution
 
@@ -53,8 +53,8 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 | REL-02 | 80 | U2 | Complete |
 | OBS-01 | 81 | U3 | Complete |
 | OBS-02 | 81 | U3 | Complete |
-| TOK-01 | 82 | U4 | Pending |
-| TOK-02 | 82 | U7 | Pending |
+| TOK-01 | 82 | U4 | Complete |
+| TOK-02 | 82 | U7 | Complete |
 | SAND-01 | 83 | U5 | Pending |
 | SAND-02 | 83 | U5 | Pending |
 | EVAL-01 | 84 | U6 | Pending |
