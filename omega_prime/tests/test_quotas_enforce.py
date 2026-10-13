@@ -402,3 +402,33 @@ def test_rollup_cli_writes_and_skips(
         )
         == 1
     )
+
+def test_warn_refires_after_utc_rollover_with_gauge_set(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Warn on day 1, roll to day 2, exceed 80% again: warn + gauge (P2)."""
+    now = [FIXED_NOW]
+    registry = MetricsRegistry()
+    engine = QuotaEngine(
+        registry,
+        mode="soft",
+        limits={"alice": QuotaLimits(requests_per_day=10)},
+        clock=lambda: now[0],
+    )
+    with caplog.at_level(logging.WARNING, logger="omega_prime.quotas"):
+        for _ in range(8):  # 80% of 10 on day 1
+            assert engine.before(_call(ALICE)) is None
+            engine.after(_call(ALICE), _ok())
+    assert 'omega_caller_quota_warn{caller="alice"} 1' in registry.render()
+    day1_warnings = [r for r in caplog.records if r.name == "omega_prime.quotas"]
+    assert len(day1_warnings) == 1
+    caplog.clear()
+    now[0] = FIXED_NOW + 86400  # next UTC day
+    with caplog.at_level(logging.WARNING, logger="omega_prime.quotas"):
+        for _ in range(10):  # past the threshold plus follow-up traffic
+            assert engine.before(_call(ALICE)) is None
+            engine.after(_call(ALICE), _ok())
+    day2_warnings = [r for r in caplog.records if r.name == "omega_prime.quotas"]
+    assert len(day2_warnings) == 1
+    assert "alice" in day2_warnings[0].getMessage()
+    assert 'omega_caller_quota_warn{caller="alice"} 1' in registry.render()

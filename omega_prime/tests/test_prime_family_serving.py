@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -103,7 +104,7 @@ def test_signed_roe_completes_the_roster(tmp_path: Path, monkeypatch) -> None:
     _flags(monkeypatch, **{family: "1" for family in PRIME_FAMILIES})
     monkeypatch.setenv("OMEGA_PRIME_SIDECAR_REPORTS_DIR", str(tmp_path / "reports"))
     monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ENABLED", "1")
-    fixture_key = b"fixture-roe-key-79-01"
+    fixture_key = hashlib.sha256(b"omega-prime fixture - not a secret").hexdigest().encode()
     now = datetime.now(UTC)
     document = {
         "schema_version": 1,

@@ -344,11 +344,14 @@ class QuotaEngine:
 
     def _roll_day(self, day: str) -> None:
         """Reset sticky warn state when the UTC day advances."""
-        known_days = [known for known in self._days if known != day]
-        if not known_days:
+        stale = {(d, c, k) for (d, c, k) in self._warned if d != day}
+        if not stale:
             return
+        warned_today = {caller for (d, caller, _) in self._warned if d == day}
         if self._warn_gauge is not None:
-            for _, caller, _ in list(self._warned):
+            for _, caller, _ in stale:
+                if caller in warned_today:
+                    continue
                 with contextlib.suppress(Exception):
                     self._warn_gauge.labels(caller=caller).set(0)
         self._warned = {(d, c, k) for (d, c, k) in self._warned if d == day}
@@ -365,9 +368,9 @@ class QuotaEngine:
         for label, limit in self._limits.items():
             for kind, value in limit.kinds().items():
                 with contextlib.suppress(Exception):
-                    self._limit_gauge.labels(
-                        caller=self._fold(label), kind=kind
-                    ).set(float(value))
+                    self._limit_gauge.labels(caller=self._fold(label), kind=kind).set(
+                        float(value)
+                    )
 
     def _maybe_warn(
         self, day: str, caller: str, raw: str, kind: str, used: int

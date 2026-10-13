@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -14,7 +15,7 @@ from sidecar.roe import (
     validate_targets,
 )
 
-FIXTURE_KEY = b"fixture-roe-key-79-01"
+FIXTURE_KEY = hashlib.sha256(b"omega-prime fixture - not a secret").hexdigest().encode()
 
 
 def _window(days_from_now: int = -1, days_to_now: int = 7) -> tuple[str, str]:

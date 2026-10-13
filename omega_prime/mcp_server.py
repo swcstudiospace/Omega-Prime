@@ -89,6 +89,7 @@ from omega_prime.tools.omega_command import register_omega_command_tools
 from omega_prime.tools.packs import PacksClient, PacksContext, register_packs_tools
 from omega_prime.tools.platform import register_platform_tools
 from omega_prime.tools.quality import (
+    DEFAULT_SANDBOX_POLICY,
     QualityClient,
     QualityContext,
     register_quality_tools,
@@ -523,6 +524,28 @@ def _sidecar_import(name: str) -> Any:
     return module
 
 
+def _quality_sandbox_from_env(env: Mapping[str, str]) -> dict[str, Any] | None:
+    """Sandbox node for the served quality tools (Phase 83, SAND-02).
+
+    Reads the ``OMEGA_PRIME_SANDBOX_*`` overrides with the config.py
+    semantics: only an explicit truthy ``ENABLED`` routes gates through
+    :class:`SandboxRunner`; anything else returns None so gates run
+    exactly as today (byte-identical flag-off behavior). Scope validation
+    stays in ``quality._sandbox_cfg`` (bogus scope disables, never enables).
+    """
+    get = env.get if isinstance(env, Mapping) else {}.get
+    enabled = str(get("OMEGA_PRIME_SANDBOX_ENABLED", "") or "").strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return None
+    policy = str(get("OMEGA_PRIME_SANDBOX_POLICY", "") or "").strip()
+    scope = str(get("OMEGA_PRIME_SANDBOX_SCOPE", "") or "").strip().lower()
+    return {
+        "enabled": True,
+        "policy": policy or DEFAULT_SANDBOX_POLICY,
+        "scope": scope or "gates",
+    }
+
+
 def _log_sidecar_transition(from_state: str, to_state: str, cause: str) -> None:
     """Append one audit row. Best-effort: logging never breaks startup."""
     try:
@@ -755,7 +778,13 @@ def default_registry(
     )
     register_quality_tools(
         registry,
-        QualityClient(QualityContext(root=work, greptile=desk["greptile"])),
+        QualityClient(
+            QualityContext(
+                root=work,
+                greptile=desk["greptile"],
+                sandbox=_quality_sandbox_from_env(env),
+            )
+        ),
     )
     register_packs_tools(
         registry,

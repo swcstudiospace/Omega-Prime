@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any
+from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
 
+from omega_prime.mcp_server import default_registry
 from omega_prime.receipts import (
     ReceiptError,
     command_digest,
@@ -381,3 +383,80 @@ def test_unrecorded_commands_still_rejected_with_sandbox_on(tmp_path, monkeypatc
     )
     refused = client.receipt_approve("ghost-receipt.json", approver="ada")
     assert "gate_failed" in refused["error"]
+
+# --- served registration honors OMEGA_PRIME_SANDBOX_ENABLED (P1) ---
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class _RecordingSandboxRunner:
+    """Stub SandboxRunner seam: records construction, never executes argv."""
+
+    seen: ClassVar[list] = []
+
+    def __init__(self, policy_path, *, transport=None, **kwargs) -> None:
+        self.policy_path = str(policy_path)
+        type(self).seen.append(self)
+
+    def available(self):
+        return (True, None)
+
+    def run(self, argv, timeout, cwd):
+        from omega_prime.sandbox.runner import SandboxResult
+
+        record = list(argv)
+        try:
+            policy_sha = digest_file(self.policy_path)
+        except OSError:
+            policy_sha = "unreadable"
+        return SandboxResult(
+            argv=record,
+            argv_sha256=command_digest(record),
+            exit_code=0,
+            output="sandboxed-ok",
+            policy_sha256=policy_sha,
+        )
+
+
+def _served_dispatch(tmp_path, env):
+    registry = default_registry(ROOT, tmp_path / "home", env=env)
+    return json.loads(
+        registry.dispatch(
+            "qua_gates_run",
+            {"suites": [{"name": "unit", "argv": ["no-such-binary-xyz"], "timeout": 30}]},
+        )
+    )
+
+
+def test_served_registry_routes_gates_through_runner_when_flag_on(
+    tmp_path, monkeypatch
+):
+    _RecordingSandboxRunner.seen.clear()
+    monkeypatch.setattr(
+        "omega_prime.tools.quality.SandboxRunner", _RecordingSandboxRunner
+    )
+    monkeypatch.setenv("OMEGA_PRIME_COMMAND_LOG", str(tmp_path / "cmdlog.jsonl"))
+    policy = tmp_path / "sandbox-policy.yaml"
+    policy.write_text("version: 1\n", encoding="utf-8")
+    payload = _served_dispatch(
+        tmp_path,
+        {
+            "OMEGA_PRIME_SANDBOX_ENABLED": "1",
+            "OMEGA_PRIME_SANDBOX_POLICY": str(policy),
+            "OMEGA_PRIME_SANDBOX_SCOPE": "gates",
+        },
+    )
+    assert _RecordingSandboxRunner.seen, "flag on must route through SandboxRunner"
+    assert _RecordingSandboxRunner.seen[0].policy_path == str(policy)
+    assert payload["gates"]["unit"]["output"] == "sandboxed-ok"
+    assert payload["gates"]["unit"]["sandbox"]["enabled"] is True
+
+
+def test_served_registry_skips_runner_when_flag_off(tmp_path, monkeypatch):
+    _RecordingSandboxRunner.seen.clear()
+    monkeypatch.setattr(
+        "omega_prime.tools.quality.SandboxRunner", _RecordingSandboxRunner
+    )
+    payload = _served_dispatch(tmp_path, {})
+    assert _RecordingSandboxRunner.seen == []
+    assert set(payload["gates"]["unit"]) == {"exit_code", "output"}

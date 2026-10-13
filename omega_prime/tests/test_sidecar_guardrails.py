@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -26,7 +27,7 @@ from omega_prime.tools.redteam import (
 )
 from sidecar.roe import sign_artifact
 
-FIXTURE_KEY = b"fixture-roe-key-79-01"
+FIXTURE_KEY = hashlib.sha256(b"omega-prime fixture - not a secret").hexdigest().encode()
 
 EXPECTED_TOOL_NAMES = (
     "tempest_status",
