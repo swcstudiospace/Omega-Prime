@@ -67,6 +67,16 @@ REQUIRED_TOP_KEYS = (
 
 EXPECTED_KEYS = ("detection", "residual_rationale")
 
+# Optional lifecycle key for operator-provisioned drafts (PLAN-F4).
+# Files without "status" validate exactly as before this change.
+OPTIONAL_TOP_KEYS = ("status",)
+STATUS_VALUES = ("draft", "active")
+# Placeholder detection carried by drafts until a human sets the real one.
+# Valid only on status: draft documents.
+REVIEW_PLACEHOLDER = "REVIEW-REQUIRED"
+# Drafts live here; load_suite never enters this subdir (non-recursive glob).
+DRAFTS_DIRNAME = "drafts"
+
 _SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
 CASES_DIRNAME = "cases"
@@ -195,9 +205,14 @@ def validate_case(doc: object, source: str = "<case>") -> list[str]:
     for key in REQUIRED_TOP_KEYS:
         if key not in doc:
             errors.append(f"{label}: missing required key {key!r}")
-    extra = sorted(set(doc) - set(REQUIRED_TOP_KEYS))
+    extra = sorted(set(doc) - set(REQUIRED_TOP_KEYS) - set(OPTIONAL_TOP_KEYS))
     if extra:
         errors.append(f"{label}: unexpected keys {extra}")
+    if "status" in doc and doc["status"] not in STATUS_VALUES:
+        errors.append(
+            f"{label}: 'status' must be one of {list(STATUS_VALUES)} "
+            f"(got {doc.get('status')!r})"
+        )
     if "case_id" in doc and (
         not isinstance(doc["case_id"], str) or not doc["case_id"].strip()
     ):
@@ -244,6 +259,14 @@ def validate_case(doc: object, source: str = "<case>") -> list[str]:
                 errors.append(
                     f"{label}: 'expected.detection' must be a non-empty string"
                 )
+            elif (
+                expected["detection"] == REVIEW_PLACEHOLDER
+                and doc.get("status") != "draft"
+            ):
+                errors.append(
+                    f"{label}: 'expected.detection' {REVIEW_PLACEHOLDER!r} "
+                    "requires status 'draft' (set a real detection name to activate)"
+                )
             extra_expected = sorted(set(expected) - set(EXPECTED_KEYS))
             if extra_expected:
                 errors.append(f"{label}: unexpected 'expected' keys {extra_expected}")
@@ -271,6 +294,12 @@ def load_suite(
 
     Returns ``(cases, errors)`` with cases sorted by ``case_id``.
     Duplicate ``case_id`` values are reported as errors naming both files.
+
+    Draft exclusion (two layers, PLAN-F4): (1) the ``*.yaml`` glob is
+    non-recursive, so ``drafts/`` is never entered; (2) any parsed doc
+    with ``status: draft`` is skipped here — not an error — as defense
+    in depth against a stray draft copy landing directly in ``cases/``.
+    Nothing provisioned as a draft can execute in ``run_suite``.
     """
     directory = Path(directory) if directory is not None else cases_dir()
     files = sorted(directory.glob("*.yaml"))
@@ -284,6 +313,8 @@ def load_suite(
             doc = load_case_file(path)
         except CaseError as exc:
             errors.append(str(exc))
+            continue
+        if doc.get("status") == "draft":
             continue
         errors.extend(validate_case(doc, source=str(path)))
         case_id = doc.get("case_id")
@@ -552,8 +583,12 @@ if __name__ == "__main__":
 
 __all__ = [
     "CASE_CLASSES",
+    "DRAFTS_DIRNAME",
+    "OPTIONAL_TOP_KEYS",
     "REQUIRED_TOP_KEYS",
+    "REVIEW_PLACEHOLDER",
     "SEVERITIES",
+    "STATUS_VALUES",
     "CaseError",
     "FakeGateway",
     "cases_dir",

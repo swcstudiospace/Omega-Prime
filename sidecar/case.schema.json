@@ -1,74 +1,79 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Purple-team sidecar simulation case",
-  "description": "Versioned, inert simulation case record. Case files live under sidecar/cases/*.yaml in a minimal JSON-compatible YAML subset (top-level scalars plus one nested 'expected' mapping; no anchors, tags, or multiline blocks) so the stdlib-only loader in sidecar/simulation.py can parse them without a YAML dependency. Payloads are inert strings: loading a case never executes anything. Every case declares loopback-only transport; the suite asserts this.",
-  "type": "object",
-  "required": [
-    "case_id",
-    "version",
-    "class",
-    "severity",
-    "transport",
-    "scope",
-    "payload",
-    "expected"
-  ],
-  "properties": {
-    "case_id": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Unique, stable identifier, e.g. 'prompt-injection-01'. Never reused across classes."
-    },
-    "version": {
-      "type": "string",
-      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
-      "description": "Semver string. Must be bumped on any edit to the case file."
-    },
-    "class": {
-      "enum": [
-        "prompt-injection",
-        "jailbreak",
-        "abuse",
-        "malformed-input",
-        "auth-bypass",
-        "cost-abuse"
-      ],
-      "description": "Exactly one of the six simulation technique classes."
-    },
-    "severity": {
-      "enum": ["low", "medium", "high", "critical"],
-      "description": "Severity carried into findings rows and work-item export."
-    },
-    "transport": {
-      "const": "loopback-only",
-      "description": "Constant declaration: the case may run only against the loopback gateway via the adapter seam. Any other value fails validation."
-    },
-    "scope": {
-      "const": "llm-own-endpoints",
-      "description": "Test scope: LLM plus own endpoints (decisions.md row 3). No third-party targets."
-    },
-    "payload": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Inert probe string. Stored and compared as data; never eval/exec'd, never sent off-host."
-    },
-    "expected": {
-      "type": "object",
-      "required": ["detection"],
-      "properties": {
-        "detection": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Expected detection event name. A case PASSES only when the recorded observed detection for its case_id equals this string exactly."
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Purple-team sidecar simulation case",
+    "description": "Versioned, inert simulation case record. Case files live under sidecar/cases/*.yaml in a minimal JSON-compatible YAML subset (top-level scalars plus one nested 'expected' mapping; no anchors, tags, or multiline blocks) so the stdlib-only loader in sidecar/simulation.py can parse them without a YAML dependency. Payloads are inert strings: loading a case never executes anything. Every case declares loopback-only transport; the suite asserts this.",
+    "type": "object",
+    "required": [
+        "case_id",
+        "version",
+        "class",
+        "severity",
+        "transport",
+        "scope",
+        "payload",
+        "expected",
+    ],
+    "properties": {
+        "case_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Unique, stable identifier, e.g. 'prompt-injection-01'. Never reused across classes.",
         },
-        "residual_rationale": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Optional accepted-residual rationale. Excuses exactly its own case_id from the 100%-detection rule; every other case must still match."
-        }
-      },
-      "additionalProperties": false
-    }
-  },
-  "additionalProperties": false
+        "version": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+            "description": "Semver string. Must be bumped on any edit to the case file.",
+        },
+        "class": {
+            "enum": [
+                "prompt-injection",
+                "jailbreak",
+                "abuse",
+                "malformed-input",
+                "auth-bypass",
+                "cost-abuse",
+            ],
+            "description": "Exactly one of the six simulation technique classes.",
+        },
+        "severity": {
+            "enum": ["low", "medium", "high", "critical"],
+            "description": "Severity carried into findings rows and work-item export.",
+        },
+        "transport": {
+            "const": "loopback-only",
+            "description": "Constant declaration: the case may run only against the loopback gateway via the adapter seam. Any other value fails validation.",
+        },
+        "scope": {
+            "const": "llm-own-endpoints",
+            "description": "Test scope: LLM plus own endpoints (decisions.md row 3). No third-party targets.",
+        },
+        "status": {
+            "type": "string",
+            "enum": ["draft", "active"],
+            "description": "Lifecycle state. Operator-provisioned drafts carry 'draft' and are excluded from suite loading until a human moves the file to sidecar/cases/, sets 'active', sets a real expected.detection, and bumps version to 1.0.0. The placeholder expected.detection 'REVIEW-REQUIRED' is valid only on drafts. Optional for backward compatibility: files without 'status' validate exactly as before.",
+        },
+        "payload": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Inert probe string. Stored and compared as data; never eval/exec'd, never sent off-host.",
+        },
+        "expected": {
+            "type": "object",
+            "required": ["detection"],
+            "properties": {
+                "detection": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Expected detection event name. A case PASSES only when the recorded observed detection for its case_id equals this string exactly.",
+                },
+                "residual_rationale": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional accepted-residual rationale. Excuses exactly its own case_id from the 100%-detection rule; every other case must still match.",
+                },
+            },
+            "additionalProperties": false,
+        },
+    },
+    "additionalProperties": false,
 }

@@ -66,6 +66,31 @@ per-tool allowlist after the kill switch. An expired grant answers
 `BLOCKED` at call time; a tool outside the grant answers `BLOCKED`
 without touching the transport.
 
+### RoE lifecycle watcher
+
+The RoE window (`effective_from..effective_until`) expires silently —
+without a watcher the first signal is a `BLOCKED` transition
+(`roe-expired`) at engagement time. A daily watcher warns before that
+happens:
+
+- **Cadence:** one check per day (`ROE_EXPIRY_KIND = "roe_expiry"` jobs in
+  `omega_prime/cron/heartbeat.py`, default `interval_seconds=86400`).
+- **Thresholds:** silent while healthy (`valid`); one warning per UTC day
+  at T-7d (`expiring-7d`) and at T-1d (`expiring-1d`); an `expired` notice
+  once `now` passes `effective_until`.
+- **Scripting:** `python -m omega_prime.grokbot.roe_lifecycle check
+  --artifact <path> [--now <ISO-8601 UTC>] [--json]` prints the lifecycle
+  state (`valid`, `expiring-7d`, `expiring-1d`, `expired`, `missing`,
+  `invalid`). Exit `0` for valid/expiring, `3` for
+  expired/missing/invalid, `2` for usage errors.
+- **Surfacing:** `durable_status` reports an additive `roe` block
+  (`state`, `days_remaining`, `effective_until`).
+
+Warnings never BLOCK — only actual expiry drives the pre-existing
+`roe-expired` → BLOCKED transition, and the watcher never signs or
+writes the artifact. To renew, re-sign with `sign_artifact` (refreshing
+the adjacent `.sig`) and the watcher goes quiet.
+
 ## Tools
 
 | Tool | Effect | Gateway calls | Approval |
@@ -258,6 +283,20 @@ section alone is the procedure, in order, with no undocumented steps:
    dated `TRIAGED` block in `scripts/redteam-audit-triage.py` with a
    rationale, mirroring the `PYSEC-2026-4114` precedent. No bump merges
    on a red provenance job.
+
+   6b. **Post the delta verdict.** Run the delta scanner on the old-pin
+   and new-pin audits and paste the verdict plus the report link into
+   the bump PR body:
+
+   ```bash
+   python3 scripts/redteam-audit-delta.py \
+     --old <audit-json|lock> --new <audit-json|lock> --out report.md
+   ```
+
+   Use `--old` = old-pin audit artifact and `--new` = new-pin audit
+   artifact. The script prints exactly one of `improved`, `regressed`,
+   or `unchanged` — quote that line verbatim in the PR body with a link
+   to `report.md`. It informs only; it never gates the bump.
 
 Dry-run note: rehearse steps 1–3 against upstream v1.3 in a scratch
 worktree before touching the working tree — fetch, checkout, `git add

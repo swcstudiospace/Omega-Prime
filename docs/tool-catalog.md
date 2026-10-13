@@ -937,7 +937,10 @@ Render several advisor notes as escaped advisory lines.
 - Approval: not required
 - Required params: none
 
-Report the cron turn journal and workflow checkpoint count.
+Report the cron turn journal and workflow checkpoint count. Adds a `roe`
+block read from `redteam.roe_file`: `{state, days_remaining,
+effective_until}` where `state` is one of `valid`, `expiring-7d`,
+`expiring-1d`, `expired`, `missing`, `invalid`.
 
 ## rlm_spawn
 

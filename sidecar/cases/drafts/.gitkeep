@@ -1,0 +1,4 @@
+# Operator-provisioned draft cases land in this directory (see
+# omega_prime/evals/case_from_finding.py). Drafts carry status: draft and are
+# EXCLUDED from suite loading; nothing here ever executes. This placeholder
+# keeps the directory tracked in git.

@@ -1,0 +1,41 @@
+{
+  "vulnerabilities": {
+    "brace-expansion": {
+      "name": "brace-expansion",
+      "severity": "high",
+      "range": "<1.1.8",
+      "fixAvailable": true,
+      "nodes": ["node_modules/brace-expansion"],
+      "via": [
+        {"name": "brace-expansion", "range": "<1.1.8"},
+        "https://github.com/advisories/GHSA-fixed-0001"
+      ]
+    },
+    "old-stable-pkg": {
+      "name": "old-stable-pkg",
+      "severity": "moderate",
+      "range": ">=2.0.0 <2.0.5",
+      "fixAvailable": false,
+      "nodes": ["node_modules/old-stable-pkg"],
+      "via": [
+        "old-stable-pkg",
+        "https://github.com/advisories/GHSA-rescinded-0002"
+      ]
+    },
+    "drift-pkg": {
+      "name": "drift-pkg",
+      "severity": "moderate",
+      "range": "^3.1.0",
+      "fixAvailable": false,
+      "nodes": ["node_modules/drift-pkg"],
+      "via": [
+        "drift-pkg",
+        "https://github.com/advisories/GHSA-drift-0003"
+      ]
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {"info": 0, "low": 0, "moderate": 2, "high": 1, "critical": 0},
+    "auditLevel": "high"
+  }
+}

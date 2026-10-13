@@ -1,0 +1,33 @@
+{
+  "name": "purple-team",
+  "version": "1.3.0",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "purple-team", "version": "1.3.0"},
+    "node_modules/old-stable-pkg": {
+      "version": "2.0.3",
+      "range": ">=2.0.0 <2.0.5"
+    },
+    "node_modules/drift-pkg": {
+      "version": "3.1.0",
+      "range": "^3.1.0",
+      "advisories": [
+        {
+          "url": "https://github.com/advisories/GHSA-drift-0003",
+          "severity": "high"
+        }
+      ]
+    },
+    "node_modules/shiny-new-dep": {
+      "version": "4.0.0",
+      "advisories": [
+        {
+          "url": "https://github.com/advisories/GHSA-new-0004",
+          "severity": "critical"
+        }
+      ]
+    },
+    "node_modules/left-pad-shim": {"version": "1.0.0"}
+  },
+  "dependencies": {"purple-team": "1.3.0"}
+}
