@@ -486,6 +486,7 @@ def test_redteam_disabled_by_default_and_enabled_by_env(monkeypatch):
         "roe_file": "",
         "roe_key": "",
         "roe_key_file": "",
+        "reports_dir": "",
         "findings_sync": {
             "enabled": False,
             "repo": "",
