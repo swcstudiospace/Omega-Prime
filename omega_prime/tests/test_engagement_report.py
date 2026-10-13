@@ -340,8 +340,12 @@ def test_timeline_orders_chronologically_with_footer(tmp_path):
     seed_transitions(
         fixture,
         [
-            {"cause": "kill-switch-set", "from": "RUNNING", "to": "BLOCKED",
-             "ts": "2026-10-06T00:00:00+00:00"},
+            {
+                "cause": "kill-switch-set",
+                "from": "RUNNING",
+                "to": "BLOCKED",
+                "ts": "2026-10-06T00:00:00+00:00",
+            },
             {"cause": "run-started", "from": "IDLE", "to": "RUNNING", "ts": T1},
             {"cause": "run-completed", "from": "RUNNING", "to": "IDLE", "ts": T1},
             {"cause": "run-started", "from": "IDLE", "to": "RUNNING", "ts": T2},
@@ -404,9 +408,10 @@ def test_timeline_determinism_equal_timestamps(tmp_path):
     first = run_script("--reports-dir", str(fixture), "--since", T0)
     second = run_script("--reports-dir", str(fixture), "--since", T0)
     assert first.returncode == 0 and second.returncode == 0
-    assert hashlib.sha256(first.stdout.encode()).hexdigest() == hashlib.sha256(
-        second.stdout.encode()
-    ).hexdigest()
+    assert (
+        hashlib.sha256(first.stdout.encode()).hexdigest()
+        == hashlib.sha256(second.stdout.encode()).hexdigest()
+    )
     body = section_lines(first.stdout, "## State timeline")
     assert body[1].endswith("(a-cause)")
     assert body[2].endswith("(b-cause)")
@@ -462,6 +467,7 @@ def test_coverage_matrix_zero_runs_renders_na(tmp_path):
 def _coverage_fn():
     """The real ``coverage_rows()`` loaded from the report script."""
     import importlib.util
+
     spec = importlib.util.spec_from_file_location(
         "engagement_report_coverage_under_test", str(SCRIPT)
     )

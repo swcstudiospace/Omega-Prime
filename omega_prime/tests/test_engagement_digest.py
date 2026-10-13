@@ -49,9 +49,7 @@ def _store(tmp_path: Path) -> JobStore:
 
 def _child_env() -> dict[str, str]:
     return {
-        key: value
-        for key, value in os.environ.items()
-        if key != SIDECAR_REPORTS_ENV
+        key: value for key, value in os.environ.items() if key != SIDECAR_REPORTS_ENV
     }
 
 
@@ -90,7 +88,9 @@ def seed_last_run(directory: Path) -> None:
     )
 
 
-def _finding_row(case_id: str, response: str, digest: str, ts: str) -> dict[str, object]:
+def _finding_row(
+    case_id: str, response: str, digest: str, ts: str
+) -> dict[str, object]:
     return {
         "case_id": case_id,
         "class": "test",
@@ -173,7 +173,9 @@ def _summarize_fn():
     """The real ``summarize()`` loaded from the report script."""
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("engagement_report_under_test", SCRIPT)
+    spec = importlib.util.spec_from_file_location(
+        "engagement_report_under_test", SCRIPT
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
