@@ -937,7 +937,7 @@ Render several advisor notes as escaped advisory lines.
 - Approval: not required
 - Required params: none
 
-Report the cron turn journal and workflow checkpoint count.
+Report the cron turn journal, workflow checkpoint count, RoE lifecycle, and purple-team engagement posture digest.
 
 ## rlm_spawn
 

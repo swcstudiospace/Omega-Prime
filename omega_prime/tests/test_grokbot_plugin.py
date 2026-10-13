@@ -46,7 +46,7 @@ ROSTER = "omega_prime/contracts/tool-rosters/omega-prime.yaml"
 SKILLS = checked_in_skills(ROOT)
 ROUTINES = checked_in_routines(ROOT)
 
-# RESEARCH R-2: the 16 curated names, in catalog order.
+# RESEARCH R-2: the 20 curated names, in catalog order.
 CURATED = [
     "omega-help",
     "omega-doctor",
@@ -64,6 +64,10 @@ CURATED = [
     "omega-redteam-status",
     "omega-redteam-findings",
     "omega-redteam-triage",
+    "omega-redteam-roe-create",
+    "omega-redteam-roe-sign",
+    "omega-redteam-roe-check",
+    "omega-redteam-triage-apply",
 ]
 # RESEARCH §Generation rule, applied table: exactly these take a suffix.
 SUFFIXED = {
@@ -336,7 +340,7 @@ def test_every_checked_in_skill_has_platform_valid_frontmatter() -> None:
 
 def test_every_command_file_routes_to_omega_command_with_its_exact_text() -> None:
     files = sorted((ROOT / COMMANDS_DIR).glob("*.md"))
-    assert len(files) == 50
+    assert len(files) == 54
     for path in files:
         text = path.read_text(encoding="utf-8")
         mapping = _frontmatter(text)
@@ -352,11 +356,11 @@ def test_every_command_file_routes_to_omega_command_with_its_exact_text() -> Non
 # --- catalog (R08, R09) -----------------------------------------------------
 
 
-def test_catalog_has_50_entries_with_exactly_the_five_suffixed_names() -> None:
+def test_catalog_has_54_entries_with_exactly_the_five_suffixed_names() -> None:
     assert [spec.name for spec in COMMANDS] == CURATED
     assert len(ROUTINES) == 7
     names = {spec.name for spec in plugin.catalog(ROOT)}
-    assert len(names) == 50 == len(CURATED) + len(SKILLS) + len(ROUTINES)
+    assert len(names) == 54 == len(CURATED) + len(SKILLS) + len(ROUTINES)
     assert names == _expected_names()
     generated = names - set(CURATED)
     suffixed = {name for name in generated if name.endswith(("-skill", "-routine"))}

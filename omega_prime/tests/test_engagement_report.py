@@ -1,4 +1,4 @@
-"""Scheduled engagement reports (PLAN-F7): script + config key tests.
+"""Scheduled engagement reports (PLAN-F7, batch-02 G3/G5/G6): script + config tests.
 
 Hermetic ``tmp_path`` fixture histories with fixed RFC3339 timestamps —
 no wall-clock leakage. The script is exercised as a subprocess; the
@@ -32,9 +32,11 @@ SECTIONS = [
     "## Header",
     "## Runs summary",
     "## Per-technique pass rates",
+    "## Coverage matrix",
     "## Detection gaps",
     "## Findings deltas",
     "## State transitions",
+    "## State timeline",
 ]
 
 
@@ -329,3 +331,186 @@ def test_config_reports_dir_default_and_env(tmp_path, monkeypatch):
         json.dumps({"redteam": {"reports_dir": "rel/reports"}}), encoding="utf-8"
     )
     assert load_config(tmp_path)["redteam"]["reports_dir"] == "rel/reports"
+
+
+def test_timeline_orders_chronologically_with_footer(tmp_path):
+    """G5 happy: out-of-order rows render ascending with cause counts."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(
+        fixture,
+        [
+            {
+                "cause": "kill-switch-set",
+                "from": "RUNNING",
+                "to": "BLOCKED",
+                "ts": "2026-10-06T00:00:00+00:00",
+            },
+            {"cause": "run-started", "from": "IDLE", "to": "RUNNING", "ts": T1},
+            {"cause": "run-completed", "from": "RUNNING", "to": "IDLE", "ts": T1},
+            {"cause": "run-started", "from": "IDLE", "to": "RUNNING", "ts": T2},
+        ],
+    )
+    seed_last_run(fixture)
+    # --since excludes the T1 rows: neither bullets nor footer may show them.
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", "2026-10-06T00:00:00+00:00"
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## State timeline")
+    bullets = [line for line in body if line.startswith("- ")]
+    assert bullets == [
+        "- 2026-10-06T00:00:00+00:00 RUNNING -> BLOCKED (kill-switch-set)",
+        "- 2026-10-08T12:00:00+00:00 IDLE -> RUNNING (run-started)",
+        "- causes: kill-switch-set=1, run-started=1",
+    ]
+    assert "2026-10-05" not in "\n".join(bullets)
+    positions = [proc.stdout.index(section) for section in SECTIONS]
+    assert positions == sorted(positions)
+
+
+def test_timeline_empty_window_and_unknown_cause(tmp_path):
+    """G5 edge: empty window text; legacy rows without cause count as unknown."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(
+        fixture,
+        [
+            {"from": "IDLE", "to": "RUNNING", "ts": T1},
+            {"cause": "", "from": "RUNNING", "to": "IDLE", "ts": T1},
+        ],
+    )
+    seed_last_run(fixture)
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "- 2026-10-05T12:00:00+00:00 IDLE -> RUNNING (unknown)" in proc.stdout
+    assert "- causes: unknown=2" in proc.stdout
+    empty = run_script(
+        "--reports-dir", str(fixture), "--since", "2027-01-01T00:00:00+00:00"
+    )
+    assert empty.returncode == 0, empty.stderr
+    assert "- no transitions in window" in empty.stdout
+    assert "- causes: none" in empty.stdout
+
+
+def test_timeline_determinism_equal_timestamps(tmp_path):
+    """G5 determinism: duplicate-timestamp ties order identically across runs."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(
+        fixture,
+        [
+            {"cause": "b-cause", "from": "RUNNING", "to": "IDLE", "ts": T1},
+            {"cause": "a-cause", "from": "IDLE", "to": "RUNNING", "ts": T1},
+        ],
+    )
+    seed_last_run(fixture)
+    first = run_script("--reports-dir", str(fixture), "--since", T0)
+    second = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert first.returncode == 0 and second.returncode == 0
+    assert (
+        hashlib.sha256(first.stdout.encode()).hexdigest()
+        == hashlib.sha256(second.stdout.encode()).hexdigest()
+    )
+    body = section_lines(first.stdout, "## State timeline")
+    assert body[1].endswith("(a-cause)")
+    assert body[2].endswith("(b-cause)")
+
+
+def test_coverage_matrix_all_covered(tmp_path):
+    """G6 happy: default suite fixture renders six covered rows."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## Coverage matrix")
+    rows = [line for line in body if line.startswith("| ")][2:]
+    assert len(rows) == 6
+    assert rows == sorted(rows)
+    assert rows[0] == "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered |"
+    assert all(line.endswith("| covered |") for line in rows)
+
+
+def test_coverage_matrix_failing_class_is_gappy(tmp_path):
+    """G6: one failing observation flips only its class row to gappy."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture, wrong={"jailbreak-01": "not-detected"})
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## Coverage matrix")
+    text = "\n".join(body)
+    assert "| jailbreak | 1 | 1 | 0/1 (0.0%) | 1 | gappy |" in text
+    assert "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered |" in text
+
+
+def test_coverage_matrix_zero_runs_renders_na(tmp_path):
+    """G6 edge: far-future --since still renders six n/a rows (cases exist)."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", "2027-01-01T00:00:00+00:00"
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## Coverage matrix")
+    rows = [line for line in body if line.startswith("| ")][2:]
+    assert len(rows) == 6
+    assert all("0/0 (n/a)" in line for line in rows)
+    assert all(line.endswith("| gappy |") for line in rows)
+
+
+def _coverage_fn():
+    """The real ``coverage_rows()`` loaded from the report script."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "engagement_report_coverage_under_test", str(SCRIPT)
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.coverage_rows
+
+
+def test_coverage_rows_unknown_class_unexercised_and_attribution():
+    """G6 unit edges: unknown classes sort last; load errors attribute by file."""
+    coverage_rows = _coverage_fn()
+    cases = [
+        ("abuse-01", "abuse-detected", "", "abuse"),
+        ("zzz-01", "detected", "", "weird-class"),
+    ]
+    observations = {"abuse-01": {"observed_detection": "abuse-detected"}}
+    gaps = [
+        "/tmp/cases/cost-abuse-99.yaml: cannot read ([Errno 13] denied)",
+        "version drift implies DEGRADED: contract changed",
+    ]
+    rows = coverage_rows(cases, observations, gaps)
+    by_class = {row[0]: row for row in rows}
+    assert [row[0] for row in rows][-1] == "weird-class"
+    assert len(rows) == 7
+    assert by_class["abuse"] == ("abuse", 1, 1, 1, 100.0, 0, "covered")
+    assert by_class["cost-abuse"] == ("cost-abuse", 0, 0, 0, 0.0, 1, "unexercised")
+    assert by_class["weird-class"] == ("weird-class", 1, 0, 0, 0.0, 0, "gappy")
+    assert sum(row[5] for row in rows) == 1
+
+
+def test_coverage_rows_quoted_case_id_attributes_mismatch():
+    """G6 unit: observation-mismatch strings count toward their case's class."""
+    coverage_rows = _coverage_fn()
+    cases = [
+        ("abuse-01", "abuse-detected", "", "abuse"),
+        ("jailbreak-01", "jailbreak-detected", "", "jailbreak"),
+    ]
+    observations = {
+        "abuse-01": {"observed_detection": "abuse-detected"},
+        "jailbreak-01": {"observed_detection": "not-detected"},
+    }
+    gaps = ["case 'jailbreak-01': FAIL — observed detection 'not-detected'"]
+    rows = {row[0]: row for row in coverage_rows(cases, observations, gaps)}
+    assert rows["abuse"] == ("abuse", 1, 1, 1, 100.0, 0, "covered")
+    assert rows["jailbreak"] == ("jailbreak", 1, 1, 0, 0.0, 1, "gappy")

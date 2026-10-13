@@ -114,7 +114,7 @@ for the gate mechanics and the `--approve` flag.
 
 ## Slash commands
 
-The sidecar harness is driven through four curated commands (all routed
+The sidecar harness is driven through eight curated commands (all routed
 via `omega_command`, like every other `/omega-*` command):
 
 | Command | Effect |
@@ -123,6 +123,10 @@ via `omega_command`, like every other `/omega-*` command):
 | `/omega-redteam-status` | Show harness state and recent transitions. Read-only. |
 | `/omega-redteam-findings [--limit N]` | Tail recent findings. Read-only. |
 | `/omega-redteam-triage <dedupe-hash> --rationale <text>` | Append one triage proposal to the review queue. |
+| `/omega-redteam-roe-create --operator <name> --days <N> --key-file <path>` | Write one unsigned Rules-of-Engagement artifact. |
+| `/omega-redteam-roe-sign --artifact <path> --key-file <path>` | Sign one Rules-of-Engagement artifact with a key file and print the install command. |
+| `/omega-redteam-roe-check` | Print the Rules-of-Engagement authorization state and days remaining. Read-only. |
+| `/omega-redteam-triage-apply --hash <dedupe-hash> [--untriage] [--apply]` | Preview one triage proposal without `--apply`, apply it with `--apply`; refuses when the audit script is dirty. |
 
 BLOCKED is fail-closed: `/omega-redteam-run` checks the harness state
 first and refuses with `harness_blocked` unless the state is `IDLE` —

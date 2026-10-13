@@ -649,7 +649,7 @@ never claimed as working.
 Local proof is separate. In this repository, `python -m omega_prime.tooling.plugin --check`
 fails on every drift class, and `--verify` spawned exactly the declared
 `mcp.json` command, which answered `initialize` and `/omega-help`
-(50 commands); the loopback bearer host passed at `/mcp`. Those are owned
+(54 commands); the loopback bearer host passed at `/mcp`. Those are owned
 local processes. None of them reaches a Grok Bot or a Cursor account.
 
 | Platform fact | Level | Source | UAT row |

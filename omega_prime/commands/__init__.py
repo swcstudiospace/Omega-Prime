@@ -5,7 +5,7 @@
 A command is the whole user message: ``/omega-help``, not a sentence that
 mentions it. Execution goes through the registry. A tool error stays an error.
 
-The 16 curated commands come first. Generated commands follow, one per
+The 20 curated commands come first. Generated commands follow, one per
 checked-in skill and routine (``omega_prime.commands.generated``). A skill
 command returns that skill's instructions. A routine command whose exact stem
 is a workflow runs that workflow; any other routine returns its text.
@@ -147,6 +147,33 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "/omega-redteam-triage <dedupe-hash> --rationale <text>",
         "Propose triage for one red-team finding.",
         "The user asks to triage a red-team finding with a rationale.",
+        needs_args=True,
+    ),
+    CommandSpec(
+        "omega-redteam-roe-create",
+        "/omega-redteam-roe-create --operator <name> --days <N> --key-file <path>",
+        "Build an unsigned red-team Rules-of-Engagement artifact.",
+        "The user asks to create or renew a red-team Rules-of-Engagement artifact.",
+        needs_args=True,
+    ),
+    CommandSpec(
+        "omega-redteam-roe-sign",
+        "/omega-redteam-roe-sign --artifact <path> --key-file <path>",
+        "Sign a red-team Rules-of-Engagement artifact with a key file.",
+        "The user asks to sign a red-team Rules-of-Engagement artifact.",
+        needs_args=True,
+    ),
+    CommandSpec(
+        "omega-redteam-roe-check",
+        "/omega-redteam-roe-check",
+        "Check the red-team Rules-of-Engagement authorization status.",
+        "The user asks whether the red-team Rules of Engagement are satisfied.",
+    ),
+    CommandSpec(
+        "omega-redteam-triage-apply",
+        "/omega-redteam-triage-apply --hash <dedupe-hash> [--untriage] [--apply]",
+        "Apply (or preview) one triage PROPOSAL into the TRIAGED block.",
+        "The user asks to approve or apply a red-team triage proposal.",
         needs_args=True,
     ),
 )
@@ -328,6 +355,14 @@ def _run(
         return _redteam(name, args, env, "findings")
     if name == "omega-redteam-triage":
         return _redteam(name, args, env, "triage")
+    if name == "omega-redteam-roe-create":
+        return _redteam(name, args, env, "roe_create")
+    if name == "omega-redteam-roe-sign":
+        return _redteam(name, args, env, "roe_sign")
+    if name == "omega-redteam-roe-check":
+        return _redteam(name, args, env, "roe_check")
+    if name == "omega-redteam-triage-apply":
+        return _redteam(name, args, env, "triage_apply")
     return _fail(name, "unknown_command", {"commands": _command_names()})
 
 
@@ -344,6 +379,10 @@ def _redteam(
             "status": "omega_prime.commands.redteam_status",
             "findings": "omega_prime.commands.redteam_findings",
             "triage": "omega_prime.commands.redteam_triage",
+            "roe_create": "omega_prime.commands.redteam_roe_create",
+            "roe_sign": "omega_prime.commands.redteam_roe_sign",
+            "roe_check": "omega_prime.commands.redteam_roe_check",
+            "triage_apply": "omega_prime.commands.redteam_triage_apply",
         }[kind]
         mod = importlib.import_module(module_name)
         return _ok(command, mod.run(args, env))

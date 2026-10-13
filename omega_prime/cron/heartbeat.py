@@ -14,6 +14,7 @@ that session rather than starting a fresh conversation.
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -252,18 +253,225 @@ def tick_roe_expiry(store: JobStore, now: Any, checker: Any) -> list[dict]:
     return fired
 
 
+#: Job kind marker stored on engagement-digest jobs.
+ENGAGEMENT_DIGEST_KIND = "engagement_digest"
+
+#: Default digest cadence: once a week (seconds), matching the report epilog.
+ENGAGEMENT_DIGEST_INTERVAL_SECONDS = 604800
+
+#: Bounded per-job run history, mirroring :func:`tick_heartbeats`.
+ENGAGEMENT_DIGEST_HISTORY_LIMIT = 20
+
+#: Env override for the digest history source (mirrors the report script).
+ENGAGEMENT_DIGEST_REPORTS_ENV_VAR = "OMEGA_PRIME_SIDECAR_REPORTS_DIR"
+
+
+def schedule_engagement_digest(
+    store: JobStore,
+    *,
+    interval_seconds: int | float = ENGAGEMENT_DIGEST_INTERVAL_SECONDS,
+    due_at: int | float,
+) -> str:
+    """Schedule a recurring engagement-digest watcher.
+
+    Mirrors :func:`schedule_roe_expiry`: validates a positive interval,
+    then stamps ``kind`` on the stored job. Returns the job id. The
+    default cadence is weekly.
+    """
+    if isinstance(interval_seconds, bool) or interval_seconds <= 0:
+        raise ValueError("an engagement digest needs a positive interval_seconds")
+    job_id = store.schedule(
+        "engagement-digest", due_at, interval_seconds=interval_seconds
+    )
+    for job in store.jobs:
+        if isinstance(job, dict) and job.get("id") == job_id:
+            job["kind"] = ENGAGEMENT_DIGEST_KIND
+            break
+    store._save()
+    return job_id
+
+
+def list_engagement_digests(store: JobStore) -> list[dict]:
+    """All engagement-digest jobs, complete or not."""
+    return [
+        job
+        for job in store.jobs
+        if isinstance(job, dict) and job.get("kind") == ENGAGEMENT_DIGEST_KIND
+    ]
+
+
+def clear_engagement_digest(store: JobStore, job_id: str) -> dict:
+    """Remove one engagement digest by id. Unknown id is a structured result."""
+    for index, job in enumerate(store.jobs):
+        if (
+            isinstance(job, dict)
+            and job.get("id") == job_id
+            and job.get("kind") == ENGAGEMENT_DIGEST_KIND
+        ):
+            store.jobs.pop(index)
+            store._save()
+            return {"cleared": job_id}
+    return {"error": f"no engagement-digest job: {job_id!r}"}
+
+
+def tick_engagement_digest(store: JobStore, now: Any, checker: Any) -> list[dict]:
+    """Run each due engagement digest through ``checker``.
+
+    Mirrors :func:`tick_roe_expiry`: iterates only
+    ``ENGAGEMENT_DIGEST_KIND`` non-completed jobs due at ``now``,
+    accepts a datetime-or-timestamp ``now`` via :func:`_roe_now`, claims
+    via ``claimed_at``/``history`` (``ran_at == now`` ⇒ skip), calls
+    ``checker(reports_dir, now)`` where ``reports_dir`` is the
+    ``OMEGA_PRIME_SIDECAR_REPORTS_DIR`` override or ``None`` (resolve
+    the default), records ``last_result``/``last_ran_at``, appends
+    bounded history (cap 20, ``del history[:-20]``), advances
+    ``due_at = stamp + interval``, ``_save()``. Every fire returns the
+    job (the digest always fires when it runs — there is no
+    silent-valid state). A checker exception is recorded as the job's
+    ``last_result`` (``state: "error"``) with history still appended —
+    the store is never corrupted. Pass
+    ``skip_kind=ENGAGEMENT_DIGEST_KIND`` to the generic ``JobStore.tick``
+    driver so it leaves these jobs to this tick. Never calls
+    ``transition()``.
+    """
+    checker_now, stamp, _today = _roe_now(now)
+    override = os.environ.get(ENGAGEMENT_DIGEST_REPORTS_ENV_VAR, "").strip()
+    reports_dir = override or None
+    fired: list[dict] = []
+    ran_any = False
+    for job in store.jobs:
+        if not isinstance(job, dict):
+            continue
+        if job.get("kind") != ENGAGEMENT_DIGEST_KIND or job.get("completed"):
+            continue
+        due_at = job.get("due_at")
+        if due_at is None or due_at > stamp:
+            continue
+        history = job.setdefault("history", [])
+        if job.get("claimed_at") == stamp:
+            continue
+        if any(isinstance(e, dict) and e.get("ran_at") == stamp for e in history):
+            continue
+        job["claimed_at"] = stamp
+        store._save()
+        try:
+            job["last_result"] = checker(reports_dir, checker_now)
+        except Exception as exc:
+            job["last_result"] = {"state": "error", "error": str(exc)}
+        job["last_ran_at"] = stamp
+        history.append({"ran_at": stamp, "result": job["last_result"]})
+        del history[:-ENGAGEMENT_DIGEST_HISTORY_LIMIT]
+        job["claimed_at"] = None
+        job["due_at"] = stamp + job["interval_seconds"]
+        ran_any = True
+        fired.append(job)
+    if ran_any:
+        store._save()
+    return fired
+
+
+#: Job kind marker stored on release-watch jobs.
+RELEASE_WATCH_KIND = "release_watch"
+RELEASE_WATCH_INTERVAL_SECONDS = 86400
+RELEASE_WATCH_HISTORY_LIMIT = 20
+
+
+def schedule_release_watch(
+    store: Any, *, interval_seconds: int = 86400, due_at: Any
+) -> Any:
+    if isinstance(interval_seconds, bool) or interval_seconds <= 0:
+        raise ValueError("a release-watch watcher needs a positive interval_seconds")
+    job_id = store.schedule("release-watch", due_at, interval_seconds=interval_seconds)
+    for job in store.jobs:
+        if isinstance(job, dict) and job.get("id") == job_id:
+            job["kind"] = RELEASE_WATCH_KIND
+            break
+    store._save()
+    return job_id
+
+
+def list_release_watches(store: Any) -> list[Any]:
+    return [
+        job
+        for job in store.jobs
+        if isinstance(job, dict) and job.get("kind") == RELEASE_WATCH_KIND
+    ]
+
+
+def clear_release_watch(store: Any, job_id: Any) -> dict[str, Any]:
+    for index, job in enumerate(store.jobs):
+        if (
+            isinstance(job, dict)
+            and job.get("id") == job_id
+            and job.get("kind") == RELEASE_WATCH_KIND
+        ):
+            store.jobs.pop(index)
+            store._save()
+            return {"cleared": job_id}
+    return {"error": f"no release-watch job: {job_id!r}"}
+
+
+def tick_release_watch(store: Any, now: Any, checker: Any) -> list[dict]:
+    checker_now, stamp, _today = _roe_now(now)
+    fired: list[dict] = []
+    ran_any = False
+    for job in store.jobs:
+        if not isinstance(job, dict):
+            continue
+        if job.get("kind") != RELEASE_WATCH_KIND or job.get("completed"):
+            continue
+        due_at = job.get("due_at")
+        if due_at is None or due_at > stamp:
+            continue
+        history = job.setdefault("history", [])
+        if job.get("claimed_at") == stamp:
+            continue
+        if any(isinstance(e, dict) and e.get("ran_at") == stamp for e in history):
+            continue
+        job["claimed_at"] = stamp
+        store._save()
+        job["last_result"] = checker(checker_now)
+        job["last_ran_at"] = stamp
+        history.append({"ran_at": stamp, "result": job["last_result"]})
+        del history[:-RELEASE_WATCH_HISTORY_LIMIT]
+        job["claimed_at"] = None
+        job["due_at"] = stamp + job["interval_seconds"]
+        ran_any = True
+        result = job["last_result"]
+        if isinstance(result, dict) and result.get("new"):
+            fired.append(job)
+    if ran_any:
+        store._save()
+    return fired
+
+
 __all__ = [
+    "ENGAGEMENT_DIGEST_HISTORY_LIMIT",
+    "ENGAGEMENT_DIGEST_INTERVAL_SECONDS",
+    "ENGAGEMENT_DIGEST_KIND",
+    "ENGAGEMENT_DIGEST_REPORTS_ENV_VAR",
     "HEARTBEAT_KIND",
+    "RELEASE_WATCH_HISTORY_LIMIT",
+    "RELEASE_WATCH_INTERVAL_SECONDS",
+    "RELEASE_WATCH_KIND",
     "ROE_EXPIRY_HISTORY_LIMIT",
     "ROE_EXPIRY_INTERVAL_SECONDS",
     "ROE_EXPIRY_KIND",
+    "clear_engagement_digest",
     "clear_heartbeat",
+    "clear_release_watch",
     "clear_roe_expiry",
     "heartbeat_runner",
+    "list_engagement_digests",
     "list_heartbeats",
+    "list_release_watches",
     "list_roe_expiries",
+    "schedule_engagement_digest",
     "schedule_heartbeat",
+    "schedule_release_watch",
     "schedule_roe_expiry",
+    "tick_engagement_digest",
     "tick_heartbeats",
+    "tick_release_watch",
     "tick_roe_expiry",
 ]
