@@ -883,3 +883,43 @@ def test_periodic_export_leaves_restored_untouched_day_alone(tmp_path: Any) -> N
     assert (
         json.loads(today_target.read_text(encoding="utf-8"))["alice"]["requests"] == 1
     )
+
+
+def test_restored_past_day_warn_keeps_gauge_clear(tmp_path: Any) -> None:
+    """A warn restored for a PAST day stays state-only: gauge stays clear."""
+    outdir = tmp_path / "rollups"
+    past = "2023-11-13"  # the day before the fixed clock's UTC day
+    saved = {"alice": {"requests": 9, "tool_calls": 0, "denied": 0, "warn": True}}
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / f"counters-{past}.json").write_text(json.dumps(saved), encoding="utf-8")
+    registry = MetricsRegistry()
+    engine = _engine(registry, {"alice": QuotaLimits(requests_per_day=10)}, mode="soft")
+    assert engine.restore_counters(outdir) == []
+    assert ("2023-11-13", "alice", "requests") not in engine._warned
+    assert 'omega_caller_quota_warn{caller="alice"} 1' not in registry.render()
+
+
+def test_same_day_restore_still_publishes_gauge(tmp_path: Any) -> None:
+    outdir = tmp_path / "rollups"
+    saved = {"alice": {"requests": 9, "tool_calls": 0, "denied": 0, "warn": True}}
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / f"counters-{DAY}.json").write_text(json.dumps(saved), encoding="utf-8")
+    registry = MetricsRegistry()
+    engine = _engine(registry, {"alice": QuotaLimits(requests_per_day=10)}, mode="soft")
+    assert engine.restore_counters(outdir) == [DAY]
+    assert 'omega_caller_quota_warn{caller="alice"} 1' in registry.render()
+
+
+def test_restore_skips_days_older_than_retention(tmp_path: Any) -> None:
+    """Days beyond the 31-day retention window are never restored (P2)."""
+    outdir = tmp_path / "rollups"
+    ancient = "2022-01-01"  # > 31 days before the fixed clock's 2023-11-14
+    saved = {"alice": {"requests": 5, "tool_calls": 0, "denied": 0}}
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / f"counters-{ancient}.json").write_text(
+        json.dumps(saved), encoding="utf-8"
+    )
+    registry = MetricsRegistry()
+    engine = _engine(registry, {}, mode="report")
+    assert engine.restore_counters(outdir) == []
+    assert engine.daily_counts(ancient) == {}

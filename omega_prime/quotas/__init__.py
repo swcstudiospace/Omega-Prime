@@ -44,6 +44,11 @@ QUOTA_MODES = ("report", "soft", "hard")
 
 #: UTC-day window kind keys, matching the quota-document field stems.
 KIND_REQUESTS = "requests"
+
+# Days older than this are skipped at restore: daily quotas from a year ago
+# cannot affect enforcement, and holding every historical day in memory (and
+# in the export set) only grows without bound.
+_RESTORE_MAX_AGE_DAYS = 31
 KIND_TOOL_CALLS = "tool_calls"
 
 #: Fixed safe bucket for callers without token identity. Never denied.
@@ -669,12 +674,26 @@ class QuotaEngine:
             logger.warning("quota counters restore failed: %s", exc)
             return []
         restored: list[str] = []
+        today = _utc_day(self._clock())
         for candidate in candidates:
             stem = candidate.name[len("counters-") : -len(".json")]
             try:
                 datetime.strptime(stem, "%Y-%m-%d")
             except ValueError:
                 continue
+            if stem < today:
+                try:
+                    age = (
+                        datetime.now(UTC)
+                        - datetime.strptime(stem, "%Y-%m-%d").replace(tzinfo=UTC)
+                    ).days
+                except ValueError:
+                    continue
+                if age > _RESTORE_MAX_AGE_DAYS:
+                    # Daily quotas older than the retention window cannot
+                    # affect enforcement; keeping a year of them in memory
+                    # (and in the export set) only grows without bound.
+                    continue
             if self._restore_day(directory, stem):
                 restored.append(stem)
         return restored
@@ -724,7 +743,9 @@ class QuotaEngine:
                 bucket.denied += denied
                 if entry.get("warn"):
                     self._warned.add((day, label, KIND_REQUESTS))
-                    if self._warn_gauge is not None:
+                    # The gauge means "warned today": a warn restored for a
+                    # past day stays state-only so it never reads as current.
+                    if day == _utc_day(self._clock()) and self._warn_gauge is not None:
                         with contextlib.suppress(Exception):
                             self._warn_gauge.labels(caller=self._fold(label)).set(1)
         return True
