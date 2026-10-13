@@ -21,6 +21,7 @@ from omega_prime.sandbox.runner import (
     SandboxRunner,
     SandboxUnavailable,
     build_create_argv,
+    default_transport,
     probe_openshell,
 )
 
@@ -39,6 +40,7 @@ def _success_transport(seen: list):
         ):
             return {"exit_code": 0, "stdout": "openshell 0.1.2", "stderr": ""}
         return {"exit_code": 0, "stdout": "gate-ok", "stderr": ""}
+
     return transport
 
 
@@ -54,22 +56,28 @@ def test_stub_present_run_captures_exit_output_and_binding(tmp_path):
     assert "gate-ok" in result.output
     assert result.argv == ["python3", "-m", "pytest", "-q"]
     expected = hashlib.sha256(
-        json.dumps(["python3", "-m", "pytest", "-q"], ensure_ascii=False,
-                   sort_keys=True).encode("utf-8")
+        json.dumps(
+            ["python3", "-m", "pytest", "-q"], ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
     ).hexdigest()
     assert result.argv_sha256 == expected
-    assert result.policy_sha256 == hashlib.sha256(
-        (tmp_path / "sandbox-policy.yaml").read_bytes()
-    ).hexdigest()
+    assert (
+        result.policy_sha256
+        == hashlib.sha256((tmp_path / "sandbox-policy.yaml").read_bytes()).hexdigest()
+    )
     create_argv = seen[0][0]
     assert create_argv[:3] == ["openshell", "sandbox", "create"]
     assert "--no-auto-providers" in create_argv
     assert "--policy" in create_argv
-    assert create_argv[create_argv.index("--") + 1:] == [
-        "python3", "-m", "pytest", "-q",
+    assert create_argv[create_argv.index("--") + 1 :] == [
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
     ]
     assert seen[0][1] == 60
     assert seen[0][2] == "/work"
+
 
 def test_forced_create_failure_never_executes_argv(tmp_path):
     marker = tmp_path / "would-have-run.txt"
@@ -109,6 +117,35 @@ def test_create_failure_cause_names_create_failed(tmp_path):
         assert "sandbox_unavailable" in str(exc)
     else:
         raise AssertionError("expected SandboxUnavailable")
+
+
+def test_marked_setup_failure_raises_instead_of_recording_exit_127(tmp_path):
+    """A transport startup failure (exit 127 + setup_error) is not evidence."""
+
+    def _setup_broken(argv, timeout=120, cwd=None):
+        if list(argv)[:2] == ["openshell", "--version"]:
+            return {"exit_code": 0, "stdout": "openshell 0.1.2", "stderr": ""}
+        return {
+            "exit_code": 127,
+            "stdout": "",
+            "stderr": "timeout after 120s before exec",
+            "setup_error": "transport startup failed: timeout after 120s",
+        }
+
+    runner = SandboxRunner(
+        _policy(tmp_path),
+        transport=_setup_broken,
+        probe=lambda: (True, None),
+    )
+    with pytest.raises(SandboxUnavailable, match="create-failed"):
+        runner.run(["echo", "hi"])
+
+
+def test_default_transport_marks_startup_failures(tmp_path):
+    """OSError/timeout from the default transport carries setup_error."""
+    result = default_transport(["definitely-not-a-real-binary-xyz"], timeout=5)
+    assert result["exit_code"] == 127
+    assert result.get("setup_error")
 
 
 def _missing_binary_transport(calls: list):
@@ -165,7 +202,7 @@ def test_argv_with_shell_metacharacters_passes_as_argv(tmp_path):
     result = runner.run(tricky)
     assert result.argv == tricky
     wrapped = seen[0][0]
-    assert wrapped[wrapped.index("--") + 1:] == tricky
+    assert wrapped[wrapped.index("--") + 1 :] == tricky
     assert all(isinstance(part, str) for part in wrapped)
 
 
@@ -177,8 +214,17 @@ def test_no_shell_true_in_runner_source():
 def test_build_create_argv_shape():
     argv = build_create_argv("p.yaml", "gate-abc", ["a", "b"])
     assert argv == [
-        "openshell", "sandbox", "create", "--name", "gate-abc",
-        "--policy", "p.yaml", "--no-auto-providers", "--", "a", "b",
+        "openshell",
+        "sandbox",
+        "create",
+        "--name",
+        "gate-abc",
+        "--policy",
+        "p.yaml",
+        "--no-auto-providers",
+        "--",
+        "a",
+        "b",
     ]
 
 

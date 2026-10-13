@@ -960,6 +960,48 @@ def test_promote_digest_mismatch_refuses(
     assert list(out.glob("*promotion*evidence*.json")) == []
 
 
+def test_promote_empty_digest_file_refuses_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A present-but-empty .digest refuses instead of skipping the check."""
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _promotion_dir(tmp_path)
+    (out / "image.digest").write_text("\n", encoding="utf-8")
+    assert deploy.promote(_DRILL_DIGEST, out, out / "approval.json") == 1
+    assert list(out.glob("*promotion*evidence*.json")) == []
+
+
+def test_promote_malformed_digest_file_refuses_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A .digest with no digest token refuses instead of passing anything."""
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _promotion_dir(tmp_path)
+    (out / "image.digest").write_text("pending manual review\n", encoding="utf-8")
+    assert deploy.promote(_DRILL_DIGEST, out, out / "approval.json") == 1
+    assert list(out.glob("*promotion*evidence*.json")) == []
+
+
+def test_promote_unreadable_digest_file_refuses_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable .digest refuses instead of skipping the check."""
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _promotion_dir(tmp_path)
+    digest_file = out / "image.digest"
+    digest_file.write_text(_DRILL_DIGEST + "\n", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def _boom(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == digest_file:
+            raise OSError("EACCES: permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    assert deploy.promote(_DRILL_DIGEST, out, out / "approval.json") == 1
+    assert list(out.glob("*promotion*evidence*.json")) == []
+
+
 def test_promote_direct_requires_env_and_flag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1002,9 +1044,12 @@ def test_healthcheck_default_probe_is_stdlib_urlopen(
 ) -> None:
     out = _rendered(tmp_path, "k8s")
     calls: list[str] = []
-    monkeypatch.setattr(
-        deploy, "_probe_url", lambda url, **_: calls.append(url) or True
-    )
+
+    def _probe(url: str, **_: Any) -> bool:
+        calls.append(url)
+        return True
+
+    monkeypatch.setattr(deploy, "_probe_url", _probe)
     assert deploy.healthcheck("k8s", out) == 0
     assert [url.split("/")[-1] for url in calls] == ["healthz", "readyz"]
 

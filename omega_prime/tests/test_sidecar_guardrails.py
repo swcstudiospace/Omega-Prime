@@ -49,6 +49,7 @@ REDTEAM_ENV_KEYS = (
     "OMEGA_PRIME_REDTEAM_ROE_REQUIRED",
     "OMEGA_PRIME_REDTEAM_ROE_FILE",
     "OMEGA_PRIME_REDTEAM_ROE_KEY",
+    "OMEGA_PRIME_REDTEAM_ROE_KEY_FILE",
     "OMEGA_PRIME_REDTEAM_GATEWAY_URL",
 )
 
@@ -78,6 +79,25 @@ def _write_signed_roe(directory, key: bytes = FIXTURE_KEY):
     artifact.write_text(json.dumps(document), encoding="utf-8")
     sign_artifact(artifact, key)
     return artifact
+
+
+def _write_grant_roe(directory, key: bytes = FIXTURE_KEY, *, tools=None, days_to=1):
+    """Signed RoE with a tool allowlist subset and a controlled window."""
+    now = datetime.now(UTC)
+    document = {
+        "schema_version": 1,
+        "operator": "grant-fixture",
+        "authorized_targets": [{"host": "127.0.0.1", "tools": list(tools or [])}],
+        "effective_from": (now - timedelta(days=1)).isoformat(timespec="seconds"),
+        "effective_until": (now + timedelta(days=days_to)).isoformat(
+            timespec="seconds"
+        ),
+        "case_classes": ["prompt-injection"],
+    }
+    artifact = directory / "roe.json"
+    artifact.write_text(json.dumps(document), encoding="utf-8")
+    sign_artifact(artifact, key)
+    return artifact, document
 
 
 def _build(monkeypatch, tmp_path, **env):
@@ -218,3 +238,111 @@ def test_state_gauge_covers_all_five_states():
     assert sidecar_state_value("BLOCKED") == 3.0
     with pytest.raises(ValueError, match="unknown sidecar state"):
         sidecar_state_value("FLYING")
+
+
+def test_limited_grant_registers_only_allowed_tools(monkeypatch, sidecar_env):
+    """A grant limited to tempest_status never enables the other ten."""
+    artifact, _ = _write_grant_roe(sidecar_env, tools=["tempest_status"])
+    registry = _build(
+        monkeypatch,
+        sidecar_env,
+        OMEGA_PRIME_REDTEAM_ENABLED="1",
+        OMEGA_PRIME_REDTEAM_ROE_FILE=str(artifact),
+        OMEGA_PRIME_REDTEAM_ROE_KEY=FIXTURE_KEY.decode(),
+    )
+    assert registry.runtime_bindings["sidecar_state"] == "IDLE"
+    assert _registered_names(registry) & set(REDTEAM_TOOL_NAMES) == {"tempest_status"}
+
+
+def test_limited_grant_denies_other_tools_at_call_time(monkeypatch, sidecar_env):
+    """Call-time allowlist holds even for directly built clients."""
+    calls: list = []
+
+    def _ok(base_url, method, path, payload, headers, timeout):
+        calls.append(path)
+        return 200, {"ok": True}
+
+    monkeypatch.delenv("OMEGA_PRIME_REDTEAM_KILL", raising=False)
+    _, grant = _write_grant_roe(sidecar_env, tools=["tempest_status"])
+    client = RedteamClient(RedteamContext(request=_ok, roe=grant))
+    assert client.status()["tool"] == "tempest_status"
+    assert calls == ["/api/mission/status", "/api/llm/status"]
+    refused = client.mission_stop()
+    assert refused["ok"] is False
+    assert "roe-tool-denied" in refused["error"]
+    assert "BLOCKED" in refused["error"]
+    assert calls == ["/api/mission/status", "/api/llm/status"]
+
+
+def test_expired_grant_blocks_at_call_time(monkeypatch, sidecar_env):
+    """A grant past effective_until answers BLOCKED without transport I/O."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("transport must not run on an expired grant")
+
+    monkeypatch.delenv("OMEGA_PRIME_REDTEAM_KILL", raising=False)
+    _, grant = _write_grant_roe(sidecar_env, tools=[], days_to=-1)
+    client = RedteamClient(RedteamContext(request=_boom, roe=grant))
+    refused = client.status()
+    assert refused["mission"]["ok"] is False
+    assert "roe-expired" in refused["mission"]["error"]
+    assert "BLOCKED" in refused["mission"]["error"]
+
+
+def test_kill_switch_still_first_with_a_grant(monkeypatch, sidecar_env):
+    """Kill-first order is preserved when a grant is present."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("no transport under kill")
+
+    _, grant = _write_grant_roe(sidecar_env, tools=[])
+    client = RedteamClient(RedteamContext(request=_boom, roe=grant))
+    monkeypatch.setenv("OMEGA_PRIME_REDTEAM_KILL", "1")
+    body = client.mission_stop()
+    assert body["error"].startswith("killed:")
+
+
+def test_file_key_value_rejected_fail_closed(monkeypatch, sidecar_env, tmp_path):
+    """A key value in omega-prime.json is BLOCKED with a broker warning."""
+    from omega_prime.mcp_server import _evaluate_redteam_guard, default_registry
+
+    artifact = _write_signed_roe(sidecar_env)
+    install = tmp_path / "install"
+    (install / "omega_prime").mkdir(parents=True, exist_ok=True)
+    (install / "omega-prime.json").write_text(
+        json.dumps({"redteam": {"roe_key": "sekrit-in-file"}}), encoding="utf-8"
+    )
+    for name, value in {
+        "OMEGA_PRIME_REDTEAM_ENABLED": "1",
+        "OMEGA_PRIME_REDTEAM_ROE_FILE": str(artifact),
+        "OMEGA_PRIME_REDTEAM_ROE_KEY": FIXTURE_KEY.decode(),
+    }.items():
+        monkeypatch.setenv(name, value)
+    config = load_config(install)
+    assert config["redteam"]["roe_key_in_file"] is True
+    state, cause = _evaluate_redteam_guard(config)
+    assert (state, cause) == ("BLOCKED", "roe-key-in-file")
+    registry = default_registry(
+        install, tmp_path / "home", approval_log=ApprovalLog(), env={}
+    )
+    assert registry.runtime_bindings["sidecar_state"] == "BLOCKED"
+    assert not (_registered_names(registry) & set(REDTEAM_TOOL_NAMES))
+
+
+def test_key_file_resolves_to_idle(monkeypatch, sidecar_env, tmp_path):
+    """roe_key_file (0600) authorizes exactly like the env key."""
+    artifact = _write_signed_roe(sidecar_env)
+    key_file = tmp_path / "roe-key"
+    key_file.write_bytes(FIXTURE_KEY)
+    key_file.chmod(0o600)
+    registry = _build(
+        monkeypatch,
+        sidecar_env,
+        OMEGA_PRIME_REDTEAM_ENABLED="1",
+        OMEGA_PRIME_REDTEAM_ROE_FILE=str(artifact),
+        OMEGA_PRIME_REDTEAM_ROE_KEY_FILE=str(key_file),
+    )
+    assert registry.runtime_bindings["sidecar_state"] == "IDLE"
+    assert _registered_names(registry) & set(REDTEAM_TOOL_NAMES) == set(
+        REDTEAM_TOOL_NAMES
+    )

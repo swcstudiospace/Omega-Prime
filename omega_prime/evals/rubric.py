@@ -21,6 +21,7 @@ contribute 0 with ``judge_unavailable`` unset.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,7 @@ class UnknownPredicateError(RubricError):
 
 
 class InvalidWeightsError(RubricError):
-    """Criterion weights do not sum to 1 (tolerance 1e-9)."""
+    """A weight is non-numeric, non-finite, or negative, or weights do not sum to 1 (tolerance 1e-9)."""
 
 
 #: Deterministic predicates over the replay outcome. ``judge`` is the only
@@ -107,7 +108,14 @@ def validate_case(case: Any) -> dict:
                 f"rubric case {case_id!r}: criterion "
                 f"{criterion.get('id', '<missing-id>')!r} needs a numeric weight"
             )
-        total += float(weight)
+        value = float(weight)
+        if not math.isfinite(value) or value < 0:
+            raise InvalidWeightsError(
+                f"rubric case {case_id!r}: criterion "
+                f"{criterion.get('id', '<missing-id>')!r} needs a finite "
+                f"weight >= 0, got {weight!r}"
+            )
+        total += value
     if abs(total - 1.0) > _TOLERANCE:
         raise InvalidWeightsError(
             f"rubric case {case_id!r}: weights sum to {total!r}, expected 1"

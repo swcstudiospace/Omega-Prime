@@ -214,7 +214,14 @@ mode is token-identity-scoped. At most 64 distinct caller labels are
 exported; excess folds into `caller="_overflow_"`.
 
 Windows are UTC calendar days. The live counters enforce within the
-current day; the per-day rollup file is the audit source of truth.
+current day; the per-day rollup file is the audit source of truth. The
+serve host also dumps its raw per-caller counters on a 60-second
+maintenance tick into `counters-<UTC-day>.json` files inside the same
+`rollup_dir` — one object per caller (`requests`, `tool_calls`, `denied`,
+`warn`) with unfolded labels, so overflow callers the exported series
+folds away keep their own numbers. The same tick re-reads the `quotas`
+config node, so `mode` and `document` changes take effect live with no
+restart and no chain rebuild.
 Per-caller series (all scope-gated behind `/metrics` exactly like the
 other series — unauthenticated scrapes still 401):
 
@@ -235,14 +242,17 @@ In `report` mode (the default) nothing is enforced: no denial, no
 warning, no behavior change.
 
 The nightly rollup is an ordinary `heartbeat_set` job invoking the rollup
-CLI with explicit paths — no new scheduler, no new tool name:
+CLI with explicit paths — no new scheduler, no new tool name. Point
+`--counters` at the host's dumped file so the report carries the day's
+real numbers (when the flag is omitted the CLI falls back to
+`rollup-dir/counters-<date>.json` when that file exists):
 
 ```json
-{"session": "ops-nightly", "prompt": "Run the quota rollup: .venv/bin/python -m omega_prime.quotas rollup --date <yesterday as YYYY-MM-DD> --rollup-dir /var/lib/omega-prime/.omega-quotas --document /etc/omega-prime/quotas.json", "interval_seconds": 86400}
+{"session": "ops-nightly", "prompt": "Run the quota rollup: .venv/bin/python -m omega_prime.quotas rollup --date <yesterday as YYYY-MM-DD> --rollup-dir /var/lib/omega-prime/.omega-quotas --counters /var/lib/omega-prime/.omega-quotas/counters-<yesterday as YYYY-MM-DD>.json --document /etc/omega-prime/quotas.json", "interval_seconds": 86400}
 ```
 
 ```bash
-.venv/bin/python -m omega_prime.quotas rollup --date 2026-10-12 --rollup-dir .omega-quotas/ --document /etc/omega-prime/quotas.json
+.venv/bin/python -m omega_prime.quotas rollup --date 2026-10-12 --rollup-dir .omega-quotas/ --counters .omega-quotas/counters-2026-10-12.json --document /etc/omega-prime/quotas.json
 ```
 
 The CLI writes `rollup_dir/usage-YYYY-MM-DD.json` — one object per caller
@@ -252,8 +262,11 @@ that day's `/metrics` counters. With quotas disabled (no document) the run
 logs one skip line and writes nothing.
 
 Escape hatch (T-82-06): flipping `quotas.mode` back to `report` stops
-warnings and denials on live-reload with no restart; callers are unlimited
-again exactly as before.
+warnings and denials on the next maintenance tick (within a minute), with
+no restart; callers are unlimited again exactly as before. The same live
+reload applies the other way: raising `report` to `soft` or `hard`, or
+pointing `document` at a new file, takes effect on the tick — including
+activating a host that started with no document.
 
 ## Runtime and further reading
 

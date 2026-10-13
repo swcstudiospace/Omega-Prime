@@ -1878,13 +1878,30 @@ def promote(
         )
         return 1
     known: set[str] = set()
+    unreadable: list[str] = []
     for path in peers:
         if not path.name.lower().endswith(".digest"):
             continue
         try:
-            known |= _digest_tokens(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
+            unreadable.append(path.name)
             continue
+        tokens = _digest_tokens(text)
+        if not tokens:
+            # Present but empty or malformed: fail closed, never silently
+            # skip — otherwise any supplied digest would succeed.
+            unreadable.append(path.name)
+            continue
+        known |= tokens
+    if unreadable:
+        print(
+            "deploy: promotion refused: unreadable or malformed .digest file "
+            f"({', '.join(sorted(unreadable))}); refusing fail-closed rather "
+            "than promoting without digest evidence",
+            file=sys.stderr,
+        )
+        return 1
     if known and digest not in known:
         print(
             "deploy: promotion refused: digest does not match the .digest file; "

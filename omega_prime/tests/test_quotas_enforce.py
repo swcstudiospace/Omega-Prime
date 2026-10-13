@@ -403,6 +403,7 @@ def test_rollup_cli_writes_and_skips(
         == 1
     )
 
+
 def test_warn_refires_after_utc_rollover_with_gauge_set(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -432,3 +433,185 @@ def test_warn_refires_after_utc_rollover_with_gauge_set(
     assert len(day2_warnings) == 1
     assert "alice" in day2_warnings[0].getMessage()
     assert 'omega_caller_quota_warn{caller="alice"} 1' in registry.render()
+
+
+# -- overflow enforcement isolation --------------------------------------
+
+
+def test_overflow_callers_enforced_independently() -> None:
+    """70 callers, hard mode: sharing ends at the export label (P1).
+
+    Buckets stay per-caller past the 64-label cap, so caller-65's first
+    request is allowed even after caller-64 consumed its own budget; the
+    exported `_overflow_` entry still sums both.
+    """
+    registry = MetricsRegistry()
+    labels = [f"c{i:02d}" for i in range(70)]
+    engine = _engine(
+        registry,
+        {label: QuotaLimits(requests_per_day=1) for label in labels},
+        mode="hard",
+    )
+    c64 = Principal("tok-64", frozenset({SCOPE_CALL}), "c64")
+    c65 = Principal("tok-65", frozenset({SCOPE_CALL}), "c65")
+    assert engine.caller_label(c64) == "_overflow_"
+    assert engine.caller_label(c65) == "_overflow_"
+    assert engine.before(_call(c64)) is None  # own budget, first request
+    assert engine.before(_call(c65)) is None  # not denied for c64's usage
+    assert engine.before(_call(c64)) is not None  # own second request denies
+    counts = engine.daily_counts(DAY)
+    assert counts["_overflow_"]["requests"] == 3
+    assert sum(entry["requests"] for entry in counts.values()) == 3
+    assert len(counts) == 1
+    assert 'caller="_overflow_"' in registry.render()
+
+
+# -- host-side counters dump ---------------------------------------------
+
+
+def test_counters_dump_feeds_rollup_cli(tmp_path: Any) -> None:
+    """Serve-side dump round-trips through `rollup --counters` (P1)."""
+    from omega_prime.quotas.__main__ import main
+
+    registry = MetricsRegistry()
+    engine = _engine(
+        registry,
+        {
+            "alice": QuotaLimits(requests_per_day=100, tool_calls_per_day=100),
+            "bob": QuotaLimits(requests_per_day=100),
+        },
+        mode="report",
+    )
+    chain = _chain(registry, engine)
+    for _ in range(3):
+        _, outcome = run_tool_call(chain, _call(ALICE), lambda: '{"ok": true}')
+        assert outcome.status == "ok"
+    for _ in range(2):
+        _, outcome = run_tool_call(chain, _call(BOB), lambda: '{"ok": true}')
+        assert outcome.status == "ok"
+    outdir = tmp_path / "rollups"
+    dumped = engine.export_counters(outdir)
+    assert dumped == [outdir / f"counters-{DAY}.json"]
+    snapshot = json.loads(dumped[0].read_text(encoding="utf-8"))
+    assert (snapshot["alice"]["requests"], snapshot["alice"]["tool_calls"]) == (3, 3)
+    assert (snapshot["bob"]["requests"], snapshot["bob"]["tool_calls"]) == (2, 2)
+    assert (
+        engine.dump_counters_file(outdir, DAY).read_bytes() == dumped[0].read_bytes()
+    )  # byte-identical re-dump
+    doc = tmp_path / "quotas.json"
+    doc.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "callers": {
+                    "alice": {"requests_per_day": 100, "tool_calls_per_day": 100},
+                    "bob": {"requests_per_day": 100},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        main(
+            [
+                "rollup",
+                "--date",
+                DAY,
+                "--rollup-dir",
+                str(outdir),
+                "--document",
+                str(doc),
+                "--counters",
+                str(dumped[0]),
+            ]
+        )
+        == 0
+    )
+    usage = json.loads((outdir / f"usage-{DAY}.json").read_text(encoding="utf-8"))
+    assert usage["callers"]["alice"]["requests"] == 3
+    assert usage["callers"]["bob"]["requests"] == 2
+    # Without --counters the CLI falls back to the host's dumped file.
+    (outdir / f"usage-{DAY}.json").unlink()
+    assert (
+        main(
+            [
+                "rollup",
+                "--date",
+                DAY,
+                "--rollup-dir",
+                str(outdir),
+                "--document",
+                str(doc),
+            ]
+        )
+        == 0
+    )
+    rediscovered = json.loads(
+        (outdir / f"usage-{DAY}.json").read_text(encoding="utf-8")
+    )
+    assert rediscovered["callers"]["alice"]["requests"] == 3
+
+
+# -- live reload via the maintenance tick ---------------------------------
+
+
+def test_maintenance_tick_flips_mode_live_without_restart(tmp_path: Any) -> None:
+    """The serve tick activates hard mode and back with no restart (P1)."""
+    from omega_prime.quotas import QuotasMaintenance
+
+    doc = tmp_path / "quotas.json"
+    doc.write_text(
+        json.dumps(
+            {"schema_version": 1, "callers": {"alice": {"requests_per_day": 1}}}
+        ),
+        encoding="utf-8",
+    )
+    rollup_dir = tmp_path / "rollups"
+    state = {"mode": "report", "document": ""}
+    registry = MetricsRegistry()
+    engine = _engine(registry, {}, mode="report")
+    assert not engine.is_active
+    maint = QuotasMaintenance(
+        engine,
+        root=tmp_path,
+        config_loader=lambda: {"quotas": {**state, "rollup_dir": str(rollup_dir)}},
+    )
+    tick = maint.tick_once()
+    assert tick["ok"] and tick["mode"] == "report" and tick["dumped"] == []
+    assert engine.before(_call(ALICE)) is None  # inert: unlimited
+    state.update(mode="hard", document=str(doc))
+    tick = maint.tick_once()
+    assert tick["ok"] and tick["mode"] == "hard"
+    assert engine.is_active
+    assert engine.before(_call(ALICE)) is None
+    assert engine.before(_call(ALICE)) is not None  # over budget: denied live
+    assert 'omega_caller_requests_total{caller="alice"} 2' in registry.render()
+    tick = maint.tick_once()  # next tick dumps the counted day
+    assert tick["ok"] and tick["mode"] == "hard"
+    assert tick["dumped"] == [str(rollup_dir / f"counters-{DAY}.json")]
+    snapshot = json.loads(
+        (rollup_dir / f"counters-{DAY}.json").read_text(encoding="utf-8")
+    )
+    assert snapshot["alice"]["requests"] == 2
+    state["mode"] = "report"  # escape hatch, still no restart
+    assert maint.tick_once()["mode"] == "report"
+    assert engine.before(_call(ALICE)) is None
+    maint.start()
+    maint.stop()
+
+
+def test_refresh_bad_document_keeps_previous_mode_and_limits(
+    tmp_path: Any,
+) -> None:
+    """A bad document never half-applies: mode and limits stay put."""
+    from omega_prime.quotas import QuotaDocumentError
+
+    engine = _engine(
+        MetricsRegistry(), {"alice": QuotaLimits(requests_per_day=5)}, mode="hard"
+    )
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    with pytest.raises(QuotaDocumentError):
+        engine.refresh_from_config({"quotas": {"mode": "report", "document": str(bad)}})
+    assert engine.mode == "hard"
+    assert engine.limits["alice"].requests_per_day == 5

@@ -92,7 +92,11 @@ from omega_prime.grokbot.telemetry import (
     RequestContextMiddleware,
     configure_logging,
 )
-from omega_prime.grokbot.tokens import CompositeTokenStore, FileTokenStore
+from omega_prime.grokbot.tokens import (
+    CompositeTokenStore,
+    FileTokenStore,
+    observe_active_with_bearer,
+)
 from omega_prime.mcp_server import (
     SERVER_NAME,
     SERVER_VERSION,
@@ -102,7 +106,7 @@ from omega_prime.mcp_server import (
     load_runtime,
 )
 from omega_prime.metrics import register_sidecar_state
-from omega_prime.quotas import QuotaEngine, load_quota_document
+from omega_prime.quotas import QuotaEngine, QuotasMaintenance
 
 # uvicorn's logger is the one that is configured when this runs under `serve_sse`.
 logger = logging.getLogger("uvicorn.error")
@@ -476,17 +480,19 @@ def create_sse_app(
         )
         # Token rotation series (Phase 82): registered next to the existing
         # registry construction; the serve-time snapshot syncs from the token
-        # records via `observe`, so the active gauge AND the expiry counter
-        # advance from entry states (label hashes only — raw labels never
-        # leave the process). Env-token-only deployments have no records, so
-        # the principals count is the fallback. A snapshot failure must never
-        # break serving.
+        # records plus the single bearer/env caller, so the active gauge AND
+        # the expiry counter advance from entry states (label hashes only —
+        # raw labels never leave the process). Env-token-only deployments
+        # have no records, so the principals count is the fallback.
+        # A snapshot failure must never break serving.
         token_metrics = register_token_metrics(metrics)
         try:
             _records = _token_file_records(store, token_store_path)
             if _records is not None:
                 _now = clock() if clock is not None else time.time()
-                token_metrics.observe(_records, _now)
+                # File records PLUS the single bearer/env caller: a combined
+                # bearer-token + file store must count every live caller.
+                observe_active_with_bearer(token_metrics, store, _records, _now)
             else:
                 counts: dict[str, int] = {}
                 for principal in store.principals():
@@ -526,28 +532,29 @@ def create_sse_app(
             logger.warning("telemetry push failed to start; export off", exc_info=True)
             otlp_exporter = None
 
-    # Per-caller usage quotas (Phase 82). Inert unless quotas.document names
-    # a quota file; a load failure also leaves quotas off (never half-on).
-    # The mode was already allowlist-normalized by load_config.
-    quota_engine: QuotaEngine | None = None
+    # Per-caller usage quotas (Phase 82). Always constructed and always in
+    # the chain: with no document the engine is inert (pass-through hooks,
+    # no series, no counting), and the maintenance tick below activates it
+    # live when a document or mode appears — no restart. A load failure
+    # also leaves quotas off (never half-on). The mode was already
+    # allowlist-normalized by load_config.
+    quota_engine = QuotaEngine(metrics, mode="report", limits={})
     try:
         _quotas_node = _load_telemetry_config(root).get("quotas", {})
     except Exception:
         logger.warning("quota config load failed; quotas off", exc_info=True)
         _quotas_node = {}
-    if isinstance(_quotas_node, dict) and str(_quotas_node.get("document") or ""):
+    if isinstance(_quotas_node, dict):
         try:
-            _quota_mode = _quotas_node.get("mode", "report")
-            if _quota_mode not in ("report", "soft", "hard"):
-                _quota_mode = "report"
-            quota_engine = QuotaEngine(
-                metrics,
-                mode=_quota_mode,
-                limits=load_quota_document(_quotas_node.get("document") or ""),
-            )
+            quota_engine.refresh_from_config({"quotas": _quotas_node})
         except Exception:
             logger.warning("quota engine start failed; quotas off", exc_info=True)
-            quota_engine = None
+    # Live reload + counters dump (Phase 82 maintenance tick): re-reads the
+    # `quotas` node and dumps `counters-<UTC-day>.json` into the rollup dir
+    # for the nightly rollup. Inert ticks only re-read config and write
+    # nothing; stopped with the lifespan below.
+    quotas_maintenance = QuotasMaintenance(quota_engine, root=root)
+    quotas_maintenance.start()
 
     in_flight = InFlightInterceptor()
 
@@ -568,10 +575,10 @@ def create_sse_app(
         observers.append(MetricsInterceptor(metrics, tool_names=served_tool_names))
     # The quota check precedes dispatch (never partial) and follows the
     # observers, so audit and the tool-denial metric see quota denials;
-    # it follows ScopeInterceptor so forbidden calls consume no quota.
-    quota_chain: tuple[ToolCallInterceptor, ...] = (
-        (quota_engine,) if quota_engine is not None else ()
-    )
+    # it follows ScopeInterceptor so forbidden calls consume no quota. The
+    # engine is always present (inert when unconfigured) so live reload
+    # needs no restart and no chain rebuild.
+    quota_chain: tuple[ToolCallInterceptor, ...] = (quota_engine,)
     chain: tuple[ToolCallInterceptor, ...] = (
         *observers,
         ScopeInterceptor(),
@@ -722,6 +729,10 @@ def create_sse_app(
             streamable_state["down"] = True
             raise
         finally:
+            try:
+                quotas_maintenance.stop()
+            except Exception:
+                logger.warning("quota maintenance stop failed", exc_info=True)
             if otlp_exporter is not None:
                 try:
                     otlp_exporter.stop()
@@ -796,6 +807,7 @@ def create_sse_app(
     app.state.metrics = metrics
     app.state.token_metrics = token_metrics
     app.state.quota_engine = quota_engine
+    app.state.quotas_maintenance = quotas_maintenance
     app.state.otlp_exporter = otlp_exporter
     app.state.token_store = store
     app.state.approval_log = runtime.approval_log

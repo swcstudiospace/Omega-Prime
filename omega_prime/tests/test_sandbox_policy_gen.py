@@ -191,7 +191,9 @@ def test_header_names_generator_and_commands(tmp_path):
 
 
 def test_snapshot_golden_pins_canonical_output():
-    assert GOLDEN_PATH.is_file(), "golden file missing; regenerate per REGENERATE_COMMAND"
+    assert GOLDEN_PATH.is_file(), (
+        "golden file missing; regenerate per REGENERATE_COMMAND"
+    )
     assert render_policy(CANONICAL_SEAT_PATH) == GOLDEN_PATH.read_bytes()
 
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -41,7 +42,7 @@ def test_judge_off_records_skipped_with_zero_network(monkeypatch):
         def load_module(self, name):
             raise AssertionError(f"socket-capable import attempted: {name}")
 
-    hook = _BlockImports()
+    hook: Any = _BlockImports()
     sys.meta_path.insert(0, hook)
     try:
         record = judge.score_criterion(
@@ -73,11 +74,14 @@ def test_judge_on_with_stubbed_endpoint_stores_score_and_rationale(monkeypatch):
         "OMEGA_PRIME_EVALS_JUDGE_API_KEY": "secret",
         "OMEGA_PRIME_EVALS_JUDGE_ENDPOINT": "https://judge.example/score",
     }
-    monkeypatch.setattr(
-        judge,
-        "_post_json",
-        lambda url, payload, timeout=30: {"score": 0.8, "rationale": "polite refusal"},
-    )
+    seen: dict = {}
+
+    def _stub(url, payload, timeout=30, api_key=None):
+        seen["url"] = url
+        seen["api_key"] = api_key
+        return {"score": 0.8, "rationale": "polite refusal"}
+
+    monkeypatch.setattr(judge, "_post_json", _stub)
     record = judge.score_criterion(
         dict(CRITERION), "transcript", ON_CONFIG, environ=environ
     )
@@ -85,6 +89,7 @@ def test_judge_on_with_stubbed_endpoint_stores_score_and_rationale(monkeypatch):
     assert record.get("score") == pytest.approx(0.8)
     assert record.get("rationale") == "polite refusal"
     assert record.get("model") == "test-model"
+    assert seen["api_key"] == "secret", "the configured key must reach the request"
 
 
 def test_judge_endpoint_down_records_unavailable_and_completes(monkeypatch):
@@ -93,7 +98,7 @@ def test_judge_endpoint_down_records_unavailable_and_completes(monkeypatch):
         "OMEGA_PRIME_EVALS_JUDGE_ENDPOINT": "https://judge.example/score",
     }
 
-    def _down(url, payload, timeout=30):
+    def _down(url, payload, timeout=30, api_key=None):
         raise ConnectionError("endpoint down")
 
     monkeypatch.setattr(judge, "_post_json", _down)
@@ -128,7 +133,62 @@ def test_judge_module_top_level_imports_no_socket_stack():
             assert module not in sys.modules, f"{module} imported at judge top level"
     finally:
         for module in mods:
-            if saved[module] is not None:
-                sys.modules[module] = saved[module]
+            mod = saved[module]
+            if mod is not None:
+                sys.modules[module] = mod
             else:
                 sys.modules.pop(module, None)
+
+
+def test_post_json_attaches_bearer_authorization_header(monkeypatch):
+    """The configured key travels as ``Authorization: Bearer`` (hermetic)."""
+    import urllib.request
+
+    seen: dict = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"score": 1.0, "rationale": "ok"}'
+
+    def _capture(request, timeout=None):
+        seen["auth"] = request.get_header("Authorization")
+        seen["content_type"] = request.get_header("Content-type")
+        return _Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _capture)
+    answer = judge._post_json(
+        "https://judge.example/score", {"model": "m"}, api_key="secret"
+    )
+    assert answer["score"] == 1.0
+    assert seen["auth"] == "Bearer secret"
+    assert seen["content_type"] == "application/json"
+
+
+def test_post_json_without_key_sends_no_authorization_header(monkeypatch):
+    import urllib.request
+
+    seen: dict = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"score": 0.0}'
+
+    def _capture(request, timeout=None):
+        seen["auth"] = request.get_header("Authorization")
+        return _Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _capture)
+    judge._post_json("https://judge.example/score", {"model": "m"})
+    assert seen["auth"] is None

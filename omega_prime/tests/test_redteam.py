@@ -485,6 +485,7 @@ def test_redteam_disabled_by_default_and_enabled_by_env(monkeypatch):
         "roe_required": True,
         "roe_file": "",
         "roe_key": "",
+        "roe_key_file": "",
     }
     monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ENABLED", "1")
     monkeypatch.setenv("OMEGA_PRIME_REDTEAM_GATEWAY_URL", "http://127.0.0.1:4444")

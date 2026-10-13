@@ -120,10 +120,17 @@ def main(argv: list[str] | None = None) -> int:
         report = run_suite(cases_dir, Path(tmp))
         rubric_failed = 0
         if rubric_path is not None:
+            from omega_prime.config import load_config
             from omega_prime.evals import rubric as _rubric
 
+            try:
+                suite_config: dict | None = load_config()
+            except Exception:
+                suite_config = None
             cases = _rubric.load_rubric_cases(rubric_path)
-            records = _rubric.run_rubric_suite(cases, Path(tmp) / "rubric")
+            records = _rubric.run_rubric_suite(
+                cases, Path(tmp) / "rubric", config=suite_config
+            )
             report["rubric_cases"] = records
             rubric_failed = sum(
                 1 for record in records if record["score"] < record["min_score"]

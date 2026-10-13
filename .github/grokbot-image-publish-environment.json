@@ -2,7 +2,7 @@
   "_notes": [
     "Desired configuration record for the grokbot-image-publish protected environment.",
     "Owner/repo (swcstudiospace/omes-bot) resolved at authoring time from the checkout remote via `git remote get-url origin`; never copied from prose.",
-    "The gh api PUT body is derived from this file by the parent-run command in docs/deploy.md: only wait_timer, prevent_self_review, reviewers (numeric id resolved at apply time), and deployment_branch_policy are sent. environment_name, required_reviewers, and _notes are record-keeping only.",
+    "The gh api PUT body is derived from this file by the parent-run command in docs/deploy.md: wait_timer, prevent_self_review, can_admins_bypass (false: no admin bypass), reviewers (numeric id resolved at apply time), and deployment_branch_policy are sent. environment_name, required_reviewers, and _notes are record-keeping only.",
     "Reviewer login is the repo owner as sole required reviewer. If the owner resolves to an organization rather than a user, the operator re-attempts with a Team reviewer and records the change; the workflow gate stays fail-closed until required-reviewer protection reads back."
   ],
   "environment_name": "grokbot-image-publish",

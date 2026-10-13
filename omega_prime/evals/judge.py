@@ -11,8 +11,8 @@ credential checks pass.
 Rules (plan-06 rollout contract):
 
 - Flag off (or model empty, or credential absent) => the criterion records
-  ``judge: skipped``, contributes 0, and zero network is attempted — no key
-  reads beyond a presence check, no client construction.
+  ``judge: skipped``, contributes 0, and zero network is attempted — the
+  key is only presence-checked, never read or attached.
 - Endpoint down => the criterion scores 0 with ``judge_unavailable: true``;
   the suite still completes (recorded, never fabricated, never blocks).
 - Rationale + model id are stored per record; judge-scored criteria stay
@@ -56,19 +56,24 @@ def judge_model(config: dict | None) -> str:
     return model if isinstance(model, str) else ""
 
 
-def _credential_present(environ: Any) -> bool:
+def _credential_value(environ: Any) -> str:
+    """The configured judge API key (empty when absent)."""
     env = environ if environ is not None else os.environ
     try:
-        return bool(str(env.get(CREDENTIAL_ENV_VAR, "")).strip())
+        return str(env.get(CREDENTIAL_ENV_VAR, "")).strip()
     except Exception:
-        return False
+        return ""
 
 
-def _post_json(url: str, payload: dict, timeout: int = 30) -> dict:
+def _post_json(
+    url: str, payload: dict, timeout: int = 30, api_key: str | None = None
+) -> dict:
     """POST a JSON payload, return the decoded JSON response.
 
     Separated for stubbing in tests. Only ever called on the enabled path
     (socket-capable imports live here, nowhere else in this module).
+    When ``api_key`` is non-empty it travels as the documented
+    ``Authorization: Bearer <key>`` header — never in the URL or body.
     """
     import http.client
     import ssl
@@ -76,9 +81,10 @@ def _post_json(url: str, payload: dict, timeout: int = 30) -> dict:
 
     _ = (http.client, ssl)  # named so the enabled path owns its imports
     body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}
-    )
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(url, data=body, headers=headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -102,7 +108,8 @@ def score_criterion(
         else "<bad-criterion>"
     )
     model = judge_model(config)
-    if not judge_enabled(config) or not _credential_present(environ):
+    api_key = _credential_value(environ)
+    if not judge_enabled(config) or not api_key:
         return {
             "id": criterion_id,
             "score": 0.0,
@@ -144,6 +151,7 @@ def score_criterion(
                 "prompt": prompt,
                 "transcript": transcript,
             },
+            api_key=api_key,
         )
     except Exception as exc:
         return {

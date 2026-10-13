@@ -410,6 +410,9 @@ def validate_suite(
         for case in cases
         if isinstance(case.get("case_id"), str)
     }
+    # Case-linked failures double as findings input: each one names a case
+    # whose observed detection did not meet expectation.
+    finding_records: list[tuple[dict[str, object], str, str]] = []
     for case in cases:
         case_id = case.get("case_id")
         if not isinstance(case_id, str) or not case_id:
@@ -419,6 +422,7 @@ def validate_suite(
             failures.append(
                 f"case {case_id!r}: FAIL — no recorded observation; re-run the suite"
             )
+            finding_records.append((case, "no-observation", ""))
             continue
         expected = case.get("expected")
         want = str(expected.get("detection")) if isinstance(expected, dict) else ""
@@ -435,13 +439,58 @@ def validate_suite(
         failures.append(
             f"case {case_id!r}: FAIL — observed detection {got!r} != expected {want!r}"
         )
+        response = observed.get("response")
+        finding_records.append(
+            (case, str(got), str(response) if isinstance(response, str) else "")
+        )
     for observed_id in sorted(observations):
         if observed_id not in known_ids:
             failures.append(
                 f"case {observed_id!r}: FAIL — recorded observation "
                 "for unknown case_id; re-run the suite"
             )
+    for case, observed_detection, response in finding_records:
+        try:
+            _record_suite_finding(case, observed_detection, response, reports)
+        except (OSError, ValueError) as exc:
+            failures.append(
+                f"case {case.get('case_id')!r}: FAIL — could not record finding ({exc})"
+            )
     return (len(failures) == 0), failures
+
+
+def _record_suite_finding(
+    case: dict[str, object],
+    observed_detection: str,
+    response: str,
+    reports: str | Path | None,
+) -> None:
+    """Record one validation failure as a finding (production caller path).
+
+    Every case-linked ``validate_suite`` failure becomes a row in
+    ``findings.ndjson`` via :func:`sidecar.findings.record_finding`, so
+    :func:`sidecar.findings.export_work_items` emits it as a tracked work
+    item. Replays dedupe by content (``occurrence_count`` grows instead of
+    new rows). Only failures tied to a known case record — load errors,
+    drift, and unknown observation ids have no case metadata to file.
+    """
+    case_id = str(case.get("case_id") or "unknown")
+    klass = case.get("class")
+    severity = case.get("severity")
+    verdict = (
+        "no-observation"
+        if observed_detection == "no-observation"
+        else "missed-detection"
+    )
+    _findings.record_finding(
+        case_id=case_id,
+        klass=str(klass) if isinstance(klass, str) and klass else "unknown",
+        severity=str(severity) if isinstance(severity, str) and severity else "unknown",
+        observed_detection=observed_detection,
+        verdict=verdict,
+        response=response,
+        directory=reports,
+    )
 
 
 def _per_class_lines(cases: list[dict[str, object]]) -> list[str]:

@@ -15,7 +15,7 @@
 #   2. Sign it with a detached HMAC-SHA256 (key provisioned out-of-band, never
 #      fetched at runtime):
 #        python3 -c "import sys; sys.path.insert(0, '.'); \
-#          from sidecar.roe import sign_artifact; \
+#          from omega_prime.redteam.roe import sign_artifact; \
 #          sign_artifact('/etc/omega-prime/roe.json', open('/run/secrets/roe-key','rb').read())"
 #      This writes roe.json.sig next to the artifact. Any edit to the JSON
 #      after signing invalidates the signature (fail closed).

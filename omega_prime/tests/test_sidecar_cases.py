@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -22,7 +23,7 @@ def test_six_classes_each_have_a_versioned_case():
     cases, errors = load_suite(SHIPPED_DIR)
     assert errors == []
     assert len(cases) == 6
-    assert sorted(case["class"] for case in cases) == sorted(CASE_CLASSES)
+    assert sorted(cast(str, case["class"]) for case in cases) == sorted(CASE_CLASSES)
 
 
 @pytest.mark.parametrize("case_class", CASE_CLASSES)
@@ -60,7 +61,7 @@ def test_payloads_are_inert_strings_never_executed():
         # Parsed documents hold only strings and the expected mapping.
         for key, value in case.items():
             assert isinstance(value, str) or key == "expected", key
-        assert set(case["expected"]) <= {"detection", "residual_rationale"}
+        assert set(cast(dict[str, str], case["expected"])) <= {"detection", "residual_rationale"}
 
 
 def test_missing_expectation_fails_validation_by_name(tmp_path):
@@ -89,14 +90,14 @@ def test_duplicate_case_id_fails_naming_both_files(tmp_path):
 @pytest.mark.parametrize(
     "bad_text",
     [
-        "case_id: \"x\"\n\tversion: \"1.0.0\"\n",  # tabs forbidden
-        "case_id: \"x\"\nversion: \"1.0.0\"\n- stray\n",  # lists forbidden
-        "case_id: &anchor \"x\"\n",  # anchors forbidden
-        "case_id: !tag \"x\"\n",  # tags forbidden
+        'case_id: "x"\n\tversion: "1.0.0"\n',  # tabs forbidden
+        'case_id: "x"\nversion: "1.0.0"\n- stray\n',  # lists forbidden
+        'case_id: &anchor "x"\n',  # anchors forbidden
+        'case_id: !tag "x"\n',  # tags forbidden
         "payload: |\n  block\n",  # block scalars forbidden
-        "expected:\n  detection: \"a\"\n    deeper: \"b\"\n",  # deep nesting
-        "other:\n  nested: \"x\"\n",  # nested mapping outside expected:
-        "case_id: \"x\"\ncase_id: \"y\"\n",  # duplicate keys
+        'expected:\n  detection: "a"\n    deeper: "b"\n',  # deep nesting
+        'other:\n  nested: "x"\n',  # nested mapping outside expected:
+        'case_id: "x"\ncase_id: "y"\n',  # duplicate keys
     ],
 )
 def test_hostile_yaml_constructs_rejected(bad_text):

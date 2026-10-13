@@ -51,8 +51,16 @@ def _cmd_rollup(args: argparse.Namespace) -> int:
             print("quotas disabled (no quota document); skipping rollup")
             return 0
         counts: dict = {}
-        if args.counters:
-            counts = json.loads(Path(args.counters).read_text(encoding="utf-8"))
+        counters_source = args.counters
+        if not counters_source:
+            # The serve host dumps per-day counters here on its maintenance
+            # tick; a nightly job that omits --counters still reports the
+            # host's numbers instead of an empty day.
+            candidate = Path(args.rollup_dir) / f"counters-{args.date}.json"
+            if candidate.is_file():
+                counters_source = str(candidate)
+        if counters_source:
+            counts = json.loads(Path(counters_source).read_text(encoding="utf-8"))
             if not isinstance(counts, dict):
                 raise ValueError("--counters must contain a JSON object")
         engine.seed_day(args.date, counts)

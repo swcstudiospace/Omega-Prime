@@ -54,13 +54,24 @@ class SandboxResult:
 def default_transport(
     argv: list[str], timeout: float | int = 120, cwd: str | None = None
 ) -> dict[str, Any]:
-    """Run argv directly (no shell) and capture exit + output."""
+    """Run argv directly (no shell) and capture exit + output.
+
+    Startup failures (missing binary, timeout before exec) are marked
+    with ``setup_error`` so :meth:`SandboxRunner.run` raises
+    :class:`SandboxUnavailable` instead of recording an exit-127 result
+    as executed evidence.
+    """
     try:
         run = subprocess.run(
             list(argv), capture_output=True, text=True, timeout=timeout, cwd=cwd
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"exit_code": 127, "stdout": "", "stderr": str(exc)}
+        return {
+            "exit_code": 127,
+            "stdout": "",
+            "stderr": str(exc),
+            "setup_error": f"transport startup failed: {exc}",
+        }
     return {"exit_code": run.returncode, "stdout": run.stdout, "stderr": run.stderr}
 
 
@@ -159,6 +170,11 @@ class SandboxRunner:
             raise SandboxUnavailable(f"create-failed: {exc}") from exc
         if not isinstance(result, dict):
             raise SandboxUnavailable("create-failed: transport returned no result")
+        setup_error = result.get("setup_error")
+        if isinstance(setup_error, str) and setup_error.strip():
+            # Startup failure, not an execution: degrade explicitly instead
+            # of recording exit 127 as executed evidence with the argv.
+            raise SandboxUnavailable(f"create-failed: {setup_error.strip()}")
         exit_code = result.get("exit_code", 127)
         if isinstance(exit_code, bool) or not isinstance(exit_code, int):
             exit_code = 127

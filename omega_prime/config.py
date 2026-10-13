@@ -57,12 +57,15 @@ def _defaults() -> dict[str, Any]:
             "bearer_token_file": "",
             # Sidecar authorization (Phase 79). All restrictive by default:
             # kill stops everything, RoE is required, and an empty roe_file
-            # means BLOCKED when enabled. roe_key is the detached-HMAC
-            # verification key (config-supplied, never fetched at runtime).
+            # means BLOCKED when enabled. The verification key never lives
+            # in this file: it resolves from OMEGA_PRIME_REDTEAM_ROE_KEY or
+            # from the file named by roe_key_file (broker rule). A key value
+            # stored under roe_key here is rejected fail-closed by the guard.
             "kill": False,
             "roe_required": True,
             "roe_file": "",
             "roe_key": "",
+            "roe_key_file": "",
         },
         # Telemetry export (Phase 81). Off by default with an empty endpoint;
         # the exporter refuses to start until an endpoint is configured.
@@ -111,7 +114,7 @@ def _defaults() -> dict[str, Any]:
                 "model": "",
             },
         },
-     }
+    }
 
 
 def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -133,12 +136,27 @@ def load_config(root: str | Path | None = None) -> dict[str, Any]:
             loaded = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(loaded, dict):
                 raise ValueError("omega-prime.json must contain a JSON object")
+            if _file_holds_roe_key(loaded):
+                # Broker rule: the verification key must never live in the
+                # config file. The marker survives the env merge below so
+                # the guard can reject fail-closed even when the env key
+                # is also set.
+                loaded.setdefault("redteam", {})["roe_key_in_file"] = True
             _merge(config, loaded)
     _merge(config, _env_overrides(os.environ))
     _normalize_quotas_mode(config)
     _normalize_sandbox_scope(config)
     _normalize_evals(config)
     return config
+
+
+def _file_holds_roe_key(loaded: dict[str, Any]) -> bool:
+    """True when the config file itself stores a ``redteam.roe_key`` value."""
+    node = loaded.get("redteam")
+    if not isinstance(node, dict):
+        return False
+    value = node.get("roe_key")
+    return isinstance(value, str) and bool(value.strip())
 
 
 QUOTA_MODES = ("report", "soft", "hard")
@@ -270,6 +288,16 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 # OMEGA_PRIME_REDTEAM_ROE_KEY — detached-HMAC verification
                 # key. Secret: never logged, never rendered to metrics.
                 overlay.setdefault("redteam", {})["roe_key"] = value.strip()
+            elif (
+                len(parts) == 4
+                and parts[1] == "roe"
+                and parts[2] == "key"
+                and parts[3] == "file"
+            ):
+                # OMEGA_PRIME_REDTEAM_ROE_KEY_FILE — path to a file holding
+                # the verification key (broker-rule alternative to the env
+                # key above; mirrors bearer_token_file).
+                overlay.setdefault("redteam", {})["roe_key_file"] = value.strip()
         elif parts[0] == "telemetry":
             # OMEGA_PRIME_TELEMETRY_OTLP_ENABLED — truthy enables export;
             # the exporter additionally requires a non-empty push target.
@@ -365,16 +393,16 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
             elif len(parts) == 3 and parts[1] == "judge" and parts[2] == "enabled":
                 # OMEGA_PRIME_EVALS_JUDGE_ENABLED — truthy enables the
                 # live-model judge; anything else leaves it off.
-                overlay.setdefault("evals", {}).setdefault("judge", {})[
-                    "enabled"
-                ] = value.strip().lower() in ("1", "true", "yes", "on")
+                overlay.setdefault("evals", {}).setdefault("judge", {})["enabled"] = (
+                    value.strip().lower() in ("1", "true", "yes", "on")
+                )
             elif len(parts) == 3 and parts[1] == "judge" and parts[2] == "model":
                 # OMEGA_PRIME_EVALS_JUDGE_MODEL — model id; empty (the
                 # default) means the judge refuses to start even when
                 # enabled. The endpoint credential is env-only, never here.
-                overlay.setdefault("evals", {}).setdefault("judge", {})[
-                    "model"
-                ] = value.strip()
+                overlay.setdefault("evals", {}).setdefault("judge", {})["model"] = (
+                    value.strip()
+                )
     return overlay
 
 

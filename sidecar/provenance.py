@@ -87,7 +87,23 @@ def parse_docstring_pins(text: str) -> list[str]:
 
 
 def read_gitlink(root: Path) -> str:
-    """Tracked ``redteam/`` gitlink SHA from the index (offline)."""
+    """Tracked ``redteam/`` gitlink SHA, staged index first (offline).
+
+    Reads the staged gitlink (``git ls-files -s redteam``) so a Dependabot
+    or hand bump staged with ``git add redteam`` verifies before commit;
+    falls back to ``HEAD`` (``git ls-tree HEAD redteam``) when nothing is
+    staged. Callers may bypass both with ``--gitlink``.
+    """
+    staged = subprocess.run(
+        ["git", "ls-files", "-s", "redteam"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if staged.returncode == 0:
+        match = re.search(r"\b([0-9a-f]{40})\b", staged.stdout)
+        if match:
+            return match.group(1)
     proc = subprocess.run(
         ["git", "ls-tree", "HEAD", "redteam"],
         cwd=root,

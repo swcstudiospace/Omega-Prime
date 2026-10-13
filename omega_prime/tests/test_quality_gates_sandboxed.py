@@ -52,9 +52,16 @@ class StubSandboxTransport:
             return {"exit_code": 0, "stdout": "openshell 0.1.2", "stderr": ""}
         assert argv[:3] == ["openshell", "sandbox", "create"], argv[:3]
         assert "--no-auto-providers" in argv
-        self.wrapped.append(argv[argv.index("--") + 1:])
+        self.wrapped.append(argv[argv.index("--") + 1 :])
         if self.behavior == "create-failure":
             raise RuntimeError("sandbox create: policy rejected")
+        if self.behavior == "setup-timeout":
+            return {
+                "exit_code": 127,
+                "stdout": "",
+                "stderr": "timeout before exec",
+                "setup_error": "transport startup failed: timed out",
+            }
         if self.behavior == "egress-denied":
             return {
                 "exit_code": 1,
@@ -280,6 +287,27 @@ def test_create_failure_degrades_with_cause(tmp_path, monkeypatch):
     assert not marker.exists()
 
 
+def test_setup_timeout_degrades_without_executed_evidence(tmp_path, monkeypatch):
+    """Exit 127 from setup is a degraded receipt, never executed evidence."""
+    policy = _policy(tmp_path, monkeypatch)
+    transport = StubSandboxTransport("setup-timeout")
+    argv = ["echo", "hi"]
+    client = QualityClient(
+        _ctx(
+            tmp_path,
+            sandbox={"enabled": True, "policy": str(policy), "scope": "gates"},
+            sandbox_transport=transport,
+        )
+    )
+    result = client.gates_run(suites=_suites(argv))
+    assert result["ok"] is False
+    entry = result["gates"]["unit"]
+    assert entry["exit_code"] == 127
+    assert "sandbox_unavailable" in entry["sandbox"]["degraded"]
+    assert "create-failed" in entry["sandbox"]["degraded"]
+    assert load_executions() == []
+
+
 # --- receipt binding: tamper-evidence + approve cross-check ---
 
 
@@ -384,6 +412,7 @@ def test_unrecorded_commands_still_rejected_with_sandbox_on(tmp_path, monkeypatc
     refused = client.receipt_approve("ghost-receipt.json", approver="ada")
     assert "gate_failed" in refused["error"]
 
+
 # --- served registration honors OMEGA_PRIME_SANDBOX_ENABLED (P1) ---
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -423,7 +452,11 @@ def _served_dispatch(tmp_path, env):
     return json.loads(
         registry.dispatch(
             "qua_gates_run",
-            {"suites": [{"name": "unit", "argv": ["no-such-binary-xyz"], "timeout": 30}]},
+            {
+                "suites": [
+                    {"name": "unit", "argv": ["no-such-binary-xyz"], "timeout": 30}
+                ]
+            },
         )
     )
 

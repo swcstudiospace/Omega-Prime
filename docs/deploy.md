@@ -269,18 +269,20 @@ Publication stays manual and default-off: `workflow_dispatch` with `publish: tru
    jq --argjson rid "${REVIEWER_ID}" \
      '.wait_timer = 0
       | .prevent_self_review = true
+      | .can_admins_bypass = false
       | .reviewers = [{type: "User", id: $rid}]
-      | {wait_timer, prevent_self_review, reviewers, deployment_branch_policy}' \
+      | {wait_timer, prevent_self_review, can_admins_bypass, reviewers, deployment_branch_policy}' \
      .github/grokbot-image-publish-environment.json > /tmp/grokbot-image-publish-put.json
    gh api --method PUT "repos/${OWNER}/${REPO}/environments/${ENV_NAME}" \
      --input /tmp/grokbot-image-publish-put.json
    ```
-   The payload names the repo owner as the sole required reviewer with a zero wait timer, restricts the deployment branch policy to `main` (protected branches only, no custom policies), prohibits self-review, and configures no admin bypass.
+   The payload names the repo owner as the sole required reviewer with a zero wait timer, restricts the deployment branch policy to `main` (protected branches only, no custom policies), prohibits self-review, and sets `can_admins_bypass` false so the no-admin-bypass claim is sent, not just stated.
 2. Read back the protection (parent-run):
    ```sh
    gh api "repos/${OWNER}/${REPO}/environments/${ENV_NAME}" --jq '.protection_rules[].type'
+   jq -e '.can_admins_bypass == false' /tmp/grokbot-image-publish-put.json
    ```
-   The output must contain `required_reviewers`; an empty, missing, or ambiguous rule set leaves the gate refusing.
+   The output must contain `required_reviewers`; an empty, missing, or ambiguous rule set leaves the gate refusing. The second command proves the sent payload carried the no-admin-bypass flag — the environment readback has no `can_admins_bypass` field of its own, so the claim is checked against the exact PUT body (`/tmp/grokbot-image-publish-put.json`), which fails closed when the flag is absent or not false.
 3. Fallback when admin rights refuse: if the creation call fails (forbidden, or the reviewer type needs a Team instead of a User), record the refusal, stop, and keep the workflow gate unchanged and fail-closed. Never weaken a refusal, never auto-approve, and never publish without the protected environment. Configuring protection remains a separately authorized operator prerequisite; this page records no observed approval.
 
 The publisher downloads the same run's immutable artifacts, gates strict complete evidence, verifies ref/event/run/

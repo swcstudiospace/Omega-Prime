@@ -159,6 +159,31 @@ def _check_sandbox_binding(
                     )
 
 
+def _select_policy_bound(
+    candidates: list[dict], expected_policy_sha256: str | None
+) -> dict | None:
+    """Pick the captured record a receipt command binds to.
+
+    Without an expected policy digest the first same command+exit record
+    wins (historical behavior). With one, records whose ``policy_sha256``
+    equals the expected digest win; digest-less records are only a
+    fallback when no policy-bound record exists, and records bound to a
+    *different* digest never match — an old run under policy A must not
+    approve a receipt expecting policy B.
+    """
+    if not candidates:
+        return None
+    if expected_policy_sha256 is None:
+        return candidates[0]
+    for record in candidates:
+        if record.get("policy_sha256") == expected_policy_sha256:
+            return record
+    for record in candidates:
+        if "policy_sha256" not in record or record.get("policy_sha256") is None:
+            return record
+    return None
+
+
 def validate_receipt(
     receipt: dict,
     executions: list | None = None,
@@ -246,28 +271,29 @@ def validate_receipt(
                 continue
             cmd = command.get("cmd")
             exit_code = command.get("exit_code")
-            cmd_seen = False
-            matched = False
-            matched_record: dict | None = None
-            for record in captured:
-                if not isinstance(record, dict) or record.get("cmd") != cmd:
-                    continue
-                cmd_seen = True
-                if _exit_equal(record.get("exit_code"), exit_code):
-                    matched = True
-                    matched_record = record
-                    break
-            if matched:
-                _check_sandbox_binding(
-                    errors, index, command, matched_record, expected_policy_sha256
+            cmd_candidates: list[dict] = [
+                record
+                for record in captured
+                if isinstance(record, dict) and record.get("cmd") == cmd
+            ]
+            if not cmd_candidates:
+                errors.append(f"commands[{index}] was not captured")
+                continue
+            matched_record = _select_policy_bound(cmd_candidates, expected_policy_sha256)
+            if matched_record is None:
+                errors.append(
+                    f"commands[{index}] matches only executions bound to "
+                    "a different policy digest"
                 )
                 continue
-            if cmd_seen:
+            if not _exit_equal(matched_record.get("exit_code"), exit_code):
                 errors.append(
                     f"commands[{index}] exit_code does not match a captured execution"
                 )
-            else:
-                errors.append(f"commands[{index}] was not captured")
+                continue
+            _check_sandbox_binding(
+                errors, index, command, matched_record, expected_policy_sha256
+            )
     else:
         for index, command in enumerate(commands):
             if not isinstance(command, dict):

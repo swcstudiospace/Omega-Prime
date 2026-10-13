@@ -53,7 +53,7 @@ def _write_fixture_root(
     vendor_line = f"- Commit: `{vendor_pin}`\n" if vendor_pin else "- Commit: TBD\n"
     (tmp_path / "VENDOR.md").write_text(
         "# Vendored behavior\n\n## T3MP3ST red team pack\n\n"
-        "- Remote: https://example.invalid/purple-team.git\n"
+        "- Remote: http://127.0.0.1/purple-team.git\n"
         f"{vendor_line}",
         encoding="utf-8",
     )
@@ -150,6 +150,43 @@ def test_check_missing_vendor_file_is_environment_error(tmp_path, capsys):
     code, _, err = _run(capsys, "--root", str(tmp_path), "check", "--gitlink", PIN_A)
     assert code == 2
     assert "missing" in err
+
+
+def test_read_gitlink_prefers_staged_index_over_head(monkeypatch):
+    """A staged bump (``git add redteam``) verifies before commit."""
+    calls: list[list[str]] = []
+
+    class _Proc:
+        def __init__(self, stdout: str, returncode: int = 0):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = returncode
+
+    def _fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if argv[:2] == ["git", "ls-files"]:
+            return _Proc(f"160000 {PIN_B} 0\tredteam\n")
+        return _Proc(f"160000 {PIN_A} 0\tredteam\n")
+
+    monkeypatch.setattr(provenance.subprocess, "run", _fake_run)
+    assert provenance.read_gitlink(Path("/repo")) == PIN_B
+    assert calls[0][:3] == ["git", "ls-files", "-s"]
+
+
+def test_read_gitlink_falls_back_to_head_when_nothing_staged(monkeypatch):
+    class _Proc:
+        def __init__(self, stdout: str, returncode: int = 0):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = returncode
+
+    def _fake_run(argv, **kwargs):
+        if argv[:2] == ["git", "ls-files"]:
+            return _Proc("")
+        return _Proc(f"160000 {PIN_A} 0\tredteam\n")
+
+    monkeypatch.setattr(provenance.subprocess, "run", _fake_run)
+    assert provenance.read_gitlink(Path("/repo")) == PIN_A
 
 
 # -------------------------------------------------------------- pack-diff
@@ -259,7 +296,7 @@ def test_surface_unparseable_adapter_fails_loudly(tmp_path, capsys):
 def test_provenance_module_is_stdlib_only():
     source = Path(provenance.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
-    imported = set()
+    imported: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imported.update(a.name.split(".")[0] for a in node.names)

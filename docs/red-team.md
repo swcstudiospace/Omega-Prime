@@ -20,7 +20,12 @@ The family is off until `omega-prime.json` turns it on. The top-level
   "redteam": {
     "enabled": false,
     "gateway_url": "http://127.0.0.1:3333",
-    "bearer_token_file": ""
+    "bearer_token_file": "",
+    "kill": false,
+    "roe_required": true,
+    "roe_file": "",
+    "roe_key": "",
+    "roe_key_file": ""
   }
 }
 ```
@@ -35,6 +40,31 @@ OMEGA_PRIME_REDTEAM_GATEWAY_URL=http://127.0.0.1:3333
 With the family off, none of the eleven tools register and the host
 behaves as if the module did not exist. Restart the host after a change;
 see the troubleshooting table in [Driving the bot](driving-the-bot.md).
+
+## Signed rules of engagement
+
+When enabled with `roe_required` (the default), the guard resolves a
+signed RoE artifact before any tool registers: kill switch first, then
+the file-key broker check, then `authorize()` from
+`omega_prime/redteam/roe.py` — the canonical helper shipped in the
+wheel and the image (`sidecar/roe.py` is only the harness-side wrapper
+for checkout use, since installed installs never ship `sidecar/`).
+Anything but a valid signature resolves `BLOCKED` with zero
+registrations.
+
+The verification key follows the credential-broker rule: it resolves
+from `OMEGA_PRIME_REDTEAM_ROE_KEY` or from the file named by
+`redteam.roe_key_file` (permission-gated like `bearer_token_file`). A
+key value stored in `omega-prime.json` under `redteam.roe_key` is
+rejected fail-closed (`roe-key-in-file`, warning plus `BLOCKED`) — move
+it to the env var or a key file.
+
+The parsed grant stays on the client: registration exposes only the
+grant's allowed tools (a grant limited to `tempest_status` registers
+only that tool), and every call re-checks the effective window plus the
+per-tool allowlist after the kill switch. An expired grant answers
+`BLOCKED` at call time; a tool outside the grant answers `BLOCKED`
+without touching the transport.
 
 ## Tools
 
@@ -225,7 +255,7 @@ section alone is the procedure, in order, with no undocumented steps:
    PR must show `redteam-provenance` green (`check`, `pack-diff`,
    `surface`) plus the weekly `redteam-node-audit` supply-chain result
    for the new pin; triage any untriaged high-or-above advisory into the
-   dated ignore block in `.github/workflows/supply-chain.yml` with a
+   dated `TRIAGED` block in `scripts/redteam-audit-triage.py` with a
    rationale, mirroring the `PYSEC-2026-4114` precedent. No bump merges
    on a red provenance job.
 

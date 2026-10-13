@@ -13,7 +13,12 @@ import sys
 
 import pytest
 
-from omega_prime.receipts import ReceiptError, append_execution, validate_receipt
+from omega_prime.receipts import (
+    ReceiptError,
+    append_execution,
+    command_digest,
+    validate_receipt,
+)
 from omega_prime.tools.approvals import ApprovalLog
 from omega_prime.tools.quality import QualityClient, QualityContext
 
@@ -130,3 +135,43 @@ def test_destructive_receipt_needs_another_approver_and_stamp(tmp_path, monkeypa
     )
     refused = client.receipt_approve("self-receipt.json")
     assert "self_approval" in refused["error"]
+
+
+def test_policy_bound_record_wins_over_older_same_command_run():
+    """An A-run then a B-run: expecting B approves the B record, not A."""
+    cmd = "pytest -q"
+    executions = [
+        {"cmd": cmd, "exit_code": 0, "policy_sha256": "a" * 64},
+        {"cmd": cmd, "exit_code": 0, "policy_sha256": "b" * 64},
+    ]
+    receipt = {
+        "bot": "bot-01",
+        "commands": [
+            {
+                "cmd": cmd,
+                "exit_code": 0,
+                "argv_sha256": command_digest(cmd),
+                "sandbox_policy_sha256": "b" * 64,
+            }
+        ],
+        "claims": [{"claim": "suite green", "evidence_command_index": 0}],
+        "unverified": [],
+    }
+    # Expecting B binds the B record: validates clean.
+    validate_receipt(receipt, executions=executions, expected_policy_sha256="b" * 64)
+    # Expecting A against only the B record refuses: no fallback across digests.
+    with pytest.raises(ReceiptError, match="different policy digest"):
+        validate_receipt(
+            receipt, executions=[executions[1]], expected_policy_sha256="a" * 64
+        )
+    # Digest-less history still approves when no policy-bound record exists.
+    validate_receipt(
+        {
+            "bot": "bot-01",
+            "commands": [{"cmd": cmd, "exit_code": 0}],
+            "claims": [{"claim": "suite green", "evidence_command_index": 0}],
+            "unverified": [],
+        },
+        executions=[{"cmd": cmd, "exit_code": 0}],
+        expected_policy_sha256="b" * 64,
+    )

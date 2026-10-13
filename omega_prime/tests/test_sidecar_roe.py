@@ -187,3 +187,57 @@ def test_case_classes_match_planned_six():
         "auth-bypass",
         "cost-abuse",
     }
+
+
+def test_sidecar_wrapper_reexports_canonical_runtime_module():
+    """sidecar.roe is the harness-side wrapper over omega_prime.redteam.roe."""
+    import omega_prime.redteam.roe as canonical
+    import sidecar.roe as wrapper
+
+    for name in (
+        "CASE_CLASSES",
+        "CAUSE_EXPIRED",
+        "CAUSE_INVALID",
+        "CAUSE_MISSING",
+        "LOOPBACK_HOSTS",
+        "REQUIRED_KEYS",
+        "SCHEMA_VERSION",
+        "RoeDecision",
+        "authorize",
+        "canonical_bytes",
+        "sign_artifact",
+        "signature_path",
+        "validate_schema",
+        "validate_targets",
+        "verify_signature",
+    ):
+        assert getattr(wrapper, name) is getattr(canonical, name), name
+
+
+def test_grant_allowlist_unions_targets_and_defaults_to_all():
+    from omega_prime.redteam.roe import grant_tool_allowlist
+
+    assert grant_tool_allowlist({"authorized_targets": [{"host": "127.0.0.1"}]}) is None
+    assert grant_tool_allowlist(
+        {
+            "authorized_targets": [
+                {"host": "127.0.0.1", "tools": ["tempest_status"]},
+                {"host": "localhost", "tools": ["tempest_report"]},
+            ]
+        }
+    ) == {"tempest_status", "tempest_report"}
+    assert grant_tool_allowlist("not-a-grant") is None
+
+
+def test_grant_expired_detects_window_and_unparseable():
+    from datetime import timedelta
+
+    from omega_prime.redteam.roe import grant_expired
+
+    now = datetime.now(UTC)
+    past = (now - timedelta(days=1)).isoformat(timespec="seconds")
+    future = (now + timedelta(days=1)).isoformat(timespec="seconds")
+    assert grant_expired({"effective_until": past}) is True
+    assert grant_expired({"effective_until": future}) is False
+    assert grant_expired({"effective_until": "not-a-time"}) is None
+    assert grant_expired(None) is None

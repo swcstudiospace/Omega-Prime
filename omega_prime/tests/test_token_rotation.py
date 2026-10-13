@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 from omega_prime.grokbot.audit import GENESIS_HASH, GrokBotAuditTracer
@@ -14,14 +15,21 @@ from omega_prime.grokbot.metrics import (
     register_token_metrics,
     token_label_hash,
 )
+from omega_prime.grokbot.security import TokenStore
 from omega_prime.grokbot.tokens import (
+    CompositeTokenStore,
     FileTokenStore,
     TokenFileError,
+    TokenRecord,
     create_token,
+    default_audit_file_for,
     due_for_rotation,
     list_tokens,
     main,
+    non_file_principals,
+    observe_active_with_bearer,
     revoke_token,
+    rotate_due_tokens,
     rotate_token,
 )
 
@@ -155,8 +163,15 @@ def test_due_only_dry_run_reports_without_mutation(
     assert [r.label for r in due] == ["soon"]
     assert (
         main(
-            ["rotate", "--file", str(path), "--due-only", "--dry-run",
-             "--overlap-hours", "1"],
+            [
+                "rotate",
+                "--file",
+                str(path),
+                "--due-only",
+                "--dry-run",
+                "--overlap-hours",
+                "1",
+            ],
             clock=clock,
         )
         == 0
@@ -195,7 +210,15 @@ def test_rotate_cli_prints_plaintext_once_and_links_json(
     capsys.readouterr()
     assert (
         main(
-            ["rotate", "--file", str(path), "--label", "ci", "--audit-file", str(_audit(tmp_path))],
+            [
+                "rotate",
+                "--file",
+                str(path),
+                "--label",
+                "ci",
+                "--audit-file",
+                str(_audit(tmp_path)),
+            ],
             clock=clock,
         )
         == 0
@@ -324,8 +347,8 @@ def test_token_metrics_counters_and_gauge(tmp_path: Path) -> None:
     text = registry.render()
     assert "omega_token_rotations_total 1\n" in text
     assert "omega_token_expiry_total 1\n" in text
-    assert f"omega_token_active{{label_hash=\"{token_label_hash('a')}\"}} 1\n" in text
-    assert f"omega_token_active{{label_hash=\"{token_label_hash('b')}\"}} 0\n" in text
+    assert f'omega_token_active{{label_hash="{token_label_hash("a")}"}} 1\n' in text
+    assert f'omega_token_active{{label_hash="{token_label_hash("b")}"}} 0\n' in text
 
 
 def test_rotate_token_records_rotation_metric(tmp_path: Path) -> None:
@@ -338,7 +361,7 @@ def test_rotate_token_records_rotation_metric(tmp_path: Path) -> None:
 
     class _FakeRecorder:
         def __init__(self) -> None:
-            self.calls = 0
+            self.calls = 0.0
 
         def record_rotation(self, n: float = 1.0) -> None:
             self.calls += n
@@ -368,7 +391,11 @@ def test_rotation_then_expiry_between_scrapes_bumps_expiry_total(
     assert handle.observe(list_tokens(path), clock())["newly_expired"] == []
 
     rotate_token(
-        path, label="a", overlap_hours=1, clock=clock, audit_file=None,
+        path,
+        label="a",
+        overlap_hours=1,
+        clock=clock,
+        audit_file=None,
         metrics=handle,
     )
     clock.now += 2 * HOUR
@@ -378,3 +405,94 @@ def test_rotation_then_expiry_between_scrapes_bumps_expiry_total(
     text = registry.render()
     assert "omega_token_rotations_total 1\n" in text
     assert "omega_token_expiry_total 1\n" in text
+
+
+def test_concurrent_due_runs_mint_once(tmp_path: Path) -> None:
+    """Two concurrent scheduled runs rotate a due entry exactly once."""
+    path = _store(tmp_path)
+    clock = FakeClock()
+    create_token(path, scopes=["read"], label="svc", ttl_days=1, clock=clock)
+    clock.now += 23 * HOUR  # 1h of TTL left: due inside a 24h window
+    assert len(due_for_rotation(list_tokens(path), clock(), 24)) == 1
+
+    outcomes: list[list[tuple[str, TokenRecord, TokenRecord]]] = []
+    barrier = threading.Barrier(2)
+
+    def _run() -> None:
+        barrier.wait(timeout=10)
+        outcomes.append(
+            rotate_due_tokens(path, overlap_hours=24, clock=clock, audit_file=None)
+        )
+
+    workers = [threading.Thread(target=_run) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=30)
+    assert all(not worker.is_alive() for worker in workers)
+    assert sum(len(outcome) for outcome in outcomes) == 1
+    records = list_tokens(path)
+    assert len(records) == 2
+    assert sum(1 for record in records if record.rotated_to is not None) == 1
+    assert sum(1 for record in records if record.rotated_from is not None) == 1
+    # A follow-up run mints nothing.
+    assert rotate_due_tokens(path, overlap_hours=24, clock=clock, audit_file=None) == []
+
+
+def test_cli_rotate_writes_default_audit_file(tmp_path: Path, capsys) -> None:
+    """A plain CLI rotate (no --audit-file) writes the sibling audit event."""
+    path = _store(tmp_path)
+    clock = FakeClock()
+    assert main(["new", "--file", str(path), "--label", "ci"], clock=clock) == 0
+    capsys.readouterr()
+    expected = default_audit_file_for(path)
+    assert not expected.exists()
+    assert main(["rotate", "--file", str(path), "--label", "ci"], clock=clock) == 0
+    capsys.readouterr()
+    assert expected.exists()
+    lines = expected.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    (_, new) = sorted(list_tokens(path), key=lambda r: r.created_at)
+    assert event["event"] == "token_rotated"
+    assert event["details"]["new_entry_hash"] == new.sha256
+    assert event["details"]["label_hash"] == hashlib.sha256(b"ci").hexdigest()
+
+
+def test_cli_due_only_rotate_writes_default_audit_file(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """The --due-only CLI branch audits to the sibling file when unset."""
+    monkeypatch.setenv("OMEGA_PRIME_ROTATION_ENABLED", "1")
+    monkeypatch.delenv("OMEGA_PRIME_ROTATION_OVERLAP_HOURS", raising=False)
+    path = _store(tmp_path)
+    clock = FakeClock()
+    create_token(path, scopes=["read"], label="svc", ttl_days=0.5 / 24, clock=clock)
+    expected = default_audit_file_for(path)
+    assert main(["rotate", "--file", str(path), "--due-only"], clock=clock) == 0
+    out, _ = capsys.readouterr()
+    assert len(out.split()) == 1  # fresh plaintext on stdout
+    lines = expected.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["event"] == "token_rotated"
+
+
+def test_active_snapshot_counts_bearer_principal(tmp_path: Path) -> None:
+    """Combined file + single-bearer store counts every live caller."""
+    path = _store(tmp_path)
+    clock = FakeClock()
+    create_token(path, scopes=["read"], label="file-svc", clock=clock)
+    bearer = TokenStore.from_token("omk_" + "e" * 32)
+    file_store = FileTokenStore(path, clock=clock, reload_interval=0)
+    combined = CompositeTokenStore([file_store, bearer])
+    assert [p.id for p in non_file_principals(combined)] == ["env-token"]
+    assert non_file_principals(file_store) == []
+
+    registry = MetricsRegistry()
+    handle = register_token_metrics(registry)
+    observe_active_with_bearer(handle, combined, list_tokens(path), clock())
+    text = registry.render()
+    assert (
+        f'omega_token_active{{label_hash="{token_label_hash("file-svc")}"}} 1\n' in text
+    )
+    assert f'omega_token_active{{label_hash="{token_label_hash("")}"}} 1\n' in text
