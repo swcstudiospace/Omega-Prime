@@ -49,12 +49,12 @@ publication or social-preview upload.
   `omega_prime/grokbot/plugin/mcp.https.example.json` with a `${VAR}`
   placeholder.
 - One generated `/omega-<name>` command per checked-in skill and routine
-  beside the 16 curated commands (50 today), routed through the existing
+  beside the 20 curated commands (54 today), routed through the existing
   `omega_command` tool; a generated name that collides takes a `-skill` or
   `-routine` suffix (`/omega-python-skill`, `/omega-onboard-routine`,
   `/omega-connectors-routine`, `/omega-ultrathink-skill`,
   `/omega-ultrathink-routine`). No new tool joins the roster.
-- `python -m omega_prime.tooling.plugin --write|--check|--verify` renders 50
+- `python -m omega_prime.tooling.plugin --write|--check|--verify` renders 54
   command files plus the manifests deterministically, fails `--check` on any
   drift, frontmatter, collision or secret-shape problem, and `--verify`
   spawns the declared stdio command and a loopback bearer host. `setup_check`
