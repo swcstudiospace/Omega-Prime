@@ -763,3 +763,123 @@ def test_sse_app_threads_run_only_inside_lifespan(tmp_path: Any) -> None:
         assert _bg_threads() == []
     finally:
         maint.stop()
+
+
+# -- restore regression (round-7 findings) -----------------------------------
+
+
+def test_restored_warn_republishes_gauge(tmp_path: Any) -> None:
+    """A saved warn:true restores the warn gauge, not just _warned (P1)."""
+    outdir = tmp_path / "rollups"
+    registry1 = MetricsRegistry()
+    engine1 = _engine(
+        registry1,
+        {"alice": QuotaLimits(requests_per_day=10, tool_calls_per_day=10)},
+        mode="soft",
+    )
+    for _ in range(8):  # 80% of 10 → soft warning fires
+        assert engine1.before(_call(ALICE)) is None
+        engine1.after(_call(ALICE), _ok())
+    assert 'omega_caller_quota_warn{caller="alice"} 1' in registry1.render()
+    dumped = engine1.export_counters(outdir)
+    assert json.loads(dumped[0].read_text(encoding="utf-8"))["alice"]["warn"] is True
+    # Fresh process: restore must republish the gauge, otherwise later
+    # requests early-return from _maybe_warn (already warned) and the gauge
+    # stays 0 for the restored day.
+    registry2 = MetricsRegistry()
+    engine2 = _engine(
+        registry2,
+        {"alice": QuotaLimits(requests_per_day=10, tool_calls_per_day=10)},
+        mode="soft",
+    )
+    assert engine2.restore_counters(outdir) == [DAY]
+    assert 'omega_caller_quota_warn{caller="alice"} 1' in registry2.render()
+    assert engine2.daily_counts(DAY)["alice"]["warn"] is True
+
+
+def test_restore_dedups_equivalent_rollup_dir_spellings(tmp_path: Any) -> None:
+    """A symlink/a/../b spelling of the same dir restores once (P1)."""
+    import os
+
+    outdir = tmp_path / "rollups"
+    registry = MetricsRegistry()
+    engine = _engine(
+        registry,
+        {"alice": QuotaLimits(requests_per_day=100, tool_calls_per_day=100)},
+        mode="report",
+    )
+    chain = _chain(registry, engine)
+    for _ in range(3):
+        _, outcome = run_tool_call(chain, _call(ALICE), lambda: '{"ok": true}')
+        assert outcome.status == "ok"
+    engine.export_counters(outdir)
+    link = tmp_path / "link-rollups"
+    try:
+        os.symlink(outdir, link)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    dots = outdir / "sub" / ".."
+    fresh = _engine(
+        MetricsRegistry(),
+        {"alice": QuotaLimits(requests_per_day=100, tool_calls_per_day=100)},
+        mode="report",
+    )
+    assert fresh.restore_counters(outdir) == [DAY]
+    # Equivalent spellings of the same directory must not merge the same file
+    # a second time (saved usage would count twice).
+    assert fresh.restore_counters(link) == []
+    assert fresh.restore_counters(dots) == []
+    assert fresh.daily_counts(DAY)["alice"]["requests"] == 3
+
+
+def test_periodic_export_leaves_restored_untouched_day_alone(tmp_path: Any) -> None:
+    """Restore an old day → two ticks → old file stable, today dumped (P2)."""
+    import time
+
+    from omega_prime.quotas import QuotasMaintenance
+
+    outdir = tmp_path / "rollups"
+    outdir.mkdir()
+    old_day = "2023-11-13"
+    engine = _engine(
+        MetricsRegistry(),
+        {"alice": QuotaLimits(requests_per_day=100, tool_calls_per_day=100)},
+        mode="report",
+    )
+    engine.seed_day(old_day, {"alice": {"requests": 5, "tool_calls": 5, "denied": 0}})
+    old_target = engine.dump_counters_file(outdir, old_day)
+    old_bytes = old_target.read_bytes()
+    old_mtime = old_target.stat().st_mtime_ns
+    # Fresh process with activity today: the old report is a read-only source.
+    fresh_registry = MetricsRegistry()
+    fresh = _engine(
+        fresh_registry,
+        {"alice": QuotaLimits(requests_per_day=100, tool_calls_per_day=100)},
+        mode="report",
+    )
+    chain = _chain(fresh_registry, fresh)
+    _, outcome = run_tool_call(chain, _call(ALICE), lambda: '{"ok": true}')
+    assert outcome.status == "ok"
+    maint = QuotasMaintenance(
+        fresh,
+        root=tmp_path,
+        config_loader=lambda: {"quotas": {"mode": "report", "rollup_dir": str(outdir)}},
+    )
+    try:
+        first = maint.tick_once()
+        assert first["ok"]
+        # Make mtime comparisons robust on coarse filesystems.
+        time.sleep(0.02)
+        second = maint.tick_once()
+        assert second["ok"]
+    finally:
+        maint.stop()
+    assert old_target.read_bytes() == old_bytes
+    assert old_target.stat().st_mtime_ns == old_mtime
+    assert str(outdir / f"counters-{old_day}.json") not in second["dumped"]
+    today_target = outdir / f"counters-{DAY}.json"
+    assert today_target.is_file()
+    assert str(today_target) in second["dumped"]
+    assert (
+        json.loads(today_target.read_text(encoding="utf-8"))["alice"]["requests"] == 1
+    )

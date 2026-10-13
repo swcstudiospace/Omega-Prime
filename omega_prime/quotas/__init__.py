@@ -221,10 +221,15 @@ class QuotaEngine:
         self._resolve = label_resolver or _default_resolver
         self._lock = threading.Lock()
         self._days: dict[str, dict[str, _Buckets]] = {}
-        # (rollup-dir, day) pairs already folded back from disk. A restart
-        # recovery merge runs once per pair so a re-dump never double-counts
-        # the restored totals.
+        # (resolved rollup-dir, day) pairs already folded back from disk. A
+        # restart recovery merge runs once per pair so a re-dump never
+        # double-counts the restored totals. The dir is resolved so equivalent
+        # spellings (symlink, a/../b) of the same directory restore once.
         self._restored: set[tuple[str, str]] = set()
+        # Days with in-memory activity since boot (counted/seeded). Restores
+        # never mark a day: the periodic export re-dumps only touched days so
+        # restored-but-untouched reports are never rewritten (no mtime churn).
+        self._touched: set[str] = set()
         # Buckets are keyed by RAW caller label (never folded): enforcement is
         # per-caller even past the export cardinality cap. Only the exported
         # series label folds excess callers into `_overflow_` (T-82-07).
@@ -466,6 +471,7 @@ class QuotaEngine:
             caller = self._fold(raw)
             bucket = self._day_buckets(day).setdefault(raw, _Buckets())
             bucket.requests += 1
+            self._touched.add(day)
             if self._requests is not None:
                 with contextlib.suppress(Exception):
                     self._requests.labels(caller=caller).inc()
@@ -518,6 +524,7 @@ class QuotaEngine:
             caller = self._fold(raw)
             bucket = self._day_buckets(day).setdefault(raw, _Buckets())
             bucket.tool_calls += 1
+            self._touched.add(day)
             if self._tool_calls is not None:
                 with contextlib.suppress(Exception):
                     self._tool_calls.labels(caller=caller).inc()
@@ -553,6 +560,7 @@ class QuotaEngine:
                     if self._warn_gauge is not None:
                         with contextlib.suppress(Exception):
                             self._warn_gauge.labels(caller=self._fold(label)).set(1)
+            self._touched.add(day)
 
     def daily_counts(self, day: str) -> dict[str, dict[str, Any]]:
         """Per-caller `{requests, tool_calls, denied, limits, warn}` for `day`.
@@ -649,8 +657,9 @@ class QuotaEngine:
         Restart recovery: a fresh process starts with empty buckets, so the
         first dump/tick after a restart merges the previously saved totals
         (seeded for new labels, added onto post-boot counts for known ones)
-        instead of truncating them. Each `(rollup-dir, day)` pair merges at
-        most once per process, so re-dumps never double-count. Never raises:
+        instead of truncating them. Each `(resolved rollup-dir, day)` pair
+        merges at most once per process, so re-dumps never double-count and
+        equivalent spellings of the same directory restore once. Never raises:
         unreadable files are logged and skipped.
         """
         directory = Path(rollup_dir)
@@ -672,7 +681,11 @@ class QuotaEngine:
 
     def _restore_day(self, directory: Path, day: str) -> bool:
         """Merge one saved day file into memory; `True` when newly restored."""
-        key = (str(directory), day)
+        try:
+            resolved = str(directory.resolve())
+        except OSError:
+            resolved = str(directory)
+        key = (resolved, day)
         with self._lock:
             if key in self._restored:
                 return False
@@ -711,6 +724,9 @@ class QuotaEngine:
                 bucket.denied += denied
                 if entry.get("warn"):
                     self._warned.add((day, label, KIND_REQUESTS))
+                    if self._warn_gauge is not None:
+                        with contextlib.suppress(Exception):
+                            self._warn_gauge.labels(caller=self._fold(label)).set(1)
         return True
 
     def dump_counters_file(self, rollup_dir: str | Path, day: str) -> Path:
@@ -718,8 +734,9 @@ class QuotaEngine:
 
         Merges any previously saved file for `day` first (restart recovery,
         once per process), never writes an empty day over a saved non-empty
-        one, and writes atomically (temp file + `os.replace`) so concurrent
-        rollup readers never observe a truncated file.
+        one, skips the write when the payload bytes would not change (no
+        mtime churn), and writes atomically (temp file + `os.replace`) so
+        concurrent rollup readers never observe a truncated file.
         """
         datetime.strptime(day, "%Y-%m-%d")
         directory = Path(rollup_dir)
@@ -735,6 +752,11 @@ class QuotaEngine:
             if isinstance(existing, dict) and existing:
                 return target
         payload = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
+        try:
+            if target.is_file() and target.read_bytes() == payload.encode("utf-8"):
+                return target
+        except OSError:
+            pass
         tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
         try:
             tmp.write_text(payload, encoding="utf-8")
@@ -745,8 +767,20 @@ class QuotaEngine:
         return target
 
     def export_counters(self, rollup_dir: str | Path) -> list[Path]:
-        """Dump every known day into `rollup_dir` (the nightly rollup input)."""
-        return [self.dump_counters_file(rollup_dir, day) for day in self.known_days()]
+        """Dump touched days into `rollup_dir` (the nightly rollup input).
+
+        Only days with in-memory activity since boot are dumped; days that
+        were merely restored from disk and never counted/seeded afterwards
+        are read-only sources and never rewritten, so the periodic tick
+        converges instead of churning old reports every 60s. An explicit
+        `dump_counters_file` still persists any single day on demand.
+        """
+        with self._lock:
+            days = sorted(self._days)
+            touched = set(self._touched)
+        return [
+            self.dump_counters_file(rollup_dir, day) for day in days if day in touched
+        ]
 
 
 def render_rollup(payload: dict[str, Any]) -> str:
