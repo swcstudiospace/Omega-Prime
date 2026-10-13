@@ -113,6 +113,14 @@ def append_records(
     base_commit = commit or resolve_commit()
     rid = run_id or make_run_id(base_commit, stamp)
     location.parent.mkdir(parents=True, exist_ok=True)
+    if location.exists():
+        # A torn tail (crash mid-write) must be repaired BEFORE appending:
+        # otherwise the first new record fuses onto the broken line and
+        # read_history() would refuse the whole file as mid-file corruption.
+        raw = location.read_bytes()
+        if raw and not raw.endswith(b"\n"):
+            with location.open("r+b") as handle:
+                handle.truncate(raw.rfind(b"\n") + 1)
     with location.open("a", encoding="utf-8") as handle:
         for record in case_records:
             row = {

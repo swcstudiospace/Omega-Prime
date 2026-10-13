@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -140,3 +141,21 @@ def test_baseline_compare_green_on_flat():
     }
     regressed, _ = compare_baseline(baseline, report, threshold=0.1)
     assert regressed is False
+
+
+def test_append_repairs_torn_tail_instead_of_fusing(tmp_path: Path):
+    path = tmp_path / "history.ndjson"
+    good = '{"run_id":"a","commit":"c","case_id":"k","score":0.9,"criteria":[],"timestamp":"t"}'
+    torn = '{"run_id":"b","commit":"c","case_id":'  # crash mid-write
+    path.write_text(good + "\n" + torn, encoding="utf-8")
+    record = {
+        "case_id": "k2",
+        "score": 0.8,
+        "criteria": [],
+    }
+    append_records([record], str(path), commit="c2", timestamp="t2")
+    lines = [line for line in path.read_text().splitlines() if line.strip()]
+    assert len(lines) == 2  # torn line dropped, not fused
+    rows = [json.loads(line) for line in lines]  # every line parses
+    assert rows[0]["case_id"] == "k" and rows[0]["run_id"] == "a"
+    assert rows[1]["case_id"] == "k2" and rows[1]["run_id"] != "a"
