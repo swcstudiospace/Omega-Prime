@@ -4,9 +4,9 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 
 ## Purple-team sidecar
 
-- [ ] **SIDE-01**: Maintainer receives automated pin freshness for the T3MP3ST submodule: Dependabot `gitsubmodule` PRs, CI provenance/equivalence/surface-drift checks, and a Node-dependency supply-chain audit, so constant upstream upgrades cannot silently rot the sidecar. (U1, plan-01)
-- [ ] **SIDE-02**: The sidecar fails closed: no start without a present, unexpired rules-of-engagement artifact (BLOCKED, nonzero exit), a working kill switch, and logged IDLE/RUNNING/DEGRADED/BLOCKED/ERROR transitions. Ships BLOCKED per user decision 2026-10-13 — no live engagement until the user signs the artifact. (U1, plan-01)
-- [ ] **SIDE-03**: Adversarial coverage is versioned data with detection validation and a findings pipeline: cases tagged technique/severity/expected behavior, passes require observed detection matching expectation, findings dedupe into tracked work items, and version drift reports DEGRADED. (U1, plan-01)
+- [x] **SIDE-01**: Maintainer receives automated pin freshness for the T3MP3ST submodule: Dependabot `gitsubmodule` PRs, CI provenance/equivalence/surface-drift checks, and a Node-dependency supply-chain audit, so constant upstream upgrades cannot silently rot the sidecar. (U1, plan-01)
+- [x] **SIDE-02**: The sidecar fails closed: no start without a present, unexpired rules-of-engagement artifact (BLOCKED, nonzero exit), a working kill switch, and logged IDLE/RUNNING/DEGRADED/BLOCKED/ERROR transitions. Ships BLOCKED per user decision 2026-10-13 — no live engagement until the user signs the artifact. (U1, plan-01)
+- [x] **SIDE-03**: Adversarial coverage is versioned data with detection validation and a findings pipeline: cases tagged technique/severity/expected behavior, passes require observed detection matching expectation, findings dedupe into tracked work items, and version drift reports DEGRADED. (U1, plan-01)
 
 ## Release
 
@@ -46,9 +46,9 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 
 | Requirement | Phase | Update | Status |
 |-------------|-------|--------|--------|
-| SIDE-01 | 79 | U1 | Pending |
-| SIDE-02 | 79 | U1 | Pending |
-| SIDE-03 | 79 | U1 | Pending |
+| SIDE-01 | 79 | U1 | Complete |
+| SIDE-02 | 79 | U1 | Complete |
+| SIDE-03 | 79 | U1 | Complete |
 | REL-01 | 80 | U2 | Pending |
 | REL-02 | 80 | U2 | Pending |
 | OBS-01 | 81 | U3 | Pending |

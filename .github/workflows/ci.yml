@@ -221,3 +221,25 @@ jobs:
         run: python3 -m omega_prime.tooling.catalog --check
       - name: plugin manifest currency
         run: python3 -m omega_prime.tooling.plugin --check
+  # Pin-freshness gate: proves the redteam submodule gitlink, the VENDOR.md
+  # pin, the provenance docstrings, the vendored pack, and the adapter tool
+  # surface all agree with upstream at the pin. Fail-closed: any mismatch
+  # fails the job naming the disagreeing pair (see sidecar/provenance.py).
+  redteam-provenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: provenance check
+        run: python3 sidecar/provenance.py check
+      - name: provenance pack-diff
+        run: python3 sidecar/provenance.py pack-diff
+      - name: provenance surface
+        run: python3 sidecar/provenance.py surface

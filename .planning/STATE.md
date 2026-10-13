@@ -1,21 +1,21 @@
 ---
 gsd_state_version: "1.0"
 milestone: v16
-status: Milestone in progress
-stopped_at: v16 started 2026-10-13; phases 79-84 scaffolded; phase 79 discuss/plan next
-last_updated: "2026-10-13T00:42:37.993Z"
+milestone_name: Enterprise Hardening and Continuous Verification
+current_phase: 80
+current_phase_name: Protected release pipeline
+status: planning
+stopped_at: Phase 79 complete, ready to plan Phase 80
+last_updated: "2026-10-13T02:04:12.347Z"
 last_activity: 2026-10-13
-last_activity_desc: v16 started from the seven staged updates
-state_head: df1451250d7a676a97b39153a73e25612a86769a
+last_activity_desc: Phase 79 complete, transitioned to Phase 80
+state_head: 699db86a9331e27a5d63d17856f63dda652d16c0
 progress:
   total_phases: 6
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
-milestone_name: Enterprise Hardening and Continuous Verification
-current_phase: "79"
-current_phase_name: Purple-team sidecar hardening
+  completed_phases: 1
+  total_plans: 3
+  completed_plans: 3
+  percent: 17
 current_plan: null
 ---
 
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 
 ## Current Position
 
-Phase: 79 Purple-team sidecar hardening
-Plan: — (not yet planned)
-Status: Scaffolded; discuss/plan next
-Last activity: 2026-10-13 — v16 started; phases 79-84 scaffolded from the staged updates
+Phase: 80 — Protected release pipeline
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-10-13 — Phase 79 complete, transitioned to Phase 80
 
 ## Deferred Verification
 
@@ -125,7 +125,7 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ## Session
 
 **Last session:** 2026-10-12
-**Stopped at:** Milestone v15 completed and archived; the close-out PR from `v15-milestone-close` is next
+**Stopped at:** Phase 79 complete, ready to plan Phase 80
 **Resume file:** .planning/milestones/v15-phases/77.1-grok-bot-import-packaging/77.1-UAT.md
 
 ## Operator Next Steps

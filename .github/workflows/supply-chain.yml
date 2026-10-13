@@ -26,7 +26,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: install
-        run: python3 -m pip install -e . pip-audit
       - name: pip-audit
         # Audit the committed lock, not the runner's own pip. oauthlib stays
         # below 4 because tweepy 4.17 requires oauthlib>=3.2.0,<4.
@@ -35,3 +34,85 @@ jobs:
         # process does not host. Drop the ignore when tweepy accepts
         # oauthlib>=4. See SECURITY.md.
         run: python3 -m pip_audit --progress-spinner off -r requirements-lock.txt --ignore-vuln PYSEC-2026-4114
+  # CI-only supply-chain audit of the redteam sidecar backend's Node
+  # dependencies. Nothing Node-related enters the runtime path or the image:
+  # this job checks out the redteam submodule path only, installs with
+  # --ignore-scripts, and fails on any untriaged high-or-above advisory.
+  redteam-node-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: init redteam submodule only
+        run: git submodule update --init redteam
+      # Pinned major matches the mixed-major precedent in grokbot-image.yml
+      # (checkout@v4 alongside artifact@v7). Node 22 satisfies the upstream
+      # engines contract (redteam/package.json requires >=22.19.0).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: npm ci (no scripts)
+        working-directory: redteam
+        run: npm ci --ignore-scripts
+      - name: npm audit
+        working-directory: redteam
+        env:
+          AUDIT_JSON: ${{ runner.temp }}/redteam-audit.json
+        run: |
+          npm audit --omit=dev --audit-level=high --json > "$AUDIT_JSON" || audit_exit=$?
+          python3 - <<'EOF'
+          import json, os, sys
+
+          # Triaged advisories: finding key -> (date, rationale). Mirrors the
+          # PYSEC-2026-4114 ignore in the pip-audit job above: every entry
+          # needs a date and a rationale, and anything not listed here fails
+          # the job. EMPTY as of 2026-10-13 at pin 831a6b0: no high-or-above
+          # advisory in the redteam dependency tree has been triaged yet.
+          # Only triage real audit output — never invent entries.
+          TRIAGED = {
+              # Example shape:
+              # "GHSA-xxxx-yyyy-zzzz": ("2026-10-13", "dev-only transitive; loopback sidecar never loads it."),
+          }
+
+          with open(os.environ["AUDIT_JSON"], encoding="utf-8") as fh:
+              doc = json.load(fh)
+          findings = []
+          for name, vuln in (doc.get("vulnerabilities") or {}).items():
+              severity = str(vuln.get("severity") or "").lower()
+              if severity not in ("high", "critical"):
+                  continue
+              via = vuln.get("via") or []
+              key = next(
+                  (
+                      str(entry)
+                      for entry in via
+                      if isinstance(entry, str)
+                      and ("GHSA" in entry or "CVE" in entry or entry.startswith("https://"))
+                  ),
+                  name,
+              )
+              findings.append((key, severity, name))
+          for advisory in (doc.get("advisories") or {}).values():
+              severity = str(advisory.get("severity") or "").lower()
+              if severity not in ("high", "critical"):
+                  continue
+              key = (
+                  advisory.get("url")
+                  or advisory.get("cves")
+                  or advisory.get("module_name")
+                  or str(advisory.get("id"))
+              )
+              findings.append((str(key), severity, advisory.get("module_name")))
+          untriaged = [finding for finding in findings if finding[0] not in TRIAGED]
+          if untriaged:
+              print("redteam-node-audit FAILED: untriaged high/critical advisories:")
+              for key, severity, name in untriaged:
+                  print(f"  {severity} {name}: {key}")
+              sys.exit(1)
+          print(
+              f"redteam-node-audit OK: {len(findings)} high+ findings, "
+              f"{len(untriaged)} untriaged"
+          )
+          EOF

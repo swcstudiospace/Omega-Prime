@@ -151,10 +151,86 @@ deployed or live model / mission proof is established here — no
 claim is made about a running sidecar, a live provider, or a real
 mission outcome.
 
-## Authorized use only
-
 The pack and the `tempest_*` tools exist for red-team and purple-team
 work against systems you own or have explicit written permission to
 test. Nothing in this module authorizes testing anyone else's systems,
 and the approval gates on the state-changing tools are part of that
 contract, not an obstacle to it.
+
+## Bumping the redteam submodule
+
+The `redteam/` gitlink is the only moving part in this module. Dependabot
+watches the `gitsubmodule` ecosystem (`.github/dependabot.yml`) and opens
+a PR when upstream
+(`https://github.com/swcstudiospace/purple-team.git`) moves; the
+`redteam-provenance` CI job (`.github/workflows/ci.yml`) proves the bump
+before merge. A hand bump follows the same mechanical sequence — this
+section alone is the procedure, in order, with no undocumented steps:
+
+1. **Move the pin.** Fetch upstream, check out the new commit inside the
+   submodule, and stage the gitlink:
+
+   ```bash
+   git submodule update --init redteam
+   cd redteam && git fetch origin && git checkout <new-sha> && cd ..
+   git add redteam
+   ```
+
+2. **Run the provenance checker.** The checker was relocated from
+   plan-01's `omega_prime/redteam/provenance.py` to
+   `sidecar/provenance.py` (checker advisory 4) so it lives with the
+   sidecar it gates instead of inside the vendored package it verifies.
+   All three subcommands run offline against the local checkout:
+
+   ```bash
+   python3 sidecar/provenance.py check
+   python3 sidecar/provenance.py pack-diff
+   python3 sidecar/provenance.py surface
+   ```
+
+   `check` asserts the submodule gitlink, the `Commit:` line in
+   `VENDOR.md`, and the `Upstream commit:` provenance docstring in
+   `omega_prime/redteam/__init__.py` all agree; any disagreeing pair
+   fails naming the pair. Fix by updating the lagging side, never by
+   weakening the check.
+
+3. **Update the pin records.** Set the `Commit:` line under
+   `VENDOR.md` ("T3MP3ST red team pack") to the new SHA and update the
+   `Upstream commit:` provenance docstring in
+   `omega_prime/redteam/__init__.py` to the same SHA. The two must match
+   the staged gitlink exactly — `check` re-proves this.
+
+4. **Re-vendor the pack on divergence.** If `pack-diff` lists `DIVERGED`,
+   `MISSING-UPSTREAM`, or `EXTRA-UPSTREAM` files, copy the upstream files
+   from `redteam/grokbot/` over `omega_prime/redteam/pack/` byte-verbatim
+   (same relative paths; the vendored `pack/LICENSE` MIT notice stays —
+   it has no upstream counterpart and `pack-diff` skips it). Binary
+   assets such as `pack/avatars/*.png` are outside the markdown/JSON
+   comparison; copy those too when upstream changes them. Re-run
+   `pack-diff` until it reports byte-identical.
+
+5. **Refresh the tool surface on legitimate drift.** If `surface` reports
+   `DRIFT`, upstream renamed or added a `tempest_*` tool in
+   `redteam/src/mcp-server.ts`. When the drift is legitimate (upstream
+   changelog or release notes confirm the tool), update
+   `REDTEAM_TOOL_NAMES` in `omega_prime/tools/redteam.py` and
+   `tool_names` in `sidecar/contract/bot-interface.json` together — the
+   three sides must agree exactly, and the adapter change follows the
+   consistency-triangle rule (setup check, catalog, tool-catalog docs,
+   and roster move together; no new rostered names beyond what upstream
+   shipped). When the drift is not legitimate, do not touch the adapter:
+   leave the pin where `surface` is green.
+
+6. **Open a PR with CI proof.** Push the bump branch and open a PR. The
+   PR must show `redteam-provenance` green (`check`, `pack-diff`,
+   `surface`) plus the weekly `redteam-node-audit` supply-chain result
+   for the new pin; triage any untriaged high-or-above advisory into the
+   dated ignore block in `.github/workflows/supply-chain.yml` with a
+   rationale, mirroring the `PYSEC-2026-4114` precedent. No bump merges
+   on a red provenance job.
+
+Dry-run note: rehearse steps 1–3 against upstream v1.3 in a scratch
+worktree before touching the working tree — fetch, checkout, `git add
+redteam`, then the three checker subcommands. The rehearsal needs no
+steps beyond the ones above; if it does, the missing step is a doc bug —
+fix this section first.

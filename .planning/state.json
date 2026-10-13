@@ -1,19 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v16",
-  "phases": [
-    { "number": "79", "name": "Purple-team sidecar hardening", "status": "pending" },
-    { "number": "80", "name": "Protected release pipeline", "status": "pending" },
-    { "number": "81", "name": "Telemetry export and SLO alerting", "status": "pending" },
-    { "number": "82", "name": "Token rotation and usage quotas", "status": "pending" },
-    { "number": "83", "name": "Sandboxed execution verification", "status": "pending" },
-    { "number": "84", "name": "Live evals and regression tracking", "status": "pending" }
-  ],
+  "milestone": "v16 — Enterprise Hardening and Continuous Verification",
+  "phases": [],
   "next": {
-    "command": "/gsd:plan-phase 79",
-    "label": "Plan Phase 79",
-    "reason": "v16 phases scaffolded; phase 79 discuss/plan next"
+    "command": "/gsd:progress --next",
+    "label": "Advance to the next step (plan phase 80)",
+    "reason": "Phase 80 of 6 — needs a plan"
   },
-  "updated_at": "2026-10-13T00:42:37.993Z"
+  "updated_at": "2026-10-13T02:04:12.363Z"
 }

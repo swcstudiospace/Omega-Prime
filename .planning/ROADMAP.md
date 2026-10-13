@@ -50,10 +50,10 @@ Seven evidence-grounded updates staged from the 2026-10-13 ultrathink run (Linea
 2. The engagement harness refuses to start (nonzero BLOCKED exit) without a present, unexpired rules-of-engagement artifact; a kill switch halts a run immediately; every IDLE/RUNNING/DEGRADED/BLOCKED/ERROR transition is logged with timestamps. Per decision log 2026-10-13 the sidecar SHIPS BLOCKED: no live engagement until the user signs the artifact.
 3. Simulation cases are versioned data (prompt-injection, jailbreak, abuse, malformed-input, auth-bypass, cost-abuse classes) tagged with technique/severity/expected behavior; a pass requires observed detection matching the expected detection; findings land in a deduplicated structured pipeline mapped to tracked work items; harness/bot version drift reports DEGRADED, never a silent pass.
 
-**Plans:** 0 plans
-
-Plans:
-- [ ] TBD (run /gsd-plan-phase 79 to break down)
+**Plans:** 4/3 plans complete (1 wave-1, 2 wave-2), executed and verified.
+- [x] 79-01 — Sidecar harness core: state machine, RoE fail-closed BLOCKED startup, kill switch (wave1)
+- [x] 79-02 — Simulation case library, detection validation, findings pipeline, drift→DEGRADED (wave2)
+- [x] 79-03 — Pin-freshness automation: provenance checker, Dependabot, CI jobs, bump runbook (wave2)
 
 ### Phase 80: Protected release pipeline
 

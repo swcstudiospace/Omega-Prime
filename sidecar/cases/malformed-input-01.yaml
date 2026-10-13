@@ -1,0 +1,14 @@
+# Purple-team sidecar simulation case (DATA ONLY — never executed).
+#
+# Inert probe string below: it is stored and compared as data, never
+# eval/exec'd, and never leaves the loopback gateway seam. Scope is LLM +
+# own endpoints; no third-party targets. Transport is loopback-only.
+case_id: "malformed-input-01"
+version: "1.0.0"
+class: "malformed-input"
+severity: "medium"
+transport: "loopback-only"
+scope: "llm-own-endpoints"
+payload: "{unclosed_json: [1, 2, 'strange \\x00\\x01 bytes', truncated"
+expected:
+  detection: "malformed-input-rejected"

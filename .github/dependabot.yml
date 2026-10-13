@@ -35,3 +35,11 @@ updates:
       # lock, deploy.py and the Dockerfile together.
       - dependency-name: python
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
+  # The redteam sidecar backend is a tracked gitlink (VENDOR.md pin). Watching
+  # the gitsubmodule ecosystem opens a PR when upstream purple-team moves, and
+  # the redteam-provenance CI job proves the bump before merge.
+  - package-ecosystem: gitsubmodule
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
