@@ -93,6 +93,8 @@ does not host that grant. The supply-chain workflow ignores only that
 advisory, against the lockfile, until a tweepy release accepts `oauthlib>=4`.
 The runner's own `pip` is not part of the audit.
 
+The weekly `redteam-remediation` workflow proposes upstream purple-team dependency bumps while the redteam pin audits red; its optional `REMEDIATION_TOKEN` secret carries only `repo` scope on `swcstudiospace/purple-team` (fix branches + bump PRs, never approve/merge), and without it the workflow degrades to artifact + tracking issue. See `docs/red-team.md`.
+
 ## Approvals and authorization boundaries
 
 - Approval is registration-specific: `ToolRegistry.dispatch` checks

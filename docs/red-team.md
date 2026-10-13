@@ -264,3 +264,43 @@ worktree before touching the working tree — fetch, checkout, `git add
 redteam`, then the three checker subcommands. The rehearsal needs no
 steps beyond the ones above; if it does, the missing step is a doc bug —
 fix this section first.
+
+### Upstream remediation loop
+
+The weekly `redteam-remediation` workflow
+(`.github/workflows/redteam-remediation.yml`) keeps the supply-chain
+`redteam-node-audit` RED visible AND actionable until upstream ships
+fixes. It runs every Monday at 04:30 UTC (after the `supply-chain.yml`
+04:17 run) and on `workflow_dispatch` (with a `dry-run` input that
+builds the report but skips all `gh` writes).
+
+1. **Audit.** The `audit` job reuses the `supply-chain.yml` audit chain
+   verbatim (`git submodule update --init redteam`, Node 22,
+   `npm ci --ignore-scripts`, `npm audit --omit=dev
+   --audit-level=high --json` triaged by
+   `scripts/redteam-audit-triage.py`). While untriaged high-or-above
+   advisories remain, the job fails and the `remediate` job runs.
+2. **Upstream bump PR.** With the optional `REMEDIATION_TOKEN` secret
+   (a PAT with `repo` scope on `swcstudiospace/purple-team`) set, the
+   workflow pushes a `redteam-remediation/npm-audit-<run-id>` fix
+   branch (lockfile only, from `npm audit fix --package-lock-only`)
+   and opens one bump PR per run via `gh api
+   repos/swcstudiospace/purple-team/pulls`, with the advisory table in
+   the body. It never pushes to upstream `main` and never
+   approves or merges — an operator reviews upstream.
+3. **Green-upstream comment.** The workflow also audits upstream
+   `main`; when it exits 0, it comments the green commit SHA plus the
+   `npm audit` exit-0 proof line on the `redteam-remediation`-labeled
+   tracking issue in `swcstudiospace/omes-bot`, so the operator can run
+   the bump runbook above. When the pin itself audits green, the
+   `notify-green` job posts the pin-green proof the same way.
+4. **Degrade path (first-class).** Without `REMEDIATION_TOKEN`, or when
+   any cross-repo write is denied (403), the workflow degrades instead
+   of failing: the lockfile delta, `redteam-audit.json`, and advisory
+   table upload as the `redteam-remediation-report-<run-id>` artifact,
+   and an omes-bot issue opens with the same content pasted in. The
+   workflow exits 0 in degrade — it is a signal, not a red build.
+
+Top-level permissions are `contents: read`; only `remediate` adds
+`pull-requests: write` + `issues: write`, and `notify-green` adds
+`issues: write`. No `contents: write`, no `actions: write`.

@@ -1,0 +1,263 @@
+name: redteam-remediation
+
+# Upstream dependency remediation loop for the redteam sidecar backend.
+#
+# The `redteam-node-audit` job in supply-chain.yml fails while untriaged
+# high-or-above advisories remain in the pinned purple-team tree. This
+# workflow keeps that RED visible AND actionable: it re-audits the pin,
+# proposes dependency-bump PRs on swcstudiospace/purple-team, and comments
+# the green upstream SHA on the omes-bot tracking issue once upstream
+# audits clean so an operator can run the docs/red-team.md bump runbook.
+#
+# Secret REMEDIATION_TOKEN (optional): a PAT with `repo` scope on
+# swcstudiospace/purple-team used ONLY to push fix branches and open
+# bump PRs there. When absent (or on any cross-repo 403), the workflow
+# degrades honestly: report artifact + omes-bot issue, exit 0.
+#
+# This workflow NEVER approves or merges upstream PRs, NEVER pushes to
+# upstream main, and NEVER edits scripts/redteam-audit-triage.py.
+
+on:
+  schedule:
+    - cron: "30 4 * * 1" # weekly, Monday 04:30 UTC, after supply-chain 04:17
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Plan only: build the report, skip all gh writes"
+        type: boolean
+        default: false
+
+# Least privilege at the top level; jobs escalate only where needed.
+permissions:
+  contents: read
+
+concurrency:
+  group: redteam-remediation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Reuses the supply-chain.yml audit chain verbatim — never a second
+  # audit convention. Fails while untriaged high+ advisories remain.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: init redteam submodule only
+        run: git submodule update --init redteam
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: npm ci (no scripts)
+        working-directory: redteam
+        run: npm ci --ignore-scripts
+      - name: npm audit
+        id: triage
+        working-directory: redteam
+        env:
+          AUDIT_JSON: ${{ runner.temp }}/redteam-audit.json
+        run: |
+          npm audit --omit=dev --audit-level=high --json > "$AUDIT_JSON" || audit_exit=$?
+          # npm audit exits nonzero when advisories exist; that output is the
+          # triage input below. Only bail here when it failed WITHOUT JSON.
+          if [ -n "${audit_exit:-}" ] && [ ! -s "$AUDIT_JSON" ]; then
+            echo "npm audit failed (exit $audit_exit) without usable JSON"
+            exit "$audit_exit"
+          fi
+          python3 ../scripts/redteam-audit-triage.py
+
+  # Pin is RED: propose upstream bumps, or degrade to artifact + issue.
+  # Signal, not red: every path below exits 0.
+  remediate:
+    needs: audit
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    env:
+      UPSTREAM_REPO: swcstudiospace/purple-team
+      TRACKING_REPO: swcstudiospace/omes-bot
+      # Empty when the secret is unset; the report step selects degrade.
+      REMEDIATION_TOKEN: ${{ secrets.REMEDIATION_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: init redteam submodule only
+        run: git submodule update --init redteam
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: npm ci (no scripts)
+        working-directory: redteam
+        run: npm ci --ignore-scripts
+      - name: build remediation report
+        id: report
+        working-directory: redteam
+        run: |
+          REPORT="$GITHUB_WORKSPACE/redteam-remediation-report"
+          mkdir -p "$REPORT"
+          cp package.json package-lock.json "$REPORT/"
+          npm audit --omit=dev --audit-level=high --json > "$REPORT/redteam-audit.json" || true
+          echo "report-dir=$REPORT" >> "$GITHUB_OUTPUT"
+      - name: advisory table
+        working-directory: redteam
+        run: |
+          REPORT="$GITHUB_WORKSPACE/redteam-remediation-report"
+          AUDIT_JSON="$REPORT/redteam-audit.json" python3 - <<'EOF' >> "$REPORT/advisories.md"
+          doc = json.load(open(os.environ["AUDIT_JSON"]))
+          print("| Package | Severity | Advisory | Fix available |")
+          print("| --- | --- | --- | --- |")
+          for name, vuln in (doc.get("vulnerabilities") or {}).items():
+              if not isinstance(vuln, dict):
+                  continue
+              sev = str(vuln.get("severity", "")).lower()
+              if sev not in ("high", "critical"):
+                  continue
+              via = [v for v in (vuln.get("via") or []) if isinstance(v, dict)]
+              adv = ", ".join(str(v.get("url", "")) for v in via) or "-"
+              print(f"| {name} | {sev} | {adv} | {vuln.get('fixAvailable')} |")
+          EOF
+          cat "$REPORT/advisories.md"
+      - name: upstream bump PR attempt
+        id: upstream_pr
+        if: github.event.inputs.dry-run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.REMEDIATION_TOKEN }}
+        run: |
+          # No token, no attempt: fall through to the degrade path below.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "REMEDIATION_TOKEN absent; skipping PR attempt (degrade path)."
+            echo "attempted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set +e
+          PIN_SHA=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:redteam)
+          BRANCH="redteam-remediation/npm-audit-${GITHUB_RUN_ID}"
+          cd "$GITHUB_WORKSPACE/redteam"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${UPSTREAM_REPO}.git"
+          git checkout -b "$BRANCH"
+          npm audit fix --package-lock-only
+          git add package-lock.json
+          git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
+            commit -m "chore(deps): npm audit fix for high+ advisories at ${PIN_SHA}"
+          if ! git push origin "$BRANCH"; then
+            echo "branch push denied; degrading."
+            echo "attempted=denied" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cat > "$GITHUB_WORKSPACE/pr-body.md" <<EOF
+          Automated dependency-bump proposal from omes-bot redteam-remediation (run $GITHUB_RUN_ID).
+
+          Audited pin: $PIN_SHA
+
+          $(cat "$GITHUB_WORKSPACE/redteam-remediation-report/advisories.md")
+          EOF
+          if ! gh api "repos/${UPSTREAM_REPO}/pulls" \
+            -f title="chore(deps): remediate npm audit high+ advisories" \
+            -f head="$BRANCH" -f base="main" -F body=@"$GITHUB_WORKSPACE/pr-body.md"; then
+            echo "PR creation denied; degrading."
+            echo "attempted=denied" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "attempted=true" >> "$GITHUB_OUTPUT"
+      - name: upstream green check
+        id: upstream_green
+        run: |
+          cd "$GITHUB_WORKSPACE/redteam"
+          git fetch origin
+          UPSTREAM_SHA=$(git rev-parse origin/main)
+          echo "upstream-sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          git checkout -q "$UPSTREAM_SHA"
+          npm ci --ignore-scripts
+          if npm audit --omit=dev --audit-level=high; then
+            echo "green=true" >> "$GITHUB_OUTPUT"
+            echo "npm audit --omit=dev --audit-level=high exit 0 at $UPSTREAM_SHA" > "$GITHUB_WORKSPACE/upstream-green-proof.txt"
+          else
+            echo "green=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: comment green upstream SHA
+        if: github.event.inputs.dry-run != 'true' && steps.upstream_green.outputs.green == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PROOF=$(cat "$GITHUB_WORKSPACE/upstream-green-proof.txt")
+          SHA="${{ steps.upstream_green.outputs.upstream-sha }}"
+          cat > "$GITHUB_WORKSPACE/green-comment.md" <<EOF
+          Upstream $SHA audits green — ready for the docs/red-team.md bump runbook.
+
+          Green commit SHA: $SHA
+          Proof: \`$PROOF\`
+          EOF
+          NUMBER=$(gh issue list -R "$TRACKING_REPO" --label redteam-remediation --state open --json number --jq '.[0].number // empty')
+          if [ -z "$NUMBER" ]; then
+            gh issue create -R "$TRACKING_REPO" --label redteam-remediation \
+              --title "redteam pin bump: upstream $SHA audits green" --body-file "$GITHUB_WORKSPACE/green-comment.md"
+          else
+            gh issue comment -R "$TRACKING_REPO" "$NUMBER" --body-file "$GITHUB_WORKSPACE/green-comment.md"
+          fi
+      - name: upload remediation report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: redteam-remediation-report-${{ github.run_id }}
+          path: redteam-remediation-report/
+          if-no-files-found: error
+      - name: degrade to tracking issue
+        # Honest degrade: no token, denied PR, or dry-run off-ramp all land
+        # here with the same content the PR would have carried. Exit 0.
+        if: always() && github.event.inputs.dry-run != 'true' && steps.upstream_pr.outputs.attempted != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PIN_SHA=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:redteam)
+          cat > "$GITHUB_WORKSPACE/degrade-issue.md" <<EOF
+          Upstream bump PR could not be opened (no REMEDIATION_TOKEN or cross-repo write denied).
+
+          Pinned redteam SHA: $PIN_SHA
+          Run: $GITHUB_RUN_ID
+
+          ## Advisories
+
+          $(cat "$GITHUB_WORKSPACE/redteam-remediation-report/advisories.md")
+
+          Full lockfile diff + redteam-audit.json: workflow artifact \`redteam-remediation-report-$GITHUB_RUN_ID\`.
+          EOF
+          gh issue create -R "$TRACKING_REPO" --label redteam-remediation \
+            --title "redteam remediation report for pin $PIN_SHA" --body-file "$GITHUB_WORKSPACE/degrade-issue.md"
+
+  # Pin is GREEN: close the loop with proof on the tracking issue.
+  notify-green:
+    needs: audit
+    if: success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      TRACKING_REPO: swcstudiospace/omes-bot
+    steps:
+      - uses: actions/checkout@v7
+      - name: comment pin-green proof
+        if: github.event.inputs.dry-run != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PIN_SHA=$(git rev-parse HEAD:redteam)
+          PROOF="npm audit --omit=dev --audit-level=high exit 0 at pin $PIN_SHA"
+          cat > "$GITHUB_WORKSPACE/pin-green.md" <<EOF
+          Redteam pin audits green — remediation loop closed.
+
+          Pin SHA: $PIN_SHA
+          Proof: \`$PROOF\`
+          EOF
+          NUMBER=$(gh issue list -R "$TRACKING_REPO" --label redteam-remediation --state open --json number --jq '.[0].number // empty')
+          if [ -n "$NUMBER" ]; then
+            gh issue comment -R "$TRACKING_REPO" "$NUMBER" --body-file "$GITHUB_WORKSPACE/pin-green.md"
+          else
+            echo "$PROOF (no open tracking issue; nothing to comment on)"
+          fi
