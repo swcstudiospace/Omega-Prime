@@ -439,6 +439,30 @@ def create_sse_app(
             register_sidecar_state(metrics, _sidecar_state)
     count_auth_failure = record_auth_failure(metrics) if metrics_enabled else None
 
+    # Optional push-based telemetry (Phase 81). Off by default: constructed
+    # only when telemetry.otlp is enabled with a push target and the otel
+    # extra installed; otherwise serving proceeds exactly as before.
+    otlp_exporter = None
+    try:
+        from omega_prime.config import load_config as _load_telemetry_config
+
+        _otlp_node = (
+            _load_telemetry_config(root).get("telemetry", {}).get("otlp", {})
+        )
+    except Exception:
+        logger.warning("telemetry config load failed; export disabled", exc_info=True)
+        _otlp_node = {}
+    if isinstance(_otlp_node, dict) and _otlp_node.get("enabled"):
+        try:
+            from omega_prime.telemetry.otlp_export import (
+                maybe_start as _maybe_start_otlp,
+            )
+
+            otlp_exporter = _maybe_start_otlp(_otlp_node, metrics)
+        except Exception:
+            logger.warning("telemetry push failed to start; export off", exc_info=True)
+            otlp_exporter = None
+
     in_flight = InFlightInterceptor()
 
     def served_tool_names() -> list[str]:
@@ -605,6 +629,11 @@ def create_sse_app(
             streamable_state["down"] = True
             raise
         finally:
+            if otlp_exporter is not None:
+                try:
+                    otlp_exporter.stop()
+                except Exception:
+                    logger.warning("telemetry push stop failed", exc_info=True)
             tracer.close()
 
     # Outermost first. CORS only when an origin was named. Auth only when a
@@ -672,6 +701,7 @@ def create_sse_app(
     app.state.gate = gate
     app.state.shutting_down = False
     app.state.metrics = metrics
+    app.state.otlp_exporter = otlp_exporter
     app.state.token_store = store
     app.state.approval_log = runtime.approval_log
     app.state.rate_limiter = request_limiter

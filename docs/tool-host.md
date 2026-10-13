@@ -98,6 +98,43 @@ host does not execute inside an AgentOS actor. Run the host on a
 VM, VPS, or sandbox and have the actor reach it over MCP or
 HTTP. Details: `omega_prime/hosting/agentos/NOTES.md`.
 
+## Scraping & alerting
+
+`/metrics` is pull-only Prometheus text (`scope: read`; bearer required
+when auth is on, same rules as `GET /manifest.json`). Point an
+operator-run Prometheus at it — nothing in this repo pushes alerts
+anywhere; hosted alert delivery is operator wiring, not executed here.
+
+SLO thresholds live in exactly one versioned artifact,
+`omega_prime/telemetry/slo.json` (`schema_version: 1`): serve
+availability, tool-call p99 latency, denial-rate budget. Never duplicate
+a threshold into rules or docs — regenerate the rules file from it:
+
+```bash
+python scripts/slo_rules.py --slo omega_prime/telemetry/slo.json --output /tmp/omega-slo-rules.yaml
+```
+
+Load the generated file into the operator Prometheus (`rule_files`; one
+alert per objective plus burn-rate recording rules). Validate the
+document any time with `python -m omega_prime.telemetry.slo check`
+(non-zero names the offending objective).
+
+Nightly regression: `.github/workflows/nightly-readiness.yml` runs
+`python -m omega_prime.grokbot.readiness --root . --json --output
+readiness-report.json` from source, attaches the report as an artifact,
+and compares `ok` / `summary.exercised` against
+`omega_prime/telemetry/readiness_baseline.json` via
+`scripts/nightly_readiness_check.py check`. A regression fails the job
+and tracks one deduplicated `[nightly-readiness] readiness regression`
+issue; a green run closes it. Move the baseline only with an explicit
+`python scripts/nightly_readiness_check.py bless --baseline
+omega_prime/telemetry/readiness_baseline.json --report <report>` inside a
+reviewed PR — the workflow never blesses.
+
+OTLP export stays opt-in: enable `telemetry.otlp.*` only with a collector
+endpoint configured (`telemetry.otlp.endpoint`); without it the process
+serves `/metrics` exactly as before.
+
 ## Runtime and further reading
 
 The host is the same in-process Python product (package floor `>=3.11`;

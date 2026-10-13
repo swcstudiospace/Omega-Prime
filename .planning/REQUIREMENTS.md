@@ -15,8 +15,8 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 
 ## Observability
 
-- [ ] **OBS-01**: Optional OTLP telemetry export ships as an extra dependency, off by default, leaving the zero-dependency `/metrics` surface and its auth guarantees unchanged; export failure never degrades local metrics/logging/audit. (U3, plan-03)
-- [ ] **OBS-02**: SLOs for serve availability, tool-call p99 latency and denial-rate budget are defined with alert rules, and a nightly scheduled readiness-profile run alerts on regression. (U3, plan-03)
+- [x] **OBS-01**: Optional OTLP telemetry export ships as an extra dependency, off by default, leaving the zero-dependency `/metrics` surface and its auth guarantees unchanged; export failure never degrades local metrics/logging/audit. (U3, plan-03)
+- [x] **OBS-02**: SLOs for serve availability, tool-call p99 latency and denial-rate budget are defined with alert rules, and a nightly scheduled readiness-profile run alerts on regression. (U3, plan-03)
 
 ## Token lifecycle and cost
 
@@ -51,8 +51,8 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 | SIDE-03 | 79 | U1 | Complete |
 | REL-01 | 80 | U2 | Complete |
 | REL-02 | 80 | U2 | Complete |
-| OBS-01 | 81 | U3 | Pending |
-| OBS-02 | 81 | U3 | Pending |
+| OBS-01 | 81 | U3 | Complete |
+| OBS-02 | 81 | U3 | Complete |
 | TOK-01 | 82 | U4 | Pending |
 | TOK-02 | 82 | U7 | Pending |
 | SAND-01 | 83 | U5 | Pending |

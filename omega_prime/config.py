@@ -63,6 +63,15 @@ def _defaults() -> dict[str, Any]:
             "roe_file": "",
             "roe_key": "",
         },
+        # Telemetry export (Phase 81). Off by default with an empty endpoint;
+        # the exporter refuses to start until an endpoint is configured.
+        "telemetry": {
+            "otlp": {
+                "enabled": False,
+                "endpoint": "",
+                "interval_seconds": 60,
+            },
+        },
     }
 
 
@@ -149,6 +158,32 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 # OMEGA_PRIME_REDTEAM_ROE_KEY — detached-HMAC verification
                 # key. Secret: never logged, never rendered to metrics.
                 overlay.setdefault("redteam", {})["roe_key"] = value.strip()
+        elif parts[0] == "telemetry":
+            # OMEGA_PRIME_TELEMETRY_OTLP_ENABLED — truthy enables export;
+            # the exporter additionally requires a non-empty push target.
+            if len(parts) == 3 and parts[1] == "otlp" and parts[2] == "enabled":
+                overlay.setdefault("telemetry", {}).setdefault("otlp", {})[
+                    "enabled"
+                ] = value.strip().lower() in ("1", "true", "yes", "on")
+            elif len(parts) == 3 and parts[1] == "otlp" and parts[2] == "endpoint":
+                # OMEGA_PRIME_TELEMETRY_OTLP_ENDPOINT — push target URL.
+                overlay.setdefault("telemetry", {}).setdefault("otlp", {})[
+                    "endpoint"
+                ] = value.strip()
+            elif (
+                len(parts) == 4
+                and parts[1] == "otlp"
+                and parts[2] == "interval"
+                and parts[3] == "seconds"
+            ):
+                # OMEGA_PRIME_TELEMETRY_OTLP_INTERVAL_SECONDS — push cadence.
+                try:
+                    interval = int(value.strip())
+                except ValueError:
+                    continue
+                overlay.setdefault("telemetry", {}).setdefault("otlp", {})[
+                    "interval_seconds"
+                ] = interval
     return overlay
 
 

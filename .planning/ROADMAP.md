@@ -79,10 +79,9 @@ Seven evidence-grounded updates staged from the 2026-10-13 ultrathink run (Linea
 2. SLOs are defined for serve availability, tool-call p99 latency and denial-rate budget, with alert rules; a nightly scheduled readiness-profile run alerts on regression.
 3. Export failure degrades gracefully: local metrics/logging/audit continue uninterrupted.
 
-**Plans:** 0 plans
-
-Plans:
-- [ ] TBD (run /gsd-plan-phase 81 to break down)
+**Plans:** 2/2 plans complete (sequential waves), executed and verified.
+- [x] 81-01 — telemetry.otlp config, optional otel extra, lazy exporter, serve wiring (wave1)
+- [x] 81-02 — slo.json + loader, deterministic alert generator, nightly readiness workflow + docs (wave2)
 
 ### Phase 82: Token rotation and usage quotas
 
