@@ -30,8 +30,8 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 
 ## Evaluation
 
-- [ ] **EVAL-01**: Scored rubric eval cases run beside the deterministic suite with persistent per-case history showing trends. (U6, plan-06)
-- [ ] **EVAL-02**: A nightly scheduled eval workflow surfaces regressions; the deterministic step remains the blocking push/PR gate; any live-model judge requires an explicit flag and makes no network calls without it. (U6, plan-06)
+- [x] **EVAL-01**: Scored rubric eval cases run beside the deterministic suite with persistent per-case history showing trends. (U6, plan-06)
+- [x] **EVAL-02**: A nightly scheduled eval workflow surfaces regressions; the deterministic step remains the blocking push/PR gate; any live-model judge requires an explicit flag and makes no network calls without it. (U6, plan-06)
 
 ## Out of scope
 
@@ -57,7 +57,7 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 | TOK-02 | 82 | U7 | Complete |
 | SAND-01 | 83 | U5 | Complete |
 | SAND-02 | 83 | U5 | Complete |
-| EVAL-01 | 84 | U6 | Pending |
-| EVAL-02 | 84 | U6 | Pending |
+| EVAL-01 | 84 | U6 | Complete |
+| EVAL-02 | 84 | U6 | Complete |
 
 Coverage: 13 requirements, each mapped once to phases 79-84 and update plans plan-01..07.

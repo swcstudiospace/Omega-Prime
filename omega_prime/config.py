@@ -99,7 +99,19 @@ def _defaults() -> dict[str, Any]:
             "policy": "omega_prime/hosting/openshell/sandbox-policy.yaml",
             "scope": "gates",
         },
-    }
+        # Live evals and regression tracking (Phase 84). `regress_threshold`
+        # is the per-case score drop that counts as a regression; the judge
+        # is off by default with an empty model (enabling without a model
+        # still refuses to start). The judge credential comes from the
+        # environment/secret store only — never from this file.
+        "evals": {
+            "regress_threshold": 0.1,
+            "judge": {
+                "enabled": False,
+                "model": "",
+            },
+        },
+     }
 
 
 def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -125,6 +137,7 @@ def load_config(root: str | Path | None = None) -> dict[str, Any]:
     _merge(config, _env_overrides(os.environ))
     _normalize_quotas_mode(config)
     _normalize_sandbox_scope(config)
+    _normalize_evals(config)
     return config
 
 
@@ -169,6 +182,33 @@ def _normalize_quotas_mode(config: dict[str, Any]) -> None:
             file=sys.stderr,
         )
         node["mode"] = "report"
+
+
+def _normalize_evals(config: dict[str, Any]) -> None:
+    """Fall back to the default threshold loudly when invalid.
+
+    Config loading never crashes on a bogus ``evals.regress_threshold``
+    and never silently gates: anything non-numeric or non-positive reads
+    as the default (0.1). The judge node needs no normalization — off by
+    default with an empty model, and enabling without a model still
+    refuses to start at the judge call site.
+    """
+    node = config.get("evals")
+    if not isinstance(node, dict):
+        return
+    threshold = node.get("regress_threshold", 0.1)
+    if (
+        isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        or not (threshold > 0)
+        or threshold == float("inf")
+    ):
+        print(
+            f"warning: ignoring invalid evals.regress_threshold={threshold!r}; "
+            "using default 0.1",
+            file=sys.stderr,
+        )
+        node["regress_threshold"] = 0.1
 
 
 def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
@@ -304,6 +344,37 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 # else falls back to gates loudly in _normalize_sandbox_scope
                 # (never crashes, never silently enables enforcement).
                 overlay.setdefault("sandbox", {})["scope"] = value.strip().lower()
+        elif parts[0] == "evals":
+            # OMEGA_PRIME_EVALS_REGRESS_THRESHOLD — per-case score drop that
+            # counts as a regression. Invalid values are ignored here and
+            # fall back to the default loudly in _normalize_evals (never
+            # crashes, never silently gates).
+            if len(parts) == 3 and parts[1] == "regress" and parts[2] == "threshold":
+                try:
+                    threshold = float(value.strip())
+                except ValueError:
+                    threshold = float("nan")
+                if not (threshold > 0 and threshold != float("inf")):
+                    print(
+                        "warning: ignoring invalid OMEGA_PRIME_EVALS_REGRESS_THRESHOLD"
+                        f"={value.strip()!r}; using default",
+                        file=sys.stderr,
+                    )
+                    continue
+                overlay.setdefault("evals", {})["regress_threshold"] = threshold
+            elif len(parts) == 3 and parts[1] == "judge" and parts[2] == "enabled":
+                # OMEGA_PRIME_EVALS_JUDGE_ENABLED — truthy enables the
+                # live-model judge; anything else leaves it off.
+                overlay.setdefault("evals", {}).setdefault("judge", {})[
+                    "enabled"
+                ] = value.strip().lower() in ("1", "true", "yes", "on")
+            elif len(parts) == 3 and parts[1] == "judge" and parts[2] == "model":
+                # OMEGA_PRIME_EVALS_JUDGE_MODEL — model id; empty (the
+                # default) means the judge refuses to start even when
+                # enabled. The endpoint credential is env-only, never here.
+                overlay.setdefault("evals", {}).setdefault("judge", {})[
+                    "model"
+                ] = value.strip()
     return overlay
 
 

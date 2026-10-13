@@ -38,9 +38,10 @@ build/
 # Subagent-driven-development scratch
 .superpowers/
 
-# Runtime artifacts (created on runs, never committed)
-omega_prime/sessions.db
-.substrate/
+ # Runtime artifacts (created on runs, never committed)
+ omega_prime/sessions.db
+ .substrate/
+ .omega-evals/
 
 # Prime family state the tool host writes under --root (docs/driving-the-bot.md)
 /goals/

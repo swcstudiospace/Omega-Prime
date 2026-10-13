@@ -80,18 +80,71 @@ def run_suite(cases_dir: str | Path, workdir: str | Path) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`python3 -m omega_prime.evals.runner [cases_dir]`. Exit 0 when all pass."""
+    """`python3 -m omega_prime.evals.runner [cases_dir] [--rubric F] [--output F]`.
+
+    Without ``--rubric`` the report shape is exactly ``run_suite`` output and
+    the exit code reflects only the deterministic suite. With ``--rubric`` a
+    ``rubric_cases`` key (per-case ``{case_id, score, criteria, min_score}``
+    records) is attached, the report is written to ``--output`` when given,
+    and the exit is nonzero when any case scores below its ``min_score``.
+    """
     args = list(sys.argv[1:] if argv is None else argv)
-    cases_dir = Path(args[0]) if args else Path(__file__).resolve().parent / "cases"
+    rubric_path: str | None = None
+    output_path: str | None = None
+    positional: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in ("--rubric", "--output"):
+            if index + 1 >= len(args):
+                print(f"runner: {token} needs a file path", file=sys.stderr)
+                return 2
+            if token == "--rubric":
+                rubric_path = args[index + 1]
+            else:
+                output_path = args[index + 1]
+            index += 2
+        elif token.startswith("--rubric="):
+            rubric_path = token[len("--rubric=") :]
+            index += 1
+        elif token.startswith("--output="):
+            output_path = token[len("--output=") :]
+            index += 1
+        else:
+            positional.append(token)
+            index += 1
+    cases_dir = (
+        Path(positional[0]) if positional else Path(__file__).resolve().parent / "cases"
+    )
     with tempfile.TemporaryDirectory(prefix="omega-prime-evals-") as tmp:
         report = run_suite(cases_dir, Path(tmp))
+        rubric_failed = 0
+        if rubric_path is not None:
+            from omega_prime.evals import rubric as _rubric
+
+            cases = _rubric.load_rubric_cases(rubric_path)
+            records = _rubric.run_rubric_suite(cases, Path(tmp) / "rubric")
+            report["rubric_cases"] = records
+            rubric_failed = sum(
+                1 for record in records if record["score"] < record["min_score"]
+            )
+            report["rubric_failed"] = rubric_failed
     for result in report["results"]:
         status = "PASS" if result["passed"] else "FAIL"
         print(f"{status} {result['id']}")
         for failure in result["failures"]:
             print(f"  - {failure}")
     print(f"{report['passed']} passed, {report['failed']} failed")
-    return 0 if report["failed"] == 0 else 1
+    for record in report.get("rubric_cases", []):
+        status = "PASS" if record["score"] >= record["min_score"] else "FAIL"
+        print(f"{status} {record['case_id']} score={record['score']:.3f}")
+    if output_path is not None:
+        Path(output_path).write_text(
+            json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8"
+        )
+    if report["failed"] == 0 and rubric_failed == 0:
+        return 0
+    return 1
 
 
 def _check_case(case: Any) -> None:
