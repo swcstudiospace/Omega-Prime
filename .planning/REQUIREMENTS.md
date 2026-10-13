@@ -25,8 +25,8 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 
 ## Sandboxed execution
 
-- [ ] **SAND-01**: The OpenShell sandbox policy is generated from the seat policy (generated-and-tested replaces hand-maintained), with writable paths matching Omega home/root defaults. (U5, plan-05)
-- [ ] **SAND-02**: Verification and execute paths run inside OpenShell sandboxes where available; quality receipts bind to the recorded executed command and exit status; sandbox-unavailable outcomes are explicitly degraded, never silent passes. (U5, plan-05)
+- [x] **SAND-01**: The OpenShell sandbox policy is generated from the seat policy (generated-and-tested replaces hand-maintained), with writable paths matching Omega home/root defaults. (U5, plan-05)
+- [x] **SAND-02**: Verification and execute paths run inside OpenShell sandboxes where available; quality receipts bind to the recorded executed command and exit status; sandbox-unavailable outcomes are explicitly degraded, never silent passes. (U5, plan-05)
 
 ## Evaluation
 
@@ -55,8 +55,8 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 | OBS-02 | 81 | U3 | Complete |
 | TOK-01 | 82 | U4 | Complete |
 | TOK-02 | 82 | U7 | Complete |
-| SAND-01 | 83 | U5 | Pending |
-| SAND-02 | 83 | U5 | Pending |
+| SAND-01 | 83 | U5 | Complete |
+| SAND-02 | 83 | U5 | Complete |
 | EVAL-01 | 84 | U6 | Pending |
 | EVAL-02 | 84 | U6 | Pending |
 

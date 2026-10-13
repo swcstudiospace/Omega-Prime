@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v16
 milestone_name: Enterprise Hardening and Continuous Verification
-current_phase: 83
-current_phase_name: Sandboxed execution verification
+current_phase: 84
+current_phase_name: Live evals and regression tracking
 status: planning
-stopped_at: Phase 82 complete, ready to plan Phase 83
-last_updated: "2026-10-13T03:53:59.517Z"
+stopped_at: Phase 83 complete, ready to plan Phase 84
+last_updated: "2026-10-13T04:22:46.642Z"
 last_activity: 2026-10-13
-last_activity_desc: Phase 82 complete, transitioned to Phase 83
-state_head: 92714b694627225e955e7846a2b6f14b300b9182
+last_activity_desc: Phase 83 complete, transitioned to Phase 84
+state_head: bb60078a3fda6a274a6f3c155277a5ecf61ceb72
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 9
-  completed_plans: 9
+  total_plans: 11
+  completed_plans: 11
   percent: 33
 current_plan: null
 ---
@@ -30,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 
 ## Current Position
 
-Phase: 83 — Sandboxed execution verification
+Phase: 84 — Live evals and regression tracking
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-10-13 — Phase 82 complete, transitioned to Phase 83
+Last activity: 2026-10-13 — Phase 83 complete, transitioned to Phase 84
 
 ## Deferred Verification
 
@@ -125,7 +125,7 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ## Session
 
 **Last session:** 2026-10-12
-**Stopped at:** Phase 82 complete, ready to plan Phase 83
+**Stopped at:** Phase 83 complete, ready to plan Phase 84
 **Resume file:** .planning/milestones/v15-phases/77.1-grok-bot-import-packaging/77.1-UAT.md
 
 ## Operator Next Steps

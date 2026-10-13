@@ -104,13 +104,12 @@ Seven evidence-grounded updates staged from the 2026-10-13 ultrathink run (Linea
 **Depends on:** Phase 82
 **Success Criteria:**
 1. The sandbox policy is generated from the seat policy (the hand-maintained `omega_prime/hosting/openshell/sandbox-policy.yaml` becomes generated and tested), with writable paths matching Omega home/root defaults.
-2. Verification and execute paths run inside OpenShell sandboxes where available; quality receipts bind to the recorded executed command and its exit status rather than model-written claims.
+2. Verification-gate paths run inside OpenShell sandboxes where available (execute-path coverage is the deferred SEED-012 follow-up per 83-CONTEXT.md); quality receipts bind to the recorded executed command and exit status rather than model-written claims.
 3. When a sandbox is unavailable the outcome is an explicitly degraded receipt, never a silent pass.
 
-**Plans:** 0 plans
-
-Plans:
-- [ ] TBD (run /gsd-plan-phase 83 to break down)
+**Plans:** 2/2 plans complete (sequential waves), executed and verified.
+- [x] 83-01 — policy_gen renderer, cutover, snapshot golden, sandbox config, CI drift job (wave1)
+- [x] 83-02 — fail-closed runner, gates-in-sandbox routing, argv/exit/policy-digest receipt binding, degraded mode (wave2)
 
 ### Phase 84: Live evals and regression tracking
 

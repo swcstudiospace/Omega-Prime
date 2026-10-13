@@ -19,7 +19,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from omega_prime.credentials.redact import redact_text
-from omega_prime.receipts import ReceiptError, load_executions, validate_receipt
+from omega_prime.receipts import (
+    ReceiptError,
+    append_execution,
+    command_digest,
+    load_executions,
+    validate_receipt,
+)
+from omega_prime.sandbox.policy_gen import digest_file
+from omega_prime.sandbox.runner import SandboxRunner, SandboxUnavailable
 from omega_prime.tools.registry import ToolRegistry
 
 QUALITY_TOOL_NAMES = (
@@ -165,6 +173,39 @@ def _git_vcs(root: str):
     return {"diff_names": diff_names, "diff": diff}
 
 
+SANDBOX_SCOPES = ("gates", "gates+execute")
+DEFAULT_SANDBOX_POLICY = "omega_prime/hosting/openshell/sandbox-policy.yaml"
+
+
+def _sandbox_cfg(ctx: QualityContext) -> dict[str, Any] | None:
+    """Sandbox routing for gates_run. None means disabled (today's path).
+
+    Enabled only for an explicit ``{"enabled": True}`` node with a scope
+    in {gates, gates+execute} (both cover verification gates; execute-path
+    sandboxing stays out of scope). Anything else — including a bogus
+    scope — disables sandboxing rather than silently enabling it.
+    """
+    sandbox = getattr(ctx, "sandbox", None)
+    if not isinstance(sandbox, dict) or sandbox.get("enabled") is not True:
+        return None
+    scope = sandbox.get("scope", "gates")
+    if scope not in SANDBOX_SCOPES:
+        return None
+    policy = sandbox.get("policy") or DEFAULT_SANDBOX_POLICY
+    return {"policy": policy, "scope": scope}
+
+
+def _expected_policy_digest(ctx: QualityContext) -> str | None:
+    """Policy digest for the receipt_approve cross-check (None when off)."""
+    cfg = _sandbox_cfg(ctx)
+    if cfg is None:
+        return None
+    try:
+        return digest_file(cfg["policy"])
+    except OSError:
+        return None
+
+
 class AckStore:
     """JSON contract-acknowledgement ledger."""
 
@@ -205,6 +246,13 @@ class QualityContext:
     vcs: Any = None
     repo_slug: str = "swcstudiospace/omega-prime"
     bot_id: str = "bot-00-omega-prime"
+    # Sandbox routing (Phase 83, SAND-02). None/empty means disabled: gates
+    # run exactly as today. Enable with {"enabled": True, "policy": <path>,
+    # "scope": "gates"} (the config sandbox node shape).
+    sandbox: Any = None
+    # Transport for sandboxed runs: callable(argv, timeout, cwd). Defaults
+    # to direct subprocess execution when sandboxing is enabled.
+    sandbox_transport: Any = None
 
 
 class QualityClient:
@@ -220,8 +268,14 @@ class QualityClient:
         run = self.ctx.run or _default_run
         root = str(self.ctx.root if repo is None else repo)
         selected = _discover_suites(root, suites)
+        sandbox_cfg = _sandbox_cfg(self.ctx)
         gates: dict[str, Any] = {}
         for name, argv, timeout in selected:
+            if sandbox_cfg is not None:
+                gates[name] = self._sandboxed_gate(
+                    list(argv), timeout, root, sandbox_cfg
+                )
+                continue
             try:
                 result = (
                     run(argv, timeout, root) if _takes_cwd(run) else run(argv, timeout)
@@ -237,6 +291,70 @@ class QualityClient:
                 ],
             }
         return {"ok": all(g["exit_code"] == 0 for g in gates.values()), "gates": gates}
+
+    def _sandboxed_gate(
+        self, argv: list[str], timeout: int | float, root: str, cfg: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Run one gate argv inside a sandbox; degrade explicitly when absent.
+
+        Success entries carry the additive receipt binding (argv,
+        argv_sha256, sandbox block) and append the execution to the command
+        log. Enabled-but-absent entries carry ``degraded`` naming
+        ``sandbox_unavailable: <cause>``, report ``ok False`` upstream via
+        exit 127, and never execute the argv.
+        """
+        record = list(argv)
+        argv_sha256 = command_digest(record)
+        try:
+            policy_sha256: str | None = digest_file(cfg["policy"])
+        except OSError:
+            policy_sha256 = None
+        runner = SandboxRunner(cfg["policy"], transport=self.ctx.sandbox_transport)
+        ok, cause = runner.available()
+        if not ok:
+            return {
+                "exit_code": 127,
+                "output": "",
+                "argv": record,
+                "argv_sha256": argv_sha256,
+                "sandbox": {
+                    "enabled": True,
+                    "policy_sha256": policy_sha256,
+                    "degraded": f"sandbox_unavailable: {cause}",
+                },
+            }
+        try:
+            result = runner.run(record, timeout, root)
+        except SandboxUnavailable as exc:
+            return {
+                "exit_code": 127,
+                "output": "",
+                "argv": record,
+                "argv_sha256": argv_sha256,
+                "sandbox": {
+                    "enabled": True,
+                    "policy_sha256": policy_sha256,
+                    "degraded": str(exc),
+                },
+            }
+        append_execution(
+            record,
+            result.exit_code,
+            result.output,
+            cwd=root,
+            policy_sha256=result.policy_sha256,
+        )
+        return {
+            "exit_code": result.exit_code,
+            "output": result.output,
+            "argv": record,
+            "argv_sha256": result.argv_sha256,
+            "sandbox": {
+                "enabled": True,
+                "policy_sha256": result.policy_sha256,
+                "degraded": None,
+            },
+        }
 
     def greptile_review(
         self,
@@ -318,7 +436,11 @@ class QualityClient:
         else:
             stamp = identity
         try:
-            validate_receipt(receipt, executions=load_executions())
+            validate_receipt(
+                receipt,
+                executions=load_executions(),
+                expected_policy_sha256=_expected_policy_digest(self.ctx),
+            )
         except ReceiptError as exc:
             return _error(
                 "gate_failed",

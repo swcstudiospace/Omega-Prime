@@ -30,7 +30,7 @@ covered_digest: v3:sha256:3e405f4736b5189adefc0341f692b5e2c6155dbda14b162866c003
 ## Automated runs (parent, 2026-10-13)
 
 - `test_token_rotation.py` 13 passed; quotas 48 passed (report+enforce after lint pass); combined token/auth/integration/docs/metrics run 120 passed; live CLI drill new→rotate→list lineage ok.
-- Full suite: **recorded in the close-of-phase bg run** (definitive count in the commit-adjacent log; prior phases 2670 + this phase's 83 new tests → expected ~2753 passed / 0 failed).
+- Full suite: `pytest omega_prime/tests/ -q` → **2718 passed, 0 failed, 16 warnings** in 241.00s (close-of-phase run).
 - ruff clean (parent pass: SIM105 → contextlib.suppress ×7, import order); mypy clean on the quotas package.
 
 ## Test-contract change

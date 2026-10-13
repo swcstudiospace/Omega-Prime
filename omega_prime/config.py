@@ -89,6 +89,16 @@ def _defaults() -> dict[str, Any]:
             "document": "",
             "rollup_dir": ".omega-quotas/",
         },
+        # OpenShell sandboxed execution (Phase 83). Off by default: with
+        # sandbox disabled, gates and execute paths run exactly as today.
+        # `policy` is the generated sandbox policy file (plan 83-01);
+        # `scope` gates which paths may sandbox — `gates` (verification
+        # gates only, the fixed slice order) or `gates+execute`.
+        "sandbox": {
+            "enabled": False,
+            "policy": "omega_prime/hosting/openshell/sandbox-policy.yaml",
+            "scope": "gates",
+        },
     }
 
 
@@ -114,10 +124,32 @@ def load_config(root: str | Path | None = None) -> dict[str, Any]:
             _merge(config, loaded)
     _merge(config, _env_overrides(os.environ))
     _normalize_quotas_mode(config)
+    _normalize_sandbox_scope(config)
     return config
 
 
 QUOTA_MODES = ("report", "soft", "hard")
+
+SANDBOX_SCOPES = ("gates", "gates+execute")
+
+
+def _normalize_sandbox_scope(config: dict[str, Any]) -> None:
+    """Fall back to `gates` loudly when `sandbox.scope` is unknown.
+
+    Config loading never crashes on a bogus scope and never silently
+    enables enforcement: anything outside {gates, gates+execute} reads as
+    gates (verification gates only, the fixed slice order).
+    """
+    node = config.get("sandbox")
+    if not isinstance(node, dict):
+        return
+    scope = node.get("scope", "gates")
+    if scope not in SANDBOX_SCOPES:
+        print(
+            f"warning: ignoring invalid sandbox.scope={scope!r}; using 'gates'",
+            file=sys.stderr,
+        )
+        node["scope"] = "gates"
 
 
 def _normalize_quotas_mode(config: dict[str, Any]) -> None:
@@ -257,6 +289,21 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 # OMEGA_PRIME_QUOTAS_DOCUMENT — path to the quota JSON;
                 # empty (the default) means the engine is inert.
                 overlay.setdefault("quotas", {})["document"] = value.strip()
+        elif parts[0] == "sandbox":
+            # OMEGA_PRIME_SANDBOX_ENABLED — truthy enables sandboxed
+            # execution; anything else leaves the default (off) in place.
+            if len(parts) == 2 and parts[1] == "enabled":
+                overlay.setdefault("sandbox", {})["enabled"] = (
+                    value.strip().lower() in ("1", "true", "yes", "on")
+                )
+            elif len(parts) == 2 and parts[1] == "policy":
+                # OMEGA_PRIME_SANDBOX_POLICY — generated policy file path.
+                overlay.setdefault("sandbox", {})["policy"] = value.strip()
+            elif len(parts) == 2 and parts[1] == "scope":
+                # OMEGA_PRIME_SANDBOX_SCOPE — gates/gates+execute; anything
+                # else falls back to gates loudly in _normalize_sandbox_scope
+                # (never crashes, never silently enables enforcement).
+                overlay.setdefault("sandbox", {})["scope"] = value.strip().lower()
     return overlay
 
 
@@ -289,6 +336,7 @@ def family_config(config: dict[str, Any], family: str) -> dict[str, Any]:
 __all__ = [
     "PRIME_FAMILIES",
     "QUOTA_MODES",
+    "SANDBOX_SCOPES",
     "family_config",
     "load_config",
     "prime_enabled",

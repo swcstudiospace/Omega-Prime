@@ -70,3 +70,55 @@ def test_non_object_file_rejected(tmp_path):
         assert "JSON object" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_sandbox_defaults_off(tmp_path):
+    config = load_config(tmp_path)
+    assert config["sandbox"] == {
+        "enabled": False,
+        "policy": "omega_prime/hosting/openshell/sandbox-policy.yaml",
+        "scope": "gates",
+    }
+
+
+def test_sandbox_env_overrides(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGA_PRIME_SANDBOX_ENABLED", "1")
+    monkeypatch.setenv("OMEGA_PRIME_SANDBOX_POLICY", "/tmp/custom-policy.yaml")
+    monkeypatch.setenv("OMEGA_PRIME_SANDBOX_SCOPE", "gates+execute")
+    config = load_config(tmp_path)
+    assert config["sandbox"] == {
+        "enabled": True,
+        "policy": "/tmp/custom-policy.yaml",
+        "scope": "gates+execute",
+    }
+
+
+def test_sandbox_env_enabled_falsy_stays_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGA_PRIME_SANDBOX_ENABLED", "0")
+    config = load_config(tmp_path)
+    assert config["sandbox"]["enabled"] is False
+
+
+def test_sandbox_bogus_scope_falls_back_to_gates(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OMEGA_PRIME_SANDBOX_SCOPE", "everything")
+    config = load_config(tmp_path)
+    assert config["sandbox"]["scope"] == "gates"
+    assert "sandbox.scope" in capsys.readouterr().err
+
+
+def test_sandbox_bogus_scope_in_file_falls_back(tmp_path, capsys):
+    (tmp_path / "omega-prime.json").write_text(
+        json.dumps({"sandbox": {"scope": "everything"}})
+    )
+    config = load_config(tmp_path)
+    assert config["sandbox"]["scope"] == "gates"
+    assert "sandbox.scope" in capsys.readouterr().err
+
+
+def test_sandbox_file_enables_gates(tmp_path):
+    (tmp_path / "omega-prime.json").write_text(
+        json.dumps({"sandbox": {"enabled": True}})
+    )
+    config = load_config(tmp_path)
+    assert config["sandbox"]["enabled"] is True
+    assert config["sandbox"]["scope"] == "gates"
