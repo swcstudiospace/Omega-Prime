@@ -684,8 +684,8 @@ class QuotaEngine:
             if stem < today:
                 try:
                     age = (
-                        datetime.now(UTC)
-                        - datetime.strptime(stem, "%Y-%m-%d").replace(tzinfo=UTC)
+                        datetime.strptime(today, "%Y-%m-%d")
+                        - datetime.strptime(stem, "%Y-%m-%d")
                     ).days
                 except ValueError:
                     continue

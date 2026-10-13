@@ -894,8 +894,10 @@ def test_restored_past_day_warn_keeps_gauge_clear(tmp_path: Any) -> None:
     (outdir / f"counters-{past}.json").write_text(json.dumps(saved), encoding="utf-8")
     registry = MetricsRegistry()
     engine = _engine(registry, {"alice": QuotaLimits(requests_per_day=10)}, mode="soft")
-    assert engine.restore_counters(outdir) == []
-    assert ("2023-11-13", "alice", "requests") not in engine._warned
+    # Within retention (1 day on the fixed clock): state restores, and the
+    # past-day warn must NOT light today's gauge.
+    assert engine.restore_counters(outdir) == [past]
+    assert ("2023-11-13", "alice", "requests") in engine._warned
     assert 'omega_caller_quota_warn{caller="alice"} 1' not in registry.render()
 
 

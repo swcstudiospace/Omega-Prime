@@ -29,10 +29,30 @@ from __future__ import annotations
 
 import json
 import os
+import types
 from typing import Any
+from urllib.parse import urlsplit
+
+from omega_prime.credentials.broker import CredentialBroker
 
 CREDENTIAL_ENV_VAR = "OMEGA_PRIME_EVALS_JUDGE_API_KEY"
 ENDPOINT_ENV_VAR = "OMEGA_PRIME_EVALS_JUDGE_ENDPOINT"
+
+
+class _JudgeEndpointPolicy:
+    """Allowlist whose only approved host is the configured judge endpoint.
+
+    The operator explicitly configured this endpoint and its key variable,
+    so the broker resolution rule ("provider env vars only for
+    policy-allowlisted hosts") is honored with the endpoint itself as the
+    single approved host.
+    """
+
+    def __init__(self, host: str) -> None:
+        self._host = host
+
+    def allows_host(self, host: str) -> bool:
+        return bool(self._host) and host == self._host
 
 
 def judge_enabled(config: dict | None) -> bool:
@@ -56,11 +76,26 @@ def judge_model(config: dict | None) -> str:
     return model if isinstance(model, str) else ""
 
 
-def _credential_value(environ: Any) -> str:
-    """The configured judge API key (empty when absent)."""
+def _credential_value(environ: Any, endpoint: str | None = None) -> str:
+    """The judge API key, resolved through the credential-broker rule.
+
+    The key env var is only honored for the operator-configured judge
+    endpoint: a ``CredentialBroker`` is built over a minimal allowlist
+    policy whose single approved host is the endpoint's host, so keys are
+    resolved per-approved-endpoint (and recorded for redaction) exactly
+    like every other provider credential. Returns empty when the endpoint
+    host cannot be parsed or no key is configured.
+    """
     env = environ if environ is not None else os.environ
     try:
-        return str(env.get(CREDENTIAL_ENV_VAR, "")).strip()
+        if not endpoint:
+            return ""
+        host = urlsplit(endpoint).hostname or ""
+        broker = CredentialBroker(_JudgeEndpointPolicy(host), env=env)
+        provider = types.SimpleNamespace(
+            name="evals-judge", requires_key=True, env_vars=(CREDENTIAL_ENV_VAR,)
+        )
+        return str(broker.key_for(provider, endpoint)).strip()
     except Exception:
         return ""
 
@@ -108,8 +143,7 @@ def score_criterion(
         else "<bad-criterion>"
     )
     model = judge_model(config)
-    api_key = _credential_value(environ)
-    if not judge_enabled(config) or not api_key:
+    if not judge_enabled(config):
         return {
             "id": criterion_id,
             "score": 0.0,
@@ -121,10 +155,26 @@ def score_criterion(
         }
     env = environ if environ is not None else os.environ
     try:
+        raw_key = str(env.get(CREDENTIAL_ENV_VAR, "")).strip()
         endpoint = str(env.get(ENDPOINT_ENV_VAR, "")).strip()
     except Exception:
+        raw_key = ""
         endpoint = ""
     if not endpoint:
+        # No endpoint configured: a missing credential is the more
+        # fundamental gate (flag on, model set, but nothing to call).
+        if not raw_key:
+            return {
+                "id": criterion_id,
+                "score": 0.0,
+                "passed": False,
+                "check": criterion.get("check")
+                if isinstance(criterion, dict)
+                else None,
+                "judge": "skipped",
+                "model": model,
+                "rationale": "judge disabled (flag off, model empty, or credential absent)",
+            }
         return {
             "id": criterion_id,
             "score": 0.0,
@@ -134,6 +184,17 @@ def score_criterion(
             "judge_unavailable": True,
             "model": model,
             "rationale": "judge endpoint unconfigured",
+        }
+    api_key = _credential_value(environ, endpoint)
+    if not api_key:
+        return {
+            "id": criterion_id,
+            "score": 0.0,
+            "passed": False,
+            "check": criterion.get("check") if isinstance(criterion, dict) else None,
+            "judge": "skipped",
+            "model": model,
+            "rationale": "judge disabled (flag off, model empty, or credential absent)",
         }
     prompt = ""
     check = criterion.get("check") if isinstance(criterion, dict) else None
