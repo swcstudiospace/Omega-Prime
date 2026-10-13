@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 milestone: v15
 milestone_name: Integrated Readiness and Repository Delivery
 status: Awaiting next milestone
-stopped_at: Milestone v15 completed and archived; the close-out PR from v15-milestone-close is next
-last_updated: "2026-10-12T21:44:13.706Z"
-last_activity: 2026-10-12
-last_activity_desc: Milestone v15 completed and archived
+stopped_at: v15 archived and closed out via PR #19 (merged to main 2026-10-12); 77.1 live UAT deferred by the user until after the next Grok Bot upload
+last_updated: "2026-10-13T00:07:31.745Z"
+last_activity: 2026-10-13
+last_activity_desc: Close-out PR #19 merged; user deferred 77.1 live UAT to after the next upload; v16 scope pending user pick from the 7 proposed updates
 state_head: 2ccb3e8bd4449b23c10c36ac4ba55a6ece1e13cc
 progress:
   total_phases: 5
@@ -26,14 +26,14 @@ current_plan: 08
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** No milestone in progress. v15 is complete and archived (audit 21/22; GROK-03 live import UAT deferred by the user). Next: ship the close-out PR from `v15-milestone-close`, then `/gsd:new-milestone`. Deferred: the six live 77.1 Grok Bot import UAT rows on `main` (`/gsd:verify-work 77.1`).
+**Current focus:** No milestone in progress. v15 is complete, archived, and closed out (PR #19 merged to `main` 2026-10-12; audit 21/22). Next: `/gsd:new-milestone` — the user is picking v16 scope from the seven 2026-10-13 update proposals (redteam refresh pipeline, protected release pipeline, telemetry/SLOs, token rotation, sandboxed execution, live evals, native Bot palette). Deferred: the six live 77.1 Grok Bot import UAT rows on `main` (`/gsd:verify-work 77.1`), which the user will run after the next Grok Bot upload.
 
 ## Current Position
 
 Phase: Milestone v15 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-10-12 — Milestone v15 completed and archived
+Last activity: 2026-10-13 — PR #19 merged; 77.1 live UAT deferred to after the next Grok Bot upload; v16 scope pending
 
 ## Deferred Verification
 
@@ -130,4 +130,5 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- After the next Grok Bot upload, run the six live 77.1 UAT rows and record them with /gsd-verify-work 77.1
+- Start the next milestone with /gsd-new-milestone (v16 scope: user picking from the seven 2026-10-13 proposals)
