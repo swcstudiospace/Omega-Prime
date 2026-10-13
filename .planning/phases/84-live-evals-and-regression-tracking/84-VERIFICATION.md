@@ -12,7 +12,7 @@ covered_files:
   - omega_prime/evals/history-baseline.json
   - omega_prime/config.py
   - .github/workflows/nightly-evals.yml
-covered_digest: v3:sha256:98871596d61fad8464a4790484071ddb83767cc66f6aac98b94c3e2fbe18d784
+covered_digest: v3:sha256:835480b8dca5547244d9a803f1d447343dfa154fe67bf7adc76d4590d0be0701
 ---
 
 # Phase 84 Verification

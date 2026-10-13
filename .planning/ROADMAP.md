@@ -121,5 +121,5 @@ Seven evidence-grounded updates staged from the 2026-10-13 ultrathink run (Linea
 2. A nightly scheduled eval workflow runs the suite and surfaces regressions; the deterministic eval step remains the blocking push/PR gate.
 3. Any live-model judge is strictly behind an explicit flag and makes no network calls when the flag is unset.
 
-**Plans:** 1 plan (3 tasks), executed and verified.
+**Plans:** 1/1 plans complete (3 tasks), executed and verified.
 - [x] 84-01 — scored rubric cases + history/trend/baseline; flag-gated judge; nightly-evals workflow
