@@ -571,6 +571,9 @@ jobs:
     env:
       IMAGE_TAG: omega-prime-mcp:ci
       PUBLISH_ENVIRONMENT: grokbot-image-publish
+    outputs:
+      archive_sha256: ${{ steps.transfer.outputs.archive_sha256 }}
+      image_id: ${{ steps.transfer.outputs.image_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -652,6 +655,7 @@ jobs:
           path: ${{ runner.temp }}/validated-image-evidence
 
       - name: Transfer and verify the validated bytes
+        id: transfer
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REF_PROTECTED: "${{ github.ref_protected }}"
@@ -780,6 +784,20 @@ jobs:
           if not decision.allowed:
               print(decision.detail, file=sys.stderr)
               raise SystemExit(1)
+          # Reached only when every binding matched: record the verified
+          # evidence values (taken from the evidence JSON loaded above, whose
+          # equality with the observed bytes the gate just proved) as step
+          # outputs and as a sha256sums.txt covering the transferred tarball.
+          # These describe the approved bytes; they authorize nothing.
+          (runner_temp / "sha256sums.txt").write_text(
+              f"{record['archive_sha256']}  omega-prime-mcp-ci.tar\n",
+              encoding="utf-8",
+          )
+          with Path(environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:
+              handle.write(f"archive_sha256={record['archive_sha256']}\n")
+              handle.write(f"image_id={record['image_id']}\n")
+              handle.write(f"source_sha={record['source_sha']}\n")
+              handle.write(f"run_id={record['run_id']}\n")
           PY
 
       - name: Push the validated image
@@ -805,6 +823,26 @@ jobs:
           umask 077
           printf '%s\n' "$digest" > "$RUNNER_TEMP/published-manifest-digest.txt"
 
+      - name: Record the publication binding
+        env:
+          # The approved image ID enters only as a quoted env value, matching
+          # the untrusted-input pattern used by the bind-input step above.
+          BIND_IMAGE_ID: ${{ steps.transfer.outputs.image_id }}
+        run: |
+          set -euo pipefail
+          # Informational record only: the approved image ID, this run, and
+          # the source commit, plus the registry manifest digest. It chains
+          # build approval to promotion without authorizing anything.
+          digest="$(cat "$RUNNER_TEMP/published-manifest-digest.txt")"
+          if [ -z "$BIND_IMAGE_ID" ] || [ -z "$digest" ]; then
+            echo "publication record refused: missing binding" >&2
+            exit 1
+          fi
+          {
+            echo "image $BIND_IMAGE_ID <- run $GITHUB_RUN_ID <- commit $GITHUB_SHA"
+            echo "manifest $digest"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload the publication record
         uses: actions/upload-artifact@v7
         with:
@@ -812,4 +850,5 @@ jobs:
           path: |
             ${{ runner.temp }}/publish-decision.json
             ${{ runner.temp }}/published-manifest-digest.txt
+            ${{ runner.temp }}/sha256sums.txt
           if-no-files-found: error

@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import configparser
+import hashlib
 import json
 import re
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -894,3 +896,106 @@ def test_promotion_with_staging_and_approval_is_quiet(tmp_path: Path) -> None:
     (out / "staging-receipt.json").write_text('{"ok": true}\n', encoding="utf-8")
     (out / "approval.json").write_text('{"approver": "oncall"}\n', encoding="utf-8")
     assert check(out) == []
+
+
+# ------------------------------------------------- staged rollout and promotion
+
+_DRILL_DIGEST = "sha256:" + hashlib.sha256(b"omega-prime-80-02-drill").hexdigest()
+_OTHER_DIGEST = "sha256:" + hashlib.sha256(b"omega-prime-80-02-other").hexdigest()
+
+
+def _promotion_dir(tmp_path: Path, *, digest: str = _DRILL_DIGEST) -> Path:
+    out = _rendered(tmp_path, "k8s")
+    (out / "promotion.yaml").write_text("promotion: true\n", encoding="utf-8")
+    (out / "staging-receipt.json").write_text('{"ok": true}\n', encoding="utf-8")
+    (out / "approval.json").write_text('{"approver": "oncall"}\n', encoding="utf-8")
+    (out / "image.digest").write_text(digest + "\n", encoding="utf-8")
+    return out
+
+
+def _evidence(out: Path) -> list[dict[str, Any]]:
+    paths = sorted(out.glob("*promotion*evidence*.json"))
+    assert paths, "expected a promotion evidence file"
+    return [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def test_promote_staged_without_staging_evidence_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _rendered(tmp_path, "k8s")
+    (out / "promotion.yaml").write_text("promotion: true\n", encoding="utf-8")
+    approval = out / "approval.json"
+    approval.write_text('{"approver": "oncall"}\n', encoding="utf-8")
+    assert deploy.promote(_DRILL_DIGEST, out, approval) == 1
+    assert list(out.glob("*promotion*evidence*.json")) == []
+
+
+def test_promote_staged_success_writes_evidence_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _promotion_dir(tmp_path)
+    assert deploy.promote(_DRILL_DIGEST, out, out / "approval.json") == 0
+    first = _evidence(out)[-1]
+    assert first["promoted_digest"] == _DRILL_DIGEST
+    assert first["previous_digest"] is None
+    assert first["approval"]["content"]
+    assert "timestamp" in first
+    (out / "image.digest").write_text(_OTHER_DIGEST + "\n", encoding="utf-8")
+    assert deploy.promote(_OTHER_DIGEST, out, out / "approval.json") == 0
+    second = _evidence(out)[-1]
+    assert second["promoted_digest"] == _OTHER_DIGEST
+    assert second["previous_digest"] == _DRILL_DIGEST
+
+
+def test_promote_digest_mismatch_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    out = _promotion_dir(tmp_path)
+    assert deploy.promote(_OTHER_DIGEST, out, out / "approval.json") == 1
+    assert list(out.glob("*promotion*evidence*.json")) == []
+
+
+def test_promote_direct_requires_env_and_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = _promotion_dir(tmp_path)
+    approval = out / "approval.json"
+    monkeypatch.delenv(deploy.ROLLOUT_ENV_VAR, raising=False)
+    assert deploy.promote(_DRILL_DIGEST, out, approval, direct=True) == 1
+    monkeypatch.setenv(deploy.ROLLOUT_ENV_VAR, "direct")
+    assert deploy.promote(_DRILL_DIGEST, out, approval) == 1
+    assert deploy.promote(_DRILL_DIGEST, out, approval, direct=True) == 0
+    assert _evidence(out)[-1]["rollout"] == "direct"
+
+
+def test_healthcheck_dead_port_fails(tmp_path: Path) -> None:
+    out = _rendered(tmp_path, "k8s", port=_free_port())
+    assert deploy.healthcheck("k8s", out) == 1
+
+
+def test_healthcheck_unresolvable_dir_exits_2(tmp_path: Path) -> None:
+    assert deploy.healthcheck("k8s", tmp_path / "missing") == 2
+    assert deploy.healthcheck("nope", tmp_path) == 2
+
+
+def test_promotion_warn_then_clear_evidence_sequence(tmp_path: Path) -> None:
+    out = _rendered(tmp_path, "k8s")
+    (out / "promotion.yaml").write_text("promotion: true\n", encoding="utf-8")
+    assert _ids(check(out), "warning") == {
+        "promote-without-staging-evidence",
+        "missing-promotion-approval-record",
+    }
+    assert deploy.main(["check", str(out)]) == 0
+    (out / "staging-receipt.json").write_text('{"ok": true}\n', encoding="utf-8")
+    (out / "approval.json").write_text('{"approver": "oncall"}\n', encoding="utf-8")
+    assert "promote-without-staging-evidence" not in _ids(check(out), "warning")
+    assert "missing-promotion-approval-record" not in _ids(check(out), "warning")

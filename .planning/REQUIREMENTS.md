@@ -10,8 +10,8 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 
 ## Release
 
-- [ ] **REL-01**: Maintainer can publish the hardened image through the `grokbot-image-publish` protected environment via manual `workflow_dispatch`, with checksum/image-id binding and retained evidence; publication stays manual and default-off. (U2, plan-02)
-- [ ] **REL-02**: A staged rollout path with `deploy.py check()` staging-first promotion evidence and a documented, exercised one-step rollback (previous digest) exists. (U2, plan-02)
+- [x] **REL-01**: Maintainer can publish the hardened image through the `grokbot-image-publish` protected environment via manual `workflow_dispatch`, with checksum/image-id binding and retained evidence; publication stays manual and default-off. (U2, plan-02)
+- [x] **REL-02**: A staged rollout path with `deploy.py check()` staging-first promotion evidence and a documented, exercised one-step rollback (previous digest) exists. (U2, plan-02)
 
 ## Observability
 
@@ -49,8 +49,8 @@ Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous
 | SIDE-01 | 79 | U1 | Complete |
 | SIDE-02 | 79 | U1 | Complete |
 | SIDE-03 | 79 | U1 | Complete |
-| REL-01 | 80 | U2 | Pending |
-| REL-02 | 80 | U2 | Pending |
+| REL-01 | 80 | U2 | Complete |
+| REL-02 | 80 | U2 | Complete |
 | OBS-01 | 81 | U3 | Pending |
 | OBS-02 | 81 | U3 | Pending |
 | TOK-01 | 82 | U4 | Pending |

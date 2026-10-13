@@ -65,10 +65,9 @@ Seven evidence-grounded updates staged from the 2026-10-13 ultrathink run (Linea
 2. A rollback path (redeploy of the previous digest) is documented and exercised once against a non-production target.
 3. Staged rollout produces `deploy.py check()` staging-first promotion evidence (approval/digest) before any promotion step.
 
-**Plans:** 0 plans
-
-Plans:
-- [ ] TBD (run /gsd-plan-phase 80 to break down)
+**Plans:** 2/2 plans complete (sequential waves), executed and verified.
+- [x] 80-01 — Protected environment payload + publish-gate digest/confirm binding (wave1)
+- [x] 80-02 — Staged rollout wiring, staging-first evidence drill, local rollback drill + runbook (wave2)
 
 ### Phase 81: Telemetry export and SLO alerting
 

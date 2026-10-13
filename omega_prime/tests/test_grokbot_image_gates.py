@@ -204,6 +204,47 @@ def test_run_mismatch_refuses() -> None:
     assert decision.detail == REFUSAL_RUN_MISMATCH
 
 
+def test_binding_archive_mismatch_refuses_by_name() -> None:
+    decision = evaluate_publish_gate(
+        _evidence(archive_observed=ArchiveChecksum("08" * 32)),
+    )
+    assert decision.allowed is False
+    assert decision.reason == "refused:archive-mismatch"
+    assert decision.detail == REFUSAL_ARCHIVE_MISMATCH
+
+
+def test_binding_image_id_mismatch_refuses_by_name() -> None:
+    decision = evaluate_publish_gate(
+        _evidence(image_observed=ImageId("sha256:" + "09" * 32)),
+    )
+    assert decision.allowed is False
+    assert decision.reason == "refused:image-mismatch"
+    assert decision.detail == REFUSAL_IMAGE_MISMATCH
+
+
+def test_binding_run_id_mismatch_refuses_by_name() -> None:
+    decision = evaluate_publish_gate(_evidence(run_id_observed="555555555"))
+    assert decision.allowed is False
+    assert decision.reason == "refused:run-mismatch"
+    assert decision.detail == REFUSAL_RUN_MISMATCH
+
+
+def test_binding_source_commit_mismatch_refuses_by_name() -> None:
+    decision = evaluate_publish_gate(
+        _evidence(source_sha_observed="07" * 20),
+    )
+    assert decision.allowed is False
+    assert decision.reason == "refused:source-sha-mismatch"
+    assert decision.detail == REFUSAL_SOURCE_SHA_MISMATCH
+
+
+def test_binding_all_match_allows() -> None:
+    decision = evaluate_publish_gate(_evidence())
+    assert decision.allowed is True
+    assert decision.reason == "allow"
+    assert decision.detail == ALLOW_DETAIL
+
+
 def test_failed_required_check_refuses_and_names_the_check() -> None:
     decision = evaluate_publish_gate(
         _evidence(
