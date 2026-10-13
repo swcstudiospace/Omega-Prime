@@ -57,3 +57,5 @@ build/
 .planning/grokbot_*.lock
 
 .DS_Store
+sidecar/reports/*
+!sidecar/reports/.gitkeep
