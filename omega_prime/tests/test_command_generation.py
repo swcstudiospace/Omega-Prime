@@ -137,10 +137,10 @@ def test_help_lists_curated_then_generated(tmp_path: Path) -> None:
     assert body["ok"] is True, body
     names = [row["name"] for row in body["result"]["commands"]]
     expected = _expected()
-    assert len(names) == 50
-    assert names[:16] == CURATED
-    assert names[16:] == sorted(expected)
-    suffixed = [name for name in names[16:] if name.endswith(("-skill", "-routine"))]
+    assert len(names) == 54
+    assert names[:20] == CURATED
+    assert names[20:] == sorted(expected)
+    suffixed = [name for name in names[20:] if name.endswith(("-skill", "-routine"))]
     assert sorted(suffixed) == sorted(SUFFIXED.values())
     assert "omega-commands" in names
     assert "omega-omega-commands" not in names

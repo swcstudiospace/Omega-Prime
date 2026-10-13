@@ -107,16 +107,18 @@ def _strip_quotes(value: str) -> str:
     return text
 
 
-def parse_case_text(text: str, source: str) -> tuple[str | None, str, str]:
-    """Extract ``(case_id, expected detection, residual_rationale)``.
+def parse_case_text(text: str, source: str) -> tuple[str | None, str, str, str]:
+    """Extract ``(case_id, expected detection, residual_rationale, class)``.
 
     Minimal line reader for the fixed case schema (top-level scalars
-    plus one nested ``expected:`` mapping). Raises :class:`ValueError`
-    when the text is not a mapping at all.
+    plus one nested ``expected:`` mapping). A missing/empty top-level
+    ``class:`` yields ``""``. Raises :class:`ValueError` when the text
+    is not a mapping at all.
     """
     case_id: str | None = None
     detection = ""
     rationale = ""
+    case_class = ""
     in_expected = False
     seen_mapping = False
     for line in text.splitlines():
@@ -134,6 +136,8 @@ def parse_case_text(text: str, source: str) -> tuple[str | None, str, str]:
                 in_expected = False
                 if key == "case_id":
                     case_id = _strip_quotes(value)
+                elif key == "class":
+                    case_class = _strip_quotes(value)
             continue
         if in_expected and indented and ":" in stripped:
             sub, _, value = stripped.partition(":")
@@ -144,18 +148,20 @@ def parse_case_text(text: str, source: str) -> tuple[str | None, str, str]:
                 rationale = _strip_quotes(value)
     if not seen_mapping:
         raise ValueError(f"{source}: not a YAML mapping")
-    return case_id, detection, rationale
+    return case_id, detection, rationale, case_class
 
 
-def read_cases(cases_dir: Path) -> tuple[list[tuple[str, str, str]], list[str]]:
-    """Load ``(case_id, detection, rationale)`` rows sorted by case id."""
+def read_cases(
+    cases_dir: Path,
+) -> tuple[list[tuple[str, str, str, str]], list[str]]:
+    """Load ``(case_id, detection, rationale, class)`` rows sorted by case id."""
     try:
         files = sorted(cases_dir.glob("*.yaml"))
     except OSError as exc:
         return [], [f"{cases_dir}: cannot list case files ({exc})"]
     if not files:
         return [], [f"{cases_dir}: no case files (*.yaml) found"]
-    cases: list[tuple[str, str, str]] = []
+    cases: list[tuple[str, str, str, str]] = []
     errors: list[str] = []
     for path in files:
         try:
@@ -164,14 +170,14 @@ def read_cases(cases_dir: Path) -> tuple[list[tuple[str, str, str]], list[str]]:
             errors.append(f"{path}: cannot read ({exc})")
             continue
         try:
-            case_id, detection, rationale = parse_case_text(text, str(path))
+            case_id, detection, rationale, case_class = parse_case_text(text, str(path))
         except ValueError as exc:
             errors.append(str(exc))
             continue
         if not case_id:
             errors.append(f"{path}: missing case_id")
             continue
-        cases.append((case_id, detection, rationale))
+        cases.append((case_id, detection, rationale, case_class))
     cases.sort(key=lambda row: row[0])
     return cases, errors
 
@@ -331,7 +337,11 @@ def load_findings(path: Path) -> list[dict[str, object]]:
 
 
 def load_transitions(path: Path) -> tuple[list[dict[str, object]], datetime | None]:
-    """Transition rows with parsed timestamps; malformed lines warn to stderr."""
+    """Transition rows with parsed timestamps; malformed lines warn to stderr.
+
+    Legacy rows without a ``cause`` are normalized to ``"unknown"`` so the
+    state-timeline section and its footer never KeyError on old history.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -372,6 +382,7 @@ def load_transitions(path: Path) -> tuple[list[dict[str, object]], datetime | No
             )
             continue
         row["_dt"] = moment
+        row["cause"] = str(row.get("cause") or "unknown")
         rows.append(row)
         if newest is None or moment > newest:
             newest = moment
@@ -396,7 +407,7 @@ def findings_newest(rows: list[dict[str, object]]) -> datetime | None:
 
 
 def detection_gaps(
-    cases: list[tuple[str, str, str]],
+    cases: list[tuple[str, str, str, str]],
     load_errors: list[str],
     observations: dict[str, object],
     last_run_missing: bool,
@@ -420,8 +431,8 @@ def detection_gaps(
     if mapping_invalid:
         failures.append("recorded run has no 'observations' mapping")
         return failures
-    known = {case_id for case_id, _, _ in cases}
-    for case_id, expected, rationale in cases:
+    known = {case_id for case_id, _, _, _ in cases}
+    for case_id, expected, rationale, _case_class in cases:
         observed = observations.get(case_id)
         if not isinstance(observed, dict) or "observed_detection" not in observed:
             failures.append(
@@ -444,6 +455,88 @@ def detection_gaps(
                 "for unknown case_id; re-run the suite"
             )
     return failures
+
+
+#: Technique classes from ``sidecar/case.schema.json`` (byte-wise order).
+#: Unknown ``class:`` values seen on disk render as extra rows after these.
+SCHEMA_CLASSES = (
+    "abuse",
+    "auth-bypass",
+    "cost-abuse",
+    "jailbreak",
+    "malformed-input",
+    "prompt-injection",
+)
+
+
+def _gap_case_ids(text: str) -> list[str]:
+    """Quoted ``'case_id'`` tokens plus ``*.yaml`` filename stems in ``text``."""
+    tokens = re.findall(r"'([^']*)'", text)
+    for stem in re.findall(r"([A-Za-z0-9][A-Za-z0-9_.-]*)\.yaml", text):
+        tokens.append(stem)
+    return tokens
+
+
+def coverage_rows(
+    cases: list[tuple[str, str, str, str]],
+    observations: dict[str, object],
+    gaps: list[str],
+) -> list[tuple[str, int, int, int, float, int, str]]:
+    """Per-class coverage rows ``(class, cases, runs, wins, pct, gaps, verdict)``.
+
+    Pure helper over already-read inputs: ``cases`` counts loaded case
+    files of the class; ``runs`` counts those cases present in
+    ``observations`` with an ``observed_detection`` key (same pass rule
+    as the per-technique table: ``got == expected`` or a non-empty
+    ``residual_rationale`` counts as a win); ``gaps`` counts
+    ``detection_gaps()`` strings attributable to the class via a
+    mentioned ``case_id`` (drift/global errors attribute to no class).
+    Row order is the six schema classes byte-wise, then any unknown
+    ``class:`` values seen on disk sorted after them.
+    """
+    by_class: dict[str, list[tuple[str, str, str]]] = {}
+    for case_id, expected, rationale, case_class in cases:
+        by_class.setdefault(case_class, []).append((case_id, expected, rationale))
+    known_class = {case_id: case_class for case_id, _, _, case_class in cases}
+    known_ids = set(known_class)
+    gap_counts: dict[str, int] = {}
+    for failure in gaps:
+        attributed: set[str] = set()
+        for token in _gap_case_ids(failure):
+            if token in known_ids:
+                attributed.add(known_class[token])
+            else:
+                for class_name in list(SCHEMA_CLASSES) + sorted(by_class):
+                    if token == class_name or token.startswith(class_name + "-"):
+                        attributed.add(class_name)
+                        break
+        for class_name in attributed:
+            gap_counts[class_name] = gap_counts.get(class_name, 0) + 1
+    ordered = list(SCHEMA_CLASSES) + sorted(
+        name for name in by_class if name not in SCHEMA_CLASSES
+    )
+    rows: list[tuple[str, int, int, int, int, float, int, str]] = []
+    for class_name in ordered:
+        members = by_class.get(class_name, [])
+        wins = 0
+        runs = 0
+        for case_id, expected, rationale in members:
+            observed = observations.get(case_id)
+            if not isinstance(observed, dict) or "observed_detection" not in observed:
+                continue
+            runs += 1
+            if observed["observed_detection"] == expected or str(rationale).strip():
+                wins += 1
+        pct = 100.0 * wins / runs if runs else 0.0
+        class_gaps = gap_counts.get(class_name, 0)
+        if not members:
+            verdict = "unexercised"
+        elif runs > 0 and wins == runs and class_gaps == 0:
+            verdict = "covered"
+        else:
+            verdict = "gappy"
+        rows.append((class_name, len(members), runs, wins, pct, class_gaps, verdict))
+    return rows
 
 
 def read_baseline_snapshot(report_path: Path) -> dict[str, str] | None:
@@ -494,13 +587,25 @@ def render_report(
     version: str,
     runs: int,
     pass_rows: list[tuple[str, str]],
-    gaps: list[str],
-    current_findings: dict[str, str],
-    baseline_name: str | None,
-    baseline: dict[str, str] | None,
-    transition_counts: list[tuple[str, str, int]],
+    coverage: list[tuple[str, int, int, int, float, int, str]] | None = None,
+    gaps: list[str] | None = None,
+    current_findings: dict[str, str] | None = None,
+    baseline_name: str | None = None,
+    baseline: dict[str, str] | None = None,
+    transition_counts: list[tuple[str, str, int]] | None = None,
+    timeline: list[tuple[str, str, str, str]] | None = None,
+    cause_counts: list[tuple[str, int]] | None = None,
 ) -> str:
-    """Assemble the six report sections in fixed order."""
+    """Assemble the eight report sections in fixed order."""
+    gaps = gaps if gaps is not None else []
+    current_findings = current_findings if current_findings is not None else {}
+    transition_counts = transition_counts if transition_counts is not None else []
+    timeline = timeline if timeline is not None else []
+    if cause_counts is None:
+        counts: dict[str, int] = {}
+        for _, _, _, cause in timeline:
+            counts[cause] = counts.get(cause, 0) + 1
+        cause_counts = sorted(counts.items())
     lines = [
         "# Engagement report",
         "",
@@ -525,6 +630,19 @@ def render_report(
         lines += ["| case_id | result |", "| --- | --- |"]
         if runs == 0:
             lines.append("- no runs in window")
+    lines += ["", "## Coverage matrix", ""]
+    lines += [
+        "| class | cases | runs | pass rate | gaps | verdict |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for class_name, case_count, class_runs, wins, pct, class_gaps, verdict in (
+        coverage if coverage is not None else []
+    ):
+        rate = f"{wins}/{class_runs} ({pct:.1f}%)" if class_runs else "0/0 (n/a)"
+        lines.append(
+            f"| {class_name} | {case_count} | {class_runs} | {rate} "
+            f"| {class_gaps} | {verdict} |"
+        )
     lines += ["", "## Detection gaps", ""]
     if gaps:
         for failure in gaps:
@@ -554,6 +672,15 @@ def render_report(
     lines += ["| from | to | count |", "| --- | --- | --- |"]
     for from_state, to_state, count in transition_counts:
         lines.append(f"| {from_state} | {to_state} | {count} |")
+    lines += ["", "## State timeline", ""]
+    if timeline:
+        for ts_text, from_state, to_state, cause in timeline:
+            lines.append(f"- {ts_text} {from_state} -> {to_state} ({cause})")
+        causes_text = ", ".join(f"{cause}={count}" for cause, count in cause_counts)
+        lines.append(f"- causes: {causes_text}")
+    else:
+        lines.append("- no transitions in window")
+        lines.append("- causes: none")
     lines += [
         "",
         f"<!-- findings-snapshot: {json.dumps(current_findings, sort_keys=True)} -->",
@@ -562,13 +689,19 @@ def render_report(
     return "\n".join(lines)
 
 
-def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, Path]:
-    """Render the report; return ``(markdown, file_name, out_dir)``."""
+def _collect_window(reports_dir: Path, since_text: str | None) -> dict[str, object]:
+    """Load history and compute the shared report window.
+
+    Read-only projection used by both :func:`build_report` and
+    :func:`summarize`: window endpoints, in-window transitions, run
+    count, transition counts, loaded cases, run observations,
+    detection gaps, per-technique rows, and the current findings map.
+    Raises :class:`ReportError` on unreadable inputs.
+    """
     if not reports_dir.exists():
         raise ReportError(f"error: reports dir does not exist: {reports_dir}")
     if not reports_dir.is_dir():
         raise ReportError(f"error: reports dir is not a directory: {reports_dir}")
-
     transitions, transitions_newest = load_transitions(
         reports_dir / TRANSITIONS_FILENAME
     )
@@ -578,12 +711,10 @@ def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, P
     last_run_missing = observations is None
     if observations is None:
         observations = {}
-
     newest = transitions_newest
     findings_stamp = findings_newest(findings)
     if findings_stamp is not None and (newest is None or findings_stamp > newest):
         newest = findings_stamp
-
     epoch = parse_rfc3339(EPOCH_RFC3339)
     window_end = newest if newest is not None else epoch
     if since_text is not None:
@@ -593,8 +724,6 @@ def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, P
             raise ReportError(f"error: cannot parse --since ({exc})") from exc
     else:
         window_start = window_end - timedelta(days=7)
-    generated_at = window_end
-
     in_window = [
         row
         for row in transitions
@@ -613,7 +742,6 @@ def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, P
             for (from_state, to_state), count in counts.items()
         )
     )
-
     cases, load_errors = read_cases(REPO_ROOT / "sidecar" / "cases")
     gaps = detection_gaps(
         cases,
@@ -624,11 +752,10 @@ def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, P
         last_run_path,
         check_drift(REPO_ROOT),
     )
-
     pass_rows: list[tuple[str, str]] = []
     if runs > 0:
         known = {
-            case_id: (expected, rationale) for case_id, expected, rationale in cases
+            case_id: (expected, rationale) for case_id, expected, rationale, _ in cases
         }
         for case_id in sorted(set(known) | {str(k) for k in observations}):
             observed = observations.get(case_id)
@@ -646,7 +773,6 @@ def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, P
                 pass_rows.append((case_id, f"{wins}/{total} ({pct:.1f}%)"))
             else:
                 pass_rows.append((case_id, "0/0 (n/a)"))
-
     current_findings: dict[str, str] = {}
     for row in findings:
         digest = row.get("dedupe_hash")
@@ -661,13 +787,56 @@ def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, P
         current_findings[digest] = (
             case_id if isinstance(case_id, str) and case_id else "unknown"
         )
+    return {
+        "window_start": window_start,
+        "window_end": window_end,
+        "in_window": in_window,
+        "runs": runs,
+        "transition_counts": transition_counts,
+        "cases": cases,
+        "observations": observations,
+        "last_run_missing": last_run_missing,
+        "gaps": gaps,
+        "pass_rows": pass_rows,
+        "current_findings": current_findings,
+        "history_empty": not transitions and not findings and last_run_missing,
+    }
 
+
+def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, Path]:
+    """Render the report; return ``(markdown, file_name, out_dir)``."""
+    window = _collect_window(reports_dir, since_text)
+    window_start = window["window_start"]
+    window_end = window["window_end"]
+    generated_at = window_end
+    in_window = window["in_window"]
+    runs = window["runs"]
+    cases = window["cases"]
+    observations = window["observations"]
+    gaps = window["gaps"]
+    pass_rows = window["pass_rows"]
+    current_findings = window["current_findings"]
+    timeline = sorted(
+        (
+            fmt_rfc3339(row["_dt"]),
+            str(row["from"]),
+            str(row["to"]),
+            str(row["cause"]),
+        )
+        for row in in_window
+    )
+    cause_tally: dict[str, int] = {}
+    for _, _, _, cause in timeline:
+        cause_tally[cause] = cause_tally.get(cause, 0) + 1
+    cause_counts = sorted(cause_tally.items())
+    # Zero report-wide runs still renders the matrix, but every row is
+    # 0/0 (n/a): observations only count inside a non-empty window.
+    coverage = coverage_rows(cases, observations if runs > 0 else {}, gaps)
     start_day = window_start.date().isoformat().replace(":", "-")
     end_day = window_end.date().isoformat().replace(":", "-")
     file_name = f"engagement-{start_day}_{end_day}.md"
     out_dir = output_dir(reports_dir)
     baseline_name, baseline = newest_baseline(out_dir, file_name)
-
     version = read_version(REPO_ROOT)
     markdown = render_report(
         window_start=window_start,
@@ -676,13 +845,82 @@ def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, P
         version=version,
         runs=runs,
         pass_rows=pass_rows,
+        coverage=coverage,
         gaps=gaps,
         current_findings=current_findings,
         baseline_name=baseline_name,
         baseline=baseline,
-        transition_counts=transition_counts,
+        transition_counts=window["transition_counts"],
+        timeline=timeline,
+        cause_counts=cause_counts,
     )
     return markdown, file_name, out_dir
+
+
+def _summary_pct(pass_rows: list[tuple[str, str]]) -> int:
+    """Integer pass percentage over ``pass_rows`` (``0`` when no rows)."""
+    wins = 0
+    total = 0
+    for _, result in pass_rows:
+        match = re.match(r"(\d+)/(\d+)", result)
+        if match:
+            wins += int(match.group(1))
+            total += int(match.group(2))
+    if not total:
+        return 0
+    return round(100 * wins / total)
+
+
+def summarize(reports_dir: Path, since_text: str | None = None) -> dict[str, object]:
+    """One-line engagement posture ``(state, line, report, generated_at)``.
+
+    Read-only projection of :func:`_collect_window`: ``line`` is
+    ``runs=X pass=Y% gaps=Z findings=+N/-M`` with ``Y`` the integer pass
+    percentage over ``pass_rows`` and ``+N``/``-M`` diffed against the
+    newest baseline via :func:`newest_baseline`. Empty or missing history
+    reports ``state: "no-reports"`` with an all-zeros line instead of an
+    error. Writes no files. Raises :class:`ReportError` only for genuine
+    I/O or parse failures.
+    """
+    if not reports_dir.exists() or not reports_dir.is_dir():
+        return {
+            "state": "no-reports",
+            "line": "runs=0 pass=0% gaps=0 findings=+0/-0",
+            "report": None,
+            "generated_at": None,
+        }
+    window = _collect_window(reports_dir, since_text)
+    if window["history_empty"]:
+        return {
+            "state": "no-reports",
+            "line": "runs=0 pass=0% gaps=0 findings=+0/-0",
+            "report": None,
+            "generated_at": None,
+        }
+    window_start = window["window_start"]
+    window_end = window["window_end"]
+    current_findings = window["current_findings"]
+    start_day = window_start.date().isoformat().replace(":", "-")
+    end_day = window_end.date().isoformat().replace(":", "-")
+    file_name = f"engagement-{start_day}_{end_day}.md"
+    out_dir = output_dir(reports_dir)
+    baseline_name, baseline = newest_baseline(out_dir, file_name)
+    if baseline is None:
+        new_count = len(current_findings)
+        rescinded_count = 0
+    else:
+        new_count = sum(1 for h in current_findings if h not in baseline)
+        rescinded_count = sum(1 for h in baseline if h not in current_findings)
+    line = (
+        f"runs={window['runs']} pass={_summary_pct(window['pass_rows'])}% "
+        f"gaps={len(window['gaps'])} findings=+{new_count}/-{rescinded_count}"
+    )
+    return {
+        "state": "ok",
+        "line": line,
+        "report": baseline_name,
+        "generated_at": fmt_rfc3339(window_end),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -696,7 +934,10 @@ def main(argv: list[str] | None = None) -> int:
             "Weekly cadence: schedule_heartbeat(store, session, "
             '"Run scripts/engagement-report.py for the past 7 days and '
             'attach sidecar/reports/reports/<newest report>", '
-            "due_at, interval_seconds=604800)."
+            "due_at, interval_seconds=604800). "
+            "The report carries a Coverage matrix section (per-class "
+            "cases/runs/pass-rate/gaps/verdict) and a State timeline section "
+            "(chronological transitions plus per-cause counts)."
         ),
     )
     parser.add_argument(
@@ -717,9 +958,25 @@ def main(argv: list[str] | None = None) -> int:
         help="write the markdown file here; default: stdout. A canonical "
         "per-window copy is always kept in the output directory.",
     )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="emit exactly one summary line "
+        "(runs=X pass=Y%% gaps=Z findings=+N/-M) on stdout and write no "
+        "files; exit 0 with an all-zeros line when no reports exist, "
+        "exit 1 with error: on stderr only for genuine I/O or parse failures.",
+    )
     args = parser.parse_args(argv)
 
     reports_dir = Path(args.reports_dir) if args.reports_dir else default_reports_dir()
+    if args.summary:
+        try:
+            summary = summarize(reports_dir, args.since)
+        except ReportError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        sys.stdout.write(str(summary["line"]) + "\n")
+        return 0
     try:
         markdown, file_name, out_dir = build_report(reports_dir, args.since)
     except ReportError as exc:

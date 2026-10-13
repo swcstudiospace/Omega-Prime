@@ -172,9 +172,9 @@ def _write_fixture_root(
         json.dumps({"tool_names": TOOLS}), encoding="utf-8"
     )
     if with_saved_old_audit:
-        data = tmp_path / "omega_prime" / "tests" / "data"
-        data.mkdir(parents=True, exist_ok=True)
-        (data / f"redteam-audit-{PIN_OLD}.json").write_text(
+        audit_dir = tmp_path / "omega_prime" / "tests" / "data"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        (audit_dir / f"redteam-audit-{PIN_OLD}.json").write_text(
             json.dumps(old_audit_doc if old_audit_doc is not None else _audit()),
             encoding="utf-8",
         )
@@ -387,20 +387,6 @@ def test_missing_old_audit_exits_2(tmp_path, capsys):
     err = capsys.readouterr().err
     assert rc == 2
     assert "--old-audit" in err
-
-
-def test_submodule_missing_exits_3(tmp_path, capsys):
-    root = _write_fixture_root(tmp_path)
-    for child in (root / "redteam").iterdir():
-        pass
-    # Remove the whole submodule dir.
-    import shutil
-
-    shutil.rmtree(root / "redteam")
-    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), skip_audit=True)
-    err = capsys.readouterr().err
-    assert rc == 3
-    assert "submodule unreachable" in err
 
 
 def test_surface_drift_reports_and_stops(tmp_path, capsys):

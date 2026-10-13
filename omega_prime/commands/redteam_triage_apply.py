@@ -269,7 +269,7 @@ def run(args: str, env: Mapping[str, str]) -> dict[str, Any]:
             if digest < key:
                 insert_at = keys[key]
                 break
-        new_lines = lines[:insert_at] + [entry] + lines[insert_at:]
+        new_lines = [*lines[:insert_at], entry, *lines[insert_at:]]
     # Fail closed on concurrent edits before touching the file, in both modes.
     if _git_status_porcelain(script).strip():
         raise Error("dirty_script", {"script": str(script)})

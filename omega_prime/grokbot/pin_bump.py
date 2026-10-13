@@ -62,6 +62,7 @@ hermetic. The CLI takes no ``OMEGA_PRIME_*`` env vars and reads no
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import json
 import os
@@ -191,10 +192,8 @@ def revendor_pack(upstream_dir: Path, vendored_dir: Path) -> tuple[int, int]:
         key=lambda p: len(p.parts),
         reverse=True,
     ):
-        try:
+        with contextlib.suppress(OSError):
             empty.rmdir()
-        except OSError:
-            pass
     return copied, removed
 
 
