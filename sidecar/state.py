@@ -45,6 +45,7 @@ BLOCKED_CAUSES = (
     "roe-missing",
     "roe-expired",
     "roe-invalid",
+    "roe-key-in-file",
     "disabled",
     "drift-detected",
     "gateway-unreachable",
