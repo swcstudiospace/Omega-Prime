@@ -39,7 +39,7 @@ jobs:
         run: echo "has_key=$KEY_SET" >> "$GITHUB_OUTPUT"
       - name: report judge skip
         if: steps.gate.outputs.has_key != 'true'
-        run: echo "nightly-evals: judge steps skipped — OMEGA_PRIME_EVALS_JUDGE_API_KEY is not configured (deterministic + rubric still run)"
+        run: echo "judge steps skipped - OMEGA_PRIME_EVALS_JUDGE_API_KEY is not configured (deterministic + rubric still run)"
       - name: append history
         if: always()
         run: |

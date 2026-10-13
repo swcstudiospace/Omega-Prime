@@ -26,6 +26,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: install
+        run: python3 -m pip install -e . pip-audit
       - name: pip-audit
         # Audit the committed lock, not the runner's own pip. oauthlib stays
         # below 4 because tweepy 4.17 requires oauthlib>=3.2.0,<4.
@@ -62,6 +63,12 @@ jobs:
           AUDIT_JSON: ${{ runner.temp }}/redteam-audit.json
         run: |
           npm audit --omit=dev --audit-level=high --json > "$AUDIT_JSON" || audit_exit=$?
+          # npm audit exits nonzero when advisories exist; that output is the
+          # triage input below. Only bail here when it failed WITHOUT JSON.
+          if [ -n "${audit_exit:-}" ] && [ ! -s "$AUDIT_JSON" ]; then
+            echo "npm audit failed (exit $audit_exit) without usable JSON"
+            exit "$audit_exit"
+          fi
           python3 - <<'EOF'
           import json, os, sys
 
