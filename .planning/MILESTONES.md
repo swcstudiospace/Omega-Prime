@@ -1,5 +1,15 @@
 # Milestones
 
+## v16 v16 (Shipped: 2026-10-13)
+
+**Phases completed:** 6 phases, 12 plans, 6 tasks
+
+**Key accomplishments:**
+- Deterministic seat-to-OpenShell policy renderer with generated-file cutover, snapshot golden, sandbox config node, and CI drift guard.
+- Fail-closed OpenShell runner routing verification gates
+
+---
+
 ## v15 — Integrated Readiness and Repository Delivery (2026-10-12)
 
 **Status:** Complete with one user-accepted gap. 5 phases (75, 76, 77, inserted 77.1, 78), 33 plans. Audit gaps_found: 21/22 requirements satisfied; GROK-03 is partial. Closeout type: override_closeout, approved by the user on 2026-10-12.

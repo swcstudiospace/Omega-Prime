@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v16
 milestone_name: Enterprise Hardening and Continuous Verification
-current_phase: 84
-status: completed
+status: Awaiting next milestone
 stopped_at: Phase 84 complete — all phases complete
-last_updated: "2026-10-13T04:48:16.041Z"
+last_updated: "2026-10-13T04:49:21.839Z"
 last_activity: 2026-10-13
-last_activity_desc: Phase 84 complete
-state_head: a00dea7d45ecbec11c6ebd346b4678e8be455905
+last_activity_desc: Milestone v16 completed and archived
+state_head: a3383b2ec675083ac30a0ddc8f4e755899bdc9e3
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 12
   completed_plans: 12
   percent: 33
+current_phase: 84
 current_plan: null
 ---
 
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 
 ## Current Position
 
-Phase: 84
-Plan: Not started
-Status: All phases complete
-Last activity: 2026-10-13 — Phase 84 complete
+Phase: Milestone v16 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-10-13 — Milestone v16 completed and archived
 
 ## Deferred Verification
 
@@ -129,6 +129,4 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Operator Next Steps
 
-- Plan and execute phase 79 next (/gsd-plan-phase 79 after /gsd-discuss-phase 79), then 80-84 in order
-- After the next Grok Bot upload, run the six live 77.1 UAT rows and record them with /gsd-verify-work 77.1
-- Sign the purple-team rules-of-engagement artifact when live engagements are wanted; until then the sidecar stays BLOCKED by design
+- Start the next milestone with /gsd-new-milestone
