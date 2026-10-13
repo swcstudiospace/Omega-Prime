@@ -1,38 +1,19 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v15 — Integrated Readiness and Repository Delivery",
+  "milestone": "v16",
   "phases": [
-    {
-      "number": "75",
-      "name": "Integrated local readiness",
-      "status": "complete"
-    },
-    {
-      "number": "76",
-      "name": "Clean CI/CD",
-      "status": "complete"
-    },
-    {
-      "number": "77",
-      "name": "Maintained docs and knowledge base",
-      "status": "complete"
-    },
-    {
-      "number": "77.1",
-      "name": "Grok Bot import packaging",
-      "status": "pending"
-    },
-    {
-      "number": "78",
-      "name": "Repository marketing",
-      "status": "complete"
-    }
+    { "number": "79", "name": "Purple-team sidecar hardening", "status": "pending" },
+    { "number": "80", "name": "Protected release pipeline", "status": "pending" },
+    { "number": "81", "name": "Telemetry export and SLO alerting", "status": "pending" },
+    { "number": "82", "name": "Token rotation and usage quotas", "status": "pending" },
+    { "number": "83", "name": "Sandboxed execution verification", "status": "pending" },
+    { "number": "84", "name": "Live evals and regression tracking", "status": "pending" }
   ],
   "next": {
-    "command": "/gsd:progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd:plan-phase 79",
+    "label": "Plan Phase 79",
+    "reason": "v16 phases scaffolded; phase 79 discuss/plan next"
   },
-  "updated_at": "2026-10-12T21:44:13.719Z"
+  "updated_at": "2026-10-13T00:42:37.993Z"
 }

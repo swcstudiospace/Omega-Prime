@@ -1,22 +1,22 @@
 ---
 gsd_state_version: "1.0"
-milestone: v15
-milestone_name: Integrated Readiness and Repository Delivery
-status: Awaiting next milestone
-stopped_at: v15 archived and closed out via PR #19 (merged to main 2026-10-12); 77.1 live UAT deferred by the user until after the next Grok Bot upload
-last_updated: "2026-10-13T00:07:31.745Z"
+milestone: v16
+status: Milestone in progress
+stopped_at: v16 started 2026-10-13; phases 79-84 scaffolded; phase 79 discuss/plan next
+last_updated: "2026-10-13T00:42:37.993Z"
 last_activity: 2026-10-13
-last_activity_desc: Close-out PR #19 merged; user deferred 77.1 live UAT to after the next upload; v16 scope pending user pick from the 7 proposed updates
-state_head: 2ccb3e8bd4449b23c10c36ac4ba55a6ece1e13cc
+last_activity_desc: v16 started from the seven staged updates
+state_head: df1451250d7a676a97b39153a73e25612a86769a
 progress:
-  total_phases: 5
-  completed_phases: 4
-  total_plans: 33
-  completed_plans: 33
-  percent: 80
-current_phase: "77.1"
-current_phase_name: Grok Bot import packaging
-current_plan: 08
+  total_phases: 6
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
+milestone_name: Enterprise Hardening and Continuous Verification
+current_phase: "79"
+current_phase_name: Purple-team sidecar hardening
+current_plan: null
 ---
 
 # Project State
@@ -26,14 +26,14 @@ current_plan: 08
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** No milestone in progress. v15 is complete, archived, and closed out (PR #19 merged to `main` 2026-10-12; audit 21/22). Next: `/gsd:new-milestone` — the user is picking v16 scope from the seven 2026-10-13 update proposals (redteam refresh pipeline, protected release pipeline, telemetry/SLOs, token rotation, sandboxed execution, live evals, native Bot palette). Deferred: the six live 77.1 Grok Bot import UAT rows on `main` (`/gsd:verify-work 77.1`), which the user will run after the next Grok Bot upload.
+**Current focus:** Milestone v16 "Enterprise Hardening and Continuous Verification" in progress (started 2026-10-13 from the SPE-10591..10598 graph; phases 79-84 scaffolded). The seven per-update plans live in `.planning/updates/plan-01..07.md`; evidence in `.planning/recon-evidence.md`; sidecar gap table in `.planning/sidecar-audit.md`; decisions in `.planning/decisions.md`. The purple-team sidecar SHIPS BLOCKED per user decision: no live engagement until a signed rules-of-engagement artifact exists. Deferred: the six live 77.1 Grok Bot import UAT rows on `main` (`/gsd:verify-work 77.1`), which the user will run after the next Grok Bot upload.
 
 ## Current Position
 
-Phase: Milestone v15 complete
-Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-10-13 — PR #19 merged; 77.1 live UAT deferred to after the next Grok Bot upload; v16 scope pending
+Phase: 79 Purple-team sidecar hardening
+Plan: — (not yet planned)
+Status: Scaffolded; discuss/plan next
+Last activity: 2026-10-13 — v16 started; phases 79-84 scaffolded from the staged updates
 
 ## Deferred Verification
 
@@ -130,5 +130,6 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Operator Next Steps
 
+- Plan and execute phase 79 next (/gsd-plan-phase 79 after /gsd-discuss-phase 79), then 80-84 in order
 - After the next Grok Bot upload, run the six live 77.1 UAT rows and record them with /gsd-verify-work 77.1
-- Start the next milestone with /gsd-new-milestone (v16 scope: user picking from the seven 2026-10-13 proposals)
+- Sign the purple-team rules-of-engagement artifact when live engagements are wanted; until then the sidecar stays BLOCKED by design
