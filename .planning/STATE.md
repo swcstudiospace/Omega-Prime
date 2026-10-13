@@ -25,14 +25,14 @@ current_plan: null
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** No milestone in progress. v16 "Enterprise Hardening and Continuous Verification" is complete and archived (audit PASS 13/13; `.planning/milestones/v16-MILESTONE-AUDIT.md`): purple-team sidecar hardened and refresh-automated (ships BLOCKED), protected publish environment live, OTLP/SLOs, token rotation + quotas, sandboxed verification gates, live evals with regression tracking. Self-contained run package: `.planning/package/DELIVERABLE.md`. Operator next actions: sign the rules-of-enforcement artifact to unblock live purple-team engagements; approve the first `workflow_dispatch publish:true` run; run the six deferred 77.1 live UAT rows after the next Grok Bot upload (`/gsd:verify-work 77.1`).
+**Current focus:** No milestone in progress. Batch 01 (7 Purple-Team SOTA features) shipped to main 2026-10-13 — report: `.planning/BATCH-01-REPORT.md`; proposed batch 02 awaiting go-ahead (ITERATION_CONTROL pause-per-batch). `redteam-node-audit` is intentionally RED on main: upstream pin 831a6b0 ships 1 critical + 7 high (v1.3 too); batch-01 F1's remediation loop is the fix path — do not triage the critical. v16 "Enterprise Hardening and Continuous Verification" is complete and archived (audit PASS 13/13; `.planning/milestones/v16-MILESTONE-AUDIT.md`): purple-team sidecar hardened and refresh-automated (ships BLOCKED), protected publish environment live, OTLP/SLOs, token rotation + quotas, sandboxed verification gates, live evals with regression tracking. Self-contained run package: `.planning/package/DELIVERABLE.md`. Operator next actions: sign the rules-of-enforcement artifact to unblock live purple-team engagements; approve the first `workflow_dispatch publish:true` run; run the six deferred 77.1 live UAT rows after the next Grok Bot upload (`/gsd:verify-work 77.1`).
 
 ## Current Position
 
 Phase: Milestone v16 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-10-13 — Milestone v16 completed and archived
+Last activity: 2026-10-13 — Batch 01 (7 Purple-Team features) shipped to main; batch 02 proposed, paused per ITERATION_CONTROL
 
 ## Deferred Verification
 
