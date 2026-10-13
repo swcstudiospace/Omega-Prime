@@ -25,7 +25,7 @@ current_plan: null
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** Milestone v16 "Enterprise Hardening and Continuous Verification" in progress (started 2026-10-13 from the SPE-10591..10598 graph; phases 79-84 scaffolded). The seven per-update plans live in `.planning/updates/plan-01..07.md`; evidence in `.planning/recon-evidence.md`; sidecar gap table in `.planning/sidecar-audit.md`; decisions in `.planning/decisions.md`. The purple-team sidecar SHIPS BLOCKED per user decision: no live engagement until a signed rules-of-engagement artifact exists. Deferred: the six live 77.1 Grok Bot import UAT rows on `main` (`/gsd:verify-work 77.1`), which the user will run after the next Grok Bot upload.
+**Current focus:** No milestone in progress. v16 "Enterprise Hardening and Continuous Verification" is complete and archived (audit PASS 13/13; `.planning/milestones/v16-MILESTONE-AUDIT.md`): purple-team sidecar hardened and refresh-automated (ships BLOCKED), protected publish environment live, OTLP/SLOs, token rotation + quotas, sandboxed verification gates, live evals with regression tracking. Self-contained run package: `.planning/package/DELIVERABLE.md`. Operator next actions: sign the rules-of-enforcement artifact to unblock live purple-team engagements; approve the first `workflow_dispatch publish:true` run; run the six deferred 77.1 live UAT rows after the next Grok Bot upload (`/gsd:verify-work 77.1`).
 
 ## Current Position
 
