@@ -115,8 +115,8 @@ Send `/omega-<name>` as the whole message, with any arguments after a space
 the `omega-commands` skill tell the Bot to pass that exact text to the
 `omega_command` tool of the `omega-prime` server. A sentence that only
 mentions a command is ordinary prose, not a command. `/omega-help` lists
-every name: the 12 curated commands, one `/omega-<skill>` per checked-in
-skill and one `/omega-<routine>` per routine (46 today). A generated name
+every name: the 16 curated commands, one `/omega-<skill>` per checked-in
+skill and one `/omega-<routine>` per routine (50 today). A generated name
 that matches a curated command or another generated name takes a `-skill`
 or `-routine` suffix: `/omega-python-skill`, `/omega-onboard-routine`,
 `/omega-connectors-routine`, `/omega-ultrathink-skill` and

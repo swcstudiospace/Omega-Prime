@@ -5,7 +5,7 @@
 A command is the whole user message: ``/omega-help``, not a sentence that
 mentions it. Execution goes through the registry. A tool error stays an error.
 
-The 12 curated commands come first. Generated commands follow, one per
+The 16 curated commands come first. Generated commands follow, one per
 checked-in skill and routine (``omega_prime.commands.generated``). A skill
 command returns that skill's instructions. A routine command whose exact stem
 is a workflow runs that workflow; any other routine returns its text.
@@ -14,6 +14,7 @@ is a workflow runs that workflow; any other routine returns its text.
 from __future__ import annotations
 
 import functools
+import importlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -121,6 +122,32 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "/omega-desk",
         "Desk status: doctor, roster, and the next intake.",
         "The user asks for desk status or the next intake.",
+    ),
+    CommandSpec(
+        "omega-redteam-run",
+        "/omega-redteam-run --suite <name>",
+        "Run a red-team simulation suite through the fail-closed gate.",
+        "The user asks to run the red-team harness or a simulation suite.",
+        needs_args=True,
+    ),
+    CommandSpec(
+        "omega-redteam-status",
+        "/omega-redteam-status",
+        "Show the red-team harness state and recent transitions.",
+        "The user asks for red-team harness status or state.",
+    ),
+    CommandSpec(
+        "omega-redteam-findings",
+        "/omega-redteam-findings [--limit N]",
+        "Tail recent red-team harness findings. Read-only.",
+        "The user asks for red-team findings or detections.",
+    ),
+    CommandSpec(
+        "omega-redteam-triage",
+        "/omega-redteam-triage <dedupe-hash> --rationale <text>",
+        "Propose triage for one red-team finding.",
+        "The user asks to triage a red-team finding with a rationale.",
+        needs_args=True,
     ),
 )
 
@@ -293,7 +320,39 @@ def _run(
         return _tool(name, registry, "lead_roster_status", {})
     if name == "omega-gates":
         return _tool(name, registry, "qua_gates_run", {})
+    if name == "omega-redteam-run":
+        return _redteam(name, args, env, "run")
+    if name == "omega-redteam-status":
+        return _redteam(name, args, env, "status")
+    if name == "omega-redteam-findings":
+        return _redteam(name, args, env, "findings")
+    if name == "omega-redteam-triage":
+        return _redteam(name, args, env, "triage")
     return _fail(name, "unknown_command", {"commands": _command_names()})
+
+
+def _redteam(
+    command: str,
+    args: str,
+    env: Mapping[str, str],
+    kind: str,
+) -> dict[str, Any]:
+    """Run one red-team harness command. A bad run is a dict, never a raise."""
+    try:
+        module_name = {
+            "run": "omega_prime.commands.redteam_run",
+            "status": "omega_prime.commands.redteam_status",
+            "findings": "omega_prime.commands.redteam_findings",
+            "triage": "omega_prime.commands.redteam_triage",
+        }[kind]
+        mod = importlib.import_module(module_name)
+        return _ok(command, mod.run(args, env))
+    except mod.Error as exc:
+        return _fail(command, exc.error, exc.result)
+    except Exception as exc:
+        return _fail(
+            command, "command_failed", {"error": f"{type(exc).__name__}: {exc}"}
+        )
 
 
 def _run_generated(

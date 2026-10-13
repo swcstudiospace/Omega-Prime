@@ -112,6 +112,26 @@ start and stop, direct operator tasking, and hat dispatch. They are
 gated like any other tool in the host; see [Tool host](tool-host.md)
 for the gate mechanics and the `--approve` flag.
 
+## Slash commands
+
+The sidecar harness is driven through four curated commands (all routed
+via `omega_command`, like every other `/omega-*` command):
+
+| Command | Effect |
+| --- | --- |
+| `/omega-redteam-run --suite <name>` | Evaluate the fail-closed gate, then run one simulation suite. |
+| `/omega-redteam-status` | Show harness state and recent transitions. Read-only. |
+| `/omega-redteam-findings [--limit N]` | Tail recent findings. Read-only. |
+| `/omega-redteam-triage <dedupe-hash> --rationale <text>` | Append one triage proposal to the review queue. |
+
+BLOCKED is fail-closed: `/omega-redteam-run` checks the harness state
+first and refuses with `harness_blocked` unless the state is `IDLE` —
+a blocked run executes nothing. Triage is proposal-only: the command
+validates the 64-hex dedupe hash and a rationale of 1–500 characters,
+then appends one `PROPOSAL` row (`dedupe_hash`, `rationale`, timestamp,
+proposer `operator`) to `review-queue.ndjson`. Applying the verdict is a
+separate operator step; the command itself changes no finding.
+
 ## Gateway contract
 
 The tools speak the upstream loopback HTTP API, not MCP:

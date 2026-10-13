@@ -7,6 +7,7 @@ Hermetic: ``tmp_path`` only, no repo writes. Follows the
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 from omega_prime.evals import case_from_finding
 from sidecar.findings import record_finding
@@ -59,7 +60,7 @@ def test_happy_provisions_schema_valid_draft_and_rerun_is_idempotent(tmp_path, c
     assert row["dedupe_hash"] in text  # source hash in comment header
     assert "abuse-01" in text  # source case_id in comment header
 
-    doc = load_case_file(expected)
+    doc = cast(dict[str, Any], load_case_file(expected))
     assert validate_case(doc, source=str(expected)) == []
     assert doc["case_id"] == f"abuse-{row['dedupe_hash'][:12]}"
     assert doc["version"] == "0.1.0"

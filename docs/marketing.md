@@ -39,7 +39,7 @@ the opening sentence of the package description in `pyproject.toml`.
 | --- | --- | --- |
 | What is it? | One Python process, one conversation loop, one tool registry. Optional native Prime helpers run in-process when enabled; no sidecar is required. | [Architecture](architecture.md), "The shape" |
 | How do clients reach the tools? | An MCP tool host: stdio as a local process, and a remote listener that serves legacy SSE and Streamable HTTP on one port with bearer auth. | [Setup](setup.md), section 6 |
-| How do people drive it? | 46 `/omega-*` commands today (12 curated, plus one per checked-in skill and routine), each sent as the whole message and routed through the `omega_command` tool. | [grokbot/SETUP.md](../omega_prime/grokbot/SETUP.md), "Prompting contract"; [CHANGELOG.md](../CHANGELOG.md), Grok Bot import packaging |
+| How do people drive it? | 50 `/omega-*` commands today (16 curated, plus one per checked-in skill and routine), each sent as the whole message and routed through the `omega_command` tool. | [grokbot/SETUP.md](../omega_prime/grokbot/SETUP.md), "Prompting contract"; [CHANGELOG.md](../CHANGELOG.md), Grok Bot import packaging |
 | How do I check it? | An isolated readiness profile accounts for every roster tool with no Grok account and no live credentials, and writes one JSON report whose rows are `exercised`, `feature_disabled`, `blocked` or `failed`. | [Local validation](local-validation.md) |
 | What is off by default? | Every Prime capability family and the Red Team gateway family. The Red Team TypeScript backend is started separately and never auto-launched. | [README.md](../README.md), Configuration and Quickstart |
 | What is not claimed? | Live Grok, provider or account attachment; a public marketplace listing; a hosted HTTPS deployment; a published image. | [Setup](setup.md), "Claim limits"; [import evidence ledger](grok-bot-native.md#import-evidence-ledger), closing paragraph |
@@ -86,7 +86,7 @@ Source: [Local validation](local-validation.md), "What is actually proven";
 fails on every drift class. `--verify` spawns the declared `mcp.json` stdio
 command and a loopback bearer host and exits 0 only when both entries answer;
 the ledger records that the stdio command answered `initialize` and
-`/omega-help` (46 commands). These are owned local processes; none reaches a
+`/omega-help` (50 commands). These are owned local processes; none reaches a
 Grok Bot or a Cursor account.
 
 Source: `omega_prime/tooling/plugin.py` (module docstring and `main`);
@@ -278,7 +278,7 @@ The Cursor Teams/Enterprise import is the secondary route (UAT rows 2 to 4).
 > host (stdio, plus legacy SSE and Streamable HTTP with bearer auth) and a
 > Grok Bot template.
 >
-> Send `/omega-help` as the whole message to list the 46 `/omega-*` commands,
+> Send `/omega-help` as the whole message to list the 50 `/omega-*` commands,
 > each routed through one `omega_command` tool.
 >
 > Check it without credentials: clone the repository, install, then run
@@ -297,7 +297,7 @@ The Cursor Teams/Enterprise import is the secondary route (UAT rows 2 to 4).
 Sources, claim by claim: behavior ports and default-off capabilities,
 [README.md](../README.md); one process and one registry,
 [Architecture](architecture.md); transports, [Setup](setup.md) section 6;
-46 commands and `omega_command`,
+50 commands and `omega_command`,
 [grokbot/SETUP.md](../omega_prime/grokbot/SETUP.md) "Prompting contract";
 exit codes, the [demo](#reproducible-local-demo) sources; readiness report,
 [Local validation](local-validation.md); Bot route status,

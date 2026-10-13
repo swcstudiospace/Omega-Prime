@@ -66,6 +66,18 @@ def _defaults() -> dict[str, Any]:
             "roe_file": "",
             "roe_key": "",
             "roe_key_file": "",
+            # Weekly engagement reports (PLAN-F7): output dir override;
+            # empty (the default) means sidecar/reports/reports/.
+            "reports_dir": "",
+            # Findings → tracker sync (Phase 86, PLAN-F3). Off by default;
+            # the CLI and heartbeat tick are inert until enabled with a
+            # non-empty repo. Labels/repo are non-secret (operator map of
+            # severity → GitHub labels; per-severity replacement).
+            "findings_sync": {
+                "enabled": False,
+                "repo": "",
+                "labels": {},
+            },
         },
         # Telemetry export (Phase 81). Off by default with an empty endpoint;
         # the exporter refuses to start until an endpoint is configured.
@@ -298,6 +310,34 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 # the verification key (broker-rule alternative to the env
                 # key above; mirrors bearer_token_file).
                 overlay.setdefault("redteam", {})["roe_key_file"] = value.strip()
+            elif len(parts) == 3 and parts[1] == "reports" and parts[2] == "dir":
+                # OMEGA_PRIME_REDTEAM_REPORTS_DIR — engagement-report
+                # output dir override; empty (the default) means
+                # sidecar/reports/reports/. Non-secret.
+                overlay.setdefault("redteam", {})["reports_dir"] = value.strip()
+            elif (
+                len(parts) == 4
+                and parts[1] == "findings"
+                and parts[2] == "sync"
+                and parts[3] == "enabled"
+            ):
+                # OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_ENABLED — truthy enables
+                # the findings → tracker push; anything else leaves the
+                # default (off) in place.
+                overlay.setdefault("redteam", {}).setdefault("findings_sync", {})[
+                    "enabled"
+                ] = value.strip().lower() in ("1", "true", "yes", "on")
+            elif (
+                len(parts) == 4
+                and parts[1] == "findings"
+                and parts[2] == "sync"
+                and parts[3] == "repo"
+            ):
+                # OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_REPO — target OWNER/NAME;
+                # empty (the default) means the CLI fails closed. Non-secret.
+                overlay.setdefault("redteam", {}).setdefault("findings_sync", {})[
+                    "repo"
+                ] = value.strip()
         elif parts[0] == "telemetry":
             # OMEGA_PRIME_TELEMETRY_OTLP_ENABLED — truthy enables export;
             # the exporter additionally requires a non-empty push target.
