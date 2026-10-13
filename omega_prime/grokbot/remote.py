@@ -312,6 +312,44 @@ def _assemble_token_store(
     return CompositeTokenStore([file_store, base])
 
 
+def _token_file_records(
+    store: TokenStore, token_store_path: Path | str | None
+) -> list[Any] | None:
+    """Token records behind `store` for the metrics sync; None when unavailable.
+
+    Prefers `token_store_path` (the hashed file backing serve); otherwise walks
+    a composite store for file-backed children. Env-token-only deployments
+    have no records — the caller falls back to the principals snapshot.
+    A missing or unreadable file also returns None (fail closed, never raise).
+    """
+    from omega_prime.grokbot.tokens import list_tokens
+
+    paths: list[Path] = []
+    if token_store_path is not None:
+        paths.append(Path(token_store_path))
+    else:
+        seen: set[int] = set()
+        stack: list[Any] = [store]
+        while stack:
+            current = stack.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            path = getattr(current, "path", None)
+            if path is not None:
+                paths.append(Path(path))
+            stack.extend(getattr(current, "_stores", ()))
+    if not paths:
+        return None
+    records: list[Any] = []
+    for path in paths:
+        try:
+            records.extend(list_tokens(path))
+        except Exception:
+            return None
+    return records
+
+
 def _json_error(status: int, error: str) -> JSONResponse:
     headers = {"Cache-Control": "no-store"}
     if status == 401:
@@ -437,17 +475,25 @@ def create_sse_app(
             metrics, version=SERVER_VERSION, package_version=PACKAGE_VERSION
         )
         # Token rotation series (Phase 82): registered next to the existing
-        # registry construction; the active gauge snapshots the live store at
-        # build time (label hashes only — raw labels never leave the process).
-        # A snapshot failure must never break serving.
+        # registry construction; the serve-time snapshot syncs from the token
+        # records via `observe`, so the active gauge AND the expiry counter
+        # advance from entry states (label hashes only — raw labels never
+        # leave the process). Env-token-only deployments have no records, so
+        # the principals count is the fallback. A snapshot failure must never
+        # break serving.
         token_metrics = register_token_metrics(metrics)
         try:
-            counts: dict[str, int] = {}
-            for principal in store.principals():
-                digest = token_label_hash(principal.label or "")
-                counts[digest] = counts.get(digest, 0) + 1
-            for digest, count in counts.items():
-                token_metrics.set_active(digest, count)
+            _records = _token_file_records(store, token_store_path)
+            if _records is not None:
+                _now = clock() if clock is not None else time.time()
+                token_metrics.observe(_records, _now)
+            else:
+                counts: dict[str, int] = {}
+                for principal in store.principals():
+                    digest = token_label_hash(principal.label or "")
+                    counts[digest] = counts.get(digest, 0) + 1
+                for digest, count in counts.items():
+                    token_metrics.set_active(digest, count)
         except Exception:
             logger.warning("token active snapshot failed", exc_info=True)
         # Sidecar state gauge is a serve-time snapshot of the registration-time

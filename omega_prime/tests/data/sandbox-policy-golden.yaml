@@ -31,8 +31,8 @@ filesystem_policy:
     - "grokbot/**"
     - "ownership.yaml"
   read_write:
-    - "/root/.omega-prime"
-    - "/root/src/repos/omega-prime/omega_prime/state"
+    - "$HOME/.omega-prime"
+    - "omega_prime/state"
     - "/sandbox"
     - "/tmp"
     - "/dev/null"

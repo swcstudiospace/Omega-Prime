@@ -30,7 +30,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -1765,11 +1765,19 @@ def _probe_url(url: str, *, timeout: float = _PROBE_TIMEOUT) -> bool:
         return False
 
 
-def healthcheck(target: str, directory: str | Path) -> int:
+def healthcheck(
+    target: str,
+    directory: str | Path,
+    *,
+    probe: Callable[[str], bool] | None = None,
+) -> int:
     """Probe the rendered /healthz then /readyz paths; 0 only when both pass.
 
     Returns 2 when the target is unknown or the directory cannot be resolved,
     1 on the first failed probe after the rendered retry budget is spent.
+    `probe` is an injectable single-GET seam (takes the probe URL, returns
+    True on HTTP 200); the default is the stdlib urllib probe used in
+    production. Tests MUST pass a scripted probe — never a live socket.
     """
     if target not in TARGETS:
         print(f"deploy: unknown target {target!r}", file=sys.stderr)
@@ -1784,11 +1792,12 @@ def healthcheck(target: str, directory: str | Path) -> int:
         return 2
     port = _resolve_probe_port(target, root)
     attempts = _probe_attempts(root)
+    probe_fn = _probe_url if probe is None else probe
     for probe_path in _HEALTH_PATHS:
         url = f"http://127.0.0.1:{port}{probe_path}"
         passed = False
         for attempt in range(attempts):
-            if _probe_url(url):
+            if probe_fn(url):
                 passed = True
                 break
             if attempt + 1 < attempts:

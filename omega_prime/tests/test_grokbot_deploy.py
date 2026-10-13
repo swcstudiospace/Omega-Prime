@@ -8,7 +8,6 @@ import configparser
 import hashlib
 import json
 import re
-import socket
 from pathlib import Path
 from typing import Any
 
@@ -919,10 +918,7 @@ def _evidence(out: Path) -> list[dict[str, Any]]:
     return [json.loads(p.read_text(encoding="utf-8")) for p in paths]
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+# NOTE: healthcheck tests use socket-free scripted probes only (no _free_port).
 
 
 def test_promote_staged_without_staging_evidence_refuses(
@@ -978,8 +974,39 @@ def test_promote_direct_requires_env_and_flag(
 
 
 def test_healthcheck_dead_port_fails(tmp_path: Path) -> None:
-    out = _rendered(tmp_path, "k8s", port=_free_port())
-    assert deploy.healthcheck("k8s", out) == 1
+    out = _rendered(tmp_path, "k8s")
+    seen: list[str] = []
+
+    def _refuse(url: str) -> bool:
+        seen.append(url)
+        return False
+
+    assert deploy.healthcheck("k8s", out, probe=_refuse) == 1
+    assert [url.split("/")[-1] for url in seen] == ["healthz"] * 3
+
+
+def test_healthcheck_passes_with_scripted_probe(tmp_path: Path) -> None:
+    out = _rendered(tmp_path, "k8s")
+    seen: list[str] = []
+
+    def _serve(url: str) -> bool:
+        seen.append(url)
+        return True
+
+    assert deploy.healthcheck("k8s", out, probe=_serve) == 0
+    assert [url.split("/")[-1] for url in seen] == ["healthz", "readyz"]
+
+
+def test_healthcheck_default_probe_is_stdlib_urlopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = _rendered(tmp_path, "k8s")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        deploy, "_probe_url", lambda url, **_: calls.append(url) or True
+    )
+    assert deploy.healthcheck("k8s", out) == 0
+    assert [url.split("/")[-1] for url in calls] == ["healthz", "readyz"]
 
 
 def test_healthcheck_unresolvable_dir_exits_2(tmp_path: Path) -> None:

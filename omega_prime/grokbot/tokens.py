@@ -424,6 +424,7 @@ def rotate_token(
     overlap_hours: float = DEFAULT_CLI_OVERLAP_HOURS,
     clock: Clock = time.time,
     audit_file: Path | str | None = ...,
+    metrics: Any | None = None,
 ) -> tuple[str, TokenRecord, TokenRecord]:
     """Mint a replacement for one entry, linked by `rotated_from`/`rotated_to`.
 
@@ -434,6 +435,9 @@ def rotate_token(
     uses — then reads as expired. Revocation bypasses the window entirely
     (use `revoke_token` for break-glass). `audit_file=None` disables the audit
     event; the default (`...`) resolves to the store's sibling chain file.
+    `metrics` is an optional `TokenMetrics`-shaped handle (duck-typed:
+    `.record_rotation()`); each successful rotation records exactly once.
+    A metrics failure never blocks rotation — it warns on stderr.
     """
     if (label is None) == (token_id is None):
         raise ValueError("rotate needs exactly one of label= or token_id=")
@@ -487,6 +491,13 @@ def rotate_token(
     _append_rotation_audit(
         resolved_audit, old=stamped_old, new=new, overlap_hours=overlap_hours
     )
+    if metrics is not None:
+        try:
+            metrics.record_rotation()
+        except Exception as exc:  # never block rotation on metrics
+            print(
+                f"warning: token metrics record_rotation failed: {exc}", file=sys.stderr
+            )
     return plaintext, stamped_old, new
 
 
@@ -518,9 +529,12 @@ def rotate_due_tokens(
     overlap_hours: float,
     clock: Clock = time.time,
     audit_file: Path | str | None = ...,
+    metrics: Any | None = None,
 ) -> list[tuple[str, TokenRecord, TokenRecord]]:
     """Rotate every due entry once; a second run mints nothing (fresh entries
-    carry no expiry, superseded ones are excluded from `due_for_rotation`)."""
+    carry no expiry, superseded ones are excluded from `due_for_rotation`).
+    `metrics`, when given, is forwarded to each `rotate_token` call so every
+    successful rotation records exactly once."""
     target = Path(path)
     now = clock()
     with _exclusive_lock(target):
@@ -548,6 +562,7 @@ def rotate_due_tokens(
                 overlap_hours=overlap_hours,
                 clock=clock,
                 audit_file=audit_file,
+                metrics=metrics,
             )
         )
     return rotated

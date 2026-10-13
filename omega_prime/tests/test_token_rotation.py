@@ -326,3 +326,55 @@ def test_token_metrics_counters_and_gauge(tmp_path: Path) -> None:
     assert "omega_token_expiry_total 1\n" in text
     assert f"omega_token_active{{label_hash=\"{token_label_hash('a')}\"}} 1\n" in text
     assert f"omega_token_active{{label_hash=\"{token_label_hash('b')}\"}} 0\n" in text
+
+
+def test_rotate_token_records_rotation_metric(tmp_path: Path) -> None:
+    path = _store(tmp_path)
+    clock = FakeClock()
+    create_token(path, scopes=["read"], label="a", clock=clock)
+
+    registry = MetricsRegistry()
+    handle = register_token_metrics(registry)
+
+    class _FakeRecorder:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def record_rotation(self, n: float = 1.0) -> None:
+            self.calls += n
+
+    fake = _FakeRecorder()
+    rotate_token(path, label="a", clock=clock, audit_file=None, metrics=fake)
+    assert fake.calls == 1
+
+    rotate_token(path, label="a", clock=clock, audit_file=None, metrics=handle)
+    text = registry.render()
+    assert "omega_token_rotations_total 1\n" in text
+
+    # Default (no handle) stays backward compatible: rotates without recording.
+    rotate_token(path, label="a", clock=clock, audit_file=None)
+    assert registry.render() == text
+
+
+def test_rotation_then_expiry_between_scrapes_bumps_expiry_total(
+    tmp_path: Path,
+) -> None:
+    path = _store(tmp_path)
+    clock = FakeClock()
+    create_token(path, scopes=["read"], label="a", clock=clock)
+
+    registry = MetricsRegistry()
+    handle = register_token_metrics(registry)
+    assert handle.observe(list_tokens(path), clock())["newly_expired"] == []
+
+    rotate_token(
+        path, label="a", overlap_hours=1, clock=clock, audit_file=None,
+        metrics=handle,
+    )
+    clock.now += 2 * HOUR
+    summary = handle.observe(list_tokens(path), clock())
+    assert summary["expired"] == 1 and len(summary["newly_expired"]) == 1
+
+    text = registry.render()
+    assert "omega_token_rotations_total 1\n" in text
+    assert "omega_token_expiry_total 1\n" in text

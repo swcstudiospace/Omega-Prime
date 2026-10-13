@@ -19,6 +19,8 @@ from omega_prime.sandbox.policy_gen import (
     CANONICAL_SEAT,
     CREATE_COMMAND,
     GENERATOR,
+    PORTABLE_HOME_SCRATCH,
+    PORTABLE_STATE_DIR,
     REGENERATE_COMMAND,
     SYSTEM_READ_ONLY,
     build_policy_doc,
@@ -104,10 +106,36 @@ def test_read_write_covers_omega_defaults(tmp_path):
     policy, document = load_seat_document(seat)
     doc = build_policy_doc(policy, document, seat)
     read_write = doc["filesystem_policy"]["read_write"]
-    assert str(Path.home() / ".omega-prime") in read_write
-    assert any(part.endswith("omega_prime/state") for part in read_write)
+    assert PORTABLE_HOME_SCRATCH in read_write
+    assert PORTABLE_STATE_DIR in read_write
     for fixed in ("/sandbox", "/tmp", "/dev/null"):
         assert fixed in read_write
+
+
+def test_read_write_defaults_are_machine_independent(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", "/tmp/fake-home")
+    seat = _write_seat(tmp_path, _seat_doc())
+    rendered = render_policy(seat).decode("utf-8")
+    assert PORTABLE_HOME_SCRATCH in rendered
+    assert PORTABLE_STATE_DIR in rendered
+    assert "/root/" not in rendered
+    assert str(Path.cwd()) not in rendered
+
+
+def test_read_write_explicit_overrides_render_concrete_paths(tmp_path):
+    seat = _write_seat(tmp_path, _seat_doc())
+    policy, document = load_seat_document(seat)
+    doc = build_policy_doc(
+        policy, document, seat, home="/tmp/fake-home", work_root="/tmp/fake-work"
+    )
+    read_write = doc["filesystem_policy"]["read_write"]
+    assert "/tmp/fake-home/.omega-prime" in read_write
+    assert "/tmp/fake-work/omega_prime/state" in read_write
+    rendered = render_policy(
+        seat, home="/tmp/fake-home", work_root="/tmp/fake-work"
+    ).decode("utf-8")
+    assert "/tmp/fake-home/.omega-prime" in rendered
+    assert "/tmp/fake-work/omega_prime/state" in rendered
 
 
 def test_read_write_derived_not_hardcoded():
