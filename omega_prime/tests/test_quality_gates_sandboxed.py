@@ -209,7 +209,7 @@ def test_network_denial_observable_in_gate_output(tmp_path, monkeypatch):
             sandbox_transport=StubSandboxTransport("egress-denied"),
         )
     )
-    result = client.gates_run(suites=_suites(["curl", "https://api.evil.test"]))
+    result = client.gates_run(suites=_suites(["curl", "http://127.0.0.1/evil"]))
     assert result["ok"] is False
     entry = result["gates"]["unit"]
     assert "egress denied" in entry["output"]

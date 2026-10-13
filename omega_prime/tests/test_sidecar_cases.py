@@ -61,7 +61,10 @@ def test_payloads_are_inert_strings_never_executed():
         # Parsed documents hold only strings and the expected mapping.
         for key, value in case.items():
             assert isinstance(value, str) or key == "expected", key
-        assert set(cast(dict[str, str], case["expected"])) <= {"detection", "residual_rationale"}
+        assert set(cast(dict[str, str], case["expected"])) <= {
+            "detection",
+            "residual_rationale",
+        }
 
 
 def test_missing_expectation_fails_validation_by_name(tmp_path):

@@ -279,16 +279,23 @@ def validate_receipt(
             if not cmd_candidates:
                 errors.append(f"commands[{index}] was not captured")
                 continue
-            matched_record = _select_policy_bound(cmd_candidates, expected_policy_sha256)
+            exit_candidates: list[dict] = [
+                record
+                for record in cmd_candidates
+                if _exit_equal(record.get("exit_code"), exit_code)
+            ]
+            if not exit_candidates:
+                errors.append(
+                    f"commands[{index}] exit_code does not match a captured execution"
+                )
+                continue
+            matched_record = _select_policy_bound(
+                exit_candidates, expected_policy_sha256
+            )
             if matched_record is None:
                 errors.append(
                     f"commands[{index}] matches only executions bound to "
                     "a different policy digest"
-                )
-                continue
-            if not _exit_equal(matched_record.get("exit_code"), exit_code):
-                errors.append(
-                    f"commands[{index}] exit_code does not match a captured execution"
                 )
                 continue
             _check_sandbox_binding(

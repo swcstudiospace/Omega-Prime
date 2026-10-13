@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
 from typing import Any
 
 import pytest
@@ -615,3 +617,149 @@ def test_refresh_bad_document_keeps_previous_mode_and_limits(
         engine.refresh_from_config({"quotas": {"mode": "report", "document": str(bad)}})
     assert engine.mode == "hard"
     assert engine.limits["alice"].requests_per_day == 5
+
+
+# -- restart recovery + atomic dump ----------------------------------------
+
+
+def test_restart_preserves_saved_counters(tmp_path: Any) -> None:
+    """A fresh engine never truncates the previous process's saved counts."""
+    from omega_prime.quotas import QuotasMaintenance
+
+    outdir = tmp_path / "rollups"
+    registry1 = MetricsRegistry()
+    engine1 = _engine(
+        registry1,
+        {"alice": QuotaLimits(requests_per_day=100, tool_calls_per_day=100)},
+        mode="report",
+    )
+    chain1 = _chain(registry1, engine1)
+    for _ in range(3):
+        _, outcome = run_tool_call(chain1, _call(ALICE), lambda: '{"ok": true}')
+        assert outcome.status == "ok"
+    dumped = engine1.export_counters(outdir)
+    assert dumped == [outdir / f"counters-{DAY}.json"]
+    assert json.loads(dumped[0].read_text(encoding="utf-8"))["alice"]["requests"] == 3
+    # Simulate a restart: a brand-new engine dumping the same day keeps the
+    # saved totals (restore-before-dump), and the maintenance tick does too.
+    engine2 = _engine(
+        MetricsRegistry(),
+        {"alice": QuotaLimits(requests_per_day=100, tool_calls_per_day=100)},
+        mode="report",
+    )
+    engine2.dump_counters_file(outdir, DAY)
+    assert json.loads(dumped[0].read_text(encoding="utf-8"))["alice"]["requests"] == 3
+    assert engine2.daily_counts(DAY)["alice"]["requests"] == 3
+    engine3 = _engine(
+        MetricsRegistry(),
+        {"alice": QuotaLimits(requests_per_day=100, tool_calls_per_day=100)},
+        mode="report",
+    )
+    maint = QuotasMaintenance(
+        engine3,
+        root=tmp_path,
+        config_loader=lambda: {"quotas": {"mode": "report", "rollup_dir": str(outdir)}},
+    )
+    tick = maint.tick_once()
+    assert tick["ok"]
+    assert json.loads(dumped[0].read_text(encoding="utf-8"))["alice"]["requests"] == 3
+    assert engine3.daily_counts(DAY)["alice"]["requests"] == 3
+
+
+def test_counters_dump_is_atomic_and_never_truncates(tmp_path: Any) -> None:
+    """Atomic dump: no temp files left behind, empty never clobbers saved."""
+    outdir = tmp_path / "rollups"
+    outdir.mkdir()
+    saved = outdir / f"counters-{DAY}.json"
+    saved.write_text(
+        json.dumps({"alice": {"requests": 3, "tool_calls": 3, "denied": 0}}),
+        encoding="utf-8",
+    )
+    # An engine with no buckets for the day must not truncate the saved file.
+    empty = _engine(MetricsRegistry(), {}, mode="report")
+    empty.dump_counters_file(outdir, DAY)
+    assert json.loads(saved.read_text(encoding="utf-8"))["alice"]["requests"] == 3
+    # A counted dump writes the merged totals atomically: readers see the
+    # whole file and no temp file survives the replace.
+    registry = MetricsRegistry()
+    engine = _engine(
+        registry,
+        {"alice": QuotaLimits(requests_per_day=100, tool_calls_per_day=100)},
+        mode="report",
+    )
+    chain = _chain(registry, engine)
+    _, outcome = run_tool_call(chain, _call(ALICE), lambda: '{"ok": true}')
+    assert outcome.status == "ok"
+    target = engine.dump_counters_file(outdir, DAY)
+    assert json.loads(target.read_text(encoding="utf-8"))["alice"]["requests"] == 4
+    leftovers = [
+        p
+        for p in outdir.iterdir()
+        if p.name.startswith(".counters-") or p.suffix == ".tmp"
+    ]
+    assert leftovers == []
+
+
+def test_reloaded_limits_republish_to_gauge(tmp_path: Any) -> None:
+    """Changing a limit and reloading moves the limit gauge (no restart)."""
+    doc = tmp_path / "quotas.json"
+    doc.write_text(
+        json.dumps(
+            {"schema_version": 1, "callers": {"alice": {"requests_per_day": 5}}}
+        ),
+        encoding="utf-8",
+    )
+    registry = MetricsRegistry()
+    engine = _engine(
+        registry, {"alice": QuotaLimits(requests_per_day=5)}, mode="report"
+    )
+    assert 'omega_caller_quota_limit{caller="alice",kind="requests"} 5' in (
+        registry.render()
+    )
+    doc.write_text(
+        json.dumps(
+            {"schema_version": 1, "callers": {"alice": {"requests_per_day": 10}}}
+        ),
+        encoding="utf-8",
+    )
+    engine.reload_document(doc)
+    assert 'omega_caller_quota_limit{caller="alice",kind="requests"} 10' in (
+        registry.render()
+    )
+
+
+def test_sse_app_threads_run_only_inside_lifespan(tmp_path: Any) -> None:
+    """Building the app starts no thread; lifespan starts and stops them."""
+    from omega_prime.grokbot.audit import GrokBotAuditTracer
+    from omega_prime.grokbot.manifest import find_repo_root
+    from omega_prime.grokbot.remote import create_sse_app
+
+    def _bg_threads() -> list:
+        return [
+            t
+            for t in threading.enumerate()
+            if t.name in ("quota-maintenance", "otlp-export")
+        ]
+
+    app = create_sse_app(
+        find_repo_root(),
+        env={},
+        home=tmp_path / "home",
+        audit=GrokBotAuditTracer(tmp_path / "audit" / "audit.jsonl"),
+    )
+    try:
+        maint = app.state.quotas_maintenance
+        assert maint._thread is None
+        assert _bg_threads() == []
+
+        async def _cycle() -> None:
+            async with app.router.lifespan_context(app):
+                assert maint._thread is not None
+                assert maint._thread.is_alive()
+                assert maint._thread.name == "quota-maintenance"
+
+        asyncio.run(_cycle())
+        assert maint._thread is None
+        assert _bg_threads() == []
+    finally:
+        maint.stop()

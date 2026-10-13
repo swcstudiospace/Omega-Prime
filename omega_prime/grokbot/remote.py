@@ -510,10 +510,12 @@ def create_sse_app(
             register_sidecar_state(metrics, _sidecar_state)
     count_auth_failure = record_auth_failure(metrics) if metrics_enabled else None
 
-    # Optional push-based telemetry (Phase 81). Off by default: constructed
-    # only when telemetry.otlp is enabled with a push target and the otel
-    # extra installed; otherwise serving proceeds exactly as before.
-    otlp_exporter = None
+    # Optional push-based telemetry (Phase 81). Off by default: started in
+    # the lifespan below, only when telemetry.otlp is enabled with a push
+    # target and the otel extra installed; otherwise serving proceeds
+    # exactly as before. The config node is read here (never started) so
+    # merely constructing the app starts no thread.
+    otlp_holder: dict[str, Any] = {"exporter": None}
     try:
         from omega_prime.config import load_config as _load_telemetry_config
 
@@ -521,16 +523,6 @@ def create_sse_app(
     except Exception:
         logger.warning("telemetry config load failed; export disabled", exc_info=True)
         _otlp_node = {}
-    if isinstance(_otlp_node, dict) and _otlp_node.get("enabled"):
-        try:
-            from omega_prime.telemetry.otlp_export import (
-                maybe_start as _maybe_start_otlp,
-            )
-
-            otlp_exporter = _maybe_start_otlp(_otlp_node, metrics)
-        except Exception:
-            logger.warning("telemetry push failed to start; export off", exc_info=True)
-            otlp_exporter = None
 
     # Per-caller usage quotas (Phase 82). Always constructed and always in
     # the chain: with no document the engine is inert (pass-through hooks,
@@ -551,10 +543,11 @@ def create_sse_app(
             logger.warning("quota engine start failed; quotas off", exc_info=True)
     # Live reload + counters dump (Phase 82 maintenance tick): re-reads the
     # `quotas` node and dumps `counters-<UTC-day>.json` into the rollup dir
-    # for the nightly rollup. Inert ticks only re-read config and write
-    # nothing; stopped with the lifespan below.
+    # for the nightly rollup. The tick thread starts in the lifespan below
+    # (stopped in teardown) so constructing the app without running
+    # lifespan starts no thread; inert ticks only re-read config and write
+    # nothing.
     quotas_maintenance = QuotasMaintenance(quota_engine, root=root)
-    quotas_maintenance.start()
 
     in_flight = InFlightInterceptor()
 
@@ -707,7 +700,6 @@ def create_sse_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
-        del app
         logger.info(
             "Omega Prime MCP host ready: %d tools, auth %s, audit %s",
             len(runtime.tool_names),
@@ -719,6 +711,22 @@ def create_sse_app(
                 "Host header validation is off (bearer auth is the control); "
                 "set a public URL or allowed hosts to enable it"
             )
+        # Background threads start here (not at construction) so merely
+        # building the app starts no thread; teardown stops them below.
+        quotas_maintenance.start()
+        if isinstance(_otlp_node, dict) and _otlp_node.get("enabled"):
+            try:
+                from omega_prime.telemetry.otlp_export import (
+                    maybe_start as _maybe_start_otlp,
+                )
+
+                otlp_holder["exporter"] = _maybe_start_otlp(_otlp_node, metrics)
+                app.state.otlp_exporter = otlp_holder["exporter"]
+            except Exception:
+                logger.warning(
+                    "telemetry push failed to start; export off", exc_info=True
+                )
+                otlp_holder["exporter"] = None
         try:
             async with streamable.lifespan():
                 try:
@@ -733,9 +741,12 @@ def create_sse_app(
                 quotas_maintenance.stop()
             except Exception:
                 logger.warning("quota maintenance stop failed", exc_info=True)
-            if otlp_exporter is not None:
+            exporter = otlp_holder["exporter"]
+            otlp_holder["exporter"] = None
+            app.state.otlp_exporter = None
+            if exporter is not None:
                 try:
-                    otlp_exporter.stop()
+                    exporter.stop()
                 except Exception:
                     logger.warning("telemetry push stop failed", exc_info=True)
             tracer.close()
@@ -808,7 +819,9 @@ def create_sse_app(
     app.state.token_metrics = token_metrics
     app.state.quota_engine = quota_engine
     app.state.quotas_maintenance = quotas_maintenance
-    app.state.otlp_exporter = otlp_exporter
+    # The lifespan sets the live exporter on startup (and clears it on
+    # teardown); construction alone starts no push thread.
+    app.state.otlp_exporter = None
     app.state.token_store = store
     app.state.approval_log = runtime.approval_log
     app.state.rate_limiter = request_limiter

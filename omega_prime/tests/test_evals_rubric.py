@@ -266,9 +266,7 @@ def test_cli_passes_enabled_judge_config_to_suite(tmp_path: Path, monkeypatch):
         },
     )
     monkeypatch.setenv("OMEGA_PRIME_EVALS_JUDGE_API_KEY", "cli-secret")
-    monkeypatch.setenv(
-        "OMEGA_PRIME_EVALS_JUDGE_ENDPOINT", "https://judge.example/score"
-    )
+    monkeypatch.setenv("OMEGA_PRIME_EVALS_JUDGE_ENDPOINT", "http://127.0.0.1/score")
 
     def _stub(url, payload, timeout=30, api_key=None):
         assert api_key == "cli-secret"

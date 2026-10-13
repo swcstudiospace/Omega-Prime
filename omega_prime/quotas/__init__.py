@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -220,6 +221,10 @@ class QuotaEngine:
         self._resolve = label_resolver or _default_resolver
         self._lock = threading.Lock()
         self._days: dict[str, dict[str, _Buckets]] = {}
+        # (rollup-dir, day) pairs already folded back from disk. A restart
+        # recovery merge runs once per pair so a re-dump never double-counts
+        # the restored totals.
+        self._restored: set[tuple[str, str]] = set()
         # Buckets are keyed by RAW caller label (never folded): enforcement is
         # per-caller even past the export cardinality cap. Only the exported
         # series label folds excess callers into `_overflow_` (T-82-07).
@@ -244,6 +249,9 @@ class QuotaEngine:
         one is built, exactly as construction does.
         """
         if self._limit_gauge is not None:
+            # Series already exist (live reload path): reloaded limits still
+            # need publishing or the gauge keeps serving stale values.
+            self._publish_limits()
             return
         registry = self._registry
         if registry is None:
@@ -635,16 +643,105 @@ class QuotaEngine:
         with self._lock:
             return sorted(self._days)
 
+    def restore_counters(self, rollup_dir: str | Path) -> list[str]:
+        """Fold saved `counters-<day>.json` files back into memory (once each).
+
+        Restart recovery: a fresh process starts with empty buckets, so the
+        first dump/tick after a restart merges the previously saved totals
+        (seeded for new labels, added onto post-boot counts for known ones)
+        instead of truncating them. Each `(rollup-dir, day)` pair merges at
+        most once per process, so re-dumps never double-count. Never raises:
+        unreadable files are logged and skipped.
+        """
+        directory = Path(rollup_dir)
+        try:
+            candidates = sorted(directory.glob("counters-*.json"))
+        except OSError as exc:
+            logger.warning("quota counters restore failed: %s", exc)
+            return []
+        restored: list[str] = []
+        for candidate in candidates:
+            stem = candidate.name[len("counters-") : -len(".json")]
+            try:
+                datetime.strptime(stem, "%Y-%m-%d")
+            except ValueError:
+                continue
+            if self._restore_day(directory, stem):
+                restored.append(stem)
+        return restored
+
+    def _restore_day(self, directory: Path, day: str) -> bool:
+        """Merge one saved day file into memory; `True` when newly restored."""
+        key = (str(directory), day)
+        with self._lock:
+            if key in self._restored:
+                return False
+            self._restored.add(key)
+        try:
+            raw = json.loads(
+                (directory / f"counters-{day}.json").read_text(encoding="utf-8")
+            )
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError) as exc:
+            logger.warning("quota counters restore failed for %s: %s", day, exc)
+            return False
+        if not isinstance(raw, dict):
+            logger.warning("quota counters restore failed for %s: not an object", day)
+            return False
+        with self._lock:
+            buckets = self._day_buckets(day)
+            for label, entry in raw.items():
+                if not isinstance(label, str) or label == "":
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    requests = int(entry.get("requests", 0))
+                    tool_calls = int(entry.get("tool_calls", 0))
+                    denied = int(entry.get("denied", 0))
+                except (TypeError, ValueError):
+                    continue
+                if requests < 0 or tool_calls < 0 or denied < 0:
+                    continue
+                self._fold(label)
+                bucket = buckets.setdefault(label, _Buckets())
+                bucket.requests += requests
+                bucket.tool_calls += tool_calls
+                bucket.denied += denied
+                if entry.get("warn"):
+                    self._warned.add((day, label, KIND_REQUESTS))
+        return True
+
     def dump_counters_file(self, rollup_dir: str | Path, day: str) -> Path:
-        """Write `rollup_dir/counters-<day>.json`; re-runs are byte-identical."""
+        """Write `rollup_dir/counters-<day>.json`; re-runs are byte-identical.
+
+        Merges any previously saved file for `day` first (restart recovery,
+        once per process), never writes an empty day over a saved non-empty
+        one, and writes atomically (temp file + `os.replace`) so concurrent
+        rollup readers never observe a truncated file.
+        """
         datetime.strptime(day, "%Y-%m-%d")
         directory = Path(rollup_dir)
         directory.mkdir(parents=True, exist_ok=True)
         target = directory / f"counters-{day}.json"
-        target.write_text(
-            json.dumps(self.counters_snapshot(day), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        self._restore_day(directory, day)
+        snapshot = self.counters_snapshot(day)
+        if not snapshot and target.is_file():
+            try:
+                existing = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                existing = None
+            if isinstance(existing, dict) and existing:
+                return target
+        payload = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
+        tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, target)
+        finally:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
         return target
 
     def export_counters(self, rollup_dir: str | Path) -> list[Path]:
@@ -757,6 +854,10 @@ class QuotasMaintenance:
             errors.append(f"reload: {exc}")
         dumped: list[str] = []
         try:
+            # Restart recovery before the first dump: fold any saved
+            # counters files back into the engine so an empty-at-boot
+            # process never truncates them (once per day per process).
+            self._engine.restore_counters(self._rollup_dir(config))
             dumped = [
                 str(target)
                 for target in self._engine.export_counters(self._rollup_dir(config))

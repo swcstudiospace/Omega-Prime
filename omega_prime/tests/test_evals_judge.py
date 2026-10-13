@@ -72,7 +72,7 @@ def test_judge_enabled_but_no_credential_skips():
 def test_judge_on_with_stubbed_endpoint_stores_score_and_rationale(monkeypatch):
     environ = {
         "OMEGA_PRIME_EVALS_JUDGE_API_KEY": "secret",
-        "OMEGA_PRIME_EVALS_JUDGE_ENDPOINT": "https://judge.example/score",
+        "OMEGA_PRIME_EVALS_JUDGE_ENDPOINT": "http://127.0.0.1/score",
     }
     seen: dict = {}
 
@@ -95,7 +95,7 @@ def test_judge_on_with_stubbed_endpoint_stores_score_and_rationale(monkeypatch):
 def test_judge_endpoint_down_records_unavailable_and_completes(monkeypatch):
     environ = {
         "OMEGA_PRIME_EVALS_JUDGE_API_KEY": "secret",
-        "OMEGA_PRIME_EVALS_JUDGE_ENDPOINT": "https://judge.example/score",
+        "OMEGA_PRIME_EVALS_JUDGE_ENDPOINT": "http://127.0.0.1/score",
     }
 
     def _down(url, payload, timeout=30, api_key=None):
@@ -163,7 +163,7 @@ def test_post_json_attaches_bearer_authorization_header(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", _capture)
     answer = judge._post_json(
-        "https://judge.example/score", {"model": "m"}, api_key="secret"
+        "http://127.0.0.1/score", {"model": "m"}, api_key="secret"
     )
     assert answer["score"] == 1.0
     assert seen["auth"] == "Bearer secret"
@@ -190,5 +190,5 @@ def test_post_json_without_key_sends_no_authorization_header(monkeypatch):
         return _Response()
 
     monkeypatch.setattr(urllib.request, "urlopen", _capture)
-    judge._post_json("https://judge.example/score", {"model": "m"})
+    judge._post_json("http://127.0.0.1/score", {"model": "m"})
     assert seen["auth"] is None

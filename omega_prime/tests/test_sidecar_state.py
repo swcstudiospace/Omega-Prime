@@ -98,3 +98,12 @@ def test_reports_dir_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("OMEGA_PRIME_SIDECAR_REPORTS_DIR", str(tmp_path))
     transition("IDLE", "IDLE", "re-evaluated")
     assert transitions_path(tmp_path).is_file()
+
+
+def test_roe_key_in_file_transition_logs_a_row(tmp_path):
+    """The blocked-config cause writes an audit row instead of raising."""
+    row = transition("IDLE", "BLOCKED", "roe-key-in-file", directory=tmp_path)
+    assert row["from"] == "IDLE"
+    assert row["to"] == "BLOCKED"
+    assert row["cause"] == "roe-key-in-file"
+    assert _rows(tmp_path) == [row]

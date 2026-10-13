@@ -89,7 +89,6 @@ from omega_prime.tools.omega_command import register_omega_command_tools
 from omega_prime.tools.packs import PacksClient, PacksContext, register_packs_tools
 from omega_prime.tools.platform import register_platform_tools
 from omega_prime.tools.quality import (
-    DEFAULT_SANDBOX_POLICY,
     QualityClient,
     QualityContext,
     register_quality_tools,
@@ -524,6 +523,22 @@ def _sidecar_import(name: str) -> Any:
     return module
 
 
+def _packaged_sandbox_policy() -> str:
+    """Absolute path of the shipped OpenShell policy (work-root independent).
+
+    The host may launch with ``--work-root`` pointing at another project,
+    so a relative default would resolve against the wrong directory both
+    for ``digest_file()`` and for the ``--policy`` argument OpenShell
+    receives while running in the gate's work directory.
+    """
+    return str(
+        Path(__file__).resolve().parent
+        / "hosting"
+        / "openshell"
+        / "sandbox-policy.yaml"
+    )
+
+
 def _quality_sandbox_from_env(env: Mapping[str, str]) -> dict[str, Any] | None:
     """Sandbox node for the served quality tools (Phase 83, SAND-02).
 
@@ -532,6 +547,8 @@ def _quality_sandbox_from_env(env: Mapping[str, str]) -> dict[str, Any] | None:
     :class:`SandboxRunner`; anything else returns None so gates run
     exactly as today (byte-identical flag-off behavior). Scope validation
     stays in ``quality._sandbox_cfg`` (bogus scope disables, never enables).
+    An explicit ``OMEGA_PRIME_SANDBOX_POLICY`` stays as given; the default
+    is the packaged absolute policy path.
     """
     get = env.get if isinstance(env, Mapping) else {}.get
     enabled = str(get("OMEGA_PRIME_SANDBOX_ENABLED", "") or "").strip().lower()
@@ -541,7 +558,7 @@ def _quality_sandbox_from_env(env: Mapping[str, str]) -> dict[str, Any] | None:
     scope = str(get("OMEGA_PRIME_SANDBOX_SCOPE", "") or "").strip().lower()
     return {
         "enabled": True,
-        "policy": policy or DEFAULT_SANDBOX_POLICY,
+        "policy": policy or _packaged_sandbox_policy(),
         "scope": scope or "gates",
     }
 
