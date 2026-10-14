@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from omega_prime.durable import workflows
 from omega_prime.grokbot import pin_bump, purple_cycle, release_watch
 from omega_prime.grokbot.purple_cycle import MODES, STEP_NAMES, main, run_cycle
 from omega_prime.redteam import roe_audit
@@ -477,7 +480,7 @@ def test_real_audit_runs_audit_only_and_never_applies(
     assert audit["detail"]["verdict"] == "improved"
 
 
-def test_pin_run_timeout_becomes_error_status(
+def test_pin_run_timeout_is_a_non_halting_audit_failure(
     dirs, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def spy_bump(to: str, *, run: Any, **kwargs: Any) -> int:
@@ -491,15 +494,16 @@ def test_pin_run_timeout_becomes_error_status(
     _seed_release_state(dirs, "v1.0.0")
     result = _cycle(dirs, fetch=Fetch("v1.1.0", "v1.0.0"), pin_run=timing_out)
     audit = _by_name(result)["pin-bump-audit"]
-    assert (audit["status"], audit["reason"]) == ("error", "step-error")
-    assert audit["detail"]["timeout"] is True
-    assert (result["ok"], result["exit"], result["state"]) == (False, 1, "failed")
-    # Steps after the error are reported as halted, not executed.
-    assert _triples(result)[3:] == [
-        ("engagement", "skipped", "halted"),
-        ("findings-plan", "skipped", "halted"),
-        ("findings-dispatch", "skipped", "halted"),
-    ]
+    assert (audit["status"], audit["reason"]) == ("warn", "audit-failed")
+    assert audit["detail"] == {
+        "tag": "v1.1.0",
+        "error_type": "timeout",
+        "attempts": 1,
+    }
+    assert (result["ok"], result["exit"], result["state"]) == (True, 0, "completed")
+    # A failed audit never starves the steps after it.
+    statuses = [rec["status"] for rec in result["steps"][3:]]
+    assert statuses == ["ok", "skipped", "skipped"]
 
 
 def test_default_pin_run_has_per_command_timeout(
@@ -1613,9 +1617,12 @@ def test_errored_audit_tag_is_audited_by_a_later_cycle(dirs, pin) -> None:
     pin.verdict = "error"
     first = _cycle(dirs, fetch=Fetch("v1.1.0", "v1.0.0"))
     audit = _by_name(first)["pin-bump-audit"]
-    assert (audit["status"], audit["reason"]) == ("error", "step-error")
+    assert (audit["status"], audit["reason"]) == ("warn", "audit-failed")
     pending = dirs.reports / "purple-cycle-pending.json"
-    assert json.loads(pending.read_text(encoding="utf-8")) == {"tag": "v1.1.0"}
+    assert json.loads(pending.read_text(encoding="utf-8")) == {
+        "attempts": 1,
+        "tag": "v1.1.0",
+    }
 
     pin.verdict = "unchanged"
     nxt = _cycle(dirs, now=NOW + timedelta(days=1), fetch=Fetch("v1.1.0", "v1.0.0"))
@@ -1640,9 +1647,14 @@ def test_audit_exception_also_records_the_pending_tag(
     monkeypatch.setattr(pin_bump, "audit_scheduled_job", exploding)
     _seed_release_state(dirs, "v1.0.0")
     result = _cycle(dirs, fetch=Fetch("v1.1.0", "v1.0.0"))
-    assert _by_name(result)["pin-bump-audit"]["status"] == "error"
+    audit = _by_name(result)["pin-bump-audit"]
+    assert (audit["status"], audit["reason"]) == ("warn", "audit-failed")
+    assert audit["detail"]["error_type"] == "RuntimeError"
     pending = dirs.reports / "purple-cycle-pending.json"
-    assert json.loads(pending.read_text(encoding="utf-8")) == {"tag": "v1.1.0"}
+    assert json.loads(pending.read_text(encoding="utf-8")) == {
+        "attempts": 1,
+        "tag": "v1.1.0",
+    }
     assert list(dirs.reports.glob(".purple-cycle-pending.json.*")) == []
 
 
@@ -1728,9 +1740,15 @@ def test_safe_tag_rejects_newline_and_unicode_digits(tag: str) -> None:
     assert purple_cycle._safe_tag(tag) is None
 
 
-def test_safe_tag_accepts_plain_ascii_tags() -> None:
-    for tag in ("v1.2.3", "1.2", "v1.2.3-rc.1", "v10.20.30+build.5"):
+def test_safe_tag_accepts_tags_pin_bump_accepts() -> None:
+    for tag in ("v1.2.3", "v1.2", "v1.2.3-rc.1", "v10.20.30-build.5", "v1.2.3_x"):
         assert purple_cycle._safe_tag(tag) == tag
+        assert pin_bump.TAG_RE.match(tag)
+
+
+@pytest.mark.parametrize("tag", ["1.2", "v2.0.0-rc.1+build", "v1", "v1.2.3+x"])
+def test_safe_tag_rejects_tags_pin_bump_would_reject(tag: str) -> None:
+    assert purple_cycle._safe_tag(tag) is None
 
 
 def test_word_rejects_trailing_newline() -> None:
@@ -1798,3 +1816,561 @@ def test_explicit_now_never_reads_the_seam(
 
     monkeypatch.setattr(purple_cycle, "_utc_now", forbidden)
     assert _cycle(dirs, mode="plan")["cycle_id"] == "purple-cycle-20261014-plan"
+
+
+# --- 12. round 2: failing audits never starve apply ---------------------------
+
+
+def _add_finding(dirs: SimpleNamespace, number: int) -> None:
+    dirs.reports.mkdir(parents=True, exist_ok=True)
+    record_finding(
+        directory=dirs.reports,
+        case_id=f"abuse-{number:02d}",
+        klass="prompt_injection",
+        severity="high",
+        observed_detection="no-detection",
+        verdict="miss",
+        response=f"r{number}",
+    )
+
+
+def test_persistently_failing_audit_never_starves_apply(dirs, pin) -> None:
+    _seed_release_state(dirs, "v1.0.0")
+    pin.verdict = "error"
+    config = _apply_sync(dirs)
+    runner = Runner()
+    outcomes: list[tuple[str, str, int]] = []
+    for day in range(4):
+        _add_finding(dirs, day)
+        result = _cycle(
+            dirs,
+            mode="apply",
+            config=config,
+            runner=runner,
+            now=NOW + timedelta(days=day),
+            fetch=Fetch("v1.1.0", "v1.0.0"),
+        )
+        audit = _by_name(result)["pin-bump-audit"]
+        outcomes.append((audit["status"], audit["reason"], len(runner.calls)))
+        assert (result["ok"], result["exit"], result["state"]) == (True, 0, "completed")
+        assert _by_name(result)["findings-dispatch"]["reason"] == "ok"
+    assert outcomes == [
+        ("warn", "audit-failed", 1),
+        ("warn", "audit-failed", 2),
+        ("warn", "audit-abandoned", 3),
+        ("skipped", "no-new-release", 4),
+    ]
+    # The abandoned tag is not audited again and the pending file is gone.
+    assert len(pin.calls) == 3
+    assert not (dirs.reports / "purple-cycle-pending.json").exists()
+
+
+def test_audit_failure_detail_is_type_only_and_secret_free(
+    dirs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def exploding(config: Any, *, root: Any = None, run: Any = None) -> Any:
+        raise RuntimeError(f"token={SECRET} /root/.ssh")
+
+    monkeypatch.setattr(pin_bump, "audit_scheduled_job", exploding)
+    _seed_release_state(dirs, "v1.0.0")
+    result = _cycle(dirs, fetch=Fetch("v1.1.0", "v1.0.0"))
+    audit = _by_name(result)["pin-bump-audit"]
+    assert audit["detail"] == {
+        "tag": "v1.1.0",
+        "error_type": "RuntimeError",
+        "attempts": 1,
+    }
+    ledger = (dirs.reports / "purple-cycle.ndjson").read_text(encoding="utf-8")
+    assert SECRET not in json.dumps(result) + ledger
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_calls"),
+    [
+        ('{"tag": "v1.1.0"}', 1),
+        ('{"tag": "v1.1.0", "attempts": 2}', 1),
+        ('{"tag": "v1.1.0", "attempts": 3}', 0),
+        ('{"tag": "v1.1.0", "attempts": 99}', 0),
+        ('{"tag": "v1.1.0", "attempts": true}', 1),
+        ('{"tag": "v1.1.0", "attempts": "x"}', 1),
+        ('{"tag": "v1.1.0", "attempts": -4}', 1),
+    ],
+)
+def test_pending_attempts_are_bounded_and_forgiving(
+    dirs, pin, content: str, expected_calls: int
+) -> None:
+    dirs.reports.mkdir(parents=True)
+    (dirs.reports / "purple-cycle-pending.json").write_text(content)
+    _cycle(dirs, fetch=Fetch("v1.0.0"))
+    assert len(pin.calls) == expected_calls
+
+
+def test_tag_regex_is_linear_time_on_adversarial_input() -> None:
+    hostile = [
+        "v1.1-" + ".".join("a" * 26) + "!",
+        "v1.1-" + ".".join("a" * 26) + "_",
+        "v1." + "1." * 28 + "!",
+        "v1.1" + ".a" * 29 + "+",
+    ]
+    started = time.perf_counter()
+    for text in hostile:
+        assert len(text) <= 64
+        purple_cycle._safe_tag(text)
+    assert time.perf_counter() - started < 0.1
+
+
+# --- 13. round 2: the pending tag is written before the checkpoint ------------
+
+
+def _fail_checkpoint_at(monkeypatch: pytest.MonkeyPatch, done: int) -> Any:
+    original = workflows._write
+
+    def failing(directory: Any, workflow_id: str, document: dict[str, Any]) -> None:
+        if document["done"] == done:
+            raise OSError("simulated crash")
+        original(directory, workflow_id, document)
+
+    monkeypatch.setattr(workflows, "_write", failing)
+    return original
+
+
+def test_new_tag_survives_a_crash_before_the_release_watch_checkpoint(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_release_state(dirs, "v1.0.0")
+    original = _fail_checkpoint_at(monkeypatch, 2)
+    first = _cycle(dirs, fetch=Fetch("v1.1.0", "v1.0.0"))
+    failed = [rec for rec in first["steps"] if rec["status"] == "error"]
+    assert [(r["name"], r["reason"]) for r in failed] == [
+        ("release-watch", "checkpoint-error")
+    ]
+    pending = dirs.reports / "purple-cycle-pending.json"
+    assert json.loads(pending.read_text(encoding="utf-8")) == {
+        "attempts": 0,
+        "tag": "v1.1.0",
+    }
+    assert pin.calls == []
+
+    monkeypatch.setattr(workflows, "_write", original)
+    second = _cycle(
+        dirs, now=NOW + timedelta(minutes=1), fetch=Fetch("v1.1.0", "v1.0.0")
+    )
+    assert _by_name(second)["release-watch"]["reason"] == "no-new-release"
+    audit = _by_name(second)["pin-bump-audit"]
+    assert (audit["status"], audit["detail"]["tag"]) == ("ok", "v1.1.0")
+    assert [call["config"] for call in pin.calls] == [{"to": "v1.1.0"}]
+    assert not pending.exists()
+
+
+def test_seeding_run_writes_no_pending_tag(dirs, pin) -> None:
+    _cycle(dirs, fetch=Fetch("v1.0.0"))
+    assert not (dirs.reports / "purple-cycle-pending.json").exists()
+
+
+def test_checkpoint_failure_after_dispatch_names_the_step_that_ran(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_one_finding(dirs)
+    config = _apply_sync(dirs)
+    runner = Runner()
+    original = _fail_checkpoint_at(monkeypatch, len(STEP_NAMES))
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert len(runner.calls) == 1
+    failed = [rec for rec in result["steps"] if rec["status"] == "error"]
+    assert [(r["name"], r["reason"]) for r in failed] == [
+        ("findings-dispatch", "checkpoint-error")
+    ]
+    monkeypatch.setattr(workflows, "_write", original)
+    again = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert again["state"] == "completed"
+    assert len(runner.calls) == 1  # the rerun dispatches nothing twice
+
+
+# --- 14. round 2: revocation cannot be dodged by path aliasing ----------------
+
+
+def _revoked_config(
+    dirs: SimpleNamespace,
+    *,
+    log: Path,
+    scope: str = "redteam",
+    key: str = "roe_audit_log",
+) -> dict[str, Any]:
+    config = _apply_sync(dirs)
+    if scope == "redteam":
+        config["redteam"][key] = str(log)
+    elif scope == "findings_sync":
+        config["redteam"]["findings_sync"][key] = str(log)
+    else:
+        config[key] = str(log)
+    return config
+
+
+def _alias_cases(dirs: SimpleNamespace) -> dict[str, tuple[str, str | None]]:
+    """``label -> (audit row path, configured path override)``."""
+    real = str(dirs.tmp / "roe-valid.json")
+    symlink = dirs.tmp / "link.json"
+    hardlink = dirs.tmp / "hard.json"
+    symlink.symlink_to(real)
+    os.link(real, hardlink)
+    return {
+        "relative-row": ("roe-valid.json", None),
+        "dot-row": ("./roe-valid.json", None),
+        "dotdot-row": ("sub/../roe-valid.json", None),
+        "trailing-space-row": (real + " ", None),
+        "symlink-row": (str(symlink), None),
+        "hardlink-row": (str(hardlink), None),
+        "relative-config-absolute-row": (real, "roe-valid.json"),
+        "dot-config-plain-row": ("roe-valid.json", "./roe-valid.json"),
+        "symlink-config-real-row": (real, str(symlink)),
+        "hardlink-config-real-row": (real, str(hardlink)),
+    }
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "relative-row",
+        "dot-row",
+        "dotdot-row",
+        "trailing-space-row",
+        "symlink-row",
+        "hardlink-row",
+        "relative-config-absolute-row",
+        "dot-config-plain-row",
+        "symlink-config-real-row",
+        "hardlink-config-real-row",
+    ],
+)
+def test_apply_refused_for_every_path_alias_of_a_revoked_grant(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch, label: str
+) -> None:
+    _seed_one_finding(dirs)
+    config = _apply_sync(dirs)
+    cases = _alias_cases(dirs)
+    row_path, configured = cases[label]
+    log = dirs.tmp / "audit.jsonl"
+    roe_audit.log_revoked(log, row_path, "op", "compromised")
+    config["redteam"]["roe_audit_log"] = str(log)
+    if configured is not None:
+        config["redteam"]["roe_file"] = configured
+    monkeypatch.chdir(dirs.tmp)
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert runner.calls == []
+    assert result["blocked"] == {"cause": "revoked", "step": "findings-dispatch"}
+
+
+@pytest.mark.parametrize(
+    ("scope", "key"),
+    [
+        ("redteam", "audit_log"),
+        ("redteam", "roe_audit_log_path"),
+        ("findings_sync", "roe_audit_log"),
+        ("findings_sync", "audit_log"),
+        ("top", "roe_audit_log"),
+        ("top", "audit_log"),
+    ],
+)
+def test_audit_log_is_found_under_every_scope_the_code_base_reads(
+    dirs, pin, scope: str, key: str
+) -> None:
+    _seed_one_finding(dirs)
+    log = dirs.tmp / "audit.jsonl"
+    roe_audit.log_revoked(log, str(dirs.tmp / "roe-valid.json"), "op", "x")
+    config = _revoked_config(dirs, log=log, scope=scope, key=key)
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert runner.calls == []
+    assert result["blocked"] == {"cause": "revoked", "step": "findings-dispatch"}
+
+
+def test_unrelated_relative_revocation_row_does_not_block(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_one_finding(dirs)
+    log = dirs.tmp / "audit.jsonl"
+    roe_audit.log_revoked(log, "someone-else.json", "op", "x")
+    config = _revoked_config(dirs, log=log)
+    monkeypatch.chdir(dirs.tmp)
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert result["state"] == "completed" and len(runner.calls) == 1
+
+
+# --- 15. round 2: config-level kill / disabled --------------------------------
+
+
+@pytest.mark.parametrize(
+    ("node", "cause"),
+    [({"kill": True}, "kill-switch-set"), ({"enabled": False}, "disabled")],
+)
+def test_apply_refused_by_config_level_switches_with_an_idle_env(
+    dirs, pin, node: dict[str, Any], cause: str
+) -> None:
+    _seed_one_finding(dirs)
+    config = _apply_sync(dirs)
+    config["redteam"].update(node)
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert runner.calls == []
+    assert result["blocked"] == {"cause": cause, "step": "findings-dispatch"}
+    pre = _by_name(result)["preflight"]
+    assert (pre["reason"], pre["detail"]["harness_state"]) == (
+        "harness-blocked",
+        "BLOCKED",
+    )
+
+
+def test_config_enabled_true_and_absent_do_not_block(dirs, pin) -> None:
+    for number, node in enumerate(({"enabled": True}, {})):
+        _add_finding(dirs, number)
+        config = _apply_sync(dirs)
+        config["redteam"].update(node)
+        runner = Runner()
+        result = _cycle(
+            dirs,
+            mode="apply",
+            config=config,
+            runner=runner,
+            now=NOW + timedelta(days=number),
+        )
+        assert result["state"] == "completed", node
+        assert len(runner.calls) == 1
+
+
+# --- 16. round 2: the gate covers the union of RoE artifacts -------------------
+
+
+def _expired_artifact(dirs: SimpleNamespace) -> str:
+    return _roe_artifact(dirs.tmp / "roe-old.json", until=NOW - timedelta(days=3))
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        ("findings_sync", "roe_artifacts"),
+        ("findings_sync", "roe_artifact"),
+        ("findings_sync", "roe_artifact_paths"),
+        ("redteam", "roe_artifacts"),
+        ("redteam", "roe_artifact"),
+    ],
+)
+def test_expired_grant_in_any_tick_key_blocks_apply(
+    dirs, pin, where: tuple[str, str]
+) -> None:
+    _seed_one_finding(dirs)
+    config = _apply_sync(dirs)
+    scope, key = where
+    old = _expired_artifact(dirs)
+    value: Any = old if key == "roe_artifact" else [old]
+    if scope == "redteam":
+        config["redteam"][key] = value
+    else:
+        config["redteam"]["findings_sync"][key] = value
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert runner.calls == []
+    assert result["blocked"] == {"cause": "expired", "step": "findings-dispatch"}
+    assert _by_name(result)["preflight"]["detail"]["roe_artifacts"] == 2
+
+
+def test_inline_document_and_missing_artifact_in_tick_keys_block(dirs, pin) -> None:
+    _seed_one_finding(dirs)
+    old = json.loads(Path(_expired_artifact(dirs)).read_text(encoding="utf-8"))
+    absent = str(dirs.tmp / "absent.json")
+    for value, cause in (([old], "expired"), ([absent], "missing")):
+        config = _apply_sync(dirs)
+        config["redteam"]["findings_sync"]["roe_artifacts"] = value
+        runner = Runner()
+        result = _cycle(
+            dirs, mode="apply", config=config, runner=runner, force_new=True
+        )
+        assert runner.calls == []
+        assert result["blocked"]["cause"] == cause
+
+
+def test_revoked_grant_named_only_by_a_tick_key_blocks_apply(dirs, pin) -> None:
+    _seed_one_finding(dirs)
+    extra = _roe_artifact(dirs.tmp / "roe-extra.json", until=NOW + timedelta(days=30))
+    log = dirs.tmp / "audit.jsonl"
+    roe_audit.log_revoked(log, extra, "op", "x")
+    config = _revoked_config(dirs, log=log)
+    config["redteam"]["findings_sync"]["roe_artifact"] = extra
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert runner.calls == []
+    assert result["blocked"] == {"cause": "revoked", "step": "findings-dispatch"}
+
+
+def test_roe_artifacts_alone_with_a_valid_grant_is_not_roe_missing(dirs, pin) -> None:
+    _seed_one_finding(dirs)
+    grant = _roe_artifact(dirs.tmp / "roe-only.json", until=NOW + timedelta(days=30))
+    config = _sync_config()
+    config["redteam"]["findings_sync"]["roe_artifacts"] = [grant]
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert result["state"] == "completed" and len(runner.calls) == 1
+    assert _by_name(result)["preflight"]["detail"]["roe_state"] == "valid"
+
+
+def test_duplicate_artifact_across_keys_counts_once(dirs, pin) -> None:
+    config = _apply_sync(dirs)
+    config["redteam"]["findings_sync"]["roe_artifacts"] = [
+        config["redteam"]["roe_file"]
+    ]
+    pre = _by_name(_cycle(dirs, mode="plan", config=config))["preflight"]
+    assert pre["detail"]["roe_artifacts"] == 1
+    assert "roe_conflicts" not in pre["detail"]
+
+
+# --- 17. round 2: forged checkpoints cannot raise or smuggle text --------------
+
+
+def _mutate_first(**changes: Any) -> Any:
+    def apply(stored: dict[str, Any]) -> None:
+        stored["state"]["steps"][0].update(changes)
+
+    return apply
+
+
+def _mutate_detail(detail: dict[str, Any]) -> Any:
+    return _mutate_first(detail=detail)
+
+
+_FORGERIES: dict[str, Any] = {
+    "status-list": _mutate_first(status=[1]),
+    "status-dict": _mutate_first(status={"a": 1}),
+    "status-none": _mutate_first(status=None),
+    "exit-mismatch": _mutate_first(exit=3),
+    "reason-esc": _mutate_first(reason="\x1b[31mred"),
+    "reason-too-long": _mutate_first(reason="a" * 41),
+    "reason-uppercase": _mutate_first(reason="Not-A-Word"),
+    "reason-empty": _mutate_first(reason=""),
+    "extra-key": _mutate_first(extra="smuggled"),
+    "detail-huge-string": _mutate_detail({"x": "A" * 5_000_000}),
+    "detail-esc": _mutate_detail({"line": "\x1b[31mred"}),
+    "detail-secret-size": _mutate_detail({f"k{i}": "s" * 150 for i in range(40)}),
+    "detail-nested-dict": _mutate_detail({"a": {"b": 1}}),
+    "detail-bad-key": _mutate_detail({"Bad Key": 1}),
+    "detail-long-list": _mutate_detail({"xs": list(range(65))}),
+    "detail-list-of-lists": _mutate_detail({"xs": [[1]]}),
+    "blocked-esc-cause": lambda stored: stored["state"].update(
+        blocked={"cause": "\x1b[31mred", "step": "findings-dispatch"}
+    ),
+    "blocked-unknown-step": lambda stored: stored["state"].update(
+        blocked={"cause": "kill-switch-set", "step": "nope"}
+    ),
+    "blocked-extra-key": lambda stored: stored["state"].update(
+        blocked={"cause": "x", "step": "findings-dispatch", "extra": 1}
+    ),
+}
+
+
+@pytest.mark.parametrize("label", sorted(_FORGERIES))
+def test_forged_checkpoint_fields_are_unreadable_never_exceptions(
+    dirs, pin, counters, label: str
+) -> None:
+    stored = _stored(_RUN_ID, "run")
+    _FORGERIES[label](stored)
+    _write_checkpoint(dirs, _RUN_ID, stored)
+    result = _cycle(dirs, mode="run")
+    assert (result["ok"], result["exit"], result["state"]) == (False, 1, "failed")
+    first = result["steps"][0]
+    assert (first["status"], first["reason"]) == ("error", "checkpoint-unreadable")
+    serialized = json.dumps(result)
+    assert "\x1b" not in serialized and "AAAA" not in serialized
+    assert len(serialized) < 4096
+    assert all(count == 0 for count in counters.values())
+
+
+def test_generated_records_always_pass_read_back_validation(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = SimpleNamespace(
+        summarize=lambda reports, since: {"state": "ok", "line": "x" * 300},
+        build_digest=lambda reports: ["y" * 300] * 40,
+    )
+    monkeypatch.setattr(purple_cycle, "_load_engagement_module", lambda: module)
+    first = _cycle(dirs)
+    detail = _by_name(first)["engagement"]["detail"]
+    assert len(json.dumps(detail, sort_keys=True)) <= 4096
+    assert 0 < len(detail["digest"]) <= 20
+    again = _cycle(dirs)
+    assert again["resumed"] is True and again["state"] == "completed"
+
+
+# --- 18. round 2: clock freshness and ledger noise -----------------------------
+
+
+def test_default_clock_is_re_read_at_the_dispatch_gate(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_one_finding(dirs)
+    config = _apply_sync(dirs, until=NOW + timedelta(hours=1))
+    reads: list[int] = []
+
+    def clock() -> datetime:
+        reads.append(1)
+        return NOW if len(reads) == 1 else NOW + timedelta(hours=2)
+
+    monkeypatch.setattr(purple_cycle, "_utc_now", clock)
+    runner = Runner()
+    result = run_cycle(
+        mode="apply",
+        root=dirs.root,
+        reports_dir=dirs.reports,
+        config=config,
+        env=IDLE_ENV,
+        fetch=Fetch("v1.0.0"),
+        runner=runner,
+    )
+    assert runner.calls == []
+    assert result["blocked"] == {"cause": "expired", "step": "findings-dispatch"}
+
+
+def test_injected_now_stays_authoritative_at_the_gate(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_one_finding(dirs)
+    config = _apply_sync(dirs, until=NOW + timedelta(hours=1))
+
+    def forbidden() -> datetime:
+        raise AssertionError("an injected now must not read the clock")
+
+    monkeypatch.setattr(purple_cycle, "_utc_now", forbidden)
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert result["state"] == "completed" and len(runner.calls) == 1
+
+
+def test_blocked_reruns_append_one_secret_free_ledger_row(dirs, pin) -> None:
+    config = _sync_config()
+    for _ in range(5):
+        result = _cycle(dirs, mode="apply", env=KILLED_ENV, config=config)
+        assert result["state"] == "blocked"
+    blocked = [row for row in _ledger_rows(dirs) if row["status"] == "blocked"]
+    assert [(row["step"], row["reason"]) for row in blocked] == [
+        ("findings-dispatch", "apply-refused:kill-switch-set")
+    ]
+    assert set(blocked[0]) == {"ts", "cycle_id", "step", "status", "exit", "reason"}
+
+    # A different cause is a different row; flipping back adds nothing new.
+    disabled_env = {"OMEGA_PRIME_REDTEAM_ROE_REQUIRED": "0"}
+    _cycle(dirs, mode="apply", env=disabled_env, config=config)
+    _cycle(dirs, mode="apply", env=KILLED_ENV, config=config)
+    reasons = [r["reason"] for r in _ledger_rows(dirs) if r["status"] == "blocked"]
+    assert reasons == ["apply-refused:kill-switch-set", "apply-refused:disabled"]
+
+
+def test_non_vocabulary_blocked_cause_is_not_written_to_the_ledger(dirs) -> None:
+    ctx = SimpleNamespace(
+        reports_dir=dirs.reports, now=NOW, cycle_id="purple-cycle-x-apply"
+    )
+    rec = purple_cycle._record(
+        "findings-dispatch", "blocked", "apply-refused", {"cause": f"A B {SECRET}"}
+    )
+    purple_cycle._append_ledger(ctx, rec)  # type: ignore[arg-type]
+    (row,) = _ledger_rows(dirs)
+    assert row["reason"] == "apply-refused"
+    assert SECRET not in json.dumps(row)
