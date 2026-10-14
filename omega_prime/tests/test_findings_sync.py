@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pytest
 
@@ -3668,3 +3669,399 @@ def test_cli_dispatch_dry_run_missing_repo_exits_two(tmp_path, monkeypatch, caps
     assert main(["--reports-dir", str(tmp_path)]) == 2
     assert fake.calls == []
     assert "no target repo configured" in capsys.readouterr().err
+
+
+# Per-tracker sync budget (R1) ----------------------------------------------
+
+_BASE_KEYS = {"pushed", "skipped", "dry_run", "disabled"}
+_BUDGET_KEYS = _BASE_KEYS | {"sync_budget", "budget_held"}
+
+#: tracker name -> (tick config builder, fake runner factory)
+_BUDGET_TRACKERS: dict[str, tuple[Callable[..., Any], Callable[[], Any]]] = {
+    "github": (_enabled_config, FakeGh),
+    "linear": (_linear_config, FakeLinear),
+    "slack": (_slack_config, FakeSlack),
+    "teams": (_teams_config, FakeTeams),
+    "graph": (_graph_config, FakeGraph),
+    "pagerduty": (_pagerduty_config, FakePagerDuty),
+    "opsgenie": (_opsgenie_config, FakeOpsgenie),
+    "jira": (_jira_config, FakeJira),
+    "webhook": (_webhook_config, FakeWebhook),
+}
+_ALL_TRACKERS = list(_BUDGET_TRACKERS)
+
+
+def _seed_severities(tmp_path, severities):
+    """Record one finding per severity; return dedupe hashes in store order."""
+    for index, severity in enumerate(severities):
+        record_finding(
+            directory=tmp_path,
+            **_finding(
+                case_id=f"budget-{index:02d}",
+                severity=severity,
+                response=f"budget text {index}",
+            ),
+        )
+    return [row["dedupe_hash"] for row in load_findings(tmp_path)]
+
+
+def _budget_tick(name, tmp_path, *, tick_kwargs=None, **node):
+    build_config, make_fake = _BUDGET_TRACKERS[name]
+    fake = make_fake()
+    result = tick(
+        build_config(**node),
+        reports_directory=tmp_path,
+        runner=fake,
+        **(tick_kwargs or {}),
+    )
+    return result, fake
+
+
+def _synced(tmp_path):
+    return [bool(row.get("issue_url")) for row in load_findings(tmp_path)]
+
+
+@pytest.mark.parametrize("name", _ALL_TRACKERS)
+def test_sync_budget_caps_non_urgent_for_every_tracker(tmp_path, name):
+    hashes = _seed_severities(tmp_path, ["low", "low", "medium", "low", "low"])
+    before = load_findings(tmp_path)
+    result, _fake = _budget_tick(name, tmp_path, sync_budget=2)
+    assert set(result) == _BUDGET_KEYS
+    assert result["sync_budget"] == 2
+    assert [e["dedupe_hash"] for e in result["pushed"]] == hashes[:2]
+    assert result["budget_held"] == [
+        {"dedupe_hash": digest, "reason": "sync-budget"} for digest in hashes[2:]
+    ]
+    assert _synced(tmp_path) == [True, True, False, False, False]
+    after = load_findings(tmp_path)
+    for index in (2, 3, 4):  # held rows are untouched
+        assert after[index] == before[index]
+        assert "issue_url" not in after[index]
+        assert "synced_at" not in after[index]
+
+
+@pytest.mark.parametrize("name", _ALL_TRACKERS)
+def test_sync_budget_urgent_rows_bypass_and_do_not_consume(tmp_path, name):
+    hashes = _seed_severities(tmp_path, ["low", "critical", "low", "HIGH", "low"])
+    result, _fake = _budget_tick(name, tmp_path, sync_budget=1)
+    assert [e["dedupe_hash"] for e in result["pushed"]] == [
+        hashes[0],
+        hashes[1],
+        hashes[3],
+    ]
+    assert [e["dedupe_hash"] for e in result["budget_held"]] == [hashes[2], hashes[4]]
+    assert _synced(tmp_path) == [True, True, False, True, False]
+
+
+def test_sync_budget_unknown_severity_is_non_urgent(tmp_path):
+    hashes = _seed_severities(tmp_path, ["weird", "weird"])
+    result, _fake = _budget_tick("github", tmp_path, sync_budget=1)
+    assert [e["dedupe_hash"] for e in result["pushed"]] == [hashes[0]]
+    assert [e["dedupe_hash"] for e in result["budget_held"]] == [hashes[1]]
+
+
+def test_sync_budget_quiet_hours_decided_first_and_never_consume(tmp_path):
+    hashes = _seed_severities(tmp_path, ["low", "low", "critical"])
+    result = tick(
+        _quiet_config(sync_budget=1),
+        reports_directory=tmp_path,
+        runner=FakeGh(),
+        now=_QUIET_NIGHT,
+    )
+    assert [e["dedupe_hash"] for e in result["pushed"]] == [hashes[2]]
+    assert [e["dedupe_hash"] for e in result["quiet_skipped"]] == hashes[:2]
+    assert all(e["reason"] == "quiet-hours" for e in result["quiet_skipped"])
+    assert result["budget_held"] == []
+    assert result["sync_budget"] == 1
+    # Outside the window the quiet-held rows now spend the budget oldest-first.
+    day = tick(
+        _quiet_config(sync_budget=1),
+        reports_directory=tmp_path,
+        runner=FakeGh(),
+        now=_QUIET_DAY,
+    )
+    assert [e["dedupe_hash"] for e in day["pushed"]] == [hashes[0]]
+    assert day["budget_held"] == [{"dedupe_hash": hashes[1], "reason": "sync-budget"}]
+    assert "quiet_hours" not in day
+
+
+def test_sync_budget_fifo_and_next_tick_retries_held_rows(tmp_path):
+    hashes = _seed_severities(tmp_path, ["low"] * 5)
+    cfg = _enabled_config(sync_budget=2)
+    first = tick(cfg, reports_directory=tmp_path, runner=FakeGh())
+    assert [e["dedupe_hash"] for e in first["pushed"]] == hashes[:2]
+    assert [e["dedupe_hash"] for e in first["budget_held"]] == hashes[2:]
+    second = tick(cfg, reports_directory=tmp_path, runner=FakeGh())
+    assert [e["dedupe_hash"] for e in second["pushed"]] == hashes[2:4]
+    assert second["skipped"] == hashes[:2]
+    assert [e["dedupe_hash"] for e in second["budget_held"]] == hashes[4:]
+    third = tick(cfg, reports_directory=tmp_path, runner=FakeGh())
+    assert [e["dedupe_hash"] for e in third["pushed"]] == hashes[4:]
+    assert third["budget_held"] == []
+    assert _synced(tmp_path) == [True] * 5
+
+
+def test_sync_budget_configured_with_nothing_to_sync_reports_empty_hold(tmp_path):
+    cfg = _enabled_config(sync_budget=3)
+    result = tick(cfg, reports_directory=tmp_path, runner=FakeGh())
+    assert result == {
+        "pushed": [],
+        "skipped": [],
+        "dry_run": False,
+        "disabled": False,
+        "sync_budget": 3,
+        "budget_held": [],
+    }
+
+
+@pytest.mark.parametrize("name", _ALL_TRACKERS)
+def test_sync_budget_plan_mode_reflects_budget(tmp_path, name):
+    hashes = _seed_severities(tmp_path, ["low", "critical", "low", "low"])
+    before = findings_path(tmp_path).read_bytes()
+    ledger = tmp_path / "dispatch-ledger.jsonl"
+    result, fake = _budget_tick(
+        name,
+        tmp_path,
+        sync_budget=1,
+        dispatch_dry_run=True,
+        dispatch_ledger=str(ledger),
+    )
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before
+    planned = [e["dedupe_hash"] for e in result["dispatch_plan"]]
+    assert planned == [hashes[0], hashes[1]]
+    assert [e["dedupe_hash"] for e in result["budget_held"]] == hashes[2:]
+    assert [row["dedupe_hash"] for row in _read_ledger_rows(ledger)] == planned
+
+
+def test_sync_budget_dry_run_counts_identically_and_writes_nothing(tmp_path):
+    hashes = _seed_severities(tmp_path, ["low"] * 4)
+    before = findings_path(tmp_path).read_bytes()
+    fake = FakeGh()
+    result = tick(
+        _enabled_config(sync_budget=2),
+        reports_directory=tmp_path,
+        runner=fake,
+        dry_run=True,
+    )
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before
+    assert [e["dedupe_hash"] for e in result["pushed"]] == hashes[:2]
+    assert [e["dedupe_hash"] for e in result["budget_held"]] == hashes[2:]
+
+
+def test_sync_budget_mapping_form_tracker_override_and_default(tmp_path):
+    budget = {"default": 3, "github": 1}
+    hashes = _seed_severities(tmp_path, ["low"] * 4)
+    github, _fake = _budget_tick("github", tmp_path, sync_budget=budget)
+    assert github["sync_budget"] == 1
+    assert [e["dedupe_hash"] for e in github["pushed"]] == hashes[:1]
+    slack_dir = tmp_path / "slack"
+    slack_hashes = _seed_severities(slack_dir, ["low"] * 4)
+    slack, _fake = _budget_tick("slack", slack_dir, sync_budget=budget)
+    assert slack["sync_budget"] == 3
+    assert [e["dedupe_hash"] for e in slack["pushed"]] == slack_hashes[:3]
+    assert [e["dedupe_hash"] for e in slack["budget_held"]] == slack_hashes[3:]
+
+
+def test_sync_budget_mapping_without_entry_for_tracker_is_off(tmp_path):
+    _seed_severities(tmp_path, ["low"] * 3)
+    result, _fake = _budget_tick("github", tmp_path, sync_budget={"slack": 1})
+    assert set(result) == _BASE_KEYS
+    assert len(result["pushed"]) == 3
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        True,
+        False,
+        0,
+        -1,
+        2.5,
+        "3",
+        [3],
+        {},
+        {"default": "3"},
+        {"default": 0},
+        {"default": True},
+        {"default": 2, "github": 1.5},
+    ],
+    ids=repr,
+)
+@pytest.mark.parametrize("name", ["github", "graph", "opsgenie"])
+def test_sync_budget_invalid_value_is_off_with_old_key_set(tmp_path, name, bad):
+    _seed_severities(tmp_path, ["low"] * 3)
+    result, _fake = _budget_tick(name, tmp_path, sync_budget=bad)
+    assert set(result) == _BASE_KEYS
+    assert len(result["pushed"]) == 3
+    assert _synced(tmp_path) == [True] * 3
+
+
+@pytest.mark.parametrize("name", _ALL_TRACKERS)
+def test_sync_budget_unset_result_shape_unchanged(tmp_path, name):
+    _seed_severities(tmp_path, ["low", "critical", "low"])
+    result, _fake = _budget_tick(name, tmp_path)
+    assert set(result) == _BASE_KEYS
+    assert len(result["pushed"]) == 3
+
+
+def test_sync_budget_direct_calls_accept_kwarg_and_ignore_invalid(tmp_path):
+    hashes = _seed_severities(tmp_path, ["low", "low", "low"])
+    result = sync_findings_opsgenie(
+        tmp_path, API_KEY, runner=FakeOpsgenie(), sync_budget=1
+    )
+    assert [e["dedupe_hash"] for e in result["pushed"]] == hashes[:1]
+    assert [e["dedupe_hash"] for e in result["budget_held"]] == hashes[1:]
+    other = tmp_path / "other"
+    _seed_severities(other, ["low", "low"])
+    off = sync_findings_opsgenie(
+        other, API_KEY, runner=FakeOpsgenie(), sync_budget=True
+    )
+    assert set(off) == {"pushed", "skipped", "dry_run"}
+    assert len(off["pushed"]) == 2
+
+
+def test_sync_budget_reason_exported():
+    assert findings_sync.SYNC_BUDGET_REASON == "sync-budget"
+    assert "SYNC_BUDGET_REASON" in findings_sync.__all__
+
+
+def test_sync_budget_notices_still_delivered(tmp_path, fresh_notices):
+    hashes = _seed_severities(tmp_path, ["low", "low", "low"])
+    fake = FakeSlack()
+    result = tick(
+        _notice_config(sync_budget=1), reports_directory=tmp_path, runner=fake
+    )
+    assert [e["dedupe_hash"] for e in result["pushed"]] == hashes[:1]
+    assert len(result["budget_held"]) == 2
+    (entry,) = result["expiry_notice"]
+    assert entry["delivered"] is True
+    assert len(fake.calls) == 2  # one finding + one notice
+
+
+def test_cli_dispatch_dry_run_prints_budget_held_rows(tmp_path, monkeypatch, capsys):
+    hashes = _seed_severities(tmp_path, ["low"] * 3)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _dispatch_config(tmp_path, sync_budget=1),
+    )
+    fake = FakeGh()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--reports-dir", str(tmp_path)]) == 0
+    assert fake.calls == []
+    out = capsys.readouterr().out
+    assert out.count("would push") == 1
+    assert f"would push {hashes[0]}" in out
+    for digest in hashes[1:]:
+        assert f"skip (sync-budget) {digest}" in out
+
+
+# Grant-conflict surface (R5) ------------------------------------------------
+
+_CONFLICTS = [
+    {
+        "kind": "tool-scope-contradiction",
+        "grants": ["op-a|2030", "op-b|2030"],
+        "detail": "fixed list from the stub detector",
+    }
+]
+
+
+def _two_grants_node(**node):
+    node["roe_artifacts"] = [
+        _expiring_grant("r5-a", "valid"),
+        _expiring_grant("r5-b", "valid"),
+    ]
+    return node
+
+
+def _stub_conflicts(monkeypatch, found):
+    from omega_prime.grokbot import roe_lifecycle
+
+    seen: list[list] = []
+
+    def fake_conflicts(artifacts, *, now=None):
+        seen.append(list(artifacts))
+        if isinstance(found, Exception):
+            raise found
+        return found
+
+    monkeypatch.setattr(roe_lifecycle, "grant_conflicts", fake_conflicts, raising=False)
+    return seen
+
+
+@pytest.mark.parametrize("name", _ALL_TRACKERS)
+def test_tick_grant_conflicts_attached_on_every_tracker(
+    tmp_path, monkeypatch, fresh_notices, name
+):
+    seen = _stub_conflicts(monkeypatch, _CONFLICTS)
+    _seed_severities(tmp_path, ["low"])
+    result, _fake = _budget_tick(name, tmp_path, **_two_grants_node())
+    assert result["grant_conflicts"] == _CONFLICTS
+    assert len(result["pushed"]) == 1  # advisory: dispatch is unchanged
+    assert len(seen) == 1 and len(seen[0]) == 2
+
+
+def test_tick_grant_conflicts_also_on_misconfig_result(
+    tmp_path, monkeypatch, fresh_notices
+):
+    _stub_conflicts(monkeypatch, _CONFLICTS)
+    node = _two_grants_node(slack_webhook_url="")
+    result, fake = _budget_tick("slack", tmp_path, **node)
+    assert result["error"] == NO_SLACK_WEBHOOK_MESSAGE
+    assert result["grant_conflicts"] == _CONFLICTS
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("found", [[], None, "x", {"kind": "k"}])
+def test_tick_grant_conflicts_key_absent_without_conflicts(
+    tmp_path, monkeypatch, fresh_notices, found
+):
+    _stub_conflicts(monkeypatch, found)
+    _seed_severities(tmp_path, ["low"])
+    result, _fake = _budget_tick("github", tmp_path, **_two_grants_node())
+    assert set(result) == _BASE_KEYS
+
+
+def test_tick_grant_conflicts_absent_for_fewer_than_two_grants(
+    tmp_path, monkeypatch, fresh_notices
+):
+    seen = _stub_conflicts(monkeypatch, _CONFLICTS)
+    _seed_severities(tmp_path, ["low"])
+    result, _fake = _budget_tick(
+        "github", tmp_path, roe_artifact=_expiring_grant("r5-solo", "valid")
+    )
+    assert set(result) == _BASE_KEYS
+    assert seen == []
+    plain, _fake = _budget_tick("github", tmp_path / "none")
+    assert "grant_conflicts" not in plain
+
+
+def test_tick_grant_conflicts_detector_failure_changes_nothing(
+    tmp_path, monkeypatch, fresh_notices
+):
+    _stub_conflicts(monkeypatch, RuntimeError("boom"))
+    _seed_severities(tmp_path, ["low", "low"])
+    result, _fake = _budget_tick("github", tmp_path, **_two_grants_node())
+    assert set(result) == _BASE_KEYS
+    assert len(result["pushed"]) == 2
+
+
+def test_tick_grant_conflicts_coexist_with_notice_and_budget(
+    tmp_path, monkeypatch, fresh_notices
+):
+    _stub_conflicts(monkeypatch, _CONFLICTS)
+    _seed_severities(tmp_path, ["low", "low"])
+    node = _two_grants_node(tracker="slack", slack_webhook_url=WEBHOOK, sync_budget=1)
+    node["roe_artifacts"][0] = _expiring_grant("r5-a", "expiring-7d")
+    fake = FakeSlack()
+    result = tick(
+        {"redteam": {"findings_sync": {"enabled": True, **node}}},
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert result["grant_conflicts"] == _CONFLICTS
+    assert len(result["expiry_notice"]) == 1
+    assert len(result["budget_held"]) == 1
