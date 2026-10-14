@@ -2155,6 +2155,42 @@ class _ReportPin:
         self._parent_fd = fd
         return fd, bool(self._missing)
 
+    def _publish(self, tmp_name: str, parent_fd: int, absent: bool) -> bool:
+        """Publish ``tmp_name`` as the destination; True if it was newly created.
+
+        A destination that existed at validation is replaced atomically. An
+        absent one is published with a no-replace hard link so a file that
+        another process creates in the meantime is never overwritten: on
+        ``FileExistsError`` the newcomer is re-inspected and only replaced
+        when it is empty or a prior pin-bump report. A filesystem without
+        hard links falls back to the atomic replace.
+        """
+        if absent:
+            try:
+                os.link(
+                    tmp_name,
+                    self._name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                if not _is_prior_report(self._name, parent_fd):
+                    raise OSError(
+                        "destination exists and is not a pin-bump report "
+                        "(refusing to overwrite)"
+                    ) from None
+                absent = False
+            except (OSError, NotImplementedError):
+                pass
+            else:
+                # Published; the temp name is only a second link now.
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_name, dir_fd=parent_fd)
+                return True
+        os.replace(tmp_name, self._name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        return absent
+
     def write(self, text: str) -> bool:
         """Atomically write ``text`` to the pinned destination.
 
@@ -2166,9 +2202,9 @@ class _ReportPin:
         try:
             os.stat(self._name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
-            created = True
+            absent = True
         else:
-            created = parents_created
+            absent = False
             if not _is_prior_report(self._name, parent_fd):
                 raise OSError(
                     "destination exists and is not a pin-bump report "
@@ -2188,12 +2224,12 @@ class _ReportPin:
                 handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp_name, self._name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            created = self._publish(tmp_name, parent_fd, absent)
         except BaseException:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_name, dir_fd=parent_fd)
             raise
-        return created
+        return created or parents_created
 
     def unlink(self) -> None:
         """Remove the pinned destination (descriptor-relative)."""

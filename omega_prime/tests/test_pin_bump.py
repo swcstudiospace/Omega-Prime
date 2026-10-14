@@ -13,9 +13,11 @@ exactly what the CLI does in production.
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -4505,6 +4507,75 @@ def test_report_to_refusal_is_rechecked_at_write_time(tmp_path, capsys):
     assert "refusing to overwrite" in out
     assert dest.read_text() == "TOKEN=abc\n"
     assert _temp_leftovers(tmp_path) == []
+
+
+def _create_during_fsync(monkeypatch, dest, content):
+    """Create ``dest`` the first time ``os.fsync`` runs while it is absent."""
+    real_fsync = os.fsync
+    created: list[bool] = []
+
+    def fsync(fd):
+        if not created and not os.path.lexists(dest):
+            dest.write_text(content, encoding="utf-8")
+            created.append(True)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    return created
+
+
+def test_report_to_file_created_during_write_is_not_overwritten(
+    tmp_path, capsys, monkeypatch
+):
+    root = _report_root(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    dest = out_dir / "r.md"
+    created = _create_during_fsync(monkeypatch, dest, "TOKEN=abc\n")
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    out = capsys.readouterr().out
+    assert created == [True]
+    assert rc == pin_bump.EXIT_BUMP_FAILED
+    assert "refusing to overwrite" in out
+    assert dest.read_bytes() == b"TOKEN=abc\n"
+    assert _temp_leftovers(out_dir) == []
+
+
+def test_report_to_prior_report_created_during_write_is_replaced(
+    tmp_path, capsys, monkeypatch
+):
+    root = _report_root(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    dest = out_dir / "r.md"
+    created = _create_during_fsync(monkeypatch, dest, _PRIOR_REPORT + "racing")
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    capsys.readouterr()
+    assert created == [True]
+    assert rc == 0
+    text = dest.read_text()
+    assert "Verdict: improved" in text
+    assert "racing" not in text
+    assert _temp_leftovers(out_dir) == []
+
+
+@pytest.mark.parametrize("code", [errno.EPERM, errno.EXDEV, errno.ENOTSUP])
+def test_report_to_hard_links_unsupported_falls_back_to_replace(
+    tmp_path, capsys, monkeypatch, code
+):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "out" / "r.md"
+
+    def no_link(*_args, **_kwargs):
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(os, "link", no_link)
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    capsys.readouterr()
+    assert rc == 0
+    assert "Verdict: improved" in dest.read_text()
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o644
+    assert _temp_leftovers(dest.parent) == []
 
 
 @pytest.mark.parametrize("target", ["vendor", "secret"])
