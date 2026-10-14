@@ -15,18 +15,26 @@ from pathlib import Path
 import pytest
 
 from omega_prime.cron.heartbeat import (
+    HEARTBEAT_KIND,
     ROE_EXPIRY_KIND,
+    ROE_RENEWAL_KIND,
     clear_roe_expiry,
+    heartbeat_roe_renewals,
     list_roe_expiries,
+    schedule_heartbeat,
     schedule_roe_expiry,
+    tick_heartbeats,
     tick_roe_expiry,
 )
 from omega_prime.cron.scheduler import JobStore
 from omega_prime.grokbot.roe_lifecycle import (
+    RENEWAL_THRESHOLDS_DAYS,
     check_readiness,
     check_roe_lifecycle,
+    clear_renewal_reminders,
     gateway_reachable,
     main,
+    renewal_reminders,
     suite_counts,
 )
 from omega_prime.tools.durable_surface import register_durable_surface_tools
@@ -606,3 +614,127 @@ def test_readiness_cli_json_and_exit_codes(tmp_path, capsys):
     )
     assert rc == 3
     assert json.loads(capsys.readouterr().out)["roe_state"] == "BLOCKED"
+
+
+# G11 renewal reminders -------------------------------------------------------
+
+
+@pytest.fixture
+def fresh_renewals():
+    """Isolate the in-memory per-threshold fire record per G11 test."""
+    clear_renewal_reminders()
+    yield
+    clear_renewal_reminders()
+
+
+def _renewal_document(days_left, operator="g11-operator"):
+    """RoE document whose window ends ``days_left`` after END."""
+    until = (END + timedelta(days=days_left)).isoformat(timespec="seconds")
+    return _document(operator=operator, effective_until=until)
+
+
+def test_renewal_thresholds_match_spec(fresh_renewals):
+    """G11: reminder thresholds are T-14d/T-7d/T-3d/T-1d."""
+    assert RENEWAL_THRESHOLDS_DAYS == (14.0, 7.0, 3.0, 1.0)
+
+
+def test_renewal_fires_widest_threshold_only(fresh_renewals):
+    """G11: 10 days left fires 14d alone."""
+    reminders = renewal_reminders(_renewal_document(10), now=END)
+    assert [r["threshold"] for r in reminders] == ["14d"]
+    assert reminders[0]["threshold_days"] == 14.0
+    assert reminders[0]["days_remaining"] == pytest.approx(10.0, abs=1e-6)
+    assert "14d" in reminders[0]["detail"]
+
+
+def test_renewal_fires_each_threshold_once(fresh_renewals):
+    """G11: each (artifact, threshold) fires once; repeats are silent."""
+    document = _renewal_document(10)
+    assert len(renewal_reminders(document, now=END)) == 1
+    assert renewal_reminders(document, now=END) == []
+    # A nearer clock crosses 7d/3d/1d; 14d stays silent (already fired).
+    later = END + timedelta(days=9, hours=12)
+    labels = [r["threshold"] for r in renewal_reminders(document, now=later)]
+    assert labels == ["7d", "3d", "1d"]
+    assert renewal_reminders(document, now=later) == []
+
+
+def test_renewal_imminent_fires_all_thresholds(fresh_renewals):
+    """G11: half a day left fires every threshold at once."""
+    reminders = renewal_reminders(_renewal_document(0.5), now=END)
+    assert [r["threshold"] for r in reminders] == ["14d", "7d", "3d", "1d"]
+
+
+def test_renewal_silent_when_far_or_expired(fresh_renewals):
+    """G11: healthy windows and expired grants emit nothing."""
+    assert renewal_reminders(_renewal_document(30), now=END) == []
+    assert renewal_reminders(_renewal_document(-1), now=END) == []
+
+
+def test_renewal_fail_closed(fresh_renewals):
+    """G11: missing/malformed effective_until means no reminders, no crash."""
+    document = _document()
+    del document["effective_until"]
+    assert renewal_reminders(document, now=END) == []
+    assert renewal_reminders(_document(effective_until="not-a-date"), now=END) == []
+    assert renewal_reminders(_document(effective_until=None), now=END) == []
+    assert renewal_reminders(None, now=END) == []
+    assert renewal_reminders("   ", now=END) == []
+    assert renewal_reminders(["not", "a", "dict"], now=END) == []
+
+
+def test_renewal_accepts_artifact_path(tmp_path, fresh_renewals):
+    """G11: a file path artifact resolves like an inline document."""
+    artifact = _write_artifact(tmp_path, _renewal_document(2))
+    reminders = renewal_reminders(str(artifact), now=END)
+    assert [r["threshold"] for r in reminders] == ["14d", "7d", "3d"]
+    assert renewal_reminders(str(artifact), now=END) == []
+    assert renewal_reminders(str(tmp_path / "absent.json"), now=END) == []
+
+
+def test_heartbeat_digest_emits_roe_renewal_kind(tmp_path, fresh_renewals):
+    """G11: a heartbeat carrying a RoE artifact digests roe_renewal entries."""
+    store = _store(tmp_path)
+    job_id = schedule_heartbeat(
+        store, "sess-G11", "ping", interval_seconds=60, due_at=1000
+    )
+    job = next(j for j in store.jobs if j["id"] == job_id)
+    job["context"] = {"roe_artifact": _renewal_document(2)}
+    store._save()
+    ran = tick_heartbeats(store, 1000, lambda s, p: "ok", roe_now=END)
+    assert [j["id"] for j in ran] == [job_id]
+    digest = job["roe_renewal_digest"]
+    assert [e["kind"] for e in digest] == [ROE_RENEWAL_KIND] * 3
+    assert [e["threshold"] for e in digest] == ["14d", "7d", "3d"]
+    assert all(e["threshold"] in e["detail"] for e in digest)
+    # Per-threshold dedupe: the next tick adds nothing new.
+    tick_heartbeats(store, 1060, lambda s, p: "ok", roe_now=END)
+    assert len(job["roe_renewal_digest"]) == 3
+
+
+def test_heartbeat_without_artifact_unchanged(tmp_path, fresh_renewals):
+    """G11: heartbeats without RoE context gain no digest key at all."""
+    store = _store(tmp_path)
+    job_id = schedule_heartbeat(
+        store, "sess-plain", "ping", interval_seconds=60, due_at=1000
+    )
+    ran = tick_heartbeats(store, 1000, lambda s, p: "ran", roe_now=END)
+    assert ran[0]["last_result"] == "ran"
+    assert ran[0]["kind"] == HEARTBEAT_KIND
+    assert "roe_renewal_digest" not in ran[0]
+    assert heartbeat_roe_renewals({"kind": HEARTBEAT_KIND}) == []
+    assert heartbeat_roe_renewals(None) == []
+
+
+def test_heartbeat_renewal_fail_closed(tmp_path, fresh_renewals):
+    """G11: a malformed RoE context never breaks the heartbeat tick."""
+    store = _store(tmp_path)
+    job_id = schedule_heartbeat(
+        store, "sess-bad", "ping", interval_seconds=60, due_at=1000
+    )
+    job = next(j for j in store.jobs if j["id"] == job_id)
+    job["roe_artifact"] = {"operator": "bad", "effective_until": "nope"}
+    store._save()
+    ran = tick_heartbeats(store, 1000, lambda s, p: "ran", roe_now=END)
+    assert ran[0]["last_result"] == "ran"
+    assert "roe_renewal_digest" not in ran[0]

@@ -672,6 +672,89 @@ def coverage_rows(
     return rows
 
 
+#: Severity-tier weights for risk-weighted coverage scoring (G12).
+#: Higher tiers dominate the weighted score, so a FAIL in a critical
+#: class (auth bypass / prompt injection) drags the score more than a
+#: FAIL in a moderate class (robustness / cost abuse).
+RISK_SEVERITY_WEIGHTS = {
+    "critical": 10,
+    "high": 5,
+    "moderate": 2,
+    "low": 1,
+}
+
+#: Risk tier per technique class. Members of SCHEMA_CLASSES map to a
+#: tier here; unknown classes seen on disk fall back to
+#: :data:`DEFAULT_CLASS_RISK_TIER` so scoring stays deterministic.
+CLASS_RISK_TIER = {
+    "auth-bypass": "critical",
+    "prompt-injection": "critical",
+    "abuse": "high",
+    "jailbreak": "high",
+    "cost-abuse": "moderate",
+    "malformed-input": "moderate",
+}
+
+#: Tier for classes absent from :data:`CLASS_RISK_TIER`.
+DEFAULT_CLASS_RISK_TIER = "low"
+
+
+def risk_weighted_score(
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+) -> tuple[float, int, int, list[tuple[str, str, int, int, int, int, int]]]:
+    """Risk-weighted coverage score over ``coverage`` rows.
+
+    Each class contributes ``weight * wins`` earned points out of
+    ``weight * cases`` possible points, where ``weight`` comes from the
+    class risk tier (:data:`CLASS_RISK_TIER`, default ``"low"``) via
+    :data:`RISK_SEVERITY_WEIGHTS`. Returns ``(score_pct, earned,
+    possible, breakdown)`` with ``breakdown`` rows ``(class, tier,
+    weight, cases, wins, earned, possible)`` in coverage order
+    (deterministic). ``score_pct`` is ``0.0`` when no class has cases.
+    """
+    breakdown: list[tuple[str, str, int, int, int, int, int]] = []
+    earned = 0
+    possible = 0
+    for class_name, case_count, _runs, wins, _pct, _gaps, _verdict in coverage:
+        tier = CLASS_RISK_TIER.get(class_name, DEFAULT_CLASS_RISK_TIER)
+        weight = RISK_SEVERITY_WEIGHTS[tier]
+        max_points = weight * case_count
+        got_points = weight * wins
+        earned += got_points
+        possible += max_points
+        breakdown.append(
+            (class_name, tier, weight, case_count, wins, got_points, max_points)
+        )
+    score = round(100.0 * earned / possible, 1) if possible else 0.0
+    return score, earned, possible, breakdown
+
+
+def render_risk_weighted_score(
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+) -> list[str]:
+    """Risk-weighted score section lines (deterministic, coverage order)."""
+    score, earned, possible, breakdown = risk_weighted_score(coverage)
+    weights_text = ", ".join(
+        f"{tier}={RISK_SEVERITY_WEIGHTS[tier]}"
+        for tier in ("critical", "high", "moderate", "low")
+    )
+    lines = [
+        "## Risk-weighted score",
+        "",
+        f"- risk-weighted score: {score:.1f}% ({earned}/{possible} weighted points)",
+        f"- weights: {weights_text}",
+        "",
+        "| class | tier | weight | cases | wins | weighted |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for class_name, tier, weight, case_count, wins, got, maximum in breakdown:
+        lines.append(
+            f"| {class_name} | {tier} | {weight} | {case_count} | {wins} "
+            f"| {got}/{maximum} |"
+        )
+    return lines
+
+
 def read_baseline_snapshot(report_path: Path) -> dict[str, str] | None:
     """Findings snapshot (hash -> case_id) embedded in a past report."""
     try:
@@ -1214,6 +1297,219 @@ def render_trend(
     return lines
 
 
+#: Severity colors for the self-contained HTML export (G10). The
+#: markdown report itself carries no color, so the export defines this
+#: canonical palette once in its inline ``<style>`` block (no external
+#: assets).
+SEVERITY_COLORS = {
+    "critical": "#c0392b",
+    "high": "#d35400",
+    "medium": "#7d6608",
+    "moderate": "#7d6608",
+    "low": "#1e8449",
+    "unknown": "#616a6b",
+}
+
+#: Whole-word severity tokens wrapped in ``sev-*`` spans by the HTML
+#: export (report severities render lowercase, so matching stays
+#: case-sensitive and deterministic).
+_SEVERITY_RE = re.compile(r"\b(critical|high|medium|moderate|low|unknown)\b")
+
+#: Whole-word coverage verdicts wrapped in ``verdict-*`` spans.
+_VERDICT_RE = re.compile(r"\b(covered|gappy|unexercised)\b")
+
+
+def _html_escape(text: str) -> str:
+    """Escape ``text`` for HTML body content (deterministic)."""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _html_inline(text: str) -> str:
+    """Inline markup for one block line: ```code`` spans plus severity colors.
+
+    Backtick spans become ``<code>`` (severity coloring does not apply
+    inside them); elsewhere exact severity/verdict words become
+    ``sev-*``/``verdict-*`` spans styled by the inline stylesheet.
+    Deterministic single pass.
+    """
+    parts = re.split(r"(`[^`]*`)", text)
+    out: list[str] = []
+    for part in parts:
+        if len(part) >= 2 and part.startswith("`") and part.endswith("`"):
+            out.append("<code>" + _html_escape(part[1:-1]) + "</code>")
+        else:
+            escaped = _html_escape(part)
+            escaped = _SEVERITY_RE.sub(
+                lambda match: (
+                    f'<span class="sev-{match.group(1)}">{match.group(1)}</span>'
+                ),
+                escaped,
+            )
+            escaped = _VERDICT_RE.sub(
+                lambda match: (
+                    f'<span class="verdict-{match.group(1)}">{match.group(1)}</span>'
+                ),
+                escaped,
+            )
+            out.append(escaped)
+    return "".join(out)
+
+
+def _html_table_row(cells: list[str], header: bool) -> str:
+    """One ``<tr>`` with inline markup applied per cell."""
+    tag = "th" if header else "td"
+    return (
+        "<tr>"
+        + "".join(f"<{tag}>{_html_inline(cell)}</{tag}>" for cell in cells)
+        + "</tr>"
+    )
+
+
+def _html_table(lines: list[str]) -> str:
+    """Render consecutive ``|``-prefixed markdown lines as one table."""
+    rows = [
+        [cell.strip() for cell in line.strip().strip("|").split("|")] for line in lines
+    ]
+    body: list[str] = []
+    data = rows
+    if len(rows) >= 2 and all(
+        re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in rows[1]
+    ):
+        body += ["<thead>", _html_table_row(rows[0], True), "</thead>"]
+        data = rows[2:]
+    if data:
+        body += (
+            ["<tbody>"] + [_html_table_row(row, False) for row in data] + ["</tbody>"]
+        )
+    return "<table>\n" + "\n".join(body) + "\n</table>"
+
+
+def _html_stylesheet() -> str:
+    """Inline CSS for the HTML export (severity colors + tables)."""
+    rules = [
+        "body{font-family:sans-serif;max-width:72rem;margin:2rem auto;"
+        "padding:0 1rem;color:#111;background:#fff}",
+        "table{border-collapse:collapse;margin:1rem 0}",
+        "th,td{border:1px solid #999;padding:.25rem .5rem;text-align:left}",
+        "th{background:#eee}",
+        "code{background:#f4f4f4;padding:0 .25rem}",
+        "pre{background:#f4f4f4;padding:1rem;overflow-x:auto}",
+        "pre code{background:none;padding:0}",
+    ]
+    for severity, color in SEVERITY_COLORS.items():
+        rules.append(f".sev-{severity}{{color:{color};font-weight:bold}}")
+    rules += [
+        ".verdict-covered{color:#1e8449;font-weight:bold}",
+        ".verdict-gappy{color:#c0392b;font-weight:bold}",
+        ".verdict-unexercised{color:#616a6b;font-weight:bold}",
+    ]
+    return "\n".join(rules)
+
+
+def render_html_report(markdown: str) -> str:
+    """Render the full markdown report as self-contained HTML (stdlib only).
+
+    Minimal deterministic converter: ``#``/``##``/``###`` headings,
+    pipe tables (second-row ``---`` separator becomes ``<thead>``),
+    fenced code blocks, ``-`` bullet lists, inline ```code`` spans, and
+    severity/verdict color spans. Everything else becomes ``<p>``.
+    Output carries an inline ``<style>`` block and no external assets.
+    The findings-snapshot ``<!-- ... -->`` marker passes through
+    verbatim. Input-order independent for identical inputs
+    (byte-identical reruns).
+    """
+    title = "Engagement report"
+    for line in markdown.splitlines():
+        if line.startswith("# "):
+            title = line[2:].strip() or title
+            break
+    body: list[str] = []
+    table_buf: list[str] = []
+    in_list = False
+    in_code = False
+
+    def flush_table() -> None:
+        if table_buf:
+            body.append(_html_table(table_buf))
+            table_buf.clear()
+
+    def flush_list() -> None:
+        nonlocal in_list
+        if in_list:
+            body.append("</ul>")
+            in_list = False
+
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            flush_table()
+            flush_list()
+            in_code = not in_code
+            body.append("<pre><code>" if in_code else "</code></pre>")
+            continue
+        if in_code:
+            body.append(_html_escape(line))
+            continue
+        if stripped.startswith("|"):
+            flush_list()
+            table_buf.append(line)
+            continue
+        flush_table()
+        heading = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if heading:
+            flush_list()
+            level = len(heading.group(1))
+            body.append(f"<h{level}>{_html_inline(heading.group(2))}</h{level}>")
+        elif stripped.startswith("- "):
+            if not in_list:
+                body.append("<ul>")
+                in_list = True
+            body.append(f"<li>{_html_inline(stripped[2:])}</li>")
+        elif stripped.startswith("<!--") and stripped.endswith("-->"):
+            flush_list()
+            body.append(stripped)
+        elif not stripped:
+            flush_list()
+        else:
+            flush_list()
+            body.append(f"<p>{_html_inline(stripped)}</p>")
+    flush_table()
+    flush_list()
+    if in_code:
+        body.append("</code></pre>")
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        f"<title>{_html_escape(title)}</title>\n"
+        "<style>\n"
+        f"{_html_stylesheet()}\n"
+        "</style>\n"
+        "</head>\n"
+        "<body>\n" + "\n".join(body) + "\n</body>\n</html>\n"
+    )
+
+
+def write_html_report(markdown: str, html_path: Path) -> int:
+    """Write the HTML export of ``markdown`` to ``html_path`` (G10).
+
+    Returns 0 on success; an unwritable output prints ``error:`` to
+    stderr and returns 1 (no fallback: HTML needs no external tool).
+    """
+    try:
+        html_path.write_text(render_html_report(markdown), encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot write HTML export {html_path} ({exc})", file=sys.stderr)
+        return 1
+    return 0
+
+
 def write_pdf(markdown: str, pdf_path: Path) -> int:
     """Convert ``markdown`` to PDF at ``pdf_path`` via pandoc (thin wrapper).
 
@@ -1335,6 +1631,10 @@ def render_report(
             f"| {class_name} | {case_count} | {class_runs} | {rate} "
             f"| {class_gaps} | {verdict} |"
         )
+    lines += [
+        "",
+        *render_risk_weighted_score(coverage if coverage is not None else []),
+    ]
     if coverage_delta:
         lines += ["", *coverage_delta]
     if trend:
@@ -2166,6 +2466,16 @@ def main(argv: list[str] | None = None) -> int:
         "and falls back to writing the .md sibling instead.",
     )
     parser.add_argument(
+        "--export",
+        nargs=2,
+        default=None,
+        metavar=("FORMAT", "OUTPUT"),
+        help="also export the markdown report at OUTPUT in FORMAT "
+        "(only 'html': self-contained file with an inline <style> block "
+        "carrying the severity colors, no external assets; converted "
+        "from the markdown with the stdlib-only built-in converter).",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="emit the full report as a single JSON object (all sections as "
@@ -2252,9 +2562,19 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     else:
         sys.stdout.write(payload)
+    status = 0
     if args.pdf:
-        return write_pdf(markdown, Path(args.pdf))
-    return 0
+        status = write_pdf(markdown, Path(args.pdf)) or status
+    if args.export:
+        export_format, export_output = args.export
+        if export_format != "html":
+            print(
+                f"error: unsupported --export format {export_format!r} (only 'html')",
+                file=sys.stderr,
+            )
+            return 1
+        status = write_html_report(markdown, Path(export_output)) or status
+    return status
 
 
 if __name__ == "__main__":

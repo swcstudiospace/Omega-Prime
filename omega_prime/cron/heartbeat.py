@@ -93,14 +93,40 @@ def heartbeat_runner(session_runner: Any) -> Any:
     return runner
 
 
+def _tick_roe_now(now: Any, override: Any) -> Any:
+    """Clock for the RoE renewal digest: explicit override, else tick stamp."""
+    if override is not None:
+        return override
+    if isinstance(now, bool):
+        return None
+    if isinstance(now, (int, float)):
+        try:
+            return datetime.fromtimestamp(now, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None
+
+
 def tick_heartbeats(
-    store: JobStore, now: int | float, session_runner: Any
+    store: JobStore,
+    now: int | float,
+    session_runner: Any,
+    *,
+    roe_now: Any = None,
 ) -> list[dict]:
     """Run each due heartbeat, re-entering its named session.
 
     Like :meth:`JobStore.tick` but the runner receives the job's ``session``
     so the turn re-enters the named session. Only heartbeat jobs are considered.
+
+    G11 additive digest: when a heartbeat job carries a RoE artifact in its
+    context (``job["context"]["roe_artifact"]``, ``job["roe_artifact"]``, or
+    ``job["roe_artifact_path"]``), newly crossed renewal thresholds append
+    ``roe_renewal`` entries to ``job["roe_renewal_digest"]`` via
+    :func:`heartbeat_roe_renewals`. Jobs without a RoE artifact are
+    byte-for-byte unchanged, as are all pre-existing heartbeat kinds.
     """
+    roe_clock = _tick_roe_now(now, roe_now)
     ran: list[dict] = []
     for job in store.jobs:
         if job.get("kind") != HEARTBEAT_KIND or job.get("completed"):
@@ -120,10 +146,71 @@ def tick_heartbeats(
         del history[:-20]
         job["claimed_at"] = None
         job["due_at"] = now + job["interval_seconds"]
+        try:
+            renewals = heartbeat_roe_renewals(job, now=roe_clock)
+        except Exception:
+            renewals = []
+        if renewals:
+            digest = job.setdefault("roe_renewal_digest", [])
+            if isinstance(digest, list):
+                digest.extend(renewals)
         ran.append(job)
     if ran:
         store._save()
     return ran
+
+
+#: Heartbeat digest kind for RoE renewal reminders (G11). Emitted as
+#: digest entries on heartbeat jobs whose context carries a RoE artifact;
+#: never stored as a job ``kind`` — pre-existing kinds are unchanged.
+ROE_RENEWAL_KIND = "roe_renewal"
+
+
+def heartbeat_roe_renewals(job: Any, *, now: Any = None) -> list[dict]:
+    """Digest entries for a heartbeat job's RoE artifact context (G11).
+
+    Reads the RoE artifact from ``job["context"]["roe_artifact"]``,
+    ``job["roe_artifact"]``, or ``job["roe_artifact_path"]`` (inline
+    document dict or artifact path — whatever :func:`renewal_reminders`
+    accepts). Each newly crossed renewal threshold becomes one
+    ``{"kind": ROE_RENEWAL_KIND, "threshold", "detail", ...}`` entry with
+    the threshold in the detail string. Fail-closed: a missing artifact,
+    a malformed window, or any error returns ``[]`` and never raises.
+    """
+    try:
+        if not isinstance(job, dict):
+            return []
+        artifact = None
+        context = job.get("context")
+        if isinstance(context, dict):
+            artifact = context.get("roe_artifact", context.get("roe_artifact_path"))
+        if artifact is None:
+            artifact = job.get("roe_artifact", job.get("roe_artifact_path"))
+        if artifact is None:
+            return []
+        from omega_prime.grokbot.roe_lifecycle import renewal_reminders
+
+        reminders = renewal_reminders(artifact, now=now)
+        entries: list[dict] = []
+        for reminder in reminders:
+            if not isinstance(reminder, dict):
+                continue
+            threshold = reminder.get("threshold", "?")
+            entries.append(
+                {
+                    "kind": ROE_RENEWAL_KIND,
+                    "threshold": threshold,
+                    "detail": reminder.get(
+                        "detail", f"roe renewal ({threshold}) — re-sign to renew"
+                    ),
+                    "artifact_id": reminder.get("artifact_id"),
+                    "days_remaining": reminder.get("days_remaining"),
+                    "effective_until": reminder.get("effective_until"),
+                }
+            )
+        return entries
+    except Exception:
+        return []
 
 
 #: Job kind marker stored on RoE expiry watcher jobs.
@@ -794,12 +881,13 @@ __all__ = [
     "ROE_EXPIRY_HISTORY_LIMIT",
     "ROE_EXPIRY_INTERVAL_SECONDS",
     "ROE_EXPIRY_KIND",
-    "check_coverage_alert",
+    "ROE_RENEWAL_KIND",
     "clear_coverage_alert",
     "clear_engagement_digest",
     "clear_heartbeat",
     "clear_release_watch",
     "clear_roe_expiry",
+    "heartbeat_roe_renewals",
     "heartbeat_runner",
     "list_coverage_alerts",
     "list_engagement_digests",

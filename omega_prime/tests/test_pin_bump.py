@@ -1053,3 +1053,278 @@ def test_semver_check_dry_run_prints_without_report(tmp_path, capsys):
     assert "[dry-run] semver compatible" in out
     assert not (root / "report.md").exists()
     assert _snapshot(root) == before
+
+
+# --bump-commit mode (G9) -------------------------------------------------------
+
+
+def _bump_commit_old_doc() -> dict:
+    """Old audit yielding verdict ``improved`` with one compatible fix.
+
+    ``GHSA-fix-0001`` (high, left-pad, 1.2.3) vanishes while ``left-pad``
+    stays in the new tree under the shared drift key, so the delta marks
+    the fix ``fixed`` instead of ``removed``. ``GHSA-shared-0002`` drifts
+    high -> moderate (downward, triage-green) to carry the new spec.
+    """
+    return {
+        "vulnerabilities": {
+            "left-pad": {
+                "severity": "high",
+                "via": ["GHSA-fix-0001"],
+                "range": "1.2.3",
+            },
+            "right-pad": {
+                "severity": "high",
+                "via": ["GHSA-shared-0002"],
+                "range": "9.9.9",
+            },
+        }
+    }
+
+
+def _bump_commit_new_doc(new_spec: str) -> dict:
+    return {
+        "vulnerabilities": {
+            "left-pad": {
+                "severity": "moderate",
+                "via": ["GHSA-shared-0002"],
+                "range": new_spec,
+            },
+        }
+    }
+
+
+def _write_package_json(root: Path, version: str = "1.2.3") -> Path:
+    pkg = root / "redteam" / "package.json"
+    pkg.write_text(
+        json.dumps({"name": "t3mp3st-test", "version": version}) + "\n",
+        encoding="utf-8",
+    )
+    return pkg
+
+
+def test_bump_commit_flag_parses():
+    args = pin_bump.build_parser().parse_args(["--to", PIN_NEW, "--bump-commit"])
+    assert args.bump_commit is True
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.bump_commit is False
+
+
+def test_bump_package_version_shapes():
+    assert pin_bump._bump_package_version("1.2.3", "patch") == "1.2.4"
+    assert pin_bump._bump_package_version("1.2.3", "minor") == "1.3.0"
+    assert pin_bump._bump_package_version("1.2.3-rc.1", "patch") == "1.2.4-rc.1"
+    assert pin_bump._bump_package_version("1.2.3-rc.1", "minor") == "1.3.0-rc.1"
+    assert pin_bump._bump_package_version("latest", "patch") is None
+    assert pin_bump._bump_package_version("", "minor") is None
+
+
+def test_bump_level_for_rows_minor_vs_patch():
+    minor_rows = [("k", "left-pad", "1.2.3", "1.4.0", "compatible")]
+    assert pin_bump._bump_level_for_rows(minor_rows) == "minor"
+    patch_rows = [("k", "left-pad", "1.2.3", "1.2.4", "compatible")]
+    assert pin_bump._bump_level_for_rows(patch_rows) == "patch"
+    removed_rows = [("k", "left-pad", "1.2.3", "", "removed")]
+    assert pin_bump._bump_level_for_rows(removed_rows) == "patch"
+
+
+def test_bump_commit_gate_shapes():
+    rows = [("k", "left-pad", "1.2.3", "1.4.0", "compatible")]
+    assert (
+        pin_bump._bump_commit_gate(semver_check=True, verdict="improved", rows=rows)
+        is None
+    )
+    no_semver = pin_bump._bump_commit_gate(
+        semver_check=False, verdict="improved", rows=rows
+    )
+    assert no_semver is not None and "requires --semver-check" in no_semver
+    regressed = pin_bump._bump_commit_gate(
+        semver_check=True, verdict="regressed", rows=rows
+    )
+    assert regressed is not None and "not 'improved'" in regressed
+    no_rows = pin_bump._bump_commit_gate(semver_check=True, verdict="improved", rows=[])
+    assert no_rows is not None and "no fixed advisories" in no_rows
+    major_rows = [("k", "left-pad", "1.2.3", "2.0.0", "major")]
+    major = pin_bump._bump_commit_gate(
+        semver_check=True, verdict="improved", rows=major_rows
+    )
+    assert major is not None and "major" in major
+    unknown_rows = [("k", "left-pad", "latest", "1.4.0", "unknown")]
+    unknown = pin_bump._bump_commit_gate(
+        semver_check=True, verdict="improved", rows=unknown_rows
+    )
+    assert unknown is not None and "unknown" in unknown
+    removed_rows = [("k", "left-pad", "1.2.3", "", "removed")]
+    removed = pin_bump._bump_commit_gate(
+        semver_check=True, verdict="improved", rows=removed_rows
+    )
+    assert removed is not None and "no compatible fixes" in removed
+
+
+def test_bump_commit_improved_compatible_bumps_minor(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    pkg = _write_package_json(root)
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.4.0"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, semver_check=True, bump_commit=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Verdict: improved" in (root / "report.md").read_text()
+    assert json.loads(pkg.read_text())["version"] == "1.3.0"
+    assert "pin-bump version bump (minor): 1.2.3 -> 1.3.0" in out
+
+
+def test_bump_commit_patch_fix_bumps_patch(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    pkg = _write_package_json(root)
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.2.4"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, semver_check=True, bump_commit=True)
+    capsys.readouterr()
+    assert rc == 0
+    assert json.loads(pkg.read_text())["version"] == "1.2.4"
+
+
+def test_bump_commit_major_fix_skips_with_warning(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    pkg = _write_package_json(root)
+    run = FakeRun(npm_doc=_bump_commit_new_doc("2.0.0"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, semver_check=True, bump_commit=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Verdict: improved" in (root / "report.md").read_text()
+    assert json.loads(pkg.read_text())["version"] == "1.2.3"
+    assert "WARNING: --bump-commit skipped" in out
+    assert "major" in out
+
+
+def test_bump_commit_missing_package_json_skips(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.4.0"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, semver_check=True, bump_commit=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Verdict: improved" in (root / "report.md").read_text()
+    assert "WARNING: --bump-commit skipped" in out
+    assert "absent" in out
+
+
+def test_bump_commit_malformed_package_json_skips(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    (root / "redteam" / "package.json").write_text("{not json", encoding="utf-8")
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.4.0"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, semver_check=True, bump_commit=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "WARNING: --bump-commit skipped" in out
+
+
+def test_bump_commit_without_semver_check_skips(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    pkg = _write_package_json(root)
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.4.0"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, bump_commit=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert json.loads(pkg.read_text())["version"] == "1.2.3"
+    assert "WARNING: --bump-commit skipped" in out
+    assert "--semver-check" in out
+
+
+def test_bump_commit_off_by_default(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    pkg = _write_package_json(root)
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.4.0"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, semver_check=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert json.loads(pkg.read_text())["version"] == "1.2.3"
+    assert "version bump" not in out
+
+
+def test_bump_commit_dry_run_prints_without_mutation(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    pkg = _write_package_json(root)
+    before = _snapshot(root)
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.4.0"))
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=run, dry_run=True, semver_check=True, bump_commit=True
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[dry-run] would bump version 1.2.3 -> 1.3.0" in out
+    assert "no files changed" in out
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before
+    assert json.loads(pkg.read_text())["version"] == "1.2.3"
+
+
+def test_bump_commit_dry_run_major_skips(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    _write_package_json(root)
+    before = _snapshot(root)
+    run = FakeRun(npm_doc=_bump_commit_new_doc("2.0.0"))
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=run, dry_run=True, semver_check=True, bump_commit=True
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[dry-run] pin-bump WARNING: --bump-commit skipped" in out
+    assert _snapshot(root) == before
+
+
+def test_bump_commit_open_pr_notes_version_in_body(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    _write_package_json(root)
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.4.0"))
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        semver_check=True,
+        bump_commit=True,
+        open_pr=True,
+    )
+    capsys.readouterr()
+    assert rc == 0
+    commits = [cmd for cmd in run.kinds() if cmd[:2] == ["git", "commit"]]
+    assert len(commits) == 1
+    assert "Version bump: 1.2.3 -> 1.3.0 (redteam/package.json)." in commits[0][-1]

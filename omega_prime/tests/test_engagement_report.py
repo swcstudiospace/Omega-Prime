@@ -1923,3 +1923,240 @@ def test_json_composes_with_diff_drill_down_and_side_by_side(tmp_path):
     assert set(metrics) == {"runs", "pass rate", "coverage", "findings"}
     assert (metrics["runs"]["current"], metrics["runs"]["previous"]) == (2, 1)
     assert data["snapshot"] and data["comparison"] is None
+
+
+# Risk-weighted coverage scoring (G12) -----------------------------------------
+
+
+def test_risk_weighted_score_section_after_matrix(tmp_path):
+    """G12 happy: all-pass run renders a 100% score section after the matrix."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    text = proc.stdout
+    assert "## Risk-weighted score" in text
+    matrix_at = text.index("## Coverage matrix")
+    risk_at = text.index("## Risk-weighted score")
+    gaps_at = text.index("## Detection gaps")
+    assert matrix_at < risk_at < gaps_at
+    assert "- risk-weighted score: 100.0%" in text
+    assert "- weights: critical=10, high=5, moderate=2, low=1" in text
+    body = section_lines(text, "## Risk-weighted score")
+    # Header + separator + one breakdown row per schema class (six).
+    assert len([line for line in body if line.startswith("| ")]) == 2 + 6
+
+
+def test_risk_weighted_score_failing_class_drops_score(tmp_path):
+    """G12: one failing observation drops the weighted score below 100%."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    first_id = sorted(expected_detections())[0]
+    seed_last_run(fixture, wrong={first_id: "WRONG-DETECTION"})
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "## Risk-weighted score" in proc.stdout
+    assert "- risk-weighted score: 100.0%" not in proc.stdout
+
+
+def test_risk_weighted_score_is_deterministic(tmp_path):
+    """G12 determinism: same inputs render a byte-identical risk section."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+
+    first = run_script("--reports-dir", str(fixture), "--since", T0)
+    second = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+    assert section_lines(first.stdout, "## Risk-weighted score") == section_lines(
+        second.stdout, "## Risk-weighted score"
+    )
+
+
+def test_risk_weights_table_values():
+    """G12 units: deterministic weights table and class tiers."""
+    module = _report_module()
+    assert module.RISK_SEVERITY_WEIGHTS == {
+        "critical": 10,
+        "high": 5,
+        "moderate": 2,
+        "low": 1,
+    }
+    assert module.CLASS_RISK_TIER["auth-bypass"] == "critical"
+    assert module.CLASS_RISK_TIER["prompt-injection"] == "critical"
+    assert module.CLASS_RISK_TIER["abuse"] == "high"
+    assert module.CLASS_RISK_TIER["jailbreak"] == "high"
+    assert module.DEFAULT_CLASS_RISK_TIER == "low"
+
+
+def test_risk_weighted_score_critical_failure_weighs_more():
+    """G12 units: a critical-class FAIL drags the score more than a low one."""
+    module = _report_module()
+    crit_fail = [
+        ("auth-bypass", 1, 1, 0, 0.0, 1, "gappy"),
+        ("cost-abuse", 1, 1, 1, 100.0, 0, "covered"),
+    ]
+    low_fail = [
+        ("auth-bypass", 1, 1, 1, 100.0, 0, "covered"),
+        ("cost-abuse", 1, 1, 0, 0.0, 1, "gappy"),
+    ]
+    crit_score, crit_earned, crit_possible, _ = module.risk_weighted_score(crit_fail)
+    low_score, low_earned, low_possible, _ = module.risk_weighted_score(low_fail)
+    assert (crit_earned, crit_possible) == (2, 12)
+    assert (low_earned, low_possible) == (10, 12)
+    assert crit_score == round(100.0 * 2 / 12, 1)
+    assert low_score == round(100.0 * 10 / 12, 1)
+    assert crit_score < low_score
+
+
+def test_risk_weighted_score_unknown_class_defaults_low_and_empty():
+    """G12 units: unknown classes score at low weight; empty coverage is 0."""
+    module = _report_module()
+    score, earned, possible, breakdown = module.risk_weighted_score(
+        [("zzz-new", 2, 0, 0, 0.0, 0, "unexercised")]
+    )
+    assert breakdown == [("zzz-new", "low", 1, 2, 0, 0, 2)]
+    assert (score, earned, possible) == (0.0, 0, 2)
+    assert module.risk_weighted_score([]) == (0.0, 0, 0, [])
+    lines = module.render_risk_weighted_score([])
+    assert lines[0] == "## Risk-weighted score"
+    assert "- risk-weighted score: 0.0% (0/0 weighted points)" in lines
+
+
+# HTML export (G10) ------------------------------------------------------------
+
+
+def test_export_html_writes_self_contained_file(tmp_path):
+    """G10 happy: --export html writes self-contained HTML, stdout stays markdown."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    out = tmp_path / "report.html"
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(out)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("# Engagement report")
+    assert "## Risk-weighted score" in proc.stdout
+    html = out.read_text(encoding="utf-8")
+    assert html.startswith("<!DOCTYPE html>")
+    assert html.endswith("</html>\n")
+    assert "<style>" in html
+    assert "#c0392b" in html  # critical severity color in the inline style
+    assert "<h1>" in html and "<h2>" in html
+    assert "<table>" in html and "<thead>" in html
+    assert 'class="sev-low"' in html
+    assert "<!-- findings-snapshot: " in html
+    assert "src=" not in html and "href=" not in html  # no external assets
+
+
+def test_export_html_is_deterministic(tmp_path):
+    """G10 determinism: same inputs export byte-identical HTML files."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+
+    first = tmp_path / "first.html"
+    second = tmp_path / "second.html"
+    proc1 = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(first)
+    )
+    proc2 = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(second)
+    )
+    assert proc1.returncode == 0, proc1.stderr
+    assert proc2.returncode == 0, proc2.stderr
+    assert proc1.stdout == proc2.stdout
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_export_html_unsupported_format_exits_1(tmp_path):
+    """G10 edge: an unknown --export format fails closed with error:."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--export",
+        "pdf",
+        str(tmp_path / "report.pdf"),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+    assert not (tmp_path / "report.pdf").exists()
+
+
+def test_export_html_unwritable_output_exits_1(tmp_path):
+    """G10 edge: an unwritable --export path fails closed with error:."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(tmp_path)
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_render_html_report_converter_units():
+    """G10 units: headings/tables/code-fences/lists convert deterministically."""
+    module = _report_module()
+    markdown = (
+        "# Title\n"
+        "\n"
+        "## Section\n"
+        "\n"
+        "| a | b |\n"
+        "| --- | --- |\n"
+        "| critical | `x<y` |\n"
+        "\n"
+        "```\n"
+        "raw <b> & critical\n"
+        "```\n"
+        "\n"
+        "- low item\n"
+        "- plain\n"
+        "\n"
+        "<!-- findings-snapshot: {} -->\n"
+    )
+    first = module.render_html_report(markdown)
+    assert module.render_html_report(markdown) == first  # deterministic
+    assert "<h1>Title</h1>" in first
+    assert "<h2>Section</h2>" in first
+    assert "<thead>" in first and "<th>a</th>" in first
+    assert 'class="sev-critical"' in first  # table cell severity colored
+    assert "<code>x&lt;y</code>" in first  # code span escaped, not colored
+    assert "raw &lt;b&gt; &amp; critical" in first  # fence raw, uncolored
+    assert "<ul>" in first and 'class="sev-low"' in first
+    assert "<!-- findings-snapshot: {} -->" in first
+    assert "src=" not in first and "href=" not in first
+
+
+def test_render_html_report_escapes_markup():
+    """G10 units: raw markup in prose is escaped, never emitted as tags."""
+    module = _report_module()
+    html = module.render_html_report('# T\n\n<a href="x">low</a>\n')
+    assert "<a " not in html
+    assert "&lt;a href=&quot;x&quot;&gt;" in html

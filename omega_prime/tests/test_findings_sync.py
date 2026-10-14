@@ -5,17 +5,21 @@ from __future__ import annotations
 import json
 import time
 from types import SimpleNamespace
+from typing import TypedDict
 
 import pytest
 
 from omega_prime.config import load_config
 from omega_prime.grokbot import findings_sync
 from omega_prime.grokbot.findings_sync import (
+    GRAPH_SCOPE,
+    NO_GRAPH_CONFIG_MESSAGE,
     NO_LINEAR_TEAM_MESSAGE,
     NO_SLACK_WEBHOOK_MESSAGE,
     NO_TEAMS_WEBHOOK_MESSAGE,
     GhApiError,
     GhNotFoundError,
+    graph_message,
     issue_body,
     issue_title,
     labels_for_severity,
@@ -24,6 +28,7 @@ from omega_prime.grokbot.findings_sync import (
     slack_color,
     slack_message,
     sync_findings,
+    sync_findings_graph,
     sync_findings_linear,
     sync_findings_slack,
     sync_findings_teams,
@@ -1103,3 +1108,286 @@ def test_tick_teams_with_repo_posts_action(tmp_path):
     assert len(result["pushed"]) == 2
     for argv, data in fake.calls:
         assert "potentialAction=" in " ".join(argv)
+
+
+# Graph API mode (G8) ----------------------------------------------------------
+
+class _GraphCreds(TypedDict):
+    tenant_id: str
+    client_id: str
+    client_secret: str
+    team_id: str
+    channel_id: str
+
+
+GRAPH_CREDS: _GraphCreds = {
+    "tenant_id": "tenant-123",
+    "client_id": "client-123",
+    "client_secret": "secret-123",
+    "team_id": "team-123",
+    "channel_id": "channel-123",
+}
+
+GRAPH_TOKEN_URL = "https://login.microsoftonline.com/tenant-123/oauth2/v2.0/token"
+GRAPH_MESSAGES_URL = (
+    "https://graph.microsoft.com/v1.0/teams/team-123/channels/channel-123/messages"
+)
+
+
+class FakeGraph:
+    """Fake GhRunner answering the token fetch + message POSTs; zero network."""
+
+    def __init__(self, token_calls=None, fail_token=False, fail_posts=0):
+        self.calls: list[tuple[list[str], dict]] = []
+        self.token = "fake-access-token"
+        self.fail_token = fail_token
+        self.fail_posts = fail_posts
+
+    def __call__(self, argv, data):
+        self.calls.append((argv, data))
+        if argv[2].startswith("https://login.microsoftonline.com/"):
+            if self.fail_token:
+                return SimpleNamespace(returncode=1, stdout="", stderr="denied")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"access_token": self.token, "expires_in": 3600}),
+                stderr="",
+            )
+        if self.fail_posts > 0:
+            self.fail_posts -= 1
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+
+def _graph_config(**overrides):
+    node = {
+        "enabled": True,
+        "tracker": "graph",
+        "repo": REPO,
+        "graph": dict(GRAPH_CREDS),
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+def test_graph_message_reuses_teams_card(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(severity="critical"))
+    message = graph_message(row, repo=REPO)
+    assert message["subject"] == issue_title(row)
+    assert message["body"]["contentType"] == "html"
+    assert row["dedupe_hash"] in message["body"]["content"]
+    card = message["attachments"][0]["content"]
+    assert card == teams_message(row, repo=REPO)
+
+
+def test_graph_happy_token_then_two_posts(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGraph()
+    result = sync_findings_graph(tmp_path, runner=fake, **GRAPH_CREDS)
+    assert len(result["pushed"]) == 2
+    assert all(entry["issue_url"].startswith("graph:") for entry in result["pushed"])
+    assert len(fake.calls) == 3  # one token fetch + two message POSTs
+    rows = load_findings(tmp_path)
+    assert all(row.get("synced_at") for row in rows)
+
+
+def test_graph_token_fetch_url_scope_and_grant(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGraph()
+    sync_findings_graph(tmp_path, runner=fake, **GRAPH_CREDS)
+    argv, data = fake.calls[0]
+    assert argv[:3] == ["gh", "api", GRAPH_TOKEN_URL]
+    assert f"scope={GRAPH_SCOPE}" in argv
+    assert GRAPH_SCOPE == "https://graph.microsoft.com/.default"
+    assert "grant_type=client_credentials" in argv
+    assert f"client_id={GRAPH_CREDS['client_id']}" in argv
+    assert "client_secret" not in json.dumps(data)  # secret rides argv only
+
+
+def test_graph_posts_bearer_and_messages_url(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGraph()
+    sync_findings_graph(tmp_path, runner=fake, **GRAPH_CREDS)
+    for argv, data in fake.calls[1:]:
+        assert argv[:3] == ["gh", "api", GRAPH_MESSAGES_URL]
+        assert f"Authorization: Bearer {fake.token}" in argv
+        assert data["attachments"][0]["content"]["summary"]
+        assert data["team_id"] == GRAPH_CREDS["team_id"]
+        assert data["channel_id"] == GRAPH_CREDS["channel_id"]
+
+
+def test_graph_blank_field_fail_closed(tmp_path):
+    def _call(creds: dict[str, str], runner: findings_sync.GhRunner | None) -> object:
+        return sync_findings_graph(
+            tmp_path,
+            tenant_id=creds["tenant_id"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"],
+            team_id=creds["team_id"],
+            channel_id=creds["channel_id"],
+            runner=runner,
+        )
+
+    for field in GRAPH_CREDS:
+        creds: dict[str, str] = {
+            "tenant_id": GRAPH_CREDS["tenant_id"],
+            "client_id": GRAPH_CREDS["client_id"],
+            "client_secret": GRAPH_CREDS["client_secret"],
+            "team_id": GRAPH_CREDS["team_id"],
+            "channel_id": GRAPH_CREDS["channel_id"],
+        }
+        creds[field] = "   "
+        with pytest.raises(ValueError, match="no graph config configured"):
+            _call(creds, FakeGraph())
+    with pytest.raises(ValueError, match=NO_GRAPH_CONFIG_MESSAGE):
+        sync_findings_graph(
+            tmp_path,
+            tenant_id="",
+            client_id="",
+            client_secret="",
+            team_id="",
+            channel_id="",
+            runner=FakeGraph(),
+        )
+
+
+def test_graph_second_run_pushes_nothing(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGraph()
+    sync_findings_graph(tmp_path, runner=fake, **GRAPH_CREDS)
+    assert len(fake.calls) == 3
+    result = sync_findings_graph(tmp_path, runner=fake, **GRAPH_CREDS)
+    assert result["pushed"] == []
+    assert len(result["skipped"]) == 2
+    assert len(fake.calls) == 4  # token fetch only, no message POSTs
+
+
+def test_graph_dry_run_calls_no_runner_writes_nothing(tmp_path):
+    _seed_two(tmp_path)
+    before = findings_path(tmp_path).read_bytes()
+
+    def _boom(argv, data):
+        raise AssertionError("runner must not be called in dry-run")
+
+    result = sync_findings_graph(tmp_path, runner=_boom, dry_run=True, **GRAPH_CREDS)
+    assert len(result["pushed"]) == 2
+    assert all(entry["issue_url"] == "" for entry in result["pushed"])
+    assert findings_path(tmp_path).read_bytes() == before
+
+
+def test_graph_token_failure_raises_rows_unsynced(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGraph(fail_token=True)
+    with pytest.raises(GhApiError):
+        sync_findings_graph(tmp_path, runner=fake, **GRAPH_CREDS)
+    assert all("issue_url" not in row for row in load_findings(tmp_path))
+
+
+def test_graph_runner_exception_mid_run_persists_earlier_push(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    _patch_retry_timing(monkeypatch)
+    fake = FakeGraph()
+    real = fake.__call__
+
+    def _flaky(argv, data):
+        if argv[2].startswith("https://login.microsoftonline.com/"):
+            return real(argv, data)
+        posts = [
+            call
+            for call in fake.calls
+            if not call[0][2].startswith("https://login.microsoftonline.com/")
+        ]
+        if posts:  # every message POST after the first blows up (incl. retries)
+            fake.calls.append((argv, data))
+            raise RuntimeError("network down")
+        return real(argv, data)
+
+    with pytest.raises(GhApiError):
+        sync_findings_graph(tmp_path, runner=_flaky, **GRAPH_CREDS)
+    rows = load_findings(tmp_path)
+    assert rows[0]["issue_url"] == f"graph:{rows[0]['dedupe_hash']}"
+    assert "issue_url" not in rows[1]
+
+
+def test_tick_graph_branch_when_config_present(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGraph()
+    result = tick(_graph_config(), reports_directory=tmp_path, runner=fake)
+    assert len(result["pushed"]) == 2
+    assert result["disabled"] is False
+    assert fake.calls[0][0][2] == GRAPH_TOKEN_URL
+    assert all(call[0][2] == GRAPH_MESSAGES_URL for call in fake.calls[1:])
+
+
+def test_tick_graph_selected_by_config_presence_without_tracker(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGraph()
+    config = _graph_config(tracker="github")
+    result = tick(config, reports_directory=tmp_path, runner=fake)
+    assert len(result["pushed"]) == 2
+    assert fake.calls[0][0][2] == GRAPH_TOKEN_URL
+
+
+def test_tick_graph_tracker_without_config_structured_error(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGraph()
+    config = _graph_config(graph={})
+    result = tick(config, reports_directory=tmp_path, runner=fake)
+    assert result["error"] == NO_GRAPH_CONFIG_MESSAGE
+    assert fake.calls == []
+
+
+def test_tick_graph_absent_leaves_teams_path_unchanged(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeTeams()
+    result = tick(_teams_config(), reports_directory=tmp_path, runner=fake)
+    assert len(result["pushed"]) == 2
+
+
+def test_cli_mode_graph_posts(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _graph_config(tracker="github"),
+    )
+    fake = FakeGraph()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--mode", "graph", "--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 3
+    assert "pushed" in capsys.readouterr().out
+
+
+def test_cli_tracker_graph_from_flag(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _graph_config(tracker="github"),
+    )
+    fake = FakeGraph()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--tracker", "graph", "--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 3
+
+
+def test_cli_graph_missing_config_exits_two(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _graph_config(graph={}),
+    )
+    assert main(["--mode", "graph", "--reports-dir", str(tmp_path)]) == 2
+    assert "no graph config configured" in capsys.readouterr().err
+
+
+def test_cli_graph_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    before = findings_path(tmp_path).read_bytes()
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _graph_config(tracker="github"),
+    )
+    fake = FakeGraph()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--mode", "graph", "--reports-dir", str(tmp_path), "--dry-run"]) == 0
+    assert "would push" in capsys.readouterr().out
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before

@@ -63,6 +63,12 @@ when the audit would regress (or shows untriaged high+), ``2`` for
 usage errors, ``3`` for degraded — the same codes as normal mode. The
 npm audit covers the current checkout (the new pin is never checked
 out in dry-run mode).
+``--bump-commit`` (with ``--semver-check``) rolls the ``version`` field in
+``redteam/package.json`` forward one patch — or one minor when a compatible
+fix moved the minor digit — when the audit verdict is ``improved`` and every
+fix classified compatible. Anything else (a major/unknown fix, a missing or
+unreadable ``package.json``) skips the bump with a warning and leaves the
+exit code untouched (fail-closed).
 
 All ``git``/``npm``/``node``/``gh`` calls go through the injectable
 ``run(cmd, cwd)`` seam (default :func:`subprocess.run`) so tests stay
@@ -446,6 +452,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--bump-commit",
+        dest="bump_commit",
+        action="store_true",
+        help=(
+            "When the audit verdict is improved and --semver-check classifies "
+            "every fix as semver-compatible, bump the version field in "
+            "redteam/package.json (patch, or minor when a fix moved the minor "
+            "digit) and note it in the --open-pr commit body. Major/unknown "
+            "fixes or an absent/unreadable package.json skip the bump with a "
+            "warning (fail-closed)."
+        ),
+    )
+    parser.add_argument(
         "--auto-detect-upstream-fix",
         dest="auto_detect_upstream_fix",
         action="store_true",
@@ -608,6 +627,114 @@ def render_semver_section(
     return "\n".join(lines)
 
 
+_PKG_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(.*)$")
+_PKG_VERSION_LINE_RE = re.compile(r'("version"\s*:\s*")([^"]*)(")')
+
+
+def _bump_package_version(current: str, level: str) -> str | None:
+    """Next ``x.y.z`` after a ``patch``/``minor`` bump, or None.
+
+    Preserves any suffix (``1.2.3-rc.1`` + patch -> ``1.2.4-rc.1``).
+    Returns None when ``current`` is not a numeric dotted version.
+    """
+    match = _PKG_VERSION_RE.match((current or "").strip())
+    if match is None:
+        return None
+    major, minor, patch, suffix = (
+        int(match.group(1)),
+        int(match.group(2)),
+        int(match.group(3)),
+        match.group(4),
+    )
+    if level == "minor":
+        return f"{major}.{minor + 1}.0{suffix}"
+    return f"{major}.{minor}.{patch + 1}{suffix}"
+
+
+def _bump_level_for_rows(
+    rows: list[tuple[str, str, str, str, str]],
+) -> str:
+    """``minor`` when a compatible fix moved the minor digit, else ``patch``."""
+    for _, _, old_spec, new_spec, label in rows:
+        if label != "compatible":
+            continue
+        old_version = _parse_version(old_spec)
+        new_version = _parse_version(new_spec)
+        if (
+            old_version is not None
+            and new_version is not None
+            and new_version[1] != old_version[1]
+        ):
+            return "minor"
+    return "patch"
+
+
+def _bump_commit_gate(
+    *,
+    semver_check: bool,
+    verdict: str | None,
+    rows: list[tuple[str, str, str, str, str]],
+) -> str | None:
+    """None when a ``--bump-commit`` version bump may proceed, else why not.
+
+    Fail-closed: without ``--semver-check`` classification, without an
+    ``improved`` verdict, with zero classifiable fixes, with any ``major``
+    or ``unknown`` fix, or with only ``removed`` fixes (nothing to match a
+    version against), the bump is skipped.
+    """
+    if not semver_check:
+        return "requires --semver-check (no compatibility classification)"
+    if verdict != "improved":
+        return f"audit verdict is {verdict!r}, not 'improved'"
+    if not rows:
+        return "no fixed advisories to base the bump on"
+    if any(row[4] == "major" for row in rows):
+        return "a fix requires a major version bump (outside the declared range)"
+    if any(row[4] == "unknown" for row in rows):
+        return "a fix has an unclassifiable version (unknown)"
+    if not any(row[4] == "compatible" for row in rows):
+        return "no compatible fixes to base the bump on"
+    return None
+
+
+def _read_package_text(
+    path: Path,
+) -> tuple[str | None, str | None, str | None]:
+    """``(text, version, error)`` for a ``package.json`` version bump.
+
+    ``error`` is non-None when the file is absent, unreadable, unparsable,
+    or carries no usable ``version`` field — every fail-closed skip path.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, None, f"package.json absent: {path}"
+    except OSError as exc:
+        return None, None, f"cannot read package.json {path} ({exc})"
+    try:
+        doc = json.loads(text)
+    except ValueError as exc:
+        return None, None, f"cannot parse package.json {path} ({exc})"
+    version = doc.get("version") if isinstance(doc, dict) else None
+    if not isinstance(version, str) or not version.strip():
+        return None, None, f"package.json {path} has no version field"
+    if _PKG_VERSION_LINE_RE.search(text) is None:
+        return None, None, f"package.json {path} has no version line to rewrite"
+    return text, version, None
+
+
+def _rewrite_package_version(text: str, new_version: str) -> str | None:
+    """``text`` with the first ``"version": "<old>"`` line set to ``new``.
+
+    A surgical line rewrite (not a JSON re-dump) so the file's formatting
+    is preserved byte-for-byte outside the version value.
+    """
+    match = _PKG_VERSION_LINE_RE.search(text)
+    if match is None:
+        return None
+    return text[: match.start(2)] + new_version + text[match.end(2) :]
+
+
 def bump(
     to: str,
     *,
@@ -616,6 +743,7 @@ def bump(
     old_audit: str | None = None,
     skip_audit: bool = False,
     semver_check: bool = False,
+    bump_commit: bool = False,
     auto_detect_upstream_fix: bool = False,
     open_pr: bool = False,
     json_mode: bool = False,
@@ -636,6 +764,8 @@ def bump(
     verdict: str | None = None
     report_path: Path | None = None
     sha: str | None = None
+
+    version_bump_note: str | None = None
 
     def finish(code: int) -> int:
         if json_mode and sha is not None:
@@ -820,6 +950,11 @@ def bump(
         if skip_audit:
             verdict = "audit-skipped"
             print("[dry-run] audit skipped (--skip-audit; no verdict)")
+            if bump_commit:
+                print(
+                    "[dry-run] pin-bump WARNING: --bump-commit skipped "
+                    "(audit verdict is 'audit-skipped', not 'improved')"
+                )
         else:
             try:
                 dry_node = run(["node", "--version"], cwd=root)
@@ -955,6 +1090,40 @@ def bump(
                         "[dry-run] WARNING: a fix requires a major version "
                         "bump (outside the declared range)"
                     )
+            if bump_commit:
+                dry_bump_reason = _bump_commit_gate(
+                    semver_check=semver_check,
+                    verdict=verdict,
+                    rows=dry_rows if semver_check else [],
+                )
+                if dry_bump_reason is not None:
+                    print(
+                        "[dry-run] pin-bump WARNING: --bump-commit skipped "
+                        f"({dry_bump_reason})"
+                    )
+                else:
+                    dry_pkg_path = redteam_dir / "package.json"
+                    _, dry_current, dry_error = _read_package_text(dry_pkg_path)
+                    if dry_error is not None:
+                        print(
+                            "[dry-run] pin-bump WARNING: --bump-commit skipped "
+                            f"({dry_error})"
+                        )
+                    else:
+                        assert dry_current is not None
+                        dry_new = _bump_package_version(
+                            dry_current, _bump_level_for_rows(dry_rows)
+                        )
+                        if dry_new is None:
+                            print(
+                                "[dry-run] pin-bump WARNING: --bump-commit skipped "
+                                f"(unparseable version {dry_current!r} in {dry_pkg_path})"
+                            )
+                        else:
+                            print(
+                                f"[dry-run] would bump version {dry_current} -> "
+                                f"{dry_new} ({dry_pkg_path}; no files changed)"
+                            )
             if not _confirm_step(
                 "delta verdict",
                 f"audit delta verdict: {verdict} (report.md not written)",
@@ -1056,6 +1225,11 @@ def bump(
     if skip_audit:
         verdict = "audit-skipped"
         print("pin-bump OK: provenance green, audit-skipped (--skip-audit)")
+        if bump_commit:
+            print(
+                "pin-bump WARNING: --bump-commit skipped "
+                "(audit verdict is 'audit-skipped', not 'improved')"
+            )
     else:
         try:
             node = run(["node", "--version"], cwd=root)
@@ -1175,6 +1349,49 @@ def bump(
             return failed("operator declined at delta verdict; bump aborted")
         if verdict == "regressed":
             return finish(EXIT_BUMP_FAILED)
+    # Step 5b (opt-in): --bump-commit rolls the target package's own
+    # version forward when the fix is proven semver-compatible. Any
+    # unmet precondition skips the bump with a warning and leaves the
+    # exit code untouched (fail-closed).
+    if bump_commit:
+        bump_reason = _bump_commit_gate(
+            semver_check=semver_check, verdict=verdict, rows=semver_rows
+        )
+        if bump_reason is not None:
+            print(f"pin-bump WARNING: --bump-commit skipped ({bump_reason})")
+        else:
+            bump_pkg_path = redteam_dir / "package.json"
+            bump_text, bump_current, bump_error = _read_package_text(bump_pkg_path)
+            if bump_error is not None:
+                print(f"pin-bump WARNING: --bump-commit skipped ({bump_error})")
+            else:
+                assert bump_text is not None and bump_current is not None
+                bump_level = _bump_level_for_rows(semver_rows)
+                bump_new = _bump_package_version(bump_current, bump_level)
+                bump_rewritten = (
+                    _rewrite_package_version(bump_text, bump_new)
+                    if bump_new is not None
+                    else None
+                )
+                if bump_new is None or bump_rewritten is None:
+                    print(
+                        "pin-bump WARNING: --bump-commit skipped "
+                        f"(unparseable version {bump_current!r} in {bump_pkg_path})"
+                    )
+                else:
+                    try:
+                        bump_pkg_path.write_text(bump_rewritten, encoding="utf-8")
+                    except OSError as exc:
+                        print(
+                            "pin-bump WARNING: --bump-commit skipped "
+                            f"(cannot write {bump_pkg_path}: {exc})"
+                        )
+                    else:
+                        version_bump_note = f"{bump_current} -> {bump_new}"
+                        print(
+                            f"pin-bump version bump ({bump_level}): "
+                            f"{bump_current} -> {bump_new} ({bump_pkg_path})"
+                        )
 
     # Step 6: open the PR (only after local green).
     if open_pr:
@@ -1210,6 +1427,8 @@ def bump(
             f"Redteam pin bump {old_pin or 'unknown'} -> {sha}.\n\n"
             f"Provenance: check, pack-diff, surface green.\n{audit_line}"
         )
+        if version_bump_note is not None:
+            body += f"\nVersion bump: {version_bump_note} (redteam/package.json)."
         committed = run(["git", "commit", "-m", title, "-m", body], cwd=root)
         if committed.returncode != 0:
             return failed(f"git commit failed: {committed.stderr.strip()}")
@@ -1237,6 +1456,7 @@ def main(argv: list[str] | None = None) -> int:
         old_audit=args.old_audit,
         skip_audit=args.skip_audit,
         semver_check=args.semver_check,
+        bump_commit=args.bump_commit,
         auto_detect_upstream_fix=args.auto_detect_upstream_fix,
         open_pr=args.open_pr,
         json_mode=args.json_mode,

@@ -343,6 +343,135 @@ def check_roe_lifecycle_all(
     }
 
 
+#: Renewal-reminder thresholds (G11): days of window left at or below
+#: which a ``renewal_reminders`` entry fires. Ordered widest first so a
+#: single call returns every newly crossed threshold in the same order.
+RENEWAL_THRESHOLDS_DAYS = (14.0, 7.0, 3.0, 1.0)
+
+#: In-memory per-threshold fire record for :func:`renewal_reminders`,
+#: keyed ``(artifact_id, threshold-label)``. Each threshold fires once
+#: per artifact id for the life of the process (mirrors the heartbeat
+#: ``job["last_fired"]`` dedupe shape, without persisting to the store).
+_RENEWAL_FIRED: set[tuple[str, str]] = set()
+
+
+def clear_renewal_reminders() -> None:
+    """Reset the in-memory renewal-reminder fire record (tests/harness)."""
+    _RENEWAL_FIRED.clear()
+
+
+def _renewal_now(now: Any) -> datetime | None:
+    """Normalize ``now`` to aware UTC; ``None`` reads the wall clock."""
+    if now is None:
+        return datetime.now(UTC)
+    if isinstance(now, datetime):
+        return _as_utc(now)
+    if isinstance(now, (int, float)) and not isinstance(now, bool):
+        try:
+            return datetime.fromtimestamp(now, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(now, str):
+        parsed = _parse_time(now)
+        return _as_utc(parsed) if parsed is not None else None
+    return None
+
+
+def _renewal_artifact_id(
+    artifact: Any, document: dict[str, Any], until_text: str
+) -> str:
+    """Stable dedupe id for a renewal artifact (never empty)."""
+    if isinstance(artifact, (str, Path)):
+        text = str(artifact).strip()
+        if text:
+            return text
+    for key in ("artifact_id", "id"):
+        candidate = document.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    operator = document.get("operator")
+    if isinstance(operator, str) and operator.strip():
+        return f"{operator.strip()}|{until_text}"
+    return until_text or "unknown-artifact"
+
+
+def renewal_reminders(artifact: Any, *, now: Any = None) -> list[dict[str, Any]]:
+    """Renewal reminders for a signed RoE artifact approaching expiry.
+
+    ``artifact`` is a parsed RoE document (dict) or a path to a RoE JSON
+    artifact file; ``now`` defaults to the wall clock (UTC). Returns one
+    reminder dict per newly crossed ``RENEWAL_THRESHOLDS_DAYS`` threshold
+    (``14d``/``7d``/``3d``/``1d`` at or below that many days of window
+    left). Each ``(artifact_id, threshold)`` fires once per process
+    lifetime (tracked in :data:`_RENEWAL_FIRED`); already-fired thresholds
+    are skipped. Fail-closed: a missing/malformed ``effective_until``
+    (or any unreadable artifact) returns ``[]`` and never raises.
+    Expired windows likewise return ``[]`` — the expiry watcher owns them.
+    """
+    try:
+        current = _renewal_now(now)
+        if current is None:
+            return []
+        if artifact is None:
+            return []
+        if isinstance(artifact, (str, Path)):
+            path_text = str(artifact).strip()
+            if not path_text:
+                return []
+            try:
+                raw = Path(path_text).read_text(encoding="utf-8")
+            except OSError:
+                return []
+            try:
+                loaded = json.loads(raw)
+            except ValueError:
+                return []
+            if not isinstance(loaded, dict):
+                return []
+            document = loaded
+        elif isinstance(artifact, dict):
+            document = artifact
+        else:
+            return []
+        until_text = document.get("effective_until")
+        end = _parse_time(until_text)
+        if end is None:
+            return []
+        until_label = (
+            until_text if isinstance(until_text, str) else str(end.isoformat())
+        )
+        days_remaining = (end - current).total_seconds() / 86400
+        if days_remaining < 0:
+            return []
+        artifact_id = _renewal_artifact_id(artifact, document, until_label)
+        reminders: list[dict[str, Any]] = []
+        for threshold in RENEWAL_THRESHOLDS_DAYS:
+            if days_remaining > threshold:
+                continue
+            label = f"{int(threshold)}d"
+            key = (artifact_id, label)
+            if key in _RENEWAL_FIRED:
+                continue
+            _RENEWAL_FIRED.add(key)
+            reminders.append(
+                {
+                    "artifact_id": artifact_id,
+                    "threshold": label,
+                    "threshold_days": threshold,
+                    "days_remaining": days_remaining,
+                    "effective_until": until_label,
+                    "detail": (
+                        f"RoE grant {artifact_id!r} expires in "
+                        f"{days_remaining:.1f}d (renewal threshold {label}; "
+                        f"effective_until {until_label}) — re-sign to renew"
+                    ),
+                }
+            )
+        return reminders
+    except Exception:
+        return []
+
+
 def _parse_now_override(text: str | None) -> datetime | None:
     """Parse the ``--now`` override, or ``None`` when it is unparseable."""
     if text is None:

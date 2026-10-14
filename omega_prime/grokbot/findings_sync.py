@@ -42,11 +42,22 @@ high→FF8C00, medium→FFD700, low→00BFFF); the dedupe hash rides in the
 card summary, and pushed rows are marked with a deterministic
 ``teams:<dedupe_hash>`` ref, so idempotency is identical to the other
 modes.
+Graph mode (``redteam.findings_sync.graph``) posts the same
+rows as Teams channel messages through the Microsoft Graph API on
+the same runner seam: one client-credentials token fetch
+(``login.microsoftonline.com``) then ``gh api`` POSTs to
+``graph.microsoft.com/v1.0/teams/{team}/channels/{channel}/messages``.
+Each message is a ``chatMessage`` whose attachment reuses the
+:func:`teams_message` Office 365 connector card structure; pushed rows
+are marked with a deterministic ``graph:<dedupe_hash>`` ref, so
+idempotency is identical to the other modes. A blank or missing
+``graph`` mapping means the feature is off (fail-closed, never crash).
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import random
 import shutil
@@ -83,7 +94,7 @@ DEFAULT_LABELS: dict[str, list[str]] = {
 UNKNOWN_SEVERITY_LABELS = ["redteam"]
 
 #: Supported tracker backends for the findings sync.
-TRACKERS = ("github", "linear", "slack", "teams")
+TRACKERS = ("github", "linear", "slack", "teams", "graph")
 
 #: Default tracker backend (the existing GitHub-issues mode, unchanged).
 DEFAULT_TRACKER = "github"
@@ -99,6 +110,26 @@ NO_SLACK_WEBHOOK_MESSAGE = "no slack webhook configured"
 #: Message used when tracker=teams but no webhook URL is configured
 #: (fail-closed, never guess).
 NO_TEAMS_WEBHOOK_MESSAGE = "no teams webhook configured"
+
+#: Message used when graph mode is selected but the ``graph`` mapping is
+#: blank or missing (fail-closed, never guess, never crash).
+NO_GRAPH_CONFIG_MESSAGE = "no graph config configured"
+
+#: OAuth2 scope for the Graph client-credentials token fetch.
+GRAPH_SCOPE = "https://graph.microsoft.com/.default"
+
+#: Token endpoint template for the Graph client-credentials flow.
+GRAPH_TOKEN_URL_TEMPLATE = (
+    "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+)
+
+#: Channel-messages endpoint template for Graph posts.
+GRAPH_MESSAGES_URL_TEMPLATE = (
+    "https://graph.microsoft.com/v1.0/teams/{team}/channels/{channel}/messages"
+)
+
+#: Required ``redteam.findings_sync.graph`` fields (all non-blank).
+GRAPH_FIELDS = ("tenant_id", "client_id", "client_secret", "team_id", "channel_id")
 
 #: Severity → Linear priority mapping (Linear API: 1=Urgent, 2=High,
 #: 3=Medium, 4=Low). Operator labels do not apply to Linear issues.
@@ -831,6 +862,249 @@ def sync_findings_teams(
     return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
 
 
+def _graph_token_url(tenant_id: str) -> str:
+    """Token endpoint for a tenant (client-credentials flow)."""
+    return GRAPH_TOKEN_URL_TEMPLATE.format(tenant=tenant_id)
+
+
+def _graph_messages_url(team_id: str, channel_id: str) -> str:
+    """Channel-messages endpoint for a team/channel pair."""
+    return GRAPH_MESSAGES_URL_TEMPLATE.format(team=team_id, channel=channel_id)
+
+
+def _graph_config_for_node(node: Mapping[str, Any]) -> dict[str, str]:
+    """Normalized ``graph`` mapping for a findings-sync node.
+
+    Always returns all :data:`GRAPH_FIELDS` keys (missing/non-string
+    values normalize to ``""``); blank/missing config therefore reads
+    as all-blank, which callers treat as feature-off/fail-closed.
+    """
+    raw = node.get("graph", {})
+    if not isinstance(raw, dict):
+        raw = {}
+    cfg: dict[str, str] = {}
+    for field in GRAPH_FIELDS:
+        value = raw.get(field, "")
+        cfg[field] = value.strip() if isinstance(value, str) else ""
+    return cfg
+
+
+def _graph_config_complete(cfg: Mapping[str, Any]) -> bool:
+    """True when every :data:`GRAPH_FIELDS` field is a non-blank string."""
+    return all(
+        isinstance(cfg.get(field), str) and bool(cfg.get(field, "").strip())
+        for field in GRAPH_FIELDS
+    )
+
+
+def _access_token_from_stdout(stdout: Any) -> str:
+    """Extract the OAuth2 access token from a token-endpoint stdout body.
+
+    Returns ``""`` when the body is not JSON with a non-blank string
+    ``access_token`` (the caller raises :class:`GhApiError`).
+    """
+    if isinstance(stdout, bytes):
+        try:
+            stdout = stdout.decode("utf-8", "replace")
+        except Exception:
+            return ""
+    if not isinstance(stdout, str):
+        return ""
+    try:
+        payload = json.loads(stdout)
+    except ValueError:
+        return ""
+    if isinstance(payload, dict):
+        token = payload.get("access_token", "")
+        return token if isinstance(token, str) and token.strip() else ""
+    return ""
+
+
+def graph_message(row: Mapping[str, Any], repo: str | None = None) -> dict[str, Any]:
+    """Graph ``chatMessage`` for one finding row.
+
+    The subject is :func:`issue_title`; the HTML body carries the fixed
+    fields only (never the raw gateway payload, threat T-79-11); and the
+    attachment reuses the :func:`teams_message` Office 365 connector
+    card structure verbatim, so the rich-card body matches the webhook
+    path. The dedupe hash rides in the HTML body (same idempotency
+    contract as the other modes).
+    """
+    card = teams_message(row, repo=repo)
+    title = issue_title(row)
+    digest = str(row.get("dedupe_hash", ""))
+    lines = [card.get("summary", "")]
+    for section in card.get("sections", []):
+        text = section.get("text", "") if isinstance(section, dict) else ""
+        if text:
+            lines.append(text)
+    content = "<br>".join(html.escape(line) for line in lines)
+    return {
+        "subject": title,
+        "body": {"contentType": "html", "content": content},
+        "attachments": [
+            {
+                "contentType": ("application/vnd.microsoft.teams.card.o365connector"),
+                "content": card,
+            }
+        ],
+    }
+
+
+def sync_findings_graph(
+    reports_dir: str | Path | None,
+    *,
+    tenant_id: str,
+    client_id: str,
+    client_secret: str,
+    team_id: str,
+    channel_id: str,
+    runner: GhRunner | None = None,
+    dry_run: bool = False,
+    repo: str | None = None,
+) -> dict[str, Any]:
+    """Post every not-yet-synced finding row to a Teams channel via Graph.
+
+    Same rows and idempotency marking as :func:`sync_findings` (rows
+    carrying ``issue_url`` are skipped; the dedupe hash rides in the
+    message body, so a second run pushes nothing); only the transport
+    differs — one OAuth2 client-credentials token fetch from
+    ``login.microsoftonline.com`` (scope
+    ``https://graph.microsoft.com/.default``), then one ``gh api``
+    ``chatMessage`` POST per row to
+    ``graph.microsoft.com/v1.0/teams/{team}/channels/{channel}/messages``.
+    Each message reuses the :func:`teams_message` card structure via
+    :func:`graph_message`. A pushed row is marked with a deterministic
+    ``graph:<dedupe_hash>`` ref. Failure semantics mirror
+    :func:`sync_findings`: earlier-in-run pushes persist, the failed row
+    stays unsynced, and a :class:`GhApiError` is raised. With zero pushes
+    (or ``dry_run``) the store file is byte-identical and the runner is
+    never called in dry-run mode (not even for the token fetch).
+
+    Blank credentials/team/channel raise :class:`ValueError`
+    (fail-closed, never guess). The client secret rides only in the
+    token-fetch ``-f`` argv fields (as webhook URLs do) — it is never
+    logged, never rendered, and never echoed into the introspection
+    payload.
+
+    Returns ``{"pushed": [...], "skipped": [...], "dry_run": bool}``
+    with the same entry shapes as :func:`sync_findings`.
+    """
+    for value in (tenant_id, client_id, client_secret, team_id, channel_id):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(NO_GRAPH_CONFIG_MESSAGE)
+    tenant_id = tenant_id.strip()
+    client_id = client_id.strip()
+    client_secret = client_secret.strip()
+    team_id = team_id.strip()
+    channel_id = channel_id.strip()
+    run = runner if runner is not None else _default_runner
+
+    rows = load_findings(reports_dir)
+    pushed: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    dirty = False
+
+    if dry_run:
+        for row in rows:
+            digest = str(row.get("dedupe_hash", ""))
+            if row.get("issue_url"):
+                skipped.append(digest)
+                continue
+            pushed.append({"dedupe_hash": digest, "issue_url": ""})
+        return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+
+    token_url = _graph_token_url(tenant_id)
+    token_argv = [
+        "gh",
+        "api",
+        token_url,
+        "--method",
+        "POST",
+        "-f",
+        f"client_id={client_id}",
+        "-f",
+        f"client_secret={client_secret}",
+        "-f",
+        f"scope={GRAPH_SCOPE}",
+        "-f",
+        "grant_type=client_credentials",
+    ]
+    token_payload: dict[str, Any] = {
+        "token_url": token_url,
+        "client_id": client_id,
+        "scope": GRAPH_SCOPE,
+        "grant_type": "client_credentials",
+    }
+    try:
+        token_completed = run(token_argv, token_payload)
+    except GhNotFoundError:
+        raise
+    except FindingsSyncError:
+        raise
+    except Exception as exc:
+        raise GhApiError(f"gh runner failed: {exc}") from exc
+    token_returncode = getattr(token_completed, "returncode", 1)
+    if token_returncode != 0:
+        stderr = getattr(token_completed, "stderr", "")
+        raise GhApiError(
+            f"gh api token endpoint exited {token_returncode}: {stderr}",
+            returncode=token_returncode if isinstance(token_returncode, int) else None,
+        )
+    token = _access_token_from_stdout(getattr(token_completed, "stdout", ""))
+    if not token:
+        raise GhApiError("graph token response missing access_token")
+
+    messages_url = _graph_messages_url(team_id, channel_id)
+    for row in rows:
+        digest = str(row.get("dedupe_hash", ""))
+        if row.get("issue_url"):
+            skipped.append(digest)
+            continue
+        message = graph_message(row, repo=repo)
+        body_json = json.dumps(message["body"])
+        attachments_json = json.dumps(message["attachments"])
+        payload: dict[str, Any] = {
+            "team_id": team_id,
+            "channel_id": channel_id,
+            "subject": message["subject"],
+            "body": message["body"],
+            "attachments": message["attachments"],
+        }
+        argv = [
+            "gh",
+            "api",
+            messages_url,
+            "--method",
+            "POST",
+            "-H",
+            f"Authorization: Bearer {token}",
+            "-f",
+            f"subject={message['subject']}",
+            "-f",
+            f"body={body_json}",
+            "-f",
+            f"attachments={attachments_json}",
+        ]
+
+        try:
+            _run_with_webhook_retry(run, argv, payload)
+        except FindingsSyncError:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise
+        except Exception as exc:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise GhApiError(f"gh runner failed: {exc}") from exc
+        row["issue_url"] = f"graph:{digest}"
+        row["synced_at"] = utc_now_rfc3339()
+        dirty = True
+        pushed.append({"dedupe_hash": digest, "issue_url": row["issue_url"]})
+
+    if dirty and not dry_run:
+        _write_rows_atomic(findings_path(reports_dir), rows)
+    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+
+
 def _persist_if_dirty(
     directory: str | Path | None, dirty: bool, rows: list[dict[str, Any]]
 ) -> None:
@@ -873,11 +1147,13 @@ def tick(
 
     Reads ``redteam.findings_sync`` (``enabled``, ``tracker``, ``repo``,
     ``labels``, ``linear_team_id``, ``slack_webhook_url``,
-    ``teams_webhook_url``) from ``config``
+    ``teams_webhook_url``, ``graph``) from ``config``
     (loads via ``load_config()`` when omitted). Disabled, repo-less,
-    team-less, webhook-less, or unknown-tracker results are structured
-    dicts — never exceptions, never a new cron kind. The sync itself
-    stays plain functions; schedulers call this ``tick`` following the
+    team-less, webhook-less, graph-less, or unknown-tracker results are
+    structured dicts — never exceptions, never a new cron kind. The
+    graph branch runs when ``tracker`` is ``"graph"`` or when the
+    ``graph`` mapping is complete; the sync itself stays plain
+    functions; schedulers call this ``tick`` following the
     ``tick``/``schedule`` precedent.
     """
     if config is None:
@@ -888,6 +1164,25 @@ def tick(
     if node.get("enabled") is not True:
         return {"pushed": [], "skipped": [], "dry_run": dry_run, "disabled": True}
     tracker = _tracker_for_node(node)
+    graph_cfg = _graph_config_for_node(node)
+    if tracker == "graph" or _graph_config_complete(graph_cfg):
+        if not _graph_config_complete(graph_cfg):
+            return _tracker_error(NO_GRAPH_CONFIG_MESSAGE, dry_run)
+        raw_repo = node.get("repo", "")
+        repo = raw_repo.strip() if isinstance(raw_repo, str) else ""
+        result = sync_findings_graph(
+            reports_directory,
+            tenant_id=graph_cfg["tenant_id"],
+            client_id=graph_cfg["client_id"],
+            client_secret=graph_cfg["client_secret"],
+            team_id=graph_cfg["team_id"],
+            channel_id=graph_cfg["channel_id"],
+            runner=runner,
+            dry_run=dry_run,
+            repo=repo or None,
+        )
+        result["disabled"] = False
+        return result
     if tracker == "linear":
         team_id = node.get("linear_team_id", "")
         if not isinstance(team_id, str) or not team_id.strip():
@@ -1064,8 +1359,58 @@ def _main_linear(directory: str | Path | None, team_id: str, dry_run: bool) -> i
     return 0
 
 
+def _main_graph(
+    directory: str | Path | None,
+    graph_cfg: Mapping[str, Any],
+    dry_run: bool,
+    repo: str | None = None,
+) -> int:
+    """Run the Graph branch of the CLI (dry-run aware)."""
+    kwargs: dict[str, Any] = {
+        "tenant_id": graph_cfg.get("tenant_id", ""),
+        "client_id": graph_cfg.get("client_id", ""),
+        "client_secret": graph_cfg.get("client_secret", ""),
+        "team_id": graph_cfg.get("team_id", ""),
+        "channel_id": graph_cfg.get("channel_id", ""),
+    }
+    if dry_run:
+        try:
+            result = sync_findings_graph(
+                directory if directory is not None else reports_dir(),
+                dry_run=True,
+                repo=repo,
+                **kwargs,
+            )
+        except FindingsSyncError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for entry in result["pushed"]:
+            print(f"would push {entry['dedupe_hash']}")
+        for digest in result["skipped"]:
+            print(f"skip (already synced) {digest}")
+        return 0
+
+    try:
+        result = sync_findings_graph(
+            directory if directory is not None else reports_dir(),
+            repo=repo,
+            **kwargs,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except FindingsSyncError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for entry in result["pushed"]:
+        print(f"pushed {entry['dedupe_hash']} -> {entry['issue_url']}")
+    for digest in result["skipped"]:
+        print(f"skip (already synced) {digest}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``findings_sync [--tracker github|linear|slack|teams] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
+    """CLI: ``findings_sync [--tracker github|linear|slack|teams|graph] [--mode graph] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
     parser = argparse.ArgumentParser(
         prog="findings_sync",
         description="Push unsynced red-team findings to tracker issues (one-way).",
@@ -1073,7 +1418,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tracker",
         default="",
-        help="Tracker backend: github (default), linear, slack, or teams; blank means config",
+        help="Tracker backend: github (default), linear, slack, teams, or graph; blank means config",
+    )
+    parser.add_argument(
+        "--mode",
+        default="",
+        help="Mode alias for --tracker (graph selects the Microsoft Graph API sender); blank means config",
     )
     parser.add_argument("--repo", default="", help="Target repo OWNER/NAME")
     parser.add_argument("--linear-team-id", default="", help="Linear team ID override")
@@ -1097,8 +1447,23 @@ def main(argv: list[str] | None = None) -> int:
     if node.get("enabled") is not True:
         print(DISABLED_MESSAGE)
         return 0
-    tracker = args.tracker.strip().lower() or _tracker_for_node(node)
+    tracker = (
+        args.tracker.strip().lower()
+        or args.mode.strip().lower()
+        or _tracker_for_node(node)
+    )
     directory: str | Path | None = args.reports_dir or None
+    graph_cfg = _graph_config_for_node(node)
+    if tracker == "graph" or _graph_config_complete(graph_cfg):
+        if not _graph_config_complete(graph_cfg):
+            print(f"error: {NO_GRAPH_CONFIG_MESSAGE}", file=sys.stderr)
+            return 2
+        graph_repo = args.repo.strip() or (
+            node.get("repo", "").strip()
+            if isinstance(node.get("repo", ""), str)
+            else ""
+        )
+        return _main_graph(directory, graph_cfg, args.dry_run, graph_repo or None)
     if tracker == "linear":
         team_id = args.linear_team_id.strip() or (
             node.get("linear_team_id", "").strip()
@@ -1190,8 +1555,13 @@ __all__ = [
     "DEFAULT_LABELS",
     "DEFAULT_TRACKER",
     "DISABLED_MESSAGE",
+    "GRAPH_FIELDS",
+    "GRAPH_MESSAGES_URL_TEMPLATE",
+    "GRAPH_SCOPE",
+    "GRAPH_TOKEN_URL_TEMPLATE",
     "LINEAR_ISSUE_MUTATION",
     "LINEAR_PRIORITIES",
+    "NO_GRAPH_CONFIG_MESSAGE",
     "NO_LINEAR_TEAM_MESSAGE",
     "NO_REPO_MESSAGE",
     "NO_SLACK_WEBHOOK_MESSAGE",
@@ -1209,6 +1579,7 @@ __all__ = [
     "GhApiError",
     "GhNotFoundError",
     "GhRunner",
+    "graph_message",
     "issue_body",
     "issue_title",
     "labels_for_severity",
@@ -1217,6 +1588,7 @@ __all__ = [
     "slack_color",
     "slack_message",
     "sync_findings",
+    "sync_findings_graph",
     "sync_findings_linear",
     "sync_findings_slack",
     "sync_findings_teams",
