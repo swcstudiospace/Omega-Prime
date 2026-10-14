@@ -652,6 +652,49 @@ def test_digest_composes_with_export_jsonl(tmp_path):
     assert "cannot write --export-jsonl export" in bad.stderr
 
 
+def test_digest_export_jsonl_missing_reports_dir_is_empty_history(tmp_path):
+    """Greptile #7: a fresh install (no reports dir) digests and exports, exit 0."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    missing = tmp_path / "absent"
+    out_missing = tmp_path / "missing.jsonl"
+    out_empty = tmp_path / "empty.jsonl"
+
+    proc = _digest(missing, "--export-jsonl", str(out_missing))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines() == [
+        DIGEST_ZERO,
+        "coverage covered=0/0 gappy=0 unexercised=0 risk=0.0",
+        "worst=none",
+    ]
+    reference = _digest(empty, "--export-jsonl", str(out_empty))
+    assert reference.returncode == 0, reference.stderr
+    assert proc.stdout == reference.stdout
+    assert out_missing.read_bytes() == out_empty.read_bytes()
+    rows = [
+        json.loads(line)
+        for line in out_missing.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["class"] for row in rows] == sorted(SCHEMA_VOCAB)
+    for row in rows:
+        assert row["schema"] == "coverage/1"
+        assert row["runs"] == 0 and row["wins"] == 0 and row["earned"] == 0
+        assert row["pass_pct"] == 0.0
+    assert not missing.exists()
+
+
+def test_digest_export_jsonl_corrupt_reports_dir_stays_an_error(tmp_path):
+    """Greptile #7: only a MISSING directory is an empty history."""
+    not_a_dir = tmp_path / "reports"
+    not_a_dir.write_text("file, not a directory\n", encoding="utf-8")
+    out = tmp_path / "coverage.jsonl"
+
+    proc = _digest(not_a_dir, "--export-jsonl", str(out))
+    assert proc.returncode == 1
+    assert "not a directory" in proc.stderr
+    assert not out.exists()
+
+
 def test_build_digest_pure_contract(tmp_path):
     module = _digest_module()
     fixture = tmp_path / "reports"

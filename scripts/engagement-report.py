@@ -1946,9 +1946,10 @@ def coverage_jsonl_rows(
     in fixed order ``schema, class, cases, runs, wins, pass_pct, gaps,
     verdict, tier, weight, earned, possible`` with ``pass_pct`` rounded
     to one decimal and the tier fields taken from the risk breakdown.
-    Raises :class:`ReportError` on unreadable history.
+    A missing ``reports_dir`` is an empty history (a fresh install); a
+    corrupt or unreadable one raises :class:`ReportError`.
     """
-    window = _collect_window(reports_dir, since_text)
+    window = _collect_window(reports_dir, since_text, allow_missing=True)
     runs = window["runs"]
     assert isinstance(runs, int)
     coverage = coverage_rows(
@@ -1994,8 +1995,29 @@ def render_jsonl(rows: Sequence[dict[str, object]]) -> str:
 
 
 def _write_jsonl_stream(text: str, jsonl_path: Path) -> None:
-    """Write ``text`` straight into ``jsonl_path`` (stream semantics)."""
-    with open(jsonl_path, "w", encoding="utf-8", newline="") as handle:
+    """Write ``text`` into the stream at ``jsonl_path`` (stream semantics).
+
+    The target is opened ``O_WRONLY`` with neither ``O_CREAT`` nor
+    ``O_TRUNC`` (symlinks are followed, so ``/dev/stdout`` works) and the
+    OPENED object is inspected with ``os.fstat``: anything but a FIFO,
+    character device or socket is refused before a byte is written, so a
+    path swapped to a regular file after the caller's checks is never
+    truncated or modified. The write goes through that same descriptor.
+    """
+    flags = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOCTTY", 0)
+    fd = os.open(jsonl_path, flags)
+    try:
+        opened_mode = os.fstat(fd).st_mode
+        if not (
+            stat.S_ISFIFO(opened_mode)
+            or stat.S_ISCHR(opened_mode)
+            or stat.S_ISSOCK(opened_mode)
+        ):
+            raise OSError("refusing to write: target is not a stream")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
         handle.write(text)
         handle.flush()
 
@@ -3196,7 +3218,9 @@ def render_report(
     return "\n".join(lines)
 
 
-def _collect_window(reports_dir: Path, since_text: str | None) -> dict[str, object]:
+def _collect_window(
+    reports_dir: Path, since_text: str | None, *, allow_missing: bool = False
+) -> dict[str, object]:
     """Load history and compute the shared report window.
 
     Read-only projection used by both :func:`build_report` and
@@ -3204,11 +3228,14 @@ def _collect_window(reports_dir: Path, since_text: str | None) -> dict[str, obje
     count, transition counts, loaded cases, run observations,
     detection gaps, per-technique rows, the current findings map, and
     the in-window severity-timeline rows.
+    With ``allow_missing`` a nonexistent directory is treated exactly
+    like an empty one (every loader maps an absent file to no history).
     Raises :class:`ReportError` on unreadable inputs.
     """
     if not reports_dir.exists():
-        raise ReportError(f"error: reports dir does not exist: {reports_dir}")
-    if not reports_dir.is_dir():
+        if not allow_missing:
+            raise ReportError(f"error: reports dir does not exist: {reports_dir}")
+    elif not reports_dir.is_dir():
         raise ReportError(f"error: reports dir is not a directory: {reports_dir}")
     transitions, transitions_newest = load_transitions(
         reports_dir / TRANSITIONS_FILENAME

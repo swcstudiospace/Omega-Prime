@@ -5663,7 +5663,7 @@ def test_coverage_jsonl_pure_functions(tmp_path, monkeypatch):
         "window_start": stamp,
         "window_end": stamp,
     }
-    monkeypatch.setattr(module, "_collect_window", lambda *_args: window)
+    monkeypatch.setattr(module, "_collect_window", lambda *_args, **_kw: window)
 
     rows = module.coverage_jsonl_rows(fixture, T0)
     assert [row["class"] for row in rows] == [
@@ -5847,6 +5847,59 @@ def test_export_jsonl_char_device_leaf_stays_a_device(tmp_path):
     assert module.write_jsonl_report([{"class": "x"}], node) == 0
     assert stat.S_ISCHR(os.lstat(node).st_mode)
     assert [p.name for p in tmp_path.iterdir()] == ["null.jsonl"]
+
+
+def test_export_jsonl_stream_swapped_to_regular_file_symlink_is_not_truncated(
+    tmp_path, monkeypatch, capsys
+):
+    """Greptile #5: a FIFO swapped for a symlink to a regular file after the
+    lstat/stat checks must not truncate the victim (fstat of the OPENED object)."""
+    module = _report_module()
+    fifo = tmp_path / "pipe.jsonl"
+    os.mkfifo(fifo)
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"PRECIOUS-BYTES")
+    real_stream = module._write_jsonl_stream
+
+    def swap_then_write(text: str, jsonl_path: Path) -> None:
+        os.unlink(jsonl_path)
+        jsonl_path.symlink_to(victim)
+        real_stream(text, jsonl_path)
+
+    monkeypatch.setattr(module, "_write_jsonl_stream", swap_then_write)
+    assert module.write_jsonl_report([{"class": "x"}], fifo) == 1
+    err = capsys.readouterr().err
+    assert "error: cannot write --export-jsonl export" in err
+    assert "not a stream" in err
+    assert victim.read_bytes() == b"PRECIOUS-BYTES"
+
+
+def test_export_jsonl_stream_swapped_to_regular_file_is_not_modified(
+    tmp_path, monkeypatch
+):
+    """Greptile #5: a FIFO replaced by a plain regular file is never written."""
+    module = _report_module()
+    fifo = tmp_path / "pipe.jsonl"
+    os.mkfifo(fifo)
+    real_stream = module._write_jsonl_stream
+
+    def swap_then_write(text: str, jsonl_path: Path) -> None:
+        os.unlink(jsonl_path)
+        jsonl_path.write_bytes(b"PRECIOUS-BYTES")
+        real_stream(text, jsonl_path)
+
+    monkeypatch.setattr(module, "_write_jsonl_stream", swap_then_write)
+    assert module.write_jsonl_report([{"class": "x"}], fifo) == 1
+    assert fifo.read_bytes() == b"PRECIOUS-BYTES"
+
+
+def test_export_jsonl_stream_open_never_creates_the_target(tmp_path):
+    """Greptile #5: the stream path has no O_CREAT, so a vanished leaf fails."""
+    module = _report_module()
+    gone = tmp_path / "gone.jsonl"
+    with pytest.raises(FileNotFoundError):
+        module._write_jsonl_stream("x\n", gone)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_export_jsonl_hostile_class_round_trips_as_one_line():
