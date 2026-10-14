@@ -1356,6 +1356,7 @@ MultiTrendLeg = tuple[str, int, int, int, int, int, float]
 
 def collect_multi_report_entries(
     directory: Path,
+    flag: str = "--compare-multi",
 ) -> tuple[list[tuple[MultiTrendLeg, datetime | None]], list[str]]:
     """Trend legs for every report ``*.md`` file in ``directory``.
 
@@ -1368,18 +1369,20 @@ def collect_multi_report_entries(
     (:func:`parse_previous_metrics`, :func:`parse_previous_coverage`,
     :func:`parse_previous_snapshot`) with the risk score recomputed
     from the parsed coverage. Deterministic; fail closed when
-    ``directory`` is missing or not a directory.
+    ``directory`` is missing or not a directory (``flag`` names the
+    option in the error text; ``--spark-history`` reuses this
+    collector for the same ordering semantics).
     """
     if not directory.is_dir():
         raise ReportError(
-            f"error: cannot read --compare-multi directory {directory} "
+            f"error: cannot read {flag} directory {directory} "
             "(missing or not a directory)"
         )
     try:
         names = sorted(path.name for path in directory.glob("*.md"))
     except OSError as exc:
         raise ReportError(
-            f"error: cannot read --compare-multi directory {directory} ({exc})"
+            f"error: cannot read {flag} directory {directory} ({exc})"
         ) from exc
     legs: list[tuple[MultiTrendLeg, datetime | None]] = []
     skipped: list[str] = []
@@ -1467,6 +1470,179 @@ def render_multi_report_trend(
     return lines
 
 
+#: One spark-history row: ``(label, runs, pass_pct, risk_score)``. History
+#: rows reuse the multi-report trend legs; the current report appends its
+#: own row last (Q10).
+SparkHistoryRow = tuple[str, int, int, float]
+
+
+def spark_history_rows(
+    legs: list[tuple[MultiTrendLeg, datetime | None]],
+    current_label: str,
+    current_leg: tuple[int, int, int, int, int, float],
+) -> list[SparkHistoryRow]:
+    """History rows plus the current report last (``--spark-history``, Q10).
+
+    ``legs`` are :func:`collect_multi_report_entries` entries (already
+    oldest-to-newest); ``current_leg`` is a :func:`_delta_leg_values`
+    tuple for the report being rendered. Each row keeps ``(label, runs,
+    pass_pct, risk_score)``. Deterministic.
+    """
+    rows: list[SparkHistoryRow] = [
+        (leg[0], leg[1], leg[2], leg[6]) for leg, _stamp in legs
+    ]
+    rows.append((current_label, current_leg[0], current_leg[1], current_leg[5]))
+    return rows
+
+
+def render_spark_history(
+    *,
+    source_label: str,
+    legs: list[tuple[MultiTrendLeg, datetime | None]],
+    skipped: list[str],
+    current_label: str,
+    current_leg: tuple[int, int, int, int, int, float],
+) -> list[str]:
+    """Inline run-history table (``--spark-history``, Q10).
+
+    One row per report ``*.md`` in the history directory (ordered by the
+    embedded ``generated-at`` timestamp via
+    :func:`collect_multi_report_entries`, like ``--compare-multi``) with
+    the current report appended as the last row. Columns are the report
+    label (``when``), runs, pass %, and risk score; each pass/risk cell
+    carries its unicode trend glyph (``↑``/``↓``/``→`` from
+    :func:`_trend_arrow`) against the prior row (``→`` for the first
+    row). Unreadable files are listed as skipped notes. Deterministic.
+    """
+    rows = spark_history_rows(legs, current_label, current_leg)
+    lines = [
+        "## Run history",
+        "",
+        f"- source: {source_label} ({len(legs)} reports)",
+    ]
+    for name in skipped:
+        lines.append(f"- skipped: {name} (unreadable)")
+    lines += [
+        "",
+        "| when | runs | pass % | risk score |",
+        "| --- | --- | --- | --- |",
+    ]
+    previous: SparkHistoryRow | None = None
+    for label, runs, pass_pct, risk_score in rows:
+        if previous is None:
+            pass_glyph = "→"
+            risk_glyph = "→"
+        else:
+            pass_glyph = _trend_arrow(float(pass_pct), float(previous[2]))
+            risk_glyph = _trend_arrow(risk_score, previous[3])
+        lines.append(
+            f"| {label} | {runs} | {pass_pct}% ({pass_glyph}) | "
+            f"{risk_score:.1f}% ({risk_glyph}) |"
+        )
+        previous = (label, runs, pass_pct, risk_score)
+    return lines
+
+
+#: Tracker backends for the grant-coverage matrix (``--grant-matrix``,
+#: Q11), in the canonical findings-sync order (mirrors
+#: ``omega_prime.grokbot.findings_sync.TRACKERS``; this script stays
+#: stdlib-only so the tuple is repeated here, not imported).
+GRANT_TRACKERS = (
+    "github",
+    "linear",
+    "slack",
+    "teams",
+    "graph",
+    "pagerduty",
+    "opsgenie",
+    "jira",
+    "webhook",
+)
+
+
+def load_grant_matrix(
+    artifact_path: Path,
+) -> tuple[str, set[str] | None, str | None]:
+    """RoE grant coverage for ``--grant-matrix`` (Q11).
+
+    Returns ``(artifact_id, covered, error)`` where ``covered`` is the
+    set of tracker names the artifact covers (``None`` means all
+    trackers: a missing/empty/non-list ``covers`` key, mirroring
+    ``roe_lifecycle.grant_trackers``) and ``error`` is a human-readable
+    reason when the artifact is unreadable or invalid (fail-soft: the
+    caller omits the table and renders the reason as a note instead of
+    exiting nonzero). ``artifact_id`` prefers the document's
+    ``artifact_id``/``id`` keys, then the file name, then
+    ``"unknown-artifact"``. Never raises.
+    """
+    try:
+        raw = artifact_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return (
+            artifact_path.name,
+            None,
+            f"cannot read --grant-matrix artifact {artifact_path} ({exc})",
+        )
+    try:
+        document = json.loads(raw)
+    except ValueError as exc:
+        return (
+            artifact_path.name,
+            None,
+            f"cannot parse --grant-matrix artifact {artifact_path} ({exc})",
+        )
+    if not isinstance(document, dict):
+        return (
+            artifact_path.name,
+            None,
+            f"invalid --grant-matrix artifact {artifact_path} (not a JSON object)",
+        )
+    artifact_id = "unknown-artifact"
+    for key in ("artifact_id", "id"):
+        candidate = document.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            artifact_id = candidate.strip()
+            break
+    else:
+        if artifact_path.name.strip():
+            artifact_id = artifact_path.name.strip()
+    covers = document.get("covers")
+    if covers is None:
+        return (artifact_id, None, None)
+    if not isinstance(covers, (list, tuple)):
+        return (artifact_id, None, None)
+    allowed = {str(name).strip().lower() for name in covers if isinstance(name, str)}
+    allowed.discard("")
+    return (artifact_id, allowed or None, None)
+
+
+def render_grant_matrix(
+    *,
+    artifact_id: str,
+    artifact_label: str,
+    covered: set[str] | None,
+) -> list[str]:
+    """Grant-coverage table lines (``--grant-matrix``, Q11).
+
+    One row per :data:`GRANT_TRACKERS` tracker with a ``yes``/``no``
+    ``Covered`` cell; ``covered=None`` (missing/empty ``covers``) marks
+    every tracker covered. The artifact id names the section header.
+    Deterministic.
+    """
+    lines = [
+        f"## Grant coverage: {artifact_id}",
+        "",
+        f"- source: {artifact_label}",
+        "",
+        "| tracker | Covered |",
+        "| --- | --- |",
+    ]
+    for tracker in GRANT_TRACKERS:
+        cell = "yes" if covered is None or tracker in covered else "no"
+        lines.append(f"| {tracker} | {cell} |")
+    return lines
+
+
 def render_md_fragment(
     *,
     coverage: list[tuple[str, int, int, int, float, int, str]],
@@ -1538,6 +1714,24 @@ def weighted_gaps(
     return scored
 
 
+def worst_classes(
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+    count: int,
+) -> list[tuple[str, int]]:
+    """Top-``count`` classes by weighted gap points (``--worst``, Q12).
+
+    Reuses :func:`weighted_gaps` ordering (descending points, name
+    ascending); only classes with points above zero are returned, so the
+    result may be shorter than ``count`` (or empty when fully covered).
+    A non-positive ``count`` yields ``[]``. Deterministic.
+    """
+    if count <= 0:
+        return []
+    return [(name, points) for name, points in weighted_gaps(coverage) if points > 0][
+        :count
+    ]
+
+
 def render_exec_summary(
     *,
     runs: int,
@@ -1547,6 +1741,7 @@ def render_exec_summary(
     rescinded_count: int,
     previous_runs: int | None = None,
     previous_pass: int | None = None,
+    worst_n: int | None = None,
 ) -> list[str]:
     """Executive-summary lines for ``--exec-summary`` (K10).
 
@@ -1554,7 +1749,9 @@ def render_exec_summary(
     runs, pass rate vs previous, risk-weighted score, top risk classes
     by weighted gaps, and the findings trend arrow. ``previous_*`` are
     ``None`` when no baseline report exists (the pass-rate bullet then
-    notes ``no baseline`` instead of a delta).
+    notes ``no baseline`` instead of a delta). ``worst_n`` (``--worst``,
+    Q12) appends a ``Worst classes by weighted gaps:`` bullet with the
+    top-``worst_n`` classes; ``None`` (flag absent) or ``0`` omits it.
     """
     current_pass = _summary_pct(pass_rows)
     score, earned, possible, _breakdown = risk_weighted_score(coverage)
@@ -1577,7 +1774,7 @@ def render_exec_summary(
     else:
         risk_bullet = "- top risk classes: none (all classes fully covered)"
     net = new_count - rescinded_count
-    return [
+    lines = [
         "## Executive summary",
         "",
         f"- runs in window: {runs}",
@@ -1587,6 +1784,23 @@ def render_exec_summary(
         f"- findings: +{new_count} new / -{rescinded_count} rescinded "
         f"({_comparison_arrow(net)})",
     ]
+    if worst_n is not None and worst_n > 0:
+        lines.append(render_worst_bullet(coverage, worst_n))
+    return lines
+
+
+def render_worst_bullet(
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+    count: int,
+) -> str:
+    """``Worst classes by weighted gaps:`` bullet line (``--worst``, Q12)."""
+    ranked = worst_classes(coverage, count)
+    if ranked:
+        detail = ", ".join(
+            f"{name} ({points} weighted points)" for name, points in ranked
+        )
+        return f"- Worst classes by weighted gaps: {detail}"
+    return "- Worst classes by weighted gaps: none (all classes fully covered)"
 
 
 def render_email_block(
@@ -2665,6 +2879,8 @@ def render_report(
     side_by_side: list[str] | None = None,
     three_way: list[str] | None = None,
     multi_trend: list[str] | None = None,
+    spark_history: list[str] | None = None,
+    grant_matrix: list[str] | None = None,
     exec_summary: list[str] | None = None,
     email_block: list[str] | None = None,
     gate_line: str | None = None,
@@ -2804,6 +3020,10 @@ def render_report(
         lines += ["", *three_way]
     if multi_trend:
         lines += ["", *multi_trend]
+    if spark_history:
+        lines += ["", *spark_history]
+    if grant_matrix:
+        lines += ["", *grant_matrix]
     if email_block:
         lines += ["", *email_block]
     lines += [
@@ -2950,6 +3170,9 @@ def build_report(
     compare_multi_dir: Path | None = None,
     sidebar: bool = False,
     baselines: list[tuple[str, float]] | None = None,
+    spark_history_dir: Path | None = None,
+    grant_artifact_path: Path | None = None,
+    worst: int | None = None,
 ) -> tuple[str, str, Path]:
     """Render the report; return ``(markdown, file_name, out_dir)``.
 
@@ -2999,6 +3222,27 @@ def build_report(
     ``## Multi-report trend`` section after the three-way trend (one row
     per metric, one column per report oldest to newest). It composes
     with ``--delta``/``--compare``.
+
+    ``spark_history_dir`` (``--spark-history``) renders an inline
+    ``## Run history`` table after the multi-report trend: one row per
+    report ``*.md`` in the directory (ordered by the embedded
+    ``generated-at`` timestamp, like ``--compare-multi``) with the
+    current report appended last; columns are when, runs, pass %, and
+    risk score, each pass/risk cell carrying its unicode trend glyph
+    against the prior row.
+
+    ``grant_artifact_path`` (``--grant-matrix``) renders a
+    ``## Grant coverage`` table after the run history: one row per
+    known sync tracker with a yes/no ``Covered`` cell from the RoE
+    artifact document's ``covers`` key (missing/empty means all
+    trackers); the artifact id names the section header. An
+    unreadable/invalid artifact omits the table with a skip note
+    (fail-soft, never an error).
+
+    ``worst`` (``--worst N``) appends a ``Worst classes by weighted
+    gaps:`` bullet to the executive summary (only when it renders) with
+    the top-``N`` classes by weighted gaps; ``None`` (flag absent) or
+    ``0`` omits the bullet.
     """
     window = _collect_window(reports_dir, since_text)
     window_start = window["window_start"]
@@ -3206,6 +3450,38 @@ def build_report(
             legs=multi_legs,
             skipped=multi_skipped,
         )
+    spark_history: list[str] | None = None
+    if spark_history_dir is not None:
+        spark_legs, spark_skipped = collect_multi_report_entries(
+            spark_history_dir, flag="--spark-history"
+        )
+        spark_score, _earned, _possible, _breakdown = risk_weighted_score(coverage)
+        spark_current_leg = (
+            runs,
+            _summary_pct(pass_rows),
+            sum(1 for row in coverage if row[6] == "covered"),
+            len(coverage),
+            len(current_findings),
+            spark_score,
+        )
+        spark_history = render_spark_history(
+            source_label=spark_history_dir.name,
+            legs=spark_legs,
+            skipped=spark_skipped,
+            current_label=file_name,
+            current_leg=spark_current_leg,
+        )
+    grant_matrix: list[str] | None = None
+    if grant_artifact_path is not None:
+        grant_id, grant_covered, grant_error = load_grant_matrix(grant_artifact_path)
+        if grant_error is not None:
+            grant_matrix = [f"- grant matrix skipped: {grant_error}"]
+        else:
+            grant_matrix = render_grant_matrix(
+                artifact_id=grant_id,
+                artifact_label=grant_artifact_path.name,
+                covered=grant_covered,
+            )
     combined_notes = merge_notes(history_notes, annotations or [])
     known_case_ids = {case_id for case_id, _result in pass_rows}
     known_case_ids |= {
@@ -3244,6 +3520,7 @@ def build_report(
             rescinded_count=rescinded_count,
             previous_runs=previous_runs,
             previous_pass=previous_pass,
+            worst_n=worst,
         )
         if recipient:
             score, earned, possible, _breakdown = risk_weighted_score(coverage)
@@ -3331,6 +3608,8 @@ def build_report(
         side_by_side=side_by_side,
         three_way=three_way,
         multi_trend=multi_trend,
+        spark_history=spark_history,
+        grant_matrix=grant_matrix,
         exec_summary=exec_summary_lines,
         email_block=email_lines,
         gate_line=str(gate_info["line"]) if gate_info is not None else None,
@@ -3367,6 +3646,9 @@ def build_report_data(
     compare_multi_dir: Path | None = None,
     sidebar: bool = False,
     baselines: list[tuple[str, float]] | None = None,
+    spark_history_dir: Path | None = None,
+    grant_artifact_path: Path | None = None,
+    worst: int | None = None,
 ) -> dict[str, object]:
     """Structured report data with the same inputs as :func:`build_report`.
 
@@ -3754,6 +4036,55 @@ def build_report_data(
                 },
             ],
         }
+    if spark_history_dir is not None:
+        spark_legs, spark_skipped = collect_multi_report_entries(
+            spark_history_dir, flag="--spark-history"
+        )
+        spark_score, _spark_earned, _spark_possible, _spark_breakdown = (
+            risk_weighted_score(coverage)
+        )
+        spark_rows = spark_history_rows(
+            spark_legs,
+            file_name,
+            (
+                runs,
+                _summary_pct(pass_rows),
+                sum(1 for row in coverage if row[6] == "covered"),
+                len(coverage),
+                len(current_findings),
+                spark_score,
+            ),
+        )
+        data["run_history"] = {
+            "source": spark_history_dir.name,
+            "reports": [row[0] for row in spark_rows],
+            "skipped": list(spark_skipped),
+            "rows": [
+                {
+                    "report": label,
+                    "runs": row_runs,
+                    "pass_pct": row_pass,
+                    "risk_score": row_score,
+                }
+                for label, row_runs, row_pass, row_score in spark_rows
+            ],
+        }
+    if grant_artifact_path is not None:
+        grant_id, grant_covered, grant_error = load_grant_matrix(grant_artifact_path)
+        if grant_error is not None:
+            data["grant_matrix"] = {"skipped": grant_error}
+        else:
+            data["grant_matrix"] = {
+                "artifact": grant_artifact_path.name,
+                "artifact_id": grant_id,
+                "rows": [
+                    {
+                        "tracker": tracker,
+                        "covered": grant_covered is None or tracker in grant_covered,
+                    }
+                    for tracker in GRANT_TRACKERS
+                ],
+            }
     if exec_summary:
         start_day = window_start.date().isoformat().replace(":", "-")
         end_day = window_end.date().isoformat().replace(":", "-")
@@ -3795,6 +4126,11 @@ def build_report_data(
             "rescinded_count": rescinded_count,
             "trend": _comparison_arrow(new_count - rescinded_count),
         }
+        if worst is not None and worst > 0:
+            data["exec_summary"]["worst_classes"] = [
+                {"class": name, "weighted_points": points}
+                for name, points in worst_classes(coverage, worst)
+            ]
         if recipient:
             email_lines = render_email_block(
                 recipient=recipient,
@@ -4459,7 +4795,49 @@ def main(argv: list[str] | None = None) -> int:
         "gate object gain the failing per-class list. Unknown class "
         "names exit 2 listing the valid classes; malformed specs exit 1.",
     )
+    parser.add_argument(
+        "--spark-history",
+        default=None,
+        metavar="REPORTS_DIR",
+        help="directory of report markdown files for the inline run "
+        "history: renders a ## Run history table after the multi-report "
+        "trend (one row per report oldest to newest by the embedded "
+        "generated-at timestamp, like --compare-multi, with the current "
+        "report appended last; columns when, runs, pass %%, and risk "
+        "score, each pass/risk cell carrying its unicode trend glyph "
+        "against the prior row). A missing directory fails closed.",
+    )
+    parser.add_argument(
+        "--grant-matrix",
+        default=None,
+        metavar="ARTIFACT_JSON",
+        help="RoE artifact JSON for the grant-coverage matrix: renders a "
+        "## Grant coverage table (one row per known sync tracker with a "
+        "yes/no Covered cell from the artifact document's covers key; "
+        "missing/empty covers means all trackers) with the artifact id in "
+        "the section header. An unreadable/invalid artifact omits the "
+        "table with a skip note (fail-soft, never an error).",
+    )
+    parser.add_argument(
+        "--worst",
+        nargs="?",
+        const=3,
+        default=None,
+        type=int,
+        metavar="N",
+        help="with --exec-summary, append a 'Worst classes by weighted "
+        "gaps:' bullet listing the top-N classes by weighted gaps (weight "
+        "table reuse; N defaults to 3 when the flag is given without a "
+        "value; 0 omits the bullet); --json gains a worst_classes array "
+        "only when --exec-summary is set. Ignored without --exec-summary.",
+    )
     args = parser.parse_args(argv)
+    if args.worst is not None and args.worst < 0:
+        print(
+            "error: --worst must be >= 0 (0 omits the bullet)",
+            file=sys.stderr,
+        )
+        return 1
 
     reports_dir = Path(args.reports_dir) if args.reports_dir else default_reports_dir()
     if args.summary:
@@ -4533,6 +4911,8 @@ def main(argv: list[str] | None = None) -> int:
         side_by_side_path = Path(args.side_by_side) if args.side_by_side else None
         delta_path = Path(args.delta) if args.delta else None
         compare_multi_dir = Path(args.compare_multi) if args.compare_multi else None
+        spark_history_dir = Path(args.spark_history) if args.spark_history else None
+        grant_artifact_path = Path(args.grant_matrix) if args.grant_matrix else None
         markdown, file_name, out_dir = build_report(
             reports_dir,
             args.since,
@@ -4550,6 +4930,9 @@ def main(argv: list[str] | None = None) -> int:
             compare_multi_dir=compare_multi_dir,
             sidebar=args.sidebar,
             baselines=baselines,
+            spark_history_dir=spark_history_dir,
+            grant_artifact_path=grant_artifact_path,
+            worst=args.worst,
         )
         payload = markdown
         if args.json:
@@ -4570,6 +4953,9 @@ def main(argv: list[str] | None = None) -> int:
                     compare_multi_dir=compare_multi_dir,
                     sidebar=args.sidebar,
                     baselines=baselines,
+                    spark_history_dir=spark_history_dir,
+                    grant_artifact_path=grant_artifact_path,
+                    worst=args.worst,
                 )
             )
     except BaselineUsageError as exc:

@@ -3533,3 +3533,247 @@ def test_from_audit_main_plumbing_skip_audit_conflict(tmp_path, capsys):
     )
     assert rc == 2
     assert "--from-audit" in capsys.readouterr().err
+
+
+# --pin-note mode (Q9) ---------------------------------------------------------
+
+
+def test_pin_note_flag_parses():
+    args = pin_bump.build_parser().parse_args(
+        ["--to", PIN_NEW, "--pin-note", "left-pad=waived: downstream only"]
+    )
+    assert args.pin_note == ["left-pad=waived: downstream only"]
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.pin_note is None
+
+
+def test_parse_pin_note_shapes():
+    notes, error = pin_bump._parse_pin_notes(["GHSA-old-0001=waived"])
+    assert error is None
+    assert notes == [("GHSA-old-0001", "waived")]
+    # Split on the first "=" only; surrounding whitespace is stripped.
+    notes, error = pin_bump._parse_pin_notes([" left-pad = needs review = soon "])
+    assert error is None
+    assert notes == [("left-pad", "needs review = soon")]
+    notes, error = pin_bump._parse_pin_notes(["missing-equals"])
+    assert notes is None
+    assert error is not None and "SELECTOR=TEXT" in error
+    notes, error = pin_bump._parse_pin_notes(["=empty selector"])
+    assert notes is None
+    assert error is not None and "non-empty" in error
+
+
+def test_render_operator_notes_section_shapes():
+    old = {"GHSA-old-0001": ("high", "left-pad", "1.2.3")}
+    section = pin_bump.render_operator_notes_section(
+        [("left-pad", "a | b"), ("nope", "later")], old, {}
+    )
+    assert section.startswith("## Operator notes")
+    assert "| Advisory | Note |" in section
+    assert "| `GHSA-old-0001` | a \\| b |" in section
+    assert "| `nope` (no matching advisory) | later |" in section
+
+
+def test_pin_note_matched_renders_in_report(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=run, pin_note=["left-pad=waived: downstream only"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    report = (root / "report.md").read_text()
+    assert "## Operator notes" in report
+    assert "| Advisory | Note |" in report
+    assert "`GHSA-old-0001`" in report
+    assert "waived: downstream only" in report
+    assert "operator notes" in out
+
+
+def test_pin_note_unmatched_flagged(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, pin_note=["nope=check later"])
+    capsys.readouterr()
+    assert rc == 0
+    report = (root / "report.md").read_text()
+    assert "`nope` (no matching advisory)" in report
+    assert "check later" in report
+
+
+def test_pin_note_case_insensitive_and_repeatable(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        pin_note=["LEFT-PAD=first note", "ghsa-old=second note"],
+    )
+    capsys.readouterr()
+    assert rc == 0
+    report = (root / "report.md").read_text()
+    assert report.index("first note") < report.index("second note")
+    assert report.count("`GHSA-old-0001`") >= 2
+
+
+def test_pin_note_malformed_exits_2_without_subprocess(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, pin_note=["missing-equals"])
+    assert rc == 2
+    assert "SELECTOR=TEXT" in capsys.readouterr().err
+    assert run.cmds == []
+
+
+def test_pin_note_conflicts(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, skip_audit=True, pin_note=["x=y"])
+    assert rc == 2
+    assert "--pin-note needs audit data" in capsys.readouterr().err
+    assert run.cmds == []
+    rc = pin_bump.bump(None, root=root, run=run, rollback=True, pin_note=["x=y"])
+    assert rc == 2
+    assert "--rollback" in capsys.readouterr().err
+    assert run.cmds == []
+
+
+def test_pin_note_json_mode_echo(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        json_mode=True,
+        pin_note=["left-pad=waived", "nope=later"],
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert payload["notes"] == [
+        {"selector": "left-pad", "note": "waived", "advisories": ["GHSA-old-0001"]},
+        {"selector": "nope", "note": "later", "advisories": []},
+    ]
+    assert "## Operator notes" in (root / "report.md").read_text()
+
+
+def test_pin_note_json_absent_without_flag(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, json_mode=True)
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "notes" not in json.loads(captured.out)
+    assert "Operator notes" not in (root / "report.md").read_text()
+
+
+def test_pin_note_audit_only_prints_without_mutation(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=run, audit_only=True, pin_note=["left-pad=waived"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "## Operator notes" in out
+    assert "waived" in out
+    assert not (root / "report.md").exists()
+    assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_pin_note_dry_run_prints_without_mutation(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    before = _snapshot(root)
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=run, dry_run=True, pin_note=["GHSA-old-0001=seen"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "## Operator notes" in out
+    assert "seen" in out
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_pin_note_composes_with_pin(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(
+            ("left-pad", "high", "GHSA-old-0001"),
+            ("wibble", "high", "GHSA-old-0002"),
+        ),
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        pin=["left-pad"],
+        pin_note=["wibble=other fix noted"],
+    )
+    capsys.readouterr()
+    assert rc == 0
+    report = (root / "report.md").read_text()
+    assert "Out of scope for --pin" in report
+    assert "## Operator notes" in report
+    assert "`GHSA-old-0002`" in report
+    assert "other fix noted" in report
+
+
+def test_pin_note_main_plumbing(tmp_path, capsys, monkeypatch):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    monkeypatch.setattr(pin_bump, "_default_run", run)
+    rc = pin_bump.main(
+        [
+            "--to",
+            PIN_NEW,
+            "--root",
+            str(root),
+            "--pin-note",
+            "left-pad=waived",
+            "--audit-only",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "## Operator notes" in out

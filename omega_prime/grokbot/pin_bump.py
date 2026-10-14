@@ -555,6 +555,22 @@ def build_parser() -> argparse.ArgumentParser:
             "(which adds an explain object)."
         ),
     )
+    parser.add_argument(
+        "--pin-note",
+        dest="pin_note",
+        action="append",
+        default=None,
+        metavar="SELECTOR=TEXT",
+        help=(
+            "Operator annotation for the delta report: SELECTOR targets "
+            "advisories by advisory id or package name substring (same "
+            "case-insensitive matching as --pin) and TEXT is the note "
+            "rendered in the report's ## Operator notes table. Notes whose "
+            "selector matches no advisory render flagged "
+            "'(no matching advisory)'. Repeatable; composes with --pin, "
+            "--semver-check, --json, --dry-run, and --audit-only."
+        ),
+    )
 
     parser.add_argument(
         "--semver-check",
@@ -1059,6 +1075,74 @@ def _pin_deltas(
     return pinned, full, scoped
 
 
+def _parse_pin_notes(
+    specs: list[str],
+) -> tuple[list[tuple[str, str]] | None, str | None]:
+    """``(notes, error)`` for ``--pin-note`` specs (``SELECTOR=TEXT``).
+
+    Each spec splits on the first ``=``: the left side targets advisories
+    with the same case-insensitive substring logic as ``--pin`` and the
+    right side is the operator note text. A spec without ``=`` (or with
+    an empty selector) is a usage error.
+    """
+    notes: list[tuple[str, str]] = []
+    for spec in specs:
+        if "=" not in spec:
+            return None, (
+                f"malformed --pin-note {spec!r}: expected SELECTOR=TEXT "
+                "(e.g. --pin-note GHSA-xxxx-yyyy-zzzz='waived: downstream only')"
+            )
+        selector, _, text = spec.partition("=")
+        selector = selector.strip()
+        if not selector:
+            return None, (
+                f"malformed --pin-note {spec!r}: expected SELECTOR=TEXT "
+                "with a non-empty advisory id or package name selector"
+            )
+        notes.append((selector, text.strip()))
+    return notes, None
+
+
+def _note_advisories(
+    selector: str,
+    old_findings: dict[str, tuple[str, str, str]],
+    new_findings: dict[str, tuple[str, str, str]],
+) -> list[str]:
+    """Sorted finding keys targeted by one ``--pin-note`` selector."""
+    matched: list[str] = []
+    for key in set(old_findings) | set(new_findings):
+        if key in new_findings:
+            package = new_findings[key][1]
+        else:
+            package = old_findings[key][1]
+        if _pin_matches(selector, key, package):
+            matched.append(key)
+    return sorted(matched)
+
+
+def render_operator_notes_section(
+    notes: list[tuple[str, str]],
+    old_findings: dict[str, tuple[str, str, str]],
+    new_findings: dict[str, tuple[str, str, str]],
+) -> str:
+    """Markdown ``## Operator notes`` section for the delta report."""
+    lines = [
+        "## Operator notes",
+        "",
+        "| Advisory | Note |",
+        "| --- | --- |",
+    ]
+    for selector, text in notes:
+        matched = _note_advisories(selector, old_findings, new_findings)
+        cell = text.replace("|", "\\|").replace("\n", " ")
+        if matched:
+            advisory = ", ".join(f"`{key}`" for key in matched)
+        else:
+            advisory = f"`{selector}` (no matching advisory)"
+        lines.append(f"| {advisory} | {cell} |")
+    return "\n".join(lines)
+
+
 def _explain_match_key(
     selector: str,
     old_findings: dict[str, tuple[str, str, str]],
@@ -1424,6 +1508,7 @@ def audit_scheduled_job(
     if not isinstance(to, str) or not to:
         return {"verdict": "error", "semver_compatible": False, "exit_code": EXIT_USAGE}
     semver_check = bool(config.get("semver_check"))
+    pin_note_specs = config.get("pin_note")
     pin_selectors = config.get("pin")
     buf = io.StringIO()
     try:
@@ -1442,6 +1527,9 @@ def audit_scheduled_job(
                 audit_only=True,
                 interactive=False,
                 pin=list(pin_selectors) if isinstance(pin_selectors, list) else None,
+                pin_note=(
+                    list(pin_note_specs) if isinstance(pin_note_specs, list) else None
+                ),
             )
     except Exception as exc:
         return {
@@ -1478,6 +1566,7 @@ def apply_scheduled_bump(
     ``--open-pr`` forced on — the tick only calls this after the
     improved + semver-compatible gate passes. Returns the exit code.
     """
+    pin_note_specs = config.get("pin_note")
     pin_selectors = config.get("pin")
     return bump(
         config.get("to", ""),
@@ -1493,6 +1582,7 @@ def apply_scheduled_bump(
         audit_only=False,
         interactive=False,
         pin=list(pin_selectors) if isinstance(pin_selectors, list) else None,
+        pin_note=(list(pin_note_specs) if isinstance(pin_note_specs, list) else None),
     )
 
 
@@ -1869,6 +1959,7 @@ def bump(
     audit_only: bool = False,
     interactive: bool = False,
     pin: list[str] | None = None,
+    pin_note: list[str] | None = None,
     explain: str | None = None,
     schedule: str | None = None,
     schedule_name: str = "pin-bump",
@@ -1926,6 +2017,7 @@ def bump(
                 "auto_detect_upstream_fix": auto_detect_upstream_fix,
                 "open_pr": open_pr,
                 "pin": [s.strip() for s in (pin or []) if s is not None],
+                "pin_note": [s for s in (pin_note or []) if s is not None],
                 "explain": explain.strip() if isinstance(explain, str) else None,
                 "verify": verify,
             },
@@ -1983,6 +2075,18 @@ def bump(
             file=sys.stderr,
         )
         return EXIT_USAGE
+    pin_note_specs = [s for s in (pin_note or []) if s is not None]
+    pin_notes, pin_notes_error = _parse_pin_notes(pin_note_specs)
+    if pin_notes_error is not None:
+        print(f"pin-bump usage error: {pin_notes_error}", file=sys.stderr)
+        return EXIT_USAGE
+    assert pin_notes is not None
+    if pin_notes and skip_audit:
+        print(
+            "pin-bump usage error: --pin-note needs audit data (drop --skip-audit)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     explain_selector = explain.strip() if isinstance(explain, str) else None
     if explain is not None and not explain_selector:
         print(
@@ -2004,6 +2108,13 @@ def bump(
             file=sys.stderr,
         )
         return EXIT_USAGE
+    if pin_notes and rollback:
+        print(
+            "pin-bump usage error: --pin-note needs audit data; --rollback "
+            "never audits, so they cannot be combined",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     if run is None:
         run = _default_run
     redteam_dir = root / "redteam"
@@ -2021,6 +2132,7 @@ def bump(
     # outcome (set only when the gate was evaluated).
     json_fixed: list[str] = []
     json_old_findings: dict[str, tuple[str, str, str]] = {}
+    json_new_findings: dict[str, tuple[str, str, str]] = {}
     json_old_packages: dict[str, str] = {}
     json_new_packages: dict[str, str] = {}
     json_semver: dict[str, str] | None = None
@@ -2083,6 +2195,22 @@ def bump(
                     "out_of_scope": json_out_of_scope or [],
                 }
                 if pin_selectors
+                else {}
+            ),
+            **(
+                {
+                    "notes": [
+                        {
+                            "selector": selector,
+                            "note": text,
+                            "advisories": _note_advisories(
+                                selector, json_old_findings, json_new_findings
+                            ),
+                        }
+                        for selector, text in pin_notes
+                    ]
+                }
+                if pin_notes
                 else {}
             ),
             **({"explain": json_explain} if explain_selector else {}),
@@ -2680,12 +2808,17 @@ def bump(
             )
         json_fixed = audit_fixed
         json_old_findings = audit_old_findings
+        json_new_findings = audit_new_findings
         json_old_packages = audit_old_packages
         json_new_packages = audit_new_packages
         if semver_check:
             json_semver = {key: label for key, _, _, _, label in audit_semver_rows}
         if semver_check:
             audit_report += "\n" + render_semver_section(audit_semver_rows)
+        if pin_notes:
+            audit_report += "\n" + render_operator_notes_section(
+                pin_notes, audit_old_findings, audit_new_findings
+            )
         print(f"[audit-only] audit verdict: {verdict} (report not written)")
         print(audit_report)
         if semver_check:
@@ -3168,6 +3301,7 @@ def bump(
                 )
             json_fixed = dry_fixed
             json_old_findings = dry_old_findings
+            json_new_findings = dry_new_findings
             json_old_packages = dry_old_packages
             json_new_packages = dry_new_packages
             print(f"[dry-run] audit verdict: {verdict} (report.md not written)")
@@ -3190,6 +3324,12 @@ def bump(
                         "[dry-run] WARNING: a fix requires a major version "
                         "bump (outside the declared range)"
                     )
+            if pin_notes:
+                print(
+                    render_operator_notes_section(
+                        pin_notes, dry_old_findings, dry_new_findings
+                    )
+                )
             if explain_selector:
                 (
                     explain_new_keys,
@@ -3589,12 +3729,21 @@ def bump(
             )
         json_fixed = fixed
         json_old_findings = old_findings
+        json_new_findings = new_findings
         json_old_packages = old_packages
         json_new_packages = new_packages
         if semver_check:
             json_semver = {key: label for key, _, _, _, label in semver_rows}
         if semver_check:
             report += "\n" + render_semver_section(semver_rows)
+        if pin_notes:
+            report += "\n" + render_operator_notes_section(
+                pin_notes, old_findings, new_findings
+            )
+            print(
+                f"pin-bump operator notes: {len(pin_notes)} note(s) recorded "
+                "(see report.md)"
+            )
         report_path = root / "report.md"
         try:
             report_path.write_text(report, encoding="utf-8")
@@ -3910,6 +4059,7 @@ def main(argv: list[str] | None = None) -> int:
         audit_only=args.audit_only,
         interactive=args.interactive,
         pin=args.pin,
+        pin_note=args.pin_note,
         explain=args.explain,
         schedule=args.schedule,
         schedule_name=args.schedule_name,

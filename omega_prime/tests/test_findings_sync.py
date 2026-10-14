@@ -3422,3 +3422,249 @@ def test_tick_quiet_hours_notices_still_fire(tmp_path, fresh_notices):
     assert entry["state"] == "expiring-7d"
     posted = " ".join(f"{argv} {data}" for argv, data in fake.calls)
     assert f"Renew: /omega-redteam-roe-sign --artifact {grant}" in posted
+
+
+# Dispatch dry-run ledger (Q8) --------------------------------------------------
+
+
+def _dispatch_config(tmp_path, **overrides):
+    node = {
+        "enabled": True,
+        "repo": REPO,
+        "labels": {},
+        "dispatch_dry_run": True,
+        "dispatch_ledger": str(tmp_path / "dispatch-ledger.jsonl"),
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+def _read_ledger_rows(path):
+    with open(path, encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle.read().splitlines() if line.strip()]
+
+
+def test_dispatch_dry_run_plans_two_without_calls_or_writes(tmp_path):
+    _seed_two(tmp_path)
+    before = findings_path(tmp_path).read_bytes()
+    fake = FakeGh()
+    result = tick(
+        _dispatch_config(tmp_path),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before
+    rows = load_findings(tmp_path)
+    assert all("issue_url" not in row for row in rows)
+    assert len(result["pushed"]) == 2
+    assert result["dry_run"] is True
+    plan = result["dispatch_plan"]
+    assert [entry["dedupe_hash"] for entry in plan] == [
+        row["dedupe_hash"] for row in rows
+    ]
+    ledger = _read_ledger_rows(tmp_path / "dispatch-ledger.jsonl")
+    assert len(ledger) == 2
+    for entry in ledger:
+        assert set(entry) == {"ts", "tracker", "dedupe_hash", "reason"}
+        assert entry["tracker"] == "github"
+        assert entry["reason"] == findings_sync.DISPATCH_DRY_RUN_REASON
+        assert entry["ts"]
+    assert [entry["dedupe_hash"] for entry in ledger] == [
+        row["dedupe_hash"] for row in rows
+    ]
+
+
+def test_dispatch_dry_run_blank_ledger_stays_in_memory(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(
+        _dispatch_config(tmp_path, dispatch_ledger="   "),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert fake.calls == []
+    assert len(result["dispatch_plan"]) == 2
+    assert not (tmp_path / "dispatch-ledger.jsonl").exists()
+
+
+def test_dispatch_dry_run_absent_ledger_key_stays_in_memory(tmp_path):
+    _seed_two(tmp_path)
+    node = _dispatch_config(tmp_path)
+    del node["redteam"]["findings_sync"]["dispatch_ledger"]
+    fake = FakeGh()
+    result = tick(node, reports_directory=tmp_path, runner=fake)
+    assert fake.calls == []
+    assert len(result["dispatch_plan"]) == 2
+    assert not (tmp_path / "dispatch-ledger.jsonl").exists()
+
+
+def test_dispatch_flag_off_leaves_no_plan_and_dispatches(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(
+        _enabled_config(),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert len(fake.calls) == 2
+    assert "dispatch_plan" not in result
+    assert not (tmp_path / "dispatch-ledger.jsonl").exists()
+
+
+def test_dispatch_dry_run_tick_param_overrides_config_off(tmp_path):
+    _seed_two(tmp_path)
+    before = findings_path(tmp_path).read_bytes()
+    fake = FakeGh()
+    result = tick(
+        _enabled_config(),
+        reports_directory=tmp_path,
+        runner=fake,
+        dispatch_dry_run=True,
+    )
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before
+    assert len(result["dispatch_plan"]) == 2
+
+
+def test_dispatch_dry_run_respects_quiet_hours(tmp_path):
+    _seed_two(tmp_path)  # high (urgent) + low (held at night)
+    fake = FakeGh()
+    node = _dispatch_config(tmp_path, quiet_hours={"start": "22:00", "end": "06:00"})
+    result = tick(
+        {"redteam": {"findings_sync": node["redteam"]["findings_sync"]}},
+        reports_directory=tmp_path,
+        runner=fake,
+        now=_QUIET_NIGHT,
+    )
+    assert fake.calls == []
+    assert result["quiet_hours"] is True
+    assert len(result["quiet_skipped"]) == 1
+    assert len(result["dispatch_plan"]) == 1
+    ledger = _read_ledger_rows(tmp_path / "dispatch-ledger.jsonl")
+    assert len(ledger) == 1
+    assert ledger[0]["dedupe_hash"] == result["dispatch_plan"][0]["dedupe_hash"]
+
+
+def test_dispatch_dry_run_skips_already_synced(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    tick(_enabled_config(), reports_directory=tmp_path, runner=fake)
+    assert len(fake.calls) == 2
+    planner = FakeGh()
+    result = tick(
+        _dispatch_config(tmp_path),
+        reports_directory=tmp_path,
+        runner=planner,
+    )
+    assert planner.calls == []
+    assert result["dispatch_plan"] == []
+    assert len(result["skipped"]) == 2
+    assert not (tmp_path / "dispatch-ledger.jsonl").exists()
+
+
+def test_dispatch_dry_run_grant_skip_writes_no_ledger(tmp_path):
+    _seed_two(tmp_path)
+    node = _dispatch_config(tmp_path)
+    node["redteam"]["findings_sync"]["roe_artifact"] = {"covers": ["slack"]}
+    fake = FakeGh()
+    result = tick(node, reports_directory=tmp_path, runner=fake)
+    assert fake.calls == []
+    assert result["skipped_tracker"] == "github"
+    assert "dispatch_plan" not in result
+    assert not (tmp_path / "dispatch-ledger.jsonl").exists()
+
+
+def test_dispatch_dry_run_ledger_failure_never_blocks(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(
+        _dispatch_config(tmp_path, dispatch_ledger=str(tmp_path)),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert fake.calls == []
+    assert len(result["dispatch_plan"]) == 2
+
+
+def test_dispatch_dry_run_slack_tracker_in_ledger(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeSlack()
+    result = tick(
+        _dispatch_config(tmp_path, tracker="slack", slack_webhook_url=WEBHOOK),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert fake.calls == []
+    ledger = _read_ledger_rows(tmp_path / "dispatch-ledger.jsonl")
+    assert len(ledger) == 2
+    assert all(entry["tracker"] == "slack" for entry in ledger)
+    assert len(result["dispatch_plan"]) == 2
+
+
+def test_record_dispatch_plan_blank_path_returns_rows_writes_nothing(tmp_path):
+    plan = findings_sync.record_dispatch_plan("", "github", ["abc", "def"])
+    assert len(plan) == 2
+    assert all(
+        set(entry) == {"ts", "tracker", "dedupe_hash", "reason"} for entry in plan
+    )
+    assert [entry["dedupe_hash"] for entry in plan] == ["abc", "def"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_record_dispatch_plan_creates_parent_dirs(tmp_path):
+    ledger = tmp_path / "nested" / "dir" / "dispatch-ledger.jsonl"
+    plan = findings_sync.record_dispatch_plan(str(ledger), "linear", ["abc"])
+    assert len(plan) == 1
+    assert _read_ledger_rows(ledger) == plan
+
+
+def test_cli_dispatch_dry_run_plans_without_calls_or_writes(
+    tmp_path, monkeypatch, capsys
+):
+    _seed_two(tmp_path)
+    before = findings_path(tmp_path).read_bytes()
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _dispatch_config(tmp_path),
+    )
+    fake = FakeGh()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--reports-dir", str(tmp_path)]) == 0
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before
+    out = capsys.readouterr().out
+    assert out.count("would push") == 2
+    assert len(_read_ledger_rows(tmp_path / "dispatch-ledger.jsonl")) == 2
+
+
+def test_cli_dispatch_dry_run_flag_beats_config_off(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    node = _enabled_config()
+    node["redteam"]["findings_sync"]["dispatch_ledger"] = str(
+        tmp_path / "dispatch-ledger.jsonl"
+    )
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: node,
+    )
+    fake = FakeGh()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--dispatch-dry-run", "--reports-dir", str(tmp_path)]) == 0
+    assert fake.calls == []
+    assert "would push" in capsys.readouterr().out
+    assert len(_read_ledger_rows(tmp_path / "dispatch-ledger.jsonl")) == 2
+
+
+def test_cli_dispatch_dry_run_missing_repo_exits_two(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    node = _dispatch_config(tmp_path, repo="")
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: node,
+    )
+    fake = FakeGh()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--reports-dir", str(tmp_path)]) == 2
+    assert fake.calls == []
+    assert "no target repo configured" in capsys.readouterr().err

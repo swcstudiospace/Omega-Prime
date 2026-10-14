@@ -4937,3 +4937,545 @@ def test_baseline_parse_validate_and_evaluate_units():
     assert met["passed"] is True
     assert met["line"] == "Gate: PASS (pass-rate 50 >= 50)"
     assert met["failures"] == []
+
+
+# Inline run history across a directory (Q10) ----------------------------------
+
+
+def test_spark_history_renders_table_with_current_last(tmp_path):
+    """Q10 happy: --spark-history renders history rows plus the current row last."""
+    multi_dir, current_dir, _previous_md = _multi_seed(tmp_path)
+    proc = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--spark-history",
+        str(multi_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Run history" in proc.stdout
+    body = section_lines(proc.stdout, "## Run history")
+    assert "- source: multi (2 reports)" in body
+    assert "| when | runs | pass % | risk score |" in body
+    rows = [line for line in body if line.startswith("| ") and "---" not in line]
+    assert len(rows) == 1 + 3  # header + 2 history rows + current row
+    assert rows[1] == "| z-older.md | 1 | 67% (→) | 70.6% (→) |"
+    assert rows[2] == "| a-previous.md | 2 | 83% (↑) | 85.3% (↑) |"
+    assert (
+        rows[3] == "| engagement-2026-10-01_2026-10-10.md | 3 | 100% (↑) | 100.0% (↑) |"
+    )
+
+
+def test_spark_history_is_deterministic(tmp_path):
+    """Q10 determinism: same directory renders byte-identical history runs."""
+    multi_dir, current_dir, _previous_md = _multi_seed(tmp_path)
+    first = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--spark-history",
+        str(multi_dir),
+    )
+    second = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--spark-history",
+        str(multi_dir),
+    )
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_spark_history_missing_dir_exits_1(tmp_path):
+    """Q10 edge: a missing --spark-history directory fails closed with error:."""
+    _fixture_dir = tmp_path / "reports"
+    _fixture_dir.mkdir()
+    _exec_fixture(_fixture_dir)
+    proc = run_script(
+        "--reports-dir",
+        str(_fixture_dir),
+        "--since",
+        T0,
+        "--spark-history",
+        str(tmp_path / "no-such-dir"),
+    )
+    assert proc.returncode == 1, proc.stdout
+    assert "error:" in proc.stderr
+    assert "--spark-history" in proc.stderr
+    assert "## Run history" not in proc.stdout
+
+
+def test_spark_history_skips_unreadable_with_note(tmp_path):
+    """Q10 order: timestamp sort with unreadable files noted, not fatal."""
+    multi_dir, current_dir, _previous_md = _multi_seed(tmp_path)
+    (multi_dir / "bad.md").write_bytes(b"\xff\xfe\x00not-utf8")
+    proc = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--spark-history",
+        str(multi_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## Run history")
+    assert "- skipped: bad.md (unreadable)" in body
+    rows = [line for line in body if line.startswith("| ") and "---" not in line]
+    assert len(rows) == 1 + 3
+
+
+def test_no_spark_history_flag_renders_no_section(tmp_path):
+    """Q10 regression: without --spark-history the report has no new section."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "## Run history" not in proc.stdout
+
+
+def test_spark_history_rows_and_render_units(tmp_path):
+    """Q10 units: row assembly (history + current last) plus glyph rendering."""
+    module = _report_module()
+    legs = [
+        (("old.md", 1, 67, 4, 6, 2, 70.6), module.parse_rfc3339(T1)),
+        (("new.md", 2, 83, 5, 6, 1, 85.3), module.parse_rfc3339(T2)),
+    ]
+    rows = module.spark_history_rows(legs, "current.md", (3, 100, 6, 6, 0, 100.0))
+    assert rows == [
+        ("old.md", 1, 67, 70.6),
+        ("new.md", 2, 83, 85.3),
+        ("current.md", 3, 100, 100.0),
+    ]
+    lines = module.render_spark_history(
+        source_label="hist",
+        legs=legs,
+        skipped=["bad.md"],
+        current_label="current.md",
+        current_leg=(3, 100, 6, 6, 0, 100.0),
+    )
+    assert lines[0] == "## Run history"
+    assert "- source: hist (2 reports)" in lines
+    assert "- skipped: bad.md (unreadable)" in lines
+    assert "| when | runs | pass % | risk score |" in lines
+    assert "| old.md | 1 | 67% (→) | 70.6% (→) |" in lines
+    assert "| new.md | 2 | 83% (↑) | 85.3% (↑) |" in lines
+    assert "| current.md | 3 | 100% (↑) | 100.0% (↑) |" in lines
+
+
+def test_json_composes_with_spark_history(tmp_path):
+    """Q10 JSON: --json --spark-history gains a run_history object; default omits it."""
+    multi_dir, current_dir, _previous_md = _multi_seed(tmp_path)
+    plain = run_script("--reports-dir", str(current_dir), "--since", T0, "--json")
+    assert plain.returncode == 0, plain.stderr
+    assert "run_history" not in json.loads(plain.stdout)
+    full = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--json",
+        "--spark-history",
+        str(multi_dir),
+    )
+    assert full.returncode == 0, full.stderr
+    data = json.loads(full.stdout)
+    history = data["run_history"]
+    assert history["source"] == "multi"
+    assert history["reports"][-1] == "engagement-2026-10-01_2026-10-10.md"
+    assert [row["report"] for row in history["rows"]] == history["reports"]
+    assert history["rows"][0] == {
+        "report": "z-older.md",
+        "runs": 1,
+        "pass_pct": 67,
+        "risk_score": 70.6,
+    }
+
+
+# Grant coverage matrix from a RoE artifact (Q11) -------------------------------
+
+
+def _grant_fixture(directory: Path) -> None:
+    """One all-pass run of history for grant-matrix tests."""
+    seed_transitions(directory, cycle(T1) + cycle(T2))
+    seed_last_run(directory)
+    seed_findings(directory, [finding_row("abuse-01", "resp-a", T1)])
+
+
+def test_grant_matrix_renders_covered_table(tmp_path):
+    """Q11 happy: --grant-matrix renders yes/no rows with the artifact id header."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _grant_fixture(fixture)
+    artifact = tmp_path / "roe.json"
+    artifact.write_text(
+        json.dumps({"artifact_id": "roe-1", "covers": ["github", "Slack"]}),
+        encoding="utf-8",
+    )
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--grant-matrix", str(artifact)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Grant coverage: roe-1" in proc.stdout
+    body = section_lines(proc.stdout, "## Grant coverage: roe-1")
+    assert "- source: roe.json" in body
+    assert "| tracker | Covered |" in body
+    rows = [line for line in body if line.startswith("| ") and "---" not in line]
+    assert len(rows) == 1 + 9  # header + one row per known tracker
+    assert "| github | yes |" in body
+    assert "| slack | yes |" in body
+    assert "| linear | no |" in body
+    assert "| webhook | no |" in body
+
+
+def test_grant_matrix_missing_covers_covers_all(tmp_path):
+    """Q11 edge: a missing/empty covers key marks every tracker covered."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _grant_fixture(fixture)
+    for name, document, heading in (
+        (
+            "missing.json",
+            {"artifact_id": "roe-missing"},
+            "## Grant coverage: roe-missing",
+        ),
+        (
+            "empty.json",
+            {"id": "roe-empty", "covers": []},
+            "## Grant coverage: roe-empty",
+        ),
+    ):
+        artifact = tmp_path / name
+        artifact.write_text(json.dumps(document), encoding="utf-8")
+        proc = run_script(
+            "--reports-dir",
+            str(fixture),
+            "--since",
+            T0,
+            "--grant-matrix",
+            str(artifact),
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert heading in proc.stdout
+        body = section_lines(proc.stdout, heading)
+        assert all(
+            f"| {tracker} | yes |" in "\n".join(body)
+            for tracker in (
+                "github",
+                "linear",
+                "slack",
+                "teams",
+                "pagerduty",
+                "opsgenie",
+                "jira",
+                "graph",
+                "webhook",
+            )
+        )
+
+
+def test_grant_matrix_invalid_artifact_is_fail_soft(tmp_path):
+    """Q11 edge: unreadable/invalid artifacts omit the table with a note, exit 0."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _grant_fixture(fixture)
+    bad_json = tmp_path / "bad.json"
+    bad_json.write_text("{not json", encoding="utf-8")
+    array_json = tmp_path / "array.json"
+    array_json.write_text("[1, 2]", encoding="utf-8")
+    for artifact in (tmp_path / "missing.json", bad_json, array_json):
+        proc = run_script(
+            "--reports-dir",
+            str(fixture),
+            "--since",
+            T0,
+            "--grant-matrix",
+            str(artifact),
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "## Grant coverage" not in proc.stdout
+        assert "grant matrix skipped" in proc.stdout
+
+
+def test_grant_matrix_is_deterministic(tmp_path):
+    """Q11 determinism: same artifact renders byte-identical matrix runs."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _grant_fixture(fixture)
+    artifact = tmp_path / "roe.json"
+    artifact.write_text(
+        json.dumps({"artifact_id": "roe-1", "covers": ["github"]}),
+        encoding="utf-8",
+    )
+    first = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--grant-matrix", str(artifact)
+    )
+    second = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--grant-matrix", str(artifact)
+    )
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_no_grant_matrix_flag_renders_no_section(tmp_path):
+    """Q11 regression: without --grant-matrix the report has no new section."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _grant_fixture(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "## Grant coverage" not in proc.stdout
+    assert "grant matrix skipped" not in proc.stdout
+
+
+def test_grant_matrix_load_and_render_units(tmp_path):
+    """Q11 units: covers parsing (case-insensitive, all-on-empty) plus table rows."""
+    module = _report_module()
+    artifact = tmp_path / "roe.json"
+    artifact.write_text(
+        json.dumps({"id": "roe-x", "covers": [" GitHub ", 7, "", "SLACK"]}),
+        encoding="utf-8",
+    )
+    artifact_id, covered, error = module.load_grant_matrix(artifact)
+    assert (artifact_id, covered, error) == ("roe-x", {"github", "slack"}, None)
+    _id, missing_covered, _error = module.load_grant_matrix(tmp_path / "nope.json")
+    assert _error is not None and "cannot read" in _error
+    lines = module.render_grant_matrix(
+        artifact_id="roe-x", artifact_label="roe.json", covered={"github"}
+    )
+    assert lines[0] == "## Grant coverage: roe-x"
+    assert "| github | yes |" in lines
+    assert "| linear | no |" in lines
+    assert len([l for l in lines if l.startswith("| ") and "---" not in l]) == 1 + 9
+    all_covered = module.render_grant_matrix(
+        artifact_id="roe-x", artifact_label="roe.json", covered=None
+    )
+    assert all(
+        f"| {tracker} | yes |" in all_covered for tracker in module.GRANT_TRACKERS
+    )
+
+
+def test_json_composes_with_grant_matrix(tmp_path):
+    """Q11 JSON: --json --grant-matrix gains a grant_matrix object; default omits it."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _grant_fixture(fixture)
+    artifact = tmp_path / "roe.json"
+    artifact.write_text(
+        json.dumps({"artifact_id": "roe-1", "covers": ["github"]}),
+        encoding="utf-8",
+    )
+    plain = run_script("--reports-dir", str(fixture), "--since", T0, "--json")
+    assert plain.returncode == 0, plain.stderr
+    assert "grant_matrix" not in json.loads(plain.stdout)
+    full = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--json",
+        "--grant-matrix",
+        str(artifact),
+    )
+    assert full.returncode == 0, full.stderr
+    matrix = json.loads(full.stdout)["grant_matrix"]
+    assert matrix["artifact_id"] == "roe-1"
+    by_tracker = {row["tracker"]: row["covered"] for row in matrix["rows"]}
+    assert by_tracker["github"] is True
+    assert by_tracker["linear"] is False
+    assert len(matrix["rows"]) == 9
+
+
+# Worst classes by weighted gaps in the executive summary (Q12) -----------------
+
+
+def _worst_fixture(directory: Path) -> None:
+    """Two runs of history with two failing classes (abuse + jailbreak)."""
+    seed_transitions(directory, cycle(T1) + cycle(T2))
+    seed_last_run(directory, wrong={"jailbreak-01": "not-detected", "abuse-01": "nope"})
+    seed_findings(directory, [finding_row("abuse-01", "resp-a", T1)])
+
+
+def test_worst_appends_top_n_bullet(tmp_path):
+    """Q12 happy: --exec-summary --worst 1 names only the top class."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _worst_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--exec-summary", "--worst", "1"
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## Executive summary")
+    worst = [line for line in body if line.startswith("- Worst classes by weighted")]
+    assert len(worst) == 1
+    assert worst[0] == "- Worst classes by weighted gaps: abuse (10 weighted points)"
+    assert "jailbreak" not in worst[0]
+
+
+def test_worst_bare_flag_defaults_to_three(tmp_path):
+    """Q12 default: a bare --worst flag lists up to three classes."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _worst_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--exec-summary", "--worst"
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## Executive summary")
+    worst = [line for line in body if line.startswith("- Worst classes by weighted")]
+    assert len(worst) == 1
+    assert "abuse (10 weighted points)" in worst[0]
+    assert "jailbreak (10 weighted points)" in worst[0]
+
+
+def test_worst_zero_omits_bullet(tmp_path):
+    """Q12 edge: --worst 0 omits the bullet (same section as without the flag)."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _worst_fixture(fixture)
+
+    omitted = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--exec-summary", "--worst", "0"
+    )
+    plain = run_script("--reports-dir", str(fixture), "--since", T0, "--exec-summary")
+    assert omitted.returncode == 0, omitted.stderr
+    assert plain.returncode == 0, plain.stderr
+    assert "Worst classes by weighted gaps" not in omitted.stdout
+    assert "Worst classes by weighted gaps" not in plain.stdout
+    assert omitted.stdout == plain.stdout
+
+
+def test_worst_without_exec_summary_renders_no_section(tmp_path):
+    """Q12 regression: --worst alone adds no executive summary section."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _worst_fixture(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0, "--worst", "2")
+    assert proc.returncode == 0, proc.stderr
+    assert "## Executive summary" not in proc.stdout
+    assert "Worst classes by weighted gaps" not in proc.stdout
+
+
+def test_worst_negative_exits_1(tmp_path):
+    """Q12 edge: a negative --worst value fails closed with error:."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _worst_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--exec-summary",
+        "--worst",
+        "-1",
+    )
+    assert proc.returncode == 1, proc.stdout
+    assert "error:" in proc.stderr
+
+
+def test_worst_is_deterministic(tmp_path):
+    """Q12 determinism: same N renders byte-identical summary runs."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _worst_fixture(fixture)
+
+    first = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--exec-summary", "--worst", "2"
+    )
+    second = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--exec-summary", "--worst", "2"
+    )
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_worst_classes_and_bullet_units():
+    """Q12 units: ranking reuse, N truncation, zero/empty handling, bullet text."""
+    module = _report_module()
+    coverage = [
+        ("abuse", 1, 1, 1, 100.0, 0, "covered"),
+        ("jailbreak", 1, 1, 0, 0.0, 1, "gappy"),
+        ("auth-bypass", 1, 1, 0, 0.0, 0, "gappy"),
+    ]
+    assert module.worst_classes(coverage, 2) == [("auth-bypass", 10), ("jailbreak", 10)]
+    assert module.worst_classes(coverage, 1) == [("auth-bypass", 10)]
+    assert module.worst_classes(coverage, 0) == []
+    assert module.worst_classes(coverage, -3) == []
+    assert (
+        module.render_worst_bullet(coverage, 2) == "- Worst classes by weighted gaps: "
+        "auth-bypass (10 weighted points), jailbreak (10 weighted points)"
+    )
+    assert (
+        module.render_worst_bullet([("abuse", 1, 1, 1, 100.0, 0, "covered")], 3)
+        == "- Worst classes by weighted gaps: none (all classes fully covered)"
+    )
+    lines = module.render_exec_summary(
+        runs=2,
+        pass_rows=[("a-01", "1/1 (100.0%)"), ("b-01", "0/1 (0.0%)")],
+        coverage=coverage,
+        new_count=1,
+        rescinded_count=0,
+        previous_pass=50,
+        worst_n=1,
+    )
+    assert (
+        lines[-1]
+        == "- Worst classes by weighted gaps: auth-bypass (10 weighted points)"
+    )
+    default = module.render_exec_summary(
+        runs=2,
+        pass_rows=[("a-01", "1/1 (100.0%)"), ("b-01", "0/1 (0.0%)")],
+        coverage=coverage,
+        new_count=1,
+        rescinded_count=0,
+        previous_pass=50,
+    )
+    assert all("Worst classes" not in line for line in default)
+
+
+def test_json_worst_classes_only_with_exec_summary(tmp_path):
+    """Q12 JSON: worst_classes appears only for --json --exec-summary --worst."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _worst_fixture(fixture)
+
+    plain = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--json", "--worst", "2"
+    )
+    assert plain.returncode == 0, plain.stderr
+    assert "exec_summary" not in json.loads(plain.stdout)
+    no_worst = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--json", "--exec-summary"
+    )
+    assert no_worst.returncode == 0, no_worst.stderr
+    assert "worst_classes" not in json.loads(no_worst.stdout)["exec_summary"]
+    full = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--json",
+        "--exec-summary",
+        "--worst",
+        "2",
+    )
+    assert full.returncode == 0, full.stderr
+    worst = json.loads(full.stdout)["exec_summary"]["worst_classes"]
+    assert worst == [
+        {"class": "abuse", "weighted_points": 10},
+        {"class": "jailbreak", "weighted_points": 10},
+    ]

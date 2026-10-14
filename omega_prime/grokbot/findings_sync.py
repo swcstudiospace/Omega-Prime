@@ -2776,6 +2776,120 @@ def _record_grant_decision(
         return None
 
 
+#: Would-sync reason recorded on every dispatch dry-run ledger row (Q8).
+DISPATCH_DRY_RUN_REASON = "would-sync"
+
+
+def _dispatch_dry_run_enabled(
+    node: Mapping[str, Any], dispatch_dry_run: bool = False
+) -> bool:
+    """True when the tick plans instead of dispatching (Q8).
+
+    Either the explicit ``dispatch_dry_run`` argument or the
+    ``redteam.findings_sync.dispatch_dry_run`` config flag enables
+    plan mode. Never raises.
+    """
+    try:
+        if dispatch_dry_run is True:
+            return True
+        return node.get("dispatch_dry_run") is True
+    except Exception:
+        return bool(dispatch_dry_run)
+
+
+def _dispatch_ledger_path(node: Mapping[str, Any]) -> str:
+    """Dispatch dry-run ledger path, or ``""`` for in-memory only (Q8)."""
+    try:
+        raw = node.get("dispatch_ledger", "")
+        return raw.strip() if isinstance(raw, str) else ""
+    except Exception:
+        return ""
+
+
+def record_dispatch_plan(
+    ledger_path: str | Path | None,
+    tracker: Any,
+    dedupe_hashes: Iterable[Any],
+    *,
+    reason: Any = DISPATCH_DRY_RUN_REASON,
+) -> list[dict[str, Any]]:
+    """Build the would-sync plan and append it to the ledger (Q8).
+
+    Returns one ``{"ts", "tracker", "dedupe_hash", "reason"}`` dict
+    per hash. The rows are appended to ``ledger_path`` following the
+    :func:`roe_lifecycle.record_grant_usage` pattern (parent
+    directories created as needed, keys sorted, one JSONL row per
+    line); a blank path means in-memory only. Never raises: an
+    unwritable location is silently skipped while the in-memory plan
+    is still returned.
+    """
+    try:
+        tracker_name = str(tracker)
+    except Exception:
+        tracker_name = ""
+    try:
+        hashes = list(dedupe_hashes)
+    except Exception:
+        return []
+    try:
+        reason_name = str(reason)
+    except Exception:
+        reason_name = DISPATCH_DRY_RUN_REASON
+    plan: list[dict[str, Any]] = []
+    for digest in hashes:
+        try:
+            plan.append(
+                {
+                    "ts": datetime.datetime.now(datetime.UTC).isoformat(
+                        timespec="seconds"
+                    ),
+                    "tracker": tracker_name,
+                    "dedupe_hash": str(digest),
+                    "reason": reason_name,
+                }
+            )
+        except Exception:
+            continue
+    if not plan:
+        # No would-sync decisions: no ledger rows, not even file creation.
+        return plan
+    try:
+        if isinstance(ledger_path, (str, Path)) and str(ledger_path).strip():
+            path = Path(ledger_path)
+            if path.parent != Path(".") and str(path.parent) not in ("", "."):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as handle:
+                for row in plan:
+                    handle.write(json.dumps(row, sort_keys=True) + "\n")
+    except Exception:
+        pass
+    return plan
+
+
+def _attach_dispatch_plan(
+    node: Mapping[str, Any], tracker: str, result: dict[str, Any]
+) -> dict[str, Any]:
+    """Attach the would-sync ``dispatch_plan`` to a tick result (Q8).
+
+    One ledger row per ``pushed`` entry (would-sync under plan mode,
+    where every branch already runs dry); error results are returned
+    untouched. Never raises.
+    """
+    try:
+        if not isinstance(result, dict) or "error" in result:
+            return result
+        pushed = result.get("pushed", [])
+        hashes = [
+            entry.get("dedupe_hash", "") for entry in pushed if isinstance(entry, dict)
+        ]
+        result["dispatch_plan"] = record_dispatch_plan(
+            _dispatch_ledger_path(node), tracker, hashes
+        )
+    except Exception:
+        pass
+    return result
+
+
 #: In-memory expiry-notice fire record (O11): ``(artifact_id, state)``
 #: pairs already delivered through a tracker. One notice per pair for
 #: the life of the process (mirrors the renewal-reminder
@@ -3280,6 +3394,7 @@ def tick(
     reports_directory: str | Path | None = None,
     runner: GhRunner | None = None,
     dry_run: bool = False,
+    dispatch_dry_run: bool = False,
     now: Any = None,
 ) -> dict[str, Any]:
     """Heartbeat-schedulable entrypoint: reuse the sync functions.
@@ -3331,12 +3446,28 @@ def tick(
     (``"quiet_hours": True`` marks the result); ``critical``/``high``
     findings, notices, and expiry notices always fire. Without
     ``quiet_hours`` the tick proceeds exactly as before.
+
+    Dispatch dry run (Q8): when ``dispatch_dry_run`` is true or the
+    ``dispatch_dry_run`` node flag is set, the tick resolves which
+    rows would sync (same gate order: grant allowlist, quiet hours,
+    idempotency skips) but forces dry behavior on every branch —
+    zero runner calls, zero store writes — and appends one
+    ``{"ts", "tracker", "dedupe_hash", "reason"}`` JSONL row per
+    would-sync decision to the ``dispatch_ledger`` path (blank path:
+    in-memory only). The plan is returned under ``"dispatch_plan"``.
+    With the flag off every real-dispatch path runs exactly as before.
     """
     if config is None:
         from omega_prime.config import load_config  # deferred: keeps import light
 
         config = load_config()
     node = _sync_node(config)
+    plan_mode = _dispatch_dry_run_enabled(node, dispatch_dry_run)
+    if plan_mode:
+        # Q8: plan mode forces dry behavior on every branch below (all
+        # kwargs read this local), so no runner call or store write can
+        # slip through. Flag-off runs never enter this branch.
+        dry_run = True
     if node.get("enabled") is not True:
         return {"pushed": [], "skipped": [], "dry_run": dry_run, "disabled": True}
     tracker = _tracker_for_node(node)
@@ -3379,6 +3510,8 @@ def tick(
             repo=repo or None,
         )
         result["disabled"] = False
+        if plan_mode:
+            _attach_dispatch_plan(node, effective_tracker, result)
         if notices:
             result["expiry_notice"] = notices
         return result
@@ -3395,6 +3528,8 @@ def tick(
             now=now,
         )
         result["disabled"] = False
+        if plan_mode:
+            _attach_dispatch_plan(node, effective_tracker, result)
         if notices:
             result["expiry_notice"] = notices
         return result
@@ -3411,6 +3546,8 @@ def tick(
             now=now,
         )
         result["disabled"] = False
+        if plan_mode:
+            _attach_dispatch_plan(node, effective_tracker, result)
         if notices:
             result["expiry_notice"] = notices
         return result
@@ -3430,6 +3567,8 @@ def tick(
             repo=repo or None,
         )
         result["disabled"] = False
+        if plan_mode:
+            _attach_dispatch_plan(node, effective_tracker, result)
         if notices:
             result["expiry_notice"] = notices
         return result
@@ -3450,6 +3589,8 @@ def tick(
             severity_map=severity_map if isinstance(severity_map, dict) else None,
         )
         result["disabled"] = False
+        if plan_mode:
+            _attach_dispatch_plan(node, effective_tracker, result)
         if notices:
             result["expiry_notice"] = notices
         return result
@@ -3468,6 +3609,8 @@ def tick(
             priority_map=priority_map if isinstance(priority_map, dict) else None,
         )
         result["disabled"] = False
+        if plan_mode:
+            _attach_dispatch_plan(node, effective_tracker, result)
         if notices:
             result["expiry_notice"] = notices
         return result
@@ -3497,6 +3640,8 @@ def tick(
             now=now,
         )
         result["disabled"] = False
+        if plan_mode:
+            _attach_dispatch_plan(node, effective_tracker, result)
         if notices:
             result["expiry_notice"] = notices
         return result
@@ -3519,6 +3664,8 @@ def tick(
             webhook_template=template,
         )
         result["disabled"] = False
+        if plan_mode:
+            _attach_dispatch_plan(node, effective_tracker, result)
         if notices:
             result["expiry_notice"] = notices
         return result
@@ -3545,6 +3692,8 @@ def tick(
         now=now,
     )
     result["disabled"] = False
+    if plan_mode:
+        _attach_dispatch_plan(node, effective_tracker, result)
     if notices:
         result["expiry_notice"] = notices
     return result
@@ -3903,8 +4052,116 @@ def _main_graph(
     return 0
 
 
+def _main_dispatch_dry_run(
+    config: Mapping[str, Any] | None,
+    node: Mapping[str, Any],
+    args: Any,
+    directory: str | Path | None,
+) -> int:
+    """Run the CLI plan branch: tick-based would-sync report (Q8).
+
+    CLI overrides win over node keys so ``--dispatch-dry-run`` plans
+    the same dispatch the real flags would run. Zero runner calls,
+    zero store writes; ledger rows go to ``dispatch_ledger``.
+    """
+    try:
+        overlay = dict(node)
+    except Exception:
+        overlay = {}
+
+    def _override(key: str, value: Any) -> None:
+        try:
+            text = value.strip() if isinstance(value, str) else ""
+        except Exception:
+            text = ""
+        if text:
+            overlay[key] = text
+
+    _override("repo", getattr(args, "repo", ""))
+    _override("linear_team_id", getattr(args, "linear_team_id", ""))
+    _override("slack_webhook_url", getattr(args, "slack_webhook_url", ""))
+    _override("teams_webhook_url", getattr(args, "teams_webhook_url", ""))
+    _override("pagerduty_routing_key", getattr(args, "pagerduty_routing_key", ""))
+    _override("opsgenie_api_key", getattr(args, "opsgenie_api_key", ""))
+    _override("webhook_url", getattr(args, "webhook_url", ""))
+    _override("webhook_template", getattr(args, "webhook_template", ""))
+    try:
+        flag_tracker = (
+            getattr(args, "tracker", "").strip() or getattr(args, "mode", "").strip()
+        ).lower()
+    except Exception:
+        flag_tracker = ""
+    if flag_tracker:
+        overlay["tracker"] = flag_tracker
+    try:
+        raw_jira = overlay.get("jira", {})
+        jira_overlay = dict(raw_jira) if isinstance(raw_jira, dict) else {}
+    except Exception:
+        jira_overlay = {}
+    for key, value in (
+        ("base_url", getattr(args, "jira_base_url", "")),
+        ("email", getattr(args, "jira_email", "")),
+        ("api_token", getattr(args, "jira_api_token", "")),
+        ("project_key", getattr(args, "jira_project_key", "")),
+        ("issue_type", getattr(args, "jira_issue_type", "")),
+    ):
+        try:
+            text = value.strip() if isinstance(value, str) else ""
+        except Exception:
+            text = ""
+        if text:
+            jira_overlay[key] = text
+    if jira_overlay:
+        overlay["jira"] = jira_overlay
+    try:
+        redteam = dict((config or {}).get("redteam", {}))
+    except Exception:
+        redteam = {}
+    if not isinstance(redteam, dict):
+        redteam = {}
+    redteam["findings_sync"] = overlay
+    try:
+        scoped = dict(config) if isinstance(config, Mapping) else {}
+    except Exception:
+        scoped = {}
+    if not isinstance(scoped, dict):
+        scoped = {}
+    scoped["redteam"] = redteam
+    try:
+        result = tick(scoped, reports_directory=directory, dispatch_dry_run=True)
+    except FindingsSyncError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # tick is structured; defensive only
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(result, dict):
+        print("error: dispatch plan unavailable", file=sys.stderr)
+        return 1
+    if result.get("error"):
+        print(f"error: {result['error']}", file=sys.stderr)
+        return 2
+    if result.get("skipped_tracker"):
+        print(f"error: {result.get('reason', 'tracker skipped')}", file=sys.stderr)
+        return 2
+    for entry in result.get("dispatch_plan", []) or []:
+        try:
+            print(f"would push {entry.get('dedupe_hash', '')}")
+        except Exception:
+            continue
+    for digest in result.get("skipped", []) or []:
+        print(f"skip (already synced) {digest}")
+    for entry in result.get("quiet_skipped", []) or []:
+        try:
+            reason = entry.get("reason", QUIET_HOURS_REASON)
+            print(f"skip ({reason}) {entry.get('dedupe_hash', '')}")
+        except Exception:
+            continue
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``findings_sync [--tracker github|linear|slack|teams|graph|pagerduty|opsgenie|jira|webhook] [--mode jira] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
+    """CLI: ``findings_sync [--tracker github|linear|slack|teams|graph|pagerduty|opsgenie|jira|webhook] [--mode jira] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run] [--dispatch-dry-run]``."""
     parser = argparse.ArgumentParser(
         prog="findings_sync",
         description="Push unsynced red-team findings to tracker issues (one-way).",
@@ -3956,11 +4213,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print would-push items; write nothing, call no gh.",
     )
+    parser.add_argument(
+        "--dispatch-dry-run",
+        action="store_true",
+        help="Plan mode: resolve which rows would sync to which tracker with zero runner calls and zero store writes; append one JSONL row per would-sync decision to redteam.findings_sync.dispatch_ledger (in-memory only when blank).",
+    )
     args = parser.parse_args(argv)
 
     from omega_prime.config import load_config  # deferred: keeps import light
 
-    node = _sync_node(load_config())
+    config = load_config()
+    node = _sync_node(config)
     if node.get("enabled") is not True:
         print(DISABLED_MESSAGE)
         return 0
@@ -3970,6 +4233,8 @@ def main(argv: list[str] | None = None) -> int:
         or _tracker_for_node(node)
     )
     directory: str | Path | None = args.reports_dir or None
+    if bool(args.dispatch_dry_run) or _dispatch_dry_run_enabled(node):
+        return _main_dispatch_dry_run(config, node, args, directory)
     graph_cfg = _graph_config_for_node(node)
     if tracker == "graph" or _graph_config_complete(graph_cfg):
         if not _graph_config_complete(graph_cfg):
@@ -4148,6 +4413,7 @@ __all__ = [
     "DEFAULT_LABELS",
     "DEFAULT_TRACKER",
     "DISABLED_MESSAGE",
+    "DISPATCH_DRY_RUN_REASON",
     "GRAPH_FIELDS",
     "GRAPH_MESSAGES_URL_TEMPLATE",
     "GRAPH_SCOPE",
@@ -4211,6 +4477,7 @@ __all__ = [
     "pagerduty_payload",
     "pagerduty_severity",
     "priority_for_severity",
+    "record_dispatch_plan",
     "render_template",
     "sign_payload",
     "slack_color",
