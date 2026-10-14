@@ -66,6 +66,21 @@ raw gateway payload). The routing key comes from
 (fail-closed, never guess). Pushed rows are marked with a deterministic
 ``pd:<dedupe_hash>`` ref, so idempotency is identical to the other
 modes.
+Opsgenie mode (``redteam.findings_sync.tracker: "opsgenie"``) creates
+the same rows as Opsgenie Alert API v2 alerts through
+``gh api https://api.opsgenie.com/v2/alerts`` POSTs on the same
+runner seam (with the webhook-retry transport, authorizing via an
+``Authorization: GenieKey`` header). Each alert carries ``message``
+(the finding title, capped at 130 chars) with ``alias`` set to the
+finding's ``dedupe_hash`` (dedupe/update semantics: re-sending the
+same alias updates rather than duplicates), a ``description`` with
+the finding details, a ``priority`` mapped from the finding severity
+(critical→P1, high→P2, moderate/medium→P3, low/info→P5), and a
+``details`` dict (fixed fields only, never the raw gateway payload).
+The API key comes from ``redteam.findings_sync.opsgenie_api_key``;
+blank means off (fail-closed, never guess). Pushed rows are marked
+with a deterministic ``og:<dedupe_hash>`` ref, so idempotency is
+identical to the other modes.
 """
 
 from __future__ import annotations
@@ -108,7 +123,7 @@ DEFAULT_LABELS: dict[str, list[str]] = {
 UNKNOWN_SEVERITY_LABELS = ["redteam"]
 
 #: Supported tracker backends for the findings sync.
-TRACKERS = ("github", "linear", "slack", "teams", "graph", "pagerduty")
+TRACKERS = ("github", "linear", "slack", "teams", "graph", "pagerduty", "opsgenie")
 
 #: Default tracker backend (the existing GitHub-issues mode, unchanged).
 DEFAULT_TRACKER = "github"
@@ -128,6 +143,10 @@ NO_TEAMS_WEBHOOK_MESSAGE = "no teams webhook configured"
 #: Message used when graph mode is selected but the ``graph`` mapping is
 #: blank or missing (fail-closed, never guess, never crash).
 NO_GRAPH_CONFIG_MESSAGE = "no graph config configured"
+
+#: Message used when tracker=opsgenie but no API key is configured
+#: (fail-closed, never guess).
+NO_OPSGENIE_API_KEY_MESSAGE = "no opsgenie api key configured"
 
 #: Message used when tracker=pagerduty but no routing key is configured
 #: (fail-closed, never guess).
@@ -218,11 +237,35 @@ PD_SEVERITIES: dict[str, str] = {
 #: requires one of ``critical``/``error``/``warning``/``info``).
 UNKNOWN_SEVERITY_PD_SEVERITY = "info"
 
+#: Opsgenie Alert API v2 create-alert endpoint.
+OPSGENIE_ALERTS_URL = "https://api.opsgenie.com/v2/alerts"
+
+#: Valid Opsgenie Alert API v2 priorities.
+OPSGENIE_PRIORITIES = ("P1", "P2", "P3", "P4", "P5")
+
+#: Finding severity → Opsgenie Alert API v2 priority mapping.
+#: Operator-overridable per severity via the ``priority_map`` argument
+#: of :func:`opsgenie_priority` (per-severity replacement).
+OG_PRIORITIES: dict[str, str] = {
+    "critical": "P1",
+    "high": "P2",
+    "medium": "P3",
+    "moderate": "P3",
+    "low": "P5",
+    "info": "P5",
+}
+
+#: Fallback Opsgenie priority for unknown severities.
+UNKNOWN_SEVERITY_OG_PRIORITY = "P5"
+
+#: Opsgenie alert ``message`` field cap (Alert API v2 limit is 130 chars).
+OPSGENIE_MESSAGE_LIMIT = 130
+
 #: ``gh`` invocation timeout (seconds).
 _GH_TIMEOUT = 60
 
 #: Webhook POST retry budget: retries after the initial attempt. Only the
-#: Slack/Teams/PagerDuty webhook transports retry; GitHub/Linear modes
+#: Slack/Teams/PagerDuty/Opsgenie webhook transports retry; GitHub/Linear modes
 #: are unchanged.
 WEBHOOK_MAX_RETRIES = 3
 
@@ -538,6 +581,60 @@ def pagerduty_payload(
                 "first_seen": row.get("ts", ""),
                 "last_seen": row.get("last_seen", ""),
             },
+        },
+    }
+
+
+def opsgenie_priority(
+    severity: Any, priority_map: Mapping[str, Any] | None = None
+) -> str:
+    """Resolve the Opsgenie Alert API v2 priority for ``severity``.
+
+    Default table (case-insensitive): critical→``P1``,
+    high→``P2``, medium/moderate→``P3``, low/info→``P5``.
+    A per-severity ``priority_map`` override replaces the default entry
+    entirely (only when the override value is a valid Alert API v2
+    priority, matched case-insensitively and normalized to uppercase);
+    unknown severities fall back to ``P5``.
+    """
+    key = severity.lower() if isinstance(severity, str) else ""
+    if priority_map:
+        override = priority_map.get(key)
+        if isinstance(override, str) and override.upper() in OPSGENIE_PRIORITIES:
+            return override.upper()
+    return OG_PRIORITIES.get(key, UNKNOWN_SEVERITY_OG_PRIORITY)
+
+
+def opsgenie_payload(
+    row: Mapping[str, Any],
+    priority_map: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Opsgenie Alert API v2 alert for one finding row.
+
+    ``message`` is the issue title capped at 130 characters (the Alert
+    API v2 limit) with ``alias`` set to the finding's ``dedupe_hash``
+    (dedupe/update semantics: re-sending the same ``alias`` updates
+    rather than duplicates). ``description`` carries the finding
+    details (same fixed fields as the issue body), ``priority`` is the
+    mapped priority (see :func:`opsgenie_priority`), and ``details``
+    carries the fixed fields only — never the raw gateway payload
+    (threat T-79-11).
+    """
+    digest = str(row.get("dedupe_hash", ""))
+    return {
+        "message": issue_title(row)[:OPSGENIE_MESSAGE_LIMIT],
+        "alias": digest,
+        "description": issue_body(row),
+        "priority": opsgenie_priority(row.get("severity"), priority_map),
+        "details": {
+            "case_id": row.get("case_id"),
+            "severity": row.get("severity"),
+            "verdict": row.get("verdict"),
+            "observed_detection": row.get("observed_detection"),
+            "dedupe_hash": digest,
+            "occurrence_count": row.get("occurrence_count", 1),
+            "first_seen": row.get("ts", ""),
+            "last_seen": row.get("last_seen", ""),
         },
     }
 
@@ -1083,6 +1180,110 @@ def sync_findings_pagerduty(
     return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
 
 
+def sync_findings_opsgenie(
+    reports_dir: str | Path | None,
+    api_key: str,
+    *,
+    runner: GhRunner | None = None,
+    priority_map: Mapping[str, Any] | None = None,
+    dry_run: bool = False,
+    **kw: Any,
+) -> dict[str, Any]:
+    """Create every not-yet-synced finding row as an Opsgenie alert.
+
+    Same rows and idempotency marking as :func:`sync_findings` (rows
+    carrying ``issue_url`` are skipped); only the transport differs —
+    ``gh api https://api.opsgenie.com/v2/alerts`` POSTs one Alert API
+    v2 alert per row (see :func:`opsgenie_payload`) instead of a GitHub
+    issue, authorizing via an ``Authorization: GenieKey`` header. The
+    ``alias`` is the finding's ``dedupe_hash``, so re-sending updates
+    rather than duplicates, and a pushed row is marked with a
+    deterministic ``og:<dedupe_hash>`` ref. The webhook-retry transport
+    (:func:`_run_with_webhook_retry`) applies. Failure semantics mirror
+    :func:`sync_findings`: earlier-in-run pushes persist, the failed row
+    stays unsynced, and a :class:`GhApiError` is raised. With zero pushes
+    (or ``dry_run``) the store file is byte-identical and the runner is
+    never called in dry-run mode.
+
+    A blank ``api_key`` raises :class:`ValueError` (fail-closed,
+    never guess). The API key rides only in the ``-H`` argv header —
+    it is never logged, never rendered, and never echoed beyond the
+    argv itself (the introspection payload carries the alert fields
+    only).
+
+    Returns ``{"pushed": [...], "skipped": [...], "dry_run": bool}``
+    with the same entry shapes as :func:`sync_findings`.
+    """
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise ValueError(NO_OPSGENIE_API_KEY_MESSAGE)
+    api_key = api_key.strip()
+    if priority_map is None:
+        maybe_map = kw.get("severity_map")
+        if isinstance(maybe_map, dict):
+            priority_map = maybe_map
+    run = runner if runner is not None else _default_runner
+
+    rows = load_findings(reports_dir)
+    pushed: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    dirty = False
+
+    for row in rows:
+        digest = str(row.get("dedupe_hash", ""))
+        if row.get("issue_url"):
+            skipped.append(digest)
+            continue
+        alert = opsgenie_payload(row, priority_map)
+        details_json = json.dumps(alert["details"])
+        payload: dict[str, Any] = {
+            "message": alert["message"],
+            "alias": digest,
+            "description": alert["description"],
+            "priority": alert["priority"],
+            "details": alert["details"],
+        }
+        argv = [
+            "gh",
+            "api",
+            OPSGENIE_ALERTS_URL,
+            "--method",
+            "POST",
+            "-H",
+            f"Authorization: GenieKey {api_key}",
+            "-f",
+            f"message={alert['message']}",
+            "-f",
+            f"alias={digest}",
+            "-f",
+            f"description={alert['description']}",
+            "-f",
+            f"priority={alert['priority']}",
+            "-f",
+            f"details={details_json}",
+        ]
+
+        if dry_run:
+            pushed.append({"dedupe_hash": digest, "issue_url": ""})
+            continue
+
+        try:
+            _run_with_webhook_retry(run, argv, payload)
+        except FindingsSyncError:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise
+        except Exception as exc:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise GhApiError(f"gh runner failed: {exc}") from exc
+        row["issue_url"] = f"og:{digest}"
+        row["synced_at"] = utc_now_rfc3339()
+        dirty = True
+        pushed.append({"dedupe_hash": digest, "issue_url": row["issue_url"]})
+
+    if dirty and not dry_run:
+        _write_rows_atomic(findings_path(reports_dir), rows)
+    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+
+
 def _graph_token_url(tenant_id: str) -> str:
     """Token endpoint for a tenant (client-credentials flow)."""
     return GRAPH_TOKEN_URL_TEMPLATE.format(tenant=tenant_id)
@@ -1509,10 +1710,11 @@ def tick(
     Reads ``redteam.findings_sync`` (``enabled``, ``tracker``, ``repo``,
     ``labels``, ``linear_team_id``, ``slack_webhook_url``,
     ``teams_webhook_url``, ``graph``, ``pagerduty_routing_key``,
-    ``pagerduty_severity_map``) from ``config``
+    ``pagerduty_severity_map``, ``opsgenie_api_key``,
+    ``opsgenie_priority_map``) from ``config``
     (loads via ``load_config()`` when omitted). Disabled, repo-less,
-    team-less, webhook-less, graph-less, routing-key-less, or
-    unknown-tracker results are structured dicts — never exceptions,
+    team-less, webhook-less, graph-less, routing-key-less, api-key-less,
+    or unknown-tracker results are structured dicts — never exceptions,
     never a new cron kind. The graph branch runs when ``tracker`` is
     ``"graph"`` or when the ``graph`` mapping is complete; the sync
     itself stays plain
@@ -1596,6 +1798,20 @@ def tick(
             runner=runner,
             dry_run=dry_run,
             severity_map=severity_map if isinstance(severity_map, dict) else None,
+        )
+        result["disabled"] = False
+        return result
+    if tracker == "opsgenie":
+        api_key = node.get("opsgenie_api_key", "")
+        if not isinstance(api_key, str) or not api_key.strip():
+            return _tracker_error(NO_OPSGENIE_API_KEY_MESSAGE, dry_run)
+        priority_map = node.get("opsgenie_priority_map")
+        result = sync_findings_opsgenie(
+            reports_directory,
+            api_key.strip(),
+            runner=runner,
+            dry_run=dry_run,
+            priority_map=priority_map if isinstance(priority_map, dict) else None,
         )
         result["disabled"] = False
         return result
@@ -1743,6 +1959,49 @@ def _main_pagerduty(
     return 0
 
 
+def _main_opsgenie(
+    directory: str | Path | None,
+    api_key: str,
+    dry_run: bool,
+    priority_map: Mapping[str, Any] | None = None,
+) -> int:
+    """Run the Opsgenie branch of the CLI (dry-run aware)."""
+    if dry_run:
+        try:
+            result = sync_findings_opsgenie(
+                directory if directory is not None else reports_dir(),
+                api_key,
+                dry_run=True,
+                priority_map=priority_map,
+            )
+        except FindingsSyncError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for entry in result["pushed"]:
+            print(f"would push {entry['dedupe_hash']}")
+        for digest in result["skipped"]:
+            print(f"skip (already synced) {digest}")
+        return 0
+
+    try:
+        result = sync_findings_opsgenie(
+            directory if directory is not None else reports_dir(),
+            api_key,
+            priority_map=priority_map,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except FindingsSyncError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for entry in result["pushed"]:
+        print(f"pushed {entry['dedupe_hash']} -> {entry['issue_url']}")
+    for digest in result["skipped"]:
+        print(f"skip (already synced) {digest}")
+    return 0
+
+
 def _main_linear(directory: str | Path | None, team_id: str, dry_run: bool) -> int:
     """Run the Linear branch of the CLI (dry-run aware)."""
     if dry_run:
@@ -1830,7 +2089,7 @@ def _main_graph(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``findings_sync [--tracker github|linear|slack|teams|graph|pagerduty] [--mode pagerduty] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
+    """CLI: ``findings_sync [--tracker github|linear|slack|teams|graph|pagerduty|opsgenie] [--mode opsgenie] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
     parser = argparse.ArgumentParser(
         prog="findings_sync",
         description="Push unsynced red-team findings to tracker issues (one-way).",
@@ -1838,12 +2097,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tracker",
         default="",
-        help="Tracker backend: github (default), linear, slack, teams, graph, or pagerduty; blank means config",
+        help="Tracker backend: github (default), linear, slack, teams, graph, pagerduty, or opsgenie; blank means config",
     )
     parser.add_argument(
         "--mode",
         default="",
-        help="Mode alias for --tracker (graph selects the Microsoft Graph API sender, pagerduty the PagerDuty Events API sender); blank means config",
+        help="Mode alias for --tracker (graph selects the Microsoft Graph API sender, pagerduty the PagerDuty Events API sender, opsgenie the Opsgenie Alert API sender); blank means config",
     )
     parser.add_argument("--repo", default="", help="Target repo OWNER/NAME")
     parser.add_argument("--linear-team-id", default="", help="Linear team ID override")
@@ -1855,6 +2114,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--pagerduty-routing-key", default="", help="PagerDuty routing key override"
+    )
+    parser.add_argument(
+        "--opsgenie-api-key", default="", help="Opsgenie API key override"
     )
     parser.add_argument("--reports-dir", default="", help="Reports dir override")
     parser.add_argument(
@@ -1938,6 +2200,22 @@ def main(argv: list[str] | None = None) -> int:
             args.dry_run,
             severity_map if isinstance(severity_map, dict) else None,
         )
+    if tracker == "opsgenie":
+        api_key = args.opsgenie_api_key.strip() or (
+            node.get("opsgenie_api_key", "").strip()
+            if isinstance(node.get("opsgenie_api_key", ""), str)
+            else ""
+        )
+        if not api_key:
+            print(f"error: {NO_OPSGENIE_API_KEY_MESSAGE}", file=sys.stderr)
+            return 2
+        priority_map = node.get("opsgenie_priority_map")
+        return _main_opsgenie(
+            directory,
+            api_key,
+            args.dry_run,
+            priority_map if isinstance(priority_map, dict) else None,
+        )
     if tracker != "github":
         print(f"error: unknown tracker: {tracker}", file=sys.stderr)
         return 2
@@ -2002,10 +2280,15 @@ __all__ = [
     "LINEAR_PRIORITIES",
     "NO_GRAPH_CONFIG_MESSAGE",
     "NO_LINEAR_TEAM_MESSAGE",
+    "NO_OPSGENIE_API_KEY_MESSAGE",
     "NO_PAGERDUTY_ROUTING_KEY_MESSAGE",
     "NO_REPO_MESSAGE",
     "NO_SLACK_WEBHOOK_MESSAGE",
     "NO_TEAMS_WEBHOOK_MESSAGE",
+    "OG_PRIORITIES",
+    "OPSGENIE_ALERTS_URL",
+    "OPSGENIE_MESSAGE_LIMIT",
+    "OPSGENIE_PRIORITIES",
     "PAGERDUTY_EVENTS_URL",
     "PAGERDUTY_SEVERITIES",
     "PD_SEVERITIES",
@@ -2014,6 +2297,7 @@ __all__ = [
     "TRACKERS",
     "UNKNOWN_SEVERITY_COLOR",
     "UNKNOWN_SEVERITY_LABELS",
+    "UNKNOWN_SEVERITY_OG_PRIORITY",
     "UNKNOWN_SEVERITY_PD_SEVERITY",
     "UNKNOWN_SEVERITY_PRIORITY",
     "UNKNOWN_SEVERITY_THEME_COLOR",
@@ -2029,6 +2313,8 @@ __all__ = [
     "issue_title",
     "labels_for_severity",
     "main",
+    "opsgenie_payload",
+    "opsgenie_priority",
     "pagerduty_payload",
     "pagerduty_severity",
     "priority_for_severity",
@@ -2037,6 +2323,7 @@ __all__ = [
     "sync_findings",
     "sync_findings_graph",
     "sync_findings_linear",
+    "sync_findings_opsgenie",
     "sync_findings_pagerduty",
     "sync_findings_slack",
     "sync_findings_teams",

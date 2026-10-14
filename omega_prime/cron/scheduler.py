@@ -14,6 +14,7 @@ import stat
 import tempfile
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -337,14 +338,226 @@ def run_due_jobs(
     return store.tick(now, runner, skip_kind=DESK_LEAD_KIND)
 
 
+#: Job kind marker stored on RoE watchdog jobs (K11). An independent
+#: ticker that flags expired grants even when the heartbeat system is
+#: down: each tick runs the lifecycle ``watchdog_check`` on the job's
+#: configured RoE artifact path and persists state transitions to the
+#: job digest. Never stored on any other kind — pre-existing kinds are
+#: unchanged.
+ROE_WATCHDOG_KIND = "roe_watchdog"
+
+#: Default watchdog cadence: once a day (seconds).
+ROE_WATCHDOG_INTERVAL_SECONDS = 86400
+
+#: Bounded per-job run history, mirroring :func:`tick_desk_lead_passes`.
+ROE_WATCHDOG_HISTORY_LIMIT = 20
+
+
+def schedule_roe_watchdog(
+    store: JobStore,
+    artifact_path: str,
+    *,
+    due_at: int | float,
+    interval_seconds: int | float = ROE_WATCHDOG_INTERVAL_SECONDS,
+) -> str:
+    """Schedule a recurring RoE watchdog for ``artifact_path`` and return its id.
+
+    Mirrors :func:`schedule_desk_lead_pass`: validates a non-empty
+    artifact path and a positive interval, then stamps ``kind`` +
+    ``artifact_path`` on the stored job. The default cadence is daily.
+    """
+    if not isinstance(artifact_path, str) or not artifact_path.strip():
+        raise ValueError("artifact_path must be a non-empty string")
+    if isinstance(interval_seconds, bool) or interval_seconds <= 0:
+        raise ValueError("a roe watchdog needs a positive interval_seconds")
+    job_id = store.schedule(
+        f"roe-watchdog {artifact_path.strip()}",
+        due_at,
+        interval_seconds=interval_seconds,
+    )
+    for job in store.jobs:
+        if isinstance(job, dict) and job.get("id") == job_id:
+            job["kind"] = ROE_WATCHDOG_KIND
+            job["artifact_path"] = artifact_path.strip()
+            break
+    store._save()
+    return job_id
+
+
+def list_roe_watchdogs(store: JobStore) -> list[dict]:
+    """All RoE watchdog jobs, complete or not."""
+    return [
+        job
+        for job in store.jobs
+        if isinstance(job, dict) and job.get("kind") == ROE_WATCHDOG_KIND
+    ]
+
+
+def clear_roe_watchdog(store: JobStore, job_id: str) -> dict:
+    """Remove one RoE watchdog by id. Unknown id is a structured result."""
+    for index, job in enumerate(store.jobs):
+        if (
+            isinstance(job, dict)
+            and job.get("id") == job_id
+            and job.get("kind") == ROE_WATCHDOG_KIND
+        ):
+            store.jobs.pop(index)
+            store._save()
+            return {"cleared": job_id}
+    return {"error": f"no roe-watchdog job: {job_id!r}"}
+
+
+def _roe_watchdog_now(now: Any) -> tuple[Any, float]:
+    """Normalize ``now`` to ``(checker_now, stamp)``.
+
+    Accepts a UTC datetime (hermetic clock) or a unix timestamp; the job
+    record only ever stores numeric stamps (JSON-safe), while the
+    checker always receives a datetime.
+    """
+    if isinstance(now, datetime):
+        current = now
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=UTC)
+        else:
+            current = current.astimezone(UTC)
+    else:
+        current = datetime.fromtimestamp(now, tz=UTC)
+    return current, current.timestamp()
+
+
+def tick_roe_watchdog(store: JobStore, now: Any, checker: Any = None) -> list[dict]:
+    """Run each due RoE watchdog through ``watchdog_check``.
+
+    Only ``roe_watchdog`` non-completed jobs due at ``now`` run, one
+    tick each in order; a job claimed or already run for ``now`` is
+    skipped, and the claim is saved before the check starts. ``checker``
+    defaults to :func:`omega_prime.grokbot.roe_lifecycle.watchdog_check`
+    (imported lazily so plain cron ticks never load the lifecycle
+    stack); pass an explicit ``checker(artifact_path, now=...)`` seam
+    for hermetic tests. Each tick records ``last_result`` /
+    ``last_ran_at``, appends bounded history (cap 20), and advances
+    ``due_at = stamp + interval``. State transitions persist to
+    ``job["roe_watchdog_digest"]`` (``{"from", "to", "at",
+    "artifact_id", "effective_until", "action"}``) and update
+    ``job["roe_watchdog_state"]``, so a DOWN heartbeat cannot silence
+    an expiring grant — the digest keeps the valid → expiring →
+    expired trail. Never raises: a checker failure records a
+    fail-closed ``missing`` result instead. Pass
+    ``skip_kind=ROE_WATCHDOG_KIND`` to the generic ``JobStore.tick``
+    driver so it leaves these jobs to this tick.
+    """
+    if checker is None:
+        from omega_prime.grokbot.roe_lifecycle import watchdog_check
+
+        checker = watchdog_check
+    checker_now, stamp = _roe_watchdog_now(now)
+    ran: list[dict] = []
+    for job in store.jobs:
+        if not isinstance(job, dict):
+            continue
+        if job.get("kind") != ROE_WATCHDOG_KIND or job.get("completed"):
+            continue
+        due_at = job.get("due_at")
+        if due_at is None or due_at > stamp:
+            continue
+        history = job.get("history")
+        if not isinstance(history, list):
+            history = []
+            job["history"] = history
+        if job.get("claimed_at") == stamp:
+            continue
+        if any(
+            isinstance(entry, dict) and entry.get("ran_at") == stamp
+            for entry in history
+        ):
+            continue
+        job["claimed_at"] = stamp
+        store._save()
+        artifact = job.get("artifact_path", "")
+        try:
+            result = checker(artifact, now=checker_now)
+        except Exception:
+            result = {
+                "state": "missing",
+                "artifact_id": artifact
+                if isinstance(artifact, str) and artifact.strip()
+                else "unknown-artifact",
+                "effective_until": None,
+                "action": "provide artifact",
+            }
+        if not isinstance(result, dict):
+            result = {
+                "state": "missing",
+                "artifact_id": "unknown-artifact",
+                "effective_until": None,
+                "action": "provide artifact",
+            }
+        if result.get("state") not in (
+            "valid",
+            "expiring-7d",
+            "expiring-1d",
+            "expired",
+            "missing",
+            "invalid",
+        ):
+            result = {
+                "state": "invalid",
+                "artifact_id": result.get("artifact_id", "unknown-artifact"),
+                "effective_until": result.get("effective_until"),
+                "action": "fix artifact",
+            }
+        job["last_result"] = result
+        job["last_ran_at"] = stamp
+        history.append({"ran_at": stamp, "result": job["last_result"]})
+        del history[:-ROE_WATCHDOG_HISTORY_LIMIT]
+        job["claimed_at"] = None
+        interval = job.get("interval_seconds")
+        if interval is not None:
+            try:
+                job["due_at"] = stamp + interval
+            except TypeError:
+                job["due_at"] = stamp + ROE_WATCHDOG_INTERVAL_SECONDS
+        else:
+            job["due_at"] = stamp + ROE_WATCHDOG_INTERVAL_SECONDS
+        previous = job.get("roe_watchdog_state")
+        current_state = result.get("state")
+        if previous != current_state:
+            job["roe_watchdog_state"] = current_state
+            digest = job.setdefault("roe_watchdog_digest", [])
+            if not isinstance(digest, list):
+                digest = []
+                job["roe_watchdog_digest"] = digest
+            digest.append(
+                {
+                    "from": previous,
+                    "to": current_state,
+                    "at": stamp,
+                    "artifact_id": result.get("artifact_id"),
+                    "effective_until": result.get("effective_until"),
+                    "action": result.get("action"),
+                }
+            )
+        ran.append(job)
+    if ran:
+        store._save()
+    return ran
+
+
 __all__ = [
     "DESK_LEAD_KIND",
     "HISTORY_LIMIT",
+    "ROE_WATCHDOG_HISTORY_LIMIT",
+    "ROE_WATCHDOG_INTERVAL_SECONDS",
+    "ROE_WATCHDOG_KIND",
     "JobStore",
+    "clear_roe_watchdog",
     "desk_lead_runner",
     "list_desk_lead_passes",
+    "list_roe_watchdogs",
     "run_desk_lead_passes",
     "run_due_jobs",
     "schedule_desk_lead_pass",
+    "schedule_roe_watchdog",
     "tick_desk_lead_passes",
+    "tick_roe_watchdog",
 ]

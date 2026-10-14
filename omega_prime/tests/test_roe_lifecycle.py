@@ -27,10 +27,19 @@ from omega_prime.cron.heartbeat import (
     tick_heartbeats,
     tick_roe_expiry,
 )
-from omega_prime.cron.scheduler import JobStore
+from omega_prime.cron.scheduler import (
+    ROE_WATCHDOG_KIND,
+    JobStore,
+    clear_roe_watchdog,
+    list_roe_watchdogs,
+    schedule_roe_watchdog,
+    tick_roe_watchdog,
+)
 from omega_prime.grokbot.roe_lifecycle import (
     RENEWAL_THRESHOLDS_DAYS,
     ROE_REVOKED_KIND,
+    STATES,
+    WATCHDOG_ACTIONS,
     check_readiness,
     check_roe_lifecycle,
     clear_renewal_reminders,
@@ -38,6 +47,7 @@ from omega_prime.grokbot.roe_lifecycle import (
     main,
     renewal_reminders,
     suite_counts,
+    watchdog_check,
 )
 from omega_prime.tools.durable_surface import register_durable_surface_tools
 from omega_prime.tools.registry import ToolRegistry
@@ -953,3 +963,203 @@ def test_heartbeat_revoked_marker_digest_only(tmp_path, fresh_renewals):
     assert "revoked" in entries[0]["detail"]
     assert fake.calls == []
     assert heartbeat_roe_renewals(job, now=END, audit_log=str(log)) == []
+
+
+# K11 RoE expiry watchdog ------------------------------------------------------
+
+
+def _watchdog_document(days_left):
+    """RoE document whose window ends ``days_left`` after END."""
+    until = (END + timedelta(days=days_left)).isoformat(timespec="seconds")
+    return _document(effective_until=until)
+
+
+def test_watchdog_states_reuse_lifecycle_vocabulary(tmp_path):
+    """K11: watchdog states reuse STATES; actions name the operator step."""
+    artifact = _write_artifact(tmp_path, _watchdog_document(30))
+    assert watchdog_check(str(artifact), now=END)["state"] == "valid"
+    artifact.write_text(json.dumps(_watchdog_document(5)), encoding="utf-8")
+    assert watchdog_check(str(artifact), now=END)["state"] == "expiring-7d"
+    artifact.write_text(json.dumps(_watchdog_document(0.5)), encoding="utf-8")
+    assert watchdog_check(str(artifact), now=END)["state"] == "expiring-1d"
+    artifact.write_text(json.dumps(_watchdog_document(-1)), encoding="utf-8")
+    result = watchdog_check(str(artifact), now=END)
+    assert result["state"] == "expired"
+    assert result["action"] == "archive"
+    for result_state in (
+        watchdog_check(str(artifact), now=END)["state"],
+        watchdog_check(None, now=END)["state"],
+    ):
+        assert result_state in STATES
+
+
+def test_watchdog_actions_per_state(tmp_path):
+    """K11: each state maps to its required operator step."""
+    assert watchdog_check(_watchdog_document(30), now=END)["action"] == "none"
+    assert watchdog_check(_watchdog_document(5), now=END)["action"] == "re-sign"
+    assert watchdog_check(_watchdog_document(0.5), now=END)["action"] == "re-sign"
+    assert watchdog_check(_watchdog_document(-2), now=END)["action"] == "archive"
+    assert (
+        watchdog_check(str(tmp_path / "absent.json"), now=END)["action"]
+        == "provide artifact"
+    )
+    assert WATCHDOG_ACTIONS["missing"] == "provide artifact"
+    assert WATCHDOG_ACTIONS["invalid"] == "fix artifact"
+
+
+def test_watchdog_reports_ids_and_until(tmp_path):
+    """K11: watchdog returns artifact_id + effective_until for triage."""
+    document = _watchdog_document(5)
+    result = watchdog_check(document, now=END)
+    assert result["artifact_id"]
+    assert result["effective_until"] == document["effective_until"]
+    artifact = _write_artifact(tmp_path, document)
+    path_result = watchdog_check(str(artifact), now=END)
+    assert path_result["artifact_id"] == str(artifact)
+    assert path_result["effective_until"] == document["effective_until"]
+    assert set(path_result) >= {
+        "state",
+        "artifact_id",
+        "effective_until",
+        "action",
+    }
+
+
+def test_watchdog_fail_closed(tmp_path):
+    """K11: missing/invalid/garbage inputs never raise; missing is missing."""
+    assert watchdog_check(None, now=END)["state"] == "missing"
+    assert watchdog_check("   ", now=END)["state"] == "missing"
+    assert watchdog_check("   ", now=END)["action"] == "provide artifact"
+    assert watchdog_check(str(tmp_path / "absent.json"), now=END)["state"] == (
+        "missing"
+    )
+    garbage = tmp_path / "roe.json"
+    garbage.write_text("{not json", encoding="utf-8")
+    assert watchdog_check(str(garbage), now=END)["state"] == "invalid"
+    assert watchdog_check(str(garbage), now=END)["action"] == "fix artifact"
+    assert watchdog_check({"no": "window"}, now=END)["state"] == "invalid"
+    assert watchdog_check(12345, now=END)["state"] == "invalid"
+    assert watchdog_check(["not", "a", "dict"], now=END)["state"] == "invalid"
+
+
+def test_watchdog_defaults_to_wall_clock():
+    """K11: omitted now reads the wall clock instead of raising."""
+    far = (datetime.now(UTC) + timedelta(days=60)).isoformat(timespec="seconds")
+    result = watchdog_check(_document(effective_until=far))
+    assert result["state"] == "valid"
+    assert result["action"] == "none"
+
+
+def test_watchdog_kind_distinct_from_existing_kinds():
+    """K11: the watchdog kind is new; existing kinds are unchanged."""
+    assert ROE_WATCHDOG_KIND == "roe_watchdog"
+    assert ROE_WATCHDOG_KIND not in {HEARTBEAT_KIND, ROE_EXPIRY_KIND}
+    assert ROE_WATCHDOG_KIND != "desk_lead_pass"
+
+
+def test_schedule_watchdog_marks_kind_and_validates(tmp_path):
+    """K11: schedule stamps kind + path; bad inputs raise ValueError."""
+    store = JobStore(tmp_path / "cron" / "jobs.json")
+    artifact = _write_artifact(tmp_path, _watchdog_document(30))
+    job_id = schedule_roe_watchdog(store, str(artifact), due_at=0)
+    jobs = list_roe_watchdogs(store)
+    assert len(jobs) == 1
+    assert jobs[0]["id"] == job_id
+    assert jobs[0]["kind"] == ROE_WATCHDOG_KIND
+    assert jobs[0]["artifact_path"] == str(artifact)
+    assert len(list_roe_watchdogs(JobStore(tmp_path / "cron" / "jobs.json"))) == 1
+    with pytest.raises(ValueError, match="artifact_path"):
+        schedule_roe_watchdog(store, "   ", due_at=0)
+    with pytest.raises(ValueError, match="positive interval"):
+        schedule_roe_watchdog(store, str(artifact), due_at=0, interval_seconds=0)
+
+
+def test_clear_watchdog_round_trip(tmp_path):
+    """K11: clear removes one watchdog; unknown id is a structured error."""
+    store = JobStore(tmp_path / "cron" / "jobs.json")
+    artifact = _write_artifact(tmp_path, _watchdog_document(30))
+    job_id = schedule_roe_watchdog(store, str(artifact), due_at=0)
+    assert clear_roe_watchdog(store, "nope")["error"]
+    assert clear_roe_watchdog(store, job_id) == {"cleared": job_id}
+    assert list_roe_watchdogs(store) == []
+
+
+def test_watchdog_tick_persists_transitions_without_heartbeat(tmp_path):
+    """K11: each tick runs watchdog_check; valid->expiring->expired digests."""
+    store = JobStore(tmp_path / "cron" / "jobs.json")
+    artifact = _write_artifact(tmp_path, _watchdog_document(30))
+    job_id = schedule_roe_watchdog(
+        store, str(artifact), due_at=0, interval_seconds=86400
+    )
+
+    def job():
+        return next(j for j in store.jobs if j["id"] == job_id)
+
+    first = END
+    ran = tick_roe_watchdog(store, first)
+    assert [j["id"] for j in ran] == [job_id]
+    assert job()["last_result"]["state"] == "valid"
+    assert job()["roe_watchdog_state"] == "valid"
+    assert len(job()["roe_watchdog_digest"]) == 1
+
+    second = END + timedelta(days=26)
+    tick_roe_watchdog(store, second)
+    assert job()["last_result"]["state"] == "expiring-7d"
+    assert job()["last_result"]["action"] == "re-sign"
+    assert [e["to"] for e in job()["roe_watchdog_digest"]] == [
+        "valid",
+        "expiring-7d",
+    ]
+
+    third = END + timedelta(days=32)
+    tick_roe_watchdog(store, third)
+    assert job()["last_result"]["state"] == "expired"
+    assert [e["to"] for e in job()["roe_watchdog_digest"]] == [
+        "valid",
+        "expiring-7d",
+        "expired",
+    ]
+    assert job()["roe_watchdog_digest"][-1]["action"] == "archive"
+
+
+def test_watchdog_tick_repeats_same_state_without_digest_growth(tmp_path):
+    """K11: steady-state ticks update last_result but add no digest entry."""
+    store = JobStore(tmp_path / "cron" / "jobs.json")
+    artifact = _write_artifact(tmp_path, _watchdog_document(30))
+    job_id = schedule_roe_watchdog(
+        store, str(artifact), due_at=0, interval_seconds=86400
+    )
+    tick_roe_watchdog(store, END)
+    before = list(
+        next(j for j in store.jobs if j["id"] == job_id)["roe_watchdog_digest"]
+    )
+    tick_roe_watchdog(store, END + timedelta(hours=12))
+    after = next(j for j in store.jobs if j["id"] == job_id)
+    assert after["roe_watchdog_digest"] == before
+    assert after["last_result"]["state"] == "valid"
+
+
+def test_watchdog_tick_missing_artifact_is_fail_closed(tmp_path):
+    """K11: a missing artifact ticks missing (provide artifact), never raises."""
+    store = JobStore(tmp_path / "cron" / "jobs.json")
+    job_id = schedule_roe_watchdog(
+        store, str(tmp_path / "absent.json"), due_at=0, interval_seconds=60
+    )
+    ran = tick_roe_watchdog(store, END)
+    assert [j["id"] for j in ran] == [job_id]
+    result = next(j for j in store.jobs if j["id"] == job_id)["last_result"]
+    assert result["state"] == "missing"
+    assert result["action"] == "provide artifact"
+
+
+def test_watchdog_tick_skips_not_due_and_generic_tick_respects_skip(tmp_path):
+    """K11: future-due watchdogs wait; generic tick can leave them alone."""
+    store = JobStore(tmp_path / "cron" / "jobs.json")
+    artifact = _write_artifact(tmp_path, _watchdog_document(30))
+    schedule_roe_watchdog(store, str(artifact), due_at=10**12)
+    assert tick_roe_watchdog(store, END) == []
+    assert store.tick(END.timestamp(), lambda prompt: "generic") == []
+    skipped = store.tick(
+        END.timestamp(), lambda prompt: "generic", skip_kind=ROE_WATCHDOG_KIND
+    )
+    assert skipped == []

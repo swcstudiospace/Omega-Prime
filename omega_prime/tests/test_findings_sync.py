@@ -15,9 +15,11 @@ from omega_prime.grokbot.findings_sync import (
     GRAPH_SCOPE,
     NO_GRAPH_CONFIG_MESSAGE,
     NO_LINEAR_TEAM_MESSAGE,
+    NO_OPSGENIE_API_KEY_MESSAGE,
     NO_PAGERDUTY_ROUTING_KEY_MESSAGE,
     NO_SLACK_WEBHOOK_MESSAGE,
     NO_TEAMS_WEBHOOK_MESSAGE,
+    OPSGENIE_ALERTS_URL,
     PAGERDUTY_EVENTS_URL,
     GhApiError,
     GhNotFoundError,
@@ -27,6 +29,8 @@ from omega_prime.grokbot.findings_sync import (
     issue_title,
     labels_for_severity,
     main,
+    opsgenie_payload,
+    opsgenie_priority,
     pagerduty_payload,
     pagerduty_severity,
     priority_for_severity,
@@ -35,6 +39,7 @@ from omega_prime.grokbot.findings_sync import (
     sync_findings,
     sync_findings_graph,
     sync_findings_linear,
+    sync_findings_opsgenie,
     sync_findings_pagerduty,
     sync_findings_slack,
     sync_findings_teams,
@@ -1791,3 +1796,229 @@ def test_cli_pagerduty_missing_routing_key_exits_two(tmp_path, monkeypatch, caps
     )
     assert main(["--tracker", "pagerduty", "--reports-dir", str(tmp_path)]) == 2
     assert "no pagerduty routing key configured" in capsys.readouterr().err
+
+
+# Opsgenie Alert API v2 mode (K8) -----------------------------------------------
+
+API_KEY = "eb243592-faa2-4ba2-a551q-1afdf565c889"
+
+
+class FakeOpsgenie:
+    """Fake GhRunner answering Alert API v2 create-alert POSTs; zero network."""
+
+    def __init__(self):
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def __call__(self, argv, data):
+        self.calls.append((list(argv), dict(data)))
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+
+def _opsgenie_config(**overrides):
+    node = {
+        "enabled": True,
+        "tracker": "opsgenie",
+        "opsgenie_api_key": API_KEY,
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+def test_opsgenie_priority_mapping_per_spec():
+    assert opsgenie_priority("critical") == "P1"
+    assert opsgenie_priority("high") == "P2"
+    assert opsgenie_priority("medium") == "P3"
+    assert opsgenie_priority("moderate") == "P3"
+    assert opsgenie_priority("low") == "P5"
+    assert opsgenie_priority("info") == "P5"
+    assert opsgenie_priority("CRITICAL") == "P1"
+    assert opsgenie_priority("weird") == "P5"
+    assert opsgenie_priority(None) == "P5"
+
+
+def test_opsgenie_priority_map_override_replaces_default():
+    assert opsgenie_priority("high", {"high": "P1"}) == "P1"
+    assert opsgenie_priority("HIGH", {"high": "p4"}) == "P4"
+    # Invalid override values fall back to the default table.
+    assert opsgenie_priority("high", {"high": "bogus"}) == "P2"
+    assert opsgenie_priority("high", {"low": "P1"}) == "P2"
+
+
+def test_opsgenie_payload_alert_v2_shape(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(severity="high"))
+    alert = opsgenie_payload(row)
+    assert alert["message"] == issue_title(row)
+    assert alert["alias"] == row["dedupe_hash"]
+    assert alert["description"] == issue_body(row)
+    assert alert["priority"] == "P2"
+    details = alert["details"]
+    assert details["dedupe_hash"] == row["dedupe_hash"]
+    assert details["verdict"] == "miss"
+    assert details["observed_detection"] == "no-detection"
+
+
+def test_opsgenie_payload_fixed_fields_only(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(response="do anything now"))
+    row["raw_response"] = "do anything now"
+    assert "do anything now" not in json.dumps(opsgenie_payload(row))
+
+
+def test_opsgenie_payload_message_truncated_to_130(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(case_id="abuse-" + "x" * 2000))
+    assert len(opsgenie_payload(row)["message"]) <= 130
+
+
+def test_opsgenie_happy_two_findings_two_posts(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeOpsgenie()
+    result = sync_findings_opsgenie(tmp_path, API_KEY, runner=fake)
+    assert len(result["pushed"]) == 2
+    assert result["skipped"] == []
+    assert result["dry_run"] is False
+    assert len(fake.calls) == 2
+    for argv, data in fake.calls:
+        assert argv[:3] == ["gh", "api", OPSGENIE_ALERTS_URL]
+        assert "Authorization: GenieKey " + API_KEY in argv
+        assert data["alias"] == data["details"]["dedupe_hash"]
+        assert data["message"] == data["message"][:130]
+    rows = load_findings(tmp_path)
+    assert all(row["issue_url"].startswith("og:") for row in rows)
+    assert all(row.get("synced_at") for row in rows)
+
+
+def test_opsgenie_priority_override_flows_to_payload(tmp_path):
+    record_finding(directory=tmp_path, **_finding(severity="high"))
+    fake = FakeOpsgenie()
+    sync_findings_opsgenie(tmp_path, API_KEY, runner=fake, priority_map={"high": "P1"})
+    assert fake.calls[0][1]["priority"] == "P1"
+
+
+def test_opsgenie_empty_api_key_fail_closed():
+    with pytest.raises(ValueError, match="no opsgenie api key configured"):
+        sync_findings_opsgenie(None, "   ", runner=FakeOpsgenie())
+
+
+def test_opsgenie_second_run_pushes_nothing(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeOpsgenie()
+    sync_findings_opsgenie(tmp_path, API_KEY, runner=fake)
+    result = sync_findings_opsgenie(tmp_path, API_KEY, runner=fake)
+    assert result["pushed"] == []
+    assert len(result["skipped"]) == 2
+    assert len(fake.calls) == 2
+
+
+def test_opsgenie_nonzero_exit_leaves_row_unsynced(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(findings_sync.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+
+    def bad(argv, data):
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    with pytest.raises(GhApiError):
+        sync_findings_opsgenie(tmp_path, API_KEY, runner=bad)
+    assert all("issue_url" not in row for row in load_findings(tmp_path))
+
+
+def test_opsgenie_runner_exception_mid_run_persists_earlier_push(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(findings_sync.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    calls: list = []
+
+    def flaky(argv, data):
+        calls.append(argv)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        raise OSError("conn reset")
+
+    with pytest.raises(GhApiError):
+        sync_findings_opsgenie(tmp_path, API_KEY, runner=flaky)
+    rows = load_findings(tmp_path)
+    assert rows[0]["issue_url"].startswith("og:")
+    assert "issue_url" not in rows[1]
+
+
+def test_opsgenie_dry_run_writes_nothing_calls_no_runner(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeOpsgenie()
+    before = findings_path(tmp_path).read_bytes()
+    result = sync_findings_opsgenie(tmp_path, API_KEY, runner=fake, dry_run=True)
+    assert len(result["pushed"]) == 2
+    assert result["dry_run"] is True
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before
+
+
+def test_opsgenie_retry_succeeds_on_second_attempt(tmp_path, monkeypatch, capsys):
+    record_finding(directory=tmp_path, **_finding())
+    sleeps = _patch_retry_timing(monkeypatch)
+    calls: list = []
+
+    def flaky(argv, data):
+        calls.append(argv)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    result = sync_findings_opsgenie(tmp_path, API_KEY, runner=flaky)
+    assert len(result["pushed"]) == 1
+    assert len(calls) == 2
+    assert sleeps == [findings_sync.WEBHOOK_RETRY_DELAYS[0]]
+    assert "retrying" in capsys.readouterr().err
+
+
+def test_tick_opsgenie_dispatches_alert_posts(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeOpsgenie()
+    result = tick(_opsgenie_config(), reports_directory=tmp_path, runner=fake)
+    assert result["disabled"] is False
+    assert len(fake.calls) == 2
+    assert all(OPSGENIE_ALERTS_URL in call[0] for call in fake.calls)
+
+
+def test_tick_opsgenie_no_api_key_structured_error(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeOpsgenie()
+    result = tick(
+        _opsgenie_config(opsgenie_api_key=""),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert result["error"] == NO_OPSGENIE_API_KEY_MESSAGE
+    assert fake.calls == []
+
+
+def test_cli_opsgenie_mode_posts(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _opsgenie_config(tracker="github"),
+    )
+    fake = FakeOpsgenie()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--mode", "opsgenie", "--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+    assert "pushed" in capsys.readouterr().out
+
+
+def test_cli_opsgenie_tracker_from_config_without_flag(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _opsgenie_config(),
+    )
+    fake = FakeOpsgenie()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+
+
+def test_cli_opsgenie_missing_api_key_exits_two(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _opsgenie_config(opsgenie_api_key=""),
+    )
+    assert main(["--tracker", "opsgenie", "--reports-dir", str(tmp_path)]) == 2
+    assert "no opsgenie api key configured" in capsys.readouterr().err

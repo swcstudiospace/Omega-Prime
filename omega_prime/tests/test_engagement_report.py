@@ -2765,3 +2765,384 @@ def test_risk_score_badge_units():
     assert module.risk_score_badge(markdown) in html
     plain = module.render_html_report("# T\n\n| a | b |\n| --- | --- |\n| x | y |\n")
     assert '<span class="risk-badge' not in plain
+
+
+# Executive summary + email block (K10) ----------------------------------------
+
+
+def _exec_fixture(directory: Path) -> None:
+    """One all-pass run of history plus one finding for exec-summary tests."""
+    seed_transitions(directory, cycle(T1) + cycle(T2))
+    seed_last_run(directory)
+    seed_findings(directory, [finding_row("abuse-01", "resp-a", T1)])
+
+
+def test_exec_summary_renders_after_title_before_header(tmp_path):
+    """K10 happy: --exec-summary renders 3-6 bullets after title, before Header."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0, "--exec-summary")
+    assert proc.returncode == 0, proc.stderr
+    text = proc.stdout
+    assert text.startswith("# Engagement report\n")
+    summary_at = text.index("## Executive summary")
+    header_at = text.index("## Header")
+    assert summary_at < header_at
+    body = section_lines(text, "## Executive summary")
+    bullets = [line for line in body if line.startswith("- ")]
+    assert 3 <= len(bullets) <= 6
+    joined = "\n".join(bullets)
+    assert "- runs in window: 2" in joined
+    assert "- risk-weighted score: 100.0%" in joined
+    assert "- findings: +1 new / -0 rescinded" in joined
+    assert "(no baseline)" in joined
+
+
+def test_exec_summary_is_deterministic(tmp_path):
+    """K10 determinism: same inputs render byte-identical summary runs."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    first = run_script("--reports-dir", str(fixture), "--since", T0, "--exec-summary")
+    second = run_script("--reports-dir", str(fixture), "--since", T0, "--exec-summary")
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_exec_summary_previous_baseline_delta(tmp_path):
+    """K10 vs previous: a seeded baseline report drives the pass-rate delta."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    out_dir = fixture / "reports"
+    out_dir.mkdir()
+    (out_dir / "engagement-2000-01-01_2000-01-02.md").write_text(
+        "# Engagement report\n"
+        "\n"
+        "## Runs summary\n"
+        "\n"
+        "- runs in window: 3\n"
+        "\n"
+        "## Per-technique pass rates\n"
+        "\n"
+        "| case_id | result |\n"
+        "| --- | --- |\n"
+        "| a-01 | 1/1 (100.0%) |\n"
+        "| b-01 | 0/1 (0.0%) |\n"
+        "\n"
+        "## Detection gaps\n"
+        "\n"
+        "- none\n"
+        "\n"
+        "## Findings deltas\n"
+        "\n"
+        "- new: 1, rescinded: 0\n"
+        "\n"
+        "<!-- findings-snapshot: {} -->\n",
+        encoding="utf-8",
+    )
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0, "--exec-summary")
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## Executive summary")
+    assert "- pass rate: 100% (previous 50%, +50pp ↑)" in body
+
+
+def test_exec_summary_failing_class_names_top_risk(tmp_path):
+    """K10 risk: a failing class is named in the top-risk bullet."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0, "--exec-summary")
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## Executive summary")
+    risk = [line for line in body if line.startswith("- top risk classes:")]
+    assert len(risk) == 1
+    assert "jailbreak" in risk[0]
+    assert "all classes fully covered" not in risk[0]
+
+
+def test_exec_summary_with_recipient_renders_email_block(tmp_path):
+    """K10 email: --recipient adds a Subject-led block under 2000 chars at the end."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--exec-summary",
+        "--recipient",
+        "lead@example.com",
+    )
+    assert proc.returncode == 0, proc.stderr
+    text = proc.stdout
+    assert "## Email summary" in text
+    email_at = text.index("## Email summary")
+    assert email_at > text.index("## Severity timeline")
+    assert email_at < text.index("<!-- findings-snapshot:")
+    body = section_lines(text, "## Email summary")
+    subjects = [line for line in body if line.startswith("Subject:")]
+    assert len(subjects) == 1
+    assert "To: lead@example.com" in body
+    block = text[email_at : text.index("<!-- findings-snapshot:")]
+    assert len(block) < 2000
+    # Deterministic reruns render a byte-identical email block.
+    rerun = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--exec-summary",
+        "--recipient",
+        "lead@example.com",
+    )
+    assert rerun.returncode == 0, rerun.stderr
+    assert rerun.stdout == proc.stdout
+
+
+def test_recipient_without_exec_summary_renders_no_email(tmp_path):
+    """K10 regression: --recipient alone adds no email or summary section."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--recipient", "lead@example.com"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Executive summary" not in proc.stdout
+    assert "## Email summary" not in proc.stdout
+
+
+def test_no_exec_summary_flag_renders_no_section(tmp_path):
+    """K10 regression: without --exec-summary the report has no new section."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "## Executive summary" not in proc.stdout
+    assert "## Email summary" not in proc.stdout
+
+
+def test_exec_summary_weighted_gaps_and_email_units():
+    """K10 units: risk ranking order plus the sub-2000-char email block."""
+    module = _report_module()
+    coverage = [
+        ("abuse", 1, 1, 1, 100.0, 0, "covered"),
+        ("jailbreak", 1, 1, 0, 0.0, 1, "gappy"),
+        ("auth-bypass", 1, 1, 0, 0.0, 0, "gappy"),
+    ]
+    ranked = module.weighted_gaps(coverage)
+    assert ranked[0] == ("auth-bypass", 10)
+    assert ranked[1] == ("jailbreak", 10)
+    assert ranked[-1] == ("abuse", 0)
+    lines = module.render_exec_summary(
+        runs=2,
+        pass_rows=[("a-01", "1/1 (100.0%)"), ("b-01", "0/1 (0.0%)")],
+        coverage=coverage,
+        new_count=1,
+        rescinded_count=0,
+        previous_pass=50,
+    )
+    assert lines[0] == "## Executive summary"
+    bullets = [line for line in lines if line.startswith("- ")]
+    assert 3 <= len(bullets) <= 6
+    assert "- pass rate: 50% (previous 50%, +0pp →)" in bullets
+    email = module.render_email_block(
+        recipient="lead@example.com",
+        window_start=module.parse_rfc3339(T0),
+        window_end=module.parse_rfc3339(T2),
+        runs=2,
+        pass_pct=50,
+        previous_pass=50,
+        score=33.3,
+        earned=10,
+        possible=30,
+        new_count=1,
+        rescinded_count=0,
+        file_name="engagement-2026-10-01_2026-10-08.md",
+    )
+    assert email[0] == "## Email summary"
+    assert email[2].startswith("Subject:")
+    assert len("\n".join(email)) < 2000
+    assert (
+        module.render_email_block(
+            recipient="lead@example.com",
+            window_start=module.parse_rfc3339(T0),
+            window_end=module.parse_rfc3339(T2),
+            runs=2,
+            pass_pct=50,
+            previous_pass=50,
+            score=33.3,
+            earned=10,
+            possible=30,
+            new_count=1,
+            rescinded_count=0,
+            file_name="engagement-2026-10-01_2026-10-08.md",
+        )
+        == email
+    )
+
+
+def test_json_composes_with_exec_summary_and_recipient(tmp_path):
+    """K10 composition: --json --exec-summary adds exec/email objects only then."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    plain = run_script("--reports-dir", str(fixture), "--since", T0, "--json")
+    assert plain.returncode == 0, plain.stderr
+    assert "exec_summary" not in json.loads(plain.stdout)
+    full = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--json",
+        "--exec-summary",
+        "--recipient",
+        "lead@example.com",
+    )
+    assert full.returncode == 0, full.stderr
+    data = json.loads(full.stdout)
+    assert data["exec_summary"]["runs"] == 2
+    assert data["exec_summary"]["trend"] == "↑"
+    assert data["email_summary"]["recipient"] == "lead@example.com"
+    assert data["email_summary"]["subject"].startswith("Subject:")
+    assert len(data["email_summary"]["subject"] + data["email_summary"]["body"]) < 2000
+
+
+# CSV coverage export (K12) ------------------------------------------------------
+
+
+def test_export_csv_writes_matrix_with_score_row(tmp_path):
+    """K12 happy: --export-csv writes the matrix plus the score row; stdout stays md."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    out = tmp_path / "coverage.csv"
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export-csv", str(out)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("# Engagement report")
+    rows = out.read_text(encoding="utf-8").splitlines()
+    assert rows[0] == "class,cases,runs,wins,pct,gaps,verdict,tier,weight,weighted"
+    # Six schema classes plus the final risk-weighted-score row.
+    assert len(rows) == 1 + 6 + 1
+    assert all(len(row.split(",")) == 10 for row in rows)
+    assert rows[1].startswith("abuse,")
+    assert "covered" in rows[1]
+    final = rows[-1].split(",")
+    assert final[0] == "risk-weighted-score"
+    assert final[4] == "100.0"
+    assert "/" in final[9]
+
+
+def test_export_csv_is_deterministic(tmp_path):
+    """K12 determinism: same inputs export byte-identical CSV files."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    first = tmp_path / "first.csv"
+    second = tmp_path / "second.csv"
+
+    assert (
+        run_script(
+            "--reports-dir", str(fixture), "--since", T0, "--export-csv", str(first)
+        ).returncode
+        == 0
+    )
+    assert (
+        run_script(
+            "--reports-dir", str(fixture), "--since", T0, "--export-csv", str(second)
+        ).returncode
+        == 0
+    )
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_export_csv_unwritable_output_exits_1(tmp_path):
+    """K12 edge: an unwritable --export-csv path fails closed with error:."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export-csv", str(fixture)
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_coverage_csv_rows_units(tmp_path):
+    """K12 units: column order, quoting round-trip, and the score row."""
+    import csv as csv_module
+
+    module = _report_module()
+    assert module.CSV_COLUMNS == (
+        "class",
+        "cases",
+        "runs",
+        "wins",
+        "pct",
+        "gaps",
+        "verdict",
+        "tier",
+        "weight",
+        "weighted",
+    )
+    coverage = [
+        ("abuse", 1, 1, 1, 100.0, 0, "covered"),
+        ("weird,class", 2, 1, 0, 0.0, 1, "gappy"),
+    ]
+    rows = module.coverage_csv_rows(coverage)
+    assert len(rows) == 3
+    assert rows[0][:7] == ["abuse", "1", "1", "1", "100.0", "0", "covered"]
+    assert rows[0][7:] == ["high", "5", "5/5"]
+    # Unknown classes fall back to the low tier at weight 1.
+    assert rows[1][7:9] == ["low", "1"]
+    assert rows[-1][0] == "risk-weighted-score"
+    score, earned, possible, _breakdown = module.risk_weighted_score(coverage)
+    assert rows[-1][4] == f"{score:.1f}"
+    assert rows[-1][9] == f"{earned}/{possible}"
+    # Proper quoting: a comma in a class survives a csv round-trip.
+    assert module.write_csv_report(coverage, tmp_path / "q.csv") == 0
+    with (tmp_path / "q.csv").open(newline="", encoding="utf-8") as handle:
+        parsed = list(csv_module.reader(handle))
+    assert parsed[0] == list(module.CSV_COLUMNS)
+    assert parsed[2][0] == "weird,class"
+
+
+def test_export_csv_composes_with_exec_summary(tmp_path):
+    """K12 composition: --export-csv and --exec-summary work in one run."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    out = tmp_path / "coverage.csv"
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--exec-summary",
+        "--export-csv",
+        str(out),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Executive summary" in proc.stdout
+    assert out.read_text(encoding="utf-8").splitlines()[0].startswith("class,cases")

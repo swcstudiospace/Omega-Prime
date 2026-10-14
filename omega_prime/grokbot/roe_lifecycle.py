@@ -386,7 +386,7 @@ def _renewal_now(now: Any) -> datetime | None:
 
 
 def _renewal_artifact_id(
-    artifact: Any, document: dict[str, Any], until_text: str
+    artifact: Any, document: dict[str, Any], until_text: str | None
 ) -> str:
     """Stable dedupe id for a renewal artifact (never empty)."""
     if isinstance(artifact, (str, Path)):
@@ -485,11 +485,13 @@ def renewal_reminders(
         end = _parse_time(until_text)
         if end is None:
             return []
-        until_label = (
+        until_label: str | None = (
             until_text if isinstance(until_text, str) else str(end.isoformat())
         )
         days_remaining = (end - current).total_seconds() / 86400
-        artifact_id = _renewal_artifact_id(artifact, document, until_label)
+        artifact_id = _renewal_artifact_id(
+            artifact, document, until_label or "unknown-artifact"
+        )
         log_path = _renewal_audit_log(artifact, document, audit_log)
         if log_path is not None:
             candidates = {artifact_id}
@@ -545,6 +547,165 @@ def renewal_reminders(
         return reminders
     except Exception:
         return []
+
+
+#: Required operator step per watchdog state (K11). ``valid`` needs no
+#: action; expiring grants must be re-signed before the window closes;
+#: expired grants are done and archive; ``missing``/``invalid`` name the
+#: recovery step. Fail-closed: unknown states map to ``"fix artifact"``.
+WATCHDOG_ACTIONS = {
+    "valid": "none",
+    "expiring-7d": "re-sign",
+    "expiring-1d": "re-sign",
+    "expired": "archive",
+    "missing": "provide artifact",
+    "invalid": "fix artifact",
+}
+
+
+def watchdog_check(artifact: Any, *, now: Any = None) -> dict[str, Any]:
+    """Independent RoE expiry watchdog (K11): flag expired grants anyway.
+
+    ``artifact`` is a RoE document dict or a path to a RoE JSON artifact
+    file; ``now`` defaults to the wall clock (UTC) and accepts the same
+    shapes as :func:`renewal_reminders` (datetime, timestamp, ISO text).
+    Returns ``{"state", "artifact_id", "effective_until", "action"}``
+    where ``state`` reuses the :data:`STATES` vocabulary (``valid`` /
+    ``expiring-7d`` / ``expiring-1d`` / ``expired`` / ``missing`` /
+    ``invalid``) and ``action`` names the required operator step from
+    :data:`WATCHDOG_ACTIONS` (``"re-sign"``, ``"archive"``,
+    ``"provide artifact"``, ...).
+
+    Runs without the heartbeat system: no dedupe set, no audit writes,
+    no signature checks — pure ``effective_until`` classification so a
+    DOWN heartbeat cannot silence an expiring grant. Fail-closed: a
+    missing/unreadable artifact reports ``missing`` with action
+    ``"provide artifact"``; anything unparseable reports ``invalid``;
+    never raises.
+    """
+    try:
+        current = _renewal_now(now)
+        if current is None:
+            return {
+                "state": "invalid",
+                "artifact_id": "unknown-artifact",
+                "effective_until": None,
+                "action": WATCHDOG_ACTIONS["invalid"],
+            }
+        if artifact is None:
+            return {
+                "state": "missing",
+                "artifact_id": "unknown-artifact",
+                "effective_until": None,
+                "action": WATCHDOG_ACTIONS["missing"],
+            }
+        if isinstance(artifact, (str, Path)):
+            path_text = str(artifact).strip()
+            if not path_text:
+                return {
+                    "state": "missing",
+                    "artifact_id": "unknown-artifact",
+                    "effective_until": None,
+                    "action": WATCHDOG_ACTIONS["missing"],
+                }
+            try:
+                raw = Path(path_text).read_text(encoding="utf-8")
+            except OSError:
+                return {
+                    "state": "missing",
+                    "artifact_id": path_text,
+                    "effective_until": None,
+                    "action": WATCHDOG_ACTIONS["missing"],
+                }
+            try:
+                loaded = json.loads(raw)
+            except ValueError:
+                return {
+                    "state": "invalid",
+                    "artifact_id": path_text,
+                    "effective_until": None,
+                    "action": WATCHDOG_ACTIONS["invalid"],
+                }
+            if not isinstance(loaded, dict):
+                return {
+                    "state": "invalid",
+                    "artifact_id": path_text,
+                    "effective_until": None,
+                    "action": WATCHDOG_ACTIONS["invalid"],
+                }
+            document = loaded
+            if validate_schema(document):
+                return {
+                    "state": "invalid",
+                    "artifact_id": path_text,
+                    "effective_until": None,
+                    "action": WATCHDOG_ACTIONS["invalid"],
+                }
+            until_text = document.get("effective_until")
+            end = _parse_time(until_text)
+            if end is None:
+                return {
+                    "state": "invalid",
+                    "artifact_id": path_text,
+                    "effective_until": until_text
+                    if isinstance(until_text, str)
+                    else None,
+                    "action": WATCHDOG_ACTIONS["invalid"],
+                }
+            until_label: str | None = (
+                until_text if isinstance(until_text, str) else end.isoformat()
+            )
+            artifact_id = _renewal_artifact_id(artifact, document, until_label)
+        elif isinstance(artifact, dict):
+            document = artifact
+            until_text = document.get("effective_until")
+            end = _parse_time(until_text)
+            until_label = (
+                until_text
+                if isinstance(until_text, str)
+                else (end.isoformat() if end is not None else None)
+            )
+            if end is None:
+                return {
+                    "state": "invalid",
+                    "artifact_id": _renewal_artifact_id(
+                        artifact, document, until_label or "unknown-artifact"
+                    ),
+                    "effective_until": until_label,
+                    "action": WATCHDOG_ACTIONS["invalid"],
+                }
+            artifact_id = _renewal_artifact_id(
+                artifact, document, until_label or "unknown-artifact"
+            )
+        else:
+            return {
+                "state": "invalid",
+                "artifact_id": "unknown-artifact",
+                "effective_until": None,
+                "action": WATCHDOG_ACTIONS["invalid"],
+            }
+        days_remaining = (end - current).total_seconds() / 86400
+        if current > end:
+            state = "expired"
+        elif days_remaining <= WARNING_1D_DAYS:
+            state = "expiring-1d"
+        elif days_remaining <= WARNING_7D_DAYS:
+            state = "expiring-7d"
+        else:
+            state = "valid"
+        return {
+            "state": state,
+            "artifact_id": artifact_id,
+            "effective_until": until_label,
+            "action": WATCHDOG_ACTIONS[state],
+        }
+    except Exception:
+        return {
+            "state": "missing",
+            "artifact_id": "unknown-artifact",
+            "effective_until": None,
+            "action": WATCHDOG_ACTIONS["missing"],
+        }
 
 
 def _parse_now_override(text: str | None) -> datetime | None:

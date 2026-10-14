@@ -69,6 +69,15 @@ fix moved the minor digit — when the audit verdict is ``improved`` and every
 fix classified compatible. Anything else (a major/unknown fix, a missing or
 unreadable ``package.json``) skips the bump with a warning and leaves the
 exit code untouched (fail-closed).
+``--pin <advisory-or-package>`` (repeatable) runs the same audit chain but
+restricts the triage gate and the delta verdict to the pinned advisory set
+(match by advisory id or package name substring). Other advisories are
+listed under ``## Out of scope for --pin`` in the delta report but do not
+affect the verdict or block the bump. A selector that matches nothing in
+either audit is a usage error naming the advisories found. Composes with
+``--dry-run``, ``--semver-check``, ``--json``, and ``--audit-only``; the
+file path (fetch/checkout, full re-vendor for a green pack-diff, pin
+rewrite, ``report.md``) still runs whole-tree so provenance stays green.
 
 All ``git``/``npm``/``node``/``gh`` calls go through the injectable
 ``run(cmd, cwd)`` seam (default :func:`subprocess.run`) so tests stay
@@ -453,6 +462,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--pin",
+        dest="pin",
+        action="append",
+        default=None,
+        metavar="ADVISORY_OR_PACKAGE",
+        help=(
+            "Targeted mode: restrict the audit delta and verdict to the "
+            "named advisory (match by advisory id or package name "
+            "substring, e.g. --pin GHSA-xxxx-yyyy-zzzz --pin left-pad). "
+            "Other advisories are listed as out of scope for --pin but do "
+            "not affect the verdict. Repeatable; the verdict considers "
+            "only the pinned set. Composes with --dry-run, --semver-check, "
+            "--json, and --audit-only."
+        ),
+    )
+    parser.add_argument(
         "--semver-check",
         dest="semver_check",
         action="store_true",
@@ -764,6 +789,143 @@ def _rewrite_package_version(text: str, new_version: str) -> str | None:
     return text[: match.start(2)] + new_version + text[match.end(2) :]
 
 
+def _pin_matches(selector: str, key: str, package: str) -> bool:
+    """True when a ``--pin`` selector targets one advisory finding.
+
+    Match by advisory id or package name substring (case-insensitive):
+    the selector hits when it occurs in the finding key (GHSA/CVE/URL)
+    or in the package name.
+    """
+    sel = selector.lower()
+    return sel in key.lower() or (bool(package) and sel in package.lower())
+
+
+def _pinned_keys(
+    selectors: list[str],
+    old_findings: dict[str, tuple[str, str, str]],
+    new_findings: dict[str, tuple[str, str, str]],
+) -> set[str]:
+    """Finding keys in the old|new union targeted by ``--pin`` selectors."""
+    pinned: set[str] = set()
+    for key in set(old_findings) | set(new_findings):
+        if key in new_findings:
+            package = new_findings[key][1]
+        else:
+            package = old_findings[key][1]
+        if any(_pin_matches(sel, key, package) for sel in selectors):
+            pinned.add(key)
+    return pinned
+
+
+def _pin_no_match_message(
+    selectors: list[str],
+    old_findings: dict[str, tuple[str, str, str]],
+    new_findings: dict[str, tuple[str, str, str]],
+) -> str:
+    """Actionable ``--pin`` usage error listing the advisories found."""
+    found = sorted(set(old_findings) | set(new_findings))
+    if not found:
+        listing = "no advisories in either audit (both clean)"
+    else:
+        parts = []
+        for key in found:
+            if key in new_findings:
+                severity, package, _ = new_findings[key]
+            else:
+                severity, package, _ = old_findings[key]
+            parts.append(f"`{key}` (package `{package}`, severity {severity})")
+        listing = "; ".join(parts)
+    sels = ", ".join(f"`{s}`" for s in selectors)
+    return (
+        f"--pin matched no advisories (selectors: {sels}); "
+        f"advisories found: {listing}. "
+        "Match by advisory id (e.g. GHSA-xxxx-yyyy-zzzz) or package name substring."
+    )
+
+
+def _pin_scope_status(
+    key: str,
+    new_keys: list[str],
+    fixed: list[str],
+    rescinded: list[str],
+    drift: list[tuple[str, str, str]],
+) -> str:
+    """Where one out-of-scope advisory sits in the full delta."""
+    if key in new_keys:
+        return "new"
+    if key in fixed:
+        return "fixed"
+    if key in rescinded:
+        return "rescinded"
+    for dkey, old_sev, new_sev in drift:
+        if dkey == key:
+            return f"drift {old_sev}->{new_sev}"
+    return "unchanged"
+
+
+def render_pin_scope_section(
+    selectors: list[str],
+    old_findings: dict[str, tuple[str, str, str]],
+    new_findings: dict[str, tuple[str, str, str]],
+    new_keys: list[str],
+    fixed: list[str],
+    rescinded: list[str],
+    drift: list[tuple[str, str, str]],
+    pinned: set[str],
+) -> str:
+    """Markdown ``## Out of scope for --pin`` section for the delta report."""
+    out_keys = sorted((set(old_findings) | set(new_findings)) - pinned)
+    sels = ", ".join(f"`{s}`" for s in selectors)
+    noun = "advisory" if len(out_keys) == 1 else "advisories"
+    lines = [
+        "## Out of scope for --pin",
+        "",
+        f"Targeted (--pin): {sels}. The verdict above considers only the "
+        f"pinned advisory set; {len(out_keys)} other {noun} "
+        "out of scope for --pin did not affect the verdict.",
+        "",
+    ]
+    if out_keys:
+        for key in out_keys:
+            if key in new_findings:
+                severity, package, _ = new_findings[key]
+            else:
+                severity, package, _ = old_findings[key]
+            status = _pin_scope_status(key, new_keys, fixed, rescinded, drift)
+            lines.append(
+                f"- `{key}` — severity {severity} (package `{package}`) [{status}]"
+            )
+    else:
+        lines.append("_None._")
+    return "\n".join(lines)
+
+
+def _pin_deltas(
+    delta_mod: Any,
+    selectors: list[str],
+    old_findings: dict[str, tuple[str, str, str]],
+    new_findings: dict[str, tuple[str, str, str]],
+    new_packages: dict[str, str],
+) -> tuple[
+    set[str],
+    tuple[list[str], list[str], list[str], list[tuple[str, str, str]], str],
+    tuple[list[str], list[str], list[str], list[tuple[str, str, str]], str],
+]:
+    """Full and ``--pin``-scoped deltas for one old|new finding pair.
+
+    Returns ``(pinned, full, scoped)`` where ``full`` is
+    ``compute_delta`` over all findings and ``scoped`` is the same call
+    over only the selector-matched keys. The scoped verdict drives the
+    exit code; the full delta feeds the out-of-scope report section.
+    """
+    full = delta_mod.compute_delta(old_findings, new_findings, new_packages)
+    pinned = _pinned_keys(selectors, old_findings, new_findings)
+    scoped_old = {k: v for k, v in old_findings.items() if k in pinned}
+    scoped_new = {k: v for k, v in new_findings.items() if k in pinned}
+    scoped = delta_mod.compute_delta(scoped_old, scoped_new, new_packages)
+    return pinned, full, scoped
+
+
 def bump(
     to: str,
     *,
@@ -779,6 +941,7 @@ def bump(
     dry_run: bool = False,
     audit_only: bool = False,
     interactive: bool = False,
+    pin: list[str] | None = None,
 ) -> int:
     """Run the pin-bump runbook against ``root``. Returns the exit code."""
     if semver_check and skip_audit:
@@ -797,6 +960,20 @@ def bump(
     if audit_only and skip_audit:
         print(
             "pin-bump usage error: --audit-only needs audit data (drop --skip-audit)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    pin_selectors = [s.strip() for s in (pin or []) if s is not None]
+    if any(not s for s in pin_selectors):
+        print(
+            "pin-bump usage error: --pin requires a non-empty advisory id "
+            "or package name",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if pin_selectors and skip_audit:
+        print(
+            "pin-bump usage error: --pin needs audit data (drop --skip-audit)",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -821,6 +998,10 @@ def bump(
     json_new_packages: dict[str, str] = {}
     json_semver: dict[str, str] | None = None
     json_bump: dict[str, Any] | None = None
+    # --pin payload state. ``json_out_of_scope`` lists advisories outside
+    # the pinned set (set only when --pin ran); unpinned runs leave it
+    # None so the default payload shape is unchanged.
+    json_out_of_scope: list[dict[str, Any]] | None = None
     # Pre-initialised so --skip-audit --bump-commit skips with a warning
     # instead of raising NameError on the unbound ``semver_rows`` below.
     semver_rows: list[tuple[str, str, str, str, str]] = []
@@ -858,6 +1039,14 @@ def bump(
             ),
             "bump": json_bump,
             "exit_code": code,
+            **(
+                {
+                    "pinned": list(pin_selectors),
+                    "out_of_scope": json_out_of_scope or [],
+                }
+                if pin_selectors
+                else {}
+            ),
         }
 
     def finish(code: int) -> int:
@@ -1014,7 +1203,36 @@ def bump(
             for finding in audit_findings
             if finding[0] not in audit_triage_mod.TRIAGED
         ]
-        if audit_untriaged:
+        if pin_selectors:
+            audit_pinned_keys = {
+                key
+                for key, _, name in audit_findings
+                if any(_pin_matches(sel, key, str(name or "")) for sel in pin_selectors)
+            }
+            audit_untriaged_in = [
+                finding
+                for finding in audit_untriaged
+                if finding[0] in audit_pinned_keys
+            ]
+            audit_untriaged_out = [
+                finding
+                for finding in audit_untriaged
+                if finding[0] not in audit_pinned_keys
+            ]
+            if audit_untriaged_in:
+                print(
+                    "[audit-only] pin-bump FAILED: untriaged high/critical "
+                    "pinned advisories at new pin:"
+                )
+                for key, severity, name in audit_untriaged_in:
+                    print(f"[audit-only]   {severity} {name}: {key}")
+                return finish(EXIT_BUMP_FAILED)
+            if audit_untriaged_out:
+                print(
+                    f"[audit-only] note: {len(audit_untriaged_out)} untriaged "
+                    "high/critical out of scope for --pin (ignored for verdict)"
+                )
+        elif audit_untriaged:
             print(
                 "[audit-only] pin-bump FAILED: untriaged high/critical "
                 "advisories at new pin:"
@@ -1088,6 +1306,92 @@ def bump(
         ) = audit_delta_mod.compute_delta(
             audit_old_findings, audit_new_findings, audit_new_packages
         )
+        if pin_selectors:
+            audit_pinned, audit_full, audit_scoped = _pin_deltas(
+                audit_delta_mod,
+                pin_selectors,
+                audit_old_findings,
+                audit_new_findings,
+                audit_new_packages,
+            )
+            if not audit_pinned:
+                return usage(
+                    _pin_no_match_message(
+                        pin_selectors, audit_old_findings, audit_new_findings
+                    )
+                )
+            (
+                audit_full_new,
+                audit_full_fixed,
+                audit_full_rescinded,
+                audit_full_drift,
+                _,
+            ) = audit_full
+            (
+                audit_new_keys,
+                audit_fixed,
+                audit_rescinded,
+                audit_drift,
+                verdict,
+            ) = audit_scoped
+            audit_report = audit_delta_mod.render_report(
+                str(audit_old_path),
+                "new-pin npm audit",
+                {k: v for k, v in audit_old_findings.items() if k in audit_pinned},
+                {k: v for k, v in audit_new_findings.items() if k in audit_pinned},
+                audit_new_keys,
+                audit_fixed,
+                audit_rescinded,
+                audit_drift,
+                verdict,
+            )
+            audit_report += "\n" + render_pin_scope_section(
+                pin_selectors,
+                audit_old_findings,
+                audit_new_findings,
+                audit_full_new,
+                audit_full_fixed,
+                audit_full_rescinded,
+                audit_full_drift,
+                audit_pinned,
+            )
+            json_out_of_scope = [
+                {
+                    "key": key,
+                    "package": (
+                        audit_new_findings[key][1]
+                        if key in audit_new_findings
+                        else audit_old_findings[key][1]
+                    ),
+                    "status": _pin_scope_status(
+                        key,
+                        audit_full_new,
+                        audit_full_fixed,
+                        audit_full_rescinded,
+                        audit_full_drift,
+                    ),
+                }
+                for key in sorted(
+                    (set(audit_old_findings) | set(audit_new_findings)) - audit_pinned
+                )
+            ]
+            print(
+                f"[audit-only] note: verdict {verdict} from pinned set "
+                f"({len(audit_pinned)} targeted, "
+                f"{len(json_out_of_scope)} out of scope for --pin)"
+            )
+        else:
+            audit_report = audit_delta_mod.render_report(
+                str(audit_old_path),
+                "new-pin npm audit",
+                audit_old_findings,
+                audit_new_findings,
+                audit_new_keys,
+                audit_fixed,
+                audit_rescinded,
+                audit_drift,
+                verdict,
+            )
         audit_semver_rows: list[tuple[str, str, str, str, str]] = []
         if semver_check:
             audit_semver_rows = classify_semver_fixes(
@@ -1102,17 +1406,6 @@ def bump(
         json_new_packages = audit_new_packages
         if semver_check:
             json_semver = {key: label for key, _, _, _, label in audit_semver_rows}
-        audit_report = audit_delta_mod.render_report(
-            str(audit_old_path),
-            "new-pin npm audit",
-            audit_old_findings,
-            audit_new_findings,
-            audit_new_keys,
-            audit_fixed,
-            audit_rescinded,
-            audit_drift,
-            verdict,
-        )
         if semver_check:
             audit_report += "\n" + render_semver_section(audit_semver_rows)
         print(f"[audit-only] audit verdict: {verdict} (report not written)")
@@ -1369,7 +1662,38 @@ def bump(
                 for finding in dry_findings
                 if finding[0] not in dry_triage_mod.TRIAGED
             ]
-            if dry_untriaged:
+            if pin_selectors:
+                dry_pinned_keys = {
+                    key
+                    for key, _, name in dry_findings
+                    if any(
+                        _pin_matches(sel, key, str(name or "")) for sel in pin_selectors
+                    )
+                }
+                dry_untriaged_in = [
+                    finding
+                    for finding in dry_untriaged
+                    if finding[0] in dry_pinned_keys
+                ]
+                dry_untriaged_out = [
+                    finding
+                    for finding in dry_untriaged
+                    if finding[0] not in dry_pinned_keys
+                ]
+                if dry_untriaged_in:
+                    print(
+                        "[dry-run] pin-bump FAILED: untriaged high/critical "
+                        "pinned advisories at new pin:"
+                    )
+                    for key, severity, name in dry_untriaged_in:
+                        print(f"[dry-run]   {severity} {name}: {key}")
+                    return finish(EXIT_BUMP_FAILED)
+                if dry_untriaged_out:
+                    print(
+                        f"[dry-run] note: {len(dry_untriaged_out)} untriaged "
+                        "high/critical out of scope for --pin (ignored for verdict)"
+                    )
+            elif dry_untriaged:
                 print(
                     "[dry-run] pin-bump FAILED: untriaged high/critical "
                     "advisories at new pin:"
@@ -1434,6 +1758,65 @@ def bump(
             _, dry_fixed, _, _, verdict = dry_delta_mod.compute_delta(
                 dry_old_findings, dry_new_findings, dry_new_packages
             )
+            if pin_selectors:
+                dry_pinned, dry_full, dry_scoped = _pin_deltas(
+                    dry_delta_mod,
+                    pin_selectors,
+                    dry_old_findings,
+                    dry_new_findings,
+                    dry_new_packages,
+                )
+                if not dry_pinned:
+                    return usage(
+                        _pin_no_match_message(
+                            pin_selectors, dry_old_findings, dry_new_findings
+                        )
+                    )
+                (
+                    dry_full_new,
+                    dry_full_fixed,
+                    dry_full_rescinded,
+                    dry_full_drift,
+                    _,
+                ) = dry_full
+                (_, dry_fixed, _, _, verdict) = dry_scoped
+                json_out_of_scope = [
+                    {
+                        "key": key,
+                        "package": (
+                            dry_new_findings[key][1]
+                            if key in dry_new_findings
+                            else dry_old_findings[key][1]
+                        ),
+                        "status": _pin_scope_status(
+                            key,
+                            dry_full_new,
+                            dry_full_fixed,
+                            dry_full_rescinded,
+                            dry_full_drift,
+                        ),
+                    }
+                    for key in sorted(
+                        (set(dry_old_findings) | set(dry_new_findings)) - dry_pinned
+                    )
+                ]
+                print(
+                    f"[dry-run] note: verdict {verdict} from pinned set "
+                    f"({len(dry_pinned)} targeted, "
+                    f"{len(json_out_of_scope)} out of scope for --pin)"
+                )
+                print(
+                    render_pin_scope_section(
+                        pin_selectors,
+                        dry_old_findings,
+                        dry_new_findings,
+                        dry_full_new,
+                        dry_full_fixed,
+                        dry_full_rescinded,
+                        dry_full_drift,
+                        dry_pinned,
+                    )
+                )
             json_fixed = dry_fixed
             json_old_findings = dry_old_findings
             json_old_packages = dry_old_packages
@@ -1670,7 +2053,32 @@ def bump(
         untriaged = [
             finding for finding in findings if finding[0] not in triage_mod.TRIAGED
         ]
-        if untriaged:
+        if pin_selectors:
+            pinned_triage_keys = {
+                key
+                for key, _, name in findings
+                if any(_pin_matches(sel, key, str(name or "")) for sel in pin_selectors)
+            }
+            untriaged_in = [
+                finding for finding in untriaged if finding[0] in pinned_triage_keys
+            ]
+            untriaged_out = [
+                finding for finding in untriaged if finding[0] not in pinned_triage_keys
+            ]
+            if untriaged_in:
+                print(
+                    "pin-bump FAILED: untriaged high/critical pinned "
+                    "advisories at new pin:"
+                )
+                for key, severity, name in untriaged_in:
+                    print(f"  {severity} {name}: {key}")
+                return finish(EXIT_BUMP_FAILED)
+            if untriaged_out:
+                print(
+                    f"pin-bump note: {len(untriaged_out)} untriaged high/critical "
+                    "out of scope for --pin (ignored for verdict)"
+                )
+        elif untriaged:
             print("pin-bump FAILED: untriaged high/critical advisories at new pin:")
             for key, severity, name in untriaged:
                 print(f"  {severity} {name}: {key}")
@@ -1710,6 +2118,72 @@ def bump(
         new_keys, fixed, rescinded, drift, verdict = delta_mod.compute_delta(
             old_findings, new_findings, new_packages
         )
+        if pin_selectors:
+            pinned, full, scoped = _pin_deltas(
+                delta_mod,
+                pin_selectors,
+                old_findings,
+                new_findings,
+                new_packages,
+            )
+            if not pinned:
+                return usage(
+                    _pin_no_match_message(pin_selectors, old_findings, new_findings)
+                )
+            (full_new, full_fixed, full_rescinded, full_drift, _) = full
+            (new_keys, fixed, rescinded, drift, verdict) = scoped
+            report = delta_mod.render_report(
+                str(old_path),
+                "new-pin npm audit",
+                {k: v for k, v in old_findings.items() if k in pinned},
+                {k: v for k, v in new_findings.items() if k in pinned},
+                new_keys,
+                fixed,
+                rescinded,
+                drift,
+                verdict,
+            )
+            report += "\n" + render_pin_scope_section(
+                pin_selectors,
+                old_findings,
+                new_findings,
+                full_new,
+                full_fixed,
+                full_rescinded,
+                full_drift,
+                pinned,
+            )
+            json_out_of_scope = [
+                {
+                    "key": key,
+                    "package": (
+                        new_findings[key][1]
+                        if key in new_findings
+                        else old_findings[key][1]
+                    ),
+                    "status": _pin_scope_status(
+                        key, full_new, full_fixed, full_rescinded, full_drift
+                    ),
+                }
+                for key in sorted((set(old_findings) | set(new_findings)) - pinned)
+            ]
+            print(
+                f"pin-bump --pin: verdict {verdict} from pinned set "
+                f"({len(pinned)} targeted, "
+                f"{len(json_out_of_scope)} out of scope for --pin; see report.md)"
+            )
+        else:
+            report = delta_mod.render_report(
+                str(old_path),
+                "new-pin npm audit",
+                old_findings,
+                new_findings,
+                new_keys,
+                fixed,
+                rescinded,
+                drift,
+                verdict,
+            )
         semver_rows = []
         if semver_check:
             semver_rows = classify_semver_fixes(
@@ -1721,17 +2195,6 @@ def bump(
         json_new_packages = new_packages
         if semver_check:
             json_semver = {key: label for key, _, _, _, label in semver_rows}
-        report = delta_mod.render_report(
-            str(old_path),
-            "new-pin npm audit",
-            old_findings,
-            new_findings,
-            new_keys,
-            fixed,
-            rescinded,
-            drift,
-            verdict,
-        )
         if semver_check:
             report += "\n" + render_semver_section(semver_rows)
         report_path = root / "report.md"
@@ -1896,7 +2359,7 @@ def bump(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--dry-run] [--audit-only] [--open-pr] [--json] [--interactive]``."""
+    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--dry-run] [--audit-only] [--open-pr] [--json] [--interactive] [--pin <advisory-or-package>]``."""
     args = build_parser().parse_args(argv)
     root = Path(args.root) if args.root is not None else REPO_ROOT
     return bump(
@@ -1912,6 +2375,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         audit_only=args.audit_only,
         interactive=args.interactive,
+        pin=args.pin,
     )
 
 

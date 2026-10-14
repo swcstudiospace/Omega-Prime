@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import csv
 import hashlib
 import json
 import os
@@ -1214,6 +1215,221 @@ def render_side_by_side(
     ]
 
 
+#: Column order for the CSV coverage export (K12). Fixed so reruns are
+#: byte-identical; per-class rows follow coverage order and the final
+#: ``risk-weighted-score`` row carries the aggregate score.
+CSV_COLUMNS = (
+    "class",
+    "cases",
+    "runs",
+    "wins",
+    "pct",
+    "gaps",
+    "verdict",
+    "tier",
+    "weight",
+    "weighted",
+)
+
+
+def weighted_gaps(
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+) -> list[tuple[str, int]]:
+    """``(class, weighted_points_at_risk)`` per class, sorted by risk.
+
+    Points at risk are ``weight * ((cases - wins) + gaps)`` where
+    ``weight`` comes from the class risk tier
+    (:data:`CLASS_RISK_TIER`, default ``"low"``): every uncovered case
+    and every detection gap counts once, scaled by tier. Sorted by
+    descending points, then class name ascending (deterministic).
+    """
+    scored: list[tuple[str, int]] = []
+    for class_name, case_count, _runs, wins, _pct, class_gaps, _verdict in coverage:
+        tier = CLASS_RISK_TIER.get(class_name, DEFAULT_CLASS_RISK_TIER)
+        weight = RISK_SEVERITY_WEIGHTS[tier]
+        scored.append((class_name, weight * ((case_count - wins) + class_gaps)))
+    scored.sort(key=lambda item: (-item[1], item[0]))
+    return scored
+
+
+def render_exec_summary(
+    *,
+    runs: int,
+    pass_rows: list[tuple[str, str]],
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+    new_count: int,
+    rescinded_count: int,
+    previous_runs: int | None = None,
+    previous_pass: int | None = None,
+) -> list[str]:
+    """Executive-summary lines for ``--exec-summary`` (K10).
+
+    Three to six deterministic bullets derived from the report data:
+    runs, pass rate vs previous, risk-weighted score, top risk classes
+    by weighted gaps, and the findings trend arrow. ``previous_*`` are
+    ``None`` when no baseline report exists (the pass-rate bullet then
+    notes ``no baseline`` instead of a delta).
+    """
+    current_pass = _summary_pct(pass_rows)
+    score, earned, possible, _breakdown = risk_weighted_score(coverage)
+    if previous_pass is None:
+        pass_bullet = f"- pass rate: {current_pass}% (no baseline)"
+    else:
+        delta = current_pass - previous_pass
+        pass_bullet = (
+            f"- pass rate: {current_pass}% (previous {previous_pass}%, "
+            f"{delta:+d}pp {_comparison_arrow(delta)})"
+        )
+    ranked = [(name, points) for name, points in weighted_gaps(coverage) if points > 0][
+        :3
+    ]
+    if ranked:
+        top_text = ", ".join(
+            f"{name} ({points} weighted points)" for name, points in ranked
+        )
+        risk_bullet = f"- top risk classes: {top_text}"
+    else:
+        risk_bullet = "- top risk classes: none (all classes fully covered)"
+    net = new_count - rescinded_count
+    return [
+        "## Executive summary",
+        "",
+        f"- runs in window: {runs}",
+        pass_bullet,
+        f"- risk-weighted score: {score:.1f}% ({earned}/{possible} weighted points)",
+        risk_bullet,
+        f"- findings: +{new_count} new / -{rescinded_count} rescinded "
+        f"({_comparison_arrow(net)})",
+    ]
+
+
+def render_email_block(
+    *,
+    recipient: str,
+    window_start: datetime,
+    window_end: datetime,
+    runs: int,
+    pass_pct: int,
+    previous_pass: int | None,
+    score: float,
+    earned: int,
+    possible: int,
+    new_count: int,
+    rescinded_count: int,
+    file_name: str,
+) -> list[str]:
+    """Copy-paste email block for ``--exec-summary --recipient`` (K10).
+
+    A ``Subject:`` line plus a short plain-text body; the whole block
+    stays under 2000 characters by construction (one line per metric,
+    no per-class detail beyond the file name pointer).
+    """
+    if previous_pass is None:
+        pass_text = f"{pass_pct}% (no baseline)"
+    else:
+        delta = pass_pct - previous_pass
+        pass_text = (
+            f"{pass_pct}% (previous {previous_pass}%, "
+            f"{delta:+d}pp {_comparison_arrow(delta)})"
+        )
+    net = new_count - rescinded_count
+    subject = (
+        f"Subject: Engagement report "
+        f"{window_start.date().isoformat()}..{window_end.date().isoformat()}: "
+        f"{runs} runs, {pass_pct}% pass, risk {score:.1f}%"
+    )
+    return [
+        "## Email summary",
+        "",
+        subject,
+        "",
+        f"To: {recipient}",
+        "",
+        "Hi,",
+        "",
+        f"- window: {fmt_rfc3339(window_start)}..{fmt_rfc3339(window_end)}",
+        f"- runs: {runs}",
+        f"- pass rate: {pass_text}",
+        f"- risk-weighted score: {score:.1f}% ({earned}/{possible} weighted points)",
+        f"- findings: +{new_count} new / -{rescinded_count} rescinded "
+        f"({_comparison_arrow(net)})",
+        f"- full report: {file_name}",
+    ]
+
+
+def coverage_csv_rows(
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+) -> list[list[str]]:
+    """CSV data rows for ``--export-csv`` (K12, without the header).
+
+    One row per class in coverage order plus a final
+    ``risk-weighted-score`` row carrying the aggregate score as
+    ``pct`` and ``earned/possible`` as ``weighted``. All cells are
+    strings; quoting is left to :func:`write_csv_report`.
+    """
+    score, earned, possible, breakdown = risk_weighted_score(coverage)
+    by_class = {row[0]: row for row in coverage}
+    rows: list[list[str]] = []
+    for class_name, tier, weight, case_count, wins, got, maximum in breakdown:
+        _name, _cases, class_runs, _wins, pct, class_gaps, verdict = by_class[
+            class_name
+        ]
+        rows.append(
+            [
+                class_name,
+                str(case_count),
+                str(class_runs),
+                str(wins),
+                f"{pct:.1f}",
+                str(class_gaps),
+                verdict,
+                tier,
+                str(weight),
+                f"{got}/{maximum}",
+            ]
+        )
+    total_cases = sum(row[1] for row in coverage)
+    total_runs = sum(row[2] for row in coverage)
+    total_wins = sum(row[3] for row in coverage)
+    total_gaps = sum(row[5] for row in coverage)
+    rows.append(
+        [
+            "risk-weighted-score",
+            str(total_cases),
+            str(total_runs),
+            str(total_wins),
+            f"{score:.1f}",
+            str(total_gaps),
+            "",
+            "",
+            "",
+            f"{earned}/{possible}",
+        ]
+    )
+    return rows
+
+
+def write_csv_report(
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+    csv_path: Path,
+) -> int:
+    """Write the coverage matrix as CSV at ``csv_path`` (K12).
+
+    Columns follow :data:`CSV_COLUMNS` in order with ``csv``-module
+    quoting (minimal) and ``\\n`` line endings. Returns 0 on success;
+    an unwritable output prints ``error:`` to stderr and returns 1.
+    """
+    try:
+        with csv_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+            writer.writerow(list(CSV_COLUMNS))
+            writer.writerows(coverage_csv_rows(coverage))
+    except OSError as exc:
+        print(f"error: cannot write CSV export {csv_path} ({exc})", file=sys.stderr)
+        return 1
+    return 0
+
+
 #: Block elements for ASCII sparklines (U+2581..U+2588, ascending).
 SPARKLINE_BLOCKS = ("▁", "▂", "▃", "▄", "▅", "▆", "▇", "█")
 
@@ -1900,6 +2116,8 @@ def render_report(
     drill_down_diff: list[str] | None = None,
     operator_notes: list[str] | None = None,
     side_by_side: list[str] | None = None,
+    exec_summary: list[str] | None = None,
+    email_block: list[str] | None = None,
 ) -> str:
     """Assemble the report sections in fixed order."""
     gaps = gaps if gaps is not None else []
@@ -1914,6 +2132,10 @@ def render_report(
     lines = [
         "# Engagement report",
         "",
+    ]
+    if exec_summary:
+        lines += [*exec_summary, ""]
+    lines += [
         "## Header",
         "",
         f"- window: {fmt_rfc3339(window_start)}..{fmt_rfc3339(window_end)}",
@@ -2024,6 +2246,8 @@ def render_report(
         lines += ["", *comparison]
     if side_by_side:
         lines += ["", *side_by_side]
+    if email_block:
+        lines += ["", *email_block]
     lines += [
         "",
         f"<!-- findings-snapshot: {json.dumps(current_findings, sort_keys=True)} -->",
@@ -2159,6 +2383,8 @@ def build_report(
     diff_drill_down_path: Path | None = None,
     side_by_side_path: Path | None = None,
     annotations: list[tuple[str, str]] | None = None,
+    exec_summary: bool = False,
+    recipient: str | None = None,
 ) -> tuple[str, str, Path]:
     """Render the report; return ``(markdown, file_name, out_dir)``.
 
@@ -2176,6 +2402,13 @@ def build_report(
     also given, the notes are appended to that file as
     ``{"kind": "note", ...}`` lines and previously persisted notes are
     shown too (exact duplicates removed).
+
+    ``exec_summary`` (``--exec-summary``) renders an ``## Executive
+    summary`` section right after the title (before ``## Header``) with
+    deterministic bullets over runs, pass rate vs the baseline report,
+    the risk-weighted score, top risk classes, and the findings trend.
+    ``recipient`` (``--recipient``) additionally renders an ``## Email
+    summary`` copy-paste block before the snapshot marker.
     """
     window = _collect_window(reports_dir, since_text)
     window_start = window["window_start"]
@@ -2328,6 +2561,51 @@ def build_report(
         if combined_notes
         else None
     )
+    exec_summary_lines: list[str] | None = None
+    email_lines: list[str] | None = None
+    if exec_summary:
+        if baseline is None:
+            new_count = len(current_findings)
+            rescinded_count = 0
+        else:
+            new_count = sum(1 for h in current_findings if h not in baseline)
+            rescinded_count = sum(1 for h in baseline if h not in current_findings)
+        baseline_metrics: dict[str, int] | None = None
+        if baseline_name is not None:
+            baseline_path = out_dir / baseline_name
+            try:
+                baseline_metrics = parse_previous_metrics(
+                    baseline_path.read_text(encoding="utf-8")
+                )
+            except OSError:
+                baseline_metrics = None
+        previous_runs = baseline_metrics["runs"] if baseline_metrics else None
+        previous_pass = baseline_metrics["pass_pct"] if baseline_metrics else None
+        exec_summary_lines = render_exec_summary(
+            runs=runs,
+            pass_rows=pass_rows,
+            coverage=coverage,
+            new_count=new_count,
+            rescinded_count=rescinded_count,
+            previous_runs=previous_runs,
+            previous_pass=previous_pass,
+        )
+        if recipient:
+            score, earned, possible, _breakdown = risk_weighted_score(coverage)
+            email_lines = render_email_block(
+                recipient=recipient,
+                window_start=window_start,
+                window_end=window_end,
+                runs=runs,
+                pass_pct=_summary_pct(pass_rows),
+                previous_pass=previous_pass,
+                score=score,
+                earned=earned,
+                possible=possible,
+                new_count=new_count,
+                rescinded_count=rescinded_count,
+                file_name=file_name,
+            )
     markdown = render_report(
         window_start=window_start,
         window_end=window_end,
@@ -2356,6 +2634,8 @@ def build_report(
         drill_down_diff=drill_down_diff,
         operator_notes=operator_notes,
         side_by_side=side_by_side,
+        exec_summary=exec_summary_lines,
+        email_block=email_lines,
     )
     return markdown, file_name, out_dir
 
@@ -2382,6 +2662,8 @@ def build_report_data(
     diff_drill_down_path: Path | None = None,
     side_by_side_path: Path | None = None,
     annotations: list[tuple[str, str]] | None = None,
+    exec_summary: bool = False,
+    recipient: str | None = None,
 ) -> dict[str, object]:
     """Structured report data with the same inputs as :func:`build_report`.
 
@@ -2700,6 +2982,69 @@ def build_report_data(
                 },
             ],
         }
+    if exec_summary:
+        start_day = window_start.date().isoformat().replace(":", "-")
+        end_day = window_end.date().isoformat().replace(":", "-")
+        file_name = f"engagement-{start_day}_{end_day}.md"
+        out_dir = output_dir(reports_dir)
+        baseline_name, baseline = newest_baseline(out_dir, file_name)
+        baseline_metrics: dict[str, int] | None = None
+        if baseline_name is not None:
+            try:
+                baseline_metrics = parse_previous_metrics(
+                    (out_dir / baseline_name).read_text(encoding="utf-8")
+                )
+            except OSError:
+                baseline_metrics = None
+        previous_pass = baseline_metrics["pass_pct"] if baseline_metrics else None
+        previous_runs = baseline_metrics["runs"] if baseline_metrics else None
+        if baseline is None:
+            new_count = len(current_findings)
+            rescinded_count = 0
+        else:
+            new_count = sum(1 for h in current_findings if h not in baseline)
+            rescinded_count = sum(1 for h in baseline if h not in current_findings)
+        score, earned, possible, _breakdown = risk_weighted_score(coverage)
+        ranked = [
+            {"class": name, "weighted_points": points}
+            for name, points in weighted_gaps(coverage)
+            if points > 0
+        ][:3]
+        data["exec_summary"] = {
+            "runs": runs,
+            "pass_pct": _summary_pct(pass_rows),
+            "previous_runs": previous_runs,
+            "previous_pass_pct": previous_pass,
+            "risk_score": score,
+            "weighted_earned": earned,
+            "weighted_possible": possible,
+            "top_risk_classes": ranked,
+            "new_count": new_count,
+            "rescinded_count": rescinded_count,
+            "trend": _comparison_arrow(new_count - rescinded_count),
+        }
+        if recipient:
+            email_lines = render_email_block(
+                recipient=recipient,
+                window_start=window_start,
+                window_end=window_end,
+                runs=runs,
+                pass_pct=_summary_pct(pass_rows),
+                previous_pass=previous_pass,
+                score=score,
+                earned=earned,
+                possible=possible,
+                new_count=new_count,
+                rescinded_count=rescinded_count,
+                file_name=file_name,
+            )
+            subject = next(line for line in email_lines if line.startswith("Subject:"))
+            body = "\n".join(email_lines[email_lines.index(subject) + 1 :]).strip()
+            data["email_summary"] = {
+                "recipient": recipient,
+                "subject": subject,
+                "body": body,
+            }
     return data
 
 
@@ -2908,6 +3253,31 @@ def main(argv: list[str] | None = None) -> int:
         "files; exit 0 with an all-zeros line when no reports exist, "
         "exit 1 with error: on stderr only for genuine I/O or parse failures.",
     )
+    parser.add_argument(
+        "--exec-summary",
+        action="store_true",
+        help="render an ## Executive summary section right after the title "
+        "(before ## Header) with deterministic bullets over runs, pass "
+        "rate vs the baseline report, the risk-weighted score, top risk "
+        "classes, and the findings trend.",
+    )
+    parser.add_argument(
+        "--recipient",
+        default=None,
+        metavar="EMAIL",
+        help="with --exec-summary, also render an ## Email summary "
+        "copy-paste block (Subject: line plus plain-text body) before the "
+        "snapshot marker; ignored without --exec-summary.",
+    )
+    parser.add_argument(
+        "--export-csv",
+        default=None,
+        metavar="OUTPUT_CSV",
+        help="also write the coverage matrix as CSV at OUTPUT_CSV "
+        "(class,cases,runs,wins,pct,gaps,verdict,tier,weight,weighted in "
+        "coverage order plus a final risk-weighted-score row); stdout "
+        "stays markdown.",
+    )
     args = parser.parse_args(argv)
 
     reports_dir = Path(args.reports_dir) if args.reports_dir else default_reports_dir()
@@ -2943,6 +3313,8 @@ def main(argv: list[str] | None = None) -> int:
             diff_drill_down_path=diff_drill_down_path,
             side_by_side_path=side_by_side_path,
             annotations=annotations,
+            exec_summary=args.exec_summary,
+            recipient=args.recipient,
         )
         payload = markdown
         if args.json:
@@ -2957,6 +3329,8 @@ def main(argv: list[str] | None = None) -> int:
                     diff_drill_down_path=diff_drill_down_path,
                     side_by_side_path=side_by_side_path,
                     annotations=annotations,
+                    exec_summary=args.exec_summary,
+                    recipient=args.recipient,
                 )
             )
     except ReportError as exc:
@@ -2996,6 +3370,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         status = write_html_report(markdown, Path(export_output)) or status
+    if args.export_csv:
+        try:
+            csv_window = _collect_window(reports_dir, args.since)
+            csv_runs = csv_window["runs"]
+            csv_coverage = coverage_rows(
+                csv_window["cases"],
+                csv_window["observations"] if csv_runs > 0 else {},
+                csv_window["gaps"],
+            )
+        except ReportError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        status = write_csv_report(csv_coverage, Path(args.export_csv)) or status
     return status
 
 

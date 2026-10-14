@@ -1673,3 +1673,289 @@ def test_audit_only_node_absent_exits_3(tmp_path, capsys):
     assert rc == 3
     assert "node" in err
     assert _snapshot(root) == before
+
+
+# --pin targeted mode (K9) -------------------------------------------------------
+
+
+def test_pin_flag_parses():
+    args = pin_bump.build_parser().parse_args(["--to", PIN_NEW, "--pin", "left-pad"])
+    assert args.pin == ["left-pad"]
+    repeated = pin_bump.build_parser().parse_args(
+        ["--to", PIN_NEW, "--pin", "left-pad", "--pin", "GHSA-old-0001"]
+    )
+    assert repeated.pin == ["left-pad", "GHSA-old-0001"]
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.pin is None
+
+
+def test_pin_match_shapes():
+    assert pin_bump._pin_matches("GHSA-old-0001", "GHSA-old-0001", "left-pad")
+    assert pin_bump._pin_matches("left", "GHSA-old-0001", "left-pad")
+    assert pin_bump._pin_matches("PAD", "GHSA-old-0001", "left-pad")
+    assert pin_bump._pin_matches("ghsa-old", "GHSA-old-0001", "left-pad")
+    assert not pin_bump._pin_matches("evil", "GHSA-old-0001", "left-pad")
+    assert not pin_bump._pin_matches("left-pad", "GHSA-new-0009", "evil")
+
+
+def test_pin_scoped_improved_despite_out_of_scope_new(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun(npm_doc=_audit(("evil", "high", "GHSA-new-0009")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, pin=["left-pad"])
+    out = capsys.readouterr().out
+    # Unpinned this delta is regressed (a new high appears); pinned to
+    # left-pad the fixed advisory carries the verdict instead.
+    assert rc == 0
+    assert "out of scope for --pin" in out
+    report = (root / "report.md").read_text()
+    assert "Verdict: improved" in report
+    assert "Out of scope for --pin" in report
+    assert "GHSA-new-0009" in report
+    assert "GHSA-old-0001" in report
+    # The file path still ran whole-tree so provenance is green.
+    assert f"- Commit: `{PIN_NEW}`" in (root / "VENDOR.md").read_text()
+    assert (
+        _pack(root) / "skills" / "deep" / "SKILL.md"
+    ).read_bytes() == b"# skill v2\n"
+
+
+def test_pin_match_by_advisory_id(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun(npm_doc=_audit(("evil", "high", "GHSA-new-0009")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, pin=["GHSA-old-0001"])
+    capsys.readouterr()
+    assert rc == 0
+    report = (root / "report.md").read_text()
+    assert "Verdict: improved" in report
+    assert "Out of scope for --pin" in report
+
+
+def test_pin_in_scope_untriaged_still_blocks(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path, with_saved_old_audit=True, old_audit_doc=_audit()
+    )
+    run = FakeRun(npm_doc=_audit(("left-pad", "high", "GHSA-new-0001")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, pin=["left-pad"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "GHSA-new-0001" in out
+
+
+def test_pin_in_scope_new_moderate_regresses(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path, with_saved_old_audit=True, old_audit_doc=_audit()
+    )
+    run = FakeRun(npm_doc=_audit(("left-pad", "moderate", "GHSA-new-0002")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, pin=["left-pad"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "regressed" in out
+    assert "Verdict: regressed" in (root / "report.md").read_text()
+
+
+def test_pin_no_match_exits_2_listing_found(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, pin=["no-such-pkg"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--pin matched no advisories" in err
+    assert "GHSA-old-0001" in err
+    assert "left-pad" in err
+
+
+def test_pin_no_match_both_clean_exits_2(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, pin=["left-pad"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--pin matched no advisories" in err
+
+
+def test_pin_repeatable_union_covers_both(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(
+            ("left-pad", "high", "GHSA-old-0001"),
+            ("wibble", "high", "GHSA-old-0002"),
+        ),
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, pin=["left-pad", "wibble"])
+    capsys.readouterr()
+    assert rc == 0
+    report = (root / "report.md").read_text()
+    assert "Verdict: improved" in report
+    assert "Out of scope for --pin" in report
+    assert "0 other advisories" in report
+
+
+def test_pin_single_leaves_other_fixed_out_of_scope(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(
+            ("left-pad", "high", "GHSA-old-0001"),
+            ("wibble", "high", "GHSA-old-0002"),
+        ),
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, pin=["left-pad"])
+    capsys.readouterr()
+    assert rc == 0
+    report = (root / "report.md").read_text()
+    assert "Verdict: improved" in report
+    assert "Out of scope for --pin" in report
+    assert "GHSA-old-0002" in report
+
+
+def test_pin_skip_audit_exits_2_without_subprocess(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, skip_audit=True, pin=["left-pad"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--pin" in err
+    assert run.cmds == []
+
+
+def test_pin_audit_only_scoped_without_mutation(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    before = _snapshot(root)
+    run = FakeRun(npm_doc=_audit(("evil", "high", "GHSA-new-0009")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True, pin=["left-pad"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[audit-only] audit verdict: improved" in out
+    assert "out of scope for --pin" in out
+    assert "GHSA-new-0009" in out
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_pin_dry_run_scoped_without_mutation(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    before = _snapshot(root)
+    run = FakeRun(npm_doc=_audit(("evil", "high", "GHSA-new-0009")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, dry_run=True, pin=["left-pad"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[dry-run] audit verdict: improved" in out
+    assert "out of scope for --pin" in out
+    assert "GHSA-new-0009" in out
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_pin_json_mode_pinned_keys(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun(npm_doc=_audit(("evil", "high", "GHSA-new-0009")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, json_mode=True, pin=["left-pad"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "improved"
+    assert payload["pinned"] == ["left-pad"]
+    assert payload["out_of_scope"] == [
+        {"key": "GHSA-new-0009", "package": "evil", "status": "new"}
+    ]
+    assert [row["key"] for row in payload["rows"]] == ["GHSA-old-0001"]
+    assert "out of scope for --pin" in captured.err
+    assert "Verdict: improved" in (root / "report.md").read_text()
+
+
+def test_pin_semver_check_scoped_to_fixed(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_versioned_audit(
+            ("left-pad", "high", "GHSA-old-0001", "1.2.3"),
+            ("wibble", "high", "GHSA-old-0002", "2.0.0"),
+        ),
+    )
+    run = FakeRun(
+        npm_doc=_versioned_audit(
+            ("left-pad", "moderate", "GHSA-new-0003", "1.4.0"),
+            ("wibble", "moderate", "GHSA-new-0004", "2.1.0"),
+        )
+    )
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=run, semver_check=True, pin=["GHSA-old-0001"]
+    )
+    out = capsys.readouterr().out
+    # Unpinned this delta is regressed (two new moderate advisories); pinned
+    # to the one compatible fix, the verdict is driven by that key alone.
+    assert rc == 0
+    report = (root / "report.md").read_text()
+    assert "Verdict: improved" in report
+    assert "Out of scope for --pin" in report
+    assert "`GHSA-old-0001` (package `left-pad`): 1.2.3 -> 1.4.0" in report
+    assert "GHSA-old-0002" in report
+    assert "semver compatible" in out
+
+
+def test_unpinned_regressed_unchanged_by_pin_feature(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun(npm_doc=_audit(("evil", "moderate", "GHSA-new-0009")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run)
+    capsys.readouterr()
+    assert rc == 1
+    report = (root / "report.md").read_text()
+    assert "Verdict: regressed" in report
+    assert "Out of scope for --pin" not in report
+
+
+def test_pin_main_plumbing(tmp_path, capsys, monkeypatch):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    monkeypatch.setattr(pin_bump, "_default_run", run)
+    rc = pin_bump.main(
+        [
+            "--to",
+            PIN_NEW,
+            "--root",
+            str(root),
+            "--pin",
+            "left-pad",
+            "--audit-only",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[audit-only] audit verdict: improved" in out
