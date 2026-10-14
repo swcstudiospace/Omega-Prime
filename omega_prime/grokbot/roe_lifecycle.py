@@ -40,10 +40,11 @@ authorization and never writes.
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import socket
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -909,16 +910,31 @@ def watchdog_check_all(artifacts: Any, *, now: Any = None) -> list[dict[str, Any
         return []
 
 
+#: Most rows :func:`grant_conflicts` returns before the truncation sentinel.
+MAX_GRANT_CONFLICTS = 100
+
+#: Largest grant file (bytes) the conflict detector reads; bigger files
+#: are treated as unreadable (detector only).
+MAX_GRANT_BYTES = 1_048_576
+
+#: ``kind`` of the sentinel row that follows a truncated conflict list.
+CONFLICTS_TRUNCATED_KIND = "conflicts-truncated"
+
+
 @dataclass(frozen=True)
 class _ConflictGrant:
-    """One readable grant prepared for pairwise conflict comparison."""
+    """One readable grant with every pair-independent value precomputed."""
 
     ident: str
     label: str
     reliable_id: bool
-    document: dict[str, Any]
     content: bytes
     window: tuple[datetime, datetime] | None
+    hosts: dict[str, set[str] | None]
+    host_open: frozenset[str]
+    host_restricted: frozenset[str]
+    covers: frozenset[str] | None
+    operator: str | None
 
 
 #: Longest rendered grant id / host / tool / tracker / operator in a
@@ -942,9 +958,33 @@ def _conflict_window(document: dict[str, Any]) -> tuple[datetime, datetime] | No
     return (start, end) if start <= end else None
 
 
+def _conflict_document(artifact: Any) -> dict[str, Any] | None:
+    """Grant document for the detector; oversized files are unreadable."""
+    if isinstance(artifact, (str, Path)):
+        path_text = str(artifact).strip()
+        if not path_text:
+            return None
+        try:
+            with open(path_text, "rb") as handle:
+                raw = handle.read(MAX_GRANT_BYTES + 1)
+        except OSError:
+            return None
+        if len(raw) > MAX_GRANT_BYTES:
+            return None
+        try:
+            loaded = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            return None
+        return loaded if isinstance(loaded, dict) else None
+    return _grant_document(artifact)
+
+
 def _conflict_grant(artifact: Any) -> _ConflictGrant | None:
-    """Prepare one artifact for comparison; ``None`` when unreadable."""
-    document = _grant_document(artifact)
+    """Prepare one artifact for comparison; ``None`` when unreadable.
+
+    Every per-grant derived value is computed here once, never per pair.
+    """
+    document = _conflict_document(artifact)
     if document is None:
         return None
     content = canonical_bytes(document)
@@ -957,13 +997,24 @@ def _conflict_grant(artifact: Any) -> _ConflictGrant | None:
         isinstance(document.get(key), str) and document[key].strip()
         for key in ("artifact_id", "id")
     )
+    hosts = _conflict_host_tools(document)
+    covers = grant_trackers(document)
+    operator = document.get("operator")
     return _ConflictGrant(
         ident=ident,
         label=_conflict_text(ident),
         reliable_id=from_path or from_doc,
-        document=document,
         content=content,
         window=_conflict_window(document),
+        hosts=hosts,
+        host_open=frozenset(host for host, tools in hosts.items() if tools is None),
+        host_restricted=frozenset(
+            host for host, tools in hosts.items() if tools is not None
+        ),
+        covers=None if covers is None else frozenset(covers),
+        operator=(
+            operator.strip() if isinstance(operator, str) and operator.strip() else None
+        ),
     )
 
 
@@ -995,23 +1046,22 @@ def _cover_text(covers: set[str] | None) -> str:
     return f"covers {_conflict_csv(covers)}"
 
 
-def _pair_conflicts(
-    first: _ConflictGrant,
-    second: _ConflictGrant,
-    window: tuple[datetime, datetime],
-) -> list[tuple[str, str]]:
-    """``(kind, detail)`` rows for two grants overlapping on ``window``."""
-    overlap = (
+def _overlap_text(window: tuple[datetime, datetime]) -> str:
+    return (
         f"overlap {window[0].isoformat(timespec='seconds')}"
         f"..{window[1].isoformat(timespec='seconds')}"
     )
-    rows: list[tuple[str, str]] = []
 
-    first_hosts = _conflict_host_tools(first.document)
-    second_hosts = _conflict_host_tools(second.document)
+
+def _tool_detail(
+    first: _ConflictGrant,
+    second: _ConflictGrant,
+    window: tuple[datetime, datetime],
+) -> str:
+    """Detail text of a ``tool-scope-contradiction`` row."""
     segments: list[str] = []
-    for host in sorted(first_hosts.keys() & second_hosts.keys()):
-        tools_a, tools_b = first_hosts[host], second_hosts[host]
+    for host in sorted(first.hosts.keys() & second.hosts.keys()):
+        tools_a, tools_b = first.hosts[host], second.hosts[host]
         if (tools_a is None) == (tools_b is None):
             continue
         open_label, restricted_label, restricted = (
@@ -1023,40 +1073,117 @@ def _pair_conflicts(
             f"host {_conflict_text(host)}: {open_label} unrestricted, "
             f"{restricted_label} restricted to {_conflict_csv(restricted or set())}"
         )
-    if segments:
-        rows.append(("tool-scope-contradiction", "; ".join(segments) + f"; {overlap}"))
+    return "; ".join(segments) + f"; {_overlap_text(window)}"
 
-    covers_a = grant_trackers(first.document)
-    covers_b = grant_trackers(second.document)
-    disjoint = (
-        covers_a is not None and covers_b is not None and not (covers_a & covers_b)
+
+def _cover_detail(
+    first: _ConflictGrant,
+    second: _ConflictGrant,
+    window: tuple[datetime, datetime],
+) -> str:
+    """Detail text of a ``tracker-cover-contradiction`` row."""
+    covers_a = None if first.covers is None else set(first.covers)
+    covers_b = None if second.covers is None else set(second.covers)
+    return (
+        f"{first.label} {_cover_text(covers_a)}; "
+        f"{second.label} {_cover_text(covers_b)}; {_overlap_text(window)}"
     )
-    if (covers_a is None) != (covers_b is None) or disjoint:
-        rows.append(
-            (
-                "tracker-cover-contradiction",
-                f"{first.label} {_cover_text(covers_a)}; "
-                f"{second.label} {_cover_text(covers_b)}; {overlap}",
-            )
-        )
 
-    operator_a = first.document.get("operator")
-    operator_b = second.document.get("operator")
-    if (
-        isinstance(operator_a, str)
-        and isinstance(operator_b, str)
-        and operator_a.strip()
-        and operator_b.strip()
-        and operator_a.strip() != operator_b.strip()
-    ):
-        rows.append(
-            (
-                "operator-mismatch",
-                f"operator {_conflict_text(operator_a.strip())} "
-                f"vs {_conflict_text(operator_b.strip())}; {overlap}",
-            )
-        )
-    return rows
+
+def _operator_detail(
+    first: _ConflictGrant,
+    second: _ConflictGrant,
+    window: tuple[datetime, datetime],
+) -> str:
+    """Detail text of an ``operator-mismatch`` row."""
+    return (
+        f"operator {_conflict_text(first.operator)} "
+        f"vs {_conflict_text(second.operator)}; {_overlap_text(window)}"
+    )
+
+
+def _overlap_window(
+    first: _ConflictGrant, second: _ConflictGrant
+) -> tuple[datetime, datetime]:
+    """Intersection of two (already known to overlap) grant windows."""
+    assert first.window is not None and second.window is not None
+    return (
+        max(first.window[0], second.window[0]),
+        min(first.window[1], second.window[1]),
+    )
+
+
+def _sweep_pairs(
+    records: Sequence[_ConflictGrant],
+    indices: Sequence[int],
+    group_of: Callable[[int], Any],
+    compatible: Callable[[Any, Any], bool],
+) -> Iterator[tuple[int, int]]:
+    """Overlapping record pairs ``(low, high)`` from different groups.
+
+    Sweeps the windowed ``indices`` in window-start order, keeping the
+    still-open windows per group, so only overlapping pairs whose groups
+    are ``compatible`` are ever visited (cost: sort + output). Every pair
+    is yielded once, smaller record index first.
+    """
+    bounds: dict[int, tuple[datetime, datetime]] = {}
+    for idx in indices:
+        window = records[idx].window
+        if window is not None:
+            bounds[idx] = window
+    order = sorted(bounds, key=lambda idx: bounds[idx][0])
+    active: dict[Any, list[int]] = {}
+    for idx in order:
+        start = bounds[idx][0]
+        group = group_of(idx)
+        for other_group, members in active.items():
+            if other_group == group or not compatible(group, other_group):
+                continue
+            live = [member for member in members if bounds[member][1] >= start]
+            if len(live) != len(members):
+                members[:] = live
+            for member in live:
+                yield (member, idx) if member < idx else (idx, member)
+        active.setdefault(group, []).append(idx)
+
+
+class _TopConflicts:
+    """Streams distinct conflict rows, keeping the smallest ``cap`` sorted.
+
+    ``count`` is the number of distinct rows offered. Rows between records
+    that share a rendered label may repeat (the same row from two record
+    pairs), so those alone go through a ``seen`` digest set; every other
+    row is unique by construction and is counted without being stored.
+    """
+
+    def __init__(self, cap: int, shared_labels: set[str]) -> None:
+        self.cap = cap
+        self.shared = shared_labels
+        self.top: list[tuple[str, tuple[str, str], str]] = []
+        self.count = 0
+        self._seen: set[int] = set()
+
+    def offer(
+        self, kind: str, grants: tuple[str, str], build: Callable[[], str]
+    ) -> None:
+        top = self.top
+        colliding = grants[0] in self.shared or grants[1] in self.shared
+        if not colliding and len(top) >= self.cap:
+            last = top[-1]
+            if (kind, grants) > (last[0], last[1]):
+                self.count += 1
+                return
+        row = (kind, grants, build())
+        if colliding:
+            digest = hash(row)
+            if digest in self._seen:
+                return
+            self._seen.add(digest)
+        self.count += 1
+        if len(top) < self.cap or row < top[-1]:
+            bisect.insort(top, row)
+            if len(top) > self.cap:
+                top.pop()
 
 
 def grant_conflicts(artifacts: Any, *, now: Any = None) -> list[dict[str, Any]]:
@@ -1069,10 +1196,16 @@ def grant_conflicts(artifacts: Any, *, now: Any = None) -> list[dict[str, Any]]:
     ``[{"kind", "grants": [id_a, id_b], "detail"}, ...]`` with ``grants``
     sorted and the list sorted by ``(kind, grants, detail)``. ``detail``
     is built only from ids, hosts, tool/tracker/operator names and ISO
-    times, with control characters stripped. Unreadable artifacts are
-    skipped silently (:func:`watchdog_check_all` already reports them);
-    fewer than two readable grants, ``None`` or any internal failure
-    return ``[]``; never raises.
+    times, with control characters stripped. Unreadable artifacts (incl.
+    grant files larger than :data:`MAX_GRANT_BYTES`) are skipped silently
+    (:func:`watchdog_check_all` already reports them); fewer than two
+    readable grants, ``None`` or any internal failure return ``[]``;
+    never raises.
+
+    At most :data:`MAX_GRANT_CONFLICTS` rows are returned (the first ones
+    in sorted order); when more exist, one final sentinel row
+    ``{"kind": "conflicts-truncated", "grants": [], "detail":
+    "<N> more conflicts not listed"}`` follows them.
 
     Two grants *overlap* when both windows parse and
     ``a.from <= b.until and b.from <= a.until`` (inclusive bounds, UTC).
@@ -1104,16 +1237,21 @@ def grant_conflicts(artifacts: Any, *, now: Any = None) -> list[dict[str, Any]]:
     """
     try:
         items = list(artifacts) if isinstance(artifacts, (list, tuple)) else [artifacts]
-        records: list[_ConflictGrant] = []
+        classes: dict[tuple[str, bool, bytes], _ConflictGrant] = {}
+        readable = 0
         for item in items:
             try:
                 record = _conflict_grant(item)
             except Exception:
                 record = None
             if record is not None:
-                records.append(record)
-        if len(records) < 2:
+                readable += 1
+                classes.setdefault(
+                    (record.ident, record.reliable_id, record.content), record
+                )
+        if readable < 2:
             return []
+        records = list(classes.values())
         current = None if now is None else _renewal_now(now)
         if current is not None:
             records = [
@@ -1122,35 +1260,107 @@ def grant_conflicts(artifacts: Any, *, now: Any = None) -> list[dict[str, Any]]:
                 if rec.window is None or rec.window[0] <= current <= rec.window[1]
             ]
         records.sort(key=lambda rec: (rec.label, rec.content))
-        found: set[tuple[str, tuple[str, str], str]] = set()
-        for idx, first in enumerate(records):
-            for second in records[idx + 1 :]:
-                grants = (first.label, second.label)
-                if (
-                    first.reliable_id
-                    and second.reliable_id
-                    and first.ident == second.ident
-                    and first.content != second.content
-                ):
-                    found.add(
-                        (
-                            "duplicate-id-divergent",
-                            grants,
-                            f"id {first.label} has divergent content",
-                        )
-                    )
-                if first.window is None or second.window is None:
-                    continue
-                start = max(first.window[0], second.window[0])
-                end = min(first.window[1], second.window[1])
-                if start > end:
-                    continue
-                for kind, detail in _pair_conflicts(first, second, (start, end)):
-                    found.add((kind, grants, detail))
-        return [
+        label_owners: dict[str, int] = {}
+        for rec in records:
+            label_owners[rec.label] = label_owners.get(rec.label, 0) + 1
+        rows = _TopConflicts(
+            MAX_GRANT_CONFLICTS,
+            {label for label, owners in label_owners.items() if owners > 1},
+        )
+
+        def divergent_detail(label: str) -> Callable[[], str]:
+            return lambda: f"id {label} has divergent content"
+
+        def host_open_in(host: str) -> Callable[[int], bool]:
+            return lambda idx: host in records[idx].host_open
+
+        by_ident: dict[str, list[_ConflictGrant]] = {}
+        for rec in records:
+            if rec.reliable_id:
+                by_ident.setdefault(rec.ident, []).append(rec)
+        for group in by_ident.values():
+            if len(group) > 1:
+                label = group[0].label
+                rows.offer(
+                    "duplicate-id-divergent",
+                    (label, label),
+                    divergent_detail(label),
+                )
+
+        windowed = [idx for idx, rec in enumerate(records) if rec.window is not None]
+
+        def offer_pair(
+            kind: str,
+            low: int,
+            high: int,
+            detail: Callable[
+                [_ConflictGrant, _ConflictGrant, tuple[datetime, datetime]], str
+            ],
+        ) -> None:
+            first, second = records[low], records[high]
+            rows.offer(
+                kind,
+                (first.label, second.label),
+                lambda: detail(first, second, _overlap_window(first, second)),
+            )
+
+        hosts_open: dict[str, list[int]] = {}
+        hosts_restricted: dict[str, list[int]] = {}
+        for idx in windowed:
+            for host in records[idx].host_open:
+                hosts_open.setdefault(host, []).append(idx)
+            for host in records[idx].host_restricted:
+                hosts_restricted.setdefault(host, []).append(idx)
+        for host in sorted(hosts_open.keys() & hosts_restricted.keys()):
+            members = hosts_open[host] + hosts_restricted[host]
+            for low, high in _sweep_pairs(
+                records,
+                members,
+                host_open_in(host),
+                lambda _a, _b: True,
+            ):
+                first, second = records[low], records[high]
+                mismatched = (first.host_open & second.host_restricted) | (
+                    first.host_restricted & second.host_open
+                )
+                if min(mismatched) == host:
+                    offer_pair("tool-scope-contradiction", low, high, _tool_detail)
+
+        def covers_compatible(
+            group_a: frozenset[str] | None, group_b: frozenset[str] | None
+        ) -> bool:
+            if group_a is None or group_b is None:
+                return True
+            return group_a.isdisjoint(group_b)
+
+        for low, high in _sweep_pairs(
+            records, windowed, lambda idx: records[idx].covers, covers_compatible
+        ):
+            offer_pair("tracker-cover-contradiction", low, high, _cover_detail)
+
+        named = [idx for idx in windowed if records[idx].operator is not None]
+        for low, high in _sweep_pairs(
+            records,
+            named,
+            lambda idx: records[idx].operator,
+            lambda _a, _b: True,
+        ):
+            offer_pair("operator-mismatch", low, high, _operator_detail)
+
+        out = [
             {"kind": kind, "grants": list(grants), "detail": detail}
-            for kind, grants, detail in sorted(found)
+            for kind, grants, detail in rows.top
         ]
+        if rows.count > MAX_GRANT_CONFLICTS:
+            more = rows.count - MAX_GRANT_CONFLICTS
+            out.append(
+                {
+                    "kind": CONFLICTS_TRUNCATED_KIND,
+                    "grants": [],
+                    "detail": f"{more} more conflicts not listed",
+                }
+            )
+        return out
     except Exception:
         return []
 
@@ -1463,6 +1673,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(conflicts, indent=2))
         elif conflicts:
             for row in conflicts:
+                if len(row["grants"]) != 2:
+                    print(f"{row['kind']}: {row['detail']}")
+                    continue
                 id_a, id_b = row["grants"]
                 print(f"{row['kind']}: {id_a} vs {id_b} - {row['detail']}")
         else:

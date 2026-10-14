@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import itertools
 import json
+import random
+import time
+import tracemalloc
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,6 +17,7 @@ import pytest
 
 from omega_prime.grokbot.roe_lifecycle import (
     EXPIRY_NOTICE_STATES,
+    MAX_GRANT_BYTES,
     STATES,
     grant_conflicts,
     main,
@@ -559,3 +563,274 @@ def test_cli_writes_nothing(tmp_path):
     main(["conflicts", "--artifact", first, "--artifact", second])
     assert sorted(p.name for p in tmp_path.iterdir()) == before
     assert {name: (tmp_path / name).read_bytes() for name in before} == contents
+
+
+# --- scaling, output cap and input cap ----------------------------------------
+
+_FAR_END = BASE + timedelta(days=3650)
+
+
+def _wide(
+    index: int,
+    tools: list[str] | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A long-lived grant on host ``h.example`` (``tools=None`` = no key)."""
+    target: dict[str, Any] = {"host": "h.example"}
+    if tools is not None:
+        target["tools"] = tools
+    document = _grant(
+        f"g{index:05d}",
+        end=_FAR_END,
+        authorized_targets=[target],
+        operator="alice",
+    )
+    document.update(overrides)
+    return document
+
+
+def _reference_pairs(
+    documents: list[dict[str, Any]],
+) -> set[tuple[str, tuple[str, str]]]:
+    """Brute-force ``(kind, ids)`` pairs for unique-id single-host grants."""
+    expected: set[tuple[str, tuple[str, str]]] = set()
+    ordered = sorted(documents, key=lambda doc: doc["artifact_id"])
+    for idx, first in enumerate(ordered):
+        for second in ordered[idx + 1 :]:
+            if not (
+                first["effective_from"] <= second["effective_until"]
+                and second["effective_from"] <= first["effective_until"]
+            ):
+                continue
+            ids = (first["artifact_id"], second["artifact_id"])
+            tools_a = first["authorized_targets"][0].get("tools") or None
+            tools_b = second["authorized_targets"][0].get("tools") or None
+            if first["authorized_targets"][0]["host"].lower() == second[
+                "authorized_targets"
+            ][0]["host"].lower() and (tools_a is None) != (tools_b is None):
+                expected.add(("tool-scope-contradiction", ids))
+            cover_a, cover_b = first.get("covers") or None, second.get("covers") or None
+            if (cover_a is None) != (cover_b is None) or (
+                cover_a is not None
+                and cover_b is not None
+                and not set(cover_a) & set(cover_b)
+            ):
+                expected.add(("tracker-cover-contradiction", ids))
+            if first.get("operator") != second.get("operator"):
+                expected.add(("operator-mismatch", ids))
+    return expected
+
+
+def test_sweep_matches_bruteforce_reference_on_random_fixtures():
+    rng = random.Random(1801)
+    cover_choices: list[list[str] | None] = [
+        None,
+        ["slack"],
+        ["jira"],
+        ["slack", "jira"],
+    ]
+    conflicted = 0
+    for _trial in range(300):
+        documents = []
+        for index in range(rng.randint(2, 8)):
+            start = rng.randint(0, 12)
+            end = start + rng.randint(0, 6)
+            document = _grant(
+                f"r{index}",
+                start=BASE + timedelta(days=start),
+                end=BASE + timedelta(days=end),
+                operator=rng.choice(["alice", "bob"]),
+                authorized_targets=[
+                    {
+                        "host": rng.choice(["H.example", "h.example"]),
+                        **(
+                            {"tools": rng.choice([[], ["t1"], ["t2"]])}
+                            if rng.random() < 0.8
+                            else {}
+                        ),
+                    }
+                ],
+            )
+            cover = rng.choice(cover_choices)
+            if cover is not None:
+                document["covers"] = cover
+            documents.append(document)
+        rows = grant_conflicts(documents)
+        assert len(rows) < 100
+        actual = {(row["kind"], tuple(row["grants"])) for row in rows}
+        assert len(actual) == len(rows)
+        assert actual == _reference_pairs(documents)
+        conflicted += bool(rows)
+    assert conflicted > 100
+
+
+def test_rows_beyond_the_cap_become_one_sentinel_with_the_exact_remainder():
+    # 20 "alice" grants x 8 "bob" grants -> 160 operator-mismatch pairs.
+    documents = [_wide(i) for i in range(20)] + [
+        _wide(100 + i, operator="bob") for i in range(8)
+    ]
+    rows = grant_conflicts(documents)
+    assert len(rows) == 101
+    assert rows[-1] == {
+        "kind": "conflicts-truncated",
+        "grants": [],
+        "detail": "60 more conflicts not listed",
+    }
+    reference = sorted(_reference_pairs(documents))
+    assert [(row["kind"], tuple(row["grants"])) for row in rows[:-1]] == reference[:100]
+    assert all(row["kind"] == "operator-mismatch" for row in rows[:-1])
+    assert rows[:-1] == sorted(
+        rows[:-1], key=lambda row: (row["kind"], row["grants"], row["detail"])
+    )
+
+
+def test_exactly_the_cap_has_no_sentinel_and_one_over_adds_it():
+    exactly = [_wide(i) for i in range(10)] + [
+        _wide(100 + i, operator="bob") for i in range(10)
+    ]
+    rows = grant_conflicts(exactly)
+    assert len(rows) == 100
+    assert "conflicts-truncated" not in _kinds(rows)
+    one_over = [_wide(0)] + [_wide(100 + i, operator="bob") for i in range(101)]
+    rows = grant_conflicts(one_over)
+    assert len(rows) == 101
+    assert rows[-1]["kind"] == "conflicts-truncated"
+    assert rows[-1]["detail"] == "1 more conflicts not listed"
+
+
+def test_truncated_listing_is_deterministic_for_any_input_order():
+    documents = [_wide(i) for i in range(15)] + [
+        _wide(100 + i, operator="bob") for i in range(15)
+    ]
+    expected = grant_conflicts(documents)
+    assert expected[-1]["kind"] == "conflicts-truncated"
+    for seed in range(5):
+        shuffled = list(documents)
+        random.Random(seed).shuffle(shuffled)
+        assert grant_conflicts(shuffled) == expected
+
+
+def test_mixed_unrestricted_and_restricted_grants_stay_capped_and_bounded():
+    # 400 unrestricted x 400 restricted on one host: 160k tool-scope pairs.
+    documents = [_wide(i, [] if i % 2 == 0 else ["tempest_a"]) for i in range(800)]
+    tracemalloc.start()
+    started = time.monotonic()
+    rows = grant_conflicts(documents)
+    elapsed = time.monotonic() - started
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert elapsed < 30
+    assert peak < 10_000_000
+    assert len(rows) == 101
+    assert _kinds(rows[:-1]) == ["tool-scope-contradiction"] * 100
+    assert rows[-1]["detail"] == f"{400 * 400 - 100} more conflicts not listed"
+
+
+def test_colliding_labels_count_each_distinct_row_once():
+    # 60 grants share one id (divergent operators): one duplicate-id row
+    # plus one operator row per unordered pair of distinct operators.
+    documents = [
+        _wide(0, artifact_id="same", operator=f"op{index:03d}") for index in range(60)
+    ]
+    rows = grant_conflicts(documents)
+    total = 1 + 60 * 59 // 2
+    assert len(rows) == 101
+    assert rows[-1]["detail"] == f"{total - 100} more conflicts not listed"
+    assert _kinds(rows).count("duplicate-id-divergent") == 1
+    assert len({json.dumps(row, sort_keys=True) for row in rows}) == 101
+
+
+def test_two_thousand_non_conflicting_grants_scale():
+    documents = [_wide(i, ["tempest_a"]) for i in range(2000)]
+    started = time.monotonic()
+    assert grant_conflicts(documents) == []
+    assert time.monotonic() - started < 10
+
+
+def test_many_targets_per_grant_scale():
+    documents = [
+        _wide(
+            index,
+            authorized_targets=[
+                {"host": f"h{host}.example", "tools": ["t"]} for host in range(50)
+            ],
+        )
+        for index in range(500)
+    ]
+    started = time.monotonic()
+    assert grant_conflicts(documents) == []
+    assert time.monotonic() - started < 10
+
+
+def test_non_overlapping_grants_are_never_compared():
+    documents = [
+        _grant(
+            f"w{index:04d}",
+            start=BASE + timedelta(days=index * 2),
+            end=BASE + timedelta(days=index * 2 + 1),
+            operator=f"op{index}",
+        )
+        for index in range(600)
+    ]
+    assert grant_conflicts(documents) == []
+
+
+def _padded_grant_file(tmp_path: Path, name: str, size: int) -> str:
+    document = _grant("padded", operator="someone-else")
+    document["padding"] = ""
+    overhead = len(json.dumps(document).encode("utf-8"))
+    document["padding"] = "x" * (size - overhead)
+    path = tmp_path / name
+    path.write_text(json.dumps(document), encoding="utf-8")
+    assert path.stat().st_size == size
+    return str(path)
+
+
+def test_oversized_grant_file_is_ignored_but_the_limit_itself_is_read(tmp_path):
+    other = _grant("other", operator="test-operator")
+    at_limit = _padded_grant_file(tmp_path, "at-limit.json", MAX_GRANT_BYTES)
+    over = _padded_grant_file(tmp_path, "over.json", MAX_GRANT_BYTES + 1)
+    assert _kinds(grant_conflicts([at_limit, other])) == ["operator-mismatch"]
+    assert grant_conflicts([over, other]) == []
+    # an in-memory document is never size-capped by the file limit
+    assert grant_conflicts([over, other, _grant("third", operator="x")]) != []
+
+
+def test_oversized_file_does_not_hide_the_remaining_grants(tmp_path):
+    over = _padded_grant_file(tmp_path, "over.json", MAX_GRANT_BYTES + 10)
+    rows = grant_conflicts(
+        [over, _grant("a", operator="one"), _grant("b", operator="two")]
+    )
+    assert _kinds(rows) == ["operator-mismatch"]
+    assert rows[0]["grants"] == ["a", "b"]
+
+
+def test_cli_json_prints_the_capped_list_with_sentinel(tmp_path, capsys):
+    paths = [
+        _write(tmp_path, f"a{index}.json", _wide(index, artifact_id=f"a{index:03d}"))
+        for index in range(11)
+    ] + [
+        _write(
+            tmp_path,
+            f"b{index}.json",
+            _wide(100 + index, artifact_id=f"b{index:03d}", operator="bob"),
+        )
+        for index in range(11)
+    ]
+    argv = ["conflicts"]
+    for path in paths:
+        argv += ["--artifact", path]
+    rc = main([*argv, "--json"])
+    assert rc == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 101
+    assert payload[-1] == {
+        "kind": "conflicts-truncated",
+        "grants": [],
+        "detail": "21 more conflicts not listed",
+    }
+    rc = main(argv)
+    assert rc == 3
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 101
+    assert lines[-1] == "conflicts-truncated: 21 more conflicts not listed"
