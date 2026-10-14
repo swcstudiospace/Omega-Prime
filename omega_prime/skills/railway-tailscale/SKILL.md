@@ -4,7 +4,7 @@ description: Reach the Railway data planes over Tailscale Forwarders, cut the VP
 bots: [bot-00-omega-prime]
 gates: [G-5, G-6]
 ---
-
+<skill name="railway-tailscale" version="1">
 # Railway over Tailscale
 
 ## When this applies (L1)
@@ -184,3 +184,4 @@ removed before the new one was proven. The order in §5 exists for this case.
 | No `TS_AUTHKEY`, passwords or bearer keys anywhere but the secret stores | G-3, PD-4 | Receipts, templates and messages are copied |
 | Every probe recorded with its exit code; the unprobed goes in `unverified` | G-2, PD-1, PD-6 | "Reachable over the tailnet" is a claim a re-run must be able to check |
 | `infra/railway/**`, `infra/tailscale/**` are INFRA's; ACL widenings go past QUALITY | G-1, PD-2 | Ownership is already declared for these paths |
+</skill>

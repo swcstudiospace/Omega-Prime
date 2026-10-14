@@ -4,7 +4,7 @@ description: Reviewing another bot's work — what to check, in what order, and 
 bots: [bot-00-omega-prime]
 gates: [G-2]
 ---
-
+<skill name="code-review" version="1">
 # Code Review
 
 ## L1 — Summary
@@ -153,3 +153,4 @@ luck, not process — and the process is what you are reviewing.
 | Receipt skimmed | Unverified work approved | §1 — it is the highest-yield check |
 | Tests not read | Assertions that never fire | Read them |
 | Blocking on taste | Slow reviews, friction, no safety gained | §6 |
+</skill>

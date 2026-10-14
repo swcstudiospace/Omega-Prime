@@ -3,7 +3,7 @@ name: lead-pack
 description: "Run the desk Lead flow inside Omega Prime: claim intake, write tickets, dispatch to specialists, consolidate receipts into a report."
 bots: [bot-00-omega-prime]
 ---
-
+<skill name="lead-pack" version="1">
 # Lead pack
 
 Run the desk Lead flow inside Omega Prime: claim intake, write tickets, dispatch to
@@ -43,3 +43,4 @@ dropped, never counted as done.
 `lead_event_emit`, `lead_doctor`, `lead_render_prompt`, `lead_docs_search`,
 `lead_graph_register`, `lead_graph_state`, `lead_bus_start`, `lead_bus_wait`,
 `lead_roster_status`.
+</skill>

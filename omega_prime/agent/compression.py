@@ -14,12 +14,14 @@ flagged as errors are never elided, and an error is never marked useless.
 from __future__ import annotations
 
 from typing import Any
+from xml.sax.saxutils import escape
 
 SUMMARY_KIND = "summary"
-_SUMMARY_HEADING = "[CONTEXT SUMMARY]"
+_SUMMARY_HEADING = '<context_summary version="1">'
+_SUMMARY_CLOSE = "</context_summary>"
 
 # Exact placeholder written over an elided useless tool result (Omp pruning).
-USELESS_NOTICE = "[ELIDED USELESS TOOL RESULT]"
+USELESS_NOTICE = '<elided reason="useless-tool-result"/>'
 
 
 def prune_useless_results(messages: list) -> int:
@@ -84,7 +86,7 @@ def _summary_text(older: list) -> str:
     lines = [_SUMMARY_HEADING]
     for message in older:
         if not isinstance(message, dict):
-            lines.append(str(message))
+            lines.append(escape(str(message)))
             continue
         role = message.get("role", "?")
         content = message.get("content")
@@ -98,7 +100,8 @@ def _summary_text(older: list) -> str:
                 if name:
                     names.append(str(name))
             text = (text + " " if text else "") + "tool calls: " + ", ".join(names)
-        lines.append(f"{role}: {text[:200]}")
+        lines.append(f"{escape(str(role))}: {escape(text[:200])}")
+    lines.append(_SUMMARY_CLOSE)
     return "\n".join(lines)
 
 

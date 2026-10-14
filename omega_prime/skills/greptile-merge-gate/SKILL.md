@@ -3,7 +3,7 @@ name: greptile-merge-gate
 description: Use when QUALITY (or LEAD on QUALITY's behalf) must enforce the Greptile merge gate on a draft PR before anyone claims the change may merge. Does not weaken G-1..G-6.
 bots: [bot-00-omega-prime]
 ---
-
+<skill name="greptile-merge-gate" version="1">
 # greptile-merge-gate
 
 **Owner:** QUALITY (bot-06). LEAD may trigger the review after a draft PR opens. Only QUALITY records the merge-claim verdict. This skill does not weaken G-1…G-6 or PD-1…PD-6.
@@ -50,3 +50,4 @@ Do not use to skip review, waive comments without a receipt, or treat a queued t
 - It does not rewrite product code. Findings go back to the owning seat.
 - It does not claim the full intake → merge loop is verified.
 - It does not authorize `--no-verify`, skipped tests, or a green receipt over a failed Greptile run.
+</skill>

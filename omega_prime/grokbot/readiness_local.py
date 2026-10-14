@@ -38,22 +38,27 @@ __all__ = ["run"]
 _MARKER = "omega-prime-75-05-baseline"
 _PROFILE = "readiness-75-05"
 _SKILL_NAME = "readiness-75-05-probe"
-_SKILL_V1 = (
-    "---\n"
-    "name: readiness-75-05-probe\n"
-    "description: 75-05 baseline skill probe\n"
-    "---\n"
-    "# Probe skill v1\n"
-    "75-05 skill body v1.\n"
-)
-_SKILL_V2 = (
-    "---\n"
-    "name: readiness-75-05-probe\n"
-    "description: 75-05 baseline skill probe\n"
-    "---\n"
-    "# Probe skill v2\n"
-    "75-05 skill body v2 with an update.\n"
-)
+
+
+def _skill_document(body: str) -> str:
+    """Canonical skill file. ``skill_manage`` stores a valid envelope unchanged.
+
+    The lifecycle below asserts that the reopened file equals the content
+    that was submitted, so the fixture is that envelope rather than plain
+    Markdown the manager would wrap.
+    """
+    return (
+        "---\n"
+        f"name: {_SKILL_NAME}\n"
+        "description: 75-05 baseline skill probe\n"
+        "---\n"
+        f'<skill name="{_SKILL_NAME}" version="1">\n'
+        f"{body}</skill>\n"
+    )
+
+
+_SKILL_V1 = _skill_document("# Probe skill v1\n75-05 skill body v1.\n")
+_SKILL_V2 = _skill_document("# Probe skill v2\n75-05 skill body v2 with an update.\n")
 _LSP_FILE = f"{_PROFILE}/lsp_probe.py"
 _LSP_SOURCE = "def probe_answer() -> int:\n    return 42\n"
 _MCP_TOOL = "local_roundtrip"

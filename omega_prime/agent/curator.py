@@ -1,7 +1,8 @@
 """Earn a skill only when the turn actually asked to save one.
 
-``review_turn`` does not invent a procedure. The body is the tool output plus
-one trailing newline, written through ``skill_manage``.
+``review_turn`` does not invent a procedure. The tool output is XML-escaped
+and wrapped in a ``<skill name="{slug}" version="1">`` envelope (behind the
+skill frontmatter), written through ``skill_manage``.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 from omega_prime.memory.provider import is_trivial_prompt
 from omega_prime.skills_runtime.guards import validate_name
@@ -80,8 +82,12 @@ def _output(tool_results: Any) -> str | None:
 
 
 def _skill_text(slug: str, output: str) -> str:
-    # The body is the tool output plus one newline. No other procedure text.
-    return f"---\nname: {slug}\ndescription: {EARNED_DESCRIPTION}\n---\n{output}\n"
+    # Escape the tool output so it cannot break out of the envelope.
+    body = escape(output)
+    return (
+        f"---\nname: {slug}\ndescription: {EARNED_DESCRIPTION}\n---\n"
+        f'<skill name="{slug}" version="1">\n{body}\n</skill>\n'
+    )
 
 
 __all__ = ["EARNED_DESCRIPTION", "review_turn"]

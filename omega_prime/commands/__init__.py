@@ -451,6 +451,20 @@ def _redteam(
         return _fail(command, "command_failed", {"error": type(exc).__name__})
 
 
+def _exact_final_close(stripped: str, open_tag: str, close: str) -> bool:
+    """True when the only close is the exact tag at the end of stripped text."""
+    name = close[2:-1]
+    matches = list(re.finditer(rf"</{re.escape(name)}\s*>", stripped))
+    if len(matches) != 1:
+        return False
+    match = matches[0]
+    return (
+        stripped.startswith(open_tag)
+        and match.group(0) == close
+        and match.end() == len(stripped)
+    )
+
+
 def _run_generated(
     spec: CommandSpec,
     args: str,
@@ -493,7 +507,27 @@ def _run_generated(
                 "source_invalid",
                 {"kind": spec.kind, "source": spec.source},
             )
+        folder = PurePosixPath(spec.source).parent.name
+        stripped_body = body.strip()
+        if not _exact_final_close(
+            stripped_body, f'<skill name="{folder}" version="1">', "</skill>"
+        ):
+            return _fail(
+                spec.name,
+                "source_invalid",
+                {"kind": spec.kind, "source": spec.source},
+            )
         instructions = body
+    elif spec.kind == "routine":
+        stripped_text = text.strip()
+        if not _exact_final_close(
+            stripped_text, f'<routine name="{stem}" version="1">', "</routine>"
+        ):
+            return _fail(
+                spec.name,
+                "source_invalid",
+                {"kind": spec.kind, "source": spec.source},
+            )
     return _ok(
         spec.name,
         {

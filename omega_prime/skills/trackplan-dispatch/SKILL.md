@@ -3,7 +3,7 @@ name: trackplan-dispatch
 description: Use when the second-uplift XML already contains live Notion and Linear URLs (5–8 GoT nodes, 4–8 CoT sub-issues per node) and Programming Lead must launch Cursor Cloud Agent or VPS Hermes to implement the work as a GitHub PR.
 bots: [bot-00-omega-prime]
 ---
-
+<skill name="trackplan-dispatch" version="1">
 # trackplan-dispatch
 
 **Owner:** Programming Lead (bot-00). LEAD orchestrates; specialists own product paths via `ownership.yaml`. This skill never invents product-code ownership.
@@ -272,3 +272,4 @@ Honest `unverified` / `blockers` are success. Do not fabricate PR URLs, Greptile
 | `skills/trackplan-dispatch/prompt-template.md` | Prompt scaffold |
 | `skills/greptile-merge-gate/SKILL.md` | After the draft PR exists |
 | `vendor/ultrathink-policy/constants.ts` | 5–8 nodes, 4–8 steps |
+</skill>

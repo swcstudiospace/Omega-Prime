@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 ENTRY_DELIMITER = "\n§\n"
 MEMORY_CHAR_LIMIT = 2200
@@ -18,6 +19,10 @@ _LIMITS = {"memory": MEMORY_CHAR_LIMIT, "user": USER_CHAR_LIMIT}
 _TITLES = {
     "memory": "MEMORY (your personal notes)",
     "user": "USER PROFILE (who the user is)",
+}
+_BLOCK_TAGS = {
+    "memory": "memory_notes",
+    "user": "user_profile",
 }
 
 
@@ -122,7 +127,10 @@ class MemoryStore:
         entries = self._entries(target)
         if not entries:
             return ""
-        return f"{_TITLES[target]}\n{ENTRY_DELIMITER.join(entries)}"
+        tag = _BLOCK_TAGS[target]
+        close = f"</{tag}>"
+        joined = ENTRY_DELIMITER.join(escape(entry) for entry in entries)
+        return f'<{tag} title="{_TITLES[target]}">\n{joined}\n{close}'
 
     def _entries(self, target: str) -> list[str]:
         return self.user_entries if target == "user" else self.memory_entries

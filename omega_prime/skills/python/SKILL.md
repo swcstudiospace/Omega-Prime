@@ -3,7 +3,7 @@ name: python
 description: Writing and reviewing Python in this codebase. Use for any change to .py files, pyproject.toml, or Python packaging.
 bots: [bot-00-omega-prime]
 ---
-
+<skill name="python" version="1">
 # Python
 
 ## L1 — Summary
@@ -145,3 +145,4 @@ def test_rejects_negative():
 | Over-mocking | Tests pass, production breaks | Mock boundaries only |
 | Unawaited coroutine | Work silently not done | Await it or hold the task |
 | Coverage as a target | High coverage, weak assertions | Read the tests |
+</skill>

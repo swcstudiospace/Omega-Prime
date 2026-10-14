@@ -7,7 +7,7 @@
     "commit_date": "2026-10-08T07:13:44+00:00",
     "first_v10_commit": "70babccf47776ace9e3e7c6a08cbffe13ee53850",
     "scope": "Public pre-v10 Agent/run_conversation with actual ToolRegistry and ApprovalLog; no enabled Prime hooks, no journal/tracer or network. Immutable committed source before Phase53, not an invented v9-final commit.",
-    "normalization": "None. Fixed scripted tool-call IDs and task IDs; callable values are represented only by actually offered tool names. Semantic messages/results/events/approval/effects/stop/model-call accounting preserved.",
+    "normalization": "One deliberate change (v17 XML prompt standard): the recorded system content's old plain prefix was replaced with the wrapped <omega_prime_system version=\"1\"> prefix; no other recorded byte changed. Otherwise none. Fixed scripted tool-call IDs and task IDs; callable values are represented only by actually offered tool names. Semantic messages/results/events/approval/effects/stop/model-call accounting preserved.",
     "capture_script": "import json\nimport sys\nfrom omega_prime.agent.conversation_loop import Agent, run_conversation\nfrom omega_prime.agent.harness import events_of\nfrom omega_prime.agent.model import ScriptedModel\nfrom omega_prime.tools.approvals import ApprovalLog\nfrom omega_prime.tools.registry import ToolRegistry\n\ndef capture_case(case):\n    counter = [0]\n    def advance_counter(amount):\n        counter[0] += amount\n        return {\"total\": counter[0]}\n    def fail_operation():\n        raise ValueError(\"historical operation failed\")\n    approvals = ApprovalLog()\n    if case[\"approved\"]:\n        approvals.approve(\"advance_counter\", \"historical-human\")\n    registry = ToolRegistry(approval_log=approvals)\n    registry.register(\"advance_counter\", \"Advance a stateful counter\", {\"type\":\"object\",\"properties\":{\"amount\":{\"type\":\"integer\"}},\"required\":[\"amount\"]}, advance_counter, requires_approval=True)\n    registry.register(\"fail_operation\", \"Report a deterministic operation failure\", {\"type\":\"object\",\"properties\":{}}, fail_operation)\n    def dispatcher(name):\n        def dispatch(**arguments):\n            return registry.dispatch(name, arguments)\n        return dispatch\n    tools = {row[\"function\"][\"name\"]: dispatcher(row[\"function\"][\"name\"]) for row in registry.schemas()}\n    model = ScriptedModel(case[\"script\"])\n    agent = Agent(model=model, tools=tools, max_iterations=case[\"max_iterations\"])\n    result = run_conversation(agent, case[\"user_message\"], task_id=case[\"id\"])\n    return {\"result\":result,\"model_requests\":model.seen,\"offered_tools\":[sorted(offered) for offered in model.tools_seen],\"events\":events_of(agent),\"counter\":counter[0],\"approved\":approvals.is_approved(\"advance_counter\"),\"model_call_count\":model.call_count,\"model_remaining\":model.remaining}\n\nif __name__ == \"__main__\":\n    print(json.dumps([{**case,\"expected\":capture_case(case)} for case in json.loads(sys.stdin.read())],sort_keys=True))\n",
     "source_sha256": {
       "omega_prime/agent/conversation_loop.py": "d6a97130ebd9c23bb2436d4beb3cca8accd64b76ff7bab7d4b46ecba7aee2cfb",
@@ -49,7 +49,7 @@
         "model_requests": [
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -72,7 +72,7 @@
           "interrupted": false,
           "messages": [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -137,7 +137,7 @@
         "model_requests": [
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -147,7 +147,7 @@
           ],
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -195,7 +195,7 @@
           "interrupted": false,
           "messages": [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -295,7 +295,7 @@
         "model_requests": [
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -305,7 +305,7 @@
           ],
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -353,7 +353,7 @@
           "interrupted": false,
           "messages": [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -461,7 +461,7 @@
         "model_requests": [
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -471,7 +471,7 @@
           ],
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -502,7 +502,7 @@
           ],
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -575,7 +575,7 @@
           "interrupted": false,
           "messages": [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -718,7 +718,7 @@
         "model_requests": [
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -728,7 +728,7 @@
           ],
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -759,7 +759,7 @@
           ],
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -832,7 +832,7 @@
           "interrupted": false,
           "messages": [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -967,7 +967,7 @@
         "model_requests": [
           [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {
@@ -990,7 +990,7 @@
           "interrupted": false,
           "messages": [
             {
-              "content": "You are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.",
+              "content": "<omega_prime_system version=\"1\">\nYou are Omega Prime. This system prompt is fixed for the conversation. New context arrives as a user message or a tool result.\n</omega_prime_system>",
               "role": "system"
             },
             {

@@ -221,6 +221,8 @@ jobs:
         run: python3 -m omega_prime.tooling.catalog --check
       - name: plugin manifest currency
         run: python3 -m omega_prime.tooling.plugin --check
+      - name: prompt format currency
+        run: python3 -m omega_prime.tooling.prompt_format --check
   # Pin-freshness gate: proves the redteam submodule gitlink, the VENDOR.md
   # pin, the provenance docstrings, the vendored pack, and the adapter tool
   # surface all agree with upstream at the pin. Fail-closed: any mismatch

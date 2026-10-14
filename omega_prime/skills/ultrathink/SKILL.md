@@ -3,7 +3,7 @@ name: ultrathink
 description: Use when a turn may carry an ultrathink plan (Graph of Thought + tracked issues + Greptile-gated ship). Resolve the plan, work the waves, track and ship through the bridge tools.
 bots: [bot-00-omega-prime]
 ---
-
+<skill name="ultrathink" version="1">
 # Ultrathink
 
 Run a turn the ultrathink way: a written plan exists (or gets
@@ -49,3 +49,4 @@ Single lookups and one-file edits go direct.
   AGPL-3.0; Omega Prime is MIT).
 - A blocked wave stops the run: report the blocker, do not route
   around it with scope cuts.
+</skill>

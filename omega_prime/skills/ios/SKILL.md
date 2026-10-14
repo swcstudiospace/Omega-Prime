@@ -4,7 +4,7 @@ description: Writing and reviewing iOS code — Swift, SwiftUI, Xcode, App Revie
 bots: [bot-00-omega-prime]
 gates: [G-5, G-6]
 ---
-
+<skill name="ios" version="1">
 # iOS
 
 ## L1 — Summary
@@ -160,3 +160,4 @@ failures.
 | Newest-simulator-only testing | Crash on the minimum supported OS | Test at minimum |
 | Debug-only verification | Release-only failure ships | Build and test Release |
 | Warnings ignored | Real bugs hidden in the noise | Zero new warnings |
+</skill>

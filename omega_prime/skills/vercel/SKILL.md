@@ -4,7 +4,7 @@ description: Deploying to Vercel, edge runtime constraints, and rollback. Use be
 bots: [bot-00-omega-prime]
 gates: [G-5]
 ---
-
+<skill name="vercel" version="1">
 # Vercel
 
 ## L1 — Summary
@@ -150,3 +150,4 @@ Never debug a production incident by pushing experimental changes to production.
 | Rollback plan ignores data | "Instant rollback" leaves broken state | State data implications (§4) |
 | Debugging in production | Prolonged incident | Roll back first |
 | Stale cache after rollback | Fixed site still looks broken | Purge on deploy |
+</skill>

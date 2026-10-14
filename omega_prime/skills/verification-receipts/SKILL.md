@@ -4,7 +4,7 @@ description: Produce a verification receipt that passes gate G-2. Use before mak
 bots: [bot-00-omega-prime]
 gates: [G-2]
 ---
-
+<skill name="verification-receipts" version="1">
 # Verification Receipts
 
 ## L1 — Summary
@@ -196,3 +196,4 @@ never there while the real one persists.
 | Bypass command | `-x test`, `|| true` | §5 — rejected outright |
 | Self-approval | `approved_by` is you | Route to Bot 6 |
 | Summary exceeds receipt | "Fully working" on one unit test | Language matches evidence |
+</skill>

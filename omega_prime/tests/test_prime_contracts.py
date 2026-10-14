@@ -347,8 +347,9 @@ def test_goals_connector_lifecycle(tmp_path):
     # Junk counters are the capability's tolerance: delta 0, no raise.
     connector.accrue(AccrueRequest(usage={"total_tokens": "lots"}))
     assert connector.status(GoalStatusRequest())["tokens_used"] == 40
-    assert connector.continuation_prompt()["prompt"].startswith(
-        "Continue working toward"
+    assert connector.continuation_prompt()["prompt"] == (
+        '<goal_continuation version="1">Continue working toward the goal: '
+        "ship it. Next step: a.</goal_continuation>"
     )
     assert connector.pause(PauseRequest())["prime_status"] == "paused"
     assert connector.resume(ResumeRequest())["prime_status"] == "active"

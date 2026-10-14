@@ -4,7 +4,7 @@ description: Finding the actual cause of a failure rather than a plausible one. 
 bots: [bot-00-omega-prime]
 gates: [G-2]
 ---
-
+<skill name="debugging" version="1">
 # Debugging
 
 ## L1 — Summary
@@ -148,3 +148,4 @@ exists to prevent.
 | Refactor bundled into a fix | Unreviewable diff; revert takes the refactor too | Separate changes |
 | No regression test | Same bug returns | Test the specific case |
 | Restart before capture | Evidence gone | Preserve state first |
+</skill>

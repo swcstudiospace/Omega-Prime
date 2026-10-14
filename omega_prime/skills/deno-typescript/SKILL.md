@@ -3,7 +3,7 @@ name: deno-typescript
 description: Writing and reviewing TypeScript and Deno code. Use for any change to .ts/.tsx files, deno.json, or package.json.
 bots: [bot-00-omega-prime]
 ---
-
+<skill name="deno-typescript" version="1">
 # TypeScript & Deno
 
 ## L1 — Summary
@@ -159,3 +159,4 @@ shell history.
 | Index keys | Wrong row state after reorder | Stable ids |
 | Missing effect cleanup | setState-after-unmount warnings | AbortController, cleanup return |
 | `Promise.all` for partial | One failure loses all results | `allSettled` where partial is fine |
+</skill>

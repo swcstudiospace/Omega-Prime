@@ -3,7 +3,7 @@ name: gotxcot-uplift
 description: Use when Programming Lead receives a plain operator ask and must run the dense double-uplift pipeline — first XML uplift, 5–8 GoT nodes, 4–8 CoT steps per node, Notion/Linear materialization, second uplift with live URLs — before trackplan-dispatch.
 bots: [bot-00-omega-prime]
 ---
-
+<skill name="gotxcot-uplift" version="1">
 # gotxcot-uplift
 
 **Owner:** Programming Lead (bot-00). LEAD orchestrates this skill. Specialists execute tickets. This skill never invents product-code ownership and never edits specialist paths.
@@ -240,3 +240,4 @@ Write a Lead receipt under `.receipts/bot-00-programming-lead/` for the orchestr
 | `skills/trackplan-dispatch/SKILL.md` | Dispatch after stage 5 |
 | `docs/desk-operating-model.md` | Specialist ticket shape |
 | `ownership.yaml` | Who may implement |
+</skill>

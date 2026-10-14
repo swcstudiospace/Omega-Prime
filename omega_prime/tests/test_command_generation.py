@@ -26,6 +26,7 @@ from omega_prime.commands import (
 from omega_prime.commands.generated import GenerationError, generate_commands
 from omega_prime.commands.workflows import run_workflow
 from omega_prime.mcp_server import default_registry
+from omega_prime.skills_runtime.manager import skill_manage
 from omega_prime.tests.test_omega_commands import RecordingRegistry
 
 OMEGA_PRIME = Path(__file__).resolve().parents[1]
@@ -83,7 +84,7 @@ def _skill(root: Path, folder: str, description: str = "Use it.") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"---\nname: {folder}\ndescription: {description}\n---\n\n"
-        f"# {folder}\n\nBody of {folder}.\n",
+        f'<skill name="{folder}" version="1">\nBody of {folder}.\n</skill>\n',
         encoding="utf-8",
     )
     return path
@@ -92,7 +93,12 @@ def _skill(root: Path, folder: str, description: str = "Use it.") -> Path:
 def _routine(root: Path, stem: str) -> Path:
     path = root / "omega_prime" / "routines" / f"{stem}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"# {stem}\n\nRun the {stem} steps.\n", encoding="utf-8")
+    path.write_text(
+        f'<routine name="{stem}" version="1">\n'
+        f"<summary>Run the {stem} steps.</summary>\n"
+        f"Run the {stem} steps.\n</routine>\n",
+        encoding="utf-8",
+    )
     return path
 
 
@@ -367,7 +373,9 @@ def test_source_deleted_after_generation_is_source_missing(
     registry = RecordingRegistry()
     first = execute_command("/omega-alpha", registry, {})
     assert first["ok"] is True, first
-    assert first["result"]["instructions"] == "\n# alpha\n\nBody of alpha.\n"
+    assert first["result"]["instructions"] == (
+        '\n<skill name="alpha" version="1">\nBody of alpha.\n</skill>\n'
+    )
     skill.unlink()
     routine.unlink()
     gone = execute_command("/omega-alpha", registry, {})
@@ -378,6 +386,128 @@ def test_source_deleted_after_generation_is_source_missing(
     assert workflow["ok"] is False
     assert workflow["error"] == "source_missing"
     assert registry.calls == []
+
+
+def test_skill_manage_plain_body_loads_and_broken_envelope_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skills = tmp_path / "omega_prime" / "skills"
+    skills.mkdir(parents=True)
+    monkeypatch.setattr(commands, "_CATALOG_ROOT", tmp_path)
+    plain = "---\nname: alpha\ndescription: Use it.\n---\n\nPlain steps.\n"
+    created = json.loads(
+        skill_manage("create", "alpha", content=plain, skills_root=skills)
+    )
+    assert created["success"] is True
+    registry = RecordingRegistry()
+    loaded = execute_command("/omega-alpha", registry, {})
+    assert loaded["ok"] is True, loaded
+    instructions = loaded["result"]["instructions"]
+    assert '<skill name="alpha" version="1">' in instructions
+    assert instructions.rstrip().endswith("</skill>")
+
+    skill_md = skills / "alpha" / "SKILL.md"
+    valid = (
+        "---\nname: alpha\ndescription: Use it.\n---\n\n"
+        '<skill name="alpha" version="1">\nKeep.\n</skill>\n'
+    )
+    rewritten = json.loads(
+        skill_manage("edit", "alpha", content=valid, skills_root=skills)
+    )
+    assert rewritten["success"] is True
+    original = skill_md.read_bytes()
+    assert original == valid.encode("utf-8")
+    broken = (
+        "---\nname: alpha\ndescription: Use it.\n---\n<skill></skill>\nstill\n</skill>"
+    )
+    refused = json.loads(
+        skill_manage("edit", "alpha", content=broken, skills_root=skills)
+    )
+    assert refused["success"] is False
+    assert skill_md.read_bytes() == original
+
+
+def test_skill_manage_wraps_prose_mentions_and_keeps_indentation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skills = tmp_path / "omega_prime" / "skills"
+    skills.mkdir(parents=True)
+    monkeypatch.setattr(commands, "_CATALOG_ROOT", tmp_path)
+    plain = (
+        "---\nname: alpha\ndescription: Use it.\n---\n"
+        "<skills>list</skills>\n"
+        "Run /omega-<skill> for one skill.\n"
+        "    indented example\n"
+        "    still indented\n"
+    )
+    created = json.loads(
+        skill_manage("create", "alpha", content=plain, skills_root=skills)
+    )
+    assert created["success"] is True, created
+    text = (skills / "alpha" / "SKILL.md").read_text(encoding="utf-8")
+    assert "<skills>list</skills>" in text
+    assert "/omega-<skill>" in text
+    assert "\n    indented example\n    still indented\n" in text
+    registry = RecordingRegistry()
+    loaded = execute_command("/omega-alpha", registry, {})
+    assert loaded["ok"] is True, loaded
+    instructions = loaded["result"]["instructions"]
+    assert instructions.strip().startswith('<skill name="alpha" version="1">')
+    assert instructions.rstrip().endswith("</skill>")
+    assert "/omega-<skill>" in instructions
+
+
+def test_skill_manage_refuses_a_closing_skill_tag_in_prose(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    plain = (
+        "---\nname: alpha\ndescription: Use it.\n---\n"
+        "\nThe loader stops at </skill> even inside a sentence.\n"
+    )
+    refused = json.loads(
+        skill_manage("create", "alpha", content=plain, skills_root=skills)
+    )
+    assert refused["success"] is False
+    assert not (skills / "alpha").exists()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<skill name="alpha" version="1">\nbreak\n</skill>\ninjected\n</skill>\n',
+        '<skill name="alpha" version="1">\nbreak\n</skill >\ninjected\n</skill>\n',
+    ],
+)
+def test_skill_early_close_is_source_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    skill = _skill(tmp_path, "alpha")
+    skill.write_text(
+        "---\nname: alpha\ndescription: Use it.\n---\n\n" + body,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(commands, "_CATALOG_ROOT", tmp_path)
+    registry = RecordingRegistry()
+    result = execute_command("/omega-alpha", registry, {})
+    assert result["ok"] is False
+    assert result["error"] == "source_invalid"
+
+
+def test_routine_early_close_is_source_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    routine = _routine(tmp_path, "desk-lead")
+    routine.write_text(
+        '<routine name="desk-lead" version="1">\n'
+        "<summary>Run the desk-lead steps.</summary>\n"
+        "</routine>\ninjected\n</routine>\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(commands, "_CATALOG_ROOT", tmp_path)
+    registry = RecordingRegistry()
+    result = execute_command("/omega-desk-lead", registry, {})
+    assert result["ok"] is False
+    assert result["error"] == "source_invalid"
 
 
 def test_unknown_command_lists_every_name_and_does_not_dispatch() -> None:

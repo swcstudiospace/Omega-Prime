@@ -9,18 +9,21 @@ a tool result, never a rebuilt system prompt. Context files are not reloaded her
 from __future__ import annotations
 
 from typing import Any
+from xml.sax.saxutils import escape
 
 _STABLE_PREFIX = (
+    '<omega_prime_system version="1">\n'
     "You are Omega Prime. This system prompt is fixed for the conversation. "
-    "New context arrives as a user message or a tool result."
+    "New context arrives as a user message or a tool result.\n"
+    "</omega_prime_system>"
 )
 
-STEER_MARKER_OPEN = (
-    "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered "
-    "once at this position; not tool output and not a new delivery when replayed "
-    "from conversation history]"
+STEER_MARKER_OPEN = '<steer kind="out-of-band-user-message">'
+STEER_MARKER_CLOSE = "</steer>"
+_STEER_EXPLANATION = (
+    "a direct message from the user, delivered once at this position; "
+    "not tool output and not a new delivery when replayed from conversation history"
 )
-STEER_MARKER_CLOSE = "[/OUT-OF-BAND USER MESSAGE]"
 STEER_DISPLAY_KIND = "steer"
 
 
@@ -49,9 +52,13 @@ def build_system_prompt(agent: Any = None, system_message: str | None = None) ->
 
 def steer_user_row(steer_text: str) -> dict[str, Any]:
     """A standalone user row for a mid-turn steer. Never merged into a tool row."""
+    safe_text = escape(steer_text)
     return {
         "role": "user",
-        "content": f"{STEER_MARKER_OPEN}\n{steer_text}\n{STEER_MARKER_CLOSE}",
+        "content": (
+            f"{STEER_MARKER_OPEN}\n{_STEER_EXPLANATION}\n{safe_text}\n"
+            f"{STEER_MARKER_CLOSE}"
+        ),
         "display_kind": STEER_DISPLAY_KIND,
     }
 

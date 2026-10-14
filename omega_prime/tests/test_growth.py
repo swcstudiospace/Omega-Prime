@@ -147,6 +147,17 @@ def _skill(name: str, description: str, body: str) -> str:
     return f"---\nname: {name}\ndescription: {description}\n---\n{body}"
 
 
+def _stored(name: str, content: str) -> str:
+    """On-disk text after a plain body is wrapped for the loader.
+
+    The body is kept as written, including indentation. Only the envelope
+    tags are added.
+    """
+    front, body = content.split("---\n", 2)[1:]
+    prefix = f"---\n{front}---\n"
+    return prefix + f'\n<skill name="{name}" version="1">\n{body}\n</skill>\n'
+
+
 def _tool_call(name: str, arguments: dict, call_id: str = "call-1") -> dict:
     return {
         "role": "assistant",
@@ -203,14 +214,15 @@ def test_conversation_creates_a_skill_and_skill_view_reads_it_back(tmp_path: Pat
 
     result = run_conversation(agent, "please make a skill", system_message="sys")
     skill_md = skills / "ship-check" / "SKILL.md"
-    assert skill_md.read_bytes() == content.encode("utf-8")
+    stored = _stored("ship-check", content)
+    assert skill_md.read_bytes() == stored.encode("utf-8")
     tool_row = next(
         message for message in result["messages"] if message.get("role") == "tool"
     )
     assert _load(tool_row["content"])["success"] is True
 
     viewed = _load(skill_view("ship-check", skills_root=skills))
-    assert viewed["content"] == content
+    assert viewed["content"] == stored
     assert viewed["content"].encode("utf-8") == skill_md.read_bytes()
     again = _load(skill_view("ship-check", skills_root=skills))
     assert again["content"] == viewed["content"]
@@ -230,7 +242,7 @@ def test_conversation_creates_a_skill_and_skill_view_reads_it_back(tmp_path: Pat
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    assert _load(completed.stdout)["content"] == content
+    assert _load(completed.stdout)["content"] == stored
     missing = _load(skill_view("no-such-skill", skills_root=skills))
     assert "error" in missing
     assert "content" not in missing
@@ -245,14 +257,15 @@ def test_edit_replaces_and_patch_requires_one_exact_match(tmp_path: Path):
     )
     assert created["success"] is True
     skill_md = skills / "ship-check" / "SKILL.md"
-    assert skill_md.read_bytes() == original.encode("utf-8")
+    assert skill_md.read_bytes() == _stored("ship-check", original).encode("utf-8")
 
     replacement = _skill("ship-check", "d" * 61, "replaced body\n")
     edited = _load(
         skill_manage("edit", "ship-check", content=replacement, skills_root=skills)
     )
     assert edited["success"] is True
-    assert skill_md.read_bytes() == replacement.encode("utf-8")
+    stored_replacement = _stored("ship-check", replacement)
+    assert skill_md.read_bytes() == stored_replacement.encode("utf-8")
 
     patched = _load(
         skill_manage(
@@ -264,7 +277,7 @@ def test_edit_replaces_and_patch_requires_one_exact_match(tmp_path: Path):
         )
     )
     assert patched["success"] is True
-    assert skill_md.read_bytes() == replacement.replace(
+    assert skill_md.read_bytes() == stored_replacement.replace(
         "replaced body", "patched body", 1
     ).encode("utf-8")
 
@@ -555,11 +568,12 @@ def test_curator_writes_a_skill_only_when_the_turn_earned_one(
     skill_md = skills / "deploy-check" / "SKILL.md"
     assert Path(earned["path"]) == skill_md
     expected = (
-        f"---\nname: deploy-check\ndescription: {EARNED_DESCRIPTION}\n---\nexit 0\n"
+        f"---\nname: deploy-check\ndescription: {EARNED_DESCRIPTION}\n---\n"
+        '<skill name="deploy-check" version="1">\nexit 0\n</skill>\n'
     )
     assert skill_md.read_text(encoding="utf-8") == expected
     body = skill_md.read_text(encoding="utf-8").split("---", 2)[2]
-    assert body == "\nexit 0\n"
+    assert body == '\n<skill name="deploy-check" version="1">\nexit 0\n</skill>\n'
     assert calls and calls[-1][0][0] == "create"
     saved = _tree(skills)
 

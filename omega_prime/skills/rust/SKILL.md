@@ -3,7 +3,7 @@ name: rust
 description: Writing and reviewing Rust in this codebase. Use for any change to .rs files, Cargo manifests, or crate structure.
 bots: [bot-00-omega-prime]
 ---
-
+<skill name="rust" version="1">
 # Rust
 
 ## L1 — Summary
@@ -147,3 +147,4 @@ optimising the wrong thing costs clarity for nothing.
 | Clippy ignored | Real bugs in `-D warnings` output | Run it, fix it |
 | Unsafe without SAFETY | Unreviewable, unauditable | §5, all five requirements |
 | Debug benchmarks | Wrong conclusions about hot paths | `--release`, always |
+</skill>

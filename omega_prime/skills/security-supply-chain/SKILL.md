@@ -3,7 +3,7 @@ name: security-supply-chain
 description: Assessing dependencies before adding them and responding to vulnerabilities. Use before adding any dependency and when a CVE affects the project.
 bots: [bot-00-omega-prime]
 ---
-
+<skill name="security-supply-chain" version="1">
 # Supply Chain
 
 ## L1 — Summary
@@ -134,3 +134,4 @@ work.
 | Licence unchecked | Legal exposure discovered late | Check before adding |
 | Transitive bloat | Large attack surface for one function | Weigh the transitive cost |
 | `postinstall` unexamined | Arbitrary code at install time | Check install scripts |
+</skill>

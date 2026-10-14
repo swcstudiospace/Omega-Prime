@@ -4,7 +4,7 @@ description: "First-run procedure for a Bot created from a Programming Desk temp
 bots: [bot-00-omega-prime]
 gates: [G-7]
 ---
-
+<skill name="desk-bootstrap" version="1">
 # Desk Bootstrap
 
 ## Omega Prime adaptation
@@ -169,3 +169,4 @@ second and third; only a re-publish of the template and a passphrase rotation fi
 | Prompt hash must match the gateway render; no `{{…}}` | G-7 | The prompt is a controlled document; drift is invisible without the hash |
 | Doctor green before routines | G-7 | Routines act unattended; they must act from a verified seat |
 | Report what you could not finish | PD-6 | A half-bootstrapped seat reported as done blocks the whole team's acceptance run |
+</skill>

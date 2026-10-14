@@ -129,7 +129,11 @@ class AutonomousDriver:
 
         return {
             "action": "continue",
-            "prompt": "Continue autonomously toward the goal.",
+            "prompt": (
+                '<autonomous_continuation version="1">'
+                "Continue autonomously toward the goal."
+                "</autonomous_continuation>"
+            ),
             "turns": self._turns,
             "tokens": self._tokens,
         }

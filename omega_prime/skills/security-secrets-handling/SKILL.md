@@ -4,7 +4,7 @@ description: Detecting, preventing and responding to secret exposure. Use when h
 bots: [bot-00-omega-prime]
 gates: [G-3]
 ---
-
+<skill name="security-secrets-handling" version="1">
 # Secrets Handling
 
 ## L1 — Summary
@@ -165,3 +165,4 @@ difference.
 | Scanner disabled for noise | Real secrets ship | Allowlist the line with a reason |
 | Shared credential across environments | Preview URLs hold production access | Per-environment credentials |
 | Never rotated | Untested rotation path during an incident | Scheduled rotation |
+</skill>
