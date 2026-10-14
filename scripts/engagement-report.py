@@ -32,16 +32,20 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import csv
 import hashlib
 import json
 import math
 import os
 import re
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -1930,6 +1934,185 @@ def write_csv_report(
     return 0
 
 
+JSONL_SCHEMA = "coverage/1"
+
+
+def coverage_jsonl_rows(
+    reports_dir: Path, since_text: str | None = None
+) -> list[dict[str, object]]:
+    """Rows for ``--export-jsonl`` (R4), one dict per technique class.
+
+    Coverage order (schema classes, then unknown classes sorted); keys
+    in fixed order ``schema, class, cases, runs, wins, pass_pct, gaps,
+    verdict, tier, weight, earned, possible`` with ``pass_pct`` rounded
+    to one decimal and the tier fields taken from the risk breakdown.
+    A missing ``reports_dir`` is an empty history (a fresh install); a
+    corrupt or unreadable one raises :class:`ReportError`.
+    """
+    window = _collect_window(reports_dir, since_text, allow_missing=True)
+    runs = window["runs"]
+    assert isinstance(runs, int)
+    coverage = coverage_rows(
+        window["cases"],  # type: ignore[arg-type]
+        window["observations"] if runs > 0 else {},
+        window["gaps"],  # type: ignore[arg-type]
+    )
+    by_class = {row[0]: row for row in coverage}
+    rows: list[dict[str, object]] = []
+    breakdown = risk_weighted_score(coverage)[3]
+    for class_name, tier, weight, case_count, wins, got, maximum in breakdown:
+        _name, _cases, class_runs, _wins, pct, class_gaps, verdict = by_class[
+            class_name
+        ]
+        rows.append(
+            {
+                "schema": JSONL_SCHEMA,
+                "class": class_name,
+                "cases": case_count,
+                "runs": class_runs,
+                "wins": wins,
+                "pass_pct": round(float(pct), 1),
+                "gaps": class_gaps,
+                "verdict": verdict,
+                "tier": tier,
+                "weight": weight,
+                "earned": got,
+                "possible": maximum,
+            }
+        )
+    return rows
+
+
+def render_jsonl(rows: Sequence[dict[str, object]]) -> str:
+    """JSON Lines text: one compact ASCII-only object per row, ``\\n`` ended.
+
+    ``ensure_ascii`` escapes every control character, so no raw newline
+    can appear inside a line. Deterministic; ``""`` for no rows.
+    """
+    return "".join(
+        json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n" for row in rows
+    )
+
+
+def _write_jsonl_stream(text: str, jsonl_path: Path) -> None:
+    """Write ``text`` into the stream at ``jsonl_path`` (stream semantics).
+
+    The target is opened ``O_WRONLY`` with neither ``O_CREAT`` nor
+    ``O_TRUNC`` (symlinks are followed, so ``/dev/stdout`` works) and the
+    OPENED object is inspected with ``os.fstat``: anything but a FIFO,
+    character device or socket is refused before a byte is written, so a
+    path swapped to a regular file after the caller's checks is never
+    truncated or modified. The write goes through that same descriptor.
+    """
+    flags = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOCTTY", 0)
+    fd = os.open(jsonl_path, flags)
+    try:
+        opened_mode = os.fstat(fd).st_mode
+        if not (
+            stat.S_ISFIFO(opened_mode)
+            or stat.S_ISCHR(opened_mode)
+            or stat.S_ISBLK(opened_mode)
+            or stat.S_ISSOCK(opened_mode)
+        ):
+            raise OSError("refusing to write: target is not a stream")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+        handle.flush()
+
+
+def _write_jsonl_atomic(text: str, jsonl_path: Path) -> None:
+    """Atomic temp + ``os.replace`` write; the temp never outlives a failure.
+
+    The temporary file is created ``O_EXCL`` with mode ``0o666`` so the
+    kernel applies the process umask: the final mode is
+    ``0o666 & ~umask`` (no umask is read or swapped, hence no race), and
+    the owner is the invoking user. Any exception, not only ``OSError``,
+    removes the temporary file.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    parent = jsonl_path.parent
+    temp_name: str | None = None
+    try:
+        for _attempt in range(100):
+            candidate = str(parent / f".engrep-{secrets.token_hex(4)}.tmp")
+            try:
+                fd = os.open(candidate, flags, 0o666)
+            except FileExistsError:
+                continue
+            temp_name = candidate
+            break
+        else:
+            raise OSError("cannot create a unique temporary file")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, jsonl_path)
+        temp_name = None
+    finally:
+        if temp_name is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_name)
+
+
+def write_jsonl_report(
+    rows: Sequence[dict[str, object]],
+    jsonl_path: Path,
+    *,
+    sanitize: bool = False,
+) -> int:
+    """Write ``rows`` as JSON Lines at ``jsonl_path`` (R4).
+
+    The leaf is inspected with ``os.lstat``. Absent or a regular file:
+    atomic write (a ``.engrep-`` temporary file in the same directory is
+    fsynced and ``os.replace``d over the target; the mode is
+    ``0o666 & ~umask``). A symlink to a regular file, a directory or a
+    dangling target is refused. A symlink to a non-regular target, or an
+    existing FIFO / character / block device / socket leaf, is written
+    through directly and never replaced (so ``/dev/null`` and
+    ``/dev/stdout`` keep working). A directory leaf fails. Returns 0 on
+    success; an unwritable output prints ``error:`` to stderr and returns
+    1; ``sanitize`` (digest mode) backslash-escapes non-printable text in
+    that line.
+    """
+    try:
+        try:
+            leaf_mode: int | None = os.lstat(jsonl_path).st_mode
+        except FileNotFoundError:
+            leaf_mode = None
+        direct = False
+        if leaf_mode is not None and stat.S_ISLNK(leaf_mode):
+            try:
+                target_mode = os.stat(jsonl_path).st_mode
+            except OSError:
+                target_mode = None
+            if (
+                target_mode is None
+                or stat.S_ISREG(target_mode)
+                or stat.S_ISDIR(target_mode)
+            ):
+                raise OSError("refusing to write through a symlink")
+            direct = True
+        elif leaf_mode is not None and not (
+            stat.S_ISREG(leaf_mode) or stat.S_ISDIR(leaf_mode)
+        ):
+            direct = True
+        text = render_jsonl(rows)
+        if direct:
+            _write_jsonl_stream(text, jsonl_path)
+        else:
+            _write_jsonl_atomic(text, jsonl_path)
+    except OSError as exc:
+        message = f"error: cannot write --export-jsonl export {jsonl_path} ({exc})"
+        print(_printable_only(message) if sanitize else message, file=sys.stderr)
+        return 1
+    return 0
+
+
 def render_recipient_file_text(email_lines: list[str], *, recipient: str | None) -> str:
     """Standalone ``--recipient-file`` text from an email block (N10).
 
@@ -3036,7 +3219,9 @@ def render_report(
     return "\n".join(lines)
 
 
-def _collect_window(reports_dir: Path, since_text: str | None) -> dict[str, object]:
+def _collect_window(
+    reports_dir: Path, since_text: str | None, *, allow_missing: bool = False
+) -> dict[str, object]:
     """Load history and compute the shared report window.
 
     Read-only projection used by both :func:`build_report` and
@@ -3044,11 +3229,14 @@ def _collect_window(reports_dir: Path, since_text: str | None) -> dict[str, obje
     count, transition counts, loaded cases, run observations,
     detection gaps, per-technique rows, the current findings map, and
     the in-window severity-timeline rows.
+    With ``allow_missing`` a nonexistent directory is treated exactly
+    like an empty one (every loader maps an absent file to no history).
     Raises :class:`ReportError` on unreadable inputs.
     """
     if not reports_dir.exists():
-        raise ReportError(f"error: reports dir does not exist: {reports_dir}")
-    if not reports_dir.is_dir():
+        if not allow_missing:
+            raise ReportError(f"error: reports dir does not exist: {reports_dir}")
+    elif not reports_dir.is_dir():
         raise ReportError(f"error: reports dir is not a directory: {reports_dir}")
     transitions, transitions_newest = load_transitions(
         reports_dir / TRANSITIONS_FILENAME
@@ -4254,17 +4442,25 @@ def parse_baseline(spec: str) -> tuple[str, float]:
 def validate_baseline_classes(
     baselines: list[tuple[str, float]],
     cases: list[tuple[str, str, str, str]],
+    *,
+    fixed_vocab: bool = False,
 ) -> None:
     """Reject ``--baseline`` classes seen neither in schema nor on disk.
 
     Raises :class:`BaselineUsageError` (exit 2) naming the first unknown
     class and listing every valid class (schema classes byte-wise, then
-    any extra on-disk classes sorted). Deterministic.
+    any extra on-disk classes sorted). Deterministic. With
+    ``fixed_vocab`` (``--digest``) only the schema classes are listed, so
+    no on-disk text reaches the message and ``other`` (the gate's display
+    label for on-disk classes, not a selectable class) is never offered.
     """
     known = set(SCHEMA_CLASSES) | {case_class for _, _, _, case_class in cases}
     for name, _floor in baselines:
         if name not in known:
-            valid = ", ".join([*SCHEMA_CLASSES, *sorted(known - set(SCHEMA_CLASSES))])
+            extras = sorted(known - set(SCHEMA_CLASSES))
+            if fixed_vocab:
+                extras = []
+            valid = ", ".join([*SCHEMA_CLASSES, *extras])
             raise BaselineUsageError(
                 f"error: unknown --baseline class {name!r} (valid: {valid})"
             )
@@ -4415,6 +4611,8 @@ def evaluate_threshold(
     coverage: list[tuple[str, int, int, int, float, int, str]],
     spec: str | None,
     baselines: list[tuple[str, float]] | None = None,
+    *,
+    fixed_vocab: bool = False,
 ) -> dict[str, object]:
     """Gate verdict over the current window (L10, P12 floors).
 
@@ -4429,7 +4627,9 @@ def evaluate_threshold(
     threshold passes (``failures`` lists ``class``/``pass_pct``/``floor``
     in CLI order). With ``spec`` unset the gate rests on the floors
     alone (``metric`` ``"floors"``). Without baselines the passing and
-    failing lines match the L10 shapes exactly.
+    failing lines match the L10 shapes exactly. With ``fixed_vocab``
+    (``--digest``) failing class names outside :data:`SCHEMA_CLASSES`
+    are rendered as ``other`` in ``failures``, ``line`` and ``stderr``.
     """
     failures: list[dict[str, object]] = []
     if baselines:
@@ -4439,7 +4639,11 @@ def evaluate_threshold(
             if pct < floor:
                 failures.append(
                     {
-                        "class": class_name,
+                        "class": (
+                            "other"
+                            if fixed_vocab and class_name not in SCHEMA_CLASSES
+                            else class_name
+                        ),
                         "pass_pct": round(pct, 1),
                         "floor": int(floor) if float(floor).is_integer() else floor,
                     }
@@ -4547,6 +4751,91 @@ def summarize(reports_dir: Path, since_text: str | None = None) -> dict[str, obj
         "report": baseline_name,
         "generated_at": fmt_rfc3339(window_end),
     }
+
+
+def _printable_only(text: str) -> str:
+    """``text`` with every non-printable character backslash-escaped.
+
+    Digest-mode stdout/stderr guard: control characters, bidi marks and
+    line separators can never reach the terminal raw. Printable text is
+    returned unchanged.
+    """
+    return "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in text)
+
+
+def build_digest(
+    reports_dir: Path,
+    since_text: str | None = None,
+    *,
+    threshold: str | None = None,
+    baselines: Sequence[tuple[str, float]] = (),
+) -> dict[str, object]:
+    """Plain-text engagement digest for ``--digest`` (R3).
+
+    Returns ``{"state", "lines", "gate"}``: ``state`` is ``"ok"`` or
+    ``"no-reports"``; ``lines`` holds at most four strings without line
+    endings: the :func:`summarize` line, ``coverage covered=C/T
+    gappy=G unexercised=U risk=S.S``, ``worst=<classes>`` (``worst=none``
+    when nothing is at risk) and, only with ``threshold`` or
+    ``baselines``, the gate line; ``gate`` is the
+    :func:`evaluate_threshold` dict or ``None``. Built only from numbers
+    and schema class names (unknown on-disk classes appear as
+    ``other``), never from finding or case free text. Empty or missing
+    history yields the zero line, an all-zero coverage line and
+    ``worst=none``. Raises :class:`ReportError` and
+    :class:`BaselineUsageError` like the rest of the script.
+    """
+    summary = summarize(reports_dir, since_text)
+    state = str(summary["state"])
+    gated = threshold is not None or bool(baselines)
+    window = (
+        _collect_window(reports_dir, since_text) if state == "ok" or gated else None
+    )
+    coverage: list[tuple[str, int, int, int, float, int, str]] = []
+    if window is not None:
+        runs = window["runs"]
+        assert isinstance(runs, int)
+        coverage = coverage_rows(
+            window["cases"],  # type: ignore[arg-type]
+            window["observations"] if runs > 0 else {},
+            window["gaps"],  # type: ignore[arg-type]
+        )
+    gate: dict[str, object] | None = None
+    if gated and window is not None:
+        if baselines:
+            validate_baseline_classes(
+                list(baselines),
+                window["cases"],  # type: ignore[arg-type]
+                fixed_vocab=True,
+            )
+        gate = evaluate_threshold(
+            window["pass_rows"],  # type: ignore[arg-type]
+            coverage,
+            threshold,
+            list(baselines) if baselines else None,
+            fixed_vocab=True,
+        )
+    lines = [str(summary["line"])]
+    if state == "ok":
+        verdicts = [row[6] for row in coverage]
+        score = risk_weighted_score(coverage)[0]
+        lines.append(
+            f"coverage covered={verdicts.count('covered')}/{len(coverage)} "
+            f"gappy={verdicts.count('gappy')} "
+            f"unexercised={verdicts.count('unexercised')} risk={score:.1f}"
+        )
+        worst: list[str] = []
+        for name, _points in worst_classes(coverage, len(coverage)):
+            shown = name if name in SCHEMA_CLASSES else "other"
+            if shown not in worst:
+                worst.append(shown)
+        lines.append("worst=" + (",".join(worst[:3]) if worst else "none"))
+    else:
+        lines.append("coverage covered=0/0 gappy=0 unexercised=0 risk=0.0")
+        lines.append("worst=none")
+    if gate is not None:
+        lines.append(str(gate["line"]))
+    return {"state": state, "lines": lines, "gate": gate}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -4831,6 +5120,31 @@ def main(argv: list[str] | None = None) -> int:
         "value; 0 omits the bullet); --json gains a worst_classes array "
         "only when --exec-summary is set. Ignored without --exec-summary.",
     )
+    parser.add_argument(
+        "--digest",
+        action="store_true",
+        help="print a stdout-only plain-text digest of at most 5 lines "
+        "(the --summary line, a 'coverage covered=C/T gappy=G "
+        "unexercised=U risk=S.S' line, 'worst=<class,...>' or "
+        "'worst=none', plus the 'Gate: ...' line when --threshold or "
+        "--baseline is given); deterministic, no timestamps, built only "
+        "from numbers and schema class names. Empty or missing history "
+        "prints zeros, not an error. Exit 0 ok, 3 gate FAIL, 2 unknown "
+        "--baseline class, 1 report/IO error. Cannot be combined with "
+        "--json or --summary (exit 1). Composes with --since, "
+        "--reports-dir, --threshold, --baseline and --export-jsonl; like "
+        "--summary it writes no report and ignores every other "
+        "file-writing flag.",
+    )
+    parser.add_argument(
+        "--export-jsonl",
+        default=None,
+        metavar="OUTPUT_JSONL",
+        help="also write the coverage matrix as JSON Lines at OUTPUT_JSONL "
+        "(one compact object per technique class in coverage order: "
+        "schema, class, cases, runs, wins, pass_pct, gaps, verdict, tier, "
+        "weight, earned, possible); stdout is unchanged.",
+    )
     args = parser.parse_args(argv)
     if args.worst is not None and args.worst < 0:
         print(
@@ -4838,8 +5152,50 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.digest and args.json:
+        print("error: --digest cannot be combined with --json", file=sys.stderr)
+        return 1
+    if args.digest and args.summary:
+        print("error: --digest cannot be combined with --summary", file=sys.stderr)
+        return 1
 
     reports_dir = Path(args.reports_dir) if args.reports_dir else default_reports_dir()
+    if args.digest:
+        try:
+            digest_baselines = (
+                [parse_baseline(raw) for raw in args.baseline] if args.baseline else ()
+            )
+            digest = build_digest(
+                reports_dir,
+                args.since,
+                threshold=args.threshold,
+                baselines=digest_baselines,
+            )
+            digest_jsonl_rows = (
+                coverage_jsonl_rows(reports_dir, args.since)
+                if args.export_jsonl
+                else None
+            )
+        except BaselineUsageError as exc:
+            print(_printable_only(str(exc)), file=sys.stderr)
+            return 2
+        except ReportError as exc:
+            print(_printable_only(str(exc)), file=sys.stderr)
+            return 1
+        digest_lines = digest["lines"]
+        digest_gate = digest["gate"]
+        assert isinstance(digest_lines, list)
+        assert digest_gate is None or isinstance(digest_gate, dict)
+        sys.stdout.write("".join(f"{line}\n" for line in digest_lines))
+        digest_status = 0
+        if digest_jsonl_rows is not None:
+            digest_status = write_jsonl_report(
+                digest_jsonl_rows, Path(args.export_jsonl), sanitize=True
+            )
+        if digest_gate is not None and not digest_gate["passed"]:
+            print(_printable_only(str(digest_gate["stderr"])), file=sys.stderr)
+            return 3
+        return digest_status
     if args.summary:
         try:
             summary = summarize(reports_dir, args.since)
@@ -5048,6 +5404,13 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 1
         status = write_csv_report(csv_coverage, Path(args.export_csv)) or status
+    if args.export_jsonl:
+        try:
+            jsonl_rows = coverage_jsonl_rows(reports_dir, args.since)
+        except ReportError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        status = write_jsonl_report(jsonl_rows, Path(args.export_jsonl)) or status
     if args.export_md:
         try:
             md_window = _collect_window(reports_dir, args.since)

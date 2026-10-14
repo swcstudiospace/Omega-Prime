@@ -6,6 +6,89 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Purple-team operator tooling (batch 18)
+
+#### Added
+
+- `redteam.findings_sync.sync_budget` (integer or per-tracker mapping with a
+  `default`): caps non-urgent rows dispatched per tick and tracker. The
+  budget is spent medium first, then low, then other severities, oldest
+  first, and pushes stay in store order. `critical`/`high` rows bypass it
+  and are deliberately uncapped. Quiet hours are decided first. Mappings
+  resolve per entry and are looked up by the effective tracker (graph wins
+  when its credentials are complete). The tick result gains `sync_budget`
+  and `budget_held` (`reason: "sync-budget"`) when the budget is valid and
+  `sync_budget_invalid` (`type`, `value` or `entry`) when the key is
+  present but unusable. Unset leaves results unchanged. The `_main_<tracker>`
+  CLI entry points apply neither quiet hours nor the budget.
+- `pin_bump --report-to PATH`: writes the audit delta report to `PATH`
+  instead of `<root>/report.md` (atomic, mode 0644, through a directory
+  descriptor pinned with `O_PATH`, so ancestors need only search
+  permission), validated up front (usage errors exit 2: trailing separator,
+  a path ending in `/.` or `/..`, file name over 200 bytes, symlink or non-regular
+  file, and an existing file that is neither empty nor a previous pin-bump
+  report, so `VENDOR.md` is never overwritten), replay-validated for
+  schedules, with a `report` key in `--json` only when set. Printed paths
+  escape control characters.
+- `scripts/engagement-report.py --digest`: a stdout-only digest of at most
+  five lines (summary, `coverage covered=C/T gappy=G unexercised=U
+  risk=S.S`, `worst=...`, an optional gate line). Exit 0, 1, 2 or 3; it
+  cannot combine with `--json` or `--summary`. The gate line and all digest
+  stderr name only schema classes or `other` and escape control characters.
+- `scripts/engagement-report.py --export-jsonl OUTPUT_JSONL`: the coverage
+  matrix as JSON Lines, one `coverage/1` object per class. Absent or
+  regular targets are replaced atomically with mode `0666 & ~umask`; an
+  existing FIFO, device or socket is written in place; a symlink to a
+  regular file, directory or nothing is refused (exit 1); a symlink to a
+  stream such as `/dev/stdout` is written through. `--digest --baseline
+  other=N` is rejected.
+- `roe_lifecycle.grant_conflicts` and the `roe_lifecycle conflicts` CLI
+  (exit 0 none, 3 found, 2 usage): advisory detection of
+  `duplicate-id-divergent`, `tool-scope-contradiction`,
+  `tracker-cover-contradiction` and `operator-mismatch` across several RoE
+  grants. At most 100 rows are listed, then one `conflicts-truncated`
+  sentinel row; grant files over 1 MiB are ignored. `findings_sync.tick`
+  surfaces a non-empty result as `grant_conflicts`, also on the grant-skip
+  result. It never blocks authorization. With no budget set, tick results
+  are identical unless two or more configured grants conflict.
+- Three read-only chat commands, `/omega-redteam-report`,
+  `/omega-redteam-coverage` and `/omega-redteam-sync-plan`, over the digest,
+  the coverage matrix and the findings-sync plan. Output is bounded and
+  path-free: `/omega-redteam-sync-plan` lists at most 20 entries per list
+  with `<name>_total` counts (`grant_conflicts_total` also counts conflicts
+  beyond the listed and detector-capped rows), escaped and clipped hashes
+  and tracker, and grant path labels as basenames or non-clashing
+  `grant-N`; non-structured failures return only the
+  exception type name; `--since` and `--threshold` accept ASCII digits only.
+- `python -m omega_prime.grokbot.purple_cycle` (modes `plan`, `run`,
+  `apply`; six steps from preflight to findings dispatch; resumable
+  checkpoints and an NDJSON ledger) and `/omega-redteam-cycle`, which plans
+  by default and with `--run` refreshes release-watch state and audits a
+  new upstream tag. Chat never dispatches findings or applies a pin bump
+  and returns no checkpoint or ledger path. Apply is refused (exit 3)
+  without a configured RoE (`roe-missing`), with an expired, missing,
+  invalid or revoked RoE in the union of `redteam.roe_file(s)` and the
+  findings-sync grant keys (revocations matched by realpath and file
+  identity), with a config-level kill or `redteam.enabled: false`, or with
+  a non-IDLE harness; the gate is re-checked on every pass and resume, and
+  a blocked step is never checkpointed. Stored checkpoint records are
+  validated strictly (invalid: `checkpoint-unreadable`). Cycle ids are `purple-cycle-YYYYMMDD-<mode>[-s<8hex>]
+  [-HHMMSS]`; checkpoints live under `<reports>/purple-cycle/workflows/`,
+  and a failed pin-bump audit is a non-halting `audit-failed` warning,
+  retried through `<reports>/purple-cycle-pending.json`
+  (`{"attempts": n, "tag": T}`) and abandoned after 3 attempts
+  (`audit-abandoned`); only `v<digits>.<digits>...` tags are audited. `--now` is rejected in apply mode
+  and option abbreviations are rejected. The release-watch `gh api` call
+  times out after 60 s (exit 3).
+  Usage: [Operator tools](docs/red-team.md#operator-tools).
+
+#### Changed
+
+- Slash command counts: curated 20 -> 24, total 54 -> 58 (generated stays
+  34). The red-team command family grows from eight to twelve.
+  `docs/red-team.md`, `docs/driving-the-bot.md`, `grokbot/SETUP.md` and
+  `docs/marketing.md` carry the new counts.
+
 ### Repository marketing
 
 #### Added

@@ -42,6 +42,9 @@ DEFAULT_STATE = "sidecar/reports/release-watch.json"
 #: CLI exit when the ``gh`` fetch fails (mirrors ``roe_lifecycle`` BLOCKED).
 FETCH_FAILURE_EXIT = 3
 
+#: Timeout (seconds) for the ``gh api`` subprocess in :func:`fetch_upstream_tags`.
+GH_TIMEOUT_SECONDS = 60
+
 #: Config key gating release-watch → pin-bump chaining (explicit opt-in).
 AUTO_PIN_BUMP_CONFIG_KEY = "auto_pin_bump"
 
@@ -228,6 +231,7 @@ def check_release_watch(
     auto_pin_bump: bool = False,
     bump: Callable[[str], int] | None = None,
     root: str | Path | None = None,
+    on_new: Callable[[list[dict]], None] | None = None,
 ) -> dict[str, Any]:
     """Diff upstream tags against state; record new releases.
 
@@ -255,6 +259,13 @@ def check_release_watch(
     Bump-runner exceptions propagate with the state file untouched.
     Seeding ticks never bump. Default (``False``) is inert: the result
     shape is exactly the historical three-key dict.
+
+    ``on_new`` (default ``None``: no effect) is called with the new-tag
+    list when new tags were found on a non-seeding tick, AFTER they are
+    computed and BEFORE any state write (and before an opt-in bump), so a
+    caller can persist follow-up work first and a crash between the two
+    writes cannot lose it. A raising callback aborts the tick with the
+    state file untouched and propagates like a fetch error.
     """
     current = _as_utc(now)
     checked_at = current.isoformat(timespec="seconds")
@@ -274,6 +285,8 @@ def check_release_watch(
             merged[index] = {"tag": pair["tag"], "sha": latest}
     for entry in new:
         merged.append({"tag": entry["tag"], "sha": entry["sha"]})
+    if new and on_new is not None:
+        on_new(list(new))
     if auto_pin_bump and new:
         target = new[0]
         runner = bump if bump is not None else _default_bump_runner(root)
@@ -359,6 +372,7 @@ def make_checker(
     auto_pin_bump: bool = False,
     bump: Callable[[str], int] | None = None,
     root: str | Path | None = None,
+    on_new: Callable[[list[dict]], None] | None = None,
 ) -> Callable[[Any], dict[str, Any]]:
     """Build a ``checker(now)`` closure for the heartbeat tick driver.
 
@@ -367,7 +381,8 @@ def make_checker(
     so the tick records the failure in job history with state untouched
     (signal, not red). Only ticks with a non-empty ``new`` list fire.
     ``auto_pin_bump``/``bump``/``root`` pass through to
-    :func:`check_release_watch` (explicit opt-in; default inert).
+    :func:`check_release_watch` (explicit opt-in; default inert), as does
+    ``on_new`` (a raising callback degrades like a fetch failure).
     """
 
     def _default_fetch() -> Any:
@@ -384,6 +399,7 @@ def make_checker(
                 auto_pin_bump=auto_pin_bump,
                 bump=bump,
                 root=root,
+                on_new=on_new,
             )
         except Exception as exc:
             return {
@@ -401,8 +417,9 @@ def fetch_upstream_tags(repo: str) -> list[dict]:
 
     Raises ``RuntimeError`` on empty repo (fail closed),
     ``FileNotFoundError`` when ``gh`` is absent, and
-    ``subprocess.CalledProcessError`` on non-zero ``gh`` exit. Never
-    prints tokens; ``gh`` stderr passes through uncensored.
+    ``subprocess.CalledProcessError`` on non-zero ``gh`` exit, and
+    ``subprocess.TimeoutExpired`` when ``gh`` exceeds ``GH_TIMEOUT_SECONDS``.
+    Never prints tokens; ``gh`` stderr passes through uncensored.
     """
     if not isinstance(repo, str) or not repo.strip():
         raise RuntimeError("repo must be a non-empty OWNER/NAME (fails closed)")
@@ -411,6 +428,7 @@ def fetch_upstream_tags(repo: str) -> list[dict]:
         capture_output=True,
         text=True,
         check=False,
+        timeout=GH_TIMEOUT_SECONDS,
     )
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
@@ -458,7 +476,12 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError:
             print("error: gh not found (GitHub CLI absent)", file=sys.stderr)
             return FETCH_FAILURE_EXIT
-        except (subprocess.CalledProcessError, RuntimeError, OSError) as exc:
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            RuntimeError,
+            OSError,
+        ) as exc:
             print(f"error: release-watch fetch failed: {exc}", file=sys.stderr)
             return FETCH_FAILURE_EXIT
         if args.json:
@@ -481,6 +504,7 @@ __all__ = [
     "DEFAULT_REPO",
     "DEFAULT_STATE",
     "FETCH_FAILURE_EXIT",
+    "GH_TIMEOUT_SECONDS",
     "auto_pin_bump_enabled",
     "build_digest",
     "check_release_watch",

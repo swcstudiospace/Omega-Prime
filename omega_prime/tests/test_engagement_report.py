@@ -11,8 +11,10 @@ import ast
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -5480,3 +5482,455 @@ def test_json_worst_classes_only_with_exec_summary(tmp_path):
         {"class": "abuse", "weighted_points": 10},
         {"class": "jailbreak", "weighted_points": 10},
     ]
+
+
+# --------------------------------------------------------------------------
+# --export-jsonl (batch-18 R4): coverage matrix as JSON Lines
+# --------------------------------------------------------------------------
+
+JSONL_KEYS = [
+    "schema",
+    "class",
+    "cases",
+    "runs",
+    "wins",
+    "pass_pct",
+    "gaps",
+    "verdict",
+    "tier",
+    "weight",
+    "earned",
+    "possible",
+]
+
+
+def _jsonl_run(fixture: Path, out: Path, *extra: str):
+    return run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--export-jsonl",
+        str(out),
+        *extra,
+    )
+
+
+def test_export_jsonl_schema_key_order_and_one_line_per_class(tmp_path):
+    """R4 happy: one compact object per class, fixed keys, single trailing LF."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    out = tmp_path / "coverage.jsonl"
+
+    proc = _jsonl_run(fixture, out)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("# Engagement report")
+    text = out.read_text(encoding="utf-8")
+    assert text.endswith("\n") and not text.endswith("\n\n")
+    lines = text.split("\n")[:-1]
+    assert len(lines) == 6
+    rows = [json.loads(line) for line in lines]
+    assert [row["class"] for row in rows] == [
+        "abuse",
+        "auth-bypass",
+        "cost-abuse",
+        "jailbreak",
+        "malformed-input",
+        "prompt-injection",
+    ]
+    for line, row in zip(lines, rows, strict=True):
+        assert list(row) == JSONL_KEYS
+        assert row["schema"] == "coverage/1"
+        assert ", " not in line and ": " not in line  # compact separators
+        assert line.isascii()
+    abuse = rows[0]
+    assert abuse["verdict"] == "covered"
+    assert abuse["pass_pct"] == 100.0 and isinstance(abuse["pass_pct"], float)
+    assert (abuse["tier"], abuse["weight"]) == ("high", 5)
+    assert (abuse["earned"], abuse["possible"]) == (5, 5)
+    assert rows[1]["tier"] == "critical" and rows[1]["weight"] == 10
+
+
+def test_export_jsonl_is_deterministic(tmp_path):
+    """R4 determinism: two runs export byte-identical files."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+
+    assert _jsonl_run(fixture, first).returncode == 0
+    assert _jsonl_run(fixture, second).returncode == 0
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_export_jsonl_matches_csv_export(tmp_path):
+    """R4: shared numbers agree with the CSV export of the same window."""
+    import csv as csv_module
+
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture, wrong={"abuse-01": "x"})
+    out = tmp_path / "coverage.jsonl"
+    csv_out = tmp_path / "coverage.csv"
+
+    proc = _jsonl_run(fixture, out, "--export-csv", str(csv_out))
+    assert proc.returncode == 0, proc.stderr
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    with csv_out.open(newline="", encoding="utf-8") as handle:
+        table = list(csv_module.DictReader(handle))[:-1]
+    assert len(rows) == len(table)
+    for row, record in zip(rows, table, strict=True):
+        assert row["class"] == record["class"]
+        assert f"{row['pass_pct']:.1f}" == record["pct"]
+        assert row["verdict"] == record["verdict"]
+        assert f"{row['earned']}/{row['possible']}" == record["weighted"]
+    assert rows[0]["verdict"] == "gappy"
+    assert rows[0]["wins"] == 0 and rows[0]["pass_pct"] == 0.0
+
+
+def test_export_jsonl_unwritable_output_exits_1(tmp_path):
+    """R4 edge: an unwritable --export-jsonl path fails closed with error:."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    proc = _jsonl_run(fixture, fixture)
+    assert proc.returncode == 1
+    assert "error: cannot write --export-jsonl export" in proc.stderr
+    missing = _jsonl_run(fixture, tmp_path / "no-such-dir" / "out.jsonl")
+    assert missing.returncode == 1
+    assert "error: cannot write --export-jsonl export" in missing.stderr
+
+
+def test_export_jsonl_unset_leaves_report_and_json_unchanged(tmp_path):
+    """R4: stdout markdown and --json payload do not depend on the new flag."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    out = tmp_path / "coverage.jsonl"
+
+    plain = run_script("--reports-dir", str(fixture), "--since", T0)
+    flagged = _jsonl_run(fixture, out)
+    assert plain.returncode == 0 and flagged.returncode == 0
+    assert plain.stdout == flagged.stdout
+    plain_json = run_script("--reports-dir", str(fixture), "--since", T0, "--json")
+    flagged_json = _jsonl_run(fixture, out, "--json")
+    assert plain_json.returncode == 0 and flagged_json.returncode == 0
+    assert plain_json.stdout == flagged_json.stdout
+    assert "coverage/1" not in plain.stdout and "coverage/1" not in plain_json.stdout
+
+
+def test_export_jsonl_composes_with_csv_and_gate(tmp_path):
+    """R4 composition: file written even when the gate then fails with exit 3."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture, wrong={"abuse-01": "x"})
+    out = tmp_path / "coverage.jsonl"
+
+    proc = _jsonl_run(fixture, out, "--threshold", "gate:100")
+    assert proc.returncode == 3
+    assert len(out.read_text(encoding="utf-8").splitlines()) == 6
+
+
+def test_coverage_jsonl_pure_functions(tmp_path, monkeypatch):
+    """R4 contract: coverage_jsonl_rows/render_jsonl/write_jsonl_report units."""
+    from datetime import UTC, datetime
+
+    module = _report_module()
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    stamp = datetime(2026, 10, 8, 12, 0, 0, tzinfo=UTC)
+    evil = "we\nird\u00e9\x1b[0m"
+    window = {
+        "runs": 1,
+        "cases": [
+            ("abuse-01", "detected", "", "abuse"),
+            ("abuse-02", "detected", "", "abuse"),
+            ("abuse-03", "detected", "", "abuse"),
+            ("z-01", "detected", "", evil),
+        ],
+        "observations": {
+            "abuse-01": {"observed_detection": "detected"},
+            "abuse-02": {"observed_detection": "missed"},
+            "abuse-03": {"observed_detection": "missed"},
+        },
+        "gaps": [],
+        "pass_rows": [],
+        "window_start": stamp,
+        "window_end": stamp,
+    }
+    monkeypatch.setattr(module, "_collect_window", lambda *_args, **_kw: window)
+
+    rows = module.coverage_jsonl_rows(fixture, T0)
+    assert [row["class"] for row in rows] == [
+        "abuse",
+        "auth-bypass",
+        "cost-abuse",
+        "jailbreak",
+        "malformed-input",
+        "prompt-injection",
+        evil,
+    ]
+    assert all(list(row) == JSONL_KEYS for row in rows)
+    abuse = rows[0]
+    assert abuse["pass_pct"] == 33.3  # rounded to one decimal
+    assert abuse["verdict"] == "gappy"
+    assert rows[1]["verdict"] == "unexercised"
+    assert (rows[-1]["tier"], rows[-1]["weight"]) == ("low", 1)
+
+    text = module.render_jsonl(rows)
+    lines = text.split("\n")
+    assert lines[-1] == "" and len(lines) == len(rows) + 1
+    assert text.isascii()  # control/non-ascii class names are escaped
+    assert [json.loads(line) for line in lines[:-1]] == rows
+    assert module.render_jsonl([]) == ""
+
+    target = tmp_path / "out.jsonl"
+    assert module.write_jsonl_report(rows, target) == 0
+    assert target.read_text(encoding="utf-8") == text
+    assert module.write_jsonl_report(rows, tmp_path) == 1
+
+
+def _active_umask() -> int:
+    previous = os.umask(0)
+    os.umask(previous)
+    return previous
+
+
+def test_export_jsonl_write_is_atomic_mode_follows_umask_and_leaves_no_temp(tmp_path):
+    """FX-2/FX-7b: temp file + replace; existing file replaced; 0666 & ~umask."""
+    module = _report_module()
+    out = tmp_path / "coverage.jsonl"
+    out.write_text("OLD\n", encoding="utf-8")
+    out.chmod(0o600)
+    rows = [{"schema": "coverage/1", "class": "abuse"}]
+
+    assert module.write_jsonl_report(rows, out) == 0
+    assert out.read_text(encoding="utf-8") == module.render_jsonl(rows)
+    assert (out.stat().st_mode & 0o777) == 0o666 & ~_active_umask()
+    assert [p.name for p in tmp_path.iterdir()] == ["coverage.jsonl"]
+
+
+def test_export_jsonl_failed_replace_keeps_old_file_and_cleans_temp(
+    tmp_path, monkeypatch, capsys
+):
+    module = _report_module()
+    out = tmp_path / "coverage.jsonl"
+    out.write_text("OLD\n", encoding="utf-8")
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(module.os, "replace", boom)
+    assert module.write_jsonl_report([{"class": "x"}], out) == 1
+    assert "error: cannot write --export-jsonl export" in capsys.readouterr().err
+    assert out.read_text(encoding="utf-8") == "OLD\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["coverage.jsonl"]
+
+
+def test_export_jsonl_refuses_symlink_leaf(tmp_path, capsys):
+    module = _report_module()
+    real = tmp_path / "real.txt"
+    real.write_text("KEEP", encoding="utf-8")
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(real)
+
+    assert module.write_jsonl_report([{"class": "x"}], link) == 1
+    assert "error: cannot write --export-jsonl export" in capsys.readouterr().err
+    assert real.read_text(encoding="utf-8") == "KEEP"
+    assert link.is_symlink()
+
+
+def test_export_jsonl_mode_honours_umask(tmp_path):
+    """FX-7b P3-3: umask 077 gives 0600, umask 022 gives 0644."""
+    module = _report_module()
+    rows = [{"class": "x"}]
+    previous = os.umask(0o077)
+    try:
+        private = tmp_path / "private.jsonl"
+        assert module.write_jsonl_report(rows, private) == 0
+        os.umask(0o022)
+        shared = tmp_path / "shared.jsonl"
+        assert module.write_jsonl_report(rows, shared) == 0
+    finally:
+        os.umask(previous)
+    assert (private.stat().st_mode & 0o777) == 0o600
+    assert (shared.stat().st_mode & 0o777) == 0o644
+    assert private.stat().st_uid == os.getuid()
+
+
+def test_export_jsonl_cleans_temp_on_any_exception(tmp_path, monkeypatch):
+    """FX-7b P3-2: a non-OSError mid-write still removes the temp file."""
+    module = _report_module()
+    out = tmp_path / "coverage.jsonl"
+
+    def boom(_fd: int) -> None:
+        raise RuntimeError("not an OSError")
+
+    monkeypatch.setattr(module.os, "fsync", boom)
+    with pytest.raises(RuntimeError):
+        module.write_jsonl_report([{"class": "x"}], out)
+    assert list(tmp_path.iterdir()) == []
+
+
+def _drain_fifo(path: Path, sink: list[str]) -> threading.Thread:
+    def reader() -> None:
+        with open(path, encoding="utf-8") as handle:
+            sink.append(handle.read())
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_export_jsonl_fifo_leaf_is_written_never_replaced(tmp_path):
+    """FX-7b P2-1: an existing FIFO stays a FIFO and receives the rows."""
+    module = _report_module()
+    fifo = tmp_path / "pipe.jsonl"
+    os.mkfifo(fifo)
+    sink: list[str] = []
+    thread = _drain_fifo(fifo, sink)
+    rows = [{"class": "x"}]
+    assert module.write_jsonl_report(rows, fifo) == 0
+    thread.join(timeout=10)
+    assert sink == [module.render_jsonl(rows)]
+    assert stat.S_ISFIFO(os.lstat(fifo).st_mode)
+    assert [p.name for p in tmp_path.iterdir()] == ["pipe.jsonl"]
+
+
+def test_export_jsonl_symlink_to_fifo_streams_and_keeps_both(tmp_path):
+    """FX-7b P2-1: a symlink to a non-regular target writes through it."""
+    module = _report_module()
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(fifo)
+    sink: list[str] = []
+    thread = _drain_fifo(fifo, sink)
+    rows = [{"class": "y"}]
+    assert module.write_jsonl_report(rows, link) == 0
+    thread.join(timeout=10)
+    assert sink == [module.render_jsonl(rows)]
+    assert link.is_symlink()
+    assert stat.S_ISFIFO(os.lstat(fifo).st_mode)
+
+
+def test_export_jsonl_dangling_symlink_and_dir_symlink_refused(tmp_path, capsys):
+    module = _report_module()
+    dangling = tmp_path / "dangling.jsonl"
+    dangling.symlink_to(tmp_path / "nowhere")
+    assert module.write_jsonl_report([{"class": "x"}], dangling) == 1
+    assert "refusing to write through a symlink" in capsys.readouterr().err
+    assert not (tmp_path / "nowhere").exists()
+    directory = tmp_path / "adir"
+    directory.mkdir()
+    dirlink = tmp_path / "dirlink.jsonl"
+    dirlink.symlink_to(directory)
+    assert module.write_jsonl_report([{"class": "x"}], dirlink) == 1
+    assert "error: cannot write --export-jsonl export" in capsys.readouterr().err
+    assert dirlink.is_symlink()
+    assert list(directory.iterdir()) == []
+
+
+def test_export_jsonl_char_device_leaf_stays_a_device(tmp_path):
+    """FX-7b P2-1: a device node (as /dev/null) is never replaced."""
+    module = _report_module()
+    node = tmp_path / "null.jsonl"
+    try:
+        os.mknod(node, stat.S_IFCHR | 0o666, os.makedev(1, 3))
+    except (PermissionError, OSError):
+        pytest.skip("cannot create a character device here")
+    assert module.write_jsonl_report([{"class": "x"}], node) == 0
+    assert stat.S_ISCHR(os.lstat(node).st_mode)
+    assert [p.name for p in tmp_path.iterdir()] == ["null.jsonl"]
+
+
+def test_export_jsonl_stream_swapped_to_regular_file_symlink_is_not_truncated(
+    tmp_path, monkeypatch, capsys
+):
+    """Greptile #5: a FIFO swapped for a symlink to a regular file after the
+    lstat/stat checks must not truncate the victim (fstat of the OPENED object)."""
+    module = _report_module()
+    fifo = tmp_path / "pipe.jsonl"
+    os.mkfifo(fifo)
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"PRECIOUS-BYTES")
+    real_stream = module._write_jsonl_stream
+
+    def swap_then_write(text: str, jsonl_path: Path) -> None:
+        os.unlink(jsonl_path)
+        jsonl_path.symlink_to(victim)
+        real_stream(text, jsonl_path)
+
+    monkeypatch.setattr(module, "_write_jsonl_stream", swap_then_write)
+    assert module.write_jsonl_report([{"class": "x"}], fifo) == 1
+    err = capsys.readouterr().err
+    assert "error: cannot write --export-jsonl export" in err
+    assert "not a stream" in err
+    assert victim.read_bytes() == b"PRECIOUS-BYTES"
+
+
+def test_export_jsonl_stream_swapped_to_regular_file_is_not_modified(
+    tmp_path, monkeypatch
+):
+    """Greptile #5: a FIFO replaced by a plain regular file is never written."""
+    module = _report_module()
+    fifo = tmp_path / "pipe.jsonl"
+    os.mkfifo(fifo)
+    real_stream = module._write_jsonl_stream
+
+    def swap_then_write(text: str, jsonl_path: Path) -> None:
+        os.unlink(jsonl_path)
+        jsonl_path.write_bytes(b"PRECIOUS-BYTES")
+        real_stream(text, jsonl_path)
+
+    monkeypatch.setattr(module, "_write_jsonl_stream", swap_then_write)
+    assert module.write_jsonl_report([{"class": "x"}], fifo) == 1
+    assert fifo.read_bytes() == b"PRECIOUS-BYTES"
+
+
+def test_export_jsonl_stream_open_never_creates_the_target(tmp_path):
+    """Greptile #5: the stream path has no O_CREAT, so a vanished leaf fails."""
+    module = _report_module()
+    gone = tmp_path / "gone.jsonl"
+    with pytest.raises(FileNotFoundError):
+        module._write_jsonl_stream("x\n", gone)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_export_jsonl_stream_writer_accepts_block_device_mode(tmp_path, monkeypatch):
+    """Greptile round 2: a block device is a supported in-place target."""
+    module = _report_module()
+    target = tmp_path / "blk.jsonl"
+    target.write_bytes(b"")
+    real_fstat = os.fstat
+
+    class _BlockMode:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+            self.st_mode = stat.S_IFBLK | 0o600
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "fstat", lambda fd: _BlockMode(real_fstat(fd)))
+        module._write_jsonl_stream("row\n", target)
+    assert target.read_bytes() == b"row\n"
+
+
+def test_export_jsonl_hostile_class_round_trips_as_one_line():
+    """FX-2: unknown class names stay JSON-escaped data on a single line."""
+    module = _report_module()
+    evil = 'evil\n\x1b[31mclass\u2028\u202e"}{'
+    text = module.render_jsonl(
+        [{"schema": "coverage/1", "class": evil}, {"class": "abuse"}]
+    )
+    lines = text.split("\n")
+    assert lines[-1] == "" and len(lines) == 3
+    assert text.isascii() and "\x1b" not in text
+    assert json.loads(lines[0])["class"] == evil

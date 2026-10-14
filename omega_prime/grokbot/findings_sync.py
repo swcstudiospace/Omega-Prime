@@ -593,6 +593,164 @@ def _with_quiet_result(
     return result
 
 
+#: Structured hold reason for findings deferred by the per-tick sync
+#: budget (R1). Held rows stay unsynced and are retried oldest-first.
+SYNC_BUDGET_REASON = "sync-budget"
+
+
+def _budget_value(value: Any) -> int | None:
+    """A positive, non-bool ``int`` budget, else ``None`` (feature off)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+#: Rank of a (case/whitespace-normalized) severity when the sync budget is
+#: spent (R1): ``medium`` before ``low`` before everything else (unknown,
+#: missing, non-string). Urgent severities never reach this table (they
+#: bypass the budget); ties keep store order (oldest first).
+SYNC_BUDGET_SEVERITY_RANK: dict[str, int] = {"medium": 2, "low": 1}
+
+#: Reasons reported under ``sync_budget_invalid`` for an unusable setting.
+SYNC_BUDGET_INVALID_TYPE = "type"
+SYNC_BUDGET_INVALID_VALUE = "value"
+SYNC_BUDGET_INVALID_ENTRY = "entry"
+
+
+def _severity_budget_rank(severity: Any) -> int:
+    """Budget priority of ``severity`` (higher is spent first; default 0)."""
+    try:
+        key = severity.strip().lower() if isinstance(severity, str) else ""
+    except Exception:
+        return 0
+    return SYNC_BUDGET_SEVERITY_RANK.get(key, 0)
+
+
+def _sync_budget_status(
+    node: Mapping[str, Any], tracker: str
+) -> tuple[int | None, str | None]:
+    """Resolve ``sync_budget`` for ``tracker`` plus an invalid-config reason.
+
+    Returns ``(budget, invalid)``. ``budget`` is the positive ``int`` that
+    applies (``None`` = feature off). ``invalid`` is ``None`` unless the
+    key is present, not ``None`` and unusable: ``"type"`` (not an int or
+    mapping, including ``bool``/``float``/``str``), ``"value"`` (an int
+    that is not positive) or ``"entry"`` (a mapping holding at least one
+    bad key or value). A mapping resolves per entry: the effective
+    tracker's valid entry (else a valid ``default``) still applies when a
+    sibling entry is invalid. An empty mapping, or one with no entry for
+    ``tracker`` and no ``default``, is simply off, not invalid. Never
+    raises (fail-open: ``(None, None)``).
+    """
+    try:
+        raw = node.get("sync_budget")
+        if raw is None:
+            return None, None
+        if isinstance(raw, Mapping):
+            table: dict[str, int] = {}
+            bad_entry = False
+            for key, value in raw.items():
+                budget = _budget_value(value)
+                if not isinstance(key, str) or budget is None:
+                    bad_entry = True
+                    continue
+                table[key.strip().lower()] = budget
+            applied = table.get(tracker.strip().lower(), table.get("default"))
+            invalid = SYNC_BUDGET_INVALID_ENTRY if bad_entry else None
+            return applied, invalid
+        budget = _budget_value(raw)
+        if budget is not None:
+            return budget, None
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            return None, SYNC_BUDGET_INVALID_VALUE
+        return None, SYNC_BUDGET_INVALID_TYPE
+    except Exception:
+        return None, None
+
+
+def _sync_budget_for_node(node: Mapping[str, Any], tracker: str) -> int | None:
+    """Resolve ``redteam.findings_sync.sync_budget`` for ``tracker`` (R1).
+
+    Accepts a positive ``int`` (applies to whichever tracker is effective)
+    or a mapping ``{"default": N, "<tracker>": M}``; the effective
+    tracker's valid entry wins over a valid ``"default"``, and an invalid
+    sibling entry does not discard it. Anything else (missing, ``None``,
+    ``bool``, zero, negative, float, string, empty mapping, no entry for
+    the tracker and no ``default``) means the feature is off and returns
+    ``None`` (fail-open: the tick is unchanged). Never raises. See
+    :func:`_sync_budget_status` for the invalid-config reason.
+    """
+    return _sync_budget_status(node, tracker)[0]
+
+
+class _RowGate:
+    """Per-run hold decisions for unsynced rows: quiet hours, then budget (R1).
+
+    One instance per row loop; every loop calls :meth:`prepare` once with
+    all rows before iterating, then :meth:`hold` for every unsynced row in
+    store order. Urgent rows (``critical``/``high``) are never held and
+    never consume budget (so a source stamping everything urgent is not
+    throttled: the budget caps only non-urgent rows). Otherwise quiet hours
+    decide first (a quiet-held row never consumes budget); then, when a
+    valid ``sync_budget`` is configured, :meth:`prepare` has chosen the
+    best ``sync_budget`` non-urgent unsynced rows by severity rank
+    (:data:`SYNC_BUDGET_SEVERITY_RANK`, then oldest first) and the rest are
+    held with :data:`SYNC_BUDGET_REASON`. Dispatch order is never changed:
+    only the choice of which rows get budget. Held rows are not touched, so
+    the next run retries them. :meth:`finish` attaches the quiet keys
+    (unchanged) and, only when a valid budget is configured,
+    ``sync_budget`` + ``budget_held``.
+    """
+
+    def __init__(self, now: Any, quiet_hours: Any, sync_budget: Any = None) -> None:
+        self.quiet_active = in_quiet_hours(now, quiet_hours)
+        self.budget = _budget_value(sync_budget)
+        self.quiet_skipped: list[dict[str, Any]] = []
+        self.budget_held: list[dict[str, Any]] = []
+        self._chosen: set[int] = set()
+
+    def prepare(self, rows: list[dict[str, Any]]) -> None:
+        """Choose which non-urgent unsynced rows get budget this run."""
+        if self.budget is None or self.quiet_active:
+            return
+        eligible = [
+            row
+            for row in rows
+            if not row.get("issue_url") and _quiet_skip_severity(row.get("severity"))
+        ]
+        # sorted() is stable: equal ranks keep store (oldest-first) order.
+        ranked = sorted(
+            eligible, key=lambda row: -_severity_budget_rank(row.get("severity"))
+        )
+        self._chosen = {id(row) for row in ranked[: self.budget]}
+
+    def hold(self, row: Mapping[str, Any], digest: str) -> bool:
+        """True when ``row`` must stay unsynced this run."""
+        if not _quiet_skip_severity(row.get("severity")):
+            return False
+        if self.quiet_active:
+            self.quiet_skipped.append(
+                {"dedupe_hash": digest, "reason": QUIET_HOURS_REASON}
+            )
+            return True
+        if self.budget is None:
+            return False
+        if id(row) not in self._chosen:
+            self.budget_held.append(
+                {"dedupe_hash": digest, "reason": SYNC_BUDGET_REASON}
+            )
+            return True
+        return False
+
+    def finish(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Attach the quiet and budget hold records to a sync result."""
+        result = _with_quiet_result(result, self.quiet_active, self.quiet_skipped)
+        if self.budget is not None:
+            result["sync_budget"] = self.budget
+            result["budget_held"] = self.budget_held
+        return result
+
+
 def labels_for_severity(
     severity: Any, overrides: Mapping[str, Any] | None = None
 ) -> list[str]:
@@ -954,6 +1112,7 @@ def sync_findings(
     dry_run: bool = False,
     quiet_hours: Mapping[str, Any] | None = None,
     now: Any = None,
+    sync_budget: int | None = None,
 ) -> dict[str, Any]:
     """Push every not-yet-synced finding row to ``repo`` as a GitHub issue.
 
@@ -980,15 +1139,14 @@ def sync_findings(
     skipped: list[str] = []
     dirty = False
 
-    quiet_active = in_quiet_hours(now, quiet_hours)
-    quiet_skipped: list[dict[str, Any]] = []
+    gate = _RowGate(now, quiet_hours, sync_budget)
+    gate.prepare(rows)
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
             continue
-        if quiet_active and _quiet_skip_severity(row.get("severity")):
-            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
+        if gate.hold(row, digest):
             continue
         title = issue_title(row)
         body = issue_body(row)
@@ -1032,11 +1190,7 @@ def sync_findings(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return _with_quiet_result(
-        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
-        quiet_active,
-        quiet_skipped,
-    )
+    return gate.finish({"pushed": pushed, "skipped": skipped, "dry_run": dry_run})
 
 
 def sync_findings_linear(
@@ -1047,6 +1201,7 @@ def sync_findings_linear(
     dry_run: bool = False,
     quiet_hours: Mapping[str, Any] | None = None,
     now: Any = None,
+    sync_budget: int | None = None,
 ) -> dict[str, Any]:
     """Push every not-yet-synced finding row to Linear as an issue.
 
@@ -1074,15 +1229,14 @@ def sync_findings_linear(
     skipped: list[str] = []
     dirty = False
 
-    quiet_active = in_quiet_hours(now, quiet_hours)
-    quiet_skipped: list[dict[str, Any]] = []
+    gate = _RowGate(now, quiet_hours, sync_budget)
+    gate.prepare(rows)
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
             continue
-        if quiet_active and _quiet_skip_severity(row.get("severity")):
-            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
+        if gate.hold(row, digest):
             continue
         title = issue_title(row)
         body = issue_body(row)
@@ -1142,11 +1296,7 @@ def sync_findings_linear(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return _with_quiet_result(
-        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
-        quiet_active,
-        quiet_skipped,
-    )
+    return gate.finish({"pushed": pushed, "skipped": skipped, "dry_run": dry_run})
 
 
 def sync_findings_slack(
@@ -1157,6 +1307,7 @@ def sync_findings_slack(
     dry_run: bool = False,
     quiet_hours: Mapping[str, Any] | None = None,
     now: Any = None,
+    sync_budget: int | None = None,
 ) -> dict[str, Any]:
     """Post every not-yet-synced finding row to Slack via the webhook URL.
 
@@ -1186,15 +1337,14 @@ def sync_findings_slack(
     skipped: list[str] = []
     dirty = False
 
-    quiet_active = in_quiet_hours(now, quiet_hours)
-    quiet_skipped: list[dict[str, Any]] = []
+    gate = _RowGate(now, quiet_hours, sync_budget)
+    gate.prepare(rows)
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
             continue
-        if quiet_active and _quiet_skip_severity(row.get("severity")):
-            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
+        if gate.hold(row, digest):
             continue
         message = slack_message(row)
         blocks_json = json.dumps(message["blocks"])
@@ -1234,11 +1384,7 @@ def sync_findings_slack(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return _with_quiet_result(
-        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
-        quiet_active,
-        quiet_skipped,
-    )
+    return gate.finish({"pushed": pushed, "skipped": skipped, "dry_run": dry_run})
 
 
 def sync_findings_teams(
@@ -1249,6 +1395,7 @@ def sync_findings_teams(
     dry_run: bool = False,
     quiet_hours: Mapping[str, Any] | None = None,
     now: Any = None,
+    sync_budget: int | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
     """Post every not-yet-synced finding row to Teams via the webhook URL.
@@ -1282,15 +1429,14 @@ def sync_findings_teams(
     skipped: list[str] = []
     dirty = False
 
-    quiet_active = in_quiet_hours(now, quiet_hours)
-    quiet_skipped: list[dict[str, Any]] = []
+    gate = _RowGate(now, quiet_hours, sync_budget)
+    gate.prepare(rows)
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
             continue
-        if quiet_active and _quiet_skip_severity(row.get("severity")):
-            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
+        if gate.hold(row, digest):
             continue
         card = teams_message(row, repo=repo)
         payload: dict[str, Any] = {
@@ -1338,11 +1484,7 @@ def sync_findings_teams(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return _with_quiet_result(
-        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
-        quiet_active,
-        quiet_skipped,
-    )
+    return gate.finish({"pushed": pushed, "skipped": skipped, "dry_run": dry_run})
 
 
 def sign_payload(payload_bytes: bytes, secret: str) -> str:
@@ -1513,6 +1655,7 @@ def sync_findings_webhook(
     dry_run: bool = False,
     quiet_hours: Mapping[str, Any] | None = None,
     now: Any = None,
+    sync_budget: int | None = None,
     signing_secret: str = "",
     previous_signing_secret: str = "",
     timestamp: int | None = None,
@@ -1567,15 +1710,14 @@ def sync_findings_webhook(
     skipped: list[str] = []
     dirty = False
 
-    quiet_active = in_quiet_hours(now, quiet_hours)
-    quiet_skipped: list[dict[str, Any]] = []
+    gate = _RowGate(now, quiet_hours, sync_budget)
+    gate.prepare(rows)
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
             continue
-        if quiet_active and _quiet_skip_severity(row.get("severity")):
-            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
+        if gate.hold(row, digest):
             continue
         use_template = isinstance(webhook_template, str) and bool(
             webhook_template.strip()
@@ -1660,11 +1802,7 @@ def sync_findings_webhook(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return _with_quiet_result(
-        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
-        quiet_active,
-        quiet_skipped,
-    )
+    return gate.finish({"pushed": pushed, "skipped": skipped, "dry_run": dry_run})
 
 
 def sync_findings_pagerduty(
@@ -1676,6 +1814,7 @@ def sync_findings_pagerduty(
     dry_run: bool = False,
     quiet_hours: Mapping[str, Any] | None = None,
     now: Any = None,
+    sync_budget: int | None = None,
 ) -> dict[str, Any]:
     """Trigger every not-yet-synced finding row as a PagerDuty event.
 
@@ -1711,15 +1850,14 @@ def sync_findings_pagerduty(
     skipped: list[str] = []
     dirty = False
 
-    quiet_active = in_quiet_hours(now, quiet_hours)
-    quiet_skipped: list[dict[str, Any]] = []
+    gate = _RowGate(now, quiet_hours, sync_budget)
+    gate.prepare(rows)
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
             continue
-        if quiet_active and _quiet_skip_severity(row.get("severity")):
-            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
+        if gate.hold(row, digest):
             continue
         event = pagerduty_payload(row, routing_key, severity_map)
         inner_json = json.dumps(event["payload"])
@@ -1764,11 +1902,7 @@ def sync_findings_pagerduty(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return _with_quiet_result(
-        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
-        quiet_active,
-        quiet_skipped,
-    )
+    return gate.finish({"pushed": pushed, "skipped": skipped, "dry_run": dry_run})
 
 
 def sync_findings_opsgenie(
@@ -1780,6 +1914,7 @@ def sync_findings_opsgenie(
     dry_run: bool = False,
     quiet_hours: Mapping[str, Any] | None = None,
     now: Any = None,
+    sync_budget: int | None = None,
     **kw: Any,
 ) -> dict[str, Any]:
     """Create every not-yet-synced finding row as an Opsgenie alert.
@@ -1821,15 +1956,14 @@ def sync_findings_opsgenie(
     skipped: list[str] = []
     dirty = False
 
-    quiet_active = in_quiet_hours(now, quiet_hours)
-    quiet_skipped: list[dict[str, Any]] = []
+    gate = _RowGate(now, quiet_hours, sync_budget)
+    gate.prepare(rows)
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
             continue
-        if quiet_active and _quiet_skip_severity(row.get("severity")):
-            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
+        if gate.hold(row, digest):
             continue
         alert = opsgenie_payload(row, priority_map)
         details_json = json.dumps(alert["details"])
@@ -1879,11 +2013,7 @@ def sync_findings_opsgenie(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return _with_quiet_result(
-        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
-        quiet_active,
-        quiet_skipped,
-    )
+    return gate.finish({"pushed": pushed, "skipped": skipped, "dry_run": dry_run})
 
 
 def _jira_config_for_node(node: Mapping[str, Any]) -> dict[str, str]:
@@ -2010,6 +2140,7 @@ def sync_findings_jira(
     dry_run: bool = False,
     quiet_hours: Mapping[str, Any] | None = None,
     now: Any = None,
+    sync_budget: int | None = None,
     **kw: Any,
 ) -> dict[str, Any]:
     """Create/update every not-yet-synced finding row as a Jira issue.
@@ -2069,15 +2200,14 @@ def sync_findings_jira(
     skipped: list[str] = []
     dirty = False
 
-    quiet_active = in_quiet_hours(now, quiet_hours)
-    quiet_skipped: list[dict[str, Any]] = []
+    gate = _RowGate(now, quiet_hours, sync_budget)
+    gate.prepare(rows)
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
             continue
-        if quiet_active and _quiet_skip_severity(row.get("severity")):
-            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
+        if gate.hold(row, digest):
             continue
         jql = _jira_search_jql(digest, project_key)
         search_url = f"{base_url}/rest/api/3/search/jql"
@@ -2173,11 +2303,7 @@ def sync_findings_jira(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return _with_quiet_result(
-        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
-        quiet_active,
-        quiet_skipped,
-    )
+    return gate.finish({"pushed": pushed, "skipped": skipped, "dry_run": dry_run})
 
 
 def _graph_token_url(tenant_id: str) -> str:
@@ -2339,6 +2465,7 @@ def sync_findings_graph(
     dry_run: bool = False,
     quiet_hours: Mapping[str, Any] | None = None,
     now: Any = None,
+    sync_budget: int | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
     """Post every not-yet-synced finding row to a Teams channel via Graph.
@@ -2384,37 +2511,29 @@ def sync_findings_graph(
     dirty = False
 
     if dry_run:
-        quiet_active = in_quiet_hours(now, quiet_hours)
-        quiet_skipped: list[dict[str, Any]] = []
+        gate = _RowGate(now, quiet_hours, sync_budget)
+        gate.prepare(rows)
         for row in rows:
             digest = str(row.get("dedupe_hash", ""))
             if row.get("issue_url"):
                 skipped.append(digest)
                 continue
-            if quiet_active and _quiet_skip_severity(row.get("severity")):
-                quiet_skipped.append(
-                    {"dedupe_hash": digest, "reason": QUIET_HOURS_REASON}
-                )
+            if gate.hold(row, digest):
                 continue
             pushed.append({"dedupe_hash": digest, "issue_url": ""})
-        return _with_quiet_result(
-            {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
-            quiet_active,
-            quiet_skipped,
-        )
+        return gate.finish({"pushed": pushed, "skipped": skipped, "dry_run": dry_run})
 
     token = _graph_fetch_token(run, tenant_id, client_id, client_secret)
 
     messages_url = _graph_messages_url(team_id, channel_id)
-    quiet_active = in_quiet_hours(now, quiet_hours)
-    quiet_skipped = []
+    gate = _RowGate(now, quiet_hours, sync_budget)
+    gate.prepare(rows)
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
             continue
-        if quiet_active and _quiet_skip_severity(row.get("severity")):
-            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
+        if gate.hold(row, digest):
             continue
         message = graph_message(row, repo=repo)
         body_json = json.dumps(message["body"])
@@ -2457,11 +2576,7 @@ def sync_findings_graph(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return _with_quiet_result(
-        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
-        quiet_active,
-        quiet_skipped,
-    )
+    return gate.finish({"pushed": pushed, "skipped": skipped, "dry_run": dry_run})
 
 
 def _reminder_graph_message(reminder: Mapping[str, Any]) -> dict[str, Any]:
@@ -3382,6 +3497,30 @@ def _expiry_notices_for_tick(
     return notices
 
 
+def _grant_conflicts_for_tick(
+    config: Mapping[str, Any] | None, node: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Advisory grant-conflict findings for the tick's RoE grants (R5).
+
+    Calls :func:`roe_lifecycle.grant_conflicts` with the flat grant items
+    from :func:`_tick_grant_items`. No grants, fewer than two, a missing
+    detector, a detector failure, or a non-list answer yield ``[]``.
+    Never raises (fail-open: conflicts never block a dispatch).
+    """
+    try:
+        from omega_prime.grokbot import roe_lifecycle
+
+        items = _tick_grant_items(config, node)
+        if len(items) < 2:
+            return []
+        found = roe_lifecycle.grant_conflicts(items)
+        if not isinstance(found, list):
+            return []
+        return [dict(entry) for entry in found if isinstance(entry, Mapping)]
+    except Exception:
+        return []
+
+
 def tick(
     config: Mapping[str, Any] | None = None,
     *,
@@ -3450,6 +3589,44 @@ def tick(
     would-sync decision to the ``dispatch_ledger`` path (blank path:
     in-memory only). The plan is returned under ``"dispatch_plan"``.
     With the flag off every real-dispatch path runs exactly as before.
+
+    Sync budget (R1): when ``sync_budget`` is a positive int (or a
+    mapping ``{"default": N, "<tracker>": M}``; the mapping is looked up
+    by the EFFECTIVE tracker, i.e. ``"graph"`` whenever the graph
+    credentials are complete, else the configured ``tracker``, and its
+    entry wins over ``"default"``), at most that many non-urgent findings
+    are dispatched per tick. ``critical``/``high`` findings bypass the
+    budget without consuming it, quiet-hours holds are decided first and
+    never consume it, and expiry notices are never touched. The budget
+    goes to the best non-urgent unsynced rows by severity rank (``medium``
+    before ``low`` before anything else, then oldest first); pushes still
+    happen in store order. The rest are held unsynced (no ``issue_url``,
+    store untouched), reported under ``"budget_held"`` with reason
+    ``"sync-budget"`` and retried by the next tick. The result gains
+    ``"sync_budget": N`` plus ``"budget_held"`` (possibly empty). Dry and
+    dispatch-dry-run ticks count identically, so ``"dispatch_plan"``
+    reflects the budget. A missing/``None`` value, or a mapping with no
+    entry for the effective tracker and no ``default``, means the feature
+    is off and the tick proceeds exactly as before. A present but unusable
+    value (non-int/bool/float/str: reason ``"type"``; non-positive int:
+    ``"value"``; a mapping with a bad key or value: ``"entry"``) also
+    turns the feature off for that entry (a valid entry for the effective
+    tracker, or a valid ``default``, still applies despite an invalid
+    sibling) and the result gains ``"sync_budget_invalid": "<reason>"``;
+    nothing else changes. Limits: urgent rows are deliberately uncapped,
+    so a source that stamps everything ``critical`` is not throttled; the
+    per-tracker ``_main_<tracker>`` CLI entry points call the sync
+    functions directly and apply neither quiet hours nor the budget
+    (only ``tick`` does).
+
+    Grant conflicts (R5): when the tick's RoE context holds at least two
+    grants and :func:`roe_lifecycle.grant_conflicts` reports
+    contradictions, they are returned under ``"grant_conflicts"``
+    (``{"kind", "grants", "detail"}`` entries) next to
+    ``"expiry_notice"`` (and on the grant-skip result, where it explains
+    which grants disagree). Advisory only: never blocks or alters a
+    dispatch and is never delivered to a tracker; the key is absent
+    when there is nothing to report.
     """
     if config is None:
         from omega_prime.config import load_config  # deferred: keeps import light
@@ -3474,98 +3651,102 @@ def tick(
     allowed = _grant_allowed_trackers(config, node)
     if allowed is not None and effective_tracker not in allowed:
         _record_grant_decision(config, node, effective_tracker, "skip")
-        return _grant_skip_result(effective_tracker, dry_run)
+        skipped = _grant_skip_result(effective_tracker, dry_run)
+        skip_conflicts = _grant_conflicts_for_tick(config, node)
+        if skip_conflicts:
+            skipped["grant_conflicts"] = skip_conflicts
+        return skipped
     _record_grant_decision(config, node, effective_tracker, "allow")
     notices = _expiry_notices_for_tick(
         config, node, effective_tracker, runner=runner, dry_run=dry_run
     )
+    conflicts = _grant_conflicts_for_tick(config, node)
+    sync_budget, budget_invalid = _sync_budget_status(node, effective_tracker)
 
     def _with_notices(result: dict[str, Any]) -> dict[str, Any]:
         if notices:
             result["expiry_notice"] = notices
+        if conflicts:
+            result["grant_conflicts"] = conflicts
+        if budget_invalid:
+            result["sync_budget_invalid"] = budget_invalid
         return result
+
+    def _finish(result: dict[str, Any]) -> dict[str, Any]:
+        result["disabled"] = False
+        if plan_mode:
+            _attach_dispatch_plan(node, effective_tracker, result)
+        return _with_notices(result)
 
     if tracker == "graph" or _graph_config_complete(graph_cfg):
         if not _graph_config_complete(graph_cfg):
             return _with_notices(_tracker_error(NO_GRAPH_CONFIG_MESSAGE, dry_run))
         raw_repo = node.get("repo", "")
         repo = raw_repo.strip() if isinstance(raw_repo, str) else ""
-        result = sync_findings_graph(
-            reports_directory,
-            tenant_id=graph_cfg["tenant_id"],
-            client_id=graph_cfg["client_id"],
-            client_secret=graph_cfg["client_secret"],
-            team_id=graph_cfg["team_id"],
-            channel_id=graph_cfg["channel_id"],
-            runner=runner,
-            dry_run=dry_run,
-            quiet_hours=node.get("quiet_hours"),
-            now=now,
-            repo=repo or None,
+        return _finish(
+            sync_findings_graph(
+                reports_directory,
+                tenant_id=graph_cfg["tenant_id"],
+                client_id=graph_cfg["client_id"],
+                client_secret=graph_cfg["client_secret"],
+                team_id=graph_cfg["team_id"],
+                channel_id=graph_cfg["channel_id"],
+                runner=runner,
+                dry_run=dry_run,
+                quiet_hours=node.get("quiet_hours"),
+                now=now,
+                sync_budget=sync_budget,
+                repo=repo or None,
+            )
         )
-        result["disabled"] = False
-        if plan_mode:
-            _attach_dispatch_plan(node, effective_tracker, result)
-        if notices:
-            result["expiry_notice"] = notices
-        return result
     if tracker == "linear":
         team_id = node.get("linear_team_id", "")
         if not isinstance(team_id, str) or not team_id.strip():
             return _with_notices(_tracker_error(NO_LINEAR_TEAM_MESSAGE, dry_run))
-        result = sync_findings_linear(
-            reports_directory,
-            team_id.strip(),
-            runner=runner,
-            dry_run=dry_run,
-            quiet_hours=node.get("quiet_hours"),
-            now=now,
+        return _finish(
+            sync_findings_linear(
+                reports_directory,
+                team_id.strip(),
+                runner=runner,
+                dry_run=dry_run,
+                quiet_hours=node.get("quiet_hours"),
+                now=now,
+                sync_budget=sync_budget,
+            )
         )
-        result["disabled"] = False
-        if plan_mode:
-            _attach_dispatch_plan(node, effective_tracker, result)
-        if notices:
-            result["expiry_notice"] = notices
-        return result
     if tracker == "slack":
         webhook_url = node.get("slack_webhook_url", "")
         if not isinstance(webhook_url, str) or not webhook_url.strip():
             return _with_notices(_tracker_error(NO_SLACK_WEBHOOK_MESSAGE, dry_run))
-        result = sync_findings_slack(
-            reports_directory,
-            webhook_url.strip(),
-            runner=runner,
-            dry_run=dry_run,
-            quiet_hours=node.get("quiet_hours"),
-            now=now,
+        return _finish(
+            sync_findings_slack(
+                reports_directory,
+                webhook_url.strip(),
+                runner=runner,
+                dry_run=dry_run,
+                quiet_hours=node.get("quiet_hours"),
+                now=now,
+                sync_budget=sync_budget,
+            )
         )
-        result["disabled"] = False
-        if plan_mode:
-            _attach_dispatch_plan(node, effective_tracker, result)
-        if notices:
-            result["expiry_notice"] = notices
-        return result
     if tracker == "teams":
         webhook_url = node.get("teams_webhook_url", "")
         if not isinstance(webhook_url, str) or not webhook_url.strip():
             return _with_notices(_tracker_error(NO_TEAMS_WEBHOOK_MESSAGE, dry_run))
         raw_repo = node.get("repo", "")
         repo = raw_repo.strip() if isinstance(raw_repo, str) else ""
-        result = sync_findings_teams(
-            reports_directory,
-            webhook_url.strip(),
-            runner=runner,
-            dry_run=dry_run,
-            quiet_hours=node.get("quiet_hours"),
-            now=now,
-            repo=repo or None,
+        return _finish(
+            sync_findings_teams(
+                reports_directory,
+                webhook_url.strip(),
+                runner=runner,
+                dry_run=dry_run,
+                quiet_hours=node.get("quiet_hours"),
+                now=now,
+                sync_budget=sync_budget,
+                repo=repo or None,
+            )
         )
-        result["disabled"] = False
-        if plan_mode:
-            _attach_dispatch_plan(node, effective_tracker, result)
-        if notices:
-            result["expiry_notice"] = notices
-        return result
     if tracker == "pagerduty":
         routing_key = node.get("pagerduty_routing_key", "")
         if not isinstance(routing_key, str) or not routing_key.strip():
@@ -3573,41 +3754,35 @@ def tick(
                 _tracker_error(NO_PAGERDUTY_ROUTING_KEY_MESSAGE, dry_run)
             )
         severity_map = node.get("pagerduty_severity_map")
-        result = sync_findings_pagerduty(
-            reports_directory,
-            routing_key.strip(),
-            runner=runner,
-            dry_run=dry_run,
-            quiet_hours=node.get("quiet_hours"),
-            now=now,
-            severity_map=severity_map if isinstance(severity_map, dict) else None,
+        return _finish(
+            sync_findings_pagerduty(
+                reports_directory,
+                routing_key.strip(),
+                runner=runner,
+                dry_run=dry_run,
+                quiet_hours=node.get("quiet_hours"),
+                now=now,
+                sync_budget=sync_budget,
+                severity_map=severity_map if isinstance(severity_map, dict) else None,
+            )
         )
-        result["disabled"] = False
-        if plan_mode:
-            _attach_dispatch_plan(node, effective_tracker, result)
-        if notices:
-            result["expiry_notice"] = notices
-        return result
     if tracker == "opsgenie":
         api_key = node.get("opsgenie_api_key", "")
         if not isinstance(api_key, str) or not api_key.strip():
             return _with_notices(_tracker_error(NO_OPSGENIE_API_KEY_MESSAGE, dry_run))
         priority_map = node.get("opsgenie_priority_map")
-        result = sync_findings_opsgenie(
-            reports_directory,
-            api_key.strip(),
-            runner=runner,
-            dry_run=dry_run,
-            quiet_hours=node.get("quiet_hours"),
-            now=now,
-            priority_map=priority_map if isinstance(priority_map, dict) else None,
+        return _finish(
+            sync_findings_opsgenie(
+                reports_directory,
+                api_key.strip(),
+                runner=runner,
+                dry_run=dry_run,
+                quiet_hours=node.get("quiet_hours"),
+                now=now,
+                sync_budget=sync_budget,
+                priority_map=priority_map if isinstance(priority_map, dict) else None,
+            )
         )
-        result["disabled"] = False
-        if plan_mode:
-            _attach_dispatch_plan(node, effective_tracker, result)
-        if notices:
-            result["expiry_notice"] = notices
-        return result
     if tracker == "jira":
         jira_cfg = _jira_config_for_node(node)
         if not _jira_config_complete(jira_cfg):
@@ -3621,24 +3796,21 @@ def tick(
             if isinstance(raw_issue_type, str) and raw_issue_type.strip()
             else JIRA_DEFAULT_ISSUE_TYPE
         )
-        result = sync_findings_jira(
-            reports_directory,
-            base_url=jira_cfg["base_url"],
-            email=jira_cfg["email"],
-            api_token=jira_cfg["api_token"],
-            project_key=jira_cfg["project_key"],
-            issue_type=issue_type,
-            runner=runner,
-            dry_run=dry_run,
-            quiet_hours=node.get("quiet_hours"),
-            now=now,
+        return _finish(
+            sync_findings_jira(
+                reports_directory,
+                base_url=jira_cfg["base_url"],
+                email=jira_cfg["email"],
+                api_token=jira_cfg["api_token"],
+                project_key=jira_cfg["project_key"],
+                issue_type=issue_type,
+                runner=runner,
+                dry_run=dry_run,
+                quiet_hours=node.get("quiet_hours"),
+                now=now,
+                sync_budget=sync_budget,
+            )
         )
-        result["disabled"] = False
-        if plan_mode:
-            _attach_dispatch_plan(node, effective_tracker, result)
-        if notices:
-            result["expiry_notice"] = notices
-        return result
     if tracker == "webhook":
         webhook_url = _webhook_url_for_node(node)
         if not webhook_url:
@@ -3646,23 +3818,20 @@ def tick(
         signing_secret, previous_secret = _webhook_signing_secrets(node)
         raw_template = node.get("webhook_template", "")
         template = raw_template if isinstance(raw_template, str) else ""
-        result = sync_findings_webhook(
-            reports_directory,
-            webhook_url,
-            runner=runner,
-            dry_run=dry_run,
-            quiet_hours=node.get("quiet_hours"),
-            now=now,
-            signing_secret=signing_secret,
-            previous_signing_secret=previous_secret,
-            webhook_template=template,
+        return _finish(
+            sync_findings_webhook(
+                reports_directory,
+                webhook_url,
+                runner=runner,
+                dry_run=dry_run,
+                quiet_hours=node.get("quiet_hours"),
+                now=now,
+                sync_budget=sync_budget,
+                signing_secret=signing_secret,
+                previous_signing_secret=previous_secret,
+                webhook_template=template,
+            )
         )
-        result["disabled"] = False
-        if plan_mode:
-            _attach_dispatch_plan(node, effective_tracker, result)
-        if notices:
-            result["expiry_notice"] = notices
-        return result
     if tracker != "github":
         return _with_notices(_tracker_error(f"unknown tracker: {tracker}", dry_run))
     repo = node.get("repo", "")
@@ -3676,21 +3845,18 @@ def tick(
             }
         )
     node_labels = node.get("labels")
-    result = sync_findings(
-        reports_directory,
-        repo.strip(),
-        runner=runner,
-        labels=node_labels if isinstance(node_labels, dict) else None,
-        dry_run=dry_run,
-        quiet_hours=node.get("quiet_hours"),
-        now=now,
+    return _finish(
+        sync_findings(
+            reports_directory,
+            repo.strip(),
+            runner=runner,
+            labels=node_labels if isinstance(node_labels, dict) else None,
+            dry_run=dry_run,
+            quiet_hours=node.get("quiet_hours"),
+            now=now,
+            sync_budget=sync_budget,
+        )
     )
-    result["disabled"] = False
-    if plan_mode:
-        _attach_dispatch_plan(node, effective_tracker, result)
-    if notices:
-        result["expiry_notice"] = notices
-    return result
 
 
 def _main_slack(directory: str | Path | None, webhook_url: str, dry_run: bool) -> int:
@@ -4046,6 +4212,20 @@ def _main_graph(
     return 0
 
 
+def _printable(value: Any) -> str:
+    """``value`` as text with every non-printable character escaped.
+
+    A stored ``dedupe_hash`` is untrusted: a newline or ESC in it must not
+    forge extra plan lines or terminal control sequences. Printable text
+    passes through unchanged; anything else becomes its ``\\n``/``\\x1b``/
+    ``\\u202e`` escape.
+    """
+    return "".join(
+        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii")
+        for ch in str(value)
+    )
+
+
 def _main_dispatch_dry_run(
     config: Mapping[str, Any] | None,
     node: Mapping[str, Any],
@@ -4140,15 +4320,21 @@ def _main_dispatch_dry_run(
         return 2
     for entry in result.get("dispatch_plan", []) or []:
         try:
-            print(f"would push {entry.get('dedupe_hash', '')}")
+            print(f"would push {_printable(entry.get('dedupe_hash', ''))}")
         except Exception:
             continue
     for digest in result.get("skipped", []) or []:
-        print(f"skip (already synced) {digest}")
+        print(f"skip (already synced) {_printable(digest)}")
     for entry in result.get("quiet_skipped", []) or []:
         try:
             reason = entry.get("reason", QUIET_HOURS_REASON)
-            print(f"skip ({reason}) {entry.get('dedupe_hash', '')}")
+            print(f"skip ({reason}) {_printable(entry.get('dedupe_hash', ''))}")
+        except Exception:
+            continue
+    for entry in result.get("budget_held", []) or []:
+        try:
+            reason = entry.get("reason", SYNC_BUDGET_REASON)
+            print(f"skip ({reason}) {_printable(entry.get('dedupe_hash', ''))}")
         except Exception:
             continue
     return 0
@@ -4435,6 +4621,11 @@ __all__ = [
     "QUIET_HOURS_REASON",
     "QUIET_HOURS_URGENT_SEVERITIES",
     "SLACK_COLORS",
+    "SYNC_BUDGET_INVALID_ENTRY",
+    "SYNC_BUDGET_INVALID_TYPE",
+    "SYNC_BUDGET_INVALID_VALUE",
+    "SYNC_BUDGET_REASON",
+    "SYNC_BUDGET_SEVERITY_RANK",
     "TEAMS_THEME_COLORS",
     "TRACKERS",
     "UNKNOWN_SEVERITY_COLOR",

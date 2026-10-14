@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -153,6 +155,45 @@ def test_release_watch_cli_empty_repo_fails_closed(tmp_path, capsys):
 
     code = main(["check", "--state", str(tmp_path / "rw.json"), "--repo", ""])
     assert code == 2
+
+
+def test_fetch_upstream_tags_passes_a_timeout_to_gh(monkeypatch):
+    from omega_prime.grokbot import release_watch
+
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        seen["cmd"] = list(cmd)
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="", args=cmd)
+
+    monkeypatch.setattr(release_watch.subprocess, "run", fake_run)
+    assert release_watch.fetch_upstream_tags("OWNER/NAME") == []
+    assert seen["cmd"] == ["gh", "api", "repos/OWNER/NAME/tags"]
+    assert seen["timeout"] == 60
+
+
+def test_fetch_upstream_tags_timeout_is_a_fetch_error(tmp_path, monkeypatch, capsys):
+    from omega_prime.grokbot import release_watch
+
+    def hanging(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(release_watch.subprocess, "run", hanging)
+    state = _write_state(tmp_path / "release-watch.json", [("v1.2", "831a6b0")])
+    before = state.read_bytes()
+
+    def fetch():
+        return release_watch.fetch_upstream_tags("OWNER/NAME")
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        check_release_watch(state, fetch, NOW)
+    assert state.read_bytes() == before
+    degraded = make_checker(str(state), fetch)(NOW)
+    assert "error" in degraded and degraded["new"] == []
+    code = release_watch.main(["check", "--state", str(state)])
+    assert code == release_watch.FETCH_FAILURE_EXIT
+    assert "fetch failed" in capsys.readouterr().err
 
 
 def test_build_digest_and_releases_block(tmp_path):
@@ -376,3 +417,70 @@ def test_auto_pin_bump_config_default_and_overrides(tmp_path, monkeypatch):
     )
     assert load_config(tmp_path)["redteam"]["auto_pin_bump"] is True
     assert auto_pin_bump_enabled(load_config(tmp_path)) is True
+
+
+def test_on_new_runs_after_diff_and_before_the_state_write(tmp_path):
+    state = _write_state(tmp_path / "release-watch.json", [("v1.2", "831a6b0")])
+    before = state.read_bytes()
+    seen: list[tuple[list[dict], bytes]] = []
+
+    def on_new(found):
+        seen.append((found, state.read_bytes()))
+
+    result = check_release_watch(
+        state, lambda: [dict(V12), dict(V13)], NOW, on_new=on_new
+    )
+    assert result["new"] == [dict(V13)]
+    assert seen == [([dict(V13)], before)]
+    assert state.read_bytes() != before
+
+
+def test_on_new_not_called_on_seed_or_without_new_tags(tmp_path):
+    calls: list[list[dict]] = []
+    state = tmp_path / "release-watch.json"
+    check_release_watch(state, lambda: [dict(V12)], NOW, on_new=calls.append)
+    check_release_watch(state, lambda: [dict(V12)], NOW, on_new=calls.append)
+    assert calls == []
+
+
+def test_on_new_unset_is_byte_identical(tmp_path):
+    plain = _write_state(tmp_path / "a.json", [("v1.2", "831a6b0")])
+    hooked = _write_state(tmp_path / "b.json", [("v1.2", "831a6b0")])
+
+    def fetch():
+        return [dict(V12), dict(V13)]
+
+    first = check_release_watch(plain, fetch, NOW)
+    second = check_release_watch(hooked, fetch, NOW, on_new=lambda found: None)
+    assert first == second
+    assert plain.read_bytes() == hooked.read_bytes()
+    assert set(first) == {"new", "seeded", "checked_at"}
+
+
+def test_raising_on_new_aborts_the_state_write(tmp_path):
+    state = _write_state(tmp_path / "release-watch.json", [("v1.2", "831a6b0")])
+    before = state.read_bytes()
+
+    def on_new(found):
+        raise OSError("disk full")
+
+    with pytest.raises(OSError, match="disk full"):
+        check_release_watch(state, lambda: [dict(V12), dict(V13)], NOW, on_new=on_new)
+    assert state.read_bytes() == before
+
+
+def test_make_checker_on_new_passthrough_and_failure_degrades(tmp_path):
+    state = _write_state(tmp_path / "release-watch.json", [("v1.2", "831a6b0")])
+    got: list[list[dict]] = []
+    ok = make_checker(
+        state, lambda: [dict(V12), dict(V13)], on_new=lambda found: got.append(found)
+    )(NOW)
+    assert ok["new"] == [dict(V13)] and got == [[dict(V13)]]
+
+    other = _write_state(tmp_path / "other.json", [("v1.2", "831a6b0")])
+
+    def boom(found):
+        raise RuntimeError("nope")
+
+    bad = make_checker(other, lambda: [dict(V12), dict(V13)], on_new=boom)(NOW)
+    assert bad["new"] == [] and bad["error"] == "RuntimeError: nope"

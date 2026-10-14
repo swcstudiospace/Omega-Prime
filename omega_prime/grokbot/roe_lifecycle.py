@@ -29,15 +29,23 @@ open, else ``BLOCKED``), a 2s-timeout TCP probe of the configured
 ``gateway_url``, and ``suites_loaded``/``suites_total`` from
 ``sidecar/cases`` ``load_suite`` (drafts excluded). ``ready_for_live`` is
 true only when all three hold. It never starts an engagement.
+
+The ``conflicts`` subcommand (R5) is a read-only multi-grant detector:
+``conflicts --artifact A --artifact B [--now ISO] [--json]`` lists
+contradictions between concurrent grants (see :func:`grant_conflicts`);
+exit 0 = none, 3 = conflicts found, 2 = usage error. It never blocks
+authorization and never writes.
 """
 
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import socket
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -48,6 +56,8 @@ from omega_prime.redteam.roe import (
     CAUSE_INVALID,
     CAUSE_MISSING,
     _parse_time,
+    canonical_bytes,
+    grant_tool_allowlist,
     validate_schema,
 )
 
@@ -900,6 +910,461 @@ def watchdog_check_all(artifacts: Any, *, now: Any = None) -> list[dict[str, Any
         return []
 
 
+#: Most rows :func:`grant_conflicts` returns before the truncation sentinel.
+MAX_GRANT_CONFLICTS = 100
+
+#: Largest grant file (bytes) the conflict detector reads; bigger files
+#: are treated as unreadable (detector only).
+MAX_GRANT_BYTES = 1_048_576
+
+#: ``kind`` of the sentinel row that follows a truncated conflict list.
+CONFLICTS_TRUNCATED_KIND = "conflicts-truncated"
+
+
+@dataclass(frozen=True)
+class _ConflictGrant:
+    """One readable grant with every pair-independent value precomputed."""
+
+    ident: str
+    label: str
+    reliable_id: bool
+    content: bytes
+    window: tuple[datetime, datetime] | None
+    hosts: dict[str, set[str] | None]
+    host_open: frozenset[str]
+    host_restricted: frozenset[str]
+    covers: frozenset[str] | None
+    operator: str | None
+
+
+#: Longest rendered grant id / host / tool / tracker / operator in a
+#: conflict row (longer values are truncated, never rejected).
+_CONFLICT_TEXT_MAX = 200
+
+
+def _conflict_text(value: Any) -> str:
+    """Printable, bounded text for a conflict row (no control characters)."""
+    text = "".join(ch for ch in str(value) if ch.isprintable())
+    return text[:_CONFLICT_TEXT_MAX]
+
+
+def _conflict_window(document: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    """Inclusive aware-UTC ``(from, until)`` window, or ``None`` if unusable."""
+    start = _parse_time(document.get("effective_from"))
+    end = _parse_time(document.get("effective_until"))
+    if start is None or end is None:
+        return None
+    start, end = _as_utc(start), _as_utc(end)
+    return (start, end) if start <= end else None
+
+
+def _conflict_document(artifact: Any) -> dict[str, Any] | None:
+    """Grant document for the detector; oversized files are unreadable."""
+    if isinstance(artifact, (str, Path)):
+        path_text = str(artifact).strip()
+        if not path_text:
+            return None
+        try:
+            with open(path_text, "rb") as handle:
+                raw = handle.read(MAX_GRANT_BYTES + 1)
+        except OSError:
+            return None
+        if len(raw) > MAX_GRANT_BYTES:
+            return None
+        try:
+            loaded = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            return None
+        return loaded if isinstance(loaded, dict) else None
+    return _grant_document(artifact)
+
+
+def _conflict_grant(artifact: Any) -> _ConflictGrant | None:
+    """Prepare one artifact for comparison; ``None`` when unreadable.
+
+    Every per-grant derived value is computed here once, never per pair.
+    """
+    document = _conflict_document(artifact)
+    if document is None:
+        return None
+    content = canonical_bytes(document)
+    until_text = document.get("effective_until")
+    ident = _renewal_artifact_id(
+        artifact, document, until_text if isinstance(until_text, str) else None
+    )
+    from_path = isinstance(artifact, (str, Path)) and bool(str(artifact).strip())
+    from_doc = any(
+        isinstance(document.get(key), str) and document[key].strip()
+        for key in ("artifact_id", "id")
+    )
+    hosts = _conflict_host_tools(document)
+    covers = grant_trackers(document)
+    operator = document.get("operator")
+    return _ConflictGrant(
+        ident=ident,
+        label=_conflict_text(ident),
+        reliable_id=from_path or from_doc,
+        content=content,
+        window=_conflict_window(document),
+        hosts=hosts,
+        host_open=frozenset(host for host, tools in hosts.items() if tools is None),
+        host_restricted=frozenset(
+            host for host, tools in hosts.items() if tools is not None
+        ),
+        covers=None if covers is None else frozenset(covers),
+        operator=(
+            operator.strip() if isinstance(operator, str) and operator.strip() else None
+        ),
+    )
+
+
+def _conflict_host_tools(document: dict[str, Any]) -> dict[str, set[str] | None]:
+    """Per-host tool allowlist (``None`` = every tool) for one grant."""
+    targets = document.get("authorized_targets")
+    if not isinstance(targets, list):
+        return {}
+    by_host: dict[str, list[Any]] = {}
+    for entry in targets:
+        if not isinstance(entry, dict):
+            continue
+        host = entry.get("host")
+        if isinstance(host, str) and host.strip():
+            by_host.setdefault(host.strip().lower(), []).append(entry)
+    return {
+        host: grant_tool_allowlist({"authorized_targets": entries})
+        for host, entries in by_host.items()
+    }
+
+
+def _conflict_csv(names: set[str]) -> str:
+    return ",".join(sorted(_conflict_text(name) for name in names))
+
+
+def _cover_text(covers: set[str] | None) -> str:
+    if covers is None:
+        return "covers all trackers"
+    return f"covers {_conflict_csv(covers)}"
+
+
+def _overlap_text(window: tuple[datetime, datetime]) -> str:
+    return (
+        f"overlap {window[0].isoformat(timespec='seconds')}"
+        f"..{window[1].isoformat(timespec='seconds')}"
+    )
+
+
+def _tool_detail(
+    first: _ConflictGrant,
+    second: _ConflictGrant,
+    window: tuple[datetime, datetime],
+) -> str:
+    """Detail text of a ``tool-scope-contradiction`` row."""
+    segments: list[str] = []
+    for host in sorted(first.hosts.keys() & second.hosts.keys()):
+        tools_a, tools_b = first.hosts[host], second.hosts[host]
+        if (tools_a is None) == (tools_b is None):
+            continue
+        open_label, restricted_label, restricted = (
+            (first.label, second.label, tools_b)
+            if tools_a is None
+            else (second.label, first.label, tools_a)
+        )
+        segments.append(
+            f"host {_conflict_text(host)}: {open_label} unrestricted, "
+            f"{restricted_label} restricted to {_conflict_csv(restricted or set())}"
+        )
+    return "; ".join(segments) + f"; {_overlap_text(window)}"
+
+
+def _cover_detail(
+    first: _ConflictGrant,
+    second: _ConflictGrant,
+    window: tuple[datetime, datetime],
+) -> str:
+    """Detail text of a ``tracker-cover-contradiction`` row."""
+    covers_a = None if first.covers is None else set(first.covers)
+    covers_b = None if second.covers is None else set(second.covers)
+    return (
+        f"{first.label} {_cover_text(covers_a)}; "
+        f"{second.label} {_cover_text(covers_b)}; {_overlap_text(window)}"
+    )
+
+
+def _operator_detail(
+    first: _ConflictGrant,
+    second: _ConflictGrant,
+    window: tuple[datetime, datetime],
+) -> str:
+    """Detail text of an ``operator-mismatch`` row."""
+    return (
+        f"operator {_conflict_text(first.operator)} "
+        f"vs {_conflict_text(second.operator)}; {_overlap_text(window)}"
+    )
+
+
+def _overlap_window(
+    first: _ConflictGrant, second: _ConflictGrant
+) -> tuple[datetime, datetime]:
+    """Intersection of two (already known to overlap) grant windows."""
+    assert first.window is not None and second.window is not None
+    return (
+        max(first.window[0], second.window[0]),
+        min(first.window[1], second.window[1]),
+    )
+
+
+def _sweep_pairs(
+    records: Sequence[_ConflictGrant],
+    indices: Sequence[int],
+    group_of: Callable[[int], Any],
+    compatible: Callable[[Any, Any], bool],
+) -> Iterator[tuple[int, int]]:
+    """Overlapping record pairs ``(low, high)`` from different groups.
+
+    Sweeps the windowed ``indices`` in window-start order, keeping the
+    still-open windows per group, so only overlapping pairs whose groups
+    are ``compatible`` are ever visited (cost: sort + output). Every pair
+    is yielded once, smaller record index first.
+    """
+    bounds: dict[int, tuple[datetime, datetime]] = {}
+    for idx in indices:
+        window = records[idx].window
+        if window is not None:
+            bounds[idx] = window
+    order = sorted(bounds, key=lambda idx: bounds[idx][0])
+    active: dict[Any, list[int]] = {}
+    for idx in order:
+        start = bounds[idx][0]
+        group = group_of(idx)
+        for other_group, members in active.items():
+            if other_group == group or not compatible(group, other_group):
+                continue
+            live = [member for member in members if bounds[member][1] >= start]
+            if len(live) != len(members):
+                members[:] = live
+            for member in live:
+                yield (member, idx) if member < idx else (idx, member)
+        active.setdefault(group, []).append(idx)
+
+
+class _TopConflicts:
+    """Streams distinct conflict rows, keeping the smallest ``cap`` sorted.
+
+    ``count`` is the number of distinct rows offered. Rows between records
+    that share a rendered label may repeat (the same row from two record
+    pairs), so those alone go through a ``seen`` digest set; every other
+    row is unique by construction and is counted without being stored.
+    """
+
+    def __init__(self, cap: int, shared_labels: set[str]) -> None:
+        self.cap = cap
+        self.shared = shared_labels
+        self.top: list[tuple[str, tuple[str, str], str]] = []
+        self.count = 0
+        self._seen: set[int] = set()
+
+    def offer(
+        self, kind: str, grants: tuple[str, str], build: Callable[[], str]
+    ) -> None:
+        top = self.top
+        colliding = grants[0] in self.shared or grants[1] in self.shared
+        if not colliding and len(top) >= self.cap:
+            last = top[-1]
+            if (kind, grants) > (last[0], last[1]):
+                self.count += 1
+                return
+        row = (kind, grants, build())
+        if colliding:
+            digest = hash(row)
+            if digest in self._seen:
+                return
+            self._seen.add(digest)
+        self.count += 1
+        if len(top) < self.cap or row < top[-1]:
+            bisect.insort(top, row)
+            if len(top) > self.cap:
+                top.pop()
+
+
+def grant_conflicts(artifacts: Any, *, now: Any = None) -> list[dict[str, Any]]:
+    """Detect contradictions between concurrent RoE grants (R5 detector).
+
+    ``artifacts`` is a single RoE document dict / artifact path, or a
+    list/tuple of them (the shapes :func:`watchdog_check_all` accepts).
+    Signatures are never verified and nothing is written: this is an
+    advisory warning surface that never blocks authorization. Returns
+    ``[{"kind", "grants": [id_a, id_b], "detail"}, ...]`` with ``grants``
+    sorted and the list sorted by ``(kind, grants, detail)``. ``detail``
+    is built only from ids, hosts, tool/tracker/operator names and ISO
+    times, with control characters stripped. Unreadable artifacts (incl.
+    grant files larger than :data:`MAX_GRANT_BYTES`) are skipped silently
+    (:func:`watchdog_check_all` already reports them); fewer than two
+    readable grants, ``None`` or any internal failure return ``[]``;
+    never raises.
+
+    At most :data:`MAX_GRANT_CONFLICTS` rows are returned (the first ones
+    in sorted order); when more exist, one final sentinel row
+    ``{"kind": "conflicts-truncated", "grants": [], "detail":
+    "<N> more conflicts not listed"}`` follows them.
+
+    Two grants *overlap* when both windows parse and
+    ``a.from <= b.until and b.from <= a.until`` (inclusive bounds, UTC).
+    ``now`` (datetime, epoch seconds or ISO text) restricts the check to
+    grants active at ``now`` (``from <= now <= until``); ``None`` -- or
+    an unparseable ``now`` -- compares overlap only. Grants without a
+    usable window are skipped by every window-based kind.
+
+    Kinds (the only contradictions expressible in today's fields):
+
+    - ``duplicate-id-divergent``: one id (document ``artifact_id``/``id``
+      or the artifact path -- never the ``operator|until`` fallback id)
+      carries differing canonical content. Needs no window; with ``now``
+      only grants whose parseable window is closed at ``now`` are dropped.
+    - ``tool-scope-contradiction``: overlapping grants where one is
+      unrestricted on a host (no ``tools``) and another restricts that
+      same host to a tool subset (the union merge narrows the former).
+      Hosts are compared case-insensitively; differing non-empty tool
+      sets are not a conflict.
+    - ``tracker-cover-contradiction``: overlapping grants where one has
+      ``covers`` and the other none (= all trackers), or two ``covers``
+      sets are disjoint (:func:`grant_trackers` semantics).
+    - ``operator-mismatch``: overlapping grants with different non-empty
+      ``operator`` strings.
+
+    NOT detectable today: rate limits, deny lists or per-class limits
+    (the schema has no such fields), targets beyond ``host``/``tools``,
+    and ``case_classes`` differences (merged as a deliberate union).
+    """
+    try:
+        items = list(artifacts) if isinstance(artifacts, (list, tuple)) else [artifacts]
+        classes: dict[tuple[str, bool, bytes], _ConflictGrant] = {}
+        readable = 0
+        for item in items:
+            try:
+                record = _conflict_grant(item)
+            except Exception:
+                record = None
+            if record is not None:
+                readable += 1
+                classes.setdefault(
+                    (record.ident, record.reliable_id, record.content), record
+                )
+        if readable < 2:
+            return []
+        records = list(classes.values())
+        current = None if now is None else _renewal_now(now)
+        if current is not None:
+            records = [
+                rec
+                for rec in records
+                if rec.window is None or rec.window[0] <= current <= rec.window[1]
+            ]
+        records.sort(key=lambda rec: (rec.label, rec.content))
+        label_owners: dict[str, int] = {}
+        for rec in records:
+            label_owners[rec.label] = label_owners.get(rec.label, 0) + 1
+        rows = _TopConflicts(
+            MAX_GRANT_CONFLICTS,
+            {label for label, owners in label_owners.items() if owners > 1},
+        )
+
+        def divergent_detail(label: str) -> Callable[[], str]:
+            return lambda: f"id {label} has divergent content"
+
+        def host_open_in(host: str) -> Callable[[int], bool]:
+            return lambda idx: host in records[idx].host_open
+
+        by_ident: dict[str, list[_ConflictGrant]] = {}
+        for rec in records:
+            if rec.reliable_id:
+                by_ident.setdefault(rec.ident, []).append(rec)
+        for group in by_ident.values():
+            if len(group) > 1:
+                label = group[0].label
+                rows.offer(
+                    "duplicate-id-divergent",
+                    (label, label),
+                    divergent_detail(label),
+                )
+
+        windowed = [idx for idx, rec in enumerate(records) if rec.window is not None]
+
+        def offer_pair(
+            kind: str,
+            low: int,
+            high: int,
+            detail: Callable[
+                [_ConflictGrant, _ConflictGrant, tuple[datetime, datetime]], str
+            ],
+        ) -> None:
+            first, second = records[low], records[high]
+            rows.offer(
+                kind,
+                (first.label, second.label),
+                lambda: detail(first, second, _overlap_window(first, second)),
+            )
+
+        hosts_open: dict[str, list[int]] = {}
+        hosts_restricted: dict[str, list[int]] = {}
+        for idx in windowed:
+            for host in records[idx].host_open:
+                hosts_open.setdefault(host, []).append(idx)
+            for host in records[idx].host_restricted:
+                hosts_restricted.setdefault(host, []).append(idx)
+        for host in sorted(hosts_open.keys() & hosts_restricted.keys()):
+            members = hosts_open[host] + hosts_restricted[host]
+            for low, high in _sweep_pairs(
+                records,
+                members,
+                host_open_in(host),
+                lambda _a, _b: True,
+            ):
+                first, second = records[low], records[high]
+                mismatched = (first.host_open & second.host_restricted) | (
+                    first.host_restricted & second.host_open
+                )
+                if min(mismatched) == host:
+                    offer_pair("tool-scope-contradiction", low, high, _tool_detail)
+
+        def covers_compatible(
+            group_a: frozenset[str] | None, group_b: frozenset[str] | None
+        ) -> bool:
+            if group_a is None or group_b is None:
+                return True
+            return group_a.isdisjoint(group_b)
+
+        for low, high in _sweep_pairs(
+            records, windowed, lambda idx: records[idx].covers, covers_compatible
+        ):
+            offer_pair("tracker-cover-contradiction", low, high, _cover_detail)
+
+        named = [idx for idx in windowed if records[idx].operator is not None]
+        for low, high in _sweep_pairs(
+            records,
+            named,
+            lambda idx: records[idx].operator,
+            lambda _a, _b: True,
+        ):
+            offer_pair("operator-mismatch", low, high, _operator_detail)
+
+        out = [
+            {"kind": kind, "grants": list(grants), "detail": detail}
+            for kind, grants, detail in rows.top
+        ]
+        if rows.count > MAX_GRANT_CONFLICTS:
+            more = rows.count - MAX_GRANT_CONFLICTS
+            out.append(
+                {
+                    "kind": CONFLICTS_TRUNCATED_KIND,
+                    "grants": [],
+                    "detail": f"{more} more conflicts not listed",
+                }
+            )
+        return out
+    except Exception:
+        return []
+
+
 #: Watchdog states that trigger a grant-expiry notice via the
 #: configured findings-sync tracker (O11). A healthy (``valid``) grant
 #: stays silent; ``missing``/``invalid`` are operator-input problems,
@@ -1035,7 +1500,7 @@ def _exit_code(state: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``check`` (lifecycle), ``readiness`` (live check), ``revoke``."""
+    """CLI: ``check``, ``readiness``, ``conflicts`` and ``revoke``."""
     parser = argparse.ArgumentParser(
         description="RoE lifecycle watcher — warn before RoE expiry, never renew"
     )
@@ -1063,6 +1528,26 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to the RoE grant audit JSONL log: expired grants append "
         "a grant-expired row here and the log contents are included in "
         "the output (audit_log key with --json). Audit writes never raise.",
+    )
+    conflicts_parser = sub.add_parser(
+        "conflicts",
+        help="Detect contradictions between concurrent RoE grants (read-only)",
+    )
+    conflicts_parser.add_argument(
+        "--artifact",
+        dest="artifacts",
+        action="append",
+        required=True,
+        help="Path to a RoE JSON artifact (repeat for concurrent grants)",
+    )
+    conflicts_parser.add_argument(
+        "--now",
+        default=None,
+        help="ISO-8601 UTC clock: only grants active then are compared "
+        "(default: overlap-only, no clock read)",
+    )
+    conflicts_parser.add_argument(
+        "--json", action="store_true", help="Output the conflict list as JSON"
     )
     ready = sub.add_parser(
         "readiness", help="Post-RoE-signing live-gateway readiness check"
@@ -1173,6 +1658,29 @@ def main(argv: list[str] | None = None) -> int:
                         f"{entry.get('artifact_path', '?')}"
                     )
         return _exit_code(result["state"])
+    if args.command == "conflicts":
+        conflict_now: datetime | None = None
+        if args.now is not None:
+            conflict_now = _parse_now_override(args.now)
+            if conflict_now is None:
+                print(
+                    f"error: --now is not a parseable datetime: {args.now!r}",
+                    file=sys.stderr,
+                )
+                return 2
+        conflicts = grant_conflicts(list(args.artifacts or []), now=conflict_now)
+        if args.json:
+            print(json.dumps(conflicts, indent=2))
+        elif conflicts:
+            for row in conflicts:
+                if len(row["grants"]) != 2:
+                    print(f"{row['kind']}: {row['detail']}")
+                    continue
+                id_a, id_b = row["grants"]
+                print(f"{row['kind']}: {id_a} vs {id_b} - {row['detail']}")
+        else:
+            print("roe conflicts: none")
+        return 3 if conflicts else 0
     if args.command == "readiness":
         now = _parse_now_override(args.now)
         if now is None:
