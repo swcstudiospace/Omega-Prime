@@ -228,7 +228,11 @@ def heartbeat_roe_renewals(
     Reads the RoE artifact from ``job["context"]["roe_artifact"]``,
     ``job["roe_artifact"]``, or ``job["roe_artifact_path"]`` (inline
     document dict or artifact path — whatever :func:`renewal_reminders`
-    accepts). Each newly crossed renewal threshold becomes one
+    accepts; the plural ``roe_artifacts`` / ``roe_artifact_paths`` keys
+    are read the same way). A list/tuple of artifacts — several
+    concurrent grants on one heartbeat — is iterated and merged into a
+    single digest, deduped per (artifact_id, threshold-or-kind) so each
+    grant reminds once. Each newly crossed renewal threshold becomes one
     ``{"kind": ROE_RENEWAL_KIND, "threshold", "detail", ...}`` entry with
     the threshold in the detail string. When the job context (or job)
     also carries a complete ``graph`` mapping, each reminder is
@@ -253,8 +257,14 @@ def heartbeat_roe_renewals(
         context = job.get("context")
         if isinstance(context, dict):
             artifact = context.get("roe_artifact", context.get("roe_artifact_path"))
+            if artifact is None:
+                artifact = context.get(
+                    "roe_artifacts", context.get("roe_artifact_paths")
+                )
         if artifact is None:
             artifact = job.get("roe_artifact", job.get("roe_artifact_path"))
+            if artifact is None:
+                artifact = job.get("roe_artifacts", job.get("roe_artifact_paths"))
         if artifact is None:
             return []
         log_path = audit_log

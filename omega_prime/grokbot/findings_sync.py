@@ -81,11 +81,29 @@ The API key comes from ``redteam.findings_sync.opsgenie_api_key``;
 blank means off (fail-closed, never guess). Pushed rows are marked
 with a deterministic ``og:<dedupe_hash>`` ref, so idempotency is
 identical to the other modes.
+Jira mode (``redteam.findings_sync.tracker: "jira"``) creates the
+same rows as Jira issues through the Jira REST API v3 on the same
+runner seam (with the webhook-retry transport, authorizing via a
+``Authorization: Basic`` header built from ``email:api_token``).
+Each row is first looked up with a JQL search
+(``labels = "dedupe:<hash>" AND project = <key>``) so an existing
+issue for the same finding is updated (``PUT /issue/{key}``) rather
+than duplicated; otherwise a new issue is created
+(``POST /issue``) with ``summary`` (the finding title),
+``description`` (the finding details in Atlassian document format),
+``labels`` (including the ``dedupe:<hash>`` label), ``project``,
+and ``issuetype``. Connection details come from the
+``redteam.findings_sync.jira`` mapping
+(``base_url``/``email``/``api_token``/``project_key``); blank or
+incomplete means off (fail-closed, never guess). Pushed rows are
+marked with a deterministic ``jira:<issuekey>:<dedupe_hash>`` ref,
+so idempotency is identical to the other modes.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import json
 import random
@@ -123,7 +141,16 @@ DEFAULT_LABELS: dict[str, list[str]] = {
 UNKNOWN_SEVERITY_LABELS = ["redteam"]
 
 #: Supported tracker backends for the findings sync.
-TRACKERS = ("github", "linear", "slack", "teams", "graph", "pagerduty", "opsgenie")
+TRACKERS = (
+    "github",
+    "linear",
+    "slack",
+    "teams",
+    "graph",
+    "pagerduty",
+    "opsgenie",
+    "jira",
+)
 
 #: Default tracker backend (the existing GitHub-issues mode, unchanged).
 DEFAULT_TRACKER = "github"
@@ -151,6 +178,17 @@ NO_OPSGENIE_API_KEY_MESSAGE = "no opsgenie api key configured"
 #: Message used when tracker=pagerduty but no routing key is configured
 #: (fail-closed, never guess).
 NO_PAGERDUTY_ROUTING_KEY_MESSAGE = "no pagerduty routing key configured"
+
+#: Message used when tracker=jira but the ``jira`` mapping is blank or
+#: incomplete (fail-closed, never guess).
+NO_JIRA_CONFIG_MESSAGE = "no jira config configured"
+
+#: Required ``redteam.findings_sync.jira`` fields (all non-blank).
+JIRA_FIELDS = ("base_url", "email", "api_token", "project_key")
+
+#: Default Jira issue type for created issues (operator-overridable via
+#: the ``jira`` mapping's ``issue_type`` entry).
+JIRA_DEFAULT_ISSUE_TYPE = "Task"
 
 #: PagerDuty Events API v2 enqueue endpoint (``event_action: trigger``).
 PAGERDUTY_EVENTS_URL = "https://events.pagerduty.com/v2/enqueue"
@@ -1284,6 +1322,294 @@ def sync_findings_opsgenie(
     return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
 
 
+def _jira_config_for_node(node: Mapping[str, Any]) -> dict[str, str]:
+    """Normalized ``jira`` mapping for a findings-sync node.
+
+    Always returns all :data:`JIRA_FIELDS` keys (missing/non-string
+    values normalize to ``""``); blank/missing config therefore reads
+    as all-blank, which callers treat as feature-off/fail-closed.
+    """
+    raw = node.get("jira", {})
+    if not isinstance(raw, dict):
+        raw = {}
+    cfg: dict[str, str] = {}
+    for field in JIRA_FIELDS:
+        value = raw.get(field, "")
+        cfg[field] = value.strip() if isinstance(value, str) else ""
+    return cfg
+
+
+def _jira_config_complete(cfg: Mapping[str, Any]) -> bool:
+    """True when every :data:`JIRA_FIELDS` field is a non-blank string."""
+    return all(
+        isinstance(cfg.get(field), str) and bool(cfg.get(field, "").strip())
+        for field in JIRA_FIELDS
+    )
+
+
+def _jira_basic_auth(email: str, api_token: str) -> str:
+    """``Authorization: Basic`` header value for Jira Cloud (``email:token``)."""
+    raw = f"{email}:{api_token}".encode()
+    return f"Basic {base64.b64encode(raw).decode('ascii')}"
+
+
+def _jira_search_jql(dedupe_hash: str, project_key: str) -> str:
+    """JQL locating the existing issue for one finding (dedupe/update)."""
+    return f'labels = "dedupe:{dedupe_hash}" AND project = {project_key}'
+
+
+def _jira_issue_key_from_stdout(stdout: Any) -> str:
+    """Extract a Jira issue key from a REST API stdout body.
+
+    Accepts a create-issue body (``{"key": "PROJ-123", ...}``) or a
+    search body (``{"issues": [{"key": "PROJ-123", ...}]}``); returns
+    ``""`` when no non-blank string key is present.
+    """
+    if isinstance(stdout, bytes):
+        try:
+            stdout = stdout.decode("utf-8", "replace")
+        except Exception:
+            return ""
+    if not isinstance(stdout, str):
+        return ""
+    try:
+        payload = json.loads(stdout)
+    except ValueError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    key = payload.get("key", "")
+    if isinstance(key, str) and key.strip():
+        return key.strip()
+    issues = payload.get("issues", [])
+    if isinstance(issues, list) and issues:
+        first = issues[0]
+        if isinstance(first, dict):
+            first_key = first.get("key", "")
+            if isinstance(first_key, str) and first_key.strip():
+                return first_key.strip()
+    return ""
+
+
+def jira_payload(
+    row: Mapping[str, Any],
+    project_key: str = "",
+    issue_type: str = JIRA_DEFAULT_ISSUE_TYPE,
+    overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Jira REST API v3 issue for one finding row.
+
+    ``summary`` is the issue title (:func:`issue_title`); ``description``
+    carries the finding details (:func:`issue_body`) as an Atlassian
+    document with a single plain-text paragraph block; ``labels``
+    combines the severity labels (:func:`labels_for_severity`) with the
+    ``dedupe:<hash>`` label used by the JQL update lookup; and
+    ``project``/``issuetype`` carry ``project_key``/``issue_type``
+    (``project`` is omitted when ``project_key`` is blank). Fixed
+    fields only — never the raw gateway payload (threat T-79-11).
+    """
+    digest = str(row.get("dedupe_hash", ""))
+    labels = labels_for_severity(row.get("severity"), overrides)
+    dedupe_label = f"dedupe:{digest}"
+    if dedupe_label not in labels:
+        labels.append(dedupe_label)
+    fields: dict[str, Any] = {
+        "summary": issue_title(row),
+        "description": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": issue_body(row)}],
+                }
+            ],
+        },
+        "issuetype": {"name": issue_type},
+        "labels": labels,
+    }
+    if isinstance(project_key, str) and project_key.strip():
+        fields["project"] = {"key": project_key.strip()}
+    return {"fields": fields}
+
+
+def sync_findings_jira(
+    reports_dir: str | Path | None,
+    *,
+    base_url: str,
+    email: str,
+    api_token: str,
+    project_key: str,
+    issue_type: str = JIRA_DEFAULT_ISSUE_TYPE,
+    runner: GhRunner | None = None,
+    overrides: Mapping[str, Any] | None = None,
+    dry_run: bool = False,
+    **kw: Any,
+) -> dict[str, Any]:
+    """Create/update every not-yet-synced finding row as a Jira issue.
+
+    Same rows and idempotency marking as :func:`sync_findings` (rows
+    carrying ``issue_url`` are skipped); only the transport differs —
+    one Jira REST API v3 round-trip per row through ``gh api`` on the
+    same runner seam, authorizing via an ``Authorization: Basic``
+    header built from ``email:api_token``. Each row is first looked up
+    with a JQL search
+    (``GET {base_url}/rest/api/3/search/jql`` with
+    ``labels = "dedupe:<hash>" AND project = <key>``) so an existing
+    issue for the same finding is updated
+    (``PUT {base_url}/rest/api/3/issue/{key}``) rather than
+    duplicated; otherwise a new issue is created
+    (``POST {base_url}/rest/api/3/issue``, see :func:`jira_payload`).
+    A pushed row is marked with a deterministic
+    ``jira:<issuekey>:<dedupe_hash>`` ref (falling back to
+    ``jira:<dedupe_hash>`` when the API response carries no issue
+    key). The webhook-retry transport
+    (:func:`_run_with_webhook_retry`) applies to every call. Failure
+    semantics mirror :func:`sync_findings`: earlier-in-run pushes
+    persist, the failed row stays unsynced, and a
+    :class:`GhApiError` is raised. With zero pushes (or ``dry_run``)
+    the store file is byte-identical and the runner is never called
+    in dry-run mode.
+
+    A blank ``base_url``/``email``/``api_token``/``project_key``
+    raises :class:`ValueError` (fail-closed, never guess). The email
+    and API token ride only in the ``-H`` argv header — they are never
+    logged, never rendered, and never echoed beyond the argv itself
+    (the introspection payloads carry the issue fields and JQL only).
+
+    Returns ``{"pushed": [...], "skipped": [...], "dry_run": bool}``
+    with the same entry shapes as :func:`sync_findings`.
+    """
+    for name, value in (
+        ("base_url", base_url),
+        ("email", email),
+        ("api_token", api_token),
+        ("project_key", project_key),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(NO_JIRA_CONFIG_MESSAGE)
+    base_url = base_url.strip().rstrip("/")
+    email = email.strip()
+    api_token = api_token.strip()
+    project_key = project_key.strip()
+    if not isinstance(issue_type, str) or not issue_type.strip():
+        issue_type = JIRA_DEFAULT_ISSUE_TYPE
+    else:
+        issue_type = issue_type.strip()
+    if overrides is None:
+        maybe_overrides = kw.get("labels")
+        if isinstance(maybe_overrides, dict):
+            overrides = maybe_overrides
+    run = runner if runner is not None else _default_runner
+    auth_header = f"Authorization: {_jira_basic_auth(email, api_token)}"
+
+    rows = load_findings(reports_dir)
+    pushed: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    dirty = False
+
+    for row in rows:
+        digest = str(row.get("dedupe_hash", ""))
+        if row.get("issue_url"):
+            skipped.append(digest)
+            continue
+        jql = _jira_search_jql(digest, project_key)
+        search_url = f"{base_url}/rest/api/3/search/jql"
+        search_argv = [
+            "gh",
+            "api",
+            search_url,
+            "--method",
+            "GET",
+            "-H",
+            auth_header,
+            "-f",
+            f"jql={jql}",
+        ]
+        search_payload: dict[str, Any] = {"jql": jql, "project_key": project_key}
+
+        if dry_run:
+            pushed.append({"dedupe_hash": digest, "issue_url": ""})
+            continue
+
+        try:
+            search_completed = _run_with_webhook_retry(run, search_argv, search_payload)
+        except FindingsSyncError:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise
+        except Exception as exc:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise GhApiError(f"gh runner failed: {exc}") from exc
+        existing_key = _jira_issue_key_from_stdout(
+            getattr(search_completed, "stdout", "")
+        )
+        issue = jira_payload(row, project_key, issue_type, overrides)
+        fields = dict(issue["fields"])
+        if existing_key:
+            update_fields = {
+                key: fields[key]
+                for key in ("summary", "description", "labels")
+                if key in fields
+            }
+            update_payload: dict[str, Any] = {"fields": update_fields}
+            update_fields_json = json.dumps(update_fields)
+            update_argv = [
+                "gh",
+                "api",
+                f"{base_url}/rest/api/3/issue/{existing_key}",
+                "--method",
+                "PUT",
+                "-H",
+                auth_header,
+                "-f",
+                f"fields={update_fields_json}",
+            ]
+            try:
+                _run_with_webhook_retry(run, update_argv, update_payload)
+            except FindingsSyncError:
+                _persist_if_dirty(reports_dir, dirty, rows)
+                raise
+            except Exception as exc:
+                _persist_if_dirty(reports_dir, dirty, rows)
+                raise GhApiError(f"gh runner failed: {exc}") from exc
+            issue_key = existing_key
+        else:
+            create_fields_json = json.dumps(fields)
+            create_argv = [
+                "gh",
+                "api",
+                f"{base_url}/rest/api/3/issue",
+                "--method",
+                "POST",
+                "-H",
+                auth_header,
+                "-f",
+                f"fields={create_fields_json}",
+            ]
+            try:
+                create_completed = _run_with_webhook_retry(run, create_argv, issue)
+            except FindingsSyncError:
+                _persist_if_dirty(reports_dir, dirty, rows)
+                raise
+            except Exception as exc:
+                _persist_if_dirty(reports_dir, dirty, rows)
+                raise GhApiError(f"gh runner failed: {exc}") from exc
+            issue_key = _jira_issue_key_from_stdout(
+                getattr(create_completed, "stdout", "")
+            )
+        if issue_key:
+            row["issue_url"] = f"jira:{issue_key}:{digest}"
+        else:
+            row["issue_url"] = f"jira:{digest}"
+        row["synced_at"] = utc_now_rfc3339()
+        dirty = True
+        pushed.append({"dedupe_hash": digest, "issue_url": row["issue_url"]})
+
+    if dirty and not dry_run:
+        _write_rows_atomic(findings_path(reports_dir), rows)
+    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+
+
 def _graph_token_url(tenant_id: str) -> str:
     """Token endpoint for a tenant (client-credentials flow)."""
     return GRAPH_TOKEN_URL_TEMPLATE.format(tenant=tenant_id)
@@ -1711,9 +2037,10 @@ def tick(
     ``labels``, ``linear_team_id``, ``slack_webhook_url``,
     ``teams_webhook_url``, ``graph``, ``pagerduty_routing_key``,
     ``pagerduty_severity_map``, ``opsgenie_api_key``,
-    ``opsgenie_priority_map``) from ``config``
+    ``opsgenie_priority_map``, ``jira``) from ``config``
     (loads via ``load_config()`` when omitted). Disabled, repo-less,
     team-less, webhook-less, graph-less, routing-key-less, api-key-less,
+    jira-config-less,
     or unknown-tracker results are structured dicts — never exceptions,
     never a new cron kind. The graph branch runs when ``tracker`` is
     ``"graph"`` or when the ``graph`` mapping is complete; the sync
@@ -1812,6 +2139,31 @@ def tick(
             runner=runner,
             dry_run=dry_run,
             priority_map=priority_map if isinstance(priority_map, dict) else None,
+        )
+        result["disabled"] = False
+        return result
+    if tracker == "jira":
+        jira_cfg = _jira_config_for_node(node)
+        if not _jira_config_complete(jira_cfg):
+            return _tracker_error(NO_JIRA_CONFIG_MESSAGE, dry_run)
+        raw_jira = node.get("jira", {})
+        raw_issue_type = (
+            raw_jira.get("issue_type", "") if isinstance(raw_jira, dict) else ""
+        )
+        issue_type = (
+            raw_issue_type.strip()
+            if isinstance(raw_issue_type, str) and raw_issue_type.strip()
+            else JIRA_DEFAULT_ISSUE_TYPE
+        )
+        result = sync_findings_jira(
+            reports_directory,
+            base_url=jira_cfg["base_url"],
+            email=jira_cfg["email"],
+            api_token=jira_cfg["api_token"],
+            project_key=jira_cfg["project_key"],
+            issue_type=issue_type,
+            runner=runner,
+            dry_run=dry_run,
         )
         result["disabled"] = False
         return result
@@ -2002,6 +2354,59 @@ def _main_opsgenie(
     return 0
 
 
+def _main_jira(
+    directory: str | Path | None,
+    *,
+    base_url: str,
+    email: str,
+    api_token: str,
+    project_key: str,
+    issue_type: str = JIRA_DEFAULT_ISSUE_TYPE,
+    dry_run: bool = False,
+) -> int:
+    """Run the Jira branch of the CLI (dry-run aware)."""
+    if dry_run:
+        try:
+            result = sync_findings_jira(
+                directory if directory is not None else reports_dir(),
+                base_url=base_url,
+                email=email,
+                api_token=api_token,
+                project_key=project_key,
+                issue_type=issue_type,
+                dry_run=True,
+            )
+        except FindingsSyncError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for entry in result["pushed"]:
+            print(f"would push {entry['dedupe_hash']}")
+        for digest in result["skipped"]:
+            print(f"skip (already synced) {digest}")
+        return 0
+
+    try:
+        result = sync_findings_jira(
+            directory if directory is not None else reports_dir(),
+            base_url=base_url,
+            email=email,
+            api_token=api_token,
+            project_key=project_key,
+            issue_type=issue_type,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except FindingsSyncError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for entry in result["pushed"]:
+        print(f"pushed {entry['dedupe_hash']} -> {entry['issue_url']}")
+    for digest in result["skipped"]:
+        print(f"skip (already synced) {digest}")
+    return 0
+
+
 def _main_linear(directory: str | Path | None, team_id: str, dry_run: bool) -> int:
     """Run the Linear branch of the CLI (dry-run aware)."""
     if dry_run:
@@ -2089,7 +2494,7 @@ def _main_graph(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``findings_sync [--tracker github|linear|slack|teams|graph|pagerduty|opsgenie] [--mode opsgenie] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
+    """CLI: ``findings_sync [--tracker github|linear|slack|teams|graph|pagerduty|opsgenie|jira] [--mode jira] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
     parser = argparse.ArgumentParser(
         prog="findings_sync",
         description="Push unsynced red-team findings to tracker issues (one-way).",
@@ -2097,12 +2502,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tracker",
         default="",
-        help="Tracker backend: github (default), linear, slack, teams, graph, pagerduty, or opsgenie; blank means config",
+        help="Tracker backend: github (default), linear, slack, teams, graph, pagerduty, opsgenie, or jira; blank means config",
     )
     parser.add_argument(
         "--mode",
         default="",
-        help="Mode alias for --tracker (graph selects the Microsoft Graph API sender, pagerduty the PagerDuty Events API sender, opsgenie the Opsgenie Alert API sender); blank means config",
+        help="Mode alias for --tracker (graph selects the Microsoft Graph API sender, pagerduty the PagerDuty Events API sender, opsgenie the Opsgenie Alert API sender, jira the Jira REST API sender); blank means config",
     )
     parser.add_argument("--repo", default="", help="Target repo OWNER/NAME")
     parser.add_argument("--linear-team-id", default="", help="Linear team ID override")
@@ -2117,6 +2522,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--opsgenie-api-key", default="", help="Opsgenie API key override"
+    )
+    parser.add_argument("--jira-base-url", default="", help="Jira base URL override")
+    parser.add_argument("--jira-email", default="", help="Jira Cloud email override")
+    parser.add_argument("--jira-api-token", default="", help="Jira API token override")
+    parser.add_argument(
+        "--jira-project-key", default="", help="Jira project key override"
+    )
+    parser.add_argument(
+        "--jira-issue-type", default="", help="Jira issue type override"
     )
     parser.add_argument("--reports-dir", default="", help="Reports dir override")
     parser.add_argument(
@@ -2216,6 +2630,33 @@ def main(argv: list[str] | None = None) -> int:
             args.dry_run,
             priority_map if isinstance(priority_map, dict) else None,
         )
+    if tracker == "jira":
+        jira_cfg = _jira_config_for_node(node)
+        base_url = args.jira_base_url.strip() or jira_cfg["base_url"]
+        email = args.jira_email.strip() or jira_cfg["email"]
+        api_token = args.jira_api_token.strip() or jira_cfg["api_token"]
+        project_key = args.jira_project_key.strip() or jira_cfg["project_key"]
+        if not (base_url and email and api_token and project_key):
+            print(f"error: {NO_JIRA_CONFIG_MESSAGE}", file=sys.stderr)
+            return 2
+        raw_jira = node.get("jira", {})
+        cfg_issue_type = (
+            raw_jira.get("issue_type", "") if isinstance(raw_jira, dict) else ""
+        )
+        issue_type = (
+            args.jira_issue_type.strip()
+            or (cfg_issue_type.strip() if isinstance(cfg_issue_type, str) else "")
+            or JIRA_DEFAULT_ISSUE_TYPE
+        )
+        return _main_jira(
+            directory,
+            base_url=base_url,
+            email=email,
+            api_token=api_token,
+            project_key=project_key,
+            issue_type=issue_type,
+            dry_run=args.dry_run,
+        )
     if tracker != "github":
         print(f"error: unknown tracker: {tracker}", file=sys.stderr)
         return 2
@@ -2276,9 +2717,12 @@ __all__ = [
     "GRAPH_MESSAGES_URL_TEMPLATE",
     "GRAPH_SCOPE",
     "GRAPH_TOKEN_URL_TEMPLATE",
+    "JIRA_DEFAULT_ISSUE_TYPE",
+    "JIRA_FIELDS",
     "LINEAR_ISSUE_MUTATION",
     "LINEAR_PRIORITIES",
     "NO_GRAPH_CONFIG_MESSAGE",
+    "NO_JIRA_CONFIG_MESSAGE",
     "NO_LINEAR_TEAM_MESSAGE",
     "NO_OPSGENIE_API_KEY_MESSAGE",
     "NO_PAGERDUTY_ROUTING_KEY_MESSAGE",
@@ -2311,6 +2755,7 @@ __all__ = [
     "graph_message",
     "issue_body",
     "issue_title",
+    "jira_payload",
     "labels_for_severity",
     "main",
     "opsgenie_payload",
@@ -2322,6 +2767,7 @@ __all__ = [
     "slack_message",
     "sync_findings",
     "sync_findings_graph",
+    "sync_findings_jira",
     "sync_findings_linear",
     "sync_findings_opsgenie",
     "sync_findings_pagerduty",

@@ -12,6 +12,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -63,6 +64,7 @@ class JobStore:
         runner: Callable[[str], Any],
         *,
         skip_kind: str | None = None,
+        skip_kinds: tuple[str, ...] | list[str] | None = None,
     ) -> list[dict]:
         """Run each due job that is not complete. Leave a later job unchanged.
 
@@ -71,13 +73,17 @@ class JobStore:
         ``due_at`` to ``now + interval_seconds``. A one-shot job completes.
         Each execution is recorded in the job's bounded history, and a job
         already claimed or completed for ``now`` is not re-run. Jobs of
-        ``skip_kind`` are left untouched (another driver owns them).
+        ``skip_kind`` (or in ``skip_kinds``) are left untouched (another
+        driver owns them).
         """
+        skipped: set[str] = set(skip_kinds) if skip_kinds else set()
+        if skip_kind is not None:
+            skipped.add(skip_kind)
         ran: list[dict] = []
         for job in self.jobs:
             if job.get("completed"):
                 continue
-            if skip_kind is not None and job.get("kind") == skip_kind:
+            if job.get("kind") in skipped:
                 continue
             if job["due_at"] > now:
                 continue
@@ -313,6 +319,8 @@ def run_due_jobs(
 
     ``desk_lead_pass`` jobs are skipped: they are driven by
     :func:`run_desk_lead_passes` and must never burn a model call here.
+    ``pin_bump_schedule`` jobs are skipped for the same reason: they
+    are driven by :func:`tick_pin_bump_schedules`.
     """
 
     def runner(prompt: str) -> str:
@@ -335,7 +343,7 @@ def run_due_jobs(
         response = result.get("final_response") if isinstance(result, dict) else ""
         return response if isinstance(response, str) else ""
 
-    return store.tick(now, runner, skip_kind=DESK_LEAD_KIND)
+    return store.tick(now, runner, skip_kinds=(DESK_LEAD_KIND, PIN_BUMP_SCHEDULE_KIND))
 
 
 #: Job kind marker stored on RoE watchdog jobs (K11). An independent
@@ -543,9 +551,317 @@ def tick_roe_watchdog(store: JobStore, now: Any, checker: Any = None) -> list[di
     return ran
 
 
+#: Job kind marker stored on pin-bump schedule jobs (L9). A scheduled
+#: pin-bump re-runs the audit chain on a cron cadence with audit-only
+#: semantics — no mutations — and only opens the normal bump PR path
+#: for runs whose verdict is improved (and, when the job's stored
+#: config enables ``--semver-check``, whose fixes are all
+#: semver-compatible). Any other verdict is recorded in the job digest
+#: and nothing else happens. Never stored on any other kind —
+#: pre-existing kinds are unchanged.
+PIN_BUMP_SCHEDULE_KIND = "pin_bump_schedule"
+
+#: Bounded per-job run history, mirroring :func:`tick_desk_lead_passes`.
+PIN_BUMP_SCHEDULE_HISTORY_LIMIT = 20
+
+#: Accepted minute/hour/day-of-month/month/day-of-week ranges for one
+#: five-field cron expression (day-of-week accepts 0-7; 7 is Sunday).
+_PIN_BUMP_CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+
+
+def _pin_bump_cron_atom(atom: str, lo: int, hi: int) -> bool:
+    """True when one comma-separated cron atom is in range for ``lo``-``hi``."""
+    if not atom:
+        return False
+    if atom == "*":
+        return True
+    if "/" in atom:
+        base, _, step_text = atom.partition("/")
+        if not step_text.isdigit() or int(step_text) < 1:
+            return False
+        if not base:
+            return False
+        if base == "*":
+            base = f"{lo}-{hi}"
+        atom = base
+        if atom == "*":
+            return True
+    if "-" in atom:
+        start_text, _, end_text = atom.partition("-")
+        if not start_text.isdigit() or not end_text.isdigit():
+            return False
+        start, end = int(start_text), int(end_text)
+        return lo <= start <= end <= hi
+    return atom.isdigit() and lo <= int(atom) <= hi
+
+
+def validate_pin_bump_cron(expr: str) -> str:
+    """Normalized cron expression, or raise ``ValueError`` (fail-closed).
+
+    Accepts a five-field ``minute hour dom month dow`` expression using
+    ``*``, ``*/step``, ranges, steps over ranges, and comma lists of
+    those atoms. Anything else — wrong arity, out-of-range values,
+    names, ``@`` shorthands — is a usage error.
+    """
+    if not isinstance(expr, str):
+        raise ValueError("cron expression must be a string")
+    fields = expr.split()
+    if len(fields) != 5:
+        raise ValueError(
+            "cron expression needs 5 fields "
+            f"(minute hour dom month dow), got {len(fields)}"
+        )
+    for field, (lo, hi) in zip(fields, _PIN_BUMP_CRON_RANGES):
+        atoms = field.split(",")
+        if not atoms or any(not _pin_bump_cron_atom(atom, lo, hi) for atom in atoms):
+            raise ValueError(f"invalid cron field: {field!r}")
+    return " ".join(fields)
+
+
+def _pin_bump_field_matches(field: str, lo: int, hi: int, value: int) -> bool:
+    """True when a validated cron field fires for ``value``."""
+    for atom in field.split(","):
+        step = 1
+        if "/" in atom:
+            atom, _, step_text = atom.partition("/")
+            step = int(step_text)
+            if atom == "*":
+                atom = f"{lo}-{hi}"
+            elif atom.isdigit():
+                # Vixie ``N/step`` means ``N-hi/step``.
+                atom = f"{atom}-{hi}"
+        if atom == "*":
+            span_lo, span_hi = lo, hi
+        elif "-" in atom:
+            start_text, _, end_text = atom.partition("-")
+            span_lo, span_hi = int(start_text), int(end_text)
+        else:
+            span_lo = span_hi = int(atom)
+        candidates = set(range(span_lo, span_hi + 1, step))
+        # Day-of-week 7 is Sunday (0); normalize both sides.
+        normalized = {7 if hi == 7 and v == 0 else v for v in candidates}
+        probe = 7 if hi == 7 and value == 0 and 7 in normalized else value
+        if probe in normalized or value in candidates:
+            return True
+    return False
+
+
+def _pin_bump_matches(expr: str, moment: datetime) -> bool:
+    """True when validated ``expr`` fires at ``moment`` (minute precision)."""
+    fields = expr.split()
+    values = (
+        moment.minute,
+        moment.hour,
+        moment.day,
+        moment.month,
+        moment.isoweekday() % 7,
+    )
+    return all(
+        _pin_bump_field_matches(field, lo, hi, value)
+        for field, (lo, hi), value in zip(fields, _PIN_BUMP_CRON_RANGES, values)
+    )
+
+
+def pin_bump_next_due(cron_expr: str, after: int | float) -> float:
+    """Next UTC fire time strictly after ``after`` for ``cron_expr``.
+
+    Raises ``ValueError`` for an invalid expression or when no fire
+    time exists within two years (fail-closed — a never-firing shape
+    such as Feb 30 is never silently scheduled).
+    """
+    expr = validate_pin_bump_cron(cron_expr)
+    cursor = int(after) - (int(after) % 60) + 60
+    for _ in range(2 * 366 * 24 * 60):
+        moment = datetime.fromtimestamp(cursor, tz=UTC)
+        if _pin_bump_matches(expr, moment):
+            return float(cursor)
+        cursor += 60
+    raise ValueError(f"cron expression never fires: {expr!r}")
+
+
+def schedule_pin_bump(
+    store: JobStore,
+    *,
+    cron_expr: str,
+    name: str = "pin-bump",
+    config: dict | None = None,
+    now: int | float | None = None,
+) -> str:
+    """Schedule a recurring pin-bump audit and return its id.
+
+    Mirrors :func:`schedule_desk_lead_pass`: validates the cron
+    expression fail-closed (``ValueError`` — nothing is registered),
+    then stamps ``kind`` + ``schedule_name`` + ``cron_expr`` + the
+    caller's argv-echo ``config`` on the stored job. A duplicate
+    ``name`` replaces the previous job with that name. ``last_verdict``
+    and ``last_run`` start unset and are filled by each tick.
+    """
+    expr = validate_pin_bump_cron(cron_expr)
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("schedule name must be a non-empty string")
+    label = name.strip()
+    stamp = time.time() if now is None else float(now)
+    for index, job in enumerate(store.jobs):
+        if (
+            isinstance(job, dict)
+            and job.get("kind") == PIN_BUMP_SCHEDULE_KIND
+            and job.get("schedule_name") == label
+        ):
+            store.jobs.pop(index)
+            break
+    job_id = store.schedule(
+        f"pin-bump-schedule {label} {expr}",
+        pin_bump_next_due(expr, stamp),
+    )
+    for job in store.jobs:
+        if isinstance(job, dict) and job.get("id") == job_id:
+            job["kind"] = PIN_BUMP_SCHEDULE_KIND
+            job["schedule_name"] = label
+            job["cron_expr"] = expr
+            job["pin_bump_config"] = dict(config) if config else {}
+            job["last_verdict"] = None
+            job["last_run"] = None
+            break
+    store._save()
+    return job_id
+
+
+def list_pin_bump_schedules(store: JobStore) -> list[dict]:
+    """All pin-bump schedule jobs, complete or not."""
+    return [
+        job
+        for job in store.jobs
+        if isinstance(job, dict) and job.get("kind") == PIN_BUMP_SCHEDULE_KIND
+    ]
+
+
+def _default_pin_bump_audit(job: dict, root: Any) -> dict:
+    """Run one scheduled audit with audit-only semantics (no mutations)."""
+    from omega_prime.grokbot import pin_bump as pin_bump_mod
+
+    return pin_bump_mod.audit_scheduled_job(
+        dict(job.get("pin_bump_config") or {}), root=root
+    )
+
+
+def _default_pin_bump_apply(job: dict, root: Any) -> Any:
+    """Open the normal bump PR path for one scheduled run."""
+    from omega_prime.grokbot import pin_bump as pin_bump_mod
+
+    return pin_bump_mod.apply_scheduled_bump(
+        dict(job.get("pin_bump_config") or {}), root=root
+    )
+
+
+def tick_pin_bump_schedules(
+    store: JobStore,
+    now: int | float,
+    *,
+    audit: Callable[[dict], Any] | None = None,
+    bump: Callable[[dict], Any] | None = None,
+    root: str | Path | None = None,
+) -> list[dict]:
+    """Run each due pin-bump schedule once, in order.
+
+    Each tick runs the audit chain with audit-only semantics (no
+    mutations) and opens the normal bump PR path only when the
+    verdict is ``improved`` — and, when the job's stored config
+    enables ``--semver-check``, only when every fix is
+    semver-compatible. Any other outcome records the verdict in the
+    job digest and does nothing. ``audit(job)`` returns a mapping
+    with ``verdict`` (and ``semver_compatible`` when relevant);
+    ``bump(job)`` performs the PR path. Both default to the real
+    ``pin_bump`` seams (imported lazily so plain cron ticks never
+    load the runbook stack); pass explicit seams for hermetic tests.
+    Never raises: a failing seam records a fail-closed digest entry.
+    """
+    stamp = float(now)
+    if root is None:
+        root = store.path.parent.parent
+    ran: list[dict] = []
+    for job in store.jobs:
+        if not isinstance(job, dict):
+            continue
+        if job.get("kind") != PIN_BUMP_SCHEDULE_KIND or job.get("completed"):
+            continue
+        due_at = job.get("due_at")
+        if due_at is None or due_at > stamp:
+            continue
+        history = job.get("history")
+        if not isinstance(history, list):
+            history = []
+            job["history"] = history
+        if job.get("claimed_at") == stamp:
+            continue
+        if any(
+            isinstance(entry, dict) and entry.get("ran_at") == stamp
+            for entry in history
+        ):
+            continue
+        job["claimed_at"] = stamp
+        store._save()
+        config = job.get("pin_bump_config")
+        if not isinstance(config, dict):
+            config = {}
+        semver_on = bool(config.get("semver_check"))
+        try:
+            audit_seam = audit or (lambda j: _default_pin_bump_audit(j, root))
+            result = audit_seam(job)
+        except Exception as exc:
+            result = {"verdict": "error", "error": f"{type(exc).__name__}: {exc}"}
+        if not isinstance(result, dict):
+            result = {"verdict": "error", "error": "audit seam misbehaved"}
+        verdict = result.get("verdict")
+        semver_ok = bool(result.get("semver_compatible", True))
+        action = "none"
+        bump_result: Any = None
+        if verdict == "improved" and (not semver_on or semver_ok):
+            try:
+                bump_seam = bump or (lambda j: _default_pin_bump_apply(j, root))
+                bump_result = bump_seam(job)
+                action = "bump-pr"
+            except Exception as exc:
+                bump_result = f"{type(exc).__name__}: {exc}"
+                action = "bump-pr-failed"
+        job["last_result"] = {
+            "verdict": verdict,
+            "action": action,
+            "detail": bump_result,
+        }
+        job["last_verdict"] = verdict
+        job["last_run"] = stamp
+        history.append({"ran_at": stamp, "result": job["last_result"]})
+        del history[:-PIN_BUMP_SCHEDULE_HISTORY_LIMIT]
+        digest = job.get("pin_bump_digest")
+        if not isinstance(digest, list):
+            digest = []
+            job["pin_bump_digest"] = digest
+        digest.append(
+            {
+                "at": stamp,
+                "verdict": verdict,
+                "action": action,
+                "semver_compatible": semver_ok,
+                "detail": bump_result,
+            }
+        )
+        del digest[:-PIN_BUMP_SCHEDULE_HISTORY_LIMIT]
+        job["claimed_at"] = None
+        try:
+            job["due_at"] = pin_bump_next_due(job.get("cron_expr", "* * * * *"), stamp)
+        except ValueError:
+            job["completed"] = True
+        ran.append(job)
+    if ran:
+        store._save()
+    return ran
+
+
 __all__ = [
     "DESK_LEAD_KIND",
     "HISTORY_LIMIT",
+    "PIN_BUMP_SCHEDULE_HISTORY_LIMIT",
+    "PIN_BUMP_SCHEDULE_KIND",
     "ROE_WATCHDOG_HISTORY_LIMIT",
     "ROE_WATCHDOG_INTERVAL_SECONDS",
     "ROE_WATCHDOG_KIND",
@@ -553,11 +869,16 @@ __all__ = [
     "clear_roe_watchdog",
     "desk_lead_runner",
     "list_desk_lead_passes",
+    "list_pin_bump_schedules",
     "list_roe_watchdogs",
+    "pin_bump_next_due",
     "run_desk_lead_passes",
     "run_due_jobs",
     "schedule_desk_lead_pass",
+    "schedule_pin_bump",
     "schedule_roe_watchdog",
     "tick_desk_lead_passes",
+    "tick_pin_bump_schedules",
     "tick_roe_watchdog",
+    "validate_pin_bump_cron",
 ]

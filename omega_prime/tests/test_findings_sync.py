@@ -14,6 +14,7 @@ from omega_prime.grokbot import findings_sync
 from omega_prime.grokbot.findings_sync import (
     GRAPH_SCOPE,
     NO_GRAPH_CONFIG_MESSAGE,
+    NO_JIRA_CONFIG_MESSAGE,
     NO_LINEAR_TEAM_MESSAGE,
     NO_OPSGENIE_API_KEY_MESSAGE,
     NO_PAGERDUTY_ROUTING_KEY_MESSAGE,
@@ -27,6 +28,7 @@ from omega_prime.grokbot.findings_sync import (
     graph_message,
     issue_body,
     issue_title,
+    jira_payload,
     labels_for_severity,
     main,
     opsgenie_payload,
@@ -38,6 +40,7 @@ from omega_prime.grokbot.findings_sync import (
     slack_message,
     sync_findings,
     sync_findings_graph,
+    sync_findings_jira,
     sync_findings_linear,
     sync_findings_opsgenie,
     sync_findings_pagerduty,
@@ -2022,3 +2025,285 @@ def test_cli_opsgenie_missing_api_key_exits_two(tmp_path, monkeypatch, capsys):
     )
     assert main(["--tracker", "opsgenie", "--reports-dir", str(tmp_path)]) == 2
     assert "no opsgenie api key configured" in capsys.readouterr().err
+
+
+# Jira REST API v3 mode (L8) ----------------------------------------------------
+
+JIRA_BASE_URL = "https://example.atlassian.net"
+JIRA_EMAIL = "bot@example.com"
+JIRA_API_TOKEN = "atlassian-api-token"
+JIRA_PROJECT = "RED"
+
+
+def _jira_kwargs(**overrides):
+    kwargs = {
+        "base_url": JIRA_BASE_URL,
+        "email": JIRA_EMAIL,
+        "api_token": JIRA_API_TOKEN,
+        "project_key": JIRA_PROJECT,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+class FakeJira:
+    """Fake GhRunner answering JQL search + issue create/update; zero network."""
+
+    def __init__(self, existing=()):
+        self.calls: list[tuple[list[str], dict]] = []
+        self.existing = list(existing)
+        self.created = 0
+
+    def __call__(self, argv, data):
+        self.calls.append((list(argv), dict(data)))
+        url = argv[2]
+        if url.endswith("/rest/api/3/search/jql"):
+            issues = [{"key": key} for key in self.existing]
+            return SimpleNamespace(
+                returncode=0, stdout=json.dumps({"issues": issues}), stderr=""
+            )
+        if url.endswith("/rest/api/3/issue"):
+            self.created += 1
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {"key": f"{JIRA_PROJECT}-{100 + self.created}", "id": "10001"}
+                ),
+                stderr="",
+            )
+        if "/rest/api/3/issue/" in url:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+
+def _jira_config(**overrides):
+    node = {
+        "enabled": True,
+        "tracker": "jira",
+        "jira": {
+            "base_url": JIRA_BASE_URL,
+            "email": JIRA_EMAIL,
+            "api_token": JIRA_API_TOKEN,
+            "project_key": JIRA_PROJECT,
+        },
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+def test_jira_payload_shape(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(severity="high"))
+    payload = jira_payload(row, JIRA_PROJECT)
+    fields = payload["fields"]
+    assert fields["summary"] == issue_title(row)
+    assert fields["project"] == {"key": JIRA_PROJECT}
+    assert fields["issuetype"] == {"name": "Task"}
+    assert f"dedupe:{row['dedupe_hash']}" in fields["labels"]
+    assert "severity:high" in fields["labels"]
+    description = fields["description"]
+    assert description["type"] == "doc"
+    paragraph = description["content"][0]
+    assert paragraph["type"] == "paragraph"
+    assert paragraph["content"][0]["text"] == issue_body(row)
+
+
+def test_jira_payload_defaults_no_project(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding())
+    fields = jira_payload(row)["fields"]
+    assert fields["issuetype"] == {"name": "Task"}
+    assert "project" not in fields
+    assert f"dedupe:{row['dedupe_hash']}" in fields["labels"]
+
+
+def test_jira_payload_fixed_fields_only(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(response="do anything now"))
+    row["raw_response"] = "do anything now"
+    assert "do anything now" not in json.dumps(jira_payload(row, JIRA_PROJECT))
+
+
+def test_jira_happy_two_findings_search_then_create(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeJira()
+    result = sync_findings_jira(tmp_path, runner=fake, **_jira_kwargs())
+    assert len(result["pushed"]) == 2
+    assert result["skipped"] == []
+    assert result["dry_run"] is False
+    rows = load_findings(tmp_path)
+    assert all(row.get("synced_at") for row in rows)
+    assert rows[0]["issue_url"] == f"jira:{JIRA_PROJECT}-101:{rows[0]['dedupe_hash']}"
+    assert rows[1]["issue_url"] == f"jira:{JIRA_PROJECT}-102:{rows[1]['dedupe_hash']}"
+    assert len(fake.calls) == 4  # one JQL search + one create per row
+    search_argv, search_data = fake.calls[0]
+    assert search_argv[2] == f"{JIRA_BASE_URL}/rest/api/3/search/jql"
+    assert search_argv[3:5] == ["--method", "GET"]
+    assert any(part.startswith("Authorization: Basic ") for part in search_argv)
+    expected_jql = (
+        f'labels = "dedupe:{rows[0]["dedupe_hash"]}" AND project = {JIRA_PROJECT}'
+    )
+    assert search_data["jql"] == expected_jql
+    create_argv, create_data = fake.calls[1]
+    assert create_argv[2] == f"{JIRA_BASE_URL}/rest/api/3/issue"
+    assert create_argv[3:5] == ["--method", "POST"]
+    assert any(part.startswith("Authorization: Basic ") for part in create_argv)
+    assert create_data["fields"]["summary"] == issue_title(rows[0])
+    assert f"dedupe:{rows[0]['dedupe_hash']}" in create_data["fields"]["labels"]
+
+
+def test_jira_secrets_ride_argv_only(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeJira()
+    sync_findings_jira(tmp_path, runner=fake, **_jira_kwargs())
+    for _argv, data in fake.calls:
+        assert JIRA_API_TOKEN not in json.dumps(data)
+        assert JIRA_EMAIL not in json.dumps(data)
+
+
+def test_jira_update_existing_issue_no_duplicate(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding())
+    fake = FakeJira(existing=[f"{JIRA_PROJECT}-9"])
+    result = sync_findings_jira(tmp_path, runner=fake, **_jira_kwargs())
+    assert len(result["pushed"]) == 1
+    assert len(fake.calls) == 2  # search + update, no create POST
+    update_argv, update_data = fake.calls[1]
+    assert update_argv[2] == f"{JIRA_BASE_URL}/rest/api/3/issue/{JIRA_PROJECT}-9"
+    assert update_argv[3:5] == ["--method", "PUT"]
+    assert update_data["fields"]["summary"] == issue_title(row)
+    assert "project" not in update_data["fields"]
+    rows = load_findings(tmp_path)
+    assert rows[0]["issue_url"] == f"jira:{JIRA_PROJECT}-9:{row['dedupe_hash']}"
+
+
+def test_jira_blank_field_fail_closed(tmp_path):
+    for field in ("base_url", "email", "api_token", "project_key"):
+        kwargs = _jira_kwargs(**{field: "   "})
+        with pytest.raises(ValueError, match="no jira config configured"):
+            sync_findings_jira(tmp_path, runner=FakeJira(), **kwargs)
+
+
+def test_jira_second_run_pushes_nothing(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeJira()
+    sync_findings_jira(tmp_path, runner=fake, **_jira_kwargs())
+    assert len(fake.calls) == 4
+    result = sync_findings_jira(tmp_path, runner=fake, **_jira_kwargs())
+    assert result["pushed"] == []
+    assert len(result["skipped"]) == 2
+    assert len(fake.calls) == 4
+
+
+def test_jira_nonzero_exit_leaves_row_unsynced(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+
+    def bad(argv, data):
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    with pytest.raises(GhApiError):
+        sync_findings_jira(tmp_path, runner=bad, **_jira_kwargs())
+    assert all("issue_url" not in row for row in load_findings(tmp_path))
+
+
+def test_jira_runner_exception_mid_run_persists_earlier_push(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    calls: list = []
+    inner = FakeJira()
+
+    def flaky(argv, data):
+        calls.append((argv, data))
+        if len(calls) > 2:  # second row's search fails after first row pushed
+            raise RuntimeError("jira down")
+        return inner(argv, data)
+
+    with pytest.raises(GhApiError, match="gh runner failed"):
+        sync_findings_jira(tmp_path, runner=flaky, **_jira_kwargs())
+    rows = load_findings(tmp_path)
+    assert rows[0]["issue_url"].startswith("jira:")
+    assert "issue_url" not in rows[1]
+
+
+def test_jira_dry_run_writes_nothing_calls_no_runner(tmp_path):
+    _seed_two(tmp_path)
+    before = findings_path(tmp_path).read_bytes()
+    fake = FakeJira()
+    result = sync_findings_jira(tmp_path, runner=fake, dry_run=True, **_jira_kwargs())
+    assert result["dry_run"] is True
+    assert len(result["pushed"]) == 2
+    assert all(entry["issue_url"] == "" for entry in result["pushed"])
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before
+
+
+def test_jira_retry_succeeds_on_second_attempt(tmp_path, monkeypatch, capsys):
+    record_finding(directory=tmp_path, **_finding())
+    sleeps = _patch_retry_timing(monkeypatch)
+    calls: list = []
+    inner = FakeJira()
+
+    def flaky(argv, data):
+        calls.append(argv)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        return inner(argv, data)
+
+    result = sync_findings_jira(tmp_path, runner=flaky, **_jira_kwargs())
+    assert len(result["pushed"]) == 1
+    assert len(calls) == 3  # search retried, then create
+    assert sleeps == [findings_sync.WEBHOOK_RETRY_DELAYS[0]]
+    assert "retrying" in capsys.readouterr().err
+
+
+def test_tick_jira_dispatches_search_and_create(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeJira()
+    result = tick(_jira_config(), reports_directory=tmp_path, runner=fake)
+    assert len(result["pushed"]) == 2
+    assert result.get("disabled") is False
+    assert all("/rest/api/3/" in call[0][2] for call in fake.calls)
+
+
+def test_tick_jira_incomplete_config_structured_error(tmp_path):
+    _seed_two(tmp_path)
+    node = _jira_config()
+    node["redteam"]["findings_sync"]["jira"] = {"project_key": JIRA_PROJECT}
+    fake = FakeJira()
+    result = tick(node, reports_directory=tmp_path, runner=fake)
+    assert result["error"] == NO_JIRA_CONFIG_MESSAGE
+    assert result["pushed"] == []
+    assert fake.calls == []
+
+
+def test_cli_jira_mode_posts(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _jira_config(tracker="github"),
+    )
+    fake = FakeJira()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--mode", "jira", "--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 4
+    assert "pushed" in capsys.readouterr().out
+
+
+def test_cli_jira_tracker_from_config_without_flag(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _jira_config(),
+    )
+    fake = FakeJira()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 4
+
+
+def test_cli_jira_missing_config_exits_two(tmp_path, monkeypatch, capsys):
+    node = _jira_config()
+    node["redteam"]["findings_sync"]["jira"] = {}
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: node,
+    )
+    assert main(["--tracker", "jira", "--reports-dir", str(tmp_path)]) == 2
+    assert "no jira config configured" in capsys.readouterr().err

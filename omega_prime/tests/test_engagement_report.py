@@ -3146,3 +3146,354 @@ def test_export_csv_composes_with_exec_summary(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert "## Executive summary" in proc.stdout
     assert out.read_text(encoding="utf-8").splitlines()[0].startswith("class,cases")
+
+
+# Threshold gate (L10) ---------------------------------------------------------
+
+
+def _threshold_fixture(directory: Path, wrong=None) -> None:
+    """Two runs of history; all-pass unless ``wrong`` flips observations."""
+    directory.mkdir(parents=True, exist_ok=True)
+    seed_transitions(directory, cycle(T1) + cycle(T2))
+    seed_last_run(directory, wrong=wrong)
+    seed_findings(directory, [finding_row("abuse-01", "resp-a", T1)])
+
+
+def test_threshold_pass_appends_gate_line_and_exits_0(tmp_path):
+    """L10 happy: an all-pass run meeting gate:80 exits 0 with a PASS line."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--threshold", "gate:80"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    assert proc.stdout.splitlines()[-1] == "Gate: PASS (pass-rate 100 >= 80)"
+
+
+def test_threshold_fail_exits_3_with_stderr_and_fail_line(tmp_path):
+    """L10 gate: one failing class (5/6 = 83%) below gate:100 exits 3."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture, wrong={"jailbreak-01": "not-detected"})
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--threshold", "gate:100"
+    )
+    assert proc.returncode == 3, proc.stdout
+    assert proc.stdout.splitlines()[-1] == "Gate: FAIL"
+    assert "gate: FAIL (pass-rate 83 < 100)" in proc.stderr
+
+
+def test_threshold_boundary_equal_value_passes(tmp_path):
+    """L10 boundary: value == gate (83 >= 83) still passes."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture, wrong={"jailbreak-01": "not-detected"})
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--threshold", "gate:83"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines()[-1] == "Gate: PASS (pass-rate 83 >= 83)"
+
+
+def test_threshold_gate_risk_uses_weighted_score(tmp_path):
+    """L10 risk: all-pass scores 100; one jailbreak FAIL drops to 85.3."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture)
+    passing = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--threshold", "gate-risk:90"
+    )
+    assert passing.returncode == 0, passing.stderr
+    assert passing.stdout.splitlines()[-1] == "Gate: PASS (risk-score 100.0 >= 90)"
+
+    failing_fixture = tmp_path / "failing"
+    _threshold_fixture(failing_fixture, wrong={"jailbreak-01": "not-detected"})
+    failing = run_script(
+        "--reports-dir",
+        str(failing_fixture),
+        "--since",
+        T0,
+        "--threshold",
+        "gate-risk:90",
+    )
+    assert failing.returncode == 3, failing.stdout
+    assert failing.stdout.splitlines()[-1] == "Gate: FAIL"
+    assert "gate: FAIL (risk-score 85.3 < 90)" in failing.stderr
+
+
+def test_threshold_invalid_spec_exits_1(tmp_path):
+    """L10 edge: malformed/out-of-range specs fail closed with error:."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture)
+    for bad in ("bogus", "gate:", "gate:abc", "gate:101", "gate:-1", "gate-risk:nan"):
+        proc = run_script(
+            "--reports-dir", str(fixture), "--since", T0, "--threshold", bad
+        )
+        assert proc.returncode == 1, bad
+        assert "error:" in proc.stderr, bad
+        assert "Gate:" not in proc.stdout, bad
+
+
+def test_threshold_is_deterministic(tmp_path):
+    """L10 determinism: same gate renders byte-identical runs."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture, wrong={"jailbreak-01": "not-detected"})
+    first = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--threshold", "gate:80"
+    )
+    second = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--threshold", "gate:80"
+    )
+    assert first.returncode == 0 and second.returncode == 0
+    assert first.stdout == second.stdout
+
+
+def test_threshold_json_gains_gate_object_only_when_set(tmp_path):
+    """L10 composition: --json gains a gate object only with --threshold."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture)
+
+    plain = run_script("--reports-dir", str(fixture), "--since", T0, "--json")
+    assert plain.returncode == 0, plain.stderr
+    assert "gate" not in json.loads(plain.stdout)
+
+    gated = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--json", "--threshold", "gate:80"
+    )
+    assert gated.returncode == 0, gated.stderr
+    data = json.loads(gated.stdout)
+    assert data["gate"] == {
+        "metric": "pass-rate",
+        "value": 100,
+        "gate": 80,
+        "passed": True,
+    }
+    assert list(data.keys())[-1] == "gate"
+
+    failing_fixture = tmp_path / "failing"
+    _threshold_fixture(failing_fixture, wrong={"jailbreak-01": "not-detected"})
+    failing = run_script(
+        "--reports-dir",
+        str(failing_fixture),
+        "--since",
+        T0,
+        "--json",
+        "--threshold",
+        "gate-risk:90",
+    )
+    assert failing.returncode == 3, failing.stdout
+    assert failing.stderr != ""
+    assert json.loads(failing.stdout)["gate"]["passed"] is False
+
+
+def test_threshold_composes_with_out_and_export_html(tmp_path):
+    """L10 composition: --out/--export html carry the gate; exit follows it."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture)
+    out = tmp_path / "report.md"
+    html = tmp_path / "report.html"
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--threshold",
+        "gate:80",
+        "--out",
+        str(out),
+        "--export",
+        "html",
+        str(html),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_text(encoding="utf-8").splitlines()[-1].startswith("Gate: PASS")
+    assert "Gate: PASS" in html.read_text(encoding="utf-8")
+
+
+def test_threshold_summary_mode(tmp_path):
+    """L10 composition: --summary honors the gate (extra line / exit 3)."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture, wrong={"jailbreak-01": "not-detected"})
+
+    passing = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--summary",
+        "--threshold",
+        "gate:80",
+    )
+    assert passing.returncode == 0, passing.stderr
+    assert passing.stdout.splitlines()[-1] == "Gate: PASS (pass-rate 83 >= 80)"
+
+    failing = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--summary",
+        "--threshold",
+        "gate:100",
+    )
+    assert failing.returncode == 3, failing.stdout
+    assert failing.stdout.splitlines()[-1] == "Gate: FAIL"
+    assert "gate: FAIL" in failing.stderr
+
+
+def test_threshold_parse_and_evaluate_units():
+    """L10 units: spec parsing, normalization, and verdict lines."""
+    module = _report_module()
+    assert module.parse_threshold("gate:80") == ("pass-rate", 80.0)
+    assert module.parse_threshold("gate-risk:70.5") == ("risk-score", 70.5)
+    coverage = [
+        ("abuse", 1, 1, 1, 100.0, 0, "covered"),
+        ("jailbreak", 1, 1, 0, 0.0, 1, "gappy"),
+    ]
+    pass_rows = [("a", "1/1 (100.0%)"), ("b", "0/1 (0.0%)")]
+    gate = module.evaluate_threshold(pass_rows, coverage, "gate:50")
+    assert gate["passed"] is True
+    assert gate["line"] == "Gate: PASS (pass-rate 50 >= 50)"
+    assert gate["value"] == 50 and gate["gate"] == 50
+    missed = module.evaluate_threshold(pass_rows, coverage, "gate:51")
+    assert missed["passed"] is False and missed["line"] == "Gate: FAIL"
+    assert missed["stderr"] == "gate: FAIL (pass-rate 50 < 51)"
+    risk = module.evaluate_threshold(pass_rows, coverage, "gate-risk:100")
+    assert risk["metric"] == "risk-score" and risk["passed"] is False
+    for bad in ("gate", "other:80", "gate:1e999", "gate:NaN", "gate-risk:"):
+        with pytest.raises(Exception, match="error:"):
+            module.parse_threshold(bad)
+
+
+# HTML gap evidence links (L12) ------------------------------------------------
+
+
+def _evidence_fixture(directory: Path) -> None:
+    """One failing jailbreak case plus a titled finding for its case id."""
+    directory.mkdir(parents=True, exist_ok=True)
+    seed_transitions(directory, cycle(T1) + cycle(T2))
+    seed_last_run(directory, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(
+        directory,
+        [
+            {
+                **finding_row("jailbreak-01", "resp-j", T1),
+                "class": "jailbreak",
+                "title": "Jailbreak bypass observed",
+            },
+            {
+                **finding_row("jailbreak-01", "resp-j2", T2),
+                "class": "jailbreak",
+                "title": "Second sighting",
+            },
+        ],
+    )
+
+
+def test_export_html_gap_evidence_links_and_details(tmp_path):
+    """L12 happy: gap case ids link to <details> evidence with titles."""
+    fixture = tmp_path / "reports"
+    _evidence_fixture(fixture)
+    out = tmp_path / "report.html"
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(out)
+    )
+    assert proc.returncode == 0, proc.stderr
+    html = out.read_text(encoding="utf-8")
+    jailbreak = html.split('<h3 id="coverage-jailbreak">')[1].split("<h3")[0]
+    assert '<li><a href="#gap-jailbreak-01">jailbreak-01</a></li>' in jailbreak
+    assert '<details id="gap-jailbreak-01">' in jailbreak
+    assert "<summary>jailbreak-01</summary>" in jailbreak
+    assert "<p>case id: jailbreak-01</p>" in jailbreak
+    assert "Jailbreak bypass observed" in jailbreak
+    assert "Second sighting" in jailbreak
+    # Gap-free classes render no anchors or details.
+    abuse = html.split('<h3 id="coverage-abuse">')[1].split("<h3")[0]
+    assert "<p>no gaps</p>" in abuse
+    assert "<details" not in abuse
+    assert "src=" not in html and 'href="http' not in html
+
+
+def test_export_html_gap_evidence_without_titles(tmp_path):
+    """L12 edge: gaps with no titled findings note the absence."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    out = tmp_path / "report.html"
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(out)
+    )
+    assert proc.returncode == 0, proc.stderr
+    html = out.read_text(encoding="utf-8")
+    jailbreak = html.split('<h3 id="coverage-jailbreak">')[1].split("<h3")[0]
+    assert '<a href="#gap-jailbreak-01">' in jailbreak
+    assert "<p>no associated findings</p>" in jailbreak
+
+
+def test_export_html_gap_evidence_is_deterministic(tmp_path):
+    """L12 determinism: same inputs export byte-identical evidence HTML."""
+    fixture = tmp_path / "reports"
+    _evidence_fixture(fixture)
+    first = tmp_path / "first.html"
+    second = tmp_path / "second.html"
+    proc1 = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(first)
+    )
+    proc2 = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(second)
+    )
+    assert proc1.returncode == 0, proc1.stderr
+    assert proc2.returncode == 0, proc2.stderr
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_gap_evidence_helpers_units(tmp_path):
+    """L12 units: gap attribution, title mapping, and markdown fallback."""
+    module = _report_module()
+    cases = [
+        ("abuse-01", "d", "", "abuse"),
+        ("jailbreak-01", "d", "", "jailbreak"),
+    ]
+    gaps = ["case 'jailbreak-01': FAIL \u2014 observed detection 'x' != expected 'd'"]
+    assert module.coverage_gap_case_ids(cases, gaps) == {"jailbreak": ["jailbreak-01"]}
+    assert module.coverage_gap_case_ids(cases, []) == {}
+    findings: list[dict[str, object]] = [
+        {"case_id": "jailbreak-01", "title": "B title"},
+        {"case_id": "jailbreak-01", "title": "A title"},
+        {"case_id": "abuse-01"},
+        {"case_id": "", "title": "ghost"},
+    ]
+    assert module.findings_titles_by_case(findings) == {
+        "jailbreak-01": ["A title", "B title"]
+    }
+    html = module._html_coverage_drill_down(
+        [("jailbreak", 1, 1, 0, 1, "gappy"), ("abuse", 1, 1, 1, 0, "covered")],
+        {"jailbreak": ["jailbreak-01"]},
+        {"jailbreak-01": ["A title"]},
+    )
+    assert '<a href="#gap-jailbreak-01">jailbreak-01</a>' in html
+    assert "<details" in html and "A title" in html
+    markdown = (
+        "# Engagement report\n"
+        "\n"
+        "## Coverage matrix\n"
+        "\n"
+        "| class | cases | runs | pass rate | gaps | verdict |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| jailbreak | 1 | 1 | 0/1 (0.0%) | 1 | gappy |\n"
+        "\n"
+        "## Detection gaps\n"
+        "\n"
+        "- case 'jailbreak-01': FAIL\n"
+    )
+    # Markdown-only fallback mines the same gap ids (no titles available).
+    assert module.render_html_report(markdown) == module.render_html_report(markdown)
+    fallback = module.render_html_report(markdown)
+    assert '<a href="#gap-jailbreak-01">jailbreak-01</a>' in fallback
+    assert "<p>no associated findings</p>" in fallback

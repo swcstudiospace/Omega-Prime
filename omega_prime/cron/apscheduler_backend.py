@@ -16,7 +16,11 @@ from datetime import UTC, datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from omega_prime.cron.scheduler import DESK_LEAD_KIND, JobStore
+from omega_prime.cron.scheduler import (
+    DESK_LEAD_KIND,
+    PIN_BUMP_SCHEDULE_KIND,
+    JobStore,
+)
 
 
 class SchedulerService:
@@ -41,8 +45,11 @@ class SchedulerService:
         """Tick overdue jobs now, register future entries, start firing."""
         now = self._clock()
         # Desk lead passes are another driver's jobs (DeskDriver); ticking
-        # them here would burn a model call per pass.
-        ran = self.store.tick(now, self.runner, skip_kind=DESK_LEAD_KIND)
+        # them here would burn a model call per pass. Pin-bump schedules
+        # are owned by tick_pin_bump_schedules for the same reason.
+        ran = self.store.tick(
+            now, self.runner, skip_kinds=(DESK_LEAD_KIND, PIN_BUMP_SCHEDULE_KIND)
+        )
         for job in self.store.jobs:
             if job.get("completed"):
                 continue
@@ -86,7 +93,11 @@ class SchedulerService:
         # `tick` is single-threaded (claim by exact `now`); concurrent fires
         # must not interleave inside it.
         with self._lock:
-            self.store.tick(self._clock(), self.runner, skip_kind=DESK_LEAD_KIND)
+            self.store.tick(
+                self._clock(),
+                self.runner,
+                skip_kinds=(DESK_LEAD_KIND, PIN_BUMP_SCHEDULE_KIND),
+            )
 
 
 def _at(timestamp: float) -> datetime:

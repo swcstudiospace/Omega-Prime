@@ -15,10 +15,12 @@ from __future__ import annotations
 import base64
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+from omega_prime.cron import scheduler as sched_mod
 from omega_prime.grokbot import pin_bump
 
 PIN_OLD = "a" * 40
@@ -1959,3 +1961,432 @@ def test_pin_main_plumbing(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert rc == 0
     assert "[audit-only] audit verdict: improved" in out
+
+
+# --schedule mode (L9) ----------------------------------------------------------
+
+
+def test_schedule_flag_parses():
+    args = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert args.schedule is None
+    assert args.schedule_name == "pin-bump"
+    args = pin_bump.build_parser().parse_args(
+        ["--to", PIN_NEW, "--schedule", "0 6 * * *", "--schedule-name", "nightly"]
+    )
+    assert args.schedule == "0 6 * * *"
+    assert args.schedule_name == "nightly"
+
+
+def test_schedule_invalid_cron_exits_2_without_registering(tmp_path, capsys):
+    for bad in [
+        "not-a-cron",
+        "0 6 * *",  # four fields
+        "* * * * * *",  # six fields
+        "61 * * * *",  # minute out of range
+        "0 24 * * *",  # hour out of range
+        "0 6 0 * *",  # day-of-month out of range
+        "0 6 * 13 *",  # month out of range
+        "0 6 * * 8",  # day-of-week out of range
+        "noon * * * *",  # names rejected
+        "@daily",  # shorthands rejected
+        "",
+    ]:
+        run = FakeRun()
+        rc = pin_bump.bump(
+            PIN_NEW, root=tmp_path, run=run, schedule=bad, schedule_name="nightly"
+        )
+        err = capsys.readouterr().err
+        assert rc == 2, bad
+        assert "--schedule" in err, bad
+        assert run.cmds == [], bad
+    assert not (tmp_path / "cron" / "jobs.json").exists()
+
+
+def test_schedule_empty_name_exits_2_without_registering(tmp_path, capsys):
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW, root=tmp_path, run=run, schedule="0 6 * * *", schedule_name="  "
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--schedule-name" in err
+    assert run.cmds == []
+    assert not (tmp_path / "cron" / "jobs.json").exists()
+
+
+def test_schedule_registers_job_with_argv_echo(tmp_path, capsys):
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=tmp_path,
+        run=run,
+        semver_check=True,
+        pin=["left-pad"],
+        schedule="0 6 * * *",
+        schedule_name="nightly",
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert run.cmds == []
+    assert "'nightly' (0 6 * * *)" in out
+    store = sched_mod.JobStore(tmp_path / "cron" / "jobs.json")
+    jobs = sched_mod.list_pin_bump_schedules(store)
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job["kind"] == sched_mod.PIN_BUMP_SCHEDULE_KIND
+    assert job["schedule_name"] == "nightly"
+    assert job["cron_expr"] == "0 6 * * *"
+    assert job["last_verdict"] is None
+    assert job["last_run"] is None
+    config = job["pin_bump_config"]
+    assert config["to"] == PIN_NEW
+    assert config["semver_check"] is True
+    assert config["pin"] == ["left-pad"]
+
+
+def test_schedule_duplicate_name_replaces(tmp_path, capsys):
+    run = FakeRun()
+    first = pin_bump.bump(
+        PIN_NEW, root=tmp_path, run=run, schedule="0 6 * * *", schedule_name="nightly"
+    )
+    capsys.readouterr()
+    second = pin_bump.bump(
+        PIN_NEW, root=tmp_path, run=run, schedule="30 7 * * *", schedule_name="nightly"
+    )
+    capsys.readouterr()
+    assert first == 0 and second == 0
+    store = sched_mod.JobStore(tmp_path / "cron" / "jobs.json")
+    jobs = sched_mod.list_pin_bump_schedules(store)
+    assert len(jobs) == 1
+    assert jobs[0]["cron_expr"] == "30 7 * * *"
+
+
+def test_schedule_distinct_names_coexist(tmp_path, capsys):
+    run = FakeRun()
+    pin_bump.bump(
+        PIN_NEW, root=tmp_path, run=run, schedule="0 6 * * *", schedule_name="a"
+    )
+    capsys.readouterr()
+    pin_bump.bump(
+        PIN_NEW, root=tmp_path, run=run, schedule="0 6 * * *", schedule_name="b"
+    )
+    capsys.readouterr()
+    store = sched_mod.JobStore(tmp_path / "cron" / "jobs.json")
+    assert len(sched_mod.list_pin_bump_schedules(store)) == 2
+
+
+def test_schedule_main_plumbing_default_name(tmp_path, capsys):
+    rc = pin_bump.main(
+        ["--to", PIN_NEW, "--root", str(tmp_path), "--schedule", "*/15 * * * *"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "'pin-bump' (*/15 * * * *)" in out
+    store = sched_mod.JobStore(tmp_path / "cron" / "jobs.json")
+    jobs = sched_mod.list_pin_bump_schedules(store)
+    assert [job["schedule_name"] for job in jobs] == ["pin-bump"]
+
+
+def test_validate_pin_bump_cron_shapes():
+    assert sched_mod.validate_pin_bump_cron("0 6 * * *") == "0 6 * * *"
+    assert sched_mod.validate_pin_bump_cron("  */15  9-17  *  *  1-5  ") == (
+        "*/15 9-17 * * 1-5"
+    )
+    assert sched_mod.validate_pin_bump_cron("0 0 * * 7") == "0 0 * * 7"
+    assert sched_mod.validate_pin_bump_cron("5/15 0 * * *") == "5/15 0 * * *"
+    assert sched_mod.validate_pin_bump_cron("0,30 6,18 1,15 * *") == (
+        "0,30 6,18 1,15 * *"
+    )
+    for bad in [
+        "",
+        "* * * *",
+        "* * * * * *",
+        "*/0 * * * *",
+        "/5 * * * *",
+        "5-2 * * * *",
+        "mon * * * *",
+        "@hourly",
+        "1.5 * * * *",
+    ]:
+        with pytest.raises(ValueError):
+            sched_mod.validate_pin_bump_cron(bad)
+
+
+def test_pin_bump_next_due_shapes():
+    # Every-minute cadence fires at the next minute boundary, strictly after.
+    assert sched_mod.pin_bump_next_due("* * * * *", 1000.0) == 1020.0
+    assert sched_mod.pin_bump_next_due("* * * * *", 1020.0) == 1080.0
+    # Daily 06:00 UTC lands on 06:00, and an exact hit rolls to tomorrow.
+    day = 1700006400.0  # 2023-11-15 00:00:00 UTC
+    six_am = day + 6 * 3600
+    assert sched_mod.pin_bump_next_due("0 6 * * *", day) == six_am
+    assert sched_mod.pin_bump_next_due("0 6 * * *", six_am) == six_am + 86400
+    # Feb 30 never fires: fail-closed instead of a silent dead schedule.
+    with pytest.raises(ValueError):
+        sched_mod.pin_bump_next_due("0 0 30 2 *", day)
+    with pytest.raises(ValueError):
+        sched_mod.pin_bump_next_due("bogus", day)
+
+
+def _bump_recorder(
+    calls: list[object], *, record: str | None = None
+) -> Callable[[dict], int]:
+    """Tick bump seam: record the job (or one field) and return exit 0."""
+
+    def _bump(job: dict) -> int:
+        calls.append(job[record] if record else job)
+        return 0
+
+    return _bump
+
+
+def _due_store(tmp_path, config, now=1000.0, cron="* * * * *", name="nightly"):
+    store = sched_mod.JobStore(tmp_path / "cron" / "jobs.json")
+    sched_mod.schedule_pin_bump(
+        store, cron_expr=cron, name=name, config=config, now=now
+    )
+    return store
+
+
+def test_tick_improved_compatible_opens_bump_path(tmp_path):
+    store = _due_store(tmp_path, {"to": PIN_NEW, "semver_check": True})
+    calls: list[object] = []
+    ran = sched_mod.tick_pin_bump_schedules(
+        store,
+        1020.0,
+        audit=lambda job: {"verdict": "improved", "semver_compatible": True},
+        bump=_bump_recorder(calls, record="schedule_name"),
+    )
+    assert len(ran) == 1
+    assert calls == ["nightly"]
+    job = ran[0]
+    assert job["last_verdict"] == "improved"
+    assert job["last_run"] == 1020.0
+    assert job["last_result"]["action"] == "bump-pr"
+    assert job["pin_bump_digest"][-1]["action"] == "bump-pr"
+    assert job["due_at"] == 1080.0
+
+
+def test_tick_regressed_records_digest_and_skips_bump(tmp_path):
+    store = _due_store(tmp_path, {"to": PIN_NEW})
+    calls: list[object] = []
+    ran = sched_mod.tick_pin_bump_schedules(
+        store,
+        1020.0,
+        audit=lambda job: {"verdict": "regressed"},
+        bump=_bump_recorder(calls),
+    )
+    assert len(ran) == 1
+    assert calls == []
+    job = ran[0]
+    assert job["last_verdict"] == "regressed"
+    assert job["last_run"] == 1020.0
+    assert job["last_result"] == {
+        "verdict": "regressed",
+        "action": "none",
+        "detail": None,
+    }
+    assert job["due_at"] == 1080.0
+
+
+def test_tick_improved_major_with_semver_check_skips_bump(tmp_path):
+    store = _due_store(tmp_path, {"to": PIN_NEW, "semver_check": True})
+    calls: list[object] = []
+    ran = sched_mod.tick_pin_bump_schedules(
+        store,
+        1020.0,
+        audit=lambda job: {"verdict": "improved", "semver_compatible": False},
+        bump=_bump_recorder(calls),
+    )
+    assert len(ran) == 1
+    assert calls == []
+    assert ran[0]["last_result"]["action"] == "none"
+    assert ran[0]["pin_bump_digest"][-1]["semver_compatible"] is False
+
+
+def test_tick_improved_without_semver_check_opens_bump_path(tmp_path):
+    # No --semver-check in the stored config: an improved verdict alone
+    # opens the PR path even when the seam reports incompatible fixes.
+    store = _due_store(tmp_path, {"to": PIN_NEW, "semver_check": False})
+    calls: list[object] = []
+    ran = sched_mod.tick_pin_bump_schedules(
+        store,
+        1020.0,
+        audit=lambda job: {"verdict": "improved", "semver_compatible": False},
+        bump=_bump_recorder(calls),
+    )
+    assert len(ran) == 1
+    assert len(calls) == 1
+    assert ran[0]["last_result"]["action"] == "bump-pr"
+
+
+def test_tick_audit_failure_fail_closed(tmp_path):
+    store = _due_store(tmp_path, {"to": PIN_NEW})
+    calls: list[object] = []
+
+    def _boom(job):
+        raise RuntimeError("audit exploded")
+
+    ran = sched_mod.tick_pin_bump_schedules(
+        store, 1020.0, audit=_boom, bump=_bump_recorder(calls)
+    )
+    assert len(ran) == 1
+    assert calls == []
+    assert ran[0]["last_verdict"] == "error"
+    assert ran[0]["last_result"]["action"] == "none"
+
+
+def test_tick_bump_failure_recorded_not_raised(tmp_path):
+    store = _due_store(tmp_path, {"to": PIN_NEW})
+
+    def _boom(job):
+        raise RuntimeError("pr exploded")
+
+    ran = sched_mod.tick_pin_bump_schedules(
+        store,
+        1020.0,
+        audit=lambda job: {"verdict": "improved"},
+        bump=_boom,
+    )
+    assert len(ran) == 1
+    assert ran[0]["last_result"]["action"] == "bump-pr-failed"
+    assert "pr exploded" in str(ran[0]["last_result"]["detail"])
+
+
+def test_tick_not_due_skips(tmp_path):
+    store = _due_store(tmp_path, {"to": PIN_NEW}, now=1000.0)
+    calls: list[object] = []
+    ran = sched_mod.tick_pin_bump_schedules(
+        store,
+        1000.0,  # before the 1020.0 due time
+        audit=lambda job: {"verdict": "improved"},
+        bump=_bump_recorder(calls),
+    )
+    assert ran == []
+    assert calls == []
+    # A second tick at the same stamp never double-runs.
+    ran = sched_mod.tick_pin_bump_schedules(
+        store,
+        1020.0,
+        audit=lambda job: {"verdict": "improved"},
+        bump=_bump_recorder(calls),
+    )
+    assert len(ran) == 1
+    reran = sched_mod.tick_pin_bump_schedules(
+        store,
+        1020.0,
+        audit=lambda job: {"verdict": "improved"},
+        bump=_bump_recorder(calls),
+    )
+    assert reran == []
+    assert len(calls) == 1
+
+
+def test_tick_leaves_other_kinds_alone(tmp_path):
+    store = _due_store(tmp_path, {"to": PIN_NEW})
+    due = sched_mod.pin_bump_next_due("* * * * *", 1000.0)
+    other_id = store.schedule("plain prompt", due)
+    ran = sched_mod.tick_pin_bump_schedules(
+        store,
+        due,
+        audit=lambda job: {"verdict": "improved"},
+        bump=lambda job: 0,
+    )
+    assert [job["schedule_name"] for job in ran] == ["nightly"]
+    other = next(job for job in store.jobs if job["id"] == other_id)
+    assert other["last_ran_at"] is None
+
+
+def test_generic_tick_skips_pin_bump_schedules(tmp_path):
+    store = _due_store(tmp_path, {"to": PIN_NEW})
+    calls: list[object] = []
+    ran = store.tick(
+        1020.0, calls.append, skip_kinds=(sched_mod.PIN_BUMP_SCHEDULE_KIND,)
+    )
+    assert ran == []
+    assert calls == []
+    job = sched_mod.list_pin_bump_schedules(store)[0]
+    assert job.get("completed") is not True
+    assert job["last_ran_at"] is None
+    # The legacy single-kind spelling keeps working alongside the new one.
+    ran = store.tick(1020.0, calls.append, skip_kind="desk_lead_pass")
+    assert [j["schedule_name"] for j in ran] == ["nightly"]
+
+
+def test_audit_scheduled_job_improved_compatible(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_versioned_audit(
+            ("left-pad", "high", "GHSA-old-0001", "1.2.3"),
+            ("wibble", "high", "GHSA-old-0002", "2.0.0"),
+        ),
+    )
+    run = FakeRun(
+        npm_doc=_versioned_audit(
+            ("left-pad", "moderate", "GHSA-new-0003", "1.4.0"),
+            ("wibble", "moderate", "GHSA-new-0004", "2.1.0"),
+        )
+    )
+    before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    result = pin_bump.audit_scheduled_job(
+        {
+            "to": PIN_NEW,
+            "semver_check": True,
+            "pin": ["GHSA-old-0001"],
+        },
+        root=root,
+        run=run,
+    )
+    capsys.readouterr()
+    assert result["verdict"] == "improved"
+    assert result["semver_compatible"] is True
+    assert result["exit_code"] == 0
+    # Audit-only semantics: no file under the repo root changed.
+    assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+
+def test_audit_scheduled_job_major_not_compatible(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_versioned_audit(
+            ("left-pad", "high", "GHSA-old-0001", "1.2.3"),
+        ),
+    )
+    run = FakeRun(
+        npm_doc=_versioned_audit(
+            ("left-pad", "low", "GHSA-new-0003", "2.0.0"),
+        )
+    )
+    result = pin_bump.audit_scheduled_job(
+        {"to": PIN_NEW, "semver_check": True, "pin": ["GHSA-old-0001"]},
+        root=root,
+        run=run,
+    )
+    capsys.readouterr()
+    assert result["verdict"] == "improved"
+    assert result["semver_compatible"] is False
+
+
+def test_audit_scheduled_job_broken_config_fail_closed(tmp_path):
+    assert pin_bump.audit_scheduled_job({}, root=tmp_path)["verdict"] == "error"
+    assert pin_bump.audit_scheduled_job(None, root=tmp_path)["verdict"] == "error"
+
+
+def test_apply_scheduled_bump_forces_open_pr(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    # Stored config never asked for --open-pr; the scheduled apply opens
+    # the normal bump PR path anyway.
+    rc = pin_bump.apply_scheduled_bump({"to": PIN_NEW}, root=root, run=run)
+    out = capsys.readouterr().out
+    assert rc == 0
+    verbs = [cmd for cmd, _ in run.cmds]
+    assert ["git", "checkout", "-b", f"pin-bump-{PIN_NEW[:7]}"] in verbs
+    assert any(cmd[:2] == ["gh", "pr"] for cmd in verbs)
+    assert "https://example.test/pr/1" in out

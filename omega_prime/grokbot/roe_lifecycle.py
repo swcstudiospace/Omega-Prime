@@ -438,7 +438,9 @@ def renewal_reminders(
     """Renewal reminders for a signed RoE artifact approaching expiry.
 
     ``artifact`` is a parsed RoE document (dict) or a path to a RoE JSON
-    artifact file; ``now`` defaults to the wall clock (UTC). Returns one
+    artifact file — or a list/tuple of either for operators with several
+    concurrent grants (iterated and merged, deduped per (artifact_id,
+    threshold-or-kind)); ``now`` defaults to the wall clock (UTC). Returns one
     reminder dict per newly crossed ``RENEWAL_THRESHOLDS_DAYS`` threshold
     (``14d``/``7d``/``3d``/``1d`` at or below that many days of window
     left). Each ``(artifact_id, threshold)`` fires once per process
@@ -457,6 +459,31 @@ def renewal_reminders(
     unreadable log disables suppression (never crashes, never suppresses).
     """
     try:
+        if isinstance(artifact, (list, tuple)):
+            # L11 multi-grant form: iterate and merge per-artifact
+            # reminders. Dedupe per (artifact_id, threshold-or-kind)
+            # across the whole set so an operator with several
+            # concurrent grants gets one marker per artifact, not per
+            # check run (the shared _RENEWAL_FIRED set already
+            # suppresses refires; the explicit pass below guards
+            # same-call duplicates).
+            merged: list[dict[str, Any]] = []
+            for item in artifact:
+                merged.extend(renewal_reminders(item, now=now, audit_log=audit_log))
+            seen: set[tuple[str, str]] = set()
+            unique: list[dict[str, Any]] = []
+            for reminder in merged:
+                if not isinstance(reminder, dict):
+                    continue
+                key = (
+                    str(reminder.get("artifact_id")),
+                    str(reminder.get("threshold", reminder.get("kind", "?"))),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(reminder)
+            return unique
         current = _renewal_now(now)
         if current is None:
             return []
@@ -706,6 +733,29 @@ def watchdog_check(artifact: Any, *, now: Any = None) -> dict[str, Any]:
             "effective_until": None,
             "action": WATCHDOG_ACTIONS["missing"],
         }
+
+
+def watchdog_check_all(artifacts: Any, *, now: Any = None) -> list[dict[str, Any]]:
+    """Expiry watchdog across concurrent RoE grants (L11).
+
+    ``artifacts`` is a list/tuple of RoE document dicts and/or artifact
+    paths (whatever :func:`watchdog_check` accepts); ``now`` defaults to
+    the wall clock (UTC) and accepts the same shapes. Returns one state
+    dict per artifact — same shape as :func:`watchdog_check`
+    (``{"state", "artifact_id", "effective_until", "action"}``) — in
+    input order. A single document/path (not in a list) wraps to one
+    element; ``None``/an empty list returns ``[]``. Fail-closed: per-item
+    garbage reports ``missing``/``invalid`` via :func:`watchdog_check`;
+    never raises.
+    """
+    try:
+        if artifacts is None:
+            return []
+        if isinstance(artifacts, (list, tuple)):
+            return [watchdog_check(item, now=now) for item in artifacts]
+        return [watchdog_check(artifacts, now=now)]
+    except Exception:
+        return []
 
 
 def _parse_now_override(text: str | None) -> datetime | None:

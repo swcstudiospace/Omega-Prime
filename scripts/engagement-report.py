@@ -35,6 +35,7 @@ import ast
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -1839,15 +1840,107 @@ def _html_coverage_table(lines: list[str]) -> str:
     return "<table>\n" + "\n".join(body) + "\n</table>"
 
 
+def coverage_gap_case_ids(
+    cases: list[tuple[str, str, str, str]],
+    gaps: list[str],
+) -> dict[str, list[str]]:
+    """Sorted gap case ids per technique class (L12 evidence source).
+
+    Attribution mirrors :func:`coverage_rows`: a quoted ``'case_id'``
+    (or ``*.yaml`` stem) token from :func:`_gap_case_ids` counts toward
+    its known case's class, else toward the first schema/sighting class
+    it names by ``class-`` prefix. Drift/global errors attribute to no
+    class. Deterministic (sorted ids per class).
+    """
+    by_class: dict[str, list[str]] = {}
+    for case_id, _expected, _rationale, case_class in cases:
+        by_class.setdefault(case_class, []).append(case_id)
+    known = {case_id: case_class for case_id, _, _, case_class in cases}
+    found: dict[str, set[str]] = {}
+    for failure in gaps:
+        for token in _gap_case_ids(failure):
+            target: str | None = None
+            if token in known:
+                target = known[token]
+            else:
+                for class_name in list(SCHEMA_CLASSES) + sorted(by_class):
+                    if token == class_name or token.startswith(class_name + "-"):
+                        target = class_name
+                        break
+            if target is not None:
+                found.setdefault(target, set()).add(token)
+    return {class_name: sorted(ids) for class_name, ids in found.items()}
+
+
+def findings_titles_by_case(
+    findings: list[dict[str, object]],
+) -> dict[str, list[str]]:
+    """Sorted non-empty finding ``title`` values keyed by ``case_id`` (L12).
+
+    Rows without a string ``case_id`` or without a non-blank string
+    ``title`` contribute nothing, so classes with title-less findings
+    render the ``no associated findings`` note. Deterministic.
+    """
+    titles: dict[str, set[str]] = {}
+    for row in findings:
+        if not isinstance(row, dict):
+            continue
+        case_id = row.get("case_id")
+        if not isinstance(case_id, str) or not case_id.strip():
+            continue
+        title = row.get("title")
+        if isinstance(title, str) and title.strip():
+            titles.setdefault(case_id, set()).add(title.strip())
+    return {case_id: sorted(values) for case_id, values in titles.items()}
+
+
+def _markdown_gap_ids(
+    markdown: str,
+    classes: list[str],
+) -> dict[str, list[str]]:
+    """Gap case ids per class parsed from a rendered report (L12 fallback).
+
+    Used when the HTML export only has the markdown text (no loaded
+    cases/findings): ``## Detection gaps`` bullets are mined with
+    :func:`_gap_case_ids` and attributed to the first matrix class they
+    name (exact or ``class-`` prefix). The ``- none`` empty line yields
+    no gaps. Deterministic.
+    """
+    found: dict[str, set[str]] = {}
+    for line in _report_section_lines(markdown, "## Detection gaps"):
+        stripped = line.strip()
+        if not stripped.startswith("- ") or stripped == "- none":
+            continue
+        for token in _gap_case_ids(stripped[2:]):
+            for class_name in classes:
+                if token == class_name or token.startswith(class_name + "-"):
+                    found.setdefault(class_name, set()).add(token)
+                    break
+    return {class_name: sorted(ids) for class_name, ids in found.items()}
+
+
+def _gap_slug(case_id: str) -> str:
+    """URL-fragment id for one gap's evidence detail (deterministic)."""
+    return "gap-" + _coverage_slug(case_id)
+
+
 def _html_coverage_drill_down(
     rows: list[tuple[str, int, int, int, int, str]],
+    gaps_by_class: dict[str, list[str]] | None = None,
+    findings_by_case: dict[str, list[str]] | None = None,
 ) -> str:
     """Per-class drill-down section after the coverage matrix.
 
     One anchored ``<h3>`` plus a small metric/value table per class
-    (cases, runs, wins, gaps, verdict) in matrix order. Deterministic;
-    stdlib only, no external assets.
+    (cases, runs, wins, gaps, verdict) in matrix order, followed by the
+    per-class gap list: each gap case id links to a collapsible
+    ``<details>`` evidence block (case id plus associated finding
+    titles, or a ``no associated findings`` note) under the class
+    table. Deterministic; stdlib only, no external assets (only
+    internal ``#gap-*`` fragment links).
     """
+    gap_ids = gaps_by_class if gaps_by_class is not None else {}
+    evidence = findings_by_case if findings_by_case is not None else {}
     parts = ["<h2>Coverage drill-down</h2>"]
     for class_name, cases, runs, wins, gaps, verdict in rows:
         slug = _coverage_slug(class_name)
@@ -1866,6 +1959,27 @@ def _html_coverage_drill_down(
             parts.append(f"<tr><td>{metric}</td><td>{value}</td></tr>")
         parts.append(f"<tr><td>verdict</td><td>{_html_inline(verdict)}</td></tr>")
         parts.append("</tbody>\n</table>")
+        class_gaps = gap_ids.get(class_name, [])
+        if not class_gaps:
+            parts.append("<p>no gaps</p>")
+            continue
+        parts.append("<ul>")
+        for case_id in class_gaps:
+            parts.append(
+                f'<li><a href="#{_gap_slug(case_id)}">{_html_inline(case_id)}</a></li>'
+            )
+        parts.append("</ul>")
+        for case_id in class_gaps:
+            titles = evidence.get(case_id, [])
+            parts.append(f'<details id="{_gap_slug(case_id)}">')
+            parts.append(f"<summary>{_html_inline(case_id)}</summary>")
+            parts.append(f"<p>case id: {_html_inline(case_id)}</p>")
+            if titles:
+                joined = "; ".join(_html_escape(title) for title in titles)
+                parts.append(f"<p>findings: {joined}</p>")
+            else:
+                parts.append("<p>no associated findings</p>")
+            parts.append("</details>")
     return "\n".join(parts)
 
 
@@ -1922,7 +2036,11 @@ def risk_score_badge(markdown: str) -> str:
     return f'<span class="risk-badge sev-{tier}">Risk score: {score:.1f} / 100</span>'
 
 
-def render_html_report(markdown: str) -> str:
+def render_html_report(
+    markdown: str,
+    gaps_by_class: dict[str, list[str]] | None = None,
+    findings_by_case: dict[str, list[str]] | None = None,
+) -> str:
     """Render the full markdown report as self-contained HTML (stdlib only).
 
     Minimal deterministic converter: ``#``/``##``/``###`` headings,
@@ -1930,15 +2048,19 @@ def render_html_report(markdown: str) -> str:
     fenced code blocks, ``-`` bullet lists, inline ```code`` spans, and
     severity/verdict color spans. Everything else becomes ``<p>``.
     Output carries an inline ``<style>`` block and no external assets
-    (the only ``href`` values emitted are internal ``#coverage-*``
-    fragment links). The findings-snapshot ``<!-- ... -->`` marker
-    passes through verbatim. The coverage-matrix table's class cells
-    link to a per-class drill-down section (one anchored metric/value
-    table per class: cases, runs, wins, gaps, verdict) emitted right
-    after the matrix. A risk-score badge (:func:`risk_score_badge`,
-    colored with the severity color of its tier) is emitted next to
-    the first ``<h1>``. Input-order independent for identical inputs
-    (byte-identical reruns).
+    (the only ``href`` values emitted are internal ``#coverage-*`` and
+    ``#gap-*`` fragment links). The findings-snapshot ``<!-- ... -->``
+    marker passes through verbatim. The coverage-matrix table's class
+    cells link to a per-class drill-down section (one anchored
+    metric/value table per class: cases, runs, wins, gaps, verdict,
+    plus the gap list with evidence ``<details>`` blocks) emitted
+    right after the matrix. A risk-score badge
+    (:func:`risk_score_badge`, colored with the severity color of its
+    tier) is emitted next to the first ``<h1>``. When
+    ``gaps_by_class``/``findings_by_case`` are omitted, gap ids are
+    mined from the ``## Detection gaps`` section
+    (:func:`_markdown_gap_ids`) with no finding titles. Input-order
+    independent for identical inputs (byte-identical reruns).
     """
     title = "Engagement report"
     for line in markdown.splitlines():
@@ -1953,6 +2075,12 @@ def render_html_report(markdown: str) -> str:
     coverage_emitted = False
     badge = risk_score_badge(markdown)
     badge_emitted = False
+    drill_gaps = gaps_by_class
+    if drill_gaps is None:
+        drill_gaps = _markdown_gap_ids(
+            markdown, [class_name for class_name, _, _, _, _, _ in coverage_detail]
+        )
+    drill_evidence = findings_by_case if findings_by_case is not None else {}
 
     def flush_table() -> None:
         nonlocal coverage_emitted
@@ -1960,7 +2088,11 @@ def render_html_report(markdown: str) -> str:
             if not coverage_emitted and _is_coverage_matrix_table(table_buf):
                 body.append(_html_coverage_table(table_buf))
                 if coverage_detail:
-                    body.append(_html_coverage_drill_down(coverage_detail))
+                    body.append(
+                        _html_coverage_drill_down(
+                            coverage_detail, drill_gaps, drill_evidence
+                        )
+                    )
                 coverage_emitted = True
             else:
                 body.append(_html_table(table_buf))
@@ -2028,14 +2160,25 @@ def render_html_report(markdown: str) -> str:
     )
 
 
-def write_html_report(markdown: str, html_path: Path) -> int:
-    """Write the HTML export of ``markdown`` to ``html_path`` (G10).
+def write_html_report(
+    markdown: str,
+    html_path: Path,
+    gaps_by_class: dict[str, list[str]] | None = None,
+    findings_by_case: dict[str, list[str]] | None = None,
+) -> int:
+    """Write the HTML export of ``markdown`` to ``html_path`` (G10/L12).
 
-    Returns 0 on success; an unwritable output prints ``error:`` to
-    stderr and returns 1 (no fallback: HTML needs no external tool).
+    ``gaps_by_class``/``findings_by_case`` feed the per-class gap
+    evidence drill-down; when omitted they fall back to the markdown
+    mining in :func:`render_html_report`. Returns 0 on success; an
+    unwritable output prints ``error:`` to stderr and returns 1 (no
+    fallback: HTML needs no external tool).
     """
     try:
-        html_path.write_text(render_html_report(markdown), encoding="utf-8")
+        html_path.write_text(
+            render_html_report(markdown, gaps_by_class, findings_by_case),
+            encoding="utf-8",
+        )
     except OSError as exc:
         print(f"error: cannot write HTML export {html_path} ({exc})", file=sys.stderr)
         return 1
@@ -2118,6 +2261,7 @@ def render_report(
     side_by_side: list[str] | None = None,
     exec_summary: list[str] | None = None,
     email_block: list[str] | None = None,
+    gate_line: str | None = None,
 ) -> str:
     """Assemble the report sections in fixed order."""
     gaps = gaps if gaps is not None else []
@@ -2251,8 +2395,10 @@ def render_report(
     lines += [
         "",
         f"<!-- findings-snapshot: {json.dumps(current_findings, sort_keys=True)} -->",
-        "",
     ]
+    if gate_line is not None:
+        lines.append(gate_line)
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -2385,6 +2531,7 @@ def build_report(
     annotations: list[tuple[str, str]] | None = None,
     exec_summary: bool = False,
     recipient: str | None = None,
+    threshold: str | None = None,
 ) -> tuple[str, str, Path]:
     """Render the report; return ``(markdown, file_name, out_dir)``.
 
@@ -2409,6 +2556,10 @@ def build_report(
     the risk-weighted score, top risk classes, and the findings trend.
     ``recipient`` (``--recipient``) additionally renders an ``## Email
     summary`` copy-paste block before the snapshot marker.
+
+    ``threshold`` (``--threshold``) appends the final gate verdict line
+    (``Gate: PASS (...)`` or ``Gate: FAIL``) after the snapshot marker;
+    callers map a FAIL to exit 3 (see :func:`evaluate_threshold`).
     """
     window = _collect_window(reports_dir, since_text)
     window_start = window["window_start"]
@@ -2636,6 +2787,11 @@ def build_report(
         side_by_side=side_by_side,
         exec_summary=exec_summary_lines,
         email_block=email_lines,
+        gate_line=(
+            str(evaluate_threshold(pass_rows, coverage, threshold)["line"])
+            if threshold is not None
+            else None
+        ),
     )
     return markdown, file_name, out_dir
 
@@ -2664,6 +2820,7 @@ def build_report_data(
     annotations: list[tuple[str, str]] | None = None,
     exec_summary: bool = False,
     recipient: str | None = None,
+    threshold: str | None = None,
 ) -> dict[str, object]:
     """Structured report data with the same inputs as :func:`build_report`.
 
@@ -3045,6 +3202,14 @@ def build_report_data(
                 "subject": subject,
                 "body": body,
             }
+    if threshold is not None:
+        gate = evaluate_threshold(pass_rows, coverage, threshold)
+        data["gate"] = {
+            "metric": gate["metric"],
+            "value": gate["value"],
+            "gate": gate["gate"],
+            "passed": gate["passed"],
+        }
     return data
 
 
@@ -3065,6 +3230,71 @@ def _summary_pct(pass_rows: list[tuple[str, str]]) -> int:
     if not total:
         return 0
     return round(100 * wins / total)
+
+
+def parse_threshold(spec: str) -> tuple[str, float]:
+    """``(metric, gate)`` from a ``--threshold`` value (L10).
+
+    Accepts ``gate:<pct>`` (overall pass rate) and ``gate-risk:<score>``
+    (risk-weighted score); both bounds are 0-100 inclusive. Returns the
+    report metric name (``pass-rate``/``risk-score``) plus the numeric
+    gate. Raises :class:`ReportError` on malformed or out-of-range
+    specs (NaN/inf rejected). Deterministic.
+    """
+    kind, sep, raw = spec.partition(":")
+    if sep and kind in ("gate", "gate-risk") and raw.strip():
+        try:
+            gate = float(raw.strip())
+        except ValueError:
+            gate = float("nan")
+        if math.isfinite(gate) and 0.0 <= gate <= 100.0:
+            return ("pass-rate" if kind == "gate" else "risk-score"), gate
+    raise ReportError(
+        f"error: invalid --threshold {spec!r} "
+        "(expected 'gate:<pct>' or 'gate-risk:<score>', 0-100)"
+    )
+
+
+def _format_gate(value: float) -> str:
+    """Compact gate rendering (``80`` not ``80.0``; deterministic)."""
+    return f"{value:g}"
+
+
+def evaluate_threshold(
+    pass_rows: list[tuple[str, str]],
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+    spec: str,
+) -> dict[str, object]:
+    """Gate verdict over the current window (L10).
+
+    Returns ``metric``/``value``/``gate``/``passed`` plus the report
+    ``line`` (``Gate: PASS (metric value >= gate)`` or the bare
+    ``Gate: FAIL``) and the ``stderr`` detail for failing runs.
+    ``value`` is the integer pass percentage for ``gate:`` specs and
+    the one-decimal risk-weighted score for ``gate-risk:`` specs.
+    """
+    metric, gate = parse_threshold(spec)
+    if metric == "risk-score":
+        score, _earned, _possible, _breakdown = risk_weighted_score(coverage)
+        value: float = score
+        shown = f"{score:.1f}"
+    else:
+        value = float(_summary_pct(pass_rows))
+        shown = str(int(value))
+    passed = value >= gate
+    gate_text = _format_gate(gate)
+    if passed:
+        line = f"Gate: PASS ({metric} {shown} >= {gate_text})"
+    else:
+        line = "Gate: FAIL"
+    return {
+        "metric": metric,
+        "value": int(value) if metric == "pass-rate" else value,
+        "gate": int(gate) if float(gate).is_integer() else gate,
+        "passed": passed,
+        "line": line,
+        "stderr": f"gate: FAIL ({metric} {shown} < {gate_text})",
+    }
 
 
 def summarize(reports_dir: Path, since_text: str | None = None) -> dict[str, object]:
@@ -3120,7 +3350,7 @@ def summarize(reports_dir: Path, since_text: str | None = None) -> dict[str, obj
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point. Returns 0 when the report renders, 1 otherwise."""
+    """Entry point. Returns 0 when the report renders, 1 otherwise (3 on gate FAIL)."""
     parser = argparse.ArgumentParser(
         description=(
             "Render a deterministic purple-team engagement report from "
@@ -3278,19 +3508,57 @@ def main(argv: list[str] | None = None) -> int:
         "coverage order plus a final risk-weighted-score row); stdout "
         "stays markdown.",
     )
+    parser.add_argument(
+        "--threshold",
+        default=None,
+        metavar="SPEC",
+        help="gate the run on SPEC ('gate:<pct>' over the overall pass "
+        "rate, or 'gate-risk:<score>' over the risk-weighted score, "
+        "0-100): appends the final 'Gate: PASS (...)'/'Gate: FAIL' line "
+        "to the report (a 'gate' object in --json) and exits 3 with a "
+        "gate: message on stderr when the value is below the gate; "
+        "exit 0 when it meets the gate. Composes with all modes.",
+    )
     args = parser.parse_args(argv)
 
     reports_dir = Path(args.reports_dir) if args.reports_dir else default_reports_dir()
     if args.summary:
         try:
             summary = summarize(reports_dir, args.since)
+            summary_gate: dict[str, object] | None = None
+            if args.threshold is not None:
+                summary_window = _collect_window(reports_dir, args.since)
+                summary_runs = summary_window["runs"]
+                assert isinstance(summary_runs, int)
+                summary_coverage = coverage_rows(
+                    summary_window["cases"],  # type: ignore[arg-type]
+                    summary_window["observations"] if summary_runs > 0 else {},
+                    summary_window["gaps"],  # type: ignore[arg-type]
+                )
+                summary_gate = evaluate_threshold(
+                    summary_window["pass_rows"],  # type: ignore[arg-type]
+                    summary_coverage,
+                    args.threshold,
+                )
         except ReportError as exc:
             print(str(exc), file=sys.stderr)
             return 1
         if args.json:
+            if summary_gate is not None:
+                summary["gate"] = {
+                    "metric": summary_gate["metric"],
+                    "value": summary_gate["value"],
+                    "gate": summary_gate["gate"],
+                    "passed": summary_gate["passed"],
+                }
             sys.stdout.write(json.dumps(summary, indent=2, sort_keys=False) + "\n")
         else:
             sys.stdout.write(str(summary["line"]) + "\n")
+            if summary_gate is not None:
+                sys.stdout.write(str(summary_gate["line"]) + "\n")
+        if summary_gate is not None and not summary_gate["passed"]:
+            print(str(summary_gate["stderr"]), file=sys.stderr)
+            return 3
         return 0
     try:
         annotations = (
@@ -3315,6 +3583,7 @@ def main(argv: list[str] | None = None) -> int:
             annotations=annotations,
             exec_summary=args.exec_summary,
             recipient=args.recipient,
+            threshold=args.threshold,
         )
         payload = markdown
         if args.json:
@@ -3331,6 +3600,7 @@ def main(argv: list[str] | None = None) -> int:
                     annotations=annotations,
                     exec_summary=args.exec_summary,
                     recipient=args.recipient,
+                    threshold=args.threshold,
                 )
             )
     except ReportError as exc:
@@ -3359,6 +3629,28 @@ def main(argv: list[str] | None = None) -> int:
     else:
         sys.stdout.write(payload)
     status = 0
+    gate_evidence: dict[str, object] | None = None
+    if args.threshold is not None or (
+        args.export is not None and args.export[0] == "html"
+    ):
+        try:
+            gate_window = _collect_window(reports_dir, args.since)
+        except ReportError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        gate_window_runs = gate_window["runs"]
+        assert isinstance(gate_window_runs, int)
+        gate_evidence = {
+            "pass_rows": gate_window["pass_rows"],
+            "coverage": coverage_rows(
+                gate_window["cases"],  # type: ignore[arg-type]
+                gate_window["observations"] if gate_window_runs > 0 else {},
+                gate_window["gaps"],  # type: ignore[arg-type]
+            ),
+            "cases": gate_window["cases"],
+            "gaps": gate_window["gaps"],
+            "findings": gate_window["findings"],
+        }
     if args.pdf:
         status = write_pdf(markdown, Path(args.pdf)) or status
     if args.export:
@@ -3369,7 +3661,20 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        status = write_html_report(markdown, Path(export_output)) or status
+        html_gaps: dict[str, list[str]] | None = None
+        html_titles: dict[str, list[str]] | None = None
+        if gate_evidence is not None:
+            html_gaps = coverage_gap_case_ids(
+                gate_evidence["cases"],  # type: ignore[arg-type]
+                gate_evidence["gaps"],  # type: ignore[arg-type]
+            )
+            html_titles = findings_titles_by_case(
+                gate_evidence["findings"],  # type: ignore[arg-type]
+            )
+        status = (
+            write_html_report(markdown, Path(export_output), html_gaps, html_titles)
+            or status
+        )
     if args.export_csv:
         try:
             csv_window = _collect_window(reports_dir, args.since)
@@ -3383,6 +3688,15 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 1
         status = write_csv_report(csv_coverage, Path(args.export_csv)) or status
+    if args.threshold is not None and gate_evidence is not None:
+        gate = evaluate_threshold(
+            gate_evidence["pass_rows"],  # type: ignore[arg-type]
+            gate_evidence["coverage"],  # type: ignore[arg-type]
+            args.threshold,
+        )
+        if not gate["passed"]:
+            print(str(gate["stderr"]), file=sys.stderr)
+            return 3
     return status
 
 

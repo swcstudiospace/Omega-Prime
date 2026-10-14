@@ -48,6 +48,7 @@ from omega_prime.grokbot.roe_lifecycle import (
     renewal_reminders,
     suite_counts,
     watchdog_check,
+    watchdog_check_all,
 )
 from omega_prime.tools.durable_surface import register_durable_surface_tools
 from omega_prime.tools.registry import ToolRegistry
@@ -1163,3 +1164,136 @@ def test_watchdog_tick_skips_not_due_and_generic_tick_respects_skip(tmp_path):
         END.timestamp(), lambda prompt: "generic", skip_kind=ROE_WATCHDOG_KIND
     )
     assert skipped == []
+
+
+# L11 multi-grant support -------------------------------------------------------
+
+
+def test_watchdog_check_all_returns_per_artifact_states():
+    """L11: one state dict per artifact, same shape as watchdog_check."""
+    documents = [
+        _watchdog_document(30),
+        _watchdog_document(3),
+        _watchdog_document(-1),
+    ]
+    results = watchdog_check_all(documents, now=END)
+    assert [r["state"] for r in results] == ["valid", "expiring-7d", "expired"]
+    assert [r["action"] for r in results] == ["none", "re-sign", "archive"]
+    for result in results:
+        assert set(result) >= {
+            "state",
+            "artifact_id",
+            "effective_until",
+            "action",
+        }
+
+
+def test_watchdog_check_all_accepts_paths_and_dicts(tmp_path):
+    """L11: paths and inline dicts mix; order is preserved."""
+    document = _watchdog_document(30)
+    artifact = _write_named_artifact(tmp_path, "grant-a.json", document)
+    results = watchdog_check_all([str(artifact), _watchdog_document(-1)], now=END)
+    assert [r["state"] for r in results] == ["valid", "expired"]
+    assert results[0]["artifact_id"] == str(artifact)
+    assert results[0]["effective_until"] == document["effective_until"]
+
+
+def test_watchdog_check_all_matches_single_checks():
+    """L11: a list of one behaves exactly like the single-artifact call."""
+    document = _watchdog_document(5)
+    assert watchdog_check_all([document], now=END) == [
+        watchdog_check(document, now=END)
+    ]
+    assert watchdog_check_all(document, now=END) == [watchdog_check(document, now=END)]
+
+
+def test_watchdog_check_all_fail_closed(tmp_path):
+    """L11: empty/None/garbage inputs never raise."""
+    assert watchdog_check_all([], now=END) == []
+    assert watchdog_check_all(None, now=END) == []
+    assert watchdog_check_all((), now=END) == []
+    results = watchdog_check_all([None, "   ", {"no": "window"}, 12345], now=END)
+    assert [r["state"] for r in results] == [
+        "missing",
+        "missing",
+        "invalid",
+        "invalid",
+    ]
+    assert all(r["action"] for r in results)
+
+
+def test_renewal_list_form_merges_across_grants(fresh_renewals):
+    """L11: concurrent grants each remind; merged in artifact order."""
+    first = _renewal_document(2, operator="op-a")
+    second = _renewal_document(10, operator="op-b")
+    reminders = renewal_reminders([first, second], now=END)
+    assert [r["threshold"] for r in reminders] == ["14d", "7d", "3d", "14d"]
+    assert reminders[0]["artifact_id"] != reminders[-1]["artifact_id"]
+    assert all("re-sign to renew" in r["detail"] for r in reminders)
+
+
+def test_renewal_single_item_list_matches_single(fresh_renewals):
+    """L11: a one-grant list behaves exactly like the single call."""
+    document = _renewal_document(2)
+    single = renewal_reminders(document, now=END)
+    assert single != []
+    clear_renewal_reminders()
+    assert renewal_reminders([document], now=END) == single
+
+
+def test_renewal_list_dedupes_same_artifact(fresh_renewals):
+    """L11: the same grant listed twice reminds once, not per check run."""
+    document = _renewal_document(2)
+    reminders = renewal_reminders([document, document], now=END)
+    assert [r["threshold"] for r in reminders] == ["14d", "7d", "3d"]
+
+
+def test_renewal_list_mixes_revoked_and_healthy(tmp_path, fresh_renewals):
+    """L11: a revoked grant yields one marker; a healthy one still reminds."""
+    revoked = _renewal_document(2, operator="op-revoked")
+    revoked["artifact_id"] = "l11-revoked"
+    log = _revoked_log(tmp_path, "l11-revoked")
+    healthy = _renewal_document(10, operator="op-healthy")
+    reminders = renewal_reminders([revoked, healthy], now=END, audit_log=log)
+    assert reminders[0]["kind"] == ROE_REVOKED_KIND
+    assert reminders[0]["artifact_id"] == "l11-revoked"
+    assert [r["threshold"] for r in reminders[1:]] == ["14d"]
+    assert renewal_reminders([revoked, healthy], now=END, audit_log=log) == []
+
+
+def test_heartbeat_list_artifact_merges_digests(tmp_path, fresh_renewals):
+    """L11: a heartbeat carrying several grants digests every reminder."""
+    store = _store(tmp_path)
+    job_id = schedule_heartbeat(
+        store, "sess-L11", "ping", interval_seconds=60, due_at=1000
+    )
+    job = next(j for j in store.jobs if j["id"] == job_id)
+    job["context"] = {
+        "roe_artifact": [
+            _renewal_document(2, operator="op-a"),
+            _renewal_document(10, operator="op-b"),
+        ]
+    }
+    store._save()
+    ran = tick_heartbeats(store, 1000, lambda s, p: "ok", roe_now=END)
+    digest = ran[0]["roe_renewal_digest"]
+    assert [e["kind"] for e in digest] == [ROE_RENEWAL_KIND] * 4
+    assert [e["threshold"] for e in digest] == ["14d", "7d", "3d", "14d"]
+
+
+def test_heartbeat_plural_artifacts_key(tmp_path, fresh_renewals):
+    """L11: the roe_artifacts key is read like a list-form roe_artifact."""
+    job = {"context": {"roe_artifacts": [_renewal_document(10, operator="op-c")]}}
+    entries = heartbeat_roe_renewals(job, now=END)
+    assert [e["threshold"] for e in entries] == ["14d"]
+    assert entries[0]["kind"] == ROE_RENEWAL_KIND
+
+
+def test_heartbeat_single_item_list_matches_single(fresh_renewals):
+    """L11: a one-grant heartbeat list digests like the single grant."""
+    document = _renewal_document(10, operator="op-d")
+    single = heartbeat_roe_renewals({"context": {"roe_artifact": document}}, now=END)
+    assert single != []
+    clear_renewal_reminders()
+    listed = heartbeat_roe_renewals({"context": {"roe_artifact": [document]}}, now=END)
+    assert listed == single

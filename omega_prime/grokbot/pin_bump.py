@@ -91,6 +91,7 @@ import argparse
 import base64
 import contextlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -513,6 +514,32 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--schedule",
+        dest="schedule",
+        default=None,
+        metavar="CRON_EXPR",
+        help=(
+            "Register a recurring pin-bump audit on a five-field cron "
+            "cadence (e.g. '0 6 * * *') instead of bumping now: each tick "
+            "re-runs the audit chain with audit-only semantics and opens "
+            "the normal bump PR path only when the verdict is improved "
+            "(and, with --semver-check, every fix is semver-compatible). "
+            "The current argv is stored as the job config; a duplicate "
+            "--schedule-name replaces the previous job. An invalid cron "
+            "expression is a usage error (exit 2) and registers nothing."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-name",
+        dest="schedule_name",
+        default="pin-bump",
+        metavar="NAME",
+        help=(
+            "Name for the --schedule job (default: pin-bump). Registering "
+            "again under the same name replaces the previous schedule."
+        ),
+    )
+    parser.add_argument(
         "--open-pr",
         action="store_true",
         help="Commit the bump set, push branch pin-bump-<short-sha>, run gh pr create.",
@@ -926,6 +953,146 @@ def _pin_deltas(
     return pinned, full, scoped
 
 
+def _register_pin_bump_schedule(
+    cron_expr: str,
+    *,
+    name: str,
+    root: Path,
+    config: dict,
+) -> int:
+    """Register a recurring pin-bump audit. Returns the exit code.
+
+    Fail-closed: an invalid cron expression (or an empty schedule
+    name) is a usage error (exit 2) that registers nothing and runs
+    no subprocess. A duplicate ``name`` replaces the previous job.
+    """
+    from omega_prime.cron import scheduler as scheduler_mod
+
+    try:
+        expr = scheduler_mod.validate_pin_bump_cron(cron_expr)
+    except ValueError as exc:
+        print(f"pin-bump usage error: --schedule {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    if not isinstance(name, str) or not name.strip():
+        print(
+            "pin-bump usage error: --schedule-name requires a non-empty name",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    try:
+        store = scheduler_mod.JobStore(Path(root) / "cron" / "jobs.json")
+        job_id = scheduler_mod.schedule_pin_bump(
+            store, cron_expr=expr, name=name.strip(), config=config
+        )
+    except ValueError as exc:
+        print(f"pin-bump usage error: --schedule {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    print(
+        f"pin-bump scheduled: {name.strip()!r} ({expr}) -> job {job_id} ({store.path})"
+    )
+    return EXIT_OK
+
+
+_SCHEDULED_VERDICT_RE = re.compile(
+    r"^\[audit-only\] audit verdict: (\S+)", re.MULTILINE
+)
+_SCHEDULED_SEMVER_RE = re.compile(r"^\[audit-only\] semver (\w+):", re.MULTILINE)
+
+
+def audit_scheduled_job(
+    config: dict | None,
+    *,
+    root: Path = REPO_ROOT,
+    run: Runner | None = None,
+) -> dict:
+    """One scheduled tick's audit with audit-only semantics (no mutations).
+
+    Re-runs the audit chain for the stored argv echo and returns
+    ``{"verdict", "semver_compatible", "exit_code"}``. ``verdict`` is
+    the audit delta verdict (or ``"error"`` when the chain never
+    reached a verdict); ``semver_compatible`` reuses the
+    :func:`_bump_commit_gate` policy when the stored config enables
+    ``--semver-check`` and is True otherwise. Never raises:
+    a broken chain reports ``"error"`` fail-closed.
+    """
+    if not isinstance(config, dict):
+        return {"verdict": "error", "semver_compatible": False, "exit_code": EXIT_USAGE}
+    to = config.get("to")
+    if not isinstance(to, str) or not to:
+        return {"verdict": "error", "semver_compatible": False, "exit_code": EXIT_USAGE}
+    semver_check = bool(config.get("semver_check"))
+    pin_selectors = config.get("pin")
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            exit_code = bump(
+                to,
+                root=Path(root),
+                run=run,
+                old_audit=config.get("old_audit"),
+                semver_check=semver_check,
+                bump_commit=False,
+                auto_detect_upstream_fix=bool(config.get("auto_detect_upstream_fix")),
+                open_pr=False,
+                json_mode=False,
+                dry_run=False,
+                audit_only=True,
+                interactive=False,
+                pin=list(pin_selectors) if isinstance(pin_selectors, list) else None,
+            )
+    except Exception as exc:
+        return {
+            "verdict": "error",
+            "semver_compatible": False,
+            "exit_code": EXIT_DEGRADED,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    out = buf.getvalue()
+    match = _SCHEDULED_VERDICT_RE.search(out)
+    verdict = match.group(1) if match else "error"
+    semver_compatible = True
+    if semver_check:
+        rows = [("", "", "", "", label) for label in _SCHEDULED_SEMVER_RE.findall(out)]
+        semver_compatible = (
+            _bump_commit_gate(semver_check=True, verdict=verdict, rows=rows) is None
+        )
+    return {
+        "verdict": verdict,
+        "semver_compatible": semver_compatible,
+        "exit_code": exit_code,
+    }
+
+
+def apply_scheduled_bump(
+    config: dict,
+    *,
+    root: Path = REPO_ROOT,
+    run: Runner | None = None,
+) -> int:
+    """Open the normal bump PR path for one scheduled run.
+
+    Replays the stored argv echo as a real (mutating) bump with
+    ``--open-pr`` forced on — the tick only calls this after the
+    improved + semver-compatible gate passes. Returns the exit code.
+    """
+    pin_selectors = config.get("pin")
+    return bump(
+        config.get("to", ""),
+        root=Path(root),
+        run=run,
+        old_audit=config.get("old_audit"),
+        semver_check=bool(config.get("semver_check")),
+        bump_commit=bool(config.get("bump_commit")),
+        auto_detect_upstream_fix=bool(config.get("auto_detect_upstream_fix")),
+        open_pr=True,
+        json_mode=False,
+        dry_run=False,
+        audit_only=False,
+        interactive=False,
+        pin=list(pin_selectors) if isinstance(pin_selectors, list) else None,
+    )
+
+
 def bump(
     to: str,
     *,
@@ -942,8 +1109,28 @@ def bump(
     audit_only: bool = False,
     interactive: bool = False,
     pin: list[str] | None = None,
+    schedule: str | None = None,
+    schedule_name: str = "pin-bump",
 ) -> int:
     """Run the pin-bump runbook against ``root``. Returns the exit code."""
+    if schedule is not None:
+        # Registration path: no subprocess, no mutation — validate the
+        # cron expression fail-closed and store the argv echo as the job
+        # config. Every other flag is recorded, not executed.
+        return _register_pin_bump_schedule(
+            schedule,
+            name=schedule_name,
+            root=root,
+            config={
+                "to": to,
+                "old_audit": old_audit,
+                "semver_check": semver_check,
+                "bump_commit": bump_commit,
+                "auto_detect_upstream_fix": auto_detect_upstream_fix,
+                "open_pr": open_pr,
+                "pin": [s.strip() for s in (pin or []) if s is not None],
+            },
+        )
     if semver_check and skip_audit:
         print(
             "pin-bump usage error: --semver-check needs audit data (drop --skip-audit)",
@@ -2359,7 +2546,7 @@ def bump(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--dry-run] [--audit-only] [--open-pr] [--json] [--interactive] [--pin <advisory-or-package>]``."""
+    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--dry-run] [--audit-only] [--open-pr] [--json] [--interactive] [--pin <advisory-or-package>] [--schedule <cron-expr> [--schedule-name <name>]]``."""
     args = build_parser().parse_args(argv)
     root = Path(args.root) if args.root is not None else REPO_ROOT
     return bump(
@@ -2376,6 +2563,8 @@ def main(argv: list[str] | None = None) -> int:
         audit_only=args.audit_only,
         interactive=args.interactive,
         pin=args.pin,
+        schedule=args.schedule,
+        schedule_name=args.schedule_name,
     )
 
 
