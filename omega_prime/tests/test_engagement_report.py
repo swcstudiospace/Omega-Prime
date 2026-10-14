@@ -5691,3 +5691,60 @@ def test_coverage_jsonl_pure_functions(tmp_path, monkeypatch):
     assert module.write_jsonl_report(rows, target) == 0
     assert target.read_text(encoding="utf-8") == text
     assert module.write_jsonl_report(rows, tmp_path) == 1
+
+
+def test_export_jsonl_write_is_atomic_mode_0644_and_leaves_no_temp(tmp_path):
+    """FX-2: temp file + replace; replaces an existing file; mode 0644."""
+    module = _report_module()
+    out = tmp_path / "coverage.jsonl"
+    out.write_text("OLD\n", encoding="utf-8")
+    out.chmod(0o600)
+    rows = [{"schema": "coverage/1", "class": "abuse"}]
+
+    assert module.write_jsonl_report(rows, out) == 0
+    assert out.read_text(encoding="utf-8") == module.render_jsonl(rows)
+    assert (out.stat().st_mode & 0o777) == 0o644
+    assert [p.name for p in tmp_path.iterdir()] == ["coverage.jsonl"]
+
+
+def test_export_jsonl_failed_replace_keeps_old_file_and_cleans_temp(
+    tmp_path, monkeypatch, capsys
+):
+    module = _report_module()
+    out = tmp_path / "coverage.jsonl"
+    out.write_text("OLD\n", encoding="utf-8")
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(module.os, "replace", boom)
+    assert module.write_jsonl_report([{"class": "x"}], out) == 1
+    assert "error: cannot write --export-jsonl export" in capsys.readouterr().err
+    assert out.read_text(encoding="utf-8") == "OLD\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["coverage.jsonl"]
+
+
+def test_export_jsonl_refuses_symlink_leaf(tmp_path, capsys):
+    module = _report_module()
+    real = tmp_path / "real.txt"
+    real.write_text("KEEP", encoding="utf-8")
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(real)
+
+    assert module.write_jsonl_report([{"class": "x"}], link) == 1
+    assert "error: cannot write --export-jsonl export" in capsys.readouterr().err
+    assert real.read_text(encoding="utf-8") == "KEEP"
+    assert link.is_symlink()
+
+
+def test_export_jsonl_hostile_class_round_trips_as_one_line():
+    """FX-2: unknown class names stay JSON-escaped data on a single line."""
+    module = _report_module()
+    evil = 'evil\n\x1b[31mclass\u2028\u202e"}{'
+    text = module.render_jsonl(
+        [{"schema": "coverage/1", "class": evil}, {"class": "abuse"}]
+    )
+    lines = text.split("\n")
+    assert lines[-1] == "" and len(lines) == 3
+    assert text.isascii() and "\x1b" not in text
+    assert json.loads(lines[0])["class"] == evil

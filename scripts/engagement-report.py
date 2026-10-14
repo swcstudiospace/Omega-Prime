@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import csv
 import hashlib
 import json
@@ -1993,13 +1994,29 @@ def render_jsonl(rows: Sequence[dict[str, object]]) -> str:
 def write_jsonl_report(rows: Sequence[dict[str, object]], jsonl_path: Path) -> int:
     """Write ``rows`` as JSON Lines at ``jsonl_path`` (R4).
 
-    Returns 0 on success; an unwritable output prints ``error:`` to
-    stderr and returns 1.
+    The write is atomic: a ``.engrep-`` temporary file in the same
+    directory is fsynced and ``os.replace``d over the target, which is
+    mode 0644. A symlink leaf is refused. Returns 0 on success; an
+    unwritable output prints ``error:`` to stderr and returns 1.
     """
+    temp_name: str | None = None
     try:
-        with jsonl_path.open("w", encoding="utf-8", newline="") as handle:
+        if jsonl_path.is_symlink():
+            raise OSError("refusing to write through a symlink")
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".engrep-", suffix=".tmp", dir=str(jsonl_path.parent)
+        )
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(render_jsonl(rows))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, 0o644)
+        os.replace(temp_name, jsonl_path)
+        temp_name = None
     except OSError as exc:
+        if temp_name is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_name)
         print(
             f"error: cannot write --export-jsonl export {jsonl_path} ({exc})",
             file=sys.stderr,
@@ -4332,17 +4349,24 @@ def parse_baseline(spec: str) -> tuple[str, float]:
 def validate_baseline_classes(
     baselines: list[tuple[str, float]],
     cases: list[tuple[str, str, str, str]],
+    *,
+    fixed_vocab: bool = False,
 ) -> None:
     """Reject ``--baseline`` classes seen neither in schema nor on disk.
 
     Raises :class:`BaselineUsageError` (exit 2) naming the first unknown
     class and listing every valid class (schema classes byte-wise, then
-    any extra on-disk classes sorted). Deterministic.
+    any extra on-disk classes sorted). Deterministic. With
+    ``fixed_vocab`` (``--digest``) the extra on-disk classes are listed
+    as the single word ``other`` so no on-disk text reaches the message.
     """
     known = set(SCHEMA_CLASSES) | {case_class for _, _, _, case_class in cases}
     for name, _floor in baselines:
         if name not in known:
-            valid = ", ".join([*SCHEMA_CLASSES, *sorted(known - set(SCHEMA_CLASSES))])
+            extras = sorted(known - set(SCHEMA_CLASSES))
+            if fixed_vocab:
+                extras = ["other"] if extras else []
+            valid = ", ".join([*SCHEMA_CLASSES, *extras])
             raise BaselineUsageError(
                 f"error: unknown --baseline class {name!r} (valid: {valid})"
             )
@@ -4493,6 +4517,8 @@ def evaluate_threshold(
     coverage: list[tuple[str, int, int, int, float, int, str]],
     spec: str | None,
     baselines: list[tuple[str, float]] | None = None,
+    *,
+    fixed_vocab: bool = False,
 ) -> dict[str, object]:
     """Gate verdict over the current window (L10, P12 floors).
 
@@ -4507,7 +4533,9 @@ def evaluate_threshold(
     threshold passes (``failures`` lists ``class``/``pass_pct``/``floor``
     in CLI order). With ``spec`` unset the gate rests on the floors
     alone (``metric`` ``"floors"``). Without baselines the passing and
-    failing lines match the L10 shapes exactly.
+    failing lines match the L10 shapes exactly. With ``fixed_vocab``
+    (``--digest``) failing class names outside :data:`SCHEMA_CLASSES`
+    are rendered as ``other`` in ``failures``, ``line`` and ``stderr``.
     """
     failures: list[dict[str, object]] = []
     if baselines:
@@ -4517,7 +4545,11 @@ def evaluate_threshold(
             if pct < floor:
                 failures.append(
                     {
-                        "class": class_name,
+                        "class": (
+                            "other"
+                            if fixed_vocab and class_name not in SCHEMA_CLASSES
+                            else class_name
+                        ),
                         "pass_pct": round(pct, 1),
                         "floor": int(floor) if float(floor).is_integer() else floor,
                     }
@@ -4627,6 +4659,16 @@ def summarize(reports_dir: Path, since_text: str | None = None) -> dict[str, obj
     }
 
 
+def _printable_only(text: str) -> str:
+    """``text`` with every non-printable character backslash-escaped.
+
+    Digest-mode stdout/stderr guard: control characters, bidi marks and
+    line separators can never reach the terminal raw. Printable text is
+    returned unchanged.
+    """
+    return "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in text)
+
+
 def build_digest(
     reports_dir: Path,
     since_text: str | None = None,
@@ -4670,12 +4712,14 @@ def build_digest(
             validate_baseline_classes(
                 list(baselines),
                 window["cases"],  # type: ignore[arg-type]
+                fixed_vocab=True,
             )
         gate = evaluate_threshold(
             window["pass_rows"],  # type: ignore[arg-type]
             coverage,
             threshold,
             list(baselines) if baselines else None,
+            fixed_vocab=True,
         )
     lines = [str(summary["line"])]
     if state == "ok":
@@ -5039,10 +5083,10 @@ def main(argv: list[str] | None = None) -> int:
                 else None
             )
         except BaselineUsageError as exc:
-            print(str(exc), file=sys.stderr)
+            print(_printable_only(str(exc)), file=sys.stderr)
             return 2
         except ReportError as exc:
-            print(str(exc), file=sys.stderr)
+            print(_printable_only(str(exc)), file=sys.stderr)
             return 1
         digest_lines = digest["lines"]
         digest_gate = digest["gate"]
@@ -5055,7 +5099,7 @@ def main(argv: list[str] | None = None) -> int:
                 digest_jsonl_rows, Path(args.export_jsonl)
             )
         if digest_gate is not None and not digest_gate["passed"]:
-            print(str(digest_gate["stderr"]), file=sys.stderr)
+            print(_printable_only(str(digest_gate["stderr"])), file=sys.stderr)
             return 3
         return digest_status
     if args.summary:

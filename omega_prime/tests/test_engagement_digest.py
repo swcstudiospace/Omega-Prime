@@ -695,3 +695,156 @@ def test_summary_output_unchanged_by_digest_flag_existence(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert SUMMARY_RE.match(proc.stdout)
     assert len(proc.stdout.splitlines()) == 1
+
+
+# --------------------------------------------------------------------------
+# Fix-wave FX-2: digest gate/error text obeys the fixed class vocabulary
+# --------------------------------------------------------------------------
+
+HOSTILE_CLASS = 'bad\x1b[31mRED\x1b[0m"class'
+
+
+def _hostile_repo(tmp_path: Path) -> tuple[Path, Path]:
+    """Isolated repo (script copy + sidecar cases) with one hostile class."""
+    root = tmp_path / "hostile-repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "sidecar" / "cases").mkdir(parents=True)
+    history = root / "history"
+    history.mkdir()
+    script = root / "scripts" / "engagement-report.py"
+    script.write_bytes(SCRIPT.read_bytes())
+    (root / "sidecar" / "cases" / "evil.yaml").write_text(
+        "\n".join(
+            [
+                "case_id: evil-01",
+                f"class: {HOSTILE_CLASS}",
+                "expected:",
+                "  detection: detected",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    seed_transitions(
+        history,
+        [{"cause": "run-started", "from": "IDLE", "to": "RUNNING", "ts": T1}],
+    )
+    (history / "last-run.json").write_text(
+        json.dumps({"observations": {"evil-01": {"observed_detection": "missed"}}}),
+        encoding="utf-8",
+    )
+    return script, history
+
+
+def _run_hostile(script: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-B", str(script), *args],
+        capture_output=True,
+        text=True,
+        env=_child_env(),
+    )
+
+
+def _only_printable(text: str) -> bool:
+    return all(ch.isprintable() or ch == "\n" for ch in text)
+
+
+def test_digest_gate_failure_never_echoes_raw_on_disk_class(tmp_path):
+    script, history = _hostile_repo(tmp_path)
+
+    proc = _run_hostile(
+        script,
+        "--digest",
+        "--reports-dir",
+        str(history),
+        "--baseline",
+        f"{HOSTILE_CLASS}=90",
+    )
+    assert proc.returncode == 3
+    assert "\x1b" not in proc.stdout and "\x1b" not in proc.stderr
+    assert _only_printable(proc.stdout) and _only_printable(proc.stderr)
+    assert HOSTILE_CLASS not in proc.stdout + proc.stderr
+    lines = proc.stdout.splitlines()
+    assert lines[-1] == "Gate: FAIL (floors: other 0.0% < 90%)"
+    assert proc.stderr.strip() == "gate: FAIL (floors: other 0.0% < 90%)"
+
+
+def test_digest_unknown_baseline_error_has_no_raw_text(tmp_path):
+    script, history = _hostile_repo(tmp_path)
+
+    proc = _run_hostile(
+        script,
+        "--digest",
+        "--reports-dir",
+        str(history),
+        "--baseline",
+        "nope\x1b[31m\nFORGED=50",
+    )
+    assert proc.returncode == 2
+    assert proc.stdout == ""
+    assert _only_printable(proc.stderr)
+    assert len(proc.stderr.splitlines()) == 1
+    assert "\x1b" not in proc.stderr and "RED" not in proc.stderr
+    assert "valid: abuse, auth-bypass" in proc.stderr
+    assert proc.stderr.rstrip().endswith("prompt-injection, other)")
+
+
+def test_digest_floor_failure_names_schema_class_unchanged(tmp_path):
+    fixture = tmp_path / "reports"
+    _seed_digest_history(fixture, wrong={"abuse-01": "x"})
+
+    proc = _digest(fixture, "--baseline", "abuse=90")
+    assert proc.returncode == 3
+    assert proc.stdout.splitlines()[-1] == "Gate: FAIL (floors: abuse 0.0% < 90%)"
+    assert proc.stderr.strip() == "gate: FAIL (floors: abuse 0.0% < 90%)"
+
+
+def test_digest_report_error_text_is_escaped(tmp_path):
+    fixture = tmp_path / "reports"
+    _seed_digest_history(fixture)
+
+    proc = _digest(fixture, "--baseline", "abuse\x1b[1m")
+    assert proc.returncode == 1
+    assert "\x1b" not in proc.stderr
+    assert "invalid --baseline" in proc.stderr
+
+
+def test_legacy_summary_gate_rendering_keeps_raw_class(tmp_path):
+    """--summary and evaluate_threshold defaults are byte-identical (raw)."""
+    module = _digest_module()
+    script, history = _hostile_repo(tmp_path)
+
+    proc = _run_hostile(
+        script,
+        "--summary",
+        "--reports-dir",
+        str(history),
+        "--baseline",
+        f"{HOSTILE_CLASS}=90",
+    )
+    assert proc.returncode == 3
+    assert f"floors: {HOSTILE_CLASS} 0.0% < 90%" in proc.stderr + proc.stdout
+
+    coverage = [(HOSTILE_CLASS, 1, 1, 0, 0.0, 0, "gappy")]
+    legacy = module.evaluate_threshold([], coverage, None, [(HOSTILE_CLASS, 90.0)])
+    assert legacy["line"] == f"Gate: FAIL (floors: {HOSTILE_CLASS} 0.0% < 90%)"
+    assert legacy["failures"][0]["class"] == HOSTILE_CLASS
+    mapped = module.evaluate_threshold(
+        [], coverage, None, [(HOSTILE_CLASS, 90.0)], fixed_vocab=True
+    )
+    assert mapped["line"] == "Gate: FAIL (floors: other 0.0% < 90%)"
+    assert mapped["failures"][0]["class"] == "other"
+
+
+def test_digest_jsonl_symlink_leaf_is_refused(tmp_path):
+    fixture = tmp_path / "reports"
+    _seed_digest_history(fixture)
+    real = tmp_path / "real.txt"
+    real.write_text("KEEP", encoding="utf-8")
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(real)
+
+    proc = _digest(fixture, "--export-jsonl", str(link))
+    assert proc.returncode == 1
+    assert "cannot write --export-jsonl export" in proc.stderr
+    assert real.read_text(encoding="utf-8") == "KEEP"
