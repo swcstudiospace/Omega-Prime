@@ -5902,6 +5902,27 @@ def test_export_jsonl_stream_open_never_creates_the_target(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_export_jsonl_stream_writer_accepts_block_device_mode(tmp_path, monkeypatch):
+    """Greptile round 2: a block device is a supported in-place target."""
+    module = _report_module()
+    target = tmp_path / "blk.jsonl"
+    target.write_bytes(b"")
+    real_fstat = os.fstat
+
+    class _BlockMode:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+            self.st_mode = stat.S_IFBLK | 0o600
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "fstat", lambda fd: _BlockMode(real_fstat(fd)))
+        module._write_jsonl_stream("row\n", target)
+    assert target.read_bytes() == b"row\n"
+
+
 def test_export_jsonl_hostile_class_round_trips_as_one_line():
     """FX-2: unknown class names stay JSON-escaped data on a single line."""
     module = _report_module()

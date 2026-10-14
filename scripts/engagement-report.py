@@ -2011,6 +2011,7 @@ def _write_jsonl_stream(text: str, jsonl_path: Path) -> None:
         if not (
             stat.S_ISFIFO(opened_mode)
             or stat.S_ISCHR(opened_mode)
+            or stat.S_ISBLK(opened_mode)
             or stat.S_ISSOCK(opened_mode)
         ):
             raise OSError("refusing to write: target is not a stream")
