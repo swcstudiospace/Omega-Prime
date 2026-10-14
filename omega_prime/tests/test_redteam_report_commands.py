@@ -785,6 +785,84 @@ def test_sync_plan_conflict_rows_are_capped_and_the_sentinel_passes_through(
     assert result["grant_conflicts"][20:] == [sentinel]
 
 
+def test_sync_plan_conflicts_total_counts_the_unlisted_rows(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    fixture = SyncFixture(monkeypatch, tmp_path)
+    sentinel = {
+        "kind": "conflicts-truncated",
+        "grants": [],
+        "detail": "651 more conflicts not listed",
+    }
+    rows = [
+        {"kind": "operator-mismatch", "grants": [f"id-{n:03d}", "id-z"], "detail": "d"}
+        for n in range(100)
+    ]
+    _fake_tick(
+        monkeypatch,
+        {"pushed": [], "skipped": [], "grant_conflicts": [*rows, sentinel]},
+    )
+    result = _call(fixture.env, "/omega-redteam-sync-plan")["result"]
+    assert result["grant_conflicts_total"] == 751
+    assert len(result["grant_conflicts"]) == 21
+    assert result["grant_conflicts"][-1] == sentinel
+
+
+def test_sync_plan_path_alias_never_equals_a_real_grant_id(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    fixture = SyncFixture(monkeypatch, tmp_path)
+    first, second = "/x/a/g.json", "/x/b/g.json"
+    _fake_tick(
+        monkeypatch,
+        {
+            "pushed": [],
+            "skipped": [],
+            "grant_conflicts": [
+                {
+                    "kind": "operator-mismatch",
+                    "grants": [first, second],
+                    "detail": f"{first} vs {second}",
+                },
+                {
+                    "kind": "operator-mismatch",
+                    "grants": ["grant-2", "grant-3"],
+                    "detail": "grant-2 vs grant-3",
+                },
+            ],
+        },
+    )
+    rows = _call(fixture.env, "/omega-redteam-sync-plan")["result"]["grant_conflicts"]
+    names = rows[0]["grants"] + rows[1]["grants"]
+    assert rows[1]["grants"] == ["grant-2", "grant-3"]
+    assert rows[0]["grants"] == ["grant-1", "grant-4"]
+    assert len(set(names)) == 4
+
+
+def test_sync_plan_tracker_is_clipped_and_escaped_on_every_path(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    long_tracker = "\x1b[31m" + "t" * 100_000
+    for node in ({"enabled": False}, {"enabled": True}):
+        fixture = SyncFixture(monkeypatch, tmp_path, tracker=long_tracker, **node)
+        body = _call(fixture.env, "/omega-redteam-sync-plan")
+        shown = body["result"].get("tracker", "")
+        assert len(shown) <= 64
+        assert _printable_ascii(shown)
+        assert len(json.dumps(body)) < 5_000
+    _fake_tick(
+        monkeypatch,
+        {
+            "pushed": [],
+            "skipped": [],
+            "skipped_tracker": "\x1b[31m" + "s" * 100_000,
+        },
+    )
+    shown = _call(fixture.env, "/omega-redteam-sync-plan")["result"]["tracker"]
+    assert len(shown) <= 64
+    assert shown.startswith("\\x1b[31m")
+
+
 def test_sync_plan_tick_error_detail_is_clipped_and_escaped(
     monkeypatch: Any, tmp_path: Path
 ) -> None:

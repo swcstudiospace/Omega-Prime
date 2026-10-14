@@ -34,6 +34,7 @@ _MAX_LABEL = 64
 _MAX_DETAIL = 200
 _TRUNCATED_KIND = "conflicts-truncated"
 _DRIVE_RE = re.compile(r"[A-Za-z]:[\\/]", re.ASCII)
+_MORE_RE = re.compile(r"(\d{1,9}) more conflicts not listed", re.ASCII)
 
 
 def _ascii(value: Any, limit: int = _MAX_TEXT) -> str:
@@ -101,13 +102,31 @@ def _label_aliases(rows: list[dict[str, Any]]) -> dict[str, str]:
     counts: dict[str, int] = {}
     for name in proposed.values():
         counts[name] = counts.get(name, 0) + 1
+    needs_alias = {
+        label
+        for label in labels
+        if _looks_like_path(label)
+        and (not proposed[label] or counts[proposed[label]] > 1)
+    }
+    taken = {proposed[label] for label in labels if label not in needs_alias}
     aliases: dict[str, str] = {}
     for index, label in enumerate(labels, start=1):
-        name = proposed[label]
-        if _looks_like_path(label) and (not name or counts[name] > 1):
-            name = f"grant-{index}"
+        if label not in needs_alias:
+            aliases[label] = proposed[label]
+            continue
+        number = index
+        while f"grant-{number}" in taken:
+            number += 1
+        name = f"grant-{number}"
+        taken.add(name)
         aliases[label] = name
     return aliases
+
+
+def _unlisted(sentinel: Mapping[str, Any]) -> int:
+    """``N`` from the detector's "<N> more conflicts not listed" text, else 0."""
+    found = _MORE_RE.match(str(sentinel.get("detail", "")))
+    return int(found.group(1)) if found else 0
 
 
 def _conflict_rows(value: Any) -> tuple[list[dict[str, Any]], int]:
@@ -135,7 +154,9 @@ def _conflict_rows(value: Any) -> tuple[list[dict[str, Any]], int]:
                 "detail": _ascii(detail, _MAX_DETAIL),
             }
         )
-    return out + [dict(row) for row in sentinels], len(real)
+    return out + [dict(row) for row in sentinels], len(real) + sum(
+        _unlisted(row) for row in sentinels
+    )
 
 
 def _forbidden_runner(argv: Any, data: Any) -> Any:
@@ -209,7 +230,7 @@ def run(args: str, env: Mapping[str, str]) -> dict[str, Any]:
     budget, budget_total = _held_rows(result.get("budget_held"))
     conflicts, conflicts_total = _conflict_rows(result.get("grant_conflicts"))
     return {
-        "tracker": _tracker(config, result),
+        "tracker": _ascii(_tracker(config, result)),
         "disabled": bool(result.get("disabled")),
         "would_sync": [_ascii(row.get("dedupe_hash", "")) for row in pushed[:MAX_ROWS]],
         "would_sync_total": len(pushed),
