@@ -337,6 +337,15 @@ WEBHOOK_MAX_RETRIES = 3
 #: gets up to +1s of jitter (see :func:`_webhook_retry_delay`).
 WEBHOOK_RETRY_DELAYS = (1.0, 2.0, 4.0)
 
+#: Cap (seconds) for a server-sent ``Retry-After`` delay (O8). A 429
+#: asking longer than this still retries — it just sleeps the cap
+#: instead of the full ask.
+WEBHOOK_RETRY_AFTER_MAX = 60.0
+
+#: One ``Retry-After: <value>`` header line inside ``gh`` stderr (O8).
+#: Case-insensitive; the value runs to the next whitespace/comma/semicolon.
+_RETRY_AFTER_RE = re.compile(r"retry-after\s*:\s*([^\s,;]+)", re.IGNORECASE)
+
 #: ``gh`` exit code for CLI usage errors — terminal, never retried.
 _GH_USAGE_ERROR_EXIT = 2
 
@@ -390,6 +399,41 @@ def _webhook_retry_delay(retry_index: int) -> float:
     return base + random.uniform(0, 1.0)
 
 
+def _sleep(seconds: float) -> None:
+    """Sleep seam for the webhook-retry transport (O8).
+
+    Delegates to :func:`time.sleep` at call time, so the existing
+    ``time.sleep`` monkeypatching keeps working; tests may also patch
+    ``findings_sync._sleep`` directly for deterministic timing.
+    """
+    time.sleep(seconds)
+
+
+def _retry_after_delay(stderr: Any, default: float) -> float:
+    """Server-sent retry delay parsed from ``stderr``, or ``default`` (O8).
+
+    Only 429-style failures (``"429"`` in ``stderr``) consult the
+    ``Retry-After: N`` header value: integer seconds sleep ``N``
+    (capped at :data:`WEBHOOK_RETRY_AFTER_MAX`); an HTTP-date or any
+    unparseable value falls back to ``default``. Non-429 failures
+    always keep ``default`` (the existing backoff). Never raises.
+    """
+    try:
+        text = stderr if isinstance(stderr, str) else str(stderr or "")
+    except Exception:
+        return default
+    if "429" not in text:
+        return default
+    match = _RETRY_AFTER_RE.search(text)
+    if not match:
+        return default
+    try:
+        asked = int(match.group(1).strip().strip("\"'"))
+    except (TypeError, ValueError):
+        return default
+    return float(min(max(asked, 0), WEBHOOK_RETRY_AFTER_MAX))
+
+
 def _run_with_webhook_retry(
     run: GhRunner, argv: list[str], data: dict[str, Any]
 ) -> Any:
@@ -398,7 +442,10 @@ def _run_with_webhook_retry(
     Transient failures — a nonzero ``gh`` exit (other than usage-error
     exit 2) or a runner exception such as a network error — retry up to
     :data:`WEBHOOK_MAX_RETRIES` times with :data:`WEBHOOK_RETRY_DELAYS`
-    backoff plus jitter; each retry logs a warning to stderr. Terminal
+    backoff plus jitter; each retry logs a warning to stderr. A
+    429-style failure whose stderr carries ``Retry-After: N`` instead
+    sleeps ``N`` seconds (capped at :data:`WEBHOOK_RETRY_AFTER_MAX`;
+    HTTP-date/unparseable values keep the default backoff). Terminal
     failures — exit 2, a missing ``gh`` binary
     (:class:`GhNotFoundError`), or an already-classified
     :class:`FindingsSyncError` — raise immediately with no retry.
@@ -421,7 +468,7 @@ def _run_with_webhook_retry(
                 f"({exc}); retrying in {delay:.1f}s",
                 file=sys.stderr,
             )
-            time.sleep(delay)
+            _sleep(delay)
             attempt += 1
             continue
         returncode = getattr(completed, "returncode", 1)
@@ -433,13 +480,13 @@ def _run_with_webhook_retry(
                 f"gh api {label} exited {returncode}: {stderr}",
                 returncode=returncode if isinstance(returncode, int) else None,
             )
-        delay = _webhook_retry_delay(attempt)
+        delay = _retry_after_delay(stderr, _webhook_retry_delay(attempt))
         print(
             f"findings_sync: webhook POST attempt {attempt + 1} exited "
             f"{returncode}: {stderr}; retrying in {delay:.1f}s",
             file=sys.stderr,
         )
-        time.sleep(delay)
+        _sleep(delay)
         attempt += 1
 
 
@@ -2516,6 +2563,504 @@ def _record_grant_decision(
         return None
 
 
+#: In-memory expiry-notice fire record (O11): ``(artifact_id, state)``
+#: pairs already delivered through a tracker. One notice per pair for
+#: the life of the process (mirrors the renewal-reminder
+#: ``_RENEWAL_FIRED`` shape in :mod:`roe_lifecycle`); tests reset via
+#: :func:`clear_expiry_notices`.
+_EXPIRY_NOTICE_FIRED: set[tuple[str, str]] = set()
+
+
+def clear_expiry_notices() -> None:
+    """Reset the in-memory expiry-notice fire record (tests/harness)."""
+    _EXPIRY_NOTICE_FIRED.clear()
+
+
+def _tick_grant_items(
+    config: Mapping[str, Any] | None, node: Mapping[str, Any]
+) -> list[Any]:
+    """Flat RoE grant artifacts from the tick context (never raises).
+
+    Same discovery as :func:`_grant_allowed_trackers` (the
+    ``roe_artifact``-family keys on the findings-sync node or on
+    ``redteam``), flattened to one item per grant for per-grant
+    :func:`watchdog_check` classification.
+    """
+    try:
+        candidates: list[Any] = []
+        for key in ROE_ARTIFACT_KEYS:
+            if isinstance(node, Mapping) and node.get(key) is not None:
+                candidates.append(node.get(key))
+        redteam: Any = (config or {}).get("redteam", {})
+        if isinstance(redteam, Mapping):
+            for key in ROE_ARTIFACT_KEYS:
+                if redteam.get(key) is not None:
+                    candidates.append(redteam.get(key))
+        items: list[Any] = []
+        for candidate in candidates:
+            if isinstance(candidate, (list, tuple)):
+                for item in candidate:
+                    if isinstance(item, (list, tuple)):
+                        items.extend(item)
+                    else:
+                        items.append(item)
+            else:
+                items.append(candidate)
+        return items
+    except Exception:
+        return []
+
+
+def _expiry_notice_states(
+    config: Mapping[str, Any] | None, node: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Watchdog states for the tick's grants that need a notice (O11).
+
+    One ``watchdog_check`` dict per grant artifact, filtered to
+    ``expiring-7d``/``expiring-1d``/``expired``. No grant context,
+    unreadable artifacts, or healthy (``valid``/``missing``/``invalid``)
+    grants yield ``[]``. Never raises.
+    """
+    try:
+        from omega_prime.grokbot.roe_lifecycle import (
+            EXPIRY_NOTICE_STATES,
+            watchdog_check,
+        )
+    except Exception:
+        return []
+    try:
+        states: list[dict[str, Any]] = []
+        for item in _tick_grant_items(config, node):
+            state = watchdog_check(item)
+            if isinstance(state, dict) and state.get("state") in EXPIRY_NOTICE_STATES:
+                states.append(state)
+        return states
+    except Exception:
+        return []
+
+
+def _expiry_notice_subject(watch: Mapping[str, Any]) -> str:
+    """One-line notice title from a watchdog state dict (never raises)."""
+    try:
+        artifact_id = str(watch.get("artifact_id", "") or "unknown-artifact")
+        name = str(watch.get("state", "") or "unknown")
+    except Exception:
+        artifact_id, name = "unknown-artifact", "unknown"
+    return f"RoE grant {name}: {artifact_id}"
+
+
+def _deliver_expiry_notice(
+    tracker: str,
+    notice: str,
+    watch: Mapping[str, Any],
+    node: Mapping[str, Any],
+    *,
+    runner: GhRunner | None = None,
+) -> str | None:
+    """Post one expiry notice through the configured tracker (O11).
+
+    ``tracker`` is the tick's effective tracker; ``notice`` is the
+    :func:`expiry_notice_message` text; ``node`` is the findings-sync
+    node (tracker credentials resolve exactly as in :func:`tick`).
+    Each branch reuses the same runner seam and transport the
+    corresponding ``sync_findings_*`` function uses (direct ``run``
+    for GitHub/Linear, the webhook-retry transport for the webhook
+    family, Jira create, Graph token-fetch + message POST).
+
+    Returns the deterministic ``notice:<artifact_id>:<state>`` ref on
+    success, or ``None`` when the tracker is not configured
+    (digest-only — no runner call). Delivery failures raise
+    :class:`GhApiError` (the caller records a digest entry and never
+    lets a notice break findings dispatch).
+    """
+    try:
+        artifact_id = str(watch.get("artifact_id", "") or "unknown-artifact")
+        name = str(watch.get("state", "") or "unknown")
+    except Exception:
+        artifact_id, name = "unknown-artifact", "unknown"
+    ref = f"notice:{artifact_id}:{name}"
+    subject = _expiry_notice_subject(watch)
+    run = runner if runner is not None else _default_runner
+
+    def _check(completed: Any, label: str) -> None:
+        returncode = getattr(completed, "returncode", 1)
+        if returncode != 0:
+            stderr = getattr(completed, "stderr", "")
+            raise GhApiError(
+                f"gh api {label} exited {returncode}: {stderr}",
+                returncode=returncode if isinstance(returncode, int) else None,
+            )
+
+    def _direct(argv: list[str], payload: dict[str, Any], label: str) -> None:
+        try:
+            completed = run(argv, payload)
+        except GhNotFoundError:
+            raise
+        except FindingsSyncError:
+            raise
+        except Exception as exc:
+            raise GhApiError(f"gh runner failed: {exc}") from exc
+        _check(completed, label)
+
+    def _retried(argv: list[str], payload: dict[str, Any]) -> None:
+        try:
+            _run_with_webhook_retry(run, argv, payload)
+        except FindingsSyncError:
+            raise
+        except Exception as exc:
+            raise GhApiError(f"gh runner failed: {exc}") from exc
+
+    if tracker == "github":
+        repo = node.get("repo", "")
+        if not isinstance(repo, str) or not repo.strip():
+            return None
+        repo = repo.strip()
+        argv = ["gh", "api", f"repos/{repo}/issues", "--method", "POST"]
+        argv += ["-f", f"title={subject}", "-f", f"body={notice}"]
+        argv += ["-f", "labels[]=redteam"]
+        payload: dict[str, Any] = {
+            "repo": repo,
+            "title": subject,
+            "body": notice,
+            "labels": ["redteam"],
+        }
+        _direct(argv, payload, f"repos/{repo}/issues")
+        return ref
+    if tracker == "linear":
+        team_id = node.get("linear_team_id", "")
+        if not isinstance(team_id, str) or not team_id.strip():
+            return None
+        team_id = team_id.strip()
+        priority: Any = 1 if name == "expired" else 2
+        argv = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={LINEAR_ISSUE_MUTATION}",
+            "-f",
+            f"teamId={team_id}",
+            "-f",
+            f"title={subject}",
+            "-f",
+            f"description={notice}",
+            "-F",
+            f"priority={priority}",
+        ]
+        payload = {
+            "team_id": team_id,
+            "title": subject,
+            "body": notice,
+            "priority": priority,
+        }
+        _direct(argv, payload, "graphql")
+        return ref
+    if tracker == "slack":
+        webhook_url = node.get("slack_webhook_url", "")
+        if not isinstance(webhook_url, str) or not webhook_url.strip():
+            return None
+        webhook_url = webhook_url.strip()
+        argv = ["gh", "api", webhook_url, "--method", "POST", "-f", f"text={notice}"]
+        _retried(argv, {"webhook_url": webhook_url, "text": notice})
+        return ref
+    if tracker == "teams":
+        webhook_url = node.get("teams_webhook_url", "")
+        if not isinstance(webhook_url, str) or not webhook_url.strip():
+            return None
+        webhook_url = webhook_url.strip()
+        argv = [
+            "gh",
+            "api",
+            webhook_url,
+            "--method",
+            "POST",
+            "-f",
+            f"summary={subject}",
+            "-f",
+            f"text={notice}",
+        ]
+        _retried(argv, {"webhook_url": webhook_url, "summary": subject, "text": notice})
+        return ref
+    if tracker == "pagerduty":
+        routing_key = node.get("pagerduty_routing_key", "")
+        if not isinstance(routing_key, str) or not routing_key.strip():
+            return None
+        routing_key = routing_key.strip()
+        severity = "critical" if name == "expired" else "warning"
+        summary = subject[:1024]
+        inner = {"summary": summary, "source": "roe-lifecycle", "severity": severity}
+        argv = [
+            "gh",
+            "api",
+            PAGERDUTY_EVENTS_URL,
+            "--method",
+            "POST",
+            "-f",
+            f"routing_key={routing_key}",
+            "-f",
+            "event_action=trigger",
+            "-f",
+            f"dedup_key={ref}",
+            "-f",
+            f"payload={json.dumps(inner)}",
+        ]
+        _retried(
+            argv,
+            {
+                "routing_key": routing_key,
+                "event_action": "trigger",
+                "dedup_key": ref,
+                "payload": inner,
+            },
+        )
+        return ref
+    if tracker == "opsgenie":
+        api_key = node.get("opsgenie_api_key", "")
+        if not isinstance(api_key, str) or not api_key.strip():
+            return None
+        api_key = api_key.strip()
+        priority = "P1" if name == "expired" else "P2"
+        message: Any = subject[:OPSGENIE_MESSAGE_LIMIT]
+        argv = [
+            "gh",
+            "api",
+            OPSGENIE_ALERTS_URL,
+            "--method",
+            "POST",
+            "-H",
+            f"Authorization: GenieKey {api_key}",
+            "-f",
+            f"message={message}",
+            "-f",
+            f"alias={ref}",
+            "-f",
+            f"description={notice}",
+            "-f",
+            f"priority={priority}",
+        ]
+        _retried(
+            argv,
+            {
+                "message": message,
+                "alias": ref,
+                "description": notice,
+                "priority": priority,
+                "details": {"artifact_id": artifact_id, "state": name},
+            },
+        )
+        return ref
+    if tracker == "jira":
+        jira_cfg = _jira_config_for_node(node)
+        if not _jira_config_complete(jira_cfg):
+            return None
+        raw_jira = node.get("jira", {})
+        raw_issue_type = (
+            raw_jira.get("issue_type", "") if isinstance(raw_jira, dict) else ""
+        )
+        issue_type = (
+            raw_issue_type.strip()
+            if isinstance(raw_issue_type, str) and raw_issue_type.strip()
+            else JIRA_DEFAULT_ISSUE_TYPE
+        )
+        base_url = jira_cfg["base_url"].rstrip("/")
+        auth_header = f"Authorization: {_jira_basic_auth(jira_cfg['email'], jira_cfg['api_token'])}"
+        fields = {
+            "summary": subject,
+            "description": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": notice}],
+                    }
+                ],
+            },
+            "issuetype": {"name": issue_type},
+            "labels": ["redteam", "roe-expiry-notice"],
+            "project": {"key": jira_cfg["project_key"]},
+        }
+        argv = [
+            "gh",
+            "api",
+            f"{base_url}/rest/api/3/issue",
+            "--method",
+            "POST",
+            "-H",
+            auth_header,
+            "-f",
+            f"fields={json.dumps(fields)}",
+        ]
+        _retried(argv, {"fields": fields})
+        return ref
+    if tracker == "webhook":
+        webhook_url = _webhook_url_for_node(node)
+        if not webhook_url:
+            return None
+        signing_secret, previous_secret = _webhook_signing_secrets(node)
+        body = {"title": subject, "body": notice}
+        payload_bytes = _canonical_payload_bytes(body)
+        headers = webhook_signing_headers(
+            payload_bytes, signing_secret, previous_secret
+        )
+        payload = {"webhook_url": webhook_url, "body": body}
+        if headers:
+            payload["headers"] = dict(headers)
+        argv = ["gh", "api", webhook_url, "--method", "POST"]
+        for header_name, header_value in headers.items():
+            argv += ["-H", f"{header_name}: {header_value}"]
+        argv += ["-f", f"title={subject}", "-f", f"body={notice}"]
+        _retried(argv, payload)
+        return ref
+    if tracker == "graph":
+        graph_cfg = _graph_config_for_node(node)
+        if not _graph_config_complete(graph_cfg):
+            return None
+        token = _graph_fetch_token(
+            run,
+            graph_cfg["tenant_id"],
+            graph_cfg["client_id"],
+            graph_cfg["client_secret"],
+        )
+        messages_url = _graph_messages_url(
+            graph_cfg["team_id"], graph_cfg["channel_id"]
+        )
+        message = {
+            "subject": subject,
+            "body": {"contentType": "text", "content": notice},
+        }
+        body_json = json.dumps(message["body"])
+        argv = [
+            "gh",
+            "api",
+            messages_url,
+            "--method",
+            "POST",
+            "-H",
+            f"Authorization: Bearer {token}",
+            "-f",
+            f"subject={subject}",
+            "-f",
+            f"body={body_json}",
+        ]
+        _retried(
+            argv,
+            {
+                "team_id": graph_cfg["team_id"],
+                "channel_id": graph_cfg["channel_id"],
+                "subject": subject,
+                "body": message["body"],
+            },
+        )
+        return ref
+    return None
+
+
+def _expiry_notices_for_tick(
+    config: Mapping[str, Any] | None,
+    node: Mapping[str, Any],
+    tracker: str,
+    *,
+    runner: GhRunner | None = None,
+    dry_run: bool = False,
+) -> list[dict[str, Any]]:
+    """Deliver (or digest) expiry notices for the tick's grants (O11).
+
+    For every grant in a notice state (see :func:`_expiry_notice_states`),
+    exactly one notice per ``(artifact_id, state)`` fires once per
+    process: the first tick delivers it through ``tracker`` (the tick's
+    effective tracker, already allowlist-gated by the caller) and marks
+    it with an ``issue_url``-style ``notice:<artifact_id>:<state>``
+    ref; repeats report a ``duplicate`` entry with no runner call.
+    When the tracker is not configured — or under ``dry_run`` — the
+    notice text is returned digest-only (no runner call, nothing
+    marked). A delivery failure records an ``error`` entry and stays
+    unmarked so the next tick retries. Never raises.
+    """
+    notices: list[dict[str, Any]] = []
+    try:
+        from omega_prime.grokbot.roe_lifecycle import expiry_notice_message
+    except Exception:
+        return notices
+    try:
+        for watch in _expiry_notice_states(config, node):
+            try:
+                artifact_id = str(watch.get("artifact_id", "") or "unknown-artifact")
+                name = str(watch.get("state", "") or "unknown")
+            except Exception:
+                continue
+            key = (artifact_id, name)
+            ref = f"notice:{artifact_id}:{name}"
+            try:
+                notice = expiry_notice_message(watch)
+            except Exception:
+                continue
+            if key in _EXPIRY_NOTICE_FIRED:
+                notices.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "state": name,
+                        "issue_url": ref,
+                        "delivered": False,
+                        "duplicate": True,
+                    }
+                )
+                continue
+            if dry_run:
+                notices.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "state": name,
+                        "issue_url": "",
+                        "delivered": False,
+                        "dry_run": True,
+                        "notice": notice,
+                    }
+                )
+                continue
+            try:
+                delivered = _deliver_expiry_notice(
+                    tracker, notice, watch, node, runner=runner
+                )
+            except Exception as exc:
+                notices.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "state": name,
+                        "issue_url": "",
+                        "delivered": False,
+                        "error": str(exc),
+                        "notice": notice,
+                    }
+                )
+                continue
+            if delivered is None:
+                notices.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "state": name,
+                        "issue_url": "",
+                        "delivered": False,
+                        "reason": "tracker not configured; digest-only",
+                        "notice": notice,
+                    }
+                )
+                continue
+            _EXPIRY_NOTICE_FIRED.add(key)
+            notices.append(
+                {
+                    "artifact_id": artifact_id,
+                    "state": name,
+                    "issue_url": delivered,
+                    "delivered": True,
+                    "tracker": tracker,
+                }
+            )
+    except Exception:
+        return notices
+    return notices
+
+
 def tick(
     config: Mapping[str, Any] | None = None,
     *,
@@ -2554,6 +3099,15 @@ def tick(
     blank/absent path writes nothing. Webhook payload templates (N8):
     a non-blank ``webhook_template`` renders each generic-webhook body
     via :func:`render_template` instead of the fixed payload.
+
+    Grant expiry notices (O11): when the tick's RoE grant is in an
+    expiring/expired watchdog state, one
+    :func:`expiry_notice_message` notice per ``(artifact_id, state)``
+    is delivered through the effective tracker (the same runner seam
+    and transports the findings syncs use) and reported under the
+    ``"expiry_notice"`` result key with a
+    ``notice:<artifact_id>:<state>`` ref; repeats, dry runs, and
+    unconfigured trackers report digest-only entries instead.
     """
     if config is None:
         from omega_prime.config import load_config  # deferred: keeps import light
@@ -2574,9 +3128,18 @@ def tick(
         _record_grant_decision(config, node, effective_tracker, "skip")
         return _grant_skip_result(effective_tracker, dry_run)
     _record_grant_decision(config, node, effective_tracker, "allow")
+    notices = _expiry_notices_for_tick(
+        config, node, effective_tracker, runner=runner, dry_run=dry_run
+    )
+
+    def _with_notices(result: dict[str, Any]) -> dict[str, Any]:
+        if notices:
+            result["expiry_notice"] = notices
+        return result
+
     if tracker == "graph" or _graph_config_complete(graph_cfg):
         if not _graph_config_complete(graph_cfg):
-            return _tracker_error(NO_GRAPH_CONFIG_MESSAGE, dry_run)
+            return _with_notices(_tracker_error(NO_GRAPH_CONFIG_MESSAGE, dry_run))
         raw_repo = node.get("repo", "")
         repo = raw_repo.strip() if isinstance(raw_repo, str) else ""
         result = sync_findings_graph(
@@ -2591,11 +3154,13 @@ def tick(
             repo=repo or None,
         )
         result["disabled"] = False
+        if notices:
+            result["expiry_notice"] = notices
         return result
     if tracker == "linear":
         team_id = node.get("linear_team_id", "")
         if not isinstance(team_id, str) or not team_id.strip():
-            return _tracker_error(NO_LINEAR_TEAM_MESSAGE, dry_run)
+            return _with_notices(_tracker_error(NO_LINEAR_TEAM_MESSAGE, dry_run))
         result = sync_findings_linear(
             reports_directory,
             team_id.strip(),
@@ -2603,11 +3168,13 @@ def tick(
             dry_run=dry_run,
         )
         result["disabled"] = False
+        if notices:
+            result["expiry_notice"] = notices
         return result
     if tracker == "slack":
         webhook_url = node.get("slack_webhook_url", "")
         if not isinstance(webhook_url, str) or not webhook_url.strip():
-            return _tracker_error(NO_SLACK_WEBHOOK_MESSAGE, dry_run)
+            return _with_notices(_tracker_error(NO_SLACK_WEBHOOK_MESSAGE, dry_run))
         result = sync_findings_slack(
             reports_directory,
             webhook_url.strip(),
@@ -2615,11 +3182,13 @@ def tick(
             dry_run=dry_run,
         )
         result["disabled"] = False
+        if notices:
+            result["expiry_notice"] = notices
         return result
     if tracker == "teams":
         webhook_url = node.get("teams_webhook_url", "")
         if not isinstance(webhook_url, str) or not webhook_url.strip():
-            return _tracker_error(NO_TEAMS_WEBHOOK_MESSAGE, dry_run)
+            return _with_notices(_tracker_error(NO_TEAMS_WEBHOOK_MESSAGE, dry_run))
         raw_repo = node.get("repo", "")
         repo = raw_repo.strip() if isinstance(raw_repo, str) else ""
         result = sync_findings_teams(
@@ -2630,11 +3199,15 @@ def tick(
             repo=repo or None,
         )
         result["disabled"] = False
+        if notices:
+            result["expiry_notice"] = notices
         return result
     if tracker == "pagerduty":
         routing_key = node.get("pagerduty_routing_key", "")
         if not isinstance(routing_key, str) or not routing_key.strip():
-            return _tracker_error(NO_PAGERDUTY_ROUTING_KEY_MESSAGE, dry_run)
+            return _with_notices(
+                _tracker_error(NO_PAGERDUTY_ROUTING_KEY_MESSAGE, dry_run)
+            )
         severity_map = node.get("pagerduty_severity_map")
         result = sync_findings_pagerduty(
             reports_directory,
@@ -2644,11 +3217,13 @@ def tick(
             severity_map=severity_map if isinstance(severity_map, dict) else None,
         )
         result["disabled"] = False
+        if notices:
+            result["expiry_notice"] = notices
         return result
     if tracker == "opsgenie":
         api_key = node.get("opsgenie_api_key", "")
         if not isinstance(api_key, str) or not api_key.strip():
-            return _tracker_error(NO_OPSGENIE_API_KEY_MESSAGE, dry_run)
+            return _with_notices(_tracker_error(NO_OPSGENIE_API_KEY_MESSAGE, dry_run))
         priority_map = node.get("opsgenie_priority_map")
         result = sync_findings_opsgenie(
             reports_directory,
@@ -2658,11 +3233,13 @@ def tick(
             priority_map=priority_map if isinstance(priority_map, dict) else None,
         )
         result["disabled"] = False
+        if notices:
+            result["expiry_notice"] = notices
         return result
     if tracker == "jira":
         jira_cfg = _jira_config_for_node(node)
         if not _jira_config_complete(jira_cfg):
-            return _tracker_error(NO_JIRA_CONFIG_MESSAGE, dry_run)
+            return _with_notices(_tracker_error(NO_JIRA_CONFIG_MESSAGE, dry_run))
         raw_jira = node.get("jira", {})
         raw_issue_type = (
             raw_jira.get("issue_type", "") if isinstance(raw_jira, dict) else ""
@@ -2683,11 +3260,13 @@ def tick(
             dry_run=dry_run,
         )
         result["disabled"] = False
+        if notices:
+            result["expiry_notice"] = notices
         return result
     if tracker == "webhook":
         webhook_url = _webhook_url_for_node(node)
         if not webhook_url:
-            return _tracker_error(NO_WEBHOOK_URL_MESSAGE, dry_run)
+            return _with_notices(_tracker_error(NO_WEBHOOK_URL_MESSAGE, dry_run))
         signing_secret, previous_secret = _webhook_signing_secrets(node)
         raw_template = node.get("webhook_template", "")
         template = raw_template if isinstance(raw_template, str) else ""
@@ -2701,17 +3280,21 @@ def tick(
             webhook_template=template,
         )
         result["disabled"] = False
+        if notices:
+            result["expiry_notice"] = notices
         return result
     if tracker != "github":
-        return _tracker_error(f"unknown tracker: {tracker}", dry_run)
+        return _with_notices(_tracker_error(f"unknown tracker: {tracker}", dry_run))
     repo = node.get("repo", "")
     if not isinstance(repo, str) or not repo.strip():
-        return {
-            "pushed": [],
-            "skipped": [],
-            "dry_run": dry_run,
-            "error": NO_REPO_MESSAGE,
-        }
+        return _with_notices(
+            {
+                "pushed": [],
+                "skipped": [],
+                "dry_run": dry_run,
+                "error": NO_REPO_MESSAGE,
+            }
+        )
     node_labels = node.get("labels")
     result = sync_findings(
         reports_directory,
@@ -2721,6 +3304,8 @@ def tick(
         dry_run=dry_run,
     )
     result["disabled"] = False
+    if notices:
+        result["expiry_notice"] = notices
     return result
 
 
@@ -3357,6 +3942,7 @@ __all__ = [
     "UNKNOWN_SEVERITY_THEME_COLOR",
     "WEBHOOK_MAX_RETRIES",
     "WEBHOOK_PREVIOUS_SIGNATURE_HEADER",
+    "WEBHOOK_RETRY_AFTER_MAX",
     "WEBHOOK_RETRY_DELAYS",
     "WEBHOOK_SIGNATURE_HEADER",
     "WEBHOOK_SIGNING_SECRET_ENV_VAR",
@@ -3368,6 +3954,7 @@ __all__ = [
     "GhApiError",
     "GhNotFoundError",
     "GhRunner",
+    "clear_expiry_notices",
     "deliver_reminders_graph",
     "graph_message",
     "issue_body",

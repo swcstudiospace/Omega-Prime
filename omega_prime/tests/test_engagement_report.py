@@ -433,8 +433,8 @@ def test_coverage_matrix_all_covered(tmp_path):
     rows = [line for line in body if line.startswith("| ")][2:]
     assert len(rows) == 6
     assert rows == sorted(rows)
-    assert rows[0] == "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered |"
-    assert all(line.endswith("| covered |") for line in rows)
+    assert rows[0] == "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered | █ |"
+    assert all(line.endswith("| covered | █ |") for line in rows)
 
 
 def test_coverage_matrix_failing_class_is_gappy(tmp_path):
@@ -447,8 +447,8 @@ def test_coverage_matrix_failing_class_is_gappy(tmp_path):
     assert proc.returncode == 0, proc.stderr
     body = section_lines(proc.stdout, "## Coverage matrix")
     text = "\n".join(body)
-    assert "| jailbreak | 1 | 1 | 0/1 (0.0%) | 1 | gappy |" in text
-    assert "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered |" in text
+    assert "| jailbreak | 1 | 1 | 0/1 (0.0%) | 1 | gappy | ▁ |" in text
+    assert "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered | █ |" in text
 
 
 def test_coverage_matrix_zero_runs_renders_na(tmp_path):
@@ -465,7 +465,7 @@ def test_coverage_matrix_zero_runs_renders_na(tmp_path):
     rows = [line for line in body if line.startswith("| ")][2:]
     assert len(rows) == 6
     assert all("0/0 (n/a)" in line for line in rows)
-    assert all(line.endswith("| gappy |") for line in rows)
+    assert all(line.endswith("| — |") for line in rows)
 
 
 def _coverage_fn():
@@ -3707,7 +3707,7 @@ def test_export_md_writes_fragment_stdout_unchanged(tmp_path):
     assert canonical.read_text(encoding="utf-8") == proc.stdout
     fragment = out.read_text(encoding="utf-8")
     assert "## Coverage matrix" in fragment
-    assert "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered |" in fragment
+    assert "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered | █ |" in fragment
     assert "## Risk-weighted score" in fragment
     assert "- risk-weighted score: 100.0% (34/34 weighted points)" in fragment
     assert fragment.startswith("## Coverage matrix")
@@ -3800,8 +3800,8 @@ def test_render_md_fragment_units(tmp_path):
     ]
     fragment = module.render_md_fragment(coverage=coverage)
     assert fragment.startswith("## Coverage matrix\n")
-    assert "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered |" in fragment
-    assert "| jailbreak | 1 | 0 | 0/0 (n/a) | 1 | gappy |" in fragment
+    assert "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered | █ |" in fragment
+    assert "| jailbreak | 1 | 0 | 0/0 (n/a) | 1 | gappy | — |" in fragment
     assert "## Risk-weighted score" in fragment
     assert "# Engagement report" not in fragment
     assert "findings-snapshot" not in fragment
@@ -4144,3 +4144,299 @@ def test_render_scorecard_units(tmp_path):
     # Deterministic on the same coverage.
     assert module.render_scorecard(coverage) == text
     assert module.write_scorecard_report(coverage, tmp_path) == 1
+
+
+# Unicode trend glyphs in the coverage matrix (O12) ---------------------------
+
+
+def test_coverage_matrix_trend_column_and_glyphs(tmp_path):
+    """O12 happy: the matrix gains a trend column with win-rate glyphs."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## Coverage matrix")
+    table = [line for line in body if line.startswith("| ")]
+    assert table[0] == "| class | cases | runs | pass rate | gaps | verdict | trend |"
+    assert table[1] == "| --- | --- | --- | --- | --- | --- | --- |"
+    assert len(table) == 2 + 6
+    assert all(line.endswith("| █ |") for line in table[2:])
+
+
+def test_coverage_matrix_trend_glyph_mid_and_empty(tmp_path):
+    """O12 cells: a failing class maps 0% to ▁; classes without runs get —."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture, wrong={"jailbreak-01": "not-detected"})
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    text = "\n".join(section_lines(proc.stdout, "## Coverage matrix"))
+    assert "| jailbreak | 1 | 1 | 0/1 (0.0%) | 1 | gappy | ▁ |" in text
+    empty = run_script(
+        "--reports-dir", str(fixture), "--since", "2027-01-01T00:00:00+00:00"
+    )
+    assert empty.returncode == 0, empty.stderr
+    empty_body = section_lines(empty.stdout, "## Coverage matrix")
+    empty_rows = [line for line in empty_body if line.startswith("| ")][2:]
+    assert all(line.endswith("| — |") for line in empty_rows)
+
+
+def test_coverage_trend_glyph_units():
+    """O12 units: ramp mapping across SPARKLINE_BLOCKS, clamping, em dash."""
+    module = _report_module()
+    assert module.coverage_trend_glyph(0, 0.0) == "—"
+    assert module.coverage_trend_glyph(0, 100.0) == "—"
+    assert module.coverage_trend_glyph(1, 0.0) == "▁"
+    assert module.coverage_trend_glyph(1, 100.0) == "█"
+    assert module.coverage_trend_glyph(2, 50.0) == "▅"
+    assert module.coverage_trend_glyph(1, 150.0) == "█"
+    assert module.coverage_trend_glyph(1, -5.0) == "▁"
+    assert module.coverage_trend_glyph(3, 75.0) == "▆"
+    # Trended rows parse like plain ones; the HTML export still anchors them.
+    trended = (
+        "## Coverage matrix\n"
+        "\n"
+        "| class | cases | runs | pass rate | gaps | verdict | trend |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered | █ |\n"
+        "| jailbreak | 1 | 0 | 0/0 (n/a) | 1 | gappy | — |\n"
+    )
+    assert module._parse_coverage_matrix(trended) == [
+        ("abuse", 1, 1, 1, 0, "covered"),
+        ("jailbreak", 1, 0, 0, 1, "gappy"),
+    ]
+    assert module._is_coverage_matrix_table(trended.splitlines()[2:3])
+    html = module.render_html_report("# T\n\n" + trended + "\n## Detection gaps\n")
+    assert '<td><a href="#coverage-abuse">abuse</a></td>' in html
+    assert "█" in html
+    ramp = [
+        module.coverage_trend_glyph(4, pct) for pct in (0.0, 25.0, 50.0, 75.0, 100.0)
+    ]
+    blocks = list(module.SPARKLINE_BLOCKS)
+    assert [blocks.index(glyph) for glyph in ramp] == sorted(
+        blocks.index(glyph) for glyph in ramp
+    )
+
+
+# Multi-report trend across a directory (O10) ----------------------------------
+
+
+def _multi_seed(base: Path) -> tuple[Path, Path, Path]:
+    """Two seeded reports in a scan dir plus a current dir.
+
+    Returns ``(multi_dir, current_dir, previous_md)``; the scan dir
+    holds the older and previous M10 reports under names that invert
+    chronological order, so the trend must sort by timestamp, not name.
+    """
+    older_md, previous_md, current_dir = _delta_seed(base)
+    multi_dir = base / "multi"
+    multi_dir.mkdir(parents=True, exist_ok=True)
+    (multi_dir / "z-older.md").write_text(
+        older_md.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (multi_dir / "a-previous.md").write_text(
+        previous_md.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    return multi_dir, current_dir, previous_md
+
+
+def test_compare_multi_renders_trend_table(tmp_path):
+    """O10 happy: --compare-multi renders one row per metric, columns oldest→newest."""
+    multi_dir, current_dir, _previous_md = _multi_seed(tmp_path)
+    proc = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--compare-multi",
+        str(multi_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Multi-report trend" in proc.stdout
+    body = "\n".join(section_lines(proc.stdout, "## Multi-report trend"))
+    assert "- source: multi (2 reports)" in body
+    assert "| metric | z-older.md | a-previous.md | trend |" in body
+    assert "| runs | 1 | 2 | 1 → 2 (↑) |" in body
+    assert "| pass rate | 67% | 83% | 67% → 83% (↑) |" in body
+    assert (
+        "| coverage | 4/6 covered | 5/6 covered | 4/6 covered → 5/6 covered (↑) |"
+        in body
+    )
+    assert "| findings | 2 | 1 | 2 → 1 (↑) |" in body
+    assert "| risk-weighted score | 70.6% | 85.3% | 70.6% → 85.3% (↑) |" in body
+
+
+def test_compare_multi_orders_by_timestamp_and_skips_unreadable(tmp_path):
+    """O10 order: timestamp sort (missing last, name-tiebroken); bad files skipped."""
+    module = _report_module()
+    multi_dir, _current_dir, _previous_md = _multi_seed(tmp_path)
+    (multi_dir / "no-stamp.md").write_text("# bare\n", encoding="utf-8")
+    (multi_dir / "bad.md").write_bytes(b"\xff\xfe\x00not-utf8")
+    legs, skipped = module.collect_multi_report_entries(multi_dir)
+    assert [leg[0] for leg, _stamp in legs] == [
+        "z-older.md",
+        "a-previous.md",
+        "no-stamp.md",
+    ]
+    assert skipped == ["bad.md"]
+    lines = module.render_multi_report_trend(
+        source_label=multi_dir.name, legs=legs, skipped=skipped
+    )
+    assert lines[0] == "## Multi-report trend"
+    assert "- skipped: bad.md (unreadable)" in lines
+    assert lines[3] == "- skipped: bad.md (unreadable)"
+    header = next(line for line in lines if line.startswith("| metric |"))
+    assert header == "| metric | z-older.md | a-previous.md | no-stamp.md | trend |"
+
+
+def test_compare_multi_empty_dir_omits_table_with_note(tmp_path):
+    """O10 edge: a directory with no readable reports omits the table, keeps a note."""
+    module = _report_module()
+    empty_dir = tmp_path / "empty-multi"
+    empty_dir.mkdir()
+    legs, skipped = module.collect_multi_report_entries(empty_dir)
+    assert legs == [] and skipped == []
+    lines = module.render_multi_report_trend(
+        source_label=empty_dir.name, legs=legs, skipped=skipped
+    )
+    assert "- no parseable reports in empty-multi" in lines
+    assert not any(line.startswith("| metric |") for line in lines)
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--compare-multi",
+        str(empty_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "- no parseable reports in empty-multi" in proc.stdout
+
+
+def test_compare_multi_missing_dir_exits_1(tmp_path):
+    """O10 edge: a missing --compare-multi directory fails closed with error:."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--compare-multi",
+        str(tmp_path / "missing-dir"),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+    assert "--compare-multi" in proc.stderr
+
+
+def test_compare_multi_is_deterministic(tmp_path):
+    """O10 determinism: same directory renders byte-identical trend runs."""
+    multi_dir, current_dir, _previous_md = _multi_seed(tmp_path)
+    first = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--compare-multi",
+        str(multi_dir),
+    )
+    second = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--compare-multi",
+        str(multi_dir),
+    )
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_compare_multi_composes_with_compare_and_delta(tmp_path):
+    """O10 composition: --compare-multi joins --compare/--delta sections in order."""
+    multi_dir, current_dir, previous_md = _multi_seed(tmp_path)
+    older_text = (multi_dir / "z-older.md").read_text(encoding="utf-8")
+    older_md = tmp_path / "older-o10.md"
+    older_md.write_text(older_text, encoding="utf-8")
+    proc = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--compare",
+        str(previous_md),
+        "--delta",
+        str(older_md),
+        "--compare-multi",
+        str(multi_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Week-over-week comparison" in proc.stdout
+    assert "## Three-way trend" in proc.stdout
+    assert "## Multi-report trend" in proc.stdout
+    assert proc.stdout.index("## Three-way trend") < proc.stdout.index(
+        "## Multi-report trend"
+    )
+
+
+def test_parse_report_timestamp_and_multi_render_units():
+    """O10 units: generated-at parsing plus net arrows and trend cells."""
+    module = _report_module()
+    assert module.parse_report_timestamp("# Engagement report\n") is None
+    assert module.parse_report_timestamp(
+        "## Header\n\n- generated-at: 2026-10-08T12:00:00+00:00\n"
+    ) == module.parse_rfc3339(T2)
+    assert module.parse_report_timestamp("## Header\n\n- generated-at: bogus\n") is None
+    first = ("a.md", 1, 67, 4, 6, 2, 70.6)
+    second = ("b.md", 2, 83, 5, 6, 1, 85.3)
+    lines = module.render_multi_report_trend(
+        source_label="multi", legs=[(first, None), (second, None)], skipped=[]
+    )
+    assert lines[2] == "- source: multi (2 reports)"
+    assert "| findings | 2 | 1 | 2 → 1 (↑) |" in lines
+    assert "| risk-weighted score | 70.6% | 85.3% | 70.6% → 85.3% (↑) |" in lines
+    regressed = module.render_multi_report_trend(
+        source_label="multi", legs=[(second, None), (first, None)], skipped=[]
+    )
+    assert "| runs | 2 | 1 | 2 → 1 (↓) |" in regressed
+    assert "| findings | 1 | 2 | 1 → 2 (↓) |" in regressed
+
+
+def test_json_composes_with_compare_multi(tmp_path):
+    """O10 JSON: --json --compare-multi gains a multi_trend object; default omits it."""
+    multi_dir, current_dir, _previous_md = _multi_seed(tmp_path)
+    proc = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--json",
+        "--compare-multi",
+        str(multi_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["multi_trend"]["source"] == "multi"
+    assert data["multi_trend"]["reports"] == ["z-older.md", "a-previous.md"]
+    assert data["multi_trend"]["skipped"] == []
+    assert [entry["metric"] for entry in data["multi_trend"]["metrics"]] == [
+        "runs",
+        "pass rate",
+        "coverage",
+        "findings",
+        "risk-weighted score",
+    ]
+    plain = run_script("--reports-dir", str(current_dir), "--since", T0, "--json")
+    assert plain.returncode == 0, plain.stderr
+    assert "multi_trend" not in json.loads(plain.stdout)

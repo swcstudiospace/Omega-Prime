@@ -37,7 +37,7 @@ import argparse
 import json
 import socket
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -880,6 +880,60 @@ def watchdog_check_all(artifacts: Any, *, now: Any = None) -> list[dict[str, Any
         return [watchdog_check(artifacts, now=now)]
     except Exception:
         return []
+
+
+#: Watchdog states that trigger a grant-expiry notice via the
+#: configured findings-sync tracker (O11). A healthy (``valid``) grant
+#: stays silent; ``missing``/``invalid`` are operator-input problems,
+#: not expiry, so they stay digest-only.
+EXPIRY_NOTICE_STATES = ("expiring-7d", "expiring-1d", "expired")
+
+
+def expiry_notice_message(artifact_state: Any) -> str:
+    """Deterministic plain-text expiry notice for a watchdog state (O11).
+
+    ``artifact_state`` is one :func:`watchdog_check` dict; the notice
+    renders its ``artifact_id``, ``state``, ``effective_until``, and
+    ``action`` in fixed order, so the same grant state always renders
+    byte-identical text. Fail-closed: missing/malformed fields render
+    as ``"unknown"`` (an unknown ``state`` maps its action via
+    :data:`WATCHDOG_ACTIONS`, defaulting to ``"fix artifact"``); never
+    raises.
+    """
+    try:
+        if isinstance(artifact_state, Mapping):
+            fields: dict[str, Any] = dict(artifact_state)
+        else:
+            fields = {}
+
+        def _field(name: str, fallback: str = "unknown") -> str:
+            try:
+                value = fields.get(name, fallback)
+            except Exception:
+                return fallback
+            if value is None or (isinstance(value, str) and not value.strip()):
+                return fallback
+            try:
+                return str(value)
+            except Exception:
+                return fallback
+
+        state = _field("state")
+        action_raw = fields.get("action", "")
+        if isinstance(action_raw, str) and action_raw.strip():
+            action = action_raw
+        else:
+            action = WATCHDOG_ACTIONS.get(state, WATCHDOG_ACTIONS["invalid"])
+        lines = [
+            "RoE grant expiry notice",
+            f"artifact_id: {_field('artifact_id', 'unknown-artifact')}",
+            f"state: {state}",
+            f"effective_until: {_field('effective_until')}",
+            f"action: {action}",
+        ]
+        return "\n".join(lines) + "\n"
+    except Exception:
+        return "RoE grant expiry notice\nstate: unknown\n"
 
 
 def _parse_now_override(text: str | None) -> datetime | None:

@@ -2894,3 +2894,336 @@ def test_tick_ledger_never_blocks_dispatch(tmp_path, monkeypatch):
     )
     assert len(fake.calls) == 2
     assert "skipped_tracker" not in result
+
+
+# Retry-After rate-limit awareness (O8) -----------------------------------------
+
+
+def _patch_o8_sleep(monkeypatch):
+    """Deterministic retry timing via the module-level ``_sleep`` seam."""
+    monkeypatch.setattr(findings_sync.random, "uniform", lambda _a, _b: 0.0)
+    sleeps: list[float] = []
+    monkeypatch.setattr(findings_sync, "_sleep", sleeps.append)
+    return sleeps
+
+
+def _o8_runner(script):
+    """Fake runner playing a script of results; records (argv, data) calls."""
+    calls: list = []
+
+    def run(argv, data):
+        calls.append((list(argv), dict(data)))
+        result = script[min(len(calls) - 1, len(script) - 1)]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    return calls, run
+
+
+_O8_ARGV = ["gh", "api", "https://example.com/hook", "--method", "POST"]
+
+
+def test_retry_after_delay_unit_matrix():
+    assert findings_sync._retry_after_delay("429\nRetry-After: 5", 1.0) == 5.0
+    assert findings_sync._retry_after_delay("429\nretry-after: 9", 1.0) == 9.0
+    assert findings_sync._retry_after_delay("429\nRetry-After: 120", 1.0) == 60.0
+    assert (
+        findings_sync._retry_after_delay(
+            "429\nRetry-After: Wed, 21 Oct 2015 07:28:00 GMT", 2.0
+        )
+        == 2.0
+    )
+    assert findings_sync._retry_after_delay("429\nRetry-After: soon", 2.0) == 2.0
+    assert findings_sync._retry_after_delay("429 slow down", 2.0) == 2.0
+    assert findings_sync._retry_after_delay("500\nRetry-After: 30", 2.0) == 2.0
+    assert findings_sync._retry_after_delay("boom", 2.0) == 2.0
+    assert findings_sync._retry_after_delay(None, 2.0) == 2.0
+
+
+def test_retry_after_seconds_overrides_backoff(monkeypatch, capsys):
+    sleeps = _patch_o8_sleep(monkeypatch)
+    calls, run = _o8_runner(
+        [
+            SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="HTTP 429 Too Many Requests\nRetry-After: 5",
+            ),
+            SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        ]
+    )
+    completed = findings_sync._run_with_webhook_retry(run, _O8_ARGV, {})
+    assert completed.returncode == 0
+    assert len(calls) == 2
+    assert sleeps == [5.0]
+    assert "retrying in 5.0s" in capsys.readouterr().err
+
+
+def test_retry_after_capped_at_sixty(monkeypatch):
+    sleeps = _patch_o8_sleep(monkeypatch)
+    calls, run = _o8_runner(
+        [
+            SimpleNamespace(
+                returncode=1, stdout="", stderr="error 429\nRetry-After: 120"
+            ),
+            SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        ]
+    )
+    findings_sync._run_with_webhook_retry(run, _O8_ARGV, {})
+    assert len(calls) == 2
+    assert sleeps == [60.0]
+
+
+def test_retry_after_http_date_falls_back_to_default(monkeypatch):
+    sleeps = _patch_o8_sleep(monkeypatch)
+    calls, run = _o8_runner(
+        [
+            SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="429 Too Many Requests\nRetry-After: Wed, 21 Oct 2015 07:28:00 GMT",
+            ),
+            SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        ]
+    )
+    findings_sync._run_with_webhook_retry(run, _O8_ARGV, {})
+    assert len(calls) == 2
+    assert sleeps == [findings_sync.WEBHOOK_RETRY_DELAYS[0]]
+
+
+def test_retry_after_missing_falls_back_to_default(monkeypatch):
+    sleeps = _patch_o8_sleep(monkeypatch)
+    calls, run = _o8_runner(
+        [
+            SimpleNamespace(returncode=1, stdout="", stderr="429 rate limited"),
+            SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        ]
+    )
+    findings_sync._run_with_webhook_retry(run, _O8_ARGV, {})
+    assert len(calls) == 2
+    assert sleeps == [findings_sync.WEBHOOK_RETRY_DELAYS[0]]
+
+
+def test_retry_after_unparseable_falls_back_to_default(monkeypatch):
+    sleeps = _patch_o8_sleep(monkeypatch)
+    calls, run = _o8_runner(
+        [
+            SimpleNamespace(returncode=1, stdout="", stderr="429\nRetry-After: soon"),
+            SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        ]
+    )
+    findings_sync._run_with_webhook_retry(run, _O8_ARGV, {})
+    assert len(calls) == 2
+    assert sleeps == [findings_sync.WEBHOOK_RETRY_DELAYS[0]]
+
+
+def test_retry_after_ignored_for_non_429(monkeypatch):
+    sleeps = _patch_o8_sleep(monkeypatch)
+    calls, run = _o8_runner(
+        [
+            SimpleNamespace(
+                returncode=1, stdout="", stderr="500 Internal Error\nRetry-After: 30"
+            ),
+            SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        ]
+    )
+    findings_sync._run_with_webhook_retry(run, _O8_ARGV, {})
+    assert len(calls) == 2
+    assert sleeps == [findings_sync.WEBHOOK_RETRY_DELAYS[0]]
+
+
+def test_slack_retry_after_end_to_end(tmp_path, monkeypatch):
+    record_finding(directory=tmp_path, **_finding())
+    sleeps = _patch_o8_sleep(monkeypatch)
+    calls: list = []
+
+    def flaky(argv, data):
+        calls.append(argv)
+        if len(calls) == 1:
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="429 Too Many Requests\nRetry-After: 7",
+            )
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    result = sync_findings_slack(tmp_path, WEBHOOK, runner=flaky)
+    assert len(result["pushed"]) == 1
+    assert len(calls) == 2
+    assert sleeps == [7.0]
+
+
+# Grant expiry notices via adapters (O11) ---------------------------------------
+
+
+@pytest.fixture
+def fresh_notices():
+    """Isolate the in-memory expiry-notice fire record per O11 test."""
+    findings_sync.clear_expiry_notices()
+    yield
+    findings_sync.clear_expiry_notices()
+
+
+def _expiring_grant(operator, grant_state="expiring-7d"):
+    """Inline RoE grant dict landing in ``grant_state`` at the wall clock."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    if grant_state == "expired":
+        until = now - timedelta(hours=1)
+    elif grant_state == "expiring-1d":
+        until = now + timedelta(hours=12)
+    elif grant_state == "expiring-7d":
+        until = now + timedelta(days=3)
+    else:  # valid
+        until = now + timedelta(days=30)
+    return {"operator": operator, "effective_until": until.isoformat()}
+
+
+def _notice_config(operator="o11-operator", grant_state="expiring-7d", **overrides):
+    node = {
+        "enabled": True,
+        "tracker": "slack",
+        "slack_webhook_url": WEBHOOK,
+        "roe_artifact": _expiring_grant(operator, grant_state),
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+def test_tick_expiring_grant_delivers_notice_via_slack(tmp_path, fresh_notices):
+    fake = FakeSlack()
+    result = tick(_notice_config(), reports_directory=tmp_path, runner=fake)
+    assert len(fake.calls) == 1
+    argv, data = fake.calls[0]
+    assert WEBHOOK in argv
+    assert "o11-operator" in data["text"]
+    assert "expiring-7d" in data["text"]
+    assert "re-sign" in data["text"]
+    (entry,) = result["expiry_notice"]
+    assert entry["delivered"] is True
+    assert entry["tracker"] == "slack"
+    assert entry["issue_url"].startswith("notice:")
+    assert entry["issue_url"].endswith(":expiring-7d")
+    assert entry["artifact_id"].startswith("o11-operator|")
+    assert entry["state"] == "expiring-7d"
+
+
+def test_tick_notice_fires_once_per_artifact_state(tmp_path, fresh_notices):
+    fake = FakeSlack()
+    config = _notice_config(operator="o11-once")
+    first = tick(config, reports_directory=tmp_path, runner=fake)
+    assert first["expiry_notice"][0]["delivered"] is True
+    second = tick(config, reports_directory=tmp_path, runner=fake)
+    assert len(fake.calls) == 1
+    (entry,) = second["expiry_notice"]
+    assert entry["delivered"] is False
+    assert entry["duplicate"] is True
+    assert entry["issue_url"].startswith("notice:")
+
+
+def test_tick_expired_grant_notice_says_archive(tmp_path, fresh_notices):
+    fake = FakeSlack()
+    result = tick(
+        _notice_config(operator="o11-expired", grant_state="expired"),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert len(fake.calls) == 1
+    assert "expired" in fake.calls[0][1]["text"]
+    assert "archive" in fake.calls[0][1]["text"]
+    (entry,) = result["expiry_notice"]
+    assert entry["delivered"] is True
+    assert entry["issue_url"].endswith(":expired")
+
+
+def test_tick_valid_grant_sends_no_notice(tmp_path, fresh_notices):
+    fake = FakeSlack()
+    result = tick(
+        _notice_config(operator="o11-healthy", grant_state="valid"),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert fake.calls == []
+    assert "expiry_notice" not in result
+
+
+def test_tick_notice_digest_only_without_tracker(tmp_path, fresh_notices):
+    fake = FakeSlack()
+    node = {
+        "enabled": True,
+        "tracker": "slack",
+        "roe_artifact": _expiring_grant("o11-digest"),
+    }
+    result = tick(
+        {"redteam": {"findings_sync": node}},
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert result["error"] == NO_SLACK_WEBHOOK_MESSAGE
+    assert fake.calls == []
+    (entry,) = result["expiry_notice"]
+    assert entry["delivered"] is False
+    assert entry["issue_url"] == ""
+    assert "o11-digest" in entry["notice"]
+    assert "expiring-7d" in entry["notice"]
+
+
+def test_tick_notice_dry_run_calls_no_runner(tmp_path, fresh_notices):
+    fake = FakeSlack()
+    result = tick(
+        _notice_config(operator="o11-dry"),
+        reports_directory=tmp_path,
+        runner=fake,
+        dry_run=True,
+    )
+    assert fake.calls == []
+    (entry,) = result["expiry_notice"]
+    assert entry["delivered"] is False
+    assert entry["dry_run"] is True
+    assert "o11-dry" in entry["notice"]
+
+
+def test_tick_notice_via_github_issues(tmp_path, fresh_notices):
+    fake = FakeGh()
+    node = {
+        "enabled": True,
+        "tracker": "github",
+        "repo": REPO,
+        "roe_artifact": _expiring_grant("o11-github", "expiring-1d"),
+    }
+    result = tick(
+        {"redteam": {"findings_sync": node}},
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert len(fake.calls) == 1
+    argv, data = fake.calls[0]
+    assert f"repos/{REPO}/issues" in argv
+    assert "o11-github" in data["body"]
+    assert "expiring-1d" in data["body"]
+    (entry,) = result["expiry_notice"]
+    assert entry["delivered"] is True
+    assert entry["tracker"] == "github"
+    assert entry["issue_url"].startswith("notice:")
+    assert entry["issue_url"].endswith(":expiring-1d")
+
+
+def test_tick_notice_failure_stays_undelivered_and_retries(
+    tmp_path, fresh_notices, monkeypatch
+):
+    _patch_retry_timing(monkeypatch)
+
+    def bad(argv, data):
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    config = _notice_config(operator="o11-retry")
+    failed = tick(config, reports_directory=tmp_path, runner=bad)
+    (entry,) = failed["expiry_notice"]
+    assert entry["delivered"] is False
+    assert "error" in entry
+    fake = FakeSlack()
+    retried = tick(config, reports_directory=tmp_path, runner=fake)
+    assert len(fake.calls) == 1
+    assert retried["expiry_notice"][0]["delivered"] is True

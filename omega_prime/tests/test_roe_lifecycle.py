@@ -36,6 +36,7 @@ from omega_prime.cron.scheduler import (
     tick_roe_watchdog,
 )
 from omega_prime.grokbot.roe_lifecycle import (
+    EXPIRY_NOTICE_STATES,
     RENEWAL_THRESHOLDS_DAYS,
     ROE_REVOKED_KIND,
     STATES,
@@ -43,6 +44,7 @@ from omega_prime.grokbot.roe_lifecycle import (
     check_readiness,
     check_roe_lifecycle,
     clear_renewal_reminders,
+    expiry_notice_message,
     gateway_reachable,
     grant_trackers,
     main,
@@ -1435,3 +1437,49 @@ def test_read_grant_usage_skips_malformed_lines(tmp_path):
     )
     rows = read_grant_usage(ledger)
     assert [r["tracker"] for r in rows] == ["github", "slack"]
+
+
+# O11 grant expiry notices -------------------------------------------------------
+
+
+def test_expiry_notice_states_match_spec():
+    """O11: notices fire for expiring/expired states only."""
+    assert EXPIRY_NOTICE_STATES == ("expiring-7d", "expiring-1d", "expired")
+    assert all(state in STATES for state in EXPIRY_NOTICE_STATES)
+
+
+def test_expiry_notice_message_renders_watchdog_fields():
+    """O11: the notice carries artifact_id/state/effective_until/action."""
+    check = watchdog_check(_watchdog_document(3), now=END)
+    assert check["state"] == "expiring-7d"
+    message = expiry_notice_message(check)
+    assert message.startswith("RoE grant expiry notice\n")
+    assert f"artifact_id: {check['artifact_id']}" in message
+    assert f"state: {check['state']}" in message
+    assert f"effective_until: {check['effective_until']}" in message
+    assert f"action: {check['action']}" in message
+    assert check["action"] == "re-sign"
+    assert expiry_notice_message(check) == message  # deterministic
+
+
+def test_expiry_notice_message_per_state_action():
+    """O11: expiring states say re-sign; expired says archive."""
+    expectations = {3.0: ("expiring-7d", "re-sign"), 0.5: ("expiring-1d", "re-sign")}
+    for days_left, (state, action) in expectations.items():
+        message = expiry_notice_message(
+            watchdog_check(_watchdog_document(days_left), now=END)
+        )
+        assert f"state: {state}" in message
+        assert f"action: {action}" in message
+    expired = expiry_notice_message(watchdog_check(_watchdog_document(-1), now=END))
+    assert "state: expired" in expired
+    assert "action: archive" in expired
+
+
+def test_expiry_notice_message_fail_closed():
+    """O11: missing/malformed inputs render unknown text, never raise."""
+    for bad in (None, {}, "garbage", ["not", "a", "dict"], {"state": "bogus"}):
+        message = expiry_notice_message(bad)
+        assert isinstance(message, str)
+        assert message.startswith("RoE grant expiry notice\n")
+        assert "unknown" in message

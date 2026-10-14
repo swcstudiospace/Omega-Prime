@@ -128,6 +128,7 @@ EXIT_OK = 0
 EXIT_BUMP_FAILED = 1
 EXIT_USAGE = 2
 EXIT_DEGRADED = 3
+EXIT_VERIFY_FAILED = 4
 
 # Type of the subprocess seam: run(cmd, cwd=None) -> CompletedProcess-like.
 Runner = Callable[..., Any]
@@ -426,7 +427,9 @@ def build_parser() -> argparse.ArgumentParser:
             "2 = usage error (bad ref, unresolvable tag, missing "
             "--old-audit when no saved artifact, gh missing under "
             "--open-pr); 3 = degraded — node/npm absent or the submodule "
-            "unreachable, with the completed prefix steps named on stderr."
+            "unreachable, with the completed prefix steps named on stderr; "
+            "4 = post-bump --verify smoke failed (bump rolled back locally, "
+            "no PR)."
         ),
     )
     parser.add_argument(
@@ -588,6 +591,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--open-pr",
         action="store_true",
         help="Commit the bump set, push branch pin-bump-<short-sha>, run gh pr create.",
+    )
+    parser.add_argument(
+        "--verify",
+        dest="verify",
+        action="store_true",
+        help=(
+            "Post-bump smoke: after the bump applies and before any PR, "
+            "re-run the audit chain against the new pin and require an "
+            "improved verdict with no untriaged high/critical (and the "
+            "--semver-check classification to hold when enabled). A "
+            "failed verification rolls the bump back locally and exits 4 "
+            "with no PR. Cannot be combined with --skip-audit; composes "
+            "with --dry-run (prints that verification would run, with no "
+            "second audit)."
+        ),
     )
     parser.add_argument(
         "--json",
@@ -1668,6 +1686,142 @@ def _rollback_package_versions(
     return current, old, f"{current} -> {old}", None
 
 
+def _verify_post_bump(
+    run: Runner,
+    redteam_dir: Path,
+    *,
+    old_findings: dict[str, tuple[str, str, str]],
+    old_packages: dict[str, str],
+    semver_check: bool,
+    pin_selectors: list[str],
+    baseline_rows: list[tuple[str, str, str, str, str]],
+) -> tuple[bool, str | None, list[str], list[tuple[str, str, str, str, str]]]:
+    """Re-run the audit chain against the NEW pin for ``--verify``.
+
+    Returns ``(passed, verdict, notes, rows)``: ``passed`` is True only
+    when the re-audit shows no untriaged high/critical advisories, the
+    delta verdict against the pre-bump findings is ``improved``, and —
+    with ``--semver-check`` — the re-computed per-advisory
+    classification matches ``baseline_rows``. ``notes`` are the
+    human-readable verification lines the caller prints either way (a
+    failed verification exits 4 carrying them, with no PR).
+    """
+    notes: list[str] = []
+    try:
+        proc = run(
+            ["npm", "audit", "--omit=dev", "--audit-level=high", "--json"],
+            cwd=redteam_dir,
+        )
+    except OSError as exc:
+        return False, None, [f"verification FAILED: npm is absent ({exc})"], []
+    try:
+        new_doc = json.loads(proc.stdout)
+    except ValueError as exc:
+        return (
+            False,
+            None,
+            [f"verification FAILED: cannot parse npm audit output ({exc})"],
+            [],
+        )
+    try:
+        triage_mod = _load_script("redteam-audit-triage.py")
+    except (OSError, RuntimeError) as exc:
+        return (
+            False,
+            None,
+            [f"verification FAILED: cannot load audit triage helper ({exc})"],
+            [],
+        )
+    findings, triage_error = triage_mod.triage(new_doc)
+    if triage_error is not None:
+        return (
+            False,
+            None,
+            [f"verification FAILED: audit triage refused output: {triage_error}"],
+            [],
+        )
+    untriaged = [
+        finding for finding in findings if finding[0] not in triage_mod.TRIAGED
+    ]
+    if pin_selectors:
+        pinned_keys = {
+            key
+            for key, _, name in findings
+            if any(_pin_matches(sel, key, str(name or "")) for sel in pin_selectors)
+        }
+        untriaged = [finding for finding in untriaged if finding[0] in pinned_keys]
+    if untriaged:
+        notes.append(
+            "verification FAILED: untriaged high/critical advisories at new pin:"
+        )
+        notes.extend(f"  {severity} {name}: {key}" for key, severity, name in untriaged)
+        return False, None, notes, []
+    try:
+        delta_mod = _load_script("redteam-audit-delta.py")
+    except (OSError, RuntimeError) as exc:
+        return (
+            False,
+            None,
+            [f"verification FAILED: cannot load audit delta helper ({exc})"],
+            [],
+        )
+    new_findings, new_packages, new_error = delta_mod.parse_input(new_doc)
+    if new_error is not None:
+        return (
+            False,
+            None,
+            [f"verification FAILED: new audit unusable: {new_error}"],
+            [],
+        )
+    _, fixed, _, _, verdict = delta_mod.compute_delta(
+        old_findings, new_findings, new_packages
+    )
+    if pin_selectors:
+        pinned, _, scoped = _pin_deltas(
+            delta_mod, pin_selectors, old_findings, new_findings, new_packages
+        )
+        if not pinned:
+            return (
+                False,
+                None,
+                ["verification FAILED: --pin matched no advisories"],
+                [],
+            )
+        (_, fixed, _, _, verdict) = scoped
+    if verdict != "improved":
+        return (
+            False,
+            verdict,
+            [f"verification FAILED: verdict is {verdict!r}, not 'improved'"],
+            [],
+        )
+    rows: list[tuple[str, str, str, str, str]] = []
+    if semver_check:
+        rows = classify_semver_fixes(old_findings, old_packages, new_packages, fixed)
+        baseline_labels = {key: label for key, _, _, _, label in baseline_rows}
+        verify_labels = {key: label for key, _, _, _, label in rows}
+        if verify_labels != baseline_labels:
+            return (
+                False,
+                verdict,
+                [
+                    "verification FAILED: semver classification changed "
+                    f"since the bump audit (was {baseline_labels}, "
+                    f"now {verify_labels})"
+                ],
+                rows,
+            )
+        notes.append(
+            f"verification green: verdict improved, semver holds "
+            f"({len(rows)} advisories classified)"
+        )
+    else:
+        notes.append(
+            "verification green: verdict improved (no untriaged high/critical)"
+        )
+    return True, verdict, notes, rows
+
+
 def bump(
     to: str | None,
     *,
@@ -1688,6 +1842,7 @@ def bump(
     schedule: str | None = None,
     schedule_name: str = "pin-bump",
     rollback: bool = False,
+    verify: bool = False,
     job: dict | None = None,
 ) -> int:
     """Run the pin-bump runbook against ``root``. Returns the exit code."""
@@ -1740,11 +1895,18 @@ def bump(
                 "open_pr": open_pr,
                 "pin": [s.strip() for s in (pin or []) if s is not None],
                 "explain": explain.strip() if isinstance(explain, str) else None,
+                "verify": verify,
             },
         )
     if semver_check and skip_audit:
         print(
             "pin-bump usage error: --semver-check needs audit data (drop --skip-audit)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if verify and skip_audit:
+        print(
+            "pin-bump usage error: --verify needs audit data (drop --skip-audit)",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -1825,6 +1987,13 @@ def bump(
     # (set when --explain resolved an advisory); explained runs leave the
     # default payload shape unchanged.
     json_explain: dict[str, Any] | None = None
+    # --verify payload state. ``json_verify`` is the post-bump smoke
+    # object (``ran`` stays False until the verification audit executes;
+    # dry-run and early exits keep it un-run). Only included in the
+    # --json payload when the flag is set.
+    json_verify: dict[str, Any] | None = (
+        {"ran": False, "verdict": None, "passed": None} if verify else None
+    )
     # Pre-initialised so --skip-audit --bump-commit skips with a warning
     # instead of raising NameError on the unbound ``semver_rows`` below.
     semver_rows: list[tuple[str, str, str, str, str]] = []
@@ -1871,6 +2040,7 @@ def bump(
                 else {}
             ),
             **({"explain": json_explain} if explain_selector else {}),
+            **({"verify": json_verify} if verify else {}),
         }
 
     def finish(code: int) -> int:
@@ -2577,6 +2747,29 @@ def bump(
                             "new": audit_new_version,
                             "reason": "audit-only (no files changed)",
                         }
+        if verify:
+            audit_verify_passed, audit_verify_verdict, audit_verify_notes, _ = (
+                _verify_post_bump(
+                    run,
+                    redteam_dir,
+                    old_findings=audit_old_findings,
+                    old_packages=audit_old_packages,
+                    semver_check=semver_check,
+                    pin_selectors=pin_selectors,
+                    baseline_rows=audit_semver_rows if semver_check else [],
+                )
+            )
+            json_verify = {
+                "ran": True,
+                "verdict": audit_verify_verdict,
+                "passed": audit_verify_passed,
+            }
+            for audit_verify_note in audit_verify_notes:
+                print(f"[audit-only] {audit_verify_note}")
+            if not audit_verify_passed:
+                print("[audit-only] pin-bump verification FAILED (no files changed)")
+                return finish(EXIT_VERIFY_FAILED)
+
         if not _confirm_step(
             "delta verdict",
             f"audit delta verdict: {verdict} (report not written)",
@@ -3046,6 +3239,11 @@ def bump(
             if verdict == "regressed":
                 return finish(EXIT_BUMP_FAILED)
 
+        if verify:
+            print(
+                f"[dry-run] would re-run verification audit at {sha[:7]} "
+                "(skipped; no double audit)"
+            )
         if open_pr:
             print(f"[dry-run] would open PR from branch pin-bump-{sha[:7]} (skipped)")
         print(f"[dry-run] bump to {sha[:7]} would succeed")
@@ -3469,6 +3667,90 @@ def bump(
                             "reason": None,
                         }
 
+    # Step 5c (opt-in): --verify post-bump smoke. After the bump (pins,
+    # pack, report, optional version bump) applies and before any PR,
+    # re-run the audit chain against the NEW pin: the verdict must be
+    # improved with no untriaged high/critical, and the --semver-check
+    # classification must hold when enabled. A failed verification rolls
+    # the bump back locally (pin records, package.json version,
+    # report.md), exits 4, and opens no PR.
+    if verify:
+        verify_passed, verify_verdict, verify_notes, _ = _verify_post_bump(
+            run,
+            redteam_dir,
+            old_findings=old_findings,
+            old_packages=old_packages,
+            semver_check=semver_check,
+            pin_selectors=pin_selectors,
+            baseline_rows=semver_rows if semver_check else [],
+        )
+        json_verify = {
+            "ran": True,
+            "verdict": verify_verdict,
+            "passed": verify_passed,
+        }
+        for verify_note in verify_notes:
+            print(verify_note)
+        if not verify_passed:
+            if old_pin is not None:
+                verify_rb_error = rewrite_pins(root, old_pin)
+                if verify_rb_error is not None:
+                    print(f"pin-bump verification rollback FAILED: {verify_rb_error}")
+                else:
+                    print(
+                        "pin-bump verification rollback: pin records "
+                        f"restored to {old_pin[:7]}"
+                    )
+            if isinstance(json_bump, dict) and json_bump.get("applied"):
+                verify_pkg_path = redteam_dir / "package.json"
+                try:
+                    verify_pkg_text = verify_pkg_path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    print(
+                        "pin-bump verification rollback note: cannot read "
+                        f"{verify_pkg_path} ({exc})"
+                    )
+                else:
+                    verify_restored = _rewrite_package_version(
+                        verify_pkg_text, str(json_bump["old"])
+                    )
+                    if verify_restored is None:
+                        print(
+                            "pin-bump verification rollback note: cannot "
+                            f"rewrite {verify_pkg_path}"
+                        )
+                    else:
+                        try:
+                            verify_pkg_path.write_text(
+                                verify_restored, encoding="utf-8"
+                            )
+                        except OSError as exc:
+                            print(
+                                "pin-bump verification rollback note: cannot "
+                                f"write {verify_pkg_path} ({exc})"
+                            )
+                        else:
+                            print(
+                                "pin-bump verification rollback: "
+                                "redteam/package.json version restored to "
+                                f"{json_bump['old']}"
+                            )
+            if report_path is not None:
+                try:
+                    report_path.unlink()
+                except OSError as exc:
+                    print(
+                        "pin-bump verification rollback note: cannot remove "
+                        f"{report_path} ({exc})"
+                    )
+                else:
+                    print(f"pin-bump verification rollback: {report_path.name} removed")
+            print(
+                f"pin-bump verification FAILED at new pin {sha[:7]} "
+                "(bump rolled back locally; no PR)"
+            )
+            return finish(EXIT_VERIFY_FAILED)
+
     # Step 6: open the PR (only after local green).
     if open_pr:
         try:
@@ -3559,6 +3841,7 @@ def main(argv: list[str] | None = None) -> int:
         schedule=args.schedule,
         schedule_name=args.schedule_name,
         rollback=args.rollback,
+        verify=args.verify,
     )
 
 

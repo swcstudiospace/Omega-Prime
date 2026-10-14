@@ -1189,6 +1189,24 @@ def _coverage_summary(
     return f"{covered}/{total} covered"
 
 
+#: Trend cell for coverage classes with no runs (no win rate to map).
+NO_TREND_GLYPH = "—"
+
+
+def coverage_trend_glyph(runs: int, pct: float) -> str:
+    """One-block win-rate glyph for the coverage-matrix trend column.
+
+    Maps the class win rate (0-100%) across :data:`SPARKLINE_BLOCKS`
+    (``▁`` at 0% through ``█`` at 100%); classes with no runs render
+    :data:`NO_TREND_GLYPH`. Deterministic, no external dependencies.
+    """
+    if runs <= 0:
+        return NO_TREND_GLYPH
+    top = len(SPARKLINE_BLOCKS) - 1
+    clamped = min(max(pct, 0.0), 100.0)
+    return SPARKLINE_BLOCKS[round(clamped / 100 * top)]
+
+
 def render_side_by_side(
     *,
     current_runs: int,
@@ -1302,6 +1320,153 @@ def render_three_way_trend(
     ]
 
 
+#: Metrics shown per row by the multi-report trend view
+#: (``--compare-multi``): one row per metric, one column per report
+#: (oldest to newest).
+MULTI_TREND_METRICS = (
+    "runs",
+    "pass rate",
+    "coverage",
+    "findings",
+    "risk-weighted score",
+)
+
+
+def parse_report_timestamp(text: str) -> datetime | None:
+    """``generated-at`` timestamp embedded in a rendered report header.
+
+    The ``## Header`` section carries ``- generated-at: <RFC3339>``;
+    missing or unparseable values yield ``None`` so the caller can sort
+    such reports last. Deterministic.
+    """
+    for line in _report_section_lines(text, "## Header"):
+        match = re.match(r"-\s*generated-at:\s*(\S+)", line.strip())
+        if match:
+            try:
+                return parse_rfc3339(match.group(1))
+            except (ReportError, ValueError):
+                return None
+    return None
+
+
+#: One multi-report trend leg: ``(label, runs, pass_pct, covered, total,
+#: findings, risk_score)``. ``label`` is the report file name.
+MultiTrendLeg = tuple[str, int, int, int, int, int, float]
+
+
+def collect_multi_report_entries(
+    directory: Path,
+) -> tuple[list[tuple[MultiTrendLeg, datetime | None]], list[str]]:
+    """Trend legs for every report ``*.md`` file in ``directory``.
+
+    Returns ``(legs, skipped)`` where ``legs`` holds one
+    ``(leg, timestamp)`` pair per readable report ordered oldest to
+    newest by the embedded ``generated-at`` timestamp (files without
+    one sort last, name-tiebroken) and ``skipped`` lists the file
+    names that could not be read, in sorted order. Metrics reuse the
+    ``--side-by-side``/``--diff-drill-down`` parsers
+    (:func:`parse_previous_metrics`, :func:`parse_previous_coverage`,
+    :func:`parse_previous_snapshot`) with the risk score recomputed
+    from the parsed coverage. Deterministic; fail closed when
+    ``directory`` is missing or not a directory.
+    """
+    if not directory.is_dir():
+        raise ReportError(
+            f"error: cannot read --compare-multi directory {directory} "
+            "(missing or not a directory)"
+        )
+    try:
+        names = sorted(path.name for path in directory.glob("*.md"))
+    except OSError as exc:
+        raise ReportError(
+            f"error: cannot read --compare-multi directory {directory} ({exc})"
+        ) from exc
+    legs: list[tuple[MultiTrendLeg, datetime | None]] = []
+    skipped: list[str] = []
+    for name in names:
+        try:
+            text = (directory / name).read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            skipped.append(name)
+            continue
+        leg = _delta_leg_values(
+            parse_previous_metrics(text),
+            parse_previous_coverage(text),
+            parse_previous_snapshot(text),
+        )
+        legs.append(((name, *leg), parse_report_timestamp(text)))
+    legs.sort(key=lambda entry: (entry[1] is None, entry[1], entry[0][0]))
+    return legs, skipped
+
+
+def render_multi_report_trend(
+    *,
+    source_label: str,
+    legs: list[tuple[MultiTrendLeg, datetime | None]],
+    skipped: list[str],
+) -> list[str]:
+    """Multi-report trend lines (one column per report, oldest to newest).
+
+    One table row per :data:`MULTI_TREND_METRICS` metric with one
+    column per report plus a ``trend`` cell joining the per-report
+    values with ``→`` and a net arrow from :func:`_trend_arrow` over
+    the oldest-to-newest change (``↑`` improving, ``↓`` regressing,
+    ``→`` flat within 0.5; findings improve downward). Unreadable
+    files are listed as skipped notes; with no readable reports the
+    table is omitted and a note records that instead. Deterministic.
+    """
+    lines = [
+        "## Multi-report trend",
+        "",
+        f"- source: {source_label} ({len(legs)} reports)",
+    ]
+    for name in skipped:
+        lines.append(f"- skipped: {name} (unreadable)")
+    if not legs:
+        lines.append(f"- no parseable reports in {source_label}")
+        return lines
+    labels = [leg[0] for leg, _stamp in legs]
+    header = ["metric", *labels, "trend"]
+    lines += [
+        "",
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(["---"] * len(header)) + " |",
+    ]
+    runs = [leg[1] for leg, _stamp in legs]
+    passes = [leg[2] for leg, _stamp in legs]
+    covered = [(leg[3], leg[4]) for leg, _stamp in legs]
+    findings = [leg[5] for leg, _stamp in legs]
+    scores = [leg[6] for leg, _stamp in legs]
+    run_cells = [str(value) for value in runs]
+    pass_cells = [f"{value}%" for value in passes]
+    coverage_cells = [f"{hit}/{total} covered" for hit, total in covered]
+    findings_cells = [str(value) for value in findings]
+    score_cells = [f"{value:.1f}%" for value in scores]
+    lines.append(
+        f"| runs | {' | '.join(run_cells)} | "
+        f"{' → '.join(run_cells)} ({_trend_arrow(float(runs[-1]), float(runs[0]))}) |"
+    )
+    lines.append(
+        f"| pass rate | {' | '.join(pass_cells)} | "
+        f"{' → '.join(pass_cells)} ({_trend_arrow(float(passes[-1]), float(passes[0]))}) |"
+    )
+    lines.append(
+        f"| coverage | {' | '.join(coverage_cells)} | "
+        f"{' → '.join(coverage_cells)} "
+        f"({_trend_arrow(float(covered[-1][0]), float(covered[0][0]))}) |"
+    )
+    lines.append(
+        f"| findings | {' | '.join(findings_cells)} | "
+        f"{' → '.join(findings_cells)} "
+        f"({_trend_arrow(float(findings[-1]), float(findings[0]), higher_is_better=False)}) |"
+    )
+    lines.append(
+        f"| risk-weighted score | {' | '.join(score_cells)} | "
+        f"{' → '.join(score_cells)} ({_trend_arrow(scores[-1], scores[0])}) |"
+    )
+    return lines
+
+
 def render_md_fragment(
     *,
     coverage: list[tuple[str, int, int, int, float, int, str]],
@@ -1313,19 +1478,21 @@ def render_md_fragment(
     the gate line when one is given (``--threshold``); no h1 title and
     no findings-snapshot comment, so the text pastes cleanly into a PR
     comment. Deterministic; the same ``coverage`` rows render
-    byte-identically to the full report's sections.
+    byte-identically to the full report's sections (including the
+    win-rate trend column).
     """
     lines = [
         "## Coverage matrix",
         "",
-        "| class | cases | runs | pass rate | gaps | verdict |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| class | cases | runs | pass rate | gaps | verdict | trend |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for class_name, case_count, class_runs, wins, pct, class_gaps, verdict in coverage:
         rate = f"{wins}/{class_runs} ({pct:.1f}%)" if class_runs else "0/0 (n/a)"
+        glyph = coverage_trend_glyph(class_runs, pct)
         lines.append(
             f"| {class_name} | {case_count} | {class_runs} | {rate} "
-            f"| {class_gaps} | {verdict} |"
+            f"| {class_gaps} | {verdict} | {glyph} |"
         )
     lines += ["", *render_risk_weighted_score(coverage)]
     if gate_line is not None:
@@ -1964,6 +2131,20 @@ def _html_table(lines: list[str]) -> str:
 #: markdown (the HTML export anchors this table's class cells).
 _COVERAGE_MATRIX_HEADER = ("class", "cases", "runs", "pass rate", "gaps", "verdict")
 
+#: Coverage-matrix header with the per-class win-rate trend column (O12).
+#: Reports rendered before the trend column keep the six-column header;
+#: both shapes identify the matrix and parse identically (the trend glyph
+#: cell is ignored by the parsers).
+_COVERAGE_MATRIX_HEADER_TRENDED = (*_COVERAGE_MATRIX_HEADER, "trend")
+
+
+def _is_coverage_matrix_header(cells: list[str]) -> bool:
+    """True for either coverage-matrix header shape (plain or trended)."""
+    lowered = [cell.lower() for cell in cells]
+    return lowered == list(_COVERAGE_MATRIX_HEADER) or lowered == list(
+        _COVERAGE_MATRIX_HEADER_TRENDED
+    )
+
 
 def _split_table_cells(line: str) -> list[str]:
     """Cell texts of one markdown table line (outer pipes stripped)."""
@@ -1980,9 +2161,7 @@ def _is_coverage_matrix_table(lines: list[str]) -> bool:
     """True when ``lines`` open with the coverage-matrix header row."""
     if not lines:
         return False
-    return [cell.lower() for cell in _split_table_cells(lines[0])] == list(
-        _COVERAGE_MATRIX_HEADER
-    )
+    return _is_coverage_matrix_header(_split_table_cells(lines[0]))
 
 
 def _parse_coverage_matrix(
@@ -2004,12 +2183,15 @@ def _parse_coverage_matrix(
             continue
         cells = _split_table_cells(stripped)
         if not in_matrix:
-            if [cell.lower() for cell in cells] == list(_COVERAGE_MATRIX_HEADER):
+            if _is_coverage_matrix_header(cells):
                 in_matrix = True
             continue
         if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
             continue
-        if len(cells) != len(_COVERAGE_MATRIX_HEADER):
+        if len(cells) not in (
+            len(_COVERAGE_MATRIX_HEADER),
+            len(_COVERAGE_MATRIX_HEADER_TRENDED),
+        ):
             continue
         try:
             cases = int(cells[1])
@@ -2042,7 +2224,14 @@ def _html_coverage_table(lines: list[str]) -> str:
     if data:
         rendered: list[str] = []
         for row in data:
-            if len(row) == len(_COVERAGE_MATRIX_HEADER) and row[0]:
+            if (
+                len(row)
+                in (
+                    len(_COVERAGE_MATRIX_HEADER),
+                    len(_COVERAGE_MATRIX_HEADER_TRENDED),
+                )
+                and row[0]
+            ):
                 slug = _coverage_slug(row[0])
                 first = (
                     f'<td><a href="#coverage-{slug}">{_html_inline(row[0])}</a></td>'
@@ -2475,6 +2664,7 @@ def render_report(
     operator_notes: list[str] | None = None,
     side_by_side: list[str] | None = None,
     three_way: list[str] | None = None,
+    multi_trend: list[str] | None = None,
     exec_summary: list[str] | None = None,
     email_block: list[str] | None = None,
     gate_line: str | None = None,
@@ -2519,16 +2709,17 @@ def render_report(
             lines.append("- no runs in window")
     lines += ["", "## Coverage matrix", ""]
     lines += [
-        "| class | cases | runs | pass rate | gaps | verdict |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| class | cases | runs | pass rate | gaps | verdict | trend |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for class_name, case_count, class_runs, wins, pct, class_gaps, verdict in (
         coverage if coverage is not None else []
     ):
         rate = f"{wins}/{class_runs} ({pct:.1f}%)" if class_runs else "0/0 (n/a)"
+        glyph = coverage_trend_glyph(class_runs, pct)
         lines.append(
             f"| {class_name} | {case_count} | {class_runs} | {rate} "
-            f"| {class_gaps} | {verdict} |"
+            f"| {class_gaps} | {verdict} | {glyph} |"
         )
     lines += [
         "",
@@ -2608,6 +2799,8 @@ def render_report(
         lines += ["", *side_by_side]
     if three_way:
         lines += ["", *three_way]
+    if multi_trend:
+        lines += ["", *multi_trend]
     if email_block:
         lines += ["", *email_block]
     lines += [
@@ -2751,6 +2944,7 @@ def build_report(
     exec_summary: bool = False,
     recipient: str | None = None,
     threshold: str | None = None,
+    compare_multi_dir: Path | None = None,
 ) -> tuple[str, str, Path]:
     """Render the report; return ``(markdown, file_name, out_dir)``.
 
@@ -2785,6 +2979,11 @@ def build_report(
     runs, pass rate, coverage, findings, and the risk-weighted score).
     The previous leg is ``--side-by-side``/``--compare`` when given, else
     the newest baseline, else the older report itself.
+
+    ``compare_multi_dir`` (``--compare-multi``) renders a
+    ``## Multi-report trend`` section after the three-way trend (one row
+    per metric, one column per report oldest to newest). It composes
+    with ``--delta``/``--compare``.
     """
     window = _collect_window(reports_dir, since_text)
     window_start = window["window_start"]
@@ -2984,6 +3183,14 @@ def build_report(
             previous=prev_leg,
             current=current_leg,
         )
+    multi_trend: list[str] | None = None
+    if compare_multi_dir is not None:
+        multi_legs, multi_skipped = collect_multi_report_entries(compare_multi_dir)
+        multi_trend = render_multi_report_trend(
+            source_label=compare_multi_dir.name,
+            legs=multi_legs,
+            skipped=multi_skipped,
+        )
     combined_notes = merge_notes(history_notes, annotations or [])
     known_case_ids = {case_id for case_id, _result in pass_rows}
     known_case_ids |= {
@@ -3068,6 +3275,7 @@ def build_report(
         operator_notes=operator_notes,
         side_by_side=side_by_side,
         three_way=three_way,
+        multi_trend=multi_trend,
         exec_summary=exec_summary_lines,
         email_block=email_lines,
         gate_line=(
@@ -3104,6 +3312,7 @@ def build_report_data(
     exec_summary: bool = False,
     recipient: str | None = None,
     threshold: str | None = None,
+    compare_multi_dir: Path | None = None,
 ) -> dict[str, object]:
     """Structured report data with the same inputs as :func:`build_report`.
 
@@ -3422,6 +3631,72 @@ def build_report_data(
                 },
             ],
         }
+    if compare_multi_dir is not None:
+        multi_legs, multi_skipped = collect_multi_report_entries(compare_multi_dir)
+        ordered = [leg for leg, _stamp in multi_legs]
+        multi_runs = [leg[1] for leg in ordered]
+        multi_passes = [leg[2] for leg in ordered]
+        multi_covered = [(leg[3], leg[4]) for leg in ordered]
+        multi_findings = [leg[5] for leg in ordered]
+        multi_scores = [leg[6] for leg in ordered]
+        data["multi_trend"] = {
+            "source": compare_multi_dir.name,
+            "reports": [leg[0] for leg in ordered],
+            "skipped": list(multi_skipped),
+            "note": (
+                f"no parseable reports in {compare_multi_dir.name}"
+                if not ordered
+                else None
+            ),
+            "metrics": [
+                {
+                    "metric": "runs",
+                    "values": list(multi_runs),
+                    "trend": _trend_arrow(float(multi_runs[-1]), float(multi_runs[0]))
+                    if ordered
+                    else "→",
+                },
+                {
+                    "metric": "pass rate",
+                    "values": [f"{value}%" for value in multi_passes],
+                    "trend": _trend_arrow(
+                        float(multi_passes[-1]), float(multi_passes[0])
+                    )
+                    if ordered
+                    else "→",
+                },
+                {
+                    "metric": "coverage",
+                    "values": [
+                        _coverage_summary(covered=hit, total=total)
+                        for hit, total in multi_covered
+                    ],
+                    "trend": _trend_arrow(
+                        float(multi_covered[-1][0]), float(multi_covered[0][0])
+                    )
+                    if ordered
+                    else "→",
+                },
+                {
+                    "metric": "findings",
+                    "values": list(multi_findings),
+                    "trend": _trend_arrow(
+                        float(multi_findings[-1]),
+                        float(multi_findings[0]),
+                        higher_is_better=False,
+                    )
+                    if ordered
+                    else "→",
+                },
+                {
+                    "metric": "risk-weighted score",
+                    "values": [f"{value:.1f}%" for value in multi_scores],
+                    "trend": _trend_arrow(multi_scores[-1], multi_scores[0])
+                    if ordered
+                    else "→",
+                },
+            ],
+        }
     if exec_summary:
         start_day = window_start.date().isoformat().replace(":", "-")
         end_day = window_end.date().isoformat().replace(":", "-")
@@ -3733,6 +4008,21 @@ def main(argv: list[str] | None = None) -> int:
         "newest baseline, else the older report itself.",
     )
     parser.add_argument(
+        "--compare-multi",
+        default=None,
+        metavar="REPORTS_DIR",
+        help="directory of report markdown files for the multi-report "
+        "trend: renders a ## Multi-report trend section after the "
+        "three-way trend (one row per metric over runs, pass rate, "
+        "coverage, findings, and the risk-weighted score with one "
+        "column per report oldest to newest, values joined with → "
+        "plus a net ↑/↓/→ arrow); reports order by their embedded "
+        "generated-at timestamp (files without one sort last, "
+        "name-tiebroken); unreadable files are skipped with a listed "
+        "note; with no readable reports the table is omitted with a "
+        "note instead. Composes with --delta/--compare.",
+    )
+    parser.add_argument(
         "--pdf",
         default=None,
         metavar="OUTPUT_PDF",
@@ -3897,6 +4187,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         side_by_side_path = Path(args.side_by_side) if args.side_by_side else None
         delta_path = Path(args.delta) if args.delta else None
+        compare_multi_dir = Path(args.compare_multi) if args.compare_multi else None
         markdown, file_name, out_dir = build_report(
             reports_dir,
             args.since,
@@ -3911,6 +4202,7 @@ def main(argv: list[str] | None = None) -> int:
             exec_summary=args.exec_summary,
             recipient=args.recipient,
             threshold=args.threshold,
+            compare_multi_dir=compare_multi_dir,
         )
         payload = markdown
         if args.json:
@@ -3928,6 +4220,7 @@ def main(argv: list[str] | None = None) -> int:
                     exec_summary=args.exec_summary,
                     recipient=args.recipient,
                     threshold=args.threshold,
+                    compare_multi_dir=compare_multi_dir,
                 )
             )
     except ReportError as exc:

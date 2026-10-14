@@ -55,6 +55,7 @@ class FakeRun:
         upstream_npm_doc: dict | None = None,
         git_log_vendor: str = "",
         git_show_vendor: str = "",
+        npm_docs: list[dict] | None = None,
         git_show_package: str = "",
     ):
         self.ls_remote = ls_remote
@@ -73,6 +74,8 @@ class FakeRun:
         )
         self.gh_api_fail = gh_api_fail
         self.upstream_npm_doc = upstream_npm_doc
+        self.npm_docs = npm_docs
+        self.npm_seq_calls = 0
         self.git_log_vendor = git_log_vendor
         self.git_show_vendor = git_show_vendor
         self.git_show_package = git_show_package
@@ -97,6 +100,13 @@ class FakeRun:
             self.npm_calls += 1
             if self.npm_calls == 1 and self.upstream_npm_doc is not None:
                 return _cp(cmd, 1, json.dumps(self.upstream_npm_doc))
+            if self.npm_docs:
+                self.npm_seq_calls += 1
+                seq_doc = self.npm_docs[
+                    min(self.npm_seq_calls - 1, len(self.npm_docs) - 1)
+                ]
+                seq_raw = json.dumps(seq_doc)
+                return _cp(cmd, 0 if seq_doc == {"vulnerabilities": {}} else 1, seq_raw)
             raw = self.npm_raw if self.npm_raw is not None else json.dumps(self.npm_doc)
             code = 0 if self.npm_doc == {"vulnerabilities": {}} else 1
             return _cp(cmd, code, raw)
@@ -1087,6 +1097,41 @@ def test_non_interactive_never_prompts(tmp_path, capsys):
     assert rc == 0
     assert "pin-bump confirm" not in out
     assert "Proceed? [y/n]" not in out
+
+
+def _lock_audit(specs: dict[str, str], *entries: tuple[str, str, str]) -> dict:
+    """Lockfile-shaped audit doc: full package specs plus advisory records.
+
+    ``specs`` maps package name -> locked version; ``entries`` are
+    (advisory-key, severity, package) rows attached as lock entry
+    records (plus a top-level legacy ``advisories`` map so the triage
+    helper accepts the shape). Unlike ``_versioned_audit`` (keyed by
+    package, one advisory per package), this shape keeps per-package
+    specs for fixed advisories, so ``--semver-check`` can classify them
+    ``compatible``/``major`` on an ``improved`` verdict.
+    """
+    by_package: dict[str, list[dict]] = {}
+    top_advisories: dict[str, dict] = {}
+    for key, severity, package in entries:
+        record = {
+            "url": f"https://github.com/advisories/{key}",
+            "severity": severity,
+            "module_name": package,
+        }
+        by_package.setdefault(package, []).append(record)
+        top_advisories[key] = dict(record)
+    packages = {
+        f"node_modules/{package}": {
+            "version": version,
+            "advisories": by_package.get(package, []),
+        }
+        for package, version in specs.items()
+    }
+    return {
+        "lockfileVersion": 3,
+        "packages": packages,
+        "advisories": top_advisories,
+    }
 
 
 # --semver-check mode (H11) ---------------------------------------------------
@@ -2967,3 +3012,295 @@ def test_explain_conflicts(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         pin_bump.main(["--rollback", "--explain", "x", "--root", str(tmp_path)])
     assert exc.value.code == 2
+
+
+# --verify mode (O9) -----------------------------------------------------------
+
+
+def test_verify_flag_parses():
+    args = pin_bump.build_parser().parse_args(["--to", PIN_NEW, "--verify"])
+    assert args.verify is True
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.verify is False
+
+
+def test_verify_with_skip_audit_exits_2(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, verify=True, skip_audit=True)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--verify" in err and "--skip-audit" in err
+    assert run.cmds == []
+
+
+def test_verify_main_plumbing_skip_audit_conflict(tmp_path, capsys):
+    rc = pin_bump.main(
+        ["--to", PIN_NEW, "--root", str(tmp_path), "--verify", "--skip-audit"]
+    )
+    assert rc == 2
+    assert "--verify" in capsys.readouterr().err
+
+
+def test_verify_happy_passes_and_opens_pr(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, verify=True, open_pr=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Main audit + verification audit: exactly two npm audits.
+    assert run.npm_calls == 2
+    assert "verification green" in out
+    assert f"- Commit: `{PIN_NEW}`" in (root / "VENDOR.md").read_text()
+    assert "Verdict: improved" in (root / "report.md").read_text()
+    assert "https://example.test/pr/1" in out
+
+
+def test_verify_failing_untriaged_rolls_back_exit_4(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun(
+        npm_docs=[
+            {"vulnerabilities": {}},
+            _audit(("evil", "critical", "GHSA-new-0009")),
+        ]
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, verify=True, open_pr=True)
+    out = capsys.readouterr().out
+    assert rc == 4
+    assert run.npm_calls == 2
+    # Verification output carried on exit 4.
+    assert "verification FAILED" in out
+    assert "GHSA-new-0009" in out
+    # Bump rolled back locally: pins restored, report removed, no PR.
+    vendor = (root / "VENDOR.md").read_text()
+    assert f"- Commit: `{PIN_OLD}`" in vendor
+    assert f"- Commit: `{PIN_NEW}`" not in vendor
+    init = (root / "omega_prime" / "redteam" / "__init__.py").read_text()
+    assert f"Upstream commit: {PIN_OLD}" in init
+    assert not (root / "report.md").exists()
+    verbs = run.kinds()
+    assert not any(cmd[:2] == ["gh", "pr"] for cmd in verbs)
+    assert not any(cmd[:2] == ["git", "push"] for cmd in verbs)
+    assert not any(cmd[:2] == ["git", "commit"] for cmd in verbs)
+
+
+def test_verify_failing_verdict_rolls_back_exit_4(tmp_path, capsys):
+    # Second audit is triage-clean (moderate only) but regresses the delta.
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun(
+        npm_docs=[
+            {"vulnerabilities": {}},
+            _audit(("evil", "moderate", "GHSA-new-0009")),
+        ]
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, verify=True)
+    out = capsys.readouterr().out
+    assert rc == 4
+    assert "verification FAILED" in out
+    assert "'regressed'" in out
+    assert f"- Commit: `{PIN_OLD}`" in (root / "VENDOR.md").read_text()
+    assert not (root / "report.md").exists()
+
+
+def test_verify_failing_restores_package_json(tmp_path, capsys):
+    # Lockfile shape: the bump audit sees an improved verdict with one
+    # compatible fix (so --bump-commit applies), then verification trips on
+    # an untriaged high and the version bump rolls back with the pins.
+    old_doc = _lock_audit(
+        {"left-pad": "1.2.3"},
+        ("GHSA-old-0001", "high", "left-pad"),
+        ("GHSA-persist-0002", "moderate", "left-pad"),
+    )
+    root = _write_fixture_root(
+        tmp_path, with_saved_old_audit=True, old_audit_doc=old_doc
+    )
+    pkg = _write_package_json(root, "1.2.3")
+    run = FakeRun(
+        npm_docs=[
+            _lock_audit(
+                {"left-pad": "1.4.0"},
+                ("GHSA-persist-0002", "moderate", "left-pad"),
+            ),
+            _audit(("evil", "high", "GHSA-new-0009")),
+        ]
+    )
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        verify=True,
+        semver_check=True,
+        bump_commit=True,
+    )
+    out = capsys.readouterr().out
+    assert rc == 4
+    assert "version bump (minor): 1.2.3 -> 1.3.0" in out
+    assert "verification FAILED" in out
+    assert json.loads(pkg.read_text())["version"] == "1.2.3"
+    assert f"- Commit: `{PIN_OLD}`" in (root / "VENDOR.md").read_text()
+    assert not (root / "report.md").exists()
+
+
+def test_verify_dry_run_prints_without_double_audit(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, verify=True, dry_run=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "would re-run verification audit" in out
+    assert "no double audit" in out
+    # Exactly one audit ran: verification never re-audits in dry-run.
+    assert run.npm_calls == 1
+    assert _snapshot(root) == before
+    assert not (root / "report.md").exists()
+
+
+def test_verify_semver_holds_passes(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_versioned_audit(("left-pad", "high", "GHSA-old-0001", "1.2.3")),
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, verify=True, semver_check=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert run.npm_calls == 2
+    assert "semver holds" in out
+    assert "Verdict: improved" in (root / "report.md").read_text()
+
+
+def test_verify_semver_changed_fails_exit_4(tmp_path, capsys):
+    # Both audits see an improved verdict, but the re-audit classifies the
+    # same fix as major instead of compatible: the classification no longer
+    # holds, so verification fails and the bump rolls back.
+    old_doc = _lock_audit(
+        {"left-pad": "1.2.3"},
+        ("GHSA-old-0001", "high", "left-pad"),
+        ("GHSA-persist-0002", "moderate", "left-pad"),
+    )
+    root = _write_fixture_root(
+        tmp_path, with_saved_old_audit=True, old_audit_doc=old_doc
+    )
+    run = FakeRun(
+        npm_docs=[
+            _lock_audit(
+                {"left-pad": "1.4.0"},
+                ("GHSA-persist-0002", "moderate", "left-pad"),
+            ),
+            _lock_audit(
+                {"left-pad": "2.0.0"},
+                ("GHSA-persist-0002", "moderate", "left-pad"),
+            ),
+        ]
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, verify=True, semver_check=True)
+    out = capsys.readouterr().out
+    assert rc == 4
+    assert "semver classification changed" in out
+    assert f"- Commit: `{PIN_OLD}`" in (root / "VENDOR.md").read_text()
+    assert not (root / "report.md").exists()
+
+
+def test_verify_json_mode_object_on_success(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), verify=True, json_mode=True)
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert len(captured.out.strip().splitlines()) == 1
+    payload = json.loads(captured.out)
+    assert payload["verify"] == {
+        "ran": True,
+        "verdict": "improved",
+        "passed": True,
+    }
+    assert payload["exit_code"] == 0
+
+
+def test_verify_json_mode_object_on_failure(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun(
+        npm_docs=[
+            {"vulnerabilities": {}},
+            _audit(("evil", "high", "GHSA-new-0009")),
+        ]
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, verify=True, json_mode=True)
+    captured = capsys.readouterr()
+    assert rc == 4
+    assert len(captured.out.strip().splitlines()) == 1
+    payload = json.loads(captured.out)
+    assert payload["verify"]["ran"] is True
+    assert payload["verify"]["passed"] is False
+    assert payload["exit_code"] == 4
+
+
+def test_verify_json_mode_absent_without_flag(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), json_mode=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "verify" not in json.loads(out)
+
+
+def test_verify_json_mode_dry_run_unrun(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=FakeRun(), verify=True, json_mode=True, dry_run=True
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["verify"] == {"ran": False, "verdict": None, "passed": None}
+
+
+def test_verify_audit_only_passes_without_mutation(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    # Current checkout already carries the fix: both the audit-only pass
+    # and the verification re-audit see the improved delta.
+    before = _snapshot(root)
+    run = FakeRun(npm_doc={"vulnerabilities": {}})
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, verify=True, audit_only=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert run.npm_calls == 2
+    assert "verification green" in out
+    assert _mutating_verbs(run.kinds()) == []
+    assert _snapshot(root) == before
