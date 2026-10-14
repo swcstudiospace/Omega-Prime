@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -3776,3 +3778,460 @@ def test_pin_note_main_plumbing(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert rc == 0
     assert "## Operator notes" in out
+
+
+# --report-to PATH (R2) ----------------------------------------------------------
+
+
+def _report_root(tmp_path: Path) -> Path:
+    """Improved-verdict fixture root under ``tmp_path/root``.
+
+    Keeps ``tmp_path`` itself free so tests can place report destinations
+    (and whole-tree snapshots) beside the root.
+    """
+    return _write_fixture_root(
+        tmp_path / "root",
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+
+
+def _temp_leftovers(directory: Path) -> list[str]:
+    return sorted(p.name for p in directory.iterdir() if p.name.endswith(".tmp"))
+
+
+def test_report_to_flag_parses():
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.report_to is None
+    args = pin_bump.build_parser().parse_args(
+        ["--to", PIN_NEW, "--report-to", "out/r.md"]
+    )
+    assert args.report_to == "out/r.md"
+
+
+def test_report_to_writes_custom_path_exclusively(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "out" / "nested" / "r.md"
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Verdict: improved" in dest.read_text()
+    assert not (root / "report.md").exists()
+    assert f"pin-bump audit: improved (report: {dest})" in out
+    assert (dest.stat().st_mode & 0o777) == 0o644
+    assert _temp_leftovers(dest.parent) == []
+
+
+def test_report_to_unset_is_byte_identical_to_custom_content(tmp_path, capsys):
+    default_root = _report_root(tmp_path / "a")
+    rc = pin_bump.bump(PIN_NEW, root=default_root, run=FakeRun())
+    default_out = capsys.readouterr().out
+    assert rc == 0
+    custom_root = _report_root(tmp_path / "b")
+    dest = tmp_path / "b" / "elsewhere.md"
+    rc = pin_bump.bump(PIN_NEW, root=custom_root, run=FakeRun(), report_to=str(dest))
+    custom_out = capsys.readouterr().out
+    assert rc == 0
+    # Same report bytes; stdout differs only in the reported location.
+    custom_bytes = dest.read_bytes().replace(str(custom_root).encode(), b"<ROOT>")
+    default_bytes = (
+        (default_root / "report.md")
+        .read_bytes()
+        .replace(str(default_root).encode(), b"<ROOT>")
+    )
+    assert custom_bytes == default_bytes
+    assert custom_out.replace(str(dest), "<REPORT>").replace(
+        str(custom_root), "<ROOT>"
+    ) == default_out.replace(str(default_root / "report.md"), "<REPORT>").replace(
+        str(default_root), "<ROOT>"
+    )
+    # The default run still writes <root>/report.md at 0644-style plain write.
+    assert (default_root / "report.md").is_file()
+
+
+def test_report_to_relative_path_resolves_against_cwd(tmp_path, capsys, monkeypatch):
+    root = _report_root(tmp_path)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to="rel/r.md")
+    out = capsys.readouterr().out
+    assert rc == 0
+    expected = Path(os.path.realpath(workdir)) / "rel" / "r.md"
+    assert "Verdict: improved" in expected.read_text()
+    assert f"(report: {expected})" in out
+    assert not (root / "report.md").exists()
+
+
+def test_report_to_traversal_path_writes_only_the_named_file(
+    tmp_path, capsys, monkeypatch
+):
+    root = _report_root(tmp_path)
+    workdir = tmp_path / "work" / "deep"
+    workdir.mkdir(parents=True)
+    monkeypatch.chdir(workdir)
+    before = {p for p in tmp_path.rglob("*")}
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to="../x.md")
+    capsys.readouterr()
+    assert rc == 0
+    target = tmp_path / "work" / "x.md"
+    assert "Verdict: improved" in target.read_text()
+    created = {p for p in tmp_path.rglob("*")} - before
+    # The report plus whatever the bump itself changed under root; nothing
+    # else outside root or the named file.
+    assert target in created
+    assert not [p for p in created if root not in p.parents and p != target]
+
+
+def test_report_to_replaces_existing_file_whole(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "r.md"
+    dest.write_text("STALE " * 5000, encoding="utf-8")
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    capsys.readouterr()
+    assert rc == 0
+    text = dest.read_text()
+    assert "STALE" not in text
+    assert "Verdict: improved" in text
+    assert _temp_leftovers(tmp_path) == []
+
+
+def test_report_to_missing_parent_created_existing_parent_untouched(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    existing = tmp_path / "keepme"
+    existing.mkdir()
+    existing.chmod(0o750)
+    dest = existing / "sub" / "r.md"
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    capsys.readouterr()
+    assert rc == 0
+    assert dest.is_file()
+    assert (existing.stat().st_mode & 0o777) == 0o750
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "empty",
+        "whitespace",
+        "nul",
+        "directory",
+        "symlink",
+        "dangling_symlink",
+        "fifo",
+        "parent_is_file",
+        "ancestor_is_file",
+        "dot_dot",
+        "root_slash",
+    ],
+)
+def test_report_to_usage_errors_exit_2_before_any_subprocess(tmp_path, capsys, case):
+    root = _report_root(tmp_path)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not touch", encoding="utf-8")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("i am a file", encoding="utf-8")
+    (tmp_path / "adir").mkdir()
+    if case == "symlink":
+        (tmp_path / "link.md").symlink_to(victim)
+    if case == "dangling_symlink":
+        (tmp_path / "link.md").symlink_to(tmp_path / "nowhere.md")
+    if case == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("no mkfifo")
+        os.mkfifo(tmp_path / "pipe.md")
+    bad = {
+        "empty": "",
+        "whitespace": "   \t ",
+        "nul": str(tmp_path / "a\x00b.md"),
+        "directory": str(tmp_path / "adir"),
+        "symlink": str(tmp_path / "link.md"),
+        "dangling_symlink": str(tmp_path / "link.md"),
+        "fifo": str(tmp_path / "pipe.md"),
+        "parent_is_file": str(blocker / "r.md"),
+        "ancestor_is_file": str(blocker / "deeper" / "r.md"),
+        "dot_dot": str(tmp_path / "adir" / ".."),
+        "root_slash": "/",
+    }[case]
+    before = _snapshot(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, report_to=bad)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert err.startswith("pin-bump usage error: --report-to")
+    assert run.cmds == []
+    assert _snapshot(tmp_path) == before
+    assert victim.read_text() == "do not touch"
+    assert not (root / "report.md").exists()
+
+
+@pytest.mark.parametrize("flag", ["audit_only", "rollback", "skip_audit"])
+def test_report_to_rejected_for_modes_without_a_report(tmp_path, capsys, flag):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "r.md"
+    run = FakeRun()
+    kwargs: dict[str, Any] = {flag: True}
+    to = None if flag == "rollback" else PIN_NEW
+    rc = pin_bump.bump(to, root=root, run=run, report_to=str(dest), **kwargs)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--report-to" in err
+    flag_text = "--" + flag.replace("_", "-")
+    assert flag_text in err
+    assert run.cmds == []
+    assert not dest.exists()
+
+
+def test_report_to_allowed_with_explain(tmp_path, capsys):
+    # --explain prints its section to stdout; the delta report is still
+    # written in normal mode, so --report-to stays meaningful.
+    root = _report_root(tmp_path)
+    dest = tmp_path / "r.md"
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=FakeRun(),
+        report_to=str(dest),
+        explain="GHSA-old-0001",
+    )
+    capsys.readouterr()
+    assert rc == 0
+    assert "Verdict: improved" in dest.read_text()
+
+
+def test_report_to_failed_write_leaves_no_temp_and_no_partial(
+    tmp_path, capsys, monkeypatch
+):
+    root = _report_root(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    dest = out_dir / "r.md"
+    dest.write_text("previous report", encoding="utf-8")
+    real_replace = os.replace
+
+    def boom(src, dst, *args, **kwargs):
+        if str(dst) == str(dest):
+            raise OSError("disk full")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", boom)
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    out = capsys.readouterr().out
+    assert rc == pin_bump.EXIT_BUMP_FAILED
+    assert f"cannot write report {dest} (disk full)" in out
+    assert dest.read_text() == "previous report"
+    assert _temp_leftovers(out_dir) == []
+    assert not (root / "report.md").exists()
+
+
+def test_report_to_dry_run_mutates_nothing(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "out" / "r.md"
+    before = _snapshot(tmp_path)
+    dirs_before = sorted(p for p in tmp_path.rglob("*") if p.is_dir())
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, dry_run=True, report_to=str(dest))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"[dry-run] report would be written to {dest}" in out
+    assert "(report.md not written)" in out
+    assert _snapshot(tmp_path) == before
+    assert sorted(p for p in tmp_path.rglob("*") if p.is_dir()) == dirs_before
+    assert not dest.exists()
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_report_to_dry_run_unset_prints_no_report_line(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), dry_run=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "report would be written" not in out
+
+
+def test_report_to_json_key_only_when_set(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "r.md"
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=FakeRun(), json_mode=True, report_to=str(dest)
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert set(payload) == {"verdict", "rows", "semver", "bump", "exit_code", "report"}
+    assert payload["report"] == str(dest)
+    assert not (root / "report.md").exists()
+    # Unset: the default five-key shape is unchanged.
+    other = _report_root(tmp_path / "other")
+    rc = pin_bump.bump(PIN_NEW, root=other, run=FakeRun(), json_mode=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert set(payload) == {"verdict", "rows", "semver", "bump", "exit_code"}
+
+
+def test_report_to_main_plumbing(tmp_path, capsys, monkeypatch):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "plumbed.md"
+    monkeypatch.setattr(pin_bump, "_default_run", FakeRun())
+    rc = pin_bump.main(["--to", PIN_NEW, "--root", str(root), "--report-to", str(dest)])
+    capsys.readouterr()
+    assert rc == 0
+    assert "Verdict: improved" in dest.read_text()
+    assert not (root / "report.md").exists()
+
+
+def test_report_to_pr_body_names_custom_report(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "out" / "delta-report.md"
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, open_pr=True, report_to=str(dest))
+    capsys.readouterr()
+    assert rc == 0
+    create = next(cmd for cmd in run.kinds() if cmd[:3] == ["gh", "pr", "create"])
+    body = create[create.index("--body") + 1]
+    assert "(report: delta-report.md)" in body
+    assert "report.md)" not in body.replace("delta-report.md)", "")
+
+
+def test_report_to_pr_body_default_unchanged(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, open_pr=True)
+    capsys.readouterr()
+    assert rc == 0
+    create = next(cmd for cmd in run.kinds() if cmd[:3] == ["gh", "pr", "create"])
+    assert "Audit verdict: improved (report: report.md)." in create[-1]
+
+
+def _verify_failing_run() -> FakeRun:
+    return FakeRun(
+        npm_docs=[
+            {"vulnerabilities": {}},
+            _audit(("evil", "critical", "GHSA-new-0009")),
+        ]
+    )
+
+
+def test_report_to_verify_failure_removes_report_created_by_this_run(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "out" / "r.md"
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=_verify_failing_run(),
+        verify=True,
+        open_pr=True,
+        report_to=str(dest),
+    )
+    out = capsys.readouterr().out
+    assert rc == 4
+    assert not dest.exists()
+    assert not (root / "report.md").exists()
+    assert "verification rollback: r.md removed" in out
+
+
+def test_report_to_verify_failure_keeps_preexisting_file(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "r.md"
+    dest.write_text("older report", encoding="utf-8")
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=_verify_failing_run(),
+        verify=True,
+        open_pr=True,
+        report_to=str(dest),
+    )
+    out = capsys.readouterr().out
+    assert rc == 4
+    assert dest.is_file()
+    assert f"kept {dest} (it existed before this run)" in out
+
+
+def test_report_to_schedule_stores_validated_absolute_path(tmp_path, capsys):
+    dest = tmp_path / "out" / "r.md"
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=tmp_path,
+        run=run,
+        schedule="0 6 * * *",
+        schedule_name="nightly",
+        report_to=str(dest),
+    )
+    capsys.readouterr()
+    assert rc == 0
+    assert run.cmds == []
+    store = sched_mod.JobStore(tmp_path / "cron" / "jobs.json")
+    config = sched_mod.list_pin_bump_schedules(store)[0]["pin_bump_config"]
+    assert config["report_to"] == str(dest)
+    assert not dest.exists()
+
+
+def test_report_to_schedule_unset_config_has_no_key(tmp_path, capsys):
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=tmp_path,
+        run=FakeRun(),
+        schedule="0 6 * * *",
+        schedule_name="nightly",
+    )
+    capsys.readouterr()
+    assert rc == 0
+    store = sched_mod.JobStore(tmp_path / "cron" / "jobs.json")
+    config = sched_mod.list_pin_bump_schedules(store)[0]["pin_bump_config"]
+    assert "report_to" not in config
+
+
+def test_report_to_schedule_invalid_path_registers_nothing(tmp_path, capsys):
+    (tmp_path / "adir").mkdir()
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=tmp_path,
+        run=FakeRun(),
+        schedule="0 6 * * *",
+        schedule_name="nightly",
+        report_to=str(tmp_path / "adir"),
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--report-to" in err
+    assert not (tmp_path / "cron" / "jobs.json").exists()
+
+
+def test_apply_scheduled_bump_forwards_report_to(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "out" / "r.md"
+    rc = pin_bump.apply_scheduled_bump(
+        {"to": PIN_NEW, "report_to": str(dest)}, root=root, run=FakeRun()
+    )
+    capsys.readouterr()
+    assert rc == 0
+    assert "Verdict: improved" in dest.read_text()
+    assert not (root / "report.md").exists()
+
+
+@pytest.mark.parametrize("stored", ["directory", "symlink", "empty", "non_string"])
+def test_apply_scheduled_bump_invalid_stored_path_writes_nothing(
+    tmp_path, capsys, stored
+):
+    root = _report_root(tmp_path)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep", encoding="utf-8")
+    (tmp_path / "adir").mkdir()
+    (tmp_path / "link.md").symlink_to(victim)
+    value: object = {
+        "directory": str(tmp_path / "adir"),
+        "symlink": str(tmp_path / "link.md"),
+        "empty": "",
+        "non_string": 7,
+    }[stored]
+    before = _snapshot(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.apply_scheduled_bump(
+        {"to": PIN_NEW, "report_to": value}, root=root, run=run
+    )
+    capsys.readouterr()
+    assert rc == 2
+    assert run.cmds == []
+    assert _snapshot(tmp_path) == before
+    assert victim.read_text() == "keep"

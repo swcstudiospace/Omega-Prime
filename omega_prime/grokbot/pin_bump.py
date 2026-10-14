@@ -70,6 +70,19 @@ when the audit would regress (or shows untriaged high+), ``2`` for
 usage errors, ``3`` for degraded — the same codes as normal mode. The
 npm audit covers the current checkout (the new pin is never checked
 out in dry-run mode).
+``--report-to PATH`` writes the delta report to ``PATH`` instead of
+``<root>/report.md`` (exclusive; relative paths resolve against the
+current working directory). The write is atomic (temp file in the
+destination directory + ``os.replace``, mode 0644) and missing parent
+directories are created. A symlink, directory, non-regular file,
+empty/NUL path or non-directory parent is a usage error (exit ``2``), as
+is combining it with ``--audit-only``, ``--rollback`` or
+``--skip-audit``. ``--rollback`` always reads ``<root>/report.md`` and
+falls back to the ``VENDOR.md`` git history, so a custom path loses the
+report-based rollback record. ``--dry-run`` validates only. ``--schedule``
+stores the (absolute) path and every replay re-validates it, writing
+nothing when it is invalid. ``--verify`` failure removes the report only
+when this run created it.
 ``--bump-commit`` (with ``--semver-check``) rolls the ``version`` field in
 ``redteam/package.json`` forward one patch — or one minor when a compatible
 fix moved the minor digit — when the audit verdict is ``improved`` and every
@@ -102,6 +115,7 @@ import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -664,6 +678,28 @@ def build_parser() -> argparse.ArgumentParser:
             "stderr. report.md is still written in normal mode; with "
             "--audit-only the JSON goes to stdout and no report.md is "
             "written."
+        ),
+    )
+    parser.add_argument(
+        "--report-to",
+        dest="report_to",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write the delta report to PATH instead of <root>/report.md "
+            "(exclusive: report.md is NOT also written). A relative PATH "
+            "resolves against the current working directory; missing "
+            "parent directories are created; the file is replaced "
+            "atomically (mode 0644). A symlink, directory, other "
+            "non-regular file, empty/NUL path, or a parent that is not a "
+            "directory is a usage error (exit 2), as is combining it "
+            "with --audit-only, --rollback or --skip-audit. --rollback "
+            "still reads <root>/report.md (then the VENDOR.md git "
+            "history), so a custom path loses the report-based rollback "
+            "record. --dry-run only validates and prints where the "
+            "report would go. With --json the payload gains a 'report' "
+            "key holding the resolved path. Recorded by --schedule and "
+            "re-validated at each replay."
         ),
     )
     parser.add_argument(
@@ -1559,6 +1595,7 @@ def apply_scheduled_bump(
     """
     pin_note_specs = config.get("pin_note")
     pin_selectors = config.get("pin")
+    stored_report_to = config.get("report_to")
     return bump(
         config.get("to", ""),
         root=Path(root),
@@ -1574,6 +1611,9 @@ def apply_scheduled_bump(
         interactive=False,
         pin=list(pin_selectors) if isinstance(pin_selectors, list) else None,
         pin_note=(list(pin_note_specs) if isinstance(pin_note_specs, list) else None),
+        # Fail-closed replay: a stored path that is not a string is passed
+        # through as-is so bump() rejects it instead of dropping the flag.
+        report_to=stored_report_to,
     )
 
 
@@ -1930,6 +1970,71 @@ def _verify_post_bump(
     return True, verdict, notes, rows
 
 
+def _resolve_report_to(raw: object) -> tuple[Path | None, str | None]:
+    """Validate ``--report-to`` and return ``(destination, error)``.
+
+    A relative path resolves against the current working directory and
+    the parent directory is resolved through symlinks, but the final
+    component is never followed: a symlink, a directory, or any other
+    non-regular file is refused (fail-closed). Missing parent directories
+    are allowed (created at write time) as long as the nearest existing
+    ancestor is a directory. Pure: touches nothing on disk.
+    """
+    if not isinstance(raw, str):
+        return None, "--report-to must be a path string"
+    if not raw.strip():
+        return None, "--report-to requires a non-empty path"
+    if "\x00" in raw:
+        return None, "--report-to path contains a NUL byte"
+    given = Path(raw)
+    if given.name in ("", ".", ".."):
+        return None, f"--report-to {raw!r} does not name a file"
+    absolute = given if given.is_absolute() else Path.cwd() / given
+    target = Path(os.path.realpath(absolute.parent)) / absolute.name
+    ancestor = target.parent
+    while not os.path.lexists(ancestor) and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    if not ancestor.is_dir():
+        return None, f"--report-to parent {ancestor} is not a directory"
+    try:
+        mode = os.lstat(target).st_mode
+    except FileNotFoundError:
+        return target, None
+    except OSError as exc:
+        return None, f"--report-to {target} is not accessible ({exc})"
+    if stat.S_ISLNK(mode):
+        return None, f"--report-to {target} is a symlink (refusing to follow it)"
+    if stat.S_ISDIR(mode):
+        return None, f"--report-to {target} is a directory"
+    if not stat.S_ISREG(mode):
+        return None, f"--report-to {target} is not a regular file"
+    return target, None
+
+
+def _write_report_atomic(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` atomically (sibling temp + ``os.replace``).
+
+    The file ends up mode 0644 like the default ``report.md``; missing
+    parent directories are created with default permissions and existing
+    ones are never chmodded. A failed write leaves no temp file behind.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
 def bump(
     to: str | None,
     *,
@@ -1953,6 +2058,7 @@ def bump(
     schedule_name: str = "pin-bump",
     rollback: bool = False,
     verify: bool = False,
+    report_to: str | None = None,
     job: dict | None = None,
 ) -> int:
     """Run the pin-bump runbook against ``root``. Returns the exit code."""
@@ -1982,6 +2088,24 @@ def bump(
                 file=sys.stderr,
             )
             return EXIT_USAGE
+    report_dest_resolved: Path | None = None
+    if report_to is not None:
+        # Fail closed before any subprocess: --report-to only makes sense
+        # for the modes that write a delta report.
+        report_mode_conflict = (
+            "--rollback" if rollback else "--audit-only" if audit_only else None
+        )
+        if report_mode_conflict is not None:
+            print(
+                f"pin-bump usage error: --report-to cannot be combined with "
+                f"{report_mode_conflict} (that mode never writes a report)",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        report_dest_resolved, report_to_error = _resolve_report_to(report_to)
+        if report_to_error is not None:
+            print(f"pin-bump usage error: {report_to_error}", file=sys.stderr)
+            return EXIT_USAGE
     if schedule is not None:
         if not to:
             print(
@@ -2008,6 +2132,11 @@ def bump(
                 "pin_note": [s for s in (pin_note or []) if s is not None],
                 "explain": explain.strip() if isinstance(explain, str) else None,
                 "verify": verify,
+                **(
+                    {"report_to": str(report_dest_resolved)}
+                    if report_dest_resolved is not None
+                    else {}
+                ),
             },
         )
     if semver_check and skip_audit:
@@ -2103,12 +2232,22 @@ def bump(
             file=sys.stderr,
         )
         return EXIT_USAGE
+    if report_dest_resolved is not None and skip_audit:
+        print(
+            "pin-bump usage error: --report-to has nothing to write with "
+            "--skip-audit (no report is produced)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     if run is None:
         run = _default_run
     redteam_dir = root / "redteam"
     done: list[str] = []
     verdict: str | None = None
     report_path: Path | None = None
+    report_dest: Path | None = report_dest_resolved
+    report_label = "report.md" if report_dest is None else str(report_dest)
+    report_dest_created = False
     sha: str | None = None
 
     version_bump_note: str | None = None
@@ -2203,6 +2342,7 @@ def bump(
             ),
             **({"explain": json_explain} if explain_selector else {}),
             **({"verify": json_verify} if verify else {}),
+            **({"report": str(report_dest)} if report_dest is not None else {}),
         }
 
     def finish(code: int) -> int:
@@ -3293,6 +3433,8 @@ def bump(
             json_old_packages = dry_old_packages
             json_new_packages = dry_new_packages
             print(f"[dry-run] audit verdict: {verdict} (report.md not written)")
+            if report_dest is not None:
+                print(f"[dry-run] report would be written to {report_dest}")
             if semver_check:
                 dry_rows = classify_semver_fixes(
                     dry_old_findings,
@@ -3696,7 +3838,8 @@ def bump(
             print(
                 f"pin-bump --pin: verdict {verdict} from pinned set "
                 f"({len(pinned)} targeted, "
-                f"{len(json_out_of_scope)} out of scope for --pin; see report.md)"
+                f"{len(json_out_of_scope)} out of scope for --pin; "
+                f"see {report_label})"
             )
         else:
             report = delta_mod.render_report(
@@ -3730,13 +3873,21 @@ def bump(
             )
             print(
                 f"pin-bump operator notes: {len(pin_notes)} note(s) recorded "
-                "(see report.md)"
+                f"(see {report_label})"
             )
-        report_path = root / "report.md"
-        try:
-            report_path.write_text(report, encoding="utf-8")
-        except OSError as exc:
-            return failed(f"cannot write report {report_path} ({exc})")
+        if report_dest is None:
+            report_path = root / "report.md"
+            try:
+                report_path.write_text(report, encoding="utf-8")
+            except OSError as exc:
+                return failed(f"cannot write report {report_path} ({exc})")
+        else:
+            report_path = report_dest
+            report_dest_created = not os.path.lexists(report_path)
+            try:
+                _write_report_atomic(report_path, report)
+            except OSError as exc:
+                return failed(f"cannot write report {report_path} ({exc})")
         print(verdict)
         print(f"pin-bump audit: {verdict} (report: {report_path})")
         if semver_check:
@@ -3944,7 +4095,7 @@ def bump(
                                 "redteam/package.json version restored to "
                                 f"{json_bump['old']}"
                             )
-            if report_path is not None:
+            if report_path is not None and (report_dest is None or report_dest_created):
                 try:
                     report_path.unlink()
                 except OSError as exc:
@@ -3954,6 +4105,11 @@ def bump(
                     )
                 else:
                     print(f"pin-bump verification rollback: {report_path.name} removed")
+            elif report_path is not None:
+                print(
+                    "pin-bump verification rollback note: kept "
+                    f"{report_path} (it existed before this run)"
+                )
             print(
                 f"pin-bump verification FAILED at new pin {sha[:7]} "
                 "(bump rolled back locally; no PR)"
@@ -3989,7 +4145,10 @@ def bump(
         if verdict == "audit-skipped":
             audit_line = "Audit: skipped (--skip-audit; no verdict)."
         else:
-            audit_line = f"Audit verdict: {verdict} (report: report.md)."
+            audit_line = (
+                f"Audit verdict: {verdict} (report: "
+                f"{report_dest.name if report_dest is not None else 'report.md'})."
+            )
         body = (
             f"Redteam pin bump {old_pin or 'unknown'} -> {sha}.\n\n"
             f"Provenance: check, pack-diff, surface green.\n{audit_line}"
@@ -4053,6 +4212,7 @@ def main(argv: list[str] | None = None) -> int:
         schedule_name=args.schedule_name,
         rollback=args.rollback,
         verify=args.verify,
+        report_to=args.report_to,
     )
 
 
