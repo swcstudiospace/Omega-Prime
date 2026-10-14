@@ -2046,12 +2046,7 @@ def sync_findings_jira(
     Returns ``{"pushed": [...], "skipped": [...], "dry_run": bool}``
     with the same entry shapes as :func:`sync_findings`.
     """
-    for name, value in (
-        ("base_url", base_url),
-        ("email", email),
-        ("api_token", api_token),
-        ("project_key", project_key),
-    ):
+    for value in (base_url, email, api_token, project_key):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(NO_JIRA_CONFIG_MESSAGE)
     base_url = base_url.strip().rstrip("/")
@@ -2314,7 +2309,6 @@ def graph_message(row: Mapping[str, Any], repo: str | None = None) -> dict[str, 
     """
     card = teams_message(row, repo=repo)
     title = issue_title(row)
-    digest = str(row.get("dedupe_hash", ""))
     lines = [card.get("summary", "")]
     for section in card.get("sections", []):
         text = section.get("text", "") if isinstance(section, dict) else ""

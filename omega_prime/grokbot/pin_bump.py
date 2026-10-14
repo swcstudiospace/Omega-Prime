@@ -957,10 +957,7 @@ def _pinned_keys(
     """Finding keys in the old|new union targeted by ``--pin`` selectors."""
     pinned: set[str] = set()
     for key in set(old_findings) | set(new_findings):
-        if key in new_findings:
-            package = new_findings[key][1]
-        else:
-            package = old_findings[key][1]
+        package = new_findings[key][1] if key in new_findings else old_findings[key][1]
         if any(_pin_matches(sel, key, package) for sel in selectors):
             pinned.add(key)
     return pinned
@@ -1111,10 +1108,7 @@ def _note_advisories(
     """Sorted finding keys targeted by one ``--pin-note`` selector."""
     matched: list[str] = []
     for key in set(old_findings) | set(new_findings):
-        if key in new_findings:
-            package = new_findings[key][1]
-        else:
-            package = old_findings[key][1]
+        package = new_findings[key][1] if key in new_findings else old_findings[key][1]
         if _pin_matches(selector, key, package):
             matched.append(key)
     return sorted(matched)
@@ -1285,10 +1279,7 @@ def render_explain_section(
     the advisory is not a fixed one); ROLLBACK prints the ``--rollback``
     command line that would revert the bump.
     """
-    if key in new_findings:
-        package = new_findings[key][1]
-    else:
-        package = old_findings[key][1]
+    package = new_findings[key][1] if key in new_findings else old_findings[key][1]
     old_severity = old_findings[key][0] if key in old_findings else None
     new_severity = new_findings[key][0] if key in new_findings else None
     old_spec = old_packages.get(package, "")
@@ -1718,10 +1709,7 @@ def _rollback_roe_check(job: Any) -> str | None:
     artifact, log_path = _rollback_roe_context(job)
     if artifact is None:
         return None
-    if isinstance(artifact, (list, tuple)):
-        grants = list(artifact)
-    else:
-        grants = [artifact]
+    grants = list(artifact) if isinstance(artifact, (list, tuple)) else [artifact]
     grants = [
         grant
         for grant in grants

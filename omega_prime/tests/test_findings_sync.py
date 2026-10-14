@@ -1184,7 +1184,7 @@ def test_tick_teams_with_repo_posts_action(tmp_path):
     fake = FakeTeams()
     result = tick(_teams_config(repo=REPO), reports_directory=tmp_path, runner=fake)
     assert len(result["pushed"]) == 2
-    for argv, data in fake.calls:
+    for argv, _data in fake.calls:
         assert "potentialAction=" in " ".join(argv)
 
 

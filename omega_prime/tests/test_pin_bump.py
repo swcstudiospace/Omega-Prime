@@ -3489,7 +3489,7 @@ def test_from_audit_semver_json_and_bump_commit(tmp_path, capsys):
     assert not any(cmd[0] in ("node", "npm") for cmd in run.kinds())
 
 
-def test_from_audit_main_plumbing(tmp_path, capsys, monkeypatch):
+def test_from_audit_main_plumbing(tmp_path, monkeypatch):
     root = _write_fixture_root(tmp_path)
     old_audit = tmp_path / "old.json"
     old_audit.write_text(
@@ -3511,7 +3511,6 @@ def test_from_audit_main_plumbing(tmp_path, capsys, monkeypatch):
             str(old_audit),
         ]
     )
-    out = capsys.readouterr().out
     assert rc == 0
     assert "Verdict: improved" in (root / "report.md").read_text()
     assert not any(cmd[0] in ("node", "npm") for cmd in run.kinds())

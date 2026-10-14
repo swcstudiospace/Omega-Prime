@@ -69,7 +69,7 @@ def append_event(
         with open(target, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
     except OSError as exc:
-        warnings.warn(f"roe audit log write failed ({log_path!r}): {exc}")
+        warnings.warn(f"roe audit log write failed ({log_path!r}): {exc}", stacklevel=2)
         return None
     return row
 
@@ -148,7 +148,7 @@ def revoke_artifact(
                     sig.unlink()
                     removed = True
             except OSError as exc:
-                warnings.warn(f"roe revoke failed ({path!r}): {exc}")
+                warnings.warn(f"roe revoke failed ({path!r}): {exc}", stacklevel=2)
                 return False
         if audit_log is not None and str(audit_log).strip():
             log_revoked(
@@ -159,7 +159,7 @@ def revoke_artifact(
             )
         return removed
     except Exception as exc:  # never block callers on audit/revoke bookkeeping
-        warnings.warn(f"roe revoke failed ({path!r}): {exc}")
+        warnings.warn(f"roe revoke failed ({path!r}): {exc}", stacklevel=2)
         return False
 
 

@@ -927,7 +927,7 @@ def test_diff_coverage_renders_delta_section(tmp_path):
     assert body[1] == "- baseline: baseline.md"
     assert body[3] == ("| class | metric | current | previous | delta | trend |")
     rows = [line for line in body if line.startswith("| ")]
-    assert len(rows) == 2 + 6 * 5  # header + separator + 5 metrics × 6 classes
+    assert len(rows) == 2 + 6 * 5  # header + separator + 5 metrics x 6 classes
     text = "\n".join(body)
     # The failing class regresses on pass rate; untouched classes are flat.
     assert (
@@ -1148,7 +1148,7 @@ def test_json_matches_markdown_values(tmp_path):
     matrix_body = section_lines(markdown.stdout, "## Coverage matrix")
     matrix_rows = [line for line in matrix_body if line.startswith("| ")][2:]
     assert len(matrix_rows) == len(data["coverage"])
-    for line, entry in zip(matrix_rows, data["coverage"]):
+    for line, entry in zip(matrix_rows, data["coverage"], strict=True):
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
         assert cells[0] == entry["class"]
         assert int(cells[1]) == entry["cases"]
@@ -5246,15 +5246,16 @@ def test_grant_matrix_load_and_render_units(tmp_path):
     )
     artifact_id, covered, error = module.load_grant_matrix(artifact)
     assert (artifact_id, covered, error) == ("roe-x", {"github", "slack"}, None)
-    _id, missing_covered, _error = module.load_grant_matrix(tmp_path / "nope.json")
-    assert _error is not None and "cannot read" in _error
+    _, _, error = module.load_grant_matrix(tmp_path / "nope.json")
+    assert error is not None and "cannot read" in error
     lines = module.render_grant_matrix(
         artifact_id="roe-x", artifact_label="roe.json", covered={"github"}
     )
     assert lines[0] == "## Grant coverage: roe-x"
     assert "| github | yes |" in lines
     assert "| linear | no |" in lines
-    assert len([l for l in lines if l.startswith("| ") and "---" not in l]) == 1 + 9
+    rows = [line for line in lines if line.startswith("| ") and "---" not in line]
+    assert len(rows) == 1 + 9
     all_covered = module.render_grant_matrix(
         artifact_id="roe-x", artifact_label="roe.json", covered=None
     )

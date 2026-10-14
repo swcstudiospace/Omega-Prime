@@ -126,7 +126,7 @@ def sign_artifact(
         except Exception:
             import warnings
 
-            warnings.warn("roe audit log write failed; skipped")
+            warnings.warn("roe audit log write failed; skipped", stacklevel=2)
     return sig_path
 
 
