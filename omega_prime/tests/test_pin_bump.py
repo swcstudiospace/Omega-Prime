@@ -574,3 +574,176 @@ def test_parse_github_repo_shapes():
     )
     assert pin_bump._parse_github_repo("https://example.test/acme/repo.git") is None
     assert pin_bump._parse_github_repo("") is None
+
+
+# --dry-run mode (batch-05) -----------------------------------------------------
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    """Every file under ``root`` by relative path (zero-mutation proof)."""
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _mutating_verbs(cmds: list[list[str]]) -> list[list[str]]:
+    """Commands that would change files, branches, or remote state."""
+    mutating = []
+    for cmd in cmds:
+        if cmd[:2] == ["git", "fetch"] or cmd[:2] == ["git", "checkout"]:
+            mutating.append(cmd)
+        elif cmd[:2] == ["git", "add"] or cmd[:2] == ["git", "commit"]:
+            mutating.append(cmd)
+        elif cmd[:2] == ["git", "push"] or cmd[:3] == ["gh", "pr", "create"]:
+            mutating.append(cmd)
+    return mutating
+
+
+def test_dry_run_success_mutates_nothing_and_reports(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, dry_run=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"[dry-run] would move pin {PIN_OLD[:7]} -> {PIN_NEW}" in out
+    assert "[dry-run] would re-vendor pack: copy 2, remove 0" in out
+    assert f"[dry-run] would update VENDOR.md pin {PIN_OLD[:7]} ->" in out
+    assert PIN_NEW[:7] in out
+    assert "[dry-run] would update omega_prime/redteam/__init__.py" in out
+    assert "[dry-run] audit verdict: unchanged" in out
+    assert f"[dry-run] bump to {PIN_NEW[:7]} would succeed" in out
+    assert _snapshot(root) == before
+    assert not (root / "report.md").exists()
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_dry_run_tag_resolves_without_mutation(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    run = FakeRun(ls_remote=f"{PIN_TAG}\trefs/tags/v1.4\n")
+    rc = pin_bump.bump("v1.4", root=root, run=run, dry_run=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"[dry-run] would move pin {PIN_OLD[:7]} -> {PIN_TAG}" in out
+    assert run.kinds()[0] == ["git", "ls-remote", "origin", "v1.4"]
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_dry_run_regressed_moderate_exits_1_mutates_nothing(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    run = FakeRun(npm_doc=_audit(("left-pad", "moderate", "GHSA-mod-1")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, dry_run=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[dry-run] audit verdict: regressed" in out
+    assert _snapshot(root) == before
+    assert not (root / "report.md").exists()
+
+
+def test_dry_run_untriaged_high_exits_1_mutates_nothing(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    run = FakeRun(npm_doc=_audit(("evil", "high", "GHSA-evil-1")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, dry_run=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[dry-run] pin-bump FAILED: untriaged high/critical" in out
+    assert _snapshot(root) == before
+
+
+def test_dry_run_bad_ref_exits_2_without_subprocess(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump("not-a-ref!", root=root, run=run, dry_run=True)
+    assert rc == 2
+    assert "bad ref" in capsys.readouterr().err
+    assert run.cmds == []
+
+
+def test_dry_run_missing_submodule_exits_3(tmp_path, capsys):
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=tmp_path, run=run, dry_run=True)
+    assert rc == 3
+    assert "submodule unreachable" in capsys.readouterr().err
+    assert run.cmds == []
+
+
+def test_dry_run_node_absent_exits_3(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    run = FakeRun(node_missing=True)
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, dry_run=True)
+    assert rc == 3
+    assert "node" in capsys.readouterr().err
+    assert _snapshot(root) == before
+
+
+def test_dry_run_missing_old_audit_exits_2(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)  # no saved artifact, no --old-audit
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, dry_run=True)
+    assert rc == 2
+    assert "--old-audit" in capsys.readouterr().err
+    assert _snapshot(root) == before
+
+
+def test_dry_run_skip_audit_exits_0_without_artifact(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)  # no saved artifact needed
+    before = _snapshot(root)
+    run = FakeRun(node_missing=True)  # audit skipped, node never probed
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, skip_audit=True, dry_run=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[dry-run] audit skipped (--skip-audit; no verdict)" in out
+    assert f"[dry-run] bump to {PIN_NEW[:7]} would succeed" in out
+    assert _snapshot(root) == before
+    assert not (root / "report.md").exists()
+    assert run.cmds == []
+
+
+def test_dry_run_open_pr_only_prints(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, open_pr=True, dry_run=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"[dry-run] would open PR from branch pin-bump-{PIN_NEW[:7]}" in out
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_dry_run_surface_drift_exits_1_mutates_nothing(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path, upstream_tools=["renamed_tool"], with_saved_old_audit=True
+    )
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, dry_run=True)
+    assert rc == 1
+    assert "DRIFT" in capsys.readouterr().out
+    assert _snapshot(root) == before
+
+
+def test_dry_run_flag_parses():
+    args = pin_bump.build_parser().parse_args(["--to", PIN_NEW, "--dry-run"])
+    assert args.dry_run is True
+
+
+def test_revendor_preview_matches_pack_counts(tmp_path):
+    root = _write_fixture_root(tmp_path)
+    preview = pin_bump.revendor_preview(
+        root / "redteam" / "grokbot", root / "omega_prime" / "redteam" / "pack"
+    )
+    assert preview == (2, 0)
+    before = _snapshot(root)
+    assert pin_bump.revendor_preview(
+        root / "redteam" / "grokbot", root / "omega_prime" / "redteam" / "pack"
+    ) == preview
+    assert _snapshot(root) == before

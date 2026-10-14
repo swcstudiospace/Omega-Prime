@@ -53,6 +53,17 @@ is a single revert: ``git reset --hard HEAD~1 && git submodule update
 --init redteam`` — the bump commit is atomic, so no partial pin records
 survive.
 
+``--dry-run`` runs the verification steps (ref resolution, pin-record
+readiness, re-vendor preview counts, surface check, npm audit, delta)
+and prints what WOULD change, but performs zero file mutations: no
+``git`` checkout/add, no re-vendor copy, no pin rewrite, no
+``report.md``, no PR branch. Every would-be step is printed with a
+``[dry-run]`` prefix. Exit ``0`` when the bump would succeed, ``1``
+when the audit would regress (or shows untriaged high+), ``2`` for
+usage errors, ``3`` for degraded — the same codes as normal mode. The
+npm audit covers the current checkout (the new pin is never checked
+out in dry-run mode).
+
 All ``git``/``npm``/``node``/``gh`` calls go through the injectable
 ``run(cmd, cwd)`` seam (default :func:`subprocess.run`) so tests stay
 hermetic. The CLI takes no ``OMEGA_PRIME_*`` env vars and reads no
@@ -305,6 +316,37 @@ def revendor_pack(upstream_dir: Path, vendored_dir: Path) -> tuple[int, int]:
     return copied, removed
 
 
+def revendor_preview(upstream_dir: Path, vendored_dir: Path) -> tuple[int, int]:
+    """Read-only preview of :func:`revendor_pack`.
+
+    Walks both trees with the same skip rules and returns the
+    ``(would_copy, would_remove)`` counts without creating, modifying,
+    or deleting any file. Used by ``--dry-run``.
+    """
+    would_copy = 0
+    for src in sorted(upstream_dir.rglob("*")):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(upstream_dir).as_posix()
+        if rel in provenance.PACK_SKIP_REL:
+            continue
+        data = src.read_bytes()
+        dst = vendored_dir / rel
+        if dst.is_file() and dst.read_bytes() == data:
+            continue
+        would_copy += 1
+    would_remove = 0
+    for dst in sorted(vendored_dir.rglob("*")):
+        if dst.is_dir():
+            continue
+        rel = dst.relative_to(vendored_dir).as_posix()
+        if rel in provenance.PACK_SKIP_REL:
+            continue
+        if not os.path.lexists(upstream_dir / rel):
+            would_remove += 1
+    return would_copy, would_remove
+
+
 def rewrite_pins(root: Path, sha: str) -> str | None:
     """Rewrite both pin records to ``sha``. Returns an error, or None."""
     vendor_path = root / "VENDOR.md"
@@ -383,6 +425,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the npm audit and delta report (offline bump).",
     )
     parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help=(
+            "Verify only: resolve the ref, preview the re-vendor counts, "
+            "check the surface, audit, and report the delta without "
+            "changing any file."
+        ),
+    )
+    parser.add_argument(
         "--auto-detect-upstream-fix",
         dest="auto_detect_upstream_fix",
         action="store_true",
@@ -423,6 +475,7 @@ def bump(
     auto_detect_upstream_fix: bool = False,
     open_pr: bool = False,
     json_mode: bool = False,
+    dry_run: bool = False,
 ) -> int:
     """Run the pin-bump runbook against ``root``. Returns the exit code."""
     if run is None:
@@ -512,6 +565,236 @@ def bump(
                 f"pin-bump auto-detect: upstream probe inconclusive "
                 f"({note}); proceeding with bump"
             )
+
+    # --dry-run: run every verification step, mutate nothing. Each
+    # would-be step is printed with a [dry-run] prefix; failures print
+    # the same diagnostics as normal mode (prefixed) and return the
+    # same exit codes. No git checkout/add, no re-vendor copy, no pin
+    # rewrite, no report.md, no PR branch is ever performed below.
+    if dry_run:
+        if not redteam_dir.is_dir():
+            return degraded(
+                "submodule unreachable: redteam/ is missing "
+                "(run git submodule update --init redteam)"
+            )
+        try:
+            dry_vendor_text = (root / "VENDOR.md").read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"[dry-run] pin-bump FAILED: cannot read VENDOR.md ({exc})")
+            return finish(EXIT_BUMP_FAILED)
+        dry_section = _vendor_section(dry_vendor_text)
+        dry_old_pin = (
+            provenance.parse_vendor_pin(dry_section)
+            if dry_section is not None
+            else None
+        )
+        dry_old_label = dry_old_pin[:7] if dry_old_pin else "unknown"
+        print(
+            f"[dry-run] would move pin {dry_old_label} -> {sha} "
+            "(git fetch, checkout, add redteam)"
+        )
+
+        dry_upstream_dir = root / provenance.PACK_UPSTREAM
+        dry_vendored_dir = root / provenance.PACK_VENDORED
+        if not dry_upstream_dir.is_dir():
+            print(
+                f"[dry-run] pin-bump FAILED: missing upstream pack "
+                f"{dry_upstream_dir} after checkout {sha[:7]}"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        if not dry_vendored_dir.is_dir():
+            print(
+                f"[dry-run] pin-bump FAILED: missing vendored pack "
+                f"{dry_vendored_dir}"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        dry_copied, dry_removed = revendor_preview(
+            dry_upstream_dir, dry_vendored_dir
+        )
+        print(
+            f"[dry-run] would re-vendor pack: copy {dry_copied}, "
+            f"remove {dry_removed}"
+        )
+
+        if dry_section is None:
+            print(
+                f"[dry-run] pin-bump FAILED: no {VENDOR_SECTION!r} "
+                "section in VENDOR.md"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        if not VENDOR_PIN_LINE_RE.search(dry_section):
+            print(
+                "[dry-run] pin-bump FAILED: no `Commit:` pin line in the "
+                "T3MP3ST section of VENDOR.md"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        try:
+            dry_docstring_text = (root / provenance.DOCSTRING_FILE).read_text(
+                encoding="utf-8"
+            )
+        except OSError as exc:
+            print(
+                "[dry-run] pin-bump FAILED: cannot read "
+                f"{provenance.DOCSTRING_FILE.as_posix()} ({exc})"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        if not provenance.DOCSTRING_PIN_RE.search(dry_docstring_text):
+            print(
+                "[dry-run] pin-bump FAILED: no `Upstream commit:` pin in "
+                f"{provenance.DOCSTRING_FILE.as_posix()}"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        print(
+            f"[dry-run] would update VENDOR.md pin "
+            f"{dry_old_label} -> {sha[:7]}"
+        )
+        print(
+            f"[dry-run] would update {provenance.DOCSTRING_FILE.as_posix()} "
+            f"Upstream commit {dry_old_label} -> {sha[:7]}"
+        )
+
+        if provenance.cmd_surface(root) != 0:
+            print(
+                "[dry-run] pin-bump FAILED: surface DRIFT: upstream tool "
+                "surface changed; updating REDTEAM_TOOL_NAMES stays a "
+                "manual legitimacy decision"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        print("[dry-run] surface check green")
+
+        if skip_audit:
+            verdict = "audit-skipped"
+            print("[dry-run] audit skipped (--skip-audit; no verdict)")
+        else:
+            try:
+                dry_node = run(["node", "--version"], cwd=root)
+            except OSError:
+                dry_node = None
+            if dry_node is None or dry_node.returncode != 0:
+                return degraded("node is absent (node --version failed)")
+            print(
+                "[dry-run] note: auditing the current checkout in "
+                f"{redteam_dir} (the new pin is never checked out)"
+            )
+            try:
+                dry_audit_proc = run(
+                    [
+                        "npm",
+                        "audit",
+                        "--omit=dev",
+                        "--audit-level=high",
+                        "--json",
+                    ],
+                    cwd=redteam_dir,
+                )
+            except OSError as exc:
+                return degraded(f"npm is absent ({exc})")
+            try:
+                dry_new_doc = json.loads(dry_audit_proc.stdout)
+            except ValueError as exc:
+                print(
+                    "[dry-run] pin-bump FAILED: cannot parse npm audit "
+                    f"output ({exc})"
+                )
+                return finish(EXIT_BUMP_FAILED)
+            try:
+                dry_triage_mod = _load_script("redteam-audit-triage.py")
+            except (OSError, RuntimeError) as exc:
+                print(
+                    "[dry-run] pin-bump FAILED: cannot load audit triage "
+                    f"helper ({exc})"
+                )
+                return finish(EXIT_BUMP_FAILED)
+            dry_findings, dry_triage_error = dry_triage_mod.triage(dry_new_doc)
+            if dry_triage_error is not None:
+                print(
+                    "[dry-run] pin-bump FAILED: audit triage refused "
+                    f"output: {dry_triage_error}"
+                )
+                return finish(EXIT_BUMP_FAILED)
+            dry_untriaged = [
+                finding
+                for finding in dry_findings
+                if finding[0] not in dry_triage_mod.TRIAGED
+            ]
+            if dry_untriaged:
+                print(
+                    "[dry-run] pin-bump FAILED: untriaged high/critical "
+                    "advisories at new pin:"
+                )
+                for key, severity, name in dry_untriaged:
+                    print(f"[dry-run]   {severity} {name}: {key}")
+                return finish(EXIT_BUMP_FAILED)
+            print("[dry-run] audit triage green (no untriaged high/critical)")
+
+            dry_old_path = (
+                Path(old_audit)
+                if old_audit
+                else _default_old_audit(root, dry_old_pin)
+            )
+            if dry_old_path is None:
+                return usage(
+                    "no saved audit artifact for the pre-bump pin; "
+                    "pass --old-audit <path>"
+                )
+            if old_audit and not dry_old_path.is_file():
+                return usage(f"--old-audit not found: {old_audit}")
+            try:
+                dry_old_doc = json.loads(
+                    dry_old_path.read_text(encoding="utf-8")
+                )
+            except OSError as exc:
+                print(
+                    "[dry-run] pin-bump FAILED: cannot read old audit "
+                    f"{dry_old_path} ({exc})"
+                )
+                return finish(EXIT_BUMP_FAILED)
+            except ValueError as exc:
+                print(
+                    "[dry-run] pin-bump FAILED: cannot parse old audit "
+                    f"{dry_old_path} ({exc})"
+                )
+                return finish(EXIT_BUMP_FAILED)
+            try:
+                dry_delta_mod = _load_script("redteam-audit-delta.py")
+            except (OSError, RuntimeError) as exc:
+                print(
+                    "[dry-run] pin-bump FAILED: cannot load audit delta "
+                    f"helper ({exc})"
+                )
+                return finish(EXIT_BUMP_FAILED)
+            dry_old_findings, _, dry_old_error = dry_delta_mod.parse_input(
+                dry_old_doc
+            )
+            if dry_old_error is not None:
+                print(
+                    "[dry-run] pin-bump FAILED: old audit unusable: "
+                    f"{dry_old_error}"
+                )
+                return finish(EXIT_BUMP_FAILED)
+            dry_new_findings, dry_new_packages, dry_new_error = (
+                dry_delta_mod.parse_input(dry_new_doc)
+            )
+            if dry_new_error is not None:
+                print(
+                    "[dry-run] pin-bump FAILED: new audit unusable: "
+                    f"{dry_new_error}"
+                )
+                return finish(EXIT_BUMP_FAILED)
+            _, _, _, _, verdict = dry_delta_mod.compute_delta(
+                dry_old_findings, dry_new_findings, dry_new_packages
+            )
+            print(f"[dry-run] audit verdict: {verdict} (report.md not written)")
+            if verdict == "regressed":
+                return finish(EXIT_BUMP_FAILED)
+
+        if open_pr:
+            print(
+                f"[dry-run] would open PR from branch pin-bump-{sha[:7]} "
+                "(skipped)"
+            )
+        print(f"[dry-run] bump to {sha[:7]} would succeed")
+        return finish(EXIT_OK)
 
     # Step 1 (cont.): fetch, checkout, stage the gitlink.
     if not redteam_dir.is_dir():
@@ -729,7 +1012,7 @@ def bump(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--open-pr] [--json]``."""
+    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--dry-run] [--open-pr] [--json]``."""
     args = build_parser().parse_args(argv)
     root = Path(args.root) if args.root is not None else REPO_ROOT
     return bump(
@@ -740,6 +1023,7 @@ def main(argv: list[str] | None = None) -> int:
         auto_detect_upstream_fix=args.auto_detect_upstream_fix,
         open_pr=args.open_pr,
         json_mode=args.json_mode,
+        dry_run=args.dry_run,
     )
 
 
