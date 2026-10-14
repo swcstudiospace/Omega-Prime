@@ -1549,6 +1549,103 @@ def write_csv_report(
     return 0
 
 
+def render_recipient_file_text(email_lines: list[str], *, recipient: str | None) -> str:
+    """Standalone ``--recipient-file`` text from an email block (N10).
+
+    Subject line first, blank line, then the plain-text body. With a
+    ``recipient`` the block is reused verbatim minus the ``## Email
+    summary`` heading; without one the ``To:`` line (which has no
+    address) is dropped. Deterministic; stays under 2000 characters
+    whenever the email block does.
+    """
+    subject_idx = next(
+        index for index, line in enumerate(email_lines) if line.startswith("Subject:")
+    )
+    chunks = list(email_lines[subject_idx:])
+    if recipient is None:
+        stripped: list[str] = []
+        skip_blank = False
+        for line in chunks:
+            if line.startswith("To:"):
+                skip_blank = True
+                continue
+            if skip_blank and line == "":
+                skip_blank = False
+                continue
+            stripped.append(line)
+        chunks = stripped
+    return "\n".join(chunks) + "\n"
+
+
+def write_recipient_file(text: str, recipient_path: Path) -> int:
+    """Write the standalone email file at ``recipient_path`` (N10).
+
+    Returns 0 on success; an unwritable output prints ``error:`` to
+    stderr and returns 1.
+    """
+    try:
+        recipient_path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"error: cannot write --recipient-file email: {recipient_path} ({exc})",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+#: Verdicts mapping to PASS in the scorecard export (N12); every other
+#: verdict (``gappy``, ``unexercised``) maps to FAIL.
+SCORECARD_PASS_VERDICTS = frozenset({"covered"})
+
+
+def render_scorecard(
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+) -> str:
+    """Machine-readable per-class scorecard for ``--export-scorecard`` (N12).
+
+    One deterministic line per coverage class in coverage order
+    (``CLASS<TAB>verdict<TAB>PASS|FAIL``) plus a final
+    ``OVERALL<TAB><risk-score>`` line carrying the risk-weighted score
+    with one decimal. Header comment lines (``#``) document the
+    verdict mapping so CI annotation tooling can ``grep -v '^#'`` for
+    the data lines.
+    """
+    score, _earned, _possible, _breakdown = risk_weighted_score(coverage)
+    lines = [
+        "# engagement scorecard: CLASS<TAB>verdict<TAB>PASS|FAIL "
+        "per coverage class plus OVERALL risk score",
+        "# mapping: covered->PASS; gappy->FAIL; unexercised->FAIL "
+        "(grep -v '^#' for data lines)",
+    ]
+    for class_name, _cases, _runs, _wins, _pct, _gaps, verdict in coverage:
+        status = "PASS" if verdict in SCORECARD_PASS_VERDICTS else "FAIL"
+        lines.append(f"{class_name}\t{verdict}\t{status}")
+    lines.append(f"OVERALL\t{score:.1f}")
+    return "\n".join(lines) + "\n"
+
+
+def write_scorecard_report(
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+    scorecard_path: Path,
+) -> int:
+    """Write the per-class scorecard at ``scorecard_path`` (N12).
+
+    Returns 0 on success; an unwritable output prints ``error:`` to
+    stderr and returns 1.
+    """
+    try:
+        scorecard_path.write_text(render_scorecard(coverage), encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"error: cannot write --export-scorecard scorecard: "
+            f"{scorecard_path} ({exc})",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 #: Block elements for ASCII sparklines (U+2581..U+2588, ascending).
 SPARKLINE_BLOCKS = ("▁", "▂", "▃", "▄", "▅", "▆", "▇", "█")
 
@@ -3716,6 +3813,27 @@ def main(argv: list[str] | None = None) -> int:
         "stdout and the canonical report are unchanged.",
     )
     parser.add_argument(
+        "--recipient-file",
+        default=None,
+        metavar="OUTPUT_TXT",
+        help="also write the email block (the same content --recipient "
+        "renders) as a standalone file at OUTPUT_TXT (Subject line first, "
+        "blank line, plain-text body under 2000 chars); without "
+        "--recipient or --exec-summary it implies the exec-summary "
+        "derivation for the email body; stdout and the canonical report "
+        "are unchanged.",
+    )
+    parser.add_argument(
+        "--export-scorecard",
+        default=None,
+        metavar="OUTPUT_TXT",
+        help="also write a machine-readable per-class scorecard at "
+        "OUTPUT_TXT (one deterministic CLASS<TAB>verdict<TAB>PASS|FAIL "
+        "line per coverage class plus a final OVERALL<TAB>risk-score "
+        "line; the verdict mapping is documented in # header comments); "
+        "stdout and the canonical report are unchanged.",
+    )
+    parser.add_argument(
         "--threshold",
         default=None,
         metavar="SPEC",
@@ -3932,6 +4050,76 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+    if args.recipient_file or args.export_scorecard:
+        try:
+            extra_window = _collect_window(reports_dir, args.since)
+            extra_runs = extra_window["runs"]
+            assert isinstance(extra_runs, int)
+            extra_coverage = coverage_rows(
+                extra_window["cases"],  # type: ignore[arg-type]
+                extra_window["observations"] if extra_runs > 0 else {},  # type: ignore[arg-type]
+                extra_window["gaps"],  # type: ignore[arg-type]
+            )
+        except ReportError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if args.export_scorecard:
+            status = (
+                write_scorecard_report(extra_coverage, Path(args.export_scorecard))
+                or status
+            )
+        if args.recipient_file:
+            extra_current = extra_window["current_findings"]
+            assert isinstance(extra_current, dict)
+            extra_out_dir = output_dir(reports_dir)
+            extra_baseline_name, extra_baseline = newest_baseline(
+                extra_out_dir, file_name
+            )
+            if extra_baseline is None:
+                extra_new = len(extra_current)
+                extra_rescinded = 0
+            else:
+                extra_new = sum(1 for h in extra_current if h not in extra_baseline)
+                extra_rescinded = sum(
+                    1 for h in extra_baseline if h not in extra_current
+                )
+            extra_baseline_metrics: dict[str, int] | None = None
+            if extra_baseline_name is not None:
+                try:
+                    extra_baseline_metrics = parse_previous_metrics(
+                        (extra_out_dir / extra_baseline_name).read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                except OSError:
+                    extra_baseline_metrics = None
+            extra_previous_pass = (
+                extra_baseline_metrics["pass_pct"] if extra_baseline_metrics else None
+            )
+            extra_score, extra_earned, extra_possible, _extra_breakdown = (
+                risk_weighted_score(extra_coverage)
+            )
+            extra_block = render_email_block(
+                recipient=args.recipient if args.recipient is not None else "",
+                window_start=extra_window["window_start"],  # type: ignore[arg-type]
+                window_end=extra_window["window_end"],  # type: ignore[arg-type]
+                runs=extra_runs,
+                pass_pct=_summary_pct(extra_window["pass_rows"]),  # type: ignore[arg-type]
+                previous_pass=extra_previous_pass,
+                score=extra_score,
+                earned=extra_earned,
+                possible=extra_possible,
+                new_count=extra_new,
+                rescinded_count=extra_rescinded,
+                file_name=file_name,
+            )
+            status = (
+                write_recipient_file(
+                    render_recipient_file_text(extra_block, recipient=args.recipient),
+                    Path(args.recipient_file),
+                )
+                or status
+            )
     if args.threshold is not None and gate_evidence is not None:
         gate = evaluate_threshold(
             gate_evidence["pass_rows"],  # type: ignore[arg-type]

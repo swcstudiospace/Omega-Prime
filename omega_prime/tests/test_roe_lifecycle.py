@@ -46,6 +46,8 @@ from omega_prime.grokbot.roe_lifecycle import (
     gateway_reachable,
     grant_trackers,
     main,
+    read_grant_usage,
+    record_grant_usage,
     renewal_reminders,
     suite_counts,
     watchdog_check,
@@ -1370,3 +1372,66 @@ def test_grant_trackers_single_item_list_matches_single():
     """M11: a one-grant list behaves exactly like the single call."""
     document = {"covers": ["teams"]}
     assert grant_trackers([document]) == grant_trackers(document) == {"teams"}
+
+
+# N11 grant usage ledger ---------------------------------------------------------
+
+
+def test_record_grant_usage_row_shape_and_sort_keys(tmp_path):
+    """N11: one JSONL row with ts/artifact_id/tracker/verdict, keys sorted."""
+    ledger = tmp_path / "grant-usage.jsonl"
+    record_grant_usage(ledger, artifact_id="grant-1", tracker="github", verdict="allow")
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert lines[0] == json.dumps(json.loads(lines[0]), sort_keys=True)
+    row = json.loads(lines[0])
+    assert set(row) == {"ts", "artifact_id", "tracker", "verdict"}
+    assert row["artifact_id"] == "grant-1"
+    assert row["tracker"] == "github"
+    assert row["verdict"] == "allow"
+    assert datetime.fromisoformat(row["ts"]).tzinfo is not None
+
+
+def test_record_grant_usage_appends_rows(tmp_path):
+    """N11: repeated calls append one row each, oldest first."""
+    ledger = tmp_path / "grant-usage.jsonl"
+    record_grant_usage(ledger, artifact_id="a", tracker="github", verdict="allow")
+    record_grant_usage(ledger, artifact_id="a", tracker="slack", verdict="skip")
+    rows = read_grant_usage(ledger)
+    assert [r["tracker"] for r in rows] == ["github", "slack"]
+    assert [r["verdict"] for r in rows] == ["allow", "skip"]
+
+
+def test_record_grant_usage_never_raises(tmp_path):
+    """N11: blank/unwritable/bad paths are silently skipped."""
+    record_grant_usage("", artifact_id="a", tracker="github", verdict="allow")
+    record_grant_usage("   ", artifact_id="a", tracker="github", verdict="allow")
+    record_grant_usage(None, artifact_id="a", tracker="github", verdict="allow")
+    record_grant_usage(
+        tmp_path / "no-such-dir" / "deep" / "u.jsonl",
+        artifact_id="a",
+        tracker="github",
+        verdict="allow",
+    )
+    assert read_grant_usage(tmp_path / "no-such-dir" / "deep" / "u.jsonl") != []
+
+
+def test_read_grant_usage_unreadable_is_empty(tmp_path):
+    """N11: a missing ledger reads as no rows, never raises."""
+    assert read_grant_usage(tmp_path / "absent.jsonl") == []
+    assert read_grant_usage(tmp_path) == []
+
+
+def test_read_grant_usage_skips_malformed_lines(tmp_path):
+    """N11: blank and non-object lines are skipped, order preserved."""
+    ledger = tmp_path / "grant-usage.jsonl"
+    ledger.write_text(
+        '{"ts": "t", "artifact_id": "a", "tracker": "github", "verdict": "allow"}\n'
+        "\n"
+        "not json\n"
+        "[1, 2]\n"
+        '{"ts": "t", "artifact_id": "a", "tracker": "slack", "verdict": "skip"}\n',
+        encoding="utf-8",
+    )
+    rows = read_grant_usage(ledger)
+    assert [r["tracker"] for r in rows] == ["github", "slack"]

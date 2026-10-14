@@ -110,6 +110,7 @@ import html
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -1178,6 +1179,72 @@ def webhook_payload(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+#: Whitelisted ``{{field}}`` names for generic-webhook payload templates
+#: (N8). Only these row fields ever render; anything else (including
+#: dunder/payload keys) renders as an empty string — never evaluated.
+WEBHOOK_TEMPLATE_FIELDS = (
+    "issue_title",
+    "severity",
+    "class",
+    "dedupe_hash",
+    "case_id",
+    "observed_detection",
+    "timestamp",
+)
+
+#: One ``{{field}}`` placeholder (no nesting): the inner text may not
+#: contain braces, so malformed/stray braces never match and pass
+#: through verbatim.
+_TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{\{([^{}]*)\}\}")
+
+
+def _template_field_value(name: str, row: Mapping[str, Any]) -> str:
+    """Render value for one whitelisted template field (never raises)."""
+    try:
+        if name == "issue_title":
+            return issue_title(row)
+        if name == "timestamp":
+            for key in ("timestamp", "last_seen", "ts"):
+                value = row.get(key, "")
+                if value:
+                    return str(value)
+            return ""
+        if name == "class":
+            return str(row.get("class", "") or row.get("klass", "") or "")
+        value = row.get(name, "")
+        return "" if value is None else str(value)
+    except Exception:
+        return ""
+
+
+def render_template(template: Any, row: Mapping[str, Any]) -> str:
+    """Render a webhook payload template against one finding row.
+
+    Every ``{{field}}`` whose stripped name is in
+    :data:`WEBHOOK_TEMPLATE_FIELDS` is replaced with that row field
+    (``issue_title`` is computed like the fixed payload;
+    ``timestamp`` prefers an explicit ``timestamp`` key, then
+    ``last_seen``, then ``ts``). Unknown placeholders (``{{foo}}``,
+    ``{{}}``) render as an empty string; text without a closing
+    ``}}`` (or any other stray brace) passes through verbatim.
+    Deterministic string substitution only — no eval, no attribute
+    access, no method calls. A non-string ``template`` returns ``""``.
+    """
+    if not isinstance(template, str):
+        return ""
+
+    def _replace(match: re.Match[str]) -> str:
+        name = match.group(1).strip()
+        if name not in WEBHOOK_TEMPLATE_FIELDS:
+            return ""
+        return _template_field_value(name, row)
+
+    try:
+        return _TEMPLATE_PLACEHOLDER_RE.sub(_replace, template)
+    except Exception:
+        return ""
+
+
 def _canonical_payload_bytes(body: Mapping[str, Any]) -> bytes:
     """Canonical JSON bytes of a webhook body (the signed ``payload``)."""
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1253,6 +1320,7 @@ def sync_findings_webhook(
     signing_secret: str = "",
     previous_signing_secret: str = "",
     timestamp: int | None = None,
+    webhook_template: str = "",
 ) -> dict[str, Any]:
     """Post every not-yet-synced finding row to a generic webhook URL.
 
@@ -1278,6 +1346,15 @@ def sync_findings_webhook(
     are never logged, never rendered, and never echoed beyond the
     introspection payload.
 
+    When ``webhook_template`` is a non-blank string, the fixed
+    :func:`webhook_payload` body is replaced by
+    :func:`render_template` output: the rendered text is posted
+    verbatim as the ``body`` (one ``-f body=<rendered>`` field) and
+    the HMAC signature — when secrets are configured — covers the
+    rendered bytes instead of the canonical fixed-payload JSON.
+    A blank/absent template keeps the existing fixed payload
+    byte-identical.
+
     A blank ``webhook_url`` raises :class:`ValueError` (fail-closed,
     never guess).
 
@@ -1299,37 +1376,69 @@ def sync_findings_webhook(
         if row.get("issue_url"):
             skipped.append(digest)
             continue
-        body = webhook_payload(row)
-        payload_bytes = _canonical_payload_bytes(body)
-        headers = webhook_signing_headers(
-            payload_bytes,
-            signing_secret,
-            previous_signing_secret,
-            timestamp,
+        use_template = isinstance(webhook_template, str) and bool(
+            webhook_template.strip()
         )
-        payload: dict[str, Any] = {
-            "webhook_url": webhook_url,
-            "body": body,
-        }
-        if headers:
-            payload["headers"] = dict(headers)
-        argv = [
-            "gh",
-            "api",
-            webhook_url,
-            "--method",
-            "POST",
-        ]
-        for name, value in headers.items():
-            argv += ["-H", f"{name}: {value}"]
-        argv += [
-            "-f",
-            f"title={body['title']}",
-            "-f",
-            f"body={body['body']}",
-            "-f",
-            f"dedupe_hash={body['dedupe_hash']}",
-        ]
+        if use_template:
+            rendered = render_template(webhook_template, row)
+            payload_bytes = rendered.encode("utf-8")
+            headers = webhook_signing_headers(
+                payload_bytes,
+                signing_secret,
+                previous_signing_secret,
+                timestamp,
+            )
+            payload: dict[str, Any] = {
+                "webhook_url": webhook_url,
+                "body": rendered,
+            }
+            if headers:
+                payload["headers"] = dict(headers)
+            argv = [
+                "gh",
+                "api",
+                webhook_url,
+                "--method",
+                "POST",
+            ]
+            for name, value in headers.items():
+                argv += ["-H", f"{name}: {value}"]
+            argv += [
+                "-f",
+                f"body={rendered}",
+            ]
+        else:
+            body = webhook_payload(row)
+            payload_bytes = _canonical_payload_bytes(body)
+            headers = webhook_signing_headers(
+                payload_bytes,
+                signing_secret,
+                previous_signing_secret,
+                timestamp,
+            )
+            payload = {
+                "webhook_url": webhook_url,
+                "body": body,
+            }
+            if headers:
+                payload["headers"] = dict(headers)
+            argv = [
+                "gh",
+                "api",
+                webhook_url,
+                "--method",
+                "POST",
+            ]
+            for name, value in headers.items():
+                argv += ["-H", f"{name}: {value}"]
+            argv += [
+                "-f",
+                f"title={body['title']}",
+                "-f",
+                f"body={body['body']}",
+                "-f",
+                f"dedupe_hash={body['dedupe_hash']}",
+            ]
 
         if dry_run:
             pushed.append({"dedupe_hash": digest, "issue_url": ""})
@@ -2331,6 +2440,82 @@ def _grant_skip_result(tracker: str, dry_run: bool) -> dict[str, Any]:
     }
 
 
+def _grant_ledger_artifact_id(
+    config: Mapping[str, Any] | None, node: Mapping[str, Any]
+) -> str:
+    """Best-effort ledger identity for the tick's grant context (N11)."""
+    try:
+        candidates: list[Any] = []
+        for key in ROE_ARTIFACT_KEYS:
+            if isinstance(node, Mapping) and node.get(key) is not None:
+                candidates.append(node.get(key))
+        redteam: Any = (config or {}).get("redteam", {})
+        if isinstance(redteam, Mapping):
+            for key in ROE_ARTIFACT_KEYS:
+                if redteam.get(key) is not None:
+                    candidates.append(redteam.get(key))
+        parts: list[str] = []
+        for candidate in candidates:
+            items = (
+                list(candidate) if isinstance(candidate, (list, tuple)) else [candidate]
+            )
+            for item in items:
+                if isinstance(item, (list, tuple)):
+                    parts.extend(_ledger_part(sub) for sub in item)
+                else:
+                    parts.append(_ledger_part(item))
+        return ",".join(part for part in parts if part)
+    except Exception:
+        return ""
+
+
+def _ledger_part(item: Any) -> str:
+    """One grant candidate as a ledger id part (never raises)."""
+    try:
+        if isinstance(item, (str, Path)):
+            return str(item)
+        if isinstance(item, Mapping):
+            for key in ("artifact_id", "id", "path", "artifact"):
+                value = item.get(key, "")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+    except Exception:
+        return ""
+
+
+def _record_grant_decision(
+    config: Mapping[str, Any] | None,
+    node: Mapping[str, Any],
+    tracker: str,
+    verdict: str,
+) -> None:
+    """Append the per-grant tracker gate decision to the usage ledger.
+
+    Reads the ledger path from ``redteam.findings_sync``'s
+    ``grant_usage_ledger`` key; a blank/absent path means no ledger
+    (backward compatible — nothing is written). The
+    :func:`roe_lifecycle.record_grant_usage` import is deferred so a
+    tick without the ledger configured never touches that module.
+    Never raises.
+    """
+    try:
+        raw = node.get("grant_usage_ledger", "")
+        ledger_path = raw.strip() if isinstance(raw, str) else ""
+        if not ledger_path:
+            return
+        from omega_prime.grokbot.roe_lifecycle import record_grant_usage
+
+        record_grant_usage(
+            ledger_path,
+            artifact_id=_grant_ledger_artifact_id(config, node),
+            tracker=tracker,
+            verdict=verdict,
+        )
+    except Exception:
+        return None
+
+
 def tick(
     config: Mapping[str, Any] | None = None,
     *,
@@ -2345,7 +2530,8 @@ def tick(
     ``teams_webhook_url``, ``graph``, ``pagerduty_routing_key``,
     ``pagerduty_severity_map``, ``opsgenie_api_key``,
     ``opsgenie_priority_map``, ``jira``, ``webhook_url``,
-    ``webhook_signing_secret``, ``webhook_signing_secret_previous``)
+    ``webhook_signing_secret``, ``webhook_signing_secret_previous``,
+    ``webhook_template``, ``grant_usage_ledger``)
     from ``config`` (loads via ``load_config()`` when omitted).
     Disabled, repo-less, team-less, webhook-less, graph-less,
     routing-key-less, api-key-less, jira-config-less, or
@@ -2362,6 +2548,12 @@ def tick(
     ``reason`` result (fail-closed only when grants exist and cover
     nothing for this tracker). Without grant scoping the tick proceeds
     exactly as before.
+
+    Grant usage ledger (N11): the allow/skip gate decision is appended
+    to the ``grant_usage_ledger`` JSONL path when configured; a
+    blank/absent path writes nothing. Webhook payload templates (N8):
+    a non-blank ``webhook_template`` renders each generic-webhook body
+    via :func:`render_template` instead of the fixed payload.
     """
     if config is None:
         from omega_prime.config import load_config  # deferred: keeps import light
@@ -2379,7 +2571,9 @@ def tick(
     )
     allowed = _grant_allowed_trackers(config, node)
     if allowed is not None and effective_tracker not in allowed:
+        _record_grant_decision(config, node, effective_tracker, "skip")
         return _grant_skip_result(effective_tracker, dry_run)
+    _record_grant_decision(config, node, effective_tracker, "allow")
     if tracker == "graph" or _graph_config_complete(graph_cfg):
         if not _graph_config_complete(graph_cfg):
             return _tracker_error(NO_GRAPH_CONFIG_MESSAGE, dry_run)
@@ -2495,6 +2689,8 @@ def tick(
         if not webhook_url:
             return _tracker_error(NO_WEBHOOK_URL_MESSAGE, dry_run)
         signing_secret, previous_secret = _webhook_signing_secrets(node)
+        raw_template = node.get("webhook_template", "")
+        template = raw_template if isinstance(raw_template, str) else ""
         result = sync_findings_webhook(
             reports_directory,
             webhook_url,
@@ -2502,6 +2698,7 @@ def tick(
             dry_run=dry_run,
             signing_secret=signing_secret,
             previous_signing_secret=previous_secret,
+            webhook_template=template,
         )
         result["disabled"] = False
         return result
@@ -2751,6 +2948,7 @@ def _main_webhook(
     dry_run: bool,
     signing_secret: str = "",
     previous_signing_secret: str = "",
+    webhook_template: str = "",
 ) -> int:
     """Run the generic-webhook branch of the CLI (dry-run aware)."""
     if dry_run:
@@ -2761,6 +2959,7 @@ def _main_webhook(
                 dry_run=True,
                 signing_secret=signing_secret,
                 previous_signing_secret=previous_signing_secret,
+                webhook_template=webhook_template,
             )
         except FindingsSyncError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -2777,6 +2976,7 @@ def _main_webhook(
             webhook_url,
             signing_secret=signing_secret,
             previous_signing_secret=previous_signing_secret,
+            webhook_template=webhook_template,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -2919,6 +3119,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--webhook-url", default="", help="Generic webhook URL override"
     )
+    parser.add_argument(
+        "--webhook-template",
+        default="",
+        help="Generic webhook payload template override ({{field}} placeholders)",
+    )
     parser.add_argument("--reports-dir", default="", help="Reports dir override")
     parser.add_argument(
         "--dry-run",
@@ -3050,12 +3255,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {NO_WEBHOOK_URL_MESSAGE}", file=sys.stderr)
             return 2
         signing_secret, previous_secret = _webhook_signing_secrets(node)
+        node_template = node.get("webhook_template", "")
+        node_template = node_template if isinstance(node_template, str) else ""
+        template = args.webhook_template.strip() or node_template
         return _main_webhook(
             directory,
             webhook_url,
             args.dry_run,
             signing_secret,
             previous_secret,
+            template,
         )
     if tracker != "github":
         print(f"error: unknown tracker: {tracker}", file=sys.stderr)
@@ -3152,6 +3361,7 @@ __all__ = [
     "WEBHOOK_SIGNATURE_HEADER",
     "WEBHOOK_SIGNING_SECRET_ENV_VAR",
     "WEBHOOK_SIGNING_SECRET_PREVIOUS_ENV_VAR",
+    "WEBHOOK_TEMPLATE_FIELDS",
     "WEBHOOK_TIMESTAMP_HEADER",
     "WEBHOOK_URL_ENV_VAR",
     "FindingsSyncError",
@@ -3170,6 +3380,7 @@ __all__ = [
     "pagerduty_payload",
     "pagerduty_severity",
     "priority_for_severity",
+    "render_template",
     "sign_payload",
     "slack_color",
     "slack_message",

@@ -401,6 +401,72 @@ def grant_trackers(artifact: Any) -> set[str] | None:
     return allowed or None
 
 
+def record_grant_usage(
+    ledger_path: str | Path | None,
+    *,
+    artifact_id: Any,
+    tracker: Any,
+    verdict: Any,
+) -> None:
+    """Append one per-grant tracker-gate decision to the usage ledger.
+
+    Each call appends a single JSONL row ``{"ts", "artifact_id",
+    "tracker", "verdict"}`` (keys sorted, one row per line) where
+    ``ts`` is the current UTC time in ISO-8601 seconds precision.
+    Parent directories are created as needed. Never raises: a blank
+    path, an unwritable location, or any I/O failure is silently
+    skipped (absence of a ledger row never blocks dispatch).
+    """
+    try:
+        if not isinstance(ledger_path, (str, Path)):
+            return None
+        if not str(ledger_path).strip():
+            return None
+        path = Path(ledger_path)
+        row = {
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+            "artifact_id": str(artifact_id),
+            "tracker": str(tracker),
+            "verdict": str(verdict),
+        }
+        if path.parent != Path(".") and str(path.parent) not in ("", "."):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    except Exception:
+        return None
+    return None
+
+
+def read_grant_usage(ledger_path: str | Path) -> list[dict[str, Any]]:
+    """Read grant-usage ledger rows (oldest first).
+
+    Returns the JSON-object rows of the ``ledger_path`` JSONL file in
+    file order; blank lines and malformed/non-object lines are
+    skipped. An unreadable or missing file returns ``[]``. Never
+    raises.
+    """
+    try:
+        text = Path(ledger_path).read_text(encoding="utf-8")
+    except Exception:
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                entry = json.loads(stripped)
+            except Exception:
+                continue
+            if isinstance(entry, dict):
+                rows.append(entry)
+    except Exception:
+        return []
+    return rows
+
+
 #: Renewal-reminder thresholds (G11): days of window left at or below
 #: which a ``renewal_reminders`` entry fires. Ordered widest first so a
 #: single call returns every newly crossed threshold in the same order.

@@ -2748,3 +2748,222 @@ def test_rollback_conflicts_parsing(tmp_path, capsys):
             ["--rollback", "--schedule", "0 6 * * *", "--root", str(tmp_path)]
         )
     assert exc.value.code == 2
+
+
+def _cvss_audit() -> dict:
+    """Old audit whose via objects carry title/url/CVSS detail."""
+    return {
+        "vulnerabilities": {
+            "left-pad": {
+                "severity": "high",
+                "via": [
+                    "GHSA-old-0001",
+                    {
+                        "name": "left-pad",
+                        "title": "Prototype pollution in left-pad",
+                        "url": "https://github.com/advisories/GHSA-old-0001",
+                        "severity": "high",
+                        "cvss": {"score": 7.5},
+                        "range": ">=1.0.0",
+                    },
+                ],
+                "range": "1.2.3",
+            }
+        }
+    }
+
+
+def test_explain_flag_parses():
+    args = pin_bump.build_parser().parse_args(
+        ["--to", PIN_NEW, "--explain", "left-pad"]
+    )
+    assert args.explain == "left-pad"
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.explain is None
+
+
+def test_explain_match_key_shapes():
+    old = {"GHSA-old-0001": ("high", "left-pad", "1.2.3")}
+    new: dict = {}
+    key, matches = pin_bump._explain_match_key("GHSA-OLD-0001", old, new)
+    assert (key, matches) == ("GHSA-old-0001", ["GHSA-old-0001"])
+    key, matches = pin_bump._explain_match_key("left-pad", old, new)
+    assert (key, matches) == ("GHSA-old-0001", ["GHSA-old-0001"])
+    assert pin_bump._explain_match_key("nope", old, new) == (None, [])
+    assert pin_bump._explain_match_key("nope", {}, {}) == (None, [])
+
+
+def test_explain_audit_only_fixed_advisory(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_versioned_audit(("left-pad", "high", "GHSA-old-0001", "1.2.3")),
+    )
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=run, audit_only=True, explain="GHSA-old-0001"
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "## Explain: `GHSA-old-0001`" in out
+    assert "### WHAT" in out
+    assert "- Package: `left-pad`" in out
+    assert "1.2.3 -> gone (dependency removed)" in out
+    assert "### WHY" in out
+    assert "this bump fixes it" in out
+    assert "### FIX" in out
+    assert f"Pin bump {PIN_OLD[:7]} -> {PIN_NEW[:7]} fixes `GHSA-old-0001`" in out
+    assert "Semver: dependency removed (no bump needed)" in out
+    assert "### ROLLBACK" in out
+    assert "python -m omega_prime.grokbot.pin_bump --rollback" in out
+    assert "[audit-only] audit verdict: improved" in out
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_explain_audit_only_new_advisory_by_package(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    run = FakeRun(npm_doc=_audit(("left-pad", "moderate", "GHSA-new-0002")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True, explain="left-pad")
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "## Explain: `GHSA-new-0002`" in out
+    assert "this bump introduces it" in out
+    assert "Semver: n/a (not a fixed advisory" in out
+    assert _snapshot(root) == before
+
+
+def test_explain_audit_only_cvss_and_title(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path, with_saved_old_audit=True, old_audit_doc=_cvss_audit()
+    )
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True, explain="left-pad")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "- CVSS: 7.5" in out
+    assert "Prototype pollution in left-pad" in out
+    assert "https://github.com/advisories/GHSA-old-0001" in out
+
+
+def test_explain_not_found_exits_2_listing_present(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True, explain="nope")
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--explain matched no advisories" in captured.err
+    assert "GHSA-old-0001" in captured.err
+    assert "## Explain:" not in captured.out
+    assert _snapshot(root) == before
+
+
+def test_explain_not_found_both_clean(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True, explain="nope")
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "both clean" in err
+
+
+def test_explain_json_mode_adds_object(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_cvss_audit(),
+    )
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=FakeRun(),
+        audit_only=True,
+        json_mode=True,
+        explain="left-pad",
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert len(captured.out.strip().splitlines()) == 1
+    payload = json.loads(captured.out)
+    assert payload["explain"]["key"] == "GHSA-old-0001"
+    assert payload["explain"]["package"] == "left-pad"
+    assert payload["explain"]["status"] == "fixed"
+    assert payload["explain"]["spec_old"] == "1.2.3"
+    assert payload["explain"]["spec_new"] == ""
+    assert payload["explain"]["cvss"] == "7.5"
+    assert payload["explain"]["title"] == "Prototype pollution in left-pad"
+    assert payload["explain"]["semver"] == "removed"
+    assert payload["explain"]["rollback"] == (
+        "python -m omega_prime.grokbot.pin_bump --rollback"
+    )
+    assert "## Explain:" not in captured.out
+    assert "## Explain: `GHSA-old-0001`" in captured.err
+
+
+def test_explain_normal_mode_writes_report_and_explains(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.4.0"))
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=run, semver_check=True, explain="GHSA-fix-0001"
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "## Explain: `GHSA-fix-0001`" in out
+    assert "1.2.3 -> 1.4.0" in out
+    assert "Semver: semver-compatible" in out
+    assert "Verdict: improved" in (root / "report.md").read_text()
+
+
+def test_explain_main_plumbing(tmp_path, capsys, monkeypatch):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    run = FakeRun()
+    monkeypatch.setattr(pin_bump, "_default_run", run)
+    rc = pin_bump.main(
+        [
+            "--to",
+            PIN_NEW,
+            "--root",
+            str(root),
+            "--audit-only",
+            "--explain",
+            "left-pad",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "## Explain: `GHSA-old-0001`" in out
+
+
+def test_explain_conflicts(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, skip_audit=True, explain="x")
+    assert rc == 2
+    assert "--explain needs audit data" in capsys.readouterr().err
+    assert run.cmds == []
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True, explain="  ")
+    assert rc == 2
+    assert "--explain requires a non-empty" in capsys.readouterr().err
+    rc = pin_bump.bump(None, root=root, run=run, rollback=True, explain="x")
+    assert rc == 2
+    assert "--rollback" in capsys.readouterr().err
+    assert run.cmds == []
+    with pytest.raises(SystemExit) as exc:
+        pin_bump.main(["--rollback", "--explain", "x", "--root", str(tmp_path)])
+    assert exc.value.code == 2

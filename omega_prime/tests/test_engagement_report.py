@@ -3811,3 +3811,336 @@ def test_render_md_fragment_units(tmp_path):
     )
     assert gated.splitlines()[-1] == "Gate: PASS (pass-rate 100 >= 80)"
     assert gated.endswith("\n")
+
+
+# Standalone recipient file (N10) ---------------------------------------------
+
+
+def test_recipient_file_with_recipient_matches_email_block(tmp_path):
+    """N10 happy: --recipient-file mirrors the in-report email block standalone."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    out = tmp_path / "email.txt"
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--exec-summary",
+        "--recipient",
+        "lead@example.com",
+        "--recipient-file",
+        str(out),
+    )
+    assert proc.returncode == 0, proc.stderr
+    # Stdout is unchanged by the sidecar file: same as without the flag.
+    plain = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--exec-summary",
+        "--recipient",
+        "lead@example.com",
+    )
+    assert plain.returncode == 0, plain.stderr
+    assert proc.stdout == plain.stdout
+    text = out.read_text(encoding="utf-8")
+    assert len(text) < 2000
+    assert text.endswith("\n")
+    file_lines = text.splitlines()
+    assert file_lines[0].startswith("Subject:")
+    assert file_lines[1] == ""
+    assert "To: lead@example.com" in file_lines
+    # Same subject and body as the in-report ## Email summary block
+    # (section_lines also sweeps the trailing snapshot marker, so cut it).
+    body = section_lines(proc.stdout, "## Email summary")
+    subjects = [line for line in body if line.startswith("Subject:")]
+    assert len(subjects) == 1
+    assert file_lines[0] == subjects[0]
+    block_body = body[body.index(subjects[0]) + 1 :]
+    cut = next(
+        (
+            index
+            for index, line in enumerate(block_body)
+            if line.startswith("<!--") or line.startswith("Gate:")
+        ),
+        len(block_body),
+    )
+    expected = block_body[:cut]
+    while expected and expected[-1] == "":
+        expected.pop()
+    assert file_lines[1:] == expected
+
+
+def test_recipient_file_implies_exec_summary_derivation(tmp_path):
+    """N10 implied: --recipient-file alone still writes the email file."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    out = tmp_path / "email.txt"
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--recipient-file", str(out)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Email summary" not in proc.stdout
+    assert "## Executive summary" not in proc.stdout
+    text = out.read_text(encoding="utf-8")
+    assert len(text) < 2000
+    file_lines = text.splitlines()
+    assert file_lines[0].startswith("Subject:")
+    assert file_lines[1] == ""
+    # No address: the To: line is dropped, the greeting stays.
+    assert not any(line.startswith("To:") for line in file_lines)
+    assert "Hi," in file_lines
+    assert any(line.startswith("- runs: 2") for line in file_lines)
+
+
+def test_recipient_file_is_deterministic(tmp_path):
+    """N10 determinism: same inputs write byte-identical email files."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+
+    assert (
+        run_script(
+            "--reports-dir",
+            str(fixture),
+            "--since",
+            T0,
+            "--exec-summary",
+            "--recipient",
+            "lead@example.com",
+            "--recipient-file",
+            str(first),
+        ).returncode
+        == 0
+    )
+    assert (
+        run_script(
+            "--reports-dir",
+            str(fixture),
+            "--since",
+            T0,
+            "--exec-summary",
+            "--recipient",
+            "lead@example.com",
+            "--recipient-file",
+            str(second),
+        ).returncode
+        == 0
+    )
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_recipient_file_unwritable_output_exits_1(tmp_path):
+    """N10 edge: an unwritable --recipient-file path fails closed with error:."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--recipient-file",
+        str(fixture),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_render_recipient_file_text_units():
+    """N10 units: heading stripped; To: kept with recipient, dropped without."""
+    module = _report_module()
+    email = module.render_email_block(
+        recipient="lead@example.com",
+        window_start=module.parse_rfc3339(T0),
+        window_end=module.parse_rfc3339(T2),
+        runs=2,
+        pass_pct=50,
+        previous_pass=50,
+        score=33.3,
+        earned=10,
+        possible=30,
+        new_count=1,
+        rescinded_count=0,
+        file_name="engagement-2026-10-01_2026-10-08.md",
+    )
+    with_recipient = module.render_recipient_file_text(
+        email, recipient="lead@example.com"
+    )
+    assert with_recipient.startswith("Subject:")
+    assert with_recipient.splitlines()[1] == ""
+    assert "## Email summary" not in with_recipient
+    assert "To: lead@example.com" in with_recipient
+    assert with_recipient.endswith("\n")
+    assert len(with_recipient) < 2000
+    # Deterministic on the same block.
+    assert (
+        module.render_recipient_file_text(email, recipient="lead@example.com")
+        == with_recipient
+    )
+    without_recipient = module.render_recipient_file_text(email, recipient=None)
+    assert without_recipient.startswith("Subject:")
+    assert without_recipient.splitlines()[1] == ""
+    assert not any(line.startswith("To:") for line in without_recipient.splitlines())
+    assert "Hi," in without_recipient.splitlines()
+    assert without_recipient.splitlines()[0] == with_recipient.splitlines()[0]
+
+
+# Machine-readable scorecard (N12) ----------------------------------------------
+
+
+def test_export_scorecard_writes_lines_with_overall(tmp_path):
+    """N12 happy: --export-scorecard writes per-class lines plus OVERALL."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    out = tmp_path / "scorecard.txt"
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export-scorecard", str(out)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("# Engagement report")
+    lines = out.read_text(encoding="utf-8").splitlines()
+    # Two # header comments document the verdict mapping.
+    assert len(lines) == 2 + 6 + 1
+    assert all(line.startswith("#") for line in lines[:2])
+    assert "covered->PASS" in lines[1]
+    assert "gappy->FAIL" in lines[1]
+    data = [line.split("\t") for line in lines[2:]]
+    assert all(len(fields) == 3 for fields in data[:-1])
+    assert [row[0] for row in data[:-1]] == [
+        "abuse",
+        "auth-bypass",
+        "cost-abuse",
+        "jailbreak",
+        "malformed-input",
+        "prompt-injection",
+    ]
+    assert data[0] == ["abuse", "covered", "PASS"]
+    overall = lines[-1].split("\t")
+    assert overall == ["OVERALL", "100.0"]
+    assert out.read_text(encoding="utf-8").endswith("\n")
+
+
+def test_export_scorecard_is_deterministic(tmp_path):
+    """N12 determinism: same inputs export byte-identical scorecards."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+
+    assert (
+        run_script(
+            "--reports-dir",
+            str(fixture),
+            "--since",
+            T0,
+            "--export-scorecard",
+            str(first),
+        ).returncode
+        == 0
+    )
+    assert (
+        run_script(
+            "--reports-dir",
+            str(fixture),
+            "--since",
+            T0,
+            "--export-scorecard",
+            str(second),
+        ).returncode
+        == 0
+    )
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_export_scorecard_unwritable_output_exits_1(tmp_path):
+    """N12 edge: an unwritable --export-scorecard path fails closed with error:."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--export-scorecard",
+        str(fixture),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_export_scorecard_composes_with_all_modes(tmp_path):
+    """N12 composition: scorecard works with summary, gate, and recipient files."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    scorecard = tmp_path / "scorecard.txt"
+    email = tmp_path / "email.txt"
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--exec-summary",
+        "--recipient",
+        "lead@example.com",
+        "--threshold",
+        "gate:80",
+        "--export-scorecard",
+        str(scorecard),
+        "--recipient-file",
+        str(email),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Executive summary" in proc.stdout
+    assert "## Email summary" in proc.stdout
+    assert proc.stdout.splitlines()[-1] == "Gate: PASS (pass-rate 100 >= 80)"
+    assert scorecard.is_file()
+    assert scorecard.read_text(encoding="utf-8").splitlines()[-1] == ("OVERALL\t100.0")
+    assert email.read_text(encoding="utf-8").splitlines()[0].startswith("Subject:")
+
+
+def test_render_scorecard_units(tmp_path):
+    """N12 units: covered->PASS; gappy/unexercised->FAIL; OVERALL carries score."""
+    module = _report_module()
+    coverage = [
+        ("abuse", 1, 1, 1, 100.0, 0, "covered"),
+        ("jailbreak", 1, 1, 0, 0.0, 1, "gappy"),
+        ("auth-bypass", 0, 0, 0, 0.0, 0, "unexercised"),
+    ]
+    text = module.render_scorecard(coverage)
+    assert text.endswith("\n")
+    lines = text.splitlines()
+    assert lines[0].startswith("#")
+    assert lines[1].startswith("#")
+    assert "covered->PASS" in lines[1]
+    assert "gappy->FAIL" in lines[1]
+    assert "unexercised->FAIL" in lines[1]
+    data = {}
+    for line in lines[2:]:
+        fields = line.split("\t")
+        if len(fields) == 3:
+            data[fields[0]] = (fields[1], fields[2])
+    assert data["abuse"] == ("covered", "PASS")
+    assert data["jailbreak"] == ("gappy", "FAIL")
+    assert data["auth-bypass"] == ("unexercised", "FAIL")
+    score, _earned, _possible, _breakdown = module.risk_weighted_score(coverage)
+    assert lines[-1] == f"OVERALL\t{score:.1f}"
+    # Deterministic on the same coverage.
+    assert module.render_scorecard(coverage) == text
+    assert module.write_scorecard_report(coverage, tmp_path) == 1

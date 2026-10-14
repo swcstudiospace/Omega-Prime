@@ -505,6 +505,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--explain",
+        dest="explain",
+        default=None,
+        metavar="ADVISORY_OR_PACKAGE",
+        help=(
+            "Explain one advisory: render a deterministic markdown one-pager "
+            "to stdout for the single advisory matching the given id or "
+            "package name substring (same matching as --pin) — WHAT "
+            "(package, old->new pinned versions, severity, CVSS if present), "
+            "WHY (detection summary from the audit data), FIX (the exact "
+            "pin-bump action plus the semver classification), and ROLLBACK "
+            "(the --rollback command line that would revert it). An unknown "
+            "advisory is a usage error (exit 2) listing the advisories "
+            "present. Composes with --audit-only (no mutations) and --json "
+            "(which adds an explain object)."
+        ),
+    )
+
+    parser.add_argument(
         "--semver-check",
         dest="semver_check",
         action="store_true",
@@ -992,6 +1011,303 @@ def _pin_deltas(
     return pinned, full, scoped
 
 
+def _explain_match_key(
+    selector: str,
+    old_findings: dict[str, tuple[str, str, str]],
+    new_findings: dict[str, tuple[str, str, str]],
+) -> tuple[str | None, list[str]]:
+    """``(chosen key, all matches)`` for one ``--explain`` selector.
+
+    An exact (case-insensitive) advisory-key hit wins; otherwise every
+    advisory-or-package substring hit (the same rule as
+    :func:`_pin_matches`) counts and the first in sorted order is chosen
+    so the one-pager is deterministic. No hit returns ``(None, [])``.
+    """
+    union = set(old_findings) | set(new_findings)
+    exact = sorted(key for key in union if key.lower() == selector.lower())
+    if exact:
+        return exact[0], exact
+
+    def _package(key: str) -> str:
+        if key in new_findings:
+            return new_findings[key][1]
+        return old_findings[key][1]
+
+    matches = sorted(key for key in union if _pin_matches(selector, key, _package(key)))
+    if not matches:
+        return None, []
+    return matches[0], matches
+
+
+def _explain_no_match_message(
+    selector: str,
+    old_findings: dict[str, tuple[str, str, str]],
+    new_findings: dict[str, tuple[str, str, str]],
+) -> str:
+    """Actionable ``--explain`` usage error listing the advisories found."""
+    found = sorted(set(old_findings) | set(new_findings))
+    if not found:
+        listing = "no advisories in either audit (both clean)"
+    else:
+        parts = []
+        for key in found:
+            if key in new_findings:
+                severity, package, _ = new_findings[key]
+            else:
+                severity, package, _ = old_findings[key]
+            parts.append(f"`{key}` (package `{package}`, severity {severity})")
+        listing = "; ".join(parts)
+    return (
+        f"--explain matched no advisories (selector: `{selector}`); "
+        f"advisories found: {listing}. "
+        "Match by advisory id (e.g. GHSA-xxxx-yyyy-zzzz) or package name substring."
+    )
+
+
+def _explain_advisory_detail(
+    doc: object, package: str, key: str
+) -> tuple[str | None, str | None, str | None]:
+    """``(cvss, title, url)`` for one advisory from a raw npm audit doc.
+
+    Scans the ``via`` objects of the package's ``vulnerabilities`` entry
+    (npm audit shape: each carries ``title``/``url``/``cvss``) and the
+    legacy ``advisories`` map. Anything absent stays None so callers
+    render "not present in the audit data".
+    """
+    if not isinstance(doc, dict):
+        return None, None, None
+    records: list[dict] = []
+    vulnerabilities = doc.get("vulnerabilities")
+    if isinstance(vulnerabilities, dict):
+        entry = vulnerabilities.get(package)
+        if isinstance(entry, dict):
+            via = entry.get("via")
+            if isinstance(via, list):
+                records.extend(item for item in via if isinstance(item, dict))
+    advisories = doc.get("advisories")
+    if isinstance(advisories, dict):
+        for advisory in advisories.values():
+            if (
+                isinstance(advisory, dict)
+                and str(advisory.get("module_name") or "") == package
+            ):
+                records.append(advisory)
+    is_package_key = bool(package) and key.lower() == package.lower()
+    for record in records:
+        haystack = " ".join(
+            str(record.get(field) or "")
+            for field in ("url", "name", "title", "id", "source", "cves")
+        )
+        if key.lower() not in haystack.lower() and not (
+            is_package_key
+            and any(record.get(field) for field in ("title", "url", "cvss"))
+        ):
+            continue
+        cvss = record.get("cvss")
+        if isinstance(cvss, dict):
+            score = cvss.get("score")
+        elif isinstance(cvss, (int, float, str)):
+            score = cvss
+        else:
+            score = None
+        title = record.get("title")
+        url = record.get("url")
+        return (
+            str(score) if score is not None and str(score) else None,
+            str(title) if title else None,
+            str(url) if url else None,
+        )
+    return None, None, None
+
+
+#: The ``--rollback`` command line rendered in the ROLLBACK section of the
+#: ``--explain`` one-pager (module invocation follows the repo convention
+#: used across ``omega_prime/grokbot``).
+_EXPLAIN_ROLLBACK_CMD = "python -m omega_prime.grokbot.pin_bump --rollback"
+
+
+def render_explain_section(
+    *,
+    selector: str,
+    key: str,
+    matches: list[str],
+    old_findings: dict[str, tuple[str, str, str]],
+    new_findings: dict[str, tuple[str, str, str]],
+    old_packages: dict[str, str],
+    new_packages: dict[str, str],
+    old_doc: object,
+    new_doc: object,
+    fixed: list[str],
+    new_keys: list[str],
+    rescinded: list[str],
+    drift: list[tuple[str, str, str]],
+    old_pin: str,
+    new_pin: str,
+) -> tuple[str, dict[str, Any]]:
+    """Deterministic markdown one-pager + JSON object for ``--explain``.
+
+    WHAT names the package, the old->new pinned versions, the severity,
+    and the CVSS score when the audit data carries one; WHY summarizes
+    detection from the two audit docs; FIX states the exact pin-bump
+    action plus the :func:`classify_semver_fixes` label (``None`` when
+    the advisory is not a fixed one); ROLLBACK prints the ``--rollback``
+    command line that would revert the bump.
+    """
+    if key in new_findings:
+        package = new_findings[key][1]
+    else:
+        package = old_findings[key][1]
+    old_severity = old_findings[key][0] if key in old_findings else None
+    new_severity = new_findings[key][0] if key in new_findings else None
+    old_spec = old_packages.get(package, "")
+    new_spec = new_packages.get(package, "")
+    status = _pin_scope_status(key, new_keys, fixed, rescinded, drift)
+    cvss: str | None = None
+    title: str | None = None
+    advisory_url: str | None = None
+    for doc in (new_doc, old_doc):
+        found_cvss, found_title, found_url = _explain_advisory_detail(doc, package, key)
+        cvss = cvss or found_cvss
+        title = title or found_title
+        advisory_url = advisory_url or found_url
+    if key in fixed:
+        rows = classify_semver_fixes(old_findings, old_packages, new_packages, [key])
+        semver_label = rows[0][4] if rows else "unknown"
+    else:
+        semver_label = None
+    if old_severity is not None and new_severity is not None:
+        severity_line = f"{old_severity} -> {new_severity}"
+    elif old_severity is not None:
+        severity_line = f"{old_severity} (old audit only)"
+    else:
+        severity_line = f"{new_severity} (new audit only)"
+    old_show = old_spec or "?"
+    if package in new_packages:
+        new_show = new_spec or "?"
+    else:
+        new_show = "gone (dependency removed)"
+    if title and advisory_url:
+        evidence = f": {title} ({advisory_url})"
+    elif title:
+        evidence = f": {title}"
+    elif advisory_url:
+        evidence = f" ({advisory_url})"
+    else:
+        evidence = ""
+    if status == "fixed":
+        why = (
+            f"Detected in the old-pin audit (severity {old_severity}, "
+            f"range `{old_spec or '?'}`){evidence}; absent from the new-pin "
+            "audit — this bump fixes it."
+        )
+        fix = (
+            f"Pin bump {old_pin} -> {new_pin} fixes `{key}` "
+            f"(package `{package}`: {old_show} -> {new_show})."
+        )
+    elif status == "new":
+        why = (
+            "Absent from the old-pin audit; detected in the new-pin audit "
+            f"(severity {new_severity}, range `{new_spec or '?'}`){evidence} "
+            "— this bump introduces it."
+        )
+        fix = (
+            f"Pin bump {old_pin} -> {new_pin} introduces `{key}` — hold the "
+            "bump or triage the advisory before proceeding."
+        )
+    elif status == "rescinded":
+        why = (
+            f"Flagged in the old-pin audit (severity {old_severity}){evidence}; "
+            "no longer reported at the new pin with the package spec unchanged "
+            "— rescinded, not a code fix."
+        )
+        fix = (
+            f"Pin bump {old_pin} -> {new_pin} clears the `{key}` flag with no "
+            "version change (rescinded)."
+        )
+    elif status.startswith("drift"):
+        why = (
+            "Present in both audits; severity drifted "
+            f"{old_severity}->{new_severity}{evidence} — reviewer attention needed."
+        )
+        fix = (
+            f"Pin bump {old_pin} -> {new_pin} leaves `{key}` in place "
+            f"(status: {status}); no per-advisory action."
+        )
+    else:
+        why = (
+            f"Present in both audits (severity {new_severity or old_severity})"
+            f"{evidence} — the bump leaves it unchanged."
+        )
+        fix = (
+            f"Pin bump {old_pin} -> {new_pin} leaves `{key}` in place "
+            f"(status: {status}); no per-advisory action."
+        )
+    if semver_label == "compatible":
+        semver_line = (
+            "Semver: semver-compatible (patch/minor within the declared range)"
+        )
+    elif semver_label == "major":
+        semver_line = "Semver: MAJOR bump (outside the declared range)"
+    elif semver_label == "removed":
+        semver_line = "Semver: dependency removed (no bump needed)"
+    elif semver_label == "unknown":
+        semver_line = "Semver: unknown (could not parse versions)"
+    else:
+        semver_line = (
+            "Semver: n/a (not a fixed advisory — the classifier only covers fixes)"
+        )
+    if len(matches) > 1:
+        matched = (
+            f"Selector: `{selector}` matched {len(matches)} advisories "
+            f"(showing `{key}`): " + ", ".join(f"`{match}`" for match in matches)
+        )
+    else:
+        matched = f"Selector: `{selector}` matched 1 advisory."
+    lines = [
+        f"## Explain: `{key}`",
+        "",
+        matched,
+        "",
+        "### WHAT",
+        "",
+        f"- Package: `{package}`",
+        f"- Severity: {severity_line}",
+        f"- Pinned versions: {old_show} -> {new_show}",
+        f"- CVSS: {cvss if cvss is not None else '_not present in the audit data_'}",
+        "",
+        "### WHY",
+        "",
+        f"- {why}",
+        "",
+        "### FIX",
+        "",
+        f"- {fix}",
+        f"- {semver_line}",
+        "",
+        "### ROLLBACK",
+        "",
+        f"- Revert this bump with: `{_EXPLAIN_ROLLBACK_CMD}`",
+    ]
+    payload = {
+        "selector": selector,
+        "key": key,
+        "matched": list(matches),
+        "package": package,
+        "status": status,
+        "severity_old": old_severity,
+        "severity_new": new_severity,
+        "spec_old": old_spec,
+        "spec_new": new_spec,
+        "cvss": cvss,
+        "title": title,
+        "url": advisory_url,
+        "semver": semver_label,
+        "fix": fix,
+        "rollback": _EXPLAIN_ROLLBACK_CMD,
+    }
+    return "\n".join(lines), payload
+
+
 def _register_pin_bump_schedule(
     cron_expr: str,
     *,
@@ -1368,6 +1684,7 @@ def bump(
     audit_only: bool = False,
     interactive: bool = False,
     pin: list[str] | None = None,
+    explain: str | None = None,
     schedule: str | None = None,
     schedule_name: str = "pin-bump",
     rollback: bool = False,
@@ -1422,6 +1739,7 @@ def bump(
                 "auto_detect_upstream_fix": auto_detect_upstream_fix,
                 "open_pr": open_pr,
                 "pin": [s.strip() for s in (pin or []) if s is not None],
+                "explain": explain.strip() if isinstance(explain, str) else None,
             },
         )
     if semver_check and skip_audit:
@@ -1457,6 +1775,27 @@ def bump(
             file=sys.stderr,
         )
         return EXIT_USAGE
+    explain_selector = explain.strip() if isinstance(explain, str) else None
+    if explain is not None and not explain_selector:
+        print(
+            "pin-bump usage error: --explain requires a non-empty advisory id "
+            "or package name",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if explain_selector and skip_audit:
+        print(
+            "pin-bump usage error: --explain needs audit data (drop --skip-audit)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if explain_selector and rollback:
+        print(
+            "pin-bump usage error: --explain needs audit data; --rollback "
+            "never audits, so they cannot be combined",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     if run is None:
         run = _default_run
     redteam_dir = root / "redteam"
@@ -1482,6 +1821,10 @@ def bump(
     # the pinned set (set only when --pin ran); unpinned runs leave it
     # None so the default payload shape is unchanged.
     json_out_of_scope: list[dict[str, Any]] | None = None
+    # --explain payload state. ``json_explain`` is the one-pager object
+    # (set when --explain resolved an advisory); explained runs leave the
+    # default payload shape unchanged.
+    json_explain: dict[str, Any] | None = None
     # Pre-initialised so --skip-audit --bump-commit skips with a warning
     # instead of raising NameError on the unbound ``semver_rows`` below.
     semver_rows: list[tuple[str, str, str, str, str]] = []
@@ -1527,6 +1870,7 @@ def bump(
                 if pin_selectors
                 else {}
             ),
+            **({"explain": json_explain} if explain_selector else {}),
         }
 
     def finish(code: int) -> int:
@@ -2130,6 +2474,44 @@ def bump(
                     "[audit-only] WARNING: a fix requires a major version "
                     "bump (outside the declared range)"
                 )
+        if explain_selector:
+            (
+                explain_new_keys,
+                explain_fixed,
+                explain_rescinded,
+                explain_drift,
+                _,
+            ) = audit_delta_mod.compute_delta(
+                audit_old_findings, audit_new_findings, audit_new_packages
+            )
+            explain_key, explain_matches = _explain_match_key(
+                explain_selector, audit_old_findings, audit_new_findings
+            )
+            if explain_key is None:
+                return usage(
+                    _explain_no_match_message(
+                        explain_selector, audit_old_findings, audit_new_findings
+                    )
+                )
+            explain_md, explain_obj = render_explain_section(
+                selector=explain_selector,
+                key=explain_key,
+                matches=explain_matches,
+                old_findings=audit_old_findings,
+                new_findings=audit_new_findings,
+                old_packages=audit_old_packages,
+                new_packages=audit_new_packages,
+                old_doc=audit_old_doc,
+                new_doc=audit_new_doc,
+                fixed=explain_fixed,
+                new_keys=explain_new_keys,
+                rescinded=explain_rescinded,
+                drift=explain_drift,
+                old_pin=audit_old_pin[:7] if audit_old_pin else "unknown",
+                new_pin=sha[:7],
+            )
+            print(explain_md)
+            json_explain = explain_obj
         if bump_commit:
             audit_bump_reason = _bump_commit_gate(
                 semver_check=semver_check,
@@ -2549,6 +2931,44 @@ def bump(
                         "[dry-run] WARNING: a fix requires a major version "
                         "bump (outside the declared range)"
                     )
+            if explain_selector:
+                (
+                    explain_new_keys,
+                    explain_fixed,
+                    explain_rescinded,
+                    explain_drift,
+                    _,
+                ) = dry_delta_mod.compute_delta(
+                    dry_old_findings, dry_new_findings, dry_new_packages
+                )
+                explain_key, explain_matches = _explain_match_key(
+                    explain_selector, dry_old_findings, dry_new_findings
+                )
+                if explain_key is None:
+                    return usage(
+                        _explain_no_match_message(
+                            explain_selector, dry_old_findings, dry_new_findings
+                        )
+                    )
+                explain_md, explain_obj = render_explain_section(
+                    selector=explain_selector,
+                    key=explain_key,
+                    matches=explain_matches,
+                    old_findings=dry_old_findings,
+                    new_findings=dry_new_findings,
+                    old_packages=dry_old_packages,
+                    new_packages=dry_new_packages,
+                    old_doc=dry_old_doc,
+                    new_doc=dry_new_doc,
+                    fixed=explain_fixed,
+                    new_keys=explain_new_keys,
+                    rescinded=explain_rescinded,
+                    drift=explain_drift,
+                    old_pin=dry_old_pin[:7] if dry_old_pin else "unknown",
+                    new_pin=sha[:7],
+                )
+                print(explain_md)
+                json_explain = explain_obj
             if bump_commit:
                 dry_bump_reason = _bump_commit_gate(
                     semver_check=semver_check,
@@ -2924,6 +3344,42 @@ def bump(
                     "pin-bump WARNING: a fix requires a major version "
                     "bump (outside the declared range)"
                 )
+        if explain_selector:
+            (
+                explain_new_keys,
+                explain_fixed,
+                explain_rescinded,
+                explain_drift,
+                _,
+            ) = delta_mod.compute_delta(old_findings, new_findings, new_packages)
+            explain_key, explain_matches = _explain_match_key(
+                explain_selector, old_findings, new_findings
+            )
+            if explain_key is None:
+                return usage(
+                    _explain_no_match_message(
+                        explain_selector, old_findings, new_findings
+                    )
+                )
+            explain_md, explain_obj = render_explain_section(
+                selector=explain_selector,
+                key=explain_key,
+                matches=explain_matches,
+                old_findings=old_findings,
+                new_findings=new_findings,
+                old_packages=old_packages,
+                new_packages=new_packages,
+                old_doc=old_doc,
+                new_doc=new_doc,
+                fixed=explain_fixed,
+                new_keys=explain_new_keys,
+                rescinded=explain_rescinded,
+                drift=explain_drift,
+                old_pin=old_pin[:7] if old_pin else "unknown",
+                new_pin=sha[:7],
+            )
+            print(explain_md)
+            json_explain = explain_obj
         if not _confirm_step(
             "delta verdict",
             f"audit delta verdict: {verdict} (report: {report_path})",
@@ -3082,6 +3538,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.rollback and args.schedule is not None:
         parser.error("--rollback cannot be combined with --schedule")
+    if args.rollback and args.explain is not None:
+        parser.error("--rollback never audits, so it cannot be combined with --explain")
     root = Path(args.root) if args.root is not None else REPO_ROOT
     return bump(
         args.to,
@@ -3097,6 +3555,7 @@ def main(argv: list[str] | None = None) -> int:
         audit_only=args.audit_only,
         interactive=args.interactive,
         pin=args.pin,
+        explain=args.explain,
         schedule=args.schedule,
         schedule_name=args.schedule_name,
         rollback=args.rollback,

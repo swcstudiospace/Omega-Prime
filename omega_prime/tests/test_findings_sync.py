@@ -2653,3 +2653,244 @@ def test_tick_no_grant_context_backward_compatible(tmp_path):
     )
     assert len(fake.calls) == 2
     assert "skipped_tracker" not in result
+
+
+# Webhook payload templates (N8) -------------------------------------------------
+
+
+def _template_row(tmp_path):
+    return record_finding(directory=tmp_path, **_finding())
+
+
+def test_render_template_spec_example(tmp_path):
+    row = _template_row(tmp_path)
+    rendered = findings_sync.render_template(
+        '{"text": "{{issue_title}} [{{severity}}] {{dedupe_hash}}"}', row
+    )
+    assert rendered == (
+        '{"text": "' + issue_title(row) + " [high] " + row["dedupe_hash"] + '"}'
+    )
+
+
+def test_render_template_all_whitelisted_fields(tmp_path):
+    row = _template_row(tmp_path)
+    rendered = findings_sync.render_template(
+        "{{issue_title}}|{{severity}}|{{class}}|{{dedupe_hash}}|"
+        "{{case_id}}|{{observed_detection}}|{{timestamp}}",
+        row,
+    )
+    assert rendered == "|".join(
+        [
+            issue_title(row),
+            "high",
+            "prompt_injection",
+            row["dedupe_hash"],
+            "abuse-01",
+            "no-detection",
+            row.get("last_seen") or row.get("ts"),
+        ]
+    )
+
+
+def test_render_template_unknown_placeholders_render_empty(tmp_path):
+    row = _template_row(tmp_path)
+    assert findings_sync.render_template("a{{nope}}b{{}}c{{ }}d", row) == "abcd"
+
+
+def test_render_template_malformed_braces_verbatim(tmp_path):
+    row = _template_row(tmp_path)
+    assert findings_sync.render_template("a {{unclosed b", row) == "a {{unclosed b"
+    assert findings_sync.render_template("a unclosed}} b", row) == "a unclosed}} b"
+    assert findings_sync.render_template("no braces", row) == "no braces"
+
+
+def test_render_template_deterministic_and_no_eval(tmp_path):
+    row = _template_row(tmp_path)
+    template = "{{severity}} {{__class__}} {{__import__('os').system('x')}}"
+    first = findings_sync.render_template(template, row)
+    assert first == findings_sync.render_template(template, row) == "high  "
+    assert findings_sync.render_template("{{verdict}}", row) == ""
+
+
+def test_render_template_non_string_template_returns_empty(tmp_path):
+    row = _template_row(tmp_path)
+    assert findings_sync.render_template(None, row) == ""
+    assert findings_sync.render_template(123, row) == ""
+
+
+def test_webhook_template_posts_rendered_body_verbatim(tmp_path):
+    row = _template_row(tmp_path)
+    fake = FakeWebhook()
+    template = '{"text": "{{issue_title}} [{{severity}}] {{dedupe_hash}}"}'
+    result = sync_findings_webhook(
+        tmp_path, WEBHOOK_URL, runner=fake, webhook_template=template
+    )
+    assert len(result["pushed"]) == 1
+    expected = findings_sync.render_template(template, row)
+    assert fake.calls[0][1]["body"] == expected
+    argv = fake.calls[0][0]
+    assert f"body={expected}" in argv
+    assert "title=" not in " ".join(argv)
+
+
+def test_webhook_template_signed_over_rendered_bytes(tmp_path):
+    _template_row(tmp_path)
+    fake = FakeWebhook()
+    template = "{{case_id}}:{{severity}}"
+    sync_findings_webhook(
+        tmp_path,
+        WEBHOOK_URL,
+        runner=fake,
+        signing_secret=SIGNING_SECRET,
+        previous_signing_secret=PREVIOUS_SECRET,
+        timestamp=1700000000,
+        webhook_template=template,
+    )
+    rendered = fake.calls[0][1]["body"]
+    assert rendered == "abuse-01:high"
+    expected = webhook_signing_headers(
+        rendered.encode("utf-8"), SIGNING_SECRET, PREVIOUS_SECRET, 1700000000
+    )
+    assert fake.calls[0][1]["headers"] == expected
+
+
+def test_webhook_blank_template_keeps_fixed_payload(tmp_path):
+    _template_row(tmp_path)
+    fake = FakeWebhook()
+    sync_findings_webhook(tmp_path, WEBHOOK_URL, runner=fake, webhook_template="   ")
+    body = fake.calls[0][1]["body"]
+    assert isinstance(body, dict)
+    assert set(body) == {"title", "body", "dedupe_hash", "severity"}
+
+
+def test_tick_webhook_template_from_config(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeWebhook()
+    node = _webhook_config(webhook_template="{{case_id}}:{{severity}}")
+    result = tick(node, reports_directory=tmp_path, runner=fake)
+    assert len(result["pushed"]) == 2
+    assert fake.calls[0][1]["body"] == "abuse-01:high"
+    assert fake.calls[1][1]["body"] == "abuse-02:low"
+
+
+def test_cli_webhook_template_override(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _webhook_config(),
+    )
+    fake = FakeWebhook()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert (
+        main(
+            [
+                "--tracker",
+                "webhook",
+                "--webhook-template",
+                "{{case_id}}!",
+                "--reports-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    assert fake.calls[0][1]["body"] == "abuse-01!"
+    capsys.readouterr()
+
+
+def test_cli_webhook_template_flag_beats_config(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _webhook_config(webhook_template="config:{{case_id}}"),
+    )
+    fake = FakeWebhook()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert (
+        main(
+            [
+                "--tracker",
+                "webhook",
+                "--webhook-template",
+                "flag:{{case_id}}",
+                "--reports-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    assert fake.calls[0][1]["body"] == "flag:abuse-01"
+    capsys.readouterr()
+
+
+# Grant usage ledger in tick (N11) -----------------------------------------------
+
+
+def test_tick_grant_allow_records_ledger_row(tmp_path):
+    from omega_prime.grokbot.roe_lifecycle import read_grant_usage
+
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    ledger = str(tmp_path / "grant-usage.jsonl")
+    result = tick(
+        _grant_config("github", ["github"], grant_usage_ledger=ledger),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert len(fake.calls) == 2
+    assert "skipped_tracker" not in result
+    rows = read_grant_usage(ledger)
+    assert len(rows) == 1
+    assert rows[0]["tracker"] == "github"
+    assert rows[0]["verdict"] == "allow"
+    assert set(rows[0]) == {"ts", "artifact_id", "tracker", "verdict"}
+
+
+def test_tick_grant_skip_records_ledger_row(tmp_path):
+    from omega_prime.grokbot.roe_lifecycle import read_grant_usage
+
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    ledger = str(tmp_path / "grant-usage.jsonl")
+    result = tick(
+        _grant_config("github", ["slack"], grant_usage_ledger=ledger),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert result["skipped_tracker"] == "github"
+    assert fake.calls == []
+    rows = read_grant_usage(ledger)
+    assert len(rows) == 1
+    assert rows[0]["tracker"] == "github"
+    assert rows[0]["verdict"] == "skip"
+
+
+def test_tick_without_ledger_path_writes_nothing(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(
+        _grant_config("github", ["github"]),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert len(fake.calls) == 2
+    assert "skipped_tracker" not in result
+    assert not (tmp_path / "grant-usage.jsonl").exists()
+
+
+def test_tick_ledger_never_blocks_dispatch(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    monkeypatch.setattr(
+        "omega_prime.grokbot.roe_lifecycle.record_grant_usage",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    result = tick(
+        _grant_config(
+            "github", ["github"], grant_usage_ledger=str(tmp_path / "u.jsonl")
+        ),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert len(fake.calls) == 2
+    assert "skipped_tracker" not in result
