@@ -97,9 +97,12 @@ multi-grant `roe_files` case). `grant_conflicts(artifacts, *, now=None)` in
 (the two grant ids, sorted) and `detail`, sorted by `(kind, grants,
 detail)` with exact duplicates dropped:
 
-- **`duplicate-id-divergent`:** two grants carry the same id (`artifact_id`
-  or `id`, else the artifact path) but different canonical content. No
-  window overlap is needed.
+- **`duplicate-id-divergent`:** two grants share one identity but carry
+  different canonical content. The identity of a file input is its
+  artifact path (two files that merely share an `artifact_id` are separate
+  grants); the identity of an inline grant is its `artifact_id` or `id`.
+  The `operator|until` fallback id is never used. No window overlap is
+  needed.
 - **`tool-scope-contradiction`:** on one host (case-insensitive) one grant
   allows every tool and the other restricts the tool list. Two different
   non-empty lists are not flagged.
@@ -195,6 +198,13 @@ release-watch state, audits a newly released upstream tag without applying
 it, and writes a checkpoint and a ledger row. Chat can never dispatch
 findings or apply a pin bump: those stay with the CLI in
 [Operator tools](#operator-tools).
+
+These commands need a source checkout. Like every `/omega-redteam-*`
+command they import the `sidecar/` package, and the reporting commands and
+the cycle also load `scripts/engagement-report.py`; the container image
+ships neither (`.dockerignore` excludes `/sidecar` and the image copies only
+`omega_prime/`), so there they answer `sidecar_unavailable` or
+`report_unavailable` instead of raising.
 
 Chat output is bounded and path-free:
 
