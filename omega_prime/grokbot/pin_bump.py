@@ -1988,6 +1988,9 @@ _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+# Linux O_PATH pins a directory for search (x) only, so a 0711 ancestor works
+# like it does for a plain path walk; O_RDONLY would need read permission.
+_DIR_PIN_FLAGS = (getattr(os, "O_PATH", 0) or os.O_RDONLY) | _O_DIRECTORY | _O_CLOEXEC
 _DIR_FD_OK = all(fn in os.supports_dir_fd for fn in (os.open, os.mkdir, os.unlink))
 
 
@@ -2045,6 +2048,10 @@ def _resolve_report_to(raw: object) -> tuple[Path | None, str | None]:
         return None, "--report-to path contains a NUL byte"
     if raw.endswith(("/", os.sep)):
         return None, f"--report-to {raw!r} ends with a path separator"
+    if raw in (".", "..") or raw.endswith(("/.", "/..", f"{os.sep}.", f"{os.sep}..")):
+        # Path() normalises a trailing "/." away, which would silently turn
+        # "dir/new.md/." into a regular file named new.md.
+        return None, f"--report-to {raw!r} does not name a file"
     given = Path(raw)
     if given.name in ("", ".", ".."):
         return None, f"--report-to {raw!r} does not name a file"
@@ -2112,7 +2119,7 @@ class _ReportPin:
         self._missing = target.parent.relative_to(ancestor).parts
         self._name = target.name
         parts = ancestor.parts
-        flags = os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC
+        flags = _DIR_PIN_FLAGS
         try:
             fd = os.open(parts[0], flags)
             self._fds.append(fd)
@@ -2136,7 +2143,7 @@ class _ReportPin:
         """Return ``(parent_fd, created_any_directory)``, creating the chain."""
         if self._parent_fd is not None:
             return self._parent_fd, False
-        flags = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
+        flags = _DIR_PIN_FLAGS | _O_NOFOLLOW
         fd = self._fds[-1] if self._fds else -1
         for part in self._missing:
             # Descend one level at a time; the opened children stay on

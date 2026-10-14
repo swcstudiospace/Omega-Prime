@@ -15,7 +15,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
+import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -4568,3 +4571,120 @@ def test_report_to_usage_error_escapes_control_characters(tmp_path, capsys):
     assert rc == 2
     assert "\x1b" not in err
     assert err.count("\n") == 1
+
+
+# --report-to round 2 (FX-7a) ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "case", ["file_dot", "file_dotdot", "nested_dot", "bare_dot", "bare_dotdot"]
+)
+def test_report_to_dot_suffix_is_usage_error_before_any_subprocess(
+    tmp_path, capsys, case
+):
+    root = _report_root(tmp_path)
+    (tmp_path / "adir").mkdir()
+    bad = {
+        "file_dot": str(tmp_path / "absent.md") + "/.",
+        "file_dotdot": str(tmp_path / "absent.md") + "/..",
+        "nested_dot": str(tmp_path / "adir") + "/.",
+        "bare_dot": ".",
+        "bare_dotdot": "..",
+    }[case]
+    before = _snapshot(tmp_path)
+    dirs_before = sorted(p for p in tmp_path.rglob("*") if p.is_dir())
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, report_to=bad)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert err.startswith("pin-bump usage error: --report-to")
+    assert "does not name a file" in err
+    assert run.cmds == []
+    assert _snapshot(tmp_path) == before
+    assert sorted(p for p in tmp_path.rglob("*") if p.is_dir()) == dirs_before
+
+
+def test_report_to_dotted_components_inside_the_path_stay_allowed(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    (tmp_path / "a").mkdir()
+    dest = tmp_path / "a" / ".." / "r.md"
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    capsys.readouterr()
+    assert rc == 0
+    assert (tmp_path / "r.md").is_file()
+
+
+_NOBODY_CHILD = """
+import contextlib, io, os, sys
+from pathlib import Path
+try:
+    from omega_prime.grokbot import pin_bump
+    from omega_prime.tests.test_pin_bump import PIN_NEW, FakeRun
+except (ImportError, PermissionError):
+    sys.exit(77)
+root, dest, dry = Path(sys.argv[1]), sys.argv[2], sys.argv[3] == "dry"
+out, err = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=FakeRun(), dry_run=dry, report_to=dest
+    )
+sys.stderr.write(err.getvalue())
+sys.exit(rc)
+"""
+
+
+@pytest.mark.skipif(
+    not (hasattr(os, "O_PATH") and os.geteuid() == 0), reason="needs Linux root"
+)
+@pytest.mark.parametrize("dry", ["dry", "real"])
+def test_report_to_works_through_search_only_ancestors_as_unprivileged_user(dry):
+    setpriv = shutil.which("setpriv")
+    if setpriv is None:
+        pytest.skip("setpriv missing")
+    base = Path(tempfile.mkdtemp(prefix="pinbump-xo-"))
+    try:
+        base.chmod(0o755)
+        xo = base / "xo"
+        (xo / "inner").mkdir(parents=True)
+        xo.chmod(0o711)  # search only: no read permission
+        (xo / "inner").chmod(0o777)
+        root = _report_root(base / "fx")
+        for path in [root, *root.rglob("*")]:
+            path.chmod(path.stat().st_mode | 0o777 if path.is_dir() else 0o666)
+        dest = xo / "inner" / "r.md"
+        repo = str(Path(pin_bump.__file__).resolve().parents[2])
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": os.pathsep.join(
+                [repo, *os.environ.get("PYTHONPATH", "").split(os.pathsep)]
+            ),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "HOME": str(base),
+        }
+        proc = subprocess.run(
+            [
+                setpriv,
+                "--reuid=65534",
+                "--regid=65534",
+                "--clear-groups",
+                sys.executable,
+                "-c",
+                _NOBODY_CHILD,
+                str(root),
+                str(dest),
+                dry,
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(base),
+            check=False,
+        )
+        if proc.returncode == 77:
+            pytest.skip("unprivileged user cannot import the package")
+        assert proc.returncode == 0, proc.stderr
+        assert dest.exists() == (dry == "real")
+        if dry == "real":
+            assert dest.read_bytes().startswith(pin_bump._PIN_BUMP_REPORT_PREFIX)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
