@@ -1,21 +1,21 @@
 # Batch 05 Report: Purple-Team SOTA features (6 shipped)
 
-**Shipped:** 2026-10-14 · **On main:** `da60b36` · **Suite:** 3190 passed / 0 failed / 3 skipped (ruff + `mypy omega_prime/` clean, 409 files)
+**Shipped:** 2026-10-14 · **On main:** `f37ffe4` · **Suite:** 3190 passed / 0 failed / 3 skipped (ruff + `mypy omega_prime/` clean, 409 files)
 
 ## The 6 features
 
-| # | Feature | Value | Spec |
-|---|---------|-------|------|
-| 1 | Teams webhook adapter | `--tracker teams` posts findings as Office 365 connector cards with severity-colored themeColor; same dedupe/idempotency/fail-closed as Slack/GitHub/Linear modes | — |
-| 2 | Pin-bump `--dry-run` | Runs all verification steps (ref resolution, surface check, audit, delta) with zero file mutations; `[dry-run]` prefix on every would-be step | — |
-| 3 | Coverage-matrix delta diff | `--diff-coverage <previous>` renders per-class metric comparison (cases/runs/pass-rate/gaps/verdict) with improved/regressed/unchanged trend | — |
-| 4 | Engagement report JSON output | `--json` outputs the full report as structured JSON for programmatic consumption; markdown mode unchanged | — |
-| 5 | Live-gateway integration test scaffold | Real HTTP tests against T3MP3ST gateway (skipif when unreachable); proves adapter works against a live backend, not just mocks | — |
-| 6 | Multi-scope RoE grant filter | `grant_scope_filter()` narrows a merged 14-tool allowlist to one engagement type (coverage, gaps, etc.); fail-closed | — |
+| # | Feature | Value | Revert |
+|---|---------|-------|--------|
+| 1 | Teams webhook adapter | `--tracker teams` posts findings as Office 365 connector cards with severity-colored themeColor; same dedupe/idempotency/fail-closed as Slack/GitHub/Linear modes | revert Teams mode in findings_sync.py |
+| 2 | Pin-bump `--dry-run` | Runs all verification steps (ref resolution, surface check, audit, delta) with zero file mutations; `[dry-run]` prefix on every would-be step | revert `--dry-run` flag |
+| 3 | Coverage-matrix delta diff | `--diff-coverage <previous>` renders per-class metric comparison (cases/runs/pass-rate/gaps/verdict) with improved/regressed/unchanged trend | revert `--diff-coverage` flag |
+| 4 | Engagement report JSON output | `--json` outputs the full report as structured JSON for programmatic consumption; markdown mode unchanged | revert `--json` flag |
+| 5 | Live-gateway integration test scaffold | Real HTTP tests against T3MP3ST gateway (skipif when unreachable); proves adapter works against a live backend, not just mocks | revert test_redteam_live_gateway.py |
+| 6 | Multi-scope RoE grant filter | `grant_scope_filter()` narrows a merged 14-tool allowlist to one engagement type (coverage, gaps, etc.); fail-closed | revert `grant_scope_filter` |
 
 ## Verification
 
-- Full suite: **3190 passed / 0 failed / 3 skipped** on main (`da60b36`); ruff + `mypy omega_prime/` (409 files) clean.
+- Full suite: **3190 passed / 0 failed / 3 skipped** on main (`f37ffe4`); ruff + `mypy omega_prime/` (409 files) clean.
 - New tests: ~150 across the 7 new/extended test files.
 - Item ① (moderate advisory sweep): **already resolved** — batch 03's dep-bump cleared all 10 advisories including moderates (0 total at HEAD).
 
