@@ -13,6 +13,7 @@ import importlib.util
 import os
 import re
 import shlex
+import sys
 from collections.abc import Collection, Mapping
 from datetime import datetime
 from pathlib import Path
@@ -26,9 +27,10 @@ MAX_ARGS_LENGTH = 512
 
 _SINCE_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}"
-    r"(?:[Tt]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:[Zz]|[+-]\d{2}:\d{2})?)?"
+    r"(?:[Tt]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:[Zz]|[+-]\d{2}:\d{2})?)?",
+    re.ASCII,
 )
-_THRESHOLD_RE = re.compile(r"(gate|gate-risk):(\d{1,3}(?:\.\d{1,2})?)")
+_THRESHOLD_RE = re.compile(r"(gate|gate-risk):(\d{1,3}(?:\.\d{1,2})?)", re.ASCII)
 _MAX_THRESHOLD = 100.0
 
 _ENGAGEMENT_MODULE: Any = None
@@ -129,6 +131,8 @@ def load_engagement_module(usage: str) -> Any:
         script = (
             Path(__file__).resolve().parents[2] / "scripts" / "engagement-report.py"
         )
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
         try:
             spec = importlib.util.spec_from_file_location(
                 "omega_prime_commands_engagement_report", script
@@ -142,6 +146,8 @@ def load_engagement_module(usage: str) -> Any:
                 "report_unavailable",
                 {"usage": usage, "reason": type(exc).__name__},
             ) from exc
+        finally:
+            sys.dont_write_bytecode = previous
         _ENGAGEMENT_MODULE = module
     return _ENGAGEMENT_MODULE
 

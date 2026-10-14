@@ -15,8 +15,9 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -182,21 +183,21 @@ def test_unknown_kind_and_failed_import_return_a_dict_not_a_raise(
     broken = commands._redteam("omega-redteam-report", "", {}, "report")
     assert broken["ok"] is False
     assert broken["error"] == "command_failed"
-    assert "ModuleNotFoundError" in broken["result"]["error"]
+    assert broken["result"] == {"error": "ModuleNotFoundError"}
 
 
 def test_a_module_error_without_the_shared_class_is_command_failed(
-    monkeypatch: Any,
+    monkeypatch: Any, tmp_path: Path
 ) -> None:
     module = importlib.import_module("omega_prime.commands.redteam_report")
 
     def run(args: str, env: Any) -> Any:
-        raise ValueError("odd")
+        raise ValueError(f"odd {tmp_path}/private")
 
     monkeypatch.setattr(module, "run", run)
     body = commands._redteam("omega-redteam-report", "", {}, "report")
     assert body["error"] == "command_failed"
-    assert body["result"] == {"error": "ValueError: odd"}
+    assert body["result"] == {"error": "ValueError"}
 
 
 # --- /omega-redteam-report -------------------------------------------------
@@ -485,10 +486,14 @@ def test_sync_plan_lists_what_would_sync_and_writes_nothing(
         "tracker": "github",
         "disabled": False,
         "would_sync": hashes,
+        "would_sync_total": 3,
         "skipped": 0,
         "quiet_held": [],
+        "quiet_held_total": 0,
         "budget_held": [],
+        "budget_held_total": 0,
         "grant_conflicts": [],
+        "grant_conflicts_total": 0,
     }
     assert _snapshot(tmp_path) == before
     assert not fixture.dispatch_ledger.exists()
@@ -590,6 +595,209 @@ def test_sync_plan_config_or_tick_exceptions_return_the_type_only(
     }
 
 
+def _fake_tick(monkeypatch: Any, result: dict[str, Any]) -> None:
+    """Replace the findings-sync tick with a canned (possibly huge) result."""
+    monkeypatch.setattr(findings_sync, "tick", lambda *a, **k: result)
+
+
+def _printable_ascii(text: str) -> bool:
+    return all(0x20 <= ord(char) < 0x7F for char in text)
+
+
+def test_sync_plan_caps_every_list_at_twenty_with_totals(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    fixture = SyncFixture(monkeypatch, tmp_path, sync_budget=5)
+    hashes = fixture.seed(60)
+    result = _call(fixture.env, "/omega-redteam-sync-plan")["result"]
+    assert result["would_sync"] == hashes[:5]
+    assert result["would_sync_total"] == 5
+    assert result["budget_held_total"] == 55
+    assert len(result["budget_held"]) == 20
+    assert [row["dedupe_hash"] for row in result["budget_held"]] == hashes[5:25]
+    assert result["quiet_held"] == [] and result["quiet_held_total"] == 0
+    assert result["grant_conflicts"] == [] and result["grant_conflicts_total"] == 0
+
+
+def test_sync_plan_caps_would_sync_and_quiet_held(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    fixture = SyncFixture(monkeypatch, tmp_path)
+    hashes = fixture.seed(30)
+    result = _call(fixture.env, "/omega-redteam-sync-plan")["result"]
+    assert result["would_sync"] == hashes[:20]
+    assert result["would_sync_total"] == 30
+    quiet = SyncFixture(
+        monkeypatch,
+        tmp_path / "q",
+        quiet_hours={"start": "00:00", "end": "23:59"},
+    )
+    held = quiet.seed(25)
+    shown = _call(quiet.env, "/omega-redteam-sync-plan")["result"]
+    assert [row["dedupe_hash"] for row in shown["quiet_held"]] == held[:20]
+    assert shown["quiet_held_total"] == 25
+
+
+def test_sync_plan_with_twenty_thousand_findings_stays_small(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    fixture = SyncFixture(monkeypatch, tmp_path)
+    rows = [{"dedupe_hash": f"{index:064x}"} for index in range(20_000)]
+    held = [
+        {"dedupe_hash": row["dedupe_hash"], "reason": "sync-budget"} for row in rows
+    ]
+    conflicts = [
+        {
+            "kind": "operator-mismatch",
+            "grants": [f"/srv/roe/{index}/a.json", f"/srv/roe/{index}/b.json"],
+            "detail": f"operator a vs b; /srv/roe/{index}/a.json " + "x" * 400,
+        }
+        for index in range(5_000)
+    ]
+    _fake_tick(
+        monkeypatch,
+        {
+            "pushed": rows[:5],
+            "skipped": [],
+            "budget_held": held,
+            "quiet_skipped": held,
+            "grant_conflicts": conflicts,
+        },
+    )
+    body = _call(fixture.env, "/omega-redteam-sync-plan")
+    size = len(json.dumps(body["result"]))
+    assert size < 20_000, size
+    result = body["result"]
+    assert result["budget_held_total"] == 20_000
+    assert result["quiet_held_total"] == 20_000
+    assert result["grant_conflicts_total"] == 5_000
+    assert len(result["budget_held"]) == len(result["grant_conflicts"]) == 20
+    assert result["budget_held"][0] == {
+        "dedupe_hash": f"{0:064x}",
+        "reason": "sync-budget",
+    }
+
+
+def test_sync_plan_hashes_are_clipped_and_escaped(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    fixture = SyncFixture(monkeypatch, tmp_path)
+    hostile = "x\x1b[31m\nFORGED: ok\u202e" + "y" * 500
+    _fake_tick(
+        monkeypatch,
+        {
+            "pushed": [{"dedupe_hash": hostile}],
+            "skipped": [],
+            "budget_held": [{"dedupe_hash": hostile, "reason": "sync-budget"}],
+            "quiet_skipped": [{"dedupe_hash": hostile, "reason": "quiet-hours"}],
+        },
+    )
+    result = _call(fixture.env, "/omega-redteam-sync-plan")["result"]
+    shown = [
+        result["would_sync"][0],
+        result["budget_held"][0]["dedupe_hash"],
+        result["quiet_held"][0]["dedupe_hash"],
+    ]
+    for text in shown:
+        assert len(text) <= 64
+        assert _printable_ascii(text)
+        assert text.startswith("x\\x1b[31m\\x0aFORGED: ok\\u202e")
+    assert result["budget_held"][0]["reason"] == "sync-budget"
+    assert _printable_ascii(json.dumps(result).replace("\\", ""))
+
+
+def test_sync_plan_grant_labels_that_are_paths_become_basenames(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    fixture = SyncFixture(monkeypatch, tmp_path)
+    secret_dir = tmp_path / "alpha-secret-dir"
+    first, second = str(secret_dir / "g1.json"), str(secret_dir / "g2.json")
+    _fake_tick(
+        monkeypatch,
+        {
+            "pushed": [],
+            "skipped": [],
+            "grant_conflicts": [
+                {
+                    "kind": "operator-mismatch",
+                    "grants": [first, second],
+                    "detail": f"operator a vs b; {first} and {second}",
+                },
+                {
+                    "kind": "tool-scope-contradiction",
+                    "grants": ["plain-id", first],
+                    "detail": f"plain-id vs {first}",
+                },
+            ],
+        },
+    )
+    body = _call(fixture.env, "/omega-redteam-sync-plan")
+    rows = body["result"]["grant_conflicts"]
+    assert rows[0]["grants"] == ["g1.json", "g2.json"]
+    assert rows[0]["detail"] == "operator a vs b; g1.json and g2.json"
+    assert rows[1]["grants"] == ["plain-id", "g1.json"]
+    assert rows[1]["detail"] == "plain-id vs g1.json"
+    assert "alpha-secret-dir" not in json.dumps(body)
+    assert str(tmp_path) not in json.dumps(body)
+
+
+def test_sync_plan_colliding_basenames_get_grant_aliases(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    fixture = SyncFixture(monkeypatch, tmp_path)
+    first, second = "/srv/a/roe.json", "/srv/b/roe.json"
+    _fake_tick(
+        monkeypatch,
+        {
+            "pushed": [],
+            "skipped": [],
+            "grant_conflicts": [
+                {
+                    "kind": "operator-mismatch",
+                    "grants": [first, second],
+                    "detail": f"{first} vs {second}",
+                }
+            ],
+        },
+    )
+    result = _call(fixture.env, "/omega-redteam-sync-plan")["result"]
+    (row,) = result["grant_conflicts"]
+    assert row["grants"] == ["grant-1", "grant-2"]
+    assert row["detail"] == "grant-1 vs grant-2"
+
+
+def test_sync_plan_conflict_rows_are_capped_and_the_sentinel_passes_through(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    fixture = SyncFixture(monkeypatch, tmp_path)
+    sentinel = {"kind": "conflicts-truncated", "grants": [], "detail": "cap 100"}
+    rows = [
+        {"kind": "operator-mismatch", "grants": [f"id-{n:03d}", "id-z"], "detail": "d"}
+        for n in range(30)
+    ]
+    _fake_tick(
+        monkeypatch,
+        {"pushed": [], "skipped": [], "grant_conflicts": [*rows, sentinel]},
+    )
+    result = _call(fixture.env, "/omega-redteam-sync-plan")["result"]
+    assert result["grant_conflicts_total"] == 30
+    assert result["grant_conflicts"][:20] == rows[:20]
+    assert result["grant_conflicts"][20:] == [sentinel]
+
+
+def test_sync_plan_tick_error_detail_is_clipped_and_escaped(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    fixture = SyncFixture(monkeypatch, tmp_path)
+    _fake_tick(monkeypatch, {"error": "unknown tracker: \x1b[31m\nfake " + "z" * 5_000})
+    body = _call(fixture.env, "/omega-redteam-sync-plan")
+    assert body["error"] == "plan_failed"
+    detail = body["result"]["detail"]
+    assert len(detail) <= 200
+    assert _printable_ascii(detail)
+    assert detail.startswith("unknown tracker: \\x1b[31m\\x0afake")
+
+
 def test_sync_plan_takes_no_arguments(monkeypatch: Any, tmp_path: Path) -> None:
     fixture = SyncFixture(monkeypatch, tmp_path)
     for text in (
@@ -619,7 +827,7 @@ def test_cycle_plan_is_pure_and_deterministic(
     assert result["mode"] == "plan"
     assert result["state"] == "completed"
     assert (result["ok"], result["exit"]) == (True, 0)
-    assert result["checkpoint"] is None and result["ledger"] is None
+    assert "checkpoint" not in result and "ledger" not in result
     assert [step["name"] for step in result["steps"]] == list(purple_cycle.STEP_NAMES)
     by_name = {step["name"]: step for step in result["steps"]}
     assert by_name["release-watch"]["reason"] == "plan-mode"
@@ -654,8 +862,16 @@ def test_cycle_unknown_or_empty_steps_are_bad_args(
     assert body["result"] == {"usage": redteam_cycle.USAGE}
 
 
+@pytest.fixture
+def frozen_day(monkeypatch: pytest.MonkeyPatch) -> datetime:
+    """Pin the cycle's default clock so two ``--run`` calls share one UTC day."""
+    moment = datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(purple_cycle, "_utc_now", lambda: moment)
+    return moment
+
+
 def test_cycle_run_flag_runs_the_real_cycle_with_fake_upstream(
-    monkeypatch: Any, tmp_path: Path, no_subprocess: None
+    monkeypatch: Any, tmp_path: Path, no_subprocess: None, frozen_day: datetime
 ) -> None:
     env = _env(monkeypatch, tmp_path)
     monkeypatch.setattr(purple_cycle, "_default_fetch", lambda: [])
@@ -668,11 +884,69 @@ def test_cycle_run_flag_runs_the_real_cycle_with_fake_upstream(
     by_name = {step["name"]: step for step in result["steps"]}
     assert by_name["release-watch"]["reason"] == "seeded"
     assert by_name["findings-dispatch"]["reason"] == "not-selected"
-    assert Path(result["checkpoint"]).parent == tmp_path / "state" / "workflows"
+    assert "checkpoint" not in result and "ledger" not in result
+    assert list(tmp_path.rglob("purple-cycle-*.json"))
     assert (_reports(env) / "release-watch.json").is_file()
     again = _call(env, "/omega-redteam-cycle --run")["result"]
     assert again["resumed"] is True
     assert again["steps"] == result["steps"]
+
+
+def _strings(value: Any) -> list[str]:
+    """Every string key and value nested anywhere in ``value``."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for item in value.items() for text in _strings(list(item))]
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in _strings(item)]
+    return []
+
+
+def _assert_path_free(body: dict[str, Any], tmp_path: Path) -> None:
+    assert str(tmp_path) not in json.dumps(body)
+    assert not [text for text in _strings(body) if text.startswith("/")]
+    assert "checkpoint" not in body["result"] and "ledger" not in body["result"]
+
+
+def test_cycle_run_result_carries_no_absolute_path(
+    monkeypatch: Any, tmp_path: Path, frozen_day: datetime
+) -> None:
+    env = _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(purple_cycle, "_default_fetch", lambda: [])
+    _assert_path_free(_call(env, "/omega-redteam-cycle --run"), tmp_path)
+    _assert_path_free(_call(env, "/omega-redteam-cycle"), tmp_path)
+
+
+def test_cycle_failed_and_blocked_envelopes_carry_no_absolute_path(
+    monkeypatch: Any, tmp_path: Path, frozen_day: datetime
+) -> None:
+    env = _env(monkeypatch, tmp_path)
+
+    def down() -> Any:
+        raise RuntimeError("upstream down")
+
+    monkeypatch.setattr(purple_cycle, "_default_fetch", down)
+    failed = _call(env, "/omega-redteam-cycle --run")
+    assert failed["error"] == "cycle_failed"
+    _assert_path_free(failed, tmp_path)
+
+    for state in ("failed", "blocked"):
+
+        def canned(state: str = state, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "state": state,
+                "exit": 1,
+                "checkpoint": f"{tmp_path}/state/workflows/c.json",
+                "ledger": f"{tmp_path}/state/ledger.ndjson",
+                "steps": [],
+            }
+
+        monkeypatch.setattr(purple_cycle, "run_cycle", canned)
+        body = _call(env, "/omega-redteam-cycle --run")
+        assert body["error"] == f"cycle_{state}"
+        assert body["result"]["state"] == state
+        _assert_path_free(body, tmp_path)
 
 
 def test_cycle_run_flag_selects_run_mode_and_passes_only_safe_arguments(
@@ -840,6 +1114,9 @@ def test_hostile_arguments_are_rejected_with_the_envelope(
         "9" * 40,
         "",
         "../../etc/passwd",
+        "\u0662\u0660\u0662\u0666-01-01T00:00:00Z",
+        "2026-\u0660\u0661-01",
+        "\uff12\uff10\uff12\uff16-01-01",
     ],
 )
 @pytest.mark.parametrize("module", [redteam_report, redteam_coverage])
@@ -874,6 +1151,10 @@ def test_invalid_since_is_bad_since(
         "gate: 80",
         "gate:nan",
         "gate:1e2",
+        "gate:\u0665\u0660",
+        "gate-risk:\u0665",
+        "gate:5\u0660.\u0665",
+        "gate:\uff15\uff10",
     ],
 )
 def test_invalid_threshold_is_bad_threshold(
@@ -884,6 +1165,68 @@ def test_invalid_threshold_is_bad_threshold(
     assert body["ok"] is False
     assert body["error"] == "bad_threshold"
     assert body["result"] == {"usage": redteam_report.USAGE}
+
+
+def test_generic_command_failure_returns_the_exception_type_only(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    env = _env(monkeypatch, tmp_path)
+
+    def broken(**kwargs: Any) -> Any:
+        raise OSError(f"cannot open {tmp_path}/secret/file {SECRET}")
+
+    monkeypatch.setattr(purple_cycle, "run_cycle", broken)
+    body = _call(env, "/omega-redteam-cycle")
+    assert body["ok"] is False
+    assert body["error"] == "command_failed"
+    assert body["result"] == {"error": "OSError"}
+    assert str(tmp_path) not in json.dumps(body)
+
+
+def test_engagement_loader_never_writes_bytecode(monkeypatch: Any) -> None:
+    seen: list[bool] = []
+
+    class Loader:
+        def create_module(self, spec: Any) -> None:
+            return None
+
+        def exec_module(self, module: Any) -> None:
+            seen.append(sys.dont_write_bytecode)
+
+    def fake_spec(name: str, location: Any) -> Any:
+        loader: Any = Loader()
+        return importlib.util.spec_from_loader(name, loader)
+
+    monkeypatch.setattr(redteam_common, "_ENGAGEMENT_MODULE", None)
+    monkeypatch.setattr(importlib.util, "spec_from_file_location", fake_spec)
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    redteam_common.load_engagement_module("usage")
+    assert seen == [True]
+    assert sys.dont_write_bytecode is False
+
+
+def test_engagement_loader_restores_the_bytecode_flag_on_failure(
+    monkeypatch: Any,
+) -> None:
+    class Loader:
+        def create_module(self, spec: Any) -> None:
+            return None
+
+        def exec_module(self, module: Any) -> None:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(redteam_common, "_ENGAGEMENT_MODULE", None)
+    monkeypatch.setattr(
+        importlib.util,
+        "spec_from_file_location",
+        lambda name, location: importlib.util.spec_from_loader(
+            name, cast(Any, Loader())
+        ),
+    )
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    with pytest.raises(redteam_common.Error):
+        redteam_common.load_engagement_module("usage")
+    assert sys.dont_write_bytecode is False
 
 
 @pytest.mark.parametrize(

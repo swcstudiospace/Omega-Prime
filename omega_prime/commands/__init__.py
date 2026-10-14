@@ -440,9 +440,7 @@ def _redteam(
     try:
         mod = importlib.import_module(module_name)
     except Exception as exc:
-        return _fail(
-            command, "command_failed", {"error": f"{type(exc).__name__}: {exc}"}
-        )
+        return _fail(command, "command_failed", {"error": type(exc).__name__})
     error_type: Any = getattr(mod, "Error", None)
     try:
         return _ok(command, mod.run(args, env))
@@ -450,9 +448,7 @@ def _redteam(
         failure: Any = exc
         if isinstance(error_type, type) and isinstance(exc, error_type):
             return _fail(command, failure.error, failure.result)
-        return _fail(
-            command, "command_failed", {"error": f"{type(exc).__name__}: {exc}"}
-        )
+        return _fail(command, "command_failed", {"error": type(exc).__name__})
 
 
 def _run_generated(

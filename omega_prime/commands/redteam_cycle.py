@@ -23,6 +23,9 @@ SUMMARY = (
 )
 WHEN = "The user asks to plan or run the purple-team operations cycle."
 
+#: Result keys that carry absolute local paths; never returned to chat.
+_PATH_KEYS = frozenset({"checkpoint", "ledger"})
+
 
 def _cycle_env(env: Mapping[str, str]) -> dict[str, str]:
     """The caller env, plus the process state dir when the caller set none."""
@@ -32,6 +35,11 @@ def _cycle_env(env: Mapping[str, str]) -> dict[str, str]:
         if fallback:
             merged[STATE_DIR_ENV_VAR] = fallback
     return merged
+
+
+def _public(result: Mapping[str, Any]) -> dict[str, Any]:
+    """``result`` without the absolute ``checkpoint`` / ``ledger`` paths."""
+    return {key: value for key, value in result.items() if key not in _PATH_KEYS}
 
 
 def run(args: str, env: Mapping[str, str]) -> dict[str, Any]:
@@ -59,10 +67,10 @@ def run(args: str, env: Mapping[str, str]) -> dict[str, Any]:
     except ValueError:
         raise Error("bad_args", {"usage": USAGE}) from None
     if result.get("state") == "failed":
-        raise Error("cycle_failed", result)
+        raise Error("cycle_failed", _public(result))
     if result.get("state") != "completed":
-        raise Error("cycle_blocked", result)
-    return result
+        raise Error("cycle_blocked", _public(result))
+    return _public(result)
 
 
 __all__ = ["NAME", "SUMMARY", "USAGE", "WHEN", "Error", "run"]

@@ -193,7 +193,15 @@ def test_sync_plan_matches_the_real_tick_and_writes_nothing(world, monkeypatch) 
     assert dispatched == hashes[:2]
     assert plan["would_sync"] == dispatched
     assert plan["budget_held"] == real["budget_held"]
-    assert plan["grant_conflicts"] == real["grant_conflicts"]
+    assert plan["grant_conflicts_total"] == len(real["grant_conflicts"]) == 1
+    (shown,) = plan["grant_conflicts"]
+    (raw,) = real["grant_conflicts"]
+    assert shown == {
+        "kind": raw["kind"],
+        "grants": [Path(label).name for label in raw["grants"]],
+        "detail": raw["detail"],
+    }
+    assert str(world.tmp) not in json.dumps(plan)
     assert len(runner.calls) == 2
     assert plan["tracker"] == "github"
     assert plan["disabled"] is False

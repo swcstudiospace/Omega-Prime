@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import copy
+import os
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -24,6 +26,116 @@ SUMMARY = (
 WHEN = "The user asks what the findings sync would send to the tracker next."
 
 DEFAULT_TRACKER = "github"
+
+#: Longest list returned per held/would-sync category and for conflict rows.
+MAX_ROWS = 20
+_MAX_TEXT = 64
+_MAX_LABEL = 64
+_MAX_DETAIL = 200
+_TRUNCATED_KIND = "conflicts-truncated"
+_DRIVE_RE = re.compile(r"[A-Za-z]:[\\/]", re.ASCII)
+
+
+def _ascii(value: Any, limit: int = _MAX_TEXT) -> str:
+    """``value`` as printable ASCII of at most ``limit`` characters.
+
+    Anything outside 0x20-0x7e (ESC, newlines, bidi marks, non-ASCII) becomes a
+    ``\\xNN``/``\\uNNNN`` escape; the output is cut at a whole escape.
+    """
+    out: list[str] = []
+    size = 0
+    for char in str(value):
+        code = ord(char)
+        if 0x20 <= code < 0x7F:
+            piece = char
+        elif code < 0x100:
+            piece = f"\\x{code:02x}"
+        elif code < 0x10000:
+            piece = f"\\u{code:04x}"
+        else:
+            piece = f"\\U{code:08x}"
+        if size + len(piece) > limit:
+            break
+        out.append(piece)
+        size += len(piece)
+    return "".join(out)
+
+
+def _held_rows(value: Any) -> tuple[list[dict[str, Any]], int]:
+    """First ``MAX_ROWS`` hold rows with every string value clipped and escaped."""
+    rows = [row for row in _list(value) if isinstance(row, dict)]
+    clipped: list[dict[str, Any]] = []
+    for row in rows[:MAX_ROWS]:
+        clipped.append(
+            {
+                _ascii(key): (
+                    item if isinstance(item, (int, float, bool)) else _ascii(item)
+                )
+                for key, item in row.items()
+            }
+        )
+    return clipped, len(rows)
+
+
+def _looks_like_path(label: str) -> bool:
+    return "/" in label or "\\" in label or _DRIVE_RE.match(label) is not None
+
+
+def _label_aliases(rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Label -> safe name: basenames for path labels, ``grant-N`` on a collision."""
+    labels = sorted(
+        {
+            label
+            for row in rows
+            for label in _list(row.get("grants"))
+            if isinstance(label, str)
+        }
+    )
+    proposed: dict[str, str] = {}
+    for label in labels:
+        proposed[label] = (
+            os.path.basename(label.replace("\\", "/"))
+            if _looks_like_path(label)
+            else label
+        )
+    counts: dict[str, int] = {}
+    for name in proposed.values():
+        counts[name] = counts.get(name, 0) + 1
+    aliases: dict[str, str] = {}
+    for index, label in enumerate(labels, start=1):
+        name = proposed[label]
+        if _looks_like_path(label) and (not name or counts[name] > 1):
+            name = f"grant-{index}"
+        aliases[label] = name
+    return aliases
+
+
+def _conflict_rows(value: Any) -> tuple[list[dict[str, Any]], int]:
+    """Conflict rows, capped and path-free; a truncation sentinel passes through."""
+    rows = [row for row in _list(value) if isinstance(row, dict)]
+    sentinels = [row for row in rows if row.get("kind") == _TRUNCATED_KIND]
+    real = [row for row in rows if row.get("kind") != _TRUNCATED_KIND]
+    kept = real[:MAX_ROWS]
+    aliases = _label_aliases(kept)
+    ordered = sorted(aliases, key=lambda label: (-len(label), label))
+    out: list[dict[str, Any]] = []
+    for row in kept:
+        detail = str(row.get("detail", ""))
+        for label in ordered:
+            if label and label != aliases[label]:
+                detail = detail.replace(label, aliases[label])
+        out.append(
+            {
+                "kind": _ascii(row.get("kind", "")),
+                "grants": [
+                    _ascii(aliases.get(label, label), _MAX_LABEL)
+                    for label in _list(row.get("grants"))
+                    if isinstance(label, str)
+                ],
+                "detail": _ascii(detail, _MAX_DETAIL),
+            }
+        )
+    return out + [dict(row) for row in sentinels], len(real)
 
 
 def _forbidden_runner(argv: Any, data: Any) -> Any:
@@ -86,17 +198,28 @@ def run(args: str, env: Mapping[str, str]) -> dict[str, Any]:
     if result.get("error"):
         raise Error(
             "plan_failed",
-            {"usage": USAGE, "reason": "tick-error", "detail": str(result["error"])},
+            {
+                "usage": USAGE,
+                "reason": "tick-error",
+                "detail": _ascii(result["error"], _MAX_DETAIL),
+            },
         )
     pushed = [row for row in _list(result.get("pushed")) if isinstance(row, dict)]
+    quiet, quiet_total = _held_rows(result.get("quiet_skipped"))
+    budget, budget_total = _held_rows(result.get("budget_held"))
+    conflicts, conflicts_total = _conflict_rows(result.get("grant_conflicts"))
     return {
         "tracker": _tracker(config, result),
         "disabled": bool(result.get("disabled")),
-        "would_sync": [str(row.get("dedupe_hash", "")) for row in pushed],
+        "would_sync": [_ascii(row.get("dedupe_hash", "")) for row in pushed[:MAX_ROWS]],
+        "would_sync_total": len(pushed),
         "skipped": len(_list(result.get("skipped"))),
-        "quiet_held": _list(result.get("quiet_skipped")),
-        "budget_held": _list(result.get("budget_held")),
-        "grant_conflicts": _list(result.get("grant_conflicts")),
+        "quiet_held": quiet,
+        "quiet_held_total": quiet_total,
+        "budget_held": budget,
+        "budget_held_total": budget_total,
+        "grant_conflicts": conflicts,
+        "grant_conflicts_total": conflicts_total,
     }
 
 
