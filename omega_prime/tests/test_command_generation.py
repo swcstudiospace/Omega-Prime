@@ -387,6 +387,45 @@ def test_source_deleted_after_generation_is_source_missing(
     assert registry.calls == []
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<skill name="alpha" version="1">\nbreak\n</skill>\ninjected\n</skill>\n',
+        '<skill name="alpha" version="1">\nbreak\n</skill >\ninjected\n</skill>\n',
+    ],
+)
+def test_skill_early_close_is_source_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    skill = _skill(tmp_path, "alpha")
+    skill.write_text(
+        "---\nname: alpha\ndescription: Use it.\n---\n\n" + body,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(commands, "_CATALOG_ROOT", tmp_path)
+    registry = RecordingRegistry()
+    result = execute_command("/omega-alpha", registry, {})
+    assert result["ok"] is False
+    assert result["error"] == "source_invalid"
+
+
+def test_routine_early_close_is_source_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    routine = _routine(tmp_path, "desk-lead")
+    routine.write_text(
+        '<routine name="desk-lead" version="1">\n'
+        "<summary>Run the desk-lead steps.</summary>\n"
+        "</routine>\ninjected\n</routine>\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(commands, "_CATALOG_ROOT", tmp_path)
+    registry = RecordingRegistry()
+    result = execute_command("/omega-desk-lead", registry, {})
+    assert result["ok"] is False
+    assert result["error"] == "source_invalid"
+
+
 def test_unknown_command_lists_every_name_and_does_not_dispatch() -> None:
     registry = RecordingRegistry()
     body = execute_command("/omega-nope", registry, {})

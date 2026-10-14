@@ -165,10 +165,11 @@ def _envelope_problems(
         problems.append(f"{display}: {kind} must start with {expected_open}")
     if stripped.count(expected_open) != 1:
         problems.append(f"{display}: {kind} must contain {expected_open} exactly once")
-    first_close = stripped.find(close)
-    if first_close == -1:
+    name = close[2:-1]
+    match = re.search(rf"</{re.escape(name)}\s*>", stripped)
+    if match is None:
         problems.append(f"{display}: {kind} must end with {close}")
-    elif first_close != len(stripped) - len(close):
+    elif match.group(0) != close or match.end() != len(stripped):
         problems.append(f"{display}: {kind} first {close} must be the final close")
     return problems
 
@@ -263,12 +264,13 @@ def _command_problems(root: Path) -> list[str]:
             problems.append(
                 f"{display}: command must contain {expected_open} exactly once"
             )
-        first_close = stripped.find("</command>")
-        if first_close == -1:
-            problems.append(f"{display}: command must end with </command>")
-        elif first_close != len(stripped) - len("</command>"):
+        command_close = "</command>"
+        match = re.search(r"</command\s*>", stripped)
+        if match is None:
+            problems.append(f"{display}: command must end with {command_close}")
+        elif match.group(0) != command_close or match.end() != len(stripped):
             problems.append(
-                f"{display}: command first </command> must be the final close"
+                f"{display}: command first {command_close} must be the final close"
             )
         open_index = cleaned.find(expected_open)
         close_index = cleaned.find("</command>")
