@@ -786,7 +786,37 @@ def test_digest_unknown_baseline_error_has_no_raw_text(tmp_path):
     assert len(proc.stderr.splitlines()) == 1
     assert "\x1b" not in proc.stderr and "RED" not in proc.stderr
     assert "valid: abuse, auth-bypass" in proc.stderr
-    assert proc.stderr.rstrip().endswith("prompt-injection, other)")
+    assert proc.stderr.rstrip().endswith("prompt-injection)")
+    assert "other" not in proc.stderr
+
+
+def test_digest_baseline_other_rejected_without_claiming_it_valid(tmp_path):
+    """FX-7b P3-4: ``other`` is a display label, never offered as valid."""
+    script, history = _hostile_repo(tmp_path)
+
+    proc = _run_hostile(
+        script, "--digest", "--reports-dir", str(history), "--baseline", "other=90"
+    )
+    assert proc.returncode == 2
+    assert proc.stdout == ""
+    assert "unknown --baseline class 'other'" in proc.stderr
+    assert "valid:" in proc.stderr
+    assert not proc.stderr.rstrip().endswith("other)")
+    assert proc.stderr.count("other") == 1
+
+
+def test_digest_export_jsonl_failure_message_is_printable_only(tmp_path):
+    """FX-7b P3-5: the operator-supplied path never reaches stderr raw."""
+    script, history = _hostile_repo(tmp_path)
+    bad = tmp_path / "no-such-dir\x1b[31mRED" / "out.jsonl"
+
+    proc = _run_hostile(
+        script, "--digest", "--reports-dir", str(history), "--export-jsonl", str(bad)
+    )
+    assert proc.returncode == 1
+    assert "\x1b" not in proc.stderr
+    assert _only_printable(proc.stderr)
+    assert "error: cannot write --export-jsonl export" in proc.stderr
 
 
 def test_digest_floor_failure_names_schema_class_unchanged(tmp_path):

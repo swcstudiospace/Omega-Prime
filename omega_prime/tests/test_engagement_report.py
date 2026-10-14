@@ -11,8 +11,10 @@ import ast
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -5693,8 +5695,14 @@ def test_coverage_jsonl_pure_functions(tmp_path, monkeypatch):
     assert module.write_jsonl_report(rows, tmp_path) == 1
 
 
-def test_export_jsonl_write_is_atomic_mode_0644_and_leaves_no_temp(tmp_path):
-    """FX-2: temp file + replace; replaces an existing file; mode 0644."""
+def _active_umask() -> int:
+    previous = os.umask(0)
+    os.umask(previous)
+    return previous
+
+
+def test_export_jsonl_write_is_atomic_mode_follows_umask_and_leaves_no_temp(tmp_path):
+    """FX-2/FX-7b: temp file + replace; existing file replaced; 0666 & ~umask."""
     module = _report_module()
     out = tmp_path / "coverage.jsonl"
     out.write_text("OLD\n", encoding="utf-8")
@@ -5703,7 +5711,7 @@ def test_export_jsonl_write_is_atomic_mode_0644_and_leaves_no_temp(tmp_path):
 
     assert module.write_jsonl_report(rows, out) == 0
     assert out.read_text(encoding="utf-8") == module.render_jsonl(rows)
-    assert (out.stat().st_mode & 0o777) == 0o644
+    assert (out.stat().st_mode & 0o777) == 0o666 & ~_active_umask()
     assert [p.name for p in tmp_path.iterdir()] == ["coverage.jsonl"]
 
 
@@ -5735,6 +5743,110 @@ def test_export_jsonl_refuses_symlink_leaf(tmp_path, capsys):
     assert "error: cannot write --export-jsonl export" in capsys.readouterr().err
     assert real.read_text(encoding="utf-8") == "KEEP"
     assert link.is_symlink()
+
+
+def test_export_jsonl_mode_honours_umask(tmp_path):
+    """FX-7b P3-3: umask 077 gives 0600, umask 022 gives 0644."""
+    module = _report_module()
+    rows = [{"class": "x"}]
+    previous = os.umask(0o077)
+    try:
+        private = tmp_path / "private.jsonl"
+        assert module.write_jsonl_report(rows, private) == 0
+        os.umask(0o022)
+        shared = tmp_path / "shared.jsonl"
+        assert module.write_jsonl_report(rows, shared) == 0
+    finally:
+        os.umask(previous)
+    assert (private.stat().st_mode & 0o777) == 0o600
+    assert (shared.stat().st_mode & 0o777) == 0o644
+    assert private.stat().st_uid == os.getuid()
+
+
+def test_export_jsonl_cleans_temp_on_any_exception(tmp_path, monkeypatch):
+    """FX-7b P3-2: a non-OSError mid-write still removes the temp file."""
+    module = _report_module()
+    out = tmp_path / "coverage.jsonl"
+
+    def boom(_fd: int) -> None:
+        raise RuntimeError("not an OSError")
+
+    monkeypatch.setattr(module.os, "fsync", boom)
+    with pytest.raises(RuntimeError):
+        module.write_jsonl_report([{"class": "x"}], out)
+    assert list(tmp_path.iterdir()) == []
+
+
+def _drain_fifo(path: Path, sink: list[str]) -> threading.Thread:
+    def reader() -> None:
+        with open(path, encoding="utf-8") as handle:
+            sink.append(handle.read())
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_export_jsonl_fifo_leaf_is_written_never_replaced(tmp_path):
+    """FX-7b P2-1: an existing FIFO stays a FIFO and receives the rows."""
+    module = _report_module()
+    fifo = tmp_path / "pipe.jsonl"
+    os.mkfifo(fifo)
+    sink: list[str] = []
+    thread = _drain_fifo(fifo, sink)
+    rows = [{"class": "x"}]
+    assert module.write_jsonl_report(rows, fifo) == 0
+    thread.join(timeout=10)
+    assert sink == [module.render_jsonl(rows)]
+    assert stat.S_ISFIFO(os.lstat(fifo).st_mode)
+    assert [p.name for p in tmp_path.iterdir()] == ["pipe.jsonl"]
+
+
+def test_export_jsonl_symlink_to_fifo_streams_and_keeps_both(tmp_path):
+    """FX-7b P2-1: a symlink to a non-regular target writes through it."""
+    module = _report_module()
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(fifo)
+    sink: list[str] = []
+    thread = _drain_fifo(fifo, sink)
+    rows = [{"class": "y"}]
+    assert module.write_jsonl_report(rows, link) == 0
+    thread.join(timeout=10)
+    assert sink == [module.render_jsonl(rows)]
+    assert link.is_symlink()
+    assert stat.S_ISFIFO(os.lstat(fifo).st_mode)
+
+
+def test_export_jsonl_dangling_symlink_and_dir_symlink_refused(tmp_path, capsys):
+    module = _report_module()
+    dangling = tmp_path / "dangling.jsonl"
+    dangling.symlink_to(tmp_path / "nowhere")
+    assert module.write_jsonl_report([{"class": "x"}], dangling) == 1
+    assert "refusing to write through a symlink" in capsys.readouterr().err
+    assert not (tmp_path / "nowhere").exists()
+    directory = tmp_path / "adir"
+    directory.mkdir()
+    dirlink = tmp_path / "dirlink.jsonl"
+    dirlink.symlink_to(directory)
+    assert module.write_jsonl_report([{"class": "x"}], dirlink) == 1
+    assert "error: cannot write --export-jsonl export" in capsys.readouterr().err
+    assert dirlink.is_symlink()
+    assert list(directory.iterdir()) == []
+
+
+def test_export_jsonl_char_device_leaf_stays_a_device(tmp_path):
+    """FX-7b P2-1: a device node (as /dev/null) is never replaced."""
+    module = _report_module()
+    node = tmp_path / "null.jsonl"
+    try:
+        os.mknod(node, stat.S_IFCHR | 0o666, os.makedev(1, 3))
+    except (PermissionError, OSError):
+        pytest.skip("cannot create a character device here")
+    assert module.write_jsonl_report([{"class": "x"}], node) == 0
+    assert stat.S_ISCHR(os.lstat(node).st_mode)
+    assert [p.name for p in tmp_path.iterdir()] == ["null.jsonl"]
 
 
 def test_export_jsonl_hostile_class_round_trips_as_one_line():

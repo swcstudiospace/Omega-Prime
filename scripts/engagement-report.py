@@ -39,7 +39,9 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1991,36 +1993,99 @@ def render_jsonl(rows: Sequence[dict[str, object]]) -> str:
     )
 
 
-def write_jsonl_report(rows: Sequence[dict[str, object]], jsonl_path: Path) -> int:
-    """Write ``rows`` as JSON Lines at ``jsonl_path`` (R4).
+def _write_jsonl_stream(text: str, jsonl_path: Path) -> None:
+    """Write ``text`` straight into ``jsonl_path`` (stream semantics)."""
+    with open(jsonl_path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+        handle.flush()
 
-    The write is atomic: a ``.engrep-`` temporary file in the same
-    directory is fsynced and ``os.replace``d over the target, which is
-    mode 0644. A symlink leaf is refused. Returns 0 on success; an
-    unwritable output prints ``error:`` to stderr and returns 1.
+
+def _write_jsonl_atomic(text: str, jsonl_path: Path) -> None:
+    """Atomic temp + ``os.replace`` write; the temp never outlives a failure.
+
+    The temporary file is created ``O_EXCL`` with mode ``0o666`` so the
+    kernel applies the process umask: the final mode is
+    ``0o666 & ~umask`` (no umask is read or swapped, hence no race), and
+    the owner is the invoking user. Any exception, not only ``OSError``,
+    removes the temporary file.
     """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    parent = jsonl_path.parent
     temp_name: str | None = None
     try:
-        if jsonl_path.is_symlink():
-            raise OSError("refusing to write through a symlink")
-        fd, temp_name = tempfile.mkstemp(
-            prefix=".engrep-", suffix=".tmp", dir=str(jsonl_path.parent)
-        )
+        for _attempt in range(100):
+            candidate = str(parent / f".engrep-{secrets.token_hex(4)}.tmp")
+            try:
+                fd = os.open(candidate, flags, 0o666)
+            except FileExistsError:
+                continue
+            temp_name = candidate
+            break
+        else:
+            raise OSError("cannot create a unique temporary file")
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(render_jsonl(rows))
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temp_name, 0o644)
         os.replace(temp_name, jsonl_path)
         temp_name = None
-    except OSError as exc:
+    finally:
         if temp_name is not None:
             with contextlib.suppress(OSError):
                 os.unlink(temp_name)
-        print(
-            f"error: cannot write --export-jsonl export {jsonl_path} ({exc})",
-            file=sys.stderr,
-        )
+
+
+def write_jsonl_report(
+    rows: Sequence[dict[str, object]],
+    jsonl_path: Path,
+    *,
+    sanitize: bool = False,
+) -> int:
+    """Write ``rows`` as JSON Lines at ``jsonl_path`` (R4).
+
+    The leaf is inspected with ``os.lstat``. Absent or a regular file:
+    atomic write (a ``.engrep-`` temporary file in the same directory is
+    fsynced and ``os.replace``d over the target; the mode is
+    ``0o666 & ~umask``). A symlink to a regular file, a directory or a
+    dangling target is refused. A symlink to a non-regular target, or an
+    existing FIFO / character / block device / socket leaf, is written
+    through directly and never replaced (so ``/dev/null`` and
+    ``/dev/stdout`` keep working). A directory leaf fails. Returns 0 on
+    success; an unwritable output prints ``error:`` to stderr and returns
+    1; ``sanitize`` (digest mode) backslash-escapes non-printable text in
+    that line.
+    """
+    try:
+        try:
+            leaf_mode: int | None = os.lstat(jsonl_path).st_mode
+        except FileNotFoundError:
+            leaf_mode = None
+        direct = False
+        if leaf_mode is not None and stat.S_ISLNK(leaf_mode):
+            try:
+                target_mode = os.stat(jsonl_path).st_mode
+            except OSError:
+                target_mode = None
+            if (
+                target_mode is None
+                or stat.S_ISREG(target_mode)
+                or stat.S_ISDIR(target_mode)
+            ):
+                raise OSError("refusing to write through a symlink")
+            direct = True
+        elif leaf_mode is not None and not (
+            stat.S_ISREG(leaf_mode) or stat.S_ISDIR(leaf_mode)
+        ):
+            direct = True
+        text = render_jsonl(rows)
+        if direct:
+            _write_jsonl_stream(text, jsonl_path)
+        else:
+            _write_jsonl_atomic(text, jsonl_path)
+    except OSError as exc:
+        message = f"error: cannot write --export-jsonl export {jsonl_path} ({exc})"
+        print(_printable_only(message) if sanitize else message, file=sys.stderr)
         return 1
     return 0
 
@@ -4357,15 +4422,16 @@ def validate_baseline_classes(
     Raises :class:`BaselineUsageError` (exit 2) naming the first unknown
     class and listing every valid class (schema classes byte-wise, then
     any extra on-disk classes sorted). Deterministic. With
-    ``fixed_vocab`` (``--digest``) the extra on-disk classes are listed
-    as the single word ``other`` so no on-disk text reaches the message.
+    ``fixed_vocab`` (``--digest``) only the schema classes are listed, so
+    no on-disk text reaches the message and ``other`` (the gate's display
+    label for on-disk classes, not a selectable class) is never offered.
     """
     known = set(SCHEMA_CLASSES) | {case_class for _, _, _, case_class in cases}
     for name, _floor in baselines:
         if name not in known:
             extras = sorted(known - set(SCHEMA_CLASSES))
             if fixed_vocab:
-                extras = ["other"] if extras else []
+                extras = []
             valid = ", ".join([*SCHEMA_CLASSES, *extras])
             raise BaselineUsageError(
                 f"error: unknown --baseline class {name!r} (valid: {valid})"
@@ -5096,7 +5162,7 @@ def main(argv: list[str] | None = None) -> int:
         digest_status = 0
         if digest_jsonl_rows is not None:
             digest_status = write_jsonl_report(
-                digest_jsonl_rows, Path(args.export_jsonl)
+                digest_jsonl_rows, Path(args.export_jsonl), sanitize=True
             )
         if digest_gate is not None and not digest_gate["passed"]:
             print(_printable_only(str(digest_gate["stderr"])), file=sys.stderr)
