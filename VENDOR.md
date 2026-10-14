@@ -82,7 +82,7 @@ the link through `prime_crates`. "Probe only" means the sole caller is
 ## T3MP3ST red team pack
 
 - Remote: https://github.com/swcstudiospace/purple-team.git
-- Commit: `831a6b0ee09f12c0f069f51d62b2f0945d505980`
+- Commit: `f6d2fc216555857b304ddec7d6877d72a90689d3`
 - Root `redteam/` submodule: tracked gitlink at the same pin, alongside the preserved `prime-agent/` gitlink. An ordinary `git clone` leaves it empty; populate with `git clone --recurse-submodules` or `git submodule update --init redteam`.
 - License: MIT
 - Copyright: 2026 SWC Studio Space

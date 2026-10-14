@@ -97,7 +97,7 @@ def test_all_prime_flags_serve_the_roster(tmp_path: Path, monkeypatch) -> None:
     from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
 
     assert served == roster - set(REDTEAM_TOOL_NAMES)
-    assert len(roster) == 165
+    assert len(roster) == 168
 
 
 def test_signed_roe_completes_the_roster(tmp_path: Path, monkeypatch) -> None:
@@ -125,4 +125,4 @@ def test_signed_roe_completes_the_roster(tmp_path: Path, monkeypatch) -> None:
     served = _names(registry)
     roster = set(load_roster_names(ROSTER))
     assert served == roster
-    assert len(roster) == 165
+    assert len(roster) == 168

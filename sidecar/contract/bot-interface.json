@@ -16,8 +16,11 @@
     "tempest_findings",
     "tempest_providers",
     "tempest_purple_synthesize",
+    "tempest_blue_gaps",
+    "tempest_black_cover",
+    "tempest_white_roe",
     "tempest_hats_list",
     "tempest_hat_dispatch"
   ],
-  "note": "Drift baseline for the red-team adapter surface: tool_names must equal omega_prime/tools/redteam.py REDTEAM_TOOL_NAMES exactly (11 names, no additions). Phase 79 plans 79-02/79-03 diff the live adapter against this file; any mismatch fails closed."
+  "note": "Drift baseline for the red-team adapter surface: tool_names must equal omega_prime/tools/redteam.py REDTEAM_TOOL_NAMES exactly (14 names, no additions). Phase 79 plans 79-02/79-03 diff the live adapter against this file; any mismatch fails closed."
 }

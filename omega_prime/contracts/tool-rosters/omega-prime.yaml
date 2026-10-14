@@ -196,5 +196,8 @@ tools:
   - tempest_findings
   - tempest_providers
   - tempest_purple_synthesize
+  - tempest_blue_gaps
+  - tempest_black_cover
+  - tempest_white_roe
   - tempest_hats_list
   - tempest_hat_dispatch

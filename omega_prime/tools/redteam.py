@@ -34,6 +34,9 @@ REDTEAM_TOOL_NAMES = (
     "tempest_findings",
     "tempest_providers",
     "tempest_purple_synthesize",
+    "tempest_blue_gaps",
+    "tempest_black_cover",
+    "tempest_white_roe",
     "tempest_hats_list",
     "tempest_hat_dispatch",
 )
@@ -395,6 +398,18 @@ class RedteamClient:
             tool="tempest_purple_synthesize",
         )
 
+    def blue_gaps(self) -> dict[str, Any]:
+        """Blue detection-coverage gaps for the whole findings ledger."""
+        return self._get("/api/teams/blue/gaps", tool="tempest_blue_gaps")
+
+    def black_cover(self) -> dict[str, Any]:
+        """Black opsec cover review of the active red plan."""
+        return self._get("/api/teams/black/cover", tool="tempest_black_cover")
+
+    def white_roe(self) -> dict[str, Any]:
+        """White ROE adjudication state on record."""
+        return self._get("/api/teams/white/roe", tool="tempest_white_roe")
+
     def hats_list(self) -> dict[str, Any]:
         """Specialist hats and parent teams, projected live from tool grants."""
         refusal = self._refusal()
@@ -513,7 +528,7 @@ def register_redteam_tools(
     """Register the red team tools. Start/stop/task/dispatch need approval.
 
     ``allowed`` is the signed grant's tool allowlist (``None`` means the
-    full eleven): a grant limited to a subset registers only that subset,
+    full fourteen): a grant limited to a subset registers only that subset,
     so a limited grant never enables tools outside the signed scope.
     """
 
@@ -539,6 +554,9 @@ def register_redteam_tools(
         "tempest_purple_synthesize": lambda findings=None, detections=None: _wrap(
             client.purple_synthesize, findings, detections
         ),
+        "tempest_blue_gaps": lambda: _wrap(client.blue_gaps),
+        "tempest_black_cover": lambda: _wrap(client.black_cover),
+        "tempest_white_roe": lambda: _wrap(client.white_roe),
         "tempest_hats_list": lambda: _wrap(client.hats_list),
         "tempest_hat_dispatch": lambda hat=None, task=None, missionId=None: _wrap(
             client.hat_dispatch, hat, task, missionId
@@ -648,6 +666,18 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
             },
             [],
         ),
+    ),
+    "tempest_blue_gaps": (
+        "Blue detection-coverage gaps for the whole findings ledger (GET /api/teams/blue/gaps). Read-only.",
+        _object({}, []),
+    ),
+    "tempest_black_cover": (
+        "Black opsec cover review of the active red plan (GET /api/teams/black/cover). Read-only.",
+        _object({}, []),
+    ),
+    "tempest_white_roe": (
+        "White ROE adjudication state on record (GET /api/teams/white/roe). Read-only.",
+        _object({}, []),
     ),
     "tempest_hats_list": (
         "Specialist hats with parent teams and live tool grants (GET /api/teams/tool-grants + /api/operators/prompts). Read-only.",

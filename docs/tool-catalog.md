@@ -1307,6 +1307,30 @@ Provider + subscription-session state (GET /api/llm/status + /api/oauth/status).
 
 Purple posture synthesis from red findings + blue detection gaps (POST /api/teams/purple/synthesize). Read-only.
 
+## tempest_blue_gaps
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Blue detection-coverage gaps for the whole findings ledger (GET /api/teams/blue/gaps). Read-only.
+
+## tempest_black_cover
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Black opsec cover review of the active red plan (GET /api/teams/black/cover). Read-only.
+
+## tempest_white_roe
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+White ROE adjudication state on record (GET /api/teams/white/roe). Read-only.
+
 ## tempest_hats_list
 
 - Family: Red Team

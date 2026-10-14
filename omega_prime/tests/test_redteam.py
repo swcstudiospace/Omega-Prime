@@ -66,6 +66,9 @@ def _routes(**overrides) -> dict:
         ("GET", "/api/mission/report"): (200, {"summary": "clean"}),
         ("GET", "/api/operators/list"): (200, {"operators": [{"id": "op-1"}]}),
         ("GET", "/api/findings"): (200, {"findings": []}),
+        ("GET", "/api/teams/blue/gaps"): (200, {"gaps": []}),
+        ("GET", "/api/teams/black/cover"): (200, {"cover": "holds"}),
+        ("GET", "/api/teams/white/roe"): (200, {"revision": 3}),
         ("GET", "/api/teams/tool-grants"): (
             200,
             {"grants": {"black": ["gate"], "blue": ["detect"], "recon": ["scan"]}},
@@ -97,12 +100,12 @@ def _registry(client: RedteamClient) -> ToolRegistry:
     return registry
 
 
-def test_registration_returns_exactly_the_eleven_names_with_approval_flags():
+def test_registration_returns_exactly_the_fourteen_names_with_approval_flags():
     client, _ = _client()
     registry = ToolRegistry(approval_log=ApprovalLog())
     names = register_redteam_tools(registry, client)
     assert names == list(REDTEAM_TOOL_NAMES)
-    assert len(names) == 11
+    assert len(names) == 14
     for name in REDTEAM_TOOL_NAMES:
         assert registry.approval_required(name) == (name in APPROVALS)
 
@@ -138,6 +141,18 @@ def test_dispatch_routes_gets_per_the_contract_table():
     plain = json.loads(registry.dispatch("tempest_findings", {}))
     assert plain["ok"] is True
     assert transport.calls == [("GET", "/api/findings", None)]
+    transport.calls.clear()
+    gaps = json.loads(registry.dispatch("tempest_blue_gaps", {}))
+    assert gaps["data"]["gaps"] == []
+    assert transport.calls == [("GET", "/api/teams/blue/gaps", None)]
+    transport.calls.clear()
+    cover = json.loads(registry.dispatch("tempest_black_cover", {}))
+    assert cover["data"]["cover"] == "holds"
+    assert transport.calls == [("GET", "/api/teams/black/cover", None)]
+    transport.calls.clear()
+    roe = json.loads(registry.dispatch("tempest_white_roe", {}))
+    assert roe["data"]["revision"] == 3
+    assert transport.calls == [("GET", "/api/teams/white/roe", None)]
 
 
 def test_dispatch_routes_posts_per_the_contract_table():
