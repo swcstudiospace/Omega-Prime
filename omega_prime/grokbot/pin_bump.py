@@ -457,12 +457,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print machine-readable {pin, verdict, report}.",
     )
     parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help=(
+            "Confirm each step (ref resolved, pack re-vendor counts, "
+            "audit verdict, delta verdict) with a y/n prompt before "
+            "proceeding; non-TTY stdin auto-declines."
+        ),
+    )
+    parser.add_argument(
         "--root",
         type=Path,
         default=None,
         help="Repository root (default: parent of omega_prime/). Testing override.",
     )
     return parser
+
+
+def _confirm_step(
+    step: str, summary: str, *, interactive: bool, dry_run: bool = False
+) -> bool:
+    """Y/n gate for ``--interactive`` mode. Returns True to proceed.
+
+    Prints the step's result ``summary`` before prompting. A non-TTY
+    stdin auto-declines (same as answering ``n``); any answer other
+    than ``y``/``yes`` declines.
+    """
+    if not interactive:
+        return True
+    prefix = "[dry-run] " if dry_run else ""
+    print(f"{prefix}pin-bump confirm [{step}]: {summary}")
+    try:
+        is_tty = sys.stdin.isatty() if hasattr(sys.stdin, "isatty") else False
+    except (OSError, ValueError):
+        is_tty = False
+    if not is_tty:
+        print(f"{prefix}pin-bump declined [{step}]: non-TTY stdin (auto-decline)")
+        return False
+    print(f"{prefix}Proceed? [y/n]: ", end="")
+    try:
+        answer = sys.stdin.readline()
+    except (OSError, ValueError):
+        print(f"{prefix}pin-bump declined [{step}]: unreadable stdin (auto-decline)")
+        return False
+    if answer.strip().lower() in ("y", "yes"):
+        return True
+    print(f"{prefix}pin-bump declined [{step}]: operator declined")
+    return False
 
 
 def bump(
@@ -476,6 +517,7 @@ def bump(
     open_pr: bool = False,
     json_mode: bool = False,
     dry_run: bool = False,
+    interactive: bool = False,
 ) -> int:
     """Run the pin-bump runbook against ``root``. Returns the exit code."""
     if run is None:
@@ -539,6 +581,10 @@ def bump(
     else:
         return usage(f"bad ref {to!r}: expected a 40-hex SHA or a v-tag such as v1.4")
     assert sha is not None
+    if not _confirm_step(
+        "ref resolved", f"resolved {to!r} -> {sha} ({sha[:7]})", interactive=interactive
+    ):
+        return failed("operator declined at ref-resolved; bump aborted")
 
     # Step 0 (opt-in): --auto-detect-upstream-fix probes upstream HEAD
     # before any local mutation. A still-vulnerable upstream means there
@@ -611,6 +657,14 @@ def bump(
         print(
             f"[dry-run] would re-vendor pack: copy {dry_copied}, remove {dry_removed}"
         )
+        if not _confirm_step(
+            "pack re-vendor",
+            f"would re-vendor pack: copy {dry_copied}, remove {dry_removed}",
+            interactive=interactive,
+            dry_run=True,
+        ):
+            print("[dry-run] pin-bump FAILED: operator declined at pack re-vendor")
+            return finish(EXIT_BUMP_FAILED)
 
         if dry_section is None:
             print(
@@ -717,6 +771,15 @@ def bump(
                     print(f"[dry-run]   {severity} {name}: {key}")
                 return finish(EXIT_BUMP_FAILED)
             print("[dry-run] audit triage green (no untriaged high/critical)")
+            if not _confirm_step(
+                "audit verdict",
+                f"audit triage green at {sha[:7]} "
+                f"({len(dry_findings)} findings, 0 untriaged high/critical)",
+                interactive=interactive,
+                dry_run=True,
+            ):
+                print("[dry-run] pin-bump FAILED: operator declined at audit verdict")
+                return finish(EXIT_BUMP_FAILED)
 
             dry_old_path = (
                 Path(old_audit) if old_audit else _default_old_audit(root, dry_old_pin)
@@ -763,6 +826,15 @@ def bump(
                 dry_old_findings, dry_new_findings, dry_new_packages
             )
             print(f"[dry-run] audit verdict: {verdict} (report.md not written)")
+            if not _confirm_step(
+                "delta verdict",
+                f"audit delta verdict: {verdict} (report.md not written)",
+                interactive=interactive,
+                dry_run=True,
+            ):
+                print("[dry-run] pin-bump FAILED: operator declined at delta verdict")
+                return finish(EXIT_BUMP_FAILED)
+
             if verdict == "regressed":
                 return finish(EXIT_BUMP_FAILED)
 
@@ -819,6 +891,14 @@ def bump(
         return failed(f"missing upstream pack {upstream_dir} after checkout {sha[:7]}")
     if not vendored_dir.is_dir():
         return failed(f"missing vendored pack {vendored_dir}")
+    if interactive:
+        preview_copy, preview_remove = revendor_preview(upstream_dir, vendored_dir)
+        if not _confirm_step(
+            "pack re-vendor",
+            f"re-vendor pack: would copy {preview_copy}, remove {preview_remove}",
+            interactive=interactive,
+        ):
+            return failed("operator declined at pack re-vendor; bump aborted")
     copied, removed = revendor_pack(upstream_dir, vendored_dir)
     print(f"pin-bump re-vendor: copied {copied}, removed {removed}")
     done.append("pack-revendored")
@@ -887,6 +967,13 @@ def bump(
                 print(f"  {severity} {name}: {key}")
             return finish(EXIT_BUMP_FAILED)
         done.append("audit-green")
+        if not _confirm_step(
+            "audit verdict",
+            f"audit triage green at {sha[:7]} "
+            f"({len(findings)} findings, 0 untriaged high/critical)",
+            interactive=interactive,
+        ):
+            return failed("operator declined at audit verdict; bump aborted")
 
         old_path = Path(old_audit) if old_audit else _default_old_audit(root, old_pin)
         if old_path is None:
@@ -932,6 +1019,12 @@ def bump(
             return failed(f"cannot write report {report_path} ({exc})")
         print(verdict)
         print(f"pin-bump audit: {verdict} (report: {report_path})")
+        if not _confirm_step(
+            "delta verdict",
+            f"audit delta verdict: {verdict} (report: {report_path})",
+            interactive=interactive,
+        ):
+            return failed("operator declined at delta verdict; bump aborted")
         if verdict == "regressed":
             return finish(EXIT_BUMP_FAILED)
 
@@ -987,7 +1080,7 @@ def bump(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--dry-run] [--open-pr] [--json]``."""
+    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--dry-run] [--open-pr] [--json] [--interactive]``."""
     args = build_parser().parse_args(argv)
     root = Path(args.root) if args.root is not None else REPO_ROOT
     return bump(
@@ -999,6 +1092,7 @@ def main(argv: list[str] | None = None) -> int:
         open_pr=args.open_pr,
         json_mode=args.json_mode,
         dry_run=args.dry_run,
+        interactive=args.interactive,
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -652,8 +653,9 @@ def test_slack_second_run_pushes_nothing(tmp_path):
     assert len(fake.calls) == 2
 
 
-def test_slack_nonzero_exit_leaves_row_unsynced(tmp_path):
+def test_slack_nonzero_exit_leaves_row_unsynced(tmp_path, monkeypatch):
     _seed_two(tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
 
     def bad(argv, data):
         return SimpleNamespace(returncode=1, stdout="", stderr="boom")
@@ -663,13 +665,14 @@ def test_slack_nonzero_exit_leaves_row_unsynced(tmp_path):
     assert all("issue_url" not in row for row in load_findings(tmp_path))
 
 
-def test_slack_runner_exception_mid_run_persists_earlier_push(tmp_path):
+def test_slack_runner_exception_mid_run_persists_earlier_push(tmp_path, monkeypatch):
     _seed_two(tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
     calls: list = []
 
     def flaky(argv, data):
         calls.append((argv, data))
-        if len(calls) == 2:
+        if len(calls) >= 2:
             raise RuntimeError("webhook down")
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
@@ -832,8 +835,9 @@ def test_teams_second_run_pushes_nothing(tmp_path):
     assert len(fake.calls) == 2
 
 
-def test_teams_nonzero_exit_leaves_row_unsynced(tmp_path):
+def test_teams_nonzero_exit_leaves_row_unsynced(tmp_path, monkeypatch):
     _seed_two(tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
 
     def bad(argv, data):
         return SimpleNamespace(returncode=1, stdout="", stderr="boom")
@@ -843,13 +847,14 @@ def test_teams_nonzero_exit_leaves_row_unsynced(tmp_path):
     assert all("issue_url" not in row for row in load_findings(tmp_path))
 
 
-def test_teams_runner_exception_mid_run_persists_earlier_push(tmp_path):
+def test_teams_runner_exception_mid_run_persists_earlier_push(tmp_path, monkeypatch):
     _seed_two(tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
     calls: list = []
 
     def flaky(argv, data):
         calls.append((argv, data))
-        if len(calls) == 2:
+        if len(calls) >= 2:
             raise RuntimeError("webhook down")
         return SimpleNamespace(returncode=0, stdout="1", stderr="")
 
@@ -932,3 +937,107 @@ def test_env_override_teams_webhook_url(monkeypatch):
     )
     node = load_config(None)["redteam"]["findings_sync"]
     assert node["teams_webhook_url"] == TEAMS_WEBHOOK
+
+
+# Webhook retry with exponential backoff --------------------------------------
+
+
+def _patch_retry_timing(monkeypatch):
+    """Hermetic retry timing: deterministic delays, no real sleeping."""
+    monkeypatch.setattr(findings_sync.random, "uniform", lambda _a, _b: 0.0)
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    return sleeps
+
+
+def test_slack_retry_succeeds_on_second_attempt(tmp_path, monkeypatch, capsys):
+    record_finding(directory=tmp_path, **_finding())
+    sleeps = _patch_retry_timing(monkeypatch)
+    calls: list = []
+
+    def flaky(argv, data):
+        calls.append(argv)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    result = sync_findings_slack(tmp_path, WEBHOOK, runner=flaky)
+    assert len(result["pushed"]) == 1
+    assert len(calls) == 2
+    assert sleeps == [findings_sync.WEBHOOK_RETRY_DELAYS[0]]
+    assert "retrying" in capsys.readouterr().err
+
+
+def test_slack_retry_on_network_error_then_succeeds(tmp_path, monkeypatch, capsys):
+    record_finding(directory=tmp_path, **_finding())
+    sleeps = _patch_retry_timing(monkeypatch)
+    calls: list = []
+
+    def flaky(argv, data):
+        calls.append(argv)
+        if len(calls) == 1:
+            raise OSError("conn reset")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    result = sync_findings_slack(tmp_path, WEBHOOK, runner=flaky)
+    assert len(result["pushed"]) == 1
+    assert len(calls) == 2
+    assert sleeps == [findings_sync.WEBHOOK_RETRY_DELAYS[0]]
+    assert "retrying" in capsys.readouterr().err
+
+
+def test_slack_retry_exhausts_on_persistent_failure(tmp_path, monkeypatch, capsys):
+    record_finding(directory=tmp_path, **_finding())
+    sleeps = _patch_retry_timing(monkeypatch)
+    calls: list = []
+
+    def bad(argv, data):
+        calls.append(argv)
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    with pytest.raises(GhApiError):
+        sync_findings_slack(tmp_path, WEBHOOK, runner=bad)
+    assert len(calls) == 1 + findings_sync.WEBHOOK_MAX_RETRIES
+    assert sleeps == list(findings_sync.WEBHOOK_RETRY_DELAYS)
+    assert (
+        capsys.readouterr().err.count("retrying") == findings_sync.WEBHOOK_MAX_RETRIES
+    )
+    assert all("issue_url" not in row for row in load_findings(tmp_path))
+
+
+def test_slack_usage_error_does_not_retry(tmp_path, monkeypatch):
+    record_finding(directory=tmp_path, **_finding())
+    sleeps = _patch_retry_timing(monkeypatch)
+    calls: list = []
+
+    def usage(argv, data):
+        calls.append(argv)
+        return SimpleNamespace(returncode=2, stdout="", stderr="usage error")
+
+    with pytest.raises(GhApiError):
+        sync_findings_slack(tmp_path, WEBHOOK, runner=usage)
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_slack_empty_webhook_does_not_retry(tmp_path, monkeypatch):
+    sleeps = _patch_retry_timing(monkeypatch)
+    with pytest.raises(ValueError, match="no slack webhook configured"):
+        sync_findings_slack(tmp_path, "   ", runner=FakeSlack())
+    assert sleeps == []
+
+
+def test_teams_retry_succeeds_on_second_attempt(tmp_path, monkeypatch):
+    record_finding(directory=tmp_path, **_finding())
+    _patch_retry_timing(monkeypatch)
+    calls: list = []
+
+    def flaky(argv, data):
+        calls.append(argv)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        return SimpleNamespace(returncode=0, stdout="1", stderr="")
+
+    result = sync_findings_teams(tmp_path, TEAMS_WEBHOOK, runner=flaky)
+    assert len(result["pushed"]) == 1
+    assert len(calls) == 2

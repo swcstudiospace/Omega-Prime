@@ -204,13 +204,20 @@ def _invalid() -> dict[str, Any]:
 
 
 def check_roe_lifecycle(
-    artifact_path: str | Path | None, now: datetime
+    artifact_path: str | Path | None,
+    now: datetime,
+    audit_log: str | Path | None = None,
 ) -> dict[str, Any]:
     """Classify the RoE lifecycle state of ``artifact_path`` at ``now``.
 
     Reads no wall-clock time: ``now`` (UTC) is injected by the caller.
     Never verifies signatures and never raises on artifact problems —
     unparseable or unreadable artifacts report ``missing``/``invalid``.
+
+    When ``audit_log`` is given and the grant is past ``effective_until``,
+    a ``grant-expired`` row is appended to that JSONL log (see
+    :mod:`omega_prime.redteam.roe_audit`). Audit writes never raise:
+    failures are warned and skipped.
     """
     current = _as_utc(now)
     path = str(artifact_path or "").strip()
@@ -232,6 +239,22 @@ def check_roe_lifecycle(
     days_remaining = (end - current).total_seconds() / 86400
     effective_until = document.get("effective_until")
     if current > end:
+        if audit_log is not None and str(audit_log).strip():
+            try:
+                from omega_prime.redteam import roe_audit
+
+                candidate = document.get("operator", "")
+                claimed = candidate.strip() if isinstance(candidate, str) else ""
+                roe_audit.log_expired(
+                    audit_log,
+                    path,
+                    claimed,
+                    f"effective_until {effective_until!r} is in the past",
+                )
+            except Exception:
+                import warnings
+
+                warnings.warn("roe audit log write failed; skipped")
         return {
             "state": "expired",
             "days_remaining": days_remaining,
@@ -279,6 +302,7 @@ def _normalize_artifact_list(
 def check_roe_lifecycle_all(
     artifacts: str | Path | Sequence[str | Path] | None,
     now: datetime,
+    audit_log: str | Path | None = None,
 ) -> dict[str, Any]:
     """Aggregate lifecycle state across concurrent RoE grants.
 
@@ -288,13 +312,19 @@ def check_roe_lifecycle_all(
     ``effective_until``, and the per-artifact breakdown. A single path
     (or ``None``) behaves like :func:`check_roe_lifecycle` plus an
     ``artifacts`` breakdown entry. Never verifies signatures.
+
+    When ``audit_log`` is given, each expired grant appends a
+    ``grant-expired`` row (audit writes never raise).
     """
     paths = _normalize_artifact_list(artifacts)
     if not paths:
         result = _missing()
         result["artifacts"] = []
         return result
-    per_artifact = [{"path": path, **check_roe_lifecycle(path, now)} for path in paths]
+    per_artifact = [
+        {"path": path, **check_roe_lifecycle(path, now, audit_log=audit_log)}
+        for path in paths
+    ]
     worst = max(per_artifact, key=lambda row: STATES.index(row["state"]))
     days = [
         row["days_remaining"]
@@ -353,6 +383,13 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument(
         "--json", action="store_true", help="Output machine-readable JSON"
     )
+    check.add_argument(
+        "--audit-log",
+        default=None,
+        help="Path to the RoE grant audit JSONL log: expired grants append "
+        "a grant-expired row here and the log contents are included in "
+        "the output (audit_log key with --json). Audit writes never raise.",
+    )
     ready = sub.add_parser(
         "readiness", help="Post-RoE-signing live-gateway readiness check"
     )
@@ -387,10 +424,21 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         artifacts: list[str] = args.artifacts or []
+        audit_log = args.audit_log
         if len(artifacts) == 1:
-            result = check_roe_lifecycle(artifacts[0], now)
+            result = check_roe_lifecycle(artifacts[0], now, audit_log=audit_log)
         else:
-            result = check_roe_lifecycle_all(artifacts, now)
+            result = check_roe_lifecycle_all(artifacts, now, audit_log=audit_log)
+        if audit_log is not None and str(audit_log).strip():
+            try:
+                from omega_prime.redteam import roe_audit
+
+                result["audit_log"] = roe_audit.read_log(audit_log)
+            except Exception:
+                import warnings
+
+                warnings.warn("roe audit log read failed; skipped")
+                result["audit_log"] = []
         if args.json:
             print(json.dumps(result, indent=2))
         elif len(artifacts) == 1:
@@ -398,6 +446,15 @@ def main(argv: list[str] | None = None) -> int:
             days_text = f"{days:.2f}d remaining" if days is not None else "no window"
             until = result["effective_until"] or "unknown"
             print(f"roe: {result['state']} ({days_text}, until {until})")
+            if audit_log is not None and str(audit_log).strip():
+                entries = result.get("audit_log", [])
+                print(f"audit log: {len(entries)} entries ({audit_log})")
+                for entry in entries:
+                    print(
+                        f"  - {entry.get('timestamp', '?')} "
+                        f"{entry.get('event', '?')} "
+                        f"{entry.get('artifact_path', '?')}"
+                    )
         else:
             days = result["days_remaining"]
             days_text = f"{days:.2f}d remaining" if days is not None else "no window"
@@ -415,6 +472,15 @@ def main(argv: list[str] | None = None) -> int:
                     else "no window"
                 )
                 print(f"  - {row['path']}: {row['state']} ({row_text})")
+            if audit_log is not None and str(audit_log).strip():
+                entries = result.get("audit_log", [])
+                print(f"audit log: {len(entries)} entries ({audit_log})")
+                for entry in entries:
+                    print(
+                        f"  - {entry.get('timestamp', '?')} "
+                        f"{entry.get('event', '?')} "
+                        f"{entry.get('artifact_path', '?')}"
+                    )
         return _exit_code(result["state"])
     if args.command == "readiness":
         now = _parse_now_override(args.now)

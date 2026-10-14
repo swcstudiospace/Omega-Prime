@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from sidecar.findings import dedupe_hash
 from sidecar.simulation import load_suite, validate_suite
@@ -124,7 +125,7 @@ def finding_row(case_id: str, response: str, ts: str) -> dict[str, object]:
     }
 
 
-def seed_findings(directory: Path, rows: list[dict[str, object]]) -> None:
+def seed_findings(directory: Path, rows: list[dict[str, Any]]) -> None:
     path = directory / "findings.ndjson"
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -1268,3 +1269,323 @@ def test_json_missing_compare_fails_closed(tmp_path):
     )
     assert proc.returncode == 1
     assert "error:" in proc.stderr
+
+
+# Historical trend graph (batch-06 Feature A) ----------------------------------
+
+TREND_ROWS = [
+    {"pass_rate": 80.0, "findings": 5},
+    {"pass_rate": 90.0, "findings": 3},
+    {"pass_rate": 100.0, "findings": 1},
+]
+
+
+def _trend_fixture(directory: Path) -> None:
+    """One run of history for trend tests."""
+    directory.mkdir(parents=True, exist_ok=True)
+    seed_transitions(directory, cycle(T1))
+    seed_last_run(directory)
+    seed_findings(directory, [finding_row("abuse-01", "resp-a", T1)])
+
+
+def seed_trend(path: Path, rows: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def test_trend_renders_sparkline_section(tmp_path):
+    """Feature A happy: --trend renders per-run sparklines in file order."""
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+    history = tmp_path / "history.ndjson"
+    seed_trend(history, TREND_ROWS)
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--trend", str(history)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    body = section_lines(proc.stdout, "## Trend")
+    assert body, "trend section must render"
+    text = "\n".join(body)
+    assert "- source: history.ndjson" in text
+    assert "- runs: 3" in text
+    assert "- pass rate: 80.0%, 90.0%, 100.0%" in text
+    assert "- pass-rate trend: \u2581\u2585\u2588" in text
+    assert "- findings: 5, 3, 1" in text
+    assert "- findings trend: \u2588\u2585\u2581" in text
+
+
+def test_trend_section_after_coverage_delta(tmp_path):
+    """Feature A order: Trend sits after Coverage delta, before drill-down."""
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+    baseline_path = tmp_path / "baseline.md"
+    baseline_path.write_text(
+        run_script("--reports-dir", str(fixture), "--since", T0).stdout,
+        encoding="utf-8",
+    )
+    history = tmp_path / "history.ndjson"
+    seed_trend(history, TREND_ROWS)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--diff-coverage",
+        str(baseline_path),
+        "--trend",
+        str(history),
+        "--drill-down",
+        "abuse",
+    )
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+    matrix_at = lines.index("## Coverage matrix")
+    delta_at = lines.index("## Coverage delta")
+    trend_at = lines.index("## Trend")
+    drill_at = lines.index("## Coverage drill-down: abuse")
+    gaps_at = lines.index("## Detection gaps")
+    assert matrix_at < delta_at < trend_at < drill_at < gaps_at
+
+
+def test_trend_is_deterministic(tmp_path):
+    """Feature A determinism: same history renders byte-identical runs."""
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+    history = tmp_path / "history.ndjson"
+    seed_trend(history, TREND_ROWS)
+    args = ["--reports-dir", str(fixture), "--since", T0, "--trend", str(history)]
+
+    first = run_script(*args)
+    second = run_script(*args)
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_trend_missing_file_exits_1(tmp_path):
+    """Feature A edge: an unreadable --trend path fails closed with error:."""
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--trend",
+        str(tmp_path / "absent.ndjson"),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_trend_corrupt_row_exits_1(tmp_path):
+    """Feature A edge: a corrupt trend row fails closed, never silent."""
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+    history = tmp_path / "history.ndjson"
+    history.write_text(
+        '{"pass_rate": 80.0, "findings": 5}\nnot-json\n', encoding="utf-8"
+    )
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--trend", str(history)
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_trend_empty_history_renders_empty_line(tmp_path):
+    """Feature A edge: an empty history file renders the empty line."""
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+    history = tmp_path / "history.ndjson"
+    history.write_text("", encoding="utf-8")
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--trend", str(history)
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## Trend")
+    assert "- runs: 0" in "\n".join(body)
+    assert "- no trend history" in "\n".join(body)
+
+
+def test_trend_sparkline_and_loader_units(tmp_path):
+    """Feature A units: sparkline mapping, key aliases, flat/empty series."""
+    module = _report_module()
+    assert module.sparkline([]) == ""
+    assert module.sparkline([80.0, 90.0, 100.0]) == "\u2581\u2585\u2588"
+    assert module.sparkline([5.0, 3.0, 1.0]) == "\u2588\u2585\u2581"
+    assert module.sparkline([42.0, 42.0]) == "\u2585\u2585"
+
+    history = tmp_path / "history.ndjson"
+    seed_trend(
+        history,
+        [
+            {"pass_pct": "80%", "findings_count": 5},
+            {"pass": 90, "count": 3},
+        ],
+    )
+    rates, counts = module.load_trend_history(history)
+    assert rates == [80.0, 90.0]
+    assert counts == [5, 3]
+    lines = module.render_trend(
+        pass_rates=rates, findings_counts=counts, source_label="history.ndjson"
+    )
+    assert lines[0] == "## Trend"
+    assert "- source: history.ndjson" in lines
+
+
+def test_no_trend_flag_renders_no_section(tmp_path):
+    """Feature A regression: without --trend the report has no new section."""
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "## Trend" not in proc.stdout
+
+
+def test_json_trend_composition(tmp_path):
+    """Feature A composition: --json --trend adds a trend object; default omits it."""
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+    history = tmp_path / "history.ndjson"
+    seed_trend(history, TREND_ROWS)
+
+    plain = run_script("--reports-dir", str(fixture), "--since", T0, "--json")
+    assert plain.returncode == 0, plain.stderr
+    assert "trend" not in json.loads(plain.stdout)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--json",
+        "--trend",
+        str(history),
+    )
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["trend"]["source"] == "history.ndjson"
+    assert data["trend"]["pass_rates"] == [80.0, 90.0, 100.0]
+    assert data["trend"]["findings_counts"] == [5, 3, 1]
+    assert data["trend"]["pass_rate_sparkline"] == "\u2581\u2585\u2588"
+    assert data["trend"]["findings_sparkline"] == "\u2588\u2585\u2581"
+
+
+# PDF export hint (batch-06 Feature B) ------------------------------------------
+
+
+def _hide_pandoc(monkeypatch, tmp_path: Path) -> Path:
+    """Empty PATH dir so shutil.which("pandoc") finds nothing."""
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    return empty
+
+
+def test_pdf_fallback_without_pandoc(tmp_path, monkeypatch):
+    """Feature B fallback: no pandoc errors to stderr, writes the .md sibling."""
+    _hide_pandoc(monkeypatch, tmp_path)
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+    pdf_path = tmp_path / "report.pdf"
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--pdf", str(pdf_path)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "pandoc" in proc.stderr
+    assert "error:" in proc.stderr
+    assert not pdf_path.exists()
+    fallback = tmp_path / "report.md"
+    assert fallback.exists()
+    # Fallback carries the rendered markdown report unchanged.
+    assert fallback.read_text(encoding="utf-8") == proc.stdout
+    assert proc.stdout.startswith("# Engagement report")
+
+
+def test_pdf_fallback_write_failure_exits_1(tmp_path, monkeypatch):
+    """Feature B edge: an unwritable fallback path fails closed."""
+    _hide_pandoc(monkeypatch, tmp_path)
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--pdf",
+        str(tmp_path / "no-such-dir" / "report.pdf"),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_pdf_converts_with_pandoc(tmp_path, monkeypatch):
+    """Feature B happy: a present pandoc converts the markdown to PDF."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "pandoc"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'out=""\n'
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "-o" ]; then out="$a"; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'for a in "$@"; do last="$a"; done\n'
+        'printf "PDF:" > "$out"\n'
+        'cat "$last" >> "$out"\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+    pdf_path = tmp_path / "report.pdf"
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--pdf", str(pdf_path)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    assert pdf_path.exists()
+    content = pdf_path.read_bytes()
+    assert content.startswith(b"PDF:")
+    assert b"# Engagement report" in content
+    # No markdown fallback sibling on the success path.
+    assert not (tmp_path / "report.md").exists()
+
+
+def test_pdf_composes_with_trend(tmp_path, monkeypatch):
+    """Feature B composition: --pdf converts the trend-bearing markdown."""
+    _hide_pandoc(monkeypatch, tmp_path)
+    fixture = tmp_path / "reports"
+    _trend_fixture(fixture)
+    history = tmp_path / "history.ndjson"
+    seed_trend(history, TREND_ROWS)
+    pdf_path = tmp_path / "report.pdf"
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--trend",
+        str(history),
+        "--pdf",
+        str(pdf_path),
+    )
+    assert proc.returncode == 0, proc.stderr
+    fallback = tmp_path / "report.md"
+    assert "## Trend" in fallback.read_text(encoding="utf-8")

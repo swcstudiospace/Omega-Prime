@@ -36,7 +36,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -998,6 +1001,165 @@ def render_coverage_delta(
     return lines
 
 
+#: Block elements for ASCII sparklines (U+2581..U+2588, ascending).
+SPARKLINE_BLOCKS = ("▁", "▂", "▃", "▄", "▅", "▆", "▇", "█")
+
+#: Trend-history keys accepted for the per-run pass rate (first hit wins).
+PASS_RATE_KEYS = ("pass_rate", "pass_pct", "pass")
+
+#: Trend-history keys accepted for the per-run findings count.
+FINDINGS_COUNT_KEYS = ("findings", "findings_count", "count")
+
+
+def sparkline(values: list[float]) -> str:
+    """ASCII sparkline over ``values`` in file order (deterministic).
+
+    Each value maps to one of :data:`SPARKLINE_BLOCKS` by its relative
+    position between the min and max; a flat series renders the middle
+    block. An empty series renders ``""``.
+    """
+    if not values:
+        return ""
+    low = min(values)
+    high = max(values)
+    if high == low:
+        return SPARKLINE_BLOCKS[len(SPARKLINE_BLOCKS) // 2] * len(values)
+    span = high - low
+    top = len(SPARKLINE_BLOCKS) - 1
+    return "".join(
+        SPARKLINE_BLOCKS[round((value - low) / span * top)] for value in values
+    )
+
+
+def _trend_number(row: dict[str, object], keys: tuple[str, ...]) -> float | None:
+    """First numeric value under ``keys`` (``"80%"`` strings accepted)."""
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str) and value.strip():
+            text = value.strip().removesuffix("%").strip()
+            try:
+                return float(text)
+            except ValueError:
+                continue
+    return None
+
+
+def load_trend_history(path: Path) -> tuple[list[float], list[int]]:
+    """Per-run ``(pass_rates, findings_counts)`` from a trend NDJSON file.
+
+    Same line format as the findings history: one JSON object per line
+    (blank lines skipped). Each row carries a pass rate in percentage
+    points (``pass_rate``, ``pass_pct``, or ``pass``) and a findings
+    count (``findings``, ``findings_count``, or ``count``). File order
+    is the run order. Fail closed on unreadable files and corrupt rows.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ReportError(f"error: cannot read --trend history {path} ({exc})") from exc
+    pass_rates: list[float] = []
+    findings_counts: list[int] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            raise ReportError(
+                f"error: corrupt trend row: {path}:{lineno} ({exc})"
+            ) from exc
+        if not isinstance(row, dict):
+            raise ReportError(f"error: corrupt trend row: {path}:{lineno}")
+        rate = _trend_number(row, PASS_RATE_KEYS)
+        count = _trend_number(row, FINDINGS_COUNT_KEYS)
+        if rate is None or count is None:
+            raise ReportError(f"error: corrupt trend row: {path}:{lineno}")
+        pass_rates.append(rate)
+        findings_counts.append(int(count))
+    return pass_rates, findings_counts
+
+
+def render_trend(
+    *,
+    pass_rates: list[float],
+    findings_counts: list[int],
+    source_label: str,
+) -> list[str]:
+    """Historical trend lines (per-run sparklines in file order)."""
+    lines = [
+        "## Trend",
+        "",
+        f"- source: {source_label}",
+        "",
+        f"- runs: {len(pass_rates)}",
+    ]
+    if not pass_rates:
+        lines.append("- no trend history")
+        return lines
+    rate_text = ", ".join(f"{rate:.1f}%" for rate in pass_rates)
+    count_text = ", ".join(str(count) for count in findings_counts)
+    lines += [
+        f"- pass rate: {rate_text}",
+        f"- pass-rate trend: {sparkline(pass_rates)}",
+        f"- findings: {count_text}",
+        f"- findings trend: {sparkline([float(n) for n in findings_counts])}",
+    ]
+    return lines
+
+
+def write_pdf(markdown: str, pdf_path: Path) -> int:
+    """Convert ``markdown`` to PDF at ``pdf_path`` via pandoc (thin wrapper).
+
+    Returns 0 on success. When pandoc is unavailable, prints an error to
+    stderr and falls back to writing the markdown to the ``.md`` sibling
+    of ``pdf_path`` (still returning 0). Pandoc conversion failures and
+    unwritable outputs print ``error:`` to stderr and return 1.
+    """
+    if shutil.which("pandoc") is None:
+        fallback = pdf_path.with_suffix(".md")
+        try:
+            fallback.write_text(markdown, encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot write fallback {fallback} ({exc})", file=sys.stderr)
+            return 1
+        print(
+            f"error: pandoc not found; wrote markdown fallback {fallback}",
+            file=sys.stderr,
+        )
+        return 0
+    tmp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".md", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write(markdown)
+            tmp_name = handle.name
+        completed = subprocess.run(
+            ["pandoc", "-f", "markdown", "-t", "pdf", "-o", str(pdf_path), tmp_name],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        print(f"error: cannot run pandoc ({exc})", file=sys.stderr)
+        return 1
+    finally:
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip()
+        suffix = f": {detail}" if detail else ""
+        print(f"error: pandoc conversion failed{suffix}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def render_report(
     *,
     window_start: datetime,
@@ -1017,6 +1179,7 @@ def render_report(
     severity_timeline: list[tuple[str, str, str, str]] | None = None,
     comparison: list[str] | None = None,
     coverage_delta: list[str] | None = None,
+    trend: list[str] | None = None,
     drill_down: str | None = None,
     drill_down_rows: list[tuple[str, str, str, str, str]] | None = None,
 ) -> str:
@@ -1069,6 +1232,8 @@ def render_report(
         )
     if coverage_delta:
         lines += ["", *coverage_delta]
+    if trend:
+        lines += ["", *trend]
     if drill_down is not None:
         lines += ["", f"## Coverage drill-down: {drill_down}", ""]
         lines += [
@@ -1262,6 +1427,7 @@ def build_report(
     compare_path: Path | None = None,
     drill_down: str | None = None,
     diff_coverage_path: Path | None = None,
+    trend_path: Path | None = None,
 ) -> tuple[str, str, Path]:
     """Render the report; return ``(markdown, file_name, out_dir)``."""
     window = _collect_window(reports_dir, since_text)
@@ -1337,6 +1503,14 @@ def build_report(
             previous=parse_previous_coverage(diff_text),
             baseline_label=diff_coverage_path.name,
         )
+    trend: list[str] | None = None
+    if trend_path is not None:
+        rates, counts = load_trend_history(trend_path)
+        trend = render_trend(
+            pass_rates=rates,
+            findings_counts=counts,
+            source_label=trend_path.name,
+        )
     markdown = render_report(
         window_start=window_start,
         window_end=window_end,
@@ -1355,6 +1529,7 @@ def build_report(
         severity_timeline=window["severity_timeline"],
         comparison=comparison,
         coverage_delta=coverage_delta,
+        trend=trend,
         drill_down=drill_down,
         drill_down_rows=(
             drill_down_rows(window["findings"], drill_down)
@@ -1383,6 +1558,7 @@ def build_report_data(
     compare_path: Path | None = None,
     drill_down: str | None = None,
     diff_coverage_path: Path | None = None,
+    trend_path: Path | None = None,
 ) -> dict[str, object]:
     """Structured report data with the same inputs as :func:`build_report`.
 
@@ -1485,6 +1661,16 @@ def build_report_data(
                 )
             ],
         }
+    trend_data: dict[str, object] | None = None
+    if trend_path is not None:
+        trend_rates, trend_counts = load_trend_history(trend_path)
+        trend_data = {
+            "source": trend_path.name,
+            "pass_rates": list(trend_rates),
+            "findings_counts": list(trend_counts),
+            "pass_rate_sparkline": sparkline(trend_rates),
+            "findings_sparkline": sparkline([float(n) for n in trend_counts]),
+        }
     drill_data: dict[str, object] | None = None
     if drill_down is not None:
         drill_data = {
@@ -1502,7 +1688,7 @@ def build_report_data(
                 )
             ],
         }
-    return {
+    data: dict[str, object] = {
         "title": "Engagement report",
         "header": {
             "window_start": fmt_rfc3339(window_start),
@@ -1586,6 +1772,9 @@ def build_report_data(
         "comparison": comparison_data,
         "snapshot": dict(sorted(current_findings.items())),
     }
+    if trend_data is not None:
+        data["trend"] = trend_data
+    return data
 
 
 def render_json_report(data: dict[str, object]) -> str:
@@ -1719,6 +1908,23 @@ def main(argv: list[str] | None = None) -> int:
         "for technique class CLASS from findings.ndjson.",
     )
     parser.add_argument(
+        "--trend",
+        default=None,
+        metavar="HISTORY_NDJSON",
+        help="per-run history NDJSON (one JSON object per line with a pass "
+        "rate and a findings count, same line format as findings.ndjson): "
+        "renders a ## Trend section with ASCII sparklines after the "
+        "coverage delta.",
+    )
+    parser.add_argument(
+        "--pdf",
+        default=None,
+        metavar="OUTPUT_PDF",
+        help="also convert the markdown report to PDF at OUTPUT_PDF via "
+        "pandoc; when pandoc is unavailable, prints an error to stderr "
+        "and falls back to writing the .md sibling instead.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="emit the full report as a single JSON object (all sections as "
@@ -1751,12 +1957,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         compare_path = Path(args.compare) if args.compare else None
         diff_coverage_path = Path(args.diff_coverage) if args.diff_coverage else None
+        trend_path = Path(args.trend) if args.trend else None
         markdown, file_name, out_dir = build_report(
             reports_dir,
             args.since,
             compare_path,
             drill_down=args.drill_down,
             diff_coverage_path=diff_coverage_path,
+            trend_path=trend_path,
         )
         payload = markdown
         if args.json:
@@ -1767,6 +1975,7 @@ def main(argv: list[str] | None = None) -> int:
                     compare_path,
                     drill_down=args.drill_down,
                     diff_coverage_path=diff_coverage_path,
+                    trend_path=trend_path,
                 )
             )
     except ReportError as exc:
@@ -1794,6 +2003,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     else:
         sys.stdout.write(payload)
+    if args.pdf:
+        return write_pdf(markdown, Path(args.pdf))
     return 0
 
 

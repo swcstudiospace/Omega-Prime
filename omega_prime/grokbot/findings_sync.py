@@ -48,9 +48,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -148,6 +150,17 @@ UNKNOWN_SEVERITY_THEME_COLOR = "#808080"
 #: ``gh`` invocation timeout (seconds).
 _GH_TIMEOUT = 60
 
+#: Webhook POST retry budget: retries after the initial attempt. Only the
+#: Slack/Teams webhook transports retry; GitHub/Linear modes are unchanged.
+WEBHOOK_MAX_RETRIES = 3
+
+#: Base backoff delays (seconds) before webhook retry 1/2/3. Each delay
+#: gets up to +1s of jitter (see :func:`_webhook_retry_delay`).
+WEBHOOK_RETRY_DELAYS = (1.0, 2.0, 4.0)
+
+#: ``gh`` exit code for CLI usage errors — terminal, never retried.
+_GH_USAGE_ERROR_EXIT = 2
+
 
 class FindingsSyncError(RuntimeError):
     """Base error for findings-sync failures (CLI maps these to exit 1)."""
@@ -187,6 +200,68 @@ def _default_runner(argv: list[str], data: dict[str, Any]) -> Any:
         text=True,
         timeout=_GH_TIMEOUT,
     )
+
+
+def _webhook_retry_delay(retry_index: int) -> float:
+    """Backoff delay (seconds) before webhook retry ``retry_index`` (0-based)."""
+    if retry_index < len(WEBHOOK_RETRY_DELAYS):
+        base = WEBHOOK_RETRY_DELAYS[retry_index]
+    else:
+        base = WEBHOOK_RETRY_DELAYS[-1]
+    return base + random.uniform(0, 1.0)
+
+
+def _run_with_webhook_retry(
+    run: GhRunner, argv: list[str], data: dict[str, Any]
+) -> Any:
+    """Run one webhook POST with exponential-backoff retry.
+
+    Transient failures — a nonzero ``gh`` exit (other than usage-error
+    exit 2) or a runner exception such as a network error — retry up to
+    :data:`WEBHOOK_MAX_RETRIES` times with :data:`WEBHOOK_RETRY_DELAYS`
+    backoff plus jitter; each retry logs a warning to stderr. Terminal
+    failures — exit 2, a missing ``gh`` binary
+    (:class:`GhNotFoundError`), or an already-classified
+    :class:`FindingsSyncError` — raise immediately with no retry.
+    """
+    label = argv[2] if len(argv) > 2 else "webhook"
+    attempt = 0
+    while True:
+        try:
+            completed = run(argv, data)
+        except GhNotFoundError:
+            raise
+        except FindingsSyncError:
+            raise
+        except Exception as exc:
+            if attempt >= WEBHOOK_MAX_RETRIES:
+                raise GhApiError(f"gh runner failed: {exc}") from exc
+            delay = _webhook_retry_delay(attempt)
+            print(
+                f"findings_sync: webhook POST attempt {attempt + 1} failed "
+                f"({exc}); retrying in {delay:.1f}s",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+            attempt += 1
+            continue
+        returncode = getattr(completed, "returncode", 1)
+        if returncode == 0:
+            return completed
+        stderr = getattr(completed, "stderr", "")
+        if returncode == _GH_USAGE_ERROR_EXIT or attempt >= WEBHOOK_MAX_RETRIES:
+            raise GhApiError(
+                f"gh api {label} exited {returncode}: {stderr}",
+                returncode=returncode if isinstance(returncode, int) else None,
+            )
+        delay = _webhook_retry_delay(attempt)
+        print(
+            f"findings_sync: webhook POST attempt {attempt + 1} exited "
+            f"{returncode}: {stderr}; retrying in {delay:.1f}s",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+        attempt += 1
 
 
 def labels_for_severity(
@@ -620,25 +695,13 @@ def sync_findings_slack(
             continue
 
         try:
-            completed = run(argv, payload)
-        except GhNotFoundError:
-            _persist_if_dirty(reports_dir, dirty, rows)
-            raise
+            _run_with_webhook_retry(run, argv, payload)
         except FindingsSyncError:
             _persist_if_dirty(reports_dir, dirty, rows)
             raise
         except Exception as exc:
             _persist_if_dirty(reports_dir, dirty, rows)
             raise GhApiError(f"gh runner failed: {exc}") from exc
-
-        returncode = getattr(completed, "returncode", 1)
-        if returncode != 0:
-            _persist_if_dirty(reports_dir, dirty, rows)
-            stderr = getattr(completed, "stderr", "")
-            raise GhApiError(
-                f"gh api {webhook_url} exited {returncode}: {stderr}",
-                returncode=returncode if isinstance(returncode, int) else None,
-            )
         row["issue_url"] = f"slack:{digest}"
         row["synced_at"] = utc_now_rfc3339()
         dirty = True
@@ -714,25 +777,13 @@ def sync_findings_teams(
             continue
 
         try:
-            completed = run(argv, payload)
-        except GhNotFoundError:
-            _persist_if_dirty(reports_dir, dirty, rows)
-            raise
+            _run_with_webhook_retry(run, argv, payload)
         except FindingsSyncError:
             _persist_if_dirty(reports_dir, dirty, rows)
             raise
         except Exception as exc:
             _persist_if_dirty(reports_dir, dirty, rows)
             raise GhApiError(f"gh runner failed: {exc}") from exc
-
-        returncode = getattr(completed, "returncode", 1)
-        if returncode != 0:
-            _persist_if_dirty(reports_dir, dirty, rows)
-            stderr = getattr(completed, "stderr", "")
-            raise GhApiError(
-                f"gh api {webhook_url} exited {returncode}: {stderr}",
-                returncode=returncode if isinstance(returncode, int) else None,
-            )
         row["issue_url"] = f"teams:{digest}"
         row["synced_at"] = utc_now_rfc3339()
         dirty = True
@@ -1100,6 +1151,8 @@ __all__ = [
     "UNKNOWN_SEVERITY_LABELS",
     "UNKNOWN_SEVERITY_PRIORITY",
     "UNKNOWN_SEVERITY_THEME_COLOR",
+    "WEBHOOK_MAX_RETRIES",
+    "WEBHOOK_RETRY_DELAYS",
     "FindingsSyncError",
     "GhApiError",
     "GhNotFoundError",

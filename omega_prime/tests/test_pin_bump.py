@@ -753,3 +753,146 @@ def test_revendor_preview_matches_pack_counts(tmp_path):
         == preview
     )
     assert _snapshot(root) == before
+
+
+# --interactive mode ----------------------------------------------------------
+
+
+def _tty_stdin(*answers: str):
+    """TTY stdin fake answering each prompt with one line."""
+    import io
+
+    class _Tty(io.StringIO):
+        def isatty(self):
+            return True
+
+    return _Tty("".join(a + "\n" for a in answers))
+
+
+def test_interactive_flag_parses():
+    args = pin_bump.build_parser().parse_args(["--to", PIN_NEW, "--interactive"])
+    assert args.interactive is True
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.interactive is False
+
+
+def test_interactive_accept_all_proceeds(tmp_path, capsys, monkeypatch):
+    import sys
+
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    monkeypatch.setattr(sys, "stdin", _tty_stdin("y", "y", "y", "y"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), interactive=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.count("pin-bump confirm") == 4
+    assert "ref resolved" in out
+    assert "pack re-vendor" in out
+    assert "audit verdict" in out
+    assert "delta verdict" in out
+    assert f"- Commit: `{PIN_NEW}`" in (root / "VENDOR.md").read_text()
+    assert "Verdict: improved" in (root / "report.md").read_text()
+
+
+def test_interactive_decline_at_ref_resolved(tmp_path, capsys, monkeypatch):
+    import sys
+
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    run = FakeRun()
+    monkeypatch.setattr(sys, "stdin", _tty_stdin("n"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, interactive=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "declined [ref resolved]" in out
+    assert _snapshot(root) == before
+    assert run.cmds == []
+    assert not (root / "report.md").exists()
+
+
+def test_interactive_decline_at_pack_revendor(tmp_path, capsys, monkeypatch):
+    import sys
+
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    run = FakeRun()
+    monkeypatch.setattr(sys, "stdin", _tty_stdin("y", "n"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, interactive=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "declined [pack re-vendor]" in out
+    assert (
+        _pack(root) / "skills" / "deep" / "SKILL.md"
+    ).read_bytes() == b"# skill v1\n"
+    assert _snapshot(root) == before
+    assert not (root / "report.md").exists()
+
+
+def test_interactive_decline_at_audit_verdict(tmp_path, capsys, monkeypatch):
+    import sys
+
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    monkeypatch.setattr(sys, "stdin", _tty_stdin("y", "y", "n"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), interactive=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "declined [audit verdict]" in out
+    assert not (root / "report.md").exists()
+
+
+def test_interactive_decline_at_delta_verdict(tmp_path, capsys, monkeypatch):
+    import sys
+
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    monkeypatch.setattr(sys, "stdin", _tty_stdin("y", "y", "y", "n"))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), interactive=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "declined [delta verdict]" in out
+    assert (root / "report.md").exists()
+
+
+def test_interactive_non_tty_auto_declines(tmp_path, capsys, monkeypatch):
+    import io
+    import sys
+
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    run = FakeRun()
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    assert sys.stdin.isatty() is False
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, interactive=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "non-TTY stdin (auto-decline)" in out
+    assert _snapshot(root) == before
+    assert not (root / "report.md").exists()
+
+
+def test_interactive_dry_run_accept_all(tmp_path, capsys, monkeypatch):
+    import sys
+
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    monkeypatch.setattr(sys, "stdin", _tty_stdin("y", "y", "y", "y"))
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=FakeRun(), dry_run=True, interactive=True
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.count("pin-bump confirm") == 4
+    assert f"[dry-run] bump to {PIN_NEW[:7]} would succeed" in out
+    assert _snapshot(root) == before
+    assert not (root / "report.md").exists()
+
+
+def test_non_interactive_never_prompts(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "pin-bump confirm" not in out
+    assert "Proceed? [y/n]" not in out

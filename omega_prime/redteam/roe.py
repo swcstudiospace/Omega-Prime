@@ -89,11 +89,20 @@ def signature_path(artifact: str | Path) -> Path:
     return Path(artifact).with_name(Path(artifact).name + ".sig")
 
 
-def sign_artifact(artifact: str | Path, key: bytes) -> Path:
+def sign_artifact(
+    artifact: str | Path,
+    key: bytes,
+    audit_log: str | Path | None = None,
+    operator: str | None = None,
+) -> Path:
     """HMAC-sign a JSON artifact file; writes and returns the ``.sig`` path.
 
     Operator-side act (signing installs authorization). The artifact file
     must already hold the final canonical document.
+
+    When ``audit_log`` is given, a ``grant-created`` row is appended to
+    that JSONL log (see :mod:`omega_prime.redteam.roe_audit`). Audit
+    writes never raise: failures are warned and skipped.
     """
     if not key:
         raise ValueError("signing requires a non-empty key")
@@ -101,6 +110,23 @@ def sign_artifact(artifact: str | Path, key: bytes) -> Path:
     digest = hmac.new(key, canonical_bytes(document), hashlib.sha256).hexdigest()
     sig_path = signature_path(artifact)
     sig_path.write_text(digest + "\n", encoding="utf-8")
+    if audit_log is not None and str(audit_log).strip():
+        try:
+            from omega_prime.redteam import roe_audit
+
+            claimed = operator
+            if claimed is None or not str(claimed).strip():
+                candidate = (
+                    document.get("operator", "") if isinstance(document, dict) else ""
+                )
+                claimed = candidate.strip() if isinstance(candidate, str) else ""
+            roe_audit.log_created(
+                audit_log, str(artifact), claimed or "", "grant signed"
+            )
+        except Exception:
+            import warnings
+
+            warnings.warn("roe audit log write failed; skipped")
     return sig_path
 
 
