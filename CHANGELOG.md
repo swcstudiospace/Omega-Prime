@@ -11,35 +11,63 @@ All notable changes to this project are documented here. Format follows
 #### Added
 
 - `redteam.findings_sync.sync_budget` (integer or per-tracker mapping with a
-  `default`): caps non-urgent rows dispatched per tick and tracker.
-  `critical`/`high` rows bypass it, quiet hours are decided first, held rows
-  retry oldest-first, and the tick result gains `sync_budget` and
-  `budget_held` (`reason: "sync-budget"`) only when the budget is valid.
-  Unset leaves results unchanged.
+  `default`): caps non-urgent rows dispatched per tick and tracker. The
+  budget is spent medium first, then low, then other severities, oldest
+  first, and pushes stay in store order. `critical`/`high` rows bypass it
+  and are deliberately uncapped. Quiet hours are decided first. Mappings
+  resolve per entry and are looked up by the effective tracker (graph wins
+  when its credentials are complete). The tick result gains `sync_budget`
+  and `budget_held` (`reason: "sync-budget"`) when the budget is valid and
+  `sync_budget_invalid` (`type`, `value` or `entry`) when the key is
+  present but unusable. Unset leaves results unchanged. The `_main_<tracker>`
+  CLI entry points apply neither quiet hours nor the budget.
 - `pin_bump --report-to PATH`: writes the audit delta report to `PATH`
-  instead of `<root>/report.md` (atomic, mode 0644), validated up front
-  (usage errors exit 2), replay-validated for schedules, with a `report` key
-  in `--json` only when set.
+  instead of `<root>/report.md` (atomic, mode 0644, through a directory
+  descriptor pinned at validation), validated up front (usage errors exit
+  2: trailing separator, file name over 200 bytes, symlink or non-regular
+  file, and an existing file that is neither empty nor a previous pin-bump
+  report, so `VENDOR.md` is never overwritten), replay-validated for
+  schedules, with a `report` key in `--json` only when set. Printed paths
+  escape control characters.
 - `scripts/engagement-report.py --digest`: a stdout-only digest of at most
   five lines (summary, `coverage covered=C/T gappy=G unexercised=U
   risk=S.S`, `worst=...`, an optional gate line). Exit 0, 1, 2 or 3; it
-  cannot combine with `--json` or `--summary`.
+  cannot combine with `--json` or `--summary`. The gate line and all digest
+  stderr name only schema classes or `other` and escape control characters.
 - `scripts/engagement-report.py --export-jsonl OUTPUT_JSONL`: the coverage
-  matrix as JSON Lines, one `coverage/1` object per class.
+  matrix as JSON Lines, one `coverage/1` object per class, written
+  atomically with mode 0644; a symlink target is refused (exit 1).
 - `roe_lifecycle.grant_conflicts` and the `roe_lifecycle conflicts` CLI
   (exit 0 none, 3 found, 2 usage): advisory detection of
   `duplicate-id-divergent`, `tool-scope-contradiction`,
   `tracker-cover-contradiction` and `operator-mismatch` across several RoE
-  grants. `findings_sync.tick` surfaces a non-empty result as
-  `grant_conflicts`. It never blocks authorization.
+  grants. At most 100 rows are listed, then one `conflicts-truncated`
+  sentinel row; grant files over 1 MiB are ignored. `findings_sync.tick`
+  surfaces a non-empty result as `grant_conflicts`, also on the grant-skip
+  result. It never blocks authorization. With no budget set, tick results
+  are identical unless two or more configured grants conflict.
 - Three read-only chat commands, `/omega-redteam-report`,
   `/omega-redteam-coverage` and `/omega-redteam-sync-plan`, over the digest,
-  the coverage matrix and the findings-sync plan.
+  the coverage matrix and the findings-sync plan. Output is bounded and
+  path-free: `/omega-redteam-sync-plan` lists at most 20 entries per list
+  with `<name>_total` counts, escaped and clipped hashes, and grant path
+  labels as basenames or `grant-N`; non-structured failures return only the
+  exception type name; `--since` and `--threshold` accept ASCII digits only.
 - `python -m omega_prime.grokbot.purple_cycle` (modes `plan`, `run`,
   `apply`; six steps from preflight to findings dispatch; resumable
   checkpoints and an NDJSON ledger) and `/omega-redteam-cycle`, which plans
   by default and with `--run` refreshes release-watch state and audits a
-  new upstream tag. Chat never dispatches findings or applies a pin bump.
+  new upstream tag. Chat never dispatches findings or applies a pin bump
+  and returns no checkpoint or ledger path. Apply is refused (exit 3)
+  without a configured RoE (`roe-missing`), with an expired, missing,
+  invalid or revoked RoE, or with a non-IDLE harness; the gate is
+  re-checked on every pass and resume, and a blocked step is never
+  checkpointed. Cycle ids are `purple-cycle-YYYYMMDD-<mode>[-s<8hex>]
+  [-HHMMSS]`; checkpoints live under `<reports>/purple-cycle/workflows/`,
+  and an errored pin-bump audit is retried by a later cycle through
+  `<reports>/purple-cycle-pending.json`. `--now` is rejected in apply mode
+  and option abbreviations are rejected. The release-watch `gh api` call
+  times out after 60 s (exit 3).
   Usage: [Operator tools](docs/red-team.md#operator-tools).
 
 #### Changed

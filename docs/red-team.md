@@ -125,6 +125,15 @@ detail)` with exact duplicates dropped:
   fewer than two readable grants give an empty list and unreadable
   artifacts are skipped. `findings_sync.tick` attaches a non-empty result
   as `grant_conflicts` (see [Operator tools](#operator-tools)).
+- **Scaling cap:** at most 100 rows are returned, in the same sort order,
+  followed by one sentinel row `{"kind": "conflicts-truncated", "grants":
+  [], "detail": "<N> more conflicts not listed"}` (`N` is the exact count
+  of the remaining distinct rows); with 100 rows or fewer the output is
+  unchanged. A grant file larger than 1 MiB (1,048,576 bytes) is ignored
+  by the detector as unreadable; a file of exactly that size is read.
+  `conflicts --json` prints the capped list with the sentinel, the text
+  output prints it as `conflicts-truncated: <N> more conflicts not
+  listed`, and the exit code is still `3`.
 - **Not detectable:** rate limits, deny lists, per-class limits, targets
   beyond host and tools, and `case_classes` differences (treated as a
   union).
@@ -167,8 +176,8 @@ via `omega_command`, like every other `/omega-*` command):
 | `/omega-redteam-triage-apply --hash <dedupe-hash> [--untriage] [--apply]` | Preview one triage proposal without `--apply`, apply it with `--apply`; refuses when the audit script is dirty. |
 | `/omega-redteam-report [--summary] [--since <RFC3339>] [--threshold gate:<pct>\|gate-risk:<score>]` | Read-only engagement digest (3-4 plain-text lines: runs, pass, gaps and findings; coverage counts and risk score; worst classes; an optional gate line), or one summary line with `--summary`. A failing gate is reported in the result, not as an error. |
 | `/omega-redteam-coverage [--jsonl] [--since <RFC3339>]` | Read-only per-class coverage rows (class, cases, runs, wins, pass_pct, gaps, verdict, tier, weight, earned, possible); `--jsonl` adds the JSONL text. |
-| `/omega-redteam-sync-plan` | Plan the next findings sync with zero tracker calls and zero writes: what would sync, what quiet hours or the sync budget hold, and grant conflicts. |
-| `/omega-redteam-cycle [--run] [--steps <a,b>]` | Plan the purple cycle (default, pure) or run it with `--run`: refresh the release-watch state, audit a newly released upstream tag (audit-only), write a checkpoint and a ledger row. |
+| `/omega-redteam-sync-plan` | Plan the next findings sync with zero tracker calls and zero writes: what would sync, what quiet hours or the sync budget hold, and grant conflicts. Each list is capped at 20 entries with a `<name>_total` count. |
+| `/omega-redteam-cycle [--run] [--steps <a,b>]` | Plan the purple cycle (default, pure) or run it with `--run`: refresh the release-watch state, audit a newly released upstream tag (audit-only), write a checkpoint and a ledger row. The result carries no file paths. |
 
 BLOCKED is fail-closed: `/omega-redteam-run` checks the harness state
 first and refuses with `harness_blocked` unless the state is `IDLE` —
@@ -187,10 +196,30 @@ it, and writes a checkpoint and a ledger row. Chat can never dispatch
 findings or apply a pin bump: those stay with the CLI in
 [Operator tools](#operator-tools).
 
+Chat output is bounded and path-free:
+
+- `/omega-redteam-sync-plan` returns at most 20 entries per list
+  (`would_sync`, `quiet_held`, `budget_held`, `grant_conflicts`) plus
+  `would_sync_total`, `quiet_held_total`, `budget_held_total` and
+  `grant_conflicts_total`. Hashes and row values are ASCII-escaped
+  (non-printable and non-ASCII characters become `\xNN`/`\uNNNN`) and
+  clipped to 64 characters; `detail` and tick-error text to 200. A grant
+  label that is a file path is shown as its basename, or as `grant-N`
+  when basenames collide; the same alias replaces the path inside
+  `detail`. The `conflicts-truncated` sentinel row passes through after
+  the capped rows and is not counted in `grant_conflicts_total`.
+- `/omega-redteam-cycle` returns no `checkpoint` or `ledger` path, in
+  results or error envelopes.
+- A command failure that is not a structured error returns only the
+  exception type name (`{"error": "<TypeName>"}`).
+- `--since` and `--threshold` accept ASCII digits only.
+
 ## Operator tools
 
 Four operator-run tools extend the purple-team loop. Each flag is opt-in:
-with it unset, output and result shape are unchanged.
+with it unset, output and result shape are unchanged. The one advisory
+exception is the tick key `grant_conflicts`, present only when two or more
+configured grants conflict.
 
 ### Findings sync budget
 
@@ -205,24 +234,45 @@ with it unset, output and result shape are unchanged.
 | --- | --- |
 | integer `N > 0` | At most `N` non-urgent unsynced rows per tick. |
 | mapping | `{"default": N, "<tracker>": M}`: the tracker's entry (case-insensitive) wins, then `default`. |
-| anything else | Off: missing, `None`, bool, `0`, negative, float, string, list, `{}`, any invalid value in the mapping, or no entry and no `default`. |
+| anything else | Off: missing, `None`, bool, `0`, negative, float, string, list, `{}`, a mapping with no entry for the tracker and no `default`. |
 
-- `critical` and `high` rows (case-insensitive) always dispatch and never
-  consume budget.
+- `critical` and `high` rows (case-insensitive, whitespace-trimmed) always
+  dispatch and never consume budget. They are deliberately uncapped: a
+  source that stamps every row `critical` is not limited by this budget.
 - Quiet hours are decided first; quiet-held rows never consume budget.
-- The first `N` non-urgent unsynced rows in store order dispatch. The rest
-  stay unsynced and retry oldest-first on the next tick.
+- The budget is spent by severity: `medium` rows first, then `low`, then
+  every other severity (unknown or missing), and oldest first within a
+  severity. The chosen rows are still pushed in store order. The rest
+  stay unsynced and retry on the next tick, so a `medium` row is not
+  starved behind a backlog of `low` rows.
+- The mapping is looked up by the EFFECTIVE tracker: when the graph
+  tracker's credentials are complete, graph wins and a `slack` entry is
+  not used (use `graph`, or `default`). Mappings resolve per entry: a
+  valid entry for the tracker, or a valid `default`, still applies when a
+  sibling entry is invalid.
 - A valid budget adds `sync_budget: N` and `budget_held:
-  [{"dedupe_hash", "reason": "sync-budget"}]` (possibly empty) to the tick
-  result; dry-run and plan modes count the same way.
+  [{"dedupe_hash", "reason": "sync-budget"}]` (possibly empty, store
+  order) to the tick result; dry-run and plan modes choose the same rows.
+- An unusable value adds `sync_budget_invalid` to the tick result (also on
+  error, dry-run and plan results, not on the disabled or grant-skip
+  result) and the cap is off for that tracker. Reasons: `type` (bool,
+  float, string, list, ...), `value` (a non-positive integer), `entry` (a
+  mapping with a non-string key or an invalid entry). An absent or `None`
+  key, `{}` and a mapping with no entry for the tracker are not flagged.
 - `grant_conflicts` (advisory, only when non-empty and at least two grants
-  are configured) is also added to tick results.
+  are configured) is also added to tick results, including the grant-skip
+  result. With the budget unset, results are identical unless two or more
+  configured grants conflict.
+- The `_main_<tracker>` CLI entry points (a real run without
+  `--dispatch-dry-run`) call the sync functions directly and apply neither
+  quiet hours nor the budget; only `tick` and `--dispatch-dry-run` do.
 
 ```bash
 python -m omega_prime.grokbot.findings_sync --tracker slack --dispatch-dry-run
 ```
 
-The dry run prints `skip (sync-budget) <hash>` for each held row.
+The dry run prints `skip (sync-budget) <hash>` for each held row;
+non-printable characters in printed hashes are escaped.
 
 ### Pin bump report path
 
@@ -235,19 +285,27 @@ python -m omega_prime.grokbot.pin_bump --to v1.4 --report-to /tmp/delta.md
 
 - A relative `PATH` resolves against the working directory; the resolved
   absolute path is printed in the `pin-bump audit: <verdict> (report:
-  <path>)` line.
-- The file is written atomically (temp file, then rename) with mode
-  `0644`; missing parent directories are created.
+  <path>)` line. Printed paths have control characters escaped; the
+  `--json` `report` key is the raw resolved path.
+- The file is written atomically (temp file `.pin-bump-report.<hex>.tmp`,
+  then rename) with mode `0644`; missing parent directories are created.
+  The write goes through a directory descriptor pinned at validation, so
+  swapping the parent or an ancestor afterwards cannot redirect it. If the
+  destination is tampered with after validation, the run exits `1` and
+  leaves the file unchanged.
 - Usage errors exit `2` before any subprocess: empty, NUL or non-string
-  path, `.` or `..`, an existing directory, any symlink (including a
-  dangling one) or other non-regular file, a parent that is not a
-  directory, and combination with `--audit-only`, `--rollback` or
-  `--skip-audit`.
+  path, `.` or `..`, a trailing path separator, a file name over 200
+  bytes (UTF-8), an existing directory, any symlink (including a dangling
+  one) or other non-regular file, a parent that is not a directory, an
+  existing file that is neither empty nor a previous pin-bump report
+  (so `VENDOR.md` or any other file is never overwritten), and
+  combination with `--audit-only`, `--rollback` or `--skip-audit`.
 - `--dry-run` validates only and prints `[dry-run] report would be written
   to <path>`.
 - `--json` gains a `report` key only when the flag is set.
-- `--schedule` stores the absolute path; every replay re-validates it and
-  an invalid stored path exits `2` without writing.
+- `--schedule` stores the absolute path; every replay re-validates it
+  (including the overwrite refusal) and an invalid stored path exits `2`
+  without writing.
 - `--verify` failure deletes only a report this run created.
 - `--rollback` still reads `<root>/report.md`, then falls back to the
   `VENDOR.md` git history, so a custom path loses the report-based
@@ -267,7 +325,10 @@ Gate: ...
 
 The `worst=` line lists up to three classes (`worst=none` when there are
 none); the `Gate:` line appears only with `--threshold` or `--baseline`.
-Empty or missing history prints zeros, not an error.
+Empty or missing history prints zeros, not an error. The `Gate:` line and
+all digest stderr (exit `1`, `2` and `3`) name only schema classes or
+`other` (a class that is not in the schema is shown as `other`), and
+control characters appear as backslash escapes.
 
 | Exit | Meaning |
 | --- | --- |
@@ -284,7 +345,10 @@ flags like `--summary`.
 Lines: one compact object per class, in coverage order, with keys
 `schema` (`"coverage/1"`), `class`, `cases`, `runs`, `wins`, `pass_pct`,
 `gaps`, `verdict`, `tier`, `weight`, `earned`, `possible`. Stdout is
-unchanged.
+unchanged. Class names are JSON-escaped data (the fixed vocabulary above
+applies to the digest only). The file is written atomically (a
+`.engrep-*.tmp` file in the target directory, fsync, rename) with mode
+`0644`; a symlink at the target is refused and the exit code is `1`.
 
 ```bash
 python3 scripts/engagement-report.py --digest --threshold gate:80 \
@@ -297,7 +361,9 @@ python3 scripts/engagement-report.py --digest --threshold gate:80 \
 [--apply] [--steps a,b] [--reports-dir DIR] [--root DIR] [--now ISO-8601]
 [--force-new] [--json]` chains the purple-team operations in order. It
 never runs a simulation, signs or creates RoE, edits repo files or applies
-a pin bump.
+a pin bump. `--root` is the pin-bump repository root. `--now` is rejected
+(exit `2`) together with apply mode, and option abbreviations are rejected
+(exit `2`).
 
 ```bash
 python -m omega_prime.grokbot.purple_cycle --json
@@ -318,26 +384,38 @@ The six steps, in order:
    upstream tags (writes, uses the network).
 3. `pin-bump-audit` - audit-only check of the newest new tag, 300 s per
    command; skipped when nothing is new. A tag that is not a plain version
-   tag gives `unsafe-tag` and no audit.
+   tag gives `unsafe-tag` and no audit. If the audit errors, the tag is
+   kept in `<reports>/purple-cycle-pending.json` (`{"tag": ...}`) and a
+   later cycle audits it; a successful audit clears the file.
 4. `engagement` - summary and digest of the reports directory.
 5. `findings-plan` - a dry findings sync: would-sync, quiet-held and
    budget-held counts and whether grants conflict.
 6. `findings-dispatch` - apply only. Refused (`blocked`, `apply-refused`,
-   exit `3`) unless the preflight harness state is `IDLE` and the RoE state
-   is not `expired`, `missing` or `invalid`.
+   exit `3`, cause in `detail.cause`) when the harness state is not `IDLE`
+   (its cause, e.g. `kill-switch-set`), when no RoE is configured
+   (`roe-missing`), or when the RoE is `expired`, `missing`, `invalid` or
+   revoked (`revoked`: a `grant-revoked` row in `redteam.roe_audit_log`,
+   read only). The gate is re-checked fresh on every pass and every
+   resume; checkpointed preflight facts are reporting only.
 
+- **Cycle id:** `purple-cycle-YYYYMMDD-<mode>[-s<8hex>][-HHMMSS]`. A
+  `--steps` subset adds `-s<8hex>` (a hash of the selected steps in
+  canonical order), so each selection has its own id; `--force-new` adds
+  `-HHMMSS`.
 - **Checkpoint:** `run` and `apply` write
-  `<root>/workflows/purple-cycle-<YYYYMMDD>-<mode>.json`; `--force-new`
-  appends `-<HHMMSS>`. Without `--root` the root is `$OMEGA_PRIME_STATE_DIR`
-  if set, else the repository root. Cycle checkpoints raise
-  `durable_status.workflow_checkpoints`.
+  `<reports>/purple-cycle/workflows/<cycle id>.json`, not the repository
+  or the durable state root, so `durable_status.workflow_checkpoints` is
+  unaffected. A checkpoint whose mode, cycle id, selection or step records
+  do not match the current run is `checkpoint-unreadable` (exit `1`).
 - **Ledger:** `<reports>/purple-cycle.ndjson`; a ledger write failure never
   raises.
-- **Resume:** a step that errors is not checkpointed, so a rerun repeats
-  only that step; later steps report `halted`. A finished cycle (including
-  a refused one) returns its stored result without executing anything;
-  use `--force-new` to retry the same day. The `--steps` selection is fixed
-  by the first run of a cycle id.
+- **Resume:** a step that errors or is blocked is never checkpointed, so a
+  rerun (the same day too) re-evaluates it and reuses the completed steps;
+  later steps report `halted`. A fully completed cycle returns its stored
+  result without executing anything (`resumed` true); a release published
+  later the same day is picked up the next UTC day or with `--force-new`.
+- **Release watch:** the `gh api` call times out after 60 s; a timeout is a
+  fetch failure (exit `3`).
 - **Exit codes:** `0` completed, `1` a step errored, `2` usage error, `3`
   apply refused.
 
