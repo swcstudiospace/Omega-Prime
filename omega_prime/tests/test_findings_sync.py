@@ -3728,13 +3728,15 @@ def test_sync_budget_caps_non_urgent_for_every_tracker(tmp_path, name):
     result, _fake = _budget_tick(name, tmp_path, sync_budget=2)
     assert set(result) == _BUDGET_KEYS
     assert result["sync_budget"] == 2
-    assert [e["dedupe_hash"] for e in result["pushed"]] == hashes[:2]
+    # Severity priority: the lone medium (store index 2) and the oldest low
+    # take the budget; pushes still follow store order.
+    assert [e["dedupe_hash"] for e in result["pushed"]] == [hashes[0], hashes[2]]
     assert result["budget_held"] == [
-        {"dedupe_hash": digest, "reason": "sync-budget"} for digest in hashes[2:]
+        {"dedupe_hash": hashes[index], "reason": "sync-budget"} for index in (1, 3, 4)
     ]
-    assert _synced(tmp_path) == [True, True, False, False, False]
+    assert _synced(tmp_path) == [True, False, True, False, False]
     after = load_findings(tmp_path)
-    for index in (2, 3, 4):  # held rows are untouched
+    for index in (1, 3, 4):  # held rows are untouched
         assert after[index] == before[index]
         assert "issue_url" not in after[index]
         assert "synced_at" not in after[index]
@@ -3872,29 +3874,32 @@ def test_sync_budget_mapping_without_entry_for_tracker_is_off(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "bad",
+    ("bad", "reason"),
     [
-        None,
-        True,
-        False,
-        0,
-        -1,
-        2.5,
-        "3",
-        [3],
-        {},
-        {"default": "3"},
-        {"default": 0},
-        {"default": True},
-        {"default": 2, "github": 1.5},
+        (None, None),
+        (True, "type"),
+        (False, "type"),
+        (0, "value"),
+        (-1, "value"),
+        (2.5, "type"),
+        ("3", "type"),
+        ([3], "type"),
+        ({}, None),
+        ({"default": "3"}, "entry"),
+        ({"default": 0}, "entry"),
+        ({"default": True}, "entry"),
     ],
     ids=repr,
 )
 @pytest.mark.parametrize("name", ["github", "graph", "opsgenie"])
-def test_sync_budget_invalid_value_is_off_with_old_key_set(tmp_path, name, bad):
+def test_sync_budget_invalid_value_is_off_and_flagged(tmp_path, name, bad, reason):
     _seed_severities(tmp_path, ["low"] * 3)
     result, _fake = _budget_tick(name, tmp_path, sync_budget=bad)
-    assert set(result) == _BASE_KEYS
+    if reason is None:
+        assert set(result) == _BASE_KEYS
+    else:
+        assert set(result) == _BASE_KEYS | {"sync_budget_invalid"}
+        assert result["sync_budget_invalid"] == reason
     assert len(result["pushed"]) == 3
     assert _synced(tmp_path) == [True] * 3
 
@@ -4065,3 +4070,294 @@ def test_tick_grant_conflicts_coexist_with_notice_and_budget(
     assert result["grant_conflicts"] == _CONFLICTS
     assert len(result["expiry_notice"]) == 1
     assert len(result["budget_held"]) == 1
+
+
+# Fix wave FX-3: budget severity priority, invalid-config signal, skip ---------
+
+
+def _pushed_hashes(result):
+    return [entry["dedupe_hash"] for entry in result["pushed"]]
+
+
+def _held_hashes(result):
+    return [entry["dedupe_hash"] for entry in result["budget_held"]]
+
+
+@pytest.mark.parametrize("name", _ALL_TRACKERS)
+def test_sync_budget_spends_by_severity_rank_but_pushes_in_store_order(tmp_path, name):
+    hashes = _seed_severities(
+        tmp_path, ["weird", "low", "Medium ", "LOW", "medium", "critical"]
+    )
+    result, fake = _budget_tick(name, tmp_path, sync_budget=2)
+    # Both mediums take the budget (ahead of the older low/unknown rows),
+    # the critical row bypasses it, and pushes follow store order.
+    assert _pushed_hashes(result) == [hashes[2], hashes[4], hashes[5]]
+    assert _held_hashes(result) == [hashes[0], hashes[1], hashes[3]]
+    assert _synced(tmp_path) == [False, False, True, False, True, True]
+    assert len(fake.calls) >= 3
+
+
+@pytest.mark.parametrize("name", _ALL_TRACKERS)
+def test_sync_budget_low_outranks_unknown_severity(tmp_path, name):
+    hashes = _seed_severities(tmp_path, ["weird", "unknown", "low", "low"])
+    result, _fake = _budget_tick(name, tmp_path, sync_budget=2)
+    assert _pushed_hashes(result) == hashes[2:]
+    assert _held_hashes(result) == hashes[:2]
+
+
+@pytest.mark.parametrize("name", _ALL_TRACKERS)
+def test_sync_budget_medium_behind_low_backlog_goes_first(tmp_path, name):
+    hashes = _seed_severities(tmp_path, ["low"] * 10 + ["medium"])
+    result, _fake = _budget_tick(name, tmp_path, sync_budget=2)
+    assert _pushed_hashes(result) == [hashes[0], hashes[10]]
+    assert len(result["budget_held"]) == 9
+
+
+def test_sync_budget_severity_priority_is_deterministic_across_ticks(tmp_path):
+    hashes = _seed_severities(tmp_path, ["low", "low", "low", "medium", "low"])
+    cfg = _enabled_config(sync_budget=2)
+    first = tick(cfg, reports_directory=tmp_path, runner=FakeGh())
+    assert _pushed_hashes(first) == [hashes[0], hashes[3]]
+    second = tick(cfg, reports_directory=tmp_path, runner=FakeGh())
+    assert _pushed_hashes(second) == [hashes[1], hashes[2]]
+    third = tick(cfg, reports_directory=tmp_path, runner=FakeGh())
+    assert _pushed_hashes(third) == [hashes[4]]
+    assert third["budget_held"] == []
+
+
+@pytest.mark.parametrize("name", _ALL_TRACKERS)
+def test_sync_budget_dry_and_plan_choose_the_same_rows_as_a_real_run(tmp_path, name):
+    severities = ["low", "weird", "medium", "low", "critical", "medium"]
+    real_dir, dry_dir, plan_dir = (tmp_path / part for part in ("r", "d", "p"))
+    real_hashes = _seed_severities(real_dir, severities)
+    _seed_severities(dry_dir, severities)
+    _seed_severities(plan_dir, severities)
+    real, _fake = _budget_tick(name, real_dir, sync_budget=2)
+    dry, dry_fake = _budget_tick(
+        name, dry_dir, sync_budget=2, tick_kwargs={"dry_run": True}
+    )
+    plan, plan_fake = _budget_tick(name, plan_dir, sync_budget=2, dispatch_dry_run=True)
+    expected = [real_hashes[index] for index in (2, 4, 5)]
+    assert _pushed_hashes(real) == expected
+    assert _pushed_hashes(dry) == expected
+    assert [e["dedupe_hash"] for e in plan["dispatch_plan"]] == expected
+    for held in (real, dry, plan):
+        assert _held_hashes(held) == [real_hashes[index] for index in (0, 1, 3)]
+    assert plan_fake.calls == []
+    assert dry_fake.calls == []
+
+
+@pytest.mark.parametrize("name", _ALL_TRACKERS)
+@pytest.mark.parametrize("bad", [True, "3", 0, -2, 2.5, [1], {}, {"x": 0}])
+def test_sync_budget_unset_and_invalid_are_identical_to_each_other(tmp_path, name, bad):
+    severities = ["low", "medium", "weird", "high", "low"]
+    plain_dir, bad_dir = tmp_path / "plain", tmp_path / "bad"
+    _seed_severities(plain_dir, severities)
+    _seed_severities(bad_dir, severities)
+    plain, plain_fake = _budget_tick(name, plain_dir)
+    other, other_fake = _budget_tick(name, bad_dir, sync_budget=bad)
+    other.pop("sync_budget_invalid", None)
+    assert set(plain) == _BASE_KEYS
+    assert other == plain
+    # Payload bodies carry wall-clock stamps, so compare the call count.
+    assert len(other_fake.calls) == len(plain_fake.calls)
+    assert _synced(bad_dir) == _synced(plain_dir) == [True] * 5
+
+
+def test_sync_budget_invalid_flag_only_when_present_and_unusable(tmp_path):
+    for good in (None, 3, {"default": 2}, {"slack": 1}, {}):
+        out = tmp_path / f"good-{good!r}".replace("/", "_").replace(" ", "")
+        _seed_severities(out, ["low"])
+        result, _fake = _budget_tick("github", out, sync_budget=good)
+        assert "sync_budget_invalid" not in result
+    absent_dir = tmp_path / "absent"
+    _seed_severities(absent_dir, ["low"])
+    absent, _fake = _budget_tick("github", absent_dir)
+    assert "sync_budget_invalid" not in absent
+
+
+def test_sync_budget_mapping_valid_entry_survives_invalid_sibling(tmp_path):
+    hashes = _seed_severities(tmp_path, ["low"] * 3)
+    result, _fake = _budget_tick(
+        "slack", tmp_path, sync_budget={"slack": 1, "teams": "x"}
+    )
+    assert result["sync_budget"] == 1
+    assert result["sync_budget_invalid"] == "entry"
+    assert _pushed_hashes(result) == hashes[:1]
+    assert _held_hashes(result) == hashes[1:]
+
+
+def test_sync_budget_mapping_valid_default_survives_invalid_tracker_entry(tmp_path):
+    hashes = _seed_severities(tmp_path, ["low"] * 3)
+    result, _fake = _budget_tick(
+        "github", tmp_path, sync_budget={"default": 2, "github": 1.5}
+    )
+    assert result["sync_budget"] == 2
+    assert result["sync_budget_invalid"] == "entry"
+    assert _pushed_hashes(result) == hashes[:2]
+
+
+def test_sync_budget_mapping_non_string_key_is_a_bad_entry(tmp_path):
+    _seed_severities(tmp_path, ["low"] * 2)
+    result, _fake = _budget_tick("github", tmp_path, sync_budget={1: 3})
+    assert set(result) == _BASE_KEYS | {"sync_budget_invalid"}
+    assert result["sync_budget_invalid"] == "entry"
+    assert len(result["pushed"]) == 2
+
+
+def test_sync_budget_mapping_keyed_by_configured_tracker_is_ignored_under_graph(
+    tmp_path,
+):
+    # Complete graph credentials win as the effective tracker, so a
+    # ``github`` entry is simply not looked up: off, and not "invalid".
+    _seed_severities(tmp_path, ["low"] * 3)
+    cfg = _graph_config(sync_budget={"github": 1}, tracker="github")
+    result = tick(cfg, reports_directory=tmp_path, runner=FakeGraph())
+    assert set(result) == _BASE_KEYS
+    assert len(result["pushed"]) == 3
+
+
+def test_sync_budget_invalid_flag_rides_on_error_results_but_not_disabled(
+    tmp_path,
+):
+    erroring = _budget_tick("slack", tmp_path, sync_budget=True, slack_webhook_url="")
+    result, fake = erroring
+    assert result["error"] == NO_SLACK_WEBHOOK_MESSAGE
+    assert result["sync_budget_invalid"] == "type"
+    assert fake.calls == []
+    off, _fake = _budget_tick("github", tmp_path, sync_budget=True, enabled=False)
+    assert off["disabled"] is True
+    assert "sync_budget_invalid" not in off
+
+
+def test_sync_budget_invalid_flag_on_dry_and_plan_results(tmp_path):
+    _seed_severities(tmp_path, ["low"] * 2)
+    dry, _fake = _budget_tick(
+        "github", tmp_path, sync_budget=0, tick_kwargs={"dry_run": True}
+    )
+    assert dry["sync_budget_invalid"] == "value"
+    assert len(dry["pushed"]) == 2
+    plan, _fake = _budget_tick("github", tmp_path, sync_budget=0, dispatch_dry_run=True)
+    assert plan["sync_budget_invalid"] == "value"
+    assert len(plan["dispatch_plan"]) == 2
+
+
+def test_sync_budget_reason_constants_exported():
+    for name in (
+        "SYNC_BUDGET_INVALID_ENTRY",
+        "SYNC_BUDGET_INVALID_TYPE",
+        "SYNC_BUDGET_INVALID_VALUE",
+        "SYNC_BUDGET_SEVERITY_RANK",
+    ):
+        assert name in findings_sync.__all__
+    rank = findings_sync.SYNC_BUDGET_SEVERITY_RANK
+    assert rank["medium"] > rank["low"] > 0
+
+
+def test_tick_grant_skip_result_carries_conflicts(tmp_path, monkeypatch, fresh_notices):
+    seen = _stub_conflicts(monkeypatch, _CONFLICTS)
+    _seed_severities(tmp_path, ["low"])
+    cfg = _grant_config("github", ["jira"])
+    cfg["redteam"]["findings_sync"]["roe_artifacts"] = [
+        {"covers": ["jira"]},
+        {"covers": ["jira"]},
+    ]
+    del cfg["redteam"]["findings_sync"]["roe_artifact"]
+    fake = FakeGh()
+    result = tick(cfg, reports_directory=tmp_path, runner=fake)
+    assert result["skipped_tracker"] == "github"
+    assert result["grant_conflicts"] == _CONFLICTS
+    assert fake.calls == []
+    assert len(seen) == 1 and len(seen[0]) == 2
+
+
+def test_tick_grant_skip_result_unchanged_without_conflicts(
+    tmp_path, monkeypatch, fresh_notices
+):
+    _stub_conflicts(monkeypatch, [])
+    _seed_severities(tmp_path, ["low"])
+    result = tick(
+        _grant_config("github", ["jira"]),
+        reports_directory=tmp_path,
+        runner=FakeGh(),
+    )
+    assert set(result) == {
+        "pushed",
+        "skipped",
+        "dry_run",
+        "disabled",
+        "skipped_tracker",
+        "reason",
+    }
+
+
+_HOSTILE_HASH = "ab\x1b[31m\nFORGED: would push evil\u202e"
+_ESCAPED_HASH = "ab\\x1b[31m\\nFORGED: would push evil\\u202e"
+
+
+def _poison_hash(tmp_path, index):
+    path = findings_path(tmp_path)
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+    rows[index]["dedupe_hash"] = _HOSTILE_HASH
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+
+def _assert_no_forged_lines(out):
+    assert "\x1b" not in out
+    assert "\u202e" not in out
+    for line in out.splitlines():
+        assert line.startswith(("would push ", "skip ("))
+
+
+def test_cli_dispatch_dry_run_sanitizes_budget_held_hash(tmp_path, monkeypatch, capsys):
+    hashes = _seed_severities(tmp_path, ["low"] * 3)
+    _poison_hash(tmp_path, 2)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _dispatch_config(tmp_path, sync_budget=1),
+    )
+    monkeypatch.setattr(findings_sync, "_default_runner", FakeGh())
+    assert main(["--reports-dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    _assert_no_forged_lines(out)
+    assert f"skip (sync-budget) {hashes[1]}" in out
+    assert f"skip (sync-budget) {_ESCAPED_HASH}" in out
+
+
+def test_cli_dispatch_dry_run_sanitizes_quiet_skipped_hash(
+    tmp_path, monkeypatch, capsys
+):
+    _seed_severities(tmp_path, ["low"] * 2)
+    _poison_hash(tmp_path, 1)
+    monkeypatch.setattr(findings_sync, "in_quiet_hours", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _dispatch_config(
+            tmp_path, quiet_hours={"start": "22:00", "end": "06:00"}
+        ),
+    )
+    monkeypatch.setattr(findings_sync, "_default_runner", FakeGh())
+    assert main(["--reports-dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    _assert_no_forged_lines(out)
+    assert f"skip (quiet-hours) {_ESCAPED_HASH}" in out
+
+
+def test_cli_dispatch_dry_run_sanitizes_plan_and_synced_hashes(
+    tmp_path, monkeypatch, capsys
+):
+    _seed_severities(tmp_path, ["low", "low"])
+    path = findings_path(tmp_path)
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+    rows[1]["issue_url"] = "https://github.com/x/y/issues/1"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    _poison_hash(tmp_path, 0)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _dispatch_config(tmp_path),
+    )
+    monkeypatch.setattr(findings_sync, "_default_runner", FakeGh())
+    assert main(["--reports-dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert f"would push {_ESCAPED_HASH}" in out
