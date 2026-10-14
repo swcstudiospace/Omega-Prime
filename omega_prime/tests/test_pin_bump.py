@@ -592,11 +592,14 @@ def _mutating_verbs(cmds: list[list[str]]) -> list[list[str]]:
     """Commands that would change files, branches, or remote state."""
     mutating = []
     for cmd in cmds:
-        if cmd[:2] == ["git", "fetch"] or cmd[:2] == ["git", "checkout"]:
-            mutating.append(cmd)
-        elif cmd[:2] == ["git", "add"] or cmd[:2] == ["git", "commit"]:
-            mutating.append(cmd)
-        elif cmd[:2] == ["git", "push"] or cmd[:3] == ["gh", "pr", "create"]:
+        if (
+            cmd[:2] == ["git", "fetch"]
+            or cmd[:2] == ["git", "checkout"]
+            or cmd[:2] == ["git", "add"]
+            or cmd[:2] == ["git", "commit"]
+            or cmd[:2] == ["git", "push"]
+            or cmd[:3] == ["gh", "pr", "create"]
+        ):
             mutating.append(cmd)
     return mutating
 
@@ -743,7 +746,10 @@ def test_revendor_preview_matches_pack_counts(tmp_path):
     )
     assert preview == (2, 0)
     before = _snapshot(root)
-    assert pin_bump.revendor_preview(
-        root / "redteam" / "grokbot", root / "omega_prime" / "redteam" / "pack"
-    ) == preview
+    assert (
+        pin_bump.revendor_preview(
+            root / "redteam" / "grokbot", root / "omega_prime" / "redteam" / "pack"
+        )
+        == preview
+    )
     assert _snapshot(root) == before

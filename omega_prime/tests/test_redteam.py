@@ -512,6 +512,7 @@ def test_redteam_disabled_by_default_and_enabled_by_env(monkeypatch):
             "tracker": "github",
             "linear_team_id": "",
             "slack_webhook_url": "",
+            "teams_webhook_url": "",
         },
     }
     monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ENABLED", "1")

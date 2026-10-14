@@ -875,3 +875,396 @@ def test_no_drill_down_flag_renders_no_section(tmp_path):
     proc = run_script("--reports-dir", str(fixture), "--since", T0)
     assert proc.returncode == 0, proc.stderr
     assert "## Coverage drill-down" not in proc.stdout
+
+
+# Coverage delta vs previous report (batch-05 Feature 3) -----------------------
+
+
+def test_diff_coverage_renders_delta_section(tmp_path):
+    """Feature 3 happy: --diff-coverage renders current|previous|Δ per class."""
+    previous_dir = tmp_path / "previous"
+    previous_dir.mkdir()
+    seed_transitions(previous_dir, cycle(T1))
+    seed_last_run(previous_dir)
+    seed_findings(previous_dir, [finding_row("abuse-01", "resp-a", T1)])
+    baseline_path = tmp_path / "baseline.md"
+    baseline_path.write_text(
+        run_script("--reports-dir", str(previous_dir), "--since", T0).stdout,
+        encoding="utf-8",
+    )
+
+    current_dir = tmp_path / "current"
+    current_dir.mkdir()
+    seed_transitions(current_dir, cycle(T1) + cycle(T2))
+    seed_last_run(current_dir, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(
+        current_dir,
+        [
+            finding_row("abuse-01", "resp-a", T1),
+            finding_row("jailbreak-01", "resp-j", T2),
+        ],
+    )
+    proc = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--diff-coverage",
+        str(baseline_path),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    lines = proc.stdout.splitlines()
+    matrix_at = lines.index("## Coverage matrix")
+    delta_at = lines.index("## Coverage delta")
+    gaps_at = lines.index("## Detection gaps")
+    assert matrix_at < delta_at < gaps_at
+    body = section_lines(proc.stdout, "## Coverage delta")
+    assert body[0] == ""
+    assert body[1] == "- baseline: baseline.md"
+    assert body[3] == ("| class | metric | current | previous | delta | trend |")
+    rows = [line for line in body if line.startswith("| ")]
+    assert len(rows) == 2 + 6 * 5  # header + separator + 5 metrics × 6 classes
+    text = "\n".join(body)
+    # The failing class regresses on pass rate; untouched classes are flat.
+    assert (
+        "| jailbreak | pass rate | 0/1 (0.0%) | 1/1 (100.0%) | -100.0pp ↓ | regressed |"
+        in text
+    )
+    assert (
+        "| jailbreak | verdict | gappy | covered | covered → gappy | regressed |"
+        in text
+    )
+    assert (
+        "| abuse | pass rate | 1/1 (100.0%) | 1/1 (100.0%) | +0.0pp → | unchanged |"
+        in text
+    )
+    assert all(
+        line.split("|")[6].strip() in ("improved", "regressed", "unchanged")
+        for line in rows[2:]
+    )
+
+
+def test_diff_coverage_is_deterministic(tmp_path):
+    """Feature 3 determinism: same inputs render byte-identical delta runs."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    baseline_path = tmp_path / "baseline.md"
+    baseline_path.write_text(
+        run_script("--reports-dir", str(fixture), "--since", T0).stdout,
+        encoding="utf-8",
+    )
+    first = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--diff-coverage",
+        str(baseline_path),
+    )
+    second = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--diff-coverage",
+        str(baseline_path),
+    )
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_diff_coverage_missing_file_exits_1(tmp_path):
+    """Feature 3 edge: an unreadable --diff-coverage path fails closed."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--diff-coverage",
+        str(tmp_path / "absent.md"),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_parse_previous_coverage_and_render_delta_units():
+    """Feature 3 units: matrix parsing (n/a ⇒ 0.0) and trend rendering."""
+    module = _report_module()
+    assert module.parse_previous_coverage("# Engagement report\n") == {}
+    text = (
+        "# Engagement report\n"
+        "\n"
+        "## Coverage matrix\n"
+        "\n"
+        "| class | cases | runs | pass rate | gaps | verdict |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered |\n"
+        "| jailbreak | 2 | 0 | 0/0 (n/a) | 1 | gappy |\n"
+        "\n"
+        "## Detection gaps\n"
+    )
+    assert module.parse_previous_coverage(text) == {
+        "abuse": (1, 1, 1, 100.0, 0, "covered"),
+        "jailbreak": (2, 0, 0, 0.0, 1, "gappy"),
+    }
+    lines = module.render_coverage_delta(
+        current=[
+            ("abuse", 1, 1, 1, 100.0, 0, "covered"),
+            ("jailbreak", 2, 1, 0, 0.0, 2, "gappy"),
+        ],
+        previous={"abuse": (1, 1, 1, 100.0, 0, "covered")},
+        baseline_label="prev.md",
+    )
+    text = "\n".join(lines)
+    assert lines[0] == "## Coverage delta"
+    assert "- baseline: prev.md" in text
+    assert "| abuse | gaps | 0 | 0 | +0 → | unchanged |" in text
+    assert "| jailbreak | pass rate | 0/1 (0.0%) | n/a | n/a → | unchanged |" in text
+    assert "| jailbreak | gaps | 2 | n/a | n/a → | unchanged |" in text
+    improved = module.render_coverage_delta(
+        current=[("abuse", 1, 1, 1, 100.0, 0, "covered")],
+        previous={"abuse": (1, 1, 0, 0.0, 1, "gappy")},
+        baseline_label="prev.md",
+    )
+    improved_text = "\n".join(improved)
+    assert (
+        "| abuse | pass rate | 1/1 (100.0%) | 0/1 (0.0%) | +100.0pp ↑ | improved |"
+        in improved_text
+    )
+    assert "| abuse | gaps | 0 | 1 | -1 ↓ | improved |" in improved_text
+    assert (
+        "| abuse | verdict | covered | gappy | gappy → covered | improved |"
+        in improved_text
+    )
+
+
+def test_no_diff_coverage_flag_renders_no_section(tmp_path):
+    """Feature 3 regression: without --diff-coverage there is no delta."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "## Coverage delta" not in proc.stdout
+
+
+# JSON output mode (batch-05 Feature 4) ----------------------------------------
+
+JSON_KEYS = [
+    "title",
+    "header",
+    "runs_summary",
+    "pass_rates",
+    "coverage",
+    "coverage_delta",
+    "coverage_drill_down",
+    "detection_gaps",
+    "findings_deltas",
+    "state_transitions",
+    "state_timeline",
+    "severity_timeline",
+    "comparison",
+    "snapshot",
+]
+
+
+def _json_fixture(directory: Path) -> None:
+    """One run of history plus two findings for JSON tests."""
+    directory.mkdir(parents=True, exist_ok=True)
+    seed_transitions(directory, cycle(T1) + cycle(T2))
+    seed_last_run(directory)
+    seed_findings(
+        directory,
+        [
+            finding_row("abuse-01", "resp-a", T1),
+            finding_row("jailbreak-01", "resp-j", T2),
+        ],
+    )
+
+
+def test_json_outputs_single_object_with_all_sections(tmp_path):
+    """Feature 4 happy: --json emits one ordered JSON object, no markdown."""
+    fixture = tmp_path / "reports"
+    _json_fixture(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0, "--json")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    assert "## " not in proc.stdout
+    data = json.loads(proc.stdout)
+    assert list(data.keys()) == JSON_KEYS
+    assert data["title"] == "Engagement report"
+    assert data["runs_summary"] == {"runs": 2, "empty": False}
+    assert len(data["coverage"]) == 6
+    assert data["coverage"][0]["class"] == "abuse"
+    assert set(data["coverage"][0].keys()) == {
+        "class",
+        "cases",
+        "runs",
+        "wins",
+        "pass_pct",
+        "gaps",
+        "verdict",
+    }
+    assert data["coverage_delta"] is None
+    assert data["coverage_drill_down"] is None
+    assert data["comparison"] is None
+    assert data["findings_deltas"]["new_count"] == 2
+    assert data["state_timeline"]["cause_counts"] == {
+        "run-completed": 2,
+        "run-started": 2,
+    }
+    assert len(data["severity_timeline"]) == 2
+    assert len(data["snapshot"]) == 2
+    # Canonical rendering: re-dumping the parsed object is a fixed point.
+    assert json.dumps(data, indent=2, sort_keys=False) + "\n" == proc.stdout
+
+
+def test_json_matches_markdown_values(tmp_path):
+    """Feature 4 consistency: JSON sections agree with the markdown run."""
+    fixture = tmp_path / "reports"
+    _json_fixture(fixture)
+
+    markdown = run_script("--reports-dir", str(fixture), "--since", T0)
+    payload = run_script("--reports-dir", str(fixture), "--since", T0, "--json")
+    assert markdown.returncode == 0, markdown.stderr
+    assert payload.returncode == 0, payload.stderr
+    data = json.loads(payload.stdout)
+    matrix_body = section_lines(markdown.stdout, "## Coverage matrix")
+    matrix_rows = [line for line in matrix_body if line.startswith("| ")][2:]
+    assert len(matrix_rows) == len(data["coverage"])
+    for line, entry in zip(matrix_rows, data["coverage"]):
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        assert cells[0] == entry["class"]
+        assert int(cells[1]) == entry["cases"]
+        assert int(cells[2]) == entry["runs"]
+        assert int(cells[4]) == entry["gaps"]
+        assert cells[5] == entry["verdict"]
+    gap_body = [
+        line
+        for line in section_lines(markdown.stdout, "## Detection gaps")
+        if line.strip().startswith("- ") and line.strip() != "- none"
+    ]
+    assert [f"- {gap}" for gap in data["detection_gaps"]] == gap_body
+
+
+def test_json_is_deterministic(tmp_path):
+    """Feature 4 determinism: same inputs emit byte-identical JSON."""
+    fixture = tmp_path / "reports"
+    _json_fixture(fixture)
+
+    first = run_script("--reports-dir", str(fixture), "--since", T0, "--json")
+    second = run_script("--reports-dir", str(fixture), "--since", T0, "--json")
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_json_composes_with_compare_delta_and_drill_down(tmp_path):
+    """Feature 4 composition: optional sections appear as JSON objects."""
+    fixture = tmp_path / "reports"
+    _json_fixture(fixture)
+    baseline_path = tmp_path / "baseline.md"
+    baseline_path.write_text(
+        run_script("--reports-dir", str(fixture), "--since", T0).stdout,
+        encoding="utf-8",
+    )
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--json",
+        "--compare",
+        str(baseline_path),
+        "--diff-coverage",
+        str(baseline_path),
+        "--drill-down",
+        "abuse",
+    )
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["comparison"]["baseline"] == "baseline.md"
+    assert [entry["metric"] for entry in data["comparison"]["metrics"]] == [
+        "runs",
+        "pass_pct",
+        "gaps",
+        "new",
+        "rescinded",
+    ]
+    assert data["coverage_delta"]["baseline"] == "baseline.md"
+    assert len(data["coverage_delta"]["rows"]) == 6 * 5
+    assert set(data["coverage_delta"]["rows"][0].keys()) == {
+        "class",
+        "metric",
+        "current",
+        "previous",
+        "delta",
+        "trend",
+    }
+    assert data["coverage_drill_down"]["class"] == "abuse"
+    # The canonical per-window copy stays markdown for future baselines.
+    canonical = next((fixture / "reports").glob("engagement-*.md"))
+    assert canonical.read_text(encoding="utf-8").startswith("# Engagement report")
+
+
+def test_json_empty_window(tmp_path):
+    """Feature 4 edge: far-future --since still emits valid all-zero JSON."""
+    fixture = tmp_path / "reports"
+    _json_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", "2030-01-01T00:00:00+00:00", "--json"
+    )
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert list(data.keys()) == JSON_KEYS
+    assert data["runs_summary"] == {"runs": 0, "empty": True}
+    assert all(entry["runs"] == 0 for entry in data["coverage"])
+    assert data["state_timeline"] == {"events": [], "cause_counts": {}}
+
+
+def test_json_out_writes_json_file(tmp_path):
+    """Feature 4 --out: the JSON payload (not markdown) lands in the file."""
+    fixture = tmp_path / "reports"
+    _json_fixture(fixture)
+    out_path = tmp_path / "report.json"
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--json", "--out", str(out_path)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+    data = json.loads(out_path.read_text(encoding="utf-8"))
+    assert list(data.keys()) == JSON_KEYS
+
+
+def test_json_missing_compare_fails_closed(tmp_path):
+    """Feature 4 edge: --json with an unreadable --compare exits 1."""
+    fixture = tmp_path / "reports"
+    _json_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--json",
+        "--compare",
+        str(tmp_path / "absent.md"),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr

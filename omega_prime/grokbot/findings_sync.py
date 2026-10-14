@@ -246,6 +246,7 @@ def slack_message(row: Mapping[str, Any]) -> dict[str, Any]:
     ]
     return {"text": text, "attachments": attachments}
 
+
 def teams_theme_color(severity: Any) -> str:
     """Resolve the Teams connector card color for ``severity``.
 
@@ -647,6 +648,7 @@ def sync_findings_slack(
         _write_rows_atomic(findings_path(reports_dir), rows)
     return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
 
+
 def sync_findings_teams(
     reports_dir: str | Path | None,
     webhook_url: str,
@@ -891,6 +893,7 @@ def _main_slack(directory: str | Path | None, webhook_url: str, dry_run: bool) -
         print(f"skip (already synced) {digest}")
     return 0
 
+
 def _main_teams(directory: str | Path | None, webhook_url: str, dry_run: bool) -> int:
     """Run the Teams branch of the CLI (dry-run aware)."""
     if dry_run:
@@ -1089,18 +1092,18 @@ __all__ = [
     "NO_LINEAR_TEAM_MESSAGE",
     "NO_REPO_MESSAGE",
     "NO_SLACK_WEBHOOK_MESSAGE",
+    "NO_TEAMS_WEBHOOK_MESSAGE",
     "SLACK_COLORS",
+    "TEAMS_THEME_COLORS",
     "TRACKERS",
     "UNKNOWN_SEVERITY_COLOR",
     "UNKNOWN_SEVERITY_LABELS",
     "UNKNOWN_SEVERITY_PRIORITY",
+    "UNKNOWN_SEVERITY_THEME_COLOR",
     "FindingsSyncError",
     "GhApiError",
     "GhNotFoundError",
     "GhRunner",
-    "NO_TEAMS_WEBHOOK_MESSAGE",
-    "TEAMS_THEME_COLORS",
-    "UNKNOWN_SEVERITY_THEME_COLOR",
     "issue_body",
     "issue_title",
     "labels_for_severity",

@@ -604,22 +604,17 @@ def bump(
             return finish(EXIT_BUMP_FAILED)
         if not dry_vendored_dir.is_dir():
             print(
-                f"[dry-run] pin-bump FAILED: missing vendored pack "
-                f"{dry_vendored_dir}"
+                f"[dry-run] pin-bump FAILED: missing vendored pack {dry_vendored_dir}"
             )
             return finish(EXIT_BUMP_FAILED)
-        dry_copied, dry_removed = revendor_preview(
-            dry_upstream_dir, dry_vendored_dir
-        )
+        dry_copied, dry_removed = revendor_preview(dry_upstream_dir, dry_vendored_dir)
         print(
-            f"[dry-run] would re-vendor pack: copy {dry_copied}, "
-            f"remove {dry_removed}"
+            f"[dry-run] would re-vendor pack: copy {dry_copied}, remove {dry_removed}"
         )
 
         if dry_section is None:
             print(
-                f"[dry-run] pin-bump FAILED: no {VENDOR_SECTION!r} "
-                "section in VENDOR.md"
+                f"[dry-run] pin-bump FAILED: no {VENDOR_SECTION!r} section in VENDOR.md"
             )
             return finish(EXIT_BUMP_FAILED)
         if not VENDOR_PIN_LINE_RE.search(dry_section):
@@ -644,10 +639,7 @@ def bump(
                 f"{provenance.DOCSTRING_FILE.as_posix()}"
             )
             return finish(EXIT_BUMP_FAILED)
-        print(
-            f"[dry-run] would update VENDOR.md pin "
-            f"{dry_old_label} -> {sha[:7]}"
-        )
+        print(f"[dry-run] would update VENDOR.md pin {dry_old_label} -> {sha[:7]}")
         print(
             f"[dry-run] would update {provenance.DOCSTRING_FILE.as_posix()} "
             f"Upstream commit {dry_old_label} -> {sha[:7]}"
@@ -693,8 +685,7 @@ def bump(
                 dry_new_doc = json.loads(dry_audit_proc.stdout)
             except ValueError as exc:
                 print(
-                    "[dry-run] pin-bump FAILED: cannot parse npm audit "
-                    f"output ({exc})"
+                    f"[dry-run] pin-bump FAILED: cannot parse npm audit output ({exc})"
                 )
                 return finish(EXIT_BUMP_FAILED)
             try:
@@ -728,9 +719,7 @@ def bump(
             print("[dry-run] audit triage green (no untriaged high/critical)")
 
             dry_old_path = (
-                Path(old_audit)
-                if old_audit
-                else _default_old_audit(root, dry_old_pin)
+                Path(old_audit) if old_audit else _default_old_audit(root, dry_old_pin)
             )
             if dry_old_path is None:
                 return usage(
@@ -740,9 +729,7 @@ def bump(
             if old_audit and not dry_old_path.is_file():
                 return usage(f"--old-audit not found: {old_audit}")
             try:
-                dry_old_doc = json.loads(
-                    dry_old_path.read_text(encoding="utf-8")
-                )
+                dry_old_doc = json.loads(dry_old_path.read_text(encoding="utf-8"))
             except OSError as exc:
                 print(
                     "[dry-run] pin-bump FAILED: cannot read old audit "
@@ -759,27 +746,18 @@ def bump(
                 dry_delta_mod = _load_script("redteam-audit-delta.py")
             except (OSError, RuntimeError) as exc:
                 print(
-                    "[dry-run] pin-bump FAILED: cannot load audit delta "
-                    f"helper ({exc})"
+                    f"[dry-run] pin-bump FAILED: cannot load audit delta helper ({exc})"
                 )
                 return finish(EXIT_BUMP_FAILED)
-            dry_old_findings, _, dry_old_error = dry_delta_mod.parse_input(
-                dry_old_doc
-            )
+            dry_old_findings, _, dry_old_error = dry_delta_mod.parse_input(dry_old_doc)
             if dry_old_error is not None:
-                print(
-                    "[dry-run] pin-bump FAILED: old audit unusable: "
-                    f"{dry_old_error}"
-                )
+                print(f"[dry-run] pin-bump FAILED: old audit unusable: {dry_old_error}")
                 return finish(EXIT_BUMP_FAILED)
             dry_new_findings, dry_new_packages, dry_new_error = (
                 dry_delta_mod.parse_input(dry_new_doc)
             )
             if dry_new_error is not None:
-                print(
-                    "[dry-run] pin-bump FAILED: new audit unusable: "
-                    f"{dry_new_error}"
-                )
+                print(f"[dry-run] pin-bump FAILED: new audit unusable: {dry_new_error}")
                 return finish(EXIT_BUMP_FAILED)
             _, _, _, _, verdict = dry_delta_mod.compute_delta(
                 dry_old_findings, dry_new_findings, dry_new_packages
@@ -789,10 +767,7 @@ def bump(
                 return finish(EXIT_BUMP_FAILED)
 
         if open_pr:
-            print(
-                f"[dry-run] would open PR from branch pin-bump-{sha[:7]} "
-                "(skipped)"
-            )
+            print(f"[dry-run] would open PR from branch pin-bump-{sha[:7]} (skipped)")
         print(f"[dry-run] bump to {sha[:7]} would succeed")
         return finish(EXIT_OK)
 

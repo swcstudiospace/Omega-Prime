@@ -427,6 +427,43 @@ def grant_tool_allowlist(document: Any) -> set[str] | None:
     return allowed or None
 
 
+def grant_scope_filter(
+    allowlist: set[str] | None, scope: str | None
+) -> set[str] | None:
+    """Restrict a merged grant's tool allowlist to one engagement scope.
+
+    Unions from :func:`authorize_all` span every artifact; an operator who
+    wants to run a narrower engagement type (``"coverage"``, ``"gaps"``)
+    filters the union down first. Matching is case-insensitive: a tool is
+    kept when the scope appears in its name, or when a ``_``-separated
+    name token (length 4+, so ``"roe"`` never fuzzy-matches) appears in
+    the scope — so scope ``"coverage"`` keeps ``tempest_black_cover``
+    via its ``cover`` token, and ``"gaps"`` keeps ``tempest_blue_gaps``.
+
+    ``None`` (the unrestricted ``tools: []`` convention) passes through
+    as ``None`` — there is nothing to restrict. Anything else that
+    cannot match (unparseable scope, blank scope, no tool matching)
+    fails closed to the empty set.
+    """
+    if allowlist is None:
+        return None
+    allowed = set(allowlist)
+    text = scope.strip().lower() if isinstance(scope, str) else ""
+    if not text:
+        return set()
+    matched: set[str] = set()
+    for tool in allowed:
+        if not isinstance(tool, str) or not tool:
+            continue
+        name = tool.lower()
+        if text in name:
+            matched.add(tool)
+            continue
+        if any(len(part) >= 4 and part in text for part in name.split("_")):
+            matched.add(tool)
+    return matched
+
+
 def grant_expired(document: Any, now: datetime | None = None) -> bool | None:
     """Whether a signed grant is past ``effective_until``.
 
@@ -454,6 +491,7 @@ __all__ = [
     "authorize_all",
     "canonical_bytes",
     "grant_expired",
+    "grant_scope_filter",
     "grant_tool_allowlist",
     "sign_artifact",
     "signature_path",

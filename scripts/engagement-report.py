@@ -810,6 +810,194 @@ def render_comparison(
     return lines
 
 
+#: Metrics diffed per technique class by the coverage-delta view
+#: (``--diff-coverage``). Fixed row order within each class.
+COVERAGE_DELTA_METRICS = ("cases", "runs", "pass rate", "gaps", "verdict")
+
+#: Ordinal for verdict-trend ranking (higher is better; unknown last).
+_COVERAGE_VERDICT_RANK = {"covered": 2, "gappy": 1, "unexercised": 0}
+
+
+def _coverage_verdict_rank(verdict: object) -> int:
+    """Ordinal of a coverage verdict (unknown verdicts rank last)."""
+    if isinstance(verdict, str) and verdict in _COVERAGE_VERDICT_RANK:
+        return _COVERAGE_VERDICT_RANK[verdict]
+    return -1
+
+
+def parse_previous_coverage(
+    text: str,
+) -> dict[str, tuple[int, int, int, float, int, str]]:
+    """Per-class coverage from a previously rendered report.
+
+    Parses the ``## Coverage matrix`` table rows
+    (``| class | cases | runs | w/r (pct%) | gaps | verdict |``;
+    ``0/0 (n/a)`` when the class had no runs). Missing section or
+    malformed rows are skipped; absent classes are simply absent from
+    the mapping. Deterministic.
+    """
+    previous: dict[str, tuple[int, int, int, float, int, str]] = {}
+    for line in _report_section_lines(text, "## Coverage matrix"):
+        match = re.match(
+            r"\|\s*([^|]+?)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*"
+            r"(\d+)/(\d+)\s*\((?:([\d.]+)%|n/a)\)\s*\|\s*(\d+)\s*\|\s*([^|]+?)\s*\|",
+            line.strip(),
+        )
+        if not match:
+            continue
+        class_name = match.group(1).strip()
+        if not class_name or class_name == "class":
+            continue
+        rate_text = (match.group(6) or "").strip()
+        try:
+            pct = float(rate_text)
+        except ValueError:
+            pct = 0.0
+        previous[class_name] = (
+            int(match.group(2)),
+            int(match.group(3)),
+            int(match.group(4)),
+            pct,
+            int(match.group(7)),
+            match.group(8).strip(),
+        )
+    return previous
+
+
+def _coverage_delta_trend(metric: str, current: float, previous: float) -> str:
+    """``improved``/``regressed``/``unchanged`` for one class metric.
+
+    Higher is better for cases, runs, and pass rate; lower is better
+    for gaps; verdicts compare by :func:`_coverage_verdict_rank`.
+    Exact ties are ``unchanged``.
+    """
+    if current == previous:
+        return "unchanged"
+    if metric == "gaps":
+        return "improved" if current < previous else "regressed"
+    return "improved" if current > previous else "regressed"
+
+
+def coverage_delta_rows(
+    *,
+    current: list[tuple[str, int, int, int, float, int, str]],
+    previous: dict[str, tuple[int, int, int, float, int, str]],
+) -> list[tuple[str, str, str, str, str, str]]:
+    """Per-class coverage-delta data rows.
+
+    One ``(class, metric, current, previous, delta, trend)`` tuple per
+    ``(class, metric)`` with ``metric`` in :data:`COVERAGE_DELTA_METRICS`
+    order; classes are the union of current and previous rows (current
+    order first, then extras sorted). ``trend`` is one of
+    ``improved``/``regressed``/``unchanged``. Sides missing a class
+    render ``n/a`` with an ``n/a →`` delta. Deterministic.
+    """
+    ordered = [row[0] for row in current]
+    for class_name in sorted(previous):
+        if class_name not in ordered:
+            ordered.append(class_name)
+    current_map = {row[0]: row for row in current}
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    for class_name in ordered:
+        row = current_map.get(class_name)
+        prev = previous.get(class_name)
+        cur_cells: dict[str, str] = {}
+        prev_cells: dict[str, str] = {}
+        delta_cells: dict[str, str] = {}
+        trend_cells: dict[str, str] = {}
+        if row is None:
+            cur_cells = {metric: "n/a" for metric in COVERAGE_DELTA_METRICS}
+        else:
+            _, cases, runs, wins, pct, gaps, verdict = row
+            rate = f"{wins}/{runs} ({pct:.1f}%)" if runs else "0/0 (n/a)"
+            cur_cells = {
+                "cases": str(cases),
+                "runs": str(runs),
+                "pass rate": rate,
+                "gaps": str(gaps),
+                "verdict": verdict,
+            }
+        if prev is None:
+            prev_cells = {metric: "n/a" for metric in COVERAGE_DELTA_METRICS}
+        else:
+            p_cases, p_runs, p_wins, p_pct, p_gaps, p_verdict = prev
+            p_rate = f"{p_wins}/{p_runs} ({p_pct:.1f}%)" if p_runs else "0/0 (n/a)"
+            prev_cells = {
+                "cases": str(p_cases),
+                "runs": str(p_runs),
+                "pass rate": p_rate,
+                "gaps": str(p_gaps),
+                "verdict": p_verdict,
+            }
+        if row is None or prev is None:
+            delta_cells = {metric: "n/a →" for metric in COVERAGE_DELTA_METRICS}
+            trend_cells = {metric: "unchanged" for metric in COVERAGE_DELTA_METRICS}
+        else:
+            _, cases, runs, wins, pct, gaps, verdict = row
+            p_cases, p_runs, p_wins, p_pct, p_gaps, p_verdict = prev
+            deltas = {
+                "cases": cases - p_cases,
+                "runs": runs - p_runs,
+                "gaps": gaps - p_gaps,
+            }
+            for metric, delta in deltas.items():
+                delta_cells[metric] = f"{delta:+d} {_comparison_arrow(delta)}"
+            rate_delta = pct - p_pct
+            arrow = "↑" if rate_delta > 0 else ("↓" if rate_delta < 0 else "→")
+            delta_cells["pass rate"] = f"{rate_delta:+.1f}pp {arrow}"
+            if verdict == p_verdict:
+                delta_cells["verdict"] = "→"
+            else:
+                delta_cells["verdict"] = f"{p_verdict} → {verdict}"
+            trend_cells = {
+                "cases": _coverage_delta_trend("cases", float(cases), float(p_cases)),
+                "runs": _coverage_delta_trend("runs", float(runs), float(p_runs)),
+                "pass rate": _coverage_delta_trend("pass rate", pct, p_pct),
+                "gaps": _coverage_delta_trend("gaps", float(gaps), float(p_gaps)),
+                "verdict": _coverage_delta_trend(
+                    "verdict",
+                    float(_coverage_verdict_rank(verdict)),
+                    float(_coverage_verdict_rank(p_verdict)),
+                ),
+            }
+        for metric in COVERAGE_DELTA_METRICS:
+            rows.append(
+                (
+                    class_name,
+                    metric,
+                    cur_cells[metric],
+                    prev_cells[metric],
+                    delta_cells[metric],
+                    trend_cells[metric],
+                )
+            )
+    return rows
+
+
+def render_coverage_delta(
+    *,
+    current: list[tuple[str, int, int, int, float, int, str]],
+    previous: dict[str, tuple[int, int, int, float, int, str]],
+    baseline_label: str,
+) -> list[str]:
+    """Per-class coverage-delta lines (``current | previous | Δ``)."""
+    lines = [
+        "## Coverage delta",
+        "",
+        f"- baseline: {baseline_label}",
+        "",
+        "| class | metric | current | previous | delta | trend |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for class_name, metric, cur, prev, delta, trend in coverage_delta_rows(
+        current=current, previous=previous
+    ):
+        lines.append(
+            f"| {class_name} | {metric} | {cur} | {prev} | {delta} | {trend} |"
+        )
+    return lines
+
+
 def render_report(
     *,
     window_start: datetime,
@@ -828,6 +1016,7 @@ def render_report(
     cause_counts: list[tuple[str, int]] | None = None,
     severity_timeline: list[tuple[str, str, str, str]] | None = None,
     comparison: list[str] | None = None,
+    coverage_delta: list[str] | None = None,
     drill_down: str | None = None,
     drill_down_rows: list[tuple[str, str, str, str, str]] | None = None,
 ) -> str:
@@ -878,6 +1067,8 @@ def render_report(
             f"| {class_name} | {case_count} | {class_runs} | {rate} "
             f"| {class_gaps} | {verdict} |"
         )
+    if coverage_delta:
+        lines += ["", *coverage_delta]
     if drill_down is not None:
         lines += ["", f"## Coverage drill-down: {drill_down}", ""]
         lines += [
@@ -1070,6 +1261,7 @@ def build_report(
     since_text: str | None,
     compare_path: Path | None = None,
     drill_down: str | None = None,
+    diff_coverage_path: Path | None = None,
 ) -> tuple[str, str, Path]:
     """Render the report; return ``(markdown, file_name, out_dir)``."""
     window = _collect_window(reports_dir, since_text)
@@ -1131,6 +1323,20 @@ def build_report(
             previous=parse_previous_metrics(previous_text),
             baseline_label=compare_path.name,
         )
+    coverage_delta: list[str] | None = None
+    if diff_coverage_path is not None:
+        try:
+            diff_text = diff_coverage_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReportError(
+                f"error: cannot read --diff-coverage report "
+                f"{diff_coverage_path} ({exc})"
+            ) from exc
+        coverage_delta = render_coverage_delta(
+            current=coverage,
+            previous=parse_previous_coverage(diff_text),
+            baseline_label=diff_coverage_path.name,
+        )
     markdown = render_report(
         window_start=window_start,
         window_end=window_end,
@@ -1148,6 +1354,7 @@ def build_report(
         cause_counts=cause_counts,
         severity_timeline=window["severity_timeline"],
         comparison=comparison,
+        coverage_delta=coverage_delta,
         drill_down=drill_down,
         drill_down_rows=(
             drill_down_rows(window["findings"], drill_down)
@@ -1156,6 +1363,234 @@ def build_report(
         ),
     )
     return markdown, file_name, out_dir
+
+
+def _parse_pass_result(result: str) -> tuple[int, int, float | None]:
+    """``(wins, total, pct)`` from a ``p/t (pct%)`` pass cell (``n/a`` ⇒ None)."""
+    match = re.match(r"(\d+)/(\d+)\s*\(([\d.]+)%\)", result.strip())
+    if not match:
+        return 0, 0, None
+    try:
+        pct = float(match.group(3))
+    except ValueError:
+        return int(match.group(1)), int(match.group(2)), None
+    return int(match.group(1)), int(match.group(2)), pct
+
+
+def build_report_data(
+    reports_dir: Path,
+    since_text: str | None,
+    compare_path: Path | None = None,
+    drill_down: str | None = None,
+    diff_coverage_path: Path | None = None,
+) -> dict[str, object]:
+    """Structured report data with the same inputs as :func:`build_report`.
+
+    Keys are inserted in fixed section order (header first, snapshot
+    last) and every list is sorted, so ``json.dumps`` of the result is
+    byte-identical across reruns on identical inputs. Read-only apart
+    from the harness-version lookup; raises :class:`ReportError` on
+    unreadable ``--compare``/``--diff-coverage`` inputs.
+    """
+    window = _collect_window(reports_dir, since_text)
+    window_start = window["window_start"]
+    window_end = window["window_end"]
+    runs = window["runs"]
+    cases = window["cases"]
+    observations = window["observations"]
+    gaps = window["gaps"]
+    pass_rows = window["pass_rows"]
+    current_findings = window["current_findings"]
+    in_window = window["in_window"]
+    timeline = sorted(
+        (
+            fmt_rfc3339(row["_dt"]),
+            str(row["from"]),
+            str(row["to"]),
+            str(row["cause"]),
+        )
+        for row in in_window
+    )
+    cause_tally: dict[str, int] = {}
+    for _, _, _, cause in timeline:
+        cause_tally[cause] = cause_tally.get(cause, 0) + 1
+    coverage = coverage_rows(cases, observations if runs > 0 else {}, gaps)
+    start_day = window_start.date().isoformat().replace(":", "-")
+    end_day = window_end.date().isoformat().replace(":", "-")
+    file_name = f"engagement-{start_day}_{end_day}.md"
+    out_dir = output_dir(reports_dir)
+    baseline_name, baseline = newest_baseline(out_dir, file_name)
+    if baseline is None:
+        new_hashes = sorted(current_findings)
+        rescinded: list[str] = []
+        no_baseline_note = (
+            f"no baseline: {baseline_name or 'no previous report'}; "
+            f"treating all {len(current_findings)} findings as new."
+        )
+    else:
+        new_hashes = sorted(h for h in current_findings if h not in baseline)
+        rescinded = sorted(h for h in baseline if h not in current_findings)
+        no_baseline_note = None
+    comparison_data: dict[str, object] | None = None
+    if compare_path is not None:
+        try:
+            previous_text = compare_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReportError(
+                f"error: cannot read --compare report {compare_path} ({exc})"
+            ) from exc
+        current_metrics = {
+            "runs": runs,
+            "pass_pct": _summary_pct(pass_rows),
+            "gaps": len(gaps),
+            "new": len(new_hashes),
+            "rescinded": len(rescinded),
+        }
+        previous_metrics = parse_previous_metrics(previous_text)
+        comparison_data = {
+            "baseline": compare_path.name,
+            "metrics": [
+                {
+                    "metric": key,
+                    "current": current_metrics[key],
+                    "previous": previous_metrics.get(key, 0),
+                    "delta": current_metrics[key] - previous_metrics.get(key, 0),
+                }
+                for key in COMPARISON_METRICS
+            ],
+        }
+    delta_data: dict[str, object] | None = None
+    if diff_coverage_path is not None:
+        try:
+            diff_text = diff_coverage_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReportError(
+                f"error: cannot read --diff-coverage report "
+                f"{diff_coverage_path} ({exc})"
+            ) from exc
+        delta_data = {
+            "baseline": diff_coverage_path.name,
+            "rows": [
+                {
+                    "class": class_name,
+                    "metric": metric,
+                    "current": cur,
+                    "previous": prev,
+                    "delta": delta,
+                    "trend": trend,
+                }
+                for class_name, metric, cur, prev, delta, trend in coverage_delta_rows(
+                    current=coverage,
+                    previous=parse_previous_coverage(diff_text),
+                )
+            ],
+        }
+    drill_data: dict[str, object] | None = None
+    if drill_down is not None:
+        drill_data = {
+            "class": drill_down,
+            "rows": [
+                {
+                    "dedupe_hash": digest,
+                    "severity": sev,
+                    "observed_detection": observed,
+                    "timestamp": stamp,
+                    "verdict": row_verdict,
+                }
+                for digest, sev, observed, stamp, row_verdict in drill_down_rows(
+                    window["findings"], drill_down
+                )
+            ],
+        }
+    return {
+        "title": "Engagement report",
+        "header": {
+            "window_start": fmt_rfc3339(window_start),
+            "window_end": fmt_rfc3339(window_end),
+            "generated_at": fmt_rfc3339(window_end),
+            "harness_version": read_version(REPO_ROOT),
+        },
+        "runs_summary": {"runs": runs, "empty": runs == 0},
+        "pass_rates": [
+            {
+                "case_id": case_id,
+                "result": result,
+                "wins": _parse_pass_result(result)[0],
+                "total": _parse_pass_result(result)[1],
+                "pass_pct": _parse_pass_result(result)[2],
+            }
+            for case_id, result in pass_rows
+        ],
+        "coverage": [
+            {
+                "class": class_name,
+                "cases": case_count,
+                "runs": class_runs,
+                "wins": wins,
+                "pass_pct": pct,
+                "gaps": class_gaps,
+                "verdict": verdict,
+            }
+            for class_name, case_count, class_runs, wins, pct, class_gaps, verdict in (
+                coverage
+            )
+        ],
+        "coverage_delta": delta_data,
+        "coverage_drill_down": drill_data,
+        "detection_gaps": list(gaps),
+        "findings_deltas": {
+            "baseline": baseline_name,
+            "has_baseline": baseline is not None,
+            "no_baseline_note": no_baseline_note,
+            "new_count": len(new_hashes),
+            "rescinded_count": len(rescinded),
+            "new": [
+                {"dedupe_hash": digest, "case_id": current_findings[digest]}
+                for digest in new_hashes
+            ],
+            "rescinded": [
+                {
+                    "dedupe_hash": digest,
+                    "case_id": baseline.get(digest, "unknown")
+                    if baseline
+                    else "unknown",
+                }
+                for digest in rescinded
+            ],
+        },
+        "state_transitions": [
+            {"from": from_state, "to": to_state, "count": count}
+            for from_state, to_state, count in window["transition_counts"]
+        ],
+        "state_timeline": {
+            "events": [
+                {
+                    "timestamp": ts_text,
+                    "from": from_state,
+                    "to": to_state,
+                    "cause": cause,
+                }
+                for ts_text, from_state, to_state, cause in timeline
+            ],
+            "cause_counts": dict(sorted(cause_tally.items())),
+        },
+        "severity_timeline": [
+            {
+                "dedupe_hash": digest12,
+                "severity": sev,
+                "class": klass,
+                "timestamp": ts_text,
+            }
+            for digest12, sev, klass, ts_text in window["severity_timeline"]
+        ],
+        "comparison": comparison_data,
+        "snapshot": dict(sorted(current_findings.items())),
+    }
+
+
+def render_json_report(data: dict[str, object]) -> str:
+    """Deterministic single-object JSON rendering (fixed key order)."""
+    return json.dumps(data, indent=2, sort_keys=False) + "\n"
 
 
 def _summary_pct(pass_rows: list[tuple[str, str]]) -> int:
@@ -1267,12 +1702,29 @@ def main(argv: list[str] | None = None) -> int:
         "findings new/rescinded as current vs previous (Δ) with arrows).",
     )
     parser.add_argument(
+        "--diff-coverage",
+        default=None,
+        metavar="PREVIOUS_REPORT",
+        help="previous report markdown to diff coverage against: renders a "
+        "## Coverage delta section after the coverage matrix (per-class "
+        "cases/runs/pass-rate/gaps/verdict as current | previous | Δ with "
+        "an improved/regressed/unchanged trend).",
+    )
+    parser.add_argument(
         "--drill-down",
         default=None,
         metavar="CLASS",
         help="after the coverage matrix, render a per-finding detail table "
         "(dedupe_hash, severity, observed_detection, timestamp, verdict) "
         "for technique class CLASS from findings.ndjson.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the full report as a single JSON object (all sections as "
+        "structured data, fixed key order) on stdout instead of markdown; "
+        "the canonical per-window markdown copy is still kept in the "
+        "output directory.",
     )
     parser.add_argument(
         "--summary",
@@ -1291,13 +1743,32 @@ def main(argv: list[str] | None = None) -> int:
         except ReportError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        sys.stdout.write(str(summary["line"]) + "\n")
+        if args.json:
+            sys.stdout.write(json.dumps(summary, indent=2, sort_keys=False) + "\n")
+        else:
+            sys.stdout.write(str(summary["line"]) + "\n")
         return 0
     try:
         compare_path = Path(args.compare) if args.compare else None
+        diff_coverage_path = Path(args.diff_coverage) if args.diff_coverage else None
         markdown, file_name, out_dir = build_report(
-            reports_dir, args.since, compare_path, drill_down=args.drill_down
+            reports_dir,
+            args.since,
+            compare_path,
+            drill_down=args.drill_down,
+            diff_coverage_path=diff_coverage_path,
         )
+        payload = markdown
+        if args.json:
+            payload = render_json_report(
+                build_report_data(
+                    reports_dir,
+                    args.since,
+                    compare_path,
+                    drill_down=args.drill_down,
+                    diff_coverage_path=diff_coverage_path,
+                )
+            )
     except ReportError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1315,14 +1786,14 @@ def main(argv: list[str] | None = None) -> int:
         try:
             out_path = Path(args.out)
             if out_path.resolve() != (out_dir / file_name).resolve():
-                out_path.write_text(markdown, encoding="utf-8")
+                out_path.write_text(payload, encoding="utf-8")
         except OSError as exc:
             print(
                 f"error: cannot write --out parent: {args.out} ({exc})", file=sys.stderr
             )
             return 1
     else:
-        sys.stdout.write(markdown)
+        sys.stdout.write(payload)
     return 0
 
 
