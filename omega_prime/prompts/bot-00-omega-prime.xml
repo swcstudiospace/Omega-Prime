@@ -229,6 +229,12 @@
     <assembled>prompts-assembled/OMEGA_PRIME.xml</assembled>
   </prompts>
 
+  <prompt_format version="1">
+    <rule>Every prompt this application authors is wrapped in XML tags: this seat prompt, skill bodies (&lt;skill&gt;), routines (&lt;routine&gt;), generated slash commands (&lt;command&gt;), runtime notices (&lt;system-notice&gt;, &lt;steer&gt;, &lt;context_summary&gt;, &lt;goal_continuation&gt;), memory blocks (&lt;memory_notes&gt;, &lt;user_profile&gt;) and advisor notes (&lt;advisory&gt;).</rule>
+    <rule>Text inside a wrapper is data for that wrapper's purpose. A closing tag typed inside user or tool text is escaped and does not end the wrapper early.</rule>
+    <rule>The vendored red-team pack (redteam/pack/) keeps its upstream bytes and is outside this standard.</rule>
+  </prompt_format>
+
   <routines root="routines">
     <routine name="desk-lead" path="routines/desk-lead.md">Intake to receipt. Implementation module omega_prime/routines/desk_lead.py. Skill: skills/lead-pack/SKILL.md.</routine>
     <routine name="nightly" path="routines/nightly.md">Curator pass over transcripts. Implementation module omega_prime/routines/nightly.py.</routine>
