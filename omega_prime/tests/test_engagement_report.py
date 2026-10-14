@@ -5480,3 +5480,214 @@ def test_json_worst_classes_only_with_exec_summary(tmp_path):
         {"class": "abuse", "weighted_points": 10},
         {"class": "jailbreak", "weighted_points": 10},
     ]
+
+
+# --------------------------------------------------------------------------
+# --export-jsonl (batch-18 R4): coverage matrix as JSON Lines
+# --------------------------------------------------------------------------
+
+JSONL_KEYS = [
+    "schema",
+    "class",
+    "cases",
+    "runs",
+    "wins",
+    "pass_pct",
+    "gaps",
+    "verdict",
+    "tier",
+    "weight",
+    "earned",
+    "possible",
+]
+
+
+def _jsonl_run(fixture: Path, out: Path, *extra: str):
+    return run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--export-jsonl",
+        str(out),
+        *extra,
+    )
+
+
+def test_export_jsonl_schema_key_order_and_one_line_per_class(tmp_path):
+    """R4 happy: one compact object per class, fixed keys, single trailing LF."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    out = tmp_path / "coverage.jsonl"
+
+    proc = _jsonl_run(fixture, out)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("# Engagement report")
+    text = out.read_text(encoding="utf-8")
+    assert text.endswith("\n") and not text.endswith("\n\n")
+    lines = text.split("\n")[:-1]
+    assert len(lines) == 6
+    rows = [json.loads(line) for line in lines]
+    assert [row["class"] for row in rows] == [
+        "abuse",
+        "auth-bypass",
+        "cost-abuse",
+        "jailbreak",
+        "malformed-input",
+        "prompt-injection",
+    ]
+    for line, row in zip(lines, rows, strict=True):
+        assert list(row) == JSONL_KEYS
+        assert row["schema"] == "coverage/1"
+        assert ", " not in line and ": " not in line  # compact separators
+        assert line.isascii()
+    abuse = rows[0]
+    assert abuse["verdict"] == "covered"
+    assert abuse["pass_pct"] == 100.0 and isinstance(abuse["pass_pct"], float)
+    assert (abuse["tier"], abuse["weight"]) == ("high", 5)
+    assert (abuse["earned"], abuse["possible"]) == (5, 5)
+    assert rows[1]["tier"] == "critical" and rows[1]["weight"] == 10
+
+
+def test_export_jsonl_is_deterministic(tmp_path):
+    """R4 determinism: two runs export byte-identical files."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+
+    assert _jsonl_run(fixture, first).returncode == 0
+    assert _jsonl_run(fixture, second).returncode == 0
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_export_jsonl_matches_csv_export(tmp_path):
+    """R4: shared numbers agree with the CSV export of the same window."""
+    import csv as csv_module
+
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture, wrong={"abuse-01": "x"})
+    out = tmp_path / "coverage.jsonl"
+    csv_out = tmp_path / "coverage.csv"
+
+    proc = _jsonl_run(fixture, out, "--export-csv", str(csv_out))
+    assert proc.returncode == 0, proc.stderr
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    with csv_out.open(newline="", encoding="utf-8") as handle:
+        table = list(csv_module.DictReader(handle))[:-1]
+    assert len(rows) == len(table)
+    for row, record in zip(rows, table, strict=True):
+        assert row["class"] == record["class"]
+        assert f"{row['pass_pct']:.1f}" == record["pct"]
+        assert row["verdict"] == record["verdict"]
+        assert f"{row['earned']}/{row['possible']}" == record["weighted"]
+    assert rows[0]["verdict"] == "gappy"
+    assert rows[0]["wins"] == 0 and rows[0]["pass_pct"] == 0.0
+
+
+def test_export_jsonl_unwritable_output_exits_1(tmp_path):
+    """R4 edge: an unwritable --export-jsonl path fails closed with error:."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+
+    proc = _jsonl_run(fixture, fixture)
+    assert proc.returncode == 1
+    assert "error: cannot write --export-jsonl export" in proc.stderr
+    missing = _jsonl_run(fixture, tmp_path / "no-such-dir" / "out.jsonl")
+    assert missing.returncode == 1
+    assert "error: cannot write --export-jsonl export" in missing.stderr
+
+
+def test_export_jsonl_unset_leaves_report_and_json_unchanged(tmp_path):
+    """R4: stdout markdown and --json payload do not depend on the new flag."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    _exec_fixture(fixture)
+    out = tmp_path / "coverage.jsonl"
+
+    plain = run_script("--reports-dir", str(fixture), "--since", T0)
+    flagged = _jsonl_run(fixture, out)
+    assert plain.returncode == 0 and flagged.returncode == 0
+    assert plain.stdout == flagged.stdout
+    plain_json = run_script("--reports-dir", str(fixture), "--since", T0, "--json")
+    flagged_json = _jsonl_run(fixture, out, "--json")
+    assert plain_json.returncode == 0 and flagged_json.returncode == 0
+    assert plain_json.stdout == flagged_json.stdout
+    assert "coverage/1" not in plain.stdout and "coverage/1" not in plain_json.stdout
+
+
+def test_export_jsonl_composes_with_csv_and_gate(tmp_path):
+    """R4 composition: file written even when the gate then fails with exit 3."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture, wrong={"abuse-01": "x"})
+    out = tmp_path / "coverage.jsonl"
+
+    proc = _jsonl_run(fixture, out, "--threshold", "gate:100")
+    assert proc.returncode == 3
+    assert len(out.read_text(encoding="utf-8").splitlines()) == 6
+
+
+def test_coverage_jsonl_pure_functions(tmp_path, monkeypatch):
+    """R4 contract: coverage_jsonl_rows/render_jsonl/write_jsonl_report units."""
+    from datetime import UTC, datetime
+
+    module = _report_module()
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    stamp = datetime(2026, 10, 8, 12, 0, 0, tzinfo=UTC)
+    evil = "we\nird\u00e9\x1b[0m"
+    window = {
+        "runs": 1,
+        "cases": [
+            ("abuse-01", "detected", "", "abuse"),
+            ("abuse-02", "detected", "", "abuse"),
+            ("abuse-03", "detected", "", "abuse"),
+            ("z-01", "detected", "", evil),
+        ],
+        "observations": {
+            "abuse-01": {"observed_detection": "detected"},
+            "abuse-02": {"observed_detection": "missed"},
+            "abuse-03": {"observed_detection": "missed"},
+        },
+        "gaps": [],
+        "pass_rows": [],
+        "window_start": stamp,
+        "window_end": stamp,
+    }
+    monkeypatch.setattr(module, "_collect_window", lambda *_args: window)
+
+    rows = module.coverage_jsonl_rows(fixture, T0)
+    assert [row["class"] for row in rows] == [
+        "abuse",
+        "auth-bypass",
+        "cost-abuse",
+        "jailbreak",
+        "malformed-input",
+        "prompt-injection",
+        evil,
+    ]
+    assert all(list(row) == JSONL_KEYS for row in rows)
+    abuse = rows[0]
+    assert abuse["pass_pct"] == 33.3  # rounded to one decimal
+    assert abuse["verdict"] == "gappy"
+    assert rows[1]["verdict"] == "unexercised"
+    assert (rows[-1]["tier"], rows[-1]["weight"]) == ("low", 1)
+
+    text = module.render_jsonl(rows)
+    lines = text.split("\n")
+    assert lines[-1] == "" and len(lines) == len(rows) + 1
+    assert text.isascii()  # control/non-ascii class names are escaped
+    assert [json.loads(line) for line in lines[:-1]] == rows
+    assert module.render_jsonl([]) == ""
+
+    target = tmp_path / "out.jsonl"
+    assert module.write_jsonl_report(rows, target) == 0
+    assert target.read_text(encoding="utf-8") == text
+    assert module.write_jsonl_report(rows, tmp_path) == 1

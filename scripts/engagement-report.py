@@ -42,6 +42,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -1926,6 +1927,83 @@ def write_csv_report(
             writer.writerows(coverage_csv_rows(coverage))
     except OSError as exc:
         print(f"error: cannot write CSV export {csv_path} ({exc})", file=sys.stderr)
+        return 1
+    return 0
+
+
+JSONL_SCHEMA = "coverage/1"
+
+
+def coverage_jsonl_rows(
+    reports_dir: Path, since_text: str | None = None
+) -> list[dict[str, object]]:
+    """Rows for ``--export-jsonl`` (R4), one dict per technique class.
+
+    Coverage order (schema classes, then unknown classes sorted); keys
+    in fixed order ``schema, class, cases, runs, wins, pass_pct, gaps,
+    verdict, tier, weight, earned, possible`` with ``pass_pct`` rounded
+    to one decimal and the tier fields taken from the risk breakdown.
+    Raises :class:`ReportError` on unreadable history.
+    """
+    window = _collect_window(reports_dir, since_text)
+    runs = window["runs"]
+    assert isinstance(runs, int)
+    coverage = coverage_rows(
+        window["cases"],  # type: ignore[arg-type]
+        window["observations"] if runs > 0 else {},
+        window["gaps"],  # type: ignore[arg-type]
+    )
+    by_class = {row[0]: row for row in coverage}
+    rows: list[dict[str, object]] = []
+    breakdown = risk_weighted_score(coverage)[3]
+    for class_name, tier, weight, case_count, wins, got, maximum in breakdown:
+        _name, _cases, class_runs, _wins, pct, class_gaps, verdict = by_class[
+            class_name
+        ]
+        rows.append(
+            {
+                "schema": JSONL_SCHEMA,
+                "class": class_name,
+                "cases": case_count,
+                "runs": class_runs,
+                "wins": wins,
+                "pass_pct": round(float(pct), 1),
+                "gaps": class_gaps,
+                "verdict": verdict,
+                "tier": tier,
+                "weight": weight,
+                "earned": got,
+                "possible": maximum,
+            }
+        )
+    return rows
+
+
+def render_jsonl(rows: Sequence[dict[str, object]]) -> str:
+    """JSON Lines text: one compact ASCII-only object per row, ``\\n`` ended.
+
+    ``ensure_ascii`` escapes every control character, so no raw newline
+    can appear inside a line. Deterministic; ``""`` for no rows.
+    """
+    return "".join(
+        json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n" for row in rows
+    )
+
+
+def write_jsonl_report(rows: Sequence[dict[str, object]], jsonl_path: Path) -> int:
+    """Write ``rows`` as JSON Lines at ``jsonl_path`` (R4).
+
+    Returns 0 on success; an unwritable output prints ``error:`` to
+    stderr and returns 1.
+    """
+    try:
+        with jsonl_path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(render_jsonl(rows))
+    except OSError as exc:
+        print(
+            f"error: cannot write --export-jsonl export {jsonl_path} ({exc})",
+            file=sys.stderr,
+        )
         return 1
     return 0
 
@@ -4549,6 +4627,79 @@ def summarize(reports_dir: Path, since_text: str | None = None) -> dict[str, obj
     }
 
 
+def build_digest(
+    reports_dir: Path,
+    since_text: str | None = None,
+    *,
+    threshold: str | None = None,
+    baselines: Sequence[tuple[str, float]] = (),
+) -> dict[str, object]:
+    """Plain-text engagement digest for ``--digest`` (R3).
+
+    Returns ``{"state", "lines", "gate"}``: ``state`` is ``"ok"`` or
+    ``"no-reports"``; ``lines`` holds at most four strings without line
+    endings: the :func:`summarize` line, ``coverage covered=C/T
+    gappy=G unexercised=U risk=S.S``, ``worst=<classes>`` (``worst=none``
+    when nothing is at risk) and, only with ``threshold`` or
+    ``baselines``, the gate line; ``gate`` is the
+    :func:`evaluate_threshold` dict or ``None``. Built only from numbers
+    and schema class names (unknown on-disk classes appear as
+    ``other``), never from finding or case free text. Empty or missing
+    history yields the zero line, an all-zero coverage line and
+    ``worst=none``. Raises :class:`ReportError` and
+    :class:`BaselineUsageError` like the rest of the script.
+    """
+    summary = summarize(reports_dir, since_text)
+    state = str(summary["state"])
+    gated = threshold is not None or bool(baselines)
+    window = (
+        _collect_window(reports_dir, since_text) if state == "ok" or gated else None
+    )
+    coverage: list[tuple[str, int, int, int, float, int, str]] = []
+    if window is not None:
+        runs = window["runs"]
+        assert isinstance(runs, int)
+        coverage = coverage_rows(
+            window["cases"],  # type: ignore[arg-type]
+            window["observations"] if runs > 0 else {},
+            window["gaps"],  # type: ignore[arg-type]
+        )
+    gate: dict[str, object] | None = None
+    if gated and window is not None:
+        if baselines:
+            validate_baseline_classes(
+                list(baselines),
+                window["cases"],  # type: ignore[arg-type]
+            )
+        gate = evaluate_threshold(
+            window["pass_rows"],  # type: ignore[arg-type]
+            coverage,
+            threshold,
+            list(baselines) if baselines else None,
+        )
+    lines = [str(summary["line"])]
+    if state == "ok":
+        verdicts = [row[6] for row in coverage]
+        score = risk_weighted_score(coverage)[0]
+        lines.append(
+            f"coverage covered={verdicts.count('covered')}/{len(coverage)} "
+            f"gappy={verdicts.count('gappy')} "
+            f"unexercised={verdicts.count('unexercised')} risk={score:.1f}"
+        )
+        worst: list[str] = []
+        for name, _points in worst_classes(coverage, len(coverage)):
+            shown = name if name in SCHEMA_CLASSES else "other"
+            if shown not in worst:
+                worst.append(shown)
+        lines.append("worst=" + (",".join(worst[:3]) if worst else "none"))
+    else:
+        lines.append("coverage covered=0/0 gappy=0 unexercised=0 risk=0.0")
+        lines.append("worst=none")
+    if gate is not None:
+        lines.append(str(gate["line"]))
+    return {"state": state, "lines": lines, "gate": gate}
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns 0 when the report renders, 1 otherwise (3 on gate FAIL)."""
     parser = argparse.ArgumentParser(
@@ -4831,6 +4982,31 @@ def main(argv: list[str] | None = None) -> int:
         "value; 0 omits the bullet); --json gains a worst_classes array "
         "only when --exec-summary is set. Ignored without --exec-summary.",
     )
+    parser.add_argument(
+        "--digest",
+        action="store_true",
+        help="print a stdout-only plain-text digest of at most 5 lines "
+        "(the --summary line, a 'coverage covered=C/T gappy=G "
+        "unexercised=U risk=S.S' line, 'worst=<class,...>' or "
+        "'worst=none', plus the 'Gate: ...' line when --threshold or "
+        "--baseline is given); deterministic, no timestamps, built only "
+        "from numbers and schema class names. Empty or missing history "
+        "prints zeros, not an error. Exit 0 ok, 3 gate FAIL, 2 unknown "
+        "--baseline class, 1 report/IO error. Cannot be combined with "
+        "--json or --summary (exit 1). Composes with --since, "
+        "--reports-dir, --threshold, --baseline and --export-jsonl; like "
+        "--summary it writes no report and ignores every other "
+        "file-writing flag.",
+    )
+    parser.add_argument(
+        "--export-jsonl",
+        default=None,
+        metavar="OUTPUT_JSONL",
+        help="also write the coverage matrix as JSON Lines at OUTPUT_JSONL "
+        "(one compact object per technique class in coverage order: "
+        "schema, class, cases, runs, wins, pass_pct, gaps, verdict, tier, "
+        "weight, earned, possible); stdout is unchanged.",
+    )
     args = parser.parse_args(argv)
     if args.worst is not None and args.worst < 0:
         print(
@@ -4838,8 +5014,50 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.digest and args.json:
+        print("error: --digest cannot be combined with --json", file=sys.stderr)
+        return 1
+    if args.digest and args.summary:
+        print("error: --digest cannot be combined with --summary", file=sys.stderr)
+        return 1
 
     reports_dir = Path(args.reports_dir) if args.reports_dir else default_reports_dir()
+    if args.digest:
+        try:
+            digest_baselines = (
+                [parse_baseline(raw) for raw in args.baseline] if args.baseline else ()
+            )
+            digest = build_digest(
+                reports_dir,
+                args.since,
+                threshold=args.threshold,
+                baselines=digest_baselines,
+            )
+            digest_jsonl_rows = (
+                coverage_jsonl_rows(reports_dir, args.since)
+                if args.export_jsonl
+                else None
+            )
+        except BaselineUsageError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        except ReportError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        digest_lines = digest["lines"]
+        digest_gate = digest["gate"]
+        assert isinstance(digest_lines, list)
+        assert digest_gate is None or isinstance(digest_gate, dict)
+        sys.stdout.write("".join(f"{line}\n" for line in digest_lines))
+        digest_status = 0
+        if digest_jsonl_rows is not None:
+            digest_status = write_jsonl_report(
+                digest_jsonl_rows, Path(args.export_jsonl)
+            )
+        if digest_gate is not None and not digest_gate["passed"]:
+            print(str(digest_gate["stderr"]), file=sys.stderr)
+            return 3
+        return digest_status
     if args.summary:
         try:
             summary = summarize(reports_dir, args.since)
@@ -5048,6 +5266,13 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 1
         status = write_csv_report(csv_coverage, Path(args.export_csv)) or status
+    if args.export_jsonl:
+        try:
+            jsonl_rows = coverage_jsonl_rows(reports_dir, args.since)
+        except ReportError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        status = write_jsonl_report(jsonl_rows, Path(args.export_jsonl)) or status
     if args.export_md:
         try:
             md_window = _collect_window(reports_dir, args.since)
