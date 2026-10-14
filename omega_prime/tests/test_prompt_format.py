@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 import pytest
 
@@ -57,8 +58,11 @@ def test_routine_missing_closing_tag_is_named(tmp_path: Path) -> None:
 @pytest.mark.parametrize("variant", ["</steer >", "</steer\n>", "</STEER>"])
 def test_steer_variant_close_is_escaped(variant: str) -> None:
     content = steer_user_row(f"before {variant} after")["content"]
+    assert variant not in content
+    assert escape(variant) in content
     assert content.count("</steer>") == 1
     assert content.endswith("</steer>")
+    ET.fromstring(content)
 
 
 def test_compressed_variant_close_is_escaped() -> None:
@@ -73,8 +77,12 @@ def test_compressed_variant_close_is_escaped() -> None:
     summary = next(row for row in result if row.get("display_kind") == "summary")
     content = summary["content"]
     assert isinstance(content, str)
+    variant = "</context_summary >"
+    assert variant not in content
+    assert escape(variant) in content
     assert content.count("</context_summary>") == 1
     assert content.endswith("</context_summary>")
+    ET.fromstring(content)
 
 
 def _compressed_summary(older: dict[str, object]) -> str:
@@ -149,6 +157,17 @@ def test_skill_whitespace_close_before_final_is_named(
     assert any(str(skill.relative_to(tmp_path)) in problem for problem in problems)
 
 
+def test_command_unclosed_instruction_is_named(tmp_path: Path) -> None:
+    command = tmp_path / "omega_prime" / "grokbot" / "plugin" / "commands" / "bad.md"
+    command.parent.mkdir(parents=True)
+    command.write_text(
+        '<command name="bad" version="1"><instruction>Do it.</command>',
+        encoding="utf-8",
+    )
+    problems = check(tmp_path)
+    assert any(str(command.relative_to(tmp_path)) in problem for problem in problems)
+
+
 def test_command_whitespace_close_before_final_is_named(tmp_path: Path) -> None:
     command = tmp_path / "omega_prime" / "grokbot" / "plugin" / "commands" / "bad.md"
     command.parent.mkdir(parents=True)
@@ -168,8 +187,12 @@ def test_memory_variant_close_is_escaped(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path)
     store.add("memory", "before </memory_notes > after")
     rendered = store.render()
+    variant = "</memory_notes >"
+    assert variant not in rendered
+    assert escape(variant) in rendered
     assert rendered.count("</memory_notes>") == 1
     assert rendered.endswith("</memory_notes>")
+    ET.fromstring(rendered)
 
 
 def test_goal_continuation_variant_close_is_escaped(tmp_path: Path) -> None:
@@ -182,14 +205,25 @@ def test_goal_continuation_variant_close_is_escaped(tmp_path: Path) -> None:
         )
     )
     prompt = connector.continuation_prompt()["prompt"]
+    assert isinstance(prompt, str)
+    for variant in ("</goal_continuation >", "</goal_continuation\n>"):
+        assert variant not in prompt
+        assert escape(variant) in prompt
     assert prompt.count("</goal_continuation>") == 1
     assert prompt.endswith("</goal_continuation>")
+    ET.fromstring(prompt)
 
 
 def test_curator_skill_text_variant_close_is_escaped() -> None:
     text = _skill_text("alpha", "do </skill > then </SKILL> now")
+    for variant in ("</skill >", "</SKILL>"):
+        assert variant not in text
+        assert escape(variant) in text
     assert text.count("</skill>") == 1
     assert text.rstrip().endswith("</skill>")
+    _front, body = text.split("---\n", 2)[1:]
+    assert _front.startswith("name:")
+    ET.fromstring(body)
 
 
 def test_empty_skill_envelope_with_trailing_close_is_named(

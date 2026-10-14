@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from omega_prime.skills_runtime.guards import (
     outside_root,
+    parse_frontmatter,
     skill_directory,
     validate_category,
     validate_content_size,
@@ -76,6 +78,10 @@ def _create(
     assert content is not None
     if _find(root, name):
         return _error(f"A skill named '{name}' already exists.")
+    content, refused = _normalize(name, content)
+    if refused is not None:
+        return refused
+    assert content is not None
     skill_dir = skill_directory(root, name, category)
     if outside_root(root, skill_dir) or _symlink_leaves(root, skill_dir):
         return _error("Skill directory escapes the skills root.")
@@ -111,6 +117,10 @@ def _edit(name: str, content: str | None, skills_root: str | Path) -> str:
     assert skill_md is not None
     if outside_root(root, skill_md) or _symlink_leaves(root, skill_md):
         return _error("Skill path leaves the skills root.")
+    content, refused = _normalize(name, content)
+    if refused is not None:
+        return refused
+    assert content is not None
     try:
         _write_text(skill_md, content)
     except OSError as exc:
@@ -155,12 +165,55 @@ def _patch(
         updated, new_skill=False
     ):
         return _error(guard)
+    normalized, refused = _normalize(name, updated)
+    if refused is not None or normalized is None:
+        return refused or _error("Content is required.")
+    updated = normalized
     if updated.encode("utf-8") != original:
         try:
             _write_text(skill_md, updated)
         except OSError as exc:
             return _error(f"Cannot patch skill '{name}': {exc}")
     return _ok(message=f"Patched skill '{name}'.", path=str(skill_md), name=name)
+
+
+def _exact_final_close(stripped: str, open_tag: str, close: str) -> bool:
+    """Match the generated-command load rule for one skill envelope."""
+    tag_name = close[2:-1]
+    matches = list(re.finditer(rf"</{re.escape(tag_name)}\s*>", stripped))
+    if len(matches) != 1:
+        return False
+    match = matches[0]
+    return (
+        stripped.startswith(open_tag)
+        and match.group(0) == close
+        and match.end() == len(stripped)
+    )
+
+
+def _normalize(name: str, content: str) -> tuple[str | None, str | None]:
+    """Return text to store, or the JSON error and no text.
+
+    A body that already meets the load rule is returned unchanged. A body that
+    mentions a skill tag without meeting that rule is refused. Any other body
+    is wrapped, leaving the frontmatter bytes as they were.
+    """
+    _mapping, body, error = parse_frontmatter(content)
+    if error is not None or body is None:
+        return None, _error(error or "Content is required.")
+    stripped = body.strip()
+    open_tag = f'<skill name="{name}" version="1">'
+    if _exact_final_close(stripped, open_tag, "</skill>"):
+        return content, None
+    if "<skill" in body or "</skill" in body:
+        return None, _error(f"Skill body is not a valid envelope for '{name}'.")
+    text = content.lstrip("\ufeff")
+    prefix = content[: len(content) - len(text) + (len(text) - len(body))]
+    wrapped = f'\n<skill name="{name}" version="1">\n{stripped}\n</skill>\n'
+    stored = prefix + wrapped
+    if guard := validate_content_size(stored):
+        return None, _error(guard)
+    return stored, None
 
 
 def _prepare(

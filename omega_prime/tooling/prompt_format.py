@@ -279,9 +279,20 @@ def _command_problems(root: Path) -> list[str]:
             if close_index != -1
             else ""
         )
-        if "<instruction>" not in inner:
+        instruction_open = "<instruction>"
+        instruction_close = "</instruction>"
+        opens = inner.count(instruction_open)
+        close_matches = list(re.finditer(r"</instruction\s*>", inner))
+        open_at = inner.find(instruction_open)
+        if not (
+            opens == 1
+            and len(close_matches) == 1
+            and close_matches[0].group(0) == instruction_close
+            and open_at < close_matches[0].start()
+        ):
             problems.append(
-                f"{display}: command must contain <instruction> inside {expected_open}"
+                f"{display}: command must contain exactly one "
+                f"<instruction>...</instruction> inside {expected_open}"
             )
     return problems
 
