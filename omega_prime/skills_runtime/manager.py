@@ -191,12 +191,34 @@ def _exact_final_close(stripped: str, open_tag: str, close: str) -> bool:
     )
 
 
+# An opening skill tag at the start of the body. ``<skills>`` and a prose
+# placeholder such as ``/omega-<skill>`` do not match: the next character
+# after ``skill`` has to be whitespace, ``>``, or the end of an empty tag.
+_SKILL_OPEN_AT_START = re.compile(r"<skill(?:\s|>|/>)")
+# A closing tag the loader treats as the end of the envelope, including
+# ``</skill >``. A mention of ``<skill>`` does not match.
+_SKILL_CLOSE = re.compile(r"</skill\s*>")
+
+
+def _attempted_skill_wrapper(body: str) -> bool:
+    """True when the body is trying to be a skill envelope and is not one.
+
+    A real ``</skill>`` close, or a ``<skill>`` / ``<skill ...>`` open tag
+    that begins the body, is an attempted wrapper. Ordinary text such as
+    ``<skills>`` or ``/omega-<skill>`` is not, and can be wrapped.
+    """
+    if _SKILL_CLOSE.search(body):
+        return True
+    return _SKILL_OPEN_AT_START.match(body.strip()) is not None
+
+
 def _normalize(name: str, content: str) -> tuple[str | None, str | None]:
     """Return text to store, or the JSON error and no text.
 
-    A body that already meets the load rule is returned unchanged. A body that
-    mentions a skill tag without meeting that rule is refused. Any other body
-    is wrapped, leaving the frontmatter bytes as they were.
+    A body that already meets the load rule is returned unchanged. A body
+    that tries to be a skill envelope and does not meet that rule is refused.
+    Any other body is wrapped, leaving the frontmatter and the body bytes
+    (including indentation) as they were.
     """
     _mapping, body, error = parse_frontmatter(content)
     if error is not None or body is None:
@@ -205,11 +227,11 @@ def _normalize(name: str, content: str) -> tuple[str | None, str | None]:
     open_tag = f'<skill name="{name}" version="1">'
     if _exact_final_close(stripped, open_tag, "</skill>"):
         return content, None
-    if "<skill" in body or "</skill" in body:
+    if _attempted_skill_wrapper(body):
         return None, _error(f"Skill body is not a valid envelope for '{name}'.")
     text = content.lstrip("\ufeff")
     prefix = content[: len(content) - len(text) + (len(text) - len(body))]
-    wrapped = f'\n<skill name="{name}" version="1">\n{stripped}\n</skill>\n'
+    wrapped = f'\n<skill name="{name}" version="1">\n{body}\n</skill>\n'
     stored = prefix + wrapped
     if guard := validate_content_size(stored):
         return None, _error(guard)

@@ -427,6 +427,50 @@ def test_skill_manage_plain_body_loads_and_broken_envelope_is_refused(
     assert skill_md.read_bytes() == original
 
 
+def test_skill_manage_wraps_prose_mentions_and_keeps_indentation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skills = tmp_path / "omega_prime" / "skills"
+    skills.mkdir(parents=True)
+    monkeypatch.setattr(commands, "_CATALOG_ROOT", tmp_path)
+    plain = (
+        "---\nname: alpha\ndescription: Use it.\n---\n"
+        "<skills>list</skills>\n"
+        "Run /omega-<skill> for one skill.\n"
+        "    indented example\n"
+        "    still indented\n"
+    )
+    created = json.loads(
+        skill_manage("create", "alpha", content=plain, skills_root=skills)
+    )
+    assert created["success"] is True, created
+    text = (skills / "alpha" / "SKILL.md").read_text(encoding="utf-8")
+    assert "<skills>list</skills>" in text
+    assert "/omega-<skill>" in text
+    assert "\n    indented example\n    still indented\n" in text
+    registry = RecordingRegistry()
+    loaded = execute_command("/omega-alpha", registry, {})
+    assert loaded["ok"] is True, loaded
+    instructions = loaded["result"]["instructions"]
+    assert instructions.strip().startswith('<skill name="alpha" version="1">')
+    assert instructions.rstrip().endswith("</skill>")
+    assert "/omega-<skill>" in instructions
+
+
+def test_skill_manage_refuses_a_closing_skill_tag_in_prose(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    plain = (
+        "---\nname: alpha\ndescription: Use it.\n---\n"
+        "\nThe loader stops at </skill> even inside a sentence.\n"
+    )
+    refused = json.loads(
+        skill_manage("create", "alpha", content=plain, skills_root=skills)
+    )
+    assert refused["success"] is False
+    assert not (skills / "alpha").exists()
+
+
 @pytest.mark.parametrize(
     "body",
     [

@@ -148,10 +148,14 @@ def _skill(name: str, description: str, body: str) -> str:
 
 
 def _stored(name: str, content: str) -> str:
-    """On-disk text after a plain body is wrapped for the loader."""
-    _head, front, body = content.split("---\n", 2)
+    """On-disk text after a plain body is wrapped for the loader.
+
+    The body is kept as written, including indentation. Only the envelope
+    tags are added.
+    """
+    front, body = content.split("---\n", 2)[1:]
     prefix = f"---\n{front}---\n"
-    return prefix + f'\n<skill name="{name}" version="1">\n{body.strip()}\n</skill>\n'
+    return prefix + f'\n<skill name="{name}" version="1">\n{body}\n</skill>\n'
 
 
 def _tool_call(name: str, arguments: dict, call_id: str = "call-1") -> dict:
