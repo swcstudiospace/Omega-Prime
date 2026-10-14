@@ -19,6 +19,10 @@ _TITLES = {
     "memory": "MEMORY (your personal notes)",
     "user": "USER PROFILE (who the user is)",
 }
+_BLOCK_TAGS = {
+    "memory": "memory_notes",
+    "user": "user_profile",
+}
 
 
 class MemoryStore:
@@ -122,7 +126,12 @@ class MemoryStore:
         entries = self._entries(target)
         if not entries:
             return ""
-        return f"{_TITLES[target]}\n{ENTRY_DELIMITER.join(entries)}"
+        tag = _BLOCK_TAGS[target]
+        close = f"</{tag}>"
+        joined = ENTRY_DELIMITER.join(
+            entry.replace(close, f"&lt;/{tag}&gt;") for entry in entries
+        )
+        return f'<{tag} title="{_TITLES[target]}">\n{joined}\n{close}'
 
     def _entries(self, target: str) -> list[str]:
         return self.user_entries if target == "user" else self.memory_entries
