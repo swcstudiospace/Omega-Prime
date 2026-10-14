@@ -66,7 +66,7 @@ class Runner:
 
     def __call__(self, argv: list[str], data: dict[str, Any]) -> Any:
         self.calls.append(list(argv))
-        payload = {"html_url": f"https://github.com/{REPO}/issues/{len(self.calls)}"}
+        payload = {"html_url": f"gh-issue-{len(self.calls)}"}
         return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
 

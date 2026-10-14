@@ -4349,7 +4349,7 @@ def test_cli_dispatch_dry_run_sanitizes_plan_and_synced_hashes(
     _seed_severities(tmp_path, ["low", "low"])
     path = findings_path(tmp_path)
     rows = [json.loads(line) for line in path.read_text().splitlines() if line]
-    rows[1]["issue_url"] = "https://github.com/x/y/issues/1"
+    rows[1]["issue_url"] = "gh-issue-marker-1"
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     _poison_hash(tmp_path, 0)
     monkeypatch.setattr(

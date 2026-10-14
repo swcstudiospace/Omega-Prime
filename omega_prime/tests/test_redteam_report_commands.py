@@ -594,7 +594,7 @@ def test_sync_plan_counts_already_synced_findings(
     hashes = fixture.seed(2)
     store = fixture.reports / "findings.ndjson"
     rows = [json.loads(line) for line in store.read_text("utf-8").splitlines()]
-    rows[0]["issue_url"] = "https://github.com/OWNER/NAME/issues/1"
+    rows[0]["issue_url"] = "gh-issue-marker-1"
     rows[0]["synced_at"] = "2026-01-01T00:00:00+00:00"
     store.write_text(
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
