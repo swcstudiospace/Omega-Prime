@@ -23,8 +23,9 @@ All notable changes to this project are documented here. Format follows
   CLI entry points apply neither quiet hours nor the budget.
 - `pin_bump --report-to PATH`: writes the audit delta report to `PATH`
   instead of `<root>/report.md` (atomic, mode 0644, through a directory
-  descriptor pinned at validation), validated up front (usage errors exit
-  2: trailing separator, file name over 200 bytes, symlink or non-regular
+  descriptor pinned with `O_PATH`, so ancestors need only search
+  permission), validated up front (usage errors exit 2: trailing separator,
+  a path ending in `/.` or `/..`, file name over 200 bytes, symlink or non-regular
   file, and an existing file that is neither empty nor a previous pin-bump
   report, so `VENDOR.md` is never overwritten), replay-validated for
   schedules, with a `report` key in `--json` only when set. Printed paths
@@ -35,8 +36,12 @@ All notable changes to this project are documented here. Format follows
   cannot combine with `--json` or `--summary`. The gate line and all digest
   stderr name only schema classes or `other` and escape control characters.
 - `scripts/engagement-report.py --export-jsonl OUTPUT_JSONL`: the coverage
-  matrix as JSON Lines, one `coverage/1` object per class, written
-  atomically with mode 0644; a symlink target is refused (exit 1).
+  matrix as JSON Lines, one `coverage/1` object per class. Absent or
+  regular targets are replaced atomically with mode `0666 & ~umask`; an
+  existing FIFO, device or socket is written in place; a symlink to a
+  regular file, directory or nothing is refused (exit 1); a symlink to a
+  stream such as `/dev/stdout` is written through. `--digest --baseline
+  other=N` is rejected.
 - `roe_lifecycle.grant_conflicts` and the `roe_lifecycle conflicts` CLI
   (exit 0 none, 3 found, 2 usage): advisory detection of
   `duplicate-id-divergent`, `tool-scope-contradiction`,
@@ -50,8 +55,10 @@ All notable changes to this project are documented here. Format follows
   `/omega-redteam-coverage` and `/omega-redteam-sync-plan`, over the digest,
   the coverage matrix and the findings-sync plan. Output is bounded and
   path-free: `/omega-redteam-sync-plan` lists at most 20 entries per list
-  with `<name>_total` counts, escaped and clipped hashes, and grant path
-  labels as basenames or `grant-N`; non-structured failures return only the
+  with `<name>_total` counts (`grant_conflicts_total` also counts conflicts
+  beyond the listed and detector-capped rows), escaped and clipped hashes
+  and tracker, and grant path labels as basenames or non-clashing
+  `grant-N`; non-structured failures return only the
   exception type name; `--since` and `--threshold` accept ASCII digits only.
 - `python -m omega_prime.grokbot.purple_cycle` (modes `plan`, `run`,
   `apply`; six steps from preflight to findings dispatch; resumable
@@ -60,12 +67,17 @@ All notable changes to this project are documented here. Format follows
   new upstream tag. Chat never dispatches findings or applies a pin bump
   and returns no checkpoint or ledger path. Apply is refused (exit 3)
   without a configured RoE (`roe-missing`), with an expired, missing,
-  invalid or revoked RoE, or with a non-IDLE harness; the gate is
-  re-checked on every pass and resume, and a blocked step is never
-  checkpointed. Cycle ids are `purple-cycle-YYYYMMDD-<mode>[-s<8hex>]
+  invalid or revoked RoE in the union of `redteam.roe_file(s)` and the
+  findings-sync grant keys (revocations matched by realpath and file
+  identity), with a config-level kill or `redteam.enabled: false`, or with
+  a non-IDLE harness; the gate is re-checked on every pass and resume, and
+  a blocked step is never checkpointed. Stored checkpoint records are
+  validated strictly (invalid: `checkpoint-unreadable`). Cycle ids are `purple-cycle-YYYYMMDD-<mode>[-s<8hex>]
   [-HHMMSS]`; checkpoints live under `<reports>/purple-cycle/workflows/`,
-  and an errored pin-bump audit is retried by a later cycle through
-  `<reports>/purple-cycle-pending.json`. `--now` is rejected in apply mode
+  and a failed pin-bump audit is a non-halting `audit-failed` warning,
+  retried through `<reports>/purple-cycle-pending.json`
+  (`{"attempts": n, "tag": T}`) and abandoned after 3 attempts
+  (`audit-abandoned`); only `v<digits>.<digits>...` tags are audited. `--now` is rejected in apply mode
   and option abbreviations are rejected. The release-watch `gh api` call
   times out after 60 s (exit 3).
   Usage: [Operator tools](docs/red-team.md#operator-tools).

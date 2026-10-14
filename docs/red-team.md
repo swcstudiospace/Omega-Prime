@@ -206,8 +206,12 @@ Chat output is bounded and path-free:
   clipped to 64 characters; `detail` and tick-error text to 200. A grant
   label that is a file path is shown as its basename, or as `grant-N`
   when basenames collide; the same alias replaces the path inside
-  `detail`. The `conflicts-truncated` sentinel row passes through after
-  the capped rows and is not counted in `grant_conflicts_total`.
+  `detail`. A `grant-N` alias never equals a real grant id (it takes the
+  first free name). The `conflicts-truncated` sentinel row passes through
+  after the capped rows; `grant_conflicts_total` counts every conflict,
+  including those beyond the 20 listed rows and beyond the detector's
+  100-row cap (the count comes from the sentinel text). `tracker` is
+  clipped to 64 characters and escaped.
 - `/omega-redteam-cycle` returns no `checkpoint` or `ledger` path, in
   results or error envelopes.
 - A command failure that is not a structured error returns only the
@@ -290,11 +294,13 @@ python -m omega_prime.grokbot.pin_bump --to v1.4 --report-to /tmp/delta.md
 - The file is written atomically (temp file `.pin-bump-report.<hex>.tmp`,
   then rename) with mode `0644`; missing parent directories are created.
   The write goes through a directory descriptor pinned at validation, so
-  swapping the parent or an ancestor afterwards cannot redirect it. If the
-  destination is tampered with after validation, the run exits `1` and
-  leaves the file unchanged.
+  swapping the parent or an ancestor afterwards cannot redirect it. The
+  walk pins each directory with `O_PATH` on Linux, so ancestors need only
+  search (`x`) permission, not read. If the destination is tampered with
+  after validation, the run exits `1` and leaves the file unchanged.
 - Usage errors exit `2` before any subprocess: empty, NUL or non-string
-  path, `.` or `..`, a trailing path separator, a file name over 200
+  path, `.` or `..` (also as the last component: a path ending in `/.` or
+  `/..`), a trailing path separator, a file name over 200
   bytes (UTF-8), an existing directory, any symlink (including a dangling
   one) or other non-regular file, a parent that is not a directory, an
   existing file that is neither empty nor a previous pin-bump report
@@ -328,13 +334,15 @@ none); the `Gate:` line appears only with `--threshold` or `--baseline`.
 Empty or missing history prints zeros, not an error. The `Gate:` line and
 all digest stderr (exit `1`, `2` and `3`) name only schema classes or
 `other` (a class that is not in the schema is shown as `other`), and
-control characters appear as backslash escapes.
+control characters appear as backslash escapes. `other` is only the display
+label for on-disk classes in gate-failure text: `--digest --baseline
+other=N` is rejected and `other` is not listed among the valid classes.
 
 | Exit | Meaning |
 | --- | --- |
 | `0` | OK |
 | `1` | Report or I/O error, `--digest` combined with `--json` or `--summary`, or a failed `--export-jsonl` write |
-| `2` | Unknown `--baseline` class |
+| `2` | Unknown `--baseline` class (with `--digest`, `other` is not selectable) |
 | `3` | Gate FAIL |
 
 `--digest` composes with `--since`, `--reports-dir`, `--threshold`,
@@ -346,9 +354,17 @@ Lines: one compact object per class, in coverage order, with keys
 `schema` (`"coverage/1"`), `class`, `cases`, `runs`, `wins`, `pass_pct`,
 `gaps`, `verdict`, `tier`, `weight`, `earned`, `possible`. Stdout is
 unchanged. Class names are JSON-escaped data (the fixed vocabulary above
-applies to the digest only). The file is written atomically (a
-`.engrep-*.tmp` file in the target directory, fsync, rename) with mode
-`0644`; a symlink at the target is refused and the exit code is `1`.
+applies to the digest only). The target is handled by type:
+
+- Absent or regular file: written atomically (a `.engrep-*.tmp` file in
+  the target directory, fsync, rename) with mode `0666 & ~umask`.
+- Existing FIFO, device or socket: written in place, never replaced
+  (`/dev/null` stays a device).
+- Symlink to a regular file, a directory or nothing (dangling): refused,
+  exit `1`.
+- Symlink to a stream such as `/dev/stdout`: written through.
+
+In `--digest` mode the export error line is printable-escaped.
 
 ```bash
 python3 scripts/engagement-report.py --digest --threshold gate:80 \
@@ -383,20 +399,32 @@ The six steps, in order:
 2. `release-watch` - refresh `<reports>/release-watch.json` from the
    upstream tags (writes, uses the network).
 3. `pin-bump-audit` - audit-only check of the newest new tag, 300 s per
-   command; skipped when nothing is new. A tag that is not a plain version
-   tag gives `unsafe-tag` and no audit. If the audit errors, the tag is
-   kept in `<reports>/purple-cycle-pending.json` (`{"tag": ...}`) and a
-   later cycle audits it; a successful audit clears the file.
+   command; skipped when nothing is new. Only `v<digits>.<digits>...`
+   tags that pin_bump accepts are audited; any other tag gives
+   `unsafe-tag` and no audit. `release-watch` records the new tag in
+   `<reports>/purple-cycle-pending.json` (`{"attempts": n, "tag": T}`)
+   before its checkpoint, so a crash cannot lose it. A failed, timed-out or
+   raising audit is a `warn` with reason `audit-failed`: it never halts the
+   cycle or changes the exit code, and a later cycle retries it. After 3
+   failed attempts the tag is dropped with `warn`/`audit-abandoned`. A
+   successful audit clears the file.
 4. `engagement` - summary and digest of the reports directory.
 5. `findings-plan` - a dry findings sync: would-sync, quiet-held and
    budget-held counts and whether grants conflict.
 6. `findings-dispatch` - apply only. Refused (`blocked`, `apply-refused`,
    exit `3`, cause in `detail.cause`) when the harness state is not `IDLE`
    (its cause, e.g. `kill-switch-set`), when no RoE is configured
-   (`roe-missing`), or when the RoE is `expired`, `missing`, `invalid` or
-   revoked (`revoked`: a `grant-revoked` row in `redteam.roe_audit_log`,
-   read only). The gate is re-checked fresh on every pass and every
-   resume; checkpointed preflight facts are reporting only.
+   (`roe-missing`), when config sets `redteam.kill` (`kill-switch-set`) or
+   an explicit `redteam.enabled: false` (`disabled`), or when any RoE in
+   the gate is `expired`, `missing`, `invalid` or revoked (`revoked`: a
+   `grant-revoked` row in an audit log, read only). The gate covers the
+   union of `redteam.roe_file(s)` and the findings-sync grant keys.
+   Revocations are matched by realpath and file identity, so path aliases
+   do not escape them, in the audit logs named by `roe_audit_log`,
+   `audit_log`, `roe_audit_log_path` or `audit_log_path` under `redteam`,
+   `redteam.findings_sync` or the top level. The gate is re-checked fresh
+   on every pass and every resume (with a fresh clock unless `now` was
+   injected); checkpointed preflight facts are reporting only.
 
 - **Cycle id:** `purple-cycle-YYYYMMDD-<mode>[-s<8hex>][-HHMMSS]`. A
   `--steps` subset adds `-s<8hex>` (a hash of the selected steps in
@@ -406,9 +434,12 @@ The six steps, in order:
   `<reports>/purple-cycle/workflows/<cycle id>.json`, not the repository
   or the durable state root, so `durable_status.workflow_checkpoints` is
   unaffected. A checkpoint whose mode, cycle id, selection or step records
-  do not match the current run is `checkpoint-unreadable` (exit `1`).
+  do not match the current run, or whose stored step records fail strict
+  validation (exact keys, types, bounded sizes), is `checkpoint-unreadable`
+  (exit `1`).
 - **Ledger:** `<reports>/purple-cycle.ndjson`; a ledger write failure never
-  raises.
+  raises. A blocked step is recorded as `apply-refused:<cause>`, once per
+  identical row.
 - **Resume:** a step that errors or is blocked is never checkpointed, so a
   rerun (the same day too) re-evaluates it and reuses the completed steps;
   later steps report `halted`. A fully completed cycle returns its stored

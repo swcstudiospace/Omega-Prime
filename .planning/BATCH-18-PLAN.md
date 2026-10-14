@@ -41,7 +41,7 @@ Every feature: typed and validated inputs, fail-closed or fail-open per the exis
 
 ## Review outcome
 
-Four independent reviews (correctness x3, security x1) of the wave A/B diff produced fixes, each with tests:
+Two independent review rounds ran. Round 1: four reviews (correctness x3, security x1) of the wave A/B diff produced fixes, each with tests:
 
 - `--report-to`: the write goes through a directory descriptor pinned at validation (a parent or ancestor swap cannot redirect it); an existing file that is not empty or a previous pin-bump report is never overwritten; trailing separator and name over 200 bytes are refused; short temp name; printed paths escaped.
 - Engagement digest: the gate line and all digest stderr use only schema classes or `other` and escape control characters.
@@ -55,3 +55,12 @@ Four independent reviews (correctness x3, security x1) of the wave A/B diff prod
 - Release watch: the `gh api` call times out after 60 s (a fetch failure, exit 3).
 - Chat: bounded, path-free output (sync-plan lists capped at 20 with totals, escaped and clipped hashes, grant path labels as basenames or `grant-N`; cycle returns no checkpoint or ledger path; non-structured failures return the exception type name only; ASCII-digit-only `--since`/`--threshold`).
 - Not addressed (documented limits): no overall `--run` deadline in the cycle; budget keys are absent on error/skip/disabled tick results; `budget_held` is unbounded in a tick result.
+
+Round 2 (one correctness reviewer pair, no P0) produced further fixes, each with tests:
+
+- `--report-to`: the directory walk pins with `O_PATH`, so ancestors need only search permission; paths ending in `/.` or `/..` are usage errors.
+- `--export-jsonl`: leaf policy by type (atomic replace at `0666 & ~umask`, FIFO/device/socket written in place, symlink to file/directory/dangling refused, symlink to a stream written through); digest export errors escaped; `--digest --baseline other=` rejected.
+- Purple cycle audit non-starvation: a failed audit is a retried `audit-failed` warning that never halts or changes the exit code; pending file `{"attempts", "tag"}`, abandoned after 3 attempts; the pending tag is written inside `release-watch`; only pin_bump-accepted tags are audited.
+- Apply gate: union of `redteam.roe_file(s)` and findings-sync grant keys, config kill / explicit `enabled: false` refusal, revocations matched by realpath and file identity across the four audit-log key names, fresh clock unless `now` injected.
+- Checkpoint records are validated strictly on read-back (`checkpoint-unreadable`); ledger rows for blocked steps read `apply-refused:<cause>`, once per identical row.
+- Sync-plan: `grant_conflicts_total` counts conflicts beyond the listed and detector-capped rows; `tracker` clipped and escaped; aliases never clash with real ids.
