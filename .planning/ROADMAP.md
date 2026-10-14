@@ -19,6 +19,7 @@
 - ✅ **v15 Integrated Readiness and Repository Delivery** — Phases 75–78 (shipped 2026-10-12; audit 21/22, GROK-03 live import UAT deferred by the user)
 - ✅ **v16 Enterprise Hardening and Continuous Verification** — Phases 79–84 (shipped 2026-10-13; audit PASS 13/13, sidecar ships BLOCKED pending signed RoE)
 - ✅ **v17 XML Prompt Standard** — Phases 85–88 (shipped 2026-10-14; every first-party prompt wrapped in XML tags like Programming Desk, enforced by a gate)
+- **v18 Operator posture** - Phases 89-95 (in progress). Seven upgrades accepted when the operator said to continue.
 
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
@@ -63,5 +64,20 @@ PROM-01..PROM-08 in `milestones/v17-REQUIREMENTS.md`.
 - [x] Phase 86: Runtime-built prompts in XML (1/1 plan) — completed 2026-10-14
 - [x] Phase 87: Static prompt documents in XML (1/1 plan) — completed 2026-10-14
 - [x] Phase 88: Grok Bot import readiness re-proof (1/1 plan) — completed 2026-10-14
+
+</details>
+
+<details open>
+<summary>v18 Operator posture (Phases 89-95) - in progress</summary>
+
+Accepted set from STATE.md after the operator said to continue. Requirements: milestones/v18-REQUIREMENTS.md.
+
+- [x] Phase 89: Purple-cycle schedule (1/1 plan) - completed 2026-10-14
+- [x] Phase 90: Cycle and sync backlog on durable_status (1/1 plan) - completed 2026-10-14
+- [x] Phase 91: Grant conflicts slash command (1/1 plan) - completed 2026-10-14
+- [x] Phase 92: Findings JSONL export (1/1 plan) - completed 2026-10-14
+- [x] Phase 93: Purple-cycle lock and deadline (1/1 plan) - completed 2026-10-14
+- [x] Phase 94: Readiness slash command (1/1 plan) - completed 2026-10-14
+- [x] Phase 95: Audit-chain slash command (1/1 plan) - completed 2026-10-14
 
 </details>

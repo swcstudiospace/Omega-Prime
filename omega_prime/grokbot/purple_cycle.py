@@ -43,8 +43,16 @@ Steps, in canonical order (:data:`STEP_NAMES`):
    clock is re-read); checkpointed preflight facts are reporting only.
 
 Modes (:data:`MODES`): ``plan`` is PURE (no checkpoint, no ledger, no state
-file, no network, no subprocess); ``run`` adds release-watch and the pin-bump
-audit; ``apply`` additionally dispatches findings.
+file, no network, no subprocess, no lock); ``run`` adds release-watch and the
+pin-bump audit; ``apply`` additionally dispatches findings. ``run`` and
+``apply`` hold an exclusive non-blocking ``flock`` on
+``<reports>/.purple-cycle.lock`` for the whole call and release it in a
+``finally``. A held lock returns ``blocked`` / ``cycle-locked`` (exit 3)
+without a ledger row and without dispatch. A lock file that cannot be created
+is a failure. An optional ``deadline_seconds`` (CLI ``--deadline``, rejected
+in plan mode) is a monotonic budget: a step whose start is already past the
+deadline does not run; earlier steps stay completed and the outcome is
+``partial`` (exit 1).
 
 Durability: run/apply checkpoint through
 :func:`omega_prime.durable.workflows.run_workflow` at
@@ -65,14 +73,15 @@ append-only ledger ``<reports>/purple-cycle.ndjson`` receives one secret-free
 row per executed step; a ``blocked`` row carries ``reason:cause`` (cause only
 when it is a short vocabulary word) and is appended once, not per rerun.
 
-Exit codes: 0 completed (ok/warn/skipped only), 1 any step error, 3 apply
-refused/blocked, 2 CLI usage error.
+Exit codes: 0 completed (ok/warn/skipped only), 1 any step error, lock
+failure, or deadline ``partial``, 3 apply refused/blocked or ``cycle-locked``,
+2 CLI usage error.
 
 CLI::
 
     python -m omega_prime.grokbot.purple_cycle [--mode plan|run|apply] [--apply]
         [--steps a,b] [--reports-dir DIR] [--root DIR] [--now ISO-8601-UTC]
-        [--force-new] [--json]
+        [--force-new] [--deadline SECONDS] [--json]
 """
 
 from __future__ import annotations
@@ -80,14 +89,17 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -107,6 +119,7 @@ STEP_NAMES = (
 MODES = ("plan", "run", "apply")
 
 LEDGER_FILENAME = "purple-cycle.ndjson"
+LOCK_FILENAME = ".purple-cycle.lock"
 RELEASE_WATCH_FILENAME = "release-watch.json"
 PENDING_FILENAME = "purple-cycle-pending.json"
 #: Checkpoint directory name under the reports dir.
@@ -332,6 +345,8 @@ class _Ctx:
     pin_run: Any
     fetch: Callable[[], Any] | None
     ledger: bool
+    #: Monotonic instant after which the next step must not start.
+    deadline_at: float | None = None
     #: True when the caller injected ``now`` (then it stays authoritative).
     now_injected: bool = True
     #: Name of the step that executed last (attributes checkpoint failures).
@@ -918,8 +933,22 @@ class _StepFailure(Exception):
         self.rec = rec
 
 
+class _Deadline(Exception):
+    """The monotonic deadline passed before this step started.
+
+    The carried state is the last checkpointed state. The step is not run and
+    not checkpointed.
+    """
+
+    def __init__(self, state: dict[str, Any]) -> None:
+        super().__init__("deadline")
+        self.state = state
+
+
 def _make_step(ctx: _Ctx, name: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
     def step(state: dict[str, Any]) -> dict[str, Any]:
+        if ctx.deadline_at is not None and time.monotonic() >= ctx.deadline_at:
+            raise _Deadline(dict(state))
         ctx.last_step = name
         records = list(state.get("steps", []))
         rec = _execute(ctx, name, state)
@@ -938,6 +967,23 @@ def _make_step(ctx: _Ctx, name: str) -> Callable[[dict[str, Any]], dict[str, Any
 # result assembly
 
 
+def _mark_unstarted(state: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    """Records for steps that never started (deadline), without executing them."""
+    done = {rec.get("name") for rec in state.get("steps", []) if isinstance(rec, dict)}
+    selected = set(state.get("selected", []))
+    steps = [dict(rec) for rec in state.get("steps", []) if isinstance(rec, dict)]
+    for name in STEP_NAMES:
+        if name in done:
+            continue
+        if name in selected:
+            steps.append(_record(name, "skipped", reason))
+        else:
+            steps.append(_record(name, "skipped", "not-selected"))
+    updated = dict(state)
+    updated["steps"] = steps
+    return updated
+
+
 def _result(
     ctx: _Ctx,
     state: Mapping[str, Any],
@@ -946,6 +992,7 @@ def _result(
     resumed: bool,
     checkpoint: str | None,
     ledger: str | None,
+    partial: bool = False,
 ) -> dict[str, Any]:
     records = [dict(rec) for rec in state.get("steps", [])]
     if failed is not None:
@@ -967,6 +1014,8 @@ def _result(
         outcome, code = "failed", EXIT_STEP_ERROR
     elif blocked:
         outcome, code = "blocked", EXIT_BLOCKED
+    elif partial:
+        outcome, code = "partial", EXIT_STEP_ERROR
     else:
         outcome, code = "completed", EXIT_OK
     return {
@@ -1094,6 +1143,58 @@ def _validated_prior(
 # public API
 
 
+def _checked_deadline(mode: str, deadline_seconds: float | None) -> float | None:
+    """Validate ``deadline_seconds``. ``None`` means no budget.
+
+    Plan mode rejects a deadline (it must stay pure). ``0`` is already due.
+    The monotonic clock starts only after the cycle lock is held.
+    """
+    if deadline_seconds is None:
+        return None
+    if mode == "plan":
+        raise ValueError("deadline_seconds is not allowed in plan mode")
+    if (
+        isinstance(deadline_seconds, bool)
+        or not isinstance(deadline_seconds, (int, float))
+        or not math.isfinite(float(deadline_seconds))
+        or float(deadline_seconds) < 0
+    ):
+        raise ValueError("deadline_seconds must be a finite number of seconds >= 0")
+    return float(deadline_seconds)
+
+
+def _acquire_cycle_lock(reports: Path) -> tuple[str, int | None]:
+    """Non-blocking exclusive lock on ``<reports>/.purple-cycle.lock``.
+
+    Returns ``("held", fd)``, ``("locked", None)`` when another holder has it,
+    or ``("error", None)`` when the lock file cannot be created. A held
+    descriptor is the caller's to unlock.
+    """
+    fd: int | None = None
+    try:
+        reports.mkdir(parents=True, exist_ok=True)
+        fd = os.open(reports / LOCK_FILENAME, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        if fd is not None:
+            os.close(fd)
+        return "locked", None
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+        return "error", None
+    return "held", fd
+
+
+def _release_cycle_lock(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def run_cycle(
     *,
     mode: str = "plan",
@@ -1107,6 +1208,7 @@ def run_cycle(
     runner: Any = None,
     pin_run: Any = None,
     fetch: Callable[[], Any] | None = None,
+    deadline_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Run (or plan) one purple cycle and return its structured result.
 
@@ -1117,6 +1219,7 @@ def run_cycle(
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; expected one of {MODES}")
+    deadline_seconds = _checked_deadline(mode, deadline_seconds)
     if steps is None:
         selected = list(STEP_NAMES)
     else:
@@ -1173,7 +1276,36 @@ def run_cycle(
     funcs = [_make_step(ctx, name) for name in STEP_NAMES]
     if mode == "plan":
         return _run_plan(ctx, initial, funcs)
-    return _run_durable(ctx, initial, funcs)
+    status, fd = _acquire_cycle_lock(reports)
+    try:
+        if status == "locked":
+            return _result(
+                ctx,
+                initial,
+                failed=_record(
+                    STEP_NAMES[0],
+                    "blocked",
+                    "cycle-locked",
+                    {"cause": "cycle-locked"},
+                ),
+                resumed=False,
+                checkpoint=str(ctx.checkpoint_dir / "workflows" / f"{cycle_id}.json"),
+                ledger=str(reports / LEDGER_FILENAME),
+            )
+        if status != "held":
+            return _result(
+                ctx,
+                initial,
+                failed=_pending_error(initial, "lock-error"),
+                resumed=False,
+                checkpoint=str(ctx.checkpoint_dir / "workflows" / f"{cycle_id}.json"),
+                ledger=str(reports / LEDGER_FILENAME),
+            )
+        if deadline_seconds is not None:
+            ctx.deadline_at = time.monotonic() + deadline_seconds
+        return _run_durable(ctx, initial, funcs)
+    finally:
+        _release_cycle_lock(fd)
 
 
 def _run_plan(
@@ -1223,6 +1355,17 @@ def _run_durable(
         final: dict[str, Any] = outcome["state"]
     except _StepFailure as exc:
         final, failed = exc.state, exc.rec
+    except _Deadline as exc:
+        final, failed = _mark_unstarted(exc.state, "deadline"), None
+        return _result(
+            ctx,
+            final,
+            failed=failed,
+            resumed=resumed,
+            checkpoint=checkpoint_path,
+            ledger=ledger_path,
+            partial=True,
+        )
     except (OSError, ValueError):
         final = prior_state if prior_state is not None else initial
         failed = _pending_error(final, "checkpoint-error", ctx.last_step)
@@ -1272,7 +1415,8 @@ def main(
         description=(
             "Resumable purple cycle: preflight, release-watch, pin-bump audit, "
             "engagement, findings plan and (apply only) findings dispatch. "
-            "Exit 0 completed, 1 step error, 2 usage error, 3 apply refused. "
+            "Exit 0 completed, 1 step error or deadline partial, 2 usage error, "
+            "3 apply refused or cycle locked. "
             "--now is rejected in apply mode (the RoE expiry check must use "
             "the real clock)."
         ),
@@ -1301,6 +1445,12 @@ def main(
         help="start a new cycle id (appends -HHMMSS) instead of resuming",
     )
     parser.add_argument(
+        "--deadline",
+        default=None,
+        help="monotonic seconds budget for run/apply (rejected in plan mode); "
+        "a step is not started after the deadline and the cycle ends partial",
+    )
+    parser.add_argument(
         "--json", action="store_true", help="print the result as one JSON line"
     )
     try:
@@ -1321,6 +1471,16 @@ def main(
         unknown = [name for name in selected if name not in STEP_NAMES]
         if unknown:
             return _usage_error(f"unknown step {unknown[0]!r}")
+    deadline: float | None = None
+    if args.deadline is not None:
+        if mode == "plan":
+            return _usage_error("--deadline is not allowed in plan mode")
+        try:
+            deadline = float(args.deadline)
+        except ValueError:
+            return _usage_error("--deadline must be a number of seconds")
+        if not math.isfinite(deadline) or deadline < 0:
+            return _usage_error("--deadline must be a finite number of seconds >= 0")
     now: datetime | None = None
     if args.now is not None:
         if mode == "apply":
@@ -1342,6 +1502,7 @@ def main(
             runner=runner,
             pin_run=pin_run,
             fetch=fetch,
+            deadline_seconds=deadline,
         )
     except ValueError as exc:
         return _usage_error(str(exc))

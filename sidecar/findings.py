@@ -25,9 +25,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import hashlib
 import json
+import os
 import re
+import secrets
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -40,6 +44,7 @@ from sidecar.state import reports_dir, utc_now_rfc3339  # noqa: E402
 
 FINDINGS_FILENAME = "findings.ndjson"
 WORK_ITEMS_FILENAME = "work-items.json"
+FINDING_SCHEMA = "finding/1"
 
 VERSION_FILENAME = "VERSION"
 CONTRACT_FILENAME = "bot-interface.json"
@@ -166,6 +171,120 @@ def record_finding(
     rows.append(new_row)
     _write_rows_atomic(path, rows)
     return new_row
+
+
+def render_findings_jsonl(rows: list[dict[str, Any]]) -> str:
+    """Render ``finding/1`` JSON Lines. Empty input is one trailing newline.
+
+    Each object carries only ``schema``, ``case_id``, ``severity``,
+    ``dedupe_hash``, and ``synced`` (true when ``issue_url`` is a
+    non-empty string). Raw gateway text is never included.
+    """
+    lines: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("finding row must be an object")
+        issue_url = row.get("issue_url")
+        payload = {
+            "schema": FINDING_SCHEMA,
+            "case_id": row["case_id"] if isinstance(row.get("case_id"), str) else "",
+            "severity": row["severity"] if isinstance(row.get("severity"), str) else "",
+            "dedupe_hash": (
+                row["dedupe_hash"] if isinstance(row.get("dedupe_hash"), str) else ""
+            ),
+            "synced": isinstance(issue_url, str) and issue_url != "",
+        }
+        lines.append(json.dumps(payload, sort_keys=True))
+    if not lines:
+        return "\n"
+    return "".join(line + "\n" for line in lines)
+
+
+def _write_jsonl_stream(text: str, jsonl_path: Path) -> None:
+    """Write ``text`` into a FIFO or device. Refuses a swapped regular file."""
+    flags = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOCTTY", 0)
+    fd = os.open(jsonl_path, flags)
+    try:
+        opened_mode = os.fstat(fd).st_mode
+        if not (
+            stat.S_ISFIFO(opened_mode)
+            or stat.S_ISCHR(opened_mode)
+            or stat.S_ISBLK(opened_mode)
+            or stat.S_ISSOCK(opened_mode)
+        ):
+            raise OSError("refusing to write: target is not a stream")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+        handle.flush()
+
+
+def _write_jsonl_atomic(text: str, jsonl_path: Path) -> None:
+    """Atomic temp + ``os.replace``. The temp is removed if replace fails."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    parent = jsonl_path.parent
+    temp_name: str | None = None
+    try:
+        for _attempt in range(100):
+            candidate = str(parent / f".findings-{secrets.token_hex(4)}.tmp")
+            try:
+                fd = os.open(candidate, flags, 0o666)
+            except FileExistsError:
+                continue
+            temp_name = candidate
+            break
+        else:
+            raise OSError("cannot create a unique temporary file")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, jsonl_path)
+        temp_name = None
+    finally:
+        if temp_name is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_name)
+
+
+def export_findings_jsonl(rows: list[dict[str, Any]], destination: Path) -> None:
+    """Write ``finding/1`` JSON Lines at ``destination``.
+
+    A missing path or a regular file is replaced atomically. A FIFO,
+    character device, block device, or socket is written in place. A
+    symlink leaf whose target is missing, a regular file, or a directory
+    is refused. A symlink to a non-regular target is written through.
+    """
+    destination = Path(destination)
+    try:
+        leaf_mode: int | None = os.lstat(destination).st_mode
+    except FileNotFoundError:
+        leaf_mode = None
+    direct = False
+    if leaf_mode is not None and stat.S_ISLNK(leaf_mode):
+        try:
+            target_mode = os.stat(destination).st_mode
+        except OSError:
+            target_mode = None
+        if (
+            target_mode is None
+            or stat.S_ISREG(target_mode)
+            or stat.S_ISDIR(target_mode)
+        ):
+            raise OSError("refusing to write through a symlink")
+        direct = True
+    elif leaf_mode is not None and not (
+        stat.S_ISREG(leaf_mode) or stat.S_ISDIR(leaf_mode)
+    ):
+        direct = True
+    text = render_findings_jsonl(rows)
+    if direct:
+        _write_jsonl_stream(text, destination)
+    else:
+        _write_jsonl_atomic(text, destination)
 
 
 def export_work_items(
@@ -326,13 +445,16 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "FINDING_SCHEMA",
     "check_drift",
     "dedupe_hash",
+    "export_findings_jsonl",
     "export_work_items",
     "findings_path",
     "load_findings",
     "main",
     "normalize_response",
     "record_finding",
+    "render_findings_jsonl",
     "work_items_path",
 ]

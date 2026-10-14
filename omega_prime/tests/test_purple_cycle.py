@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -2509,6 +2510,98 @@ def test_apply_refuses_schema_invalid_file_and_inline_grants(dirs, pin, mutate) 
         result = _cycle(dirs, mode="apply", config=_grant_config(grant), runner=runner)
         assert runner.calls == []
         assert result["blocked"] == {"cause": "invalid", "step": "findings-dispatch"}
+
+
+def test_overlapping_cycles_lock_without_a_second_dispatch(
+    dirs, pin, monkeypatch
+) -> None:
+    _seed_one_finding(dirs)
+    config = _apply_sync(dirs)
+    runner = Runner()
+    started = threading.Event()
+    release = threading.Event()
+    original = purple_cycle._STEP_FUNCS["preflight"]
+
+    def hold(ctx: Any, state: Any) -> Any:
+        started.set()
+        assert release.wait(5)
+        return original(ctx, state)
+
+    monkeypatch.setitem(purple_cycle._STEP_FUNCS, "preflight", hold)
+    held: dict[str, Any] = {}
+
+    def run_holder() -> None:
+        held["result"] = _cycle(
+            dirs, mode="apply", config=config, runner=runner, force_new=True
+        )
+
+    thread = threading.Thread(target=run_holder)
+    thread.start()
+    assert started.wait(5)
+    second = _cycle(dirs, mode="apply", config=config, runner=runner, force_new=True)
+    release.set()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert second["exit"] == 3 and second["state"] == "blocked"
+    assert second["blocked"] == {"cause": "cycle-locked", "step": "preflight"}
+    assert _by_name(second)["preflight"]["reason"] == "cycle-locked"
+    assert _by_name(second)["findings-dispatch"]["status"] == "skipped"
+    assert held["result"]["state"] == "completed"
+    dispatch = [row for row in _ledger_rows(dirs) if row["step"] == "findings-dispatch"]
+    assert len(dispatch) == 1
+    assert len(runner.calls) == 1
+
+
+def test_zero_deadline_is_partial_and_starts_nothing(dirs, pin, counters) -> None:
+    result = _cycle(dirs, deadline_seconds=0.0)
+    assert result["state"] == "partial"
+    assert result["exit"] != 0 and result["ok"] is False
+    assert counters == dict.fromkeys(STEP_NAMES, 0)
+    assert [rec["reason"] for rec in result["steps"]] == ["deadline"] * len(STEP_NAMES)
+    assert not (dirs.reports / "purple-cycle.ndjson").exists()
+
+
+def test_slow_step_past_a_tiny_deadline_stays_partial(dirs, pin, monkeypatch) -> None:
+    original = purple_cycle._STEP_FUNCS["preflight"]
+
+    def slow(ctx: Any, state: Any) -> Any:
+        time.sleep(0.3)
+        return original(ctx, state)
+
+    monkeypatch.setitem(purple_cycle._STEP_FUNCS, "preflight", slow)
+    result = _cycle(dirs, deadline_seconds=0.05)
+    assert result["state"] == "partial" and result["exit"] != 0
+    assert _by_name(result)["preflight"]["status"] in {"ok", "warn"}
+    assert _by_name(result)["release-watch"]["reason"] == "deadline"
+    assert _by_name(result)["release-watch"]["status"] == "skipped"
+
+
+def test_plan_mode_writes_nothing_and_rejects_deadline(dirs, pin, capsys) -> None:
+    before = _snapshot(dirs.tmp)
+    planned = _cycle(dirs, mode="plan")
+    assert planned["state"] == "completed" and planned["exit"] == 0
+    assert _snapshot(dirs.tmp) == before
+    assert not (dirs.reports / ".purple-cycle.lock").exists()
+    assert _cli(["--mode", "plan", "--deadline", "1"], dirs) == 2
+    assert capsys.readouterr().out == ""
+    assert _snapshot(dirs.tmp) == before
+
+
+def test_finished_checkpoint_rerun_is_not_cycle_locked(dirs, pin, counters) -> None:
+    first = _cycle(dirs)
+    again = _cycle(dirs)
+    assert first["state"] == "completed" and again["resumed"] is True
+    assert again["state"] == "completed" and again["exit"] == 0
+    assert again["blocked"] is None
+    assert all(count == 1 for count in counters.values())
+
+
+def test_lock_file_that_cannot_be_created_fails(dirs, pin) -> None:
+    blocked = dirs.tmp / "reports-file"
+    blocked.write_text("not a directory", encoding="utf-8")
+    result = _cycle(dirs, reports_dir=blocked)
+    assert result["state"] == "failed" and result["exit"] == 1
+    assert _by_name(result)["preflight"]["reason"] == "lock-error"
 
 
 def test_schema_invalid_grant_next_to_a_valid_one_still_refuses(dirs, pin) -> None:

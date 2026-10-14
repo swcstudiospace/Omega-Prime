@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -196,6 +197,158 @@ def _engagement_block(root: Path) -> dict[str, Any]:
     }
 
 
+def _reports_dir(root: Path) -> Path:
+    """Sidecar reports directory, same override ``_engagement_block`` uses."""
+    override = os.environ.get(ENGAGEMENT_SIDECAR_REPORTS_ENV_VAR, "").strip()
+    return Path(override) if override else root / "sidecar" / "reports"
+
+
+def _empty_cycle() -> dict[str, Any]:
+    return {"id": None, "state": None, "age_seconds": None, "pending_tag": None}
+
+
+def _empty_backlog() -> dict[str, Any]:
+    return {"trackers": {"default": {"depth": 0, "oldest_age_seconds": None}}}
+
+
+def _cycle_id(document: dict[str, Any], stem: str) -> str | None:
+    """JSON cycle id when present, otherwise the checkpoint filename stem."""
+    for candidate in (
+        document.get("cycle_id"),
+        document.get("id"),
+        (document.get("state") or {}).get("cycle_id")
+        if isinstance(document.get("state"), dict)
+        else None,
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return stem or None
+
+
+def _cycle_state(document: dict[str, Any]) -> str | None:
+    """Status or outcome string written on the checkpoint, when one exists."""
+    for key in ("status", "outcome"):
+        value = document.get(key)
+        if isinstance(value, str) and value:
+            return value
+    nested = document.get("state")
+    if isinstance(nested, str) and nested:
+        return nested
+    if isinstance(nested, dict):
+        for key in ("status", "outcome"):
+            value = nested.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _pending_tag(reports_dir: Path) -> str | None:
+    try:
+        raw = json.loads(
+            (reports_dir / "purple-cycle-pending.json").read_text(encoding="utf-8")
+        )
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    tag = raw.get("tag")
+    return tag if isinstance(tag, str) and tag else None
+
+
+def _cycle_block(reports_dir: Path, *, now: float | None = None) -> dict[str, Any]:
+    """Newest purple-cycle checkpoint, or all-None when absent or unreadable.
+
+    Reads only. Missing directories, unreadable JSON, and stat failures stay
+    empty — no paths and no exception text.
+    """
+    try:
+        if not reports_dir.is_dir():
+            return _empty_cycle()
+        workflow_dir = reports_dir / "purple-cycle" / "workflows"
+        paths = [path for path in workflow_dir.glob("*.json") if path.is_file()]
+    except Exception:
+        return _empty_cycle()
+    if not paths:
+        block = _empty_cycle()
+        block["pending_tag"] = _pending_tag(reports_dir)
+        return block
+    try:
+        newest = max(paths, key=lambda path: (path.stat().st_mtime, path.name))
+        document = json.loads(newest.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ValueError("checkpoint is not an object")
+        age = int((time.time() if now is None else now) - newest.stat().st_mtime)
+    except Exception:
+        return _empty_cycle()
+    return {
+        "id": _cycle_id(document, newest.stem),
+        "state": _cycle_state(document),
+        "age_seconds": age,
+        "pending_tag": _pending_tag(reports_dir),
+    }
+
+
+def _row_timestamp(row: dict[str, Any]) -> float | None:
+    raw = row.get("timestamp")
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.timestamp()
+    return None
+
+
+def _lacks_issue_url(row: dict[str, Any]) -> bool:
+    url = row.get("issue_url")
+    return not (isinstance(url, str) and url.strip())
+
+
+def _sync_backlog(reports_dir: Path, *, now: float | None = None) -> dict[str, Any]:
+    """Count findings rows that still lack a non-empty ``issue_url``.
+
+    Corrupt or missing ``findings.ndjson`` is depth 0. Row bodies are not
+    returned.
+    """
+    empty = _empty_backlog()
+    try:
+        if not reports_dir.is_dir():
+            return empty
+        text = (reports_dir / "findings.ndjson").read_text(encoding="utf-8")
+    except Exception:
+        return empty
+    clock = time.time() if now is None else now
+    depth = 0
+    oldest: float | None = None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or not _lacks_issue_url(row):
+            continue
+        depth += 1
+        stamp = _row_timestamp(row)
+        if stamp is not None and (oldest is None or stamp < oldest):
+            oldest = stamp
+    tracker: dict[str, Any] = {"depth": depth, "oldest_age_seconds": None}
+    if oldest is not None:
+        tracker["oldest_age_seconds"] = int(clock - oldest)
+    return {"trackers": {"default": tracker}}
+
+
 def _releases_block(root: Path) -> dict[str, Any]:
     """Additive upstream-releases block from the release-watch state file.
 
@@ -227,6 +380,9 @@ def register_durable_surface_tools(
         engagement = _engagement_block(base)
         releases = _releases_block(base)
         sidecar = _sidecar_block(base)
+        reports = _reports_dir(base)
+        cycle = _cycle_block(reports)
+        sync_backlog = _sync_backlog(reports)
         if not journal_path.is_file():
             return {
                 "journal": "absent",
@@ -239,6 +395,8 @@ def register_durable_surface_tools(
                 "engagement": engagement,
                 "releases": releases,
                 "sidecar": sidecar,
+                "cycle": cycle,
+                "sync_backlog": sync_backlog,
             }
         found = TurnJournal(journal_path).status()
         return {
@@ -252,6 +410,8 @@ def register_durable_surface_tools(
             "engagement": engagement,
             "releases": releases,
             "sidecar": sidecar,
+            "cycle": cycle,
+            "sync_backlog": sync_backlog,
         }
 
     registry.register(

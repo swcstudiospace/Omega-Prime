@@ -320,7 +320,8 @@ def run_due_jobs(
     ``desk_lead_pass`` jobs are skipped: they are driven by
     :func:`run_desk_lead_passes` and must never burn a model call here.
     ``pin_bump_schedule`` jobs are skipped for the same reason: they
-    are driven by :func:`tick_pin_bump_schedules`.
+    are driven by :func:`tick_pin_bump_schedules`. ``purple_cycle``
+    jobs are skipped too: they are driven by :func:`tick_purple_cycles`.
     """
 
     def runner(prompt: str) -> str:
@@ -343,7 +344,11 @@ def run_due_jobs(
         response = result.get("final_response") if isinstance(result, dict) else ""
         return response if isinstance(response, str) else ""
 
-    return store.tick(now, runner, skip_kinds=(DESK_LEAD_KIND, PIN_BUMP_SCHEDULE_KIND))
+    return store.tick(
+        now,
+        runner,
+        skip_kinds=(DESK_LEAD_KIND, PIN_BUMP_SCHEDULE_KIND, PURPLE_CYCLE_KIND),
+    )
 
 
 #: Job kind marker stored on RoE watchdog jobs (K11). An independent
@@ -859,28 +864,240 @@ def tick_pin_bump_schedules(
     return ran
 
 
+#: Job kind marker stored on purple-cycle jobs. A scheduled cycle runs
+#: ``omega_prime.grokbot.purple_cycle`` in ``plan`` or ``run`` only.
+#: ``apply`` is refused at schedule time so findings-dispatch never
+#: executes from this ticker. The generic due-job tick skips this kind.
+PURPLE_CYCLE_KIND = "purple_cycle"
+
+#: Bounded per-job run history, mirroring :func:`tick_roe_watchdog`.
+PURPLE_CYCLE_HISTORY_LIMIT = 20
+
+#: Modes a scheduled cycle may store. ``apply`` is never one of them.
+_PURPLE_CYCLE_MODES = ("plan", "run")
+
+#: Canonical step names. Order matches ``purple_cycle.STEP_NAMES``.
+PURPLE_CYCLE_STEPS = (
+    "preflight",
+    "release-watch",
+    "pin-bump-audit",
+    "engagement",
+    "findings-plan",
+    "findings-dispatch",
+)
+
+
+def schedule_purple_cycle(
+    store: JobStore,
+    *,
+    due_at: int | float,
+    interval_seconds: int | float,
+    mode: str = "plan",
+    steps: Any = None,
+) -> str:
+    """Schedule a recurring purple cycle and return its id.
+
+    ``mode`` is ``plan`` or ``run``. ``apply``, an empty mode, a
+    non-positive interval, a bool interval, and an unknown step name
+    raise ``ValueError`` before ``store.schedule`` is called. ``steps``
+    is ``None`` (every known step) or a tuple of known step names stored
+    on the job. The scheduled mode never runs findings-dispatch through
+    apply.
+    """
+    if (
+        isinstance(interval_seconds, bool)
+        or not isinstance(interval_seconds, (int, float))
+        or interval_seconds <= 0
+    ):
+        raise ValueError("a purple cycle needs a positive interval_seconds")
+    if not isinstance(mode, str) or mode not in _PURPLE_CYCLE_MODES:
+        raise ValueError("purple cycle mode must be 'plan' or 'run'")
+    stored_steps: tuple[str, ...] | None
+    if steps is None:
+        stored_steps = None
+    else:
+        if isinstance(steps, str) or not isinstance(steps, (tuple, list)):
+            raise ValueError("steps must be a sequence of known step names")
+        if not steps:
+            raise ValueError("steps must name at least one step")
+        unknown = [name for name in steps if name not in PURPLE_CYCLE_STEPS]
+        if unknown:
+            raise ValueError(
+                f"unknown step {unknown[0]!r}; expected {PURPLE_CYCLE_STEPS}"
+            )
+        stored_steps = tuple(name for name in PURPLE_CYCLE_STEPS if name in steps)
+    job_id = store.schedule(
+        f"purple-cycle {mode}",
+        due_at,
+        interval_seconds=interval_seconds,
+    )
+    for job in store.jobs:
+        if isinstance(job, dict) and job.get("id") == job_id:
+            job["kind"] = PURPLE_CYCLE_KIND
+            job["mode"] = mode
+            job["steps"] = stored_steps
+            break
+    store._save()
+    return job_id
+
+
+def list_purple_cycles(store: JobStore) -> list[dict]:
+    """All purple-cycle jobs, complete or not."""
+    return [
+        job
+        for job in store.jobs
+        if isinstance(job, dict) and job.get("kind") == PURPLE_CYCLE_KIND
+    ]
+
+
+def clear_purple_cycle(store: JobStore, job_id: str) -> dict:
+    """Remove one purple cycle by id. Unknown id is a structured result."""
+    for index, job in enumerate(store.jobs):
+        if (
+            isinstance(job, dict)
+            and job.get("id") == job_id
+            and job.get("kind") == PURPLE_CYCLE_KIND
+        ):
+            store.jobs.pop(index)
+            store._save()
+            return {"cleared": job_id}
+    return {"error": f"no purple-cycle job: {job_id!r}"}
+
+
+def _purple_cycle_failed(result: Any) -> bool:
+    """True when a cycle result is not a successful completed run."""
+    if not isinstance(result, dict):
+        return True
+    if result.get("ok") is False:
+        return True
+    state = result.get("state")
+    if state in ("failed", "blocked", "error"):
+        return True
+    exit_code = result.get("exit")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return result.get("ok") is not True
+    return exit_code != 0
+
+
+def _default_purple_cycle_runner(job: dict) -> Any:
+    """Run one cycle in the job's plan or run mode. Never apply."""
+    from omega_prime.grokbot import purple_cycle
+
+    mode = job.get("mode")
+    if mode not in _PURPLE_CYCLE_MODES:
+        raise ValueError("purple cycle mode must be 'plan' or 'run'")
+    steps = job.get("steps")
+    return purple_cycle.run_cycle(mode=mode, steps=steps)
+
+
+def tick_purple_cycles(
+    store: JobStore,
+    now: int | float,
+    runner: Callable[[dict], Any] | None = None,
+) -> list[dict]:
+    """Run each due purple cycle once, in order.
+
+    Only non-completed ``purple_cycle`` jobs due at ``now`` run. A job
+    already claimed or recorded for ``now`` is skipped, and the claim is
+    saved before the runner starts. ``runner(job)`` defaults to
+    :func:`_default_purple_cycle_runner`, which calls
+    ``omega_prime.grokbot.purple_cycle.run_cycle`` in the job's ``plan``
+    or ``run`` mode and never ``apply``. A failed cycle result is stored
+    on the job history as ``failed`` and is omitted from the returned
+    list (that list is the successful runs). After a run, ``due_at``
+    advances by ``interval_seconds``, so a second tick at the same
+    ``now`` does not run the job again.
+    """
+    stamp = float(now)
+    ran: list[dict] = []
+    changed = False
+    for job in store.jobs:
+        if not isinstance(job, dict):
+            continue
+        if job.get("kind") != PURPLE_CYCLE_KIND or job.get("completed"):
+            continue
+        due_at = job.get("due_at")
+        if due_at is None or due_at > stamp:
+            continue
+        history = job.get("history")
+        if not isinstance(history, list):
+            history = []
+            job["history"] = history
+        if job.get("claimed_at") == stamp:
+            continue
+        if any(
+            isinstance(entry, dict) and entry.get("ran_at") == stamp
+            for entry in history
+        ):
+            continue
+        job["claimed_at"] = stamp
+        store._save()
+        cycle_runner = runner or _default_purple_cycle_runner
+        try:
+            result = cycle_runner(job)
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "exit": 1,
+                "state": "failed",
+                "error": f"{type(exc).__name__}",
+            }
+        failed = _purple_cycle_failed(result)
+        job["last_result"] = result
+        job["last_ran_at"] = stamp
+        history.append(
+            {
+                "ran_at": stamp,
+                "result": result,
+                "status": "failed" if failed else "ok",
+            }
+        )
+        del history[:-PURPLE_CYCLE_HISTORY_LIMIT]
+        job["claimed_at"] = None
+        interval = job.get("interval_seconds")
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)):
+            job["completed"] = True
+        elif interval > 0:
+            job["due_at"] = stamp + interval
+        else:
+            job["completed"] = True
+        changed = True
+        if not failed:
+            ran.append(job)
+    if changed:
+        store._save()
+    return ran
+
+
 __all__ = [
     "DESK_LEAD_KIND",
     "HISTORY_LIMIT",
     "PIN_BUMP_SCHEDULE_HISTORY_LIMIT",
     "PIN_BUMP_SCHEDULE_KIND",
+    "PURPLE_CYCLE_HISTORY_LIMIT",
+    "PURPLE_CYCLE_KIND",
+    "PURPLE_CYCLE_STEPS",
     "ROE_WATCHDOG_HISTORY_LIMIT",
     "ROE_WATCHDOG_INTERVAL_SECONDS",
     "ROE_WATCHDOG_KIND",
     "JobStore",
+    "clear_purple_cycle",
     "clear_roe_watchdog",
     "desk_lead_runner",
     "list_desk_lead_passes",
     "list_pin_bump_schedules",
+    "list_purple_cycles",
     "list_roe_watchdogs",
     "pin_bump_next_due",
     "run_desk_lead_passes",
     "run_due_jobs",
     "schedule_desk_lead_pass",
     "schedule_pin_bump",
+    "schedule_purple_cycle",
     "schedule_roe_watchdog",
     "tick_desk_lead_passes",
     "tick_pin_bump_schedules",
+    "tick_purple_cycles",
     "tick_roe_watchdog",
     "validate_pin_bump_cron",
 ]

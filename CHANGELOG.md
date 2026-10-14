@@ -1,3 +1,7 @@
+## Unreleased
+
+- Slash commands: curated 24 -> 27 and total 58 -> 61. Added `/omega-redteam-conflicts`, `/omega-redteam-readiness`, and `/omega-audit`. Findings accept `--jsonl`. `durable_status` reports cycle and sync backlog. Purple-cycle jobs can be scheduled, and a live cycle takes a file lock plus an optional deadline.
+
 # Changelog
 
 All notable changes to this project are documented here. Format follows

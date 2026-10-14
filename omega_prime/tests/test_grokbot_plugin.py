@@ -46,7 +46,7 @@ ROSTER = "omega_prime/contracts/tool-rosters/omega-prime.yaml"
 SKILLS = checked_in_skills(ROOT)
 ROUTINES = checked_in_routines(ROOT)
 
-# RESEARCH R-2: the 24 curated names, in catalog order.
+# RESEARCH R-2: the 27 curated names, in catalog order.
 CURATED = [
     "omega-help",
     "omega-doctor",
@@ -72,6 +72,9 @@ CURATED = [
     "omega-redteam-coverage",
     "omega-redteam-sync-plan",
     "omega-redteam-cycle",
+    "omega-redteam-conflicts",
+    "omega-redteam-readiness",
+    "omega-audit",
 ]
 # RESEARCH §Generation rule, applied table: exactly these take a suffix.
 SUFFIXED = {
@@ -344,7 +347,7 @@ def test_every_checked_in_skill_has_platform_valid_frontmatter() -> None:
 
 def test_every_command_file_routes_to_omega_command_with_its_exact_text() -> None:
     files = sorted((ROOT / COMMANDS_DIR).glob("*.md"))
-    assert len(files) == 58
+    assert len(files) == 61
     for path in files:
         text = path.read_text(encoding="utf-8")
         mapping = _frontmatter(text)
@@ -364,7 +367,7 @@ def test_catalog_has_58_entries_with_exactly_the_five_suffixed_names() -> None:
     assert [spec.name for spec in COMMANDS] == CURATED
     assert len(ROUTINES) == 7
     names = {spec.name for spec in plugin.catalog(ROOT)}
-    assert len(names) == 58 == len(CURATED) + len(SKILLS) + len(ROUTINES)
+    assert len(names) == 61 == len(CURATED) + len(SKILLS) + len(ROUTINES)
     assert names == _expected_names()
     generated = names - set(CURATED)
     suffixed = {name for name in generated if name.endswith(("-skill", "-routine"))}

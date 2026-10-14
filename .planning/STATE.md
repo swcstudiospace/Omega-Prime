@@ -1,12 +1,12 @@
 ---
 gsd_state_version: "1.0"
-milestone: v17
-milestone_name: XML Prompt Standard
-status: Milestone complete
-stopped_at: Phase 88 complete — all phases complete
-last_updated: "2026-10-14T09:55:00.000Z"
+milestone: v18
+milestone_name: Operator posture
+status: v18 phases implemented
+stopped_at: v18 phases 89-95 implemented on ultrathink/v18-seven. Phase 77.1 live UAT stays user-owned. Stdio overlay retest waits until the new command files are committed.
+last_updated: "2026-10-14T21:50:00.000Z"
 last_activity: 2026-10-14
-last_activity_desc: v17 XML Prompt Standard shipped locally; every first-party prompt is XML-wrapped and gated
+last_activity_desc: Implemented the seven accepted v18 upgrades (graph ut-mv8mtqhp-40c94082)
 state_head: c009a34
 progress:
   total_phases: 4
@@ -25,14 +25,58 @@ current_plan: null
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** v17 XML Prompt Standard is complete (phases 85–88). Every first-party prompt is wrapped in XML and `python -m omega_prime.tooling.prompt_format --check` enforces it. v1–v16 stay shipped. The only unchecked ROADMAP phase is 77.1, whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–18 are on main (`.planning/BATCH-01-REPORT.md` … `BATCH-18-REPORT.md`); batch 19 is proposed and awaiting go-ahead (ITERATION_CONTROL pause-per-batch). `ci / lint` on main was RED from batch 05 to 17 (21 ruff errors the batch reports had called clean) and was repaired in PR #31: every batch gate MUST run the exact CI commands (`ruff check omega_prime/`, `ruff format --check omega_prime/`, `mypy omega_prime/`, full pytest, plus the docs/plugin/catalog checks). The red-team pin is `f6d2fc2` (purple-team v1.4); `redteam-node-audit` has been GREEN with 0 advisories since batch 03, and upstream v1.5 has not shipped. v16 "Enterprise Hardening and Continuous Verification" is complete and archived (audit PASS 13/13; `.planning/milestones/v16-MILESTONE-AUDIT.md`): purple-team sidecar hardened and refresh-automated (ships BLOCKED), protected publish environment live, OTLP/SLOs, token rotation + quotas, sandboxed verification gates, live evals with regression tracking. Self-contained run package: `.planning/package/DELIVERABLE.md`. Operator next actions: sign the rules-of-engagement artifact to unblock live purple-team engagements; approve the first `workflow_dispatch publish:true` run; run the six deferred 77.1 live UAT rows after the next Grok Bot upload (`/gsd:verify-work 77.1`).
+**Current focus:** v17 XML Prompt Standard is complete (phases 85–88). Every first-party prompt is wrapped in XML and `python -m omega_prime.tooling.prompt_format --check` enforces it. v1–v16 stay shipped. The only unchecked ROADMAP phase is 77.1, whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–18 are on main (`.planning/BATCH-01-REPORT.md` … `BATCH-18-REPORT.md`); batch 19 was not accepted as the seven. The upgrade gate in this file is the pause: seven proposed upgrades, no upgrade code until accepted. `ci / lint` on main was RED from batch 05 to 17 (21 ruff errors the batch reports had called clean) and was repaired in PR #31: every batch gate MUST run the exact CI commands (`ruff check omega_prime/`, `ruff format --check omega_prime/`, `mypy omega_prime/`, full pytest, plus the docs/plugin/catalog checks). The red-team pin is `f6d2fc2` (purple-team v1.4); `redteam-node-audit` has been GREEN with 0 advisories since batch 03, and upstream v1.5 has not shipped. v16 "Enterprise Hardening and Continuous Verification" is complete and archived (audit PASS 13/13; `.planning/milestones/v16-MILESTONE-AUDIT.md`): purple-team sidecar hardened and refresh-automated (ships BLOCKED), protected publish environment live, OTLP/SLOs, token rotation + quotas, sandboxed verification gates, live evals with regression tracking. Self-contained run package: `.planning/package/DELIVERABLE.md`. Operator next actions: sign the rules-of-engagement artifact to unblock live purple-team engagements; approve the first `workflow_dispatch publish:true` run; run the six deferred 77.1 live UAT rows after the next Grok Bot upload (`/gsd:verify-work 77.1`).
 
 ## Current Position
 
-Phase: Milestone v17 complete
+Phase: Milestone v17 complete. Next work is paused.
 Plan: —
-Status: Milestone complete
-Last activity: 2026-10-14 — v17 XML Prompt Standard (phases 85–88) complete. Runtime prompts, skills, routines, and generated commands are XML-wrapped; interpolated text is XML-escaped; the prompt-format gate is in CI. Batch 19 stays proposed and paused.
+Status: Inside a pause. Resume only after the seven upgrades below are accepted or replaced. Do not re-execute phases 85–88. Do not mark 77.1 passed.
+Last activity: 2026-10-14 — inventory and upgrade gate recorded. No upgrade source was written.
+
+## Upgrade gate (awaiting acceptance)
+
+v17 is already closed, so these seven are new scope for a milestone v18 (phases 89–95, one phase each) after acceptance. They are not named in ROADMAP.md. Batch 19 in `.planning/BATCH-18-REPORT.md` is a proposal, not an accepted context. `skip-pause` does not apply.
+
+Open phases outside this gate: only Phase 77.1. Its eight plans are executed and archived under `.planning/milestones/v15-phases/77.1-grok-bot-import-packaging/`. The unfinished step is the user's live Grok Bot import UAT (`/gsd:verify-work 77.1`), not discuss, plan, or execute. Source label: ROADMAP.md still has `- [ ]` on 77.1, and Deferred Verification marks it `verification_deferred_human`. Left untouched.
+
+No milestone is labeled future, deferred, or icebox. v1–v17 are complete.
+
+Workflow skills present: `gsd-discuss-phase`, `gsd-plan-phase`, `gsd-execute-phase`, `gsd-audit-milestone`, `gsd-complete-milestone`, `gsd-cleanup`, `gsd-new-milestone`. Product name: Omega Prime (`swcstudiospace/omes-bot`). No browser UI. Verification limit: repo tests only.
+
+Verify commands, copied from `.github/workflows/ci.yml`:
+
+- `python3 -m ruff check omega_prime/`
+- `python3 -m ruff format --check omega_prime/`
+- `python3 -m mypy omega_prime/`
+- `python3 -m pytest omega_prime/tests -q`
+- `python3 -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q`
+- `python3 -m omega_prime.tooling.catalog --check`
+- `python3 -m omega_prime.tooling.plugin --check`
+- `python3 -m omega_prime.tooling.prompt_format --check`
+
+Safe-stop: a failed check does not complete the phase. Record the command and result here and resume at that phase. Do not revert shipped history.
+
+### The seven (implemented)
+
+Each one is absent from the code today. Command-count pins are 24 curated and 58 total (`omega_prime/tests/test_command_generation.py`, `test_grokbot_plugin.py`). Three new slash commands move those pins to 27 and 61, and the plugin command files must be regenerated. Chat commands take no caller-supplied paths; they read the existing host env. There is no per-user auth layer on slash commands; a missing or unusable env is the unauthorized/unavailable result, and the handler still enforces it.
+
+1. **Purple-cycle schedule.** Outcome: an operator can schedule, list, clear, and tick a `purple_cycle` cron kind the way desk-lead, RoE watchdog, and pin-bump jobs already work. Gap: `omega_prime/cron/scheduler.py` has those three kinds and no purple-cycle kind, so the cycle in `omega_prime/grokbot/purple_cycle.py` runs only when someone invokes it. Why: unattended, idempotent operations jobs are how this host already runs repeated work. Surfaces: scheduler only. New phase. Acceptance: invalid interval or unknown id writes nothing; a second tick joins the existing job; a failed cycle step stays failed and is not reported as success; plan mode does not dispatch findings. Non-goals: no new scheduler, no apply-by-default. Flags: none. Overlapping runs are upgrade 5.
+2. **Cycle and backlog on `durable_status`.** Outcome: `durable_status` gains additive `cycle` and `sync_backlog` blocks (last cycle id, state, age, pending audit tag; per-tracker held depth and oldest held age). Gap: `omega_prime/tools/durable_surface.py` returns journal, RoE, engagement, releases, and sidecar only. Why: operators already inspect this tool for posture, and a silent cycle or a stuck sync is a defect. Surfaces: the existing tool. New phase. Acceptance: missing checkpoint or findings store yields empty blocks and leaves the other keys intact; unreadable input is a failed block, not a raised secret; a repeat call does not write. Non-goals: no new database. Flags: none. Additive keys only.
+3. **`/omega-redteam-conflicts`.** Outcome: chat shows RoE grant conflicts, basenames only, capped. Gap: `grant_conflicts` is a CLI subcommand of `omega_prime/grokbot/roe_lifecycle.py` and is not a slash command. Why: the other red-team reads already have `/omega-redteam-*` commands. Surfaces: `omega_prime/commands/`. New phase. Acceptance: no configured grants returns an empty list and writes nothing; bad flags return usage and write nothing; a missing env is unavailable; detector failure is an error, not an empty success; repeat is read-only. Non-goals: does not revoke grants or accept paths in the message. Flags: none.
+4. **Findings JSONL.** Outcome: a `finding/1` export uses the same atomic and special-file rules as the coverage JSONL export, and `/omega-redteam-findings --jsonl` prints that text. Gap: `omega_prime/commands/redteam_findings.py` accepts only `--limit`. Why: coverage already streams `coverage/1` for SIEM ingestion; findings do not. Surfaces: findings export plus that one command. New phase. Acceptance: empty store emits no rows and writes nothing; bad flags do not write; chat output stays bounded and path-free; a symlink leaf is refused; repeat does not duplicate a file. Non-goals: does not push to a tracker. Flags: none.
+5. **Purple-cycle lock and deadline.** Outcome: two overlapping cycles have one winner; the loser is rejected. A wall-clock deadline stops later steps and records partial. Gap: `purple_cycle.py` has no file lock and no deadline; a second process can run the same cycle. Why: the checkpoint is already idempotent for a finished cycle, but not for two live ones. Surfaces: `omega_prime/grokbot/purple_cycle.py` only. New phase. Acceptance: the second process does not dispatch or append a second ledger for the same run; a deadline records partial and does not mark success; a lock that cannot be taken is a failure, not a silent skip; a finished cycle still no-ops. Non-goals: does not change the apply gate's RoE rules. Flags: defines the overlap result as reject. Checkpoint file shape stays compatible.
+6. **`/omega-redteam-readiness`.** Outcome: chat reports `roe_state`, `gateway_reachable`, `suites_loaded`, `suites_total`, and `ready_for_live` from `check_readiness`. Gap: that function exists in `roe_lifecycle.py` and `/omega-redteam-roe-check` does not report the gateway or the suites. Why: an operator can otherwise learn live readiness only from the shell. Surfaces: a new command module. New phase. Acceptance: no artifact is not ready and writes nothing; a down gateway is `ready_for_live: false`, not success; bad flags do not probe; the command never calls `run_suite`. Non-goals: does not start an engagement or sign a RoE. Flags: one TCP probe, same as the existing function.
+7. **`/omega-audit`.** Outcome: chat can verify the tamper-evident tool-call audit chain and tail the newest redacted records. Gap: `omega_prime/grokbot/audit.py` has `verify` and `tail`, and no slash command calls them. Why: a broken chain is invisible from chat today. Surfaces: a new read-only command. New phase. Acceptance: a missing log is empty, not success; a broken chain is a failure without record bodies that hold secrets; bad flags do not read past the usage check; a repeat verifies again and writes nothing. Non-goals: does not rotate tokens or render deploy artifacts. Flags: none.
+
+### Excluded unless accepted
+
+- Absorb purple-team v1.5. Upstream HEAD is still v1.4 (`f6d2fc2`). Not implementable here.
+- Live-gateway detection end to end. Needs a running T3MP3ST and an operator-signed RoE. User-owned.
+- Fail closed when a configured RoE audit log is unreadable. Today `_any_roe_revoked` treats that log as "not revoked". Changing it narrows apply, and it changes that gate's current contract.
+- Chat commands that mint or revoke tokens. That widens who can create credentials.
+
+Safe-stop for this gate: no upgrade files exist. Accepting this section is the only resume signal. A different set replaces this section before any phase is added.
 
 ## Deferred Verification
 
