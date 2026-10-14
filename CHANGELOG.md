@@ -6,6 +6,49 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Purple-team operator tooling (batch 18)
+
+#### Added
+
+- `redteam.findings_sync.sync_budget` (integer or per-tracker mapping with a
+  `default`): caps non-urgent rows dispatched per tick and tracker.
+  `critical`/`high` rows bypass it, quiet hours are decided first, held rows
+  retry oldest-first, and the tick result gains `sync_budget` and
+  `budget_held` (`reason: "sync-budget"`) only when the budget is valid.
+  Unset leaves results unchanged.
+- `pin_bump --report-to PATH`: writes the audit delta report to `PATH`
+  instead of `<root>/report.md` (atomic, mode 0644), validated up front
+  (usage errors exit 2), replay-validated for schedules, with a `report` key
+  in `--json` only when set.
+- `scripts/engagement-report.py --digest`: a stdout-only digest of at most
+  five lines (summary, `coverage covered=C/T gappy=G unexercised=U
+  risk=S.S`, `worst=...`, an optional gate line). Exit 0, 1, 2 or 3; it
+  cannot combine with `--json` or `--summary`.
+- `scripts/engagement-report.py --export-jsonl OUTPUT_JSONL`: the coverage
+  matrix as JSON Lines, one `coverage/1` object per class.
+- `roe_lifecycle.grant_conflicts` and the `roe_lifecycle conflicts` CLI
+  (exit 0 none, 3 found, 2 usage): advisory detection of
+  `duplicate-id-divergent`, `tool-scope-contradiction`,
+  `tracker-cover-contradiction` and `operator-mismatch` across several RoE
+  grants. `findings_sync.tick` surfaces a non-empty result as
+  `grant_conflicts`. It never blocks authorization.
+- Three read-only chat commands, `/omega-redteam-report`,
+  `/omega-redteam-coverage` and `/omega-redteam-sync-plan`, over the digest,
+  the coverage matrix and the findings-sync plan.
+- `python -m omega_prime.grokbot.purple_cycle` (modes `plan`, `run`,
+  `apply`; six steps from preflight to findings dispatch; resumable
+  checkpoints and an NDJSON ledger) and `/omega-redteam-cycle`, which plans
+  by default and with `--run` refreshes release-watch state and audits a
+  new upstream tag. Chat never dispatches findings or applies a pin bump.
+  Usage: [Operator tools](docs/red-team.md#operator-tools).
+
+#### Changed
+
+- Slash command counts: curated 20 -> 24, total 54 -> 58 (generated stays
+  34). The red-team command family grows from eight to twelve.
+  `docs/red-team.md`, `docs/driving-the-bot.md`, `grokbot/SETUP.md` and
+  `docs/marketing.md` carry the new counts.
+
 ### Repository marketing
 
 #### Added
