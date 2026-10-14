@@ -896,3 +896,160 @@ def test_non_interactive_never_prompts(tmp_path, capsys):
     assert rc == 0
     assert "pin-bump confirm" not in out
     assert "Proceed? [y/n]" not in out
+
+
+# --semver-check mode (H11) ---------------------------------------------------
+
+
+def _versioned_audit(*entries: tuple[str, str, str, str]) -> dict:
+    """npm audit doc from (package, severity, advisory-key, spec) rows."""
+    vulns = {}
+    for package, severity, key, spec in entries:
+        vulns[package] = {"severity": severity, "via": [key], "range": spec}
+    return {"vulnerabilities": vulns}
+
+
+def test_semver_check_flag_parses():
+    args = pin_bump.build_parser().parse_args(["--to", PIN_NEW, "--semver-check"])
+    assert args.semver_check is True
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.semver_check is False
+
+
+def test_parse_version_shapes():
+    assert pin_bump._parse_version("^1.2.3") == (1, 2, 3)
+    assert pin_bump._parse_version("~1.2.3") == (1, 2, 3)
+    assert pin_bump._parse_version(">=1.0.0 <2.0.0") == (1, 0, 0)
+    assert pin_bump._parse_version("v2.1.0") == (2, 1, 0)
+    assert pin_bump._parse_version("1.2") == (1, 2, 0)
+    assert pin_bump._parse_version("") is None
+    assert pin_bump._parse_version("latest") is None
+
+
+def test_classify_semver_fixes_labels():
+    old_findings = {
+        "GHSA-minor": ("high", "left-pad", "1.2.3"),
+        "GHSA-major": ("high", "right-pad", "^1.0.0"),
+        "GHSA-gone": ("high", "vanished", "3.0.0"),
+        "GHSA-mystery": ("high", "weird", "latest"),
+    }
+    old_packages = {
+        "left-pad": "1.2.3",
+        "right-pad": "^1.0.0",
+        "vanished": "3.0.0",
+        "weird": "latest",
+    }
+    new_packages = {"left-pad": "1.4.0", "right-pad": "2.0.0", "weird": "x"}
+    rows = pin_bump.classify_semver_fixes(
+        old_findings,
+        old_packages,
+        new_packages,
+        ["GHSA-minor", "GHSA-major", "GHSA-gone", "GHSA-mystery"],
+    )
+    assert [row[4] for row in rows] == [
+        "compatible",
+        "major",
+        "removed",
+        "unknown",
+    ]
+    section = pin_bump.render_semver_section(rows)
+    assert "## Semver check" in section
+    assert "semver-compatible" in section
+    assert "MAJOR bump" in section
+    assert "WARNING" in section
+
+
+def test_semver_check_compatible_fix_regressed_report(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_versioned_audit(("left-pad", "high", "GHSA-old-0001", "1.2.3")),
+    )
+    run = FakeRun(
+        npm_doc=_versioned_audit(("left-pad", "moderate", "GHSA-new-0002", "1.4.0"))
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, semver_check=True)
+    out = capsys.readouterr().out
+    # The still-present moderate advisory keeps the delta regressed, but the
+    # fixed high advisory is classified from the old/new specs.
+    assert rc == 1
+    report = (root / "report.md").read_text()
+    assert "## Semver check" in report
+    assert "`GHSA-old-0001` (package `left-pad`): 1.2.3 -> 1.4.0" in report
+    assert "semver-compatible" in report
+    assert "WARNING" not in report
+    assert "semver compatible" in out
+
+
+def test_semver_check_major_fix_warns(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_versioned_audit(("left-pad", "high", "GHSA-old-0001", "1.2.3")),
+    )
+    run = FakeRun(
+        npm_doc=_versioned_audit(("left-pad", "moderate", "GHSA-new-0002", "2.0.0"))
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, semver_check=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    report = (root / "report.md").read_text()
+    assert "MAJOR bump" in report
+    assert "WARNING" in report
+    assert "WARNING" in out
+
+
+def test_semver_check_removed_dep_improved(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_versioned_audit(("left-pad", "high", "GHSA-old-0001", "1.2.3")),
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), semver_check=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    report = (root / "report.md").read_text()
+    assert "Verdict: improved" in report
+    assert "dependency removed" in report
+    assert "WARNING" not in report
+    assert "semver removed" in out
+
+
+def test_semver_check_off_by_default(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_versioned_audit(("left-pad", "high", "GHSA-old-0001", "1.2.3")),
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun())
+    capsys.readouterr()
+    assert rc == 0
+    assert "Semver check" not in (root / "report.md").read_text()
+
+
+def test_semver_check_with_skip_audit_exits_2(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, skip_audit=True, semver_check=True)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--semver-check needs audit data" in err
+    assert run.cmds == []
+
+
+def test_semver_check_dry_run_prints_without_report(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_versioned_audit(("left-pad", "high", "GHSA-old-0001", "1.2.3")),
+    )
+    before = _snapshot(root)
+    run = FakeRun(
+        npm_doc=_versioned_audit(("left-pad", "moderate", "GHSA-new-0002", "1.4.0"))
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, dry_run=True, semver_check=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[dry-run] semver compatible" in out
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before

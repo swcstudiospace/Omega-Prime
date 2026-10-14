@@ -1589,3 +1589,337 @@ def test_pdf_composes_with_trend(tmp_path, monkeypatch):
     assert proc.returncode == 0, proc.stderr
     fallback = tmp_path / "report.md"
     assert "## Trend" in fallback.read_text(encoding="utf-8")
+
+
+# Drill-down diff vs previous report (H10) -------------------------------------
+
+
+def _diff_drill_seed(previous_dir: Path, current_dir: Path) -> Path:
+    """Previous has A+OLD, current has A+NEW; returns the baseline path."""
+    previous_dir.mkdir(parents=True, exist_ok=True)
+    seed_transitions(previous_dir, cycle(T1))
+    seed_last_run(previous_dir)
+    seed_findings(
+        previous_dir,
+        [
+            finding_row("abuse-01", "resp-a", T1),
+            finding_row("jailbreak-01", "resp-old", T1),
+        ],
+    )
+    baseline = previous_dir.parent / "baseline-h10.md"
+    baseline.write_text(
+        run_script("--reports-dir", str(previous_dir), "--since", T0).stdout,
+        encoding="utf-8",
+    )
+    current_dir.mkdir(parents=True, exist_ok=True)
+    seed_transitions(current_dir, cycle(T1) + cycle(T2))
+    seed_last_run(current_dir)
+    seed_findings(
+        current_dir,
+        [
+            finding_row("abuse-01", "resp-a", T1),
+            finding_row("jailbreak-01", "resp-new", T2),
+        ],
+    )
+    return baseline
+
+
+def test_diff_drill_down_renders_new_and_resolved(tmp_path):
+    """H10 happy: --diff-drill-down keys new/resolved rows by dedupe_hash."""
+    baseline = _diff_drill_seed(tmp_path / "previous", tmp_path / "current")
+    proc = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--diff-drill-down",
+        str(baseline),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    body = section_lines(proc.stdout, "## Drill-down diff")
+    assert body, "drill-down diff section must render"
+    assert body[1] == f"- baseline: {baseline.name}"
+    assert "- new: 1, resolved: 1" in "\n".join(body)
+    assert "| dedupe_hash | change | case_id |" in body
+    new_hash = dedupe_hash("jailbreak-01", "resp-new")
+    old_hash = dedupe_hash("jailbreak-01", "resp-old")
+    text = "\n".join(body)
+    assert f"| {new_hash} | new | jailbreak-01 |" in text
+    assert f"| {old_hash} | resolved | jailbreak-01 |" in text
+    # New rows sort before resolved rows, each group sorted by hash.
+    rows = [line for line in body if line.startswith("| ")][2:]
+    assert rows[0].startswith(f"| {new_hash} | new |")
+    assert rows[1].startswith(f"| {old_hash} | resolved |")
+
+
+def test_diff_drill_down_after_drill_down_section(tmp_path):
+    """H10 order: diff sits after the drill-down, before detection gaps."""
+    _drill_fixture(tmp_path / "reports")
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text(
+        run_script("--reports-dir", str(tmp_path / "reports"), "--since", T0).stdout,
+        encoding="utf-8",
+    )
+    proc = run_script(
+        "--reports-dir",
+        str(tmp_path / "reports"),
+        "--since",
+        T0,
+        "--drill-down",
+        "abuse",
+        "--diff-drill-down",
+        str(baseline),
+    )
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+    drill_at = lines.index("## Coverage drill-down: abuse")
+    diff_at = lines.index("## Drill-down diff")
+    gaps_at = lines.index("## Detection gaps")
+    assert drill_at < diff_at < gaps_at
+
+
+def test_diff_drill_down_is_deterministic(tmp_path):
+    """H10 determinism: same inputs render byte-identical diff runs."""
+    baseline = _diff_drill_seed(tmp_path / "previous", tmp_path / "current")
+    first = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--diff-drill-down",
+        str(baseline),
+    )
+    second = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--diff-drill-down",
+        str(baseline),
+    )
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_diff_drill_down_missing_file_exits_1(tmp_path):
+    """H10 edge: an unreadable --diff-drill-down path fails closed."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--diff-drill-down",
+        str(tmp_path / "no-such.md"),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_parse_previous_snapshot_and_render_diff_units():
+    """H10 units: snapshot parsing (missing ⇒ {}) and row ordering."""
+    module = _report_module()
+    assert module.parse_previous_snapshot("# no marker\n") == {}
+    assert module.parse_previous_snapshot("<!-- findings-snapshot: nope -->") == {}
+    text = (
+        "# Engagement report\n"
+        '<!-- findings-snapshot: {"b-hash": "abuse-01", "a-hash": "x"} -->\n'
+    )
+    assert module.parse_previous_snapshot(text) == {
+        "b-hash": "abuse-01",
+        "a-hash": "x",
+    }
+    rows = module.drill_down_diff_rows(
+        current={"b-hash": "abuse-01", "c-hash": "new"},
+        previous={"b-hash": "abuse-01", "a-hash": "old"},
+    )
+    assert rows == [
+        ("c-hash", "new", "new"),
+        ("a-hash", "resolved", "old"),
+    ]
+    lines = module.render_drill_down_diff(
+        current={"c-hash": "new"},
+        previous={"a-hash": "old"},
+        baseline_label="baseline.md",
+    )
+    assert lines[0] == "## Drill-down diff"
+    assert "- baseline: baseline.md" in lines
+    assert "- new: 1, resolved: 1" in lines
+    assert lines[-2] == "| c-hash | new | new |"
+    assert lines[-1] == "| a-hash | resolved | old |"
+
+
+def test_no_diff_drill_down_flag_renders_no_section(tmp_path):
+    """H10 regression: without --diff-drill-down there is no diff."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "## Drill-down diff" not in proc.stdout
+
+
+# Side-by-side comparison vs previous report (H12) ------------------------------
+
+
+def _side_by_side_seed(previous_dir: Path, current_dir: Path) -> Path:
+    """One-run all-pass baseline; two-run current with one failing class."""
+    previous_dir.mkdir(parents=True, exist_ok=True)
+    seed_transitions(previous_dir, cycle(T1))
+    seed_last_run(previous_dir)
+    seed_findings(previous_dir, [finding_row("abuse-01", "resp-a", T1)])
+    baseline = previous_dir.parent / "baseline-h12.md"
+    baseline.write_text(
+        run_script("--reports-dir", str(previous_dir), "--since", T0).stdout,
+        encoding="utf-8",
+    )
+    current_dir.mkdir(parents=True, exist_ok=True)
+    seed_transitions(current_dir, cycle(T1) + cycle(T2))
+    seed_last_run(current_dir, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(
+        current_dir,
+        [
+            finding_row("abuse-01", "resp-a", T1),
+            finding_row("jailbreak-01", "resp-j", T2),
+        ],
+    )
+    return baseline
+
+
+def test_side_by_side_renders_two_column_table(tmp_path):
+    """H12 happy: --side-by-side renders current vs previous metrics."""
+    baseline = _side_by_side_seed(tmp_path / "previous", tmp_path / "current")
+    proc = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--side-by-side",
+        str(baseline),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    body = section_lines(proc.stdout, "## Side-by-side comparison")
+    assert body, "side-by-side section must render"
+    assert body[1] == f"- baseline: {baseline.name}"
+    assert body[3] == "| metric | current | previous |"
+    text = "\n".join(body)
+    assert "| runs | 2 | 1 |" in text
+    assert "| findings | 2 | 1 |" in text
+    assert "| pass rate | " in text and "% | " in text
+    assert "| coverage | " in text and " covered | " in text
+    # All-pass baseline covers every class; one failing class regresses.
+    assert "| coverage | 5/6 covered | 6/6 covered |" in text
+
+
+def test_side_by_side_is_deterministic(tmp_path):
+    """H12 determinism: same inputs render byte-identical comparison runs."""
+    baseline = _side_by_side_seed(tmp_path / "previous", tmp_path / "current")
+    first = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--side-by-side",
+        str(baseline),
+    )
+    second = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--side-by-side",
+        str(baseline),
+    )
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_side_by_side_missing_file_exits_1(tmp_path):
+    """H12 edge: an unreadable --side-by-side path fails closed."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--side-by-side",
+        str(tmp_path / "no-such.md"),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_render_side_by_side_units():
+    """H12 units: two-column rendering with fixed metric order."""
+    module = _report_module()
+    lines = module.render_side_by_side(
+        current_runs=2,
+        previous_runs=1,
+        current_pass=50,
+        previous_pass=100,
+        current_coverage="5/6 covered",
+        previous_coverage="6/6 covered",
+        current_findings=2,
+        previous_findings=1,
+        baseline_label="baseline.md",
+    )
+    assert lines[0] == "## Side-by-side comparison"
+    assert lines[2] == "- baseline: baseline.md"
+    assert lines[4] == "| metric | current | previous |"
+    assert "| runs | 2 | 1 |" in lines
+    assert "| pass rate | 50% | 100% |" in lines
+    assert "| coverage | 5/6 covered | 6/6 covered |" in lines
+    assert "| findings | 2 | 1 |" in lines
+    assert module._coverage_summary(covered=5, total=6) == "5/6 covered"
+
+
+def test_no_side_by_side_flag_renders_no_section(tmp_path):
+    """H12 regression: without --side-by-side there is no comparison."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "## Side-by-side comparison" not in proc.stdout
+
+
+def test_json_composes_with_diff_drill_down_and_side_by_side(tmp_path):
+    """H10/H12 composition: --json adds drill_down_diff and side_by_side."""
+    baseline = _side_by_side_seed(tmp_path / "previous", tmp_path / "current")
+    proc = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--json",
+        "--diff-drill-down",
+        str(baseline),
+        "--side-by-side",
+        str(baseline),
+    )
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["drill_down_diff"]["baseline"] == baseline.name
+    assert data["drill_down_diff"]["new_count"] == 1
+    assert data["drill_down_diff"]["resolved_count"] == 0
+    assert data["side_by_side"]["baseline"] == baseline.name
+    metrics = {row["metric"]: row for row in data["side_by_side"]["metrics"]}
+    assert set(metrics) == {"runs", "pass rate", "coverage", "findings"}
+    assert (metrics["runs"]["current"], metrics["runs"]["previous"]) == (2, 1)
+    assert data["snapshot"] and data["comparison"] is None

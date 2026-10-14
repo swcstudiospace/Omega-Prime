@@ -1041,3 +1041,65 @@ def test_teams_retry_succeeds_on_second_attempt(tmp_path, monkeypatch):
     result = sync_findings_teams(tmp_path, TEAMS_WEBHOOK, runner=flaky)
     assert len(result["pushed"]) == 1
     assert len(calls) == 2
+
+
+# Teams rich cards (H9) ---------------------------------------------------------
+
+
+def test_teams_message_sections_markdown_details(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding())
+    card = teams_message(row)
+    section = card["sections"][0]
+    assert section["markdown"] is True
+    assert section["activityTitle"] == issue_title(row)
+    text = section["text"]
+    assert row["dedupe_hash"] in text
+    assert row["class"] in text
+    assert row["observed_detection"] in text
+    assert (row.get("last_seen") or row.get("ts")) in text
+
+
+def test_teams_message_action_button_with_repo(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding())
+    card = teams_message(row, repo=REPO)
+    actions = card["potentialAction"]
+    assert actions[0]["name"] == "Open in GitHub"
+    assert actions[0]["targets"][0]["uri"] == f"https://github.com/{REPO}"
+
+
+def test_teams_message_no_action_without_repo(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding())
+    assert "potentialAction" not in teams_message(row)
+    assert "potentialAction" not in teams_message(row, repo="   ")
+    assert "potentialAction" not in teams_message(row, repo=None)
+
+
+def test_teams_sync_with_repo_posts_action(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeTeams()
+    result = sync_findings_teams(tmp_path, TEAMS_WEBHOOK, runner=fake, repo=REPO)
+    assert len(result["pushed"]) == 2
+    for argv, data in fake.calls:
+        assert "potentialAction=" in " ".join(argv)
+        assert data["potentialAction"][0]["name"] == "Open in GitHub"
+        assert data["card"]["potentialAction"][0]["name"] == "Open in GitHub"
+
+
+def test_teams_sync_without_repo_omits_action(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeTeams()
+    result = sync_findings_teams(tmp_path, TEAMS_WEBHOOK, runner=fake)
+    assert len(result["pushed"]) == 2
+    for argv, data in fake.calls:
+        assert "potentialAction=" not in " ".join(argv)
+        assert "potentialAction" not in data
+        assert "potentialAction" not in data["card"]
+
+
+def test_tick_teams_with_repo_posts_action(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeTeams()
+    result = tick(_teams_config(repo=REPO), reports_directory=tmp_path, runner=fake)
+    assert len(result["pushed"]) == 2
+    for argv, data in fake.calls:
+        assert "potentialAction=" in " ".join(argv)

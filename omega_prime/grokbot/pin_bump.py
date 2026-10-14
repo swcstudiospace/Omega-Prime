@@ -435,6 +435,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--semver-check",
+        dest="semver_check",
+        action="store_true",
+        help=(
+            "Classify each fixed advisory as semver-compatible (patch/minor "
+            "bump within the declared range) or major (outside the declared "
+            "range) by comparing old/new dependency versions, and report "
+            "the classification per advisory in the delta report."
+        ),
+    )
+    parser.add_argument(
         "--auto-detect-upstream-fix",
         dest="auto_detect_upstream_fix",
         action="store_true",
@@ -506,6 +517,97 @@ def _confirm_step(
     return False
 
 
+_VERSION_RE = re.compile(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+
+
+def _parse_version(spec: str) -> tuple[int, int, int] | None:
+    """``(major, minor, patch)`` from an audit/lockfile version spec.
+
+    Strips range operators (``^ ~ >= <= > < =``) by scanning for the first
+    ``X[.Y[.Z]]`` run: ``^1.2.3`` -> ``(1, 2, 3)``, ``>=1.0.0 <2.0.0`` ->
+    ``(1, 0, 0)``. Missing minor/patch default to 0. Returns None when the
+    spec carries no version number at all.
+    """
+    match = _VERSION_RE.search(spec or "")
+    if match is None:
+        return None
+    try:
+        return (
+            int(match.group(1)),
+            int(match.group(2) or 0),
+            int(match.group(3) or 0),
+        )
+    except ValueError:
+        return None
+
+
+def classify_semver_fixes(
+    old_findings: dict[str, tuple[str, str, str]],
+    old_packages: dict[str, str],
+    new_packages: dict[str, str],
+    fixed: list[str],
+) -> list[tuple[str, str, str, str, str]]:
+    """Classify each fixed advisory key for ``--semver-check``.
+
+    Returns ``(key, package, old_spec, new_spec, label)`` rows where label
+    is one of: ``compatible`` (same major — a patch/minor bump within the
+    declared range), ``major`` (major version changed — outside the
+    declared range), ``removed`` (package no longer in the new tree, so no
+    bump was needed), or ``unknown`` (a version could not be parsed).
+    """
+    rows: list[tuple[str, str, str, str, str]] = []
+    for key in fixed:
+        _, package, _ = old_findings.get(key, ("", "", ""))
+        old_spec = old_packages.get(package, "") if package else ""
+        new_spec = new_packages.get(package, "") if package else ""
+        if not package or not old_spec:
+            label = "unknown"
+        elif package not in new_packages:
+            label = "removed"
+        else:
+            old_version = _parse_version(old_spec)
+            new_version = _parse_version(new_spec)
+            if old_version is None or new_version is None:
+                label = "unknown"
+            elif new_version[0] != old_version[0]:
+                label = "major"
+            else:
+                label = "compatible"
+        rows.append((key, package, old_spec, new_spec, label))
+    return rows
+
+
+def render_semver_section(
+    rows: list[tuple[str, str, str, str, str]],
+) -> str:
+    """Markdown ``## Semver check`` section for the delta report."""
+    lines = ["## Semver check (--semver-check)", ""]
+    if not rows:
+        lines.append("_No fixed advisories to classify._")
+    for key, package, old_spec, new_spec, label in rows:
+        if label == "compatible":
+            note = "semver-compatible (patch/minor within the declared range)"
+        elif label == "major":
+            note = "MAJOR bump (outside the declared range)"
+        elif label == "removed":
+            note = "dependency removed (no bump needed)"
+        else:
+            note = "unknown (could not parse versions)"
+        old_show = old_spec or "?"
+        new_show = new_spec if label != "removed" else "gone"
+        lines.append(
+            f"- `{key}` (package `{package}`): {old_show} -> {new_show} — {note}"
+        )
+    majors = sum(1 for row in rows if row[4] == "major")
+    if majors:
+        lines += [
+            "",
+            f"> **WARNING: {majors} fix{'es' if majors != 1 else ''} "
+            "require(s) a major version bump (outside the declared range).**",
+        ]
+    return "\n".join(lines)
+
+
 def bump(
     to: str,
     *,
@@ -513,6 +615,7 @@ def bump(
     run: Runner | None = None,
     old_audit: str | None = None,
     skip_audit: bool = False,
+    semver_check: bool = False,
     auto_detect_upstream_fix: bool = False,
     open_pr: bool = False,
     json_mode: bool = False,
@@ -520,6 +623,12 @@ def bump(
     interactive: bool = False,
 ) -> int:
     """Run the pin-bump runbook against ``root``. Returns the exit code."""
+    if semver_check and skip_audit:
+        print(
+            "pin-bump usage error: --semver-check needs audit data (drop --skip-audit)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     if run is None:
         run = _default_run
     redteam_dir = root / "redteam"
@@ -812,7 +921,9 @@ def bump(
                     f"[dry-run] pin-bump FAILED: cannot load audit delta helper ({exc})"
                 )
                 return finish(EXIT_BUMP_FAILED)
-            dry_old_findings, _, dry_old_error = dry_delta_mod.parse_input(dry_old_doc)
+            dry_old_findings, dry_old_packages, dry_old_error = (
+                dry_delta_mod.parse_input(dry_old_doc)
+            )
             if dry_old_error is not None:
                 print(f"[dry-run] pin-bump FAILED: old audit unusable: {dry_old_error}")
                 return finish(EXIT_BUMP_FAILED)
@@ -822,10 +933,28 @@ def bump(
             if dry_new_error is not None:
                 print(f"[dry-run] pin-bump FAILED: new audit unusable: {dry_new_error}")
                 return finish(EXIT_BUMP_FAILED)
-            _, _, _, _, verdict = dry_delta_mod.compute_delta(
+            _, dry_fixed, _, _, verdict = dry_delta_mod.compute_delta(
                 dry_old_findings, dry_new_findings, dry_new_packages
             )
             print(f"[dry-run] audit verdict: {verdict} (report.md not written)")
+            if semver_check:
+                dry_rows = classify_semver_fixes(
+                    dry_old_findings,
+                    dry_old_packages,
+                    dry_new_packages,
+                    dry_fixed,
+                )
+                for key, package, old_spec, new_spec, label in dry_rows:
+                    print(
+                        f"[dry-run] semver {label}: `{key}` "
+                        f"(package `{package}`): {old_spec or '?'} -> "
+                        f"{new_spec if label != 'removed' else 'gone'}"
+                    )
+                if any(row[4] == "major" for row in dry_rows):
+                    print(
+                        "[dry-run] WARNING: a fix requires a major version "
+                        "bump (outside the declared range)"
+                    )
             if not _confirm_step(
                 "delta verdict",
                 f"audit delta verdict: {verdict} (report.md not written)",
@@ -992,7 +1121,7 @@ def bump(
             delta_mod = _load_script("redteam-audit-delta.py")
         except (OSError, RuntimeError) as exc:
             return failed(f"cannot load audit delta helper ({exc})")
-        old_findings, _, old_error = delta_mod.parse_input(old_doc)
+        old_findings, old_packages, old_error = delta_mod.parse_input(old_doc)
         if old_error is not None:
             return failed(f"old audit unusable: {old_error}")
         new_findings, new_packages, new_error = delta_mod.parse_input(new_doc)
@@ -1001,6 +1130,11 @@ def bump(
         new_keys, fixed, rescinded, drift, verdict = delta_mod.compute_delta(
             old_findings, new_findings, new_packages
         )
+        semver_rows: list[tuple[str, str, str, str, str]] = []
+        if semver_check:
+            semver_rows = classify_semver_fixes(
+                old_findings, old_packages, new_packages, fixed
+            )
         report = delta_mod.render_report(
             str(old_path),
             "new-pin npm audit",
@@ -1012,6 +1146,8 @@ def bump(
             drift,
             verdict,
         )
+        if semver_check:
+            report += "\n" + render_semver_section(semver_rows)
         report_path = root / "report.md"
         try:
             report_path.write_text(report, encoding="utf-8")
@@ -1019,6 +1155,18 @@ def bump(
             return failed(f"cannot write report {report_path} ({exc})")
         print(verdict)
         print(f"pin-bump audit: {verdict} (report: {report_path})")
+        if semver_check:
+            for key, package, old_spec, new_spec, label in semver_rows:
+                print(
+                    f"pin-bump semver {label}: `{key}` "
+                    f"(package `{package}`): {old_spec or '?'} -> "
+                    f"{new_spec if label != 'removed' else 'gone'}"
+                )
+            if any(row[4] == "major" for row in semver_rows):
+                print(
+                    "pin-bump WARNING: a fix requires a major version "
+                    "bump (outside the declared range)"
+                )
         if not _confirm_step(
             "delta verdict",
             f"audit delta verdict: {verdict} (report: {report_path})",
@@ -1088,6 +1236,7 @@ def main(argv: list[str] | None = None) -> int:
         root=root,
         old_audit=args.old_audit,
         skip_audit=args.skip_audit,
+        semver_check=args.semver_check,
         auto_detect_upstream_fix=args.auto_detect_upstream_fix,
         open_pr=args.open_pr,
         json_mode=args.json_mode,

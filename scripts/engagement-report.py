@@ -1001,6 +1001,109 @@ def render_coverage_delta(
     return lines
 
 
+def parse_previous_snapshot(text: str) -> dict[str, str]:
+    """Findings snapshot (hash -> case_id) embedded in a rendered report.
+
+    Missing markers or unparseable payloads yield ``{}`` (all current
+    findings read as new), mirroring the no-baseline findings-deltas path.
+    Deterministic.
+    """
+    match = SNAPSHOT_RE.search(text)
+    if not match:
+        return {}
+    try:
+        snapshot = json.loads(match.group(1))
+    except ValueError:
+        return {}
+    if not isinstance(snapshot, dict):
+        return {}
+    return {
+        key: value
+        for key, value in snapshot.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
+
+
+def drill_down_diff_rows(
+    *,
+    current: dict[str, str],
+    previous: dict[str, str],
+) -> list[tuple[str, str, str]]:
+    """Drill-down diff rows ``(dedupe_hash, change, case_id)``.
+
+    ``new`` rows (in current, absent previous) sort first by hash, then
+    ``resolved`` rows (in previous, absent current) by hash. Total and
+    input-order independent, so reruns are byte-identical.
+    """
+    rows: list[tuple[str, str, str]] = []
+    for digest in sorted(h for h in current if h not in previous):
+        rows.append((digest, "new", current[digest]))
+    for digest in sorted(h for h in previous if h not in current):
+        rows.append((digest, "resolved", previous[digest]))
+    return rows
+
+
+def render_drill_down_diff(
+    *,
+    current: dict[str, str],
+    previous: dict[str, str],
+    baseline_label: str,
+) -> list[str]:
+    """Drill-down diff lines (snapshot ``new`` vs ``resolved`` by hash)."""
+    rows = drill_down_diff_rows(current=current, previous=previous)
+    new_count = sum(1 for _, change, _ in rows if change == "new")
+    resolved_count = len(rows) - new_count
+    lines = [
+        "## Drill-down diff",
+        "",
+        f"- baseline: {baseline_label}",
+        "",
+        f"- new: {new_count}, resolved: {resolved_count}",
+        "",
+        "| dedupe_hash | change | case_id |",
+        "| --- | --- | --- |",
+    ]
+    for digest, change, case_id in rows:
+        lines.append(f"| {digest} | {change} | {case_id} |")
+    return lines
+
+
+def _coverage_summary(
+    *,
+    covered: int,
+    total: int,
+) -> str:
+    """Aggregate coverage cell (``X/Y covered``)."""
+    return f"{covered}/{total} covered"
+
+
+def render_side_by_side(
+    *,
+    current_runs: int,
+    previous_runs: int,
+    current_pass: int,
+    previous_pass: int,
+    current_coverage: str,
+    previous_coverage: str,
+    current_findings: int,
+    previous_findings: int,
+    baseline_label: str,
+) -> list[str]:
+    """Two-column side-by-side comparison lines (current vs previous)."""
+    return [
+        "## Side-by-side comparison",
+        "",
+        f"- baseline: {baseline_label}",
+        "",
+        "| metric | current | previous |",
+        "| --- | --- | --- |",
+        f"| runs | {current_runs} | {previous_runs} |",
+        f"| pass rate | {current_pass}% | {previous_pass}% |",
+        f"| coverage | {current_coverage} | {previous_coverage} |",
+        f"| findings | {current_findings} | {previous_findings} |",
+    ]
+
+
 #: Block elements for ASCII sparklines (U+2581..U+2588, ascending).
 SPARKLINE_BLOCKS = ("▁", "▂", "▃", "▄", "▅", "▆", "▇", "█")
 
@@ -1182,6 +1285,8 @@ def render_report(
     trend: list[str] | None = None,
     drill_down: str | None = None,
     drill_down_rows: list[tuple[str, str, str, str, str]] | None = None,
+    drill_down_diff: list[str] | None = None,
+    side_by_side: list[str] | None = None,
 ) -> str:
     """Assemble the report sections in fixed order."""
     gaps = gaps if gaps is not None else []
@@ -1248,6 +1353,8 @@ def render_report(
                 )
         else:
             lines.append(f"- no findings in class {drill_down}")
+    if drill_down_diff:
+        lines += ["", *drill_down_diff]
     lines += ["", "## Detection gaps", ""]
     if gaps:
         for failure in gaps:
@@ -1296,6 +1403,8 @@ def render_report(
         lines.append("- no findings in window")
     if comparison:
         lines += ["", *comparison]
+    if side_by_side:
+        lines += ["", *side_by_side]
     lines += [
         "",
         f"<!-- findings-snapshot: {json.dumps(current_findings, sort_keys=True)} -->",
@@ -1428,6 +1537,8 @@ def build_report(
     drill_down: str | None = None,
     diff_coverage_path: Path | None = None,
     trend_path: Path | None = None,
+    diff_drill_down_path: Path | None = None,
+    side_by_side_path: Path | None = None,
 ) -> tuple[str, str, Path]:
     """Render the report; return ``(markdown, file_name, out_dir)``."""
     window = _collect_window(reports_dir, since_text)
@@ -1511,6 +1622,48 @@ def build_report(
             findings_counts=counts,
             source_label=trend_path.name,
         )
+    drill_down_diff: list[str] | None = None
+    if diff_drill_down_path is not None:
+        try:
+            drill_text = diff_drill_down_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReportError(
+                f"error: cannot read --diff-drill-down report "
+                f"{diff_drill_down_path} ({exc})"
+            ) from exc
+        drill_down_diff = render_drill_down_diff(
+            current=current_findings,
+            previous=parse_previous_snapshot(drill_text),
+            baseline_label=diff_drill_down_path.name,
+        )
+    side_by_side: list[str] | None = None
+    if side_by_side_path is not None:
+        try:
+            side_text = side_by_side_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReportError(
+                f"error: cannot read --side-by-side report {side_by_side_path} ({exc})"
+            ) from exc
+        previous_snapshot = parse_previous_snapshot(side_text)
+        previous_coverage = parse_previous_coverage(side_text)
+        previous_metrics = parse_previous_metrics(side_text)
+        covered = sum(1 for row in coverage if row[6] == "covered")
+        prev_covered = sum(
+            1 for entry in previous_coverage.values() if entry[5] == "covered"
+        )
+        side_by_side = render_side_by_side(
+            current_runs=runs,
+            previous_runs=previous_metrics.get("runs", 0),
+            current_pass=_summary_pct(pass_rows),
+            previous_pass=previous_metrics.get("pass_pct", 0),
+            current_coverage=_coverage_summary(covered=covered, total=len(coverage)),
+            previous_coverage=_coverage_summary(
+                covered=prev_covered, total=len(previous_coverage)
+            ),
+            current_findings=len(current_findings),
+            previous_findings=len(previous_snapshot),
+            baseline_label=side_by_side_path.name,
+        )
     markdown = render_report(
         window_start=window_start,
         window_end=window_end,
@@ -1536,6 +1689,8 @@ def build_report(
             if drill_down is not None
             else None
         ),
+        drill_down_diff=drill_down_diff,
+        side_by_side=side_by_side,
     )
     return markdown, file_name, out_dir
 
@@ -1559,6 +1714,8 @@ def build_report_data(
     drill_down: str | None = None,
     diff_coverage_path: Path | None = None,
     trend_path: Path | None = None,
+    diff_drill_down_path: Path | None = None,
+    side_by_side_path: Path | None = None,
 ) -> dict[str, object]:
     """Structured report data with the same inputs as :func:`build_report`.
 
@@ -1566,7 +1723,8 @@ def build_report_data(
     last) and every list is sorted, so ``json.dumps`` of the result is
     byte-identical across reruns on identical inputs. Read-only apart
     from the harness-version lookup; raises :class:`ReportError` on
-    unreadable ``--compare``/``--diff-coverage`` inputs.
+    unreadable ``--compare``/``--diff-coverage``/``--diff-drill-down``/
+    ``--side-by-side`` inputs.
     """
     window = _collect_window(reports_dir, since_text)
     window_start = window["window_start"]
@@ -1774,6 +1932,72 @@ def build_report_data(
     }
     if trend_data is not None:
         data["trend"] = trend_data
+    if diff_drill_down_path is not None:
+        try:
+            drill_text = diff_drill_down_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReportError(
+                f"error: cannot read --diff-drill-down report "
+                f"{diff_drill_down_path} ({exc})"
+            ) from exc
+        drill_previous = parse_previous_snapshot(drill_text)
+        drill_rows = drill_down_diff_rows(
+            current=current_findings, previous=drill_previous
+        )
+        data["drill_down_diff"] = {
+            "baseline": diff_drill_down_path.name,
+            "new_count": sum(1 for _, change, _ in drill_rows if change == "new"),
+            "resolved_count": sum(
+                1 for _, change, _ in drill_rows if change == "resolved"
+            ),
+            "rows": [
+                {"dedupe_hash": digest, "change": change, "case_id": case_id}
+                for digest, change, case_id in drill_rows
+            ],
+        }
+    if side_by_side_path is not None:
+        try:
+            side_text = side_by_side_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReportError(
+                f"error: cannot read --side-by-side report {side_by_side_path} ({exc})"
+            ) from exc
+        side_previous_snapshot = parse_previous_snapshot(side_text)
+        side_previous_coverage = parse_previous_coverage(side_text)
+        side_previous_metrics = parse_previous_metrics(side_text)
+        covered_now = sum(1 for row in coverage if row[6] == "covered")
+        covered_prev = sum(
+            1 for entry in side_previous_coverage.values() if entry[5] == "covered"
+        )
+        data["side_by_side"] = {
+            "baseline": side_by_side_path.name,
+            "metrics": [
+                {
+                    "metric": "runs",
+                    "current": runs,
+                    "previous": side_previous_metrics.get("runs", 0),
+                },
+                {
+                    "metric": "pass rate",
+                    "current": f"{_summary_pct(pass_rows)}%",
+                    "previous": f"{side_previous_metrics.get('pass_pct', 0)}%",
+                },
+                {
+                    "metric": "coverage",
+                    "current": _coverage_summary(
+                        covered=covered_now, total=len(coverage)
+                    ),
+                    "previous": _coverage_summary(
+                        covered=covered_prev, total=len(side_previous_coverage)
+                    ),
+                },
+                {
+                    "metric": "findings",
+                    "current": len(current_findings),
+                    "previous": len(side_previous_snapshot),
+                },
+            ],
+        }
     return data
 
 
@@ -1917,6 +2141,23 @@ def main(argv: list[str] | None = None) -> int:
         "coverage delta.",
     )
     parser.add_argument(
+        "--diff-drill-down",
+        default=None,
+        metavar="PREVIOUS_REPORT",
+        help="previous report markdown to diff findings snapshots against: "
+        "renders a ## Drill-down diff section after the coverage drill-down "
+        "(dedupe_hash rows labelled new when only in the current report and "
+        "resolved when only in the previous report).",
+    )
+    parser.add_argument(
+        "--side-by-side",
+        default=None,
+        metavar="PREVIOUS_REPORT",
+        help="previous report markdown to compare against: renders a "
+        "## Side-by-side comparison section (two-column current vs previous "
+        "table over runs, pass rate, coverage, and findings).",
+    )
+    parser.add_argument(
         "--pdf",
         default=None,
         metavar="OUTPUT_PDF",
@@ -1958,6 +2199,10 @@ def main(argv: list[str] | None = None) -> int:
         compare_path = Path(args.compare) if args.compare else None
         diff_coverage_path = Path(args.diff_coverage) if args.diff_coverage else None
         trend_path = Path(args.trend) if args.trend else None
+        diff_drill_down_path = (
+            Path(args.diff_drill_down) if args.diff_drill_down else None
+        )
+        side_by_side_path = Path(args.side_by_side) if args.side_by_side else None
         markdown, file_name, out_dir = build_report(
             reports_dir,
             args.since,
@@ -1965,6 +2210,8 @@ def main(argv: list[str] | None = None) -> int:
             drill_down=args.drill_down,
             diff_coverage_path=diff_coverage_path,
             trend_path=trend_path,
+            diff_drill_down_path=diff_drill_down_path,
+            side_by_side_path=side_by_side_path,
         )
         payload = markdown
         if args.json:
@@ -1976,6 +2223,8 @@ def main(argv: list[str] | None = None) -> int:
                     drill_down=args.drill_down,
                     diff_coverage_path=diff_coverage_path,
                     trend_path=trend_path,
+                    diff_drill_down_path=diff_drill_down_path,
+                    side_by_side_path=side_by_side_path,
                 )
             )
     except ReportError as exc:

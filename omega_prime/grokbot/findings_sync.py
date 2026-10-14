@@ -333,17 +333,32 @@ def teams_theme_color(severity: Any) -> str:
     return TEAMS_THEME_COLORS.get(key, UNKNOWN_SEVERITY_THEME_COLOR)
 
 
-def teams_message(row: Mapping[str, Any]) -> dict[str, Any]:
+def teams_message(row: Mapping[str, Any], repo: str | None = None) -> dict[str, Any]:
     """Office 365 connector card for one finding row.
 
     The dedupe hash rides in the card summary (same idempotency contract
     as the GitHub/Linear/Slack bodies); the section carries the fixed
     fields only, never the raw gateway payload (threat T-79-11).
+
+    The section text is markdown-formatted finding details (dedupe hash,
+    class, observed detection, timestamp). When ``repo`` is a non-blank
+    ``OWNER/NAME`` string, the card also carries a ``potentialAction``
+    "Open in GitHub" button linking to the repo; otherwise the action
+    is omitted (backward compatible).
     """
     title = issue_title(row)
     digest = str(row.get("dedupe_hash", ""))
     summary = f"{title}\ndedupe_hash: {digest}"
-    return {
+    klass = row.get("class", "") or row.get("klass", "")
+    observed = row.get("observed_detection", "")
+    timestamp = row.get("last_seen", "") or row.get("ts", "")
+    section_text = (
+        f"**dedupe_hash:** `{digest}`\n"
+        f"**class:** `{klass}`\n"
+        f"**observed_detection:** `{observed}`\n"
+        f"**timestamp:** `{timestamp}`"
+    )
+    card: dict[str, Any] = {
         "@type": "MessageCard",
         "@context": "http://schema.org/extensions",
         "themeColor": teams_theme_color(row.get("severity")),
@@ -352,10 +367,21 @@ def teams_message(row: Mapping[str, Any]) -> dict[str, Any]:
             {
                 "activityTitle": title,
                 "activitySubtitle": f"severity: {row.get('severity')}",
-                "text": issue_body(row),
+                "markdown": True,
+                "text": section_text,
             }
         ],
     }
+    if isinstance(repo, str) and repo.strip():
+        clean = repo.strip()
+        card["potentialAction"] = [
+            {
+                "@type": "OpenUri",
+                "name": "Open in GitHub",
+                "targets": [{"os": "default", "uri": f"https://github.com/{clean}"}],
+            }
+        ]
+    return card
 
 
 def issue_title(row: Mapping[str, Any]) -> str:
@@ -718,6 +744,7 @@ def sync_findings_teams(
     *,
     runner: GhRunner | None = None,
     dry_run: bool = False,
+    repo: str | None = None,
 ) -> dict[str, Any]:
     """Post every not-yet-synced finding row to Teams via the webhook URL.
 
@@ -732,6 +759,10 @@ def sync_findings_teams(
     persist, the failed row stays unsynced, and a :class:`GhApiError`
     is raised. With zero pushes (or ``dry_run``) the store file is
     byte-identical and the runner is never called in dry-run mode.
+
+    When ``repo`` is a non-blank ``OWNER/NAME`` string, each card also
+    carries an "Open in GitHub" action button linking to the repo;
+    otherwise the button is omitted (backward compatible).
 
     Returns ``{"pushed": [...], "skipped": [...], "dry_run": bool}``
     with the same entry shapes as :func:`sync_findings`.
@@ -751,8 +782,8 @@ def sync_findings_teams(
         if row.get("issue_url"):
             skipped.append(digest)
             continue
-        card = teams_message(row)
-        payload = {
+        card = teams_message(row, repo=repo)
+        payload: dict[str, Any] = {
             "webhook_url": webhook_url,
             "summary": card["summary"],
             "themeColor": card["themeColor"],
@@ -771,6 +802,12 @@ def sync_findings_teams(
             "-f",
             f"sections={json.dumps(card['sections'])}",
         ]
+        if "potentialAction" in card:
+            payload["potentialAction"] = card["potentialAction"]
+            argv += [
+                "-f",
+                f"potentialAction={json.dumps(card['potentialAction'])}",
+            ]
 
         if dry_run:
             pushed.append({"dedupe_hash": digest, "issue_url": ""})
@@ -879,11 +916,14 @@ def tick(
         webhook_url = node.get("teams_webhook_url", "")
         if not isinstance(webhook_url, str) or not webhook_url.strip():
             return _tracker_error(NO_TEAMS_WEBHOOK_MESSAGE, dry_run)
+        raw_repo = node.get("repo", "")
+        repo = raw_repo.strip() if isinstance(raw_repo, str) else ""
         result = sync_findings_teams(
             reports_directory,
             webhook_url.strip(),
             runner=runner,
             dry_run=dry_run,
+            repo=repo or None,
         )
         result["disabled"] = False
         return result
@@ -945,7 +985,12 @@ def _main_slack(directory: str | Path | None, webhook_url: str, dry_run: bool) -
     return 0
 
 
-def _main_teams(directory: str | Path | None, webhook_url: str, dry_run: bool) -> int:
+def _main_teams(
+    directory: str | Path | None,
+    webhook_url: str,
+    dry_run: bool,
+    repo: str | None = None,
+) -> int:
     """Run the Teams branch of the CLI (dry-run aware)."""
     if dry_run:
         try:
@@ -953,6 +998,7 @@ def _main_teams(directory: str | Path | None, webhook_url: str, dry_run: bool) -
                 directory if directory is not None else reports_dir(),
                 webhook_url,
                 dry_run=True,
+                repo=repo,
             )
         except FindingsSyncError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -967,6 +1013,7 @@ def _main_teams(directory: str | Path | None, webhook_url: str, dry_run: bool) -
         result = sync_findings_teams(
             directory if directory is not None else reports_dir(),
             webhook_url,
+            repo=repo,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1081,7 +1128,12 @@ def main(argv: list[str] | None = None) -> int:
         if not webhook_url:
             print(f"error: {NO_TEAMS_WEBHOOK_MESSAGE}", file=sys.stderr)
             return 2
-        return _main_teams(directory, webhook_url, args.dry_run)
+        teams_repo = args.repo.strip() or (
+            node.get("repo", "").strip()
+            if isinstance(node.get("repo", ""), str)
+            else ""
+        )
+        return _main_teams(directory, webhook_url, args.dry_run, teams_repo or None)
     if tracker != "github":
         print(f"error: unknown tracker: {tracker}", file=sys.stderr)
         return 2

@@ -20,13 +20,32 @@ import sys
 
 # Triaged advisories: finding key -> (date, rationale). Mirrors the
 # PYSEC-2026-4114 ignore in the pip-audit job: every entry needs a date
-# and a rationale, and anything not listed here fails the job. EMPTY as
-# of 2026-10-13 at pin 831a6b0: no high-or-above advisory in the redteam
-# dependency tree has been triaged yet. Only triage real audit output —
-# never invent entries.
+# and a rationale, and anything not listed here fails the job. EMPTY of
+# high-or-above as of 2026-10-13 at pin 831a6b0: no high-or-above
+# advisory in the redteam dependency tree has been triaged yet. Only
+# triage real audit output — never invent entries.
+#
+# Moderate sweep 2026-10-14 at pin f6d2fc2 (post-dep-bump: prod audit
+# `--omit=dev --audit-level=high` is green, 0 findings): the full audit
+# carries 3 moderate entries under one advisory, GHSA-82fw-gwwq-j7x9
+# (vitest @vitest/mocker path traversal, CVSS 5.9). Keys are the package
+# names `triage()` derives for these entries (their `via` rows are dicts
+# or package names, so no GHSA/URL string is extracted).
 TRIAGED: dict[str, tuple[str, str]] = {
     # Example shape:
     # "GHSA-xxxx-yyyy-zzzz": ("2026-10-13", "dev-only transitive; loopback sidecar never loads it."),
+    "@vitest/coverage-v8": (
+        "2026-10-14",
+        "Moderate GHSA-82fw-gwwq-j7x9 (vitest @vitest/mocker path traversal, CVSS 5.9); dev-only test coverage transitive, never loaded by the loopback sidecar; default-off family, never in the runtime image.",
+    ),
+    "@vitest/mocker": (
+        "2026-10-14",
+        "Moderate GHSA-82fw-gwwq-j7x9 (vitest @vitest/mocker path traversal, CVSS 5.9); dev-only test mocking helper, never loaded by the loopback sidecar; default-off family, never in the runtime image.",
+    ),
+    "vitest": (
+        "2026-10-14",
+        "Moderate GHSA-82fw-gwwq-j7x9 (vitest @vitest/mocker path traversal, CVSS 5.9); dev-only test runner, never loaded by the loopback sidecar; default-off family, never in the runtime image.",
+    ),
 }
 
 

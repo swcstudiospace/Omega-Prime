@@ -328,6 +328,19 @@ redteam`, then the three checker subcommands. The rehearsal needs no
 steps beyond the ones above; if it does, the missing step is a doc bug —
 fix this section first.
 
+### Moderate-advisory sweep (2026-10-14)
+
+Post-dep-bump (pin `f6d2fc2`) the prod audit (`npm audit --omit=dev
+--audit-level=high`, the `redteam-node-audit` chain) is green with 0
+findings. The full audit (dev included) carries 3 moderate entries
+under one advisory, GHSA-82fw-gwwq-j7x9 (vitest `@vitest/mocker` path
+traversal, CVSS 5.9), triaged 2026-10-14 into the dated `TRIAGED` block
+in `scripts/redteam-audit-triage.py`: the vitest chain is dev-only test
+tooling the loopback sidecar never loads, the family is default-off,
+and nothing Node-related enters the runtime image. Upstream ships a
+semver-compatible fix (`@vitest/coverage-v8` 4.1.11) for the
+remediation loop to pick up.
+
 ### Upstream remediation loop
 
 The weekly `redteam-remediation` workflow
