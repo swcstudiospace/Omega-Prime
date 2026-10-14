@@ -3796,6 +3796,10 @@ def _report_root(tmp_path: Path) -> Path:
     )
 
 
+# What a previous pin-bump report starts with (bytes the delta script writes).
+_PRIOR_REPORT = "# redteam audit delta\n\nOld: `old.json`\n"
+
+
 def _temp_leftovers(directory: Path) -> list[str]:
     return sorted(p.name for p in directory.iterdir() if p.name.endswith(".tmp"))
 
@@ -3886,7 +3890,7 @@ def test_report_to_traversal_path_writes_only_the_named_file(
 def test_report_to_replaces_existing_file_whole(tmp_path, capsys):
     root = _report_root(tmp_path)
     dest = tmp_path / "r.md"
-    dest.write_text("STALE " * 5000, encoding="utf-8")
+    dest.write_text(_PRIOR_REPORT + "STALE " * 5000, encoding="utf-8")
     rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
     capsys.readouterr()
     assert rc == 0
@@ -4006,11 +4010,12 @@ def test_report_to_failed_write_leaves_no_temp_and_no_partial(
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     dest = out_dir / "r.md"
-    dest.write_text("previous report", encoding="utf-8")
+    dest.write_text(_PRIOR_REPORT + "previous report", encoding="utf-8")
     real_replace = os.replace
 
     def boom(src, dst, *args, **kwargs):
-        if str(dst) == str(dest):
+        # The writer is descriptor-relative: dst is the bare file name.
+        if dst == dest.name:
             raise OSError("disk full")
         return real_replace(src, dst, *args, **kwargs)
 
@@ -4019,7 +4024,7 @@ def test_report_to_failed_write_leaves_no_temp_and_no_partial(
     out = capsys.readouterr().out
     assert rc == pin_bump.EXIT_BUMP_FAILED
     assert f"cannot write report {dest} (disk full)" in out
-    assert dest.read_text() == "previous report"
+    assert dest.read_text() == _PRIOR_REPORT + "previous report"
     assert _temp_leftovers(out_dir) == []
     assert not (root / "report.md").exists()
 
@@ -4132,7 +4137,7 @@ def test_report_to_verify_failure_removes_report_created_by_this_run(tmp_path, c
 def test_report_to_verify_failure_keeps_preexisting_file(tmp_path, capsys):
     root = _report_root(tmp_path)
     dest = tmp_path / "r.md"
-    dest.write_text("older report", encoding="utf-8")
+    dest.write_text(_PRIOR_REPORT + "older report", encoding="utf-8")
     rc = pin_bump.bump(
         PIN_NEW,
         root=root,
@@ -4235,3 +4240,331 @@ def test_apply_scheduled_bump_invalid_stored_path_writes_nothing(
     assert run.cmds == []
     assert _snapshot(tmp_path) == before
     assert victim.read_text() == "keep"
+
+
+# --report-to hardening (FX-1) ----------------------------------------------------
+
+
+def _open_fd_count() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+def test_report_to_parent_swapped_for_symlink_after_validation_stays_pinned(
+    tmp_path, capsys
+):
+    root = _report_root(tmp_path)
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "r.md"
+    victim.write_text("KEEP", encoding="utf-8")
+    saved = tmp_path / "saved"
+    inner = FakeRun()
+    swapped: list[bool] = []
+
+    def run(cmd, cwd=None):
+        if not swapped:
+            parent.rename(saved)
+            parent.symlink_to(outside, target_is_directory=True)
+            swapped.append(True)
+        return inner(cmd, cwd=cwd)
+
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, report_to=str(parent / "r.md"))
+    capsys.readouterr()
+    assert swapped
+    # Nothing was written through the planted symlink.
+    assert victim.read_text() == "KEEP"
+    assert [p.name for p in outside.iterdir()] == ["r.md"]
+    # The report went to the directory that was validated (now renamed).
+    assert rc == 0
+    assert "Verdict: improved" in (saved / "r.md").read_text()
+    assert _temp_leftovers(saved) == []
+
+
+def test_report_to_ancestor_swapped_for_symlink_keeps_created_dirs_pinned(
+    tmp_path, capsys
+):
+    root = _report_root(tmp_path)
+    ancestor = tmp_path / "g"
+    ancestor.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    saved = tmp_path / "saved"
+    inner = FakeRun()
+    swapped: list[bool] = []
+
+    def run(cmd, cwd=None):
+        if not swapped:
+            ancestor.rename(saved)
+            ancestor.symlink_to(outside, target_is_directory=True)
+            swapped.append(True)
+        return inner(cmd, cwd=cwd)
+
+    dest = ancestor / "new" / "deeper" / "r.md"
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, report_to=str(dest))
+    capsys.readouterr()
+    assert swapped
+    assert list(outside.iterdir()) == []
+    assert rc == 0
+    assert "Verdict: improved" in (saved / "new" / "deeper" / "r.md").read_text()
+
+
+def test_report_to_symlinked_ancestor_at_validation_time_is_still_allowed(
+    tmp_path, capsys
+):
+    root = _report_root(tmp_path)
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "lnk").symlink_to(real, target_is_directory=True)
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=FakeRun(), report_to=str(tmp_path / "lnk" / "r.md")
+    )
+    capsys.readouterr()
+    assert rc == 0
+    assert "Verdict: improved" in (real / "r.md").read_text()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc")
+@pytest.mark.parametrize("mode", ["ok", "missing_parent", "usage_error", "dry_run"])
+def test_report_to_pin_closes_every_descriptor(tmp_path, capsys, mode):
+    root = _report_root(tmp_path)
+    dest = tmp_path / ("a" if mode == "missing_parent" else "") / "r.md"
+    kwargs: dict[str, Any] = {"dry_run": mode == "dry_run"}
+    if mode == "usage_error":
+        dest = tmp_path / "adir"
+        dest.mkdir()
+    before = _open_fd_count()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest), **kwargs)
+    capsys.readouterr()
+    assert rc == (2 if mode == "usage_error" else 0)
+    assert _open_fd_count() == before
+
+
+def test_report_to_temp_name_is_short_and_independent_of_destination_name(
+    tmp_path, capsys, monkeypatch
+):
+    root = _report_root(tmp_path)
+    dest = tmp_path / ("n" * 200)
+    created: list[str] = []
+    real_open = os.open
+
+    def spy(path, flags, *args, **kwargs):
+        if flags & os.O_EXCL:
+            created.append(str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", spy)
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    capsys.readouterr()
+    assert rc == 0
+    assert "Verdict: improved" in dest.read_text()
+    assert len(created) == 1
+    assert created[0].startswith(".pin-bump-report.")
+    assert created[0].endswith(".tmp")
+    assert len(created[0]) < 64
+    assert _temp_leftovers(tmp_path) == []
+
+
+@pytest.mark.parametrize("name", ["n" * 201, "\u00e9" * 101])
+def test_report_to_overlong_file_name_is_usage_error_before_any_subprocess(
+    tmp_path, capsys, name
+):
+    root = _report_root(tmp_path)
+    before = _snapshot(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, report_to=str(tmp_path / name))
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert err.startswith("pin-bump usage error: --report-to")
+    assert run.cmds == []
+    assert _snapshot(tmp_path) == before
+    assert not (tmp_path / name).exists()
+
+
+def test_report_to_name_limit_counts_bytes_not_characters(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / ("\u00e9" * 100)  # 200 bytes
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    capsys.readouterr()
+    assert rc == 0
+    assert dest.is_file()
+
+
+@pytest.mark.parametrize("case", ["absent_file", "absent_nested", "existing_dir"])
+def test_report_to_trailing_separator_is_usage_error(tmp_path, capsys, case):
+    root = _report_root(tmp_path)
+    (tmp_path / "adir").mkdir()
+    bad = {
+        "absent_file": str(tmp_path / "absent.md") + "/",
+        "absent_nested": str(tmp_path / "x" / "absent.md") + os.sep,
+        "existing_dir": str(tmp_path / "adir") + "/",
+    }[case]
+    before = _snapshot(tmp_path)
+    dirs_before = sorted(p for p in tmp_path.rglob("*") if p.is_dir())
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, report_to=bad)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "path separator" in err
+    assert run.cmds == []
+    assert _snapshot(tmp_path) == before
+    assert sorted(p for p in tmp_path.rglob("*") if p.is_dir()) == dirs_before
+
+
+def test_pin_bump_report_prefix_matches_what_the_bump_writes(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "r.md"
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    capsys.readouterr()
+    assert rc == 0
+    assert dest.read_bytes().startswith(pin_bump._PIN_BUMP_REPORT_PREFIX)
+    # A second run (fresh root) may overwrite the report it just wrote.
+    other = _report_root(tmp_path / "again")
+    rc = pin_bump.bump(PIN_NEW, root=other, run=FakeRun(), report_to=str(dest))
+    capsys.readouterr()
+    assert rc == 0
+
+
+def _refusal_message(dest: Path) -> str:
+    return (
+        f"pin-bump usage error: --report-to {dest} exists and is not a "
+        "pin-bump report (refusing to overwrite)\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"TOKEN=abc\n",
+        b"# redteam audit delta\n\nNew: `x`\n",
+        b"# redteam audit delta",
+        b" \n",
+    ],
+)
+def test_report_to_refuses_existing_file_that_is_not_a_report(
+    tmp_path, capsys, content
+):
+    root = _report_root(tmp_path)
+    secret = tmp_path / "secret.cfg"
+    secret.write_bytes(content)
+    secret.chmod(0o600)
+    before = _snapshot(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, report_to=str(secret))
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert err == _refusal_message(Path(os.path.realpath(secret)))
+    assert run.cmds == []
+    assert _snapshot(tmp_path) == before
+    assert (secret.stat().st_mode & 0o777) == 0o600
+
+
+def test_report_to_refuses_vendor_md(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    vendor = root / "VENDOR.md"
+    before = vendor.read_bytes()
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, report_to=str(vendor))
+    capsys.readouterr()
+    assert rc == 2
+    assert run.cmds == []
+    assert vendor.read_bytes() == before
+
+
+def test_report_to_overwrites_empty_file_and_prior_report(tmp_path, capsys):
+    for index, seed in enumerate(("", _PRIOR_REPORT)):
+        root = _report_root(tmp_path / f"case{index}")
+        dest = tmp_path / f"r{index}.md"
+        dest.write_text(seed, encoding="utf-8")
+        rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+        capsys.readouterr()
+        assert rc == 0
+        assert "Verdict: improved" in dest.read_text()
+
+
+def test_report_to_refusal_is_rechecked_at_write_time(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "r.md"
+    dest.write_text(_PRIOR_REPORT, encoding="utf-8")
+    inner = FakeRun()
+    swapped: list[bool] = []
+
+    def run(cmd, cwd=None):
+        if not swapped:
+            dest.write_text("TOKEN=abc\n", encoding="utf-8")
+            swapped.append(True)
+        return inner(cmd, cwd=cwd)
+
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, report_to=str(dest))
+    out = capsys.readouterr().out
+    assert rc == pin_bump.EXIT_BUMP_FAILED
+    assert "refusing to overwrite" in out
+    assert dest.read_text() == "TOKEN=abc\n"
+    assert _temp_leftovers(tmp_path) == []
+
+
+@pytest.mark.parametrize("target", ["vendor", "secret"])
+def test_apply_scheduled_bump_tampered_report_to_writes_nothing(
+    tmp_path, capsys, target
+):
+    root = _report_root(tmp_path)
+    secret = tmp_path / "secret.cfg"
+    secret.write_text("TOKEN=abc\n", encoding="utf-8")
+    secret.chmod(0o600)
+    victim = root / "VENDOR.md" if target == "vendor" else secret
+    before_bytes = victim.read_bytes()
+    before_mode = victim.stat().st_mode
+    run = FakeRun()
+    rc = pin_bump.apply_scheduled_bump(
+        {"to": PIN_NEW, "report_to": str(victim)}, root=root, run=run
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "not a pin-bump report" in err
+    assert run.cmds == []
+    assert victim.read_bytes() == before_bytes
+    assert victim.stat().st_mode == before_mode
+    assert not (root / "report.md").exists()
+
+
+def test_report_to_printed_lines_escape_control_characters(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "a\x1b[31mRED\nFAKE: line.md"
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=FakeRun(), report_to=str(dest), dry_run=True
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "\x1b" not in out
+    assert not any(line.startswith("FAKE: line.md") for line in out.splitlines())
+    assert "a\\x1b[31mRED\\nFAKE: line.md" in out
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(dest))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "\x1b" not in out
+    assert not any(line.startswith("FAKE: line.md") for line in out.splitlines())
+    assert dest.is_file()
+
+
+def test_report_to_json_report_key_stays_raw_resolved_path(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    dest = tmp_path / "a\x1b[31mRED.md"
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=FakeRun(), json_mode=True, report_to=str(dest)
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert json.loads(captured.out)["report"] == str(dest)
+    assert "\x1b" not in captured.err
+
+
+def test_report_to_usage_error_escapes_control_characters(tmp_path, capsys):
+    root = _report_root(tmp_path)
+    bad = tmp_path / "a\x1b[31mRED\ndir"
+    bad.mkdir()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), report_to=str(bad))
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "\x1b" not in err
+    assert err.count("\n") == 1

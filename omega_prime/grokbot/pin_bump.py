@@ -75,8 +75,11 @@ out in dry-run mode).
 current working directory). The write is atomic (temp file in the
 destination directory + ``os.replace``, mode 0644) and missing parent
 directories are created. A symlink, directory, non-regular file,
-empty/NUL path or non-directory parent is a usage error (exit ``2``), as
-is combining it with ``--audit-only``, ``--rollback`` or
+empty/NUL path, trailing path separator, file name over 200 bytes or
+non-directory parent is a usage error (exit ``2``), as is an existing file
+that is neither empty nor a previous pin-bump report (arbitrary files are
+never overwritten), as is combining it with ``--audit-only``,
+``--rollback`` or
 ``--skip-audit``. ``--rollback`` always reads ``<root>/report.md`` and
 falls back to the ``VENDOR.md`` git history, so a custom path loses the
 report-based rollback record. ``--dry-run`` validates only. ``--schedule``
@@ -110,11 +113,13 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import functools
 import importlib.util
 import io
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -122,7 +127,7 @@ import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from sidecar import provenance
 
@@ -691,8 +696,11 @@ def build_parser() -> argparse.ArgumentParser:
             "resolves against the current working directory; missing "
             "parent directories are created; the file is replaced "
             "atomically (mode 0644). A symlink, directory, other "
-            "non-regular file, empty/NUL path, or a parent that is not a "
-            "directory is a usage error (exit 2), as is combining it "
+            "non-regular file, empty/NUL path, trailing path separator, "
+            "file name over 200 bytes, or a parent that is not a "
+            "directory is a usage error (exit 2), as is an existing "
+            "file that is neither empty nor a previous pin-bump report "
+            "(never overwritten), as is combining it "
             "with --audit-only, --rollback or --skip-audit. --rollback "
             "still reads <root>/report.md (then the VENDOR.md git "
             "history), so a custom path loses the report-based rollback "
@@ -1970,15 +1978,64 @@ def _verify_post_bump(
     return True, verdict, notes, rows
 
 
+_PIN_BUMP_REPORT_PREFIX = b"# redteam audit delta\n\nOld: `"
+# Exact first bytes of every delta report (``render_report`` in
+# scripts/redteam-audit-delta.py): ``--report-to`` overwrites only an empty
+# file or a file starting with this prefix.
+_REPORT_TMP_PREFIX = ".pin-bump-report."
+_REPORT_NAME_MAX_BYTES = 200
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_DIR_FD_OK = all(fn in os.supports_dir_fd for fn in (os.open, os.mkdir, os.unlink))
+
+
+def _printable(value: object) -> str:
+    """Render ``value`` for a human line with control characters escaped."""
+    return "".join(
+        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii")
+        for ch in str(value)
+    )
+
+
+def _is_prior_report(path: str | Path, dir_fd: int | None = None) -> bool:
+    """True when ``path`` is an empty regular file or a pin-bump report.
+
+    Never follows a symlink and never blocks on a FIFO; any open/read
+    failure counts as "not a report" (fail-closed).
+    """
+    try:
+        fd = os.open(
+            path,
+            os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC,
+            dir_fd=dir_fd,
+        )
+    except OSError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
+        head = os.read(fd, len(_PIN_BUMP_REPORT_PREFIX))
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    return head == b"" or head.startswith(_PIN_BUMP_REPORT_PREFIX)
+
+
 def _resolve_report_to(raw: object) -> tuple[Path | None, str | None]:
     """Validate ``--report-to`` and return ``(destination, error)``.
 
     A relative path resolves against the current working directory and
     the parent directory is resolved through symlinks, but the final
     component is never followed: a symlink, a directory, or any other
-    non-regular file is refused (fail-closed). Missing parent directories
-    are allowed (created at write time) as long as the nearest existing
-    ancestor is a directory. Pure: touches nothing on disk.
+    non-regular file is refused (fail-closed). A trailing path separator
+    and a file name over 200 bytes are refused, and an existing file must
+    be empty or a previous pin-bump report (arbitrary files are never
+    clobbered). Missing parent directories are allowed (created at write
+    time) as long as the nearest existing ancestor is a directory. Pure:
+    touches nothing on disk.
     """
     if not isinstance(raw, str):
         return None, "--report-to must be a path string"
@@ -1986,55 +2043,176 @@ def _resolve_report_to(raw: object) -> tuple[Path | None, str | None]:
         return None, "--report-to requires a non-empty path"
     if "\x00" in raw:
         return None, "--report-to path contains a NUL byte"
+    if raw.endswith(("/", os.sep)):
+        return None, f"--report-to {raw!r} ends with a path separator"
     given = Path(raw)
     if given.name in ("", ".", ".."):
         return None, f"--report-to {raw!r} does not name a file"
+    try:
+        name_bytes = len(given.name.encode("utf-8", "surrogateescape"))
+    except UnicodeEncodeError:
+        return None, f"--report-to {raw!r} is not encodable as a file name"
+    if name_bytes > _REPORT_NAME_MAX_BYTES:
+        return None, (
+            f"--report-to file name is {name_bytes} bytes "
+            f"(limit {_REPORT_NAME_MAX_BYTES})"
+        )
+    if not _DIR_FD_OK:
+        return None, "--report-to needs a platform with descriptor-relative file ops"
     absolute = given if given.is_absolute() else Path.cwd() / given
     target = Path(os.path.realpath(absolute.parent)) / absolute.name
     ancestor = target.parent
     while not os.path.lexists(ancestor) and ancestor != ancestor.parent:
         ancestor = ancestor.parent
     if not ancestor.is_dir():
-        return None, f"--report-to parent {ancestor} is not a directory"
+        return None, f"--report-to parent {_printable(ancestor)} is not a directory"
+    shown = _printable(target)
     try:
         mode = os.lstat(target).st_mode
     except FileNotFoundError:
         return target, None
     except OSError as exc:
-        return None, f"--report-to {target} is not accessible ({exc})"
+        return None, f"--report-to {shown} is not accessible ({_printable(exc)})"
     if stat.S_ISLNK(mode):
-        return None, f"--report-to {target} is a symlink (refusing to follow it)"
+        return None, f"--report-to {shown} is a symlink (refusing to follow it)"
     if stat.S_ISDIR(mode):
-        return None, f"--report-to {target} is a directory"
+        return None, f"--report-to {shown} is a directory"
     if not stat.S_ISREG(mode):
-        return None, f"--report-to {target} is not a regular file"
+        return None, f"--report-to {shown} is not a regular file"
+    if not _is_prior_report(target):
+        return None, (
+            f"--report-to {shown} exists and is not a pin-bump report "
+            "(refusing to overwrite)"
+        )
     return target, None
 
 
-def _write_report_atomic(path: Path, text: str) -> None:
-    """Replace ``path`` with ``text`` atomically (sibling temp + ``os.replace``).
+class _ReportPin:
+    """Descriptor-pinned parent directory of the ``--report-to`` file.
 
-    The file ends up mode 0644 like the default ``report.md``; missing
-    parent directories are created with default permissions and existing
-    ones are never chmodded. A failed write leaves no temp file behind.
+    :meth:`open` walks the nearest existing ancestor from ``/`` with
+    ``O_NOFOLLOW`` and keeps the descriptor for the whole run, so a later
+    swap of that directory (or of any ancestor) for a symlink cannot
+    redirect the write. Missing components are created step by step
+    relative to the descriptor; the temp file, the replace and the cleanup
+    unlink are all descriptor-relative.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_name, 0o644)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+
+    def __init__(self) -> None:
+        self._fds: list[int] = []
+        self._parent_fd: int | None = None
+        self._missing: tuple[str, ...] = ()
+        self._name = ""
+
+    def open(self, target: Path) -> str | None:
+        """Pin the nearest existing ancestor of ``target``; error text or None."""
+        ancestor = target.parent
+        while not os.path.lexists(ancestor) and ancestor != ancestor.parent:
+            ancestor = ancestor.parent
+        self._missing = target.parent.relative_to(ancestor).parts
+        self._name = target.name
+        parts = ancestor.parts
+        flags = os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC
+        try:
+            fd = os.open(parts[0], flags)
+            self._fds.append(fd)
+            for part in parts[1:]:
+                fd = os.open(part, flags | _O_NOFOLLOW, dir_fd=fd)
+                self._fds.append(fd)
+        except OSError as exc:
+            self.close()
+            return f"--report-to parent {_printable(ancestor)} cannot be opened ({exc})"
+        self._parent_fd = fd if not self._missing else None
+        return None
+
+    def close(self) -> None:
+        """Close every pinned descriptor (idempotent)."""
+        while self._fds:
+            with contextlib.suppress(OSError):
+                os.close(self._fds.pop())
+        self._parent_fd = None
+
+    def _parent(self) -> tuple[int, bool]:
+        """Return ``(parent_fd, created_any_directory)``, creating the chain."""
+        if self._parent_fd is not None:
+            return self._parent_fd, False
+        flags = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
+        fd = self._fds[-1] if self._fds else -1
+        for part in self._missing:
+            # Descend one level at a time; the opened children stay on
+            # the list so close() releases them with the pinned ancestor.
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(part, dir_fd=fd)
+            fd = os.open(part, flags, dir_fd=fd)
+            self._fds.append(fd)
+        self._parent_fd = fd
+        return fd, bool(self._missing)
+
+    def write(self, text: str) -> bool:
+        """Atomically write ``text`` to the pinned destination.
+
+        Returns True when the destination did not exist before this call.
+        The file ends up mode 0644; a failed write leaves no temp file.
+        An existing destination must still be empty or a prior report.
+        """
+        parent_fd, parents_created = self._parent()
+        try:
+            os.stat(self._name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            created = True
+        else:
+            created = parents_created
+            if not _is_prior_report(self._name, parent_fd):
+                raise OSError(
+                    "destination exists and is not a pin-bump report "
+                    "(refusing to overwrite)"
+                )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC
+        while True:
+            tmp_name = f"{_REPORT_TMP_PREFIX}{secrets.token_hex(6)}.tmp"
+            try:
+                fd = os.open(tmp_name, flags, 0o644, dir_fd=parent_fd)
+            except FileExistsError:
+                continue
+            break
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o644)
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, self._name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            raise
+        return created
+
+    def unlink(self) -> None:
+        """Remove the pinned destination (descriptor-relative)."""
+        if self._parent_fd is None:
+            raise FileNotFoundError(self._name)
+        os.unlink(self._name, dir_fd=self._parent_fd)
 
 
+_F = TypeVar("_F", bound=Callable[..., int])
+
+
+def _owns_report_pin(fn: _F) -> _F:
+    """Give ``fn`` a ``_report_pin`` that is closed however the call ends."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> int:
+        pin = _ReportPin()
+        try:
+            return fn(*args, _report_pin=pin, **kwargs)
+        finally:
+            pin.close()
+
+    return cast(_F, wrapper)
+
+
+@_owns_report_pin
 def bump(
     to: str | None,
     *,
@@ -2060,8 +2238,10 @@ def bump(
     verify: bool = False,
     report_to: str | None = None,
     job: dict | None = None,
+    _report_pin: _ReportPin | None = None,
 ) -> int:
     """Run the pin-bump runbook against ``root``. Returns the exit code."""
+    report_pin = _report_pin if _report_pin is not None else _ReportPin()
     if rollback:
         # Mode conflicts fail closed before any other validation: the
         # audit-mode flags are inert on the rollback path (no audit
@@ -2103,6 +2283,8 @@ def bump(
             )
             return EXIT_USAGE
         report_dest_resolved, report_to_error = _resolve_report_to(report_to)
+        if report_dest_resolved is not None:
+            report_to_error = report_pin.open(report_dest_resolved)
         if report_to_error is not None:
             print(f"pin-bump usage error: {report_to_error}", file=sys.stderr)
             return EXIT_USAGE
@@ -2246,7 +2428,8 @@ def bump(
     verdict: str | None = None
     report_path: Path | None = None
     report_dest: Path | None = report_dest_resolved
-    report_label = "report.md" if report_dest is None else str(report_dest)
+    report_label = "report.md" if report_dest is None else _printable(report_dest)
+    report_shown = ""
     report_dest_created = False
     sha: str | None = None
 
@@ -3434,7 +3617,7 @@ def bump(
             json_new_packages = dry_new_packages
             print(f"[dry-run] audit verdict: {verdict} (report.md not written)")
             if report_dest is not None:
-                print(f"[dry-run] report would be written to {report_dest}")
+                print(f"[dry-run] report would be written to {report_label}")
             if semver_check:
                 dry_rows = classify_semver_fixes(
                     dry_old_findings,
@@ -3877,19 +4060,20 @@ def bump(
             )
         if report_dest is None:
             report_path = root / "report.md"
+            report_shown = str(report_path)
             try:
                 report_path.write_text(report, encoding="utf-8")
             except OSError as exc:
                 return failed(f"cannot write report {report_path} ({exc})")
         else:
             report_path = report_dest
-            report_dest_created = not os.path.lexists(report_path)
+            report_shown = report_label
             try:
-                _write_report_atomic(report_path, report)
+                report_dest_created = report_pin.write(report)
             except OSError as exc:
-                return failed(f"cannot write report {report_path} ({exc})")
+                return failed(f"cannot write report {report_shown} ({_printable(exc)})")
         print(verdict)
-        print(f"pin-bump audit: {verdict} (report: {report_path})")
+        print(f"pin-bump audit: {verdict} (report: {report_shown})")
         if semver_check:
             for key, package, old_spec, new_spec, label in semver_rows:
                 print(
@@ -3940,7 +4124,7 @@ def bump(
             json_explain = explain_obj
         if not _confirm_step(
             "delta verdict",
-            f"audit delta verdict: {verdict} (report: {report_path})",
+            f"audit delta verdict: {verdict} (report: {report_shown})",
             interactive=interactive,
         ):
             return failed("operator declined at delta verdict; bump aborted")
@@ -4097,18 +4281,24 @@ def bump(
                             )
             if report_path is not None and (report_dest is None or report_dest_created):
                 try:
-                    report_path.unlink()
+                    if report_dest is None:
+                        report_path.unlink()
+                    else:
+                        report_pin.unlink()
                 except OSError as exc:
                     print(
                         "pin-bump verification rollback note: cannot remove "
-                        f"{report_path} ({exc})"
+                        f"{report_shown} ({_printable(exc)})"
                     )
                 else:
-                    print(f"pin-bump verification rollback: {report_path.name} removed")
+                    print(
+                        "pin-bump verification rollback: "
+                        f"{_printable(report_path.name)} removed"
+                    )
             elif report_path is not None:
                 print(
                     "pin-bump verification rollback note: kept "
-                    f"{report_path} (it existed before this run)"
+                    f"{report_shown} (it existed before this run)"
                 )
             print(
                 f"pin-bump verification FAILED at new pin {sha[:7]} "
