@@ -9,24 +9,24 @@ Execution: autonomous GSD phase loop under `/gsd-autonomous`.
 
 ## Standard
 
-- [ ] **PROM-01**: An XML prompt standard is defined and enforced: every
+- [x] **PROM-01**: An XML prompt standard is defined and enforced: every
   first-party prompt the application authors is wrapped in XML tags, checked
   by `python -m omega_prime.tooling.prompt_format --check` in CI and by
   `omega_prime/tests/test_prompt_format.py`.
-- [ ] **PROM-02**: The Grok Bot system prompt stays the assembled
+- [x] **PROM-02**: The Grok Bot system prompt stays the assembled
   `prompts-assembled/OMEGA_PRIME.xml` (seat XML + shared core directives,
   PD shape) and names the prompt-format convention in a `<prompt_format>`
   section; doctor/readiness stay green on the new hash.
 
 ## Runtime-built prompts
 
-- [ ] **PROM-03**: The in-process system prompt prefix is wrapped in
+- [x] **PROM-03**: The in-process system prompt prefix is wrapped in
   `<omega_prime_system>`; mid-turn steer rows in `<steer>`; user/tool text
   cannot break out of its wrapper with a typed closing tag.
-- [ ] **PROM-04**: Compaction output is wrapped in `<context_summary>` and
+- [x] **PROM-04**: Compaction output is wrapped in `<context_summary>` and
   elided useless tool results read `<elided reason="useless-tool-result"/>`;
   the system prompt's bytes stay unchanged and transcript invariants hold.
-- [ ] **PROM-05**: Memory blocks render as `<memory_notes>` / `<user_profile>`;
+- [x] **PROM-05**: Memory blocks render as `<memory_notes>` / `<user_profile>`;
   goal and autonomous continuations render as `<goal_continuation>` /
   `<autonomous_continuation>`. The pre-v10 parity fixture records this one
   deliberate text change in its provenance; all other recorded bytes are
@@ -34,12 +34,12 @@ Execution: autonomous GSD phase loop under `/gsd-autonomous`.
 
 ## Static prompt documents
 
-- [ ] **PROM-06**: All 27 checked-in `skills/*/SKILL.md` keep their YAML
+- [x] **PROM-06**: All 27 checked-in `skills/*/SKILL.md` keep their YAML
   frontmatter and wrap the body in `<skill name="…" version="1">`; skills
   learned at runtime (curator) are written in the same envelope.
-- [ ] **PROM-07**: All 7 `routines/*.md` wrap in `<routine name="…" version="1">`
+- [x] **PROM-07**: All 7 `routines/*.md` wrap in `<routine name="…" version="1">`
   with a `<summary>`; generated command names/summaries are unchanged.
-- [ ] **PROM-08**: All 58 generated `grokbot/plugin/commands/*.md` carry a
+- [x] **PROM-08**: All 58 generated `grokbot/plugin/commands/*.md` carry a
   `<command>`/`<instruction>` body; the operator paste prompt in
   `omega_prime/grokbot/SETUP.md` §1 (and its quote in `docs/marketing.md`)
   is an XML `<task>`, with the declared stdio server command verbatim.

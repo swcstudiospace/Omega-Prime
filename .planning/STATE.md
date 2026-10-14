@@ -1,20 +1,20 @@
 ---
 gsd_state_version: "1.0"
-milestone: v16
-milestone_name: Enterprise Hardening and Continuous Verification
-status: Awaiting next milestone
-stopped_at: Phase 84 complete — all phases complete
-last_updated: "2026-10-14T10:30:00.000Z"
+milestone: v17
+milestone_name: XML Prompt Standard
+status: Milestone complete
+stopped_at: Phase 88 complete — all phases complete
+last_updated: "2026-10-14T09:55:00.000Z"
 last_activity: 2026-10-14
-last_activity_desc: Batch 18 (7 Purple-Team features) shipped; batch 19 proposed, paused per ITERATION_CONTROL
-state_head: a3383b2ec675083ac30a0ddc8f4e755899bdc9e3
+last_activity_desc: v17 XML Prompt Standard shipped locally; every first-party prompt is XML-wrapped and gated
+state_head: c009a34
 progress:
-  total_phases: 6
-  completed_phases: 6
-  total_plans: 12
-  completed_plans: 12
+  total_phases: 4
+  completed_phases: 4
+  total_plans: 4
+  completed_plans: 4
   percent: 100
-current_phase: 84
+current_phase: 88
 current_plan: null
 ---
 
@@ -25,14 +25,14 @@ current_plan: null
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** No GSD milestone in progress — v1–v16 are shipped and archived; the only unchecked ROADMAP phase is 77.1, whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–18 are on main (`.planning/BATCH-01-REPORT.md` … `BATCH-18-REPORT.md`); batch 19 is proposed and awaiting go-ahead (ITERATION_CONTROL pause-per-batch). `ci / lint` on main was RED from batch 05 to 17 (21 ruff errors the batch reports had called clean) and was repaired in PR #31: every batch gate MUST run the exact CI commands (`ruff check omega_prime/`, `ruff format --check omega_prime/`, `mypy omega_prime/`, full pytest, plus the docs/plugin/catalog checks). The red-team pin is `f6d2fc2` (purple-team v1.4); `redteam-node-audit` has been GREEN with 0 advisories since batch 03, and upstream v1.5 has not shipped. v16 "Enterprise Hardening and Continuous Verification" is complete and archived (audit PASS 13/13; `.planning/milestones/v16-MILESTONE-AUDIT.md`): purple-team sidecar hardened and refresh-automated (ships BLOCKED), protected publish environment live, OTLP/SLOs, token rotation + quotas, sandboxed verification gates, live evals with regression tracking. Self-contained run package: `.planning/package/DELIVERABLE.md`. Operator next actions: sign the rules-of-engagement artifact to unblock live purple-team engagements; approve the first `workflow_dispatch publish:true` run; run the six deferred 77.1 live UAT rows after the next Grok Bot upload (`/gsd:verify-work 77.1`).
+**Current focus:** v17 XML Prompt Standard is complete (phases 85–88). Every first-party prompt is wrapped in XML and `python -m omega_prime.tooling.prompt_format --check` enforces it. v1–v16 stay shipped. The only unchecked ROADMAP phase is 77.1, whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–18 are on main (`.planning/BATCH-01-REPORT.md` … `BATCH-18-REPORT.md`); batch 19 is proposed and awaiting go-ahead (ITERATION_CONTROL pause-per-batch). `ci / lint` on main was RED from batch 05 to 17 (21 ruff errors the batch reports had called clean) and was repaired in PR #31: every batch gate MUST run the exact CI commands (`ruff check omega_prime/`, `ruff format --check omega_prime/`, `mypy omega_prime/`, full pytest, plus the docs/plugin/catalog checks). The red-team pin is `f6d2fc2` (purple-team v1.4); `redteam-node-audit` has been GREEN with 0 advisories since batch 03, and upstream v1.5 has not shipped. v16 "Enterprise Hardening and Continuous Verification" is complete and archived (audit PASS 13/13; `.planning/milestones/v16-MILESTONE-AUDIT.md`): purple-team sidecar hardened and refresh-automated (ships BLOCKED), protected publish environment live, OTLP/SLOs, token rotation + quotas, sandboxed verification gates, live evals with regression tracking. Self-contained run package: `.planning/package/DELIVERABLE.md`. Operator next actions: sign the rules-of-engagement artifact to unblock live purple-team engagements; approve the first `workflow_dispatch publish:true` run; run the six deferred 77.1 live UAT rows after the next Grok Bot upload (`/gsd:verify-work 77.1`).
 
 ## Current Position
 
-Phase: Milestone v16 complete
+Phase: Milestone v17 complete
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-10-14 — Batch 18 (7 Purple-Team features: sync budget, pin-bump --report-to, engagement --digest/--export-jsonl, RoE grant conflicts, three chat reporting commands, purple cycle) shipped; batch 19 proposed, paused per ITERATION_CONTROL
+Status: Milestone complete
+Last activity: 2026-10-14 — v17 XML Prompt Standard (phases 85–88) complete. Runtime prompts, skills, routines, and generated commands are XML-wrapped; interpolated text is XML-escaped; the prompt-format gate is in CI. Batch 19 stays proposed and paused.
 
 ## Deferred Verification
 
