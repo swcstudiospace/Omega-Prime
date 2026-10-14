@@ -39,7 +39,7 @@ from sidecar.state import transition
 
 REPORTS_ENV_VAR = "OMEGA_PRIME_SIDECAR_REPORTS_DIR"
 STATE_ENV_VAR = "OMEGA_PRIME_STATE_DIR"
-SECRET = "sk-live-NEVER-ECHO-0123456789"
+SECRET = "SENTINEL-NOT-A-SECRET-5f3a91"
 MODULES = (
     redteam_report,
     redteam_coverage,
@@ -334,6 +334,54 @@ def test_report_and_coverage_script_unavailable(
         assert body["error"] == "report_unavailable"
         assert body["result"]["reason"] == "OSError"
         assert "hidden" not in json.dumps(body)
+
+
+def _hide_engagement_script(monkeypatch: Any, tmp_path: Path) -> None:
+    """Installed layout: only ``engagement-report.py`` cannot be loaded."""
+    original = importlib.util.spec_from_file_location
+
+    def selective(name: str, location: Any = None, *args: Any, **kwargs: Any) -> Any:
+        if str(location).endswith("engagement-report.py"):
+            raise OSError(f"no such file {tmp_path}/hidden")
+        return original(name, location, *args, **kwargs)
+
+    monkeypatch.setattr(redteam_common, "_ENGAGEMENT_MODULE", None)
+    monkeypatch.setattr(purple_cycle, "_ENGAGEMENT_MODULE", None)
+    monkeypatch.setattr(importlib.util, "spec_from_file_location", selective)
+
+
+def test_installed_layout_report_coverage_cycle_never_raise(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    env = _env(monkeypatch, tmp_path)
+    _hide_engagement_script(monkeypatch, tmp_path)
+    for text in ("/omega-redteam-report", "/omega-redteam-coverage"):
+        body = _call(env, text)
+        assert body["ok"] is False
+        assert body["error"] == "report_unavailable"
+        assert body["result"]["reason"] == "OSError"
+        assert "hidden" not in json.dumps(body)
+    cycle = _call(env, "/omega-redteam-cycle")
+    assert cycle["ok"] is False
+    assert cycle["error"] in {"cycle_unavailable", "cycle_failed"}
+    if cycle["error"] == "cycle_failed":
+        failed = [s for s in cycle["result"]["steps"] if s["status"] == "error"]
+        assert [s["name"] for s in failed] == ["engagement"]
+        assert failed[0]["detail"] == {"error_type": "OSError"}
+    assert "hidden" not in json.dumps(cycle)
+
+
+def test_cycle_unavailable_when_the_cycle_module_cannot_import(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    env = _env(monkeypatch, tmp_path)
+    monkeypatch.delattr("omega_prime.grokbot.purple_cycle", raising=False)
+    monkeypatch.setitem(sys.modules, "omega_prime.grokbot.purple_cycle", None)
+    body = _call(env, "/omega-redteam-cycle")
+    assert body["ok"] is False
+    assert body["error"] == "cycle_unavailable"
+    assert body["result"]["reason"] == "ModuleNotFoundError"
+    assert body["result"]["usage"] == redteam_cycle.USAGE
 
 
 def test_reports_dir_falls_back_to_process_env_then_sidecar_default(
