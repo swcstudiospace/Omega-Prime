@@ -4440,3 +4440,500 @@ def test_json_composes_with_compare_multi(tmp_path):
     plain = run_script("--reports-dir", str(current_dir), "--since", T0, "--json")
     assert plain.returncode == 0, plain.stderr
     assert "multi_trend" not in json.loads(plain.stdout)
+
+
+# KPI sidebar strip (P10) ------------------------------------------------------
+
+
+def _sidebar_fixture(directory: Path, wrong=None) -> None:
+    """Two runs of history; all-pass unless ``wrong`` flips observations."""
+    directory.mkdir(parents=True, exist_ok=True)
+    seed_transitions(directory, cycle(T1) + cycle(T2))
+    seed_last_run(directory, wrong=wrong)
+    seed_findings(directory, [finding_row("abuse-01", "resp-a", T1)])
+
+
+def test_sidebar_renders_kpi_strip_after_title(tmp_path):
+    """P10 happy: --sidebar renders the KPI table right after the title."""
+    fixture = tmp_path / "reports"
+    _sidebar_fixture(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0, "--sidebar")
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+    assert lines[0] == "# Engagement report"
+    assert lines[1] == ""
+    assert lines[2] == "| Runs | Pass | Coverage | Risk | Gate |"
+    assert lines[3] == "| --- | --- | --- | --- | --- |"
+    assert lines[4] == "| 2 | 100% | 6/6 covered | 100.0% | n/a |"
+    assert lines[5] == ""
+    assert lines[6] == "## Header"
+
+
+def test_sidebar_gate_cell_follows_threshold(tmp_path):
+    """P10 gate: the Gate cell is PASS/FAIL with --threshold, n/a without."""
+    fixture = tmp_path / "reports"
+    _sidebar_fixture(fixture, wrong={"jailbreak-01": "not-detected"})
+
+    passing = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--sidebar",
+        "--threshold",
+        "gate:80",
+    )
+    assert passing.returncode == 0, passing.stderr
+    assert "| 2 | 83% | 5/6 covered | 85.3% | PASS |" in passing.stdout
+
+    failing = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--sidebar",
+        "--threshold",
+        "gate:100",
+    )
+    assert failing.returncode == 3, failing.stdout
+    assert "| 2 | 83% | 5/6 covered | 85.3% | FAIL |" in failing.stdout
+
+
+def test_sidebar_is_deterministic(tmp_path):
+    """P10 determinism: same inputs render a byte-identical strip."""
+    fixture = tmp_path / "reports"
+    _sidebar_fixture(fixture, wrong={"jailbreak-01": "not-detected"})
+    first = run_script("--reports-dir", str(fixture), "--since", T0, "--sidebar")
+    second = run_script("--reports-dir", str(fixture), "--since", T0, "--sidebar")
+    assert first.returncode == 0 and second.returncode == 0
+    assert first.stdout == second.stdout
+
+
+def test_no_sidebar_flag_renders_no_strip(tmp_path):
+    """P10 regression: without --sidebar the report has no KPI table."""
+    fixture = tmp_path / "reports"
+    _sidebar_fixture(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "| Runs | Pass | Coverage | Risk | Gate |" not in proc.stdout
+    lines = proc.stdout.splitlines()
+    assert lines[0] == "# Engagement report"
+    assert lines[2] == "## Header"
+
+
+def test_sidebar_delta_vs_compare_baseline(tmp_path):
+    """P10 deltas: --sidebar --compare gains signed deltas with arrows."""
+    previous_dir = tmp_path / "previous"
+    _sidebar_fixture(previous_dir, wrong={"jailbreak-01": "not-detected"})
+    previous_md = tmp_path / "previous.md"
+    seeded = run_script(
+        "--reports-dir",
+        str(previous_dir),
+        "--since",
+        T0,
+        "--out",
+        str(previous_md),
+    )
+    assert seeded.returncode == 0, seeded.stderr
+
+    current_dir = tmp_path / "current"
+    _sidebar_fixture(current_dir)
+    proc = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--sidebar",
+        "--compare",
+        str(previous_md),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "| 2 (+0 →) | 100% (+17pp ↑) | 6/6 covered (+1 ↑) | " in proc.stdout
+    assert "100.0% (+14.7pp ↑)" in proc.stdout
+
+
+def test_sidebar_json_object_only_when_flagged(tmp_path):
+    """P10 composition: --json gains a sidebar object only with --sidebar."""
+    fixture = tmp_path / "reports"
+    _sidebar_fixture(fixture)
+
+    plain = run_script("--reports-dir", str(fixture), "--since", T0, "--json")
+    assert plain.returncode == 0, plain.stderr
+    assert "sidebar" not in json.loads(plain.stdout)
+
+    flagged = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--json",
+        "--sidebar",
+    )
+    assert flagged.returncode == 0, flagged.stderr
+    data = json.loads(flagged.stdout)
+    assert data["sidebar"] == {
+        "runs": 2,
+        "pass_pct": 100,
+        "coverage": "6/6 covered",
+        "covered": 6,
+        "total": 6,
+        "risk_score": 100.0,
+        "gate": None,
+    }
+
+    gated = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--json",
+        "--sidebar",
+        "--threshold",
+        "gate:80",
+    )
+    assert gated.returncode == 0, gated.stderr
+    gated_data = json.loads(gated.stdout)
+    assert gated_data["sidebar"]["gate"] == "PASS"
+    assert list(gated_data.keys())[-1] == "gate"
+
+
+def test_sidebar_composes_with_export_html(tmp_path):
+    """P10 composition: --export html carries the KPI strip; stdout stays md."""
+    fixture = tmp_path / "reports"
+    _sidebar_fixture(fixture)
+    html = tmp_path / "report.html"
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--sidebar",
+        "--export",
+        "html",
+        str(html),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "| Runs | Pass | Coverage | Risk | Gate |" in proc.stdout
+    html_text = html.read_text(encoding="utf-8")
+    assert "<th>Runs</th>" in html_text
+    assert "6/6" in html_text and "verdict-covered" in html_text
+
+
+def test_sidebar_render_and_data_units():
+    """P10 units: table rows, delta cells, gate default, JSON deltas."""
+    module = _report_module()
+    coverage = [
+        ("abuse", 1, 1, 1, 100.0, 0, "covered"),
+        ("jailbreak", 1, 1, 0, 0.0, 1, "gappy"),
+    ]
+    pass_rows = [("a", "1/1 (100.0%)"), ("b", "0/1 (0.0%)")]
+    lines = module.render_sidebar(runs=2, pass_rows=pass_rows, coverage=coverage)
+    assert lines[0] == "| Runs | Pass | Coverage | Risk | Gate |"
+    assert lines[2] == "| 2 | 50% | 1/2 covered | 50.0% | n/a |"
+    gated = module.render_sidebar(
+        runs=2,
+        pass_rows=pass_rows,
+        coverage=coverage,
+        gate="FAIL",
+        previous=(1, 100, 2, 2, 100.0),
+    )
+    assert "(+1 ↑)" in gated[2] and "(-50pp ↓)" in gated[2]
+    assert gated[2].endswith("| FAIL |")
+    data = module.sidebar_data(
+        runs=2,
+        pass_rows=pass_rows,
+        coverage=coverage,
+        gate="FAIL",
+        previous=(1, 100, 2, 2, 100.0),
+    )
+    assert data["previous"]["runs"] == 1
+    assert data["deltas"] == {
+        "runs": 1,
+        "pass_pct": -50,
+        "covered": -1,
+        "risk_score": -50.0,
+    }
+    assert (
+        module.sidebar_data(runs=0, pass_rows=[], coverage=[])["coverage"]
+        == "0/0 covered"
+    )
+
+
+# Per-class baseline floor gates (P12) -----------------------------------------
+
+
+def test_baseline_floor_fails_gate_despite_threshold_pass(tmp_path):
+    """P12 happy: a class below its floor fails the gate (exit 3)."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture, wrong={"jailbreak-01": "not-detected"})
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--threshold",
+        "gate:80",
+        "--baseline",
+        "jailbreak=50",
+    )
+    assert proc.returncode == 3, proc.stdout
+    assert proc.stdout.splitlines()[-1] == ("Gate: FAIL (floors: jailbreak 0.0% < 50%)")
+    assert "gate: FAIL (floors: jailbreak 0.0% < 50%)" in proc.stderr
+
+
+def test_baseline_floor_pass_keeps_classic_gate_line(tmp_path):
+    """P12 pass: met floors keep the exact L10 PASS line and exit 0."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--threshold",
+        "gate:80",
+        "--baseline",
+        "jailbreak=50",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    assert proc.stdout.splitlines()[-1] == "Gate: PASS (pass-rate 100 >= 80)"
+
+
+def test_baseline_repeatable_lists_only_failing_classes(tmp_path):
+    """P12 repeatable: two floors fail only on the unmet class."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture, wrong={"jailbreak-01": "not-detected"})
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--threshold",
+        "gate:80",
+        "--baseline",
+        "abuse=100",
+        "--baseline",
+        "jailbreak=50",
+    )
+    assert proc.returncode == 3, proc.stdout
+    assert proc.stdout.splitlines()[-1] == ("Gate: FAIL (floors: jailbreak 0.0% < 50%)")
+    assert "abuse" not in proc.stdout.splitlines()[-1]
+
+
+def test_baseline_unknown_class_exits_2(tmp_path):
+    """P12 usage: an unknown class exits 2 listing the valid classes."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--threshold",
+        "gate:80",
+        "--baseline",
+        "nope=50",
+    )
+    assert proc.returncode == 2, proc.stdout
+    assert "error: unknown --baseline class 'nope'" in proc.stderr
+    for valid in ("abuse", "jailbreak", "prompt-injection"):
+        assert valid in proc.stderr
+    assert "Gate:" not in proc.stdout
+
+
+def test_baseline_invalid_spec_exits_1(tmp_path):
+    """P12 edge: malformed/out-of-range specs fail closed with error:."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture)
+    for bad in (
+        "bogus",
+        "jailbreak:80",
+        "jailbreak=",
+        "=50",
+        "jailbreak=abc",
+        "jailbreak=101",
+        "jailbreak=-1",
+        "jailbreak=nan",
+    ):
+        proc = run_script(
+            "--reports-dir", str(fixture), "--since", T0, "--baseline", bad
+        )
+        assert proc.returncode == 1, bad
+        assert "error:" in proc.stderr, bad
+        assert "Gate:" not in proc.stdout, bad
+
+
+def test_baseline_is_deterministic(tmp_path):
+    """P12 determinism: same floors render byte-identical runs."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture, wrong={"jailbreak-01": "not-detected"})
+    first = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--threshold",
+        "gate:80",
+        "--baseline",
+        "jailbreak=50",
+    )
+    second = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--threshold",
+        "gate:80",
+        "--baseline",
+        "jailbreak=50",
+    )
+    assert first.returncode == 3 and second.returncode == 3
+    assert first.stdout == second.stdout
+
+
+def test_baseline_json_gate_gains_failures(tmp_path):
+    """P12 composition: --json gate gains failures only with --baseline."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture, wrong={"jailbreak-01": "not-detected"})
+
+    plain = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--json",
+        "--threshold",
+        "gate:80",
+    )
+    assert plain.returncode == 0, plain.stderr
+    assert "failures" not in json.loads(plain.stdout)["gate"]
+
+    failing = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--json",
+        "--threshold",
+        "gate:80",
+        "--baseline",
+        "jailbreak=50",
+    )
+    assert failing.returncode == 3, failing.stdout
+    assert json.loads(failing.stdout)["gate"] == {
+        "metric": "pass-rate",
+        "value": 83,
+        "gate": 80,
+        "passed": False,
+        "failures": [{"class": "jailbreak", "pass_pct": 0.0, "floor": 50}],
+    }
+
+    passing_dir = tmp_path / "passing"
+    _threshold_fixture(passing_dir)
+    passing = run_script(
+        "--reports-dir",
+        str(passing_dir),
+        "--since",
+        T0,
+        "--json",
+        "--threshold",
+        "gate:80",
+        "--baseline",
+        "jailbreak=50",
+    )
+    assert passing.returncode == 0, passing.stderr
+    assert json.loads(passing.stdout)["gate"]["failures"] == []
+
+
+def test_baseline_composes_with_summary_and_sidebar(tmp_path):
+    """P12 composition: --summary honors floors; --sidebar shows the verdict."""
+    fixture = tmp_path / "reports"
+    _threshold_fixture(fixture, wrong={"jailbreak-01": "not-detected"})
+
+    failing = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--summary",
+        "--threshold",
+        "gate:80",
+        "--baseline",
+        "jailbreak=50",
+    )
+    assert failing.returncode == 3, failing.stdout
+    assert failing.stdout.splitlines()[-1].startswith("Gate: FAIL (floors:")
+    assert "jailbreak" in failing.stderr
+
+    passing = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--summary",
+        "--threshold",
+        "gate:80",
+        "--baseline",
+        "abuse=100",
+    )
+    assert passing.returncode == 0, passing.stderr
+    assert passing.stdout.splitlines()[-1] == "Gate: PASS (pass-rate 83 >= 80)"
+
+    strip = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--sidebar",
+        "--threshold",
+        "gate:80",
+        "--baseline",
+        "jailbreak=50",
+    )
+    assert strip.returncode == 3, strip.stdout
+    assert "| FAIL |" in strip.stdout
+
+
+def test_baseline_parse_validate_and_evaluate_units():
+    """P12 units: spec parsing, class validation, and floor verdicts."""
+    module = _report_module()
+    assert module.parse_baseline("jailbreak=80") == ("jailbreak", 80.0)
+    assert module.parse_baseline(" abuse = 70.5 ") == ("abuse", 70.5)
+    for bad in (
+        "bogus",
+        "jailbreak:80",
+        "jailbreak=",
+        "=50",
+        "jailbreak=abc",
+        "jailbreak=101",
+        "jailbreak=-1",
+    ):
+        with pytest.raises(Exception, match="error:"):
+            module.parse_baseline(bad)
+    cases = [("a-01", "x", "", "abuse"), ("j-01", "y", "", "jailbreak")]
+    module.validate_baseline_classes([("abuse", 50.0)], cases)
+    with pytest.raises(module.BaselineUsageError, match="valid:"):
+        module.validate_baseline_classes([("nope", 50.0)], cases)
+    coverage = [
+        ("abuse", 1, 1, 1, 100.0, 0, "covered"),
+        ("jailbreak", 1, 1, 0, 0.0, 1, "gappy"),
+    ]
+    pass_rows = [("a", "1/1 (100.0%)"), ("b", "0/1 (0.0%)")]
+    floored = module.evaluate_threshold(
+        pass_rows, coverage, "gate:50", [("jailbreak", 50.0)]
+    )
+    assert floored["passed"] is False
+    assert floored["line"] == "Gate: FAIL (floors: jailbreak 0.0% < 50%)"
+    assert floored["failures"] == [{"class": "jailbreak", "pass_pct": 0.0, "floor": 50}]
+    met = module.evaluate_threshold(pass_rows, coverage, "gate:50", [("abuse", 100.0)])
+    assert met["passed"] is True
+    assert met["line"] == "Gate: PASS (pass-rate 50 >= 50)"
+    assert met["failures"] == []

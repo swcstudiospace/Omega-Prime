@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TypedDict
 
@@ -3227,3 +3228,197 @@ def test_tick_notice_failure_stays_undelivered_and_retries(
     retried = tick(config, reports_directory=tmp_path, runner=fake)
     assert len(fake.calls) == 1
     assert retried["expiry_notice"][0]["delivered"] is True
+
+
+# Per-tracker quiet hours (P8) ----------------------------------------------------
+
+
+def _quiet_config(**overrides):
+    node = {
+        "enabled": True,
+        "repo": REPO,
+        "labels": {},
+        "quiet_hours": {"start": "22:00", "end": "06:00"},
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+_QUIET_NIGHT = datetime(2026, 6, 1, 23, 30)  # inside 22:00-06:00
+_QUIET_DAY = datetime(2026, 6, 1, 12, 0)  # outside 22:00-06:00
+
+
+def test_in_quiet_hours_wrapping_window():
+    cfg = {"start": "22:00", "end": "06:00"}
+    assert findings_sync.in_quiet_hours(datetime(2026, 6, 1, 23, 30), cfg) is True
+    assert findings_sync.in_quiet_hours(datetime(2026, 6, 2, 3, 0), cfg) is True
+    assert findings_sync.in_quiet_hours(datetime(2026, 6, 1, 22, 0), cfg) is True
+    assert findings_sync.in_quiet_hours(datetime(2026, 6, 1, 12, 0), cfg) is False
+    assert findings_sync.in_quiet_hours(datetime(2026, 6, 2, 6, 0), cfg) is False
+    assert findings_sync.in_quiet_hours(datetime(2026, 6, 1, 21, 59), cfg) is False
+
+
+def test_in_quiet_hours_plain_window():
+    cfg = {"start": "09:00", "end": "17:00"}
+    assert findings_sync.in_quiet_hours(datetime(2026, 6, 1, 9, 0), cfg) is True
+    assert findings_sync.in_quiet_hours(datetime(2026, 6, 1, 12, 0), cfg) is True
+    assert findings_sync.in_quiet_hours(datetime(2026, 6, 1, 8, 59), cfg) is False
+    assert findings_sync.in_quiet_hours(datetime(2026, 6, 1, 17, 0), cfg) is False
+
+
+def test_in_quiet_hours_feature_off():
+    night = datetime(2026, 6, 1, 23, 30)
+    assert (
+        findings_sync.in_quiet_hours(night, {"start": "22:00", "end": "22:00"}) is False
+    )
+    assert findings_sync.in_quiet_hours(night, {"start": "", "end": ""}) is False
+    assert findings_sync.in_quiet_hours(night, {}) is False
+    assert findings_sync.in_quiet_hours(night, None) is False
+    assert (
+        findings_sync.in_quiet_hours(night, {"start": "evening", "end": "dawn"})
+        is False
+    )
+    assert findings_sync.in_quiet_hours(night, "22:00") is False
+
+
+def test_in_quiet_hours_never_raises():
+    cfg = {"start": "22:00", "end": "06:00"}
+    for bad_now in ("nope", 123, object(), ["x"]):
+        assert findings_sync.in_quiet_hours(bad_now, cfg) is False
+    assert isinstance(findings_sync.in_quiet_hours(None, cfg), bool)
+
+
+def test_tick_quiet_hours_holds_non_urgent_with_reason(tmp_path):
+    record_finding(directory=tmp_path, **_finding(severity="critical"))
+    record_finding(
+        directory=tmp_path, **_finding(case_id="abuse-02", severity="medium")
+    )
+    record_finding(directory=tmp_path, **_finding(case_id="abuse-03", severity="low"))
+    fake = FakeGh()
+    result = tick(
+        _quiet_config(), reports_directory=tmp_path, runner=fake, now=_QUIET_NIGHT
+    )
+    assert len(result["pushed"]) == 1
+    assert len(fake.calls) == 1
+    assert result["quiet_hours"] is True
+    assert [e["reason"] for e in result["quiet_skipped"]] == [
+        "quiet-hours",
+        "quiet-hours",
+    ]
+    rows = load_findings(tmp_path)
+    held = {e["dedupe_hash"] for e in result["quiet_skipped"]}
+    assert held == {rows[1]["dedupe_hash"], rows[2]["dedupe_hash"]}
+    assert rows[0].get("issue_url")  # critical fired
+    assert "issue_url" not in rows[1] and "issue_url" not in rows[2]
+
+
+def test_tick_quiet_hours_urgent_always_fire(tmp_path):
+    record_finding(directory=tmp_path, **_finding(severity="critical"))
+    record_finding(directory=tmp_path, **_finding(case_id="abuse-02", severity="HIGH"))
+    fake = FakeGh()
+    result = tick(
+        _quiet_config(), reports_directory=tmp_path, runner=fake, now=_QUIET_NIGHT
+    )
+    assert len(result["pushed"]) == 2
+    assert result["quiet_skipped"] == []
+    assert result["quiet_hours"] is True
+
+
+def test_tick_quiet_hours_unknown_severity_waits(tmp_path):
+    record_finding(directory=tmp_path, **_finding(severity="weird"))
+    fake = FakeGh()
+    result = tick(
+        _quiet_config(), reports_directory=tmp_path, runner=fake, now=_QUIET_NIGHT
+    )
+    assert result["pushed"] == []
+    assert [e["reason"] for e in result["quiet_skipped"]] == ["quiet-hours"]
+    assert fake.calls == []
+
+
+def test_tick_quiet_hours_daytime_dispatches_all(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(
+        _quiet_config(), reports_directory=tmp_path, runner=fake, now=_QUIET_DAY
+    )
+    assert len(result["pushed"]) == 2
+    assert "quiet_hours" not in result
+    assert "quiet_skipped" not in result
+
+
+def test_tick_without_quiet_hours_unchanged(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(
+        _enabled_config(), reports_directory=tmp_path, runner=fake, now=_QUIET_NIGHT
+    )
+    assert len(result["pushed"]) == 2
+    assert "quiet_hours" not in result
+
+
+def test_tick_blank_quiet_hours_unchanged(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    config = _quiet_config(quiet_hours={"start": "", "end": ""})
+    result = tick(config, reports_directory=tmp_path, runner=fake, now=_QUIET_NIGHT)
+    assert len(result["pushed"]) == 2
+    assert "quiet_hours" not in result
+
+
+def test_tick_quiet_hours_dry_run_holds_quiet(tmp_path):
+    record_finding(directory=tmp_path, **_finding(severity="critical"))
+    record_finding(directory=tmp_path, **_finding(case_id="abuse-02", severity="low"))
+    fake = FakeGh()
+    result = tick(
+        _quiet_config(),
+        reports_directory=tmp_path,
+        runner=fake,
+        now=_QUIET_NIGHT,
+        dry_run=True,
+    )
+    assert fake.calls == []
+    assert len(result["pushed"]) == 1
+    assert result["pushed"][0]["issue_url"] == ""
+    assert [e["reason"] for e in result["quiet_skipped"]] == ["quiet-hours"]
+
+
+def test_tick_quiet_hours_notices_still_fire(tmp_path, fresh_notices):
+    now = datetime.now(UTC)
+    grant = tmp_path / "roe.json"
+    grant.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "operator": "p8-operator",
+                "authorized_targets": [
+                    {"host": "127.0.0.1", "tools": ["tempest_status"]}
+                ],
+                "effective_from": (now - timedelta(days=30)).isoformat(),
+                "effective_until": (now + timedelta(days=3)).isoformat(),
+                "case_classes": ["prompt-injection"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    record_finding(directory=tmp_path, **_finding(severity="low"))
+    node = {
+        "enabled": True,
+        "repo": REPO,
+        "labels": {},
+        "quiet_hours": {"start": "22:00", "end": "06:00"},
+        "roe_artifact": str(grant),
+    }
+    fake = FakeGh()
+    result = tick(
+        {"redteam": {"findings_sync": node}},
+        reports_directory=tmp_path,
+        runner=fake,
+        now=_QUIET_NIGHT,
+    )
+    assert result["pushed"] == []
+    assert [e["reason"] for e in result["quiet_skipped"]] == ["quiet-hours"]
+    (entry,) = result["expiry_notice"]
+    assert entry["delivered"] is True
+    assert entry["state"] == "expiring-7d"
+    posted = " ".join(f"{argv} {data}" for argv, data in fake.calls)
+    assert f"Renew: /omega-redteam-roe-sign --artifact {grant}" in posted

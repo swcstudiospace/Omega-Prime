@@ -721,7 +721,8 @@ def watchdog_check(artifact: Any, *, now: Any = None) -> dict[str, Any]:
     file; ``now`` defaults to the wall clock (UTC) and accepts the same
     shapes as :func:`renewal_reminders` (datetime, timestamp, ISO text).
     Returns ``{"state", "artifact_id", "effective_until", "action"}``
-    where ``state`` reuses the :data:`STATES` vocabulary (``valid`` /
+    (plus ``"path"`` when ``artifact`` was a filesystem path) where
+    ``state`` reuses the :data:`STATES` vocabulary (``valid`` /
     ``expiring-7d`` / ``expiring-1d`` / ``expired`` / ``missing`` /
     ``invalid``) and ``action`` names the required operator step from
     :data:`WATCHDOG_ACTIONS` (``"re-sign"``, ``"archive"``,
@@ -735,6 +736,9 @@ def watchdog_check(artifact: Any, *, now: Any = None) -> dict[str, Any]:
     never raises.
     """
     try:
+        path_text: str | None = None
+        if isinstance(artifact, (str, Path)) and str(artifact).strip():
+            path_text = str(artifact).strip()
         current = _renewal_now(now)
         if current is None:
             return {
@@ -765,6 +769,7 @@ def watchdog_check(artifact: Any, *, now: Any = None) -> dict[str, Any]:
                 return {
                     "state": "missing",
                     "artifact_id": path_text,
+                    "path": path_text,
                     "effective_until": None,
                     "action": WATCHDOG_ACTIONS["missing"],
                 }
@@ -774,6 +779,7 @@ def watchdog_check(artifact: Any, *, now: Any = None) -> dict[str, Any]:
                 return {
                     "state": "invalid",
                     "artifact_id": path_text,
+                    "path": path_text,
                     "effective_until": None,
                     "action": WATCHDOG_ACTIONS["invalid"],
                 }
@@ -781,6 +787,7 @@ def watchdog_check(artifact: Any, *, now: Any = None) -> dict[str, Any]:
                 return {
                     "state": "invalid",
                     "artifact_id": path_text,
+                    "path": path_text,
                     "effective_until": None,
                     "action": WATCHDOG_ACTIONS["invalid"],
                 }
@@ -789,6 +796,7 @@ def watchdog_check(artifact: Any, *, now: Any = None) -> dict[str, Any]:
                 return {
                     "state": "invalid",
                     "artifact_id": path_text,
+                    "path": path_text,
                     "effective_until": None,
                     "action": WATCHDOG_ACTIONS["invalid"],
                 }
@@ -798,6 +806,7 @@ def watchdog_check(artifact: Any, *, now: Any = None) -> dict[str, Any]:
                 return {
                     "state": "invalid",
                     "artifact_id": path_text,
+                    "path": path_text,
                     "effective_until": until_text
                     if isinstance(until_text, str)
                     else None,
@@ -844,19 +853,28 @@ def watchdog_check(artifact: Any, *, now: Any = None) -> dict[str, Any]:
             state = "expiring-7d"
         else:
             state = "valid"
-        return {
+        state_result: dict[str, Any] = {
             "state": state,
             "artifact_id": artifact_id,
             "effective_until": until_label,
             "action": WATCHDOG_ACTIONS[state],
         }
+        if path_text is not None:
+            state_result["path"] = path_text
+        return state_result
     except Exception:
-        return {
+        fallback: dict[str, Any] = {
             "state": "missing",
             "artifact_id": "unknown-artifact",
             "effective_until": None,
             "action": WATCHDOG_ACTIONS["missing"],
         }
+        try:
+            if isinstance(artifact, (str, Path)) and str(artifact).strip():
+                fallback["path"] = str(artifact).strip()
+        except Exception:
+            pass
+        return fallback
 
 
 def watchdog_check_all(artifacts: Any, *, now: Any = None) -> list[dict[str, Any]]:
@@ -889,16 +907,76 @@ def watchdog_check_all(artifacts: Any, *, now: Any = None) -> list[dict[str, Any
 EXPIRY_NOTICE_STATES = ("expiring-7d", "expiring-1d", "expired")
 
 
+#: Operator-facing re-sign command path (P11). :func:`renewal_command`
+#: echoes this path with the artifact path/id arg. The key file stays
+#: operator-local, so the command carries only ``--artifact`` (pure
+#: string building — never reads files, never raises).
+RENEWAL_COMMAND_PREFIX = "/omega-redteam-roe-sign --artifact"
+
+#: Watchdog-state keys carrying a re-signable artifact path (P11), in
+#: priority order. ``artifact_id``/``id`` are the id fallback used by
+#: :func:`renewal_command` on its own (never ``"unknown-artifact"``);
+#: :func:`expiry_notice_message` embeds the ``Renew:`` line only when a
+#: path key is present (absent path = omitted).
+_RENEWAL_PATH_KEYS = ("path", "artifact_path", "artifact")
+_RENEWAL_ID_KEYS = ("artifact_id", "id")
+
+
+def _renewal_ref(artifact: Any, *, ids: bool) -> str:
+    """Best re-sign ref for ``artifact``: path first, id when ``ids``."""
+    try:
+        if isinstance(artifact, (str, Path)):
+            return str(artifact).strip()
+        if isinstance(artifact, Mapping):
+            for key in _RENEWAL_PATH_KEYS:
+                candidate = artifact.get(key)
+                if isinstance(candidate, (str, Path)) and str(candidate).strip():
+                    return str(candidate).strip()
+            if ids:
+                for key in _RENEWAL_ID_KEYS:
+                    candidate = artifact.get(key)
+                    if (
+                        isinstance(candidate, str)
+                        and candidate.strip()
+                        and candidate.strip() != "unknown-artifact"
+                    ):
+                        return candidate.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def renewal_command(artifact: Any) -> str:
+    """Deterministic one-line CLI command an operator runs to re-sign (P11).
+
+    ``artifact`` is an artifact path (``str``/``Path``) or a mapping
+    carrying one (``path``/``artifact_path``/``artifact``), falling back
+    to its ``artifact_id``/``id`` — pure string building over the
+    :data:`RENEWAL_COMMAND_PREFIX` sign path. Returns ``""`` when no
+    usable path/id is present (including ``"unknown-artifact"``); never
+    raises.
+    """
+    try:
+        ref = _renewal_ref(artifact, ids=True)
+        if not ref:
+            return ""
+        return f"{RENEWAL_COMMAND_PREFIX} {ref}"
+    except Exception:
+        return ""
+
+
 def expiry_notice_message(artifact_state: Any) -> str:
     """Deterministic plain-text expiry notice for a watchdog state (O11).
 
     ``artifact_state`` is one :func:`watchdog_check` dict; the notice
     renders its ``artifact_id``, ``state``, ``effective_until``, and
     ``action`` in fixed order, so the same grant state always renders
-    byte-identical text. Fail-closed: missing/malformed fields render
-    as ``"unknown"`` (an unknown ``state`` maps its action via
-    :data:`WATCHDOG_ACTIONS`, defaulting to ``"fix artifact"``); never
-    raises.
+    byte-identical text. When the state carries a path (see
+    :func:`renewal_command`), a final ``Renew: <command>`` line names
+    the one-line re-sign command; absent path = omitted. Fail-closed:
+    missing/malformed fields render as ``"unknown"`` (an unknown
+    ``state`` maps its action via :data:`WATCHDOG_ACTIONS`, defaulting
+    to ``"fix artifact"``); never raises.
     """
     try:
         if isinstance(artifact_state, Mapping):
@@ -924,6 +1002,7 @@ def expiry_notice_message(artifact_state: Any) -> str:
             action = action_raw
         else:
             action = WATCHDOG_ACTIONS.get(state, WATCHDOG_ACTIONS["invalid"])
+        renew_ref = _renewal_ref(fields, ids=False)
         lines = [
             "RoE grant expiry notice",
             f"artifact_id: {_field('artifact_id', 'unknown-artifact')}",
@@ -931,6 +1010,8 @@ def expiry_notice_message(artifact_state: Any) -> str:
             f"effective_until: {_field('effective_until')}",
             f"action: {action}",
         ]
+        if renew_ref:
+            lines.append(f"Renew: {RENEWAL_COMMAND_PREFIX} {renew_ref}")
         return "\n".join(lines) + "\n"
     except Exception:
         return "RoE grant expiry notice\nstate: unknown\n"

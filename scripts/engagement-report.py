@@ -2668,6 +2668,7 @@ def render_report(
     exec_summary: list[str] | None = None,
     email_block: list[str] | None = None,
     gate_line: str | None = None,
+    sidebar: list[str] | None = None,
 ) -> str:
     """Assemble the report sections in fixed order."""
     gaps = gaps if gaps is not None else []
@@ -2683,6 +2684,8 @@ def render_report(
         "# Engagement report",
         "",
     ]
+    if sidebar:
+        lines += [*sidebar, ""]
     if exec_summary:
         lines += [*exec_summary, ""]
     lines += [
@@ -2945,6 +2948,8 @@ def build_report(
     recipient: str | None = None,
     threshold: str | None = None,
     compare_multi_dir: Path | None = None,
+    sidebar: bool = False,
+    baselines: list[tuple[str, float]] | None = None,
 ) -> tuple[str, str, Path]:
     """Render the report; return ``(markdown, file_name, out_dir)``.
 
@@ -2973,6 +2978,16 @@ def build_report(
     ``threshold`` (``--threshold``) appends the final gate verdict line
     (``Gate: PASS (...)`` or ``Gate: FAIL``) after the snapshot marker;
     callers map a FAIL to exit 3 (see :func:`evaluate_threshold`).
+    ``baselines`` (repeatable ``--baseline`` ``(class, floor)`` pairs)
+    adds per-class floor gates to that verdict: a class whose win-rate
+    is below its floor fails the gate even when the overall threshold
+    passes, and the gate line gains the failing ``floors:`` list.
+
+    ``sidebar`` (``--sidebar``) renders the one-glance KPI strip table
+    (``Runs | Pass | Coverage | Risk | Gate``) right after the title,
+    with signed deltas when a comparison baseline is present (the
+    explicit ``--side-by-side``/``--compare`` report, else the newest
+    baseline in the output directory).
 
     ``delta_path`` (``--delta``) renders a ``## Three-way trend`` section
     after the side-by-side comparison (older → previous → current over
@@ -3246,6 +3261,46 @@ def build_report(
                 rescinded_count=rescinded_count,
                 file_name=file_name,
             )
+    if baselines:
+        validate_baseline_classes(baselines, cases)
+    gate_info: dict[str, object] | None = None
+    if threshold is not None or baselines:
+        gate_info = evaluate_threshold(pass_rows, coverage, threshold, baselines)
+    sidebar_lines: list[str] | None = None
+    if sidebar:
+        explicit_source = (
+            side_by_side_path if side_by_side_path is not None else compare_path
+        )
+        explicit_flag = (
+            "--side-by-side" if side_by_side_path is not None else "--compare"
+        )
+        sidebar_previous: tuple[int, int, int, int, float] | None = None
+        if explicit_source is not None:
+            try:
+                sidebar_text = explicit_source.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ReportError(
+                    f"error: cannot read {explicit_flag} report "
+                    f"{explicit_source} ({exc})"
+                ) from exc
+            sidebar_previous = _sidebar_previous_leg(sidebar_text)
+        elif baseline_name is not None:
+            try:
+                sidebar_text = (out_dir / baseline_name).read_text(encoding="utf-8")
+            except OSError:
+                sidebar_text = None
+            if sidebar_text is not None:
+                sidebar_previous = _sidebar_previous_leg(sidebar_text)
+        sidebar_gate: str | None = None
+        if gate_info is not None:
+            sidebar_gate = "PASS" if gate_info["passed"] else "FAIL"
+        sidebar_lines = render_sidebar(
+            runs=runs,
+            pass_rows=pass_rows,
+            coverage=coverage,
+            gate=sidebar_gate,
+            previous=sidebar_previous,
+        )
     markdown = render_report(
         window_start=window_start,
         window_end=window_end,
@@ -3278,11 +3333,8 @@ def build_report(
         multi_trend=multi_trend,
         exec_summary=exec_summary_lines,
         email_block=email_lines,
-        gate_line=(
-            str(evaluate_threshold(pass_rows, coverage, threshold)["line"])
-            if threshold is not None
-            else None
-        ),
+        gate_line=str(gate_info["line"]) if gate_info is not None else None,
+        sidebar=sidebar_lines,
     )
     return markdown, file_name, out_dir
 
@@ -3313,6 +3365,8 @@ def build_report_data(
     recipient: str | None = None,
     threshold: str | None = None,
     compare_multi_dir: Path | None = None,
+    sidebar: bool = False,
+    baselines: list[tuple[str, float]] | None = None,
 ) -> dict[str, object]:
     """Structured report data with the same inputs as :func:`build_report`.
 
@@ -3325,6 +3379,9 @@ def build_report_data(
     implies the side-by-side and drill-down-diff objects against the
     same previous report (explicit flags win), and records a trend note
     in the comparison object when no ``--trend`` history is provided.
+    ``sidebar`` adds the KPI strip object after the header (only when
+    flagged); ``baselines`` adds per-class floor gates to the gate
+    object (a ``failures`` list, only when floors are given).
     """
     window = _collect_window(reports_dir, since_text)
     window_start = window["window_start"]
@@ -3760,14 +3817,56 @@ def build_report_data(
                 "subject": subject,
                 "body": body,
             }
-    if threshold is not None:
-        gate = evaluate_threshold(pass_rows, coverage, threshold)
-        data["gate"] = {
+    if baselines:
+        validate_baseline_classes(baselines, cases)
+    if sidebar:
+        explicit_source = (
+            side_by_side_path if side_by_side_path is not None else compare_path
+        )
+        explicit_flag = (
+            "--side-by-side" if side_by_side_path is not None else "--compare"
+        )
+        sidebar_previous: tuple[int, int, int, int, float] | None = None
+        if explicit_source is not None:
+            try:
+                sidebar_text = explicit_source.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ReportError(
+                    f"error: cannot read {explicit_flag} report "
+                    f"{explicit_source} ({exc})"
+                ) from exc
+            sidebar_previous = _sidebar_previous_leg(sidebar_text)
+        elif baseline_name is not None:
+            try:
+                sidebar_text = (out_dir / baseline_name).read_text(encoding="utf-8")
+            except OSError:
+                sidebar_text = None
+            if sidebar_text is not None:
+                sidebar_previous = _sidebar_previous_leg(sidebar_text)
+        sidebar_gate: str | None = None
+        if threshold is not None or baselines:
+            sidebar_gate_info = evaluate_threshold(
+                pass_rows, coverage, threshold, baselines
+            )
+            sidebar_gate = "PASS" if sidebar_gate_info["passed"] else "FAIL"
+        data["sidebar"] = sidebar_data(
+            runs=runs,
+            pass_rows=pass_rows,
+            coverage=coverage,
+            gate=sidebar_gate,
+            previous=sidebar_previous,
+        )
+    if threshold is not None or baselines:
+        gate = evaluate_threshold(pass_rows, coverage, threshold, baselines)
+        gate_entry: dict[str, object] = {
             "metric": gate["metric"],
             "value": gate["value"],
             "gate": gate["gate"],
             "passed": gate["passed"],
         }
+        if baselines:
+            gate_entry["failures"] = gate["failures"]
+        data["gate"] = gate_entry
     return data
 
 
@@ -3788,6 +3887,163 @@ def _summary_pct(pass_rows: list[tuple[str, str]]) -> int:
     if not total:
         return 0
     return round(100 * wins / total)
+
+
+class BaselineUsageError(Exception):
+    """Unknown ``--baseline`` class: exit 2 with a valid-class listing."""
+
+
+def parse_baseline(spec: str) -> tuple[str, float]:
+    """``(class, floor)`` from one ``--baseline`` value (P12).
+
+    Accepts ``<class>=<pct>`` with ``pct`` 0-100 inclusive. Returns the
+    class name plus the numeric floor. Raises :class:`ReportError` on
+    malformed or out-of-range specs (NaN/inf rejected); unknown class
+    names are rejected later by :func:`validate_baseline_classes`
+    (usage error, exit 2). Deterministic.
+    """
+    name, sep, raw = spec.partition("=")
+    if sep and name.strip() and raw.strip():
+        try:
+            floor = float(raw.strip())
+        except ValueError:
+            floor = float("nan")
+        if math.isfinite(floor) and 0.0 <= floor <= 100.0:
+            return name.strip(), floor
+    raise ReportError(
+        f"error: invalid --baseline {spec!r} (expected 'class=pct', 0-100)"
+    )
+
+
+def validate_baseline_classes(
+    baselines: list[tuple[str, float]],
+    cases: list[tuple[str, str, str, str]],
+) -> None:
+    """Reject ``--baseline`` classes seen neither in schema nor on disk.
+
+    Raises :class:`BaselineUsageError` (exit 2) naming the first unknown
+    class and listing every valid class (schema classes byte-wise, then
+    any extra on-disk classes sorted). Deterministic.
+    """
+    known = set(SCHEMA_CLASSES) | {case_class for _, _, _, case_class in cases}
+    for name, _floor in baselines:
+        if name not in known:
+            valid = ", ".join([*SCHEMA_CLASSES, *sorted(known - set(SCHEMA_CLASSES))])
+            raise BaselineUsageError(
+                f"error: unknown --baseline class {name!r} (valid: {valid})"
+            )
+
+
+def _sidebar_previous_leg(text: str) -> tuple[int, int, int, int, float]:
+    """``(runs, pass_pct, covered, total, risk_score)`` from a past report.
+
+    Parses ``text`` with the same parsers ``--side-by-side`` uses; the
+    risk score is recomputed from the parsed coverage so reports
+    predating the score section still yield a value. Deterministic.
+    """
+    metrics = parse_previous_metrics(text)
+    previous_coverage = parse_previous_coverage(text)
+    snapshot = parse_previous_snapshot(text)
+    leg = _delta_leg_values(metrics, previous_coverage, snapshot)
+    return (leg[0], leg[1], leg[2], leg[3], leg[5])
+
+
+def render_sidebar(
+    *,
+    runs: int,
+    pass_rows: list[tuple[str, str]],
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+    gate: str | None = None,
+    previous: tuple[int, int, int, int, float] | None = None,
+) -> list[str]:
+    """One-glance KPI strip lines for ``--sidebar`` (P10).
+
+    A single markdown table (``Runs | Pass | Coverage | Risk | Gate``)
+    over the current window: run count, integer pass percentage,
+    ``X/Y covered`` classes, one-decimal risk-weighted score, and the
+    gate verdict (``PASS``/``FAIL`` when a gate is set, else ``n/a``).
+    When ``previous`` (a :func:`_sidebar_previous_leg` tuple) is given,
+    every value cell gains its signed delta plus a direction arrow.
+    Deterministic.
+    """
+    current_pass = _summary_pct(pass_rows)
+    covered = sum(1 for row in coverage if row[6] == "covered")
+    total = len(coverage)
+    score, _earned, _possible, _breakdown = risk_weighted_score(coverage)
+    covered_text = _coverage_summary(covered=covered, total=total)
+    if previous is None:
+        runs_cell = f"{runs}"
+        pass_cell = f"{current_pass}%"
+        covered_cell = covered_text
+        risk_cell = f"{score:.1f}%"
+    else:
+        prev_runs, prev_pass, prev_covered, _prev_total, prev_score = previous
+        delta_runs = runs - prev_runs
+        delta_pass = current_pass - prev_pass
+        delta_covered = covered - prev_covered
+        delta_score = score - prev_score
+        runs_cell = f"{runs} ({delta_runs:+d} {_comparison_arrow(delta_runs)})"
+        pass_cell = (
+            f"{current_pass}% ({delta_pass:+d}pp {_comparison_arrow(delta_pass)})"
+        )
+        covered_cell = (
+            f"{covered_text} ({delta_covered:+d} {_comparison_arrow(delta_covered)})"
+        )
+        risk_cell = (
+            f"{score:.1f}% ({delta_score:+.1f}pp {_comparison_arrow(delta_score)})"
+        )
+    gate_cell = gate if gate is not None else "n/a"
+    return [
+        "| Runs | Pass | Coverage | Risk | Gate |",
+        "| --- | --- | --- | --- | --- |",
+        f"| {runs_cell} | {pass_cell} | {covered_cell} | {risk_cell} | {gate_cell} |",
+    ]
+
+
+def sidebar_data(
+    *,
+    runs: int,
+    pass_rows: list[tuple[str, str]],
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+    gate: str | None = None,
+    previous: tuple[int, int, int, int, float] | None = None,
+) -> dict[str, object]:
+    """Structured KPI strip for ``--json --sidebar`` (P10).
+
+    Mirrors :func:`render_sidebar` with numeric values plus the display
+    strings; ``previous``/``deltas`` are present only when a comparison
+    baseline was parsed. Deterministic.
+    """
+    current_pass = _summary_pct(pass_rows)
+    covered = sum(1 for row in coverage if row[6] == "covered")
+    total = len(coverage)
+    score, _earned, _possible, _breakdown = risk_weighted_score(coverage)
+    data: dict[str, object] = {
+        "runs": runs,
+        "pass_pct": current_pass,
+        "coverage": _coverage_summary(covered=covered, total=total),
+        "covered": covered,
+        "total": total,
+        "risk_score": score,
+        "gate": gate,
+    }
+    if previous is not None:
+        prev_runs, prev_pass, prev_covered, prev_total, prev_score = previous
+        data["previous"] = {
+            "runs": prev_runs,
+            "pass_pct": prev_pass,
+            "coverage": _coverage_summary(covered=prev_covered, total=prev_total),
+            "covered": prev_covered,
+            "total": prev_total,
+            "risk_score": prev_score,
+        }
+        data["deltas"] = {
+            "runs": runs - prev_runs,
+            "pass_pct": current_pass - prev_pass,
+            "covered": covered - prev_covered,
+            "risk_score": round(score - prev_score, 1),
+        }
+    return data
 
 
 def parse_threshold(spec: str) -> tuple[str, float]:
@@ -3821,16 +4077,57 @@ def _format_gate(value: float) -> str:
 def evaluate_threshold(
     pass_rows: list[tuple[str, str]],
     coverage: list[tuple[str, int, int, int, float, int, str]],
-    spec: str,
+    spec: str | None,
+    baselines: list[tuple[str, float]] | None = None,
 ) -> dict[str, object]:
-    """Gate verdict over the current window (L10).
+    """Gate verdict over the current window (L10, P12 floors).
 
     Returns ``metric``/``value``/``gate``/``passed`` plus the report
-    ``line`` (``Gate: PASS (metric value >= gate)`` or the bare
-    ``Gate: FAIL``) and the ``stderr`` detail for failing runs.
-    ``value`` is the integer pass percentage for ``gate:`` specs and
-    the one-decimal risk-weighted score for ``gate-risk:`` specs.
+    ``line`` (``Gate: PASS (metric value >= gate)`` or ``Gate: FAIL``
+    with a per-class ``floors:`` suffix when floor gates fail) and the
+    ``stderr`` detail for failing runs. ``value`` is the integer pass
+    percentage for ``gate:`` specs and the one-decimal risk-weighted
+    score for ``gate-risk:`` specs. ``baselines`` holds repeatable
+    ``--baseline`` ``(class, floor)`` pairs: a class whose win-rate
+    ``pct`` is below its floor fails the gate even when the overall
+    threshold passes (``failures`` lists ``class``/``pass_pct``/``floor``
+    in CLI order). With ``spec`` unset the gate rests on the floors
+    alone (``metric`` ``"floors"``). Without baselines the passing and
+    failing lines match the L10 shapes exactly.
     """
+    failures: list[dict[str, object]] = []
+    if baselines:
+        pct_by_class = {row[0]: row[4] for row in coverage}
+        for class_name, floor in baselines:
+            pct = float(pct_by_class.get(class_name, 0.0))
+            if pct < floor:
+                failures.append(
+                    {
+                        "class": class_name,
+                        "pass_pct": round(pct, 1),
+                        "floor": int(floor) if float(floor).is_integer() else floor,
+                    }
+                )
+    floors_text = ", ".join(
+        f"{entry['class']} {float(entry['pass_pct']):.1f}% "
+        f"< {_format_gate(float(entry['floor']))}%"
+        for entry in failures
+    )
+    if spec is None:
+        passed = not failures
+        if passed:
+            line = "Gate: PASS (floors met)"
+        else:
+            line = f"Gate: FAIL (floors: {floors_text})"
+        return {
+            "metric": "floors",
+            "value": None,
+            "gate": None,
+            "passed": passed,
+            "line": line,
+            "stderr": f"gate: FAIL (floors: {floors_text})",
+            "failures": failures,
+        }
     metric, gate = parse_threshold(spec)
     if metric == "risk-score":
         score, _earned, _possible, _breakdown = risk_weighted_score(coverage)
@@ -3839,19 +4136,28 @@ def evaluate_threshold(
     else:
         value = float(_summary_pct(pass_rows))
         shown = str(int(value))
-    passed = value >= gate
+    passed = value >= gate and not failures
     gate_text = _format_gate(gate)
     if passed:
         line = f"Gate: PASS ({metric} {shown} >= {gate_text})"
+    elif failures:
+        line = f"Gate: FAIL (floors: {floors_text})"
     else:
         line = "Gate: FAIL"
+    stderr = f"gate: FAIL ({metric} {shown} < {gate_text})"
+    if failures:
+        if passed is False and value >= gate:
+            stderr = f"gate: FAIL (floors: {floors_text})"
+        else:
+            stderr = f"{stderr}; floors: {floors_text}"
     return {
         "metric": metric,
         "value": int(value) if metric == "pass-rate" else value,
         "gate": int(gate) if float(gate).is_integer() else gate,
         "passed": passed,
         "line": line,
-        "stderr": f"gate: FAIL ({metric} {shown} < {gate_text})",
+        "stderr": stderr,
+        "failures": failures,
     }
 
 
@@ -4134,6 +4440,25 @@ def main(argv: list[str] | None = None) -> int:
         "gate: message on stderr when the value is below the gate; "
         "exit 0 when it meets the gate. Composes with all modes.",
     )
+    parser.add_argument(
+        "--sidebar",
+        action="store_true",
+        help="render a one-glance KPI strip table (Runs | Pass | Coverage "
+        "| Risk | Gate) right after the title, with signed deltas when a "
+        "comparison baseline is present (a 'sidebar' object in --json, "
+        "only when flagged). Composes with all modes.",
+    )
+    parser.add_argument(
+        "--baseline",
+        action="append",
+        default=None,
+        metavar="CLASS=PCT",
+        help="repeatable per-class floor gate ('<class>=<pct>', 0-100): a "
+        "class whose win-rate is below its floor fails the gate even when "
+        "the overall --threshold passes; the gate line and the --json "
+        "gate object gain the failing per-class list. Unknown class "
+        "names exit 2 listing the valid classes; malformed specs exit 1.",
+    )
     args = parser.parse_args(argv)
 
     reports_dir = Path(args.reports_dir) if args.reports_dir else default_reports_dir()
@@ -4141,7 +4466,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             summary = summarize(reports_dir, args.since)
             summary_gate: dict[str, object] | None = None
-            if args.threshold is not None:
+            summary_baselines = (
+                [parse_baseline(raw) for raw in args.baseline]
+                if args.baseline
+                else None
+            )
+            if args.threshold is not None or summary_baselines:
                 summary_window = _collect_window(reports_dir, args.since)
                 summary_runs = summary_window["runs"]
                 assert isinstance(summary_runs, int)
@@ -4150,22 +4480,34 @@ def main(argv: list[str] | None = None) -> int:
                     summary_window["observations"] if summary_runs > 0 else {},
                     summary_window["gaps"],  # type: ignore[arg-type]
                 )
+                if summary_baselines:
+                    validate_baseline_classes(
+                        summary_baselines,
+                        summary_window["cases"],  # type: ignore[arg-type]
+                    )
                 summary_gate = evaluate_threshold(
                     summary_window["pass_rows"],  # type: ignore[arg-type]
                     summary_coverage,
                     args.threshold,
+                    summary_baselines,
                 )
+        except BaselineUsageError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         except ReportError as exc:
             print(str(exc), file=sys.stderr)
             return 1
         if args.json:
             if summary_gate is not None:
-                summary["gate"] = {
+                summary_gate_entry: dict[str, object] = {
                     "metric": summary_gate["metric"],
                     "value": summary_gate["value"],
                     "gate": summary_gate["gate"],
                     "passed": summary_gate["passed"],
                 }
+                if summary_baselines:
+                    summary_gate_entry["failures"] = summary_gate["failures"]
+                summary["gate"] = summary_gate_entry
             sys.stdout.write(json.dumps(summary, indent=2, sort_keys=False) + "\n")
         else:
             sys.stdout.write(str(summary["line"]) + "\n")
@@ -4178,6 +4520,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         annotations = (
             [parse_annotation(raw) for raw in args.annotate] if args.annotate else None
+        )
+        baselines = (
+            [parse_baseline(raw) for raw in args.baseline] if args.baseline else None
         )
         compare_path = Path(args.compare) if args.compare else None
         diff_coverage_path = Path(args.diff_coverage) if args.diff_coverage else None
@@ -4203,6 +4548,8 @@ def main(argv: list[str] | None = None) -> int:
             recipient=args.recipient,
             threshold=args.threshold,
             compare_multi_dir=compare_multi_dir,
+            sidebar=args.sidebar,
+            baselines=baselines,
         )
         payload = markdown
         if args.json:
@@ -4221,8 +4568,13 @@ def main(argv: list[str] | None = None) -> int:
                     recipient=args.recipient,
                     threshold=args.threshold,
                     compare_multi_dir=compare_multi_dir,
+                    sidebar=args.sidebar,
+                    baselines=baselines,
                 )
             )
+    except BaselineUsageError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     except ReportError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -4250,8 +4602,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(payload)
     status = 0
     gate_evidence: dict[str, object] | None = None
-    if args.threshold is not None or (
-        args.export is not None and args.export[0] == "html"
+    if (
+        args.threshold is not None
+        or baselines
+        or (args.export is not None and args.export[0] == "html")
     ):
         try:
             gate_window = _collect_window(reports_dir, args.since)
@@ -4327,9 +4681,10 @@ def main(argv: list[str] | None = None) -> int:
                     md_window["pass_rows"],  # type: ignore[arg-type]
                     md_coverage,  # type: ignore[arg-type]
                     args.threshold,
+                    baselines,
                 )["line"]
             )
-            if args.threshold is not None
+            if args.threshold is not None or baselines
             else None
         )
         try:
@@ -4413,11 +4768,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 or status
             )
-    if args.threshold is not None and gate_evidence is not None:
+    if (args.threshold is not None or baselines) and gate_evidence is not None:
         gate = evaluate_threshold(
             gate_evidence["pass_rows"],  # type: ignore[arg-type]
             gate_evidence["coverage"],  # type: ignore[arg-type]
             args.threshold,
+            baselines,
         )
         if not gate["passed"]:
             print(str(gate["stderr"]), file=sys.stderr)

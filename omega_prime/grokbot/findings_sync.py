@@ -104,6 +104,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import hashlib
 import hmac
 import html
@@ -490,6 +491,108 @@ def _run_with_webhook_retry(
         attempt += 1
 
 
+#: Structured skip reason for findings held by per-tracker quiet hours (P8).
+QUIET_HOURS_REASON = "quiet-hours"
+
+#: Finding severities that always fire during quiet hours (P8). This reuses
+#: the severity vocabulary of the mapping tables above
+#: (:data:`DEFAULT_LABELS` et al.): anything not ``critical``/``high``
+#: (medium, low, unknown) waits for the window to end.
+QUIET_HOURS_URGENT_SEVERITIES = ("critical", "high")
+
+#: Accepted ``quiet_hours`` clock formats (local ``HH:MM``, 24-hour).
+_QUIET_HOUR_FORMATS = ("%H:%M", "%H:%M:%S")
+
+
+def _parse_quiet_time(text: Any) -> datetime.time | None:
+    """Parse one ``quiet_hours`` clock bound, or ``None`` when unusable."""
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    for fmt in _QUIET_HOUR_FORMATS:
+        try:
+            return datetime.datetime.strptime(text, fmt).time()
+        except ValueError:
+            continue
+    return None
+
+
+def _quiet_now_time(now: Any) -> datetime.time | None:
+    """Current wall time for the quiet-hours check (never raises)."""
+    try:
+        if now is None:
+            return datetime.datetime.now().time()
+        if isinstance(now, datetime.datetime):
+            current = now.astimezone() if now.tzinfo is not None else now
+            return current.time().replace(tzinfo=None)
+        if isinstance(now, datetime.time):
+            return now.replace(tzinfo=None)
+    except Exception:
+        return None
+    return None
+
+
+def in_quiet_hours(now: Any = None, cfg: Any = None) -> bool:
+    """True when ``now`` falls inside the ``quiet_hours`` window (P8).
+
+    ``cfg`` is the ``redteam.findings_sync.quiet_hours`` mapping
+    (``{"start": "22:00", "end": "06:00"}``, local time). A missing,
+    blank, or unparseable bound — or ``start == end`` — means the
+    feature is off (returns ``False``). The window wraps past midnight
+    when ``start`` is later than ``end``. ``now`` defaults to the local
+    wall clock; an aware datetime is converted to local time first.
+    Never raises (fail-open: unusable inputs mean "not quiet", so sync
+    behavior is unchanged).
+    """
+    try:
+        if not isinstance(cfg, Mapping):
+            return False
+        start = _parse_quiet_time(cfg.get("start"))
+        end = _parse_quiet_time(cfg.get("end"))
+        if start is None or end is None:
+            return False
+        if start == end:
+            return False
+        current = _quiet_now_time(now)
+        if current is None:
+            return False
+        if start <= end:
+            return start <= current < end
+        return current >= start or current < end
+    except Exception:
+        return False
+
+
+def _quiet_skip_severity(severity: Any) -> bool:
+    """True when ``severity`` waits out quiet hours (not critical/high)."""
+    try:
+        key = str(severity).strip().lower() if isinstance(severity, str) else ""
+        return key not in QUIET_HOURS_URGENT_SEVERITIES
+    except Exception:
+        return True
+
+
+def _with_quiet_result(
+    result: dict[str, Any],
+    quiet_active: bool,
+    quiet_skipped: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Attach the quiet-hours skip record to a sync result (P8).
+
+    When the window was inactive the result passes through untouched
+    (identical shape); when active, the result gains
+    ``quiet_hours: True`` plus ``quiet_skipped`` entries of
+    ``{"dedupe_hash", "reason": "quiet-hours"}``. Held rows stay
+    unsynced, so the next tick outside the window dispatches them.
+    """
+    if quiet_active:
+        result["quiet_hours"] = True
+        result["quiet_skipped"] = quiet_skipped
+    return result
+
+
 def labels_for_severity(
     severity: Any, overrides: Mapping[str, Any] | None = None
 ) -> list[str]:
@@ -849,6 +952,8 @@ def sync_findings(
     runner: GhRunner | None = None,
     labels: Mapping[str, Any] | None = None,
     dry_run: bool = False,
+    quiet_hours: Mapping[str, Any] | None = None,
+    now: Any = None,
 ) -> dict[str, Any]:
     """Push every not-yet-synced finding row to ``repo`` as a GitHub issue.
 
@@ -875,10 +980,15 @@ def sync_findings(
     skipped: list[str] = []
     dirty = False
 
+    quiet_active = in_quiet_hours(now, quiet_hours)
+    quiet_skipped: list[dict[str, Any]] = []
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
+            continue
+        if quiet_active and _quiet_skip_severity(row.get("severity")):
+            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
             continue
         title = issue_title(row)
         body = issue_body(row)
@@ -922,7 +1032,11 @@ def sync_findings(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+    return _with_quiet_result(
+        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
+        quiet_active,
+        quiet_skipped,
+    )
 
 
 def sync_findings_linear(
@@ -931,6 +1045,8 @@ def sync_findings_linear(
     *,
     runner: GhRunner | None = None,
     dry_run: bool = False,
+    quiet_hours: Mapping[str, Any] | None = None,
+    now: Any = None,
 ) -> dict[str, Any]:
     """Push every not-yet-synced finding row to Linear as an issue.
 
@@ -958,10 +1074,15 @@ def sync_findings_linear(
     skipped: list[str] = []
     dirty = False
 
+    quiet_active = in_quiet_hours(now, quiet_hours)
+    quiet_skipped: list[dict[str, Any]] = []
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
+            continue
+        if quiet_active and _quiet_skip_severity(row.get("severity")):
+            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
             continue
         title = issue_title(row)
         body = issue_body(row)
@@ -1021,7 +1142,11 @@ def sync_findings_linear(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+    return _with_quiet_result(
+        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
+        quiet_active,
+        quiet_skipped,
+    )
 
 
 def sync_findings_slack(
@@ -1030,6 +1155,8 @@ def sync_findings_slack(
     *,
     runner: GhRunner | None = None,
     dry_run: bool = False,
+    quiet_hours: Mapping[str, Any] | None = None,
+    now: Any = None,
 ) -> dict[str, Any]:
     """Post every not-yet-synced finding row to Slack via the webhook URL.
 
@@ -1059,10 +1186,15 @@ def sync_findings_slack(
     skipped: list[str] = []
     dirty = False
 
+    quiet_active = in_quiet_hours(now, quiet_hours)
+    quiet_skipped: list[dict[str, Any]] = []
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
+            continue
+        if quiet_active and _quiet_skip_severity(row.get("severity")):
+            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
             continue
         message = slack_message(row)
         blocks_json = json.dumps(message["blocks"])
@@ -1102,7 +1234,11 @@ def sync_findings_slack(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+    return _with_quiet_result(
+        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
+        quiet_active,
+        quiet_skipped,
+    )
 
 
 def sync_findings_teams(
@@ -1111,6 +1247,8 @@ def sync_findings_teams(
     *,
     runner: GhRunner | None = None,
     dry_run: bool = False,
+    quiet_hours: Mapping[str, Any] | None = None,
+    now: Any = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
     """Post every not-yet-synced finding row to Teams via the webhook URL.
@@ -1144,10 +1282,15 @@ def sync_findings_teams(
     skipped: list[str] = []
     dirty = False
 
+    quiet_active = in_quiet_hours(now, quiet_hours)
+    quiet_skipped: list[dict[str, Any]] = []
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
+            continue
+        if quiet_active and _quiet_skip_severity(row.get("severity")):
+            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
             continue
         card = teams_message(row, repo=repo)
         payload: dict[str, Any] = {
@@ -1195,7 +1338,11 @@ def sync_findings_teams(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+    return _with_quiet_result(
+        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
+        quiet_active,
+        quiet_skipped,
+    )
 
 
 def sign_payload(payload_bytes: bytes, secret: str) -> str:
@@ -1364,6 +1511,8 @@ def sync_findings_webhook(
     *,
     runner: GhRunner | None = None,
     dry_run: bool = False,
+    quiet_hours: Mapping[str, Any] | None = None,
+    now: Any = None,
     signing_secret: str = "",
     previous_signing_secret: str = "",
     timestamp: int | None = None,
@@ -1418,10 +1567,15 @@ def sync_findings_webhook(
     skipped: list[str] = []
     dirty = False
 
+    quiet_active = in_quiet_hours(now, quiet_hours)
+    quiet_skipped: list[dict[str, Any]] = []
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
+            continue
+        if quiet_active and _quiet_skip_severity(row.get("severity")):
+            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
             continue
         use_template = isinstance(webhook_template, str) and bool(
             webhook_template.strip()
@@ -1506,7 +1660,11 @@ def sync_findings_webhook(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+    return _with_quiet_result(
+        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
+        quiet_active,
+        quiet_skipped,
+    )
 
 
 def sync_findings_pagerduty(
@@ -1516,6 +1674,8 @@ def sync_findings_pagerduty(
     runner: GhRunner | None = None,
     severity_map: Mapping[str, Any] | None = None,
     dry_run: bool = False,
+    quiet_hours: Mapping[str, Any] | None = None,
+    now: Any = None,
 ) -> dict[str, Any]:
     """Trigger every not-yet-synced finding row as a PagerDuty event.
 
@@ -1551,10 +1711,15 @@ def sync_findings_pagerduty(
     skipped: list[str] = []
     dirty = False
 
+    quiet_active = in_quiet_hours(now, quiet_hours)
+    quiet_skipped: list[dict[str, Any]] = []
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
+            continue
+        if quiet_active and _quiet_skip_severity(row.get("severity")):
+            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
             continue
         event = pagerduty_payload(row, routing_key, severity_map)
         inner_json = json.dumps(event["payload"])
@@ -1599,7 +1764,11 @@ def sync_findings_pagerduty(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+    return _with_quiet_result(
+        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
+        quiet_active,
+        quiet_skipped,
+    )
 
 
 def sync_findings_opsgenie(
@@ -1609,6 +1778,8 @@ def sync_findings_opsgenie(
     runner: GhRunner | None = None,
     priority_map: Mapping[str, Any] | None = None,
     dry_run: bool = False,
+    quiet_hours: Mapping[str, Any] | None = None,
+    now: Any = None,
     **kw: Any,
 ) -> dict[str, Any]:
     """Create every not-yet-synced finding row as an Opsgenie alert.
@@ -1650,10 +1821,15 @@ def sync_findings_opsgenie(
     skipped: list[str] = []
     dirty = False
 
+    quiet_active = in_quiet_hours(now, quiet_hours)
+    quiet_skipped: list[dict[str, Any]] = []
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
+            continue
+        if quiet_active and _quiet_skip_severity(row.get("severity")):
+            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
             continue
         alert = opsgenie_payload(row, priority_map)
         details_json = json.dumps(alert["details"])
@@ -1703,7 +1879,11 @@ def sync_findings_opsgenie(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+    return _with_quiet_result(
+        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
+        quiet_active,
+        quiet_skipped,
+    )
 
 
 def _jira_config_for_node(node: Mapping[str, Any]) -> dict[str, str]:
@@ -1828,6 +2008,8 @@ def sync_findings_jira(
     runner: GhRunner | None = None,
     overrides: Mapping[str, Any] | None = None,
     dry_run: bool = False,
+    quiet_hours: Mapping[str, Any] | None = None,
+    now: Any = None,
     **kw: Any,
 ) -> dict[str, Any]:
     """Create/update every not-yet-synced finding row as a Jira issue.
@@ -1892,10 +2074,15 @@ def sync_findings_jira(
     skipped: list[str] = []
     dirty = False
 
+    quiet_active = in_quiet_hours(now, quiet_hours)
+    quiet_skipped: list[dict[str, Any]] = []
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
+            continue
+        if quiet_active and _quiet_skip_severity(row.get("severity")):
+            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
             continue
         jql = _jira_search_jql(digest, project_key)
         search_url = f"{base_url}/rest/api/3/search/jql"
@@ -1991,7 +2178,11 @@ def sync_findings_jira(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+    return _with_quiet_result(
+        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
+        quiet_active,
+        quiet_skipped,
+    )
 
 
 def _graph_token_url(tenant_id: str) -> str:
@@ -2152,6 +2343,8 @@ def sync_findings_graph(
     channel_id: str,
     runner: GhRunner | None = None,
     dry_run: bool = False,
+    quiet_hours: Mapping[str, Any] | None = None,
+    now: Any = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
     """Post every not-yet-synced finding row to a Teams channel via Graph.
@@ -2197,21 +2390,37 @@ def sync_findings_graph(
     dirty = False
 
     if dry_run:
+        quiet_active = in_quiet_hours(now, quiet_hours)
+        quiet_skipped: list[dict[str, Any]] = []
         for row in rows:
             digest = str(row.get("dedupe_hash", ""))
             if row.get("issue_url"):
                 skipped.append(digest)
                 continue
+            if quiet_active and _quiet_skip_severity(row.get("severity")):
+                quiet_skipped.append(
+                    {"dedupe_hash": digest, "reason": QUIET_HOURS_REASON}
+                )
+                continue
             pushed.append({"dedupe_hash": digest, "issue_url": ""})
-        return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+        return _with_quiet_result(
+            {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
+            quiet_active,
+            quiet_skipped,
+        )
 
     token = _graph_fetch_token(run, tenant_id, client_id, client_secret)
 
     messages_url = _graph_messages_url(team_id, channel_id)
+    quiet_active = in_quiet_hours(now, quiet_hours)
+    quiet_skipped = []
     for row in rows:
         digest = str(row.get("dedupe_hash", ""))
         if row.get("issue_url"):
             skipped.append(digest)
+            continue
+        if quiet_active and _quiet_skip_severity(row.get("severity")):
+            quiet_skipped.append({"dedupe_hash": digest, "reason": QUIET_HOURS_REASON})
             continue
         message = graph_message(row, repo=repo)
         body_json = json.dumps(message["body"])
@@ -2254,7 +2463,11 @@ def sync_findings_graph(
 
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
-    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+    return _with_quiet_result(
+        {"pushed": pushed, "skipped": skipped, "dry_run": dry_run},
+        quiet_active,
+        quiet_skipped,
+    )
 
 
 def _reminder_graph_message(reminder: Mapping[str, Any]) -> dict[str, Any]:
@@ -3067,6 +3280,7 @@ def tick(
     reports_directory: str | Path | None = None,
     runner: GhRunner | None = None,
     dry_run: bool = False,
+    now: Any = None,
 ) -> dict[str, Any]:
     """Heartbeat-schedulable entrypoint: reuse the sync functions.
 
@@ -3076,7 +3290,7 @@ def tick(
     ``pagerduty_severity_map``, ``opsgenie_api_key``,
     ``opsgenie_priority_map``, ``jira``, ``webhook_url``,
     ``webhook_signing_secret``, ``webhook_signing_secret_previous``,
-    ``webhook_template``, ``grant_usage_ledger``)
+    ``webhook_template``, ``grant_usage_ledger``, ``quiet_hours``)
     from ``config`` (loads via ``load_config()`` when omitted).
     Disabled, repo-less, team-less, webhook-less, graph-less,
     routing-key-less, api-key-less, jira-config-less, or
@@ -3108,6 +3322,15 @@ def tick(
     ``"expiry_notice"`` result key with a
     ``notice:<artifact_id>:<state>`` ref; repeats, dry runs, and
     unconfigured trackers report digest-only entries instead.
+
+    Per-tracker quiet hours (P8): when the ``quiet_hours`` mapping
+    (``{"start": "22:00", "end": "06:00"}``, local time) holds ``now``
+    (injected for determinism; defaults to the wall clock), findings
+    below ``critical``/``high`` are held unsynced and reported under
+    ``"quiet_skipped"`` with reason ``"quiet-hours"``
+    (``"quiet_hours": True`` marks the result); ``critical``/``high``
+    findings, notices, and expiry notices always fire. Without
+    ``quiet_hours`` the tick proceeds exactly as before.
     """
     if config is None:
         from omega_prime.config import load_config  # deferred: keeps import light
@@ -3151,6 +3374,8 @@ def tick(
             channel_id=graph_cfg["channel_id"],
             runner=runner,
             dry_run=dry_run,
+            quiet_hours=node.get("quiet_hours"),
+            now=now,
             repo=repo or None,
         )
         result["disabled"] = False
@@ -3166,6 +3391,8 @@ def tick(
             team_id.strip(),
             runner=runner,
             dry_run=dry_run,
+            quiet_hours=node.get("quiet_hours"),
+            now=now,
         )
         result["disabled"] = False
         if notices:
@@ -3180,6 +3407,8 @@ def tick(
             webhook_url.strip(),
             runner=runner,
             dry_run=dry_run,
+            quiet_hours=node.get("quiet_hours"),
+            now=now,
         )
         result["disabled"] = False
         if notices:
@@ -3196,6 +3425,8 @@ def tick(
             webhook_url.strip(),
             runner=runner,
             dry_run=dry_run,
+            quiet_hours=node.get("quiet_hours"),
+            now=now,
             repo=repo or None,
         )
         result["disabled"] = False
@@ -3214,6 +3445,8 @@ def tick(
             routing_key.strip(),
             runner=runner,
             dry_run=dry_run,
+            quiet_hours=node.get("quiet_hours"),
+            now=now,
             severity_map=severity_map if isinstance(severity_map, dict) else None,
         )
         result["disabled"] = False
@@ -3230,6 +3463,8 @@ def tick(
             api_key.strip(),
             runner=runner,
             dry_run=dry_run,
+            quiet_hours=node.get("quiet_hours"),
+            now=now,
             priority_map=priority_map if isinstance(priority_map, dict) else None,
         )
         result["disabled"] = False
@@ -3258,6 +3493,8 @@ def tick(
             issue_type=issue_type,
             runner=runner,
             dry_run=dry_run,
+            quiet_hours=node.get("quiet_hours"),
+            now=now,
         )
         result["disabled"] = False
         if notices:
@@ -3275,6 +3512,8 @@ def tick(
             webhook_url,
             runner=runner,
             dry_run=dry_run,
+            quiet_hours=node.get("quiet_hours"),
+            now=now,
             signing_secret=signing_secret,
             previous_signing_secret=previous_secret,
             webhook_template=template,
@@ -3302,6 +3541,8 @@ def tick(
         runner=runner,
         labels=node_labels if isinstance(node_labels, dict) else None,
         dry_run=dry_run,
+        quiet_hours=node.get("quiet_hours"),
+        now=now,
     )
     result["disabled"] = False
     if notices:
@@ -3931,6 +4172,8 @@ __all__ = [
     "PAGERDUTY_EVENTS_URL",
     "PAGERDUTY_SEVERITIES",
     "PD_SEVERITIES",
+    "QUIET_HOURS_REASON",
+    "QUIET_HOURS_URGENT_SEVERITIES",
     "SLACK_COLORS",
     "TEAMS_THEME_COLORS",
     "TRACKERS",
@@ -3957,6 +4200,7 @@ __all__ = [
     "clear_expiry_notices",
     "deliver_reminders_graph",
     "graph_message",
+    "in_quiet_hours",
     "issue_body",
     "issue_title",
     "jira_payload",

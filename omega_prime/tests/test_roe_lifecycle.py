@@ -50,6 +50,7 @@ from omega_prime.grokbot.roe_lifecycle import (
     main,
     read_grant_usage,
     record_grant_usage,
+    renewal_command,
     renewal_reminders,
     suite_counts,
     watchdog_check,
@@ -1483,3 +1484,92 @@ def test_expiry_notice_message_fail_closed():
         assert isinstance(message, str)
         assert message.startswith("RoE grant expiry notice\n")
         assert "unknown" in message
+
+
+# P11 renewal command in notices ---------------------------------------------------
+
+
+def test_renewal_command_from_path():
+    assert (
+        renewal_command("/tmp/roe.json")
+        == "/omega-redteam-roe-sign --artifact /tmp/roe.json"
+    )
+    assert (
+        renewal_command(Path("/tmp/roe.json"))
+        == "/omega-redteam-roe-sign --artifact /tmp/roe.json"
+    )
+    assert (
+        renewal_command("  /tmp/roe.json  ")
+        == "/omega-redteam-roe-sign --artifact /tmp/roe.json"
+    )
+
+
+def test_renewal_command_from_mapping():
+    assert (
+        renewal_command({"path": "/tmp/roe.json"})
+        == "/omega-redteam-roe-sign --artifact /tmp/roe.json"
+    )
+    assert (
+        renewal_command({"artifact_path": "/tmp/roe.json"})
+        == "/omega-redteam-roe-sign --artifact /tmp/roe.json"
+    )
+    assert (
+        renewal_command({"artifact_id": "grant-1"})
+        == "/omega-redteam-roe-sign --artifact grant-1"
+    )
+    assert (
+        renewal_command({"id": "grant-1"})
+        == "/omega-redteam-roe-sign --artifact grant-1"
+    )
+    assert (
+        renewal_command({"path": "/tmp/roe.json", "artifact_id": "grant-1"})
+        == "/omega-redteam-roe-sign --artifact /tmp/roe.json"
+    )
+
+
+def test_renewal_command_empty_and_never_raises():
+    for bad in (
+        None,
+        "",
+        "   ",
+        {},
+        {"path": ""},
+        {"artifact_id": "unknown-artifact"},
+        [],
+        123,
+        ["x"],
+    ):
+        assert renewal_command(bad) == ""
+
+
+def test_watchdog_check_carries_path_for_path_input(tmp_path):
+    document = _watchdog_document(5)
+    assert "path" not in watchdog_check(document, now=END)
+    artifact = _write_artifact(tmp_path, document)
+    path_result = watchdog_check(str(artifact), now=END)
+    assert path_result["path"] == str(artifact)
+    assert watchdog_check(str(tmp_path / "absent.json"), now=END)["path"] == str(
+        tmp_path / "absent.json"
+    )
+    assert "path" not in watchdog_check(None, now=END)
+    assert "path" not in watchdog_check("   ", now=END)
+
+
+def test_expiry_notice_embeds_renew_for_path_grant(tmp_path):
+    artifact = _write_artifact(tmp_path, _watchdog_document(3))
+    check = watchdog_check(str(artifact), now=END)
+    assert check["state"] == "expiring-7d"
+    message = expiry_notice_message(check)
+    assert message.endswith(f"Renew: /omega-redteam-roe-sign --artifact {artifact}\n")
+    assert message.splitlines()[-1].startswith("Renew: ")
+    assert expiry_notice_message(check) == message  # deterministic
+
+
+def test_expiry_notice_omits_renew_without_path():
+    check = watchdog_check(_watchdog_document(3), now=END)
+    assert "Renew:" not in expiry_notice_message(check)
+    assert "Renew:" not in expiry_notice_message(
+        {"state": "expiring-7d", "artifact_id": "unknown-artifact"}
+    )
+    for bad in (None, {}, "garbage", ["not", "a", "dict"], {"state": "bogus"}):
+        assert "Renew:" not in expiry_notice_message(bad)

@@ -192,6 +192,25 @@ def _default_old_audit(root: Path, old_pin: str | None) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _load_from_audit(path_str: str) -> tuple[Any | None, str | None]:
+    """``(doc, error)`` for ``--from-audit``: the new-pin audit, no re-audit.
+
+    A missing, unreadable, or unparseable file is a usage error (exit 2):
+    the caller reports the returned message through its usage path.
+    """
+    path = Path(path_str)
+    if not path.is_file():
+        return None, f"--from-audit not found: {path_str}"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, f"cannot read --from-audit {path} ({exc})"
+    try:
+        return json.loads(text), None
+    except ValueError as exc:
+        return None, f"cannot parse --from-audit {path} ({exc})"
+
+
 _GITHUB_REPO_RE = re.compile(
     r"^(?:https?://github\.com/|git@github\.com:)([^/\s]+)/([^/\s]+?)(?:\.git)?$"
 )
@@ -462,6 +481,17 @@ def build_parser() -> argparse.ArgumentParser:
             "Old-pin npm audit JSON for the delta report. Defaults to the "
             "pre-bump pin's saved artifact "
             "(omega_prime/tests/data/redteam-audit-<pin>.json) when present."
+        ),
+    )
+    parser.add_argument(
+        "--from-audit",
+        default=None,
+        metavar="PATH",
+        help=(
+            "New-pin npm audit JSON for the delta report: run the full "
+            "bump flow from a previously exported audit document (same "
+            "schema as the normal run's audit docs) without re-auditing. "
+            "The old-pin audit still comes from --old-audit (required)."
         ),
     )
     parser.add_argument(
@@ -1828,6 +1858,7 @@ def bump(
     root: Path = REPO_ROOT,
     run: Runner | None = None,
     old_audit: str | None = None,
+    from_audit: str | None = None,
     skip_audit: bool = False,
     semver_check: bool = False,
     bump_commit: bool = False,
@@ -1889,6 +1920,7 @@ def bump(
             config={
                 "to": to,
                 "old_audit": old_audit,
+                "from_audit": from_audit,
                 "semver_check": semver_check,
                 "bump_commit": bump_commit,
                 "auto_detect_upstream_fix": auto_detect_upstream_fix,
@@ -1920,6 +1952,20 @@ def bump(
     if audit_only and skip_audit:
         print(
             "pin-bump usage error: --audit-only needs audit data (drop --skip-audit)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if from_audit and skip_audit:
+        print(
+            "pin-bump usage error: --from-audit provides the new audit "
+            "(drop --skip-audit)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if from_audit and not old_audit:
+        print(
+            "pin-bump usage error: --from-audit needs --old-audit <path> "
+            "for the old-pin audit",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -2376,36 +2422,46 @@ def bump(
             if audit_section is not None
             else None
         )
-        try:
-            audit_node = run(["node", "--version"], cwd=root)
-        except OSError:
-            audit_node = None
-        if audit_node is None or audit_node.returncode != 0:
-            return degraded("node is absent (node --version failed)")
-        print(
-            "[audit-only] note: auditing the current checkout in "
-            f"{redteam_dir} (the new pin is never checked out)"
-        )
-        try:
-            audit_proc = run(
-                [
-                    "npm",
-                    "audit",
-                    "--omit=dev",
-                    "--audit-level=high",
-                    "--json",
-                ],
-                cwd=redteam_dir,
-            )
-        except OSError as exc:
-            return degraded(f"npm is absent ({exc})")
-        try:
-            audit_new_doc = json.loads(audit_proc.stdout)
-        except ValueError as exc:
+        if from_audit:
+            audit_new_doc, audit_from_error = _load_from_audit(from_audit)
+            if audit_from_error is not None:
+                print(f"[audit-only] pin-bump usage error: {audit_from_error}")
+                return finish(EXIT_USAGE)
             print(
-                f"[audit-only] pin-bump FAILED: cannot parse npm audit output ({exc})"
+                "[audit-only] note: using saved audit "
+                f"{from_audit} (no re-audit; the new pin is never checked out)"
             )
-            return finish(EXIT_BUMP_FAILED)
+        else:
+            try:
+                audit_node = run(["node", "--version"], cwd=root)
+            except OSError:
+                audit_node = None
+            if audit_node is None or audit_node.returncode != 0:
+                return degraded("node is absent (node --version failed)")
+            print(
+                "[audit-only] note: auditing the current checkout in "
+                f"{redteam_dir} (the new pin is never checked out)"
+            )
+            try:
+                audit_proc = run(
+                    [
+                        "npm",
+                        "audit",
+                        "--omit=dev",
+                        "--audit-level=high",
+                        "--json",
+                    ],
+                    cwd=redteam_dir,
+                )
+            except OSError as exc:
+                return degraded(f"npm is absent ({exc})")
+            try:
+                audit_new_doc = json.loads(audit_proc.stdout)
+            except ValueError as exc:
+                print(
+                    f"[audit-only] pin-bump FAILED: cannot parse npm audit output ({exc})"
+                )
+                return finish(EXIT_BUMP_FAILED)
         try:
             audit_triage_mod = _load_script("redteam-audit-triage.py")
         except (OSError, RuntimeError) as exc:
@@ -2895,36 +2951,46 @@ def bump(
                     "reason": "audit verdict is 'audit-skipped', not 'improved'",
                 }
         else:
-            try:
-                dry_node = run(["node", "--version"], cwd=root)
-            except OSError:
-                dry_node = None
-            if dry_node is None or dry_node.returncode != 0:
-                return degraded("node is absent (node --version failed)")
-            print(
-                "[dry-run] note: auditing the current checkout in "
-                f"{redteam_dir} (the new pin is never checked out)"
-            )
-            try:
-                dry_audit_proc = run(
-                    [
-                        "npm",
-                        "audit",
-                        "--omit=dev",
-                        "--audit-level=high",
-                        "--json",
-                    ],
-                    cwd=redteam_dir,
-                )
-            except OSError as exc:
-                return degraded(f"npm is absent ({exc})")
-            try:
-                dry_new_doc = json.loads(dry_audit_proc.stdout)
-            except ValueError as exc:
+            if from_audit:
+                dry_new_doc, dry_from_error = _load_from_audit(from_audit)
+                if dry_from_error is not None:
+                    print(f"[dry-run] pin-bump usage error: {dry_from_error}")
+                    return finish(EXIT_USAGE)
                 print(
-                    f"[dry-run] pin-bump FAILED: cannot parse npm audit output ({exc})"
+                    "[dry-run] note: using saved audit "
+                    f"{from_audit} (no re-audit; the new pin is never checked out)"
                 )
-                return finish(EXIT_BUMP_FAILED)
+            else:
+                try:
+                    dry_node = run(["node", "--version"], cwd=root)
+                except OSError:
+                    dry_node = None
+                if dry_node is None or dry_node.returncode != 0:
+                    return degraded("node is absent (node --version failed)")
+                print(
+                    "[dry-run] note: auditing the current checkout in "
+                    f"{redteam_dir} (the new pin is never checked out)"
+                )
+                try:
+                    dry_audit_proc = run(
+                        [
+                            "npm",
+                            "audit",
+                            "--omit=dev",
+                            "--audit-level=high",
+                            "--json",
+                        ],
+                        cwd=redteam_dir,
+                    )
+                except OSError as exc:
+                    return degraded(f"npm is absent ({exc})")
+                try:
+                    dry_new_doc = json.loads(dry_audit_proc.stdout)
+                except ValueError as exc:
+                    print(
+                        f"[dry-run] pin-bump FAILED: cannot parse npm audit output ({exc})"
+                    )
+                    return finish(EXIT_BUMP_FAILED)
             try:
                 dry_triage_mod = _load_script("redteam-audit-triage.py")
             except (OSError, RuntimeError) as exc:
@@ -3346,29 +3412,35 @@ def bump(
                 "reason": "audit verdict is 'audit-skipped', not 'improved'",
             }
     else:
-        try:
-            node = run(["node", "--version"], cwd=root)
-        except OSError:
-            node = None
-        if node is None or node.returncode != 0:
-            return degraded("node is absent (node --version failed)")
-        try:
-            audit_proc = run(
-                [
-                    "npm",
-                    "audit",
-                    "--omit=dev",
-                    "--audit-level=high",
-                    "--json",
-                ],
-                cwd=redteam_dir,
-            )
-        except OSError as exc:
-            return degraded(f"npm is absent ({exc})")
-        try:
-            new_doc = json.loads(audit_proc.stdout)
-        except ValueError as exc:
-            return failed(f"cannot parse npm audit output ({exc})")
+        if from_audit:
+            new_doc, from_error = _load_from_audit(from_audit)
+            if from_error is not None:
+                return usage(from_error)
+            print(f"pin-bump note: using saved audit {from_audit} (no re-audit)")
+        else:
+            try:
+                node = run(["node", "--version"], cwd=root)
+            except OSError:
+                node = None
+            if node is None or node.returncode != 0:
+                return degraded("node is absent (node --version failed)")
+            try:
+                audit_proc = run(
+                    [
+                        "npm",
+                        "audit",
+                        "--omit=dev",
+                        "--audit-level=high",
+                        "--json",
+                    ],
+                    cwd=redteam_dir,
+                )
+            except OSError as exc:
+                return degraded(f"npm is absent ({exc})")
+            try:
+                new_doc = json.loads(audit_proc.stdout)
+            except ValueError as exc:
+                return failed(f"cannot parse npm audit output ({exc})")
         try:
             triage_mod = _load_script("redteam-audit-triage.py")
         except (OSError, RuntimeError) as exc:
@@ -3827,6 +3899,7 @@ def main(argv: list[str] | None = None) -> int:
         args.to,
         root=root,
         old_audit=args.old_audit,
+        from_audit=args.from_audit,
         skip_audit=args.skip_audit,
         semver_check=args.semver_check,
         bump_commit=args.bump_commit,

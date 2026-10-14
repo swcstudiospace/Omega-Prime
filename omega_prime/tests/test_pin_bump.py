@@ -3304,3 +3304,232 @@ def test_verify_audit_only_passes_without_mutation(tmp_path, capsys):
     assert "verification green" in out
     assert _mutating_verbs(run.kinds()) == []
     assert _snapshot(root) == before
+
+
+# --from-audit mode (P9) --------------------------------------------------------
+
+
+def test_from_audit_flag_parses():
+    args = pin_bump.build_parser().parse_args(
+        ["--to", PIN_NEW, "--from-audit", "new.json", "--old-audit", "old.json"]
+    )
+    assert args.from_audit == "new.json"
+    assert args.old_audit == "old.json"
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.from_audit is None
+
+
+def test_from_audit_happy_path_skips_reaudit(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    old_audit = tmp_path / "old.json"
+    old_audit.write_text(
+        json.dumps(_audit(("left-pad", "high", "GHSA-old-0001"))), encoding="utf-8"
+    )
+    new_audit = tmp_path / "new.json"
+    new_audit.write_text(json.dumps(_audit()), encoding="utf-8")
+    # node/npm both absent: the saved new audit must be used as-is, so no
+    # re-audit subprocess is ever attempted.
+    run = FakeRun(node_missing=True, npm_missing=True)
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        from_audit=str(new_audit),
+        old_audit=str(old_audit),
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no re-audit" in out
+    assert "Verdict: improved" in (root / "report.md").read_text()
+    assert f"- Commit: `{PIN_NEW}`" in (root / "VENDOR.md").read_text()
+    assert not any(cmd[0] in ("node", "npm") for cmd in run.kinds())
+
+
+def test_from_audit_missing_file_exits_2(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    old_audit = tmp_path / "old.json"
+    old_audit.write_text(json.dumps(_audit()), encoding="utf-8")
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        from_audit=str(tmp_path / "absent.json"),
+        old_audit=str(old_audit),
+    )
+    assert rc == 2
+    assert "--from-audit not found" in capsys.readouterr().err
+
+
+def test_from_audit_unparseable_exits_2(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    old_audit = tmp_path / "old.json"
+    old_audit.write_text(json.dumps(_audit()), encoding="utf-8")
+    new_audit = tmp_path / "new.json"
+    new_audit.write_text("{not json", encoding="utf-8")
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        from_audit=str(new_audit),
+        old_audit=str(old_audit),
+    )
+    assert rc == 2
+    assert "cannot parse --from-audit" in capsys.readouterr().err
+
+
+def test_from_audit_skip_audit_conflict_exits_2(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=run, from_audit="new.json", skip_audit=True
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--from-audit" in err and "--skip-audit" in err
+    assert run.cmds == []
+
+
+def test_from_audit_needs_old_audit(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)  # no saved artifact, no --old-audit
+    new_audit = tmp_path / "new.json"
+    new_audit.write_text(json.dumps(_audit()), encoding="utf-8")
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, from_audit=str(new_audit))
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--old-audit" in err
+    assert run.cmds == []
+
+
+def test_from_audit_dry_run_no_mutation_no_audit(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    old_audit = tmp_path / "old.json"
+    old_audit.write_text(
+        json.dumps(_audit(("left-pad", "high", "GHSA-old-0001"))), encoding="utf-8"
+    )
+    new_audit = tmp_path / "new.json"
+    new_audit.write_text(json.dumps(_audit()), encoding="utf-8")
+    before = _snapshot(root)
+    run = FakeRun(node_missing=True, npm_missing=True)
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        from_audit=str(new_audit),
+        old_audit=str(old_audit),
+        dry_run=True,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "audit verdict: improved" in out
+    assert not (root / "report.md").exists()
+    assert not any(cmd[0] in ("node", "npm") for cmd in run.kinds())
+    assert _mutating_verbs(run.kinds()) == []
+    assert _snapshot(root) == before
+
+
+def test_from_audit_audit_only_no_mutation_no_audit(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    old_audit = tmp_path / "old.json"
+    old_audit.write_text(
+        json.dumps(_audit(("left-pad", "high", "GHSA-old-0001"))), encoding="utf-8"
+    )
+    new_audit = tmp_path / "new.json"
+    new_audit.write_text(json.dumps(_audit()), encoding="utf-8")
+    before = _snapshot(root)
+    run = FakeRun(node_missing=True, npm_missing=True)
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        from_audit=str(new_audit),
+        old_audit=str(old_audit),
+        audit_only=True,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[audit-only] audit verdict: improved" in out
+    assert not any(cmd[0] in ("node", "npm") for cmd in run.kinds())
+    assert _mutating_verbs(run.kinds()) == []
+    assert _snapshot(root) == before
+
+
+def test_from_audit_semver_json_and_bump_commit(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    _write_package_json(root)
+    old_audit = tmp_path / "old.json"
+    old_audit.write_text(json.dumps(_bump_commit_old_doc()), encoding="utf-8")
+    new_audit = tmp_path / "new.json"
+    new_audit.write_text(json.dumps(_bump_commit_new_doc("1.3.0")), encoding="utf-8")
+    run = FakeRun()
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        from_audit=str(new_audit),
+        old_audit=str(old_audit),
+        semver_check=True,
+        bump_commit=True,
+        json_mode=True,
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "improved"
+    assert payload["semver"] == {"GHSA-fix-0001": "compatible"}
+    assert payload["bump"]["applied"] is True
+    assert payload["bump"]["new"] == "1.3.0"
+    assert "semver compatible" in captured.err
+    assert "## Semver check" in (root / "report.md").read_text()
+    assert json.loads((root / "redteam" / "package.json").read_text())["version"] == (
+        "1.3.0"
+    )
+    assert not any(cmd[0] in ("node", "npm") for cmd in run.kinds())
+
+
+def test_from_audit_main_plumbing(tmp_path, capsys, monkeypatch):
+    root = _write_fixture_root(tmp_path)
+    old_audit = tmp_path / "old.json"
+    old_audit.write_text(
+        json.dumps(_audit(("left-pad", "high", "GHSA-old-0001"))), encoding="utf-8"
+    )
+    new_audit = tmp_path / "new.json"
+    new_audit.write_text(json.dumps(_audit()), encoding="utf-8")
+    run = FakeRun(node_missing=True, npm_missing=True)
+    monkeypatch.setattr(pin_bump, "_default_run", run)
+    rc = pin_bump.main(
+        [
+            "--to",
+            PIN_NEW,
+            "--root",
+            str(root),
+            "--from-audit",
+            str(new_audit),
+            "--old-audit",
+            str(old_audit),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Verdict: improved" in (root / "report.md").read_text()
+    assert not any(cmd[0] in ("node", "npm") for cmd in run.kinds())
+
+
+def test_from_audit_main_plumbing_skip_audit_conflict(tmp_path, capsys):
+    rc = pin_bump.main(
+        [
+            "--to",
+            PIN_NEW,
+            "--root",
+            str(tmp_path),
+            "--from-audit",
+            "new.json",
+            "--old-audit",
+            "old.json",
+            "--skip-audit",
+        ]
+    )
+    assert rc == 2
+    assert "--from-audit" in capsys.readouterr().err
