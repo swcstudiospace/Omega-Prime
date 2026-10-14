@@ -83,7 +83,7 @@ def _skill(root: Path, folder: str, description: str = "Use it.") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"---\nname: {folder}\ndescription: {description}\n---\n\n"
-        f"# {folder}\n\nBody of {folder}.\n",
+        f'<skill name="{folder}" version="1">\nBody of {folder}.\n</skill>\n',
         encoding="utf-8",
     )
     return path
@@ -92,7 +92,12 @@ def _skill(root: Path, folder: str, description: str = "Use it.") -> Path:
 def _routine(root: Path, stem: str) -> Path:
     path = root / "omega_prime" / "routines" / f"{stem}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"# {stem}\n\nRun the {stem} steps.\n", encoding="utf-8")
+    path.write_text(
+        f'<routine name="{stem}" version="1">\n'
+        f"<summary>Run the {stem} steps.</summary>\n"
+        f"Run the {stem} steps.\n</routine>\n",
+        encoding="utf-8",
+    )
     return path
 
 
@@ -367,7 +372,9 @@ def test_source_deleted_after_generation_is_source_missing(
     registry = RecordingRegistry()
     first = execute_command("/omega-alpha", registry, {})
     assert first["ok"] is True, first
-    assert first["result"]["instructions"] == "\n# alpha\n\nBody of alpha.\n"
+    assert first["result"]["instructions"] == (
+        '\n<skill name="alpha" version="1">\nBody of alpha.\n</skill>\n'
+    )
     skill.unlink()
     routine.unlink()
     gone = execute_command("/omega-alpha", registry, {})

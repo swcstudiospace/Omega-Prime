@@ -14,6 +14,7 @@ flagged as errors are never elided, and an error is never marked useless.
 from __future__ import annotations
 
 from typing import Any
+from xml.sax.saxutils import escape
 
 SUMMARY_KIND = "summary"
 _SUMMARY_HEADING = '<context_summary version="1">'
@@ -85,25 +86,23 @@ def _summary_text(older: list) -> str:
     lines = [_SUMMARY_HEADING]
     for message in older:
         if not isinstance(message, dict):
-            lines.append(
-                str(message).replace(_SUMMARY_CLOSE, "&lt;/context_summary&gt;")
-            )
+            lines.append(escape(str(message)))
             continue
         role = message.get("role", "?")
         content = message.get("content")
         text = content if isinstance(content, str) else ""
         calls = message.get("tool_calls") or []
+        escaped_text = escape(text[:200])
         if calls:
             names = []
             for call in calls:
                 function = call.get("function") if isinstance(call, dict) else None
                 name = function.get("name") if isinstance(function, dict) else None
                 if name:
-                    names.append(str(name))
-            text = (text + " " if text else "") + "tool calls: " + ", ".join(names)
-        lines.append(
-            f"{role}: {text[:200]}".replace(_SUMMARY_CLOSE, "&lt;/context_summary&gt;")
-        )
+                    names.append(escape(str(name)))
+            suffix = "tool calls: " + ", ".join(names)
+            escaped_text = (escaped_text + " " if escaped_text else "") + suffix
+        lines.append(f"{role}: {escaped_text}")
     lines.append(_SUMMARY_CLOSE)
     return "\n".join(lines)
 

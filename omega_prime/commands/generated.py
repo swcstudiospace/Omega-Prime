@@ -223,12 +223,10 @@ def _read(root: Path, source: str) -> str:
 def _routine_description(text: str) -> str:
     match = re.search(r"<summary>(.*?)</summary>", text, re.DOTALL)
     if match is not None:
-        summary = match.group(1).strip()
-        if summary:
-            return summary
+        return " ".join(match.group(1).split())
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
+        if stripped and not stripped.startswith("#") and not stripped.startswith("<"):
             return stripped
     return ""
 

@@ -493,7 +493,27 @@ def _run_generated(
                 "source_invalid",
                 {"kind": spec.kind, "source": spec.source},
             )
+        folder = PurePosixPath(spec.source).parent.name
+        stripped_body = body.strip()
+        if not stripped_body.startswith(
+            f'<skill name="{folder}" version="1">'
+        ) or not stripped_body.endswith("</skill>"):
+            return _fail(
+                spec.name,
+                "source_invalid",
+                {"kind": spec.kind, "source": spec.source},
+            )
         instructions = body
+    elif spec.kind == "routine":
+        stripped_text = text.strip()
+        if not stripped_text.startswith(
+            f'<routine name="{stem}" version="1">'
+        ) or not stripped_text.endswith("</routine>"):
+            return _fail(
+                spec.name,
+                "source_invalid",
+                {"kind": spec.kind, "source": spec.source},
+            )
     return _ok(
         spec.name,
         {

@@ -44,7 +44,13 @@ _ROUTINES_DIR = "omega_prime/routines"
 _COMMANDS_DIR = "omega_prime/grokbot/plugin/commands"
 
 _XML_DECLARATION_RE = re.compile(r"<\?xml.*?\?>", re.DOTALL)
-_PLACEHOLDER_RE = re.compile(r"\{\{[^}]*\}\}")
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+_ASSEMBLED_PLACEHOLDERS: tuple[str, ...] = (
+    "{{DEFAULT_BRANCH}}",
+    "{{BOT_ID}}",
+    "{{ROSTER_VERSION}}",
+)
 
 
 def _display(root: Path, path: Path) -> str:
@@ -89,19 +95,54 @@ def _seat_prompt_problems(root: Path) -> list[str]:
     return problems
 
 
+def _strip_assembled_declarations(text: str) -> str:
+    body = text
+    leading = _XML_DECLARATION_RE.match(body)
+    if leading is not None:
+        body = body[leading.end() :]
+    # Find the first root tag, skipping comments before it.
+    cursor = body
+    while True:
+        cursor = cursor.lstrip()
+        if cursor.startswith("<!--"):
+            end = cursor.find("-->")
+            if end == -1:
+                return body
+            cursor = cursor[end + 3 :]
+            continue
+        break
+    root_match = re.match(r"<([A-Za-z_][\w.:-]*)", cursor)
+    if root_match is None:
+        return body
+    close = f"</{root_match.group(1)}>"
+    close_index = body.find(close)
+    if close_index == -1:
+        return body
+    after = body[close_index + len(close) :]
+    stripped_after = after.lstrip()
+    if stripped_after.startswith("<?xml"):
+        declaration = _XML_DECLARATION_RE.match(stripped_after)
+        if declaration is not None:
+            body = (
+                body[: close_index + len(close)] + stripped_after[declaration.end() :]
+            )
+    return body
+
+
 def _assembled_problems(root: Path) -> list[str]:
     problems: list[str] = []
     text = _read(root, _ASSEMBLED_PATH, problems)
     if text is None:
         return problems
-    placeholder = _PLACEHOLDER_RE.search(text)
-    if placeholder is not None:
-        problems.append(
-            f"{_ASSEMBLED_PATH}: unfilled placeholder remains: {placeholder.group(0)}"
-        )
+    for placeholder in _ASSEMBLED_PLACEHOLDERS:
+        if placeholder in text:
+            problems.append(
+                f"{_ASSEMBLED_PATH}: unfilled placeholder remains: {placeholder}"
+            )
     # The assembled file concatenates two documents, each with its own
-    # declaration; strip every declaration before wrapping in <assembled>.
-    body = _XML_DECLARATION_RE.sub("", text)
+    # declaration; strip only a declaration at the file start and one
+    # immediately after the first root's closing tag before wrapping.
+    body = _strip_assembled_declarations(text)
     try:
         element = ET.fromstring(f"<assembled>{body}</assembled>")
     except ET.ParseError as exc:
@@ -116,6 +157,22 @@ def _assembled_problems(root: Path) -> list[str]:
     return problems
 
 
+def _envelope_problems(
+    display: str, stripped: str, expected_open: str, close: str, kind: str
+) -> list[str]:
+    problems: list[str] = []
+    if not stripped.startswith(expected_open):
+        problems.append(f"{display}: {kind} must start with {expected_open}")
+    if stripped.count(expected_open) != 1:
+        problems.append(f"{display}: {kind} must contain {expected_open} exactly once")
+    first_close = stripped.find(close)
+    if first_close == -1:
+        problems.append(f"{display}: {kind} must end with {close}")
+    elif first_close != len(stripped) - len(close):
+        problems.append(f"{display}: {kind} first {close} must be the final close")
+    return problems
+
+
 def _skill_problems(root: Path) -> list[str]:
     from omega_prime.skills_runtime.guards import parse_frontmatter
 
@@ -123,7 +180,7 @@ def _skill_problems(root: Path) -> list[str]:
     directory = root / _SKILLS_DIR
     if not directory.is_dir():
         return [f"{_SKILLS_DIR}: directory is missing"]
-    for path in sorted(directory.glob("*/SKILL.md")):
+    for path in sorted(directory.rglob("SKILL.md")):
         display = _display(root, path)
         try:
             text = path.read_text(encoding="utf-8")
@@ -137,10 +194,11 @@ def _skill_problems(root: Path) -> list[str]:
         folder = path.parent.name
         stripped = body.strip()
         expected_open = f'<skill name="{folder}" version="1">'
-        if not stripped.startswith(expected_open):
-            problems.append(f"{display}: skill body must start with {expected_open}")
-        if not stripped.endswith("</skill>"):
-            problems.append(f"{display}: skill body must end with </skill>")
+        problems.extend(
+            _envelope_problems(
+                display, stripped, expected_open, "</skill>", "skill body"
+            )
+        )
     return problems
 
 
@@ -158,12 +216,28 @@ def _routine_problems(root: Path) -> list[str]:
             continue
         stripped = text.strip()
         expected_open = f'<routine name="{path.stem}" version="1">'
-        if not stripped.startswith(expected_open):
-            problems.append(f"{display}: routine must start with {expected_open}")
-        if "<summary>" not in stripped or "</summary>" not in stripped:
-            problems.append(f"{display}: routine must contain <summary> and </summary>")
-        if not stripped.endswith("</routine>"):
-            problems.append(f"{display}: routine must end with </routine>")
+        problems.extend(
+            _envelope_problems(
+                display, stripped, expected_open, "</routine>", "routine"
+            )
+        )
+        summaries = list(_SUMMARY_RE.finditer(stripped))
+        if len(summaries) != 1:
+            problems.append(
+                f"{display}: routine must contain exactly one <summary>...</summary>"
+            )
+        else:
+            summary = summaries[0]
+            if not summary.group(1).strip():
+                problems.append(f"{display}: routine summary must not be empty")
+            open_end = len(expected_open) if stripped.startswith(expected_open) else 0
+            close_index = stripped.find("</routine>")
+            if summary.start() < open_end or (
+                close_index != -1 and summary.end() > close_index
+            ):
+                problems.append(
+                    f"{display}: routine summary must be inside the routine envelope"
+                )
     return problems
 
 
@@ -179,11 +253,34 @@ def _command_problems(root: Path) -> list[str]:
         except (OSError, UnicodeDecodeError) as exc:
             problems.append(f"{display}: cannot read file: {exc}")
             continue
+        cleaned = _HTML_COMMENT_RE.sub("", text)
+        stripped = cleaned.strip()
         expected_open = f'<command name="{path.stem}" version="1">'
-        if expected_open not in text:
+        if expected_open not in cleaned:
             problems.append(f"{display}: command must contain {expected_open}")
-        if not text.strip().endswith("</command>"):
+            continue
+        if cleaned.count(expected_open) != 1:
+            problems.append(
+                f"{display}: command must contain {expected_open} exactly once"
+            )
+        first_close = stripped.find("</command>")
+        if first_close == -1:
             problems.append(f"{display}: command must end with </command>")
+        elif first_close != len(stripped) - len("</command>"):
+            problems.append(
+                f"{display}: command first </command> must be the final close"
+            )
+        open_index = cleaned.find(expected_open)
+        close_index = cleaned.find("</command>")
+        inner = (
+            cleaned[open_index + len(expected_open) : close_index]
+            if close_index != -1
+            else ""
+        )
+        if "<instruction>" not in inner:
+            problems.append(
+                f"{display}: command must contain <instruction> inside {expected_open}"
+            )
     return problems
 
 
@@ -201,6 +298,11 @@ def _runtime_problems() -> list[str]:
             problems.append(
                 "runtime build_system_prompt: system prompt must start with "
                 '<omega_prime_system version="1">'
+            )
+        if not system_prompt.endswith("</omega_prime_system>"):
+            problems.append(
+                "runtime build_system_prompt: system prompt must end with "
+                "</omega_prime_system>"
             )
         steer_content = steer_user_row("x")["content"]
         if not steer_content.startswith("<steer "):
@@ -244,6 +346,11 @@ def _runtime_problems() -> list[str]:
                     "runtime compress_messages: summary content must start with "
                     '<context_summary version="1">'
                 )
+            elif not content.endswith("</context_summary>"):
+                problems.append(
+                    "runtime compress_messages: summary content must end with "
+                    "</context_summary>"
+                )
     except Exception as exc:
         problems.append(
             f"runtime compress_messages probe failed: {type(exc).__name__}: {exc}"
@@ -260,6 +367,10 @@ def _runtime_problems() -> list[str]:
             problems.append(
                 "runtime MemoryStore.render: text must start with <memory_notes "
             )
+        if not rendered.endswith("</memory_notes>"):
+            problems.append(
+                "runtime MemoryStore.render: text must end with </memory_notes>"
+            )
     except Exception as exc:
         problems.append(
             f"runtime MemoryStore probe failed: {type(exc).__name__}: {exc}"
@@ -271,9 +382,59 @@ def _runtime_problems() -> list[str]:
         rendered_advisories = format_advisories([{"note": "x"}])
         if not rendered_advisories.startswith("<advisory"):
             problems.append("runtime format_advisories: text must start with <advisory")
+        if not rendered_advisories.endswith("</advisory>"):
+            problems.append("runtime format_advisories: text must end with </advisory>")
     except Exception as exc:
         problems.append(
             f"runtime format_advisories probe failed: {type(exc).__name__}: {exc}"
+        )
+    try:
+        from omega_prime.agent.goals import PrimeGoalStore
+
+        with tempfile.TemporaryDirectory(prefix="omega-prime-prompt-format-") as tmp:
+            goal_store = PrimeGoalStore(Path(tmp) / "goals")
+            goal_store.set_objective("prompt format probe")
+            goal_store.add_step("probe step")
+            goal_prompt = goal_store.continuation_prompt()
+        if goal_prompt is None or not goal_prompt.startswith(
+            '<goal_continuation version="1">'
+        ):
+            problems.append(
+                "runtime PrimeGoalStore.continuation_prompt: text must start with "
+                '<goal_continuation version="1">'
+            )
+        elif not goal_prompt.endswith("</goal_continuation>"):
+            problems.append(
+                "runtime PrimeGoalStore.continuation_prompt: text must end with "
+                "</goal_continuation>"
+            )
+    except Exception as exc:
+        problems.append(
+            f"runtime PrimeGoalStore probe failed: {type(exc).__name__}: {exc}"
+        )
+
+    try:
+        from omega_prime.agent.autonomous import AutonomousDriver
+
+        verdict = AutonomousDriver(root=Path(tempfile.gettempdir())).after_turn(
+            {"completed": True}
+        )
+        autonomous_prompt = verdict.get("prompt")
+        if not isinstance(autonomous_prompt, str) or not autonomous_prompt.startswith(
+            '<autonomous_continuation version="1">'
+        ):
+            problems.append(
+                "runtime AutonomousDriver.after_turn: prompt must start with "
+                '<autonomous_continuation version="1">'
+            )
+        elif not autonomous_prompt.endswith("</autonomous_continuation>"):
+            problems.append(
+                "runtime AutonomousDriver.after_turn: prompt must end with "
+                "</autonomous_continuation>"
+            )
+    except Exception as exc:
+        problems.append(
+            f"runtime AutonomousDriver probe failed: {type(exc).__name__}: {exc}"
         )
 
     return problems

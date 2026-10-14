@@ -26,6 +26,7 @@ import json
 import time
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 from omega_prime.learning.goals import GoalStore
 
@@ -193,12 +194,8 @@ class PrimeGoalStore(GoalStore):
         ]
         if not remaining:
             return None
-        objective = str(self._document["objective"]).replace(
-            "</goal_continuation>", "&lt;/goal_continuation&gt;"
-        )
-        next_step = str(remaining[0]).replace(
-            "</goal_continuation>", "&lt;/goal_continuation&gt;"
-        )
+        objective = escape(str(self._document["objective"]))
+        next_step = escape(str(remaining[0]))
         return (
             f'<goal_continuation version="1">Continue working toward the goal: '
             f"{objective}. Next step: {next_step}.</goal_continuation>"

@@ -9,6 +9,7 @@ a tool result, never a rebuilt system prompt. Context files are not reloaded her
 from __future__ import annotations
 
 from typing import Any
+from xml.sax.saxutils import escape
 
 _STABLE_PREFIX = (
     '<omega_prime_system version="1">\n'
@@ -51,7 +52,7 @@ def build_system_prompt(agent: Any = None, system_message: str | None = None) ->
 
 def steer_user_row(steer_text: str) -> dict[str, Any]:
     """A standalone user row for a mid-turn steer. Never merged into a tool row."""
-    safe_text = steer_text.replace(STEER_MARKER_CLOSE, "&lt;/steer&gt;")
+    safe_text = escape(steer_text)
     return {
         "role": "user",
         "content": (

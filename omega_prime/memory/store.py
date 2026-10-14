@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 ENTRY_DELIMITER = "\n§\n"
 MEMORY_CHAR_LIMIT = 2200
@@ -128,9 +129,7 @@ class MemoryStore:
             return ""
         tag = _BLOCK_TAGS[target]
         close = f"</{tag}>"
-        joined = ENTRY_DELIMITER.join(
-            entry.replace(close, f"&lt;/{tag}&gt;") for entry in entries
-        )
+        joined = ENTRY_DELIMITER.join(escape(entry) for entry in entries)
         return f'<{tag} title="{_TITLES[target]}">\n{joined}\n{close}'
 
     def _entries(self, target: str) -> list[str]:
