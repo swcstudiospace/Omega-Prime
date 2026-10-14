@@ -12,6 +12,7 @@ from omega_prime.grokbot import findings_sync
 from omega_prime.grokbot.findings_sync import (
     NO_LINEAR_TEAM_MESSAGE,
     NO_SLACK_WEBHOOK_MESSAGE,
+    NO_TEAMS_WEBHOOK_MESSAGE,
     GhApiError,
     GhNotFoundError,
     issue_body,
@@ -24,6 +25,9 @@ from omega_prime.grokbot.findings_sync import (
     sync_findings,
     sync_findings_linear,
     sync_findings_slack,
+    sync_findings_teams,
+    teams_message,
+    teams_theme_color,
     tick,
 )
 from sidecar.findings import findings_path, load_findings, record_finding
@@ -370,6 +374,7 @@ def test_defaults_off_empty_repo(tmp_path):
         "tracker": "github",
         "linear_team_id": "",
         "slack_webhook_url": "",
+        "teams_webhook_url": "",
     }
 
 
@@ -745,3 +750,185 @@ def test_env_override_slack_webhook_url(monkeypatch):
     monkeypatch.setenv("OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_SLACK_WEBHOOK_URL", WEBHOOK)
     node = load_config(None)["redteam"]["findings_sync"]
     assert node["slack_webhook_url"] == WEBHOOK
+
+
+# Teams tracker mode (batch-05) -----------------------------------------------
+
+TEAMS_WEBHOOK = "https://example.webhook.office.com/webhookb2/XXXX"
+
+
+class FakeTeams:
+    """Fake GhRunner answering webhook POSTs; zero network."""
+
+    def __init__(self):
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def __call__(self, argv, data):
+        self.calls.append((list(argv), dict(data)))
+        return SimpleNamespace(returncode=0, stdout="1", stderr="")
+
+
+def _teams_config(**overrides):
+    node = {
+        "enabled": True,
+        "repo": REPO,
+        "labels": {},
+        "tracker": "teams",
+        "linear_team_id": TEAM,
+        "slack_webhook_url": WEBHOOK,
+        "teams_webhook_url": TEAMS_WEBHOOK,
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+def test_teams_theme_color_mapping_per_spec():
+    assert teams_theme_color("critical") == "DC143C"
+    assert teams_theme_color("high") == "FF8C00"
+    assert teams_theme_color("medium") == "FFD700"
+    assert teams_theme_color("low") == "00BFFF"
+    assert teams_theme_color("CRITICAL") == "DC143C"
+    assert teams_theme_color("weird") == "#808080"
+    assert teams_theme_color(None) == "#808080"
+
+
+def test_teams_message_hash_in_summary_and_color(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(severity="critical"))
+    card = teams_message(row)
+    assert card["@type"] == "MessageCard"
+    assert card["themeColor"] == "DC143C"
+    assert row["dedupe_hash"] in card["summary"]
+    assert card["sections"][0]["activityTitle"] == issue_title(row)
+
+
+def test_teams_happy_two_findings_two_posts(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeTeams()
+    result = sync_findings_teams(tmp_path, TEAMS_WEBHOOK, runner=fake)
+    assert len(fake.calls) == 2
+    assert all(call[0][:2] == ["gh", "api"] for call in fake.calls)
+    assert all(TEAMS_WEBHOOK in call[0] for call in fake.calls)
+    assert all("dedupe_hash: " in call[1]["summary"] for call in fake.calls)
+    assert all(call[1]["themeColor"] for call in fake.calls)
+    assert len(result["pushed"]) == 2
+    assert result["skipped"] == []
+    rows = load_findings(tmp_path)
+    assert all(row["issue_url"] == f"teams:{row['dedupe_hash']}" for row in rows)
+    assert all(row.get("synced_at") for row in rows)
+
+
+def test_teams_empty_webhook_fail_closed():
+    with pytest.raises(ValueError, match="no teams webhook configured"):
+        sync_findings_teams(None, "   ", runner=FakeTeams())
+
+
+def test_teams_second_run_pushes_nothing(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeTeams()
+    sync_findings_teams(tmp_path, TEAMS_WEBHOOK, runner=fake)
+    result = sync_findings_teams(tmp_path, TEAMS_WEBHOOK, runner=fake)
+    assert result["pushed"] == []
+    assert len(result["skipped"]) == 2
+    assert len(fake.calls) == 2
+
+
+def test_teams_nonzero_exit_leaves_row_unsynced(tmp_path):
+    _seed_two(tmp_path)
+
+    def bad(argv, data):
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    with pytest.raises(GhApiError):
+        sync_findings_teams(tmp_path, TEAMS_WEBHOOK, runner=bad)
+    assert all("issue_url" not in row for row in load_findings(tmp_path))
+
+
+def test_teams_runner_exception_mid_run_persists_earlier_push(tmp_path):
+    _seed_two(tmp_path)
+    calls: list = []
+
+    def flaky(argv, data):
+        calls.append((argv, data))
+        if len(calls) == 2:
+            raise RuntimeError("webhook down")
+        return SimpleNamespace(returncode=0, stdout="1", stderr="")
+
+    with pytest.raises(GhApiError, match="gh runner failed"):
+        sync_findings_teams(tmp_path, TEAMS_WEBHOOK, runner=flaky)
+    rows = load_findings(tmp_path)
+    assert rows[0]["issue_url"] == f"teams:{rows[0]['dedupe_hash']}"
+    assert "issue_url" not in rows[1]
+
+
+def test_teams_dry_run_writes_nothing_calls_no_runner(tmp_path):
+    _seed_two(tmp_path)
+    before = findings_path(tmp_path).read_bytes()
+    fake = FakeTeams()
+    result = sync_findings_teams(tmp_path, TEAMS_WEBHOOK, runner=fake, dry_run=True)
+    assert len(result["pushed"]) == 2
+    assert all(entry["issue_url"] == "" for entry in result["pushed"])
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before
+
+
+def test_tick_teams_dispatches_webhook_posts(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeTeams()
+    result = tick(_teams_config(), reports_directory=tmp_path, runner=fake)
+    assert result["disabled"] is False
+    assert len(fake.calls) == 2
+    assert all(TEAMS_WEBHOOK in call[0] for call in fake.calls)
+
+
+def test_tick_teams_no_webhook_structured_error(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeTeams()
+    result = tick(
+        _teams_config(teams_webhook_url=""),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert result["error"] == NO_TEAMS_WEBHOOK_MESSAGE
+    assert fake.calls == []
+
+
+def test_cli_teams_pushes_via_webhook(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _teams_config(),
+    )
+    fake = FakeTeams()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--tracker", "teams", "--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+    assert "pushed" in capsys.readouterr().out
+
+
+def test_cli_teams_tracker_from_config_without_flag(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _teams_config(),
+    )
+    fake = FakeTeams()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+
+
+def test_cli_teams_missing_webhook_exits_two(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _teams_config(teams_webhook_url=""),
+    )
+    assert main(["--tracker", "teams", "--reports-dir", str(tmp_path)]) == 2
+    assert "no teams webhook configured" in capsys.readouterr().err
+
+
+def test_env_override_teams_webhook_url(monkeypatch):
+    monkeypatch.setenv(
+        "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_TEAMS_WEBHOOK_URL", TEAMS_WEBHOOK
+    )
+    node = load_config(None)["redteam"]["findings_sync"]
+    assert node["teams_webhook_url"] == TEAMS_WEBHOOK

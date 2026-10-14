@@ -34,6 +34,14 @@ the same runner seam. Severity maps to an attachment color
 in the message text, and pushed rows are marked with a deterministic
 ``slack:<dedupe_hash>`` ref, so idempotency is identical to the other
 modes.
+Teams mode (``redteam.findings_sync.tracker: "teams"``) posts the same
+rows as Teams channel messages through ``gh api <teams_webhook_url>``
+POSTs on the same runner seam. The payload is an Office 365 connector
+card with a severity-colored ``themeColor`` (critical→DC143C,
+high→FF8C00, medium→FFD700, low→00BFFF); the dedupe hash rides in the
+card summary, and pushed rows are marked with a deterministic
+``teams:<dedupe_hash>`` ref, so idempotency is identical to the other
+modes.
 """
 
 from __future__ import annotations
@@ -73,7 +81,7 @@ DEFAULT_LABELS: dict[str, list[str]] = {
 UNKNOWN_SEVERITY_LABELS = ["redteam"]
 
 #: Supported tracker backends for the findings sync.
-TRACKERS = ("github", "linear", "slack")
+TRACKERS = ("github", "linear", "slack", "teams")
 
 #: Default tracker backend (the existing GitHub-issues mode, unchanged).
 DEFAULT_TRACKER = "github"
@@ -85,6 +93,10 @@ NO_LINEAR_TEAM_MESSAGE = "no linear team configured"
 #: Message used when tracker=slack but no webhook URL is configured
 #: (fail-closed, never guess).
 NO_SLACK_WEBHOOK_MESSAGE = "no slack webhook configured"
+
+#: Message used when tracker=teams but no webhook URL is configured
+#: (fail-closed, never guess).
+NO_TEAMS_WEBHOOK_MESSAGE = "no teams webhook configured"
 
 #: Severity → Linear priority mapping (Linear API: 1=Urgent, 2=High,
 #: 3=Medium, 4=Low). Operator labels do not apply to Linear issues.
@@ -120,6 +132,18 @@ SLACK_COLORS: dict[str, str] = {
 
 #: Fallback Slack attachment color for unknown severities.
 UNKNOWN_SEVERITY_COLOR = "#808080"
+
+#: Severity → Teams Office 365 connector card ``themeColor`` mapping
+#: (operator labels do not apply to Teams messages).
+TEAMS_THEME_COLORS: dict[str, str] = {
+    "critical": "DC143C",
+    "high": "FF8C00",
+    "medium": "FFD700",
+    "low": "00BFFF",
+}
+
+#: Fallback Teams card theme color for unknown severities.
+UNKNOWN_SEVERITY_THEME_COLOR = "#808080"
 
 #: ``gh`` invocation timeout (seconds).
 _GH_TIMEOUT = 60
@@ -221,6 +245,41 @@ def slack_message(row: Mapping[str, Any]) -> dict[str, Any]:
         }
     ]
     return {"text": text, "attachments": attachments}
+
+def teams_theme_color(severity: Any) -> str:
+    """Resolve the Teams connector card color for ``severity``.
+
+    Critical→``DC143C``, high→``FF8C00``, medium→``FFD700``,
+    low→``00BFFF`` (case-insensitive); unknown severities fall back to
+    gray (``#808080``).
+    """
+    key = severity.lower() if isinstance(severity, str) else ""
+    return TEAMS_THEME_COLORS.get(key, UNKNOWN_SEVERITY_THEME_COLOR)
+
+
+def teams_message(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Office 365 connector card for one finding row.
+
+    The dedupe hash rides in the card summary (same idempotency contract
+    as the GitHub/Linear/Slack bodies); the section carries the fixed
+    fields only, never the raw gateway payload (threat T-79-11).
+    """
+    title = issue_title(row)
+    digest = str(row.get("dedupe_hash", ""))
+    summary = f"{title}\ndedupe_hash: {digest}"
+    return {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "themeColor": teams_theme_color(row.get("severity")),
+        "summary": summary,
+        "sections": [
+            {
+                "activityTitle": title,
+                "activitySubtitle": f"severity: {row.get('severity')}",
+                "text": issue_body(row),
+            }
+        ],
+    }
 
 
 def issue_title(row: Mapping[str, Any]) -> str:
@@ -588,6 +647,99 @@ def sync_findings_slack(
         _write_rows_atomic(findings_path(reports_dir), rows)
     return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
 
+def sync_findings_teams(
+    reports_dir: str | Path | None,
+    webhook_url: str,
+    *,
+    runner: GhRunner | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Post every not-yet-synced finding row to Teams via the webhook URL.
+
+    Same rows and idempotency marking as :func:`sync_findings` (rows
+    carrying ``issue_url`` are skipped; the dedupe hash rides in the
+    card summary, so a second run pushes nothing); only the transport
+    differs — ``gh api <webhook-url>`` POSTs one severity-colored
+    Office 365 connector card per row instead of a GitHub issue. The
+    webhook answers ``1``/empty (no issue URL), so a pushed row is
+    marked with a deterministic ``teams:<dedupe_hash>`` ref. Failure
+    semantics mirror :func:`sync_findings`: earlier-in-run pushes
+    persist, the failed row stays unsynced, and a :class:`GhApiError`
+    is raised. With zero pushes (or ``dry_run``) the store file is
+    byte-identical and the runner is never called in dry-run mode.
+
+    Returns ``{"pushed": [...], "skipped": [...], "dry_run": bool}``
+    with the same entry shapes as :func:`sync_findings`.
+    """
+    if not isinstance(webhook_url, str) or not webhook_url.strip():
+        raise ValueError(NO_TEAMS_WEBHOOK_MESSAGE)
+    webhook_url = webhook_url.strip()
+    run = runner if runner is not None else _default_runner
+
+    rows = load_findings(reports_dir)
+    pushed: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    dirty = False
+
+    for row in rows:
+        digest = str(row.get("dedupe_hash", ""))
+        if row.get("issue_url"):
+            skipped.append(digest)
+            continue
+        card = teams_message(row)
+        payload = {
+            "webhook_url": webhook_url,
+            "summary": card["summary"],
+            "themeColor": card["themeColor"],
+            "card": card,
+        }
+        argv = [
+            "gh",
+            "api",
+            webhook_url,
+            "--method",
+            "POST",
+            "-f",
+            f"summary={card['summary']}",
+            "-f",
+            f"themeColor={card['themeColor']}",
+            "-f",
+            f"sections={json.dumps(card['sections'])}",
+        ]
+
+        if dry_run:
+            pushed.append({"dedupe_hash": digest, "issue_url": ""})
+            continue
+
+        try:
+            completed = run(argv, payload)
+        except GhNotFoundError:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise
+        except FindingsSyncError:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise
+        except Exception as exc:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise GhApiError(f"gh runner failed: {exc}") from exc
+
+        returncode = getattr(completed, "returncode", 1)
+        if returncode != 0:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            stderr = getattr(completed, "stderr", "")
+            raise GhApiError(
+                f"gh api {webhook_url} exited {returncode}: {stderr}",
+                returncode=returncode if isinstance(returncode, int) else None,
+            )
+        row["issue_url"] = f"teams:{digest}"
+        row["synced_at"] = utc_now_rfc3339()
+        dirty = True
+        pushed.append({"dedupe_hash": digest, "issue_url": row["issue_url"]})
+
+    if dirty and not dry_run:
+        _write_rows_atomic(findings_path(reports_dir), rows)
+    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+
 
 def _persist_if_dirty(
     directory: str | Path | None, dirty: bool, rows: list[dict[str, Any]]
@@ -630,7 +782,8 @@ def tick(
     """Heartbeat-schedulable entrypoint: reuse the sync functions.
 
     Reads ``redteam.findings_sync`` (``enabled``, ``tracker``, ``repo``,
-    ``labels``, ``linear_team_id``, ``slack_webhook_url``) from ``config``
+    ``labels``, ``linear_team_id``, ``slack_webhook_url``,
+    ``teams_webhook_url``) from ``config``
     (loads via ``load_config()`` when omitted). Disabled, repo-less,
     team-less, webhook-less, or unknown-tracker results are structured
     dicts — never exceptions, never a new cron kind. The sync itself
@@ -662,6 +815,18 @@ def tick(
         if not isinstance(webhook_url, str) or not webhook_url.strip():
             return _tracker_error(NO_SLACK_WEBHOOK_MESSAGE, dry_run)
         result = sync_findings_slack(
+            reports_directory,
+            webhook_url.strip(),
+            runner=runner,
+            dry_run=dry_run,
+        )
+        result["disabled"] = False
+        return result
+    if tracker == "teams":
+        webhook_url = node.get("teams_webhook_url", "")
+        if not isinstance(webhook_url, str) or not webhook_url.strip():
+            return _tracker_error(NO_TEAMS_WEBHOOK_MESSAGE, dry_run)
+        result = sync_findings_teams(
             reports_directory,
             webhook_url.strip(),
             runner=runner,
@@ -726,6 +891,41 @@ def _main_slack(directory: str | Path | None, webhook_url: str, dry_run: bool) -
         print(f"skip (already synced) {digest}")
     return 0
 
+def _main_teams(directory: str | Path | None, webhook_url: str, dry_run: bool) -> int:
+    """Run the Teams branch of the CLI (dry-run aware)."""
+    if dry_run:
+        try:
+            result = sync_findings_teams(
+                directory if directory is not None else reports_dir(),
+                webhook_url,
+                dry_run=True,
+            )
+        except FindingsSyncError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for entry in result["pushed"]:
+            print(f"would push {entry['dedupe_hash']}")
+        for digest in result["skipped"]:
+            print(f"skip (already synced) {digest}")
+        return 0
+
+    try:
+        result = sync_findings_teams(
+            directory if directory is not None else reports_dir(),
+            webhook_url,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except FindingsSyncError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for entry in result["pushed"]:
+        print(f"pushed {entry['dedupe_hash']} -> {entry['issue_url']}")
+    for digest in result["skipped"]:
+        print(f"skip (already synced) {digest}")
+    return 0
+
 
 def _main_linear(directory: str | Path | None, team_id: str, dry_run: bool) -> int:
     """Run the Linear branch of the CLI (dry-run aware)."""
@@ -764,7 +964,7 @@ def _main_linear(directory: str | Path | None, team_id: str, dry_run: bool) -> i
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``findings_sync [--tracker github|linear|slack] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
+    """CLI: ``findings_sync [--tracker github|linear|slack|teams] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
     parser = argparse.ArgumentParser(
         prog="findings_sync",
         description="Push unsynced red-team findings to tracker issues (one-way).",
@@ -772,12 +972,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tracker",
         default="",
-        help="Tracker backend: github (default), linear, or slack; blank means config",
+        help="Tracker backend: github (default), linear, slack, or teams; blank means config",
     )
     parser.add_argument("--repo", default="", help="Target repo OWNER/NAME")
     parser.add_argument("--linear-team-id", default="", help="Linear team ID override")
     parser.add_argument(
         "--slack-webhook-url", default="", help="Slack webhook URL override"
+    )
+    parser.add_argument(
+        "--teams-webhook-url", default="", help="Teams webhook URL override"
     )
     parser.add_argument("--reports-dir", default="", help="Reports dir override")
     parser.add_argument(
@@ -815,6 +1018,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {NO_SLACK_WEBHOOK_MESSAGE}", file=sys.stderr)
             return 2
         return _main_slack(directory, webhook_url, args.dry_run)
+    if tracker == "teams":
+        webhook_url = args.teams_webhook_url.strip() or (
+            node.get("teams_webhook_url", "").strip()
+            if isinstance(node.get("teams_webhook_url", ""), str)
+            else ""
+        )
+        if not webhook_url:
+            print(f"error: {NO_TEAMS_WEBHOOK_MESSAGE}", file=sys.stderr)
+            return 2
+        return _main_teams(directory, webhook_url, args.dry_run)
     if tracker != "github":
         print(f"error: unknown tracker: {tracker}", file=sys.stderr)
         return 2
@@ -885,6 +1098,9 @@ __all__ = [
     "GhApiError",
     "GhNotFoundError",
     "GhRunner",
+    "NO_TEAMS_WEBHOOK_MESSAGE",
+    "TEAMS_THEME_COLORS",
+    "UNKNOWN_SEVERITY_THEME_COLOR",
     "issue_body",
     "issue_title",
     "labels_for_severity",
@@ -895,5 +1111,8 @@ __all__ = [
     "sync_findings",
     "sync_findings_linear",
     "sync_findings_slack",
+    "sync_findings_teams",
+    "teams_message",
+    "teams_theme_color",
     "tick",
 ]

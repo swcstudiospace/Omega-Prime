@@ -97,6 +97,10 @@ def _defaults() -> dict[str, Any]:
                 # Feature H3). Empty (the default) means the Slack sync
                 # fails closed. Secret: never logged, never rendered.
                 "slack_webhook_url": "",
+                # Teams webhook URL for tracker="teams" (batch-05).
+                # Empty (the default) means the Teams sync fails closed.
+                # Secret: never logged, never rendered.
+                "teams_webhook_url": "",
             },
         },
         # Telemetry export (Phase 81). Off by default with an empty endpoint;
@@ -373,8 +377,8 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 and parts[3] == "tracker"
             ):
                 # OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_TRACKER — tracker
-                # backend (github/linear); blank or unknown falls back to
-                # github loudly at sync time. Non-secret.
+                # backend (github/linear/slack/teams); blank or unknown
+                # falls back to github loudly at sync time. Non-secret.
                 overlay.setdefault("redteam", {}).setdefault("findings_sync", {})[
                     "tracker"
                 ] = value.strip()
@@ -405,6 +409,20 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 # tracker=slack. Secret: never logged.
                 overlay.setdefault("redteam", {}).setdefault("findings_sync", {})[
                     "slack_webhook_url"
+                ] = value.strip()
+            elif (
+                len(parts) == 6
+                and parts[1] == "findings"
+                and parts[2] == "sync"
+                and parts[3] == "teams"
+                and parts[4] == "webhook"
+                and parts[5] == "url"
+            ):
+                # OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_TEAMS_WEBHOOK_URL —
+                # Teams webhook URL; required (fail-closed) when
+                # tracker=teams. Secret: never logged.
+                overlay.setdefault("redteam", {}).setdefault("findings_sync", {})[
+                    "teams_webhook_url"
                 ] = value.strip()
             elif (
                 len(parts) == 4
