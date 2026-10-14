@@ -12,6 +12,7 @@ exactly what the CLI does in production.
 
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 from pathlib import Path
@@ -46,6 +47,10 @@ class FakeRun:
         npm_missing: bool = False,
         gh_missing: bool = False,
         fail_prefixes: tuple[tuple[str, ...], ...] = (),
+        origin_url: str = "https://github.com/example/purple-team.git",
+        gh_api_content: str | None = None,
+        gh_api_fail: bool = False,
+        upstream_npm_doc: dict | None = None,
     ):
         self.ls_remote = ls_remote
         self.node_ok = node_ok
@@ -55,6 +60,15 @@ class FakeRun:
         self.npm_missing = npm_missing
         self.gh_missing = gh_missing
         self.fail_prefixes = fail_prefixes
+        self.origin_url = origin_url
+        self.gh_api_content = (
+            gh_api_content
+            if gh_api_content is not None
+            else base64.b64encode(b'{"lockfileVersion": 3}').decode("ascii")
+        )
+        self.gh_api_fail = gh_api_fail
+        self.upstream_npm_doc = upstream_npm_doc
+        self.npm_calls = 0
         self.cmds: list[tuple[list[str], object]] = []
 
     def __call__(self, cmd: list[str], cwd=None):
@@ -69,6 +83,12 @@ class FakeRun:
         if cmd[0] == "npm":
             if self.npm_missing:
                 raise FileNotFoundError("No such file or directory: 'npm'")
+            # The auto-detect probe audits upstream HEAD before the local
+            # pin audit, so the first npm call answers with the upstream
+            # document when one is configured.
+            self.npm_calls += 1
+            if self.npm_calls == 1 and self.upstream_npm_doc is not None:
+                return _cp(cmd, 1, json.dumps(self.upstream_npm_doc))
             raw = self.npm_raw if self.npm_raw is not None else json.dumps(self.npm_doc)
             code = 0 if self.npm_doc == {"vulnerabilities": {}} else 1
             return _cp(cmd, code, raw)
@@ -77,8 +97,14 @@ class FakeRun:
                 raise FileNotFoundError("No such file or directory: 'gh'")
             if cmd[1:3] == ["pr", "create"]:
                 return _cp(cmd, 0, "https://example.test/pr/1\n")
+            if cmd[1] == "api":
+                if self.gh_api_fail:
+                    return _cp(cmd, 1, "", "boom")
+                return _cp(cmd, 0, self.gh_api_content + "\n")
             return _cp(cmd, 0, "gh version 2.0.0\n")
         if cmd[0] == "git":
+            if cmd[1:3] == ["config", "--get"]:
+                return _cp(cmd, 0, self.origin_url + "\n")
             for prefix in self.fail_prefixes:
                 if tuple(cmd[: len(prefix)]) == prefix:
                     return _cp(cmd, 1, "", "boom")
@@ -477,3 +503,74 @@ def test_main_help_documents_exit_codes(capsys):
     out = capsys.readouterr().out
     assert "exit codes" in out
     assert "0 = bump complete" in out
+
+
+# --auto-detect-upstream-fix (batch-04 H5)
+
+
+def test_auto_detect_skips_bump_when_upstream_still_vulnerable(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    run = FakeRun(
+        upstream_npm_doc=_audit(("left-pad", "high", "GHSA-xxxx-yyyy")),
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, auto_detect_upstream_fix=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "nothing to fix yet" in out
+    assert "GHSA-xxxx-yyyy" in out
+    # No local mutation: the pin records still point at the old pin and
+    # git never fetched, checked out, or staged.
+    vendor = (root / "VENDOR.md").read_text()
+    assert f"- Commit: `{PIN_OLD}`" in vendor
+    assert f"- Commit: `{PIN_NEW}`" not in vendor
+    verbs = run.kinds()
+    assert not any(cmd[:2] == ["git", "fetch"] for cmd in verbs)
+    assert not any(cmd[:2] == ["git", "checkout"] for cmd in verbs)
+    assert not any(cmd[:2] == ["git", "add"] for cmd in verbs)
+    assert not (root / "report.md").exists()
+
+
+def test_auto_detect_proceeds_when_upstream_clean(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    run = FakeRun(upstream_npm_doc=_audit())
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, auto_detect_upstream_fix=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "proceeding with bump" in out
+    assert "unchanged" in out
+    vendor = (root / "VENDOR.md").read_text()
+    assert f"- Commit: `{PIN_NEW}`" in vendor
+
+
+def test_auto_detect_inconclusive_proceeds(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    run = FakeRun(gh_api_fail=True, upstream_npm_doc=_audit())
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, auto_detect_upstream_fix=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "inconclusive" in out
+    assert "proceeding with bump" in out
+    vendor = (root / "VENDOR.md").read_text()
+    assert f"- Commit: `{PIN_NEW}`" in vendor
+
+
+def test_auto_detect_flag_parses():
+    args = pin_bump.build_parser().parse_args(
+        ["--to", PIN_NEW, "--auto-detect-upstream-fix"]
+    )
+    assert args.auto_detect_upstream_fix is True
+    args = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert args.auto_detect_upstream_fix is False
+
+
+def test_parse_github_repo_shapes():
+    assert pin_bump._parse_github_repo("https://github.com/acme/purple-team.git") == (
+        "acme",
+        "purple-team",
+    )
+    assert pin_bump._parse_github_repo("git@github.com:acme/purple-team.git") == (
+        "acme",
+        "purple-team",
+    )
+    assert pin_bump._parse_github_repo("https://example.test/acme/repo.git") is None
+    assert pin_bump._parse_github_repo("") is None

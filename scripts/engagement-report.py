@@ -485,6 +485,57 @@ def severity_timeline_rows(
     ]
 
 
+def drill_down_rows(
+    findings: list[dict[str, object]],
+    klass: str,
+) -> list[tuple[str, str, str, str, str]]:
+    """Per-finding detail rows for one technique class.
+
+    Returns ``(dedupe_hash, severity, observed_detection, timestamp,
+    verdict)`` tuples for every findings row whose ``class`` equals
+    ``klass``, sorted by ``dedupe_hash`` — total and input-order
+    independent, so reruns are byte-identical. Rows missing both
+    ``dedupe_hash`` and ``case_id`` are skipped; the timestamp prefers
+    ``last_seen`` over ``ts`` (``unknown`` when neither parses).
+    """
+    staged: list[tuple[str, str, str, str, str]] = []
+    for row in findings:
+        if row.get("class") != klass:
+            continue
+        digest = row.get("dedupe_hash")
+        case_id = row.get("case_id")
+        if not isinstance(digest, str) or not digest:
+            if not isinstance(case_id, str) or not case_id:
+                continue
+            response = row.get("response")
+            digest = finding_hash(
+                case_id, response if isinstance(response, str) else ""
+            )
+        severity = row.get("severity")
+        sev_text = (
+            severity.lower()
+            if isinstance(severity, str) and severity.strip()
+            else "unknown"
+        )
+        observed = row.get("observed_detection")
+        observed_text = observed if isinstance(observed, str) else ""
+        stamp_text = "unknown"
+        for key in ("last_seen", "ts"):
+            value = row.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            try:
+                stamp_text = fmt_rfc3339(parse_rfc3339(value))
+            except ReportError:
+                continue
+            break
+        verdict = row.get("verdict")
+        verdict_text = verdict if isinstance(verdict, str) and verdict else "unknown"
+        staged.append((digest, sev_text, observed_text, stamp_text, verdict_text))
+    staged.sort(key=lambda item: item[0])
+    return staged
+
+
 def detection_gaps(
     cases: list[tuple[str, str, str, str]],
     load_errors: list[str],
@@ -658,6 +709,107 @@ def newest_baseline(
     return names[-1], snapshot
 
 
+#: Metrics diffed by the week-over-week comparison view (--compare).
+COMPARISON_METRICS = ("runs", "pass_pct", "gaps", "new", "rescinded")
+
+
+def _report_section_lines(text: str, heading: str) -> list[str]:
+    """Body lines of one ``## `` section in a rendered report."""
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.strip() == heading:
+            start = index + 1
+            break
+    if start is None:
+        return []
+    body: list[str] = []
+    for line in lines[start:]:
+        if line.startswith("## "):
+            break
+        body.append(line)
+    return body
+
+
+def parse_previous_metrics(text: str) -> dict[str, int]:
+    """Key metrics from a previously rendered report (missing ⇒ 0).
+
+    Reads ``runs in window``, the per-technique ``wins/total`` rows (same
+    integer percentage as :func:`_summary_pct`), the detection-gap bullet
+    count, and the ``new/rescinded`` findings line. Deterministic.
+    """
+    metrics: dict[str, int] = {name: 0 for name in COMPARISON_METRICS}
+    for line in _report_section_lines(text, "## Runs summary"):
+        match = re.match(r"-\s+runs in window:\s+(\d+)", line.strip())
+        if match:
+            metrics["runs"] = int(match.group(1))
+            break
+    wins = 0
+    total = 0
+    for line in _report_section_lines(text, "## Per-technique pass rates"):
+        match = re.match(r"\|\s*[^|]+\|\s*(\d+)/(\d+)", line.strip())
+        if match:
+            wins += int(match.group(1))
+            total += int(match.group(2))
+    metrics["pass_pct"] = round(100 * wins / total) if total else 0
+    gap_lines = [
+        line
+        for line in _report_section_lines(text, "## Detection gaps")
+        if line.strip().startswith("- ") and line.strip() != "- none"
+    ]
+    metrics["gaps"] = len(gap_lines)
+    for line in _report_section_lines(text, "## Findings deltas"):
+        match = re.match(r"-\s*new:\s+(\d+),\s*rescinded:\s+(\d+)", line.strip())
+        if match:
+            metrics["new"] = int(match.group(1))
+            metrics["rescinded"] = int(match.group(2))
+            break
+    return metrics
+
+
+def _comparison_arrow(delta: int) -> str:
+    """Direction arrow for a metric delta (``→`` when unchanged)."""
+    if delta > 0:
+        return "↑"
+    if delta < 0:
+        return "↓"
+    return "→"
+
+
+def render_comparison(
+    *,
+    current: dict[str, int],
+    previous: dict[str, int],
+    baseline_label: str,
+) -> list[str]:
+    """Week-over-week comparison lines (``current vs previous (Δ)``)."""
+    rows = (
+        ("runs", "runs", "", False),
+        ("pass rate", "pass_pct", "%", True),
+        ("gaps", "gaps", "", False),
+        ("findings new", "new", "", False),
+        ("findings rescinded", "rescinded", "", False),
+    )
+    lines = [
+        "## Week-over-week comparison",
+        "",
+        f"- baseline: {baseline_label}",
+        "",
+        "| metric | current | previous | delta |",
+        "| --- | --- | --- | --- |",
+    ]
+    for label, key, suffix, is_points in rows:
+        cur = current.get(key, 0)
+        prev = previous.get(key, 0)
+        delta = cur - prev
+        unit = "pp" if is_points else ""
+        lines.append(
+            f"| {label} | {cur}{suffix} | {prev}{suffix} | "
+            f"{delta:+d}{unit} {_comparison_arrow(delta)} |"
+        )
+    return lines
+
+
 def render_report(
     *,
     window_start: datetime,
@@ -675,8 +827,11 @@ def render_report(
     timeline: list[tuple[str, str, str, str]] | None = None,
     cause_counts: list[tuple[str, int]] | None = None,
     severity_timeline: list[tuple[str, str, str, str]] | None = None,
+    comparison: list[str] | None = None,
+    drill_down: str | None = None,
+    drill_down_rows: list[tuple[str, str, str, str, str]] | None = None,
 ) -> str:
-    """Assemble the nine report sections in fixed order."""
+    """Assemble the report sections in fixed order."""
     gaps = gaps if gaps is not None else []
     current_findings = current_findings if current_findings is not None else {}
     transition_counts = transition_counts if transition_counts is not None else []
@@ -723,6 +878,20 @@ def render_report(
             f"| {class_name} | {case_count} | {class_runs} | {rate} "
             f"| {class_gaps} | {verdict} |"
         )
+    if drill_down is not None:
+        lines += ["", f"## Coverage drill-down: {drill_down}", ""]
+        lines += [
+            "| dedupe_hash | severity | observed_detection | timestamp | verdict |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        rows = drill_down_rows if drill_down_rows is not None else []
+        if rows:
+            for digest, sev, observed, stamp, row_verdict in rows:
+                lines.append(
+                    f"| {digest} | {sev} | {observed} | {stamp} | {row_verdict} |"
+                )
+        else:
+            lines.append(f"- no findings in class {drill_down}")
     lines += ["", "## Detection gaps", ""]
     if gaps:
         for failure in gaps:
@@ -769,6 +938,8 @@ def render_report(
             lines.append(f"- {digest12} {sev} {klass} {ts_text}")
     else:
         lines.append("- no findings in window")
+    if comparison:
+        lines += ["", *comparison]
     lines += [
         "",
         f"<!-- findings-snapshot: {json.dumps(current_findings, sort_keys=True)} -->",
@@ -888,12 +1059,18 @@ def _collect_window(reports_dir: Path, since_text: str | None) -> dict[str, obje
         "gaps": gaps,
         "pass_rows": pass_rows,
         "current_findings": current_findings,
+        "findings": findings,
         "severity_timeline": severity_timeline_rows(findings, window_start, window_end),
         "history_empty": not transitions and not findings and last_run_missing,
     }
 
 
-def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, Path]:
+def build_report(
+    reports_dir: Path,
+    since_text: str | None,
+    compare_path: Path | None = None,
+    drill_down: str | None = None,
+) -> tuple[str, str, Path]:
     """Render the report; return ``(markdown, file_name, out_dir)``."""
     window = _collect_window(reports_dir, since_text)
     window_start = window["window_start"]
@@ -928,6 +1105,32 @@ def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, P
     out_dir = output_dir(reports_dir)
     baseline_name, baseline = newest_baseline(out_dir, file_name)
     version = read_version(REPO_ROOT)
+    comparison: list[str] | None = None
+    if compare_path is not None:
+        try:
+            previous_text = compare_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReportError(
+                f"error: cannot read --compare report {compare_path} ({exc})"
+            ) from exc
+        if baseline is None:
+            new_count = len(current_findings)
+            rescinded_count = 0
+        else:
+            new_count = sum(1 for h in current_findings if h not in baseline)
+            rescinded_count = sum(1 for h in baseline if h not in current_findings)
+        current_metrics = {
+            "runs": runs,
+            "pass_pct": _summary_pct(pass_rows),
+            "gaps": len(gaps),
+            "new": new_count,
+            "rescinded": rescinded_count,
+        }
+        comparison = render_comparison(
+            current=current_metrics,
+            previous=parse_previous_metrics(previous_text),
+            baseline_label=compare_path.name,
+        )
     markdown = render_report(
         window_start=window_start,
         window_end=window_end,
@@ -944,6 +1147,13 @@ def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, P
         timeline=timeline,
         cause_counts=cause_counts,
         severity_timeline=window["severity_timeline"],
+        comparison=comparison,
+        drill_down=drill_down,
+        drill_down_rows=(
+            drill_down_rows(window["findings"], drill_down)
+            if drill_down is not None
+            else None
+        ),
     )
     return markdown, file_name, out_dir
 
@@ -1050,6 +1260,21 @@ def main(argv: list[str] | None = None) -> int:
         "per-window copy is always kept in the output directory.",
     )
     parser.add_argument(
+        "--compare",
+        default=None,
+        help="previous report markdown to diff against: appends a "
+        "## Week-over-week comparison section (runs, pass rate, gaps, "
+        "findings new/rescinded as current vs previous (Δ) with arrows).",
+    )
+    parser.add_argument(
+        "--drill-down",
+        default=None,
+        metavar="CLASS",
+        help="after the coverage matrix, render a per-finding detail table "
+        "(dedupe_hash, severity, observed_detection, timestamp, verdict) "
+        "for technique class CLASS from findings.ndjson.",
+    )
+    parser.add_argument(
         "--summary",
         action="store_true",
         help="emit exactly one summary line "
@@ -1069,7 +1294,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(str(summary["line"]) + "\n")
         return 0
     try:
-        markdown, file_name, out_dir = build_report(reports_dir, args.since)
+        compare_path = Path(args.compare) if args.compare else None
+        markdown, file_name, out_dir = build_report(
+            reports_dir, args.since, compare_path, drill_down=args.drill_down
+        )
     except ReportError as exc:
         print(str(exc), file=sys.stderr)
         return 1

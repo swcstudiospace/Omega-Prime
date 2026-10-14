@@ -26,6 +26,14 @@ same runner seam. Severity maps to Linear priority (critical→urgent(1),
 high→high(2), medium→medium(3), low→low(4)); the dedupe hash rides in the
 issue description, so idempotency marking (``issue_url`` + ``synced_at``)
 is identical to the GitHub mode.
+
+Slack mode (``redteam.findings_sync.tracker: "slack"``) posts the same
+rows as Slack messages through ``gh api <slack_webhook_url>`` POSTs on
+the same runner seam. Severity maps to an attachment color
+(critical/high→danger, medium→warning, low→good); the dedupe hash rides
+in the message text, and pushed rows are marked with a deterministic
+``slack:<dedupe_hash>`` ref, so idempotency is identical to the other
+modes.
 """
 
 from __future__ import annotations
@@ -65,7 +73,7 @@ DEFAULT_LABELS: dict[str, list[str]] = {
 UNKNOWN_SEVERITY_LABELS = ["redteam"]
 
 #: Supported tracker backends for the findings sync.
-TRACKERS = ("github", "linear")
+TRACKERS = ("github", "linear", "slack")
 
 #: Default tracker backend (the existing GitHub-issues mode, unchanged).
 DEFAULT_TRACKER = "github"
@@ -73,6 +81,10 @@ DEFAULT_TRACKER = "github"
 #: Message used when tracker=linear but no Linear team is configured
 #: (fail-closed, never guess).
 NO_LINEAR_TEAM_MESSAGE = "no linear team configured"
+
+#: Message used when tracker=slack but no webhook URL is configured
+#: (fail-closed, never guess).
+NO_SLACK_WEBHOOK_MESSAGE = "no slack webhook configured"
 
 #: Severity → Linear priority mapping (Linear API: 1=Urgent, 2=High,
 #: 3=Medium, 4=Low). Operator labels do not apply to Linear issues.
@@ -96,6 +108,18 @@ LINEAR_ISSUE_MUTATION = (
     "description: $description, priority: $priority}) { "
     "success issue { id url } } }"
 )
+
+#: Severity → Slack attachment color mapping (Slack ``good``/``warning``/
+#: ``danger`` names; operator labels do not apply to Slack messages).
+SLACK_COLORS: dict[str, str] = {
+    "critical": "danger",
+    "high": "danger",
+    "medium": "warning",
+    "low": "good",
+}
+
+#: Fallback Slack attachment color for unknown severities.
+UNKNOWN_SEVERITY_COLOR = "#808080"
 
 #: ``gh`` invocation timeout (seconds).
 _GH_TIMEOUT = 60
@@ -167,6 +191,36 @@ def priority_for_severity(severity: Any) -> int:
     """
     key = severity.lower() if isinstance(severity, str) else ""
     return LINEAR_PRIORITIES.get(key, UNKNOWN_SEVERITY_PRIORITY)
+
+
+def slack_color(severity: Any) -> str:
+    """Resolve the Slack attachment color for ``severity`` (case-insensitive).
+
+    Critical/high→``danger``, medium→``warning``, low→``good``; unknown
+    severities fall back to gray (``#808080``).
+    """
+    key = severity.lower() if isinstance(severity, str) else ""
+    return SLACK_COLORS.get(key, UNKNOWN_SEVERITY_COLOR)
+
+
+def slack_message(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Slack message for one finding row: text plus one color attachment.
+
+    The dedupe hash rides in the message text (same idempotency contract
+    as the GitHub/Linear bodies); the attachment carries the fixed
+    fields only, never the raw gateway payload (threat T-79-11).
+    """
+    title = issue_title(row)
+    digest = str(row.get("dedupe_hash", ""))
+    text = f"{title}\ndedupe_hash: {digest}"
+    attachments = [
+        {
+            "color": slack_color(row.get("severity")),
+            "title": title,
+            "text": issue_body(row),
+        }
+    ]
+    return {"text": text, "attachments": attachments}
 
 
 def issue_title(row: Mapping[str, Any]) -> str:
@@ -443,6 +497,98 @@ def sync_findings_linear(
     return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
 
 
+def sync_findings_slack(
+    reports_dir: str | Path | None,
+    webhook_url: str,
+    *,
+    runner: GhRunner | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Post every not-yet-synced finding row to Slack via the webhook URL.
+
+    Same rows and idempotency marking as :func:`sync_findings` (rows
+    carrying ``issue_url`` are skipped; the dedupe hash rides in the
+    message text, so a second run pushes nothing); only the transport
+    differs — ``gh api <webhook-url>`` POSTs one severity-colored Slack
+    message per row instead of a GitHub issue. The webhook answers
+    ``ok`` (no issue URL), so a pushed row is marked with a deterministic
+    ``slack:<dedupe_hash>`` ref. Failure semantics mirror
+    :func:`sync_findings`: earlier-in-run pushes persist, the failed row
+    stays unsynced, and a :class:`GhApiError` is raised. With zero pushes
+    (or ``dry_run``) the store file is byte-identical and the runner is
+    never called in dry-run mode.
+
+    Returns ``{"pushed": [...], "skipped": [...], "dry_run": bool}``
+    with the same entry shapes as :func:`sync_findings`.
+    """
+    if not isinstance(webhook_url, str) or not webhook_url.strip():
+        raise ValueError(NO_SLACK_WEBHOOK_MESSAGE)
+    webhook_url = webhook_url.strip()
+    run = runner if runner is not None else _default_runner
+
+    rows = load_findings(reports_dir)
+    pushed: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    dirty = False
+
+    for row in rows:
+        digest = str(row.get("dedupe_hash", ""))
+        if row.get("issue_url"):
+            skipped.append(digest)
+            continue
+        message = slack_message(row)
+        attachments_json = json.dumps(message["attachments"])
+        payload = {
+            "webhook_url": webhook_url,
+            "text": message["text"],
+            "attachments": message["attachments"],
+        }
+        argv = [
+            "gh",
+            "api",
+            webhook_url,
+            "--method",
+            "POST",
+            "-f",
+            f"text={message['text']}",
+            "-f",
+            f"attachments={attachments_json}",
+        ]
+
+        if dry_run:
+            pushed.append({"dedupe_hash": digest, "issue_url": ""})
+            continue
+
+        try:
+            completed = run(argv, payload)
+        except GhNotFoundError:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise
+        except FindingsSyncError:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise
+        except Exception as exc:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise GhApiError(f"gh runner failed: {exc}") from exc
+
+        returncode = getattr(completed, "returncode", 1)
+        if returncode != 0:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            stderr = getattr(completed, "stderr", "")
+            raise GhApiError(
+                f"gh api {webhook_url} exited {returncode}: {stderr}",
+                returncode=returncode if isinstance(returncode, int) else None,
+            )
+        row["issue_url"] = f"slack:{digest}"
+        row["synced_at"] = utc_now_rfc3339()
+        dirty = True
+        pushed.append({"dedupe_hash": digest, "issue_url": row["issue_url"]})
+
+    if dirty and not dry_run:
+        _write_rows_atomic(findings_path(reports_dir), rows)
+    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+
+
 def _persist_if_dirty(
     directory: str | Path | None, dirty: bool, rows: list[dict[str, Any]]
 ) -> None:
@@ -484,12 +630,12 @@ def tick(
     """Heartbeat-schedulable entrypoint: reuse the sync functions.
 
     Reads ``redteam.findings_sync`` (``enabled``, ``tracker``, ``repo``,
-    ``labels``, ``linear_team_id``) from ``config`` (loads via
-    ``load_config()`` when omitted). Disabled, repo-less, team-less, or
-    unknown-tracker results are structured dicts — never exceptions,
-    never a new cron kind. The sync itself stays plain functions;
-    schedulers call this ``tick`` following the ``tick``/``schedule``
-    precedent.
+    ``labels``, ``linear_team_id``, ``slack_webhook_url``) from ``config``
+    (loads via ``load_config()`` when omitted). Disabled, repo-less,
+    team-less, webhook-less, or unknown-tracker results are structured
+    dicts — never exceptions, never a new cron kind. The sync itself
+    stays plain functions; schedulers call this ``tick`` following the
+    ``tick``/``schedule`` precedent.
     """
     if config is None:
         from omega_prime.config import load_config  # deferred: keeps import light
@@ -506,6 +652,18 @@ def tick(
         result = sync_findings_linear(
             reports_directory,
             team_id.strip(),
+            runner=runner,
+            dry_run=dry_run,
+        )
+        result["disabled"] = False
+        return result
+    if tracker == "slack":
+        webhook_url = node.get("slack_webhook_url", "")
+        if not isinstance(webhook_url, str) or not webhook_url.strip():
+            return _tracker_error(NO_SLACK_WEBHOOK_MESSAGE, dry_run)
+        result = sync_findings_slack(
+            reports_directory,
+            webhook_url.strip(),
             runner=runner,
             dry_run=dry_run,
         )
@@ -531,6 +689,42 @@ def tick(
     )
     result["disabled"] = False
     return result
+
+
+def _main_slack(directory: str | Path | None, webhook_url: str, dry_run: bool) -> int:
+    """Run the Slack branch of the CLI (dry-run aware)."""
+    if dry_run:
+        try:
+            result = sync_findings_slack(
+                directory if directory is not None else reports_dir(),
+                webhook_url,
+                dry_run=True,
+            )
+        except FindingsSyncError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for entry in result["pushed"]:
+            print(f"would push {entry['dedupe_hash']}")
+        for digest in result["skipped"]:
+            print(f"skip (already synced) {digest}")
+        return 0
+
+    try:
+        result = sync_findings_slack(
+            directory if directory is not None else reports_dir(),
+            webhook_url,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except FindingsSyncError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for entry in result["pushed"]:
+        print(f"pushed {entry['dedupe_hash']} -> {entry['issue_url']}")
+    for digest in result["skipped"]:
+        print(f"skip (already synced) {digest}")
+    return 0
 
 
 def _main_linear(directory: str | Path | None, team_id: str, dry_run: bool) -> int:
@@ -570,7 +764,7 @@ def _main_linear(directory: str | Path | None, team_id: str, dry_run: bool) -> i
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``findings_sync [--tracker github|linear] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
+    """CLI: ``findings_sync [--tracker github|linear|slack] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
     parser = argparse.ArgumentParser(
         prog="findings_sync",
         description="Push unsynced red-team findings to tracker issues (one-way).",
@@ -578,10 +772,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tracker",
         default="",
-        help="Tracker backend: github (default) or linear; blank means config",
+        help="Tracker backend: github (default), linear, or slack; blank means config",
     )
     parser.add_argument("--repo", default="", help="Target repo OWNER/NAME")
     parser.add_argument("--linear-team-id", default="", help="Linear team ID override")
+    parser.add_argument(
+        "--slack-webhook-url", default="", help="Slack webhook URL override"
+    )
     parser.add_argument("--reports-dir", default="", help="Reports dir override")
     parser.add_argument(
         "--dry-run",
@@ -596,7 +793,6 @@ def main(argv: list[str] | None = None) -> int:
     if node.get("enabled") is not True:
         print(DISABLED_MESSAGE)
         return 0
-
     tracker = args.tracker.strip().lower() or _tracker_for_node(node)
     directory: str | Path | None = args.reports_dir or None
     if tracker == "linear":
@@ -609,6 +805,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {NO_LINEAR_TEAM_MESSAGE}", file=sys.stderr)
             return 2
         return _main_linear(directory, team_id, args.dry_run)
+    if tracker == "slack":
+        webhook_url = args.slack_webhook_url.strip() or (
+            node.get("slack_webhook_url", "").strip()
+            if isinstance(node.get("slack_webhook_url", ""), str)
+            else ""
+        )
+        if not webhook_url:
+            print(f"error: {NO_SLACK_WEBHOOK_MESSAGE}", file=sys.stderr)
+            return 2
+        return _main_slack(directory, webhook_url, args.dry_run)
     if tracker != "github":
         print(f"error: unknown tracker: {tracker}", file=sys.stderr)
         return 2
@@ -661,7 +867,6 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-
 __all__ = [
     "DEFAULT_LABELS",
     "DEFAULT_TRACKER",
@@ -670,7 +875,10 @@ __all__ = [
     "LINEAR_PRIORITIES",
     "NO_LINEAR_TEAM_MESSAGE",
     "NO_REPO_MESSAGE",
+    "NO_SLACK_WEBHOOK_MESSAGE",
+    "SLACK_COLORS",
     "TRACKERS",
+    "UNKNOWN_SEVERITY_COLOR",
     "UNKNOWN_SEVERITY_LABELS",
     "UNKNOWN_SEVERITY_PRIORITY",
     "FindingsSyncError",
@@ -682,7 +890,10 @@ __all__ = [
     "labels_for_severity",
     "main",
     "priority_for_severity",
+    "slack_color",
+    "slack_message",
     "sync_findings",
     "sync_findings_linear",
+    "sync_findings_slack",
     "tick",
 ]

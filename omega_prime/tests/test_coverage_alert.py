@@ -301,7 +301,9 @@ def test_tick_ignores_other_kinds(tmp_path):
     store.schedule("plain job", 0)
     calls = []
     fired = tick_coverage_alert(
-        store, T_DAY1, lambda d, n: calls.append((d, n)) or _alert_below("a")  # type: ignore[func-returns-value]
+        store,
+        T_DAY1,
+        lambda d, n: calls.append((d, n)) or _alert_below("a"),  # type: ignore[func-returns-value]
     )
     assert fired == []
     assert calls == []

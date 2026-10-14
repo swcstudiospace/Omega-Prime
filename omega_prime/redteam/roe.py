@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -290,6 +291,118 @@ def authorize(
     )
 
 
+def _normalize_artifact_list(
+    artifacts: str | Path | Sequence[str | Path] | None,
+) -> list[str]:
+    """Artifact paths as a plain list (single path wraps to one element)."""
+    if artifacts is None:
+        return []
+    if isinstance(artifacts, (str, Path)):
+        return [str(artifacts)]
+    if isinstance(artifacts, (list, tuple)):
+        paths: list[str] = []
+        for entry in artifacts:
+            if not isinstance(entry, (str, Path)):
+                raise TypeError(
+                    "RoE artifact paths must be str or Path, "
+                    f"got {type(entry).__name__}"
+                )
+            paths.append(str(entry))
+        return paths
+    raise TypeError(
+        "RoE artifacts must be a path, a list of paths, or None, "
+        f"got {type(artifacts).__name__}"
+    )
+
+
+def _merge_grants(documents: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merged grant view: union of case classes, tools, and windows.
+
+    ``grant_tool_allowlist`` over the merged document is the union of the
+    allowed tools from every valid grant; an empty union keeps the
+    ``tools: []`` convention (authorizes every tool).
+    """
+    operators = sorted({str(doc["operator"]).strip() for doc in documents})
+    classes = sorted(
+        {
+            case
+            for doc in documents
+            for case in doc.get("case_classes", [])
+            if isinstance(case, str) and case
+        }
+    )
+    targets = [
+        entry
+        for doc in documents
+        for entry in doc.get("authorized_targets", [])
+        if isinstance(entry, dict)
+    ]
+    starts = [
+        (parsed, str(doc["effective_from"]))
+        for doc in documents
+        if (parsed := _parse_time(doc.get("effective_from"))) is not None
+    ]
+    ends = [
+        (parsed, str(doc["effective_until"]))
+        for doc in documents
+        if (parsed := _parse_time(doc.get("effective_until"))) is not None
+    ]
+    # Validated grants always carry parseable windows; fall back to the
+    # first document's strings rather than crash if they somehow do not.
+    start_text = min(starts)[1] if starts else str(documents[0]["effective_from"])
+    end_text = max(ends)[1] if ends else str(documents[0]["effective_until"])
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "operator": ", ".join(operators),
+        "authorized_targets": targets,
+        "effective_from": start_text,
+        "effective_until": end_text,
+        "case_classes": classes,
+    }
+
+
+def authorize_all(
+    artifacts: str | Path | Sequence[str | Path] | None,
+    *,
+    key: bytes | None,
+    now: datetime | None = None,
+) -> RoeDecision:
+    """Multi-grant pipeline: every artifact, union of allowed tools.
+
+    Each artifact is evaluated with :func:`authorize`; grants that are
+    present, unexpired, and signed count as valid, and the decision
+    authorizes the union of their tools (via :func:`grant_tool_allowlist`
+    over the merged ``roe`` document). One grant expiring never
+    invalidates the others. A single path (or ``None``) behaves exactly
+    like :func:`authorize`. With no valid grant, the most informative
+    failure wins (``roe-expired`` over ``roe-invalid`` over
+    ``roe-missing``); with no artifacts at all the missing decision wins.
+    """
+    paths = _normalize_artifact_list(artifacts)
+    if not paths:
+        return authorize(None, key=key, now=now)
+    evaluated = [(path, authorize(path, key=key, now=now)) for path in paths]
+    valid = [(path, decision) for path, decision in evaluated if decision.ok]
+    if not valid:
+        for cause in (CAUSE_EXPIRED, CAUSE_INVALID, CAUSE_MISSING):
+            for _, decision in evaluated:
+                if decision.cause == cause:
+                    return decision
+        return evaluated[0][1]
+    documents = [
+        decision.roe for _, decision in valid if isinstance(decision.roe, dict)
+    ]
+    merged = _merge_grants(documents)
+    window = f"{merged['effective_from']}..{merged['effective_until']}"
+    return RoeDecision(
+        True,
+        "ok",
+        f"RoE authorizes operator(s) {merged['operator']!r} for {window} "
+        f"from {len(valid)}/{len(paths)} grant(s)",
+        merged,
+    )
+
+
 def grant_tool_allowlist(document: Any) -> set[str] | None:
     """Allowed ``tempest_*`` tools from a signed grant, or ``None`` for all.
 
@@ -338,6 +451,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "RoeDecision",
     "authorize",
+    "authorize_all",
     "canonical_bytes",
     "grant_expired",
     "grant_tool_allowlist",

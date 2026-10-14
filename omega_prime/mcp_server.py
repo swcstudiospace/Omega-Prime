@@ -619,8 +619,8 @@ def _evaluate_redteam_guard(
     in the wheel and the image); the ``sidecar/`` tree is never on the
     installed import path.
     """
-    from omega_prime.config import redteam_enabled, redteam_kill
-    from omega_prime.redteam.roe import authorize
+    from omega_prime.config import redteam_enabled, redteam_kill, redteam_roe_files
+    from omega_prime.redteam.roe import authorize_all
 
     try:
         if redteam_kill(config):
@@ -650,7 +650,7 @@ def _evaluate_redteam_guard(
             return "BLOCKED", "roe-key-in-file"
         resolve_env: Mapping[str, str] = env if isinstance(env, Mapping) else os.environ
         key = _resolve_roe_key(node, resolve_env)
-        decision = authorize(str(node.get("roe_file") or ""), key=key)
+        decision = authorize_all(redteam_roe_files(config), key=key)
         if decision.ok:
             _log_sidecar_transition("IDLE", "IDLE", "re-evaluated")
             return "IDLE", "re-evaluated"
@@ -670,15 +670,17 @@ def _evaluate_redteam_guard(
 def _guard_grant(
     config: dict[str, Any], env: Mapping[str, str] | None = None
 ) -> dict[str, Any] | None:
-    """Parsed signed grant for the red team client, or ``None`` when absent.
+    """Merged signed grant for the red team client, or ``None`` when absent.
 
-    Re-resolves the guard's ``authorize`` decision so the client keeps the
-    parsed grant (tool allowlist + window) for call-time enforcement. Any
-    failure means no grant — the client then keeps historical behavior and
-    registration stays filtered by the same absence.
+    Re-resolves the guard's ``authorize_all`` decision so the client keeps
+    the merged grant (union tool allowlist + window) for call-time
+    enforcement. Any failure means no grant — the client then keeps
+    historical behavior and registration stays filtered by the same
+    absence.
     """
     try:
-        from omega_prime.redteam.roe import authorize
+        from omega_prime.config import redteam_roe_files
+        from omega_prime.redteam.roe import authorize_all
 
         node = config.get("redteam", {})
         node = node if isinstance(node, dict) else {}
@@ -686,7 +688,7 @@ def _guard_grant(
             return None
         resolve_env: Mapping[str, str] = env if isinstance(env, Mapping) else os.environ
         key = _resolve_roe_key(node, resolve_env)
-        decision = authorize(str(node.get("roe_file") or ""), key=key)
+        decision = authorize_all(redteam_roe_files(config), key=key)
         if decision.ok and isinstance(decision.roe, dict):
             return decision.roe
     except Exception:

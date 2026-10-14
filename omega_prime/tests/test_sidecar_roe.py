@@ -241,3 +241,101 @@ def test_grant_expired_detects_window_and_unparseable():
     assert grant_expired({"effective_until": future}) is False
     assert grant_expired({"effective_until": "not-a-time"}) is None
     assert grant_expired(None) is None
+
+
+def _write_signed_as(tmp_path, name, document, key=FIXTURE_KEY):
+    """Signed artifact under an explicit filename (concurrent grants)."""
+    artifact = tmp_path / name
+    artifact.write_text(json.dumps(document), encoding="utf-8")
+    sign_artifact(artifact, key)
+    return artifact
+
+
+def test_authorize_all_unions_two_grants(tmp_path):
+    """H7 happy: two grants with different case classes both authorize."""
+    from omega_prime.redteam.roe import authorize_all, grant_tool_allowlist
+
+    first = _write_signed_as(
+        tmp_path,
+        "roe-a.json",
+        _document(
+            operator="alice",
+            authorized_targets=[{"host": "127.0.0.1", "tools": ["tempest_status"]}],
+            case_classes=["prompt-injection"],
+        ),
+    )
+    second = _write_signed_as(
+        tmp_path,
+        "roe-b.json",
+        _document(
+            operator="bob",
+            authorized_targets=[{"host": "localhost", "tools": ["tempest_report"]}],
+            case_classes=["jailbreak"],
+        ),
+    )
+    decision = authorize_all([first, second], key=FIXTURE_KEY)
+    assert decision is not None
+    assert decision.ok and decision.cause == "ok"
+    assert "2/2" in decision.detail
+    assert decision is not None and decision.roe is not None
+    assert set(decision.roe["case_classes"]) == {"prompt-injection", "jailbreak"}
+    assert grant_tool_allowlist(decision.roe) == {"tempest_status", "tempest_report"}
+
+
+def test_authorize_all_survives_one_expiry(tmp_path):
+    """H7 edge: one grant expiring leaves only the other's tools."""
+    from omega_prime.redteam.roe import authorize_all, grant_tool_allowlist
+
+    live = _write_signed_as(
+        tmp_path,
+        "roe-live.json",
+        _document(
+            authorized_targets=[{"host": "127.0.0.1", "tools": ["tempest_status"]}],
+            case_classes=["prompt-injection"],
+        ),
+    )
+    start, end = _window(days_from_now=-9, days_to_now=-1)
+    stale = _write_signed_as(
+        tmp_path,
+        "roe-stale.json",
+        _document(
+            effective_from=start,
+            effective_until=end,
+            authorized_targets=[{"host": "localhost", "tools": ["tempest_report"]}],
+            case_classes=["jailbreak"],
+        ),
+    )
+    decision = authorize_all([live, stale], key=FIXTURE_KEY)
+    assert decision is not None
+    assert decision.ok and decision.cause == "ok"
+    assert "1/2" in decision.detail
+    assert grant_tool_allowlist(decision.roe) == {"tempest_status"}
+    assert decision is not None and decision.roe is not None
+    assert decision.roe["case_classes"] == ["prompt-injection"]
+
+
+def test_authorize_all_single_and_empty_match_authorize(tmp_path):
+    """H7 compat: one path (or none) behaves exactly like authorize()."""
+    from omega_prime.redteam.roe import authorize_all
+
+    signed = _write_signed(tmp_path)
+    assert authorize_all(signed, key=FIXTURE_KEY).ok is True
+    assert authorize_all([signed], key=FIXTURE_KEY).ok is True
+    assert authorize_all([], key=FIXTURE_KEY).cause == "roe-missing"
+    assert authorize_all(None, key=FIXTURE_KEY).cause == "roe-missing"
+
+
+def test_authorize_all_failure_prefers_expired_over_missing(tmp_path):
+    """H7 edge: with no valid grant the most informative cause wins."""
+    from omega_prime.redteam.roe import authorize_all
+
+    start, end = _window(days_from_now=-9, days_to_now=-1)
+    stale = _write_signed_as(
+        tmp_path, "roe-stale.json", _document(effective_from=start, effective_until=end)
+    )
+    decision = authorize_all([stale, tmp_path / "absent.json"], key=FIXTURE_KEY)
+    assert (decision.ok, decision.cause) == (False, "roe-expired")
+    missing = authorize_all(
+        [tmp_path / "absent-a.json", tmp_path / "absent-b.json"], key=FIXTURE_KEY
+    )
+    assert (missing.ok, missing.cause) == (False, "roe-missing")

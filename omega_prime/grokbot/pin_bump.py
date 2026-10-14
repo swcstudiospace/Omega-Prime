@@ -62,6 +62,7 @@ hermetic. The CLI takes no ``OMEGA_PRIME_*`` env vars and reads no
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import importlib.util
 import json
@@ -69,6 +70,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -152,6 +154,112 @@ def _default_old_audit(root: Path, old_pin: str | None) -> Path | None:
         root / "omega_prime" / "tests" / "data" / f"redteam-audit-{old_pin}.json"
     )
     return candidate if candidate.is_file() else None
+
+
+_GITHUB_REPO_RE = re.compile(
+    r"^(?:https?://github\.com/|git@github\.com:)([^/\s]+)/([^/\s]+?)(?:\.git)?$"
+)
+
+
+def _parse_github_repo(url: str) -> tuple[str, str] | None:
+    """``(owner, repo)`` from a github remote URL, or ``None``."""
+    text = (url or "").strip().rstrip("/")
+    if text.endswith(".git"):
+        text = text[: -len(".git")]
+    match = _GITHUB_REPO_RE.match(text)
+    if match is None:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _check_upstream_fix(
+    run: Runner, redteam_dir: Path
+) -> tuple[bool | None, str, list[tuple[str, str, object]]]:
+    """Probe upstream HEAD for untriaged high/critical advisories.
+
+    Downloads the upstream ``package-lock.json`` via ``gh api`` into a
+    temp dir and runs ``npm audit --json`` there. Returns ``(clean,
+    note, untriaged)``: ``clean`` True means upstream shows zero
+    untriaged high+ advisories (safe to bump); False means upstream is
+    still vulnerable (nothing to fix yet); None means the probe was
+    inconclusive (callers proceed with the bump). Never raises on
+    subprocess or parse problems — those are inconclusive, not clean.
+    """
+    try:
+        url_proc = run(["git", "config", "--get", "remote.origin.url"], cwd=redteam_dir)
+    except OSError as exc:
+        return None, f"cannot read origin url ({exc})", []
+    if url_proc.returncode != 0:
+        return (
+            None,
+            f"git config remote.origin.url failed: {url_proc.stderr.strip()}",
+            [],
+        )
+    repo = _parse_github_repo(url_proc.stdout)
+    if repo is None:
+        return None, f"unparseable origin url {url_proc.stdout.strip()!r}", []
+    owner, name = repo
+    try:
+        lock_proc = run(
+            [
+                "gh",
+                "api",
+                f"repos/{owner}/{name}/contents/package-lock.json",
+                "--jq",
+                ".content",
+            ],
+            cwd=redteam_dir,
+        )
+    except OSError as exc:
+        return None, f"gh api failed ({exc})", []
+    if lock_proc.returncode != 0:
+        return None, f"gh api failed: {lock_proc.stderr.strip()}", []
+    try:
+        lock_bytes = base64.b64decode(
+            lock_proc.stdout.strip().strip('"'), validate=True
+        )
+    except ValueError as exc:
+        return None, f"cannot decode upstream package-lock.json ({exc})", []
+    with tempfile.TemporaryDirectory(prefix="pin-bump-upstream-") as tmpname:
+        tmpdir = Path(tmpname)
+        try:
+            (tmpdir / "package.json").write_text(
+                '{"name": "upstream-audit", "version": "0.0.0"}\n',
+                encoding="utf-8",
+            )
+            (tmpdir / "package-lock.json").write_bytes(lock_bytes)
+        except OSError as exc:
+            return None, f"cannot stage upstream lockfile ({exc})", []
+        try:
+            audit_proc = run(
+                [
+                    "npm",
+                    "audit",
+                    "--omit=dev",
+                    "--audit-level=high",
+                    "--json",
+                ],
+                cwd=tmpdir,
+            )
+        except OSError as exc:
+            return None, f"npm is absent ({exc})", []
+    try:
+        upstream_doc = json.loads(audit_proc.stdout)
+    except ValueError as exc:
+        return None, f"cannot parse upstream npm audit output ({exc})", []
+    try:
+        triage_mod = _load_script("redteam-audit-triage.py")
+    except (OSError, RuntimeError) as exc:
+        return None, f"cannot load audit triage helper ({exc})", []
+    findings, triage_error = triage_mod.triage(upstream_doc)
+    if triage_error is not None:
+        return None, f"upstream audit triage refused output: {triage_error}", []
+    untriaged = [
+        finding for finding in findings if finding[0] not in triage_mod.TRIAGED
+    ]
+    if untriaged:
+        return False, "upstream HEAD still vulnerable", untriaged
+    return True, "upstream HEAD audit clean", []
 
 
 def revendor_pack(upstream_dir: Path, vendored_dir: Path) -> tuple[int, int]:
@@ -275,6 +383,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the npm audit and delta report (offline bump).",
     )
     parser.add_argument(
+        "--auto-detect-upstream-fix",
+        dest="auto_detect_upstream_fix",
+        action="store_true",
+        help=(
+            "Probe upstream HEAD first: download its package-lock.json via "
+            "gh api, audit it, and skip the bump (exit 0, nothing to fix "
+            "yet) when upstream still shows untriaged high/critical "
+            "advisories."
+        ),
+    )
+    parser.add_argument(
         "--open-pr",
         action="store_true",
         help="Commit the bump set, push branch pin-bump-<short-sha>, run gh pr create.",
@@ -301,6 +420,7 @@ def bump(
     run: Runner | None = None,
     old_audit: str | None = None,
     skip_audit: bool = False,
+    auto_detect_upstream_fix: bool = False,
     open_pr: bool = False,
     json_mode: bool = False,
 ) -> int:
@@ -366,6 +486,32 @@ def bump(
     else:
         return usage(f"bad ref {to!r}: expected a 40-hex SHA or a v-tag such as v1.4")
     assert sha is not None
+
+    # Step 0 (opt-in): --auto-detect-upstream-fix probes upstream HEAD
+    # before any local mutation. A still-vulnerable upstream means there
+    # is nothing to fix yet: report the delta and exit 0 without moving
+    # the pin. A clean upstream (or an inconclusive probe) proceeds.
+    if auto_detect_upstream_fix:
+        clean, note, upstream_untriaged = _check_upstream_fix(run, redteam_dir)
+        if clean is False:
+            print(
+                "pin-bump auto-detect: upstream HEAD still shows "
+                f"{len(upstream_untriaged)} untriaged high/critical "
+                f"advisories; nothing to fix yet — skipping bump"
+            )
+            for key, severity, name in upstream_untriaged:
+                print(f"  {severity} {name}: {key}")
+            return finish(EXIT_OK)
+        if clean is True:
+            print(
+                "pin-bump auto-detect: upstream HEAD audit clean "
+                "(0 untriaged high/critical); proceeding with bump"
+            )
+        else:
+            print(
+                f"pin-bump auto-detect: upstream probe inconclusive "
+                f"({note}); proceeding with bump"
+            )
 
     # Step 1 (cont.): fetch, checkout, stage the gitlink.
     if not redteam_dir.is_dir():
@@ -591,6 +737,7 @@ def main(argv: list[str] | None = None) -> int:
         root=root,
         old_audit=args.old_audit,
         skip_audit=args.skip_audit,
+        auto_detect_upstream_fix=args.auto_detect_upstream_fix,
         open_pr=args.open_pr,
         json_mode=args.json_mode,
     )

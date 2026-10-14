@@ -499,6 +499,7 @@ def test_redteam_disabled_by_default_and_enabled_by_env(monkeypatch):
         "kill": False,
         "roe_required": True,
         "roe_file": "",
+        "roe_files": [],
         "roe_key": "",
         "roe_key_file": "",
         "reports_dir": "",
@@ -510,6 +511,7 @@ def test_redteam_disabled_by_default_and_enabled_by_env(monkeypatch):
             "labels": {},
             "tracker": "github",
             "linear_team_id": "",
+            "slack_webhook_url": "",
         },
     }
     monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ENABLED", "1")
@@ -517,3 +519,42 @@ def test_redteam_disabled_by_default_and_enabled_by_env(monkeypatch):
     config = load_config()
     assert redteam_enabled(config) is True
     assert config["redteam"]["gateway_url"] == "http://127.0.0.1:4444"
+
+
+def test_redteam_roe_files_replace_legacy_single_file(monkeypatch, tmp_path):
+    """H7 config: roe_files wins when set; roe_file is the fallback."""
+    from omega_prime.config import redteam_roe_files
+
+    for var in ("OMEGA_PRIME_REDTEAM_ROE_FILE", "OMEGA_PRIME_REDTEAM_ROE_FILES"):
+        monkeypatch.delenv(var, raising=False)
+    assert redteam_roe_files(load_config()) == []
+    assert redteam_roe_files(load_config(tmp_path)) == []
+
+    (tmp_path / "omega-prime.json").write_text(
+        json.dumps({"redteam": {"roe_file": "/etc/roe.json"}}), encoding="utf-8"
+    )
+    assert redteam_roe_files(load_config(tmp_path)) == ["/etc/roe.json"]
+
+    (tmp_path / "omega-prime.json").write_text(
+        json.dumps(
+            {
+                "redteam": {
+                    "roe_file": "/etc/roe.json",
+                    "roe_files": ["/etc/roe-a.json", "/etc/roe-b.json"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert redteam_roe_files(load_config(tmp_path)) == [
+        "/etc/roe-a.json",
+        "/etc/roe-b.json",
+    ]
+
+    monkeypatch.setenv(
+        "OMEGA_PRIME_REDTEAM_ROE_FILES", " /etc/env-a.json ,, /etc/env-b.json "
+    )
+    assert redteam_roe_files(load_config(tmp_path)) == [
+        "/etc/env-a.json",
+        "/etc/env-b.json",
+    ]

@@ -11,6 +11,7 @@ from omega_prime.config import load_config
 from omega_prime.grokbot import findings_sync
 from omega_prime.grokbot.findings_sync import (
     NO_LINEAR_TEAM_MESSAGE,
+    NO_SLACK_WEBHOOK_MESSAGE,
     GhApiError,
     GhNotFoundError,
     issue_body,
@@ -18,8 +19,11 @@ from omega_prime.grokbot.findings_sync import (
     labels_for_severity,
     main,
     priority_for_severity,
+    slack_color,
+    slack_message,
     sync_findings,
     sync_findings_linear,
+    sync_findings_slack,
     tick,
 )
 from sidecar.findings import findings_path, load_findings, record_finding
@@ -365,6 +369,7 @@ def test_defaults_off_empty_repo(tmp_path):
         "labels": {},
         "tracker": "github",
         "linear_team_id": "",
+        "slack_webhook_url": "",
     }
 
 
@@ -563,3 +568,180 @@ def test_cli_unknown_tracker_exits_two(tmp_path, monkeypatch, capsys):
     )
     assert main(["--tracker", "trello", "--reports-dir", str(tmp_path)]) == 2
     assert "unknown tracker" in capsys.readouterr().err
+
+
+# Slack tracker mode (batch-04 Feature H3) ------------------------------------
+
+WEBHOOK = "https://hooks.slack.com/services/T000/B000/XXXX"
+
+
+class FakeSlack:
+    """Fake GhRunner answering webhook POSTs with Slack ``ok``; zero network."""
+
+    def __init__(self):
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def __call__(self, argv, data):
+        self.calls.append((list(argv), dict(data)))
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+
+def _slack_config(**overrides):
+    node = {
+        "enabled": True,
+        "repo": REPO,
+        "labels": {},
+        "tracker": "slack",
+        "linear_team_id": TEAM,
+        "slack_webhook_url": WEBHOOK,
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+def test_slack_color_mapping_per_spec():
+    assert slack_color("critical") == "danger"
+    assert slack_color("high") == "danger"
+    assert slack_color("medium") == "warning"
+    assert slack_color("low") == "good"
+    assert slack_color("CRITICAL") == "danger"
+    assert slack_color("weird") == "#808080"
+    assert slack_color(None) == "#808080"
+
+
+def test_slack_message_hash_in_text_and_color(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(severity="critical"))
+    message = slack_message(row)
+    assert row["dedupe_hash"] in message["text"]
+    assert message["attachments"][0]["color"] == "danger"
+    assert row["dedupe_hash"] in message["attachments"][0]["text"]
+
+
+def test_slack_happy_two_findings_two_posts(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeSlack()
+    result = sync_findings_slack(tmp_path, WEBHOOK, runner=fake)
+    assert len(fake.calls) == 2
+    assert all(call[0][:2] == ["gh", "api"] for call in fake.calls)
+    assert all(WEBHOOK in call[0] for call in fake.calls)
+    assert all("dedupe_hash: " in call[1]["text"] for call in fake.calls)
+    assert len(result["pushed"]) == 2
+    assert result["skipped"] == []
+    rows = load_findings(tmp_path)
+    assert all(row["issue_url"] == f"slack:{row['dedupe_hash']}" for row in rows)
+    assert all(row.get("synced_at") for row in rows)
+
+
+def test_slack_empty_webhook_fail_closed():
+    with pytest.raises(ValueError, match="no slack webhook configured"):
+        sync_findings_slack(None, "   ", runner=FakeSlack())
+
+
+def test_slack_second_run_pushes_nothing(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeSlack()
+    sync_findings_slack(tmp_path, WEBHOOK, runner=fake)
+    result = sync_findings_slack(tmp_path, WEBHOOK, runner=fake)
+    assert result["pushed"] == []
+    assert len(result["skipped"]) == 2
+    assert len(fake.calls) == 2
+
+
+def test_slack_nonzero_exit_leaves_row_unsynced(tmp_path):
+    _seed_two(tmp_path)
+
+    def bad(argv, data):
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    with pytest.raises(GhApiError):
+        sync_findings_slack(tmp_path, WEBHOOK, runner=bad)
+    assert all("issue_url" not in row for row in load_findings(tmp_path))
+
+
+def test_slack_runner_exception_mid_run_persists_earlier_push(tmp_path):
+    _seed_two(tmp_path)
+    calls: list = []
+
+    def flaky(argv, data):
+        calls.append((argv, data))
+        if len(calls) == 2:
+            raise RuntimeError("webhook down")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    with pytest.raises(GhApiError, match="gh runner failed"):
+        sync_findings_slack(tmp_path, WEBHOOK, runner=flaky)
+    rows = load_findings(tmp_path)
+    assert rows[0]["issue_url"] == f"slack:{rows[0]['dedupe_hash']}"
+    assert "issue_url" not in rows[1]
+
+
+def test_slack_dry_run_writes_nothing_calls_no_runner(tmp_path):
+    _seed_two(tmp_path)
+    before = findings_path(tmp_path).read_bytes()
+    fake = FakeSlack()
+    result = sync_findings_slack(tmp_path, WEBHOOK, runner=fake, dry_run=True)
+    assert len(result["pushed"]) == 2
+    assert all(entry["issue_url"] == "" for entry in result["pushed"])
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before
+
+
+def test_tick_slack_dispatches_webhook_posts(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeSlack()
+    result = tick(_slack_config(), reports_directory=tmp_path, runner=fake)
+    assert result["disabled"] is False
+    assert len(fake.calls) == 2
+    assert all(WEBHOOK in call[0] for call in fake.calls)
+
+
+def test_tick_slack_no_webhook_structured_error(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeSlack()
+    result = tick(
+        _slack_config(slack_webhook_url=""),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert result["error"] == NO_SLACK_WEBHOOK_MESSAGE
+    assert fake.calls == []
+
+
+def test_cli_slack_pushes_via_webhook(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _slack_config(),
+    )
+    fake = FakeSlack()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--tracker", "slack", "--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+    assert "pushed" in capsys.readouterr().out
+
+
+def test_cli_slack_tracker_from_config_without_flag(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _slack_config(),
+    )
+    fake = FakeSlack()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+
+
+def test_cli_slack_missing_webhook_exits_two(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _slack_config(slack_webhook_url=""),
+    )
+    assert main(["--tracker", "slack", "--reports-dir", str(tmp_path)]) == 2
+    assert "no slack webhook configured" in capsys.readouterr().err
+
+
+def test_env_override_slack_webhook_url(monkeypatch):
+    monkeypatch.setenv("OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_SLACK_WEBHOOK_URL", WEBHOOK)
+    node = load_config(None)["redteam"]["findings_sync"]
+    assert node["slack_webhook_url"] == WEBHOOK

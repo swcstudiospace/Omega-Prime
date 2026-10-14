@@ -64,6 +64,11 @@ def _defaults() -> dict[str, Any]:
             "kill": False,
             "roe_required": True,
             "roe_file": "",
+            # Concurrent RoE grants (batch-04 H7): when non-empty, these
+            # artifact paths replace the single ``roe_file`` above; the
+            # guard authorizes the union of tools from all valid grants.
+            # Empty (the default) keeps the legacy single-file behavior.
+            "roe_files": [],
             "roe_key": "",
             "roe_key_file": "",
             # Weekly engagement reports (PLAN-F7): output dir override;
@@ -88,6 +93,10 @@ def _defaults() -> dict[str, Any]:
                 "labels": {},
                 "tracker": "github",
                 "linear_team_id": "",
+                # Slack incoming-webhook URL for tracker="slack" (batch-04
+                # Feature H3). Empty (the default) means the Slack sync
+                # fails closed. Secret: never logged, never rendered.
+                "slack_webhook_url": "",
             },
         },
         # Telemetry export (Phase 81). Off by default with an empty endpoint;
@@ -307,6 +316,14 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 # OMEGA_PRIME_REDTEAM_ROE_FILE — path to the signed artifact;
                 # empty (the default) means BLOCKED when enabled.
                 overlay.setdefault("redteam", {})["roe_file"] = value.strip()
+            elif len(parts) == 3 and parts[1] == "roe" and parts[2] == "files":
+                # OMEGA_PRIME_REDTEAM_ROE_FILES — comma-separated concurrent
+                # grant paths; when non-empty these replace roe_file.
+                # Empty entries are dropped; empty keeps the legacy
+                # single-file behavior. Non-secret (paths only).
+                overlay.setdefault("redteam", {})["roe_files"] = [
+                    entry.strip() for entry in value.split(",") if entry.strip()
+                ]
             elif len(parts) == 3 and parts[1] == "roe" and parts[2] == "key":
                 # OMEGA_PRIME_REDTEAM_ROE_KEY — detached-HMAC verification
                 # key. Secret: never logged, never rendered to metrics.
@@ -374,6 +391,20 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 # Non-secret.
                 overlay.setdefault("redteam", {}).setdefault("findings_sync", {})[
                     "linear_team_id"
+                ] = value.strip()
+            elif (
+                len(parts) == 6
+                and parts[1] == "findings"
+                and parts[2] == "sync"
+                and parts[3] == "slack"
+                and parts[4] == "webhook"
+                and parts[5] == "url"
+            ):
+                # OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_SLACK_WEBHOOK_URL —
+                # Slack incoming-webhook URL; required (fail-closed) when
+                # tracker=slack. Secret: never logged.
+                overlay.setdefault("redteam", {}).setdefault("findings_sync", {})[
+                    "slack_webhook_url"
                 ] = value.strip()
             elif (
                 len(parts) == 4
@@ -540,6 +571,38 @@ def redteam_kill(config: dict[str, Any]) -> bool:
     return bool(isinstance(node, dict) and node.get("kill") is True)
 
 
+def redteam_roe_files(config: dict[str, Any]) -> list[str]:
+    """Configured RoE artifact paths (batch-04 H7).
+
+    A non-empty ``redteam.roe_files`` list replaces the legacy single
+    ``redteam.roe_file``; otherwise the single path (when non-empty) is
+    returned alone. Empty list means no grant is configured (BLOCKED when
+    enabled). Non-string entries are ignored; surrounding whitespace is
+    stripped.
+    """
+    node = config.get("redteam", {})
+    if not isinstance(node, dict):
+        return []
+    files = node.get("roe_files")
+    if isinstance(files, (list, tuple)):
+        paths = [
+            entry.strip() for entry in files if isinstance(entry, str) and entry.strip()
+        ]
+        paths.extend(
+            str(entry).strip()
+            for entry in files
+            if isinstance(entry, os.PathLike) and str(entry).strip()
+        )
+        if paths:
+            return sorted(set(paths))
+    single = node.get("roe_file", "")
+    if isinstance(single, str) and single.strip():
+        return [single.strip()]
+    if isinstance(single, os.PathLike) and str(single).strip():
+        return [str(single).strip()]
+    return []
+
+
 def family_config(config: dict[str, Any], family: str) -> dict[str, Any]:
     """The raw config subtree for one family (empty dict when absent)."""
     node = config.get("prime", {}).get(family, {})
@@ -555,4 +618,5 @@ __all__ = [
     "prime_enabled",
     "redteam_enabled",
     "redteam_kill",
+    "redteam_roe_files",
 ]

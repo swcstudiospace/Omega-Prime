@@ -8,7 +8,9 @@ unsigned — warnings must fire even for an unsigned artifact.
 from __future__ import annotations
 
 import json
+import socket
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -20,7 +22,13 @@ from omega_prime.cron.heartbeat import (
     tick_roe_expiry,
 )
 from omega_prime.cron.scheduler import JobStore
-from omega_prime.grokbot.roe_lifecycle import check_roe_lifecycle, main
+from omega_prime.grokbot.roe_lifecycle import (
+    check_readiness,
+    check_roe_lifecycle,
+    gateway_reachable,
+    main,
+    suite_counts,
+)
 from omega_prime.tools.durable_surface import register_durable_surface_tools
 from omega_prime.tools.registry import ToolRegistry
 
@@ -326,3 +334,275 @@ def test_durable_status_gains_roe_block(tmp_path, monkeypatch):
     register_durable_surface_tools(registry, tmp_path / "empty-root")
     body = json.loads(registry.dispatch("durable_status", {}))
     assert body["roe"]["state"] == "missing"
+
+
+def _write_named_artifact(tmp_path, name, document=None):
+    artifact = tmp_path / name
+    artifact.write_text(
+        json.dumps(document if document is not None else _document()),
+        encoding="utf-8",
+    )
+    return artifact
+
+
+def test_lifecycle_all_reports_worst_state(tmp_path):
+    """H7 happy: valid + expiring + expired grants aggregate to expired."""
+    from omega_prime.grokbot.roe_lifecycle import check_roe_lifecycle_all
+
+    healthy = _write_named_artifact(
+        tmp_path,
+        "roe-healthy.json",
+        _document(effective_until=(END + timedelta(days=30)).isoformat()),
+    )
+    expiring = _write_named_artifact(
+        tmp_path,
+        "roe-expiring.json",
+        _document(effective_until=(END + timedelta(hours=12)).isoformat()),
+    )
+    stale = _write_named_artifact(
+        tmp_path,
+        "roe-stale.json",
+        _document(effective_until=(END - timedelta(days=1)).isoformat()),
+    )
+    result = check_roe_lifecycle_all([healthy, expiring, stale], END)
+    assert result["state"] == "expired"
+    assert result["cause"] == "roe-expired"
+    assert [row["path"] for row in result["artifacts"]] == [
+        str(healthy),
+        str(expiring),
+        str(stale),
+    ]
+    assert [row["state"] for row in result["artifacts"]] == [
+        "valid",
+        "expiring-1d",
+        "expired",
+    ]
+    # Worst remaining window drives the aggregate countdown.
+    assert result["days_remaining"] == pytest.approx(-1.0, abs=1e-6)
+
+
+def test_lifecycle_all_single_matches_single(tmp_path):
+    """H7 compat: one artifact aggregates to its own lifecycle state."""
+    from omega_prime.grokbot.roe_lifecycle import (
+        check_roe_lifecycle,
+        check_roe_lifecycle_all,
+    )
+
+    artifact = _write_named_artifact(tmp_path, "roe.json")
+    single = check_roe_lifecycle(artifact, END)
+    aggregate = check_roe_lifecycle_all([artifact], END)
+    assert aggregate["state"] == single["state"] == "expiring-1d"
+    assert aggregate["days_remaining"] == single["days_remaining"]
+    assert aggregate["artifacts"] == [{"path": str(artifact), **single}]
+    empty = check_roe_lifecycle_all([], END)
+    assert empty["state"] == "missing"
+    assert empty["artifacts"] == []
+
+
+def test_cli_multi_artifact_reports_worst(tmp_path, capsys):
+    """H7 CLI: repeated --artifact prints the worst-of summary plus rows."""
+    healthy = _write_named_artifact(
+        tmp_path,
+        "roe-healthy.json",
+        _document(effective_until=(END + timedelta(days=30)).isoformat()),
+    )
+    stale = _write_named_artifact(
+        tmp_path,
+        "roe-stale.json",
+        _document(effective_until=(END - timedelta(days=1)).isoformat()),
+    )
+    rc = main(
+        [
+            "check",
+            "--artifact",
+            str(healthy),
+            "--artifact",
+            str(stale),
+            "--now",
+            END.isoformat(),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 3
+    assert "roe: expired (worst of 2 artifacts" in out
+    assert f"  - {healthy}: valid" in out
+    assert f"  - {stale}: expired" in out
+
+
+# Readiness check (batch-04 Feature H2) --------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _open_listener():
+    """Bound loopback TCP listener; caller must close."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    return srv
+
+
+def _closed_port():
+    """An ephemeral loopback port with nothing listening (probe must fail)."""
+    srv = _open_listener()
+    port = srv.getsockname()[1]
+    srv.close()
+    return port
+
+
+def test_readiness_keys_and_ready_when_open(tmp_path):
+    """H2 happy: open window + reachable gateway + loaded suites ⇒ ready."""
+    artifact = _write_artifact(tmp_path)
+    srv = _open_listener()
+    try:
+        port = srv.getsockname()[1]
+        result = check_readiness(
+            str(artifact),
+            END - timedelta(days=30),
+            gateway_url=f"http://127.0.0.1:{port}",
+        )
+    finally:
+        srv.close()
+    assert set(result) == {
+        "roe_state",
+        "gateway_reachable",
+        "suites_loaded",
+        "suites_total",
+        "ready_for_live",
+    }
+    assert result["roe_state"] == "IDLE"
+    assert result["gateway_reachable"] is True
+    assert result["suites_loaded"] > 0
+    assert result["suites_loaded"] == result["suites_total"]
+    assert result["ready_for_live"] is True
+
+
+def test_readiness_blocked_states_never_ready(tmp_path):
+    """H2: expired/missing/invalid artifacts report BLOCKED, never ready."""
+    port = _closed_port()
+    url = f"http://127.0.0.1:{port}"
+    stale = _write_artifact(
+        tmp_path, _document(effective_until=(END - timedelta(days=1)).isoformat())
+    )
+    assert check_readiness(str(stale), END, gateway_url=url)["roe_state"] == "BLOCKED"
+    missing = check_readiness(str(tmp_path / "absent.json"), END, gateway_url=url)
+    assert missing["roe_state"] == "BLOCKED"
+    assert missing["ready_for_live"] is False
+    bad = tmp_path / "bad.json"
+    bad.write_text("{nope", encoding="utf-8")
+    assert check_readiness(str(bad), END, gateway_url=url)["roe_state"] == "BLOCKED"
+
+
+def test_readiness_unreachable_gateway_not_ready(tmp_path):
+    """H2: open window but closed gateway port ⇒ not ready for live."""
+    artifact = _write_artifact(tmp_path)
+    result = check_readiness(
+        str(artifact),
+        END - timedelta(days=30),
+        gateway_url=f"http://127.0.0.1:{_closed_port()}",
+    )
+    assert result["roe_state"] == "IDLE"
+    assert result["gateway_reachable"] is False
+    assert result["ready_for_live"] is False
+
+
+def test_readiness_expiring_window_stays_idle(tmp_path):
+    """H2: expiring windows are still authorized (harness IDLE semantics)."""
+    artifact = _write_artifact(tmp_path)
+    result = check_readiness(
+        str(artifact),
+        END - timedelta(days=1),
+        gateway_url=f"http://127.0.0.1:{_closed_port()}",
+    )
+    assert result["roe_state"] == "IDLE"
+    assert result["ready_for_live"] is False  # gateway closed
+
+
+def test_readiness_suite_counts_exclude_drafts(tmp_path):
+    """H2: stray draft copies in the cases dir count toward neither total."""
+    cases = tmp_path / "cases"
+    cases.mkdir()
+    body = (REPO_ROOT / "sidecar" / "cases" / "abuse-01.yaml").read_text(
+        encoding="utf-8"
+    )
+    (cases / "abuse-01.yaml").write_text(body, encoding="utf-8")
+    (cases / "draft-copy.yaml").write_text(
+        body + "\nstatus: draft\n",
+        encoding="utf-8",
+    )
+    loaded, total = suite_counts(cases)
+    assert (loaded, total) == (1, 1)
+
+
+def test_readiness_malformed_url_never_reachable():
+    """H2: a gateway URL with no host probes False instead of raising."""
+    assert gateway_reachable("not-a-url") is False
+    assert gateway_reachable("") is False
+
+
+def test_readiness_writes_nothing(tmp_path, monkeypatch):
+    """H2: the check never starts an engagement — no state files appear."""
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    monkeypatch.setenv("OMEGA_PRIME_SIDECAR_REPORTS_DIR", str(reports))
+    artifact = _write_artifact(tmp_path)
+    check_readiness(
+        str(artifact),
+        END - timedelta(days=30),
+        gateway_url=f"http://127.0.0.1:{_closed_port()}",
+    )
+    assert list(reports.iterdir()) == []
+
+
+def test_readiness_cli_json_and_exit_codes(tmp_path, capsys):
+    """H2 CLI: JSON payload with five keys; 0 when ready, 3 otherwise."""
+    artifact = _write_artifact(tmp_path)
+    now = (END - timedelta(days=30)).isoformat()
+    srv = _open_listener()
+    try:
+        port = srv.getsockname()[1]
+        rc = main(
+            [
+                "readiness",
+                "--artifact",
+                str(artifact),
+                "--now",
+                now,
+                "--gateway-url",
+                f"http://127.0.0.1:{port}",
+            ]
+        )
+    finally:
+        srv.close()
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["roe_state"] == "IDLE"
+    assert payload["ready_for_live"] is True
+
+    rc = main(
+        [
+            "readiness",
+            "--artifact",
+            str(artifact),
+            "--now",
+            now,
+            "--gateway-url",
+            f"http://127.0.0.1:{_closed_port()}",
+        ]
+    )
+    assert rc == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready_for_live"] is False
+
+    rc = main(
+        [
+            "readiness",
+            "--artifact",
+            str(tmp_path / "absent.json"),
+            "--gateway-url",
+            f"http://127.0.0.1:{_closed_port()}",
+        ]
+    )
+    assert rc == 3
+    assert json.loads(capsys.readouterr().out)["roe_state"] == "BLOCKED"

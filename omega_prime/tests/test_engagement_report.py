@@ -595,3 +595,283 @@ def test_severity_timeline_input_order_independent(tmp_path):
     assert first.returncode == 0, first.stderr
     assert second.returncode == 0, second.stderr
     assert first.stdout == second.stdout
+
+
+def _report_module():
+    """The real report script loaded as a module (compare helpers)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "engagement_report_compare_under_test", str(SCRIPT)
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_compare_renders_week_over_week_section(tmp_path):
+    """H6 happy: --compare appends current-vs-previous deltas with arrows."""
+    previous_dir = tmp_path / "previous"
+    previous_dir.mkdir()
+    seed_transitions(previous_dir, cycle(T1))
+    seed_last_run(previous_dir)
+    seed_findings(previous_dir, [finding_row("abuse-01", "resp-a", T1)])
+    first = run_script("--reports-dir", str(previous_dir), "--since", T0)
+    assert first.returncode == 0, first.stderr
+    assert "## Week-over-week comparison" not in first.stdout
+    baseline_path = tmp_path / "baseline.md"
+    baseline_path.write_text(first.stdout, encoding="utf-8")
+
+    current_dir = tmp_path / "current"
+    current_dir.mkdir()
+    seed_transitions(current_dir, cycle(T1) + cycle(T2))
+    seed_last_run(current_dir, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(
+        current_dir,
+        [
+            finding_row("abuse-01", "resp-a", T1),
+            finding_row("jailbreak-01", "resp-j", T2),
+        ],
+    )
+    second = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--compare",
+        str(baseline_path),
+    )
+    assert second.returncode == 0, second.stderr
+    body = section_lines(second.stdout, "## Week-over-week comparison")
+    assert body, "comparison section must render"
+    text = "\n".join(body)
+    assert "- baseline: baseline.md" in text
+    assert "| runs | 2 | 1 | +1 ↑ |" in text
+    # One class now fails: the pass-rate delta points down.
+    assert "| pass rate | " in text and " ↓ |" in text
+    assert "| findings new | " in text
+    assert "| findings rescinded | " in text
+
+
+def test_compare_is_deterministic(tmp_path):
+    """H6 determinism: same inputs render byte-identical comparison runs."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    baseline_path = tmp_path / "baseline.md"
+    baseline_path.write_text(
+        run_script("--reports-dir", str(fixture), "--since", T0).stdout,
+        encoding="utf-8",
+    )
+    first = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--compare",
+        str(baseline_path),
+    )
+    second = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--compare",
+        str(baseline_path),
+    )
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_compare_missing_file_exits_1(tmp_path):
+    """H6 edge: an unreadable --compare path fails closed with error:."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--compare",
+        str(tmp_path / "absent.md"),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_parse_previous_metrics_and_render_comparison_units():
+    """H6 units: metric parsing (missing ⇒ 0) and delta/arrow rendering."""
+    module = _report_module()
+    assert module.parse_previous_metrics("# Engagement report\n") == {
+        "runs": 0,
+        "pass_pct": 0,
+        "gaps": 0,
+        "new": 0,
+        "rescinded": 0,
+    }
+    text = (
+        "# Engagement report\n"
+        "\n"
+        "## Runs summary\n"
+        "\n"
+        "- runs in window: 3\n"
+        "\n"
+        "## Per-technique pass rates\n"
+        "\n"
+        "| case_id | result |\n"
+        "| --- | --- |\n"
+        "| a-01 | 1/1 (100.0%) |\n"
+        "| b-01 | 0/1 (0.0%) |\n"
+        "\n"
+        "## Detection gaps\n"
+        "\n"
+        "- 'a-01' never detected\n"
+        "- 'b-01' mapping invalid\n"
+        "\n"
+        "## Findings deltas\n"
+        "\n"
+        "- new: 2, rescinded: 1\n"
+    )
+    assert module.parse_previous_metrics(text) == {
+        "runs": 3,
+        "pass_pct": 50,
+        "gaps": 2,
+        "new": 2,
+        "rescinded": 1,
+    }
+    lines = module.render_comparison(
+        current={"runs": 3, "pass_pct": 50, "gaps": 2, "new": 2, "rescinded": 1},
+        previous={"runs": 3, "pass_pct": 100, "gaps": 0, "new": 1, "rescinded": 1},
+        baseline_label="prev.md",
+    )
+    text = "\n".join(lines)
+    assert lines[0] == "## Week-over-week comparison"
+    assert "- baseline: prev.md" in text
+    assert "| runs | 3 | 3 | +0 → |" in text
+    assert "| pass rate | 50% | 100% | -50pp ↓ |" in text
+    assert "| gaps | 2 | 0 | +2 ↑ |" in text
+    assert "| findings new | 2 | 1 | +1 ↑ |" in text
+    assert "| findings rescinded | 1 | 1 | +0 → |" in text
+
+
+# Coverage drill-down (batch-04 Feature H4) ------------------------------------
+
+
+def _drill_fixture(directory: Path) -> None:
+    """Two classes of findings plus one run of history."""
+    directory.mkdir(parents=True, exist_ok=True)
+    seed_transitions(directory, cycle(T1) + cycle(T2))
+    seed_last_run(directory)
+    seed_findings(
+        directory,
+        [
+            {
+                **finding_row("abuse-01", "resp-a", T2),
+                "class": "abuse",
+                "severity": "high",
+                "observed_detection": "no-detection",
+                "verdict": "miss",
+            },
+            {
+                **finding_row("abuse-02", "resp-b", T1),
+                "class": "abuse",
+                "severity": "low",
+                "observed_detection": "x",
+                "verdict": "fail",
+            },
+            {
+                **finding_row("jailbreak-01", "resp-j", T1),
+                "class": "jailbreak",
+                "severity": "critical",
+                "observed_detection": "y",
+                "verdict": "fail",
+            },
+        ],
+    )
+
+
+def test_drill_down_renders_class_table_after_matrix(tmp_path):
+    """H4 happy: detail rows for the class only, between matrix and gaps."""
+    fixture = tmp_path / "reports"
+    _drill_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--drill-down", "abuse"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    lines = proc.stdout.splitlines()
+    matrix_at = lines.index("## Coverage matrix")
+    drill_at = lines.index("## Coverage drill-down: abuse")
+    gaps_at = lines.index("## Detection gaps")
+    assert matrix_at < drill_at < gaps_at
+    body = section_lines(proc.stdout, "## Coverage drill-down: abuse")
+    assert body[1] == (
+        "| dedupe_hash | severity | observed_detection | timestamp | verdict |"
+    )
+    rows = [line for line in body if line.startswith("| ")]
+    assert len(rows) == 4  # header + separator + 2 findings
+    assert any("high" in line and "miss" in line for line in rows)
+    assert any("low" in line and "fail" in line for line in rows)
+    assert not any("jailbreak-01" in line for line in rows)
+    assert not any("critical" in line for line in rows)
+    digests = [line.split("|")[1].strip() for line in rows[2:]]
+    assert digests == sorted(digests)
+
+
+def test_drill_down_empty_class_reports_no_findings(tmp_path):
+    """H4 edge: a class with no findings renders the empty line."""
+    fixture = tmp_path / "reports"
+    _drill_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--drill-down", "cost-abuse"
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = section_lines(proc.stdout, "## Coverage drill-down: cost-abuse")
+    assert "- no findings in class cost-abuse" in body
+
+
+def test_drill_down_input_order_independent(tmp_path):
+    """H4 determinism: shuffled file order renders byte-identical."""
+    rows = [
+        {**finding_row("abuse-01", "resp-a", T2), "class": "abuse"},
+        {**finding_row("abuse-02", "resp-b", T1), "class": "abuse"},
+        {**finding_row("jailbreak-01", "resp-j", T1), "class": "jailbreak"},
+    ]
+    first_dir = tmp_path / "first" / "reports"
+    first_dir.mkdir(parents=True)
+    seed_transitions(first_dir, cycle(T1))
+    seed_last_run(first_dir)
+    seed_findings(first_dir, rows)
+    second_dir = tmp_path / "second" / "reports"
+    second_dir.mkdir(parents=True)
+    seed_transitions(second_dir, cycle(T1))
+    seed_last_run(second_dir)
+    seed_findings(second_dir, list(reversed(rows)))
+
+    first = run_script(
+        "--reports-dir", str(first_dir), "--since", T0, "--drill-down", "abuse"
+    )
+    second = run_script(
+        "--reports-dir", str(second_dir), "--since", T0, "--drill-down", "abuse"
+    )
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_no_drill_down_flag_renders_no_section(tmp_path):
+    """H4 regression: without --drill-down the report has no new section."""
+    fixture = tmp_path / "reports"
+    _drill_fixture(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "## Coverage drill-down" not in proc.stdout
