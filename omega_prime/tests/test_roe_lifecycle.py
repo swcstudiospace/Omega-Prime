@@ -11,6 +11,7 @@ import json
 import socket
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -738,3 +739,97 @@ def test_heartbeat_renewal_fail_closed(tmp_path, fresh_renewals):
     ran = tick_heartbeats(store, 1000, lambda s, p: "ran", roe_now=END)
     assert ran[0]["last_result"] == "ran"
     assert "roe_renewal_digest" not in ran[0]
+
+
+# I11 Graph-delivered renewal reminders ----------------------------------------
+
+
+class _FakeGraphRunner:
+    """Fake GhRunner answering the token fetch + chatMessage POSTs."""
+
+    def __init__(self, fail_token=False):
+        self.calls: list = []
+        self.token = "fake-access-token"
+        self.fail_token = fail_token
+
+    def __call__(self, argv, data):
+        self.calls.append((list(argv), dict(data)))
+        if argv[2].startswith("https://login.microsoftonline.com/"):
+            if self.fail_token:
+                return SimpleNamespace(returncode=1, stdout="", stderr="denied")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"access_token": self.token, "expires_in": 3600}),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+
+_GRAPH_CREDS = {
+    "tenant_id": "tenant-123",
+    "client_id": "client-123",
+    "client_secret": "secret-123",
+    "team_id": "team-123",
+    "channel_id": "channel-123",
+}
+
+
+def test_heartbeat_renewal_graph_delivers_and_digests(fresh_renewals):
+    """I11: a graph-configured job posts each reminder and still digests."""
+    fake = _FakeGraphRunner()
+    job = {
+        "context": {"roe_artifact": _renewal_document(2), "graph": dict(_GRAPH_CREDS)}
+    }
+    entries = heartbeat_roe_renewals(job, now=END, runner=fake)
+    assert [e["threshold"] for e in entries] == ["14d", "7d", "3d"]
+    assert len(fake.calls) == 4  # one token fetch + three message POSTs
+    assert fake.calls[0][0][2].startswith("https://login.microsoftonline.com/")
+    contents = []
+    for argv, data in fake.calls[1:]:
+        assert argv[2].startswith("https://graph.microsoft.com/v1.0/teams/")
+        assert f"Authorization: Bearer {fake.token}" in argv
+        assert data["body"]["contentType"] == "text"
+        contents.append(data["body"]["content"])
+    assert all("g11-operator" in content for content in contents)
+    for label in ("14d", "7d", "3d"):
+        assert any(label in content for content in contents)
+
+
+def test_heartbeat_renewal_graph_absent_stays_digest_only(fresh_renewals):
+    """I11: no graph config means digest-only; the runner is untouched."""
+    fake = _FakeGraphRunner()
+    entries = heartbeat_roe_renewals(
+        {"context": {"roe_artifact": _renewal_document(2)}}, now=END, runner=fake
+    )
+    assert [e["threshold"] for e in entries] == ["14d", "7d", "3d"]
+    assert fake.calls == []
+
+
+def test_heartbeat_renewal_graph_incomplete_stays_digest_only(fresh_renewals):
+    """I11: a partial graph mapping never delivers and never raises."""
+    creds = dict(_GRAPH_CREDS)
+    del creds["client_secret"]
+    fake = _FakeGraphRunner()
+    entries = heartbeat_roe_renewals(
+        {"context": {"roe_artifact": _renewal_document(2), "graph": creds}},
+        now=END,
+        runner=fake,
+    )
+    assert [e["threshold"] for e in entries] == ["14d", "7d", "3d"]
+    assert fake.calls == []
+
+
+def test_heartbeat_renewal_graph_failure_still_digests(fresh_renewals):
+    """I11: a delivery failure still returns the digest and never raises."""
+    fake = _FakeGraphRunner(fail_token=True)
+    entries = heartbeat_roe_renewals(
+        {
+            "context": {
+                "roe_artifact": _renewal_document(2),
+                "graph": dict(_GRAPH_CREDS),
+            }
+        },
+        now=END,
+        runner=fake,
+    )
+    assert [e["threshold"] for e in entries] == ["14d", "7d", "3d"]

@@ -441,6 +441,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--audit-only",
+        dest="audit_only",
+        action="store_true",
+        help=(
+            "Audit only: run the npm audit, delta report, and "
+            "--semver-check classification for the new pin and print the "
+            "report to stdout without changing any file (no lockfile "
+            "rewrite, no package.json bump even with --bump-commit, no "
+            "commit, no PR; cannot be combined with --open-pr)."
+        ),
+    )
+    parser.add_argument(
         "--semver-check",
         dest="semver_check",
         action="store_true",
@@ -505,7 +517,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _confirm_step(
-    step: str, summary: str, *, interactive: bool, dry_run: bool = False
+    step: str,
+    summary: str,
+    *,
+    interactive: bool,
+    dry_run: bool = False,
+    audit_only: bool = False,
 ) -> bool:
     """Y/n gate for ``--interactive`` mode. Returns True to proceed.
 
@@ -515,7 +532,12 @@ def _confirm_step(
     """
     if not interactive:
         return True
-    prefix = "[dry-run] " if dry_run else ""
+    if audit_only:
+        prefix = "[audit-only] "
+    elif dry_run:
+        prefix = "[dry-run] "
+    else:
+        prefix = ""
     print(f"{prefix}pin-bump confirm [{step}]: {summary}")
     try:
         is_tty = sys.stdin.isatty() if hasattr(sys.stdin, "isatty") else False
@@ -748,12 +770,26 @@ def bump(
     open_pr: bool = False,
     json_mode: bool = False,
     dry_run: bool = False,
+    audit_only: bool = False,
     interactive: bool = False,
 ) -> int:
     """Run the pin-bump runbook against ``root``. Returns the exit code."""
     if semver_check and skip_audit:
         print(
             "pin-bump usage error: --semver-check needs audit data (drop --skip-audit)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if audit_only and open_pr:
+        print(
+            "pin-bump usage error: --audit-only never mutates, so it cannot "
+            "be combined with --open-pr",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if audit_only and skip_audit:
+        print(
+            "pin-bump usage error: --audit-only needs audit data (drop --skip-audit)",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -850,6 +886,237 @@ def bump(
                 f"pin-bump auto-detect: upstream probe inconclusive "
                 f"({note}); proceeding with bump"
             )
+
+    # --audit-only: run the audit chain only, mutate nothing. The new
+    # pin is never checked out (the current checkout in redteam/ is
+    # audited instead); the delta report plus the --semver-check
+    # classification print to stdout instead of report.md. No git
+    # fetch/checkout/add, no re-vendor copy, no pin rewrite, no
+    # package.json bump (even with --bump-commit), no commit, no PR
+    # branch is ever performed below. Exit codes match the normal run
+    # (0 unless the verdict is regressed), with no side effects either
+    # way. Composes with --dry-run: this branch runs first and both
+    # are non-mutating, so the output is identical either way.
+    if audit_only:
+        if not redteam_dir.is_dir():
+            return degraded(
+                "submodule unreachable: redteam/ is missing "
+                "(run git submodule update --init redteam)"
+            )
+        try:
+            audit_vendor_text = (root / "VENDOR.md").read_text(encoding="utf-8")
+        except OSError:
+            audit_vendor_text = ""
+        audit_section = _vendor_section(audit_vendor_text)
+        audit_old_pin = (
+            provenance.parse_vendor_pin(audit_section)
+            if audit_section is not None
+            else None
+        )
+        try:
+            audit_node = run(["node", "--version"], cwd=root)
+        except OSError:
+            audit_node = None
+        if audit_node is None or audit_node.returncode != 0:
+            return degraded("node is absent (node --version failed)")
+        print(
+            "[audit-only] note: auditing the current checkout in "
+            f"{redteam_dir} (the new pin is never checked out)"
+        )
+        try:
+            audit_proc = run(
+                [
+                    "npm",
+                    "audit",
+                    "--omit=dev",
+                    "--audit-level=high",
+                    "--json",
+                ],
+                cwd=redteam_dir,
+            )
+        except OSError as exc:
+            return degraded(f"npm is absent ({exc})")
+        try:
+            audit_new_doc = json.loads(audit_proc.stdout)
+        except ValueError as exc:
+            print(
+                f"[audit-only] pin-bump FAILED: cannot parse npm audit output ({exc})"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        try:
+            audit_triage_mod = _load_script("redteam-audit-triage.py")
+        except (OSError, RuntimeError) as exc:
+            print(
+                f"[audit-only] pin-bump FAILED: cannot load audit triage helper ({exc})"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        audit_findings, audit_triage_error = audit_triage_mod.triage(audit_new_doc)
+        if audit_triage_error is not None:
+            print(
+                "[audit-only] pin-bump FAILED: audit triage refused "
+                f"output: {audit_triage_error}"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        audit_untriaged = [
+            finding
+            for finding in audit_findings
+            if finding[0] not in audit_triage_mod.TRIAGED
+        ]
+        if audit_untriaged:
+            print(
+                "[audit-only] pin-bump FAILED: untriaged high/critical "
+                "advisories at new pin:"
+            )
+            for key, severity, name in audit_untriaged:
+                print(f"[audit-only]   {severity} {name}: {key}")
+            return finish(EXIT_BUMP_FAILED)
+        print("[audit-only] audit triage green (no untriaged high/critical)")
+        if not _confirm_step(
+            "audit verdict",
+            f"audit triage green at {sha[:7]} "
+            f"({len(audit_findings)} findings, 0 untriaged high/critical)",
+            interactive=interactive,
+            audit_only=True,
+        ):
+            print("[audit-only] pin-bump FAILED: operator declined at audit verdict")
+            return finish(EXIT_BUMP_FAILED)
+
+        audit_old_path = (
+            Path(old_audit) if old_audit else _default_old_audit(root, audit_old_pin)
+        )
+        if audit_old_path is None:
+            return usage(
+                "no saved audit artifact for the pre-bump pin; pass --old-audit <path>"
+            )
+        if old_audit and not audit_old_path.is_file():
+            return usage(f"--old-audit not found: {old_audit}")
+        try:
+            audit_old_doc = json.loads(audit_old_path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            print(
+                "[audit-only] pin-bump FAILED: cannot read old audit "
+                f"{audit_old_path} ({exc})"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        except ValueError as exc:
+            print(
+                "[audit-only] pin-bump FAILED: cannot parse old audit "
+                f"{audit_old_path} ({exc})"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        try:
+            audit_delta_mod = _load_script("redteam-audit-delta.py")
+        except (OSError, RuntimeError) as exc:
+            print(
+                f"[audit-only] pin-bump FAILED: cannot load audit delta helper ({exc})"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        audit_old_findings, audit_old_packages, audit_old_error = (
+            audit_delta_mod.parse_input(audit_old_doc)
+        )
+        if audit_old_error is not None:
+            print(
+                f"[audit-only] pin-bump FAILED: old audit unusable: {audit_old_error}"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        audit_new_findings, audit_new_packages, audit_new_error = (
+            audit_delta_mod.parse_input(audit_new_doc)
+        )
+        if audit_new_error is not None:
+            print(
+                f"[audit-only] pin-bump FAILED: new audit unusable: {audit_new_error}"
+            )
+            return finish(EXIT_BUMP_FAILED)
+        (
+            audit_new_keys,
+            audit_fixed,
+            audit_rescinded,
+            audit_drift,
+            verdict,
+        ) = audit_delta_mod.compute_delta(
+            audit_old_findings, audit_new_findings, audit_new_packages
+        )
+        audit_semver_rows: list[tuple[str, str, str, str, str]] = []
+        if semver_check:
+            audit_semver_rows = classify_semver_fixes(
+                audit_old_findings,
+                audit_old_packages,
+                audit_new_packages,
+                audit_fixed,
+            )
+        audit_report = audit_delta_mod.render_report(
+            str(audit_old_path),
+            "new-pin npm audit",
+            audit_old_findings,
+            audit_new_findings,
+            audit_new_keys,
+            audit_fixed,
+            audit_rescinded,
+            audit_drift,
+            verdict,
+        )
+        if semver_check:
+            audit_report += "\n" + render_semver_section(audit_semver_rows)
+        print(f"[audit-only] audit verdict: {verdict} (report not written)")
+        print(audit_report)
+        if semver_check:
+            for key, package, old_spec, new_spec, label in audit_semver_rows:
+                print(
+                    f"[audit-only] semver {label}: `{key}` "
+                    f"(package `{package}`): {old_spec or '?'} -> "
+                    f"{new_spec if label != 'removed' else 'gone'}"
+                )
+            if any(row[4] == "major" for row in audit_semver_rows):
+                print(
+                    "[audit-only] WARNING: a fix requires a major version "
+                    "bump (outside the declared range)"
+                )
+        if bump_commit:
+            audit_bump_reason = _bump_commit_gate(
+                semver_check=semver_check,
+                verdict=verdict,
+                rows=audit_semver_rows if semver_check else [],
+            )
+            if audit_bump_reason is not None:
+                print(
+                    "[audit-only] pin-bump WARNING: --bump-commit skipped "
+                    f"({audit_bump_reason})"
+                )
+            else:
+                audit_pkg_path = redteam_dir / "package.json"
+                _, audit_current, audit_error = _read_package_text(audit_pkg_path)
+                if audit_error is not None:
+                    print(
+                        "[audit-only] pin-bump WARNING: --bump-commit skipped "
+                        f"({audit_error})"
+                    )
+                else:
+                    assert audit_current is not None
+                    audit_new_version = _bump_package_version(
+                        audit_current, _bump_level_for_rows(audit_semver_rows)
+                    )
+                    if audit_new_version is None:
+                        print(
+                            "[audit-only] pin-bump WARNING: --bump-commit skipped "
+                            f"(unparseable version {audit_current!r} in {audit_pkg_path})"
+                        )
+                    else:
+                        print(
+                            f"[audit-only] would bump version {audit_current} -> "
+                            f"{audit_new_version} ({audit_pkg_path}; no files changed)"
+                        )
+        if not _confirm_step(
+            "delta verdict",
+            f"audit delta verdict: {verdict} (report not written)",
+            interactive=interactive,
+            audit_only=True,
+        ):
+            print("[audit-only] pin-bump FAILED: operator declined at delta verdict")
+            return finish(EXIT_BUMP_FAILED)
+        if verdict == "regressed":
+            return finish(EXIT_BUMP_FAILED)
+        print(f"[audit-only] audit of {sha[:7]} complete: {verdict} (no files changed)")
+        return finish(EXIT_OK)
 
     # --dry-run: run every verification step, mutate nothing. Each
     # would-be step is printed with a [dry-run] prefix; failures print
@@ -1447,7 +1714,7 @@ def bump(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--dry-run] [--open-pr] [--json] [--interactive]``."""
+    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--dry-run] [--audit-only] [--open-pr] [--json] [--interactive]``."""
     args = build_parser().parse_args(argv)
     root = Path(args.root) if args.root is not None else REPO_ROOT
     return bump(
@@ -1461,6 +1728,7 @@ def main(argv: list[str] | None = None) -> int:
         open_pr=args.open_pr,
         json_mode=args.json_mode,
         dry_run=args.dry_run,
+        audit_only=args.audit_only,
         interactive=args.interactive,
     )
 

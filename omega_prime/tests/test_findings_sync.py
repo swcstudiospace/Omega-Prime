@@ -19,6 +19,7 @@ from omega_prime.grokbot.findings_sync import (
     NO_TEAMS_WEBHOOK_MESSAGE,
     GhApiError,
     GhNotFoundError,
+    deliver_reminders_graph,
     graph_message,
     issue_body,
     issue_title,
@@ -620,12 +621,38 @@ def test_slack_color_mapping_per_spec():
     assert slack_color(None) == "#808080"
 
 
-def test_slack_message_hash_in_text_and_color(tmp_path):
+def test_slack_message_block_kit_layout(tmp_path):
     row = record_finding(directory=tmp_path, **_finding(severity="critical"))
     message = slack_message(row)
+    # Fallback text keeps the dedupe hash (idempotency contract).
     assert row["dedupe_hash"] in message["text"]
-    assert message["attachments"][0]["color"] == "danger"
-    assert row["dedupe_hash"] in message["attachments"][0]["text"]
+    assert issue_title(row) in message["text"]
+    header, section, context = message["blocks"]
+    assert header["type"] == "header"
+    assert header["text"]["type"] == "plain_text"
+    assert issue_title(row) in header["text"]["text"]
+    assert section["type"] == "section"
+    assert section["text"]["type"] == "mrkdwn"
+    details = section["text"]["text"]
+    for field in ("critical", "abuse-01", "prompt_injection", row["dedupe_hash"]):
+        assert field in details
+    assert context["type"] == "context"
+    context_text = context["elements"][0]["text"]
+    assert context["elements"][0]["type"] == "mrkdwn"
+    assert row["dedupe_hash"] in context_text
+    assert str(row.get("last_seen", "")) in context_text
+
+
+def test_slack_message_fixed_fields_only(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(response="do anything now"))
+    row["raw_response"] = "do anything now"
+    assert "do anything now" not in json.dumps(slack_message(row))
+
+
+def test_slack_message_header_truncates_long_titles(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(case_id="abuse-" + "x" * 300))
+    header_text = slack_message(row)["blocks"][0]["text"]["text"]
+    assert len(header_text) <= 150
 
 
 def test_slack_happy_two_findings_two_posts(tmp_path):
@@ -636,6 +663,21 @@ def test_slack_happy_two_findings_two_posts(tmp_path):
     assert all(call[0][:2] == ["gh", "api"] for call in fake.calls)
     assert all(WEBHOOK in call[0] for call in fake.calls)
     assert all("dedupe_hash: " in call[1]["text"] for call in fake.calls)
+    # Block Kit rides as -f blocks=<json>; the legacy attachment field is gone.
+    assert all(any(arg.startswith("blocks=") for arg in call[0]) for call in fake.calls)
+    assert all(
+        not any(arg.startswith("attachments=") for arg in call[0])
+        for call in fake.calls
+    )
+    for _argv, data in fake.calls:
+        header, section, context = data["blocks"]
+        assert (header["type"], section["type"], context["type"]) == (
+            "header",
+            "section",
+            "context",
+        )
+        assert section["text"]["type"] == "mrkdwn"
+        assert "dedupe_hash: " in context["elements"][0]["text"]
     assert len(result["pushed"]) == 2
     assert result["skipped"] == []
     rows = load_findings(tmp_path)
@@ -743,6 +785,20 @@ def test_cli_slack_tracker_from_config_without_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(findings_sync, "_default_runner", fake)
     assert main(["--reports-dir", str(tmp_path)]) == 0
     assert len(fake.calls) == 2
+
+
+def test_cli_slack_mode_alias_posts_blocks(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _slack_config(tracker="github"),
+    )
+    fake = FakeSlack()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--mode", "slack", "--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+    assert all("blocks" in call[1] for call in fake.calls)
+    assert "pushed" in capsys.readouterr().out
 
 
 def test_cli_slack_missing_webhook_exits_two(tmp_path, monkeypatch, capsys):
@@ -1112,6 +1168,7 @@ def test_tick_teams_with_repo_posts_action(tmp_path):
 
 # Graph API mode (G8) ----------------------------------------------------------
 
+
 class _GraphCreds(TypedDict):
     tenant_id: str
     client_id: str
@@ -1391,3 +1448,108 @@ def test_cli_graph_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
     assert "would push" in capsys.readouterr().out
     assert fake.calls == []
     assert findings_path(tmp_path).read_bytes() == before
+
+
+# Graph-delivered RoE renewal reminders (I11) ----------------------------------
+
+
+def _reminder(threshold="7d", artifact_id="g11-operator|until", days_remaining=6.5):
+    return {
+        "artifact_id": artifact_id,
+        "threshold": threshold,
+        "threshold_days": 7.0,
+        "days_remaining": days_remaining,
+        "effective_until": "2026-06-07T12:00:00+00:00",
+        "detail": (
+            f"RoE grant {artifact_id!r} expires in {days_remaining:.1f}d "
+            f"(renewal threshold {threshold}) — re-sign to renew"
+        ),
+    }
+
+
+def test_deliver_reminders_graph_posts_identity_text():
+    fake = FakeGraph()
+    result = deliver_reminders_graph(
+        [_reminder("14d", days_remaining=10.0), _reminder("7d")],
+        runner=fake,
+        **GRAPH_CREDS,
+    )
+    assert [entry["threshold"] for entry in result["posted"]] == ["14d", "7d"]
+    assert all(entry["artifact_id"] for entry in result["posted"])
+    assert result["skipped"] == 0
+    assert result["dry_run"] is False
+    assert len(fake.calls) == 3  # one token fetch + two message POSTs
+    assert fake.calls[0][0][2] == GRAPH_TOKEN_URL
+    for argv, data in fake.calls[1:]:
+        assert argv[:3] == ["gh", "api", GRAPH_MESSAGES_URL]
+        assert f"Authorization: Bearer {fake.token}" in argv
+        assert data["team_id"] == GRAPH_CREDS["team_id"]
+        assert data["channel_id"] == GRAPH_CREDS["channel_id"]
+        content = data["body"]["content"]
+        assert data["body"]["contentType"] == "text"
+        assert "g11-operator|until" in content
+        assert "7d" in content or "14d" in content
+        assert "6.5" in content or "10.0" in content
+        assert "re-sign to renew" in content
+
+
+def test_deliver_reminders_graph_blank_field_fail_closed():
+    def _deliver(
+        creds: dict[str, str], runner: findings_sync.GhRunner | None
+    ) -> object:
+        return deliver_reminders_graph(
+            [_reminder()],
+            tenant_id=creds["tenant_id"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"],
+            team_id=creds["team_id"],
+            channel_id=creds["channel_id"],
+            runner=runner,
+        )
+
+    for field in ("tenant_id", "client_id", "client_secret", "team_id", "channel_id"):
+        creds: dict[str, str] = {
+            "tenant_id": GRAPH_CREDS["tenant_id"],
+            "client_id": GRAPH_CREDS["client_id"],
+            "client_secret": GRAPH_CREDS["client_secret"],
+            "team_id": GRAPH_CREDS["team_id"],
+            "channel_id": GRAPH_CREDS["channel_id"],
+        }
+        creds[field] = "   "
+        with pytest.raises(ValueError, match="no graph config configured"):
+            _deliver(creds, FakeGraph())
+
+
+def test_deliver_reminders_graph_empty_calls_no_runner():
+    fake = FakeGraph()
+    assert deliver_reminders_graph([], runner=fake, **GRAPH_CREDS) == {
+        "posted": [],
+        "skipped": 0,
+        "dry_run": False,
+    }
+    assert fake.calls == []
+
+
+def test_deliver_reminders_graph_skips_malformed_entries():
+    fake = FakeGraph()
+    result = deliver_reminders_graph(
+        ["nope", None, 42, _reminder()], runner=fake, **GRAPH_CREDS
+    )
+    assert len(result["posted"]) == 1
+    assert result["skipped"] == 3
+    assert len(fake.calls) == 2  # token fetch + one message POST
+
+
+def test_deliver_reminders_graph_token_failure_raises():
+    with pytest.raises(GhApiError):
+        deliver_reminders_graph(
+            [_reminder()], runner=FakeGraph(fail_token=True), **GRAPH_CREDS
+        )
+
+
+def test_deliver_reminders_graph_post_failure_raises(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    with pytest.raises(GhApiError):
+        deliver_reminders_graph(
+            [_reminder()], runner=FakeGraph(fail_posts=99), **GRAPH_CREDS
+        )

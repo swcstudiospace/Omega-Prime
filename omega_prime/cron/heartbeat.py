@@ -166,7 +166,63 @@ def tick_heartbeats(
 ROE_RENEWAL_KIND = "roe_renewal"
 
 
-def heartbeat_roe_renewals(job: Any, *, now: Any = None) -> list[dict]:
+def _roe_graph_config(job: Any, context: Any) -> dict[str, str] | None:
+    """Complete Graph mapping for RoE renewal delivery, else ``None``.
+
+    Reads ``context["graph"]`` (falling back to ``job["graph"]``); the
+    mapping carries the same five ``GRAPH_FIELDS`` as the findings-sync
+    ``graph`` mapping (``tenant_id``/``client_id``/``client_secret``/
+    ``team_id``/``channel_id``). Anything missing or blank means
+    digest-only (never guess, never raise).
+    """
+    candidate: Any = None
+    if isinstance(context, dict):
+        candidate = context.get("graph")
+    if not isinstance(candidate, dict):
+        candidate = job.get("graph") if isinstance(job, dict) else None
+    if not isinstance(candidate, dict):
+        return None
+    cfg = {
+        key: candidate.get(key, "")
+        for key in (
+            "tenant_id",
+            "client_id",
+            "client_secret",
+            "team_id",
+            "channel_id",
+        )
+    }
+    if all(isinstance(value, str) and value.strip() for value in cfg.values()):
+        return {key: value.strip() for key, value in cfg.items()}
+    return None
+
+
+def _deliver_roe_renewals_graph(
+    job: Any, context: Any, reminders: list[dict], runner: Any
+) -> None:
+    """Deliver renewal reminders via Graph when configured; never raises.
+
+    No graph config (or no reminders) means digest-only, exactly as
+    before. A delivery failure is swallowed — the digest entries are
+    still returned, and per-threshold dedupe stays with
+    :func:`renewal_reminders` (once per ``(artifact_id, threshold)``).
+    """
+    try:
+        if not reminders:
+            return
+        cfg = _roe_graph_config(job, context)
+        if cfg is None:
+            return
+        from omega_prime.grokbot.findings_sync import deliver_reminders_graph
+
+        deliver_reminders_graph(reminders, runner=runner, **cfg)
+    except Exception:
+        return
+
+
+def heartbeat_roe_renewals(
+    job: Any, *, now: Any = None, runner: Any = None
+) -> list[dict]:
     """Digest entries for a heartbeat job's RoE artifact context (G11).
 
     Reads the RoE artifact from ``job["context"]["roe_artifact"]``,
@@ -174,8 +230,14 @@ def heartbeat_roe_renewals(job: Any, *, now: Any = None) -> list[dict]:
     document dict or artifact path — whatever :func:`renewal_reminders`
     accepts). Each newly crossed renewal threshold becomes one
     ``{"kind": ROE_RENEWAL_KIND, "threshold", "detail", ...}`` entry with
-    the threshold in the detail string. Fail-closed: a missing artifact,
-    a malformed window, or any error returns ``[]`` and never raises.
+    the threshold in the detail string. When the job context (or job)
+    also carries a complete ``graph`` mapping, each reminder is
+    additionally delivered to the Teams channel via
+    :func:`deliver_reminders_graph` (``runner`` is the injected
+    ``GhRunner`` seam for hermetic tests; ``None`` uses production
+    delivery). Fail-closed: a missing artifact, a malformed window, an
+    incomplete graph config, a delivery failure, or any other error
+    returns the digest entries (or ``[]``) and never raises.
     """
     try:
         if not isinstance(job, dict):
@@ -191,26 +253,27 @@ def heartbeat_roe_renewals(job: Any, *, now: Any = None) -> list[dict]:
         from omega_prime.grokbot.roe_lifecycle import renewal_reminders
 
         reminders = renewal_reminders(artifact, now=now)
-        entries: list[dict] = []
-        for reminder in reminders:
-            if not isinstance(reminder, dict):
-                continue
-            threshold = reminder.get("threshold", "?")
-            entries.append(
-                {
-                    "kind": ROE_RENEWAL_KIND,
-                    "threshold": threshold,
-                    "detail": reminder.get(
-                        "detail", f"roe renewal ({threshold}) — re-sign to renew"
-                    ),
-                    "artifact_id": reminder.get("artifact_id"),
-                    "days_remaining": reminder.get("days_remaining"),
-                    "effective_until": reminder.get("effective_until"),
-                }
-            )
-        return entries
     except Exception:
         return []
+    entries: list[dict] = []
+    for reminder in reminders:
+        if not isinstance(reminder, dict):
+            continue
+        threshold = reminder.get("threshold", "?")
+        entries.append(
+            {
+                "kind": ROE_RENEWAL_KIND,
+                "threshold": threshold,
+                "detail": reminder.get(
+                    "detail", f"roe renewal ({threshold}) — re-sign to renew"
+                ),
+                "artifact_id": reminder.get("artifact_id"),
+                "days_remaining": reminder.get("days_remaining"),
+                "effective_until": reminder.get("effective_until"),
+            }
+        )
+    _deliver_roe_renewals_graph(job, context, reminders, runner)
+    return entries
 
 
 #: Job kind marker stored on RoE expiry watcher jobs.

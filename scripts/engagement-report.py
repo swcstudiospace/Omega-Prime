@@ -867,8 +867,13 @@ def render_comparison(
     current: dict[str, int],
     previous: dict[str, int],
     baseline_label: str,
+    trend_skipped: bool = False,
 ) -> list[str]:
-    """Week-over-week comparison lines (``current vs previous (Δ)``)."""
+    """Week-over-week comparison lines (``current vs previous (Δ)``).
+
+    When ``trend_skipped`` is true (``--compare`` without ``--trend``),
+    a note records that the trend section was omitted.
+    """
     rows = (
         ("runs", "runs", "", False),
         ("pass rate", "pass_pct", "%", True),
@@ -880,6 +885,10 @@ def render_comparison(
         "## Week-over-week comparison",
         "",
         f"- baseline: {baseline_label}",
+    ]
+    if trend_skipped:
+        lines.append("- trend: skipped (no --trend history provided with --compare)")
+    lines += [
         "",
         "| metric | current | previous | delta |",
         "| --- | --- | --- | --- |",
@@ -1389,6 +1398,131 @@ def _html_table(lines: list[str]) -> str:
     return "<table>\n" + "\n".join(body) + "\n</table>"
 
 
+#: Lowercased header cells identifying the coverage-matrix table in
+#: markdown (the HTML export anchors this table's class cells).
+_COVERAGE_MATRIX_HEADER = ("class", "cases", "runs", "pass rate", "gaps", "verdict")
+
+
+def _split_table_cells(line: str) -> list[str]:
+    """Cell texts of one markdown table line (outer pipes stripped)."""
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _coverage_slug(class_name: str) -> str:
+    """URL-fragment slug for a coverage class (deterministic)."""
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", class_name.strip()).strip("-")
+    return slug or "class"
+
+
+def _is_coverage_matrix_table(lines: list[str]) -> bool:
+    """True when ``lines`` open with the coverage-matrix header row."""
+    if not lines:
+        return False
+    return [cell.lower() for cell in _split_table_cells(lines[0])] == list(
+        _COVERAGE_MATRIX_HEADER
+    )
+
+
+def _parse_coverage_matrix(
+    markdown: str,
+) -> list[tuple[str, int, int, int, int, str]]:
+    """``(class, cases, runs, wins, gaps, verdict)`` coverage-matrix rows.
+
+    Parsed back from the rendered markdown table (wins come from the
+    ``w/r (pct%)`` pass-rate cell) in table order, so the HTML export
+    needs no extra inputs. Unparseable rows are skipped, never fatal.
+    """
+    rows: list[tuple[str, int, int, int, int, str]] = []
+    in_matrix = False
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            if in_matrix:
+                break
+            continue
+        cells = _split_table_cells(stripped)
+        if not in_matrix:
+            if [cell.lower() for cell in cells] == list(_COVERAGE_MATRIX_HEADER):
+                in_matrix = True
+            continue
+        if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            continue
+        if len(cells) != len(_COVERAGE_MATRIX_HEADER):
+            continue
+        try:
+            cases = int(cells[1])
+            runs = int(cells[2])
+            gaps = int(cells[4])
+        except ValueError:
+            continue
+        match = re.match(r"(\d+)\s*/\s*(\d+)", cells[3])
+        if not match:
+            continue
+        rows.append((cells[0], cases, runs, int(match.group(1)), gaps, cells[5]))
+    return rows
+
+
+def _html_coverage_table(lines: list[str]) -> str:
+    """Coverage-matrix table with class cells linking to the drill-down.
+
+    Body rows carry ``coverage-row-<slug>`` ids and their class cell
+    links to the matching ``coverage-<slug>`` drill-down heading. Only
+    internal fragment links are emitted (no external assets).
+    """
+    rows = [_split_table_cells(line) for line in lines]
+    body: list[str] = []
+    data = rows
+    if len(rows) >= 2 and all(
+        re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in rows[1]
+    ):
+        body += ["<thead>", _html_table_row(rows[0], True), "</thead>"]
+        data = rows[2:]
+    if data:
+        rendered: list[str] = []
+        for row in data:
+            if len(row) == len(_COVERAGE_MATRIX_HEADER) and row[0]:
+                slug = _coverage_slug(row[0])
+                first = (
+                    f'<td><a href="#coverage-{slug}">{_html_inline(row[0])}</a></td>'
+                )
+                rest = "".join(f"<td>{_html_inline(cell)}</td>" for cell in row[1:])
+                rendered.append(f'<tr id="coverage-row-{slug}">{first}{rest}</tr>')
+            else:
+                rendered.append(_html_table_row(row, False))
+        body += ["<tbody>"] + rendered + ["</tbody>"]
+    return "<table>\n" + "\n".join(body) + "\n</table>"
+
+
+def _html_coverage_drill_down(
+    rows: list[tuple[str, int, int, int, int, str]],
+) -> str:
+    """Per-class drill-down section after the coverage matrix.
+
+    One anchored ``<h3>`` plus a small metric/value table per class
+    (cases, runs, wins, gaps, verdict) in matrix order. Deterministic;
+    stdlib only, no external assets.
+    """
+    parts = ["<h2>Coverage drill-down</h2>"]
+    for class_name, cases, runs, wins, gaps, verdict in rows:
+        slug = _coverage_slug(class_name)
+        parts.append(f'<h3 id="coverage-{slug}">{_html_inline(class_name)}</h3>')
+        parts.append(
+            "<table>\n<thead>\n"
+            + _html_table_row(["metric", "value"], True)
+            + "\n</thead>\n<tbody>"
+        )
+        for metric, value in (
+            ("cases", str(cases)),
+            ("runs", str(runs)),
+            ("wins", str(wins)),
+            ("gaps", str(gaps)),
+        ):
+            parts.append(f"<tr><td>{metric}</td><td>{value}</td></tr>")
+        parts.append(f"<tr><td>verdict</td><td>{_html_inline(verdict)}</td></tr>")
+        parts.append("</tbody>\n</table>")
+    return "\n".join(parts)
+
+
 def _html_stylesheet() -> str:
     """Inline CSS for the HTML export (severity colors + tables)."""
     rules = [
@@ -1418,9 +1552,13 @@ def render_html_report(markdown: str) -> str:
     pipe tables (second-row ``---`` separator becomes ``<thead>``),
     fenced code blocks, ``-`` bullet lists, inline ```code`` spans, and
     severity/verdict color spans. Everything else becomes ``<p>``.
-    Output carries an inline ``<style>`` block and no external assets.
-    The findings-snapshot ``<!-- ... -->`` marker passes through
-    verbatim. Input-order independent for identical inputs
+    Output carries an inline ``<style>`` block and no external assets
+    (the only ``href`` values emitted are internal ``#coverage-*``
+    fragment links). The findings-snapshot ``<!-- ... -->`` marker
+    passes through verbatim. The coverage-matrix table's class cells
+    link to a per-class drill-down section (one anchored metric/value
+    table per class: cases, runs, wins, gaps, verdict) emitted right
+    after the matrix. Input-order independent for identical inputs
     (byte-identical reruns).
     """
     title = "Engagement report"
@@ -1432,10 +1570,19 @@ def render_html_report(markdown: str) -> str:
     table_buf: list[str] = []
     in_list = False
     in_code = False
+    coverage_detail = _parse_coverage_matrix(markdown)
+    coverage_emitted = False
 
     def flush_table() -> None:
+        nonlocal coverage_emitted
         if table_buf:
-            body.append(_html_table(table_buf))
+            if not coverage_emitted and _is_coverage_matrix_table(table_buf):
+                body.append(_html_coverage_table(table_buf))
+                if coverage_detail:
+                    body.append(_html_coverage_drill_down(coverage_detail))
+                coverage_emitted = True
+            else:
+                body.append(_html_table(table_buf))
             table_buf.clear()
 
     def flush_list() -> None:
@@ -1840,7 +1987,17 @@ def build_report(
     diff_drill_down_path: Path | None = None,
     side_by_side_path: Path | None = None,
 ) -> tuple[str, str, Path]:
-    """Render the report; return ``(markdown, file_name, out_dir)``."""
+    """Render the report; return ``(markdown, file_name, out_dir)``.
+
+    ``--compare`` is the combined mode: besides the week-over-week
+    section it renders the side-by-side comparison and the drill-down
+    diff against the same previous report (equivalent to passing
+    ``--side-by-side`` and ``--diff-drill-down`` with that path), plus
+    the trend section when ``--trend`` history is also provided. Without
+    ``--trend`` the trend is skipped and noted in the comparison
+    section. Explicit ``--side-by-side``/``--diff-drill-down`` paths win
+    over the ``--compare`` fallback.
+    """
     window = _collect_window(reports_dir, since_text)
     window_start = window["window_start"]
     window_end = window["window_end"]
@@ -1899,6 +2056,7 @@ def build_report(
             current=current_metrics,
             previous=parse_previous_metrics(previous_text),
             baseline_label=compare_path.name,
+            trend_skipped=trend_path is None,
         )
     coverage_delta: list[str] | None = None
     if diff_coverage_path is not None:
@@ -1922,27 +2080,40 @@ def build_report(
             findings_counts=counts,
             source_label=trend_path.name,
         )
+    drill_down_source = (
+        diff_drill_down_path if diff_drill_down_path is not None else compare_path
+    )
+    drill_down_flag = (
+        "--diff-drill-down" if diff_drill_down_path is not None else "--compare"
+    )
     drill_down_diff: list[str] | None = None
-    if diff_drill_down_path is not None:
+    if drill_down_source is not None:
         try:
-            drill_text = diff_drill_down_path.read_text(encoding="utf-8")
+            drill_text = drill_down_source.read_text(encoding="utf-8")
         except OSError as exc:
             raise ReportError(
-                f"error: cannot read --diff-drill-down report "
-                f"{diff_drill_down_path} ({exc})"
+                f"error: cannot read {drill_down_flag} report "
+                f"{drill_down_source} ({exc})"
             ) from exc
         drill_down_diff = render_drill_down_diff(
             current=current_findings,
             previous=parse_previous_snapshot(drill_text),
-            baseline_label=diff_drill_down_path.name,
+            baseline_label=drill_down_source.name,
         )
+    side_by_side_source = (
+        side_by_side_path if side_by_side_path is not None else compare_path
+    )
+    side_by_side_flag = (
+        "--side-by-side" if side_by_side_path is not None else "--compare"
+    )
     side_by_side: list[str] | None = None
-    if side_by_side_path is not None:
+    if side_by_side_source is not None:
         try:
-            side_text = side_by_side_path.read_text(encoding="utf-8")
+            side_text = side_by_side_source.read_text(encoding="utf-8")
         except OSError as exc:
             raise ReportError(
-                f"error: cannot read --side-by-side report {side_by_side_path} ({exc})"
+                f"error: cannot read {side_by_side_flag} report "
+                f"{side_by_side_source} ({exc})"
             ) from exc
         previous_snapshot = parse_previous_snapshot(side_text)
         previous_coverage = parse_previous_coverage(side_text)
@@ -1962,7 +2133,7 @@ def build_report(
             ),
             current_findings=len(current_findings),
             previous_findings=len(previous_snapshot),
-            baseline_label=side_by_side_path.name,
+            baseline_label=side_by_side_source.name,
         )
     markdown = render_report(
         window_start=window_start,
@@ -2024,7 +2195,10 @@ def build_report_data(
     byte-identical across reruns on identical inputs. Read-only apart
     from the harness-version lookup; raises :class:`ReportError` on
     unreadable ``--compare``/``--diff-coverage``/``--diff-drill-down``/
-    ``--side-by-side`` inputs.
+    ``--side-by-side`` inputs. Like :func:`build_report`, ``--compare``
+    implies the side-by-side and drill-down-diff objects against the
+    same previous report (explicit flags win), and records a trend note
+    in the comparison object when no ``--trend`` history is provided.
     """
     window = _collect_window(reports_dir, since_text)
     window_start = window["window_start"]
@@ -2093,6 +2267,10 @@ def build_report_data(
                 for key in COMPARISON_METRICS
             ],
         }
+        if trend_path is None:
+            comparison_data["trend_note"] = (
+                "skipped (no --trend history provided with --compare)"
+            )
     delta_data: dict[str, object] | None = None
     if diff_coverage_path is not None:
         try:
@@ -2232,20 +2410,26 @@ def build_report_data(
     }
     if trend_data is not None:
         data["trend"] = trend_data
-    if diff_drill_down_path is not None:
+    drill_down_source = (
+        diff_drill_down_path if diff_drill_down_path is not None else compare_path
+    )
+    drill_down_flag = (
+        "--diff-drill-down" if diff_drill_down_path is not None else "--compare"
+    )
+    if drill_down_source is not None:
         try:
-            drill_text = diff_drill_down_path.read_text(encoding="utf-8")
+            drill_text = drill_down_source.read_text(encoding="utf-8")
         except OSError as exc:
             raise ReportError(
-                f"error: cannot read --diff-drill-down report "
-                f"{diff_drill_down_path} ({exc})"
+                f"error: cannot read {drill_down_flag} report "
+                f"{drill_down_source} ({exc})"
             ) from exc
         drill_previous = parse_previous_snapshot(drill_text)
         drill_rows = drill_down_diff_rows(
             current=current_findings, previous=drill_previous
         )
         data["drill_down_diff"] = {
-            "baseline": diff_drill_down_path.name,
+            "baseline": drill_down_source.name,
             "new_count": sum(1 for _, change, _ in drill_rows if change == "new"),
             "resolved_count": sum(
                 1 for _, change, _ in drill_rows if change == "resolved"
@@ -2255,12 +2439,19 @@ def build_report_data(
                 for digest, change, case_id in drill_rows
             ],
         }
-    if side_by_side_path is not None:
+    side_by_side_source = (
+        side_by_side_path if side_by_side_path is not None else compare_path
+    )
+    side_by_side_flag = (
+        "--side-by-side" if side_by_side_path is not None else "--compare"
+    )
+    if side_by_side_source is not None:
         try:
-            side_text = side_by_side_path.read_text(encoding="utf-8")
+            side_text = side_by_side_source.read_text(encoding="utf-8")
         except OSError as exc:
             raise ReportError(
-                f"error: cannot read --side-by-side report {side_by_side_path} ({exc})"
+                f"error: cannot read {side_by_side_flag} report "
+                f"{side_by_side_source} ({exc})"
             ) from exc
         side_previous_snapshot = parse_previous_snapshot(side_text)
         side_previous_coverage = parse_previous_coverage(side_text)
@@ -2270,7 +2461,7 @@ def build_report_data(
             1 for entry in side_previous_coverage.values() if entry[5] == "covered"
         )
         data["side_by_side"] = {
-            "baseline": side_by_side_path.name,
+            "baseline": side_by_side_source.name,
             "metrics": [
                 {
                     "metric": "runs",
@@ -2410,9 +2601,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--compare",
         default=None,
-        help="previous report markdown to diff against: appends a "
-        "## Week-over-week comparison section (runs, pass rate, gaps, "
-        "findings new/rescinded as current vs previous (Δ) with arrows).",
+        help="combined comparison against a previous report markdown: "
+        "appends the ## Week-over-week comparison section plus the "
+        "## Side-by-side comparison and ## Drill-down diff sections "
+        "against the same file (as if --side-by-side and "
+        "--diff-drill-down were passed with it), and the ## Trend "
+        "section when --trend history is also given (otherwise the "
+        "skipped trend is noted in the comparison section).",
     )
     parser.add_argument(
         "--diff-coverage",

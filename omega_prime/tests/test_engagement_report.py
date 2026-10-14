@@ -2060,7 +2060,9 @@ def test_export_html_writes_self_contained_file(tmp_path):
     assert "<table>" in html and "<thead>" in html
     assert 'class="sev-low"' in html
     assert "<!-- findings-snapshot: " in html
-    assert "src=" not in html and "href=" not in html  # no external assets
+    # No external assets: the only hrefs are internal #coverage-* anchors.
+    assert "src=" not in html and 'href="http' not in html
+    assert 'href="#coverage-abuse"' in html
 
 
 def test_export_html_is_deterministic(tmp_path):
@@ -2160,3 +2162,291 @@ def test_render_html_report_escapes_markup():
     html = module.render_html_report('# T\n\n<a href="x">low</a>\n')
     assert "<a " not in html
     assert "&lt;a href=&quot;x&quot;&gt;" in html
+
+
+# Combined --compare mode (I10) -----------------------------------------------
+
+
+def _compare_seed(previous_dir: Path, current_dir: Path) -> Path:
+    """One-run all-pass baseline; two-run current with one failing class."""
+    previous_dir.mkdir(parents=True, exist_ok=True)
+    seed_transitions(previous_dir, cycle(T1))
+    seed_last_run(previous_dir)
+    seed_findings(previous_dir, [finding_row("abuse-01", "resp-a", T1)])
+    baseline = previous_dir.parent / "baseline-i10.md"
+    baseline.write_text(
+        run_script("--reports-dir", str(previous_dir), "--since", T0).stdout,
+        encoding="utf-8",
+    )
+    current_dir.mkdir(parents=True, exist_ok=True)
+    seed_transitions(current_dir, cycle(T1) + cycle(T2))
+    seed_last_run(current_dir, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(
+        current_dir,
+        [
+            finding_row("abuse-01", "resp-a", T1),
+            finding_row("jailbreak-01", "resp-j", T2),
+        ],
+    )
+    return baseline
+
+
+def test_compare_renders_all_comparison_sections(tmp_path):
+    """I10 happy: --compare alone renders week-over-week, side-by-side,
+    drill-down diff, and the skipped-trend note (no --trend given)."""
+    baseline = _compare_seed(tmp_path / "previous", tmp_path / "current")
+    proc = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--compare",
+        str(baseline),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Week-over-week comparison" in proc.stdout
+    assert "## Side-by-side comparison" in proc.stdout
+    assert "## Drill-down diff" in proc.stdout
+    assert "## Trend" not in proc.stdout
+    compare_body = section_lines(proc.stdout, "## Week-over-week comparison")
+    assert "- baseline: baseline-i10.md" in "\n".join(compare_body)
+    assert (
+        "- trend: skipped (no --trend history provided with --compare)" in compare_body
+    )
+    side_body = section_lines(proc.stdout, "## Side-by-side comparison")
+    assert f"- baseline: {baseline.name}" in "\n".join(side_body)
+    assert "| coverage | 5/6 covered | 6/6 covered |" in "\n".join(side_body)
+    diff_body = section_lines(proc.stdout, "## Drill-down diff")
+    assert f"- baseline: {baseline.name}" in "\n".join(diff_body)
+    assert "- new: 1, resolved: 0" in "\n".join(diff_body)
+
+
+def test_compare_matches_side_by_side_plus_diff_drill_down(tmp_path):
+    """I10 equivalence: the --compare side-by-side/drill-down sections equal
+    passing --side-by-side/--diff-drill-down with the same file."""
+    baseline = _compare_seed(tmp_path / "previous", tmp_path / "current")
+    combined = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--compare",
+        str(baseline),
+    )
+    separate = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--side-by-side",
+        str(baseline),
+        "--diff-drill-down",
+        str(baseline),
+    )
+    assert combined.returncode == 0, combined.stderr
+    assert separate.returncode == 0, separate.stderr
+    for heading in ("## Side-by-side comparison", "## Drill-down diff"):
+        assert section_lines(combined.stdout, heading) == section_lines(
+            separate.stdout, heading
+        )
+    # The separate run has neither the week-over-week section nor the note.
+    assert "## Week-over-week comparison" not in separate.stdout
+    assert "trend: skipped" not in separate.stdout
+
+
+def test_compare_with_trend_renders_trend_without_skip_note(tmp_path):
+    """I10 trend: --compare --trend renders ## Trend and drops the note."""
+    baseline = _compare_seed(tmp_path / "previous", tmp_path / "current")
+    history = tmp_path / "history.ndjson"
+    seed_trend(history, TREND_ROWS)
+    proc = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--compare",
+        str(baseline),
+        "--trend",
+        str(history),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Trend" in proc.stdout
+    assert "trend: skipped" not in proc.stdout
+    trend_body = section_lines(proc.stdout, "## Trend")
+    assert "- source: history.ndjson" in "\n".join(trend_body)
+    assert "## Side-by-side comparison" in proc.stdout
+    assert "## Drill-down diff" in proc.stdout
+
+
+def test_compare_is_deterministic_with_all_sections(tmp_path):
+    """I10 determinism: combined --compare runs are byte-identical."""
+    baseline = _compare_seed(tmp_path / "previous", tmp_path / "current")
+    first = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--compare",
+        str(baseline),
+    )
+    second = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--compare",
+        str(baseline),
+    )
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_render_comparison_trend_skipped_unit():
+    """I10 units: trend_skipped adds the note; default output unchanged."""
+    module = _report_module()
+    plain = module.render_comparison(
+        current={"runs": 2, "pass_pct": 50, "gaps": 1, "new": 1, "rescinded": 0},
+        previous={"runs": 1, "pass_pct": 100, "gaps": 0, "new": 1, "rescinded": 0},
+        baseline_label="prev.md",
+    )
+    assert not any("trend: skipped" in line for line in plain)
+    skipped = module.render_comparison(
+        current={"runs": 2, "pass_pct": 50, "gaps": 1, "new": 1, "rescinded": 0},
+        previous={"runs": 1, "pass_pct": 100, "gaps": 0, "new": 1, "rescinded": 0},
+        baseline_label="prev.md",
+        trend_skipped=True,
+    )
+    assert skipped[0] == "## Week-over-week comparison"
+    assert "- trend: skipped (no --trend history provided with --compare)" in skipped
+    # Same table rows either way; only the note line differs.
+    assert [line for line in skipped if not line.startswith("- trend:")] == plain
+
+
+def test_json_compare_includes_side_by_side_and_drill_down_diff(tmp_path):
+    """I10 JSON: --json --compare gains side_by_side/drill_down_diff objects
+    plus the trend note, without needing the individual flags."""
+    baseline = _compare_seed(tmp_path / "previous", tmp_path / "current")
+    proc = run_script(
+        "--reports-dir",
+        str(tmp_path / "current"),
+        "--since",
+        T0,
+        "--json",
+        "--compare",
+        str(baseline),
+    )
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["comparison"]["baseline"] == baseline.name
+    assert (
+        data["comparison"]["trend_note"]
+        == "skipped (no --trend history provided with --compare)"
+    )
+    assert data["side_by_side"]["baseline"] == baseline.name
+    metrics = {row["metric"]: row for row in data["side_by_side"]["metrics"]}
+    assert (metrics["runs"]["current"], metrics["runs"]["previous"]) == (2, 1)
+    assert data["drill_down_diff"]["baseline"] == baseline.name
+    assert data["drill_down_diff"]["new_count"] == 1
+    assert data["drill_down_diff"]["resolved_count"] == 0
+    assert "trend" not in data
+
+
+# HTML coverage drill-down (I12) ------------------------------------------------
+
+
+def test_export_html_coverage_drill_down(tmp_path):
+    """I12 happy: matrix class cells anchor to per-class drill-down tables."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    out = tmp_path / "report.html"
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(out)
+    )
+    assert proc.returncode == 0, proc.stderr
+    html = out.read_text(encoding="utf-8")
+    # Every matrix row links to its drill-down anchor.
+    for klass in (
+        "abuse",
+        "auth-bypass",
+        "cost-abuse",
+        "jailbreak",
+        "malformed-input",
+        "prompt-injection",
+    ):
+        assert f'href="#coverage-{klass}"' in html
+        assert f'<h3 id="coverage-{klass}">{klass}</h3>' in html
+    assert "<h2>Coverage drill-down</h2>" in html
+    # Drill-down sits after the matrix table in document order.
+    assert html.find("<h2>Coverage drill-down</h2>") > html.find(
+        '<a href="#coverage-abuse"'
+    )
+    # Per-class values: one failing class has 0 wins, 1 gap, gappy verdict.
+    jailbreak = html.split('<h3 id="coverage-jailbreak">')[1].split("<h3")[0]
+    assert "<tr><td>cases</td><td>1</td></tr>" in jailbreak
+    assert "<tr><td>runs</td><td>1</td></tr>" in jailbreak
+    assert "<tr><td>wins</td><td>0</td></tr>" in jailbreak
+    assert "<tr><td>gaps</td><td>1</td></tr>" in jailbreak
+    assert 'class="verdict-gappy"' in jailbreak
+    abuse = html.split('<h3 id="coverage-abuse">')[1].split("<h3")[0]
+    assert "<tr><td>wins</td><td>1</td></tr>" in abuse
+    assert 'class="verdict-covered"' in abuse
+    # Still self-contained: no external assets, only fragment links.
+    assert "src=" not in html and 'href="http' not in html
+
+
+def test_export_html_coverage_drill_down_is_deterministic(tmp_path):
+    """I12 determinism: same inputs export byte-identical drill-down HTML."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    first = tmp_path / "first.html"
+    second = tmp_path / "second.html"
+    proc1 = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(first)
+    )
+    proc2 = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(second)
+    )
+    assert proc1.returncode == 0, proc1.stderr
+    assert proc2.returncode == 0, proc2.stderr
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_render_html_coverage_helpers_units():
+    """I12 units: matrix parsing/slugs, anchored table, drill-down section."""
+    module = _report_module()
+    markdown = (
+        "# Engagement report\n"
+        "\n"
+        "## Coverage matrix\n"
+        "\n"
+        "| class | cases | runs | pass rate | gaps | verdict |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered |\n"
+        "| jailbreak | 1 | 1 | 0/1 (0.0%) | 1 | gappy |\n"
+        "\n"
+        "## Detection gaps\n"
+    )
+    assert module._parse_coverage_matrix(markdown) == [
+        ("abuse", 1, 1, 1, 0, "covered"),
+        ("jailbreak", 1, 1, 0, 1, "gappy"),
+    ]
+    assert module._coverage_slug("auth-bypass") == "auth-bypass"
+    html = module.render_html_report(markdown)
+    assert module.render_html_report(markdown) == html  # deterministic
+    assert '<td><a href="#coverage-abuse">abuse</a></td>' in html
+    assert '<tr id="coverage-row-jailbreak">' in html
+    assert "<h2>Coverage drill-down</h2>" in html
+    assert '<h3 id="coverage-jailbreak">jailbreak</h3>' in html
+    assert "<tr><td>wins</td><td>0</td></tr>" in html
+    # Markdown without a coverage matrix gains no anchors or section.
+    plain = module.render_html_report("# T\n\n| a | b |\n| --- | --- |\n| x | y |\n")
+    assert "Coverage drill-down" not in plain
+    assert "href=" not in plain

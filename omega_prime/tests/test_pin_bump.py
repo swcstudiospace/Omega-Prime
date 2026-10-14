@@ -1328,3 +1328,174 @@ def test_bump_commit_open_pr_notes_version_in_body(tmp_path, capsys):
     commits = [cmd for cmd in run.kinds() if cmd[:2] == ["git", "commit"]]
     assert len(commits) == 1
     assert "Version bump: 1.2.3 -> 1.3.0 (redteam/package.json)." in commits[0][-1]
+
+
+# --audit-only mode (I9) --------------------------------------------------------
+
+
+def test_audit_only_flag_parses():
+    args = pin_bump.build_parser().parse_args(["--to", PIN_NEW, "--audit-only"])
+    assert args.audit_only is True
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.audit_only is False
+
+
+def test_audit_only_improved_prints_report_and_mutates_nothing(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[audit-only] audit verdict: improved" in out
+    assert "Verdict: improved" in out
+    assert "no files changed" in out
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_audit_only_regressed_exits_1_mutates_nothing(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    before = _snapshot(root)
+    run = FakeRun(npm_doc=_audit(("left-pad", "moderate", "GHSA-new-0002")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[audit-only] audit verdict: regressed" in out
+    assert "Verdict: regressed" in out
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_audit_only_untriaged_high_exits_1_mutates_nothing(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(),
+    )
+    before = _snapshot(root)
+    run = FakeRun(npm_doc=_audit(("evil", "high", "GHSA-new-0009")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "GHSA-new-0009" in out
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_audit_only_semver_check_prints_classification(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_versioned_audit(("left-pad", "high", "GHSA-old-0001", "1.2.3")),
+    )
+    before = _snapshot(root)
+    run = FakeRun(
+        npm_doc=_versioned_audit(("left-pad", "moderate", "GHSA-new-0002", "1.4.0"))
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True, semver_check=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[audit-only] semver compatible" in out
+    assert "## Semver check" in out
+    assert "`GHSA-old-0001` (package `left-pad`): 1.2.3 -> 1.4.0" in out
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before
+
+
+def test_audit_only_bump_commit_suppressed_without_mutation(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    pkg = _write_package_json(root)
+    before = _snapshot(root)
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.4.0"))
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        audit_only=True,
+        semver_check=True,
+        bump_commit=True,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[audit-only] would bump version 1.2.3 -> 1.3.0" in out
+    assert "no files changed" in out
+    assert json.loads(pkg.read_text())["version"] == "1.2.3"
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_audit_only_open_pr_exits_2_without_subprocess(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True, open_pr=True)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--open-pr" in err
+    assert run.cmds == []
+
+
+def test_audit_only_skip_audit_exits_2_without_subprocess(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True, skip_audit=True)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--skip-audit" in err
+    assert run.cmds == []
+
+
+def test_audit_only_missing_old_audit_exits_2(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)  # no saved artifact, no --old-audit
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--old-audit" in err
+    assert _snapshot(root) == before
+
+
+def test_audit_only_dry_run_composes_without_mutation(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True, dry_run=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[audit-only] audit verdict: improved" in out
+    assert "Verdict: improved" in out
+    assert not (root / "report.md").exists()
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_audit_only_node_absent_exits_3(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    before = _snapshot(root)
+    run = FakeRun(node_missing=True)
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, audit_only=True)
+    err = capsys.readouterr().err
+    assert rc == 3
+    assert "node" in err
+    assert _snapshot(root) == before

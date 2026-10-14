@@ -64,7 +64,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -334,23 +334,47 @@ def slack_color(severity: Any) -> str:
 
 
 def slack_message(row: Mapping[str, Any]) -> dict[str, Any]:
-    """Slack message for one finding row: text plus one color attachment.
+    """Slack Block Kit message for one finding row.
 
-    The dedupe hash rides in the message text (same idempotency contract
-    as the GitHub/Linear bodies); the attachment carries the fixed
-    fields only, never the raw gateway payload (threat T-79-11).
+    Layout blocks: a ``header`` with the issue title, a ``section``
+    with mrkdwn finding details, and a ``context`` block carrying the
+    dedupe hash and timestamp. The plain-text ``text`` fallback carries
+    the dedupe hash (same idempotency contract as the other modes).
+    Fixed fields only — never the raw gateway payload (threat T-79-11).
     """
     title = issue_title(row)
     digest = str(row.get("dedupe_hash", ""))
+    klass = row.get("class", "") or row.get("klass", "")
+    timestamp = row.get("last_seen", "") or row.get("ts", "")
+    details = (
+        f"*severity:* `{row.get('severity')}`\n"
+        f"*case_id:* `{row.get('case_id')}`\n"
+        f"*class:* `{klass}`\n"
+        f"*observed_detection:* `{row.get('observed_detection')}`\n"
+        f"*verdict:* `{row.get('verdict')}`\n"
+        f"*dedupe_hash:* `{digest}`"
+    )
     text = f"{title}\ndedupe_hash: {digest}"
-    attachments = [
+    blocks = [
         {
-            "color": slack_color(row.get("severity")),
-            "title": title,
-            "text": issue_body(row),
-        }
+            "type": "header",
+            "text": {"type": "plain_text", "text": title[:150], "emoji": True},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": details},
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"dedupe_hash: {digest} | {timestamp}",
+                }
+            ],
+        },
     ]
-    return {"text": text, "attachments": attachments}
+    return {"text": text, "blocks": blocks}
 
 
 def teams_theme_color(severity: Any) -> str:
@@ -700,9 +724,10 @@ def sync_findings_slack(
 
     Same rows and idempotency marking as :func:`sync_findings` (rows
     carrying ``issue_url`` are skipped; the dedupe hash rides in the
-    message text, so a second run pushes nothing); only the transport
-    differs — ``gh api <webhook-url>`` POSTs one severity-colored Slack
-    message per row instead of a GitHub issue. The webhook answers
+    fallback text and context block, so a second run pushes nothing);
+    only the transport differs — ``gh api <webhook-url>`` POSTs one
+    Block Kit message (header + mrkdwn section + context) per row
+    instead of a GitHub issue. The webhook answers
     ``ok`` (no issue URL), so a pushed row is marked with a deterministic
     ``slack:<dedupe_hash>`` ref. Failure semantics mirror
     :func:`sync_findings`: earlier-in-run pushes persist, the failed row
@@ -729,11 +754,11 @@ def sync_findings_slack(
             skipped.append(digest)
             continue
         message = slack_message(row)
-        attachments_json = json.dumps(message["attachments"])
+        blocks_json = json.dumps(message["blocks"])
         payload = {
             "webhook_url": webhook_url,
             "text": message["text"],
-            "attachments": message["attachments"],
+            "blocks": message["blocks"],
         }
         argv = [
             "gh",
@@ -744,7 +769,7 @@ def sync_findings_slack(
             "-f",
             f"text={message['text']}",
             "-f",
-            f"attachments={attachments_json}",
+            f"blocks={blocks_json}",
         ]
 
         if dry_run:
@@ -920,6 +945,65 @@ def _access_token_from_stdout(stdout: Any) -> str:
     return ""
 
 
+def _graph_fetch_token(
+    run: GhRunner,
+    tenant_id: str,
+    client_id: str,
+    client_secret: str,
+) -> str:
+    """Client-credentials token fetch shared by the Graph senders.
+
+    POSTs to the tenant token endpoint through ``run`` (the same
+    ``GhRunner`` seam as the findings syncs) and returns the
+    ``access_token``. The client secret rides only in the token-fetch
+    ``-f`` argv fields — it is never logged, never rendered, and never
+    echoed into the introspection payload. Token failures raise
+    :class:`GhApiError` (or :class:`GhNotFoundError` when ``gh`` is
+    missing).
+    """
+    token_url = _graph_token_url(tenant_id)
+    token_argv = [
+        "gh",
+        "api",
+        token_url,
+        "--method",
+        "POST",
+        "-f",
+        f"client_id={client_id}",
+        "-f",
+        f"client_secret={client_secret}",
+        "-f",
+        f"scope={GRAPH_SCOPE}",
+        "-f",
+        "grant_type=client_credentials",
+    ]
+    token_payload: dict[str, Any] = {
+        "token_url": token_url,
+        "client_id": client_id,
+        "scope": GRAPH_SCOPE,
+        "grant_type": "client_credentials",
+    }
+    try:
+        token_completed = run(token_argv, token_payload)
+    except GhNotFoundError:
+        raise
+    except FindingsSyncError:
+        raise
+    except Exception as exc:
+        raise GhApiError(f"gh runner failed: {exc}") from exc
+    token_returncode = getattr(token_completed, "returncode", 1)
+    if token_returncode != 0:
+        stderr = getattr(token_completed, "stderr", "")
+        raise GhApiError(
+            f"gh api token endpoint exited {token_returncode}: {stderr}",
+            returncode=token_returncode if isinstance(token_returncode, int) else None,
+        )
+    token = _access_token_from_stdout(getattr(token_completed, "stdout", ""))
+    if not token:
+        raise GhApiError("graph token response missing access_token")
+    return token
+
+
 def graph_message(row: Mapping[str, Any], repo: str | None = None) -> dict[str, Any]:
     """Graph ``chatMessage`` for one finding row.
 
@@ -1014,46 +1098,7 @@ def sync_findings_graph(
             pushed.append({"dedupe_hash": digest, "issue_url": ""})
         return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
 
-    token_url = _graph_token_url(tenant_id)
-    token_argv = [
-        "gh",
-        "api",
-        token_url,
-        "--method",
-        "POST",
-        "-f",
-        f"client_id={client_id}",
-        "-f",
-        f"client_secret={client_secret}",
-        "-f",
-        f"scope={GRAPH_SCOPE}",
-        "-f",
-        "grant_type=client_credentials",
-    ]
-    token_payload: dict[str, Any] = {
-        "token_url": token_url,
-        "client_id": client_id,
-        "scope": GRAPH_SCOPE,
-        "grant_type": "client_credentials",
-    }
-    try:
-        token_completed = run(token_argv, token_payload)
-    except GhNotFoundError:
-        raise
-    except FindingsSyncError:
-        raise
-    except Exception as exc:
-        raise GhApiError(f"gh runner failed: {exc}") from exc
-    token_returncode = getattr(token_completed, "returncode", 1)
-    if token_returncode != 0:
-        stderr = getattr(token_completed, "stderr", "")
-        raise GhApiError(
-            f"gh api token endpoint exited {token_returncode}: {stderr}",
-            returncode=token_returncode if isinstance(token_returncode, int) else None,
-        )
-    token = _access_token_from_stdout(getattr(token_completed, "stdout", ""))
-    if not token:
-        raise GhApiError("graph token response missing access_token")
+    token = _graph_fetch_token(run, tenant_id, client_id, client_secret)
 
     messages_url = _graph_messages_url(team_id, channel_id)
     for row in rows:
@@ -1103,6 +1148,126 @@ def sync_findings_graph(
     if dirty and not dry_run:
         _write_rows_atomic(findings_path(reports_dir), rows)
     return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+
+
+def _reminder_graph_message(reminder: Mapping[str, Any]) -> dict[str, Any]:
+    """Graph ``chatMessage`` for one RoE renewal reminder dict.
+
+    The plain-text body carries the ``artifact_id``, ``threshold``, and
+    ``days_remaining`` identity (plus the reminder ``detail`` when
+    present), so the posted message is self-describing. Per-reminder
+    dedupe stays with :func:`renewal_reminders` (once per
+    ``(artifact_id, threshold)``) — this sender posts whatever it is
+    given.
+    """
+    artifact_id = str(reminder.get("artifact_id", "") or "unknown-artifact")
+    threshold = str(reminder.get("threshold", "") or "?")
+    days_raw: Any = reminder.get("days_remaining")
+    if days_raw is None:
+        days_text = "?"
+    else:
+        try:
+            days_text = f"{float(days_raw):.1f}d"
+        except (TypeError, ValueError):
+            days_text = str(days_raw)
+    detail = reminder.get("detail") or (
+        f"RoE grant {artifact_id!r} expires in {days_text} "
+        f"(renewal threshold {threshold}) — re-sign to renew"
+    )
+    content = (
+        f"RoE renewal reminder: grant {artifact_id} "
+        f"(threshold {threshold}, {days_text} remaining)\n{detail}"
+    )
+    return {
+        "subject": f"RoE renewal reminder: {artifact_id} ({threshold})",
+        "body": {"contentType": "text", "content": content},
+    }
+
+
+def deliver_reminders_graph(
+    reminders: Iterable[Any] | None,
+    *,
+    tenant_id: str,
+    client_id: str,
+    client_secret: str,
+    team_id: str,
+    channel_id: str,
+    runner: GhRunner | None = None,
+) -> dict[str, Any]:
+    """Post RoE renewal reminders to a Teams channel via Graph.
+
+    Each reminder dict (as returned by
+    :func:`omega_prime.grokbot.roe_lifecycle.renewal_reminders`) becomes
+    one Graph ``chatMessage`` whose text carries the ``artifact_id``,
+    ``threshold``, and ``days_remaining``. The OAuth2 client-credentials
+    token fetch reuses the :func:`_graph_fetch_token` seam (same argv,
+    same fail-closed errors); each message POST then reuses the
+    webhook-retry transport. Non-dict entries are skipped and counted;
+    with no valid reminders the runner is never called.
+
+    Blank credentials/team/channel raise :class:`ValueError`
+    (fail-closed, never guess). The client secret rides only in the
+    token-fetch ``-f`` argv fields — never logged, never rendered, and
+    never echoed into an introspection payload. A failed POST raises
+    :class:`GhApiError`; earlier-in-run posts are already delivered.
+
+    Returns ``{"posted": [{"artifact_id", "threshold"}], "skipped": int,
+    "dry_run": False}``.
+    """
+    for value in (tenant_id, client_id, client_secret, team_id, channel_id):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(NO_GRAPH_CONFIG_MESSAGE)
+    tenant_id = tenant_id.strip()
+    client_id = client_id.strip()
+    client_secret = client_secret.strip()
+    team_id = team_id.strip()
+    channel_id = channel_id.strip()
+    run = runner if runner is not None else _default_runner
+
+    entries = list(reminders) if reminders else []
+    valid = [entry for entry in entries if isinstance(entry, dict)]
+    skipped = len(entries) - len(valid)
+    posted: list[dict[str, Any]] = []
+    if not valid:
+        return {"posted": posted, "skipped": skipped, "dry_run": False}
+
+    token = _graph_fetch_token(run, tenant_id, client_id, client_secret)
+    messages_url = _graph_messages_url(team_id, channel_id)
+    for reminder in valid:
+        message = _reminder_graph_message(reminder)
+        body_json = json.dumps(message["body"])
+        payload: dict[str, Any] = {
+            "team_id": team_id,
+            "channel_id": channel_id,
+            "subject": message["subject"],
+            "body": message["body"],
+        }
+        argv = [
+            "gh",
+            "api",
+            messages_url,
+            "--method",
+            "POST",
+            "-H",
+            f"Authorization: Bearer {token}",
+            "-f",
+            f"subject={message['subject']}",
+            "-f",
+            f"body={body_json}",
+        ]
+        try:
+            _run_with_webhook_retry(run, argv, payload)
+        except FindingsSyncError:
+            raise
+        except Exception as exc:
+            raise GhApiError(f"gh runner failed: {exc}") from exc
+        posted.append(
+            {
+                "artifact_id": str(reminder.get("artifact_id", "")),
+                "threshold": str(reminder.get("threshold", "")),
+            }
+        )
+    return {"posted": posted, "skipped": skipped, "dry_run": False}
 
 
 def _persist_if_dirty(
@@ -1579,6 +1744,7 @@ __all__ = [
     "GhApiError",
     "GhNotFoundError",
     "GhRunner",
+    "deliver_reminders_graph",
     "graph_message",
     "issue_body",
     "issue_title",
