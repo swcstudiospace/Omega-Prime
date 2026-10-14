@@ -406,6 +406,85 @@ def findings_newest(rows: list[dict[str, object]]) -> datetime | None:
     return newest
 
 
+#: Severity display order for the severity-timeline section (critical
+#: first; unknown severities sort last).
+SEVERITY_ORDER = ("critical", "high", "medium", "low")
+
+
+def _severity_rank(severity: object) -> int:
+    """Zero-based rank of ``severity`` in SEVERITY_ORDER (unknowns last)."""
+    key = severity.lower() if isinstance(severity, str) else ""
+    try:
+        return SEVERITY_ORDER.index(key)
+    except ValueError:
+        return len(SEVERITY_ORDER)
+
+
+def severity_timeline_rows(
+    findings: list[dict[str, object]],
+    window_start: datetime,
+    window_end: datetime,
+) -> list[tuple[str, str, str, str]]:
+    """In-window findings as ``(hash12, severity, class, timestamp)`` rows.
+
+    Membership and the displayed timestamp use ``last_seen`` (falling back
+    to ``ts``); rows with neither parseable timestamp are skipped. Rows
+    missing ``dedupe_hash`` reuse the ``finding_hash(case_id, response)``
+    fallback; rows with neither hash nor case_id are skipped. Sort is
+    ``(severity rank, timestamp, hash, case_id, class)`` — total and
+    input-order independent, so reruns are byte-identical.
+    """
+    staged: list[tuple[int, str, str, str, str, str]] = []
+    for row in findings:
+        digest = row.get("dedupe_hash")
+        case_id = row.get("case_id")
+        if not isinstance(digest, str) or not digest:
+            if not isinstance(case_id, str) or not case_id:
+                continue
+            response = row.get("response")
+            digest = finding_hash(
+                case_id, response if isinstance(response, str) else ""
+            )
+        stamp: datetime | None = None
+        stamp_text = ""
+        for key in ("last_seen", "ts"):
+            value = row.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            try:
+                stamp = parse_rfc3339(value)
+            except ReportError:
+                continue
+            stamp_text = fmt_rfc3339(stamp)
+            break
+        if stamp is None or not (window_start <= stamp <= window_end):
+            continue
+        severity = row.get("severity")
+        sev_text = (
+            severity.lower()
+            if isinstance(severity, str) and severity.strip()
+            else "unknown"
+        )
+        klass = row.get("class")
+        class_text = klass if isinstance(klass, str) and klass else "unknown"
+        case_text = case_id if isinstance(case_id, str) and case_id else "unknown"
+        staged.append(
+            (
+                _severity_rank(sev_text),
+                stamp_text,
+                digest,
+                case_text,
+                sev_text,
+                class_text,
+            )
+        )
+    staged.sort()
+    return [
+        (digest[:12], sev, klass, ts_text)
+        for _, ts_text, digest, _, sev, klass in staged
+    ]
+
+
 def detection_gaps(
     cases: list[tuple[str, str, str, str]],
     load_errors: list[str],
@@ -595,8 +674,9 @@ def render_report(
     transition_counts: list[tuple[str, str, int]] | None = None,
     timeline: list[tuple[str, str, str, str]] | None = None,
     cause_counts: list[tuple[str, int]] | None = None,
+    severity_timeline: list[tuple[str, str, str, str]] | None = None,
 ) -> str:
-    """Assemble the eight report sections in fixed order."""
+    """Assemble the nine report sections in fixed order."""
     gaps = gaps if gaps is not None else []
     current_findings = current_findings if current_findings is not None else {}
     transition_counts = transition_counts if transition_counts is not None else []
@@ -681,6 +761,14 @@ def render_report(
     else:
         lines.append("- no transitions in window")
         lines.append("- causes: none")
+    lines += ["", "## Severity timeline", ""]
+    if severity_timeline is None:
+        severity_timeline = []
+    if severity_timeline:
+        for digest12, sev, klass, ts_text in severity_timeline:
+            lines.append(f"- {digest12} {sev} {klass} {ts_text}")
+    else:
+        lines.append("- no findings in window")
     lines += [
         "",
         f"<!-- findings-snapshot: {json.dumps(current_findings, sort_keys=True)} -->",
@@ -695,7 +783,8 @@ def _collect_window(reports_dir: Path, since_text: str | None) -> dict[str, obje
     Read-only projection used by both :func:`build_report` and
     :func:`summarize`: window endpoints, in-window transitions, run
     count, transition counts, loaded cases, run observations,
-    detection gaps, per-technique rows, and the current findings map.
+    detection gaps, per-technique rows, the current findings map, and
+    the in-window severity-timeline rows.
     Raises :class:`ReportError` on unreadable inputs.
     """
     if not reports_dir.exists():
@@ -799,6 +888,7 @@ def _collect_window(reports_dir: Path, since_text: str | None) -> dict[str, obje
         "gaps": gaps,
         "pass_rows": pass_rows,
         "current_findings": current_findings,
+        "severity_timeline": severity_timeline_rows(findings, window_start, window_end),
         "history_empty": not transitions and not findings and last_run_missing,
     }
 
@@ -853,6 +943,7 @@ def build_report(reports_dir: Path, since_text: str | None) -> tuple[str, str, P
         transition_counts=window["transition_counts"],
         timeline=timeline,
         cause_counts=cause_counts,
+        severity_timeline=window["severity_timeline"],
     )
     return markdown, file_name, out_dir
 

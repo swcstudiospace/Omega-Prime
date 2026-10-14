@@ -279,3 +279,78 @@ def test_sign_reports_install_without_installing(
     assert str(key_path) in signed["install"]
     assert os.getenv(ROE_FILE_ENV_VAR, "") != created["artifact"]
     _assert_hygiene(sentinel, [signed], capsys.readouterr())
+
+
+def _guided(monkeypatch: Any, answers: list[str]) -> None:
+    """Fake an interactive terminal: TTY stdin plus scripted answers."""
+    monkeypatch.setattr(redteam_roe_create, "_stdin_is_tty", lambda: True)
+    script = list(answers)
+    monkeypatch.setattr("builtins.input", lambda prompt="": script.pop(0))
+
+
+def test_non_tty_missing_flags_still_error(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    """Piped/cron callers keep the flag-required behavior (no prompts)."""
+    key_path, sentinel = _key_file(tmp_path)
+    env = _reports_env(monkeypatch, tmp_path)
+    with pytest.raises(redteam_roe_create.Error) as excinfo:
+        redteam_roe_create.run(f"--operator alice --key-file {key_path}", env)
+    assert excinfo.value.error == "missing_days"
+    _assert_hygiene(sentinel, [excinfo.value.result], capsys.readouterr())
+
+
+def test_guided_tty_prompts_signs_and_chains(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    """TTY with no flags prompts, builds, and auto-signs with the key file."""
+    key_path, sentinel = _key_file(tmp_path)
+    env = _reports_env(monkeypatch, tmp_path)
+    _guided(monkeypatch, ["bob", "7", "", str(key_path)])
+    created = redteam_roe_create.run("", env)
+    assert created["operator"] == "bob"
+    assert Path(created["signature"]).exists()
+    assert created["signature"] == created["artifact"] + ".sig"
+    assert ROE_FILE_ENV_VAR in created["install"]
+    document = _read_artifact(created)
+    assert document["operator"] == "bob"
+    decision = authorize(created["artifact"], key=sentinel.encode("utf-8"))
+    assert decision.ok and decision.cause == "ok"
+    captured = capsys.readouterr()
+    assert f"export {ROE_FILE_ENV_VAR}=" not in captured.out
+    _assert_hygiene(sentinel, [created, document], captured)
+
+
+def test_guided_tty_custom_case_classes(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    """A comma-separated answer narrows the artifact's case classes."""
+    key_path, sentinel = _key_file(tmp_path)
+    env = _reports_env(monkeypatch, tmp_path)
+    _guided(
+        monkeypatch,
+        ["carol", "14", "prompt-injection, jailbreak", str(key_path)],
+    )
+    created = redteam_roe_create.run("", env)
+    assert created["case_classes"] == ["prompt-injection", "jailbreak"]
+    document = _read_artifact(created)
+    assert document["case_classes"] == ["prompt-injection", "jailbreak"]
+    decision = authorize(created["artifact"], key=sentinel.encode("utf-8"))
+    assert decision.ok and decision.cause == "ok"
+    _assert_hygiene(sentinel, [created, document], capsys.readouterr())
+
+
+def test_print_install_prints_export_after_signing(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    """Flag mode plus --print-install signs and prints the export command."""
+    key_path, sentinel = _key_file(tmp_path)
+    env = _reports_env(monkeypatch, tmp_path)
+    created = redteam_roe_create.run(
+        f"--operator alice --days 7 --key-file {key_path} --print-install", env
+    )
+    assert Path(created["signature"]).exists()
+    captured = capsys.readouterr()
+    assert f"export {ROE_FILE_ENV_VAR}={created['artifact']}" in captured.out
+    assert created["install"] in captured.out
+    _assert_hygiene(sentinel, [created], captured)

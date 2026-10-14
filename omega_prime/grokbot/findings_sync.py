@@ -19,6 +19,13 @@ inert: the CLI and :func:`tick` exit 0, push nothing, and print
 
 The issue body carries fixed fields only — never the raw gateway payload
 (threat T-79-11 keeps raw payload text in the versioned case file).
+
+Linear mode (``redteam.findings_sync.tracker: "linear"``) pushes the same
+rows as Linear issues through ``gh api graphql`` (``issueCreate``) on the
+same runner seam. Severity maps to Linear priority (critical→urgent(1),
+high→high(2), medium→medium(3), low→low(4)); the dedupe hash rides in the
+issue description, so idempotency marking (``issue_url`` + ``synced_at``)
+is identical to the GitHub mode.
 """
 
 from __future__ import annotations
@@ -56,6 +63,39 @@ DEFAULT_LABELS: dict[str, list[str]] = {
 
 #: Fallback label for unknown severities.
 UNKNOWN_SEVERITY_LABELS = ["redteam"]
+
+#: Supported tracker backends for the findings sync.
+TRACKERS = ("github", "linear")
+
+#: Default tracker backend (the existing GitHub-issues mode, unchanged).
+DEFAULT_TRACKER = "github"
+
+#: Message used when tracker=linear but no Linear team is configured
+#: (fail-closed, never guess).
+NO_LINEAR_TEAM_MESSAGE = "no linear team configured"
+
+#: Severity → Linear priority mapping (Linear API: 1=Urgent, 2=High,
+#: 3=Medium, 4=Low). Operator labels do not apply to Linear issues.
+LINEAR_PRIORITIES: dict[str, int] = {
+    "critical": 1,
+    "high": 2,
+    "medium": 3,
+    "low": 4,
+}
+
+#: Fallback Linear priority for unknown severities (Linear "No Priority").
+UNKNOWN_SEVERITY_PRIORITY = 0
+
+#: Linear ``issueCreate`` mutation run through ``gh api graphql``. Variables
+#: (``teamId``/``title``/``description``/``priority``) ride as ``-f``/``-F``
+#: fields on the same runner seam as the GitHub mode.
+LINEAR_ISSUE_MUTATION = (
+    "mutation($teamId: String!, $title: String!, "
+    "$description: String, $priority: Int) { "
+    "issueCreate(input: {teamId: $teamId, title: $title, "
+    "description: $description, priority: $priority}) { "
+    "success issue { id url } } }"
+)
 
 #: ``gh`` invocation timeout (seconds).
 _GH_TIMEOUT = 60
@@ -119,6 +159,16 @@ def labels_for_severity(
     return list(DEFAULT_LABELS.get(key, UNKNOWN_SEVERITY_LABELS))
 
 
+def priority_for_severity(severity: Any) -> int:
+    """Resolve the Linear priority for ``severity`` (case-insensitive).
+
+    Critical→urgent (1), high→high (2), medium→medium (3), low→low (4);
+    unknown severities fall back to ``0`` (Linear "No Priority").
+    """
+    key = severity.lower() if isinstance(severity, str) else ""
+    return LINEAR_PRIORITIES.get(key, UNKNOWN_SEVERITY_PRIORITY)
+
+
 def issue_title(row: Mapping[str, Any]) -> str:
     """Issue title — same format as ``export_work_items()`` titles."""
     return (
@@ -169,6 +219,35 @@ def _issue_url_from_stdout(stdout: Any, repo: str) -> str:
     if isinstance(payload, dict):
         url = payload.get("html_url", "")
         return url if isinstance(url, str) else ""
+    return ""
+
+
+def _linear_issue_url_from_stdout(stdout: Any) -> str:
+    """Extract the pushed Linear issue URL from ``gh api graphql`` stdout.
+
+    Prefers ``data.issueCreate.issue.url`` from the JSON response; falls
+    back to a bare-URL stdout body. Returns ``""`` when nothing URL-like
+    is present (the row is still marked synced — the push itself
+    succeeded).
+    """
+    if isinstance(stdout, bytes):
+        try:
+            stdout = stdout.decode("utf-8", "replace")
+        except Exception:
+            return ""
+    if not isinstance(stdout, str):
+        return ""
+    try:
+        payload = json.loads(stdout)
+    except ValueError:
+        text = stdout.strip()
+        return text if text.startswith("http") else ""
+    if isinstance(payload, dict):
+        try:
+            node: Any = payload["data"]["issueCreate"]["issue"]["url"]
+        except (KeyError, TypeError):
+            return ""
+        return node if isinstance(node, str) else ""
     return ""
 
 
@@ -265,6 +344,105 @@ def sync_findings(
     return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
 
 
+def sync_findings_linear(
+    reports_dir: str | Path | None,
+    team_id: str,
+    *,
+    runner: GhRunner | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Push every not-yet-synced finding row to Linear as an issue.
+
+    Same rows, titles, and bodies as :func:`sync_findings` (the dedupe
+    hash rides in the issue description, so idempotency marking via
+    ``issue_url`` + ``synced_at`` is identical); only the transport
+    differs — ``gh api graphql`` ``issueCreate`` with the severity mapped
+    to a Linear priority (critical→1 urgent … low→4 low) instead of
+    GitHub labels. Failure semantics mirror :func:`sync_findings`:
+    earlier-in-run pushes persist, the failed row stays unsynced, and a
+    :class:`GhApiError` is raised. With zero pushes (or ``dry_run``) the
+    store file is byte-identical and the runner is never called in
+    dry-run mode.
+
+    Returns ``{"pushed": [...], "skipped": [...], "dry_run": bool}``
+    with the same entry shapes as :func:`sync_findings`.
+    """
+    if not isinstance(team_id, str) or not team_id.strip():
+        raise ValueError(NO_LINEAR_TEAM_MESSAGE)
+    team_id = team_id.strip()
+    run = runner if runner is not None else _default_runner
+
+    rows = load_findings(reports_dir)
+    pushed: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    dirty = False
+
+    for row in rows:
+        digest = str(row.get("dedupe_hash", ""))
+        if row.get("issue_url"):
+            skipped.append(digest)
+            continue
+        title = issue_title(row)
+        body = issue_body(row)
+        priority = priority_for_severity(row.get("severity"))
+        payload = {
+            "team_id": team_id,
+            "title": title,
+            "body": body,
+            "priority": priority,
+        }
+        argv = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={LINEAR_ISSUE_MUTATION}",
+            "-f",
+            f"teamId={team_id}",
+            "-f",
+            f"title={title}",
+            "-f",
+            f"description={body}",
+            "-F",
+            f"priority={priority}",
+        ]
+
+        if dry_run:
+            pushed.append({"dedupe_hash": digest, "issue_url": ""})
+            continue
+
+        try:
+            completed = run(argv, payload)
+        except GhNotFoundError:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise
+        except FindingsSyncError:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise
+        except Exception as exc:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise GhApiError(f"gh runner failed: {exc}") from exc
+
+        returncode = getattr(completed, "returncode", 1)
+        if returncode != 0:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            stderr = getattr(completed, "stderr", "")
+            raise GhApiError(
+                f"gh api graphql exited {returncode}: {stderr}",
+                returncode=returncode if isinstance(returncode, int) else None,
+            )
+        row["issue_url"] = _linear_issue_url_from_stdout(
+            getattr(completed, "stdout", "")
+        )
+        row["synced_at"] = utc_now_rfc3339()
+        dirty = True
+        pushed.append({"dedupe_hash": digest, "issue_url": row["issue_url"]})
+
+    if dirty and not dry_run:
+        _write_rows_atomic(findings_path(reports_dir), rows)
+    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+
+
 def _persist_if_dirty(
     directory: str | Path | None, dirty: bool, rows: list[dict[str, Any]]
 ) -> None:
@@ -278,6 +456,24 @@ def _sync_node(config: Mapping[str, Any] | None) -> dict[str, Any]:
     return dict(node) if isinstance(node, dict) else {}
 
 
+def _tracker_for_node(node: Mapping[str, Any]) -> str:
+    """Normalized tracker backend for a findings-sync node (default github)."""
+    tracker = node.get("tracker", DEFAULT_TRACKER)
+    if not isinstance(tracker, str) or not tracker.strip():
+        return DEFAULT_TRACKER
+    return tracker.strip().lower()
+
+
+def _tracker_error(message: str, dry_run: bool) -> dict[str, Any]:
+    """Structured fail-closed result for a misconfigured sync node."""
+    return {
+        "pushed": [],
+        "skipped": [],
+        "dry_run": dry_run,
+        "error": message,
+    }
+
+
 def tick(
     config: Mapping[str, Any] | None = None,
     *,
@@ -285,13 +481,15 @@ def tick(
     runner: GhRunner | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Heartbeat-schedulable entrypoint: reuse :func:`sync_findings`.
+    """Heartbeat-schedulable entrypoint: reuse the sync functions.
 
-    Reads ``redteam.findings_sync`` (``enabled``, ``repo``, ``labels``) from
-    ``config`` (loads via ``load_config()`` when omitted). Disabled or
-    repo-less results are structured dicts — never exceptions, never a new
-    cron kind. The sync itself stays a plain function; schedulers call this
-    ``tick`` following the ``tick``/``schedule`` precedent.
+    Reads ``redteam.findings_sync`` (``enabled``, ``tracker``, ``repo``,
+    ``labels``, ``linear_team_id``) from ``config`` (loads via
+    ``load_config()`` when omitted). Disabled, repo-less, team-less, or
+    unknown-tracker results are structured dicts — never exceptions,
+    never a new cron kind. The sync itself stays plain functions;
+    schedulers call this ``tick`` following the ``tick``/``schedule``
+    precedent.
     """
     if config is None:
         from omega_prime.config import load_config  # deferred: keeps import light
@@ -300,6 +498,21 @@ def tick(
     node = _sync_node(config)
     if node.get("enabled") is not True:
         return {"pushed": [], "skipped": [], "dry_run": dry_run, "disabled": True}
+    tracker = _tracker_for_node(node)
+    if tracker == "linear":
+        team_id = node.get("linear_team_id", "")
+        if not isinstance(team_id, str) or not team_id.strip():
+            return _tracker_error(NO_LINEAR_TEAM_MESSAGE, dry_run)
+        result = sync_findings_linear(
+            reports_directory,
+            team_id.strip(),
+            runner=runner,
+            dry_run=dry_run,
+        )
+        result["disabled"] = False
+        return result
+    if tracker != "github":
+        return _tracker_error(f"unknown tracker: {tracker}", dry_run)
     repo = node.get("repo", "")
     if not isinstance(repo, str) or not repo.strip():
         return {
@@ -320,13 +533,55 @@ def tick(
     return result
 
 
+def _main_linear(directory: str | Path | None, team_id: str, dry_run: bool) -> int:
+    """Run the Linear branch of the CLI (dry-run aware)."""
+    if dry_run:
+        try:
+            result = sync_findings_linear(
+                directory if directory is not None else reports_dir(),
+                team_id,
+                dry_run=True,
+            )
+        except FindingsSyncError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for entry in result["pushed"]:
+            print(f"would push {entry['dedupe_hash']}")
+        for digest in result["skipped"]:
+            print(f"skip (already synced) {digest}")
+        return 0
+
+    try:
+        result = sync_findings_linear(
+            directory if directory is not None else reports_dir(),
+            team_id,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except FindingsSyncError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for entry in result["pushed"]:
+        print(f"pushed {entry['dedupe_hash']} -> {entry['issue_url']}")
+    for digest in result["skipped"]:
+        print(f"skip (already synced) {digest}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``findings_sync [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
+    """CLI: ``findings_sync [--tracker github|linear] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
     parser = argparse.ArgumentParser(
         prog="findings_sync",
-        description="Push unsynced red-team findings to GitHub issues (one-way).",
+        description="Push unsynced red-team findings to tracker issues (one-way).",
+    )
+    parser.add_argument(
+        "--tracker",
+        default="",
+        help="Tracker backend: github (default) or linear; blank means config",
     )
     parser.add_argument("--repo", default="", help="Target repo OWNER/NAME")
+    parser.add_argument("--linear-team-id", default="", help="Linear team ID override")
     parser.add_argument("--reports-dir", default="", help="Reports dir override")
     parser.add_argument(
         "--dry-run",
@@ -342,13 +597,28 @@ def main(argv: list[str] | None = None) -> int:
         print(DISABLED_MESSAGE)
         return 0
 
+    tracker = args.tracker.strip().lower() or _tracker_for_node(node)
+    directory: str | Path | None = args.reports_dir or None
+    if tracker == "linear":
+        team_id = args.linear_team_id.strip() or (
+            node.get("linear_team_id", "").strip()
+            if isinstance(node.get("linear_team_id", ""), str)
+            else ""
+        )
+        if not team_id:
+            print(f"error: {NO_LINEAR_TEAM_MESSAGE}", file=sys.stderr)
+            return 2
+        return _main_linear(directory, team_id, args.dry_run)
+    if tracker != "github":
+        print(f"error: unknown tracker: {tracker}", file=sys.stderr)
+        return 2
+
     repo = args.repo.strip() or (
         node.get("repo", "").strip() if isinstance(node.get("repo", ""), str) else ""
     )
     if not repo:
         print(f"error: {NO_REPO_MESSAGE}", file=sys.stderr)
         return 2
-    directory: str | Path | None = args.reports_dir or None
     node_labels = node.get("labels")
     overrides = node_labels if isinstance(node_labels, dict) else None
 
@@ -394,9 +664,15 @@ if __name__ == "__main__":
 
 __all__ = [
     "DEFAULT_LABELS",
+    "DEFAULT_TRACKER",
     "DISABLED_MESSAGE",
+    "LINEAR_ISSUE_MUTATION",
+    "LINEAR_PRIORITIES",
+    "NO_LINEAR_TEAM_MESSAGE",
     "NO_REPO_MESSAGE",
+    "TRACKERS",
     "UNKNOWN_SEVERITY_LABELS",
+    "UNKNOWN_SEVERITY_PRIORITY",
     "FindingsSyncError",
     "GhApiError",
     "GhNotFoundError",
@@ -405,6 +681,8 @@ __all__ = [
     "issue_title",
     "labels_for_severity",
     "main",
+    "priority_for_severity",
     "sync_findings",
+    "sync_findings_linear",
     "tick",
 ]

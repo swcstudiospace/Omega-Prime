@@ -42,6 +42,13 @@ DEFAULT_STATE = "sidecar/reports/release-watch.json"
 #: CLI exit when the ``gh`` fetch fails (mirrors ``roe_lifecycle`` BLOCKED).
 FETCH_FAILURE_EXIT = 3
 
+#: Config key gating release-watch → pin-bump chaining (explicit opt-in).
+AUTO_PIN_BUMP_CONFIG_KEY = "auto_pin_bump"
+
+#: Sentinel for :func:`_write_state`: carry forward any recorded pin-bump
+#: outcome instead of overwriting it.
+_PRESERVE_BUMP: Any = object()
+
 
 def _as_utc(now: datetime | int | float | None = None) -> datetime:
     """Normalize ``now`` to an aware UTC datetime (hermetic clock)."""
@@ -129,26 +136,98 @@ def _read_state(state_path: str | Path) -> list[dict[str, str]] | None:
     return pairs
 
 
+def _read_bump_record(state_path: str | Path) -> dict[str, Any] | None:
+    """Best-effort read of the recorded pin-bump outcome, else ``None``.
+
+    Missing file, corrupt JSON, and wrong-schema contents all return
+    ``None`` — never raise.
+    """
+    try:
+        payload = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    record = payload.get("last_pin_bump")
+    return dict(record) if isinstance(record, dict) else None
+
+
 def _write_state(
-    state_path: str | Path, pairs: list[dict[str, str]], checked_at: str
+    state_path: str | Path,
+    pairs: list[dict[str, str]],
+    checked_at: str,
+    last_pin_bump: Any = _PRESERVE_BUMP,
 ) -> None:
-    """Atomically write the state file (tmp + rename)."""
+    """Atomically write the state file (tmp + rename).
+
+    A recorded pin-bump outcome (``last_pin_bump``) survives ordinary
+    ticks: pass an explicit record to replace it, ``None`` to clear it,
+    or leave the default to carry the stored record forward.
+    """
     path = Path(state_path)
     if path.parent and str(path.parent) not in ("", "."):
         path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    if last_pin_bump is _PRESERVE_BUMP:
+        last_pin_bump = _read_bump_record(path)
+    payload: dict[str, Any] = {
         "last_seen": [{"tag": p["tag"], "sha": p["sha"]} for p in pairs],
         "checked_at": checked_at,
     }
+    if last_pin_bump is not None:
+        payload["last_pin_bump"] = last_pin_bump
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)
+
+
+def auto_pin_bump_enabled(config: Any = None) -> bool:
+    """Whether release-watch may chain into pin-bump. Explicit opt-in.
+
+    Only ``config["redteam"]["auto_pin_bump"] is True`` enables it;
+    anything else (absent node, falsy value, non-dict config) is
+    ``False``. Operators wire it as
+    ``check_release_watch(..., auto_pin_bump=auto_pin_bump_enabled(cfg))``.
+    """
+    if not isinstance(config, dict):
+        return False
+    node = config.get("redteam")
+    return bool(isinstance(node, dict) and node.get(AUTO_PIN_BUMP_CONFIG_KEY) is True)
+
+
+def _default_bump_runner(root: str | Path | None) -> Callable[[str], int]:
+    """Build the production pin-bump runner (lazy import, no load cycle)."""
+    from omega_prime.grokbot.pin_bump import REPO_ROOT
+    from omega_prime.grokbot.pin_bump import bump as _bump
+
+    base = Path(root) if root is not None else REPO_ROOT
+
+    def _run(tag: str) -> int:
+        return int(_bump(tag, root=base))
+
+    return _run
+
+
+def _bump_report_path(root: str | Path | None) -> str | None:
+    """Delta-report path ``pin_bump`` writes on the audit path, if present."""
+    if root is not None:
+        candidate = Path(root) / "report.md"
+        return str(candidate) if candidate.is_file() else None
+    try:
+        from omega_prime.grokbot import pin_bump
+    except ImportError:
+        return None
+    candidate = pin_bump.REPO_ROOT / "report.md"
+    return str(candidate) if candidate.is_file() else None
 
 
 def check_release_watch(
     state_path: str | Path,
     fetch: Callable[[], Any],
     now: datetime | int | float | None = None,
+    *,
+    auto_pin_bump: bool = False,
+    bump: Callable[[str], int] | None = None,
+    root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Diff upstream tags against state; record new releases.
 
@@ -164,6 +243,18 @@ def check_release_watch(
     ``checked_at`` always refreshes. Fetch exceptions propagate with
     the state file untouched — callers degrade (heartbeat history /
     CLI exit 3), never delete state.
+
+    Opt-in chaining (batch-03 Feature F): with ``auto_pin_bump=True``
+    and a non-empty ``new`` list, the newest tag is passed to ``bump``
+    (default: :func:`omega_prime.grokbot.pin_bump.bump` against
+    ``root``). Exit 0 records ``last_pin_bump`` in the state file and
+    the result carries ``"bump": {"tag", "exit": 0, "recorded": True}``.
+    Any other exit (notably 1, audit regression) logs the delta-report
+    path to stderr, leaves the pin and the bump record untouched, and
+    carries ``"bump": {"tag", "exit", "report", "recorded": False}``.
+    Bump-runner exceptions propagate with the state file untouched.
+    Seeding ticks never bump. Default (``False``) is inert: the result
+    shape is exactly the historical three-key dict.
     """
     current = _as_utc(now)
     checked_at = current.isoformat(timespec="seconds")
@@ -183,6 +274,41 @@ def check_release_watch(
             merged[index] = {"tag": pair["tag"], "sha": latest}
     for entry in new:
         merged.append({"tag": entry["tag"], "sha": entry["sha"]})
+    if auto_pin_bump and new:
+        target = new[0]
+        runner = bump if bump is not None else _default_bump_runner(root)
+        exit_code = runner(target["tag"])
+        if exit_code == 0:
+            record = {
+                "tag": target["tag"],
+                "checked_at": checked_at,
+                "exit": 0,
+            }
+            _write_state(state_path, merged, checked_at, last_pin_bump=record)
+            return {
+                "new": new,
+                "seeded": False,
+                "checked_at": checked_at,
+                "bump": {"tag": target["tag"], "exit": 0, "recorded": True},
+            }
+        report = _bump_report_path(root)
+        print(
+            f"release-watch auto-pin-bump for {target['tag']} exited "
+            f"{exit_code} (report: {report}); pin left unchanged",
+            file=sys.stderr,
+        )
+        _write_state(state_path, merged, checked_at)
+        return {
+            "new": new,
+            "seeded": False,
+            "checked_at": checked_at,
+            "bump": {
+                "tag": target["tag"],
+                "exit": exit_code,
+                "report": report,
+                "recorded": False,
+            },
+        }
     _write_state(state_path, merged, checked_at)
     return {"new": new, "seeded": False, "checked_at": checked_at}
 
@@ -229,6 +355,10 @@ def make_checker(
     state_path: str | Path,
     fetch: Callable[[], Any] | None = None,
     repo: str = DEFAULT_REPO,
+    *,
+    auto_pin_bump: bool = False,
+    bump: Callable[[str], int] | None = None,
+    root: str | Path | None = None,
 ) -> Callable[[Any], dict[str, Any]]:
     """Build a ``checker(now)`` closure for the heartbeat tick driver.
 
@@ -236,6 +366,8 @@ def make_checker(
     ``{"new": [], "seeded": False, "error": str, "checked_at": None}``
     so the tick records the failure in job history with state untouched
     (signal, not red). Only ticks with a non-empty ``new`` list fire.
+    ``auto_pin_bump``/``bump``/``root`` pass through to
+    :func:`check_release_watch` (explicit opt-in; default inert).
     """
 
     def _default_fetch() -> Any:
@@ -245,7 +377,14 @@ def make_checker(
 
     def checker(now: Any) -> dict[str, Any]:
         try:
-            return check_release_watch(state_path, active, now)
+            return check_release_watch(
+                state_path,
+                active,
+                now,
+                auto_pin_bump=auto_pin_bump,
+                bump=bump,
+                root=root,
+            )
         except Exception as exc:
             return {
                 "new": [],
@@ -288,7 +427,8 @@ def fetch_upstream_tags(repo: str) -> list[dict]:
 def main(argv: list[str] | None = None) -> int:
     """CLI: ``check --state <path> [--repo OWNER/NAME] [--json]``."""
     parser = argparse.ArgumentParser(
-        description="Upstream release watcher — digest new tags, never bump"
+        description="Upstream release watcher — digest new tags "
+        "(pin-bump only via the explicit API opt-in, never the CLI)"
     )
     sub = parser.add_subparsers(dest="command", required=True)
     check = sub.add_parser("check", help="Digest tags new since last tick")
@@ -337,9 +477,11 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "AUTO_PIN_BUMP_CONFIG_KEY",
     "DEFAULT_REPO",
     "DEFAULT_STATE",
     "FETCH_FAILURE_EXIT",
+    "auto_pin_bump_enabled",
     "build_digest",
     "check_release_watch",
     "fetch_upstream_tags",

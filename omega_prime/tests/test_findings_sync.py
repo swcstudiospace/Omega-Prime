@@ -10,13 +10,16 @@ import pytest
 from omega_prime.config import load_config
 from omega_prime.grokbot import findings_sync
 from omega_prime.grokbot.findings_sync import (
+    NO_LINEAR_TEAM_MESSAGE,
     GhApiError,
     GhNotFoundError,
     issue_body,
     issue_title,
     labels_for_severity,
     main,
+    priority_for_severity,
     sync_findings,
+    sync_findings_linear,
     tick,
 )
 from sidecar.findings import findings_path, load_findings, record_finding
@@ -346,6 +349,217 @@ def test_env_overrides_enable_and_repo(tmp_path, monkeypatch):
     assert node["repo"] == REPO
 
 
+def test_env_overrides_tracker_and_linear_team(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_TRACKER", "linear")
+    monkeypatch.setenv("OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_LINEAR_TEAM_ID", "team-123")
+    node = load_config(tmp_path)["redteam"]["findings_sync"]
+    assert node["tracker"] == "linear"
+    assert node["linear_team_id"] == "team-123"
+
+
 def test_defaults_off_empty_repo(tmp_path):
     node = load_config(tmp_path)["redteam"]["findings_sync"]
-    assert node == {"enabled": False, "repo": "", "labels": {}}
+    assert node == {
+        "enabled": False,
+        "repo": "",
+        "labels": {},
+        "tracker": "github",
+        "linear_team_id": "",
+    }
+
+
+# Linear tracker mode --------------------------------------------------------
+
+
+TEAM = "team-123"
+
+
+class FakeLinear:
+    """Fake GhRunner returning Linear issueCreate payloads; zero network."""
+
+    def __init__(self, base_url="https://linear.app/spectrum/issue/"):
+        self.calls: list[tuple[list[str], dict]] = []
+        self.base_url = base_url
+        self._n = 0
+
+    def __call__(self, argv, data):
+        self.calls.append((list(argv), dict(data)))
+        self._n += 1
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "issueCreate": {
+                            "success": True,
+                            "issue": {
+                                "id": f"iss-{self._n}",
+                                "url": f"{self.base_url}{self._n}",
+                            },
+                        }
+                    }
+                }
+            ),
+            stderr="",
+        )
+
+
+def _linear_config(**overrides):
+    node = {
+        "enabled": True,
+        "repo": REPO,
+        "labels": {},
+        "tracker": "linear",
+        "linear_team_id": TEAM,
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+def test_linear_priority_mapping_per_spec():
+    assert priority_for_severity("critical") == 1
+    assert priority_for_severity("high") == 2
+    assert priority_for_severity("medium") == 3
+    assert priority_for_severity("low") == 4
+    assert priority_for_severity("CRITICAL") == 1
+    assert priority_for_severity("weird") == 0
+    assert priority_for_severity(None) == 0
+
+
+def test_linear_happy_two_findings_graphql_calls(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeLinear()
+    result = sync_findings_linear(tmp_path, TEAM, runner=fake)
+    assert len(result["pushed"]) == 2
+    assert result["skipped"] == []
+    assert result["dry_run"] is False
+    for argv, data in fake.calls:
+        assert argv[:3] == ["gh", "api", "graphql"]
+        assert f"teamId={TEAM}" in argv
+        assert data["team_id"] == TEAM
+        assert "dedupe_hash" in data["body"]
+    assert [call[1]["priority"] for call in fake.calls] == [2, 4]
+    rows = load_findings(tmp_path)
+    assert all(row["issue_url"].startswith(fake.base_url) for row in rows)
+    assert all(row.get("synced_at") for row in rows)
+
+
+def test_linear_empty_team_fail_closed():
+    with pytest.raises(ValueError, match="no linear team configured"):
+        sync_findings_linear(None, "   ", runner=FakeLinear())
+
+
+def test_linear_second_run_pushes_nothing(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeLinear()
+    sync_findings_linear(tmp_path, TEAM, runner=fake)
+    result = sync_findings_linear(tmp_path, TEAM, runner=fake)
+    assert result["pushed"] == []
+    assert len(result["skipped"]) == 2
+    assert len(fake.calls) == 2
+
+
+def test_linear_nonzero_exit_leaves_row_unsynced(tmp_path):
+    _seed_two(tmp_path)
+    calls = []
+
+    def runner(argv, data):
+        calls.append((argv, data))
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    with pytest.raises(GhApiError):
+        sync_findings_linear(tmp_path, TEAM, runner=runner)
+    assert len(calls) == 1
+    assert all("issue_url" not in row for row in load_findings(tmp_path))
+
+
+def test_linear_dry_run_writes_nothing_calls_no_runner(tmp_path):
+    _seed_two(tmp_path)
+    before = findings_path(tmp_path).read_bytes()
+    fake = FakeLinear()
+    result = sync_findings_linear(tmp_path, TEAM, runner=fake, dry_run=True)
+    assert len(result["pushed"]) == 2
+    assert all(entry["issue_url"] == "" for entry in result["pushed"])
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before
+
+
+def test_tick_linear_dispatches_graphql(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeLinear()
+    result = tick(_linear_config(), reports_directory=tmp_path, runner=fake)
+    assert result["disabled"] is False
+    assert len(fake.calls) == 2
+    assert all(call[0][:3] == ["gh", "api", "graphql"] for call in fake.calls)
+
+
+def test_tick_linear_no_team_structured_error(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeLinear()
+    result = tick(
+        _linear_config(linear_team_id=""), reports_directory=tmp_path, runner=fake
+    )
+    assert result["error"] == NO_LINEAR_TEAM_MESSAGE
+    assert fake.calls == []
+
+
+def test_tick_unknown_tracker_structured_error(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeLinear()
+    result = tick(
+        _linear_config(tracker="trello"), reports_directory=tmp_path, runner=fake
+    )
+    assert "unknown tracker" in result["error"]
+    assert fake.calls == []
+
+
+def test_tick_default_tracker_stays_github(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(_enabled_config(), reports_directory=tmp_path, runner=fake)
+    assert result["disabled"] is False
+    assert all("repos/" in " ".join(call[0]) for call in fake.calls)
+
+
+def test_cli_linear_pushes_via_graphql(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _linear_config(),
+    )
+    fake = FakeLinear()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--tracker", "linear", "--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+    assert all(call[0][:3] == ["gh", "api", "graphql"] for call in fake.calls)
+    assert "pushed" in capsys.readouterr().out
+
+
+def test_cli_linear_tracker_from_config_without_flag(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _linear_config(),
+    )
+    fake = FakeLinear()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+
+
+def test_cli_linear_missing_team_exits_two(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _linear_config(linear_team_id=""),
+    )
+    assert main(["--tracker", "linear", "--reports-dir", str(tmp_path)]) == 2
+    assert "no linear team configured" in capsys.readouterr().err
+
+
+def test_cli_unknown_tracker_exits_two(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _enabled_config(),
+    )
+    assert main(["--tracker", "trello", "--reports-dir", str(tmp_path)]) == 2
+    assert "unknown tracker" in capsys.readouterr().err

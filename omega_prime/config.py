@@ -69,6 +69,15 @@ def _defaults() -> dict[str, Any]:
             # Weekly engagement reports (PLAN-F7): output dir override;
             # empty (the default) means sidecar/reports/reports/.
             "reports_dir": "",
+            # Coverage-matrix alerts (batch-03 Feature E): pass-rate
+            # percent; a covered technique class below it fires the
+            # coverage_alert heartbeat kind. The watcher itself stays
+            # inert until scheduled. Non-secret.
+            "coverage_alert_threshold": 80.0,
+            # Release-watcher auto-chaining (batch-03 Feature F). Off by
+            # default: check_release_watch() only invokes pin_bump when
+            # this is explicitly True. Non-secret.
+            "auto_pin_bump": False,
             # Findings → tracker sync (Phase 86, PLAN-F3). Off by default;
             # the CLI and heartbeat tick are inert until enabled with a
             # non-empty repo. Labels/repo are non-secret (operator map of
@@ -77,6 +86,8 @@ def _defaults() -> dict[str, Any]:
                 "enabled": False,
                 "repo": "",
                 "labels": {},
+                "tracker": "github",
+                "linear_team_id": "",
             },
         },
         # Telemetry export (Phase 81). Off by default with an empty endpoint;
@@ -338,6 +349,69 @@ def _env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                 overlay.setdefault("redteam", {}).setdefault("findings_sync", {})[
                     "repo"
                 ] = value.strip()
+            elif (
+                len(parts) == 4
+                and parts[1] == "findings"
+                and parts[2] == "sync"
+                and parts[3] == "tracker"
+            ):
+                # OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_TRACKER — tracker
+                # backend (github/linear); blank or unknown falls back to
+                # github loudly at sync time. Non-secret.
+                overlay.setdefault("redteam", {}).setdefault("findings_sync", {})[
+                    "tracker"
+                ] = value.strip()
+            elif (
+                len(parts) == 6
+                and parts[1] == "findings"
+                and parts[2] == "sync"
+                and parts[3] == "linear"
+                and parts[4] == "team"
+                and parts[5] == "id"
+            ):
+                # OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_LINEAR_TEAM_ID — Linear
+                # team ID; required (fail-closed) when tracker=linear.
+                # Non-secret.
+                overlay.setdefault("redteam", {}).setdefault("findings_sync", {})[
+                    "linear_team_id"
+                ] = value.strip()
+            elif (
+                len(parts) == 4
+                and parts[1] == "auto"
+                and parts[2] == "pin"
+                and parts[3] == "bump"
+            ):
+                # OMEGA_PRIME_REDTEAM_AUTO_PIN_BUMP — truthy opts in to
+                # release-watch → pin-bump chaining; anything else leaves
+                # the default (off) in place. Non-secret.
+                overlay.setdefault("redteam", {})["auto_pin_bump"] = (
+                    value.strip().lower() in ("1", "true", "yes", "on")
+                )
+            elif (
+                len(parts) == 4
+                and parts[1] == "coverage"
+                and parts[2] == "alert"
+                and parts[3] == "threshold"
+            ):
+                # OMEGA_PRIME_REDTEAM_COVERAGE_ALERT_THRESHOLD — pass-rate
+                # percent below which a class fires coverage_alert.
+                # Invalid values are ignored loudly; config loading never
+                # crashes and never silently arms the alerter.
+                try:
+                    threshold = float(value.strip())
+                except ValueError:
+                    threshold = float("nan")
+                if not (threshold > 0 and threshold <= 100):
+                    print(
+                        "warning: ignoring invalid "
+                        "OMEGA_PRIME_REDTEAM_COVERAGE_ALERT_THRESHOLD"
+                        f"={value.strip()!r}; using default",
+                        file=sys.stderr,
+                    )
+                    continue
+                overlay.setdefault("redteam", {})["coverage_alert_threshold"] = (
+                    threshold
+                )
         elif parts[0] == "telemetry":
             # OMEGA_PRIME_TELEMETRY_OTLP_ENABLED — truthy enables export;
             # the exporter additionally requires a non-empty push target.

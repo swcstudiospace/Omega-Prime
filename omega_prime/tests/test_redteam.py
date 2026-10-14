@@ -502,10 +502,14 @@ def test_redteam_disabled_by_default_and_enabled_by_env(monkeypatch):
         "roe_key": "",
         "roe_key_file": "",
         "reports_dir": "",
+        "coverage_alert_threshold": 80.0,
+        "auto_pin_bump": False,
         "findings_sync": {
             "enabled": False,
             "repo": "",
             "labels": {},
+            "tracker": "github",
+            "linear_team_id": "",
         },
     }
     monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ENABLED", "1")

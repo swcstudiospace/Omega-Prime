@@ -14,8 +14,12 @@ that session rather than starting a fresh conversation.
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import re
+from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from omega_prime.cron.scheduler import JobStore
@@ -445,7 +449,340 @@ def tick_release_watch(store: Any, now: Any, checker: Any) -> list[dict]:
     return fired
 
 
+#: Job kind marker stored on coverage-alert jobs.
+COVERAGE_ALERT_KIND = "coverage_alert"
+
+#: Default watcher cadence: once a day (seconds).
+COVERAGE_ALERT_INTERVAL_SECONDS = 86400
+
+#: Bounded per-job run history, mirroring :func:`tick_heartbeats`.
+COVERAGE_ALERT_HISTORY_LIMIT = 20
+
+#: Default pass-rate percent below which a class fires (config key
+#: ``redteam.coverage_alert_threshold`` overrides this per deployment;
+#: operators pass it to :func:`make_coverage_checker`).
+COVERAGE_ALERT_DEFAULT_THRESHOLD = 80.0
+
+#: Env override for the engagement history source (mirrors the report script).
+COVERAGE_ALERT_REPORTS_ENV_VAR = "OMEGA_PRIME_SIDECAR_REPORTS_DIR"
+
+#: Repo-relative fallback history dir when neither an arg nor the env
+#: override names one.
+_COVERAGE_DEFAULT_HISTORY = Path(__file__).resolve().parents[2] / "sidecar" / "reports"
+
+#: Pass-rate cell in the rendered coverage matrix, e.g. ``3/3 (100.0%)``.
+_COVERAGE_RATE_RE = re.compile(r"\(([\d.]+)%\)")
+
+#: Cached engagement-report script module (loaded once, never raises).
+_COVERAGE_REPORT_MODULE: Any = None
+_COVERAGE_REPORT_LOADED = False
+
+
+def _coverage_report_module() -> Any | None:
+    """Load ``scripts/engagement-report.py`` once (cached importlib)."""
+    global _COVERAGE_REPORT_MODULE, _COVERAGE_REPORT_LOADED
+    if _COVERAGE_REPORT_LOADED:
+        return _COVERAGE_REPORT_MODULE
+    _COVERAGE_REPORT_LOADED = True
+    script = Path(__file__).resolve().parents[2] / "scripts" / "engagement-report.py"
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "omega_prime_coverage_report", script
+        )
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception:
+        return None
+    _COVERAGE_REPORT_MODULE = module
+    return module
+
+
+def _parse_coverage_rows(text: str) -> dict[str, dict[str, Any]]:
+    """Parse the ``## Coverage matrix`` table of one engagement report.
+
+    Returns ``{class: {"pass_rate": float | None, "verdict": str}}``.
+    ``0/0 (n/a)`` rows (no runs) yield ``pass_rate None`` — unjudgeable,
+    never alerting. Never raises: unparseable input yields ``{}``.
+    """
+    classes: dict[str, dict[str, Any]] = {}
+    try:
+        lines = text.splitlines()
+        start = next(
+            index
+            for index, line in enumerate(lines)
+            if line.strip() == "## Coverage matrix"
+        )
+    except StopIteration:
+        return classes
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            break
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) != 6:
+            continue
+        class_name, _cases, _runs, rate, _gaps, verdict = cells
+        if class_name in ("class", "---") or not class_name.strip("- "):
+            continue
+        match = _COVERAGE_RATE_RE.search(rate)
+        try:
+            pass_rate = float(match.group(1)) if match else None
+        except ValueError:
+            pass_rate = None
+        classes[class_name] = {"pass_rate": pass_rate, "verdict": verdict}
+    return classes
+
+
+def read_coverage_matrix(reports_dir: str | Path | None = None) -> dict[str, Any]:
+    """Read the newest engagement report's coverage matrix.
+
+    A ``read_releases_block``-style read through
+    ``scripts/engagement-report.py``: resolves the report output dir via
+    the script's own ``output_dir()`` over ``reports_dir`` (explicit
+    arg, else the ``OMEGA_PRIME_SIDECAR_REPORTS_DIR`` override, else the
+    ``sidecar/reports/`` default), picks the newest
+    ``engagement-*.md``, and parses its ``## Coverage matrix`` table.
+
+    Returns ``{"report": <name> | None, "classes": {class:
+    {"pass_rate": float | None, "verdict": str}}}``. Never raises:
+    missing dirs, no reports, or unparseable matrices yield
+    ``{"report": None, "classes": {}}``.
+    """
+    try:
+        if reports_dir is not None:
+            history = Path(reports_dir)
+        else:
+            override = os.environ.get(COVERAGE_ALERT_REPORTS_ENV_VAR, "").strip()
+            history = Path(override) if override else _COVERAGE_DEFAULT_HISTORY
+        module = _coverage_report_module()
+        if module is not None:
+            out_dir = module.output_dir(history)
+        else:
+            out_dir = history / "reports"
+        names = sorted(
+            path.name for path in out_dir.glob("engagement-*.md") if path.is_file()
+        )
+        if not names:
+            return {"report": None, "classes": {}}
+        newest = names[-1]
+        text = (out_dir / newest).read_text(encoding="utf-8")
+        return {"report": newest, "classes": _parse_coverage_rows(text)}
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {"report": None, "classes": {}}
+
+
+def _coerce_threshold(threshold: Any) -> float:
+    """Pass-rate percent; garbage (including bools) falls back to default."""
+    if isinstance(threshold, bool):
+        return COVERAGE_ALERT_DEFAULT_THRESHOLD
+    try:
+        value = float(threshold)
+    except (TypeError, ValueError):
+        return COVERAGE_ALERT_DEFAULT_THRESHOLD
+    if not (value > 0 and value <= 100):
+        return COVERAGE_ALERT_DEFAULT_THRESHOLD
+    return value
+
+
+def check_coverage_alert(
+    reports_dir: str | Path | None,
+    now: Any,
+    threshold: Any = COVERAGE_ALERT_DEFAULT_THRESHOLD,
+) -> dict[str, Any]:
+    """Check the newest engagement report's coverage matrix vs ``threshold``.
+
+    ``threshold`` is a pass-rate percent (default 80.0; operators pass
+    ``load_config(root)["redteam"]["coverage_alert_threshold"]``).
+    Returns ``{"state": "ok" | "alert" | "no-reports", "threshold":
+    float, "below": [{"class", "pass_rate"}], "report": <name> | None,
+    "checked_at": "<ISO-8601 UTC>"}``. Classes with no runs (``0/0
+    (n/a)``) are unjudgeable and never fire. Never raises: unreadable
+    state degrades to ``no-reports`` (signal, not red) so the tick
+    still records history.
+    """
+    checker_now, _stamp, _today = _roe_now(now)
+    checked_at = checker_now.isoformat(timespec="seconds")
+    wanted = _coerce_threshold(threshold)
+    try:
+        matrix = read_coverage_matrix(reports_dir)
+    except Exception:
+        matrix = {"report": None, "classes": {}}
+    if matrix.get("report") is None:
+        return {
+            "state": "no-reports",
+            "threshold": wanted,
+            "below": [],
+            "report": None,
+            "checked_at": checked_at,
+        }
+    classes = matrix.get("classes")
+    if not isinstance(classes, dict):
+        classes = {}
+    below = [
+        {"class": name, "pass_rate": info["pass_rate"]}
+        for name, info in classes.items()
+        if isinstance(info, dict)
+        and info.get("pass_rate") is not None
+        and info["pass_rate"] < wanted
+    ]
+    return {
+        "state": "alert" if below else "ok",
+        "threshold": wanted,
+        "below": below,
+        "report": matrix.get("report"),
+        "checked_at": checked_at,
+    }
+
+
+def make_coverage_checker(
+    threshold: Any = COVERAGE_ALERT_DEFAULT_THRESHOLD,
+) -> Callable[[Any, Any], dict[str, Any]]:
+    """Build a ``checker(reports_dir, now)`` closure for the tick driver.
+
+    The returned checker never raises: unreadable state degrades to
+    ``{"state": "no-reports", ...}`` so the tick records history with
+    the store untouched (signal, not red).
+    """
+    wanted = _coerce_threshold(threshold)
+
+    def checker(reports_dir: Any, now: Any) -> dict[str, Any]:
+        try:
+            return check_coverage_alert(reports_dir, now, wanted)
+        except Exception as exc:
+            return {
+                "state": "error",
+                "threshold": wanted,
+                "below": [],
+                "report": None,
+                "checked_at": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    return checker
+
+
+def schedule_coverage_alert(
+    store: JobStore,
+    *,
+    interval_seconds: int | float = COVERAGE_ALERT_INTERVAL_SECONDS,
+    due_at: int | float,
+) -> str:
+    """Schedule a recurring coverage-matrix alert watcher.
+
+    Mirrors :func:`schedule_roe_expiry`: validates a positive interval,
+    then stamps ``kind`` on the stored job. Returns the job id. The
+    default cadence is daily; the pass threshold lives in the checker
+    closure (see :func:`make_coverage_checker`), not on the job.
+    """
+    if isinstance(interval_seconds, bool) or interval_seconds <= 0:
+        raise ValueError("a coverage-alert watcher needs a positive interval_seconds")
+    job_id = store.schedule("coverage-alert", due_at, interval_seconds=interval_seconds)
+    for job in store.jobs:
+        if isinstance(job, dict) and job.get("id") == job_id:
+            job["kind"] = COVERAGE_ALERT_KIND
+            break
+    store._save()
+    return job_id
+
+
+def list_coverage_alerts(store: JobStore) -> list[dict]:
+    """All coverage-alert jobs, complete or not."""
+    return [
+        job
+        for job in store.jobs
+        if isinstance(job, dict) and job.get("kind") == COVERAGE_ALERT_KIND
+    ]
+
+
+def clear_coverage_alert(store: JobStore, job_id: str) -> dict:
+    """Remove one coverage alert by id. Unknown id is a structured result."""
+    for index, job in enumerate(store.jobs):
+        if (
+            isinstance(job, dict)
+            and job.get("id") == job_id
+            and job.get("kind") == COVERAGE_ALERT_KIND
+        ):
+            store.jobs.pop(index)
+            store._save()
+            return {"cleared": job_id}
+    return {"error": f"no coverage-alert job: {job_id!r}"}
+
+
+def tick_coverage_alert(store: JobStore, now: Any, checker: Any) -> list[dict]:
+    """Run each due coverage alert through ``checker``.
+
+    Mirrors :func:`tick_engagement_digest` bookkeeping (datetime-or-
+    timestamp ``now`` via :func:`_roe_now`, ``claimed_at``/``history``
+    claims, bounded history, ``due_at`` advance, ``_save()``; a checker
+    exception is recorded as ``last_result`` ``state: "error"``) with
+    the :func:`tick_roe_expiry` fire-dedup pattern: each below-threshold
+    class fires at most once per UTC calendar day per job, tracked as
+    ``job["last_fired"] = {class: "YYYY-MM-DD"}``. Ticks whose classes
+    all fired today, ``ok`` ticks, and ``no-reports`` ticks are silent
+    bookkeeping. Pass ``skip_kind=COVERAGE_ALERT_KIND`` to the generic
+    ``JobStore.tick`` driver so it leaves these jobs to this tick.
+    Never calls ``transition()``.
+    """
+    checker_now, stamp, today = _roe_now(now)
+    override = os.environ.get(COVERAGE_ALERT_REPORTS_ENV_VAR, "").strip()
+    reports_dir = override or None
+    fired: list[dict] = []
+    ran_any = False
+    for job in store.jobs:
+        if not isinstance(job, dict):
+            continue
+        if job.get("kind") != COVERAGE_ALERT_KIND or job.get("completed"):
+            continue
+        due_at = job.get("due_at")
+        if due_at is None or due_at > stamp:
+            continue
+        history = job.setdefault("history", [])
+        if job.get("claimed_at") == stamp:
+            continue
+        if any(isinstance(e, dict) and e.get("ran_at") == stamp for e in history):
+            continue
+        job["claimed_at"] = stamp
+        store._save()
+        try:
+            job["last_result"] = checker(reports_dir, checker_now)
+        except Exception as exc:
+            job["last_result"] = {"state": "error", "error": str(exc)}
+        job["last_ran_at"] = stamp
+        history.append({"ran_at": stamp, "result": job["last_result"]})
+        del history[:-COVERAGE_ALERT_HISTORY_LIMIT]
+        job["claimed_at"] = None
+        job["due_at"] = stamp + job["interval_seconds"]
+        ran_any = True
+        result = job["last_result"]
+        if isinstance(result, dict) and result.get("state") == "alert":
+            below = result.get("below")
+            if isinstance(below, list) and below:
+                last_fired = job.setdefault("last_fired", {})
+                new_fire = False
+                for item in below:
+                    cls = item.get("class") if isinstance(item, dict) else item
+                    if not isinstance(cls, str) or not cls:
+                        continue
+                    if last_fired.get(cls) != today:
+                        last_fired[cls] = today
+                        new_fire = True
+                if new_fire:
+                    fired.append(job)
+    if ran_any:
+        store._save()
+    return fired
+
+
 __all__ = [
+    "COVERAGE_ALERT_DEFAULT_THRESHOLD",
+    "COVERAGE_ALERT_HISTORY_LIMIT",
+    "COVERAGE_ALERT_INTERVAL_SECONDS",
+    "COVERAGE_ALERT_KIND",
+    "COVERAGE_ALERT_REPORTS_ENV_VAR",
     "ENGAGEMENT_DIGEST_HISTORY_LIMIT",
     "ENGAGEMENT_DIGEST_INTERVAL_SECONDS",
     "ENGAGEMENT_DIGEST_KIND",
@@ -457,19 +794,26 @@ __all__ = [
     "ROE_EXPIRY_HISTORY_LIMIT",
     "ROE_EXPIRY_INTERVAL_SECONDS",
     "ROE_EXPIRY_KIND",
+    "check_coverage_alert",
+    "clear_coverage_alert",
     "clear_engagement_digest",
     "clear_heartbeat",
     "clear_release_watch",
     "clear_roe_expiry",
     "heartbeat_runner",
+    "list_coverage_alerts",
     "list_engagement_digests",
     "list_heartbeats",
     "list_release_watches",
     "list_roe_expiries",
+    "make_coverage_checker",
+    "read_coverage_matrix",
+    "schedule_coverage_alert",
     "schedule_engagement_digest",
     "schedule_heartbeat",
     "schedule_release_watch",
     "schedule_roe_expiry",
+    "tick_coverage_alert",
     "tick_engagement_digest",
     "tick_heartbeats",
     "tick_release_watch",

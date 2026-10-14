@@ -37,6 +37,7 @@ SECTIONS = [
     "## Findings deltas",
     "## State transitions",
     "## State timeline",
+    "## Severity timeline",
 ]
 
 
@@ -514,3 +515,83 @@ def test_coverage_rows_quoted_case_id_attributes_mismatch():
     rows = {row[0]: row for row in coverage_rows(cases, observations, gaps)}
     assert rows["abuse"] == ("abuse", 1, 1, 1, 100.0, 0, "covered")
     assert rows["jailbreak"] == ("jailbreak", 1, 1, 0, 0.0, 1, "gappy")
+
+
+def test_severity_timeline_groups_critical_first(tmp_path):
+    """Feature D happy: critical-first grouping with hash12/class/ts rows."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture)
+    seed_findings(
+        fixture,
+        [
+            {**finding_row("abuse-01", "resp-a", T2), "severity": "low"},
+            {
+                **finding_row("jailbreak-01", "resp-j", T1),
+                "severity": "critical",
+                "class": "jailbreak",
+            },
+            {
+                **finding_row("exfil-01", "resp-e", "2026-09-01T00:00:00+00:00"),
+                "severity": "high",
+                "class": "exfil",
+            },
+        ],
+    )
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    body = [
+        line
+        for line in section_lines(proc.stdout, "## Severity timeline")
+        if line.startswith("- ")
+    ]
+    assert body == [
+        f"- {dedupe_hash('jailbreak-01', 'resp-j')[:12]} critical jailbreak {T1}",
+        f"- {dedupe_hash('abuse-01', 'resp-a')[:12]} low test {T2}",
+    ]
+
+
+def test_severity_timeline_empty_window(tmp_path):
+    """Feature D edge: no in-window findings renders the empty line."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1))
+    seed_last_run(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "- no findings in window" in section_lines(
+        proc.stdout, "## Severity timeline"
+    )
+
+
+def test_severity_timeline_input_order_independent(tmp_path):
+    """Feature D determinism: shuffled file order renders byte-identical."""
+    rows = [
+        {**finding_row("abuse-01", "resp-a", T2), "severity": "low"},
+        {
+            **finding_row("jailbreak-01", "resp-j", T1),
+            "severity": "critical",
+            "class": "jailbreak",
+        },
+        {**finding_row("abuse-02", "resp-b", T1), "severity": "medium"},
+    ]
+    first_dir = tmp_path / "first" / "reports"
+    first_dir.mkdir(parents=True)
+    seed_transitions(first_dir, cycle(T1))
+    seed_last_run(first_dir)
+    seed_findings(first_dir, rows)
+    second_dir = tmp_path / "second" / "reports"
+    second_dir.mkdir(parents=True)
+    seed_transitions(second_dir, cycle(T1))
+    seed_last_run(second_dir)
+    seed_findings(second_dir, list(reversed(rows)))
+
+    first = run_script("--reports-dir", str(first_dir), "--since", T0)
+    second = run_script("--reports-dir", str(second_dir), "--since", T0)
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout

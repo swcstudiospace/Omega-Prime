@@ -11,6 +11,7 @@ not an error.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +56,87 @@ def _engagement_summarize(reports_dir: Path) -> dict[str, Any] | None:
         return dict(_ENGAGEMENT_SUMMARY_FN(reports_dir, None))
     except Exception:
         return None
+
+
+#: Remediation command per sidecar BLOCKED/DEGRADED cause, shown alongside
+#: the sidecar state block. Unknown causes fall back to
+#: ``_SIDECAR_GENERIC_HINT``. Hints name commands and env vars only —
+#: never key material or artifact contents.
+_SIDECAR_HINTS = {
+    "kill-switch-set": "Unset OMEGA_PRIME_REDTEAM_KILL to re-enable the sidecar",
+    "roe-missing": (
+        "Create an artifact with /omega-redteam-roe-create, sign it with "
+        "/omega-redteam-roe-sign, then set OMEGA_PRIME_REDTEAM_ROE_FILE"
+    ),
+    "roe-expired": "Re-sign with /omega-redteam-roe-sign",
+    "roe-invalid": (
+        "Re-create the artifact with /omega-redteam-roe-create and sign it "
+        "with /omega-redteam-roe-sign"
+    ),
+    "roe-key-in-file": (
+        "Move the key to a file and set OMEGA_PRIME_REDTEAM_ROE_KEY_FILE"
+    ),
+    "disabled": (
+        "Set OMEGA_PRIME_REDTEAM_ENABLED=1 (or redteam.enabled) to enable the sidecar"
+    ),
+    "drift-detected": (
+        "Run python -m omega_prime.grokbot.pin_bump --to <upstream-ref>"
+    ),
+    "gateway-unreachable": (
+        "Start the red-team gateway on http://127.0.0.1:3333 and re-check"
+    ),
+    "protocol-fault": (
+        "Inspect sidecar/reports/transitions.ndjson for the fault, "
+        "then re-run the failing step"
+    ),
+}
+
+#: Fallback hint for DEGRADED/BLOCKED causes with no specific entry above.
+_SIDECAR_GENERIC_HINT = (
+    "Inspect sidecar/reports/transitions.ndjson and re-run the failing check"
+)
+
+#: Sidecar states that carry a remediation hint.
+_HINTED_SIDECAR_STATES = ("DEGRADED", "BLOCKED")
+
+
+def _sidecar_block(root: Path) -> dict[str, Any]:
+    """Additive sidecar-harness state block from the transitions audit log.
+
+    State is the last row's target (``IDLE`` when the log is absent or
+    empty); ``cause`` is the last row's cause. DEGRADED/BLOCKED states
+    carry a ``hint`` with the remediation command for the cause. Never
+    raises: unreadable history reports ``IDLE`` with no cause.
+    """
+    try:
+        override = os.environ.get(ENGAGEMENT_SIDECAR_REPORTS_ENV_VAR, "").strip()
+        reports_dir = Path(override) if override else root / "sidecar" / "reports"
+        text = (reports_dir / "transitions.ndjson").read_text(encoding="utf-8")
+    except Exception:
+        return {"state": "IDLE", "cause": None}
+    rows: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    if not rows:
+        return {"state": "IDLE", "cause": None}
+    last = rows[-1]
+    state = str(last.get("to") or "IDLE")
+    cause = last.get("cause")
+    block: dict[str, Any] = {
+        "state": state,
+        "cause": cause if isinstance(cause, str) else None,
+    }
+    if state in _HINTED_SIDECAR_STATES:
+        key = cause if isinstance(cause, str) else ""
+        block["hint"] = _SIDECAR_HINTS.get(key, _SIDECAR_GENERIC_HINT)
+    return block
 
 
 def _roe_block(root: Path) -> dict[str, Any]:
@@ -144,6 +226,7 @@ def register_durable_surface_tools(
         roe = _roe_block(base)
         engagement = _engagement_block(base)
         releases = _releases_block(base)
+        sidecar = _sidecar_block(base)
         if not journal_path.is_file():
             return {
                 "journal": "absent",
@@ -155,6 +238,7 @@ def register_durable_surface_tools(
                 "roe": roe,
                 "engagement": engagement,
                 "releases": releases,
+                "sidecar": sidecar,
             }
         found = TurnJournal(journal_path).status()
         return {
@@ -167,6 +251,7 @@ def register_durable_surface_tools(
             "roe": roe,
             "engagement": engagement,
             "releases": releases,
+            "sidecar": sidecar,
         }
 
     registry.register(
