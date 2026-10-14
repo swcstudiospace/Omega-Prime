@@ -29,6 +29,12 @@ open, else ``BLOCKED``), a 2s-timeout TCP probe of the configured
 ``gateway_url``, and ``suites_loaded``/``suites_total`` from
 ``sidecar/cases`` ``load_suite`` (drafts excluded). ``ready_for_live`` is
 true only when all three hold. It never starts an engagement.
+
+The ``conflicts`` subcommand (R5) is a read-only multi-grant detector:
+``conflicts --artifact A --artifact B [--now ISO] [--json]`` lists
+contradictions between concurrent grants (see :func:`grant_conflicts`);
+exit 0 = none, 3 = conflicts found, 2 = usage error. It never blocks
+authorization and never writes.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ import json
 import socket
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -48,6 +55,8 @@ from omega_prime.redteam.roe import (
     CAUSE_INVALID,
     CAUSE_MISSING,
     _parse_time,
+    canonical_bytes,
+    grant_tool_allowlist,
     validate_schema,
 )
 
@@ -900,6 +909,252 @@ def watchdog_check_all(artifacts: Any, *, now: Any = None) -> list[dict[str, Any
         return []
 
 
+@dataclass(frozen=True)
+class _ConflictGrant:
+    """One readable grant prepared for pairwise conflict comparison."""
+
+    ident: str
+    label: str
+    reliable_id: bool
+    document: dict[str, Any]
+    content: bytes
+    window: tuple[datetime, datetime] | None
+
+
+#: Longest rendered grant id / host / tool / tracker / operator in a
+#: conflict row (longer values are truncated, never rejected).
+_CONFLICT_TEXT_MAX = 200
+
+
+def _conflict_text(value: Any) -> str:
+    """Printable, bounded text for a conflict row (no control characters)."""
+    text = "".join(ch for ch in str(value) if ch.isprintable())
+    return text[:_CONFLICT_TEXT_MAX]
+
+
+def _conflict_window(document: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    """Inclusive aware-UTC ``(from, until)`` window, or ``None`` if unusable."""
+    start = _parse_time(document.get("effective_from"))
+    end = _parse_time(document.get("effective_until"))
+    if start is None or end is None:
+        return None
+    start, end = _as_utc(start), _as_utc(end)
+    return (start, end) if start <= end else None
+
+
+def _conflict_grant(artifact: Any) -> _ConflictGrant | None:
+    """Prepare one artifact for comparison; ``None`` when unreadable."""
+    document = _grant_document(artifact)
+    if document is None:
+        return None
+    content = canonical_bytes(document)
+    until_text = document.get("effective_until")
+    ident = _renewal_artifact_id(
+        artifact, document, until_text if isinstance(until_text, str) else None
+    )
+    from_path = isinstance(artifact, (str, Path)) and bool(str(artifact).strip())
+    from_doc = any(
+        isinstance(document.get(key), str) and document[key].strip()
+        for key in ("artifact_id", "id")
+    )
+    return _ConflictGrant(
+        ident=ident,
+        label=_conflict_text(ident),
+        reliable_id=from_path or from_doc,
+        document=document,
+        content=content,
+        window=_conflict_window(document),
+    )
+
+
+def _conflict_host_tools(document: dict[str, Any]) -> dict[str, set[str] | None]:
+    """Per-host tool allowlist (``None`` = every tool) for one grant."""
+    targets = document.get("authorized_targets")
+    if not isinstance(targets, list):
+        return {}
+    by_host: dict[str, list[Any]] = {}
+    for entry in targets:
+        if not isinstance(entry, dict):
+            continue
+        host = entry.get("host")
+        if isinstance(host, str) and host.strip():
+            by_host.setdefault(host.strip().lower(), []).append(entry)
+    return {
+        host: grant_tool_allowlist({"authorized_targets": entries})
+        for host, entries in by_host.items()
+    }
+
+
+def _conflict_csv(names: set[str]) -> str:
+    return ",".join(sorted(_conflict_text(name) for name in names))
+
+
+def _cover_text(covers: set[str] | None) -> str:
+    if covers is None:
+        return "covers all trackers"
+    return f"covers {_conflict_csv(covers)}"
+
+
+def _pair_conflicts(
+    first: _ConflictGrant,
+    second: _ConflictGrant,
+    window: tuple[datetime, datetime],
+) -> list[tuple[str, str]]:
+    """``(kind, detail)`` rows for two grants overlapping on ``window``."""
+    overlap = (
+        f"overlap {window[0].isoformat(timespec='seconds')}"
+        f"..{window[1].isoformat(timespec='seconds')}"
+    )
+    rows: list[tuple[str, str]] = []
+
+    first_hosts = _conflict_host_tools(first.document)
+    second_hosts = _conflict_host_tools(second.document)
+    segments: list[str] = []
+    for host in sorted(first_hosts.keys() & second_hosts.keys()):
+        tools_a, tools_b = first_hosts[host], second_hosts[host]
+        if (tools_a is None) == (tools_b is None):
+            continue
+        open_label, restricted_label, restricted = (
+            (first.label, second.label, tools_b)
+            if tools_a is None
+            else (second.label, first.label, tools_a)
+        )
+        segments.append(
+            f"host {_conflict_text(host)}: {open_label} unrestricted, "
+            f"{restricted_label} restricted to {_conflict_csv(restricted or set())}"
+        )
+    if segments:
+        rows.append(("tool-scope-contradiction", "; ".join(segments) + f"; {overlap}"))
+
+    covers_a = grant_trackers(first.document)
+    covers_b = grant_trackers(second.document)
+    disjoint = (
+        covers_a is not None and covers_b is not None and not (covers_a & covers_b)
+    )
+    if (covers_a is None) != (covers_b is None) or disjoint:
+        rows.append(
+            (
+                "tracker-cover-contradiction",
+                f"{first.label} {_cover_text(covers_a)}; "
+                f"{second.label} {_cover_text(covers_b)}; {overlap}",
+            )
+        )
+
+    operator_a = first.document.get("operator")
+    operator_b = second.document.get("operator")
+    if (
+        isinstance(operator_a, str)
+        and isinstance(operator_b, str)
+        and operator_a.strip()
+        and operator_b.strip()
+        and operator_a.strip() != operator_b.strip()
+    ):
+        rows.append(
+            (
+                "operator-mismatch",
+                f"operator {_conflict_text(operator_a.strip())} "
+                f"vs {_conflict_text(operator_b.strip())}; {overlap}",
+            )
+        )
+    return rows
+
+
+def grant_conflicts(artifacts: Any, *, now: Any = None) -> list[dict[str, Any]]:
+    """Detect contradictions between concurrent RoE grants (R5 detector).
+
+    ``artifacts`` is a single RoE document dict / artifact path, or a
+    list/tuple of them (the shapes :func:`watchdog_check_all` accepts).
+    Signatures are never verified and nothing is written: this is an
+    advisory warning surface that never blocks authorization. Returns
+    ``[{"kind", "grants": [id_a, id_b], "detail"}, ...]`` with ``grants``
+    sorted and the list sorted by ``(kind, grants, detail)``. ``detail``
+    is built only from ids, hosts, tool/tracker/operator names and ISO
+    times, with control characters stripped. Unreadable artifacts are
+    skipped silently (:func:`watchdog_check_all` already reports them);
+    fewer than two readable grants, ``None`` or any internal failure
+    return ``[]``; never raises.
+
+    Two grants *overlap* when both windows parse and
+    ``a.from <= b.until and b.from <= a.until`` (inclusive bounds, UTC).
+    ``now`` (datetime, epoch seconds or ISO text) restricts the check to
+    grants active at ``now`` (``from <= now <= until``); ``None`` -- or
+    an unparseable ``now`` -- compares overlap only. Grants without a
+    usable window are skipped by every window-based kind.
+
+    Kinds (the only contradictions expressible in today's fields):
+
+    - ``duplicate-id-divergent``: one id (document ``artifact_id``/``id``
+      or the artifact path -- never the ``operator|until`` fallback id)
+      carries differing canonical content. Needs no window; with ``now``
+      only grants whose parseable window is closed at ``now`` are dropped.
+    - ``tool-scope-contradiction``: overlapping grants where one is
+      unrestricted on a host (no ``tools``) and another restricts that
+      same host to a tool subset (the union merge narrows the former).
+      Hosts are compared case-insensitively; differing non-empty tool
+      sets are not a conflict.
+    - ``tracker-cover-contradiction``: overlapping grants where one has
+      ``covers`` and the other none (= all trackers), or two ``covers``
+      sets are disjoint (:func:`grant_trackers` semantics).
+    - ``operator-mismatch``: overlapping grants with different non-empty
+      ``operator`` strings.
+
+    NOT detectable today: rate limits, deny lists or per-class limits
+    (the schema has no such fields), targets beyond ``host``/``tools``,
+    and ``case_classes`` differences (merged as a deliberate union).
+    """
+    try:
+        items = list(artifacts) if isinstance(artifacts, (list, tuple)) else [artifacts]
+        records: list[_ConflictGrant] = []
+        for item in items:
+            try:
+                record = _conflict_grant(item)
+            except Exception:
+                record = None
+            if record is not None:
+                records.append(record)
+        if len(records) < 2:
+            return []
+        current = None if now is None else _renewal_now(now)
+        if current is not None:
+            records = [
+                rec
+                for rec in records
+                if rec.window is None or rec.window[0] <= current <= rec.window[1]
+            ]
+        records.sort(key=lambda rec: (rec.label, rec.content))
+        found: set[tuple[str, tuple[str, str], str]] = set()
+        for idx, first in enumerate(records):
+            for second in records[idx + 1 :]:
+                grants = (first.label, second.label)
+                if (
+                    first.reliable_id
+                    and second.reliable_id
+                    and first.ident == second.ident
+                    and first.content != second.content
+                ):
+                    found.add(
+                        (
+                            "duplicate-id-divergent",
+                            grants,
+                            f"id {first.label} has divergent content",
+                        )
+                    )
+                if first.window is None or second.window is None:
+                    continue
+                start = max(first.window[0], second.window[0])
+                end = min(first.window[1], second.window[1])
+                if start > end:
+                    continue
+                for kind, detail in _pair_conflicts(first, second, (start, end)):
+                    found.add((kind, grants, detail))
+        return [
+            {"kind": kind, "grants": list(grants), "detail": detail}
+            for kind, grants, detail in sorted(found)
+        ]
+    except Exception:
+        return []
+
+
 #: Watchdog states that trigger a grant-expiry notice via the
 #: configured findings-sync tracker (O11). A healthy (``valid``) grant
 #: stays silent; ``missing``/``invalid`` are operator-input problems,
@@ -1035,7 +1290,7 @@ def _exit_code(state: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``check`` (lifecycle), ``readiness`` (live check), ``revoke``."""
+    """CLI: ``check``, ``readiness``, ``conflicts`` and ``revoke``."""
     parser = argparse.ArgumentParser(
         description="RoE lifecycle watcher — warn before RoE expiry, never renew"
     )
@@ -1063,6 +1318,26 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to the RoE grant audit JSONL log: expired grants append "
         "a grant-expired row here and the log contents are included in "
         "the output (audit_log key with --json). Audit writes never raise.",
+    )
+    conflicts_parser = sub.add_parser(
+        "conflicts",
+        help="Detect contradictions between concurrent RoE grants (read-only)",
+    )
+    conflicts_parser.add_argument(
+        "--artifact",
+        dest="artifacts",
+        action="append",
+        required=True,
+        help="Path to a RoE JSON artifact (repeat for concurrent grants)",
+    )
+    conflicts_parser.add_argument(
+        "--now",
+        default=None,
+        help="ISO-8601 UTC clock: only grants active then are compared "
+        "(default: overlap-only, no clock read)",
+    )
+    conflicts_parser.add_argument(
+        "--json", action="store_true", help="Output the conflict list as JSON"
     )
     ready = sub.add_parser(
         "readiness", help="Post-RoE-signing live-gateway readiness check"
@@ -1173,6 +1448,26 @@ def main(argv: list[str] | None = None) -> int:
                         f"{entry.get('artifact_path', '?')}"
                     )
         return _exit_code(result["state"])
+    if args.command == "conflicts":
+        conflict_now: datetime | None = None
+        if args.now is not None:
+            conflict_now = _parse_now_override(args.now)
+            if conflict_now is None:
+                print(
+                    f"error: --now is not a parseable datetime: {args.now!r}",
+                    file=sys.stderr,
+                )
+                return 2
+        conflicts = grant_conflicts(list(args.artifacts or []), now=conflict_now)
+        if args.json:
+            print(json.dumps(conflicts, indent=2))
+        elif conflicts:
+            for row in conflicts:
+                id_a, id_b = row["grants"]
+                print(f"{row['kind']}: {id_a} vs {id_b} - {row['detail']}")
+        else:
+            print("roe conflicts: none")
+        return 3 if conflicts else 0
     if args.command == "readiness":
         now = _parse_now_override(args.now)
         if now is None:
