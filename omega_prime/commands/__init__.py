@@ -5,7 +5,7 @@
 A command is the whole user message: ``/omega-help``, not a sentence that
 mentions it. Execution goes through the registry. A tool error stays an error.
 
-The 20 curated commands come first. Generated commands follow, one per
+The 24 curated commands come first. Generated commands follow, one per
 checked-in skill and routine (``omega_prime.commands.generated``). A skill
 command returns that skill's instructions. A routine command whose exact stem
 is a workflow runs that workflow; any other routine returns its text.
@@ -175,6 +175,43 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "Apply (or preview) one triage PROPOSAL into the TRIAGED block.",
         "The user asks to approve or apply a red-team triage proposal.",
         needs_args=True,
+    ),
+    CommandSpec(
+        "omega-redteam-report",
+        (
+            "/omega-redteam-report [--summary] [--since <RFC3339>] "
+            "[--threshold gate:<pct>|gate-risk:<score>]"
+        ),
+        (
+            "Print the engagement digest (or one-line summary) from stored "
+            "harness history. Read-only."
+        ),
+        "The user asks for the red-team engagement report, digest, or posture summary.",
+    ),
+    CommandSpec(
+        "omega-redteam-coverage",
+        "/omega-redteam-coverage [--jsonl] [--since <RFC3339>]",
+        "Show the per-class detection coverage matrix from stored history. Read-only.",
+        "The user asks for red-team detection coverage or the coverage matrix.",
+    ),
+    CommandSpec(
+        "omega-redteam-sync-plan",
+        "/omega-redteam-sync-plan",
+        (
+            "Plan the next findings sync without dispatching anything: what "
+            "would sync and what is held."
+        ),
+        "The user asks what the findings sync would send to the tracker next.",
+    ),
+    CommandSpec(
+        "omega-redteam-cycle",
+        "/omega-redteam-cycle [--run] [--steps <a,b>]",
+        (
+            "Plan (default) or run the purple cycle: preflight, release watch, "
+            "pin-bump audit, engagement digest, findings plan. Never "
+            "dispatches findings."
+        ),
+        "The user asks to plan or run the purple-team operations cycle.",
     ),
 )
 
@@ -363,7 +400,31 @@ def _run(
         return _redteam(name, args, env, "roe_check")
     if name == "omega-redteam-triage-apply":
         return _redteam(name, args, env, "triage_apply")
+    if name == "omega-redteam-report":
+        return _redteam(name, args, env, "report")
+    if name == "omega-redteam-coverage":
+        return _redteam(name, args, env, "coverage")
+    if name == "omega-redteam-sync-plan":
+        return _redteam(name, args, env, "sync_plan")
+    if name == "omega-redteam-cycle":
+        return _redteam(name, args, env, "cycle")
     return _fail(name, "unknown_command", {"commands": _command_names()})
+
+
+_REDTEAM_MODULES = {
+    "run": "omega_prime.commands.redteam_run",
+    "status": "omega_prime.commands.redteam_status",
+    "findings": "omega_prime.commands.redteam_findings",
+    "triage": "omega_prime.commands.redteam_triage",
+    "roe_create": "omega_prime.commands.redteam_roe_create",
+    "roe_sign": "omega_prime.commands.redteam_roe_sign",
+    "roe_check": "omega_prime.commands.redteam_roe_check",
+    "triage_apply": "omega_prime.commands.redteam_triage_apply",
+    "report": "omega_prime.commands.redteam_report",
+    "coverage": "omega_prime.commands.redteam_coverage",
+    "sync_plan": "omega_prime.commands.redteam_sync_plan",
+    "cycle": "omega_prime.commands.redteam_cycle",
+}
 
 
 def _redteam(
@@ -373,22 +434,22 @@ def _redteam(
     kind: str,
 ) -> dict[str, Any]:
     """Run one red-team harness command. A bad run is a dict, never a raise."""
+    module_name = _REDTEAM_MODULES.get(kind)
+    if module_name is None:
+        return _fail(command, "command_failed", {"error": f"unknown kind: {kind}"})
     try:
-        module_name = {
-            "run": "omega_prime.commands.redteam_run",
-            "status": "omega_prime.commands.redteam_status",
-            "findings": "omega_prime.commands.redteam_findings",
-            "triage": "omega_prime.commands.redteam_triage",
-            "roe_create": "omega_prime.commands.redteam_roe_create",
-            "roe_sign": "omega_prime.commands.redteam_roe_sign",
-            "roe_check": "omega_prime.commands.redteam_roe_check",
-            "triage_apply": "omega_prime.commands.redteam_triage_apply",
-        }[kind]
         mod = importlib.import_module(module_name)
-        return _ok(command, mod.run(args, env))
-    except mod.Error as exc:
-        return _fail(command, exc.error, exc.result)
     except Exception as exc:
+        return _fail(
+            command, "command_failed", {"error": f"{type(exc).__name__}: {exc}"}
+        )
+    error_type: Any = getattr(mod, "Error", None)
+    try:
+        return _ok(command, mod.run(args, env))
+    except Exception as exc:
+        failure: Any = exc
+        if isinstance(error_type, type) and isinstance(exc, error_type):
+            return _fail(command, failure.error, failure.result)
         return _fail(
             command, "command_failed", {"error": f"{type(exc).__name__}: {exc}"}
         )

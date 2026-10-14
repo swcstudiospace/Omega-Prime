@@ -113,7 +113,7 @@ def _seed_finding(reports: Path, case_id: str, detection: str) -> dict[str, Any]
 
 
 def test_help_lists_the_four_new_commands_with_exact_usage() -> None:
-    assert len(COMMANDS) == 20
+    assert len(COMMANDS) == 24
     by_name = {spec.name: spec for spec in COMMANDS}
     assert by_name["omega-redteam-run"].usage == redteam_run.USAGE
     assert by_name["omega-redteam-status"].usage == redteam_status.USAGE
