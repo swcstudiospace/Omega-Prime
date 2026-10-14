@@ -104,8 +104,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
+import hmac
 import html
 import json
+import os
 import random
 import shutil
 import subprocess
@@ -150,6 +153,7 @@ TRACKERS = (
     "pagerduty",
     "opsgenie",
     "jira",
+    "webhook",
 )
 
 #: Default tracker backend (the existing GitHub-issues mode, unchanged).
@@ -166,6 +170,27 @@ NO_SLACK_WEBHOOK_MESSAGE = "no slack webhook configured"
 #: Message used when tracker=teams but no webhook URL is configured
 #: (fail-closed, never guess).
 NO_TEAMS_WEBHOOK_MESSAGE = "no teams webhook configured"
+
+#: Message used when tracker=webhook but no webhook URL is configured
+#: (fail-closed, never guess).
+NO_WEBHOOK_URL_MESSAGE = "no webhook url configured"
+
+#: Generic-webhook HMAC signing headers (M8). The signature covers
+#: ``f"{timestamp}.{payload}"`` where ``payload`` is the canonical JSON
+#: body; receivers recompute the same string to verify.
+WEBHOOK_SIGNATURE_HEADER = "X-Omega-Signature"
+WEBHOOK_PREVIOUS_SIGNATURE_HEADER = "X-Omega-Signature-Previous"
+WEBHOOK_TIMESTAMP_HEADER = "X-Omega-Timestamp"
+
+#: Env overrides for the generic-webhook sender (read when the matching
+#: ``redteam.findings_sync`` node key is blank or absent; never logged).
+WEBHOOK_URL_ENV_VAR = "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_WEBHOOK_URL"
+WEBHOOK_SIGNING_SECRET_ENV_VAR = (
+    "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_WEBHOOK_SIGNING_SECRET"
+)
+WEBHOOK_SIGNING_SECRET_PREVIOUS_ENV_VAR = (
+    "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_WEBHOOK_SIGNING_SECRET_PREVIOUS"
+)
 
 #: Message used when graph mode is selected but the ``graph`` mapping is
 #: blank or missing (fail-closed, never guess, never crash).
@@ -1125,6 +1150,209 @@ def sync_findings_teams(
     return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
 
 
+def sign_payload(payload_bytes: bytes, secret: str) -> str:
+    """HMAC-SHA256 hex digest of ``payload_bytes`` under ``secret``.
+
+    Stdlib :mod:`hmac`/:mod:`hashlib` only. The caller composes the
+    signed bytes; for outbound webhook delivery that is
+    ``f"{timestamp}.{payload}"`` (see :func:`webhook_signing_headers`).
+    """
+    return hmac.new(
+        secret.encode("utf-8"), bytes(payload_bytes), hashlib.sha256
+    ).hexdigest()
+
+
+def webhook_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Generic-webhook body for one finding row (fixed fields only).
+
+    Mirrors :func:`issue_title`/:func:`issue_body` — never the raw
+    gateway payload (threat T-79-11). The canonical JSON encoding of
+    this dict is the ``payload`` covered by :func:`sign_payload`.
+    """
+    digest = str(row.get("dedupe_hash", ""))
+    return {
+        "title": issue_title(row),
+        "body": issue_body(row),
+        "dedupe_hash": digest,
+        "severity": str(row.get("severity", "") or ""),
+    }
+
+
+def _canonical_payload_bytes(body: Mapping[str, Any]) -> bytes:
+    """Canonical JSON bytes of a webhook body (the signed ``payload``)."""
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def webhook_signing_headers(
+    payload_bytes: bytes,
+    secret: str,
+    previous_secret: str = "",
+    timestamp: int | None = None,
+) -> dict[str, str]:
+    """Signing headers for one generic-webhook payload.
+
+    Signs ``f"{timestamp}.{payload}"`` with the current ``secret``
+    (``X-Omega-Signature: sha256=<hex>``) alongside
+    ``X-Omega-Timestamp: <unix>``. During secret rotation pass the
+    outgoing secret as ``previous_secret``: its signature rides as
+    ``X-Omega-Signature-Previous`` so receivers can rotate without
+    downtime. A blank ``secret`` returns ``{}`` (unsigned — the
+    existing behavior, byte-identical).
+    """
+    if not isinstance(secret, str) or not secret.strip():
+        return {}
+    ts = str(timestamp if timestamp is not None else int(time.time()))
+    payload_text = bytes(payload_bytes).decode("utf-8")
+    signed = f"{ts}.{payload_text}".encode()
+    headers = {
+        WEBHOOK_TIMESTAMP_HEADER: ts,
+        WEBHOOK_SIGNATURE_HEADER: f"sha256={sign_payload(signed, secret)}",
+    }
+    if isinstance(previous_secret, str) and previous_secret:
+        headers[WEBHOOK_PREVIOUS_SIGNATURE_HEADER] = (
+            f"sha256={sign_payload(signed, previous_secret)}"
+        )
+    return headers
+
+
+def _webhook_signing_secrets(node: Mapping[str, Any]) -> tuple[str, str]:
+    """``(current, previous)`` signing secrets for the generic webhook.
+
+    Each reads ``redteam.findings_sync`` first, then its env override;
+    blank/absent on both sides means unsigned. Secrets are never logged.
+    """
+    raw_current = node.get("webhook_signing_secret", "")
+    current = (
+        raw_current.strip()
+        if isinstance(raw_current, str) and raw_current.strip()
+        else os.environ.get(WEBHOOK_SIGNING_SECRET_ENV_VAR, "").strip()
+    )
+    raw_previous = node.get("webhook_signing_secret_previous", "")
+    previous = (
+        raw_previous.strip()
+        if isinstance(raw_previous, str) and raw_previous.strip()
+        else os.environ.get(WEBHOOK_SIGNING_SECRET_PREVIOUS_ENV_VAR, "").strip()
+    )
+    return current, previous
+
+
+def _webhook_url_for_node(node: Mapping[str, Any]) -> str:
+    """Generic-webhook URL: node key first, then its env override."""
+    raw = node.get("webhook_url", "")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return os.environ.get(WEBHOOK_URL_ENV_VAR, "").strip()
+
+
+def sync_findings_webhook(
+    reports_dir: str | Path | None,
+    webhook_url: str,
+    *,
+    runner: GhRunner | None = None,
+    dry_run: bool = False,
+    signing_secret: str = "",
+    previous_signing_secret: str = "",
+    timestamp: int | None = None,
+) -> dict[str, Any]:
+    """Post every not-yet-synced finding row to a generic webhook URL.
+
+    Same rows and idempotency marking as :func:`sync_findings` (rows
+    carrying ``issue_url`` are skipped); only the transport differs —
+    ``gh api <webhook-url>`` POSTs one :func:`webhook_payload` JSON
+    body per row instead of a GitHub issue. A pushed row is marked
+    with a deterministic ``webhook:<dedupe_hash>`` ref. The
+    webhook-retry transport (:func:`_run_with_webhook_retry`) applies.
+    Failure semantics mirror :func:`sync_findings`: earlier-in-run
+    pushes persist, the failed row stays unsynced, and a
+    :class:`GhApiError` is raised. With zero pushes (or ``dry_run``)
+    the store file is byte-identical and the runner is never called in
+    dry-run mode.
+
+    When ``signing_secret`` is non-blank, each POST carries
+    ``X-Omega-Timestamp`` and ``X-Omega-Signature`` headers over
+    ``f"{timestamp}.{payload}"`` (see :func:`webhook_signing_headers`);
+    ``previous_signing_secret`` adds ``X-Omega-Signature-Previous``
+    for rotation. Blank/absent secrets send no signing headers —
+    the unsigned argv is byte-identical to the pre-signing shape.
+    Secrets ride only in ``-H`` argv fields (as webhook URLs do) — they
+    are never logged, never rendered, and never echoed beyond the
+    introspection payload.
+
+    A blank ``webhook_url`` raises :class:`ValueError` (fail-closed,
+    never guess).
+
+    Returns ``{"pushed": [...], "skipped": [...], "dry_run": bool}``
+    with the same entry shapes as :func:`sync_findings`.
+    """
+    if not isinstance(webhook_url, str) or not webhook_url.strip():
+        raise ValueError(NO_WEBHOOK_URL_MESSAGE)
+    webhook_url = webhook_url.strip()
+    run = runner if runner is not None else _default_runner
+
+    rows = load_findings(reports_dir)
+    pushed: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    dirty = False
+
+    for row in rows:
+        digest = str(row.get("dedupe_hash", ""))
+        if row.get("issue_url"):
+            skipped.append(digest)
+            continue
+        body = webhook_payload(row)
+        payload_bytes = _canonical_payload_bytes(body)
+        headers = webhook_signing_headers(
+            payload_bytes,
+            signing_secret,
+            previous_signing_secret,
+            timestamp,
+        )
+        payload: dict[str, Any] = {
+            "webhook_url": webhook_url,
+            "body": body,
+        }
+        if headers:
+            payload["headers"] = dict(headers)
+        argv = [
+            "gh",
+            "api",
+            webhook_url,
+            "--method",
+            "POST",
+        ]
+        for name, value in headers.items():
+            argv += ["-H", f"{name}: {value}"]
+        argv += [
+            "-f",
+            f"title={body['title']}",
+            "-f",
+            f"body={body['body']}",
+            "-f",
+            f"dedupe_hash={body['dedupe_hash']}",
+        ]
+
+        if dry_run:
+            pushed.append({"dedupe_hash": digest, "issue_url": ""})
+            continue
+
+        try:
+            _run_with_webhook_retry(run, argv, payload)
+        except FindingsSyncError:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise
+        except Exception as exc:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise GhApiError(f"gh runner failed: {exc}") from exc
+        row["issue_url"] = f"webhook:{digest}"
+        row["synced_at"] = utc_now_rfc3339()
+        dirty = True
+        pushed.append({"dedupe_hash": digest, "issue_url": row["issue_url"]})
+
+    if dirty and not dry_run:
+        _write_rows_atomic(findings_path(reports_dir), rows)
+    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+
+
 def sync_findings_pagerduty(
     reports_dir: str | Path | None,
     routing_key: str,
@@ -2024,6 +2252,85 @@ def _tracker_error(message: str, dry_run: bool) -> dict[str, Any]:
     }
 
 
+#: RoE artifact keys read (in order) for per-grant tracker allowlists
+#: (M11). Mirrors the heartbeat's ``roe_artifact``/``roe_artifacts``
+#: context keys, plus the same keys nested in the findings-sync node.
+ROE_ARTIFACT_KEYS = (
+    "roe_artifact",
+    "roe_artifact_path",
+    "roe_artifacts",
+    "roe_artifact_paths",
+)
+
+
+def _grant_allowed_trackers(
+    config: Mapping[str, Any] | None, node: Mapping[str, Any]
+) -> set[str] | None:
+    """Union of tracker names covered by active RoE grants, or ``None``.
+
+    Reads the RoE artifact from the heartbeat/tick context when
+    configured (``roe_artifact``/``roe_artifacts`` on the
+    findings-sync node or on ``redteam``); delegates per-grant
+    ``covers`` parsing to :func:`roe_lifecycle.grant_trackers`.
+    ``None`` means no grant scoping applies (no artifact configured,
+    or a grant with missing/empty ``covers`` allows every tracker) —
+    the tick proceeds exactly as before (backward compatible).
+    Never raises: an unreadable artifact fails open to ``None``.
+    """
+    candidates: list[Any] = []
+    for key in ROE_ARTIFACT_KEYS:
+        if isinstance(node, Mapping) and node.get(key) is not None:
+            candidates.append(node.get(key))
+    redteam: Any = (config or {}).get("redteam", {})
+    if isinstance(redteam, Mapping):
+        for key in ROE_ARTIFACT_KEYS:
+            if redteam.get(key) is not None:
+                candidates.append(redteam.get(key))
+    if not candidates:
+        return None
+    try:
+        from omega_prime.grokbot.roe_lifecycle import grant_trackers
+    except Exception:
+        return None
+    try:
+        merged: set[str] = set()
+        scoped = False
+        artifacts = candidates[0] if len(candidates) == 1 else candidates
+        if isinstance(artifacts, (list, tuple)):
+            items: list[Any] = []
+            for candidate in artifacts:
+                if isinstance(candidate, (list, tuple)):
+                    items.extend(candidate)
+                else:
+                    items.append(candidate)
+        else:
+            items = [artifacts]
+        for item in items:
+            covered = grant_trackers(item)
+            if covered is None:
+                return None
+            scoped = True
+            merged |= covered
+        return merged if scoped else None
+    except Exception:
+        return None
+
+
+def _grant_skip_result(tracker: str, dry_run: bool) -> dict[str, Any]:
+    """Structured fail-closed result for a grant-scoped tracker skip."""
+    return {
+        "pushed": [],
+        "skipped": [],
+        "dry_run": dry_run,
+        "disabled": False,
+        "skipped_tracker": tracker,
+        "reason": (
+            f"tracker {tracker!r} not covered by any active grant; "
+            "dispatch skipped (per-grant tracker allowlist)"
+        ),
+    }
+
+
 def tick(
     config: Mapping[str, Any] | None = None,
     *,
@@ -2037,16 +2344,24 @@ def tick(
     ``labels``, ``linear_team_id``, ``slack_webhook_url``,
     ``teams_webhook_url``, ``graph``, ``pagerduty_routing_key``,
     ``pagerduty_severity_map``, ``opsgenie_api_key``,
-    ``opsgenie_priority_map``, ``jira``) from ``config``
-    (loads via ``load_config()`` when omitted). Disabled, repo-less,
-    team-less, webhook-less, graph-less, routing-key-less, api-key-less,
-    jira-config-less,
-    or unknown-tracker results are structured dicts — never exceptions,
+    ``opsgenie_priority_map``, ``jira``, ``webhook_url``,
+    ``webhook_signing_secret``, ``webhook_signing_secret_previous``)
+    from ``config`` (loads via ``load_config()`` when omitted).
+    Disabled, repo-less, team-less, webhook-less, graph-less,
+    routing-key-less, api-key-less, jira-config-less, or
+    unknown-tracker results are structured dicts — never exceptions,
     never a new cron kind. The graph branch runs when ``tracker`` is
     ``"graph"`` or when the ``graph`` mapping is complete; the sync
-    itself stays plain
-    functions; schedulers call this ``tick`` following the
-    ``tick``/``schedule`` precedent.
+    itself stays plain functions; schedulers call this ``tick``
+    following the ``tick``/``schedule`` precedent.
+
+    Per-grant tracker allowlists (M11): when a RoE artifact is present
+    in the tick context (``roe_artifact``/``roe_artifacts`` on the
+    findings-sync node or on ``redteam``), a tracker not covered by any
+    active grant is skipped with a structured ``skipped_tracker`` +
+    ``reason`` result (fail-closed only when grants exist and cover
+    nothing for this tracker). Without grant scoping the tick proceeds
+    exactly as before.
     """
     if config is None:
         from omega_prime.config import load_config  # deferred: keeps import light
@@ -2057,6 +2372,14 @@ def tick(
         return {"pushed": [], "skipped": [], "dry_run": dry_run, "disabled": True}
     tracker = _tracker_for_node(node)
     graph_cfg = _graph_config_for_node(node)
+    effective_tracker = (
+        "graph"
+        if (tracker == "graph" or _graph_config_complete(graph_cfg))
+        else tracker
+    )
+    allowed = _grant_allowed_trackers(config, node)
+    if allowed is not None and effective_tracker not in allowed:
+        return _grant_skip_result(effective_tracker, dry_run)
     if tracker == "graph" or _graph_config_complete(graph_cfg):
         if not _graph_config_complete(graph_cfg):
             return _tracker_error(NO_GRAPH_CONFIG_MESSAGE, dry_run)
@@ -2164,6 +2487,21 @@ def tick(
             issue_type=issue_type,
             runner=runner,
             dry_run=dry_run,
+        )
+        result["disabled"] = False
+        return result
+    if tracker == "webhook":
+        webhook_url = _webhook_url_for_node(node)
+        if not webhook_url:
+            return _tracker_error(NO_WEBHOOK_URL_MESSAGE, dry_run)
+        signing_secret, previous_secret = _webhook_signing_secrets(node)
+        result = sync_findings_webhook(
+            reports_directory,
+            webhook_url,
+            runner=runner,
+            dry_run=dry_run,
+            signing_secret=signing_secret,
+            previous_signing_secret=previous_secret,
         )
         result["disabled"] = False
         return result
@@ -2407,6 +2745,52 @@ def _main_jira(
     return 0
 
 
+def _main_webhook(
+    directory: str | Path | None,
+    webhook_url: str,
+    dry_run: bool,
+    signing_secret: str = "",
+    previous_signing_secret: str = "",
+) -> int:
+    """Run the generic-webhook branch of the CLI (dry-run aware)."""
+    if dry_run:
+        try:
+            result = sync_findings_webhook(
+                directory if directory is not None else reports_dir(),
+                webhook_url,
+                dry_run=True,
+                signing_secret=signing_secret,
+                previous_signing_secret=previous_signing_secret,
+            )
+        except FindingsSyncError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for entry in result["pushed"]:
+            print(f"would push {entry['dedupe_hash']}")
+        for digest in result["skipped"]:
+            print(f"skip (already synced) {digest}")
+        return 0
+
+    try:
+        result = sync_findings_webhook(
+            directory if directory is not None else reports_dir(),
+            webhook_url,
+            signing_secret=signing_secret,
+            previous_signing_secret=previous_signing_secret,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except FindingsSyncError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for entry in result["pushed"]:
+        print(f"pushed {entry['dedupe_hash']} -> {entry['issue_url']}")
+    for digest in result["skipped"]:
+        print(f"skip (already synced) {digest}")
+    return 0
+
+
 def _main_linear(directory: str | Path | None, team_id: str, dry_run: bool) -> int:
     """Run the Linear branch of the CLI (dry-run aware)."""
     if dry_run:
@@ -2494,7 +2878,7 @@ def _main_graph(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``findings_sync [--tracker github|linear|slack|teams|graph|pagerduty|opsgenie|jira] [--mode jira] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
+    """CLI: ``findings_sync [--tracker github|linear|slack|teams|graph|pagerduty|opsgenie|jira|webhook] [--mode jira] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
     parser = argparse.ArgumentParser(
         prog="findings_sync",
         description="Push unsynced red-team findings to tracker issues (one-way).",
@@ -2502,12 +2886,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tracker",
         default="",
-        help="Tracker backend: github (default), linear, slack, teams, graph, pagerduty, opsgenie, or jira; blank means config",
+        help="Tracker backend: github (default), linear, slack, teams, graph, pagerduty, opsgenie, jira, or webhook; blank means config",
     )
     parser.add_argument(
         "--mode",
         default="",
-        help="Mode alias for --tracker (graph selects the Microsoft Graph API sender, pagerduty the PagerDuty Events API sender, opsgenie the Opsgenie Alert API sender, jira the Jira REST API sender); blank means config",
+        help="Mode alias for --tracker (graph selects the Microsoft Graph API sender, pagerduty the PagerDuty Events API sender, opsgenie the Opsgenie Alert API sender, jira the Jira REST API sender, webhook the generic signed-webhook sender); blank means config",
     )
     parser.add_argument("--repo", default="", help="Target repo OWNER/NAME")
     parser.add_argument("--linear-team-id", default="", help="Linear team ID override")
@@ -2531,6 +2915,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--jira-issue-type", default="", help="Jira issue type override"
+    )
+    parser.add_argument(
+        "--webhook-url", default="", help="Generic webhook URL override"
     )
     parser.add_argument("--reports-dir", default="", help="Reports dir override")
     parser.add_argument(
@@ -2657,6 +3044,19 @@ def main(argv: list[str] | None = None) -> int:
             issue_type=issue_type,
             dry_run=args.dry_run,
         )
+    if tracker == "webhook":
+        webhook_url = args.webhook_url.strip() or _webhook_url_for_node(node)
+        if not webhook_url:
+            print(f"error: {NO_WEBHOOK_URL_MESSAGE}", file=sys.stderr)
+            return 2
+        signing_secret, previous_secret = _webhook_signing_secrets(node)
+        return _main_webhook(
+            directory,
+            webhook_url,
+            args.dry_run,
+            signing_secret,
+            previous_secret,
+        )
     if tracker != "github":
         print(f"error: unknown tracker: {tracker}", file=sys.stderr)
         return 2
@@ -2729,6 +3129,7 @@ __all__ = [
     "NO_REPO_MESSAGE",
     "NO_SLACK_WEBHOOK_MESSAGE",
     "NO_TEAMS_WEBHOOK_MESSAGE",
+    "NO_WEBHOOK_URL_MESSAGE",
     "OG_PRIORITIES",
     "OPSGENIE_ALERTS_URL",
     "OPSGENIE_MESSAGE_LIMIT",
@@ -2746,7 +3147,13 @@ __all__ = [
     "UNKNOWN_SEVERITY_PRIORITY",
     "UNKNOWN_SEVERITY_THEME_COLOR",
     "WEBHOOK_MAX_RETRIES",
+    "WEBHOOK_PREVIOUS_SIGNATURE_HEADER",
     "WEBHOOK_RETRY_DELAYS",
+    "WEBHOOK_SIGNATURE_HEADER",
+    "WEBHOOK_SIGNING_SECRET_ENV_VAR",
+    "WEBHOOK_SIGNING_SECRET_PREVIOUS_ENV_VAR",
+    "WEBHOOK_TIMESTAMP_HEADER",
+    "WEBHOOK_URL_ENV_VAR",
     "FindingsSyncError",
     "GhApiError",
     "GhNotFoundError",
@@ -2763,6 +3170,7 @@ __all__ = [
     "pagerduty_payload",
     "pagerduty_severity",
     "priority_for_severity",
+    "sign_payload",
     "slack_color",
     "slack_message",
     "sync_findings",
@@ -2773,7 +3181,10 @@ __all__ = [
     "sync_findings_pagerduty",
     "sync_findings_slack",
     "sync_findings_teams",
+    "sync_findings_webhook",
     "teams_message",
     "teams_theme_color",
     "tick",
+    "webhook_payload",
+    "webhook_signing_headers",
 ]

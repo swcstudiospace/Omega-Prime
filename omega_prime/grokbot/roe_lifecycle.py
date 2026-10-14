@@ -343,6 +343,64 @@ def check_roe_lifecycle_all(
     }
 
 
+def _grant_document(artifact: Any) -> dict[str, Any] | None:
+    """One RoE artifact as a document dict, or ``None`` when unreadable."""
+    if isinstance(artifact, dict):
+        return artifact
+    if isinstance(artifact, (str, Path)):
+        path_text = str(artifact).strip()
+        if not path_text:
+            return None
+        try:
+            raw = Path(path_text).read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            loaded = json.loads(raw)
+        except ValueError:
+            return None
+        return loaded if isinstance(loaded, dict) else None
+    return None
+
+
+def grant_trackers(artifact: Any) -> set[str] | None:
+    """Tracker names covered by a RoE grant, or ``None`` for all.
+
+    ``artifact`` is a parsed RoE document (dict), a path to a RoE JSON
+    artifact file, or a list/tuple of either for operators with several
+    concurrent grants (merged as a union — a tracker covered by any
+    grant is allowed). Reads the document's ``covers`` key (a list of
+    tracker names such as ``["slack", "jira"]``, matched
+    case-insensitively after stripping whitespace; non-string entries
+    are ignored).
+
+    A missing or empty ``covers`` means all trackers are allowed
+    (backward compatible) — as does an unreadable artifact or a grant
+    set where any single grant allows all. Never raises.
+    """
+    if isinstance(artifact, (list, tuple)):
+        if not artifact:
+            return None
+        merged: set[str] = set()
+        for item in artifact:
+            covered = grant_trackers(item)
+            if covered is None:
+                return None
+            merged |= covered
+        return merged or None
+    document = _grant_document(artifact)
+    if document is None:
+        return None
+    covers = document.get("covers")
+    if covers is None:
+        return None
+    if not isinstance(covers, (list, tuple)):
+        return None
+    allowed = {str(name).strip().lower() for name in covers if isinstance(name, str)}
+    allowed.discard("")
+    return allowed or None
+
+
 #: Renewal-reminder thresholds (G11): days of window left at or below
 #: which a ``renewal_reminders`` entry fires. Ordered widest first so a
 #: single call returns every newly crossed threshold in the same order.

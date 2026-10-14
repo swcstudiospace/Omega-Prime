@@ -48,10 +48,17 @@ first failure, leaving no partial pin records behind:
    the completed prefix steps named on stderr.
 
 ``--skip-audit`` skips steps 4-5 (offline/provenance-only bump); stdout
-says ``audit-skipped`` so the PR body cannot quote a verdict. Rollback
-is a single revert: ``git reset --hard HEAD~1 && git submodule update
---init redteam`` — the bump commit is atomic, so no partial pin records
-survive.
+says ``audit-skipped`` so the PR body cannot quote a verdict.
+``--rollback`` re-pins to the previous version from the last bump record
+(``report.md``'s ``Old:`` audit label, else the git history of
+``VENDOR.md``), restores the old lockfile entry (and the
+``redteam/package.json`` version when ``--bump-commit`` was part of the
+original bump), and opens a revert PR. When the tick/job context carries
+a RoE artifact the grant must be active (non-expired, non-revoked);
+without RoE the rollback proceeds (fail-open local runs). No prior bump
+is a usage error naming every location checked. ``--dry-run`` prints the
+revert plan with zero mutations. ``report.md`` is left untouched so it
+stays the record a future rollback reads.
 
 ``--dry-run`` runs the verification steps (ref resolution, pin-record
 readiness, re-vendor preview counts, surface check, npm audit, delta)
@@ -99,6 +106,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -423,8 +431,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--to",
-        required=True,
-        help="New pin: a 40-hex upstream SHA or a v-tag (e.g. v1.4).",
+        required=False,
+        default=None,
+        help="New pin: a 40-hex upstream SHA or a v-tag (e.g. v1.4). Required unless --rollback.",
+    )
+    parser.add_argument(
+        "--rollback",
+        dest="rollback",
+        action="store_true",
+        help=(
+            "Re-pin to the previous version from the last bump record "
+            "(report.md's Old audit label, else the git history of "
+            "VENDOR.md), restore the old lockfile entry (and the "
+            "redteam/package.json version when --bump-commit was part of "
+            "the original bump), and open a revert PR. No prior bump is "
+            "a usage error naming every location checked. Composes with "
+            "--dry-run (prints the revert plan, zero mutations). When the "
+            "tick/job context carries a RoE artifact the grant must be "
+            "active (non-expired, non-revoked); without RoE the rollback "
+            "proceeds (fail-open local runs)."
+        ),
     )
     parser.add_argument(
         "--old-audit",
@@ -778,6 +804,25 @@ def _bump_commit_gate(
     return None
 
 
+def _package_version_from_text(text: str, label: str) -> tuple[str | None, str | None]:
+    """``(version, error)`` for ``package.json`` text from any source.
+
+    ``label`` names the source in errors (a path, or ``<pin>:package.json``
+    for ``git show`` output). ``error`` is non-None when the text is
+    unparsable or carries no usable ``version`` field.
+    """
+    try:
+        doc = json.loads(text)
+    except ValueError as exc:
+        return None, f"cannot parse package.json {label} ({exc})"
+    version = doc.get("version") if isinstance(doc, dict) else None
+    if not isinstance(version, str) or not version.strip():
+        return None, f"package.json {label} has no version field"
+    if _PKG_VERSION_LINE_RE.search(text) is None:
+        return None, f"package.json {label} has no version line to rewrite"
+    return version, None
+
+
 def _read_package_text(
     path: Path,
 ) -> tuple[str | None, str | None, str | None]:
@@ -792,15 +837,9 @@ def _read_package_text(
         return None, None, f"package.json absent: {path}"
     except OSError as exc:
         return None, None, f"cannot read package.json {path} ({exc})"
-    try:
-        doc = json.loads(text)
-    except ValueError as exc:
-        return None, None, f"cannot parse package.json {path} ({exc})"
-    version = doc.get("version") if isinstance(doc, dict) else None
-    if not isinstance(version, str) or not version.strip():
-        return None, None, f"package.json {path} has no version field"
-    if _PKG_VERSION_LINE_RE.search(text) is None:
-        return None, None, f"package.json {path} has no version line to rewrite"
+    version, error = _package_version_from_text(text, str(path))
+    if error is not None:
+        return None, None, error
     return text, version, None
 
 
@@ -1093,8 +1132,228 @@ def apply_scheduled_bump(
     )
 
 
+_ROLLBACK_REPORT_OLD_RE = re.compile(r"^Old:\s*`([^`]*)`", re.MULTILINE)
+_ROLLBACK_AUDIT_PIN_RE = re.compile(r"redteam-audit-([0-9a-fA-F]{40})\.json")
+
+#: RoE lifecycle states that count as an active grant for ``--rollback``
+#: (mirrors ``roe_lifecycle.READY_LIFECYCLE_STATES`` without importing it).
+_ROLLBACK_ROE_ACTIVE_STATES = ("valid", "expiring-7d", "expiring-1d")
+
+#: Inline-document keys that may carry the artifact id for the
+#: ``grant-revoked`` audit scan (mirrors ``roe_lifecycle`` candidates).
+_ROLLBACK_ROE_ID_KEYS = ("artifact_id", "id", "artifact_path", "path")
+
+
+def _find_rollback_target(
+    run: Runner, root: Path
+) -> tuple[str | None, str | None, list[str]]:
+    """Previous pin from the last bump record.
+
+    Returns ``(old_pin, source, looked_at)``: ``old_pin`` is the
+    lower-cased 40-hex pin to roll back to (or None), ``source`` names
+    the winning record, and ``looked_at`` lists every location probed
+    (reported when no record exists). The delta report's ``Old:``
+    audit label wins — the default saved artifact embeds the pre-bump
+    pin as ``redteam-audit-<pin>.json``; otherwise the pin is read from
+    the parent commit of the most recent ``VENDOR.md`` change.
+    """
+    looked_at: list[str] = []
+    report_path = root / "report.md"
+    try:
+        report_text = report_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        looked_at.append(f"{report_path} (unreadable: {exc})")
+    else:
+        old_match = _ROLLBACK_REPORT_OLD_RE.search(report_text)
+        if old_match is None:
+            looked_at.append(f"{report_path} (no 'Old:' audit label)")
+        else:
+            pin_match = _ROLLBACK_AUDIT_PIN_RE.search(old_match.group(1))
+            if pin_match is None:
+                looked_at.append(
+                    f"{report_path} (Old label {old_match.group(1)!r} "
+                    "carries no redteam-audit-<pin>.json)"
+                )
+            else:
+                source = f"{report_path} (Old audit label)"
+                looked_at.append(source)
+                return pin_match.group(1).lower(), source, looked_at
+    log_argv = ["git", "log", "--format=%H", "-n", "1", "--", "VENDOR.md"]
+    try:
+        logged = run(log_argv, cwd=root)
+    except OSError as exc:
+        looked_at.append(f"git history of VENDOR.md (git unavailable: {exc})")
+        return None, None, looked_at
+    if logged.returncode != 0:
+        looked_at.append(
+            f"git history of VENDOR.md (git log failed: {logged.stderr.strip()})"
+        )
+        return None, None, looked_at
+    touched = (logged.stdout or "").split()
+    if not touched:
+        looked_at.append("git history of VENDOR.md (no commits touch VENDOR.md)")
+        return None, None, looked_at
+    commit = touched[0]
+    show_argv = ["git", "show", f"{commit}^:VENDOR.md"]
+    try:
+        shown = run(show_argv, cwd=root)
+    except OSError as exc:
+        looked_at.append(f"git history of VENDOR.md (git show failed: {exc})")
+        return None, None, looked_at
+    if shown.returncode != 0:
+        looked_at.append(
+            f"git history of VENDOR.md (git show {commit[:7]}^:VENDOR.md "
+            f"failed: {shown.stderr.strip()})"
+        )
+        return None, None, looked_at
+    section = _vendor_section(shown.stdout or "")
+    pin = provenance.parse_vendor_pin(section) if section is not None else None
+    if pin is None or not SHA_RE.match(pin):
+        looked_at.append(
+            f"git history of VENDOR.md ({commit[:7]}^:VENDOR.md "
+            "carries no parseable pin)"
+        )
+        return None, None, looked_at
+    source = f"git history of VENDOR.md ({commit[:7]}^:VENDOR.md)"
+    looked_at.append(source)
+    return pin.lower(), source, looked_at
+
+
+def _rollback_roe_context(job: Any) -> tuple[Any, Any]:
+    """``(artifact, audit_log)`` from a tick/job context.
+
+    Reads the heartbeat RoE key convention (``context``/job-level
+    ``roe_artifact``/``roe_artifact_path`` plus the plural forms) and
+    the audit-log path (``roe_audit_log``/``audit_log``/
+    ``roe_audit_log_path``). Both None when no RoE is configured.
+    """
+    if not isinstance(job, dict):
+        return None, None
+    context = job.get("context")
+    artifact = None
+    if isinstance(context, dict):
+        artifact = context.get("roe_artifact", context.get("roe_artifact_path"))
+        if artifact is None:
+            artifact = context.get("roe_artifacts", context.get("roe_artifact_paths"))
+    if artifact is None:
+        artifact = job.get("roe_artifact", job.get("roe_artifact_path"))
+        if artifact is None:
+            artifact = job.get("roe_artifacts", job.get("roe_artifact_paths"))
+    log_path = None
+    for scope in (context, job):
+        if isinstance(scope, dict):
+            for key in ("roe_audit_log", "audit_log", "roe_audit_log_path"):
+                candidate = scope.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    log_path = candidate.strip()
+                    break
+        if log_path is not None:
+            break
+    return artifact, log_path
+
+
+def _rollback_roe_check(job: Any) -> str | None:
+    """None when a rollback may proceed, else the RoE block reason.
+
+    Fail-open without RoE: no artifact in the tick/job context means
+    local-run semantics (proceed). A present artifact must be an active
+    grant — window open per :func:`roe_lifecycle.watchdog_check` and
+    absent from the ``grant-revoked`` audit rows the lifecycle seams
+    consult.
+    """
+    artifact, log_path = _rollback_roe_context(job)
+    if artifact is None:
+        return None
+    if isinstance(artifact, (list, tuple)):
+        grants = list(artifact)
+    else:
+        grants = [artifact]
+    grants = [
+        grant
+        for grant in grants
+        if not (grant is None or (isinstance(grant, str) and not grant.strip()))
+    ]
+    if not grants:
+        return None
+    from omega_prime.grokbot import roe_lifecycle as roe_lifecycle_mod
+    from omega_prime.redteam import roe_audit as roe_audit_mod
+
+    now = datetime.now(UTC)
+    for grant in grants:
+        result = roe_lifecycle_mod.watchdog_check(grant, now=now)
+        state = result.get("state")
+        artifact_id = result.get("artifact_id", "unknown-artifact")
+        if state not in _ROLLBACK_ROE_ACTIVE_STATES:
+            return (
+                f"RoE grant {artifact_id!r} is not active "
+                f"(state {state}; action: {result.get('action')})"
+            )
+        candidates = {str(artifact_id)}
+        if isinstance(grant, (str, Path)) and str(grant).strip():
+            candidates.add(str(grant).strip())
+        if isinstance(grant, dict):
+            for key in _ROLLBACK_ROE_ID_KEYS:
+                candidate = grant.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    candidates.add(candidate.strip())
+        revoked = set(roe_audit_mod.list_revoked(log_path))
+        if candidates & revoked:
+            where = f" (see audit log {log_path})" if log_path else ""
+            return f"RoE grant {artifact_id!r} revoked{where} — re-sign to renew"
+    return None
+
+
+def _rollback_package_versions(
+    run: Runner, redteam_dir: Path, old_sha: str
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """``(current, old, note, warning)`` for the rollback version restore.
+
+    Read-only: compares the working-tree ``redteam/package.json`` version
+    against the version committed at ``old_sha``. ``note`` is
+    ``"<current> -> <old>"`` when a restore applies; ``warning``
+    explains why the restore cannot be confirmed (fail-open, the caller
+    warns and continues); both None when the tree already matches the
+    old pin (no ``--bump-commit`` to undo, or the checkout already
+    restored it) or when no ``package.json`` exists.
+    """
+    pkg_path = redteam_dir / "package.json"
+    if not pkg_path.is_file():
+        return None, None, None, None
+    try:
+        text = pkg_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, None, None, f"cannot read {pkg_path} ({exc})"
+    current, error = _package_version_from_text(text, str(pkg_path))
+    if error is not None:
+        return None, None, None, error
+    try:
+        shown = run(["git", "show", f"{old_sha}:package.json"], cwd=redteam_dir)
+    except OSError as exc:
+        return (
+            current,
+            None,
+            None,
+            (f"cannot show package.json at {old_sha[:7]} ({exc})"),
+        )
+    if shown.returncode != 0:
+        return (
+            current,
+            None,
+            None,
+            (f"cannot show package.json at {old_sha[:7]}: {shown.stderr.strip()}"),
+        )
+    old, old_error = _package_version_from_text(
+        shown.stdout or "", f"{old_sha[:7]}:package.json"
+    )
+    if old_error is not None:
+        return current, None, None, old_error
+    if old == current:
+        return current, old, None, None
+    return current, old, f"{current} -> {old}", None
+
+
 def bump(
-    to: str,
+    to: str | None,
     *,
     root: Path = REPO_ROOT,
     run: Runner | None = None,
@@ -1111,9 +1370,43 @@ def bump(
     pin: list[str] | None = None,
     schedule: str | None = None,
     schedule_name: str = "pin-bump",
+    rollback: bool = False,
+    job: dict | None = None,
 ) -> int:
     """Run the pin-bump runbook against ``root``. Returns the exit code."""
+    if rollback:
+        # Mode conflicts fail closed before any other validation: the
+        # audit-mode flags are inert on the rollback path (no audit
+        # chain runs), while --to/--audit-only/--schedule name a
+        # different target or mode. The schedule check below also
+        # guards the non-rollback registration path.
+        if to:
+            print(
+                "pin-bump usage error: --rollback derives the target from "
+                "the last bump record; drop --to",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        if audit_only:
+            print(
+                "pin-bump usage error: --rollback never audits, so it cannot "
+                "be combined with --audit-only",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        if schedule is not None:
+            print(
+                "pin-bump usage error: --rollback cannot be combined with --schedule",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
     if schedule is not None:
+        if not to:
+            print(
+                "pin-bump usage error: --schedule needs --to (the bump target)",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
         # Registration path: no subprocess, no mutation — validate the
         # cron expression fail-closed and store the argv echo as the job
         # config. Every other flag is recorded, not executed.
@@ -1259,6 +1552,234 @@ def bump(
     def failed(message: str) -> int:
         print(f"pin-bump FAILED: {message}")
         return finish(EXIT_BUMP_FAILED)
+
+    # --rollback (M9): re-pin to the previous version from the last bump
+    # record, restore the old lockfile entry (and the package.json
+    # version when --bump-commit was part of the original bump), and open
+    # a revert PR. No audit chain runs; report.md is left untouched so it
+    # stays the record a future rollback reads.
+    if rollback:
+        roe_block = _rollback_roe_check(job)
+        if roe_block is not None:
+            return failed(f"rollback blocked: {roe_block}")
+        try:
+            rb_vendor_text = (root / "VENDOR.md").read_text(encoding="utf-8")
+        except OSError as exc:
+            return failed(f"cannot read VENDOR.md ({exc})")
+        rb_section = _vendor_section(rb_vendor_text)
+        rb_current = (
+            provenance.parse_vendor_pin(rb_section) if rb_section is not None else None
+        )
+        if rb_current is None or not SHA_RE.match(rb_current):
+            return failed("cannot parse the current pin from VENDOR.md")
+        rb_current = rb_current.lower()
+        rb_old, rb_source, rb_looked = _find_rollback_target(run, root)
+        if rb_old is None:
+            return usage(
+                "no prior bump record found; looked at: " + "; ".join(rb_looked)
+            )
+        if rb_old == rb_current:
+            return usage(f"pin already at {rb_old[:7]}; nothing to roll back")
+        if dry_run:
+            print(
+                f"[dry-run] would roll back pin {rb_current[:7]} -> "
+                f"{rb_old[:7]} ({rb_source})"
+            )
+            dry_rb_upstream = root / provenance.PACK_UPSTREAM
+            dry_rb_vendored = root / provenance.PACK_VENDORED
+            if not dry_rb_upstream.is_dir():
+                print(
+                    "[dry-run] pin-bump FAILED: missing upstream pack "
+                    f"{dry_rb_upstream} at rollback pin {rb_old[:7]}"
+                )
+                return finish(EXIT_BUMP_FAILED)
+            if not dry_rb_vendored.is_dir():
+                print(
+                    "[dry-run] pin-bump FAILED: missing vendored pack "
+                    f"{dry_rb_vendored}"
+                )
+                return finish(EXIT_BUMP_FAILED)
+            dry_rb_copied, dry_rb_removed = revendor_preview(
+                dry_rb_upstream, dry_rb_vendored
+            )
+            print(
+                "[dry-run] would re-vendor pack: "
+                f"copy {dry_rb_copied}, remove {dry_rb_removed}"
+            )
+            print(
+                f"[dry-run] would update VENDOR.md pin {rb_current[:7]} -> {rb_old[:7]}"
+            )
+            print(
+                "[dry-run] would update "
+                f"{provenance.DOCSTRING_FILE.as_posix()} Upstream commit "
+                f"{rb_current[:7]} -> {rb_old[:7]}"
+            )
+            _, _, dry_rb_note, dry_rb_warn = _rollback_package_versions(
+                run, redteam_dir, rb_old
+            )
+            if dry_rb_note is not None:
+                print(
+                    "[dry-run] would restore redteam/package.json version "
+                    f"{dry_rb_note}"
+                )
+            elif dry_rb_warn is not None:
+                print(
+                    f"[dry-run] note: package.json version not restored ({dry_rb_warn})"
+                )
+            print(
+                "[dry-run] would open revert PR from branch "
+                f"pin-rollback-{rb_old[:7]} (skipped)"
+            )
+            print(f"[dry-run] rollback to {rb_old[:7]} would succeed")
+            return finish(EXIT_OK)
+        if not redteam_dir.is_dir():
+            return degraded(
+                "submodule unreachable: redteam/ is missing "
+                "(run git submodule update --init redteam)"
+            )
+        try:
+            rb_fetched = run(["git", "fetch", UPSTREAM_REMOTE], cwd=redteam_dir)
+        except OSError as exc:
+            return degraded(f"submodule unreachable during fetch ({exc})")
+        if rb_fetched.returncode != 0:
+            return degraded(
+                f"submodule unreachable: git fetch failed: {rb_fetched.stderr.strip()}"
+            )
+        try:
+            rb_checked_out = run(["git", "checkout", rb_old], cwd=redteam_dir)
+        except OSError as exc:
+            return degraded(f"submodule unreachable during checkout ({exc})")
+        if rb_checked_out.returncode != 0:
+            return degraded(
+                f"submodule unreachable: git checkout {rb_old} failed: "
+                f"{rb_checked_out.stderr.strip()}"
+            )
+        try:
+            rb_staged = run(["git", "add", "redteam"], cwd=root)
+        except OSError as exc:
+            return degraded(f"git add redteam failed ({exc})")
+        if rb_staged.returncode != 0:
+            return failed(f"git add redteam failed: {rb_staged.stderr.strip()}")
+        done.append("pin-rolled-back")
+        rb_upstream_dir = root / provenance.PACK_UPSTREAM
+        rb_vendored_dir = root / provenance.PACK_VENDORED
+        if not rb_upstream_dir.is_dir():
+            return failed(
+                f"missing upstream pack {rb_upstream_dir} after checkout {rb_old[:7]}"
+            )
+        if not rb_vendored_dir.is_dir():
+            return failed(f"missing vendored pack {rb_vendored_dir}")
+        rb_copied, rb_removed = revendor_pack(rb_upstream_dir, rb_vendored_dir)
+        print(f"pin-bump re-vendor: copied {rb_copied}, removed {rb_removed}")
+        done.append("pack-revendored")
+        rb_error = rewrite_pins(root, rb_old)
+        if rb_error is not None:
+            return failed(rb_error)
+        if provenance.cmd_check(root, gitlink_override=rb_old) != 0:
+            return failed("check still red after pin rewrite (pin records disagree)")
+        if provenance.cmd_pack_diff(root) != 0:
+            revendor_pack(rb_upstream_dir, rb_vendored_dir)
+            if (
+                provenance.cmd_check(root, gitlink_override=rb_old) != 0
+                or provenance.cmd_pack_diff(root) != 0
+            ):
+                return failed("pack-diff still diverged after 2 passes")
+        if provenance.cmd_surface(root) != 0:
+            return failed(
+                "surface DRIFT: upstream tool surface changed; updating "
+                "REDTEAM_TOOL_NAMES stays a manual legitimacy decision"
+            )
+        done.append("provenance-green")
+        rb_version_note: str | None = None
+        _, rb_old_ver, rb_restore_note, rb_restore_warn = _rollback_package_versions(
+            run, redteam_dir, rb_old
+        )
+        if rb_restore_warn is not None:
+            print(
+                "pin-bump WARNING: package.json version not restored "
+                f"({rb_restore_warn}; leaving working tree as-is)"
+            )
+        elif rb_restore_note is not None and rb_old_ver is not None:
+            rb_pkg_path = redteam_dir / "package.json"
+            try:
+                rb_pkg_text = rb_pkg_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                print(
+                    "pin-bump WARNING: package.json version not restored "
+                    f"(cannot read {rb_pkg_path}: {exc}; "
+                    "leaving working tree as-is)"
+                )
+            else:
+                rb_pkg_rewritten = _rewrite_package_version(rb_pkg_text, rb_old_ver)
+                if rb_pkg_rewritten is None:
+                    print(
+                        "pin-bump WARNING: package.json version not restored "
+                        f"(cannot rewrite {rb_pkg_path}; "
+                        "leaving working tree as-is)"
+                    )
+                else:
+                    try:
+                        rb_pkg_path.write_text(rb_pkg_rewritten, encoding="utf-8")
+                    except OSError as exc:
+                        print(
+                            "pin-bump WARNING: package.json version not "
+                            f"restored (cannot write {rb_pkg_path}: {exc}; "
+                            "leaving working tree as-is)"
+                        )
+                    else:
+                        rb_version_note = rb_restore_note
+                        print(
+                            "pin-bump version restore "
+                            f"(redteam/package.json): {rb_restore_note}"
+                        )
+        try:
+            rb_gh = run(["gh", "--version"], cwd=root)
+        except OSError:
+            rb_gh = None
+        if rb_gh is None or rb_gh.returncode != 0:
+            return usage("gh is missing (install gh to use --rollback)")
+        rb_branch = f"pin-rollback-{rb_old[:7]}"
+        rb_checkout = run(["git", "checkout", "-b", rb_branch], cwd=root)
+        if rb_checkout.returncode != 0:
+            return failed(
+                f"git checkout -b {rb_branch} failed: {rb_checkout.stderr.strip()}"
+            )
+        rb_add = run(
+            [
+                "git",
+                "add",
+                "redteam",
+                "VENDOR.md",
+                provenance.DOCSTRING_FILE.as_posix(),
+                provenance.PACK_VENDORED.as_posix(),
+            ],
+            cwd=root,
+        )
+        if rb_add.returncode != 0:
+            return failed(f"git add rollback set failed: {rb_add.stderr.strip()}")
+        rb_title = f"revert(redteam): roll back pin to {rb_old[:7]}"
+        rb_body = (
+            f"Revert redteam pin bump {rb_current[:7]} -> {rb_old[:7]} "
+            f"({rb_source}).\n\nProvenance: check, pack-diff, surface green."
+        )
+        if rb_version_note is not None:
+            rb_body += f"\nVersion restore: {rb_version_note} (redteam/package.json)."
+        rb_committed = run(["git", "commit", "-m", rb_title, "-m", rb_body], cwd=root)
+        if rb_committed.returncode != 0:
+            return failed(f"git commit failed: {rb_committed.stderr.strip()}")
+        rb_pushed = run(["git", "push", "-u", "origin", rb_branch], cwd=root)
+        if rb_pushed.returncode != 0:
+            return failed(f"git push {rb_branch} failed: {rb_pushed.stderr.strip()}")
+        rb_created = run(
+            ["gh", "pr", "create", "--title", rb_title, "--body", rb_body], cwd=root
+        )
+        if rb_created.returncode != 0:
+            return failed(f"gh pr create failed: {rb_created.stderr.strip()}")
+        print(f"pin-bump revert PR: {rb_created.stdout.strip()}")
+        print(f"pin-bump OK: rollback to {rb_old[:7]} complete")
+        return finish(EXIT_OK)
+    if not to:
+        return usage("--to is required (or use --rollback)")
 
     # Step 1: validate and resolve the ref.
     if SHA_RE.match(to or ""):
@@ -2546,8 +3067,21 @@ def bump(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``--to <sha|tag> [--old-audit <path>] [--skip-audit] [--dry-run] [--audit-only] [--open-pr] [--json] [--interactive] [--pin <advisory-or-package>] [--schedule <cron-expr> [--schedule-name <name>]]``."""
-    args = build_parser().parse_args(argv)
+    """CLI: ``--to <sha|tag> [...]`` or ``--rollback [--dry-run]`` (target from the last bump record)."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.rollback and args.to is not None:
+        parser.error(
+            "--rollback derives the target from the last bump record; drop --to"
+        )
+    if not args.rollback and not args.to:
+        parser.error("--to is required (or use --rollback)")
+    if args.rollback and args.audit_only:
+        parser.error(
+            "--rollback never audits, so it cannot be combined with --audit-only"
+        )
+    if args.rollback and args.schedule is not None:
+        parser.error("--rollback cannot be combined with --schedule")
     root = Path(args.root) if args.root is not None else REPO_ROOT
     return bump(
         args.to,
@@ -2565,6 +3099,7 @@ def main(argv: list[str] | None = None) -> int:
         pin=args.pin,
         schedule=args.schedule,
         schedule_name=args.schedule_name,
+        rollback=args.rollback,
     )
 
 

@@ -44,6 +44,7 @@ from omega_prime.grokbot.roe_lifecycle import (
     check_roe_lifecycle,
     clear_renewal_reminders,
     gateway_reachable,
+    grant_trackers,
     main,
     renewal_reminders,
     suite_counts,
@@ -1297,3 +1298,75 @@ def test_heartbeat_single_item_list_matches_single(fresh_renewals):
     clear_renewal_reminders()
     listed = heartbeat_roe_renewals({"context": {"roe_artifact": [document]}}, now=END)
     assert listed == single
+
+
+# M11 per-grant tracker allowlists ------------------------------------------------
+
+
+def test_grant_trackers_reads_covers_list():
+    """M11: a covers list scopes dispatch to exactly those trackers."""
+    assert grant_trackers({"covers": ["slack", "jira"]}) == {"slack", "jira"}
+
+
+def test_grant_trackers_missing_covers_allows_all():
+    """M11: no covers key means every tracker is allowed (backward compatible)."""
+    assert grant_trackers(_document()) is None
+    assert grant_trackers({}) is None
+
+
+def test_grant_trackers_empty_covers_allows_all():
+    """M11: an empty covers list means every tracker is allowed."""
+    assert grant_trackers({"covers": []}) is None
+    assert grant_trackers({"covers": None}) is None
+
+
+def test_grant_trackers_normalizes_names():
+    """M11: covers match case-insensitively; blanks/non-strings are ignored."""
+    assert grant_trackers({"covers": [" Slack ", "JIRA", "", 7, None]}) == {
+        "slack",
+        "jira",
+    }
+
+
+def test_grant_trackers_non_list_covers_allows_all():
+    """M11: a malformed (non-list) covers value never scopes dispatch."""
+    assert grant_trackers({"covers": "slack"}) is None
+    assert grant_trackers({"covers": {"slack": True}}) is None
+
+
+def test_grant_trackers_accepts_artifact_path(tmp_path):
+    """M11: a file-path artifact resolves like an inline document."""
+    artifact = tmp_path / "roe.json"
+    artifact.write_text(json.dumps({"covers": ["github"]}), encoding="utf-8")
+    assert grant_trackers(str(artifact)) == {"github"}
+    assert grant_trackers(artifact) == {"github"}
+
+
+def test_grant_trackers_unreadable_artifact_allows_all(tmp_path):
+    """M11: missing/garbage/unreadable artifacts fail open, never raise."""
+    assert grant_trackers(str(tmp_path / "absent.json")) is None
+    garbage = tmp_path / "garbage.json"
+    garbage.write_text("{not json", encoding="utf-8")
+    assert grant_trackers(str(garbage)) is None
+    assert grant_trackers(None) is None
+    assert grant_trackers(["not", "a", "dict"]) is None
+    assert grant_trackers([]) is None
+
+
+def test_grant_trackers_list_form_unions_grants():
+    """M11: concurrent grants merge as a union — any cover allows."""
+    assert grant_trackers([{"covers": ["slack"]}, {"covers": ["github"]}]) == {
+        "slack",
+        "github",
+    }
+
+
+def test_grant_trackers_list_with_open_grant_allows_all():
+    """M11: one grant without covers opens dispatch for every tracker."""
+    assert grant_trackers([{"covers": ["slack"]}, _document()]) is None
+
+
+def test_grant_trackers_single_item_list_matches_single():
+    """M11: a one-grant list behaves exactly like the single call."""
+    document = {"covers": ["teams"]}
+    assert grant_trackers([document]) == grant_trackers(document) == {"teams"}

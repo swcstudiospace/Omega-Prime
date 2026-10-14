@@ -20,8 +20,12 @@ from omega_prime.grokbot.findings_sync import (
     NO_PAGERDUTY_ROUTING_KEY_MESSAGE,
     NO_SLACK_WEBHOOK_MESSAGE,
     NO_TEAMS_WEBHOOK_MESSAGE,
+    NO_WEBHOOK_URL_MESSAGE,
     OPSGENIE_ALERTS_URL,
     PAGERDUTY_EVENTS_URL,
+    WEBHOOK_PREVIOUS_SIGNATURE_HEADER,
+    WEBHOOK_SIGNATURE_HEADER,
+    WEBHOOK_TIMESTAMP_HEADER,
     GhApiError,
     GhNotFoundError,
     deliver_reminders_graph,
@@ -36,6 +40,7 @@ from omega_prime.grokbot.findings_sync import (
     pagerduty_payload,
     pagerduty_severity,
     priority_for_severity,
+    sign_payload,
     slack_color,
     slack_message,
     sync_findings,
@@ -46,9 +51,12 @@ from omega_prime.grokbot.findings_sync import (
     sync_findings_pagerduty,
     sync_findings_slack,
     sync_findings_teams,
+    sync_findings_webhook,
     teams_message,
     teams_theme_color,
     tick,
+    webhook_payload,
+    webhook_signing_headers,
 )
 from sidecar.findings import findings_path, load_findings, record_finding
 
@@ -2307,3 +2315,341 @@ def test_cli_jira_missing_config_exits_two(tmp_path, monkeypatch, capsys):
     )
     assert main(["--tracker", "jira", "--reports-dir", str(tmp_path)]) == 2
     assert "no jira config configured" in capsys.readouterr().err
+
+
+# Generic-webhook mode with HMAC signing (M8) ----------------------------------
+
+WEBHOOK_URL = "https://example.com/hooks/omega"
+SIGNING_SECRET = "current-secret"
+PREVIOUS_SECRET = "previous-secret"
+
+
+class FakeWebhook:
+    """Fake GhRunner answering generic-webhook POSTs; zero network."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, data):
+        self.calls.append((argv, data))
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+
+def _webhook_config(**overrides):
+    node = {
+        "enabled": True,
+        "tracker": "webhook",
+        "webhook_url": WEBHOOK_URL,
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+def test_sign_payload_matches_hmac_sha256_vectors():
+    assert (
+        sign_payload(b"hello", "secret")
+        == "88aab3ede8d3adf94d26ab90d3bafd4a2083070c3bcce9c014ee04a443847c0b"
+    )
+    assert (
+        sign_payload(b"The quick brown fox jumps over the lazy dog", "key")
+        == "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+    )
+
+
+def test_webhook_signing_headers_cover_timestamp_dot_payload():
+    payload = b'{"dedupe_hash":"abc"}'
+    headers = webhook_signing_headers(payload, SIGNING_SECRET, timestamp=1700000000)
+    assert headers[WEBHOOK_TIMESTAMP_HEADER] == "1700000000"
+    assert headers[WEBHOOK_SIGNATURE_HEADER] == (
+        "sha256=" + sign_payload(b"1700000000." + payload, SIGNING_SECRET)
+    )
+    assert WEBHOOK_PREVIOUS_SIGNATURE_HEADER not in headers
+
+
+def test_webhook_signing_rotation_emits_previous_signature():
+    payload = b'{"dedupe_hash":"abc"}'
+    headers = webhook_signing_headers(
+        payload, SIGNING_SECRET, PREVIOUS_SECRET, timestamp=1700000000
+    )
+    assert headers[WEBHOOK_SIGNATURE_HEADER] == (
+        "sha256=" + sign_payload(b"1700000000." + payload, SIGNING_SECRET)
+    )
+    assert headers[WEBHOOK_PREVIOUS_SIGNATURE_HEADER] == (
+        "sha256=" + sign_payload(b"1700000000." + payload, PREVIOUS_SECRET)
+    )
+
+
+def test_webhook_signing_blank_secret_is_unsigned():
+    payload = b'{"dedupe_hash":"abc"}'
+    assert webhook_signing_headers(payload, "", timestamp=1700000000) == {}
+    assert webhook_signing_headers(payload, "   ", timestamp=1700000000) == {}
+
+
+def test_webhook_payload_fixed_fields_only(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(response="do anything now"))
+    row["raw_response"] = "do anything now"
+    body = webhook_payload(row)
+    assert body["title"] == issue_title(row)
+    assert body["body"] == issue_body(row)
+    assert "do anything now" not in json.dumps(body)
+
+
+def test_webhook_happy_two_findings_two_posts(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeWebhook()
+    result = sync_findings_webhook(tmp_path, WEBHOOK_URL, runner=fake)
+    assert len(fake.calls) == 2
+    assert all(WEBHOOK_URL in call[0] for call in fake.calls)
+    assert all("headers" not in call[1] for call in fake.calls)
+    rows = load_findings(tmp_path)
+    assert [row["issue_url"] for row in rows] == [
+        f"webhook:{row['dedupe_hash']}" for row in rows
+    ]
+    assert all(row.get("synced_at") for row in rows)
+    assert len(result["pushed"]) == 2
+
+
+def test_webhook_unsigned_argv_has_no_signing_headers(tmp_path):
+    record_finding(directory=tmp_path, **_finding())
+    fake = FakeWebhook()
+    sync_findings_webhook(tmp_path, WEBHOOK_URL, runner=fake)
+    argv = fake.calls[0][0]
+    assert not [part for part in argv if part.startswith("X-Omega-")]
+    assert "-H" not in argv
+
+
+def test_webhook_signed_argv_carries_signature_headers(tmp_path):
+    record_finding(directory=tmp_path, **_finding())
+    fake = FakeWebhook()
+    sync_findings_webhook(
+        tmp_path,
+        WEBHOOK_URL,
+        runner=fake,
+        signing_secret=SIGNING_SECRET,
+        previous_signing_secret=PREVIOUS_SECRET,
+        timestamp=1700000000,
+    )
+    argv = fake.calls[0][0]
+    headers = {
+        argv[i + 1].split(": ", 1)[0]: argv[i + 1].split(": ", 1)[1]
+        for i, part in enumerate(argv[:-1])
+        if part == "-H"
+    }
+    assert headers[WEBHOOK_TIMESTAMP_HEADER] == "1700000000"
+    assert headers[WEBHOOK_SIGNATURE_HEADER].startswith("sha256=")
+    assert headers[WEBHOOK_PREVIOUS_SIGNATURE_HEADER].startswith("sha256=")
+    body = fake.calls[0][1]["body"]
+    payload = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    assert headers[WEBHOOK_SIGNATURE_HEADER] == (
+        "sha256=" + sign_payload(b"1700000000." + payload, SIGNING_SECRET)
+    )
+    assert headers[WEBHOOK_PREVIOUS_SIGNATURE_HEADER] == (
+        "sha256=" + sign_payload(b"1700000000." + payload, PREVIOUS_SECRET)
+    )
+
+
+def test_webhook_empty_url_fail_closed():
+    with pytest.raises(ValueError, match="no webhook url configured"):
+        sync_findings_webhook(None, "   ", runner=FakeWebhook())
+
+
+def test_webhook_second_run_pushes_nothing(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeWebhook()
+    sync_findings_webhook(tmp_path, WEBHOOK_URL, runner=fake)
+    result = sync_findings_webhook(tmp_path, WEBHOOK_URL, runner=fake)
+    assert len(fake.calls) == 2
+    assert len(result["skipped"]) == 2
+
+
+def test_webhook_dry_run_writes_nothing_calls_no_runner(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeWebhook()
+    before = findings_path(tmp_path).read_bytes()
+    result = sync_findings_webhook(tmp_path, WEBHOOK_URL, runner=fake, dry_run=True)
+    assert fake.calls == []
+    assert result["dry_run"] is True
+    assert findings_path(tmp_path).read_bytes() == before
+
+
+def test_webhook_env_secret_signs_when_node_blank(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_WEBHOOK_SIGNING_SECRET", SIGNING_SECRET
+    )
+    monkeypatch.delenv(
+        "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_WEBHOOK_SIGNING_SECRET_PREVIOUS",
+        raising=False,
+    )
+    from omega_prime.grokbot.findings_sync import _webhook_signing_secrets
+
+    current, previous = _webhook_signing_secrets({})
+    assert current == SIGNING_SECRET
+    assert previous == ""
+
+
+def test_tick_webhook_dispatches_posts(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeWebhook()
+    result = tick(_webhook_config(), reports_directory=tmp_path, runner=fake)
+    assert len(fake.calls) == 2
+    assert result["disabled"] is False
+
+
+def test_tick_webhook_no_url_structured_error(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeWebhook()
+    result = tick(
+        _webhook_config(webhook_url=""), reports_directory=tmp_path, runner=fake
+    )
+    assert result["error"] == NO_WEBHOOK_URL_MESSAGE
+    assert fake.calls == []
+
+
+def test_tick_webhook_env_url_and_secret(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setenv("OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_WEBHOOK_URL", WEBHOOK_URL)
+    monkeypatch.setenv(
+        "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_WEBHOOK_SIGNING_SECRET", SIGNING_SECRET
+    )
+    node = _webhook_config()
+    del node["redteam"]["findings_sync"]["webhook_url"]
+    fake = FakeWebhook()
+    result = tick(node, reports_directory=tmp_path, runner=fake)
+    assert len(fake.calls) == 2
+    assert result["disabled"] is False
+    headers = fake.calls[0][1]["headers"]
+    assert headers[WEBHOOK_SIGNATURE_HEADER].startswith("sha256=")
+
+
+def test_cli_webhook_posts_and_missing_url_exits_two(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _webhook_config(),
+    )
+    fake = FakeWebhook()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--tracker", "webhook", "--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+    assert "pushed" in capsys.readouterr().out
+
+    node = _webhook_config(webhook_url="")
+    monkeypatch.setattr("omega_prime.config.load_config", lambda _root=None: node)
+    monkeypatch.delenv("OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_WEBHOOK_URL", raising=False)
+    assert main(["--tracker", "webhook", "--reports-dir", str(tmp_path)]) == 2
+    assert "no webhook url configured" in capsys.readouterr().err
+
+
+# Per-grant tracker allowlists in tick (M11) ------------------------------------
+
+
+def _grant_config(tracker, covers, **overrides):
+    node = {
+        "enabled": True,
+        "tracker": tracker,
+        "repo": REPO,
+        "slack_webhook_url": WEBHOOK,
+        "roe_artifact": {"covers": covers},
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+def test_tick_grant_covered_tracker_dispatches(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(
+        _grant_config("github", ["github"]),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert len(fake.calls) == 2
+    assert "skipped_tracker" not in result
+
+
+def test_tick_grant_uncovered_tracker_skipped_with_reason(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(
+        _grant_config("github", ["slack", "jira"]),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert fake.calls == []
+    assert result["pushed"] == [] and result["skipped"] == []
+    assert result["skipped_tracker"] == "github"
+    assert "github" in result["reason"] and "grant" in result["reason"]
+
+
+def test_tick_grant_missing_covers_allows_all(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(
+        _grant_config("github", None),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert len(fake.calls) == 2
+    assert "skipped_tracker" not in result
+
+
+def test_tick_grant_empty_covers_allows_all(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(
+        _grant_config("github", []),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert len(fake.calls) == 2
+    assert "skipped_tracker" not in result
+
+
+def test_tick_grant_covers_match_case_insensitively(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeSlack()
+    result = tick(
+        _grant_config("slack", ["Slack"]),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert len(fake.calls) == 2
+    assert "skipped_tracker" not in result
+
+
+def test_tick_grant_skip_leaves_store_untouched(tmp_path):
+    _seed_two(tmp_path)
+    before = findings_path(tmp_path).read_bytes()
+    fake = FakeGh()
+    tick(
+        _grant_config("github", ["jira"]),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert findings_path(tmp_path).read_bytes() == before
+
+
+def test_tick_grant_plural_artifacts_union(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    node = _grant_config("github", ["slack"])
+    node["redteam"]["findings_sync"]["roe_artifacts"] = [
+        {"covers": ["slack"]},
+        {"covers": ["github"]},
+    ]
+    del node["redteam"]["findings_sync"]["roe_artifact"]
+    result = tick(node, reports_directory=tmp_path, runner=fake)
+    assert len(fake.calls) == 2
+    assert "skipped_tracker" not in result
+
+
+def test_tick_no_grant_context_backward_compatible(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakeGh()
+    result = tick(
+        {"redteam": {"findings_sync": {"enabled": True, "repo": REPO}}},
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert len(fake.calls) == 2
+    assert "skipped_tracker" not in result

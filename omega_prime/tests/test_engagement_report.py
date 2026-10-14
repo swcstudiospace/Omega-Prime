@@ -3497,3 +3497,317 @@ def test_gap_evidence_helpers_units(tmp_path):
     fallback = module.render_html_report(markdown)
     assert '<a href="#gap-jailbreak-01">jailbreak-01</a>' in fallback
     assert "<p>no associated findings</p>" in fallback
+
+
+# Three-way trend vs older report (M10) --------------------------------------
+
+T3 = "2026-10-10T12:00:00+00:00"
+
+
+def _delta_seed(base: Path) -> tuple[Path, Path, Path]:
+    """Older (1 run, two failing classes), previous (2 runs, one failing),
+    current (3 runs, all-pass); returns ``(older_md, previous_md, current)``."""
+    older_dir = base / "older"
+    older_dir.mkdir(parents=True, exist_ok=True)
+    seed_transitions(older_dir, cycle(T1))
+    seed_last_run(older_dir, wrong={"jailbreak-01": "not-detected", "abuse-01": "nope"})
+    seed_findings(
+        older_dir,
+        [
+            finding_row("abuse-01", "resp-a", T1),
+            finding_row("jailbreak-01", "resp-j", T1),
+        ],
+    )
+    older_md = base / "older-m10.md"
+    older_proc = run_script("--reports-dir", str(older_dir), "--since", T0)
+    assert older_proc.returncode == 0, older_proc.stderr
+    older_md.write_text(older_proc.stdout, encoding="utf-8")
+    previous_dir = base / "previous"
+    previous_dir.mkdir(parents=True, exist_ok=True)
+    seed_transitions(previous_dir, cycle(T1) + cycle(T2))
+    seed_last_run(previous_dir, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(previous_dir, [finding_row("abuse-01", "resp-a", T1)])
+    previous_md = base / "previous-m10.md"
+    previous_proc = run_script("--reports-dir", str(previous_dir), "--since", T0)
+    assert previous_proc.returncode == 0, previous_proc.stderr
+    previous_md.write_text(previous_proc.stdout, encoding="utf-8")
+    current_dir = base / "current"
+    current_dir.mkdir(parents=True, exist_ok=True)
+    seed_transitions(current_dir, cycle(T1) + cycle(T2) + cycle(T3))
+    seed_last_run(current_dir)
+    seed_findings(current_dir, [])
+    return older_md, previous_md, current_dir
+
+
+def test_delta_renders_three_way_trend_after_side_by_side(tmp_path):
+    """M10 happy: --delta with --compare renders older → previous → current."""
+    older_md, previous_md, current_dir = _delta_seed(tmp_path)
+    proc = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--compare",
+        str(previous_md),
+        "--delta",
+        str(older_md),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Three-way trend" in proc.stdout
+    assert proc.stdout.index("## Side-by-side comparison") < proc.stdout.index(
+        "## Three-way trend"
+    )
+    body = "\n".join(section_lines(proc.stdout, "## Three-way trend"))
+    assert "- older: older-m10.md" in body
+    assert "- previous: previous-m10.md" in body
+    assert "- runs: 1 → 2 → 3 (↑)" in body
+    assert "- pass rate: 67% → 83% → 100% (↑)" in body
+    assert "- coverage: 4/6 covered → 5/6 covered → 6/6 covered (↑)" in body
+    assert "- findings: 2 → 1 → 0 (↑)" in body
+    assert "- risk-weighted score: 70.6% → 85.3% → 100.0% (↑)" in body
+
+
+def test_delta_is_deterministic(tmp_path):
+    """M10 determinism: same inputs render byte-identical three-way runs."""
+    older_md, previous_md, current_dir = _delta_seed(tmp_path)
+    first = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--compare",
+        str(previous_md),
+        "--delta",
+        str(older_md),
+    )
+    second = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--compare",
+        str(previous_md),
+        "--delta",
+        str(older_md),
+    )
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_delta_missing_file_exits_1(tmp_path):
+    """M10 edge: an unreadable --delta path fails closed with error:."""
+    _older_md, previous_md, current_dir = _delta_seed(tmp_path)
+    proc = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--compare",
+        str(previous_md),
+        "--delta",
+        str(tmp_path / "nope-m10.md"),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+    assert "## Three-way trend" not in proc.stdout
+
+
+def test_no_delta_flag_renders_no_section(tmp_path):
+    """M10 regression: without --delta the report has no three-way trend."""
+    _older_md, previous_md, current_dir = _delta_seed(tmp_path)
+    proc = run_script(
+        "--reports-dir",
+        str(current_dir),
+        "--since",
+        T0,
+        "--compare",
+        str(previous_md),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Three-way trend" not in proc.stdout
+
+
+def test_delta_without_compare_falls_back_to_older(tmp_path):
+    """M10 standalone: --delta alone reuses the older report as previous."""
+    older_md, _previous_md, current_dir = _delta_seed(tmp_path)
+    proc = run_script(
+        "--reports-dir", str(current_dir), "--since", T0, "--delta", str(older_md)
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = "\n".join(section_lines(proc.stdout, "## Three-way trend"))
+    assert "- older: older-m10.md" in body
+    assert "- previous: older-m10.md" in body
+    assert "- runs: 1 → 1 → 3 (↑)" in body
+    assert "- risk-weighted score: 70.6% → 70.6% → 100.0% (↑)" in body
+
+
+def test_trend_arrow_and_render_three_way_units():
+    """M10 units: net arrows (flat within 0.5, findings invert) and rows."""
+    module = _report_module()
+    assert module._trend_arrow(89.0, 71.0) == "↑"
+    assert module._trend_arrow(70.0, 71.0) == "↓"
+    assert module._trend_arrow(71.4, 71.0) == "→"
+    assert module._trend_arrow(70.5, 71.0) == "→"
+    assert module._trend_arrow(1.0, 4.0, higher_is_better=False) == "↑"
+    assert module._trend_arrow(5.0, 4.0, higher_is_better=False) == "↓"
+    assert module._trend_arrow(4.0, 4.0, higher_is_better=False) == "→"
+    lines = module.render_three_way_trend(
+        older_label="older.md",
+        previous_label="previous.md",
+        older=(1, 71, 3, 6, 4, 80.0),
+        previous=(2, 83, 5, 6, 2, 60.0),
+        current=(2, 89, 5, 6, 2, 80.4),
+    )
+    assert lines[0] == "## Three-way trend"
+    assert "- older: older.md" in lines
+    assert "- previous: previous.md" in lines
+    assert "- runs: 1 → 2 → 2 (↑)" in lines
+    assert "- pass rate: 71% → 83% → 89% (↑)" in lines
+    assert "- coverage: 3/6 covered → 5/6 covered → 5/6 covered (↑)" in lines
+    assert "- findings: 4 → 2 → 2 (↑)" in lines
+    # Risk net moves 0.4 (older → current), inside the flat band.
+    assert "- risk-weighted score: 80.0% → 60.0% → 80.4% (→)" in lines
+    regressed = module.render_three_way_trend(
+        older_label="o",
+        previous_label="p",
+        older=(3, 100, 6, 6, 0, 100.0),
+        previous=(2, 83, 5, 6, 1, 85.3),
+        current=(1, 67, 4, 6, 2, 70.6),
+    )
+    assert "- runs: 3 → 2 → 1 (↓)" in regressed
+    assert "- findings: 0 → 1 → 2 (↓)" in regressed
+
+
+# Embeddable markdown fragment (M12) ------------------------------------------
+
+
+def _export_md_fixture(directory: Path) -> None:
+    """Two all-pass runs plus one finding for fragment tests."""
+    directory.mkdir(parents=True, exist_ok=True)
+    seed_transitions(directory, cycle(T1) + cycle(T2))
+    seed_last_run(directory)
+    seed_findings(directory, [finding_row("abuse-01", "resp-a", T1)])
+
+
+def test_export_md_writes_fragment_stdout_unchanged(tmp_path):
+    """M12 happy: --export-md writes matrix+risk (no h1/snapshot); outputs stay."""
+    fixture = tmp_path / "reports"
+    _export_md_fixture(fixture)
+    out = tmp_path / "fragment.md"
+    plain = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert plain.returncode == 0, plain.stderr
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export-md", str(out)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == plain.stdout
+    canonical = fixture / "reports" / "engagement-2026-10-01_2026-10-08.md"
+    assert canonical.is_file()
+    assert canonical.read_text(encoding="utf-8") == proc.stdout
+    fragment = out.read_text(encoding="utf-8")
+    assert "## Coverage matrix" in fragment
+    assert "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered |" in fragment
+    assert "## Risk-weighted score" in fragment
+    assert "- risk-weighted score: 100.0% (34/34 weighted points)" in fragment
+    assert fragment.startswith("## Coverage matrix")
+    assert "# Engagement report" not in fragment
+    assert "findings-snapshot" not in fragment
+    assert fragment.endswith("\n")
+
+
+def test_export_md_is_deterministic(tmp_path):
+    """M12 determinism: same inputs export byte-identical fragments."""
+    fixture = tmp_path / "reports"
+    _export_md_fixture(fixture)
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    proc1 = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export-md", str(first)
+    )
+    proc2 = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export-md", str(second)
+    )
+    assert proc1.returncode == 0, proc1.stderr
+    assert proc2.returncode == 0, proc2.stderr
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_export_md_unwritable_output_exits_1(tmp_path):
+    """M12 edge: an unwritable --export-md path fails closed with error:."""
+    fixture = tmp_path / "reports"
+    _export_md_fixture(fixture)
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--export-md",
+        str(tmp_path / "missing" / "fragment.md"),
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_export_md_composes_with_threshold(tmp_path):
+    """M12 composition: the gate line lands in the fragment; exit follows it."""
+    fixture = tmp_path / "reports"
+    _export_md_fixture(fixture)
+    passing = tmp_path / "passing.md"
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--threshold",
+        "gate:80",
+        "--export-md",
+        str(passing),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines()[-1] == "Gate: PASS (pass-rate 100 >= 80)"
+    assert passing.read_text(encoding="utf-8").splitlines()[-1] == (
+        "Gate: PASS (pass-rate 100 >= 80)"
+    )
+    failing = tmp_path / "failing.md"
+    failing_fixture = tmp_path / "failing-reports"
+    failing_fixture.mkdir()
+    seed_transitions(failing_fixture, cycle(T1) + cycle(T2))
+    seed_last_run(failing_fixture, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(failing_fixture, [finding_row("abuse-01", "resp-a", T1)])
+    failed = run_script(
+        "--reports-dir",
+        str(failing_fixture),
+        "--since",
+        T0,
+        "--threshold",
+        "gate:100",
+        "--export-md",
+        str(failing),
+    )
+    assert failed.returncode == 3
+    assert "gate: FAIL" in failed.stderr
+    assert failed.stdout.splitlines()[-1] == "Gate: FAIL"
+    assert failing.read_text(encoding="utf-8").splitlines()[-1] == "Gate: FAIL"
+
+
+def test_render_md_fragment_units(tmp_path):
+    """M12 units: matrix rows (n/a without runs), risk section, gate line."""
+    module = _report_module()
+    coverage = [
+        ("abuse", 1, 1, 1, 100.0, 0, "covered"),
+        ("jailbreak", 1, 0, 0, 0.0, 1, "gappy"),
+    ]
+    fragment = module.render_md_fragment(coverage=coverage)
+    assert fragment.startswith("## Coverage matrix\n")
+    assert "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered |" in fragment
+    assert "| jailbreak | 1 | 0 | 0/0 (n/a) | 1 | gappy |" in fragment
+    assert "## Risk-weighted score" in fragment
+    assert "# Engagement report" not in fragment
+    assert "findings-snapshot" not in fragment
+    assert "Gate:" not in fragment
+    gated = module.render_md_fragment(
+        coverage=coverage, gate_line="Gate: PASS (pass-rate 100 >= 80)"
+    )
+    assert gated.splitlines()[-1] == "Gate: PASS (pass-rate 100 >= 80)"
+    assert gated.endswith("\n")

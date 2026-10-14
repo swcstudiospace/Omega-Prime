@@ -53,6 +53,9 @@ class FakeRun:
         gh_api_content: str | None = None,
         gh_api_fail: bool = False,
         upstream_npm_doc: dict | None = None,
+        git_log_vendor: str = "",
+        git_show_vendor: str = "",
+        git_show_package: str = "",
     ):
         self.ls_remote = ls_remote
         self.node_ok = node_ok
@@ -70,6 +73,9 @@ class FakeRun:
         )
         self.gh_api_fail = gh_api_fail
         self.upstream_npm_doc = upstream_npm_doc
+        self.git_log_vendor = git_log_vendor
+        self.git_show_vendor = git_show_vendor
+        self.git_show_package = git_show_package
         self.npm_calls = 0
         self.cmds: list[tuple[list[str], object]] = []
 
@@ -110,6 +116,15 @@ class FakeRun:
             for prefix in self.fail_prefixes:
                 if tuple(cmd[: len(prefix)]) == prefix:
                     return _cp(cmd, 1, "", "boom")
+            if cmd[1:2] == ["log"]:
+                return _cp(cmd, 0, self.git_log_vendor)
+            if cmd[1:2] == ["show"]:
+                target = cmd[-1] if len(cmd) > 2 else ""
+                if target.endswith("VENDOR.md"):
+                    return _cp(cmd, 0, self.git_show_vendor)
+                if target.endswith("package.json"):
+                    return _cp(cmd, 0, self.git_show_package)
+                return _cp(cmd, 0, "")
             return _cp(cmd, 0, "")
         raise AssertionError(f"unexpected command: {cmd}")
 
@@ -2390,3 +2405,346 @@ def test_apply_scheduled_bump_forces_open_pr(tmp_path, capsys):
     assert ["git", "checkout", "-b", f"pin-bump-{PIN_NEW[:7]}"] in verbs
     assert any(cmd[:2] == ["gh", "pr"] for cmd in verbs)
     assert "https://example.test/pr/1" in out
+
+
+# --rollback mode (M9) ----------------------------------------------------------
+
+
+def _write_rollback_root(
+    tmp_path: Path, *, old: str = PIN_OLD, new: str = PIN_NEW
+) -> Path:
+    """A root as if a bump ``old -> new`` just landed: pins at ``new`` and
+    a delta report whose ``Old:`` label names the saved pre-bump audit
+    (the record a rollback reads)."""
+    root = _write_fixture_root(tmp_path, vendor_pin=new)
+    (root / "report.md").write_text(
+        "# redteam audit delta\n"
+        "\n"
+        f"Old: `omega_prime/tests/data/redteam-audit-{old}.json`\n"
+        "New: `new-pin npm audit`\n"
+        "\n"
+        "## Advisories new\n"
+        "\n"
+        "_None._\n"
+        "\n"
+        "Verdict: improved\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def _roe_artifact_doc(*, until: str) -> dict:
+    """Minimal schema-valid RoE document with the window ending at ``until``."""
+    return {
+        "schema_version": 1,
+        "operator": "tester",
+        "authorized_targets": [{"host": "example.test", "tools": ["tempest_status"]}],
+        "effective_from": "2020-01-01T00:00:00Z",
+        "effective_until": until,
+        "case_classes": ["jailbreak"],
+    }
+
+
+def _write_roe_artifact(tmp_path: Path, name: str, *, until: str) -> Path:
+    path = tmp_path / name
+    path.write_text(json.dumps(_roe_artifact_doc(until=until)), encoding="utf-8")
+    return path
+
+
+def test_rollback_flag_parses():
+    args = pin_bump.build_parser().parse_args(["--rollback"])
+    assert args.rollback is True
+    assert args.to is None
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.rollback is False
+    assert default.to == PIN_NEW
+
+
+def test_rollback_with_to_exits_2(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        pin_bump.main(["--rollback", "--to", PIN_NEW, "--root", str(tmp_path)])
+    assert exc.value.code == 2
+    assert "drop --to" in capsys.readouterr().err
+
+
+def test_rollback_main_still_requires_to(tmp_path):
+    # Non-rollback runs keep the required---to behavior (SystemExit 2).
+    with pytest.raises(SystemExit) as exc:
+        pin_bump.main(["--root", str(tmp_path)])
+    assert exc.value.code == 2
+
+
+def test_rollback_no_record_exits_2_lists_locations(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)  # no report.md, empty git log
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(None, root=root, run=run, rollback=True)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "no prior bump record" in err
+    assert "report.md" in err
+    assert "VENDOR.md" in err
+    assert ["git", "log", "--format=%H", "-n", "1", "--", "VENDOR.md"] in run.kinds()
+    assert _snapshot(root) == before
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_rollback_happy_path_report_record(tmp_path, capsys):
+    root = _write_rollback_root(tmp_path)
+    run = FakeRun()
+    rc = pin_bump.bump(None, root=root, run=run, rollback=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    verbs = [cmd for cmd, _ in run.cmds]
+    # The old lockfile entry is restored via the submodule move.
+    assert ["git", "fetch", "origin"] in verbs
+    assert ["git", "checkout", PIN_OLD] in verbs
+    assert ["git", "add", "redteam"] in verbs
+    # Pin records point at the previous version again.
+    assert f"- Commit: `{PIN_OLD}`" in (root / "VENDOR.md").read_text()
+    init_text = (root / "omega_prime" / "redteam" / "__init__.py").read_text()
+    assert f"Upstream commit: {PIN_OLD}" in init_text
+    assert PIN_NEW not in (root / "VENDOR.md").read_text()
+    # The vendored pack mirrors the restored pin; the bump record survives.
+    assert (
+        _pack(root).joinpath("skills", "deep", "SKILL.md").read_bytes()
+        == b"# skill v2\n"
+    )
+    assert f"redteam-audit-{PIN_OLD}.json" in (root / "report.md").read_text()
+    # A revert PR opens on its own branch.
+    branch = f"pin-rollback-{PIN_OLD[:7]}"
+    assert ["git", "checkout", "-b", branch] in verbs
+    assert [
+        "git",
+        "add",
+        "redteam",
+        "VENDOR.md",
+        "omega_prime/redteam/__init__.py",
+        "omega_prime/redteam/pack",
+    ] in verbs
+    pr = next(cmd for cmd in verbs if cmd[:2] == ["gh", "pr"])
+    title = pr[pr.index("--title") + 1]
+    body = pr[pr.index("--body") + 1]
+    assert PIN_OLD[:7] in title
+    assert "Revert" in body
+    assert PIN_NEW[:7] in body and PIN_OLD[:7] in body
+    assert "Old audit label" in body  # the revert cites its source record
+    assert "https://example.test/pr/1" in out
+    assert f"rollback to {PIN_OLD[:7]} complete" in out
+
+
+def test_rollback_history_fallback_without_report(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, vendor_pin=PIN_NEW)  # no report.md
+    prior_vendor = (
+        "# Vendored behavior\n\n"
+        "## T3MP3ST red team pack\n\n"
+        "- Remote: http://127.0.0.1/purple-team.git\n"
+        f"- Commit: `{PIN_OLD}`\n"
+    )
+    run = FakeRun(git_log_vendor=f"{'e' * 40}\n", git_show_vendor=prior_vendor)
+    rc = pin_bump.bump(None, root=root, run=run, rollback=True)
+    capsys.readouterr()
+    assert rc == 0
+    assert f"- Commit: `{PIN_OLD}`" in (root / "VENDOR.md").read_text()
+    assert ["git", "checkout", PIN_OLD] in run.kinds()
+
+
+def test_rollback_already_current_exits_2(tmp_path, capsys):
+    root = _write_rollback_root(tmp_path, old=PIN_OLD, new=PIN_OLD)
+    before = _snapshot(root)
+    rc = pin_bump.bump(None, root=root, run=FakeRun(), rollback=True)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "nothing to roll back" in err
+    assert _snapshot(root) == before
+
+
+def test_rollback_restores_package_json_version(tmp_path, capsys):
+    root = _write_rollback_root(tmp_path)
+    pkg = root / "redteam" / "package.json"
+    pkg.write_text('{"name": "redteam", "version": "1.3.0"}\n', encoding="utf-8")
+    run = FakeRun(
+        git_show_package='{"name": "redteam", "version": "1.2.3"}\n',
+    )
+    rc = pin_bump.bump(None, root=root, run=run, rollback=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert json.loads(pkg.read_text())["version"] == "1.2.3"
+    assert "version restore" in out
+    assert "1.3.0 -> 1.2.3" in out
+    verbs = [cmd for cmd, _ in run.cmds]
+    pr = next(cmd for cmd in verbs if cmd[:2] == ["gh", "pr"])
+    assert "Version restore: 1.3.0 -> 1.2.3" in pr[pr.index("--body") + 1]
+
+
+def test_rollback_package_json_already_matches(tmp_path, capsys):
+    root = _write_rollback_root(tmp_path)
+    pkg = root / "redteam" / "package.json"
+    pkg.write_text('{"name": "redteam", "version": "1.2.3"}\n', encoding="utf-8")
+    run = FakeRun(
+        git_show_package='{"name": "redteam", "version": "1.2.3"}\n',
+    )
+    rc = pin_bump.bump(None, root=root, run=run, rollback=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert json.loads(pkg.read_text())["version"] == "1.2.3"
+    assert "version restore" not in out
+
+
+def test_rollback_dry_run_plan_mutates_nothing(tmp_path, capsys):
+    root = _write_rollback_root(tmp_path)
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(None, root=root, run=run, rollback=True, dry_run=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"[dry-run] would roll back pin {PIN_NEW[:7]} -> {PIN_OLD[:7]}" in out
+    assert "[dry-run] would re-vendor pack: copy 2, remove 0" in out
+    assert f"[dry-run] would update VENDOR.md pin {PIN_NEW[:7]} ->" in out
+    assert "[dry-run] would update omega_prime/redteam/__init__.py" in out
+    assert (
+        "[dry-run] would open revert PR from branch "
+        f"pin-rollback-{PIN_OLD[:7]} (skipped)" in out
+    )
+    assert f"[dry-run] rollback to {PIN_OLD[:7]} would succeed" in out
+    assert _snapshot(root) == before
+    assert not any(cmd[:2] == ["gh", "pr"] for cmd in run.kinds())
+    assert _mutating_verbs(run.kinds()) == []
+
+
+def test_rollback_dry_run_no_record(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path)
+    before = _snapshot(root)
+    rc = pin_bump.bump(None, root=root, run=FakeRun(), rollback=True, dry_run=True)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "no prior bump record" in err
+    assert _snapshot(root) == before
+
+
+def test_rollback_roe_expired_blocks_before_lookup(tmp_path, capsys):
+    # The gate runs before the bump-record lookup: this root has no
+    # report.md, so a record-first flow would exit 2, not 1.
+    root = _write_fixture_root(tmp_path)
+    artifact = _write_roe_artifact(tmp_path, "roe.json", until="2020-06-01T00:00:00Z")
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(
+        None,
+        root=root,
+        run=run,
+        rollback=True,
+        job={"context": {"roe_artifact": str(artifact)}},
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "rollback blocked" in out
+    assert "expired" in out
+    assert _snapshot(root) == before
+    assert run.cmds == []
+
+
+def test_rollback_roe_revoked_blocks(tmp_path, capsys):
+    from omega_prime.redteam import roe_audit
+
+    root = _write_rollback_root(tmp_path)
+    artifact = _write_roe_artifact(tmp_path, "roe.json", until="2099-01-01T00:00:00Z")
+    log_path = tmp_path / "roe-audit.jsonl"
+    assert roe_audit.log_revoked(log_path, str(artifact), "tester") is not None
+    before = _snapshot(root)
+    run = FakeRun()
+    rc = pin_bump.bump(
+        None,
+        root=root,
+        run=run,
+        rollback=True,
+        job={
+            "context": {
+                "roe_artifact": str(artifact),
+                "roe_audit_log": str(log_path),
+            }
+        },
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "rollback blocked" in out
+    assert "revoked" in out
+    assert _snapshot(root) == before
+    assert run.cmds == []
+
+
+def test_rollback_roe_valid_proceeds(tmp_path, capsys):
+    root = _write_rollback_root(tmp_path)
+    artifact = _write_roe_artifact(tmp_path, "roe.json", until="2099-01-01T00:00:00Z")
+    run = FakeRun()
+    rc = pin_bump.bump(
+        None,
+        root=root,
+        run=run,
+        rollback=True,
+        job={"context": {"roe_artifact": str(artifact)}},
+    )
+    capsys.readouterr()
+    assert rc == 0
+    assert f"- Commit: `{PIN_OLD}`" in (root / "VENDOR.md").read_text()
+
+
+def test_rollback_roe_job_level_and_dict_forms(tmp_path, capsys):
+    first = _write_rollback_root(tmp_path / "first")
+    artifact = _write_roe_artifact(tmp_path, "roe.json", until="2099-01-01T00:00:00Z")
+    rc = pin_bump.bump(
+        None,
+        root=first,
+        run=FakeRun(),
+        rollback=True,
+        job={"roe_artifact": str(artifact)},
+    )
+    capsys.readouterr()
+    assert rc == 0
+    second = _write_rollback_root(tmp_path / "second")
+    inline = _roe_artifact_doc(until="2099-01-01T00:00:00Z")
+    inline["artifact_id"] = "inline-grant"
+    rc = pin_bump.bump(
+        None,
+        root=second,
+        run=FakeRun(),
+        rollback=True,
+        job={"context": {"roe_artifact": inline}},
+    )
+    capsys.readouterr()
+    assert rc == 0
+    assert f"- Commit: `{PIN_OLD}`" in (second / "VENDOR.md").read_text()
+
+
+def test_rollback_gh_missing_exits_2_after_local_restore(tmp_path, capsys):
+    root = _write_rollback_root(tmp_path)
+    run = FakeRun(gh_missing=True)
+    rc = pin_bump.bump(None, root=root, run=run, rollback=True)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "gh" in err
+    # The local revert already landed; only the PR step failed.
+    assert f"- Commit: `{PIN_OLD}`" in (root / "VENDOR.md").read_text()
+    assert not any(cmd[:2] == ["gh", "pr"] for cmd in run.kinds())
+
+
+def test_rollback_main_plumbing(tmp_path, capsys, monkeypatch):
+    root = _write_rollback_root(tmp_path)
+    run = FakeRun()
+    monkeypatch.setattr(pin_bump, "_default_run", run)
+    rc = pin_bump.main(["--rollback", "--root", str(root)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"rollback to {PIN_OLD[:7]} complete" in out
+    assert ["git", "checkout", PIN_OLD] in run.kinds()
+
+
+def test_rollback_conflicts_parsing(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        pin_bump.main(["--rollback", "--audit-only", "--root", str(tmp_path)])
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        pin_bump.main(
+            ["--rollback", "--schedule", "0 6 * * *", "--root", str(tmp_path)]
+        )
+    assert exc.value.code == 2

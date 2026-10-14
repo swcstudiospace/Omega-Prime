@@ -1216,6 +1216,124 @@ def render_side_by_side(
     ]
 
 
+#: Metrics shown per row by the three-way trend view (``--delta``), each
+#: with whether a higher value counts as improving (findings improve
+#: downward; every other metric improves upward).
+DELTA_TREND_METRICS = ("runs", "pass rate", "coverage", "findings", "risk score")
+
+
+def _trend_arrow(current: float, older: float, *, higher_is_better: bool = True) -> str:
+    """Net direction arrow for one trend value (``--delta``).
+
+    ``→`` when the values agree within 0.5, otherwise ``↑`` when the
+    change counts as improving and ``↓`` when it counts as regressing.
+    Deterministic.
+    """
+    delta = current - older
+    if abs(delta) <= 0.5:
+        return "→"
+    return "↑" if (delta > 0) == higher_is_better else "↓"
+
+
+def _delta_leg_values(
+    metrics: dict[str, int],
+    coverage: dict[str, tuple[int, int, int, float, int, str]],
+    snapshot: dict[str, str],
+) -> tuple[int, int, int, int, int, float]:
+    """``(runs, pass_pct, covered, total, findings, risk_score)`` trend leg.
+
+    ``metrics``/``coverage``/``snapshot`` are parsed from one rendered
+    report with :func:`parse_previous_metrics`,
+    :func:`parse_previous_coverage`, and :func:`parse_previous_snapshot`
+    (the same parsers ``--side-by-side``/``--diff-drill-down`` use);
+    the risk score is recomputed from the parsed coverage so reports
+    predating the score section still yield a value. Deterministic.
+    """
+    covered = sum(1 for entry in coverage.values() if entry[5] == "covered")
+    score, _earned, _possible, _breakdown = risk_weighted_score(
+        [(class_name, *values) for class_name, values in sorted(coverage.items())]
+    )
+    return (
+        metrics.get("runs", 0),
+        metrics.get("pass_pct", 0),
+        covered,
+        len(coverage),
+        len(snapshot),
+        score,
+    )
+
+
+def render_three_way_trend(
+    *,
+    older_label: str,
+    previous_label: str,
+    older: tuple[int, int, int, int, int, float],
+    previous: tuple[int, int, int, int, int, float],
+    current: tuple[int, int, int, int, int, float],
+) -> list[str]:
+    """Three-way trend lines (``older → previous → current`` per metric).
+
+    Legs are :func:`_delta_leg_values` tuples. Each row carries one net
+    arrow from :func:`_trend_arrow` over the older-to-current change
+    (``↑`` improving, ``↓`` regressing, ``→`` flat within 0.5).
+    Deterministic.
+    """
+    old_runs, old_pass, old_covered, old_total, old_findings, old_score = older
+    prev_runs, prev_pass, prev_covered, prev_total, prev_findings, prev_score = previous
+    cur_runs, cur_pass, cur_covered, cur_total, cur_findings, cur_score = current
+    return [
+        "## Three-way trend",
+        "",
+        f"- older: {older_label}",
+        f"- previous: {previous_label}",
+        "",
+        f"- runs: {old_runs} → {prev_runs} → {cur_runs} "
+        f"({_trend_arrow(float(cur_runs), float(old_runs))})",
+        f"- pass rate: {old_pass}% → {prev_pass}% → {cur_pass}% "
+        f"({_trend_arrow(float(cur_pass), float(old_pass))})",
+        f"- coverage: {old_covered}/{old_total} covered → "
+        f"{prev_covered}/{prev_total} covered → "
+        f"{cur_covered}/{cur_total} covered "
+        f"({_trend_arrow(float(cur_covered), float(old_covered))})",
+        f"- findings: {old_findings} → {prev_findings} → {cur_findings} "
+        f"({_trend_arrow(float(cur_findings), float(old_findings), higher_is_better=False)})",
+        f"- risk-weighted score: {old_score:.1f}% → {prev_score:.1f}% → "
+        f"{cur_score:.1f}% ({_trend_arrow(cur_score, old_score)})",
+    ]
+
+
+def render_md_fragment(
+    *,
+    coverage: list[tuple[str, int, int, int, float, int, str]],
+    gate_line: str | None = None,
+) -> str:
+    """Embeddable markdown fragment for ``--export-md`` (M12).
+
+    The coverage matrix table plus the risk-weighted score section plus
+    the gate line when one is given (``--threshold``); no h1 title and
+    no findings-snapshot comment, so the text pastes cleanly into a PR
+    comment. Deterministic; the same ``coverage`` rows render
+    byte-identically to the full report's sections.
+    """
+    lines = [
+        "## Coverage matrix",
+        "",
+        "| class | cases | runs | pass rate | gaps | verdict |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for class_name, case_count, class_runs, wins, pct, class_gaps, verdict in coverage:
+        rate = f"{wins}/{class_runs} ({pct:.1f}%)" if class_runs else "0/0 (n/a)"
+        lines.append(
+            f"| {class_name} | {case_count} | {class_runs} | {rate} "
+            f"| {class_gaps} | {verdict} |"
+        )
+    lines += ["", *render_risk_weighted_score(coverage)]
+    if gate_line is not None:
+        lines += ["", gate_line]
+    lines.append("")
+    return "\n".join(lines)
+
+
 #: Column order for the CSV coverage export (K12). Fixed so reruns are
 #: byte-identical; per-class rows follow coverage order and the final
 #: ``risk-weighted-score`` row carries the aggregate score.
@@ -2259,6 +2377,7 @@ def render_report(
     drill_down_diff: list[str] | None = None,
     operator_notes: list[str] | None = None,
     side_by_side: list[str] | None = None,
+    three_way: list[str] | None = None,
     exec_summary: list[str] | None = None,
     email_block: list[str] | None = None,
     gate_line: str | None = None,
@@ -2390,6 +2509,8 @@ def render_report(
         lines += ["", *comparison]
     if side_by_side:
         lines += ["", *side_by_side]
+    if three_way:
+        lines += ["", *three_way]
     if email_block:
         lines += ["", *email_block]
     lines += [
@@ -2528,6 +2649,7 @@ def build_report(
     trend_path: Path | None = None,
     diff_drill_down_path: Path | None = None,
     side_by_side_path: Path | None = None,
+    delta_path: Path | None = None,
     annotations: list[tuple[str, str]] | None = None,
     exec_summary: bool = False,
     recipient: str | None = None,
@@ -2560,6 +2682,12 @@ def build_report(
     ``threshold`` (``--threshold``) appends the final gate verdict line
     (``Gate: PASS (...)`` or ``Gate: FAIL``) after the snapshot marker;
     callers map a FAIL to exit 3 (see :func:`evaluate_threshold`).
+
+    ``delta_path`` (``--delta``) renders a ``## Three-way trend`` section
+    after the side-by-side comparison (older → previous → current over
+    runs, pass rate, coverage, findings, and the risk-weighted score).
+    The previous leg is ``--side-by-side``/``--compare`` when given, else
+    the newest baseline, else the older report itself.
     """
     window = _collect_window(reports_dir, since_text)
     window_start = window["window_start"]
@@ -2674,6 +2802,8 @@ def build_report(
         "--side-by-side" if side_by_side_path is not None else "--compare"
     )
     side_by_side: list[str] | None = None
+    prev_leg: tuple[int, int, int, int, int, float] | None = None
+    prev_label: str | None = None
     if side_by_side_source is not None:
         try:
             side_text = side_by_side_source.read_text(encoding="utf-8")
@@ -2701,6 +2831,61 @@ def build_report(
             current_findings=len(current_findings),
             previous_findings=len(previous_snapshot),
             baseline_label=side_by_side_source.name,
+        )
+        prev_leg = _delta_leg_values(
+            previous_metrics, previous_coverage, previous_snapshot
+        )
+        prev_label = side_by_side_source.name
+    three_way: list[str] | None = None
+    if delta_path is not None:
+        try:
+            older_text = delta_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReportError(
+                f"error: cannot read --delta report {delta_path} ({exc})"
+            ) from exc
+        older_leg = _delta_leg_values(
+            parse_previous_metrics(older_text),
+            parse_previous_coverage(older_text),
+            parse_previous_snapshot(older_text),
+        )
+        if prev_leg is None and baseline_name is not None:
+            candidate = out_dir / baseline_name
+            try:
+                same_file = candidate.resolve() == delta_path.resolve()
+            except OSError:
+                same_file = False
+            if not same_file:
+                try:
+                    baseline_text = candidate.read_text(encoding="utf-8")
+                except OSError:
+                    baseline_text = None
+                if baseline_text is not None:
+                    prev_leg = _delta_leg_values(
+                        parse_previous_metrics(baseline_text),
+                        parse_previous_coverage(baseline_text),
+                        parse_previous_snapshot(baseline_text),
+                    )
+                    prev_label = baseline_name
+        if prev_leg is None:
+            prev_leg = older_leg
+            prev_label = delta_path.name
+        assert prev_label is not None
+        current_score, _earned, _possible, _breakdown = risk_weighted_score(coverage)
+        current_leg = (
+            runs,
+            _summary_pct(pass_rows),
+            sum(1 for row in coverage if row[6] == "covered"),
+            len(coverage),
+            len(current_findings),
+            current_score,
+        )
+        three_way = render_three_way_trend(
+            older_label=delta_path.name,
+            previous_label=prev_label,
+            older=older_leg,
+            previous=prev_leg,
+            current=current_leg,
         )
     combined_notes = merge_notes(history_notes, annotations or [])
     known_case_ids = {case_id for case_id, _result in pass_rows}
@@ -2785,6 +2970,7 @@ def build_report(
         drill_down_diff=drill_down_diff,
         operator_notes=operator_notes,
         side_by_side=side_by_side,
+        three_way=three_way,
         exec_summary=exec_summary_lines,
         email_block=email_lines,
         gate_line=(
@@ -3439,6 +3625,17 @@ def main(argv: list[str] | None = None) -> int:
         "table over runs, pass rate, coverage, and findings).",
     )
     parser.add_argument(
+        "--delta",
+        default=None,
+        metavar="OLDER_REPORT",
+        help="older report markdown for the three-way trend: renders a "
+        "## Three-way trend section after the side-by-side comparison "
+        "(older → previous → current over runs, pass rate, coverage, "
+        "findings, and the risk-weighted score with ↑/↓/→ arrows); the "
+        "previous leg is --side-by-side/--compare when given, else the "
+        "newest baseline, else the older report itself.",
+    )
+    parser.add_argument(
         "--pdf",
         default=None,
         metavar="OUTPUT_PDF",
@@ -3509,6 +3706,16 @@ def main(argv: list[str] | None = None) -> int:
         "stays markdown.",
     )
     parser.add_argument(
+        "--export-md",
+        default=None,
+        metavar="OUTPUT_MD",
+        help="also write an embeddable markdown fragment at OUTPUT_MD "
+        "(the coverage matrix table plus the risk-weighted score section "
+        "plus the gate line when --threshold is set; no h1 title, no "
+        "snapshot comment, suitable for pasting into a PR comment); "
+        "stdout and the canonical report are unchanged.",
+    )
+    parser.add_argument(
         "--threshold",
         default=None,
         metavar="SPEC",
@@ -3571,6 +3778,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.diff_drill_down) if args.diff_drill_down else None
         )
         side_by_side_path = Path(args.side_by_side) if args.side_by_side else None
+        delta_path = Path(args.delta) if args.delta else None
         markdown, file_name, out_dir = build_report(
             reports_dir,
             args.since,
@@ -3580,6 +3788,7 @@ def main(argv: list[str] | None = None) -> int:
             trend_path=trend_path,
             diff_drill_down_path=diff_drill_down_path,
             side_by_side_path=side_by_side_path,
+            delta_path=delta_path,
             annotations=annotations,
             exec_summary=args.exec_summary,
             recipient=args.recipient,
@@ -3688,6 +3897,41 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 1
         status = write_csv_report(csv_coverage, Path(args.export_csv)) or status
+    if args.export_md:
+        try:
+            md_window = _collect_window(reports_dir, args.since)
+            md_runs = md_window["runs"]
+            assert isinstance(md_runs, int)
+            md_coverage = coverage_rows(
+                md_window["cases"],  # type: ignore[arg-type]
+                md_window["observations"] if md_runs > 0 else {},
+                md_window["gaps"],  # type: ignore[arg-type]
+            )
+        except ReportError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        md_gate_line = (
+            str(
+                evaluate_threshold(
+                    md_window["pass_rows"],  # type: ignore[arg-type]
+                    md_coverage,  # type: ignore[arg-type]
+                    args.threshold,
+                )["line"]
+            )
+            if args.threshold is not None
+            else None
+        )
+        try:
+            Path(args.export_md).write_text(
+                render_md_fragment(coverage=md_coverage, gate_line=md_gate_line),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            print(
+                f"error: cannot write --export-md fragment: {args.export_md} ({exc})",
+                file=sys.stderr,
+            )
+            return 1
     if args.threshold is not None and gate_evidence is not None:
         gate = evaluate_threshold(
             gate_evidence["pass_rows"],  # type: ignore[arg-type]
