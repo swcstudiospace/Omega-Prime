@@ -52,6 +52,20 @@ Each message is a ``chatMessage`` whose attachment reuses the
 are marked with a deterministic ``graph:<dedupe_hash>`` ref, so
 idempotency is identical to the other modes. A blank or missing
 ``graph`` mapping means the feature is off (fail-closed, never crash).
+PagerDuty mode (``redteam.findings_sync.tracker: "pagerduty"``) triggers
+the same rows as PagerDuty Events API v2 events through
+``gh api https://events.pagerduty.com/v2/enqueue`` POSTs on the same
+runner seam (with the webhook-retry transport). Each event carries
+``event_action: trigger`` with ``dedup_key`` set to the finding's
+``dedupe_hash`` (idempotent re-trigger/update semantics), a severity
+mapped from the finding severity (critical→critical, high→error,
+moderate/medium→warning, low/info→info), and a payload with
+``summary``/``source``/``custom_details`` (fixed fields only, never the
+raw gateway payload). The routing key comes from
+``redteam.findings_sync.pagerduty_routing_key``; blank means off
+(fail-closed, never guess). Pushed rows are marked with a deterministic
+``pd:<dedupe_hash>`` ref, so idempotency is identical to the other
+modes.
 """
 
 from __future__ import annotations
@@ -94,7 +108,7 @@ DEFAULT_LABELS: dict[str, list[str]] = {
 UNKNOWN_SEVERITY_LABELS = ["redteam"]
 
 #: Supported tracker backends for the findings sync.
-TRACKERS = ("github", "linear", "slack", "teams", "graph")
+TRACKERS = ("github", "linear", "slack", "teams", "graph", "pagerduty")
 
 #: Default tracker backend (the existing GitHub-issues mode, unchanged).
 DEFAULT_TRACKER = "github"
@@ -114,6 +128,16 @@ NO_TEAMS_WEBHOOK_MESSAGE = "no teams webhook configured"
 #: Message used when graph mode is selected but the ``graph`` mapping is
 #: blank or missing (fail-closed, never guess, never crash).
 NO_GRAPH_CONFIG_MESSAGE = "no graph config configured"
+
+#: Message used when tracker=pagerduty but no routing key is configured
+#: (fail-closed, never guess).
+NO_PAGERDUTY_ROUTING_KEY_MESSAGE = "no pagerduty routing key configured"
+
+#: PagerDuty Events API v2 enqueue endpoint (``event_action: trigger``).
+PAGERDUTY_EVENTS_URL = "https://events.pagerduty.com/v2/enqueue"
+
+#: Valid PagerDuty Events API v2 severities.
+PAGERDUTY_SEVERITIES = ("critical", "error", "warning", "info")
 
 #: OAuth2 scope for the Graph client-credentials token fetch.
 GRAPH_SCOPE = "https://graph.microsoft.com/.default"
@@ -178,11 +202,28 @@ TEAMS_THEME_COLORS: dict[str, str] = {
 #: Fallback Teams card theme color for unknown severities.
 UNKNOWN_SEVERITY_THEME_COLOR = "#808080"
 
+#: Finding severity → PagerDuty Events API v2 severity mapping.
+#: Operator-overridable per severity via the ``severity_map`` argument
+#: of :func:`pagerduty_severity` (per-severity replacement).
+PD_SEVERITIES: dict[str, str] = {
+    "critical": "critical",
+    "high": "error",
+    "medium": "warning",
+    "moderate": "warning",
+    "low": "info",
+    "info": "info",
+}
+
+#: Fallback PagerDuty severity for unknown severities (Events API v2
+#: requires one of ``critical``/``error``/``warning``/``info``).
+UNKNOWN_SEVERITY_PD_SEVERITY = "info"
+
 #: ``gh`` invocation timeout (seconds).
 _GH_TIMEOUT = 60
 
 #: Webhook POST retry budget: retries after the initial attempt. Only the
-#: Slack/Teams webhook transports retry; GitHub/Linear modes are unchanged.
+#: Slack/Teams/PagerDuty webhook transports retry; GitHub/Linear modes
+#: are unchanged.
 WEBHOOK_MAX_RETRIES = 3
 
 #: Base backoff delays (seconds) before webhook retry 1/2/3. Each delay
@@ -437,6 +478,68 @@ def teams_message(row: Mapping[str, Any], repo: str | None = None) -> dict[str, 
             }
         ]
     return card
+
+
+def pagerduty_severity(
+    severity: Any, severity_map: Mapping[str, Any] | None = None
+) -> str:
+    """Resolve the PagerDuty Events API v2 severity for ``severity``.
+
+    Default table (case-insensitive): critical→``critical``,
+    high→``error``, medium/moderate→``warning``, low/info→``info``.
+    A per-severity ``severity_map`` override replaces the default entry
+    entirely (only when the override value is a valid Events API v2
+    severity); unknown severities fall back to ``info`` (the API
+    requires one of ``critical``/``error``/``warning``/``info``).
+    """
+    key = severity.lower() if isinstance(severity, str) else ""
+    if severity_map:
+        override = severity_map.get(key)
+        if isinstance(override, str) and override.lower() in PAGERDUTY_SEVERITIES:
+            return override.lower()
+    return PD_SEVERITIES.get(key, UNKNOWN_SEVERITY_PD_SEVERITY)
+
+
+def pagerduty_payload(
+    row: Mapping[str, Any],
+    routing_key: str = "",
+    severity_map: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """PagerDuty Events API v2 event for one finding row.
+
+    ``event_action`` is ``trigger`` with ``dedup_key`` set to the
+    finding's ``dedupe_hash`` (idempotent re-trigger/update semantics:
+    re-sending the same ``dedup_key`` updates rather than duplicates).
+    The inner payload carries ``summary`` (the issue title, truncated
+    to the 1024-character Events API v2 limit), ``source`` (the case
+    ID), the mapped ``severity``, and ``custom_details`` with the fixed
+    fields only — never the raw gateway payload (threat T-79-11). The
+    routing key rides the event (as webhook URLs do on the sibling
+    transports) — it is never logged, never rendered.
+    """
+    title = issue_title(row)
+    digest = str(row.get("dedupe_hash", ""))
+    case_id = str(row.get("case_id", "") or "findings_sync")
+    return {
+        "routing_key": routing_key,
+        "event_action": "trigger",
+        "dedup_key": digest,
+        "payload": {
+            "summary": title[:1024],
+            "source": case_id,
+            "severity": pagerduty_severity(row.get("severity"), severity_map),
+            "custom_details": {
+                "case_id": row.get("case_id"),
+                "severity": row.get("severity"),
+                "verdict": row.get("verdict"),
+                "observed_detection": row.get("observed_detection"),
+                "dedupe_hash": digest,
+                "occurrence_count": row.get("occurrence_count", 1),
+                "first_seen": row.get("ts", ""),
+                "last_seen": row.get("last_seen", ""),
+            },
+        },
+    }
 
 
 def issue_title(row: Mapping[str, Any]) -> str:
@@ -887,6 +990,99 @@ def sync_findings_teams(
     return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
 
 
+def sync_findings_pagerduty(
+    reports_dir: str | Path | None,
+    routing_key: str,
+    *,
+    runner: GhRunner | None = None,
+    severity_map: Mapping[str, Any] | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Trigger every not-yet-synced finding row as a PagerDuty event.
+
+    Same rows and idempotency marking as :func:`sync_findings` (rows
+    carrying ``issue_url`` are skipped); only the transport differs —
+    ``gh api https://events.pagerduty.com/v2/enqueue`` POSTs one
+    Events API v2 ``trigger`` event per row (see
+    :func:`pagerduty_payload`) instead of a GitHub issue. The
+    ``dedup_key`` is the finding's ``dedupe_hash``, so re-sending
+    updates rather than duplicates, and a pushed row is marked with a
+    deterministic ``pd:<dedupe_hash>`` ref. The webhook-retry transport
+    (:func:`_run_with_webhook_retry`) applies. Failure semantics mirror
+    :func:`sync_findings`: earlier-in-run pushes persist, the failed row
+    stays unsynced, and a :class:`GhApiError` is raised. With zero pushes
+    (or ``dry_run``) the store file is byte-identical and the runner is
+    never called in dry-run mode.
+
+    A blank ``routing_key`` raises :class:`ValueError` (fail-closed,
+    never guess). The routing key rides only in the ``-f`` argv fields
+    (as webhook URLs do) — it is never logged, never rendered, and never
+    echoed beyond the introspection payload.
+
+    Returns ``{"pushed": [...], "skipped": [...], "dry_run": bool}``
+    with the same entry shapes as :func:`sync_findings`.
+    """
+    if not isinstance(routing_key, str) or not routing_key.strip():
+        raise ValueError(NO_PAGERDUTY_ROUTING_KEY_MESSAGE)
+    routing_key = routing_key.strip()
+    run = runner if runner is not None else _default_runner
+
+    rows = load_findings(reports_dir)
+    pushed: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    dirty = False
+
+    for row in rows:
+        digest = str(row.get("dedupe_hash", ""))
+        if row.get("issue_url"):
+            skipped.append(digest)
+            continue
+        event = pagerduty_payload(row, routing_key, severity_map)
+        inner_json = json.dumps(event["payload"])
+        payload: dict[str, Any] = {
+            "routing_key": routing_key,
+            "event_action": "trigger",
+            "dedup_key": digest,
+            "payload": event["payload"],
+        }
+        argv = [
+            "gh",
+            "api",
+            PAGERDUTY_EVENTS_URL,
+            "--method",
+            "POST",
+            "-f",
+            f"routing_key={routing_key}",
+            "-f",
+            "event_action=trigger",
+            "-f",
+            f"dedup_key={digest}",
+            "-f",
+            f"payload={inner_json}",
+        ]
+
+        if dry_run:
+            pushed.append({"dedupe_hash": digest, "issue_url": ""})
+            continue
+
+        try:
+            _run_with_webhook_retry(run, argv, payload)
+        except FindingsSyncError:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise
+        except Exception as exc:
+            _persist_if_dirty(reports_dir, dirty, rows)
+            raise GhApiError(f"gh runner failed: {exc}") from exc
+        row["issue_url"] = f"pd:{digest}"
+        row["synced_at"] = utc_now_rfc3339()
+        dirty = True
+        pushed.append({"dedupe_hash": digest, "issue_url": row["issue_url"]})
+
+    if dirty and not dry_run:
+        _write_rows_atomic(findings_path(reports_dir), rows)
+    return {"pushed": pushed, "skipped": skipped, "dry_run": dry_run}
+
+
 def _graph_token_url(tenant_id: str) -> str:
     """Token endpoint for a tenant (client-credentials flow)."""
     return GRAPH_TOKEN_URL_TEMPLATE.format(tenant=tenant_id)
@@ -1312,12 +1508,14 @@ def tick(
 
     Reads ``redteam.findings_sync`` (``enabled``, ``tracker``, ``repo``,
     ``labels``, ``linear_team_id``, ``slack_webhook_url``,
-    ``teams_webhook_url``, ``graph``) from ``config``
+    ``teams_webhook_url``, ``graph``, ``pagerduty_routing_key``,
+    ``pagerduty_severity_map``) from ``config``
     (loads via ``load_config()`` when omitted). Disabled, repo-less,
-    team-less, webhook-less, graph-less, or unknown-tracker results are
-    structured dicts — never exceptions, never a new cron kind. The
-    graph branch runs when ``tracker`` is ``"graph"`` or when the
-    ``graph`` mapping is complete; the sync itself stays plain
+    team-less, webhook-less, graph-less, routing-key-less, or
+    unknown-tracker results are structured dicts — never exceptions,
+    never a new cron kind. The graph branch runs when ``tracker`` is
+    ``"graph"`` or when the ``graph`` mapping is complete; the sync
+    itself stays plain
     functions; schedulers call this ``tick`` following the
     ``tick``/``schedule`` precedent.
     """
@@ -1384,6 +1582,20 @@ def tick(
             runner=runner,
             dry_run=dry_run,
             repo=repo or None,
+        )
+        result["disabled"] = False
+        return result
+    if tracker == "pagerduty":
+        routing_key = node.get("pagerduty_routing_key", "")
+        if not isinstance(routing_key, str) or not routing_key.strip():
+            return _tracker_error(NO_PAGERDUTY_ROUTING_KEY_MESSAGE, dry_run)
+        severity_map = node.get("pagerduty_severity_map")
+        result = sync_findings_pagerduty(
+            reports_directory,
+            routing_key.strip(),
+            runner=runner,
+            dry_run=dry_run,
+            severity_map=severity_map if isinstance(severity_map, dict) else None,
         )
         result["disabled"] = False
         return result
@@ -1488,6 +1700,49 @@ def _main_teams(
     return 0
 
 
+def _main_pagerduty(
+    directory: str | Path | None,
+    routing_key: str,
+    dry_run: bool,
+    severity_map: Mapping[str, Any] | None = None,
+) -> int:
+    """Run the PagerDuty branch of the CLI (dry-run aware)."""
+    if dry_run:
+        try:
+            result = sync_findings_pagerduty(
+                directory if directory is not None else reports_dir(),
+                routing_key,
+                dry_run=True,
+                severity_map=severity_map,
+            )
+        except FindingsSyncError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for entry in result["pushed"]:
+            print(f"would push {entry['dedupe_hash']}")
+        for digest in result["skipped"]:
+            print(f"skip (already synced) {digest}")
+        return 0
+
+    try:
+        result = sync_findings_pagerduty(
+            directory if directory is not None else reports_dir(),
+            routing_key,
+            severity_map=severity_map,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except FindingsSyncError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for entry in result["pushed"]:
+        print(f"pushed {entry['dedupe_hash']} -> {entry['issue_url']}")
+    for digest in result["skipped"]:
+        print(f"skip (already synced) {digest}")
+    return 0
+
+
 def _main_linear(directory: str | Path | None, team_id: str, dry_run: bool) -> int:
     """Run the Linear branch of the CLI (dry-run aware)."""
     if dry_run:
@@ -1575,7 +1830,7 @@ def _main_graph(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``findings_sync [--tracker github|linear|slack|teams|graph] [--mode graph] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
+    """CLI: ``findings_sync [--tracker github|linear|slack|teams|graph|pagerduty] [--mode pagerduty] [--repo OWNER/NAME] [--reports-dir DIR] [--dry-run]``."""
     parser = argparse.ArgumentParser(
         prog="findings_sync",
         description="Push unsynced red-team findings to tracker issues (one-way).",
@@ -1583,12 +1838,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tracker",
         default="",
-        help="Tracker backend: github (default), linear, slack, teams, or graph; blank means config",
+        help="Tracker backend: github (default), linear, slack, teams, graph, or pagerduty; blank means config",
     )
     parser.add_argument(
         "--mode",
         default="",
-        help="Mode alias for --tracker (graph selects the Microsoft Graph API sender); blank means config",
+        help="Mode alias for --tracker (graph selects the Microsoft Graph API sender, pagerduty the PagerDuty Events API sender); blank means config",
     )
     parser.add_argument("--repo", default="", help="Target repo OWNER/NAME")
     parser.add_argument("--linear-team-id", default="", help="Linear team ID override")
@@ -1597,6 +1852,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--teams-webhook-url", default="", help="Teams webhook URL override"
+    )
+    parser.add_argument(
+        "--pagerduty-routing-key", default="", help="PagerDuty routing key override"
     )
     parser.add_argument("--reports-dir", default="", help="Reports dir override")
     parser.add_argument(
@@ -1664,6 +1922,22 @@ def main(argv: list[str] | None = None) -> int:
             else ""
         )
         return _main_teams(directory, webhook_url, args.dry_run, teams_repo or None)
+    if tracker == "pagerduty":
+        routing_key = args.pagerduty_routing_key.strip() or (
+            node.get("pagerduty_routing_key", "").strip()
+            if isinstance(node.get("pagerduty_routing_key", ""), str)
+            else ""
+        )
+        if not routing_key:
+            print(f"error: {NO_PAGERDUTY_ROUTING_KEY_MESSAGE}", file=sys.stderr)
+            return 2
+        severity_map = node.get("pagerduty_severity_map")
+        return _main_pagerduty(
+            directory,
+            routing_key,
+            args.dry_run,
+            severity_map if isinstance(severity_map, dict) else None,
+        )
     if tracker != "github":
         print(f"error: unknown tracker: {tracker}", file=sys.stderr)
         return 2
@@ -1728,14 +2002,19 @@ __all__ = [
     "LINEAR_PRIORITIES",
     "NO_GRAPH_CONFIG_MESSAGE",
     "NO_LINEAR_TEAM_MESSAGE",
+    "NO_PAGERDUTY_ROUTING_KEY_MESSAGE",
     "NO_REPO_MESSAGE",
     "NO_SLACK_WEBHOOK_MESSAGE",
     "NO_TEAMS_WEBHOOK_MESSAGE",
+    "PAGERDUTY_EVENTS_URL",
+    "PAGERDUTY_SEVERITIES",
+    "PD_SEVERITIES",
     "SLACK_COLORS",
     "TEAMS_THEME_COLORS",
     "TRACKERS",
     "UNKNOWN_SEVERITY_COLOR",
     "UNKNOWN_SEVERITY_LABELS",
+    "UNKNOWN_SEVERITY_PD_SEVERITY",
     "UNKNOWN_SEVERITY_PRIORITY",
     "UNKNOWN_SEVERITY_THEME_COLOR",
     "WEBHOOK_MAX_RETRIES",
@@ -1750,12 +2029,15 @@ __all__ = [
     "issue_title",
     "labels_for_severity",
     "main",
+    "pagerduty_payload",
+    "pagerduty_severity",
     "priority_for_severity",
     "slack_color",
     "slack_message",
     "sync_findings",
     "sync_findings_graph",
     "sync_findings_linear",
+    "sync_findings_pagerduty",
     "sync_findings_slack",
     "sync_findings_teams",
     "teams_message",

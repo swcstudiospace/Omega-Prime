@@ -348,6 +348,14 @@ def check_roe_lifecycle_all(
 #: single call returns every newly crossed threshold in the same order.
 RENEWAL_THRESHOLDS_DAYS = (14.0, 7.0, 3.0, 1.0)
 
+#: Heartbeat digest kind for a revoked RoE grant (J11). When
+#: :func:`renewal_reminders` finds the artifact's id in the audit log's
+#: ``grant-revoked`` rows, threshold reminders stop and a single entry
+#: with this kind is returned instead — once per artifact id — so
+#: operators see why reminders went silent.
+ROE_REVOKED_KIND = "roe_revoked"
+
+
 #: In-memory per-threshold fire record for :func:`renewal_reminders`,
 #: keyed ``(artifact_id, threshold-label)``. Each threshold fires once
 #: per artifact id for the life of the process (mirrors the heartbeat
@@ -395,7 +403,38 @@ def _renewal_artifact_id(
     return until_text or "unknown-artifact"
 
 
-def renewal_reminders(artifact: Any, *, now: Any = None) -> list[dict[str, Any]]:
+#: Document keys that may carry the RoE audit-log path inside an inline
+#: artifact document (checked when no explicit ``audit_log`` is passed).
+_RENEWAL_AUDIT_LOG_KEYS = ("audit_log", "audit_log_path", "roe_audit_log")
+
+
+def _renewal_audit_log(artifact: Any, document: dict[str, Any], explicit: Any) -> Any:
+    """Audit-log path for revocation suppression (``None`` disables it)."""
+    if isinstance(explicit, (str, Path)) and str(explicit).strip():
+        return explicit
+    for key in _RENEWAL_AUDIT_LOG_KEYS:
+        candidate = document.get(key)
+        if isinstance(candidate, (str, Path)) and str(candidate).strip():
+            return candidate
+    return None
+
+
+def _artifact_revoked(candidates: set[str], audit_log: Any) -> bool:
+    """True when any id candidate has a ``grant-revoked`` audit row."""
+    if not candidates or audit_log is None:
+        return False
+    try:
+        from omega_prime.redteam import roe_audit
+
+        revoked = set(roe_audit.list_revoked(audit_log))
+    except Exception:
+        return False
+    return bool(candidates & revoked)
+
+
+def renewal_reminders(
+    artifact: Any, *, now: Any = None, audit_log: Any = None
+) -> list[dict[str, Any]]:
     """Renewal reminders for a signed RoE artifact approaching expiry.
 
     ``artifact`` is a parsed RoE document (dict) or a path to a RoE JSON
@@ -407,6 +446,15 @@ def renewal_reminders(artifact: Any, *, now: Any = None) -> list[dict[str, Any]]
     are skipped. Fail-closed: a missing/malformed ``effective_until``
     (or any unreadable artifact) returns ``[]`` and never raises.
     Expired windows likewise return ``[]`` — the expiry watcher owns them.
+
+    Revoked grants (J11) are suppressed the same way: when the artifact's
+    id appears in a ``grant-revoked`` audit row (read-only scan of
+    ``audit_log``, falling back to the document's ``audit_log`` /
+    ``audit_log_path`` / ``roe_audit_log`` key for inline documents), no
+    threshold reminder fires. Instead a single ``{"kind": "roe_revoked"}``
+    marker is returned — once per artifact id via the same dedupe set —
+    so heartbeat digests show why reminders stopped. A missing or
+    unreadable log disables suppression (never crashes, never suppresses).
     """
     try:
         current = _renewal_now(now)
@@ -441,9 +489,36 @@ def renewal_reminders(artifact: Any, *, now: Any = None) -> list[dict[str, Any]]
             until_text if isinstance(until_text, str) else str(end.isoformat())
         )
         days_remaining = (end - current).total_seconds() / 86400
+        artifact_id = _renewal_artifact_id(artifact, document, until_label)
+        log_path = _renewal_audit_log(artifact, document, audit_log)
+        if log_path is not None:
+            candidates = {artifact_id}
+            if isinstance(artifact, (str, Path)) and str(artifact).strip():
+                candidates.add(str(artifact).strip())
+            for id_key in ("artifact_id", "id", "artifact_path", "path"):
+                id_candidate = document.get(id_key)
+                if isinstance(id_candidate, str) and id_candidate.strip():
+                    candidates.add(id_candidate.strip())
+            if _artifact_revoked(candidates, log_path):
+                marker_key = (artifact_id, ROE_REVOKED_KIND)
+                if marker_key in _RENEWAL_FIRED:
+                    return []
+                _RENEWAL_FIRED.add(marker_key)
+                return [
+                    {
+                        "kind": ROE_REVOKED_KIND,
+                        "artifact_id": artifact_id,
+                        "effective_until": until_label,
+                        "days_remaining": days_remaining,
+                        "detail": (
+                            f"RoE grant {artifact_id!r} revoked — renewal "
+                            f"reminders suppressed (see audit log "
+                            f"{log_path}) — re-sign to renew"
+                        ),
+                    }
+                ]
         if days_remaining < 0:
             return []
-        artifact_id = _renewal_artifact_id(artifact, document, until_label)
         reminders: list[dict[str, Any]] = []
         for threshold in RENEWAL_THRESHOLDS_DAYS:
             if days_remaining > threshold:
@@ -490,7 +565,7 @@ def _exit_code(state: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``check`` (lifecycle) and ``readiness`` (live-gateway check)."""
+    """CLI: ``check`` (lifecycle), ``readiness`` (live check), ``revoke``."""
     parser = argparse.ArgumentParser(
         description="RoE lifecycle watcher — warn before RoE expiry, never renew"
     )
@@ -541,6 +616,23 @@ def main(argv: list[str] | None = None) -> int:
         "--cases-dir",
         default=None,
         help="Case directory override (default: sidecar/cases)",
+    )
+    revoke = sub.add_parser("revoke", help="Revoke a RoE grant signature")
+    revoke.add_argument(
+        "--revoke",
+        required=True,
+        help="Artifact path or id of the grant to revoke",
+    )
+    revoke.add_argument(
+        "--reason",
+        required=True,
+        help="Reason for the revocation (stored as the audit detail)",
+    )
+    revoke.add_argument(
+        "--audit-log",
+        default=None,
+        help="Path to the RoE grant audit JSONL log: a grant-revoked row "
+        "is appended here. Audit writes never raise.",
     )
     args = parser.parse_args(argv)
 
@@ -627,6 +719,33 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(result, indent=2))
         return 0 if result["ready_for_live"] else 3
+    if args.command == "revoke":
+        target = args.revoke.strip() if isinstance(args.revoke, str) else ""
+        reason = args.reason.strip() if isinstance(args.reason, str) else ""
+        if not target or not reason:
+            print(
+                "error: revoke needs --revoke <artifact_path_or_id> "
+                "and --reason <text>",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            from omega_prime.redteam import roe_audit
+
+            removed = roe_audit.revoke_artifact(
+                target, audit_log=args.audit_log, detail=reason
+            )
+        except Exception as exc:
+            print(f"error: revoke failed ({target!r}): {exc}", file=sys.stderr)
+            return 3
+        sig_note = "signature removed" if removed else "no signature file found"
+        audit_note = (
+            f"; audit log: {args.audit_log}"
+            if args.audit_log is not None and str(args.audit_log).strip()
+            else "; no audit log"
+        )
+        print(f"revoked {target} ({sig_note}; reason: {reason}{audit_note})")
+        return 0
     return 2
 
 

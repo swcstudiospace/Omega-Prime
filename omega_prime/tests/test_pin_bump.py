@@ -296,7 +296,37 @@ def test_explicit_old_audit_without_saved_artifact(tmp_path, capsys):
     assert "improved" in out
 
 
-def test_json_mode_reports_pin_verdict_report(tmp_path, capsys):
+def test_json_mode_schema_report_written_stdout_clean(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), json_mode=True)
+    captured = capsys.readouterr()
+    assert rc == 0
+    # stdout carries exactly one JSON object — nothing else.
+    assert len(captured.out.strip().splitlines()) == 1
+    payload = json.loads(captured.out)
+    assert set(payload) == {"verdict", "rows", "semver", "bump", "exit_code"}
+    assert payload["verdict"] == "improved"
+    assert payload["exit_code"] == 0
+    assert payload["rows"] == [
+        {
+            "key": "GHSA-old-0001",
+            "package": "left-pad",
+            "old": ">=1.0.0",
+            "new": "",
+            "label": None,
+        }
+    ]
+    assert payload["semver"] is None
+    assert payload["bump"] is None
+    # Normal mode still writes the markdown report.
+    assert "Verdict: improved" in (root / "report.md").read_text()
+
+
+def test_json_mode_keys_sorted_deterministically(tmp_path, capsys):
     root = _write_fixture_root(
         tmp_path,
         with_saved_old_audit=True,
@@ -305,14 +335,158 @@ def test_json_mode_reports_pin_verdict_report(tmp_path, capsys):
     rc = pin_bump.bump(PIN_NEW, root=root, run=FakeRun(), json_mode=True)
     out = capsys.readouterr().out
     assert rc == 0
-    payload = json.loads(
-        [line for line in out.splitlines() if line.startswith("{")][-1]
+    assert out == json.dumps(json.loads(out), sort_keys=True) + "\n"
+    key_order = ["bump", "exit_code", "rows", "semver", "verdict"]
+    positions = [out.index(f'"{key}"') for key in key_order]
+    assert positions == sorted(positions)
+
+
+def test_json_mode_semver_and_bump_commit(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
     )
-    assert payload == {
-        "pin": PIN_NEW,
-        "verdict": "improved",
-        "report": str(root / "report.md"),
+    pkg = _write_package_json(root)
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.4.0"))
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        json_mode=True,
+        semver_check=True,
+        bump_commit=True,
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert len(captured.out.strip().splitlines()) == 1
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "improved"
+    assert payload["rows"] == [
+        {
+            "key": "GHSA-fix-0001",
+            "package": "left-pad",
+            "old": "1.2.3",
+            "new": "1.4.0",
+            "label": "compatible",
+        }
+    ]
+    assert payload["semver"] == {"GHSA-fix-0001": "compatible"}
+    assert payload["bump"] == {
+        "applied": True,
+        "level": "minor",
+        "old": "1.2.3",
+        "new": "1.3.0",
+        "reason": None,
     }
+    assert json.loads(pkg.read_text())["version"] == "1.3.0"
+    assert (root / "report.md").exists()
+
+
+def test_json_mode_warnings_go_to_stderr(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=FakeRun(), json_mode=True, bump_commit=True
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert payload["exit_code"] == 0
+    assert payload["bump"] is not None and payload["bump"]["applied"] is False
+    assert "--semver-check" in payload["bump"]["reason"]
+    assert "--bump-commit skipped" in captured.err
+    assert "WARNING" not in captured.out
+
+
+def test_json_mode_regressed_exit_code_1(tmp_path, capsys):
+    root = _write_fixture_root(tmp_path, with_saved_old_audit=True)
+    run = FakeRun(npm_doc=_audit(("left-pad", "moderate", "GHSA-mod-1")))
+    rc = pin_bump.bump(PIN_NEW, root=root, run=run, json_mode=True)
+    captured = capsys.readouterr()
+    assert rc == 1
+    payload = json.loads(captured.out)
+    assert payload == {
+        "verdict": "regressed",
+        "rows": [],
+        "semver": None,
+        "bump": None,
+        "exit_code": 1,
+    }
+    assert (root / "report.md").exists()
+
+
+def test_json_mode_audit_only_no_report(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_audit(("left-pad", "high", "GHSA-old-0001")),
+    )
+    rc = pin_bump.bump(
+        PIN_NEW, root=root, run=FakeRun(), json_mode=True, audit_only=True
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert len(captured.out.strip().splitlines()) == 1
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "improved"
+    assert payload["exit_code"] == 0
+    assert payload["rows"] == [
+        {
+            "key": "GHSA-old-0001",
+            "package": "left-pad",
+            "old": ">=1.0.0",
+            "new": "",
+            "label": None,
+        }
+    ]
+    assert not (root / "report.md").exists()
+
+
+def test_json_mode_audit_only_semver_and_bump_suppressed(tmp_path, capsys):
+    root = _write_fixture_root(
+        tmp_path,
+        with_saved_old_audit=True,
+        old_audit_doc=_bump_commit_old_doc(),
+    )
+    _write_package_json(root)
+    run = FakeRun(npm_doc=_bump_commit_new_doc("1.4.0"))
+    rc = pin_bump.bump(
+        PIN_NEW,
+        root=root,
+        run=run,
+        json_mode=True,
+        audit_only=True,
+        semver_check=True,
+        bump_commit=True,
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert payload["semver"] == {"GHSA-fix-0001": "compatible"}
+    assert payload["bump"] == {
+        "applied": False,
+        "level": "minor",
+        "old": "1.2.3",
+        "new": "1.3.0",
+        "reason": "audit-only (no files changed)",
+    }
+    # Suppressed: the package version is untouched and no report is written.
+    assert (
+        json.loads((root / "redteam" / "package.json").read_text())["version"]
+        == "1.2.3"
+    )
+    assert not (root / "report.md").exists()
+
+
+def test_json_flag_parses():
+    args = pin_bump.build_parser().parse_args(["--to", PIN_NEW, "--json"])
+    assert args.json_mode is True
+    default = pin_bump.build_parser().parse_args(["--to", PIN_NEW])
+    assert default.json_mode is False
 
 
 # Failure paths

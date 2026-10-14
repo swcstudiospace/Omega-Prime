@@ -15,8 +15,10 @@ from omega_prime.grokbot.findings_sync import (
     GRAPH_SCOPE,
     NO_GRAPH_CONFIG_MESSAGE,
     NO_LINEAR_TEAM_MESSAGE,
+    NO_PAGERDUTY_ROUTING_KEY_MESSAGE,
     NO_SLACK_WEBHOOK_MESSAGE,
     NO_TEAMS_WEBHOOK_MESSAGE,
+    PAGERDUTY_EVENTS_URL,
     GhApiError,
     GhNotFoundError,
     deliver_reminders_graph,
@@ -25,12 +27,15 @@ from omega_prime.grokbot.findings_sync import (
     issue_title,
     labels_for_severity,
     main,
+    pagerduty_payload,
+    pagerduty_severity,
     priority_for_severity,
     slack_color,
     slack_message,
     sync_findings,
     sync_findings_graph,
     sync_findings_linear,
+    sync_findings_pagerduty,
     sync_findings_slack,
     sync_findings_teams,
     teams_message,
@@ -1553,3 +1558,236 @@ def test_deliver_reminders_graph_post_failure_raises(monkeypatch):
         deliver_reminders_graph(
             [_reminder()], runner=FakeGraph(fail_posts=99), **GRAPH_CREDS
         )
+
+
+# PagerDuty Events API v2 mode (J8) ---------------------------------------------
+
+ROUTING_KEY = "R0UT1NGK3Y0000000000000000000000"
+
+
+class FakePagerDuty:
+    """Fake GhRunner answering Events API v2 enqueue POSTs; zero network."""
+
+    def __init__(self):
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def __call__(self, argv, data):
+        self.calls.append((list(argv), dict(data)))
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+
+def _pagerduty_config(**overrides):
+    node = {
+        "enabled": True,
+        "tracker": "pagerduty",
+        "pagerduty_routing_key": ROUTING_KEY,
+    }
+    node.update(overrides)
+    return {"redteam": {"findings_sync": node}}
+
+
+def test_pagerduty_severity_mapping_per_spec():
+    assert pagerduty_severity("critical") == "critical"
+    assert pagerduty_severity("high") == "error"
+    assert pagerduty_severity("medium") == "warning"
+    assert pagerduty_severity("moderate") == "warning"
+    assert pagerduty_severity("low") == "info"
+    assert pagerduty_severity("info") == "info"
+    assert pagerduty_severity("CRITICAL") == "critical"
+    assert pagerduty_severity("weird") == "info"
+    assert pagerduty_severity(None) == "info"
+
+
+def test_pagerduty_severity_map_override_replaces_default():
+    assert pagerduty_severity("high", {"high": "warning"}) == "warning"
+    assert pagerduty_severity("HIGH", {"high": "critical"}) == "critical"
+    # Invalid override values fall back to the default table.
+    assert pagerduty_severity("high", {"high": "bogus"}) == "error"
+    assert pagerduty_severity("high", {"low": "critical"}) == "error"
+
+
+def test_pagerduty_payload_events_v2_shape(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(severity="high"))
+    event = pagerduty_payload(row, ROUTING_KEY)
+    assert event["routing_key"] == ROUTING_KEY
+    assert event["event_action"] == "trigger"
+    assert event["dedup_key"] == row["dedupe_hash"]
+    inner = event["payload"]
+    assert inner["severity"] == "error"
+    assert inner["summary"] == issue_title(row)
+    assert inner["source"] == "abuse-01"
+    details = inner["custom_details"]
+    assert details["dedupe_hash"] == row["dedupe_hash"]
+    assert details["verdict"] == "miss"
+    assert details["observed_detection"] == "no-detection"
+
+
+def test_pagerduty_payload_fixed_fields_only(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(response="do anything now"))
+    row["raw_response"] = "do anything now"
+    assert "do anything now" not in json.dumps(pagerduty_payload(row, ROUTING_KEY))
+
+
+def test_pagerduty_payload_summary_truncated_to_1024(tmp_path):
+    row = record_finding(directory=tmp_path, **_finding(case_id="abuse-" + "x" * 2000))
+    assert len(pagerduty_payload(row, ROUTING_KEY)["payload"]["summary"]) <= 1024
+
+
+def test_pagerduty_happy_two_findings_two_posts(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakePagerDuty()
+    result = sync_findings_pagerduty(tmp_path, ROUTING_KEY, runner=fake)
+    assert len(result["pushed"]) == 2
+    assert result["skipped"] == []
+    assert result["dry_run"] is False
+    assert len(fake.calls) == 2
+    for argv, data in fake.calls:
+        assert argv[:3] == ["gh", "api", PAGERDUTY_EVENTS_URL]
+        assert data["event_action"] == "trigger"
+        assert data["routing_key"] == ROUTING_KEY
+        assert data["dedup_key"] == data["payload"]["custom_details"]["dedupe_hash"]
+    rows = load_findings(tmp_path)
+    assert all(row["issue_url"].startswith("pd:") for row in rows)
+    assert all(row.get("synced_at") for row in rows)
+
+
+def test_pagerduty_severity_override_flows_to_payload(tmp_path):
+    record_finding(directory=tmp_path, **_finding(severity="high"))
+    fake = FakePagerDuty()
+    sync_findings_pagerduty(
+        tmp_path, ROUTING_KEY, runner=fake, severity_map={"high": "warning"}
+    )
+    assert fake.calls[0][1]["payload"]["severity"] == "warning"
+
+
+def test_pagerduty_empty_routing_key_fail_closed():
+    with pytest.raises(ValueError, match="no pagerduty routing key configured"):
+        sync_findings_pagerduty(None, "   ", runner=FakePagerDuty())
+
+
+def test_pagerduty_second_run_pushes_nothing(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakePagerDuty()
+    sync_findings_pagerduty(tmp_path, ROUTING_KEY, runner=fake)
+    result = sync_findings_pagerduty(tmp_path, ROUTING_KEY, runner=fake)
+    assert result["pushed"] == []
+    assert len(result["skipped"]) == 2
+    assert len(fake.calls) == 2
+
+
+def test_pagerduty_nonzero_exit_leaves_row_unsynced(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(findings_sync.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+
+    def bad(argv, data):
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    with pytest.raises(GhApiError):
+        sync_findings_pagerduty(tmp_path, ROUTING_KEY, runner=bad)
+    assert all("issue_url" not in row for row in load_findings(tmp_path))
+
+
+def test_pagerduty_runner_exception_mid_run_persists_earlier_push(
+    tmp_path, monkeypatch
+):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(findings_sync.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    calls: list = []
+
+    def flaky(argv, data):
+        calls.append(argv)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        raise OSError("conn reset")
+
+    with pytest.raises(GhApiError):
+        sync_findings_pagerduty(tmp_path, ROUTING_KEY, runner=flaky)
+    rows = load_findings(tmp_path)
+    assert rows[0]["issue_url"].startswith("pd:")
+    assert "issue_url" not in rows[1]
+
+
+def test_pagerduty_dry_run_writes_nothing_calls_no_runner(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakePagerDuty()
+    before = findings_path(tmp_path).read_bytes()
+    result = sync_findings_pagerduty(tmp_path, ROUTING_KEY, runner=fake, dry_run=True)
+    assert len(result["pushed"]) == 2
+    assert result["dry_run"] is True
+    assert fake.calls == []
+    assert findings_path(tmp_path).read_bytes() == before
+
+
+def test_pagerduty_retry_succeeds_on_second_attempt(tmp_path, monkeypatch, capsys):
+    record_finding(directory=tmp_path, **_finding())
+    sleeps = _patch_retry_timing(monkeypatch)
+    calls: list = []
+
+    def flaky(argv, data):
+        calls.append(argv)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    result = sync_findings_pagerduty(tmp_path, ROUTING_KEY, runner=flaky)
+    assert len(result["pushed"]) == 1
+    assert len(calls) == 2
+    assert sleeps == [findings_sync.WEBHOOK_RETRY_DELAYS[0]]
+    assert "retrying" in capsys.readouterr().err
+
+
+def test_tick_pagerduty_dispatches_enqueue_posts(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakePagerDuty()
+    result = tick(_pagerduty_config(), reports_directory=tmp_path, runner=fake)
+    assert result["disabled"] is False
+    assert len(fake.calls) == 2
+    assert all(PAGERDUTY_EVENTS_URL in call[0] for call in fake.calls)
+
+
+def test_tick_pagerduty_no_routing_key_structured_error(tmp_path):
+    _seed_two(tmp_path)
+    fake = FakePagerDuty()
+    result = tick(
+        _pagerduty_config(pagerduty_routing_key=""),
+        reports_directory=tmp_path,
+        runner=fake,
+    )
+    assert result["error"] == NO_PAGERDUTY_ROUTING_KEY_MESSAGE
+    assert fake.calls == []
+
+
+def test_cli_pagerduty_mode_posts(tmp_path, monkeypatch, capsys):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _pagerduty_config(tracker="github"),
+    )
+    fake = FakePagerDuty()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--mode", "pagerduty", "--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+    assert "pushed" in capsys.readouterr().out
+
+
+def test_cli_pagerduty_tracker_from_config_without_flag(tmp_path, monkeypatch):
+    _seed_two(tmp_path)
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _pagerduty_config(),
+    )
+    fake = FakePagerDuty()
+    monkeypatch.setattr(findings_sync, "_default_runner", fake)
+    assert main(["--reports-dir", str(tmp_path)]) == 0
+    assert len(fake.calls) == 2
+
+
+def test_cli_pagerduty_missing_routing_key_exits_two(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "omega_prime.config.load_config",
+        lambda _root=None: _pagerduty_config(pagerduty_routing_key=""),
+    )
+    assert main(["--tracker", "pagerduty", "--reports-dir", str(tmp_path)]) == 2
+    assert "no pagerduty routing key configured" in capsys.readouterr().err

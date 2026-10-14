@@ -30,6 +30,7 @@ from omega_prime.cron.heartbeat import (
 from omega_prime.cron.scheduler import JobStore
 from omega_prime.grokbot.roe_lifecycle import (
     RENEWAL_THRESHOLDS_DAYS,
+    ROE_REVOKED_KIND,
     check_readiness,
     check_roe_lifecycle,
     clear_renewal_reminders,
@@ -833,3 +834,122 @@ def test_heartbeat_renewal_graph_failure_still_digests(fresh_renewals):
         runner=fake,
     )
     assert [e["threshold"] for e in entries] == ["14d", "7d", "3d"]
+
+
+# J11 RoE --revoke CLI + reminder suppression -------------------------------
+
+
+def _revoked_log(tmp_path, artifact_id):
+    """Audit log holding a single grant-revoked row for ``artifact_id``."""
+    from omega_prime.redteam import roe_audit
+
+    log = tmp_path / "roe-audit.jsonl"
+    roe_audit.log_revoked(log, artifact_id, "test-operator", "key compromised")
+    return log
+
+
+def test_revoke_cli_removes_sig_and_audits(tmp_path, capsys):
+    """J11: revoke removes the .sig, appends grant-revoked, exits 0."""
+    from omega_prime.redteam import roe_audit
+
+    artifact = _write_artifact(tmp_path, _renewal_document(2))
+    sig = Path(str(artifact) + ".sig")
+    sig.write_text("deadbeef\n", encoding="utf-8")
+    log = tmp_path / "roe-audit.jsonl"
+    code = main(
+        [
+            "revoke",
+            "--revoke",
+            str(artifact),
+            "--reason",
+            "key compromised",
+            "--audit-log",
+            str(log),
+        ]
+    )
+    assert code == 0
+    assert not sig.exists()
+    assert "revoked" in capsys.readouterr().out
+    rows = roe_audit.read_log(log)
+    assert [r["event"] for r in rows] == [roe_audit.EVENT_REVOKED]
+    assert rows[0]["artifact_path"] == str(artifact)
+    assert rows[0]["detail"] == "key compromised"
+
+
+def test_revoke_cli_usage_error(tmp_path, capsys):
+    """J11: a missing --reason (or blank pair) is usage error exit 2."""
+    with pytest.raises(SystemExit) as exc:
+        main(["revoke", "--revoke", str(tmp_path / "roe.json")])
+    assert exc.value.code == 2
+    assert main(["revoke", "--revoke", " ", "--reason", " "]) == 2
+    capsys.readouterr()
+
+
+def test_renewal_suppressed_when_revoked(tmp_path, fresh_renewals):
+    """J11: a revoked grant yields one roe_revoked marker, then silence."""
+    document = _renewal_document(2)
+    document["artifact_id"] = "j11-grant"
+    log = _revoked_log(tmp_path, "j11-grant")
+    marker = renewal_reminders(document, now=END, audit_log=log)
+    assert len(marker) == 1
+    assert marker[0]["kind"] == ROE_REVOKED_KIND == "roe_revoked"
+    assert marker[0]["artifact_id"] == "j11-grant"
+    assert "revoked" in marker[0]["detail"]
+    assert renewal_reminders(document, now=END, audit_log=log) == []
+
+
+def test_renewal_no_suppression_without_log(tmp_path, fresh_renewals):
+    """J11: revocation elsewhere never suppresses; unreadable log is safe."""
+    document = _renewal_document(2)
+    document["artifact_id"] = "j11-grant"
+    _revoked_log(tmp_path, "j11-grant")
+    assert [r["threshold"] for r in renewal_reminders(document, now=END)] == [
+        "14d",
+        "7d",
+        "3d",
+    ]
+    assert [
+        r["threshold"]
+        for r in renewal_reminders(
+            _renewal_document(2), now=END, audit_log=tmp_path / "absent.jsonl"
+        )
+    ] == ["14d", "7d", "3d"]
+
+
+def test_revoke_cli_suppresses_path_reminders(tmp_path, fresh_renewals, capsys):
+    """J11 end-to-end: revoke a file grant, its path reminders go silent."""
+    artifact = _write_artifact(tmp_path, _renewal_document(2))
+    Path(str(artifact) + ".sig").write_text("deadbeef\n", encoding="utf-8")
+    log = tmp_path / "roe-audit.jsonl"
+    assert (
+        main(
+            [
+                "revoke",
+                "--revoke",
+                str(artifact),
+                "--reason",
+                "rotation",
+                "--audit-log",
+                str(log),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    marker = renewal_reminders(str(artifact), now=END, audit_log=log)
+    assert [m["kind"] for m in marker] == [ROE_REVOKED_KIND]
+    assert renewal_reminders(str(artifact), now=END, audit_log=log) == []
+
+
+def test_heartbeat_revoked_marker_digest_only(tmp_path, fresh_renewals):
+    """J11: heartbeats digest one roe_revoked entry; Graph stays silent."""
+    document = _renewal_document(2)
+    document["artifact_id"] = "j11-grant"
+    log = _revoked_log(tmp_path, "j11-grant")
+    job = {"context": {"roe_artifact": document, "roe_audit_log": str(log)}}
+    fake = _FakeGraphRunner()
+    entries = heartbeat_roe_renewals(job, now=END, runner=fake, audit_log=str(log))
+    assert [e["kind"] for e in entries] == [ROE_REVOKED_KIND]
+    assert "revoked" in entries[0]["detail"]
+    assert fake.calls == []
+    assert heartbeat_roe_renewals(job, now=END, audit_log=str(log)) == []

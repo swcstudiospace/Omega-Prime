@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from sidecar.findings import dedupe_hash
 from sidecar.simulation import load_suite, validate_suite
 
@@ -2450,3 +2452,316 @@ def test_render_html_coverage_helpers_units():
     plain = module.render_html_report("# T\n\n| a | b |\n| --- | --- |\n| x | y |\n")
     assert "Coverage drill-down" not in plain
     assert "href=" not in plain
+
+
+# Operator notes via --annotate (J10) ------------------------------------------
+
+
+def _annotate_fixture(directory: Path) -> None:
+    """One run of history plus one finding for annotate tests."""
+    directory.mkdir(parents=True, exist_ok=True)
+    seed_transitions(directory, cycle(T1) + cycle(T2))
+    seed_last_run(directory)
+    seed_findings(directory, [finding_row("abuse-01", "resp-a", T1)])
+
+
+def test_annotate_renders_operator_notes_section(tmp_path):
+    """J10 happy: repeatable --annotate renders a case_id|note table."""
+    fixture = tmp_path / "reports"
+    _annotate_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--annotate",
+        "abuse-01=follow up with owner",
+        "--annotate",
+        "ghost-99=stale reference",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "## Operator notes" in proc.stdout
+    body = section_lines(proc.stdout, "## Operator notes")
+    assert "| case_id | note |" in body
+    assert "| abuse-01 | follow up with owner |" in body
+    ghost = [line for line in body if line.startswith("| ghost-99 |")]
+    assert len(ghost) == 1
+    assert "(no matching case in this report)" in ghost[0]
+
+
+def test_annotate_section_after_drill_down(tmp_path):
+    """J10 order: Operator notes sits after drill-down, before gaps."""
+    fixture = tmp_path / "reports"
+    _annotate_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--drill-down",
+        "abuse",
+        "--annotate",
+        "abuse-01=noted",
+    )
+    assert proc.returncode == 0, proc.stderr
+    text = proc.stdout
+    drill_at = text.find("## Coverage drill-down: abuse")
+    notes_at = text.find("## Operator notes")
+    gaps_at = text.find("## Detection gaps")
+    assert drill_at != -1 and notes_at != -1 and gaps_at != -1
+    assert drill_at < notes_at < gaps_at
+
+
+def test_annotate_is_deterministic(tmp_path):
+    """J10 determinism: same annotations render byte-identical runs."""
+    fixture = tmp_path / "reports"
+    _annotate_fixture(fixture)
+    args = [
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--annotate",
+        "abuse-01=first",
+        "--annotate",
+        "ghost-99=second",
+    ]
+    first = run_script(*args)
+    second = run_script(*args)
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+
+
+def test_annotate_malformed_exits_1(tmp_path):
+    """J10 edge: an --annotate value without = fails closed with error:."""
+    fixture = tmp_path / "reports"
+    _annotate_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--annotate", "no-equals-here"
+    )
+    assert proc.returncode == 1
+    assert "error:" in proc.stderr
+
+
+def test_no_annotate_flag_renders_no_section(tmp_path):
+    """J10 regression: without --annotate the report has no new section."""
+    fixture = tmp_path / "reports"
+    _annotate_fixture(fixture)
+
+    proc = run_script("--reports-dir", str(fixture), "--since", T0)
+    assert proc.returncode == 0, proc.stderr
+    assert "## Operator notes" not in proc.stdout
+
+
+def test_annotate_trend_persistence_and_recall(tmp_path):
+    """J10 trend: --annotate persists kind/note lines; later runs recall them."""
+    fixture = tmp_path / "reports"
+    _annotate_fixture(fixture)
+    history = tmp_path / "history.ndjson"
+    seed_trend(history, [{"pass_rate": 80.0, "findings": 5}])
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--trend",
+        str(history),
+        "--annotate",
+        "abuse-01=check trend",
+    )
+    assert proc.returncode == 0, proc.stderr
+    # Metric section unaffected by the note line; notes section rendered.
+    assert "- pass rate: 80.0%" in proc.stdout
+    assert "| abuse-01 | check trend |" in proc.stdout
+    # The note was appended to the history file as a kind/note line.
+    rows = [
+        json.loads(line) for line in history.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0] == {"findings": 5, "pass_rate": 80.0}
+    assert rows[1] == {"case_id": "abuse-01", "kind": "note", "note": "check trend"}
+    # A later run without --annotate still shows the persisted note, once.
+    recall = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--trend", str(history)
+    )
+    assert recall.returncode == 0, recall.stderr
+    assert "- pass rate: 80.0%" in recall.stdout
+    body = section_lines(recall.stdout, "## Operator notes")
+    assert body.count("| abuse-01 | check trend |") == 1
+
+
+def test_annotate_history_and_parse_units(tmp_path):
+    """J10 units: note-tolerant history loading plus parse/render helpers."""
+    module = _report_module()
+    assert module.parse_annotation("abuse-01=a=b") == ("abuse-01", "a=b")
+    assert module.parse_annotation("  abuse-01 = trim  ") == ("abuse-01", "trim")
+    with pytest.raises(module.ReportError):
+        module.parse_annotation("no-equals-here")
+    with pytest.raises(module.ReportError):
+        module.parse_annotation("=empty-case")
+    lines = module.render_operator_notes(
+        [("abuse-01", "kept"), ("ghost-99", "dropped")], {"abuse-01"}
+    )
+    assert lines[0] == "## Operator notes"
+    assert "| abuse-01 | kept |" in lines
+    assert "| ghost-99 | dropped (no matching case in this report) |" in lines
+    assert module.merge_notes([("a", "1")], [("a", "1"), ("b", "2")]) == [
+        ("a", "1"),
+        ("b", "2"),
+    ]
+
+    history = tmp_path / "history.ndjson"
+    seed_trend(
+        history,
+        [
+            {"pass_rate": 80.0, "findings": 5},
+            {"case_id": "abuse-01", "kind": "note", "note": "persisted"},
+            {"pass_rate": 90.0, "findings": 3},
+        ],
+    )
+    # Metric loader skips the note line gracefully; notes loader skips metrics.
+    rates, counts = module.load_trend_history(history)
+    assert rates == [80.0, 90.0]
+    assert counts == [5, 3]
+    assert module.load_trend_notes(history) == [("abuse-01", "persisted")]
+    empty = tmp_path / "empty.ndjson"
+    empty.write_text("", encoding="utf-8")
+    assert module.load_trend_notes(empty) == []
+
+
+def test_json_composes_with_annotate(tmp_path):
+    """J10 composition: --json --annotate adds an operator_notes array."""
+    fixture = tmp_path / "reports"
+    _annotate_fixture(fixture)
+
+    proc = run_script(
+        "--reports-dir",
+        str(fixture),
+        "--since",
+        T0,
+        "--json",
+        "--annotate",
+        "abuse-01=kept",
+        "--annotate",
+        "ghost-99=lost",
+    )
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["operator_notes"] == [
+        {"case_id": "abuse-01", "note": "kept", "matched": True},
+        {"case_id": "ghost-99", "note": "lost", "matched": False},
+    ]
+
+
+# HTML risk-score badge (J12) ---------------------------------------------------
+
+
+def test_export_html_risk_score_badge(tmp_path):
+    """J12 happy: --export html adds a risk badge next to the h1."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture)
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    out = tmp_path / "report.html"
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(out)
+    )
+    assert proc.returncode == 0, proc.stderr
+    # All-pass run scores 100.0 at the low (green) tier.
+    html = out.read_text(encoding="utf-8")
+    badge = '<span class="risk-badge sev-low">Risk score: 100.0 / 100</span>'
+    assert badge in html
+    assert html.find("</h1>\n" + badge) != -1
+    # Markdown output unchanged: no badge markup on stdout.
+    assert "risk-badge" not in proc.stdout
+    assert "<span" not in proc.stdout
+    # Deterministic reruns export byte-identical badges.
+    again = tmp_path / "again.html"
+    rerun = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(again)
+    )
+    assert rerun.returncode == 0, rerun.stderr
+    assert again.read_bytes() == out.read_bytes()
+
+
+def test_export_html_badge_tier_follows_score(tmp_path):
+    """J12 tiers: a failing class drops the score and recolors the badge."""
+    fixture = tmp_path / "reports"
+    fixture.mkdir()
+    seed_transitions(fixture, cycle(T1) + cycle(T2))
+    seed_last_run(fixture, wrong={"jailbreak-01": "not-detected"})
+    seed_findings(fixture, [finding_row("abuse-01", "resp-a", T1)])
+    out = tmp_path / "report.html"
+    module = _report_module()
+
+    proc = run_script(
+        "--reports-dir", str(fixture), "--since", T0, "--export", "html", str(out)
+    )
+    assert proc.returncode == 0, proc.stderr
+    html = out.read_text(encoding="utf-8")
+    score, _earned, _possible, _breakdown = module.risk_weighted_score(
+        [
+            (
+                class_name,
+                cases,
+                runs,
+                wins,
+                (100.0 * wins / runs if runs else 0.0),
+                gaps,
+                verdict,
+            )
+            for class_name, cases, runs, wins, gaps, verdict in (
+                module._parse_coverage_matrix(proc.stdout)
+            )
+        ]
+    )
+    assert score < 100.0
+    expected = (
+        f'<span class="risk-badge sev-{module.risk_score_tier(score)}">'
+        f"Risk score: {score:.1f} / 100</span>"
+    )
+    assert expected in html
+
+
+def test_risk_score_badge_units():
+    """J12 units: badge text/tier from the matrix; none without a matrix."""
+    module = _report_module()
+    assert module.risk_score_tier(100.0) == "low"
+    assert module.risk_score_tier(90.0) == "low"
+    assert module.risk_score_tier(89.9) == "moderate"
+    assert module.risk_score_tier(70.0) == "moderate"
+    assert module.risk_score_tier(69.9) == "high"
+    assert module.risk_score_tier(40.0) == "high"
+    assert module.risk_score_tier(39.9) == "critical"
+    assert module.risk_score_tier(0.0) == "critical"
+    markdown = (
+        "# Engagement report\n"
+        "\n"
+        "## Coverage matrix\n"
+        "\n"
+        "| class | cases | runs | pass rate | gaps | verdict |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| abuse | 1 | 1 | 1/1 (100.0%) | 0 | covered |\n"
+        "| jailbreak | 1 | 1 | 0/1 (0.0%) | 1 | gappy |\n"
+    )
+    coverage = [
+        ("abuse", 1, 1, 1, 100.0, 0, "covered"),
+        ("jailbreak", 1, 1, 0, 0.0, 1, "gappy"),
+    ]
+    score, _earned, _possible, _breakdown = module.risk_weighted_score(coverage)
+    assert module.risk_score_badge(markdown) == (
+        f'<span class="risk-badge sev-{module.risk_score_tier(score)}">'
+        f"Risk score: {score:.1f} / 100</span>"
+    )
+    assert module.risk_score_badge(markdown) == module.risk_score_badge(markdown)
+    assert module.risk_score_badge("# T\n\nNo matrix here.\n") == ""
+    html = module.render_html_report(markdown)
+    assert module.risk_score_badge(markdown) in html
+    plain = module.render_html_report("# T\n\n| a | b |\n| --- | --- |\n| x | y |\n")
+    assert '<span class="risk-badge' not in plain

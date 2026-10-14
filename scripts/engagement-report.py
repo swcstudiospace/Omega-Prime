@@ -755,6 +755,24 @@ def render_risk_weighted_score(
     return lines
 
 
+#: Risk-score bands mapping the 0-100 risk-weighted score to a
+#: severity tier for the HTML badge color (higher is better).
+RISK_SCORE_TIERS = (
+    ("low", 90.0),
+    ("moderate", 70.0),
+    ("high", 40.0),
+    ("critical", 0.0),
+)
+
+
+def risk_score_tier(score: float) -> str:
+    """Severity tier for a risk-weighted ``score`` (first band at or below)."""
+    for tier, floor in RISK_SCORE_TIERS:
+        if score >= floor:
+            return tier
+    return "critical"
+
+
 def read_baseline_snapshot(report_path: Path) -> dict[str, str] | None:
     """Findings snapshot (hash -> case_id) embedded in a past report."""
     try:
@@ -1250,7 +1268,10 @@ def load_trend_history(path: Path) -> tuple[list[float], list[int]]:
     (blank lines skipped). Each row carries a pass rate in percentage
     points (``pass_rate``, ``pass_pct``, or ``pass``) and a findings
     count (``findings``, ``findings_count``, or ``count``). File order
-    is the run order. Fail closed on unreadable files and corrupt rows.
+    is the run order. Rows persisted by ``--annotate`` (``{"kind":
+    "note", ...}``) carry no metrics and are skipped gracefully so
+    operator notes never break trend parsing. Fail closed on
+    unreadable files and corrupt rows.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -1269,6 +1290,8 @@ def load_trend_history(path: Path) -> tuple[list[float], list[int]]:
             ) from exc
         if not isinstance(row, dict):
             raise ReportError(f"error: corrupt trend row: {path}:{lineno}")
+        if row.get("kind") == "note":
+            continue
         rate = _trend_number(row, PASS_RATE_KEYS)
         count = _trend_number(row, FINDINGS_COUNT_KEYS)
         if rate is None or count is None:
@@ -1304,6 +1327,113 @@ def render_trend(
         f"- findings trend: {sparkline([float(n) for n in findings_counts])}",
     ]
     return lines
+
+
+def parse_annotation(text: str) -> tuple[str, str]:
+    """``(case_id, note)`` from one ``--annotate CASE_ID=NOTE`` value.
+
+    Split on the first ``=``; the case id is stripped and must be
+    non-empty, the note is stripped (and may be empty). Fail closed on
+    values without ``=`` so typos never pass silently.
+    """
+    case_id, sep, note = text.partition("=")
+    if not sep or not case_id.strip():
+        raise ReportError(
+            f"error: malformed --annotate {text!r} (expected CASE_ID=NOTE)"
+        )
+    return case_id.strip(), note.strip()
+
+
+def render_operator_notes(
+    notes: list[tuple[str, str]],
+    known_case_ids: set[str],
+) -> list[str]:
+    """Operator-notes section lines (CLI order, deterministic).
+
+    One ``| case_id | note |`` row per note; notes whose case id
+    appears nowhere in this report keep their row but gain a
+    ``(no matching case in this report)`` flag on the note text.
+    """
+    lines = [
+        "## Operator notes",
+        "",
+        "| case_id | note |",
+        "| --- | --- |",
+    ]
+    for case_id, note in notes:
+        cell = note
+        if case_id not in known_case_ids:
+            cell = f"{note} (no matching case in this report)".strip()
+        lines.append(f"| {case_id} | {cell} |")
+    return lines
+
+
+def load_trend_notes(path: Path) -> list[tuple[str, str]]:
+    """``(case_id, note)`` rows persisted in a trend NDJSON file.
+
+    Only ``{"kind": "note", ...}`` rows are collected (file order);
+    metric rows and blank lines are skipped gracefully. Fail closed on
+    unreadable files and corrupt JSON, mirroring
+    :func:`load_trend_history`. Malformed note rows (missing or
+    non-string ``case_id``/``note``) are skipped, never fatal.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ReportError(f"error: cannot read --trend history {path} ({exc})") from exc
+    notes: list[tuple[str, str]] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            raise ReportError(
+                f"error: corrupt trend row: {path}:{lineno} ({exc})"
+            ) from exc
+        if not isinstance(row, dict):
+            raise ReportError(f"error: corrupt trend row: {path}:{lineno}")
+        if row.get("kind") != "note":
+            continue
+        case_id = row.get("case_id")
+        note = row.get("note")
+        if not isinstance(case_id, str) or not case_id.strip():
+            continue
+        if not isinstance(note, str):
+            continue
+        notes.append((case_id.strip(), note.strip()))
+    return notes
+
+
+def persist_trend_notes(path: Path, notes: list[tuple[str, str]]) -> None:
+    """Append ``--annotate`` notes to the trend history NDJSON file.
+
+    One ``{"kind": "note", "case_id": ..., "note": ...}`` line per
+    note (CLI order) so future ``--trend`` reports can show them.
+    Fail closed when the file cannot be appended to.
+    """
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            for case_id, note in notes:
+                handle.write(
+                    json.dumps(
+                        {"case_id": case_id, "kind": "note", "note": note},
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+    except OSError as exc:
+        raise ReportError(
+            f"error: cannot persist notes to --trend history {path} ({exc})"
+        ) from exc
+
+
+def merge_notes(
+    history_notes: list[tuple[str, str]],
+    cli_notes: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """History notes plus CLI notes, exact duplicates removed (stable)."""
+    return list(dict.fromkeys(history_notes + list(cli_notes)))
 
 
 #: Severity colors for the self-contained HTML export (G10). The
@@ -1538,11 +1668,42 @@ def _html_stylesheet() -> str:
     for severity, color in SEVERITY_COLORS.items():
         rules.append(f".sev-{severity}{{color:{color};font-weight:bold}}")
     rules += [
+        ".risk-badge{display:inline-block;border:2px solid currentColor;"
+        "border-radius:.5rem;padding:.15rem .6rem;margin:.25rem 0 "
+        ".5rem .75rem;font-weight:bold;vertical-align:middle}",
         ".verdict-covered{color:#1e8449;font-weight:bold}",
         ".verdict-gappy{color:#c0392b;font-weight:bold}",
         ".verdict-unexercised{color:#616a6b;font-weight:bold}",
     ]
     return "\n".join(rules)
+
+
+def risk_score_badge(markdown: str) -> str:
+    """``<span>`` risk badge for the HTML export (``""`` without a matrix).
+
+    Reuses :func:`risk_weighted_score` over the parsed coverage matrix
+    and colors the badge with the severity color of the score tier
+    (:func:`risk_score_tier`) via the shared ``sev-*`` stylesheet
+    classes. Markdown output is unchanged (HTML-only decoration).
+    """
+    rows = _parse_coverage_matrix(markdown)
+    if not rows:
+        return ""
+    coverage = [
+        (
+            class_name,
+            cases,
+            runs,
+            wins,
+            (100.0 * wins / runs if runs else 0.0),
+            gaps,
+            verdict,
+        )
+        for class_name, cases, runs, wins, gaps, verdict in rows
+    ]
+    score, _earned, _possible, _breakdown = risk_weighted_score(coverage)
+    tier = risk_score_tier(score)
+    return f'<span class="risk-badge sev-{tier}">Risk score: {score:.1f} / 100</span>'
 
 
 def render_html_report(markdown: str) -> str:
@@ -1558,7 +1719,9 @@ def render_html_report(markdown: str) -> str:
     passes through verbatim. The coverage-matrix table's class cells
     link to a per-class drill-down section (one anchored metric/value
     table per class: cases, runs, wins, gaps, verdict) emitted right
-    after the matrix. Input-order independent for identical inputs
+    after the matrix. A risk-score badge (:func:`risk_score_badge`,
+    colored with the severity color of its tier) is emitted next to
+    the first ``<h1>``. Input-order independent for identical inputs
     (byte-identical reruns).
     """
     title = "Engagement report"
@@ -1572,6 +1735,8 @@ def render_html_report(markdown: str) -> str:
     in_code = False
     coverage_detail = _parse_coverage_matrix(markdown)
     coverage_emitted = False
+    badge = risk_score_badge(markdown)
+    badge_emitted = False
 
     def flush_table() -> None:
         nonlocal coverage_emitted
@@ -1612,6 +1777,10 @@ def render_html_report(markdown: str) -> str:
             flush_list()
             level = len(heading.group(1))
             body.append(f"<h{level}>{_html_inline(heading.group(2))}</h{level}>")
+            if level == 1 and not badge_emitted:
+                if badge:
+                    body.append(badge)
+                badge_emitted = True
         elif stripped.startswith("- "):
             if not in_list:
                 body.append("<ul>")
@@ -1729,6 +1898,7 @@ def render_report(
     drill_down: str | None = None,
     drill_down_rows: list[tuple[str, str, str, str, str]] | None = None,
     drill_down_diff: list[str] | None = None,
+    operator_notes: list[str] | None = None,
     side_by_side: list[str] | None = None,
 ) -> str:
     """Assemble the report sections in fixed order."""
@@ -1802,6 +1972,8 @@ def render_report(
             lines.append(f"- no findings in class {drill_down}")
     if drill_down_diff:
         lines += ["", *drill_down_diff]
+    if operator_notes:
+        lines += ["", *operator_notes]
     lines += ["", "## Detection gaps", ""]
     if gaps:
         for failure in gaps:
@@ -1986,6 +2158,7 @@ def build_report(
     trend_path: Path | None = None,
     diff_drill_down_path: Path | None = None,
     side_by_side_path: Path | None = None,
+    annotations: list[tuple[str, str]] | None = None,
 ) -> tuple[str, str, Path]:
     """Render the report; return ``(markdown, file_name, out_dir)``.
 
@@ -1997,6 +2170,12 @@ def build_report(
     ``--trend`` the trend is skipped and noted in the comparison
     section. Explicit ``--side-by-side``/``--diff-drill-down`` paths win
     over the ``--compare`` fallback.
+
+    ``annotations`` (``--annotate``) render as an ``## Operator notes``
+    section after the drill-down sections; when ``--trend`` history is
+    also given, the notes are appended to that file as
+    ``{"kind": "note", ...}`` lines and previously persisted notes are
+    shown too (exact duplicates removed).
     """
     window = _collect_window(reports_dir, since_text)
     window_start = window["window_start"]
@@ -2073,13 +2252,17 @@ def build_report(
             baseline_label=diff_coverage_path.name,
         )
     trend: list[str] | None = None
+    history_notes: list[tuple[str, str]] = []
     if trend_path is not None:
+        history_notes = load_trend_notes(trend_path)
         rates, counts = load_trend_history(trend_path)
         trend = render_trend(
             pass_rates=rates,
             findings_counts=counts,
             source_label=trend_path.name,
         )
+        if annotations:
+            persist_trend_notes(trend_path, annotations)
     drill_down_source = (
         diff_drill_down_path if diff_drill_down_path is not None else compare_path
     )
@@ -2135,6 +2318,16 @@ def build_report(
             previous_findings=len(previous_snapshot),
             baseline_label=side_by_side_source.name,
         )
+    combined_notes = merge_notes(history_notes, annotations or [])
+    known_case_ids = {case_id for case_id, _result in pass_rows}
+    known_case_ids |= {
+        case_id for case_id in current_findings.values() if isinstance(case_id, str)
+    }
+    operator_notes = (
+        render_operator_notes(combined_notes, known_case_ids)
+        if combined_notes
+        else None
+    )
     markdown = render_report(
         window_start=window_start,
         window_end=window_end,
@@ -2161,6 +2354,7 @@ def build_report(
             else None
         ),
         drill_down_diff=drill_down_diff,
+        operator_notes=operator_notes,
         side_by_side=side_by_side,
     )
     return markdown, file_name, out_dir
@@ -2187,6 +2381,7 @@ def build_report_data(
     trend_path: Path | None = None,
     diff_drill_down_path: Path | None = None,
     side_by_side_path: Path | None = None,
+    annotations: list[tuple[str, str]] | None = None,
 ) -> dict[str, object]:
     """Structured report data with the same inputs as :func:`build_report`.
 
@@ -2298,7 +2493,9 @@ def build_report_data(
             ],
         }
     trend_data: dict[str, object] | None = None
+    history_notes: list[tuple[str, str]] = []
     if trend_path is not None:
+        history_notes = load_trend_notes(trend_path)
         trend_rates, trend_counts = load_trend_history(trend_path)
         trend_data = {
             "source": trend_path.name,
@@ -2410,6 +2607,20 @@ def build_report_data(
     }
     if trend_data is not None:
         data["trend"] = trend_data
+    combined_notes = merge_notes(history_notes, annotations or [])
+    if combined_notes:
+        known_case_ids = {case_id for case_id, _result in pass_rows}
+        known_case_ids |= {
+            case_id for case_id in current_findings.values() if isinstance(case_id, str)
+        }
+        data["operator_notes"] = [
+            {
+                "case_id": case_id,
+                "note": note,
+                "matched": case_id in known_case_ids,
+            }
+            for case_id, note in combined_notes
+        ]
     drill_down_source = (
         diff_drill_down_path if diff_drill_down_path is not None else compare_path
     )
@@ -2679,6 +2890,17 @@ def main(argv: list[str] | None = None) -> int:
         "output directory.",
     )
     parser.add_argument(
+        "--annotate",
+        action="append",
+        default=None,
+        metavar="CASE_ID=NOTE",
+        help="repeatable operator note (CASE_ID=NOTE): appends an "
+        "## Operator notes section (case_id | note table) after the "
+        "drill-down sections; notes for case ids absent from the report "
+        "are flagged; with --trend the notes persist into the trend "
+        "history NDJSON for future reports.",
+    )
+    parser.add_argument(
         "--summary",
         action="store_true",
         help="emit exactly one summary line "
@@ -2701,6 +2923,9 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(str(summary["line"]) + "\n")
         return 0
     try:
+        annotations = (
+            [parse_annotation(raw) for raw in args.annotate] if args.annotate else None
+        )
         compare_path = Path(args.compare) if args.compare else None
         diff_coverage_path = Path(args.diff_coverage) if args.diff_coverage else None
         trend_path = Path(args.trend) if args.trend else None
@@ -2717,6 +2942,7 @@ def main(argv: list[str] | None = None) -> int:
             trend_path=trend_path,
             diff_drill_down_path=diff_drill_down_path,
             side_by_side_path=side_by_side_path,
+            annotations=annotations,
         )
         payload = markdown
         if args.json:
@@ -2730,6 +2956,7 @@ def main(argv: list[str] | None = None) -> int:
                     trend_path=trend_path,
                     diff_drill_down_path=diff_drill_down_path,
                     side_by_side_path=side_by_side_path,
+                    annotations=annotations,
                 )
             )
     except ReportError as exc:

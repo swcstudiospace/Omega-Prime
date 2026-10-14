@@ -187,12 +187,34 @@ def read_log(log_path: str | Path | None) -> list[dict[str, Any]]:
     return rows
 
 
+def list_revoked(log_path: str | Path | None) -> list[str]:
+    """Artifact ids/paths with a ``grant-revoked`` row; never raises.
+
+    Read-only scan of ``log_path`` (via :func:`read_log`): missing or
+    unreadable logs yield ``[]`` and corrupt lines are already skipped
+    by the reader. Returns the non-empty ``artifact_path`` of every
+    ``grant-revoked`` row, oldest first.
+    """
+    try:
+        return [
+            str(row.get("artifact_path", ""))
+            for row in read_log(log_path)
+            if isinstance(row, dict)
+            and row.get("event") == EVENT_REVOKED
+            and isinstance(row.get("artifact_path"), str)
+            and row.get("artifact_path", "").strip()
+        ]
+    except Exception:
+        return []
+
+
 __all__ = [
     "EVENTS",
     "EVENT_CREATED",
     "EVENT_EXPIRED",
     "EVENT_REVOKED",
     "append_event",
+    "list_revoked",
     "log_created",
     "log_expired",
     "log_revoked",

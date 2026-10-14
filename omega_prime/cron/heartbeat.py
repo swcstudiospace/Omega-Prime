@@ -221,7 +221,7 @@ def _deliver_roe_renewals_graph(
 
 
 def heartbeat_roe_renewals(
-    job: Any, *, now: Any = None, runner: Any = None
+    job: Any, *, now: Any = None, runner: Any = None, audit_log: Any = None
 ) -> list[dict]:
     """Digest entries for a heartbeat job's RoE artifact context (G11).
 
@@ -238,6 +238,13 @@ def heartbeat_roe_renewals(
     delivery). Fail-closed: a missing artifact, a malformed window, an
     incomplete graph config, a delivery failure, or any other error
     returns the digest entries (or ``[]``) and never raises.
+
+    Revoked grants (J11): the audit-log path defaults to the explicit
+    ``audit_log`` argument, else ``roe_audit_log`` / ``audit_log`` /
+    ``roe_audit_log_path`` on the job context (or job). When
+    :func:`renewal_reminders` reports the grant revoked, a single
+    ``{"kind": "roe_revoked", ...}`` marker is returned instead of
+    threshold entries (digest-only, never delivered to Graph).
     """
     try:
         if not isinstance(job, dict):
@@ -250,14 +257,46 @@ def heartbeat_roe_renewals(
             artifact = job.get("roe_artifact", job.get("roe_artifact_path"))
         if artifact is None:
             return []
-        from omega_prime.grokbot.roe_lifecycle import renewal_reminders
+        log_path = audit_log
+        if log_path is None:
+            for scope in (context, job):
+                if isinstance(scope, dict):
+                    for key in (
+                        "roe_audit_log",
+                        "audit_log",
+                        "roe_audit_log_path",
+                    ):
+                        candidate = scope.get(key)
+                        if isinstance(candidate, str) and candidate.strip():
+                            log_path = candidate
+                            break
+                if log_path is not None:
+                    break
+        from omega_prime.grokbot.roe_lifecycle import (
+            ROE_REVOKED_KIND,
+            renewal_reminders,
+        )
 
-        reminders = renewal_reminders(artifact, now=now)
+        reminders = renewal_reminders(artifact, now=now, audit_log=log_path)
     except Exception:
         return []
     entries: list[dict] = []
+    deliverable: list[dict] = []
     for reminder in reminders:
         if not isinstance(reminder, dict):
+            continue
+        if reminder.get("kind") == ROE_REVOKED_KIND:
+            entries.append(
+                {
+                    "kind": ROE_REVOKED_KIND,
+                    "detail": reminder.get(
+                        "detail", "roe grant revoked — re-sign to renew"
+                    ),
+                    "artifact_id": reminder.get("artifact_id"),
+                    "days_remaining": reminder.get("days_remaining"),
+                    "effective_until": reminder.get("effective_until"),
+                }
+            )
             continue
         threshold = reminder.get("threshold", "?")
         entries.append(
@@ -272,7 +311,8 @@ def heartbeat_roe_renewals(
                 "effective_until": reminder.get("effective_until"),
             }
         )
-    _deliver_roe_renewals_graph(job, context, reminders, runner)
+        deliverable.append(reminder)
+    _deliver_roe_renewals_graph(job, context, deliverable, runner)
     return entries
 
 

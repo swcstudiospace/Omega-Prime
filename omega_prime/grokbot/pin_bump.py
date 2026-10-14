@@ -496,7 +496,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         dest="json_mode",
         action="store_true",
-        help="Print machine-readable {pin, verdict, report}.",
+        help=(
+            "Emit the delta report as a single machine-readable JSON object "
+            "on stdout (keys: verdict, rows, semver, bump, exit_code) "
+            "instead of markdown; all human-readable progress goes to "
+            "stderr. report.md is still written in normal mode; with "
+            "--audit-only the JSON goes to stdout and no report.md is "
+            "written."
+        ),
     )
     parser.add_argument(
         "--interactive",
@@ -803,17 +810,62 @@ def bump(
 
     version_bump_note: str | None = None
 
-    def finish(code: int) -> int:
-        if json_mode and sha is not None:
-            print(
-                json.dumps(
-                    {
-                        "pin": sha,
-                        "verdict": verdict,
-                        "report": str(report_path) if report_path else None,
-                    }
-                )
+    # --json payload state. ``json_fixed``/``json_old_findings``/
+    # ``json_old_packages``/``json_new_packages`` describe the audit delta;
+    # ``json_semver`` is the per-advisory classification (set only when
+    # --semver-check ran); ``json_bump`` describes the --bump-commit
+    # outcome (set only when the gate was evaluated).
+    json_fixed: list[str] = []
+    json_old_findings: dict[str, tuple[str, str, str]] = {}
+    json_old_packages: dict[str, str] = {}
+    json_new_packages: dict[str, str] = {}
+    json_semver: dict[str, str] | None = None
+    json_bump: dict[str, Any] | None = None
+    # Pre-initialised so --skip-audit --bump-commit skips with a warning
+    # instead of raising NameError on the unbound ``semver_rows`` below.
+    semver_rows: list[tuple[str, str, str, str, str]] = []
+
+    _stdout = sys.stdout
+    if json_mode:
+        # Machine-readable mode: stdout carries exactly one JSON object
+        # (emitted by finish()); all human-readable progress — including
+        # output from helpers reached via run()/provenance — goes to
+        # stderr instead.
+        sys.stdout = sys.stderr
+
+    def _json_payload(code: int) -> dict[str, Any]:
+        """Machine-readable delta report for ``--json`` (keys sorted on dump)."""
+        labels = dict(json_semver) if json_semver else {}
+        rows = []
+        for key in sorted(json_fixed):
+            _, package, _ = json_old_findings.get(key, ("", "", ""))
+            rows.append(
+                {
+                    "key": key,
+                    "package": package,
+                    "old": json_old_packages.get(package, "") if package else "",
+                    "new": json_new_packages.get(package, "") if package else "",
+                    "label": labels.get(key),
+                }
             )
+        return {
+            "verdict": verdict,
+            "rows": rows,
+            "semver": (
+                {key: labels[key] for key in sorted(labels)}
+                if json_semver is not None
+                else None
+            ),
+            "bump": json_bump,
+            "exit_code": code,
+        }
+
+    def finish(code: int) -> int:
+        if json_mode:
+            try:
+                print(json.dumps(_json_payload(code), sort_keys=True), file=_stdout)
+            finally:
+                sys.stdout = _stdout
         return code
 
     def usage(message: str) -> int:
@@ -1044,6 +1096,12 @@ def bump(
                 audit_new_packages,
                 audit_fixed,
             )
+        json_fixed = audit_fixed
+        json_old_findings = audit_old_findings
+        json_old_packages = audit_old_packages
+        json_new_packages = audit_new_packages
+        if semver_check:
+            json_semver = {key: label for key, _, _, _, label in audit_semver_rows}
         audit_report = audit_delta_mod.render_report(
             str(audit_old_path),
             "new-pin npm audit",
@@ -1082,6 +1140,13 @@ def bump(
                     "[audit-only] pin-bump WARNING: --bump-commit skipped "
                     f"({audit_bump_reason})"
                 )
+                json_bump = {
+                    "applied": False,
+                    "level": None,
+                    "old": None,
+                    "new": None,
+                    "reason": audit_bump_reason,
+                }
             else:
                 audit_pkg_path = redteam_dir / "package.json"
                 _, audit_current, audit_error = _read_package_text(audit_pkg_path)
@@ -1090,6 +1155,13 @@ def bump(
                         "[audit-only] pin-bump WARNING: --bump-commit skipped "
                         f"({audit_error})"
                     )
+                    json_bump = {
+                        "applied": False,
+                        "level": None,
+                        "old": None,
+                        "new": None,
+                        "reason": audit_error,
+                    }
                 else:
                     assert audit_current is not None
                     audit_new_version = _bump_package_version(
@@ -1100,11 +1172,28 @@ def bump(
                             "[audit-only] pin-bump WARNING: --bump-commit skipped "
                             f"(unparseable version {audit_current!r} in {audit_pkg_path})"
                         )
+                        json_bump = {
+                            "applied": False,
+                            "level": None,
+                            "old": audit_current,
+                            "new": None,
+                            "reason": (
+                                f"unparseable version {audit_current!r} "
+                                f"in {audit_pkg_path}"
+                            ),
+                        }
                     else:
                         print(
                             f"[audit-only] would bump version {audit_current} -> "
                             f"{audit_new_version} ({audit_pkg_path}; no files changed)"
                         )
+                        json_bump = {
+                            "applied": False,
+                            "level": _bump_level_for_rows(audit_semver_rows),
+                            "old": audit_current,
+                            "new": audit_new_version,
+                            "reason": "audit-only (no files changed)",
+                        }
         if not _confirm_step(
             "delta verdict",
             f"audit delta verdict: {verdict} (report not written)",
@@ -1222,6 +1311,13 @@ def bump(
                     "[dry-run] pin-bump WARNING: --bump-commit skipped "
                     "(audit verdict is 'audit-skipped', not 'improved')"
                 )
+                json_bump = {
+                    "applied": False,
+                    "level": None,
+                    "old": None,
+                    "new": None,
+                    "reason": "audit verdict is 'audit-skipped', not 'improved'",
+                }
         else:
             try:
                 dry_node = run(["node", "--version"], cwd=root)
@@ -1338,6 +1434,10 @@ def bump(
             _, dry_fixed, _, _, verdict = dry_delta_mod.compute_delta(
                 dry_old_findings, dry_new_findings, dry_new_packages
             )
+            json_fixed = dry_fixed
+            json_old_findings = dry_old_findings
+            json_old_packages = dry_old_packages
+            json_new_packages = dry_new_packages
             print(f"[dry-run] audit verdict: {verdict} (report.md not written)")
             if semver_check:
                 dry_rows = classify_semver_fixes(
@@ -1346,6 +1446,7 @@ def bump(
                     dry_new_packages,
                     dry_fixed,
                 )
+                json_semver = {key: label for key, _, _, _, label in dry_rows}
                 for key, package, old_spec, new_spec, label in dry_rows:
                     print(
                         f"[dry-run] semver {label}: `{key}` "
@@ -1368,6 +1469,13 @@ def bump(
                         "[dry-run] pin-bump WARNING: --bump-commit skipped "
                         f"({dry_bump_reason})"
                     )
+                    json_bump = {
+                        "applied": False,
+                        "level": None,
+                        "old": None,
+                        "new": None,
+                        "reason": dry_bump_reason,
+                    }
                 else:
                     dry_pkg_path = redteam_dir / "package.json"
                     _, dry_current, dry_error = _read_package_text(dry_pkg_path)
@@ -1376,6 +1484,13 @@ def bump(
                             "[dry-run] pin-bump WARNING: --bump-commit skipped "
                             f"({dry_error})"
                         )
+                        json_bump = {
+                            "applied": False,
+                            "level": None,
+                            "old": None,
+                            "new": None,
+                            "reason": dry_error,
+                        }
                     else:
                         assert dry_current is not None
                         dry_new = _bump_package_version(
@@ -1386,11 +1501,28 @@ def bump(
                                 "[dry-run] pin-bump WARNING: --bump-commit skipped "
                                 f"(unparseable version {dry_current!r} in {dry_pkg_path})"
                             )
+                            json_bump = {
+                                "applied": False,
+                                "level": None,
+                                "old": dry_current,
+                                "new": None,
+                                "reason": (
+                                    f"unparseable version {dry_current!r} "
+                                    f"in {dry_pkg_path}"
+                                ),
+                            }
                         else:
                             print(
                                 f"[dry-run] would bump version {dry_current} -> "
                                 f"{dry_new} ({dry_pkg_path}; no files changed)"
                             )
+                            json_bump = {
+                                "applied": False,
+                                "level": _bump_level_for_rows(dry_rows),
+                                "old": dry_current,
+                                "new": dry_new,
+                                "reason": "dry-run (no files changed)",
+                            }
             if not _confirm_step(
                 "delta verdict",
                 f"audit delta verdict: {verdict} (report.md not written)",
@@ -1497,6 +1629,13 @@ def bump(
                 "pin-bump WARNING: --bump-commit skipped "
                 "(audit verdict is 'audit-skipped', not 'improved')"
             )
+            json_bump = {
+                "applied": False,
+                "level": None,
+                "old": None,
+                "new": None,
+                "reason": "audit verdict is 'audit-skipped', not 'improved'",
+            }
     else:
         try:
             node = run(["node", "--version"], cwd=root)
@@ -1571,11 +1710,17 @@ def bump(
         new_keys, fixed, rescinded, drift, verdict = delta_mod.compute_delta(
             old_findings, new_findings, new_packages
         )
-        semver_rows: list[tuple[str, str, str, str, str]] = []
+        semver_rows = []
         if semver_check:
             semver_rows = classify_semver_fixes(
                 old_findings, old_packages, new_packages, fixed
             )
+        json_fixed = fixed
+        json_old_findings = old_findings
+        json_old_packages = old_packages
+        json_new_packages = new_packages
+        if semver_check:
+            json_semver = {key: label for key, _, _, _, label in semver_rows}
         report = delta_mod.render_report(
             str(old_path),
             "new-pin npm audit",
@@ -1626,11 +1771,25 @@ def bump(
         )
         if bump_reason is not None:
             print(f"pin-bump WARNING: --bump-commit skipped ({bump_reason})")
+            json_bump = {
+                "applied": False,
+                "level": None,
+                "old": None,
+                "new": None,
+                "reason": bump_reason,
+            }
         else:
             bump_pkg_path = redteam_dir / "package.json"
             bump_text, bump_current, bump_error = _read_package_text(bump_pkg_path)
             if bump_error is not None:
                 print(f"pin-bump WARNING: --bump-commit skipped ({bump_error})")
+                json_bump = {
+                    "applied": False,
+                    "level": None,
+                    "old": None,
+                    "new": None,
+                    "reason": bump_error,
+                }
             else:
                 assert bump_text is not None and bump_current is not None
                 bump_level = _bump_level_for_rows(semver_rows)
@@ -1645,6 +1804,15 @@ def bump(
                         "pin-bump WARNING: --bump-commit skipped "
                         f"(unparseable version {bump_current!r} in {bump_pkg_path})"
                     )
+                    json_bump = {
+                        "applied": False,
+                        "level": None,
+                        "old": bump_current,
+                        "new": None,
+                        "reason": (
+                            f"unparseable version {bump_current!r} in {bump_pkg_path}"
+                        ),
+                    }
                 else:
                     try:
                         bump_pkg_path.write_text(bump_rewritten, encoding="utf-8")
@@ -1653,12 +1821,26 @@ def bump(
                             "pin-bump WARNING: --bump-commit skipped "
                             f"(cannot write {bump_pkg_path}: {exc})"
                         )
+                        json_bump = {
+                            "applied": False,
+                            "level": bump_level,
+                            "old": bump_current,
+                            "new": bump_new,
+                            "reason": f"cannot write {bump_pkg_path}: {exc}",
+                        }
                     else:
                         version_bump_note = f"{bump_current} -> {bump_new}"
                         print(
                             f"pin-bump version bump ({bump_level}): "
                             f"{bump_current} -> {bump_new} ({bump_pkg_path})"
                         )
+                        json_bump = {
+                            "applied": True,
+                            "level": bump_level,
+                            "old": bump_current,
+                            "new": bump_new,
+                            "reason": None,
+                        }
 
     # Step 6: open the PR (only after local green).
     if open_pr:
