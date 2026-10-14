@@ -22,8 +22,9 @@ from sidecar.findings import load_findings, record_finding
 
 NOW = datetime(2026, 10, 14, 12, 30, 45, tzinfo=UTC)
 REPO = "OWNER/NAME"
-SECRET = "sk-live-SUPERSECRET0123456789"
-TOKEN_TAG = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
+SECRET = "SENTINEL-NOT-A-SECRET-5f3a91"
+#: Tag-shaped sentinel the tag grammar rejects (no leading ``v<digits>.``).
+TOKEN_TAG = "SENTINEL-TAG-5f3a91-not-a-version"
 
 IDLE_ENV = {
     "OMEGA_PRIME_REDTEAM_ENABLED": "1",
@@ -523,7 +524,7 @@ def test_default_pin_run_has_per_command_timeout(
 
 def test_fetch_error_is_a_step_error_not_a_crash(dirs, pin) -> None:
     def broken() -> Any:
-        raise RuntimeError(f"gh failed token={SECRET}")
+        raise RuntimeError(f"gh failed: {SECRET}")
 
     result = _cycle(dirs, fetch=broken)
     watch = _by_name(result)["release-watch"]
@@ -733,7 +734,7 @@ def test_checkpoint_and_ledger_contents_hold_no_secrets(dirs, pin) -> None:
     for text in (json.dumps(result), checkpoint, ledger):
         assert SECRET not in text
         assert TOKEN_TAG not in text
-        assert "ghp_" not in text
+        assert "SENTINEL-TAG" not in text
     for row in _ledger_rows(dirs):
         assert set(row) == {"ts", "cycle_id", "step", "status", "exit", "reason"}
         assert row["ts"] == "2026-10-14T12:30:45+00:00"
@@ -1869,7 +1870,7 @@ def test_audit_failure_detail_is_type_only_and_secret_free(
     dirs, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def exploding(config: Any, *, root: Any = None, run: Any = None) -> Any:
-        raise RuntimeError(f"token={SECRET} /root/.ssh")
+        raise RuntimeError(f"{SECRET} /root/.ssh")
 
     monkeypatch.setattr(pin_bump, "audit_scheduled_job", exploding)
     _seed_release_state(dirs, "v1.0.0")
@@ -2374,3 +2375,147 @@ def test_non_vocabulary_blocked_cause_is_not_written_to_the_ledger(dirs) -> None
     (row,) = _ledger_rows(dirs)
     assert row["reason"] == "apply-refused"
     assert SECRET not in json.dumps(row)
+
+
+# --- 14. round 3: crash-safe release audits and schema-checked apply grants ---
+
+
+def test_pending_tag_is_persisted_before_the_seen_state_is_saved(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_release_state(dirs, "v1.0.0")
+    state_before = (dirs.reports / "release-watch.json").read_bytes()
+
+    def failing(*args: Any, **kwargs: Any) -> None:
+        raise OSError("simulated crash before the seen-state write")
+
+    monkeypatch.setattr(release_watch, "_write_state", failing)
+    first = _cycle(dirs, fetch=Fetch("v1.1.0", "v1.0.0"))
+    assert _by_name(first)["release-watch"]["reason"] == "step-error"
+    pending = dirs.reports / "purple-cycle-pending.json"
+    assert json.loads(pending.read_text(encoding="utf-8")) == {
+        "attempts": 0,
+        "tag": "v1.1.0",
+    }
+    assert (dirs.reports / "release-watch.json").read_bytes() == state_before
+    assert pin.calls == []
+
+
+def test_crash_right_after_the_seen_state_write_cannot_lose_the_audit(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_release_state(dirs, "v1.0.0")
+    original = release_watch._write_state
+
+    def write_then_crash(*args: Any, **kwargs: Any) -> None:
+        original(*args, **kwargs)
+        raise OSError("simulated crash between the two writes")
+
+    monkeypatch.setattr(release_watch, "_write_state", write_then_crash)
+    first = _cycle(dirs, fetch=Fetch("v1.1.0", "v1.0.0"))
+    assert _by_name(first)["release-watch"]["reason"] == "step-error"
+    stored = json.loads((dirs.reports / "release-watch.json").read_text("utf-8"))
+    assert "v1.1.0" in [pair["tag"] for pair in stored["last_seen"]]
+
+    monkeypatch.setattr(release_watch, "_write_state", original)
+    second = _cycle(
+        dirs, now=NOW + timedelta(minutes=1), fetch=Fetch("v1.1.0", "v1.0.0")
+    )
+    assert _by_name(second)["release-watch"]["reason"] == "no-new-release"
+    audit = _by_name(second)["pin-bump-audit"]
+    assert (audit["status"], audit["detail"]["tag"]) == ("ok", "v1.1.0")
+    assert [call["config"] for call in pin.calls] == [{"to": "v1.1.0"}]
+
+
+def test_unsafe_newest_tag_is_never_written_as_pending(dirs, pin) -> None:
+    _seed_release_state(dirs, "v1.0.0")
+    _cycle(dirs, fetch=Fetch(TOKEN_TAG, "v1.0.0"))
+    assert not (dirs.reports / "purple-cycle-pending.json").exists()
+
+
+GREPTILE_GRANT = {"effective_until": "2099-01-01T00:00:00Z"}
+
+
+def _inline_grant(until: datetime, **overrides: Any) -> dict[str, Any]:
+    document: dict[str, Any] = {
+        "schema_version": 1,
+        "operator": "alice",
+        "authorized_targets": [{"host": "127.0.0.1", "tools": ["tempest_status"]}],
+        "effective_from": (until - timedelta(days=30)).isoformat(timespec="seconds"),
+        "effective_until": until.isoformat(timespec="seconds"),
+        "case_classes": ["prompt-injection"],
+    }
+    document.update(overrides)
+    return document
+
+
+def _grant_config(grant: Any) -> dict[str, Any]:
+    return {
+        "redteam": {
+            "findings_sync": {
+                "enabled": True,
+                "repo": REPO,
+                "labels": {},
+                "roe_artifact": grant,
+            }
+        }
+    }
+
+
+def test_apply_refuses_the_incomplete_inline_grant(dirs, pin) -> None:
+    runner = Runner()
+    result = _cycle(
+        dirs, mode="apply", config=_grant_config(GREPTILE_GRANT), runner=runner
+    )
+    assert runner.calls == []
+    assert (result["exit"], result["state"]) == (3, "blocked")
+    assert result["blocked"] == {"cause": "invalid", "step": "findings-dispatch"}
+    plan = _by_name(_cycle(dirs, mode="plan", config=_grant_config(GREPTILE_GRANT)))
+    pre = plan["preflight"]
+    assert (pre["status"], pre["reason"]) == ("warn", "roe-invalid")
+    assert pre["detail"]["roe_state"] == "invalid"
+
+
+def test_apply_accepts_a_minimal_schema_valid_inline_grant(dirs, pin) -> None:
+    dirs.reports.mkdir(parents=True)
+    _seed_one_finding(dirs)
+    grant = _inline_grant(NOW + timedelta(days=30))
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=_grant_config(grant), runner=runner)
+    assert (result["ok"], result["exit"], result["state"]) == (True, 0, "completed")
+    assert result["blocked"] is None
+    assert len(runner.calls) == 1
+    assert _by_name(result)["preflight"]["detail"]["roe_state"] == "valid"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda doc: doc.pop("operator"),
+        lambda doc: doc.update(operator="  "),
+        lambda doc: doc.update(authorized_targets=[]),
+        lambda doc: doc.update(case_classes=["no-such-class"]),
+        lambda doc: doc.update(schema_version=99),
+    ],
+)
+def test_apply_refuses_schema_invalid_file_and_inline_grants(dirs, pin, mutate) -> None:
+    until = NOW + timedelta(days=30)
+    document = _inline_grant(until)
+    mutate(document)
+    path = dirs.tmp / "bad-grant.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    for grant in (str(path), document):
+        runner = Runner()
+        result = _cycle(dirs, mode="apply", config=_grant_config(grant), runner=runner)
+        assert runner.calls == []
+        assert result["blocked"] == {"cause": "invalid", "step": "findings-dispatch"}
+
+
+def test_schema_invalid_grant_next_to_a_valid_one_still_refuses(dirs, pin) -> None:
+    good = _roe_artifact(dirs.tmp / "roe-good.json", until=NOW + timedelta(days=30))
+    config = _grant_config(GREPTILE_GRANT)
+    config["redteam"]["roe_file"] = good
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert runner.calls == []
+    assert result["blocked"] == {"cause": "invalid", "step": "findings-dispatch"}

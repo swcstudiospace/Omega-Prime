@@ -231,6 +231,7 @@ def check_release_watch(
     auto_pin_bump: bool = False,
     bump: Callable[[str], int] | None = None,
     root: str | Path | None = None,
+    on_new: Callable[[list[dict]], None] | None = None,
 ) -> dict[str, Any]:
     """Diff upstream tags against state; record new releases.
 
@@ -258,6 +259,13 @@ def check_release_watch(
     Bump-runner exceptions propagate with the state file untouched.
     Seeding ticks never bump. Default (``False``) is inert: the result
     shape is exactly the historical three-key dict.
+
+    ``on_new`` (default ``None``: no effect) is called with the new-tag
+    list when new tags were found on a non-seeding tick, AFTER they are
+    computed and BEFORE any state write (and before an opt-in bump), so a
+    caller can persist follow-up work first and a crash between the two
+    writes cannot lose it. A raising callback aborts the tick with the
+    state file untouched and propagates like a fetch error.
     """
     current = _as_utc(now)
     checked_at = current.isoformat(timespec="seconds")
@@ -277,6 +285,8 @@ def check_release_watch(
             merged[index] = {"tag": pair["tag"], "sha": latest}
     for entry in new:
         merged.append({"tag": entry["tag"], "sha": entry["sha"]})
+    if new and on_new is not None:
+        on_new(list(new))
     if auto_pin_bump and new:
         target = new[0]
         runner = bump if bump is not None else _default_bump_runner(root)
@@ -362,6 +372,7 @@ def make_checker(
     auto_pin_bump: bool = False,
     bump: Callable[[str], int] | None = None,
     root: str | Path | None = None,
+    on_new: Callable[[list[dict]], None] | None = None,
 ) -> Callable[[Any], dict[str, Any]]:
     """Build a ``checker(now)`` closure for the heartbeat tick driver.
 
@@ -370,7 +381,8 @@ def make_checker(
     so the tick records the failure in job history with state untouched
     (signal, not red). Only ticks with a non-empty ``new`` list fire.
     ``auto_pin_bump``/``bump``/``root`` pass through to
-    :func:`check_release_watch` (explicit opt-in; default inert).
+    :func:`check_release_watch` (explicit opt-in; default inert), as does
+    ``on_new`` (a raising callback degrades like a fetch failure).
     """
 
     def _default_fetch() -> Any:
@@ -387,6 +399,7 @@ def make_checker(
                 auto_pin_bump=auto_pin_bump,
                 bump=bump,
                 root=root,
+                on_new=on_new,
             )
         except Exception as exc:
             return {

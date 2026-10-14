@@ -483,7 +483,28 @@ def _roe_state(roe_lifecycle: Any, items: Sequence[Any], now: datetime) -> str:
             verdict = roe_lifecycle.watchdog_check(item, now=now)
             states.append(_word(verdict.get("state")))
     order = roe_lifecycle.STATES
-    return max(states, key=lambda s: order.index(s) if s in order else len(order))
+    worst = max(states, key=lambda s: order.index(s) if s in order else len(order))
+    if worst in _OK_ROE_STATES and not all(
+        _grant_schema_ok(roe_lifecycle, item) for item in items
+    ):
+        return "invalid"
+    return worst
+
+
+def _grant_schema_ok(roe_lifecycle: Any, item: Any) -> bool:
+    """True when the grant's document passes the real RoE schema validator.
+
+    The lifecycle/watchdog states only classify expiry, so an inline dict such
+    as ``{"effective_until": ...}`` would look ``valid``. Fail-closed: a
+    missing/unparseable document or any validator failure is not ok.
+    """
+    from omega_prime.redteam import roe
+
+    try:
+        document = roe_lifecycle._grant_document(item)
+        return document is not None and not roe.validate_schema(document)
+    except Exception:
+        return False
 
 
 def _harness_verdict(ctx: _Ctx) -> tuple[str, str]:
@@ -565,8 +586,19 @@ def _step_release_watch(ctx: _Ctx, state: dict[str, Any]) -> dict[str, Any]:
     from omega_prime.grokbot import release_watch
 
     fetch = ctx.fetch if ctx.fetch is not None else _default_fetch
+
+    def persist_pending(found: list[dict[str, Any]]) -> None:
+        # Runs BEFORE the seen-state is saved: a crash between the two writes
+        # can no longer lose the audit of the newest tag.
+        tags = [_safe_tag(entry.get("tag")) for entry in found]
+        if tags and tags[0] is not None:
+            _write_pending(ctx, tags[0], 0)
+
     result = release_watch.check_release_watch(
-        ctx.reports_dir / RELEASE_WATCH_FILENAME, fetch, ctx.now
+        ctx.reports_dir / RELEASE_WATCH_FILENAME,
+        fetch,
+        ctx.now,
+        on_new=persist_pending,
     )
     new = [entry for entry in result.get("new", []) if isinstance(entry, dict)]
     tags = [_safe_tag(entry.get("tag")) for entry in new]
@@ -578,10 +610,6 @@ def _step_release_watch(ctx: _Ctx, state: dict[str, Any]) -> dict[str, Any]:
     }
     if detail["seeded"]:
         return _record("release-watch", "ok", "seeded", detail)
-    if tags and tags[0] is not None:
-        # The state file already marks these tags seen: persist the newest one
-        # NOW (before the step's checkpoint) so a crash cannot lose its audit.
-        _write_pending(ctx, tags[0], 0)
     reason = "new-release" if new else "no-new-release"
     return _record("release-watch", "ok", reason, detail)
 
