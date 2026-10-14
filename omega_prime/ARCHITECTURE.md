@@ -12,8 +12,9 @@ The Grok shell stays beside the agent:
 | `contracts/tool-rosters/omega-prime.yaml` | Tools the model may be offered. Matches the registry, not a wish list. |
 | `grokbot/templates/OMEGA_PRIME.md` | Name, description, enabled skills, routines. No prompt body, no tokens. |
 | `grokbot/rosters/default.json` | Values substituted into `{{DEFAULT_BRANCH}}`, `{{BOT_ID}}`, `{{ROSTER_VERSION}}`. |
-| `skills/<name>/SKILL.md` | A skill the template is allowed to name. |
-| `routines/<name>.md` | A routine the template is allowed to name. |
+| `skills/<name>/SKILL.md` | A skill the template is allowed to name. Frontmatter, then the body inside `<skill name="…" version="1">`. |
+| `routines/<name>.md` | A routine the template is allowed to name. `<routine name="…" version="1">` with a `<summary>`. |
+| `tooling/prompt_format.py` | The XML prompt standard gate: every authored prompt wrapped, checked in CI. |
 | `ownership.yaml` | One owner per path. Last match wins. One bot today. |
 
 Temporal is not how the two agents are merged. It can sit under cron and delegation later, after those exist.

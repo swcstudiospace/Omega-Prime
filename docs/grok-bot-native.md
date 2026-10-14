@@ -27,6 +27,23 @@ moves with the roster; read it from `/healthz` `rostered_tools`).
 checks below is local preparation on a machine you control: it does not
 attach a Grok account, reach a live provider, or prove a cloud deployment.
 
+## Prompt format
+
+Every prompt Omega Prime authors is wrapped in XML tags, the Programming
+Desk convention (`prompts/*.xml` + `prompts/_shared/core-directives.xml`
+there). The Bot's system prompt is the assembled
+`prompts-assembled/OMEGA_PRIME.xml`; skill bodies load inside
+`<skill name="…" version="1">`, routines inside `<routine>`, generated
+slash-command files inside `<command>`, and the host's runtime text uses
+`<steer>`, `<context_summary>`, `<goal_continuation>`, `<memory_notes>`,
+`<user_profile>`, `<system-notice>` and `<advisory>` wrappers. Text inside
+a wrapper is data for that wrapper's purpose: a closing tag typed inside
+user or tool text is escaped and does not end the wrapper early.
+`python -m omega_prime.tooling.prompt_format --check` enforces the
+standard in CI. The vendored red-team pack (`omega_prime/redteam/pack/`)
+keeps its upstream bytes and is outside the standard, as is this template
+file's own import format, which carries no prompt body.
+
 ## One-command start
 
 `omega_prime/scripts/grokbot-1click.sh` (also reachable through the
