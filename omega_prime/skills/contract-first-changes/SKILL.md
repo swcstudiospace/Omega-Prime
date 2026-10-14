@@ -4,7 +4,7 @@ description: Changing a shared contract safely — breaking-change analysis, ver
 bots: [bot-00-omega-prime]
 gates: [G-4]
 ---
-
+<skill name="contract-first-changes" version="1">
 # Contract-First Changes
 
 ## L1 — Summary
@@ -158,3 +158,4 @@ own code that the note did not mention.
 | Breaking change with no expand | Coordinated release across four platforms | §3 |
 | Sunset with no telemetry | Removed while still in use | Measure before contracting |
 | Migration note without "why" | Consumers miss related cases | Explain the reason |
+</skill>

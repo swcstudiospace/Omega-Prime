@@ -555,11 +555,12 @@ def test_curator_writes_a_skill_only_when_the_turn_earned_one(
     skill_md = skills / "deploy-check" / "SKILL.md"
     assert Path(earned["path"]) == skill_md
     expected = (
-        f"---\nname: deploy-check\ndescription: {EARNED_DESCRIPTION}\n---\nexit 0\n"
+        f"---\nname: deploy-check\ndescription: {EARNED_DESCRIPTION}\n---\n"
+        '<skill name="deploy-check" version="1">\nexit 0\n</skill>\n'
     )
     assert skill_md.read_text(encoding="utf-8") == expected
     body = skill_md.read_text(encoding="utf-8").split("---", 2)[2]
-    assert body == "\nexit 0\n"
+    assert body == '\n<skill name="deploy-check" version="1">\nexit 0\n</skill>\n'
     assert calls and calls[-1][0][0] == "create"
     saved = _tree(skills)
 

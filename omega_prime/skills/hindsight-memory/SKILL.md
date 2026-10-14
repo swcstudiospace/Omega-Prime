@@ -4,7 +4,7 @@ description: "Retain and recall discipline for the seat memory banks: what to ke
 bots: [bot-00-omega-prime]
 gates: [G-2, G-3]
 ---
-
+<skill name="hindsight-memory" version="1">
 # Hindsight Memory
 
 ## When this applies (L1)
@@ -166,3 +166,4 @@ The second satisfies the schema with a fake source and retains nothing useful. I
 | No secrets in `content` or any argument | G-3, PD-4 | Redaction is a backstop; the audit event outlives it |
 | Own bank only; team facts via LEAD/QUALITY | PD-2 (ownership, applied to memory) | One writer per bank keeps evidence attributable |
 | Recall is re-verified before a claim | PD-1 | A recalled exit code is not an observed one |
+</skill>

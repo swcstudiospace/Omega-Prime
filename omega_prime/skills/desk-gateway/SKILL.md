@@ -4,7 +4,7 @@ description: "How to use the per-seat gateway tools: rosters as contracts, fail-
 bots: [bot-00-omega-prime]
 gates: [G-5, G-6, G-7]
 ---
-
+<skill name="desk-gateway" version="1">
 # Desk Gateway
 
 ## Omega Prime adaptation
@@ -176,3 +176,4 @@ surface. One 403 is a misconfiguration; the response is `skills/desk-bootstrap` 
 | Roster changes go through contract review | G-4 | Every seat is a consumer of `contracts/tool-rosters/**` |
 | Roster count 10–15 (≤ 20 with a pack); g5/g6 tools carry their fields | G-7 | The same band doctor checks at runtime |
 | `not_configured` and fail-open reads land in `unverified` | G-2, PD-1, PD-6 | A result you did not get is not a result you can claim |
+</skill>

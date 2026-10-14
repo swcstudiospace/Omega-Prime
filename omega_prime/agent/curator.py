@@ -80,8 +80,13 @@ def _output(tool_results: Any) -> str | None:
 
 
 def _skill_text(slug: str, output: str) -> str:
-    # The body is the tool output plus one newline. No other procedure text.
-    return f"---\nname: {slug}\ndescription: {EARNED_DESCRIPTION}\n---\n{output}\n"
+    # The envelope matches the checked-in skill format. Neutralize a closing
+    # tag in the tool output so it cannot break out of the envelope.
+    body = output.replace("</skill>", "&lt;/skill&gt;")
+    return (
+        f"---\nname: {slug}\ndescription: {EARNED_DESCRIPTION}\n---\n"
+        f'<skill name="{slug}" version="1">\n{body}\n</skill>\n'
+    )
 
 
 __all__ = ["EARNED_DESCRIPTION", "review_turn"]

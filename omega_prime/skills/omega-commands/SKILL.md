@@ -3,7 +3,7 @@ name: omega-commands
 description: When to call omega_command. A user message that is only /omega-... runs that slash command instead of the underlying tools.
 bots: [bot-00-omega-prime]
 ---
-
+<skill name="omega-commands" version="1">
 # Omega commands
 
 ## L1 — Summary
@@ -60,3 +60,4 @@ User asks what the bot can run?
 - Do not guess a near name. `/omega-desk-lead` is the desk-lead routine,
   not `/omega-desk`. An unknown name returns `unknown_command`; offer
   `/omega-help`.
+</skill>

@@ -4,7 +4,7 @@ description: Infrastructure-as-code with Terraform and Kubernetes. Use before an
 bots: [bot-00-omega-prime]
 gates: [G-5, G-6]
 ---
-
+<skill name="terraform-k8s" version="1">
 # Terraform & Kubernetes
 
 ## L1 — Summary
@@ -168,3 +168,4 @@ nobody notices for months. Escalate above the agreed threshold.
 | Liveness checks a dependency | Cascading restarts | Check only this process |
 | Manual `kubectl apply` | Config drift, fixes silently reverted | Everything through IaC |
 | No `prevent_destroy` | One bad plan destroys a database | Set it on stateful resources |
+</skill>

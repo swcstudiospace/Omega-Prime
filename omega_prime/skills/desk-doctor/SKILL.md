@@ -4,7 +4,7 @@ description: "Run and read the desk integrity report (desk_doctor check): prompt
 bots: [bot-00-omega-prime]
 gates: [G-7]
 ---
-
+<skill name="desk-doctor" version="1">
 # Desk Doctor
 
 ## Omega Prime adaptation
@@ -158,3 +158,4 @@ ceiling for the next ticket, and the next load is refused. Unload, re-check, mov
 | Doctor never edits a receipt or gate; red gate rows are blockers | PD-3, G-2 | A repair that edits evidence is a bypass with a friendlier name |
 | Doctor output tail goes in the receipt when one is open | G-2 | The seat's state at the time is part of what the reviewer needs |
 | Report red rows verbatim, including the ones you cannot fix | PD-6 | The next decision belongs to the owning seat |
+</skill>

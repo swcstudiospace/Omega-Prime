@@ -4,7 +4,7 @@ description: Working safely on the shared remote development machine. Use before
 bots: [bot-00-omega-prime]
 gates: [G-6]
 ---
-
+<skill name="remote-dev-machine" version="1">
 # Remote Development Machine
 
 ## L1 — Summary
@@ -237,3 +237,4 @@ annoying inverse.
 - [ ] `shared/.env.local` at 0600, outside any git tree
 - [ ] **Non-root working user created and `PermitRootLogin no` set** (§6)
 - [ ] Backup for anything on the box that is not reproducible from git
+</skill>

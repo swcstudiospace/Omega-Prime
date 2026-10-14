@@ -4,7 +4,7 @@ description: Writing and reviewing Android code — Kotlin, Compose, Gradle, rel
 bots: [bot-00-omega-prime]
 gates: [G-5, G-6]
 ---
-
+<skill name="android" version="1">
 # Android
 
 ## L1 — Summary
@@ -148,3 +148,4 @@ failure — it inflates the binary and hides the real problem.
 | Blanket ProGuard keep | Bloated APK, root cause hidden | Narrow rule for the named class |
 | Debug-only testing | Release-only crash reaches users | Test the release build |
 | Full rollout | No way to limit the blast radius | Staged, always |
+</skill>

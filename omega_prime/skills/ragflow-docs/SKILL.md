@@ -4,7 +4,7 @@ description: When to search the desk document datasets and how to cite them with
 bots: [bot-00-omega-prime]
 gates: []
 ---
-
+<skill name="ragflow-docs" version="1">
 # RAGFlow Docs
 
 ## When this applies (L1)
@@ -163,3 +163,4 @@ empty, grep the checkout before writing "no documentation".
 | Cite `path @ commit`; state when only the chunk was seen | G-2, PD-6 | The reviewer must be able to re-open what you cite |
 | Do not fetch docs through the browser when the search fails | `skills/desk-gateway` §5 | The checkout is the fallback; it is already the record |
 | Receipts and secrets are not in the docs plane | G-3 | Nothing you find here should ever be a credential; if it is, escalate (PD-4) |
+</skill>

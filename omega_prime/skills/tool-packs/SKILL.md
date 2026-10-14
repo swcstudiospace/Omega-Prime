@@ -4,7 +4,7 @@ description: Load and unload application tool packs for one ticket; the 20-tool 
 bots: [bot-00-omega-prime]
 gates: [G-4, G-7]
 ---
-
+<skill name="tool-packs" version="1">
 # Tool Packs
 
 ## Omega Prime adaptation
@@ -185,3 +185,4 @@ old pack, load the new one, and the same work takes two calls.
 | g5/g6 pack tools require approval and rollback fields | G-5, G-6, PD-5 | A product rollout tool is still a rollout tool |
 | No secrets or hosts in a pack contract | G-3 | Contracts are read by every seat and template recipient |
 | Pack results are evidence under the loading ticket | G-2 | Provenance is part of what a receipt proves |
+</skill>
