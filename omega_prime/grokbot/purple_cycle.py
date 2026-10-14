@@ -13,14 +13,19 @@ Steps, in canonical order (:data:`STEP_NAMES`):
 2. ``release-watch`` (run/apply): diff upstream tags against the state file
    ``<reports>/release-watch.json`` (writes it, uses the network).
 3. ``pin-bump-audit`` (run/apply): audit-only pin-bump check for the newest
-   new tag. ``apply_scheduled_bump`` / a non-audit ``bump`` are never called.
+   new tag (or a tag whose audit errored earlier, kept in
+   ``<reports>/purple-cycle-pending.json`` until an audit succeeds).
+   ``apply_scheduled_bump`` / a non-audit ``bump`` are never called.
 4. ``engagement`` (all modes, pure): engagement summary (and digest when the
    report script provides ``build_digest``).
 5. ``findings-plan`` (all modes): findings-sync dispatch plan with ledgers
    forced off; the runner is never reachable.
 6. ``findings-dispatch`` (apply only): refused (exit 3) unless the harness is
-   IDLE and no configured RoE is expired/missing/invalid; then the real
-   findings-sync tick.
+   IDLE and a RoE artifact is configured and is neither expired, missing,
+   invalid nor revoked (``grant-revoked`` row in the configured
+   ``redteam.roe_audit_log``, read-only); then the real findings-sync tick.
+   The gate is re-evaluated FRESH every time the step is reached (current
+   ``now``); checkpointed preflight facts are reporting only.
 
 Modes (:data:`MODES`): ``plan`` is PURE (no checkpoint, no ledger, no state
 file, no network, no subprocess); ``run`` adds release-watch and the pin-bump
@@ -28,14 +33,18 @@ audit; ``apply`` additionally dispatches findings.
 
 Durability: run/apply checkpoint through
 :func:`omega_prime.durable.workflows.run_workflow` at
-``<root>/workflows/<cycle_id>.json`` (step records live in the checkpoint
-``state``). A step that returns (ok/warn/skipped/blocked) is checkpointed; a
-step error halts the cycle WITHOUT checkpointing that step, so a rerun
-re-executes it while completed steps are reused. Steps after a halt are
-reported as skipped/``halted``. Re-running a finished cycle executes nothing
-and returns the stored result (``resumed`` True). An append-only ledger
-``<reports>/purple-cycle.ndjson`` receives one secret-free row per executed
-step.
+``<reports>/purple-cycle/workflows/<cycle_id>.json`` (step records live in
+the checkpoint ``state``). A step that returns (ok/warn/skipped) is
+checkpointed; a step error or a ``blocked`` refusal halts the cycle WITHOUT
+checkpointing that step, so a rerun re-evaluates it while completed steps are
+reused. The cycle id is ``purple-cycle-<UTC date>-<mode>``, plus ``-s<8 hex>``
+(sha256 of the comma-joined selected names) for a non-default ``--steps``
+selection. A checkpoint whose mode/cycle id/selection or records do not match
+the current run is treated as unreadable (``checkpoint-unreadable``). Steps
+after a halt are reported as skipped/``halted``. Re-running a finished cycle
+executes nothing and returns the stored result (``resumed`` True). An
+append-only ledger ``<reports>/purple-cycle.ndjson`` receives one secret-free
+row per executed step.
 
 Exit codes: 0 completed (ok/warn/skipped only), 1 any step error, 3 apply
 refused/blocked, 2 CLI usage error.
@@ -50,13 +59,16 @@ CLI::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -77,8 +89,10 @@ MODES = ("plan", "run", "apply")
 
 LEDGER_FILENAME = "purple-cycle.ndjson"
 RELEASE_WATCH_FILENAME = "release-watch.json"
+PENDING_FILENAME = "purple-cycle-pending.json"
+#: Checkpoint directory name under the reports dir.
+CHECKPOINT_DIRNAME = "purple-cycle"
 REPORTS_ENV_VAR = "OMEGA_PRIME_SIDECAR_REPORTS_DIR"
-STATE_DIR_ENV_VAR = "OMEGA_PRIME_STATE_DIR"
 
 #: Per-command timeout of the default pin-bump subprocess runner.
 PIN_RUN_TIMEOUT_SECONDS = 300
@@ -89,10 +103,11 @@ EXIT_USAGE = 2
 EXIT_BLOCKED = 3
 
 _STATUS_EXIT = {"ok": 0, "warn": 0, "skipped": 0, "error": 1, "blocked": 3}
-_REFUSED_ROE_STATES = ("expired", "missing", "invalid")
+_REFUSED_ROE_STATES = ("expired", "missing", "invalid", "revoked")
+_ROE_AUDIT_LOG_KEYS = ("roe_audit_log", "audit_log", "roe_audit_log_path")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_WORD_RE = re.compile(r"^[A-Za-z0-9._-]{1,48}$")
-_TAG_RE = re.compile(r"^v?\d+\.\d+(?:\.\d+)*(?:[-+.][0-9A-Za-z.]+)*$")
+_WORD_RE = re.compile(r"[A-Za-z0-9._-]{1,48}")
+_TAG_RE = re.compile(r"v?[0-9]+\.[0-9]+(?:\.[0-9]+)*(?:[-+.][0-9A-Za-z.]+)*")
 _MAX_TAG_LENGTH = 64
 _MAX_LINE_LENGTH = 200
 _MAX_DIGEST_LINES = 20
@@ -105,7 +120,7 @@ _ENGAGEMENT_MODULE: Any = None
 
 def _word(value: Any, default: str = "unknown") -> str:
     """A short vocabulary-safe word, else ``default`` (never free text)."""
-    return value if isinstance(value, str) and _WORD_RE.match(value) else default
+    return value if isinstance(value, str) and _WORD_RE.fullmatch(value) else default
 
 
 def _safe_tag(value: Any) -> str | None:
@@ -113,7 +128,7 @@ def _safe_tag(value: Any) -> str | None:
     if (
         isinstance(value, str)
         and len(value) <= _MAX_TAG_LENGTH
-        and _TAG_RE.match(value) is not None
+        and _TAG_RE.fullmatch(value) is not None
     ):
         return value
     return None
@@ -144,9 +159,12 @@ def _record(
     }
 
 
-def _as_utc(now: datetime | None) -> datetime:
-    if now is None:
-        return datetime.now(UTC).replace(microsecond=0)
+def _utc_now() -> datetime:
+    """The cycle's default clock (seam; used only for ``run_cycle``'s ``now``)."""
+    return datetime.now(UTC)
+
+
+def _as_utc(now: datetime) -> datetime:
     if now.tzinfo is None:
         return now.replace(tzinfo=UTC, microsecond=0)
     return now.astimezone(UTC).replace(microsecond=0)
@@ -215,7 +233,12 @@ def _load_engagement_module() -> Any:
         if spec is None or spec.loader is None:
             raise ImportError("engagement-report script cannot be loaded")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
         _ENGAGEMENT_MODULE = module
     return _ENGAGEMENT_MODULE
 
@@ -241,7 +264,7 @@ class _Ctx:
     mode: str
     cycle_id: str
     root: Path | None
-    state_root: Path
+    checkpoint_dir: Path
     reports_dir: Path
     config: dict[str, Any] | None
     env: Mapping[str, str]
@@ -261,6 +284,43 @@ def _roe_conflict_count(roe_lifecycle: Any, paths: Sequence[Any], now: datetime)
     return len(found) if isinstance(found, list) else 0
 
 
+def _roe_audit_log(config: Mapping[str, Any] | None) -> str | None:
+    """The configured RoE audit-log path (``redteam.roe_audit_log``), if any."""
+    node = config.get("redteam") if config is not None else None
+    if not isinstance(node, dict):
+        return None
+    for key in _ROE_AUDIT_LOG_KEYS:
+        candidate = node.get(key)
+        if isinstance(candidate, (str, Path)) and str(candidate).strip():
+            return str(candidate).strip()
+    return None
+
+
+def _any_roe_revoked(
+    roe_lifecycle: Any, paths: Sequence[str], audit_log: str | None
+) -> bool:
+    """True when any configured artifact has a ``grant-revoked`` audit row.
+
+    Read-only: reuses the renewal-reminder revoked detection; never writes.
+    Fail-open on a missing/unreadable log (the helper returns "not revoked").
+    """
+    if audit_log is None:
+        return False
+    for path in paths:
+        candidates = {path}
+        with contextlib.suppress(OSError, RuntimeError):
+            candidates.add(str(Path(path).resolve()))
+        document = roe_lifecycle._grant_document(path)
+        if document is not None:
+            for key in ("artifact_id", "id", "artifact_path", "path"):
+                value = document.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidates.add(value.strip())
+        if roe_lifecycle._artifact_revoked(candidates, audit_log):
+            return True
+    return False
+
+
 def _preflight_facts(ctx: _Ctx) -> dict[str, Any]:
     from omega_prime.config import redteam_roe_files
     from omega_prime.grokbot import roe_lifecycle
@@ -272,6 +332,8 @@ def _preflight_facts(ctx: _Ctx) -> dict[str, Any]:
     if paths:
         roe = roe_lifecycle.check_roe_lifecycle_all(paths, ctx.now, audit_log=None)
         roe_state = _word(roe.get("state"))
+        if _any_roe_revoked(roe_lifecycle, paths, _roe_audit_log(ctx.config)):
+            roe_state = "revoked"
         if len(paths) >= 2:
             conflicts = _roe_conflict_count(roe_lifecycle, paths, ctx.now)
     else:
@@ -332,23 +394,67 @@ def _step_release_watch(ctx: _Ctx, state: dict[str, Any]) -> dict[str, Any]:
     return _record("release-watch", "ok", reason, detail)
 
 
+def _read_pending_tag(ctx: _Ctx) -> str | None:
+    """The tag whose audit errored in an earlier cycle (advisory; fail-open)."""
+    try:
+        document = json.loads(
+            (ctx.reports_dir / PENDING_FILENAME).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    return _safe_tag(document.get("tag")) if isinstance(document, dict) else None
+
+
+def _write_pending_tag(ctx: _Ctx, tag: str) -> None:
+    """Atomically persist ``tag`` as pending; best-effort, never raises."""
+    tmp_name: str | None = None
+    try:
+        ctx.reports_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(ctx.reports_dir), prefix=f".{PENDING_FILENAME}.", suffix=".tmp"
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"tag": tag}, sort_keys=True))
+        os.replace(tmp_name, ctx.reports_dir / PENDING_FILENAME)
+        tmp_name = None
+    except Exception:
+        if tmp_name is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+
+
+def _clear_pending_tag(ctx: _Ctx) -> None:
+    with contextlib.suppress(OSError):
+        (ctx.reports_dir / PENDING_FILENAME).unlink()
+
+
 def _step_pin_bump_audit(ctx: _Ctx, state: dict[str, Any]) -> dict[str, Any]:
     if ctx.mode == "plan":
         return _record("pin-bump-audit", "skipped", "plan-mode")
     watch = _find(state, "release-watch")
     detail = watch["detail"] if watch is not None and watch["status"] == "ok" else {}
-    if not detail.get("new_count"):
-        return _record("pin-bump-audit", "skipped", "no-new-release")
-    tag = detail.get("newest_tag")
-    if not isinstance(tag, str) or _safe_tag(tag) is None:
-        return _record("pin-bump-audit", "warn", "unsafe-tag", {"audited": False})
+    tag: Any
+    if detail.get("new_count"):
+        tag = detail.get("newest_tag")
+        if not isinstance(tag, str) or _safe_tag(tag) is None:
+            return _record("pin-bump-audit", "warn", "unsafe-tag", {"audited": False})
+    else:
+        # A tag whose audit errored earlier is audited again even though
+        # release-watch has already marked it seen.
+        tag = _read_pending_tag(ctx)
+        if tag is None:
+            return _record("pin-bump-audit", "skipped", "no-new-release")
     from omega_prime.grokbot import pin_bump
 
     tracker = _TimeoutTracker(
         ctx.pin_run if ctx.pin_run is not None else _default_pin_run
     )
     root = ctx.root if ctx.root is not None else pin_bump.REPO_ROOT
-    result = pin_bump.audit_scheduled_job({"to": tag}, root=root, run=tracker)
+    try:
+        result = pin_bump.audit_scheduled_job({"to": tag}, root=root, run=tracker)
+    except Exception:
+        _write_pending_tag(ctx, tag)
+        raise
     verdict = _word(result.get("verdict"))
     exit_code = result.get("exit_code")
     summary: dict[str, Any] = {
@@ -359,7 +465,9 @@ def _step_pin_bump_audit(ctx: _Ctx, state: dict[str, Any]) -> dict[str, Any]:
         "timeout": tracker.timed_out,
     }
     if tracker.timed_out or verdict == "error":
+        _write_pending_tag(ctx, tag)
         return _record("pin-bump-audit", "error", "step-error", summary)
+    _clear_pending_tag(ctx)
     if verdict == "regressed":
         return _record("pin-bump-audit", "warn", "regressed", summary)
     if not summary["semver_compatible"]:
@@ -436,6 +544,8 @@ def _refusal_cause(facts: Mapping[str, Any]) -> str | None:
     if facts.get("harness_state") != "IDLE":
         return _word(facts.get("harness_cause"))
     roe_state = facts.get("roe_state")
+    if roe_state == "none":
+        return "roe-missing"
     if roe_state in _REFUSED_ROE_STATES:
         return _word(roe_state)
     return None
@@ -445,12 +555,9 @@ def _step_findings_dispatch(ctx: _Ctx, state: dict[str, Any]) -> dict[str, Any]:
     if ctx.mode != "apply":
         reason = "plan-mode" if ctx.mode == "plan" else "not-selected"
         return _record("findings-dispatch", "skipped", reason)
-    recorded = _find(state, "preflight")
-    if recorded is not None and recorded["status"] in ("ok", "warn"):
-        facts = recorded["detail"]
-    else:
-        facts = _preflight_facts(ctx)
-    cause = _refusal_cause(facts)
+    # Evaluated FRESH on every pass (harness verdict and RoE lifecycle at the
+    # current ``now``): the checkpointed preflight is for reporting only.
+    cause = _refusal_cause(_preflight_facts(ctx))
     if cause is not None:
         detail = {"cause": cause}
         return _record("findings-dispatch", "blocked", "apply-refused", detail)
@@ -517,7 +624,10 @@ def _append_ledger(ctx: _Ctx, rec: Mapping[str, Any]) -> None:
 
 
 class _StepFailure(Exception):
-    """A step errored: carries the pre-step state and the error record."""
+    """A step errored or was blocked: carries the pre-step state and its record.
+
+    Neither outcome is checkpointed, so a rerun re-evaluates the step.
+    """
 
     def __init__(self, state: dict[str, Any], rec: dict[str, Any]) -> None:
         super().__init__(rec["name"])
@@ -528,22 +638,13 @@ class _StepFailure(Exception):
 def _make_step(ctx: _Ctx, name: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
     def step(state: dict[str, Any]) -> dict[str, Any]:
         records = list(state.get("steps", []))
-        blocked = state.get("blocked")
-        if blocked:
-            rec = _record(name, "skipped", "blocked-upstream")
-        else:
-            rec = _execute(ctx, name, state)
-            if ctx.ledger and rec["reason"] != "not-selected":
-                _append_ledger(ctx, rec)
-        if rec["status"] == "error":
+        rec = _execute(ctx, name, state)
+        if ctx.ledger and rec["reason"] != "not-selected":
+            _append_ledger(ctx, rec)
+        if rec["status"] in ("error", "blocked"):
             raise _StepFailure(dict(state), rec)
         new_state = dict(state)
         new_state["steps"] = [*records, rec]
-        if rec["status"] == "blocked":
-            new_state["blocked"] = {
-                "cause": _word(rec["detail"].get("cause")),
-                "step": name,
-            }
         return new_state
 
     return step
@@ -572,9 +673,15 @@ def _result(
     order = {name: index for index, name in enumerate(STEP_NAMES)}
     records.sort(key=lambda rec: order[rec["name"]])
     blocked = state.get("blocked")
+    blocking = next((rec for rec in records if rec["status"] == "blocked"), None)
+    if blocking is not None:
+        blocked = {
+            "cause": _word(blocking["detail"].get("cause")),
+            "step": blocking["name"],
+        }
     if any(rec["status"] == "error" for rec in records):
         outcome, code = "failed", EXIT_STEP_ERROR
-    elif blocked or any(rec["status"] == "blocked" for rec in records):
+    elif blocked:
         outcome, code = "blocked", EXIT_BLOCKED
     else:
         outcome, code = "completed", EXIT_OK
@@ -598,23 +705,55 @@ def _result(
 
 def _pending_error(state: Mapping[str, Any], reason: str) -> dict[str, Any]:
     done = {rec.get("name") for rec in state.get("steps", []) if isinstance(rec, dict)}
-    pending = next(name for name in STEP_NAMES if name not in done)
+    pending = next((name for name in STEP_NAMES if name not in done), STEP_NAMES[-1])
     return _record(pending, "error", reason)
 
 
-def _validated_prior(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
+def _valid_record(rec: Any, name: str) -> bool:
+    """A stored step record has the exact shape ``_record`` produces."""
+    return (
+        isinstance(rec, dict)
+        and rec.get("name") == name
+        and rec.get("status") in _STATUS_EXIT
+        and isinstance(rec.get("exit"), int)
+        and not isinstance(rec.get("exit"), bool)
+        and isinstance(rec.get("reason"), str)
+        and isinstance(rec.get("detail"), dict)
+    )
+
+
+def _valid_blocked(blocked: Any) -> bool:
+    return blocked is None or (
+        isinstance(blocked, dict)
+        and isinstance(blocked.get("cause"), str)
+        and isinstance(blocked.get("step"), str)
+    )
+
+
+def _validated_prior(
+    checkpoint: Mapping[str, Any], expected: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The checkpointed state, or ``ValueError`` when it is not this cycle's.
+
+    ``expected`` is the current run's initial state: the stored ``mode``,
+    ``cycle_id`` and ``selected`` must match it, and every step record (and
+    the ``blocked`` marker) must be well formed and in canonical order.
+    """
     state = checkpoint.get("state")
     done = checkpoint.get("done")
     steps = state.get("steps") if isinstance(state, dict) else None
     if (
         not isinstance(state, dict)
         or not isinstance(done, int)
+        or isinstance(done, bool)
         or not isinstance(steps, list)
         or not 0 <= done <= len(STEP_NAMES)
         or len(steps) != done
-        or not all(
-            isinstance(rec, dict) and rec.get("name") in STEP_NAMES for rec in steps
-        )
+        or any(not _valid_record(rec, STEP_NAMES[i]) for i, rec in enumerate(steps))
+        or not _valid_blocked(state.get("blocked"))
+        or state.get("mode") != expected["mode"]
+        or state.get("cycle_id") != expected["cycle_id"]
+        or state.get("selected") != expected["selected"]
     ):
         raise ValueError("checkpoint is not a purple-cycle state")
     return state
@@ -642,7 +781,8 @@ def run_cycle(
 
     See the module docstring. Raises ``ValueError`` only for an unknown
     ``mode`` or step name (before doing anything); step failures never raise.
-    ``now`` defaults to the current UTC time here and nowhere else.
+    ``now`` defaults to the current UTC time (via :func:`_utc_now`) here and
+    nowhere else.
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; expected one of {MODES}")
@@ -655,9 +795,12 @@ def run_cycle(
         if unknown:
             raise ValueError(f"unknown step {unknown[0]!r}; expected {STEP_NAMES}")
         selected = [name for name in STEP_NAMES if name in set(steps)]
-    current = _as_utc(now)
+    current = _as_utc(now if now is not None else _utc_now())
     environ: Mapping[str, str] = env if env is not None else os.environ
     cycle_id = f"purple-cycle-{current:%Y%m%d}-{mode}"
+    if selected != list(STEP_NAMES):
+        digest = hashlib.sha256(",".join(selected).encode("ascii")).hexdigest()
+        cycle_id += f"-s{digest[:8]}"
     if force_new:
         cycle_id += f"-{current:%H%M%S}"
     resolved_config: dict[str, Any] | None
@@ -670,19 +813,15 @@ def run_cycle(
             resolved_config = load_config(root)
         except Exception:
             resolved_config = None
-    state_dir = (environ.get(STATE_DIR_ENV_VAR) or "").strip()
-    fallback_root = Path(state_dir) if state_dir else _REPO_ROOT
-    state_root = Path(root) if root is not None else fallback_root
+    reports = (
+        Path(reports_dir) if reports_dir is not None else _resolve_reports_dir(environ)
+    )
     ctx = _Ctx(
         mode=mode,
         cycle_id=cycle_id,
         root=Path(root) if root is not None else None,
-        state_root=state_root,
-        reports_dir=(
-            Path(reports_dir)
-            if reports_dir is not None
-            else _resolve_reports_dir(environ)
-        ),
+        checkpoint_dir=reports / CHECKPOINT_DIRNAME,
+        reports_dir=reports,
         config=resolved_config,
         env=environ,
         now=current,
@@ -727,13 +866,13 @@ def _run_durable(
     initial: dict[str, Any],
     funcs: list[Callable[[dict[str, Any]], dict[str, Any]]],
 ) -> dict[str, Any]:
-    checkpoint_path = str(ctx.state_root / "workflows" / f"{ctx.cycle_id}.json")
+    checkpoint_path = str(ctx.checkpoint_dir / "workflows" / f"{ctx.cycle_id}.json")
     ledger_path = str(ctx.reports_dir / LEDGER_FILENAME)
     prior_state: dict[str, Any] | None = None
     try:
-        document = workflows.load_checkpoint(ctx.state_root, ctx.cycle_id)
+        document = workflows.load_checkpoint(ctx.checkpoint_dir, ctx.cycle_id)
         if document is not None:
-            prior_state = _validated_prior(document)
+            prior_state = _validated_prior(document, initial)
     except ValueError:
         return _result(
             ctx,
@@ -747,7 +886,7 @@ def _run_durable(
     failed: dict[str, Any] | None = None
     try:
         outcome = workflows.run_workflow(
-            ctx.state_root, ctx.cycle_id, funcs, state=initial
+            ctx.checkpoint_dir, ctx.cycle_id, funcs, state=initial
         )
         final: dict[str, Any] = outcome["state"]
     except _StepFailure as exc:
@@ -797,10 +936,13 @@ def main(
     """CLI entry point; the exit code is the run's ``exit`` (2 = usage error)."""
     parser = argparse.ArgumentParser(
         prog="python -m omega_prime.grokbot.purple_cycle",
+        allow_abbrev=False,
         description=(
             "Resumable purple cycle: preflight, release-watch, pin-bump audit, "
             "engagement, findings plan and (apply only) findings dispatch. "
-            "Exit 0 completed, 1 step error, 2 usage error, 3 apply refused."
+            "Exit 0 completed, 1 step error, 2 usage error, 3 apply refused. "
+            "--now is rejected in apply mode (the RoE expiry check must use "
+            "the real clock)."
         ),
     )
     parser.add_argument(
@@ -817,8 +959,10 @@ def main(
         help="comma-separated subset of: " + ", ".join(STEP_NAMES),
     )
     parser.add_argument("--reports-dir", default=None, help="reports directory")
-    parser.add_argument("--root", default=None, help="state/checkpoint root")
-    parser.add_argument("--now", default=None, help="ISO-8601 UTC instant")
+    parser.add_argument("--root", default=None, help="pin-bump repository root")
+    parser.add_argument(
+        "--now", default=None, help="ISO-8601 UTC instant (not allowed with apply)"
+    )
     parser.add_argument(
         "--force-new",
         action="store_true",
@@ -847,6 +991,8 @@ def main(
             return _usage_error(f"unknown step {unknown[0]!r}")
     now: datetime | None = None
     if args.now is not None:
+        if mode == "apply":
+            return _usage_error("--now is not allowed in apply mode")
         try:
             now = datetime.fromisoformat(args.now)
         except ValueError:

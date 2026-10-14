@@ -42,6 +42,9 @@ DEFAULT_STATE = "sidecar/reports/release-watch.json"
 #: CLI exit when the ``gh`` fetch fails (mirrors ``roe_lifecycle`` BLOCKED).
 FETCH_FAILURE_EXIT = 3
 
+#: Timeout (seconds) for the ``gh api`` subprocess in :func:`fetch_upstream_tags`.
+GH_TIMEOUT_SECONDS = 60
+
 #: Config key gating release-watch → pin-bump chaining (explicit opt-in).
 AUTO_PIN_BUMP_CONFIG_KEY = "auto_pin_bump"
 
@@ -401,8 +404,9 @@ def fetch_upstream_tags(repo: str) -> list[dict]:
 
     Raises ``RuntimeError`` on empty repo (fail closed),
     ``FileNotFoundError`` when ``gh`` is absent, and
-    ``subprocess.CalledProcessError`` on non-zero ``gh`` exit. Never
-    prints tokens; ``gh`` stderr passes through uncensored.
+    ``subprocess.CalledProcessError`` on non-zero ``gh`` exit, and
+    ``subprocess.TimeoutExpired`` when ``gh`` exceeds ``GH_TIMEOUT_SECONDS``.
+    Never prints tokens; ``gh`` stderr passes through uncensored.
     """
     if not isinstance(repo, str) or not repo.strip():
         raise RuntimeError("repo must be a non-empty OWNER/NAME (fails closed)")
@@ -411,6 +415,7 @@ def fetch_upstream_tags(repo: str) -> list[dict]:
         capture_output=True,
         text=True,
         check=False,
+        timeout=GH_TIMEOUT_SECONDS,
     )
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
@@ -458,7 +463,12 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError:
             print("error: gh not found (GitHub CLI absent)", file=sys.stderr)
             return FETCH_FAILURE_EXIT
-        except (subprocess.CalledProcessError, RuntimeError, OSError) as exc:
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            RuntimeError,
+            OSError,
+        ) as exc:
             print(f"error: release-watch fetch failed: {exc}", file=sys.stderr)
             return FETCH_FAILURE_EXIT
         if args.json:
@@ -481,6 +491,7 @@ __all__ = [
     "DEFAULT_REPO",
     "DEFAULT_STATE",
     "FETCH_FAILURE_EXIT",
+    "GH_TIMEOUT_SECONDS",
     "auto_pin_bump_enabled",
     "build_digest",
     "check_release_watch",

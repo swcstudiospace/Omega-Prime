@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ import pytest
 
 from omega_prime.grokbot import pin_bump, purple_cycle, release_watch
 from omega_prime.grokbot.purple_cycle import MODES, STEP_NAMES, main, run_cycle
+from omega_prime.redteam import roe_audit
 from sidecar.findings import load_findings, record_finding
 
 NOW = datetime(2026, 10, 14, 12, 30, 45, tzinfo=UTC)
@@ -135,6 +137,10 @@ def _seed_release_state(dirs: SimpleNamespace, *names: str) -> None:
     )
 
 
+def _checkpoint_file(dirs: SimpleNamespace, cycle_id: str) -> Path:
+    return dirs.reports / "purple-cycle" / "workflows" / f"{cycle_id}.json"
+
+
 def _ledger_rows(dirs: SimpleNamespace) -> list[dict[str, Any]]:
     text = (dirs.reports / "purple-cycle.ndjson").read_text(encoding="utf-8")
     return [json.loads(line) for line in text.splitlines()]
@@ -199,11 +205,11 @@ def test_step_order_and_statuses_per_mode(dirs, pin) -> None:
     assert run["cycle_id"] == "purple-cycle-20261014-run"
     assert run["resumed"] is False and run["blocked"] is None
     assert run["checkpoint"] == str(
-        dirs.root / "workflows" / "purple-cycle-20261014-run.json"
+        dirs.reports / "purple-cycle" / "workflows" / "purple-cycle-20261014-run.json"
     )
     assert run["ledger"] == str(dirs.reports / "purple-cycle.ndjson")
 
-    apply = _cycle(dirs, mode="apply")
+    apply = _cycle(dirs, mode="apply", config=_apply_config(dirs, enabled=False))
     assert _triples(apply)[-1] == ("findings-dispatch", "skipped", "disabled")
     assert (apply["ok"], apply["exit"], apply["state"]) == (True, 0, "completed")
 
@@ -249,6 +255,15 @@ def _roe_artifact(path: Path, *, until: datetime) -> str:
     }
     path.write_text(json.dumps(document), encoding="utf-8")
     return str(path)
+
+
+def _apply_config(
+    dirs: SimpleNamespace, *, until: datetime | None = None, **node: Any
+) -> dict[str, Any]:
+    """Config with a valid RoE artifact (apply refuses without one)."""
+    window = until if until is not None else NOW + timedelta(days=30)
+    artifact = _roe_artifact(dirs.tmp / "roe-valid.json", until=window)
+    return {"redteam": {"roe_file": artifact, "findings_sync": node}}
 
 
 @pytest.mark.parametrize(
@@ -412,7 +427,12 @@ def test_new_tag_triggers_audit_only_for_that_tag(dirs, pin) -> None:
 def test_pin_audit_regressed_is_a_warning_without_apply(dirs, pin) -> None:
     _seed_release_state(dirs, "v1.0.0")
     pin.verdict = "regressed"
-    result = _cycle(dirs, mode="apply", fetch=Fetch("v1.1.0", "v1.0.0"))
+    result = _cycle(
+        dirs,
+        mode="apply",
+        fetch=Fetch("v1.1.0", "v1.0.0"),
+        config=_apply_config(dirs, enabled=False),
+    )
     audit = _by_name(result)["pin-bump-audit"]
     assert (audit["status"], audit["reason"]) == ("warn", "regressed")
     assert result["exit"] == 0 and result["state"] == "completed"
@@ -655,7 +675,9 @@ def test_force_new_gets_its_own_cycle_id_and_checkpoint(dirs, pin) -> None:
     assert first["cycle_id"] == "purple-cycle-20261014-run"
     assert forced["cycle_id"] == "purple-cycle-20261014-run-123045"
     assert forced["resumed"] is False
-    names = sorted(p.name for p in (dirs.root / "workflows").glob("*.json"))
+    names = sorted(
+        p.name for p in (dirs.reports / "purple-cycle" / "workflows").glob("*.json")
+    )
     assert names == [
         "purple-cycle-20261014-run-123045.json",
         "purple-cycle-20261014-run.json",
@@ -677,7 +699,13 @@ def test_checkpoint_and_ledger_contents_hold_no_secrets(dirs, pin) -> None:
     _seed_release_state(dirs, "v1.0.0")
     fetch = Fetch(TOKEN_TAG, "v1.0.0")
     env = {**IDLE_ENV, "OMEGA_PRIME_REDTEAM_ROE_KEY": SECRET}
-    result = _cycle(dirs, mode="apply", fetch=fetch, env=env)
+    result = _cycle(
+        dirs,
+        mode="apply",
+        fetch=fetch,
+        env=env,
+        config=_apply_config(dirs, enabled=False),
+    )
     watch = _by_name(result)["release-watch"]
     assert watch["detail"]["new_count"] == 1
     assert watch["detail"]["new_tags"] == []
@@ -686,9 +714,7 @@ def test_checkpoint_and_ledger_contents_hold_no_secrets(dirs, pin) -> None:
     assert (audit["status"], audit["reason"]) == ("warn", "unsafe-tag")
     assert pin.calls == []
 
-    checkpoint = (dirs.root / "workflows" / f"{result['cycle_id']}.json").read_text(
-        encoding="utf-8"
-    )
+    checkpoint = _checkpoint_file(dirs, result["cycle_id"]).read_text(encoding="utf-8")
     ledger = (dirs.reports / "purple-cycle.ndjson").read_text(encoding="utf-8")
     document = json.loads(checkpoint)
     assert document["done"] == len(STEP_NAMES)
@@ -721,9 +747,9 @@ def test_ledger_write_failure_never_raises(dirs, pin, monkeypatch) -> None:
 
 
 def test_unreadable_checkpoint_fails_closed(dirs, pin, counters) -> None:
-    workflow_dir = dirs.root / "workflows"
-    workflow_dir.mkdir(parents=True)
-    (workflow_dir / "purple-cycle-20261014-run.json").write_text("{nope")
+    target = _checkpoint_file(dirs, "purple-cycle-20261014-run")
+    target.parent.mkdir(parents=True)
+    target.write_text("{nope")
     result = _cycle(dirs)
     assert (result["ok"], result["exit"], result["state"]) == (False, 1, "failed")
     first = result["steps"][0]
@@ -736,11 +762,9 @@ def test_unreadable_checkpoint_fails_closed(dirs, pin, counters) -> None:
 
 
 def test_foreign_checkpoint_shape_fails_closed(dirs, pin, counters) -> None:
-    workflow_dir = dirs.root / "workflows"
-    workflow_dir.mkdir(parents=True)
-    (workflow_dir / "purple-cycle-20261014-run.json").write_text(
-        json.dumps({"done": 3, "state": {"steps": []}})
-    )
+    target = _checkpoint_file(dirs, "purple-cycle-20261014-run")
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({"done": 3, "state": {"steps": []}}))
     result = _cycle(dirs)
     assert result["state"] == "failed" and result["exit"] == 1
     assert all(count == 0 for count in counters.values())
@@ -790,12 +814,20 @@ def test_apply_refused_when_harness_blocked(dirs, pin, counters) -> None:
         "blocked",
         3,
     )
-    # The refusal is recorded state: a rerun returns it without executing.
+    # A refusal is NOT checkpointed: a rerun re-evaluates the gate, and the
+    # completed steps are not executed again.
     again = _cycle(
         dirs, mode="apply", env=KILLED_ENV, config=_sync_config(), runner=runner
     )
     assert again == {**result, "resumed": True}
-    assert counters["findings-dispatch"] == 1
+    assert counters["findings-dispatch"] == 2
+    assert counters["preflight"] == 1 and counters["findings-plan"] == 1
+
+
+def _apply_sync(dirs: SimpleNamespace, **overrides: Any) -> dict[str, Any]:
+    return _apply_config(
+        dirs, **{"enabled": True, "repo": REPO, "labels": {}, **overrides}
+    )
 
 
 def test_apply_refused_on_expired_roe_even_when_harness_idle(dirs, pin) -> None:
@@ -839,7 +871,7 @@ def test_apply_allowed_when_idle_dispatches_real_rows(dirs, pin) -> None:
             response=response,
         )
     runner = Runner()
-    result = _cycle(dirs, mode="apply", config=_sync_config(), runner=runner)
+    result = _cycle(dirs, mode="apply", config=_apply_sync(dirs), runner=runner)
     assert (result["ok"], result["exit"], result["state"]) == (True, 0, "completed")
     assert result["blocked"] is None
     assert len(runner.calls) == 2
@@ -854,7 +886,7 @@ def test_apply_allowed_when_idle_dispatches_real_rows(dirs, pin) -> None:
 
 
 def test_apply_dispatch_runner_error_is_a_step_error(dirs, pin) -> None:
-    config = _config(enabled=True, repo="", labels={})
+    config = _apply_config(dirs, enabled=True, repo="", labels={})
     result = _cycle(dirs, mode="apply", config=config)
     dispatch = _by_name(result)["findings-dispatch"]
     assert (dispatch["status"], dispatch["reason"]) == ("error", "dispatch-error")
@@ -979,7 +1011,9 @@ def test_reports_dir_defaults_from_environment(
 # CLI
 
 
-def _cli(argv: list[str], dirs: SimpleNamespace, **overrides: Any) -> int:
+def _cli(
+    argv: list[str], dirs: SimpleNamespace, *, now: bool = True, **overrides: Any
+) -> int:
     kwargs: dict[str, Any] = {
         "env": IDLE_ENV,
         "config": _config(enabled=False),
@@ -987,15 +1021,15 @@ def _cli(argv: list[str], dirs: SimpleNamespace, **overrides: Any) -> int:
         "runner": Runner(),
     }
     kwargs.update(overrides)
-    base = [
-        "--reports-dir",
-        str(dirs.reports),
-        "--root",
-        str(dirs.root),
-        "--now",
-        "2026-10-14T12:30:45+00:00",
-    ]
+    base = ["--reports-dir", str(dirs.reports), "--root", str(dirs.root)]
+    if now:
+        base += ["--now", "2026-10-14T12:30:45+00:00"]
     return main([*argv, *base], **kwargs)
+
+
+def _live_apply_config(dirs: SimpleNamespace, **node: Any) -> dict[str, Any]:
+    """Apply config whose RoE is valid against the REAL clock (CLI apply)."""
+    return _apply_config(dirs, until=datetime.now(UTC) + timedelta(days=30), **node)
 
 
 def test_cli_json_output_shape_and_exit_zero(dirs, pin, capsys) -> None:
@@ -1035,7 +1069,7 @@ def test_cli_human_table(dirs, pin, capsys) -> None:
 
 
 def test_cli_apply_flag_is_alias_and_blocked_exit_is_three(dirs, pin, capsys) -> None:
-    code = _cli(["--apply", "--json"], dirs, env=KILLED_ENV)
+    code = _cli(["--apply", "--json"], dirs, now=False, env=KILLED_ENV)
     payload = json.loads(capsys.readouterr().out)
     assert code == 3
     assert payload["mode"] == "apply" and payload["state"] == "blocked"
@@ -1043,7 +1077,9 @@ def test_cli_apply_flag_is_alias_and_blocked_exit_is_three(dirs, pin, capsys) ->
 
 
 def test_cli_apply_with_explicit_apply_mode_is_fine(dirs, pin, capsys) -> None:
-    assert _cli(["--apply", "--mode", "apply", "--json"], dirs) == 0
+    config = _live_apply_config(dirs, enabled=False)
+    argv = ["--apply", "--mode", "apply", "--json"]
+    assert _cli(argv, dirs, now=False, config=config) == 0
     assert json.loads(capsys.readouterr().out)["mode"] == "apply"
 
 
@@ -1103,13 +1139,15 @@ def test_cli_steps_flag_selects_subset(dirs, pin, capsys) -> None:
 def test_cli_output_never_contains_secrets(dirs, pin, capsys) -> None:
     _seed_release_state(dirs, "v1.0.0")
     env = {**IDLE_ENV, "OMEGA_PRIME_REDTEAM_ROE_KEY": SECRET}
-    _cli(
-        ["--mode", "apply", "--json"],
-        dirs,
-        env=env,
-        fetch=Fetch(TOKEN_TAG, "v1.0.0"),
-    )
-    _cli(["--mode", "apply"], dirs, env=env, fetch=Fetch(TOKEN_TAG, "v1.0.0"))
+    config = _live_apply_config(dirs, enabled=False)
+    common: dict[str, Any] = {
+        "now": False,
+        "env": env,
+        "config": config,
+        "fetch": Fetch(TOKEN_TAG, "v1.0.0"),
+    }
+    _cli(["--mode", "apply", "--json"], dirs, **common)
+    _cli(["--mode", "apply"], dirs, **common)
     captured = capsys.readouterr()
     assert SECRET not in captured.out + captured.err
     assert TOKEN_TAG not in captured.out + captured.err
@@ -1282,3 +1320,481 @@ def test_engagement_step_real_digest_without_history(dirs, pin) -> None:
         "coverage covered=0/0 gappy=0 unexercised=0 risk=0.0",
         "worst=none",
     ]
+
+
+# --------------------------------------------------------------------------
+# batch 18 review fixes (FX-5a)
+
+
+def _seed_one_finding(dirs: SimpleNamespace) -> None:
+    dirs.reports.mkdir(parents=True, exist_ok=True)
+    record_finding(
+        directory=dirs.reports,
+        case_id="abuse-01",
+        klass="prompt_injection",
+        severity="high",
+        observed_detection="no-detection",
+        verdict="miss",
+        response="x",
+    )
+
+
+def _boom() -> Any:
+    raise RuntimeError("upstream down")
+
+
+def _good_records(count: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": name,
+            "status": "ok",
+            "exit": 0,
+            "reason": "ok",
+            "detail": {"harness_state": "IDLE", "roe_state": "valid"},
+        }
+        for name in STEP_NAMES[:count]
+    ]
+
+
+def _write_checkpoint(
+    dirs: SimpleNamespace, cycle_id: str, document: Any, *, raw: str | None = None
+) -> None:
+    target = _checkpoint_file(dirs, cycle_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(raw if raw is not None else json.dumps(document))
+
+
+def _stored(cycle_id: str, mode: str, **overrides: Any) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "cycle_id": cycle_id,
+        "mode": mode,
+        "now": "2026-10-14T12:30:45+00:00",
+        "selected": list(STEP_NAMES),
+        "steps": _good_records(1),
+        "blocked": None,
+    }
+    state.update(overrides)
+    return {"done": len(state["steps"]), "state": state}
+
+
+# --- 1. apply gate is fresh on every pass -----------------------------------
+
+
+def test_resume_reevaluates_roe_expiry_and_never_dispatches(dirs, pin) -> None:
+    _seed_one_finding(dirs)
+    config = _apply_sync(dirs, until=NOW + timedelta(hours=2))
+    runner = Runner()
+    first = _cycle(dirs, mode="apply", config=config, runner=runner, fetch=_boom)
+    assert first["state"] == "failed" and runner.calls == []
+    # Same UTC day, six hours later: the RoE window has closed.
+    later = _cycle(
+        dirs,
+        mode="apply",
+        config=config,
+        runner=runner,
+        now=NOW + timedelta(hours=6),
+    )
+    assert later["resumed"] is True
+    assert (later["exit"], later["state"]) == (3, "blocked")
+    assert later["blocked"] == {"cause": "expired", "step": "findings-dispatch"}
+    assert runner.calls == []
+    assert "synced_at" not in load_findings(dirs.reports)[0]
+
+
+def test_resume_reevaluates_kill_switch_and_never_dispatches(dirs, pin) -> None:
+    _seed_one_finding(dirs)
+    config = _apply_sync(dirs)
+    runner = Runner()
+    first = _cycle(dirs, mode="apply", config=config, runner=runner, fetch=_boom)
+    assert first["state"] == "failed"
+    second = _cycle(dirs, mode="apply", config=config, runner=runner, env=KILLED_ENV)
+    assert second["resumed"] is True
+    assert second["blocked"] == {
+        "cause": "kill-switch-set",
+        "step": "findings-dispatch",
+    }
+    assert runner.calls == []
+
+
+def test_fabricated_checkpoint_facts_do_not_bypass_the_live_gate(dirs, pin) -> None:
+    _seed_one_finding(dirs)
+    artifact = _roe_artifact(dirs.tmp / "roe-old.json", until=NOW - timedelta(days=1))
+    config = {
+        "redteam": {
+            "roe_file": artifact,
+            "findings_sync": {"enabled": True, "repo": REPO, "labels": {}},
+        }
+    }
+    cycle_id = "purple-cycle-20261014-apply"
+    stored = _stored(cycle_id, "apply", steps=_good_records(5))
+    _write_checkpoint(dirs, cycle_id, stored)
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert result["resumed"] is True
+    assert result["blocked"] == {"cause": "expired", "step": "findings-dispatch"}
+    assert runner.calls == []
+
+
+# --- 2. apply gate hardening -------------------------------------------------
+
+
+def test_apply_refused_when_no_roe_is_configured(dirs, pin) -> None:
+    _seed_one_finding(dirs)
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=_sync_config(), runner=runner)
+    assert runner.calls == []
+    assert (result["exit"], result["state"]) == (3, "blocked")
+    assert result["blocked"] == {"cause": "roe-missing", "step": "findings-dispatch"}
+    # Plan and run stay informational: no RoE is only a harmless "none".
+    for mode in ("plan", "run"):
+        other = _cycle(dirs, mode=mode, config=_sync_config(), runner=runner)
+        assert other["state"] == "completed" and other["exit"] == 0
+        assert _by_name(other)["preflight"]["detail"]["roe_state"] == "none"
+    assert runner.calls == []
+
+
+def test_apply_refused_when_configured_roe_is_revoked(dirs, pin) -> None:
+    _seed_one_finding(dirs)
+    artifact = _roe_artifact(dirs.tmp / "roe-r.json", until=NOW + timedelta(days=30))
+    log = dirs.tmp / "audit.jsonl"
+    roe_audit.revoke_artifact(artifact, audit_log=str(log), detail="compromised")
+    log_before = log.read_bytes()
+    config = {
+        "redteam": {
+            "roe_file": artifact,
+            "roe_audit_log": str(log),
+            "findings_sync": {"enabled": True, "repo": REPO, "labels": {}},
+        }
+    }
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert runner.calls == []
+    assert result["blocked"] == {"cause": "revoked", "step": "findings-dispatch"}
+    pre = _by_name(result)["preflight"]
+    assert (pre["status"], pre["reason"]) == ("warn", "roe-revoked")
+    assert log.read_bytes() == log_before  # read-only
+    # Without the audit log configured the same artifact is not seen revoked.
+    del config["redteam"]["roe_audit_log"]
+    unaware = _cycle(dirs, mode="apply", config=config, runner=runner, force_new=True)
+    assert unaware["state"] == "completed"
+    assert len(runner.calls) == 1
+
+
+def test_apply_ignores_other_artifacts_revocation(dirs, pin) -> None:
+    _seed_one_finding(dirs)
+    other = _roe_artifact(dirs.tmp / "other.json", until=NOW + timedelta(days=30))
+    log = dirs.tmp / "audit.jsonl"
+    roe_audit.revoke_artifact(other, audit_log=str(log))
+    config = _apply_sync(dirs)
+    config["redteam"]["roe_audit_log"] = str(log)
+    runner = Runner()
+    result = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert result["state"] == "completed" and len(runner.calls) == 1
+
+
+# --- 3. blocked is not checkpointed ------------------------------------------
+
+
+def test_blocked_apply_is_retried_after_the_kill_switch_clears(dirs, pin) -> None:
+    _seed_one_finding(dirs)
+    config = _apply_sync(dirs)
+    runner = Runner()
+    blocked = _cycle(dirs, mode="apply", config=config, runner=runner, env=KILLED_ENV)
+    assert blocked["state"] == "blocked" and runner.calls == []
+    stored = json.loads(_checkpoint_file(dirs, blocked["cycle_id"]).read_text())
+    assert stored["done"] == len(STEP_NAMES) - 1
+    assert all(rec["status"] != "blocked" for rec in stored["state"]["steps"])
+    retried = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert retried["resumed"] is True
+    assert (retried["exit"], retried["state"]) == (0, "completed")
+    assert len(runner.calls) == 1
+    assert _by_name(retried)["findings-dispatch"]["status"] == "ok"
+    # The now-complete cycle returns its stored result with zero executions.
+    again = _cycle(dirs, mode="apply", config=config, runner=runner)
+    assert again == retried
+    assert len(runner.calls) == 1
+
+
+# --- 4. cycle identity and checkpoint validation ------------------------------
+
+
+def test_default_selection_keeps_the_plain_cycle_id(dirs, pin) -> None:
+    explicit = _cycle(dirs, mode="plan", steps=list(reversed(STEP_NAMES)))
+    assert explicit["cycle_id"] == "purple-cycle-20261014-plan"
+
+
+def test_subset_selection_gets_a_stable_short_token(dirs, pin) -> None:
+    one = _cycle(dirs, mode="plan", steps=["engagement", "preflight"])
+    two = _cycle(dirs, mode="plan", steps=["preflight", "engagement"])
+    other = _cycle(dirs, mode="plan", steps=["preflight"])
+    assert one["cycle_id"] == two["cycle_id"]
+    assert one["cycle_id"] != other["cycle_id"]
+    for result in (one, other):
+        head, _, token = result["cycle_id"].rpartition("-s")
+        assert head == "purple-cycle-20261014-plan"
+        assert len(token) == 8 and all(ch in "0123456789abcdef" for ch in token)
+    forced = _cycle(dirs, mode="plan", steps=["preflight"], force_new=True)
+    assert forced["cycle_id"] == other["cycle_id"] + "-123045"
+
+
+def test_steps_subset_no_longer_poisons_the_days_full_cycle(dirs, pin) -> None:
+    fetch = Fetch("v1.0.0")
+    subset = _cycle(dirs, steps=["preflight"], fetch=fetch)
+    assert subset["state"] == "completed" and fetch.calls == 0
+    full = _cycle(dirs, fetch=fetch)
+    assert full["resumed"] is False
+    assert fetch.calls == 1
+    assert _by_name(full)["release-watch"]["reason"] == "seeded"
+    assert full["cycle_id"] != subset["cycle_id"]
+
+
+_RUN_ID = "purple-cycle-20261014-run"
+
+
+def _bad_checkpoints() -> dict[str, Any]:
+    ok_steps = _good_records(1)
+    return {
+        "all-bare-records": {
+            "done": 6,
+            "state": {"steps": [{"name": "preflight"}] * 6},
+        },
+        "blocked-is-a-string": _stored(_RUN_ID, "run", blocked="x"),
+        "blocked-missing-keys": _stored(_RUN_ID, "run", blocked={"cause": 1}),
+        "wrong-mode": _stored(_RUN_ID, "plan"),
+        "wrong-cycle-id": _stored("purple-cycle-other-run", "run"),
+        "wrong-selected": _stored(_RUN_ID, "run", selected=["preflight"]),
+        "selected-missing": _stored(_RUN_ID, "run", selected=None),
+        "unknown-status": _stored(
+            _RUN_ID, "run", steps=[{**ok_steps[0], "status": "weird"}]
+        ),
+        "exit-not-int": _stored(_RUN_ID, "run", steps=[{**ok_steps[0], "exit": "0"}]),
+        "exit-bool": _stored(_RUN_ID, "run", steps=[{**ok_steps[0], "exit": True}]),
+        "reason-not-str": _stored(
+            _RUN_ID, "run", steps=[{**ok_steps[0], "reason": None}]
+        ),
+        "detail-not-dict": _stored(
+            _RUN_ID, "run", steps=[{**ok_steps[0], "detail": []}]
+        ),
+        "detail-missing": _stored(
+            _RUN_ID,
+            "run",
+            steps=[{k: v for k, v in ok_steps[0].items() if k != "detail"}],
+        ),
+        "steps-out-of-order": _stored(
+            _RUN_ID, "run", steps=[{**ok_steps[0], "name": "engagement"}]
+        ),
+    }
+
+
+@pytest.mark.parametrize("label", sorted(_bad_checkpoints()))
+def test_malformed_or_foreign_checkpoint_is_unreadable_not_an_exception(
+    dirs, pin, counters, label: str
+) -> None:
+    _write_checkpoint(dirs, _RUN_ID, _bad_checkpoints()[label])
+    result = _cycle(dirs, mode="run")
+    assert (result["ok"], result["exit"], result["state"]) == (False, 1, "failed")
+    first = result["steps"][0]
+    assert (first["status"], first["reason"]) == ("error", "checkpoint-unreadable")
+    assert all(count == 0 for count in counters.values())
+
+
+def test_well_formed_checkpoint_still_resumes(dirs, pin, counters) -> None:
+    _write_checkpoint(dirs, _RUN_ID, _stored(_RUN_ID, "run"))
+    result = _cycle(dirs, mode="run")
+    assert result["resumed"] is True and result["state"] == "completed"
+    assert counters["preflight"] == 0 and counters["release-watch"] == 1
+
+
+# --- 5. lost audits -----------------------------------------------------------
+
+
+def test_errored_audit_tag_is_audited_by_a_later_cycle(dirs, pin) -> None:
+    _seed_release_state(dirs, "v1.0.0")
+    pin.verdict = "error"
+    first = _cycle(dirs, fetch=Fetch("v1.1.0", "v1.0.0"))
+    audit = _by_name(first)["pin-bump-audit"]
+    assert (audit["status"], audit["reason"]) == ("error", "step-error")
+    pending = dirs.reports / "purple-cycle-pending.json"
+    assert json.loads(pending.read_text(encoding="utf-8")) == {"tag": "v1.1.0"}
+
+    pin.verdict = "unchanged"
+    nxt = _cycle(dirs, now=NOW + timedelta(days=1), fetch=Fetch("v1.1.0", "v1.0.0"))
+    assert _by_name(nxt)["release-watch"]["reason"] == "no-new-release"
+    audit = _by_name(nxt)["pin-bump-audit"]
+    assert (audit["status"], audit["reason"]) == ("ok", "ok")
+    assert audit["detail"]["tag"] == "v1.1.0"
+    assert [call["config"] for call in pin.calls] == [{"to": "v1.1.0"}] * 2
+    assert not pending.exists()
+
+    third = _cycle(dirs, now=NOW + timedelta(days=2), fetch=Fetch("v1.1.0", "v1.0.0"))
+    assert _by_name(third)["pin-bump-audit"]["reason"] == "no-new-release"
+    assert len(pin.calls) == 2
+
+
+def test_audit_exception_also_records_the_pending_tag(
+    dirs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def exploding(config: Any, *, root: Any = None, run: Any = None) -> Any:
+        raise RuntimeError("audit crashed")
+
+    monkeypatch.setattr(pin_bump, "audit_scheduled_job", exploding)
+    _seed_release_state(dirs, "v1.0.0")
+    result = _cycle(dirs, fetch=Fetch("v1.1.0", "v1.0.0"))
+    assert _by_name(result)["pin-bump-audit"]["status"] == "error"
+    pending = dirs.reports / "purple-cycle-pending.json"
+    assert json.loads(pending.read_text(encoding="utf-8")) == {"tag": "v1.1.0"}
+    assert list(dirs.reports.glob(".purple-cycle-pending.json.*")) == []
+
+
+def test_pending_tag_is_never_written_in_plan_mode(dirs, pin) -> None:
+    dirs.reports.mkdir(parents=True)
+    (dirs.reports / "purple-cycle-pending.json").write_text('{"tag": "v1.1.0"}')
+    before = _snapshot(dirs.tmp)
+    result = _cycle(dirs, mode="plan")
+    assert _by_name(result)["pin-bump-audit"]["reason"] == "plan-mode"
+    assert _snapshot(dirs.tmp) == before
+    assert pin.calls == []
+
+
+@pytest.mark.parametrize(
+    "content", ["{nope", "[]", '{"tag": "bad tag\n"}', '{"tag": 3}']
+)
+def test_unusable_pending_file_is_ignored(dirs, pin, content: str) -> None:
+    dirs.reports.mkdir(parents=True)
+    (dirs.reports / "purple-cycle-pending.json").write_text(content)
+    result = _cycle(dirs, fetch=Fetch("v1.0.0"))
+    assert _by_name(result)["pin-bump-audit"]["reason"] == "no-new-release"
+    assert pin.calls == []
+
+
+# --- 6. durable location ------------------------------------------------------
+
+
+def test_checkpoint_lives_under_reports_not_root_or_repo(dirs, pin) -> None:
+    result = _cycle(dirs)
+    expected = _checkpoint_file(dirs, result["cycle_id"])
+    assert expected.is_file()
+    assert result["checkpoint"] == str(expected)
+    assert not dirs.root.exists()
+
+
+def test_checkpoint_is_not_placed_in_the_state_dir_or_repo(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = dirs.tmp / "state"
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(state))
+    env = {**IDLE_ENV, "OMEGA_PRIME_STATE_DIR": str(state)}
+    result = _cycle(dirs, root=None, env=env)
+    assert result["checkpoint"].startswith(str(dirs.reports))
+    assert not state.exists()
+    repo_workflows = Path(purple_cycle.__file__).resolve().parents[2] / "workflows"
+    assert not (repo_workflows / f"{result['cycle_id']}.json").exists()
+
+
+# --- 8. CLI: --now and abbreviations ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv", [["--apply"], ["--mode", "apply"], ["--apply", "--json"]]
+)
+def test_cli_rejects_now_with_apply_mode(dirs, pin, capsys, argv) -> None:
+    before = _snapshot(dirs.tmp)
+    assert _cli(argv, dirs) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "--now" in captured.err
+    assert _snapshot(dirs.tmp) == before
+
+
+def test_cli_now_is_still_fine_outside_apply_mode(dirs, pin, capsys) -> None:
+    assert _cli(["--mode", "run", "--json"], dirs) == 0
+    assert json.loads(capsys.readouterr().out)["cycle_id"].startswith(
+        "purple-cycle-20261014-run"
+    )
+
+
+@pytest.mark.parametrize("argv", [["--ap"], ["--mod", "apply"], ["--ste", "preflight"]])
+def test_cli_rejects_abbreviated_options(dirs, pin, capsys, argv) -> None:
+    before = _snapshot(dirs.tmp)
+    assert _cli(argv, dirs, now=False) == 2
+    assert capsys.readouterr().out == ""
+    assert _snapshot(dirs.tmp) == before
+
+
+# --- 9. regex validators ------------------------------------------------------
+
+
+@pytest.mark.parametrize("tag", ["1.2\n", "v1.2.3\n", "v\u0661.\u0662.\u0663", "v1.2 "])
+def test_safe_tag_rejects_newline_and_unicode_digits(tag: str) -> None:
+    assert purple_cycle._safe_tag(tag) is None
+
+
+def test_safe_tag_accepts_plain_ascii_tags() -> None:
+    for tag in ("v1.2.3", "1.2", "v1.2.3-rc.1", "v10.20.30+build.5"):
+        assert purple_cycle._safe_tag(tag) == tag
+
+
+def test_word_rejects_trailing_newline() -> None:
+    assert purple_cycle._word("abc\n") == "unknown"
+    assert purple_cycle._word("abc\n", "dflt") == "dflt"
+    assert purple_cycle._word("abc-1.2_x") == "abc-1.2_x"
+
+
+# --- 10. engagement script import never writes bytecode ------------------------
+
+
+def test_engagement_script_is_loaded_without_writing_bytecode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "engagement-report.py").write_text(
+        "import sys\nSEEN = sys.dont_write_bytecode\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(purple_cycle, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(purple_cycle, "_ENGAGEMENT_MODULE", None)
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    module = purple_cycle._load_engagement_module()
+    assert module.SEEN is True
+    assert sys.dont_write_bytecode is False
+
+
+def test_engagement_script_load_restores_flag_on_import_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "engagement-report.py").write_text("raise RuntimeError('x')\n")
+    monkeypatch.setattr(purple_cycle, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(purple_cycle, "_ENGAGEMENT_MODULE", None)
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    with pytest.raises(RuntimeError):
+        purple_cycle._load_engagement_module()
+    assert sys.dont_write_bytecode is False
+
+
+# --- 11. default clock seam ---------------------------------------------------
+
+
+def test_default_now_comes_from_the_utc_now_seam(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        purple_cycle, "_utc_now", lambda: datetime(2031, 2, 3, 4, 5, 6, 789, tzinfo=UTC)
+    )
+    result = run_cycle(
+        mode="plan",
+        reports_dir=dirs.reports,
+        config=_config(enabled=False),
+        env=IDLE_ENV,
+    )
+    assert result["cycle_id"] == "purple-cycle-20310203-plan"
+
+
+def test_explicit_now_never_reads_the_seam(
+    dirs, pin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden() -> datetime:
+        raise AssertionError("explicit now must not read the clock")
+
+    monkeypatch.setattr(purple_cycle, "_utc_now", forbidden)
+    assert _cycle(dirs, mode="plan")["cycle_id"] == "purple-cycle-20261014-plan"

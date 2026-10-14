@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -153,6 +155,45 @@ def test_release_watch_cli_empty_repo_fails_closed(tmp_path, capsys):
 
     code = main(["check", "--state", str(tmp_path / "rw.json"), "--repo", ""])
     assert code == 2
+
+
+def test_fetch_upstream_tags_passes_a_timeout_to_gh(monkeypatch):
+    from omega_prime.grokbot import release_watch
+
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        seen["cmd"] = list(cmd)
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="", args=cmd)
+
+    monkeypatch.setattr(release_watch.subprocess, "run", fake_run)
+    assert release_watch.fetch_upstream_tags("OWNER/NAME") == []
+    assert seen["cmd"] == ["gh", "api", "repos/OWNER/NAME/tags"]
+    assert seen["timeout"] == 60
+
+
+def test_fetch_upstream_tags_timeout_is_a_fetch_error(tmp_path, monkeypatch, capsys):
+    from omega_prime.grokbot import release_watch
+
+    def hanging(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(release_watch.subprocess, "run", hanging)
+    state = _write_state(tmp_path / "release-watch.json", [("v1.2", "831a6b0")])
+    before = state.read_bytes()
+
+    def fetch():
+        return release_watch.fetch_upstream_tags("OWNER/NAME")
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        check_release_watch(state, fetch, NOW)
+    assert state.read_bytes() == before
+    degraded = make_checker(str(state), fetch)(NOW)
+    assert "error" in degraded and degraded["new"] == []
+    code = release_watch.main(["check", "--state", str(state)])
+    assert code == release_watch.FETCH_FAILURE_EXIT
+    assert "fetch failed" in capsys.readouterr().err
 
 
 def test_build_digest_and_releases_block(tmp_path):
