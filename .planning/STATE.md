@@ -4,9 +4,9 @@ milestone: v16
 milestone_name: Enterprise Hardening and Continuous Verification
 status: Awaiting next milestone
 stopped_at: Phase 84 complete — all phases complete
-last_updated: "2026-10-13T04:49:21.839Z"
-last_activity: 2026-10-13
-last_activity_desc: Milestone v16 completed and archived
+last_updated: "2026-10-14T06:30:00.000Z"
+last_activity: 2026-10-14
+last_activity_desc: Stage 1 - CI lint on main repaired (21 ruff errors)
 state_head: a3383b2ec675083ac30a0ddc8f4e755899bdc9e3
 progress:
   total_phases: 6
@@ -25,14 +25,14 @@ current_plan: null
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** No milestone in progress. Batch 01 (7 Purple-Team SOTA features) shipped to main 2026-10-13 — report: `.planning/BATCH-01-REPORT.md`; proposed batch 02 awaiting go-ahead (ITERATION_CONTROL pause-per-batch). `redteam-node-audit` is intentionally RED on main: upstream pin 831a6b0 ships 1 critical + 7 high (v1.3 too); batch-01 F1's remediation loop is the fix path — do not triage the critical. v16 "Enterprise Hardening and Continuous Verification" is complete and archived (audit PASS 13/13; `.planning/milestones/v16-MILESTONE-AUDIT.md`): purple-team sidecar hardened and refresh-automated (ships BLOCKED), protected publish environment live, OTLP/SLOs, token rotation + quotas, sandboxed verification gates, live evals with regression tracking. Self-contained run package: `.planning/package/DELIVERABLE.md`. Operator next actions: sign the rules-of-enforcement artifact to unblock live purple-team engagements; approve the first `workflow_dispatch publish:true` run; run the six deferred 77.1 live UAT rows after the next Grok Bot upload (`/gsd:verify-work 77.1`).
+**Current focus:** No GSD milestone in progress — v1–v16 are shipped and archived; the only unchecked ROADMAP phase is 77.1, whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–17 are on main (`.planning/BATCH-01-REPORT.md` … `BATCH-17-REPORT.md`); batch 18 (seven features) follows as its own PR on the user's 2026-10-14 go-ahead. `ci / lint` on main was RED from batch 05 on (last green `ci` run `e0d7585`; 21 ruff errors that the batch reports had called clean) and is repaired by the Stage 1 change: every batch gate MUST run the exact CI commands (`ruff check omega_prime/`, `ruff format --check omega_prime/`, `mypy omega_prime/`, full pytest). The red-team pin is `f6d2fc2` (purple-team v1.4); `redteam-node-audit` has been GREEN with 0 advisories since batch 03, and upstream v1.5 has not shipped. v16 "Enterprise Hardening and Continuous Verification" is complete and archived (audit PASS 13/13; `.planning/milestones/v16-MILESTONE-AUDIT.md`): purple-team sidecar hardened and refresh-automated (ships BLOCKED), protected publish environment live, OTLP/SLOs, token rotation + quotas, sandboxed verification gates, live evals with regression tracking. Self-contained run package: `.planning/package/DELIVERABLE.md`. Operator next actions: sign the rules-of-engagement artifact to unblock live purple-team engagements; approve the first `workflow_dispatch publish:true` run; run the six deferred 77.1 live UAT rows after the next Grok Bot upload (`/gsd:verify-work 77.1`).
 
 ## Current Position
 
 Phase: Milestone v16 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-10-13 — Batch 01 (7 Purple-Team features) shipped to main; batch 02 proposed, paused per ITERATION_CONTROL
+Last activity: 2026-10-14 — Stage 1: CI lint on main repaired (21 ruff errors); batch 18 (7 Purple-Team features) follows as its own PR on the user's go-ahead
 
 ## Deferred Verification
 

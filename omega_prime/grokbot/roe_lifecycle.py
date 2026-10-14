@@ -254,7 +254,7 @@ def check_roe_lifecycle(
             except Exception:
                 import warnings
 
-                warnings.warn("roe audit log write failed; skipped")
+                warnings.warn("roe audit log write failed; skipped", stacklevel=2)
         return {
             "state": "expired",
             "days_remaining": days_remaining,
@@ -1128,7 +1128,7 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 import warnings
 
-                warnings.warn("roe audit log read failed; skipped")
+                warnings.warn("roe audit log read failed; skipped", stacklevel=2)
                 result["audit_log"] = []
         if args.json:
             print(json.dumps(result, indent=2))

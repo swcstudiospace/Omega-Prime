@@ -734,9 +734,7 @@ def test_heartbeat_digest_emits_roe_renewal_kind(tmp_path, fresh_renewals):
 def test_heartbeat_without_artifact_unchanged(tmp_path, fresh_renewals):
     """G11: heartbeats without RoE context gain no digest key at all."""
     store = _store(tmp_path)
-    job_id = schedule_heartbeat(
-        store, "sess-plain", "ping", interval_seconds=60, due_at=1000
-    )
+    schedule_heartbeat(store, "sess-plain", "ping", interval_seconds=60, due_at=1000)
     ran = tick_heartbeats(store, 1000, lambda s, p: "ran", roe_now=END)
     assert ran[0]["last_result"] == "ran"
     assert ran[0]["kind"] == HEARTBEAT_KIND

@@ -611,7 +611,7 @@ def validate_pin_bump_cron(expr: str) -> str:
             "cron expression needs 5 fields "
             f"(minute hour dom month dow), got {len(fields)}"
         )
-    for field, (lo, hi) in zip(fields, _PIN_BUMP_CRON_RANGES):
+    for field, (lo, hi) in zip(fields, _PIN_BUMP_CRON_RANGES, strict=True):
         atoms = field.split(",")
         if not atoms or any(not _pin_bump_cron_atom(atom, lo, hi) for atom in atoms):
             raise ValueError(f"invalid cron field: {field!r}")
@@ -658,7 +658,9 @@ def _pin_bump_matches(expr: str, moment: datetime) -> bool:
     )
     return all(
         _pin_bump_field_matches(field, lo, hi, value)
-        for field, (lo, hi), value in zip(fields, _PIN_BUMP_CRON_RANGES, values)
+        for field, (lo, hi), value in zip(
+            fields, _PIN_BUMP_CRON_RANGES, values, strict=True
+        )
     )
 
 
