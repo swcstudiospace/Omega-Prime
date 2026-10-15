@@ -4,9 +4,9 @@
   "milestone": "v20 — Grok Bot launch kit (In progress)",
   "phases": [],
   "next": {
-    "command": "/gsd-progress --next",
-    "label": "Advance to the next step (plan phase 98)",
-    "reason": "Phase 98 of 4 — needs a plan"
+    "command": "/gsd:new-milestone",
+    "label": "Start a new milestone",
+    "reason": "All phases complete — start a new milestone"
   },
-  "updated_at": "2026-10-15T12:14:52.401Z"
+  "updated_at": "2026-10-15T13:55:26.323Z"
 }

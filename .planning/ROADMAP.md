@@ -116,7 +116,7 @@ Requirements: milestones/v19-REQUIREMENTS.md. Phase 77.1 live UAT stays user-own
   3. `omega_prime/grokbot/listing/banner.svg` and its PNG derivative show the listing title and tagline with the same contrast as the Phase 78 banner
   4. The banner text names only verified capabilities and their evidence level, with no live-Grok claim
 
-**Plans**: 2 plans
+**Plans**: 2/2 plans complete
 Plans:
 
 - [x] 97-01-PLAN.md — icon rasters (wave 1, 2 tasks)

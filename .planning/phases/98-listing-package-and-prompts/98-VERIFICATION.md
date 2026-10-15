@@ -1,91 +1,105 @@
 ---
 phase: 98-listing-package-and-prompts
-verified: 2026-10-15T13:16:00Z
+verified: 2026-10-15T14:30:00Z
 status: passed
 score: 4/4 success criteria verified
-covered_files: [".planning/phases/98-listing-package-and-prompts/98-01-PLAN.md", ".planning/phases/98-listing-package-and-prompts/98-01-SUMMARY.md", ".planning/phases/98-listing-package-and-prompts/98-02-PLAN.md", ".planning/phases/98-listing-package-and-prompts/98-02-SUMMARY.md", ".planning/phases/98-listing-package-and-prompts/98-CONTEXT.md", "LICENSE", "mcp.json", "omega_prime/grokbot/SETUP.md", "omega_prime/grokbot/listing/CHANGELOG.md", "omega_prime/grokbot/listing/LICENSE.md", "omega_prime/grokbot/listing/README.md", "omega_prime/grokbot/listing/prompts/follow-up/01-verify-install.md", "omega_prime/grokbot/listing/prompts/follow-up/02-help-tour.md", "omega_prime/grokbot/listing/prompts/follow-up/03-health-check.md", "omega_prime/grokbot/listing/prompts/follow-up/04-first-real-task-code-review.md", "omega_prime/grokbot/listing/prompts/follow-up/05-troubleshooting.md", "omega_prime/grokbot/listing/prompts/follow-up/INDEX.md", "omega_prime/grokbot/listing/prompts/install.md", "omega_prime/tests/test_grokbot_listing.py", "omega_prime/tests/test_grokbot_listing_assets.py"]
-covered_digest: "v1:sha256:1ceb94c6c60576cf35a64eed783327bc9f876c1577d8b4f271b1d3634fc73184"
+covered_files: [".planning/phases/98-listing-package-and-prompts/98-02-PLAN.md", "LICENSE", "mcp.json", "omega_prime/grokbot/SETUP.md", "omega_prime/grokbot/listing/CHANGELOG.md", "omega_prime/grokbot/listing/LICENSE.md", "omega_prime/grokbot/listing/README.md", "omega_prime/grokbot/listing/prompts/follow-up/01-verify-install.md", "omega_prime/grokbot/listing/prompts/follow-up/02-help-tour.md", "omega_prime/grokbot/listing/prompts/follow-up/03-health-check.md", "omega_prime/grokbot/listing/prompts/follow-up/04-first-real-task-code-review.md", "omega_prime/grokbot/listing/prompts/follow-up/05-troubleshooting.md", "omega_prime/grokbot/listing/prompts/follow-up/INDEX.md", "omega_prime/grokbot/listing/prompts/install.md", "omega_prime/tests/test_grokbot_listing.py", "omega_prime/tests/test_grokbot_listing_assets.py"]
+covered_digest: "v1:sha256:ebc793bdb5ba66fc32575a0ed106f1a3967ab71b235532112183f4f8f67a9807"
 behavior_unverified: 0
 overrides_applied: 0
 gaps: []
 deferred: []
 ---
 
-# Phase 98: Listing package and prompts - Verification Report
+# Phase 98: Listing package and prompts — Verification Report
 
-**Phase Goal:** The Grok Bot listing is a folder with its own README, CHANGELOG, licensing notice, install prompt and follow-up prompts. Each prompt is tested against the real source it quotes.
-**Verified:** 2026-10-15T13:16:00Z
-**Status:** gaps_found
-**Re-verification:** No. This replaces the earlier `passed` report in this directory, which did not catch the uncited README sentence.
-**Branch:** v20-grok-bot-launch-kit
-**User override applied:** follow-up mapping 01 `/omega-roster`, 02 `/omega-help`, 03 `/omega-doctor`, 04 `/omega-code-review`, 05 `/omega-doctor` (triage). The health-check file is `03-health-check.md`.
+**Phase Goal:** A Grok Bot operator can read the listing, paste the install prompt and run the follow-up prompts, and every claim shows its evidence level and source.
+**Verified:** 2026-10-15T14:30:00Z
+**Status:** passed
+**Re-verification:** Yes — this replaces the earlier report in this directory, which recorded one gap (an uncited README sentence on line 5). Commit `030cdd1` fixed that sentence; this report re-checks every success criterion with fresh evidence.
 
 ## Goal Achievement
 
-The listing folder exists at `omega_prime/grokbot/listing/` with README, CHANGELOG, LICENSE.md, `prompts/install.md`, five follow-up prompts and `prompts/follow-up/INDEX.md`. The install prompt is byte-identical to SETUP.md section 1. Each follow-up prompt sends one `/omega-*` command whose command file exists. The index lists each prompt once. The root LICENSE is unchanged. The phase's 39 tests pass, and I confirmed by mutation that they catch drift.
+### Observable Truths
 
-One literal success-criterion gap remains: the README opening sentence is an uncited claim (SC1). Several smaller warnings are listed below. None of them is a live-Grok claim.
+| # | Truth | Status | Evidence |
+| --- | --- | --- | --- |
+| SC1 | `listing/README.md` links to the install prompt and the follow-up prompts rather than duplicating them, and each claim cites its source file and evidence level | ✓ VERIFIED | `grep` finds `](prompts/install.md)` (line 13) and `](prompts/follow-up/INDEX.md)` (line 17); `setup-omega-prime` and `<task` absent from README. Table header `\| Claim \| Evidence level \| Source \|` exact match; 12 data rows, each second cell in the allowed set (`local proof`, `optional capability`, `UNPROVEN`, `PARTIAL`) and each third cell containing a relative markdown link (checked by script). Line 5 now reads "The setup path is documented in [SETUP.md](../SETUP.md). Live Grok Bot import is UNPROVEN…" — the claim is cited inline (SETUP.md link) and labelled UNPROVEN with the UAT link; no uncited claim remains. Fix confirmed in `git show 030cdd1`. Tests `test_readme_claims_table_cites_levels_and_sources` + `test_listing_relative_links_and_anchors_resolve` pass. |
+| SC2 | `prompts/install.md` matches the SETUP.md section 1 task block verbatim, and its stdio command equals the one declared in `mcp.json`; drift fails a test | ✓ VERIFIED | Python extraction: SETUP.md slice from `<task name="setup-omega-prime" version="1">` through first `</task>` is byte-identical to install.md's only ` ```text ` fence body (1014 bytes each, `IDENTICAL`). `mcp.json` declares `bash ${CURSOR_PLUGIN_ROOT}/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`; with the placeholder replaced by `/workspace/omega-prime` it equals the `running exactly:` line in install.md (line 15). Tests `test_install_prompt_is_verbatim_setup_section_one` and `test_install_prompt_stdio_command_matches_mcp_json` pass. |
+| SC3 | Each of the five follow-up prompts names the exact `/omega-*` command it sends and states what it does not prove; unknown commands or index gaps fail a test | ✓ VERIFIED | `follow-up/` holds `01-verify-install.md`, `02-help-tour.md`, `03-health-check.md`, `04-first-real-task-code-review.md`, `05-troubleshooting.md` + `INDEX.md`. Mapping: 01 → `/omega-roster`, 02 → `/omega-help`, 03 → `/omega-doctor`, 04 → `/omega-code-review`, 05 → `/omega-doctor`; all four command files exist in `plugin/commands/`. Each prompt has a `## What this does not prove` section and each carries UNPROVEN (2 hits per file). INDEX.md table lists all five exactly once with matching Sends column. Tests `test_every_omega_command_name_has_a_command_file`, `test_each_follow_up_prompt_sends_one_command_and_states_what_it_does_not_prove`, `test_follow_up_index_lists_each_prompt_exactly_once`, `test_follow_up_commands_match_pinned_mapping` pass. |
+| SC4 | The listing `CHANGELOG.md` has a v20 entry, and `LICENSE.md` names AGPL-3.0-only and points to the unchanged root `LICENSE` | ✓ VERIFIED | `grep -c '^## \['` = 1, the line is `## [v20] - Unreleased`; root-history link `](../../../CHANGELOG.md)` present; Keep a Changelog 1.1.0 attribution present. `LICENSE.md` contains `AGPL-3.0-only`, `Copyright (C) 2026 Spectrum Web Co`, `](../../../LICENSE)` links, and `UNPROVEN`. `sha256sum LICENSE` = `6c944d7a32f9355777b7f4c70243a01bf2ea55c429a69599f53c4595d6b4b51a`, equal to `git show HEAD:LICENSE \| sha256sum`; `git status --porcelain -- LICENSE README.md CHANGELOG.md` prints nothing. Tests `test_root_license_is_pinned_and_matches_git_head`, `test_license_notice_names_license_holder_and_root_file`, `test_changelog_has_one_v20_entry_and_links_root_history` pass. |
 
-## Roadmap Success Criteria
+**Score:** 4/4 truths verified (0 present, behavior-unverified)
 
-| # | Success criterion | Command run | Result | Status |
-| - | ----------------- | ----------- | ------ | ------ |
-| SC1 | README links the install and follow-up prompts rather than duplicating them; each claim cites its source file and evidence level | `pytest omega_prime/tests/test_grokbot_listing.py -k "readme_claims_table or relative_links"`; manual read of `README.md` | Pytest passes. The README links `prompts/install.md` and `prompts/follow-up/INDEX.md` and does not repeat the install block. The claims table has 12 rows, each with an allowed level and a relative source link. **Gap:** line 5, "This is a documented setup path that is verified locally in this repository", has no row or source. The test checks only table rows, so it misses this. | ✗ GAP |
-| SC2 | `prompts/install.md` matches SETUP.md section 1 verbatim; its stdio command equals the `mcp.json` entry; drift fails a test | Python extraction of the first ```` ```text ```` fence after `## 1. Set up Omega Prime` in `SETUP.md`, and of the only text fence in `install.md`, then `cmp`. Pytest `test_install_prompt_is_verbatim_setup_section_one` and `test_install_prompt_stdio_command_matches_mcp_json`. Mutation check on temp copies (below). | `cmp` reports identical, 1015 bytes each. The `mcp.json` command with `${CURSOR_PLUGIN_ROOT}` replaced by `/workspace/omega-prime` equals the line in `install.md`. Both tests pass. Changing the step text (M1) or `--transport stdio` to `https` (M4) makes the matching test fail. | ✓ VERIFIED |
-| SC3 | Each follow-up prompt names its exact `/omega-*` command and what it does not prove; a command with no file in `plugin/commands/`, or a prompt missing from the index, fails a test | `ls plugin/commands/` for the four command files; pytest `test_every_omega_command_name_has_a_command_file`, `test_each_follow_up_prompt_sends_one_command_and_lists_limits`, `test_follow_up_index_lists_each_prompt_exactly_once`, `test_follow_up_commands_match_pinned_mapping`; mutation check (below). | Mapping matches the override: 01 `/omega-roster`, 02 `/omega-help`, 03 `/omega-doctor`, 04 `/omega-code-review`, 05 `/omega-doctor`. All four `omega-*.md` files exist. Each prompt has one fenced message and a `## What this does not prove` section with at least two bullets. INDEX lists each of the five prompt files once. Removing the 05 row (M2) and renaming `/omega-help` to `/omega-helpx` (M3) each make the matching test fail. | ✓ VERIFIED |
-| SC4 | CHANGELOG has a v20 entry; `LICENSE.md` names AGPL-3.0-only and points to the unchanged root `LICENSE` | `sha256sum LICENSE` and `git show HEAD:LICENSE \| sha256sum`; `git status --porcelain -- LICENSE README.md CHANGELOG.md`; pytest `test_root_license_is_pinned_and_matches_git_head`, `test_license_notice_names_license_holder_and_root_file`, `test_changelog_has_one_v20_entry_and_links_root_history`; manual read of `CHANGELOG.md` and `LICENSE.md` | Root LICENSE sha256 = `6c944d7a32f9355777b7f4c70243a01bf2ea55c429a69599f53c4595d6b4b51a`, equal to the value pinned in the test and to HEAD. Root status is clean. `LICENSE.md` names AGPL-3.0-only (matches `.cursor-plugin/plugin.json` `license`), the holder `Copyright (C) 2026 Spectrum Web Co` (matches root `LICENSE`) and `../../../LICENSE`. CHANGELOG has `## [v20] - Unreleased`. **Warning W1:** its section headings are `Added`, `Not changed` and `Evidence`; the Keep a Changelog types are Added/Changed/Deprecated/Removed/Fixed/Security. | ✓ VERIFIED (warning W1) |
+### Required Artifacts
 
-**Score:** 3/4 success criteria verified. SC1 has one uncited sentence.
+| Artifact | Expected | Status | Details |
+| -------- | -------- | ------ | ------- |
+| `omega_prime/grokbot/listing/README.md` | Listing page, prompt links, 12-row sourced claims table | ✓ VERIFIED | Links, header, 12 rows with allowed levels + source links; no install block; prose claims cited |
+| `omega_prime/grokbot/listing/prompts/install.md` | Verbatim install prompt, one text fence | ✓ VERIFIED | Fence body byte-identical to SETUP.md section 1; stdio line matches mcp.json |
+| `omega_prime/grokbot/listing/prompts/follow-up/01..05` | Five prompts, one command each, "does not prove" section | ✓ VERIFIED | Each sends its pinned command; each has the heading + UNPROVEN |
+| `omega_prime/grokbot/listing/prompts/follow-up/INDEX.md` | Index listing each prompt exactly once | ✓ VERIFIED | Five-row table, Sends matches pinned mapping, no duplicate links |
+| `omega_prime/grokbot/listing/CHANGELOG.md` | Single v20 entry, root-history link | ✓ VERIFIED | Exactly one `## [` heading; Keep a Changelog URL present |
+| `omega_prime/grokbot/listing/LICENSE.md` | Notice naming AGPL-3.0-only, holder, root LICENSE | ✓ VERIFIED | All literals present; no license body text |
+| `omega_prime/tests/test_grokbot_listing.py` | Drift/command/index/licence/claim/link tests | ✓ VERIFIED | Collects and passes; pins root LICENSE sha256 |
+| `omega_prime/tests/test_grokbot_listing_assets.py` | Asset tests | ✓ VERIFIED | Passes alongside the listing tests |
 
-## Requirements Coverage
+### Key Link Verification
 
-| Requirement | Status | Evidence |
-| ----------- | ------ | -------- |
-| LST-01 README: listing page, install and follow-up links, sourced claims | ✗ PARTIAL | Links and claims table verified. The uncited line 5 sentence is the SC1 gap. |
-| LST-02 CHANGELOG follows Keep a Changelog, has v20, points to root history | ✓ SATISFIED (W1) | v20 entry and root link present. Non-standard section headings. |
-| LST-03 LICENSE.md names AGPL-3.0-only and holder, points to root LICENSE, no license text | ✓ SATISFIED | 13-line notice, no license body. Root file unchanged. |
-| INS-01 install.md verbatim from SETUP section 1; stdio matches mcp.json; drift test | ✓ SATISFIED | SC2 |
-| INS-02 five follow-up prompts, each naming its command and what it does not prove | ✓ SATISFIED | SC3 |
-| INS-03 test fails on unknown command or missing index entry | ✓ SATISFIED | SC3, mutation M2 and M3 |
+| From | To | Via | Status | Details |
+| ---- | --- | --- | ------ | ------- |
+| `listing/README.md` | `prompts/install.md`, `prompts/follow-up/INDEX.md` | relative markdown links | ✓ WIRED | Both targets exist and resolve |
+| `prompts/install.md` | `omega_prime/grokbot/SETUP.md` section 1 | byte-identical fence (test-enforced) | ✓ WIRED | 1014 bytes identical; drift fails test |
+| `prompts/install.md` | `mcp.json` stdio declaration | `running exactly:` line (test-enforced) | ✓ WIRED | Placeholder-substituted command matches |
+| follow-up prompts | `plugin/commands/omega-*.md` | command name → file (test-enforced) | ✓ WIRED | All four files exist |
+| `follow-up/INDEX.md` | five prompt files | bare-name links, exactly once each | ✓ WIRED | Counter check passes |
+| `listing/LICENSE.md` | root `LICENSE` | `../../../LICENSE` links | ✓ WIRED | Target resolves to repo root |
+| `listing/CHANGELOG.md` | root `CHANGELOG.md` | `../../../CHANGELOG.md` link | ✓ WIRED | History not duplicated |
 
-No orphaned requirements. All six IDs mapped to Phase 98 in REQUIREMENTS.md are claimed by the plans.
+### Data-Flow Trace (Level 4)
 
-## Commands and Results
+Not applicable — no rendered dynamic data; all values are static documentation text verified by byte comparison and link resolution above.
 
-| Check | Command | Result |
-| ----- | ------- | ------ |
-| Phase 98 pytest targets | `.venv/bin/python -m pytest omega_prime/tests/test_grokbot_listing.py omega_prime/tests/test_grokbot_listing_assets.py omega_prime/tests/test_docs.py -q` | 39 passed in 1.30s |
-| Mypy on the phase test files | `.venv/bin/python -m mypy omega_prime/tests/test_grokbot_listing.py omega_prime/tests/test_grokbot_listing_assets.py omega_prime/tests/test_docs.py` | Success: no issues found in 3 source files |
-| Mypy on the package | `.venv/bin/python -m mypy omega_prime/` | Success: no issues found in 443 source files |
-| Ruff on the phase test files | `.venv/bin/ruff check` and `.venv/bin/ruff format --check` on `test_grokbot_listing.py` (and the two other phase test files for check) | All checks passed; 1 file already formatted |
-| Root LICENSE hash | `sha256sum LICENSE` | `6c944d7a32f9355777b7f4c70243a01bf2ea55c429a69599f53c4595d6b4b51a` |
-| Root LICENSE vs HEAD | `git show HEAD:LICENSE \| sha256sum` | same digest |
-| Root files untouched | `git status --porcelain -- LICENSE README.md CHANGELOG.md` | empty |
-| Install prompt vs SETUP section 1 | Python extraction, then `cmp /tmp/setup_sec1_fence.txt /tmp/install_fence.txt` | `CMP` identical, 1015 bytes |
-| Mutation checks (temp copies; repo unmodified) | Monkeypatched the test module's path constants to drifted copies and called the tests | M1 install text change: `test_install_prompt_is_verbatim_setup_section_one` fails. M2 index row removed: `test_follow_up_index_lists_each_prompt_exactly_once` fails. M3 `/omega-helpx` in 02: `test_every_omega_command_name_has_a_command_file` and `test_follow_up_commands_match_pinned_mapping` fail. M4 `--transport https` in install: `test_install_prompt_stdio_command_matches_mcp_json` fails. Controls on unmodified files pass. |
-| Listing claim grep | `grep -rniE "works\|connected\|published listing\|screenshot\|live (grok\|bot)\|live import\|marketplace\|successfully\|imported\|attached" omega_prime/grokbot/listing` | No live connection, published listing or screenshot is claimed. Hits are negations, UNPROVEN labels or the conditional in W2. |
-| Fingerprint | `gsd_run query verification.fingerprint` over the covered files | `v1:sha256:1ceb94c6...fc73184`, unchanged from the earlier report |
+### Behavioral Spot-Checks
 
-## Warnings (non-blocking)
+| Behavior | Command | Result | Status |
+| -------- | ------- | ------ | ------ |
+| Listing + asset tests pass | `.venv/bin/python -m pytest omega_prime/tests/test_grokbot_listing.py omega_prime/tests/test_grokbot_listing_assets.py -q` | 27 passed in 2.29s | ✓ PASS |
+| Install fence identical to SETUP section 1 | Python extraction + comparison | IDENTICAL, 1014 bytes each | ✓ PASS |
+| stdio command matches mcp.json | Python placeholder substitution + `grep running exactly` | exact match | ✓ PASS |
+| Root LICENSE pinned and equal to HEAD | `sha256sum LICENSE` vs `git show HEAD:LICENSE \| sha256sum` | `6c944d7a…4b51a` both | ✓ PASS |
+| Root files untouched | `git status --porcelain -- LICENSE README.md CHANGELOG.md` | empty | ✓ PASS |
 
-- **W1, LST-02 headings.** `CHANGELOG.md` uses `Not changed` and `Evidence` as section headings. These are not Keep a Changelog types. Renaming them to Changed, or moving the text into the Added or Changed sections, would meet LST-02 exactly.
-- **W2, "works" in INDEX.** `prompts/follow-up/INDEX.md` line 3 reads "Five prompts to run after step 4 of the install prompt works." It is a conditional, not a claim, and the same file labels live import UNPROVEN on line 13. It still fails the literal "must be absent or labelled UNPROVEN" grep. Suggested rewording: "Five prompts to run once step 4 of the install prompt has run."
-- **W3, conflicting evidence level.** `README.md` row 6 labels "A custom Command (stdio) server runs on the computer each Bot conversation uses" as UNPROVEN. `SETUP.md` section 1 labels the same claim CONFIRMED, citing the team-bots doc. The README is the more conservative label, but the two should agree.
-- **W4, untested doctor quotes (phase goal "each prompt is tested against the real source it quotes").** Prompts 03 and 05 describe `/omega-doctor` output: six named checks (prompt, skills, memory, tools, roster, substrate), a `checks` object, a `green` flag per check, and a write to the roster doctor record. I checked these by hand against `omega_prime/tools/lead.py` (around lines 956-1015) and they match. No test pins them, so a change in the doctor would not fail the listing tests. Command names and the install block are tested. The doctor description is not.
-- **Info, triage stop point.** In `lead.py`, the `prompt` check is red until `install_prompt` or `repair` has run. On a fresh host, prompt 05 will therefore stop at `prompt` on the first run. This is accurate behavior, but the troubleshooting text does not mention it.
-- **Process note (not a success criterion).** `git branch --contains` shows commits d90e330 and bdbaef1 (plan 98-01) on both `main` and `v20-grok-bot-launch-kit`. The 98-01 summary flags this for the user to decide.
+### Probe Execution
 
-## Gaps Summary
+No phase-declared or conventional probes for this phase. Skipped.
 
-**Gap 1 (SC1, LST-01):** The README opening line "This is a documented setup path that is verified locally in this repository" makes a claim with no claims-table row, source or evidence level. Add a row, citing `plugin.py` `verify_stdio` and `docs/local-validation.md` with level `local proof`, or delete the sentence. Adding a prose check to the test would stop this from recurring.
+### Requirements Coverage
 
-Once Gap 1 is fixed, SC1 passes and the phase is `passed`. Warnings W1 to W4 are advisory and do not change the status.
+| Requirement | Source Plan | Description | Status | Evidence |
+| ----------- | ---------- | ----------- | ------ | -------- |
+| LST-01 | 98-01 | Listing page, install/follow-up links, sourced claims | ✓ SATISFIED | SC1 |
+| LST-02 | 98-01 | Changelog follows Keep a Changelog, has v20, points to root history | ✓ SATISFIED | SC4; fix commit replaced non-standard `Not changed`/`Evidence` headings with prose |
+| LST-03 | 98-01 | LICENSE.md names AGPL-3.0-only and holder, points to root LICENSE | ✓ SATISFIED | SC4 |
+| INS-01 | 98-02 | install.md verbatim from SETUP section 1; stdio matches mcp.json; drift test | ✓ SATISFIED | SC2 |
+| INS-02 | 98-02 | Five follow-up prompts, each naming its command and what it does not prove | ✓ SATISFIED | SC3 |
+| INS-03 | 98-02 | Test fails on unknown command or missing index entry | ✓ SATISFIED | SC3; enforced by `test_every_omega_command_name_has_a_command_file` and `test_follow_up_index_lists_each_prompt_exactly_once` |
 
-## Human Verification Required
+### Anti-Patterns Found
 
-None needed for this phase's scope. Live Grok Bot import remains UNPROVEN and is tracked in `docs/grok-bot-native.md#user-uat`, as the phase requires.
+| File | Line | Pattern | Severity | Impact |
+| ---- | ---- | ------- | -------- | ------ |
+| — | — | None found | — | `screenshot` grep hits (3) are all negations ("not screenshots", "A live-session screenshot" under "Not claimed here"); `connected Bot` / `published listing` / `marketplace` patterns have no positive-claim hits |
+
+### Human Verification Required
+
+None. Live Grok Bot import remains UNPROVEN by design and is tracked in `docs/grok-bot-native.md#user-uat`, as the phase requires.
+
+### Gaps Summary
+
+No gaps. The single gap from the prior report (uncited README line 5 sentence) was fixed by commit `030cdd1`, which reworded the sentence to cite `[SETUP.md](../SETUP.md)` inline and label live import UNPROVEN with the UAT link. Fresh grep/script evidence above confirms no uncited prose claim remains: every other descriptive paragraph points at its claims-table row (rows 9, 10) or links its source file directly.
 
 ---
 
-_Verified: 2026-10-15T13:16:00Z_
-_Verifier: Claude (gsd-verifier)_
+_Verified: 2026-10-15T14:30:00Z_
+_Verifier: ChosenPython (gsd-verifier)_

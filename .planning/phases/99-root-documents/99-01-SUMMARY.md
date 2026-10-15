@@ -91,3 +91,7 @@
 - Commit `README.md`, `docs/developer-guide.md`, `CHANGELOG.md`,
   `docs/SUMMARY.md` (and this SUMMARY file per the plan's output step).
   This plan deliberately left everything uncommitted and un-staged.
+
+## Plan decision (recorded by the orchestrator)
+
+99-02-PLAN.md proposed fixing the five outside links by editing CONTRIBUTING.md and the listing README. Its file is renamed to 99-02-PLAN.superseded so GSD does not count it as an open plan. The owner chose to keep 99-01's approach: the README carries the compatibility anchor, and CONTRIBUTING.md and the other outside files stay untouched.
