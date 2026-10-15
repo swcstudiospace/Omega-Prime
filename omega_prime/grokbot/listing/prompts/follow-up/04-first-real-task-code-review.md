@@ -1,7 +1,8 @@
 # First real task
 
-This prompt starts a first real review. Name a file, diff or branch in place of the placeholder before you send it.
+This prompt prepares a first real review. It shows the exact command text to send so the Bot can load the review instructions and checks. Name a file, diff or branch in place of the placeholder before you send it.
 
+The Bot loads the instructions from the skill and returns checks. The actual review against those instructions is performed by the Bot as a follow-on action.
 Command: [`/omega-code-review`](../../../plugin/commands/omega-code-review.md)
 
 Evidence level: local proof for the command's own tool result. A live Bot run is UNPROVEN until the [user UAT](../../../../../docs/grok-bot-native.md#user-uat) rows are recorded.
