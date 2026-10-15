@@ -32,7 +32,7 @@ README_HEADER = "| Claim | Evidence level | Source |"
 EXPECTED_FOLLOW_UP: dict[str, str] = {
     "01-verify-install.md": "/omega-roster",
     "02-help-tour.md": "/omega-help",
-    "03-roster-health-check.md": "/omega-doctor",
+    "03-health-check.md": "/omega-doctor",
     "04-first-real-task-code-review.md": "/omega-code-review",
     "05-troubleshooting.md": "/omega-doctor",
 }
