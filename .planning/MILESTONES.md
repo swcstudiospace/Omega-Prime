@@ -1,5 +1,15 @@
 # Milestones
 
+## v19 — Installer bindings (2026-10-15)
+
+**Status:** Complete. 1 phase (96), 1 plan. Audit PASS for INST-01 through INST-07.
+
+**Core value delivered:** `/omega-connectors` walks a fresh install through a Notion Tasks template, that installer's Notion, that installer's Linear team, then an optional substrate, red-team, or desk-bus gateway. Tokens stay on the host. An empty `prime-agent` checkout fails setup with the submodule init command.
+
+**Known gaps:** Phase 77.1 live Grok Bot import UAT stays user-owned. No public Notion gallery listing exists; the template is `docs/notion-task-dashboard.md`.
+
+---
+
 ## v16 v16 (Shipped: 2026-10-13)
 
 **Phases completed:** 6 phases, 12 plans, 6 tasks

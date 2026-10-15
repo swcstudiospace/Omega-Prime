@@ -108,6 +108,21 @@ holds team and database ids, never tokens. An empty `prime-agent/`
 checkout fails `python -m omega_prime.setup_check` with
 `git submodule update --init --recursive`. `redteam/` stays optional.
 
+There is no public Notion gallery listing for the dashboard. The
+markdown page is the template: recreate that database in your own
+workspace. Do not point the bot at someone else's page id.
+
+Sibling checkouts that setup does not import stay out of `.gitmodules`:
+
+| Checkout | Why it is not a submodule |
+| --- | --- |
+| `hermes-agent/`, `oh-my-pi/` | Behavior ports. `VENDOR.md` says they are not imported. They stay gitignored. |
+| `programming-desk` | Skills and routines are copied into `omega_prime/`. The desk repo is not started by setup. |
+| `agent-substrate` | The bot talks to it over `SUBSTRATE_URL`. The server source is not imported. |
+| `claude-ultrathink` | Optional. `ULTRATHINK_ROOT` points at a checkout the operator already has. |
+| `vps-agent-bus` | Not imported. The desk bus is `OMEGA_PRIME_DESK_BUS_URL` when the operator sets it. |
+| `hermes-linear-connector` | A separate Linear-to-kanban sync. Omega Prime does not call it. |
+
 ## 5. Verify locally with no credentials
 
 These run with an empty credential surface and prove only this checkout:
