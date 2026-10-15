@@ -199,6 +199,11 @@ class RedteamClient:
 
     def _base_or_error(self) -> tuple[str, dict[str, Any] | None]:
         """``(base, None)`` or ``("", refusal row)`` — the upstream gate."""
+        from omega_prime.integrations.gateways import gateway_block
+
+        blocked = gateway_block("redteam")
+        if blocked is not None:
+            return "", blocked
         base = (self.ctx.gateway_url or "").strip().rstrip("/")
         try:
             parts = urllib.parse.urlsplit(base)

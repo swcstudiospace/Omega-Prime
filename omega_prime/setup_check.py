@@ -1,9 +1,10 @@
 """Setup smoke check: verify an Omega Prime install end to end, locally.
 
 `python -m omega_prime.setup_check --root <repo>`: runs the roster, template,
-assembly, plugin, registry, ultrathink, and substrate checks and exits 0 only
-when every required check passes. Skips (ultrathink/substrate unconfigured)
-are reported, never failures.
+assembly, plugin, registry, ultrathink, substrate, and submodule checks and
+exits 0 only when every required check passes. Skips (ultrathink/substrate
+unconfigured) are reported, never failures. An empty ``prime-agent`` checkout
+fails and prints ``git submodule update --init --recursive``.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from omega_prime.assemble import load_roster
+from omega_prime.integrations.submodules import check_submodules
 from omega_prime.mcp_server import default_registry, roster_names
 
 
@@ -199,6 +201,7 @@ CHECKS = (
     ("registry", check_registry),
     ("ultrathink", check_ultrathink),
     ("substrate", check_substrate),
+    ("submodules", check_submodules),
 )
 
 

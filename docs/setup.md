@@ -90,6 +90,8 @@ saved output — `--token` exists only as a deprecated flag that warns because
 | `SUBSTRATE_TOKEN` | Substrate brief/events/memory | host env, resolved via the credential broker |
 | `HINDSIGHT_API_KEY` | Shared Hindsight episodic memory | host env, resolved via the credential broker |
 | `MCP_AUTH_TOKEN` or `--token-file` | Bearer token a remote tool host requires | host env or a `0600` file (never `argv`) |
+| `NOTION_TOKEN` or `NOTION_TOKEN_FILE` | Notion Task dashboard (read and update content) | host env, or a mode 0600 file path |
+| `LINEAR_API_KEY` or `LINEAR_API_KEY_FILE` | Linear team selection and issue create | host env, or a mode 0600 file path |
 
 Configure only the integrations you intend to use. Availability and failure
 behavior are tool-specific: some tools return `not_configured`, readiness
@@ -97,6 +99,14 @@ accounts for named prerequisites, and some clients raise or degrade reads.
 See [substrate](substrate.md) and [connectors](connectors.md) for those contracts.
 `SUBSTRATE_URL` (default `http://127.0.0.1:7410`) and `HINDSIGHT_URL` override
 the respective peers; `omega_prime/grokbot/SETUP.md` has the full secret table.
+
+Send `/omega-connectors` to walk installer setup: the Notion template in
+[notion-task-dashboard.md](notion-task-dashboard.md), then Notion, then
+Linear, then an optional gateway. Bindings are stored outside the
+repository under `OMEGA_PRIME_STATE_DIR` (or `~/.omega-prime`). The file
+holds team and database ids, never tokens. An empty `prime-agent/`
+checkout fails `python -m omega_prime.setup_check` with
+`git submodule update --init --recursive`. `redteam/` stays optional.
 
 ## 5. Verify locally with no credentials
 

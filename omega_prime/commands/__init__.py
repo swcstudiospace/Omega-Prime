@@ -113,7 +113,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         "omega-connectors",
-        "/omega-connectors",
+        "/omega-connectors [duplicated|connected|skip-gateway|status]",
         "List configured connectors and requests for missing env names.",
         "The user asks which connectors are missing or how to connect one.",
     ),
@@ -372,7 +372,11 @@ def _run(
             )
         return _ok(name, {"commands": command_catalog()})
     if name == "omega-connectors":
-        return _ok(name, connector_requests(env))
+        from omega_prime.integrations.setup import handle as installer_handle
+
+        body = connector_requests(env)
+        body["integrations"] = installer_handle(args, env)
+        return _ok(name, body)
     if name == "omega-python":
         return _workflow("omega-python", "python-clean", registry, env, doctor_context)
     if name == "omega-onboard":
