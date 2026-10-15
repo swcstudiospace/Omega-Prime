@@ -375,7 +375,9 @@ def _run(
         from omega_prime.integrations.setup import handle as installer_handle
 
         body = connector_requests(env)
-        body["integrations"] = installer_handle(args, env)
+        body["integrations"] = installer_handle(
+            args, env, policy=getattr(registry, "policy", None)
+        )
         return _ok(name, body)
     if name == "omega-python":
         return _workflow("omega-python", "python-clean", registry, env, doctor_context)

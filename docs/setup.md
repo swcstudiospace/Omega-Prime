@@ -90,7 +90,7 @@ saved output — `--token` exists only as a deprecated flag that warns because
 | `SUBSTRATE_TOKEN` | Substrate brief/events/memory | host env, resolved via the credential broker |
 | `HINDSIGHT_API_KEY` | Shared Hindsight episodic memory | host env, resolved via the credential broker |
 | `MCP_AUTH_TOKEN` or `--token-file` | Bearer token a remote tool host requires | host env or a `0600` file (never `argv`) |
-| `NOTION_TOKEN` or `NOTION_TOKEN_FILE` | Notion Task dashboard (read and update content) | host env, or a mode 0600 file path |
+| `NOTION_TOKEN` or `NOTION_TOKEN_FILE` | Notion Task dashboard (read, update, and insert content) | host env, or a mode 0600 file path |
 | `LINEAR_API_KEY` or `LINEAR_API_KEY_FILE` | Linear team selection and issue create | host env, or a mode 0600 file path |
 
 Configure only the integrations you intend to use. Availability and failure
@@ -111,6 +111,13 @@ checkout fails `python -m omega_prime.setup_check` with
 There is no public Notion gallery listing for the dashboard. The
 markdown page is the template: recreate that database in your own
 workspace. Do not point the bot at someone else's page id.
+
+The shipped seat policy allowlist is empty. Before `/omega-connectors`
+can call Notion, Linear, or a gateway, add `api.notion.com`,
+`api.linear.app`, and each gateway host to `network.hosts` in
+`omega_prime/contracts/policies/omega-prime.json`, then regenerate the
+sandbox policy. A host that is not listed is refused and the saved
+gateway is left unchanged.
 
 Sibling checkouts that setup does not import stay out of `.gitmodules`:
 

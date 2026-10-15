@@ -4,16 +4,19 @@
 
 from __future__ import annotations
 
+import email.message
+import io
 import json
 import stat
+import urllib.error
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
 from omega_prime.commands import execute_command
-from omega_prime.grokbot.findings_sync import sync_findings_linear
+from omega_prime.grokbot.findings_sync import GhApiError, sync_findings_linear
 from omega_prime.integrations.binding import fresh_binding, load_binding, save_binding
 from omega_prime.integrations.contract import (
     CONTRACT_VERSION,
@@ -21,15 +24,24 @@ from omega_prime.integrations.contract import (
     REQUIRED_STATUS,
     schema_gaps,
 )
-from omega_prime.integrations.gateways import gateway_status
+from omega_prime.integrations.gateways import (
+    gateway_status,
+    health_url,
+    probe_gateway,
+    probe_url,
+)
 from omega_prime.integrations.linear import LINEAR_API_URL, LinearClient, LinearError
-from omega_prime.integrations.notion import NotionError
+from omega_prime.integrations.notion import NOTION_API, NotionClient, NotionError
 from omega_prime.integrations.setup import handle
 from omega_prime.integrations.submodules import (
     EMPTY_PRIME,
     INIT_COMMAND,
     check_submodules,
 )
+from omega_prime.integrations.transport import TransportError
+from omega_prime.mcp_server import _DeskBusClient
+from omega_prime.policy.policy import SeatPolicy
+from omega_prime.substrate.client import SubstrateClient
 from omega_prime.tests.test_omega_commands import RecordingRegistry
 from omega_prime.tools.redteam import RedteamClient, RedteamContext
 from sidecar.findings import record_finding
@@ -370,6 +382,7 @@ def test_contract_names_are_in_the_template_doc() -> None:
         assert name in text
     for option in REQUIRED_STATUS:
         assert option in text
+    assert "insert content" in text
     assert schema_gaps({"properties": _properties()}) == []
     assert "Status" in schema_gaps({"properties": {"Name": {"type": "title"}}})
 
@@ -461,3 +474,469 @@ def test_linear_rate_limit_retries_then_succeeds() -> None:
     assert client.viewer()["id"] == "user"
     assert slept == [0.2, 0.4]
     assert SENTINEL not in json.dumps(slept)
+
+
+def _policy(hosts: list[str]) -> SeatPolicy:
+    return SeatPolicy({"version": 1, "network": {"hosts": hosts}})
+
+
+def _record(directory: Path) -> None:
+    record_finding(
+        directory=directory,
+        case_id="abuse-01",
+        klass="prompt_injection",
+        severity="high",
+        observed_detection="no-detection",
+        verdict="miss",
+        response="do anything now",
+    )
+
+
+def test_fresh_prompt_requires_insert_content(tmp_path: Path) -> None:
+    result = handle("", _env(tmp_path), probe=lambda _url: "ok")
+    assert "insert content" in result["prompt"]
+
+
+def test_policy_blocks_a_gateway_before_the_probe(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    notion = FakeNotion()
+    notion.matches = [{"id": DB_ID, "name": "Tasks"}]
+    linear = FakeLinear()
+    handle("duplicated", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    handle("connected", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    handle("connected", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    called: list[str] = []
+
+    def probe(url: str) -> str:
+        called.append(url)
+        return "ok"
+
+    blocked = handle(
+        "gateway substrate http://127.0.0.1:9",
+        env,
+        notion=notion,
+        linear=linear,
+        probe=probe,
+        policy=_policy([]),
+    )
+    assert called == []
+    assert "saved gateway was not changed" in blocked["prompt"]
+    assert load_binding(env)["gateways"]["substrate"]["state"] == "unconfigured"
+
+
+def test_policy_blocks_linear_before_the_broker_sends(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    env["LINEAR_API_KEY"] = SENTINEL
+    notion = FakeNotion()
+    notion.matches = [{"id": DB_ID, "name": "Tasks"}]
+    handle("duplicated", env, notion=notion, probe=lambda _url: "ok")
+    handle("connected", env, notion=notion, probe=lambda _url: "ok")
+    result = handle(
+        "connected",
+        env,
+        notion=notion,
+        policy=_policy([]),
+        probe=lambda _url: "ok",
+    )
+    assert "api.linear.app" in result["prompt"]
+    assert result["linear"]["state"] != "ready"
+    assert SENTINEL not in result["prompt"]
+
+
+def test_failed_gateway_replacement_keeps_the_ready_url(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    notion = FakeNotion()
+    notion.matches = [{"id": DB_ID, "name": "Tasks"}]
+    linear = FakeLinear()
+    handle("duplicated", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    handle("connected", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    handle("connected", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    ready = handle(
+        "gateway substrate http://127.0.0.1:9",
+        env,
+        notion=notion,
+        linear=linear,
+        probe=lambda _url: "ok",
+    )
+    assert ready["gateways"]["substrate"] == "ready"
+    replaced = handle(
+        "gateway substrate http://127.0.0.1:8",
+        env,
+        notion=notion,
+        linear=linear,
+        probe=lambda _url: "timeout",
+    )
+    assert "previous URL" in replaced["prompt"]
+    saved = load_binding(env)["gateways"]["substrate"]
+    assert saved["state"] == "ready"
+    assert saved["url"] == "http://127.0.0.1:9"
+
+
+def test_team_switch_drops_the_previous_projects(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    notion = FakeNotion()
+    notion.matches = [{"id": DB_ID, "name": "Tasks"}]
+    linear = FakeLinear(
+        teams=[
+            {"id": TEAM_A, "name": "Alpha"},
+            {"id": TEAM_B, "name": "Beta"},
+        ],
+        projects={
+            TEAM_A: [
+                {"id": PROJECT_A, "name": "Board"},
+                {"id": "project-aaaa-2", "name": "Other"},
+            ]
+        },
+    )
+
+    def fail_b(team_id: str) -> list[dict[str, str]]:
+        if team_id == TEAM_B:
+            raise LinearError("transient", "Linear timed out.")
+        return list(linear.project_rows.get(team_id, []))
+
+    linear.projects = fail_b  # type: ignore[method-assign]
+    handle("duplicated", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    handle("connected", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    handle("connected", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    chosen = handle(
+        f"linear-team {TEAM_A}",
+        env,
+        notion=notion,
+        linear=linear,
+        probe=lambda _url: "ok",
+    )
+    assert chosen["step"] == "linear-project"
+    failed = handle(
+        f"linear-team {TEAM_B}",
+        env,
+        notion=notion,
+        linear=linear,
+        probe=lambda _url: "ok",
+    )
+    assert "timed out" in failed["prompt"]
+    stale = handle(
+        f"linear-project {PROJECT_A}",
+        env,
+        notion=notion,
+        linear=linear,
+        probe=lambda _url: "ok",
+    )
+    assert "not one of the projects" in stale["prompt"]
+    assert load_binding(env)["linear"]["project_id"] == ""
+
+
+def test_probe_rejects_server_errors_and_sends_the_bearer(monkeypatch) -> None:
+    def denied(request: Any, timeout: float = 3.0) -> Any:
+        del timeout
+        assert request.get_header("Authorization") == f"Bearer {SENTINEL}"
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:9/",
+            503,
+            "unavailable",
+            hdrs=email.message.Message(),
+            fp=io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr(
+        "omega_prime.integrations.gateways.urllib.request.urlopen", denied
+    )
+    assert (
+        probe_url(
+            "http://127.0.0.1:9/",
+            headers={"Authorization": f"Bearer {SENTINEL}"},
+        )
+        == "degraded"
+    )
+
+    class Ok:
+        status = 200
+
+        def __enter__(self) -> Ok:
+            return self
+
+        def __exit__(self, *args: object) -> Literal[False]:
+            return False
+
+    monkeypatch.setattr(
+        "omega_prime.integrations.gateways.urllib.request.urlopen",
+        lambda request, timeout=3.0: Ok(),
+    )
+    assert probe_url("http://127.0.0.1:9/") == "ok"
+    assert health_url("substrate", "http://127.0.0.1:9") == "http://127.0.0.1:9/healthz"
+    assert health_url("substrate", "http://127.0.0.1:9/healthz") == (
+        "http://127.0.0.1:9/healthz"
+    )
+    assert health_url("redteam", "http://127.0.0.1:9/") == "http://127.0.0.1:9/health"
+    assert health_url("desk_bus", "http://127.0.0.1:9/health") == (
+        "http://127.0.0.1:9/health"
+    )
+
+    seen: list[str] = []
+
+    def capture(request: Any, timeout: float = 3.0) -> Any:
+        del timeout
+        seen.append(request.full_url)
+        assert request.get_header("Authorization") == f"Bearer {SENTINEL}"
+        return Ok()
+
+    monkeypatch.setattr(
+        "omega_prime.integrations.gateways.urllib.request.urlopen", capture
+    )
+    assert (
+        probe_gateway(
+            "redteam",
+            "http://127.0.0.1:9",
+            {"T3MP3ST_BEARER_TOKEN": SENTINEL},
+        )
+        == "ok"
+    )
+    assert seen == ["http://127.0.0.1:9/health"]
+
+
+def test_create_issue_does_not_retry_a_timeout() -> None:
+    calls: list[int] = []
+
+    def transport(
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        del method, url, headers, body
+        calls.append(1)
+        raise TransportError("timeout", "timed out")
+
+    client = LinearClient(SENTINEL, transport, sleep=lambda _seconds: calls.append(9))
+    with pytest.raises(LinearError) as caught:
+        client.create_issue(TEAM_A, "title", "body", 0)
+    assert caught.value.code == "transient"
+    assert calls == [1]
+
+
+def test_create_issue_omits_a_null_project() -> None:
+    seen: list[Mapping[str, Any]] = []
+
+    def transport(
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        del method, url, headers
+        assert body is not None
+        seen.append(body)
+        return 200, {
+            "data": {
+                "issueCreate": {"success": True, "issue": {"id": "i1", "url": "u"}}
+            }
+        }
+
+    client = LinearClient(SENTINEL, transport)
+    assert client.create_issue(TEAM_A, "title", "body", 2)["id"] == "i1"
+    assert "projectId" not in seen[0]["query"]
+    assert "projectId" not in seen[0]["variables"]
+    assert client.create_issue(TEAM_A, "title", "body", 2, PROJECT_A)["id"] == "i1"
+    assert "projectId: $projectId" in seen[1]["query"]
+    assert seen[1]["variables"]["projectId"] == PROJECT_A
+
+
+def test_linear_teams_follow_the_cursor() -> None:
+    seen: list[Any] = []
+
+    def transport(
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        del method, url, headers
+        assert body is not None
+        after = body["variables"]["after"]
+        seen.append(after)
+        if after is None:
+            return 200, {
+                "data": {
+                    "teams": {
+                        "nodes": [{"id": TEAM_A, "name": "Alpha"}],
+                        "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                    }
+                }
+            }
+        return 200, {
+            "data": {
+                "teams": {
+                    "nodes": [{"id": TEAM_B, "name": "Beta"}],
+                    "pageInfo": {"hasNextPage": False},
+                }
+            }
+        }
+
+    client = LinearClient(SENTINEL, transport, sleep=lambda _seconds: None)
+    assert [row["id"] for row in client.teams()] == [TEAM_A, TEAM_B]
+    assert seen == [None, "cursor-1"]
+
+
+def test_notion_search_follows_the_cursor_and_update_checks_parent() -> None:
+    calls: list[str] = []
+
+    def transport(
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: Mapping[str, Any] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        del headers
+        calls.append(f"{method} {url}")
+        if url.endswith("/search"):
+            assert body is not None
+            if body.get("start_cursor") != "cursor-1":
+                return 200, {
+                    "results": [
+                        {
+                            "object": "database",
+                            "id": DB_ID,
+                            "title": [{"plain_text": "Tasks"}],
+                        }
+                    ],
+                    "has_more": True,
+                    "next_cursor": "cursor-1",
+                }
+            return 200, {
+                "results": [
+                    {
+                        "object": "database",
+                        "id": "database000000000000000000000002",
+                        "title": [{"plain_text": "Other"}],
+                    }
+                ],
+                "has_more": False,
+                "next_cursor": None,
+            }
+        if method == "GET":
+            return 200, {"id": "page0001", "parent": {"database_id": DB_ID}}
+        return 200, {"id": "page0001"}
+
+    client = NotionClient(SENTINEL, transport, sleep=lambda _seconds: None)
+    found = client.search_databases()
+    assert [row["name"] for row in found] == ["Tasks", "Other"]
+    updated = client.update_task_status(DB_ID, "page0001", "Done")
+    assert updated["id"] == "page0001"
+    assert any(item.startswith("GET ") for item in calls)
+    assert NOTION_API in calls[0]
+
+
+def test_bad_linear_file_does_not_fall_back_to_gh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = tmp_path / "linear.key"
+    secret.write_text("not-a-token\n", encoding="utf-8")
+    monkeypatch.setenv("LINEAR_API_KEY_FILE", str(secret))
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+    _record(tmp_path)
+    with pytest.raises(GhApiError) as caught:
+        sync_findings_linear(tmp_path, TEAM_A)
+    assert "LINEAR_API_KEY_FILE" in str(caught.value)
+    assert "not-a-token" not in str(caught.value)
+
+
+def test_saved_project_stays_on_its_team(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path))
+    binding = fresh_binding()
+    binding["linear"]["state"] = "ready"
+    binding["linear"]["team_id"] = TEAM_A
+    binding["linear"]["project_id"] = PROJECT_A
+    save_binding(binding, _env(tmp_path))
+    other = tmp_path / "other"
+    other.mkdir()
+    _record(other)
+    client = FakeLinear()
+    sync_findings_linear(
+        other, TEAM_B, runner=lambda *_args: None, linear_client=client
+    )  # type: ignore[arg-type]
+    assert client.created[0]["project"] == ""
+    matched = tmp_path / "matched"
+    matched.mkdir()
+    _record(matched)
+    second = FakeLinear()
+    sync_findings_linear(
+        matched, TEAM_A, runner=lambda *_args: None, linear_client=second
+    )  # type: ignore[arg-type]
+    assert second.created[0]["project"] == PROJECT_A
+
+
+def test_saved_redteam_url_is_the_one_the_client_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path))
+    binding = fresh_binding()
+    binding["gateways"]["redteam"] = {
+        "state": "ready",
+        "url": "http://127.0.0.1:9",
+    }
+    save_binding(binding, _env(tmp_path))
+    monkeypatch.setattr(
+        "omega_prime.policy.policy.SeatPolicy.load",
+        lambda _path: _policy(["127.0.0.1"]),
+    )
+    seen: list[str] = []
+
+    def request(
+        base: str,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> tuple[int, dict[str, Any]]:
+        del method, path, payload, headers, timeout
+        seen.append(base)
+        return 200, {}
+
+    client = RedteamClient(
+        RedteamContext(
+            gateway_url="http://127.0.0.1:1",
+            bearer_token=SENTINEL,
+            request=request,
+        )
+    )
+    body = client.status()
+    assert body["tool"] == "tempest_status"
+    assert seen[0] == "http://127.0.0.1:9"
+
+
+def test_skipped_gateways_do_not_use_the_default_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path))
+    binding = fresh_binding()
+    binding["gateways"]["substrate"]["state"] = "skipped"
+    binding["gateways"]["desk_bus"]["state"] = "skipped"
+    save_binding(binding, _env(tmp_path))
+
+    class Transport:
+        def get(self, *args: object, **kwargs: object) -> dict[str, str]:
+            raise AssertionError("network")
+
+        def post(self, *args: object, **kwargs: object) -> dict[str, str]:
+            raise AssertionError("network")
+
+        def post_text(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("network")
+
+    substrate = SubstrateClient(
+        "http://127.0.0.1:1",
+        transport=Transport(),
+        honor_binding=True,
+        binding_env=_env(tmp_path),
+    )
+    assert substrate.brief() == ""
+    desk = _DeskBusClient(
+        "http://127.0.0.1:1",
+        honor_binding=True,
+        binding_env=_env(tmp_path),
+    )
+    refused = desk.start_job("runtime", "goal")
+    assert refused["ok"] is False
+    assert "not_configured" in refused["error"]

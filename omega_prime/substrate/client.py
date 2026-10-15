@@ -11,6 +11,7 @@ from ``mcp.ts``.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
@@ -60,6 +61,9 @@ class SubstrateClient:
         token: str | None = None,
         surface: str = DEFAULT_SURFACE,
         timeout: float = 5.0,
+        honor_binding: bool = False,
+        binding_env: Mapping[str, str] | None = None,
+        policy: Any = None,
     ) -> None:
         base = _check_base_url(base_url)
         if not isinstance(surface, str) or surface.strip() == "":
@@ -72,6 +76,9 @@ class SubstrateClient:
         self._token = token or ""
         self._transport = transport or HttpTransport(timeout=timeout)
         self._rpc_id = 0
+        self._honor_binding = honor_binding
+        self._binding_env = binding_env
+        self._policy = policy
 
     @property
     def base_url(self) -> str:
@@ -85,8 +92,11 @@ class SubstrateClient:
 
     def health(self) -> dict:
         """GET /healthz. Raises ``SubstrateError`` on any failure."""
+        base, error = self._resolve_base()
+        if error or not base:
+            raise SubstrateError(error or "substrate gateway is not configured")
         try:
-            return self._transport.get(self._base_url + "/healthz", self._headers(), {})
+            return self._transport.get(base + "/healthz", self._headers(base), {})
         except Exception as exc:
             reason = self._redact(_reason(exc))
             raise SubstrateError(f"substrate health failed: {reason}") from exc
@@ -105,10 +115,11 @@ class SubstrateClient:
             body["branch"] = branch
         if graph_id is not None:
             body["graph_id"] = graph_id
+        base, error = self._resolve_base()
+        if error or not base:
+            return ""
         try:
-            return self._transport.post_text(
-                self._base_url + "/brief", self._headers(), body
-            )
+            return self._transport.post_text(base + "/brief", self._headers(base), body)
         except Exception:
             return ""
 
@@ -120,10 +131,11 @@ class SubstrateClient:
             raise ValueError("summary must be a non-empty string")
         body = {"kind": kind, "summary": summary, "surface": self._surface}
         body.update(fields)
+        base, error = self._resolve_base()
+        if error or not base:
+            return {"stored": False, "error": error or "substrate gateway is blocked"}
         try:
-            result = self._transport.post(
-                self._base_url + "/events", self._headers(), body
-            )
+            result = self._transport.post(base + "/events", self._headers(base), body)
         except Exception as exc:
             return {"stored": False, "error": self._redact(_reason(exc))}
         if not isinstance(result, dict):
@@ -255,21 +267,55 @@ class SubstrateClient:
             "method": "tools/call",
             "params": {"name": name, "arguments": arguments},
         }
+        base, error = self._resolve_base()
+        if error or not base:
+            raise SubstrateError(error or "substrate gateway is not configured")
         try:
-            return self._transport.post(
-                self._base_url + "/mcp", self._headers(), envelope
-            )
+            return self._transport.post(base + "/mcp", self._headers(base), envelope)
         except Exception as exc:
             reason = self._redact(_reason(exc))
             raise SubstrateError(f"substrate {name} failed: {reason}") from exc
 
-    def _headers(self) -> dict:
+    def _resolve_base(self) -> tuple[str | None, str | None]:
+        """``(base, None)`` or ``(None, error)``.
+
+        With ``honor_binding``, a skipped, invalid, or degraded saved gateway
+        blocks the call. A ready saved URL replaces the constructor URL and
+        is checked against the seat policy. No binding file keeps the
+        constructor URL, which is the historical default.
+        """
+        if not self._honor_binding:
+            return self._base_url, None
+        from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
+
+        blocked = gateway_block("substrate", self._binding_env)
+        if blocked is not None:
+            return None, str(blocked.get("error") or "substrate gateway is blocked")
+        saved = ready_gateway_url("substrate", self._binding_env)
+        if saved:
+            if not self._saved_host_allowed(saved):
+                host = urlsplit(saved).hostname or "that host"
+                return None, f"The seat policy does not allow {host}."
+            return saved.rstrip("/"), None
+        return self._base_url, None
+
+    def _saved_host_allowed(self, url: str) -> bool:
+        if self._policy is None:
+            return True
+        try:
+            host = urlsplit(url).hostname or ""
+        except ValueError:
+            return False
+        return bool(host) and bool(self._policy.allows_host(host))
+
+    def _headers(self, base: str | None = None) -> dict:
         """Authorization header, or none for anonymous local runs."""
+        target = base or self._base_url
         if self._token:
             return {"Authorization": f"Bearer {self._token}"}
         if self._broker is None:
             return {}
-        token = self._broker.key_for(_SUBSTRATE_PROVIDER, self._base_url)
+        token = self._broker.key_for(_SUBSTRATE_PROVIDER, target)
         return {"Authorization": f"Bearer {token}"} if token else {}
 
     def _redact(self, text: str) -> str:

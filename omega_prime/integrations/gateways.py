@@ -41,9 +41,18 @@ def validate_gateway_url(text: str) -> str | None:
     return None
 
 
-def probe_url(url: str, *, timeout: float = 3.0) -> str:
-    """Return ok, refused, tls, auth, or timeout. Does not return the body."""
-    request = urllib.request.Request(url, method="GET")
+def probe_url(
+    url: str,
+    *,
+    timeout: float = 3.0,
+    headers: Mapping[str, str] | None = None,
+) -> str:
+    """Return ok, degraded, refused, tls, auth, or timeout. Does not return the body.
+
+    Only a 2xx response is ok. 401 and 403 are auth. 5xx is degraded.
+    Any other HTTP status is refused.
+    """
+    request = urllib.request.Request(url, headers=dict(headers or {}), method="GET")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             status = int(response.status)
@@ -59,7 +68,89 @@ def probe_url(url: str, *, timeout: float = 3.0) -> str:
         return _os_kind(exc)
     if status in (401, 403):
         return "auth"
-    return "ok"
+    if 200 <= status < 300:
+        return "ok"
+    if status >= 500:
+        return "degraded"
+    return "refused"
+
+
+def gateway_probe_headers(name: str, env: Mapping[str, str]) -> dict[str, str]:
+    """Authorization header the live client would send, or an empty mapping."""
+    token = ""
+    if name == "substrate":
+        raw = env.get("SUBSTRATE_TOKEN") or env.get("SUBSTRATE_TOKEN_GROK_BOT") or ""
+        token = raw.strip() if isinstance(raw, str) else ""
+    elif name == "redteam":
+        raw = env.get("T3MP3ST_BEARER_TOKEN") or ""
+        token = raw.strip() if isinstance(raw, str) else ""
+        if not token:
+            token = _bearer_file(env)
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
+# Health routes the live clients already use. The saved value is the base
+# URL (substrate brief/events, T3MP3ST, agent bus), not the health path.
+_HEALTH_PATH = {
+    "substrate": "/healthz",
+    "redteam": "/health",
+    "desk_bus": "/health",
+}
+
+
+def health_url(name: str, url: str) -> str:
+    """Base URL plus that gateway's health path. A URL that already ends there is kept."""
+    base = url.strip().rstrip("/")
+    path = _HEALTH_PATH.get(name, "")
+    if not path or base.endswith(path):
+        return base
+    return base + path
+
+
+def probe_gateway(name: str, url: str, env: Mapping[str, str] | None = None) -> str:
+    """Probe one gateway's health route with the same bearer the runtime client sends."""
+    source = env or {}
+    return probe_url(health_url(name, url), headers=gateway_probe_headers(name, source))
+
+
+def ready_gateway_url(name: str, env: Mapping[str, str] | None = None) -> str:
+    """Saved URL when this gateway is ready, else ``""``.
+
+    A missing binding file leaves the caller's existing default alone.
+    """
+    if name not in GATEWAY_NAMES:
+        return ""
+    try:
+        path = binding_path(env)
+    except ValueError:
+        return ""
+    if not path.is_file():
+        return ""
+    node = load_binding(env)["gateways"].get(name) or {}
+    url = node.get("url")
+    if node.get("state") == "ready" and isinstance(url, str) and url:
+        return url
+    return ""
+
+
+def active_gateway(
+    name: str, fallback: str, env: Mapping[str, str] | None = None
+) -> tuple[str, dict[str, Any] | None]:
+    """``(url, None)`` or ``("", block)``.
+
+    A ready saved URL wins over ``fallback``. No binding file, or a gateway
+    that was never configured, keeps ``fallback``. Skipped, invalid, and
+    degraded block instead of calling the old default.
+    """
+    blocked = gateway_block(name, env)
+    if blocked is not None:
+        return "", blocked
+    saved = ready_gateway_url(name, env)
+    if saved:
+        return saved, None
+    return fallback, None
 
 
 def gateway_block(
@@ -149,3 +240,16 @@ def _os_kind(exc: OSError) -> str:
     if "refused" in text:
         return "refused"
     return "refused"
+
+
+def _bearer_file(env: Mapping[str, str]) -> str:
+    raw = env.get("T3MP3ST_BEARER_TOKEN_FILE") or ""
+    path = raw.strip() if isinstance(raw, str) else ""
+    if not path:
+        return ""
+    from omega_prime.tooling.fs import read_secret_file
+
+    try:
+        return read_secret_file(path).strip()
+    except ValueError:
+        return ""

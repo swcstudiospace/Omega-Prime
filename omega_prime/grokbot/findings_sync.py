@@ -1198,10 +1198,49 @@ def _linear_client_from_env() -> Any:
 
     The legacy ``gh api graphql`` path stays in place only when no token
     is configured, so an install that never connected Linear is unchanged.
+    A configured key file that cannot be read raises instead of falling
+    through to that legacy path.
     """
-    from omega_prime.integrations.linear import client_from_environ
+    from omega_prime.integrations.linear import LinearError, client_from_environ
 
-    return client_from_environ()
+    try:
+        return client_from_environ(policy=_installed_seat_policy())
+    except LinearError as exc:
+        raise GhApiError(str(exc)) from exc
+
+
+def _installed_seat_policy() -> Any:
+    """The shipped seat policy, or ``None`` when it cannot be loaded."""
+    from pathlib import Path
+
+    from omega_prime.policy.policy import SeatPolicy
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "contracts"
+        / "policies"
+        / "omega-prime.json"
+    )
+    try:
+        return SeatPolicy.load(path)
+    except (OSError, ValueError):
+        return None
+
+
+def _project_for_team(team_id: str, explicit: str = "") -> str:
+    """Saved project only when it belongs to this team.
+
+    An explicit project id is kept. A saved project from team A is not
+    attached to a request for team B.
+    """
+    if explicit:
+        return explicit
+    from omega_prime.integrations.binding import ready_linear_project, ready_linear_team
+
+    saved_team = ready_linear_team()
+    if saved_team and saved_team == team_id:
+        return ready_linear_project()
+    return ""
 
 
 def _resolved_linear_team(configured: Any) -> str:
@@ -1210,12 +1249,6 @@ def _resolved_linear_team(configured: Any) -> str:
     from omega_prime.integrations.binding import ready_linear_team
 
     return ready_linear_team() or text
-
-
-def _bound_linear_project() -> str:
-    from omega_prime.integrations.binding import ready_linear_project
-
-    return ready_linear_project()
 
 
 def sync_findings_linear(
@@ -1253,9 +1286,9 @@ def sync_findings_linear(
     api_client = linear_client
     if api_client is None and runner is None:
         api_client = _linear_client_from_env()
-    bound_project = project_id or (
-        _bound_linear_project() if api_client is not None else ""
-    )
+    bound_project = ""
+    if api_client is not None:
+        bound_project = _project_for_team(team_id, project_id)
 
     rows = load_findings(reports_dir)
     pushed: list[dict[str, Any]] = []
@@ -3228,7 +3261,7 @@ def _deliver_expiry_notice(
                     subject,
                     notice,
                     priority,
-                    _bound_linear_project(),
+                    _project_for_team(team_id),
                 )
             except Exception as exc:
                 raise GhApiError(f"linear api failed: {exc}") from exc
@@ -4492,11 +4525,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return _main_graph(directory, graph_cfg, args.dry_run, graph_repo or None)
     if tracker == "linear":
-        team_id = args.linear_team_id.strip() or (
-            node.get("linear_team_id", "").strip()
-            if isinstance(node.get("linear_team_id", ""), str)
-            else ""
-        )
+        flag = args.linear_team_id.strip()
+        if flag:
+            team_id = flag
+        else:
+            configured = node.get("linear_team_id", "")
+            configured = configured.strip() if isinstance(configured, str) else ""
+            team_id = _resolved_linear_team(configured)
         if not team_id:
             print(f"error: {NO_LINEAR_TEAM_MESSAGE}", file=sys.stderr)
             return 2

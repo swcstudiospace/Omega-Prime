@@ -48,6 +48,11 @@ class ToolRegistry:
         # and never bypasses ``dispatch``.
         self.runtime_bindings: dict[str, Any] = {}
 
+    @property
+    def policy(self) -> Any:
+        """Seat policy, or ``None`` when this registry was built without one."""
+        return self._policy
+
     def register(
         self,
         name: str,

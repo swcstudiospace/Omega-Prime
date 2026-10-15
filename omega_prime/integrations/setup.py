@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
+from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
+from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.integrations.binding import (
     GATEWAY_NAMES,
     LINEAR_ENV,
@@ -23,9 +26,10 @@ from omega_prime.integrations.binding import (
     save_binding,
 )
 from omega_prime.integrations.contract import CONTRACT_VERSION, schema_gaps
-from omega_prime.integrations.gateways import probe_url, validate_gateway_url
-from omega_prime.integrations.linear import LinearClient, LinearError
-from omega_prime.integrations.notion import NotionClient, NotionError
+from omega_prime.integrations.gateways import probe_gateway, validate_gateway_url
+from omega_prime.integrations.linear import LINEAR_API_URL, LinearClient, LinearError
+from omega_prime.integrations.notion import NOTION_API, NotionClient, NotionError
+from omega_prime.providers.base import ProviderError
 
 _SECRET_RE = re.compile(
     r"(?i)(lin_api_|ntn_|secret_|ghp_|sk-|xox[baprs]-|"
@@ -48,6 +52,7 @@ def handle(
     notion: Any = None,
     linear: Any = None,
     probe: Probe | None = None,
+    policy: Any = None,
 ) -> dict[str, Any]:
     """Apply one setup reply and return a public status. Never includes a secret."""
     text = (args or "").strip()
@@ -68,8 +73,8 @@ def handle(
                 "LINEAR_API_KEY_FILE at a mode 0600 file."
             ),
         )
-    probe_fn = probe or probe_url
-    message = _apply(binding, text, env, notion, linear, probe_fn)
+    message = _apply(binding, text, env, notion, linear, probe, policy)
+    message = _annotate_policy(message, binding, policy)
     if explicit or exists or text:
         try:
             save_binding(binding, env)
@@ -93,7 +98,8 @@ def _apply(
     env: Mapping[str, str],
     notion: Any,
     linear: Any,
-    probe: Probe,
+    probe: Probe | None,
+    policy: Any = None,
 ) -> str:
     if text in ("", "status"):
         return _prompt(binding)
@@ -102,25 +108,25 @@ def _apply(
     if verb == "duplicated":
         return _duplicated(binding)
     if verb == "connected":
-        return _connected(binding, env, notion, linear)
+        return _connected(binding, env, notion, linear, policy)
     if verb == "notion-database":
-        return _select_database(binding, rest, env, notion)
+        return _select_database(binding, rest, env, notion, policy)
     if verb == "linear-team":
-        return _select_team(binding, rest, env, linear)
+        return _select_team(binding, rest, env, linear, policy)
     if verb == "linear-project":
         return _select_project(binding, rest)
     if verb == "skip-gateway":
         return _skip_gateways(binding)
     if verb == "gateway":
-        return _configure_gateway(binding, rest, probe)
+        return _configure_gateway(binding, rest, probe, env, policy)
     if verb == "task":
-        return _task(binding, rest, env, notion)
+        return _task(binding, rest, env, notion, policy)
     if verb == "linear-issue":
-        return _linear_issue(binding, rest, env, linear)
+        return _linear_issue(binding, rest, env, linear, policy)
     if verb == "linear-read":
-        return _linear_read(binding, rest, env, linear)
+        return _linear_read(binding, rest, env, linear, policy)
     if verb == "linear-update":
-        return _linear_update(binding, rest, env, linear)
+        return _linear_update(binding, rest, env, linear, policy)
     if verb in ("reset", "disconnect"):
         return _reset(binding, rest)
     return (
@@ -148,17 +154,18 @@ def _connected(
     env: Mapping[str, str],
     notion: Any,
     linear: Any,
+    policy: Any = None,
 ) -> str:
     step = _step(binding)
     if step == "template":
         return _prompt(binding)
     if step == "notion":
-        message = _connect_notion(binding, env, notion)
+        message = _connect_notion(binding, env, notion, policy)
         if message:
             return message
         return _prompt(binding)
     if step in ("linear", "linear-team", "linear-project"):
-        message = _connect_linear(binding, env, linear)
+        message = _connect_linear(binding, env, linear, policy)
         if message:
             return message
         return _prompt(binding)
@@ -166,9 +173,12 @@ def _connected(
 
 
 def _connect_notion(
-    binding: dict[str, Any], env: Mapping[str, str], notion: Any
+    binding: dict[str, Any],
+    env: Mapping[str, str],
+    notion: Any,
+    policy: Any = None,
 ) -> str | None:
-    client, problem = _notion_client(env, notion)
+    client, problem = _notion_client(env, notion, policy)
     if problem:
         binding["notion"]["state"] = "awaiting-user"
         return problem
@@ -214,11 +224,15 @@ def _connect_notion(
 
 
 def _select_database(
-    binding: dict[str, Any], database_id: str, env: Mapping[str, str], notion: Any
+    binding: dict[str, Any],
+    database_id: str,
+    env: Mapping[str, str],
+    notion: Any,
+    policy: Any = None,
 ) -> str:
     if _step(binding) == "template":
         return _prompt(binding)
-    client, problem = _notion_client(env, notion)
+    client, problem = _notion_client(env, notion, policy)
     if problem or client is None:
         return problem or "Set NOTION_TOKEN on the host first."
     offered = binding["notion"]["offered_database_ids"]
@@ -243,9 +257,12 @@ def _select_database(
 
 
 def _connect_linear(
-    binding: dict[str, Any], env: Mapping[str, str], linear: Any
+    binding: dict[str, Any],
+    env: Mapping[str, str],
+    linear: Any,
+    policy: Any = None,
 ) -> str | None:
-    client, problem = _linear_client(env, linear)
+    client, problem = _linear_client(env, linear, policy)
     if problem:
         binding["linear"]["state"] = "awaiting-user"
         return problem
@@ -277,12 +294,16 @@ def _connect_linear(
 
 
 def _select_team(
-    binding: dict[str, Any], team_id: str, env: Mapping[str, str], linear: Any
+    binding: dict[str, Any],
+    team_id: str,
+    env: Mapping[str, str],
+    linear: Any,
+    policy: Any = None,
 ) -> str:
     offered = binding["linear"]["offered_team_ids"]
     if team_id not in offered:
         return "That id was not one of the teams just listed. " + _prompt(binding)
-    client, problem = _linear_client(env, linear)
+    client, problem = _linear_client(env, linear, policy)
     if problem or client is None:
         return problem or "Set LINEAR_API_KEY on the host first."
     try:
@@ -302,9 +323,14 @@ def _adopt_team(
 ) -> str | None:
     binding["linear"]["team_id"] = team["id"]
     binding["linear"]["team_name"] = team["name"]
+    binding["linear"]["project_id"] = ""
+    binding["linear"]["project_name"] = ""
+    binding["linear"]["offered_project_ids"] = []
     try:
         projects = client.projects(team["id"])
     except LinearError as exc:
+        if binding["linear"]["state"] == "ready":
+            binding["linear"]["state"] = "awaiting-user"
         return _linear_failure(binding, exc)
     if len(projects) <= 1:
         project = projects[0] if projects else {"id": "", "name": ""}
@@ -337,7 +363,13 @@ def _skip_gateways(binding: dict[str, Any]) -> str:
     return _prompt(binding)
 
 
-def _configure_gateway(binding: dict[str, Any], rest: str, probe: Probe) -> str:
+def _configure_gateway(
+    binding: dict[str, Any],
+    rest: str,
+    probe: Probe | None,
+    env: Mapping[str, str],
+    policy: Any = None,
+) -> str:
     if _step(binding) not in ("gateway", "done"):
         return _prompt(binding)
     name, _, url = rest.partition(" ")
@@ -347,32 +379,60 @@ def _configure_gateway(binding: dict[str, Any], rest: str, probe: Probe) -> str:
     error = validate_gateway_url(url)
     if error:
         return error
+    if _policy_blocks(policy, url):
+        host = _hostname(url) or "that host"
+        return (
+            f"The seat policy does not allow {host}. The saved gateway was not changed."
+        )
     try:
-        result = probe(url)
+        result = probe_gateway(name, url, env) if probe is None else probe(url)
     except Exception:
         result = "refused"
     node = binding["gateways"][name]
-    node["url"] = url
+    previous_state = node["state"]
+    previous_url = node["url"]
     if result == "ok":
+        node["url"] = url
         node["state"] = "ready"
         return _prompt(binding)
-    if result == "timeout":
+    kept = previous_state == "ready" and bool(previous_url)
+    if result in ("timeout", "degraded"):
+        if kept:
+            detail = "timed out" if result == "timeout" else "returned a server error"
+            return (
+                f"{name} gateway {detail}. The previous URL is unchanged. "
+                "Notion and Linear are unchanged."
+            )
+        node["url"] = url
         node["state"] = "degraded"
+        if result == "degraded":
+            return (
+                f"{name} gateway returned a server error. The URL is kept "
+                "for a later retry. Notion and Linear are unchanged."
+            )
         return (
             f"{name} gateway timed out. The URL is kept for a later retry. "
             "Notion and Linear are unchanged."
         )
+    if kept:
+        detail = _PROBE_TEXT.get(result, "could not be reached")
+        return f"{name} gateway {detail}. The previous URL is unchanged."
+    node["url"] = url
     node["state"] = "invalid"
     detail = _PROBE_TEXT.get(result, "could not be reached")
     return f"{name} gateway {detail}."
 
 
 def _task(
-    binding: dict[str, Any], rest: str, env: Mapping[str, str], notion: Any
+    binding: dict[str, Any],
+    rest: str,
+    env: Mapping[str, str],
+    notion: Any,
+    policy: Any = None,
 ) -> str:
     if binding["notion"]["state"] != "ready":
         return _prompt(binding)
-    client, problem = _notion_client(env, notion)
+    client, problem = _notion_client(env, notion, policy)
     if problem or client is None:
         return problem or "Set NOTION_TOKEN on the host first."
     database_id = binding["notion"]["database_id"]
@@ -403,13 +463,17 @@ def _task(
 
 
 def _linear_issue(
-    binding: dict[str, Any], title: str, env: Mapping[str, str], linear: Any
+    binding: dict[str, Any],
+    title: str,
+    env: Mapping[str, str],
+    linear: Any,
+    policy: Any = None,
 ) -> str:
     if binding["linear"]["state"] != "ready":
         return _prompt(binding)
     if not title:
         return "Reply /omega-connectors linear-issue <title>."
-    client, problem = _linear_client(env, linear)
+    client, problem = _linear_client(env, linear, policy)
     if problem or client is None:
         return problem or "Set LINEAR_API_KEY on the host first."
     try:
@@ -426,11 +490,15 @@ def _linear_issue(
 
 
 def _linear_read(
-    binding: dict[str, Any], issue_id: str, env: Mapping[str, str], linear: Any
+    binding: dict[str, Any],
+    issue_id: str,
+    env: Mapping[str, str],
+    linear: Any,
+    policy: Any = None,
 ) -> str:
     if binding["linear"]["state"] != "ready":
         return _prompt(binding)
-    client, problem = _linear_client(env, linear)
+    client, problem = _linear_client(env, linear, policy)
     if problem or client is None:
         return problem or "Set LINEAR_API_KEY on the host first."
     try:
@@ -443,14 +511,18 @@ def _linear_read(
 
 
 def _linear_update(
-    binding: dict[str, Any], rest: str, env: Mapping[str, str], linear: Any
+    binding: dict[str, Any],
+    rest: str,
+    env: Mapping[str, str],
+    linear: Any,
+    policy: Any = None,
 ) -> str:
     if binding["linear"]["state"] != "ready":
         return _prompt(binding)
     issue_id, _, title = rest.partition(" ")
     if not issue_id or not title.strip():
         return "Reply /omega-connectors linear-update <id> <title>."
-    client, problem = _linear_client(env, linear)
+    client, problem = _linear_client(env, linear, policy)
     if problem or client is None:
         return problem or "Set LINEAR_API_KEY on the host first."
     try:
@@ -491,26 +563,99 @@ def _bind_linear(binding: dict[str, Any], project_id: str, project_name: str) ->
     binding["linear"]["offered_project_ids"] = []
 
 
-def _notion_client(env: Mapping[str, str], notion: Any) -> tuple[Any, str | None]:
+def _notion_client(
+    env: Mapping[str, str], notion: Any, policy: Any = None
+) -> tuple[Any, str | None]:
     if notion is not None:
         return notion, None
-    token, error = resolve_secret(env, NOTION_ENV)
+    token, error = _checked_secret(policy, env, NOTION_ENV, NOTION_API)
     if error:
         return None, error
     if not token:
         return None, None
-    return NotionClient(token), None
+    return NotionClient(token, policy=policy), None
 
 
-def _linear_client(env: Mapping[str, str], linear: Any) -> tuple[Any, str | None]:
+def _linear_client(
+    env: Mapping[str, str], linear: Any, policy: Any = None
+) -> tuple[Any, str | None]:
     if linear is not None:
         return linear, None
-    token, error = resolve_secret(env, LINEAR_ENV)
+    token, error = _checked_secret(policy, env, LINEAR_ENV, LINEAR_API_URL)
     if error:
         return None, error
     if not token:
         return None, None
-    return LinearClient(token), None
+    return LinearClient(token, policy=policy), None
+
+
+def _checked_secret(
+    policy: Any, env: Mapping[str, str], name: str, url: str
+) -> tuple[str | None, str | None]:
+    """Resolve a host secret only after the seat policy allows that host.
+
+    No policy keeps the historical resolver, including ``*_FILE``. With a
+    policy, the env-var form goes through ``CredentialBroker`` (the same
+    host gate as every other provider). The file form is read only after
+    that host check.
+    """
+    if policy is None:
+        return resolve_secret(env, name)
+    host = _hostname(url)
+    if not host or not policy.allows_host(host):
+        shown = host or "that host"
+        return None, f"The seat policy does not allow {shown}."
+    file_key = name + "_FILE"
+    file_value = env.get(file_key, "")
+    if isinstance(file_value, str) and file_value.strip():
+        return resolve_secret(env, name)
+    raw = env.get(name, "")
+    if not isinstance(raw, str) or not raw.strip():
+        return None, None
+    provider = SimpleNamespace(name=name.lower(), requires_key=True, env_vars=(name,))
+    try:
+        token = CredentialBroker(policy, env).key_for(provider, url)
+    except ProviderError as exc:
+        if "no credential for host" in str(exc):
+            return None, f"The seat policy does not allow {host}."
+        return None, None
+    return token, None
+
+
+def _policy_blocks(policy: Any, url: str) -> bool:
+    if policy is None:
+        return False
+    host = _hostname(url)
+    return not host or not policy.allows_host(host)
+
+
+def _hostname(url: str) -> str:
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return ""
+    return host or ""
+
+
+def _annotate_policy(message: str, binding: dict[str, Any], policy: Any) -> str:
+    if policy is None or not message:
+        return message
+    step = _step(binding)
+    note = ""
+    if step in ("template", "notion") and not policy.allows_host("api.notion.com"):
+        note = "The seat policy does not allow api.notion.com."
+    elif step in ("linear", "linear-team", "linear-project") and not policy.allows_host(
+        "api.linear.app"
+    ):
+        note = "The seat policy does not allow api.linear.app."
+    elif step == "gateway":
+        note = (
+            "A gateway URL is refused unless its host is listed in the "
+            "seat policy network.hosts."
+        )
+    if not note or note in message:
+        return message
+    return message + "\n" + note
 
 
 def _notion_failure(binding: dict[str, Any], exc: NotionError) -> str:
@@ -575,8 +720,8 @@ def _prompt(binding: dict[str, Any]) -> str:
             "There is no public Notion gallery listing.\n"
             "2. In your own Notion, create a database named Tasks with the "
             "properties that page lists.\n"
-            "3. Create a Notion integration with read and update content, and "
-            "share that database with it.\n"
+            "3. Create a Notion integration with read content, update content, "
+            "and insert content, and share that database with it.\n"
             "4. Put the token in the host environment as NOTION_TOKEN, or in a "
             "mode 0600 file named by NOTION_TOKEN_FILE. Do not paste it into chat.\n"
             "5. Reply /omega-connectors duplicated when the database exists."

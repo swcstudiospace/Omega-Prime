@@ -133,6 +133,42 @@ def resolve_bearer_token(
         return ""
 
 
+def _saved_gateway_policy(name: str, url: str) -> dict[str, Any] | None:
+    """Refuse a saved gateway whose host the shipped seat policy forbids.
+
+    The constructor default is not checked here. That URL is operator
+    configuration, not a chat-supplied binding.
+    """
+    from pathlib import Path
+    from urllib.parse import urlsplit
+
+    from omega_prime.policy.policy import SeatPolicy
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "contracts"
+        / "policies"
+        / "omega-prime.json"
+    )
+    try:
+        policy = SeatPolicy.load(path)
+    except (OSError, ValueError):
+        return None
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        host = ""
+    if host and policy.allows_host(host):
+        return None
+    shown = host or "that host"
+    return _error(
+        "policy",
+        f"The seat policy does not allow {shown}.",
+        ok=False,
+        gateway=name,
+    )
+
+
 def _http_request(
     base_url: str,
     method: str,
@@ -199,12 +235,17 @@ class RedteamClient:
 
     def _base_or_error(self) -> tuple[str, dict[str, Any] | None]:
         """``(base, None)`` or ``("", refusal row)`` — the upstream gate."""
-        from omega_prime.integrations.gateways import gateway_block
+        from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
 
         blocked = gateway_block("redteam")
         if blocked is not None:
             return "", blocked
-        base = (self.ctx.gateway_url or "").strip().rstrip("/")
+        saved = ready_gateway_url("redteam")
+        if saved:
+            refused = _saved_gateway_policy("redteam", saved)
+            if refused is not None:
+                return "", refused
+        base = (saved or self.ctx.gateway_url or "").strip().rstrip("/")
         try:
             parts = urllib.parse.urlsplit(base)
         except ValueError:

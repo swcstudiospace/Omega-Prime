@@ -436,9 +436,20 @@ class _DeskBusClient:
 
     _TERMINAL = ("completed", "failed", "error")
 
-    def __init__(self, base_url: str, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 10.0,
+        *,
+        honor_binding: bool = False,
+        binding_env: Mapping[str, str] | None = None,
+        policy: Any = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._honor_binding = honor_binding
+        self._binding_env = binding_env
+        self._policy = policy
 
     def start_job(
         self,
@@ -469,9 +480,16 @@ class _DeskBusClient:
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
         import urllib.request
 
+        base, blocked = self._resolve_base()
+        if blocked is not None:
+            return {
+                "ok": False,
+                "error": str(blocked.get("error") or "desk_bus gateway is blocked"),
+                "gateway": "desk_bus",
+            }
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(
-            self._base_url + path,
+            base + path,
             data=data,
             headers={"Content-Type": "application/json"} if data else {},
             method=method,
@@ -493,6 +511,33 @@ class _DeskBusClient:
             }
         payload.setdefault("ok", True)
         return payload
+
+    def _resolve_base(self) -> tuple[str, dict | None]:
+        if not self._honor_binding:
+            return self._base_url, None
+        from urllib.parse import urlsplit
+
+        from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
+
+        blocked = gateway_block("desk_bus", self._binding_env)
+        if blocked is not None:
+            return "", blocked
+        saved = ready_gateway_url("desk_bus", self._binding_env)
+        if saved:
+            if self._policy is not None:
+                try:
+                    host = urlsplit(saved).hostname or ""
+                except ValueError:
+                    host = ""
+                if not host or not self._policy.allows_host(host):
+                    shown = host or "that host"
+                    return "", {
+                        "ok": False,
+                        "error": f"The seat policy does not allow {shown}.",
+                        "gateway": "desk_bus",
+                    }
+            return saved.rstrip("/"), None
+        return self._base_url, None
 
 
 _SIDECAR_LOG = logging.getLogger(__name__)
@@ -817,10 +862,17 @@ def default_registry(
         token=env.get("SUBSTRATE_TOKEN", "")
         or env.get("SUBSTRATE_TOKEN_GROK_BOT", "")
         or None,
+        honor_binding=True,
+        binding_env=env,
+        policy=policy,
     )
     docs_url = (env.get(DESK_DOCS_INDEX_ENV) or "").strip()
     notify_url = (env.get(DESK_NOTIFY_URL_ENV) or "").strip()
     bus_url = (env.get(DESK_BUS_URL_ENV) or "").strip()
+    from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
+
+    bus_saved = ready_gateway_url("desk_bus", env)
+    bus_blocked = gateway_block("desk_bus", env)
     register_lead_tools(
         registry,
         LeadClient(
@@ -845,7 +897,16 @@ def default_registry(
                 if docs_url
                 else None,
                 notify=_DeskNotifier(notify_url) if notify_url else None,
-                bus=_DeskBusClient(bus_url) if bus_url else None,
+                bus=(
+                    _DeskBusClient(
+                        bus_saved or bus_url or "http://127.0.0.1",
+                        honor_binding=True,
+                        binding_env=env,
+                        policy=policy,
+                    )
+                    if bus_blocked is not None or bus_saved or bus_url
+                    else None
+                ),
             )
         ),
     )

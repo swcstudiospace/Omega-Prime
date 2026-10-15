@@ -24,8 +24,9 @@ from chat into other Notion content.
 ## Setup
 
 1. Create the database in your Notion workspace.
-2. Create an internal integration with read content and update content.
-   Those are the only scopes the bot uses.
+2. Create an internal integration with read content, update content, and
+   insert content. Those are the only scopes the bot uses. `task add`
+   creates a page, which Notion calls Insert content.
 3. Share the Tasks database with that integration.
 4. On the host, set `NOTION_TOKEN`, or put the token in a mode 0600 file
    and set `NOTION_TOKEN_FILE` to that path. Do not paste the token into
@@ -54,7 +55,11 @@ endpoints: substrate, the red-team gateway, and the desk bus. Reply
 keep working. A later gateway command tells you it is not configured.
 
 `/omega-connectors gateway substrate <url>` (or `redteam`, or `desk_bus`)
-validates one endpoint. Use http or https, with no username or password
-in the URL. Connection refused, TLS failure, auth failure, and timeout
-are reported separately. Auth failure marks that gateway invalid.
-Timeout marks it degraded and keeps the URL for a later retry.
+validates that base URL. The probe requests `/healthz` on substrate and
+`/health` on redteam and the desk bus, with the same bearer the runtime
+client would send. Use http or https, with no username or password in
+the URL. Connection refused, TLS failure, auth failure, a server error,
+and timeout are reported separately. Auth failure marks that gateway
+invalid. A server error or timeout marks it degraded and keeps the URL
+for a later retry. A later replacement that fails leaves a working URL
+in place.

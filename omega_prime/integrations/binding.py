@@ -215,7 +215,10 @@ def _id_list(value: Any) -> list[str]:
         ident = _identifier(item)
         if ident and ident not in found:
             found.append(ident)
-        if len(found) >= 50:
+        # One setup list can span several API pages. Keep every id the
+        # client returned, and stop only at a hard cap so a bad payload
+        # cannot grow the binding file without limit.
+        if len(found) >= 500:
             break
     return found
 
