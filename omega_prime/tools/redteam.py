@@ -339,13 +339,16 @@ class RedteamClient:
         When the operator points the binding at another gateway, this asks
         the pinned one ``GET /api/mission/status`` (the documented status
         read, the same document a direct ``POST /api/mission/stop`` updates).
-        An explicit idle or stopped status drops the pin so the next call,
-        including ``mission_start``, follows the new binding. A transport
-        error or an unclear body keeps the pin.
+        An explicit idle or stopped status drops the pin so a later call
+        follows the new binding. ``mission_stop`` does not use that drop:
+        it stays on this gateway, and a status that already says the
+        mission ended is answered locally instead of stopping the new one.
+        A transport error or an unclear body keeps the pin. The kill switch
+        skips this read.
         """
         pinned = self._mission_gateway
-        if not pinned:
-            return None
+        if not pinned or _kill_switch_set():
+            return pinned
         if not self._binding_moved(pinned):
             return pinned
         if self._mission_still_running(pinned):
@@ -425,7 +428,24 @@ class RedteamClient:
                 "in-flight run aborted at the gateway call boundary",
                 ok=False,
             )
-        base, refusal = self._base_or_error()
+        # A stop never follows a binding change onto another gateway.
+        # If the pinned gateway already reports the mission ended, answer
+        # here and leave the new gateway's mission alone.
+        if path == "/api/mission/stop" and self._mission_gateway:
+            pinned = self._mission_gateway
+            if self._binding_moved(pinned) and not self._mission_still_running(pinned):
+                grant_refusal = self._grant_or_error(tool)
+                if grant_refusal is not None:
+                    return grant_refusal
+                self._mission_gateway = None
+                return {
+                    "ok": True,
+                    "status": 200,
+                    "data": {"active": False, "mission": None},
+                }
+            base, refusal = pinned, None
+        else:
+            base, refusal = self._base_or_error()
         if refusal is not None:
             return refusal
         grant_refusal = self._grant_or_error(tool)

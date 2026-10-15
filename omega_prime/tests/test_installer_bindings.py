@@ -1189,6 +1189,56 @@ def test_external_stop_releases_the_pinned_gateway(
     ]
 
 
+def test_external_stop_does_not_stop_the_new_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path))
+    binding = fresh_binding()
+    binding["gateways"]["redteam"] = {
+        "state": "ready",
+        "url": "http://127.0.0.1:9101",
+    }
+    save_binding(binding, _env(tmp_path))
+    calls: list[tuple[str, str]] = []
+
+    def request(
+        base: str,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> tuple[int, dict[str, Any]]:
+        del method, payload, headers, timeout
+        calls.append((base, path))
+        if path == "/api/mission/status":
+            return 200, {"active": False, "phase": "idle", "mission": None}
+        if path == "/api/mission/stop":
+            raise AssertionError("stop must not be forwarded")
+        return 200, {"missionId": "m-1"}
+
+    client = RedteamClient(
+        RedteamContext(
+            gateway_url="http://127.0.0.1:1",
+            bearer_token=SENTINEL,
+            request=request,
+            policy=_policy(["127.0.0.1"]),
+        )
+    )
+    assert client.mission_start(name="engagement")["ok"] is True
+    binding["gateways"]["redteam"]["url"] = "http://127.0.0.1:9102"
+    save_binding(binding, _env(tmp_path))
+    stopped = client.mission_stop()
+    assert stopped["ok"] is True
+    assert stopped["data"]["active"] is False
+    assert calls == [
+        ("http://127.0.0.1:9101", "/api/mission/start"),
+        ("http://127.0.0.1:9101", "/api/mission/status"),
+    ]
+    assert client.operators_list()["ok"] is True
+    assert calls[-1] == ("http://127.0.0.1:9102", "/api/operators/list")
+
+
 def test_skipped_gateways_do_not_use_the_default_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
