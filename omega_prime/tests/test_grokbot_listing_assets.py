@@ -5,13 +5,19 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+from xml.dom import minidom
 
 import pytest
 
-from omega_prime.tests.test_public_repo import _png_size, _png_texts
+from omega_prime.tests.test_public_repo import (
+    _png_size,
+    _png_texts,
+    _text_contrast_failures,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "omega_prime" / "scripts" / "render_raster.py"
@@ -158,3 +164,80 @@ def test_icon_check_flags_missing_and_extra_files(tmp_path: Path) -> None:
         "icon-32.png is missing",
         "unexpected file icon-48.png",
     ]
+
+
+BANNER_SVG = ROOT / "omega_prime" / "grokbot" / "listing" / "banner.svg"
+BANNER_PNG = BANNER_SVG.with_suffix(".png")
+PHASE78_BANNER = ROOT / "assets" / "banner.svg"
+_BANNER_TEXT = [
+    "Omega Prime",
+    "One Grok programming bot.",
+    "Local proof: MCP tool host and readiness report",
+    "Evidence levels: local proof, optional capability, unproven external",
+]
+_LIVE_CLAIM = re.compile(
+    r"\b(connect\w*|attach\w*|live|works with|running)\b", re.IGNORECASE
+)
+
+
+def _text_runs(raw: str) -> list[tuple[str, str]]:
+    """(fill, text) of each text or tspan element with visible text, in order."""
+    root = minidom.parseString(raw).documentElement
+    assert root is not None
+    runs = []
+    for node in root.getElementsByTagName("*"):
+        label = "".join(c.data for c in node.childNodes if c.nodeType == 3).strip()
+        if node.tagName in ("text", "tspan") and label:
+            runs.append((node.getAttribute("fill"), label))
+    return runs
+
+
+def _desc_text(raw: str) -> str:
+    root = minidom.parseString(raw).documentElement
+    assert root is not None
+    return " ".join(
+        "".join(c.data for c in node.childNodes if c.nodeType == 3)
+        for node in root.getElementsByTagName("desc")
+    )
+
+
+def test_listing_banner_text_contrast_matches_phase78() -> None:
+    raw = BANNER_SVG.read_text(encoding="utf-8")
+    assert _text_contrast_failures(raw) == []
+    listing = {fill for fill, _ in _text_runs(raw)}
+    phase78 = {
+        fill for fill, _ in _text_runs(PHASE78_BANNER.read_text(encoding="utf-8"))
+    }
+    assert listing
+    assert listing <= phase78
+
+
+def test_listing_banner_names_title_tagline_and_evidence_levels() -> None:
+    raw = BANNER_SVG.read_text(encoding="utf-8")
+    texts = [text for _, text in _text_runs(raw)]
+    assert texts == _BANNER_TEXT
+    assert "grok bot import" not in " ".join([*texts, _desc_text(raw)]).lower()
+    assert texts[2].startswith("Local proof: ")
+    legend = texts[3].lower()
+    for level in ("local proof", "optional capability", "unproven external"):
+        assert level in legend
+
+
+def test_listing_banner_makes_no_live_grok_claim() -> None:
+    raw = BANNER_SVG.read_text(encoding="utf-8")
+    joined = "\n".join([text for _, text in _text_runs(raw)] + [_desc_text(raw)])
+    assert _LIVE_CLAIM.search(joined) is None
+
+
+def test_listing_banner_png_is_stamped_from_its_svg() -> None:
+    assert _png_size(BANNER_PNG) == (1200, 400)
+    digest = hashlib.sha256(BANNER_SVG.read_bytes()).hexdigest().encode()
+    assert _png_texts(BANNER_PNG.read_bytes()).get(b"omega-source-sha256") == [digest]
+
+
+def test_listing_banner_is_self_contained() -> None:
+    raw = BANNER_SVG.read_text(encoding="utf-8")
+    # The SVG namespace identifier is not a reference; strip it as the asset check does.
+    without_ns = raw.replace('xmlns="http://www.w3.org/2000/svg"', "")
+    for token in ("href", "xlink", "http://", "https://", "<script"):
+        assert token not in without_ns, token
