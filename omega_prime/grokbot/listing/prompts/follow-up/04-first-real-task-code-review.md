@@ -9,7 +9,7 @@ Evidence level: local proof for the command's own tool result. A live Bot run is
 Replace the placeholder, then send this as the whole message:
 
 ```text
-/omega-code-review <file, diff or branch to review>
+/omega-code-review <file, diff or branch named in the review request>
 ```
 
 The Bot calls the `omega_command` tool of the `omega-prime` server with that text, as the [prompting contract](../../../SETUP.md#prompting-contract) states.

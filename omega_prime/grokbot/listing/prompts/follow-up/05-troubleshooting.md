@@ -20,7 +20,7 @@ The command loads and returns the doctor checks; triage against those checks is 
 
 1. Send the command above as the whole message.
 2. Show the operator the full result, unchanged.
-3. Read the `checks` object in the order shown. Find the first check whose `green` is `false`, report that check's name and its detail, and stop there.
+3. Read the `checks` object in the order shown. Find the first check whose `green` is `false`, skipping `prompt` and `skills` when the caller supplied no `doctor_context`. Report that check's name and its detail, and stop there.
 4. If every check is green, say so and stop.
 5. Send no other command. Do not ask the Bot to repair, register or install anything.
 
