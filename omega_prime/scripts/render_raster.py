@@ -1,12 +1,20 @@
 """Render an SVG asset to its PNG and record which SVG the PNG came from.
 
-usage: python3 omega_prime/scripts/render_raster.py assets/social-card.svg
+usage: python3 omega_prime/scripts/render_raster.py [--size N] [--out PATH] <asset.svg>
 
-Runs CairoSVG (``cairosvg`` on PATH) to write the sibling ``.png``, then adds
-one ``tEXt`` chunk, ``omega-source-sha256``, holding the SHA-256 of the SVG
-bytes. ``omega_prime/tests/test_public_repo.py`` fails when an SVG no longer
-matches the digest its PNG carries, so edited art cannot ship with a stale
-raster.
+Runs CairoSVG (``cairosvg`` on PATH) to write the PNG, then adds one ``tEXt``
+chunk, ``omega-source-sha256``, holding the SHA-256 of the input SVG bytes.
+``omega_prime/tests/test_public_repo.py`` fails when an SVG no longer matches
+the digest its PNG carries, so edited art cannot ship with a stale raster.
+
+Options:
+  --size N    render a square N by N pixel PNG (passed to CairoSVG as
+              ``--output-width N --output-height N``); N is a positive integer.
+  --out PATH  write the PNG to PATH (its parent directory is created) instead
+              of the sibling ``.png`` of the SVG.
+
+The digest is always taken from the input SVG, never from the output file.
+CairoSVG is never run with ``-u``/``--unsafe``.
 
 Exit status: 0 when the PNG is written and stamped; 2 for a usage error or
 no ``cairosvg`` on PATH; otherwise CairoSVG's own non-zero status, with the
@@ -51,17 +59,54 @@ def stamp(png: bytes, digest: str) -> bytes:
     return b"".join(parts)
 
 
+def _usage() -> int:
+    print(
+        "usage: render_raster.py [--size N] [--out PATH] <asset.svg>",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 2 or not argv[1].endswith(".svg"):
-        print("usage: render_raster.py <asset.svg>", file=sys.stderr)
-        return 2
+    size: int | None = None
+    out: str | None = None
+    positional: list[str] = []
+    args = argv[1:]
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("--size", "--out"):
+            if i + 1 >= len(args):
+                return _usage()
+            value = args[i + 1]
+            if arg == "--out":
+                out = value
+            else:
+                if not (value.isascii() and value.isdigit()) or int(value) < 1:
+                    return _usage()
+                size = int(value)
+            i += 2
+        elif arg.startswith("-"):
+            return _usage()
+        else:
+            positional.append(arg)
+            i += 1
+    if len(positional) != 1 or not positional[0].endswith(".svg"):
+        return _usage()
     renderer = shutil.which("cairosvg")
     if renderer is None:
         print("render_raster: cairosvg is not on PATH", file=sys.stderr)
         return 2
-    svg = Path(argv[1])
-    png = svg.with_suffix(".png")
-    rendered = subprocess.run([renderer, str(svg), "-o", str(png)], check=False)
+    svg = Path(positional[0])
+    if out is None:
+        png = svg.with_suffix(".png")
+    else:
+        png = Path(out)
+        png.parent.mkdir(parents=True, exist_ok=True)
+    command = [renderer, str(svg), "-o", str(png)]
+    if size is not None:
+        command += ["--output-width", str(size), "--output-height", str(size)]
+    rendered = subprocess.run(command, check=False)
     if rendered.returncode != 0:
         return rendered.returncode
     digest = hashlib.sha256(svg.read_bytes()).hexdigest()
