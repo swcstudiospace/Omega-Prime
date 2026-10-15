@@ -2,8 +2,8 @@
 gsd_state_version: "1.0"
 milestone: v18
 milestone_name: Operator posture
-status: v18 phases implemented
-stopped_at: v18 phases 89-95 implemented on ultrathink/v18-seven. Phase 77.1 live UAT stays user-owned. Stdio overlay retest waits until the new command files are committed.
+status: Milestone complete
+stopped_at: v18 phases 89-95 verified. Phase 77.1 live UAT stays user-owned.
 last_updated: "2026-10-14T21:50:00.000Z"
 last_activity: 2026-10-14
 last_activity_desc: Implemented the seven accepted v18 upgrades (graph ut-mv8mtqhp-40c94082)
