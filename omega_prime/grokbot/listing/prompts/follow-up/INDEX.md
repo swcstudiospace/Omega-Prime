@@ -1,6 +1,6 @@
 # Follow-up prompts
 
-Five prompts to run after step 4 of the install prompt works. Each file sends one `/omega-*` command as the whole message, as the [prompting contract](../../../SETUP.md#prompting-contract) states.
+Five prompts to run after step 4 of the install prompt has completed. Each file sends one `/omega-*` command as the whole message, as the [prompting contract](../../../SETUP.md#prompting-contract) states.
 
 | Order | Prompt | Sends | Use it when |
 | --- | --- | --- | --- |

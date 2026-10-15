@@ -2,7 +2,7 @@
 
 ![Omega Prime banner](banner.png)
 
-This is a documented setup path that is verified locally in this repository. Live Grok Bot import is UNPROVEN. The user UAT rows in [user UAT](../../../docs/grok-bot-native.md#user-uat) must be run on your own accounts before any live claim holds.
+The setup path is documented in [SETUP.md](../SETUP.md). Live Grok Bot import is UNPROVEN. The user UAT rows in [user UAT](../../../docs/grok-bot-native.md#user-uat) must be run on your own accounts before any live claim holds.
 
 ## What it is
 
