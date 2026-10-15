@@ -13,6 +13,7 @@
 - [Driving the bot](driving-the-bot.md)
 - [Agent loop](agent-loop.md)
 - [Connectors](connectors.md)
+- [Notion task dashboard](notion-task-dashboard.md)
 - [Compatibility and migration](migration.md)
 - [Tool host](tool-host.md)
 - [Remote MCP host for Grok Bot](grok-bot-native.md)

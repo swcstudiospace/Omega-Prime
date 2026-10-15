@@ -148,6 +148,13 @@ connector asks for it (Grok Bot settings or your host's env):
 | `SUBSTRATE_TOKEN` | Substrate brief/events/memory (surface grok-bot) | host env, resolved via the credential broker |
 | `HINDSIGHT_API_KEY` | Shared Hindsight episodic memory | host env, resolved via the credential broker |
 | `MCP_AUTH_TOKEN` | Bearer token Grok Bot presents to a remote tool host (HTTPS alternative only; the stdio Command entry needs none) | host env or a 0600 `--token-file` (never argv); on the Bot, a Remote HTTPS Bot secret |
+| `NOTION_TOKEN` | Notion Task dashboard. Read, update, and insert content on the duplicated database only. | host env, or a mode 0600 file named by `NOTION_TOKEN_FILE` |
+| `LINEAR_API_KEY` | Linear team and issue actions for this install | host env, or a mode 0600 file named by `LINEAR_API_KEY_FILE` |
+
+Do not paste either token into chat. `/omega-connectors` walks the Notion
+template (`docs/notion-task-dashboard.md`), the Notion connection, the
+Linear team, and an optional gateway. Reply with the verb it asks for.
+Unset gateways are a valid steady state after you reply `skip-gateway`.
 
 `SUBSTRATE_URL` (default `http://127.0.0.1:7410`) and `HINDSIGHT_URL`
 (default the Railway hindsight-api) override where those two clients point.

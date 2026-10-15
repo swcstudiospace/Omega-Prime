@@ -90,6 +90,8 @@ saved output — `--token` exists only as a deprecated flag that warns because
 | `SUBSTRATE_TOKEN` | Substrate brief/events/memory | host env, resolved via the credential broker |
 | `HINDSIGHT_API_KEY` | Shared Hindsight episodic memory | host env, resolved via the credential broker |
 | `MCP_AUTH_TOKEN` or `--token-file` | Bearer token a remote tool host requires | host env or a `0600` file (never `argv`) |
+| `NOTION_TOKEN` or `NOTION_TOKEN_FILE` | Notion Task dashboard (read, update, and insert content) | host env, or a mode 0600 file path |
+| `LINEAR_API_KEY` or `LINEAR_API_KEY_FILE` | Linear team selection and issue create | host env, or a mode 0600 file path |
 
 Configure only the integrations you intend to use. Availability and failure
 behavior are tool-specific: some tools return `not_configured`, readiness
@@ -97,6 +99,36 @@ accounts for named prerequisites, and some clients raise or degrade reads.
 See [substrate](substrate.md) and [connectors](connectors.md) for those contracts.
 `SUBSTRATE_URL` (default `http://127.0.0.1:7410`) and `HINDSIGHT_URL` override
 the respective peers; `omega_prime/grokbot/SETUP.md` has the full secret table.
+
+Send `/omega-connectors` to walk installer setup: the Notion template in
+[notion-task-dashboard.md](notion-task-dashboard.md), then Notion, then
+Linear, then an optional gateway. Bindings are stored outside the
+repository under `OMEGA_PRIME_STATE_DIR` (or `~/.omega-prime`). The file
+holds team and database ids, never tokens. An empty `prime-agent/`
+checkout fails `python -m omega_prime.setup_check` with
+`git submodule update --init --recursive`. `redteam/` stays optional.
+
+There is no public Notion gallery listing for the dashboard. The
+markdown page is the template: recreate that database in your own
+workspace. Do not point the bot at someone else's page id.
+
+The shipped seat policy allowlist is empty. Before `/omega-connectors`
+can call Notion, Linear, or a gateway, add `api.notion.com`,
+`api.linear.app`, and each gateway host to `network.hosts` in
+`omega_prime/contracts/policies/omega-prime.json`, then regenerate the
+sandbox policy. A host that is not listed is refused and the saved
+gateway is left unchanged.
+
+Sibling checkouts that setup does not import stay out of `.gitmodules`:
+
+| Checkout | Why it is not a submodule |
+| --- | --- |
+| `hermes-agent/`, `oh-my-pi/` | Behavior ports. `VENDOR.md` says they are not imported. They stay gitignored. |
+| `programming-desk` | Skills and routines are copied into `omega_prime/`. The desk repo is not started by setup. |
+| `agent-substrate` | The bot talks to it over `SUBSTRATE_URL`. The server source is not imported. |
+| `claude-ultrathink` | Optional. `ULTRATHINK_ROOT` points at a checkout the operator already has. |
+| `vps-agent-bus` | Not imported. The desk bus is `OMEGA_PRIME_DESK_BUS_URL` when the operator sets it. |
+| `hermes-linear-connector` | A separate Linear-to-kanban sync. Omega Prime does not call it. |
 
 ## 5. Verify locally with no credentials
 

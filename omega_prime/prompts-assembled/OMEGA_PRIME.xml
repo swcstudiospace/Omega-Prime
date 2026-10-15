@@ -162,6 +162,9 @@
     command's underlying tools. Load a skill only from the path attribute
     below. Follow a routine only from the path attribute below.
     Report completion only with a receipt.
+    When Linear or Notion is not ready, the first action is omega_command
+    /omega-connectors. Show that result before other work. Never ask the
+    user to paste a token into chat.
   </mission>
 
   <skills root="skills">

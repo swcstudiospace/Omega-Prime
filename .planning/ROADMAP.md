@@ -19,7 +19,8 @@
 - ✅ **v15 Integrated Readiness and Repository Delivery** — Phases 75–78 (shipped 2026-10-12; audit 21/22, GROK-03 live import UAT deferred by the user)
 - ✅ **v16 Enterprise Hardening and Continuous Verification** — Phases 79–84 (shipped 2026-10-13; audit PASS 13/13, sidecar ships BLOCKED pending signed RoE)
 - ✅ **v17 XML Prompt Standard** — Phases 85–88 (shipped 2026-10-14; every first-party prompt wrapped in XML tags like Programming Desk, enforced by a gate)
-- **v18 Operator posture** - Phases 89-95 (shipped 2026-10-14). Seven upgrades accepted when the operator said to continue.
+- ✅ **v18 Operator posture** - Phases 89-95 (shipped 2026-10-14). Seven upgrades accepted when the operator said to continue.
+- ✅ **v19 Installer bindings** - Phase 96 (shipped 2026-10-15). A fresh install binds its own Linear and Notion, treats the existing gateways as optional, and fails setup when `prime-agent` is empty.
 
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
@@ -67,8 +68,8 @@ PROM-01..PROM-08 in `milestones/v17-REQUIREMENTS.md`.
 
 </details>
 
-<details open>
-<summary>v18 Operator posture (Phases 89-95) - shipped 2026-10-14</summary>
+<details>
+<summary>✅ v18 Operator posture (Phases 89-95) - shipped 2026-10-14</summary>
 
 Accepted set from STATE.md after the operator said to continue. Requirements: milestones/v18-REQUIREMENTS.md.
 
@@ -79,5 +80,14 @@ Accepted set from STATE.md after the operator said to continue. Requirements: mi
 - [x] Phase 93: Purple-cycle lock and deadline (1/1 plan) - completed 2026-10-14
 - [x] Phase 94: Readiness slash command (1/1 plan) - completed 2026-10-14
 - [x] Phase 95: Audit-chain slash command (1/1 plan) - completed 2026-10-14
+
+</details>
+
+<details>
+<summary>✅ v19 Installer bindings (Phase 96) - shipped 2026-10-15</summary>
+
+Requirements: milestones/v19-REQUIREMENTS.md. Phase 77.1 live UAT stays user-owned.
+
+- [x] Phase 96: Per-install Linear, Notion, and optional gateways (1/1 plan) - completed 2026-10-15
 
 </details>

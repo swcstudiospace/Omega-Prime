@@ -1193,6 +1193,64 @@ def sync_findings(
     return gate.finish({"pushed": pushed, "skipped": skipped, "dry_run": dry_run})
 
 
+def _linear_client_from_env() -> Any:
+    """Real Linear client when the host has a token, else ``None``.
+
+    The legacy ``gh api graphql`` path stays in place only when no token
+    is configured, so an install that never connected Linear is unchanged.
+    A configured key file that cannot be read raises instead of falling
+    through to that legacy path.
+    """
+    from omega_prime.integrations.linear import LinearError, client_from_environ
+
+    try:
+        return client_from_environ(policy=_installed_seat_policy())
+    except LinearError as exc:
+        raise GhApiError(str(exc)) from exc
+
+
+def _installed_seat_policy() -> Any:
+    """The shipped seat policy, or ``None`` when it cannot be loaded."""
+    from pathlib import Path
+
+    from omega_prime.policy.policy import SeatPolicy
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "contracts"
+        / "policies"
+        / "omega-prime.json"
+    )
+    try:
+        return SeatPolicy.load(path)
+    except (OSError, ValueError):
+        return None
+
+
+def _project_for_team(team_id: str, explicit: str = "") -> str:
+    """Saved project only when it belongs to this team.
+
+    An explicit project id is kept. A saved project from team A is not
+    attached to a request for team B.
+    """
+    if explicit:
+        return explicit
+    from omega_prime.integrations.binding import ready_linear_project, ready_linear_team
+
+    saved_team = ready_linear_team()
+    if saved_team and saved_team == team_id:
+        return ready_linear_project()
+    return ""
+
+
+def _resolved_linear_team(configured: Any) -> str:
+    """Prefer the install binding's ready team, else the config value."""
+    text = configured.strip() if isinstance(configured, str) else ""
+    from omega_prime.integrations.binding import ready_linear_team
+
+    return ready_linear_team() or text
+
+
 def sync_findings_linear(
     reports_dir: str | Path | None,
     team_id: str,
@@ -1202,6 +1260,8 @@ def sync_findings_linear(
     quiet_hours: Mapping[str, Any] | None = None,
     now: Any = None,
     sync_budget: int | None = None,
+    linear_client: Any = None,
+    project_id: str = "",
 ) -> dict[str, Any]:
     """Push every not-yet-synced finding row to Linear as an issue.
 
@@ -1223,6 +1283,12 @@ def sync_findings_linear(
         raise ValueError(NO_LINEAR_TEAM_MESSAGE)
     team_id = team_id.strip()
     run = runner if runner is not None else _default_runner
+    api_client = linear_client
+    if api_client is None and runner is None:
+        api_client = _linear_client_from_env()
+    bound_project = ""
+    if api_client is not None:
+        bound_project = _project_for_team(team_id, project_id)
 
     rows = load_findings(reports_dir)
     pushed: list[dict[str, Any]] = []
@@ -1247,6 +1313,26 @@ def sync_findings_linear(
             "body": body,
             "priority": priority,
         }
+        if api_client is not None:
+            if dry_run:
+                pushed.append({"dedupe_hash": digest, "issue_url": ""})
+                continue
+            try:
+                created = api_client.create_issue(
+                    team_id,
+                    title,
+                    body,
+                    priority,
+                    bound_project,
+                )
+            except Exception as exc:
+                _persist_if_dirty(reports_dir, dirty, rows)
+                raise GhApiError(f"linear api failed: {exc}") from exc
+            row["issue_url"] = str(created.get("url") or "")
+            row["synced_at"] = utc_now_rfc3339()
+            dirty = True
+            pushed.append({"dedupe_hash": digest, "issue_url": row["issue_url"]})
+            continue
         argv = [
             "gh",
             "api",
@@ -3163,11 +3249,23 @@ def _deliver_expiry_notice(
         _direct(argv, payload, f"repos/{repo}/issues")
         return ref
     if tracker == "linear":
-        team_id = node.get("linear_team_id", "")
-        if not isinstance(team_id, str) or not team_id.strip():
+        team_id = _resolved_linear_team(node.get("linear_team_id", ""))
+        if not team_id:
             return None
-        team_id = team_id.strip()
         priority: Any = 1 if name == "expired" else 2
+        api_client = None if runner is not None else _linear_client_from_env()
+        if api_client is not None:
+            try:
+                api_client.create_issue(
+                    team_id,
+                    subject,
+                    notice,
+                    priority,
+                    _project_for_team(team_id),
+                )
+            except Exception as exc:
+                raise GhApiError(f"linear api failed: {exc}") from exc
+            return ref
         argv = [
             "gh",
             "api",
@@ -3700,13 +3798,13 @@ def tick(
             )
         )
     if tracker == "linear":
-        team_id = node.get("linear_team_id", "")
-        if not isinstance(team_id, str) or not team_id.strip():
+        team_id = _resolved_linear_team(node.get("linear_team_id", ""))
+        if not team_id:
             return _with_notices(_tracker_error(NO_LINEAR_TEAM_MESSAGE, dry_run))
         return _finish(
             sync_findings_linear(
                 reports_directory,
-                team_id.strip(),
+                team_id,
                 runner=runner,
                 dry_run=dry_run,
                 quiet_hours=node.get("quiet_hours"),
@@ -4427,11 +4525,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return _main_graph(directory, graph_cfg, args.dry_run, graph_repo or None)
     if tracker == "linear":
-        team_id = args.linear_team_id.strip() or (
-            node.get("linear_team_id", "").strip()
-            if isinstance(node.get("linear_team_id", ""), str)
-            else ""
-        )
+        flag = args.linear_team_id.strip()
+        if flag:
+            team_id = flag
+        else:
+            configured = node.get("linear_team_id", "")
+            configured = configured.strip() if isinstance(configured, str) else ""
+            team_id = _resolved_linear_team(configured)
         if not team_id:
             print(f"error: {NO_LINEAR_TEAM_MESSAGE}", file=sys.stderr)
             return 2
