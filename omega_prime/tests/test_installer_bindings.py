@@ -8,8 +8,10 @@ import email.message
 import io
 import json
 import stat
+import threading
 import urllib.error
 from collections.abc import Mapping
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Literal
 
@@ -572,6 +574,52 @@ def test_failed_gateway_replacement_keeps_the_ready_url(tmp_path: Path) -> None:
     assert saved["url"] == "http://127.0.0.1:9"
 
 
+def test_recheck_of_the_active_gateway_records_the_failure(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    notion = FakeNotion()
+    notion.matches = [{"id": DB_ID, "name": "Tasks"}]
+    linear = FakeLinear()
+    handle("duplicated", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    handle("connected", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    handle("connected", env, notion=notion, linear=linear, probe=lambda _url: "ok")
+    handle(
+        "gateway substrate http://127.0.0.1:9",
+        env,
+        notion=notion,
+        linear=linear,
+        probe=lambda _url: "ok",
+    )
+    timed = handle(
+        "gateway substrate http://127.0.0.1:9/",
+        env,
+        notion=notion,
+        linear=linear,
+        probe=lambda _url: "timeout",
+    )
+    assert "timed out" in timed["prompt"]
+    saved = load_binding(env)["gateways"]["substrate"]
+    assert saved["state"] == "degraded"
+    assert saved["url"] == "http://127.0.0.1:9/"
+    handle(
+        "gateway redteam http://127.0.0.1:9",
+        env,
+        notion=notion,
+        linear=linear,
+        probe=lambda _url: "ok",
+    )
+    rejected = handle(
+        "gateway redteam http://127.0.0.1:9",
+        env,
+        notion=notion,
+        linear=linear,
+        probe=lambda _url: "auth",
+    )
+    assert "previous URL" not in rejected["prompt"]
+    saved = load_binding(env)["gateways"]["redteam"]
+    assert saved["state"] == "invalid"
+    assert saved["url"] == "http://127.0.0.1:9"
+
+
 def test_team_switch_drops_the_previous_projects(tmp_path: Path) -> None:
     env = _env(tmp_path)
     notion = FakeNotion()
@@ -637,9 +685,7 @@ def test_probe_rejects_server_errors_and_sends_the_bearer(monkeypatch) -> None:
             fp=io.BytesIO(b""),
         )
 
-    monkeypatch.setattr(
-        "omega_prime.integrations.gateways.urllib.request.urlopen", denied
-    )
+    monkeypatch.setattr("omega_prime.integrations.gateways._open_probe", denied)
     assert (
         probe_url(
             "http://127.0.0.1:9/",
@@ -658,7 +704,7 @@ def test_probe_rejects_server_errors_and_sends_the_bearer(monkeypatch) -> None:
             return False
 
     monkeypatch.setattr(
-        "omega_prime.integrations.gateways.urllib.request.urlopen",
+        "omega_prime.integrations.gateways._open_probe",
         lambda request, timeout=3.0: Ok(),
     )
     assert probe_url("http://127.0.0.1:9/") == "ok"
@@ -679,9 +725,7 @@ def test_probe_rejects_server_errors_and_sends_the_bearer(monkeypatch) -> None:
         assert request.get_header("Authorization") == f"Bearer {SENTINEL}"
         return Ok()
 
-    monkeypatch.setattr(
-        "omega_prime.integrations.gateways.urllib.request.urlopen", capture
-    )
+    monkeypatch.setattr("omega_prime.integrations.gateways._open_probe", capture)
     assert (
         probe_gateway(
             "redteam",
@@ -691,6 +735,89 @@ def test_probe_rejects_server_errors_and_sends_the_bearer(monkeypatch) -> None:
         == "ok"
     )
     assert seen == ["http://127.0.0.1:9/health"]
+
+
+def _serve(handler: type[BaseHTTPRequestHandler]) -> HTTPServer:
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_probe_refuses_a_cross_origin_redirect() -> None:
+    seen: list[str] = []
+
+    class Stolen(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append(self.headers.get("Authorization", ""))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            del fmt, args
+
+    class Bounce(BaseHTTPRequestHandler):
+        location = ""
+
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", Bounce.location)
+            self.end_headers()
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            del fmt, args
+
+    stolen = _serve(Stolen)
+    bounce = _serve(Bounce)
+    Bounce.location = f"http://127.0.0.1:{stolen.server_address[1]}/taken"
+    try:
+        result = probe_url(
+            f"http://127.0.0.1:{bounce.server_address[1]}/health",
+            headers={"Authorization": f"Bearer {SENTINEL}"},
+            timeout=2,
+        )
+    finally:
+        bounce.shutdown()
+        stolen.shutdown()
+        bounce.server_close()
+        stolen.server_close()
+    assert result == "refused"
+    assert seen == []
+    assert SENTINEL not in "".join(seen)
+
+
+def test_probe_follows_a_same_origin_redirect() -> None:
+    seen: list[tuple[str, str]] = []
+
+    class Health(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append((self.path, self.headers.get("Authorization", "")))
+            if self.path == "/health":
+                self.send_response(302)
+                self.send_header("Location", "/healthz")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            del fmt, args
+
+    server = _serve(Health)
+    try:
+        result = probe_url(
+            f"http://127.0.0.1:{server.server_address[1]}/health",
+            headers={"Authorization": f"Bearer {SENTINEL}"},
+            timeout=2,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result == "ok"
+    assert seen == [
+        ("/health", f"Bearer {SENTINEL}"),
+        ("/healthz", f"Bearer {SENTINEL}"),
+    ]
 
 
 def test_create_issue_does_not_retry_a_timeout() -> None:
@@ -904,6 +1031,108 @@ def test_saved_redteam_url_is_the_one_the_client_calls(
     body = client.status()
     assert body["tool"] == "tempest_status"
     assert seen[0] == "http://127.0.0.1:9"
+
+
+def test_redteam_uses_the_runtime_policy_not_the_package_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path))
+    binding = fresh_binding()
+    binding["gateways"]["redteam"] = {
+        "state": "ready",
+        "url": "http://127.0.0.1:9",
+    }
+    save_binding(binding, _env(tmp_path))
+
+    def explode(_path: object) -> SeatPolicy:
+        raise AssertionError("package policy must not be loaded")
+
+    monkeypatch.setattr("omega_prime.policy.policy.SeatPolicy.load", explode)
+    seen: list[str] = []
+
+    def request(
+        base: str,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> tuple[int, dict[str, Any]]:
+        del method, path, payload, headers, timeout
+        seen.append(base)
+        return 200, {}
+
+    allowed = RedteamClient(
+        RedteamContext(
+            gateway_url="http://127.0.0.1:1",
+            bearer_token=SENTINEL,
+            request=request,
+            policy=_policy(["127.0.0.1"]),
+        )
+    )
+    assert allowed.status()["tool"] == "tempest_status"
+    denied = RedteamClient(
+        RedteamContext(
+            gateway_url="http://127.0.0.1:1",
+            bearer_token=SENTINEL,
+            request=request,
+            policy=_policy([]),
+        )
+    )
+    refused = denied.status()
+    assert "does not allow" in refused["error"]
+    assert seen == ["http://127.0.0.1:9", "http://127.0.0.1:9"]
+
+
+def test_mission_stop_stays_on_the_gateway_that_started_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path))
+    binding = fresh_binding()
+    binding["gateways"]["redteam"] = {
+        "state": "ready",
+        "url": "http://127.0.0.1:9101",
+    }
+    save_binding(binding, _env(tmp_path))
+    bases: list[str] = []
+    stop_status = {"code": 500}
+
+    def request(
+        base: str,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> tuple[int, dict[str, Any]]:
+        del method, payload, headers, timeout
+        bases.append(base)
+        if path == "/api/mission/stop":
+            return stop_status["code"], {}
+        return 200, {"missionId": "m-1"}
+
+    client = RedteamClient(
+        RedteamContext(
+            gateway_url="http://127.0.0.1:1",
+            bearer_token=SENTINEL,
+            request=request,
+            policy=_policy(["127.0.0.1"]),
+        )
+    )
+    assert client.mission_start(name="engagement")["ok"] is True
+    binding["gateways"]["redteam"]["url"] = "http://127.0.0.1:9102"
+    save_binding(binding, _env(tmp_path))
+    assert client.mission_stop()["ok"] is False
+    assert client.operators_list()["ok"] is True
+    assert bases == [
+        "http://127.0.0.1:9101",
+        "http://127.0.0.1:9101",
+        "http://127.0.0.1:9101",
+    ]
+    stop_status["code"] = 200
+    assert client.mission_stop()["ok"] is True
+    assert client.operators_list()["ok"] is True
+    assert bases[-2:] == ["http://127.0.0.1:9101", "http://127.0.0.1:9102"]
 
 
 def test_skipped_gateways_do_not_use_the_default_url(

@@ -395,7 +395,13 @@ def _configure_gateway(
         node["url"] = url
         node["state"] = "ready"
         return _prompt(binding)
-    kept = previous_state == "ready" and bool(previous_url)
+    # A failed replacement must not erase a working URL. A failed recheck of
+    # the URL that is already ready records invalid or degraded instead.
+    kept = (
+        previous_state == "ready"
+        and bool(previous_url)
+        and previous_url.rstrip("/") != url.rstrip("/")
+    )
     if result in ("timeout", "degraded"):
         if kept:
             detail = "timed out" if result == "timeout" else "returned a server error"

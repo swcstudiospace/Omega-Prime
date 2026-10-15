@@ -8,6 +8,7 @@ alone so an install that never ran setup keeps its current behavior.
 
 from __future__ import annotations
 
+import contextlib
 import ssl
 import urllib.error
 import urllib.request
@@ -41,6 +42,43 @@ def validate_gateway_url(text: str) -> str | None:
     return None
 
 
+class _CrossOriginRedirect(Exception):
+    """A health probe was redirected off the origin that was checked."""
+
+
+class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only when the next request stays on the same origin.
+
+    ``urllib`` copies ``Authorization`` onto a redirected request. A gateway
+    that redirects to another host would otherwise receive the bearer.
+    """
+
+    def redirect_request(  # type: ignore[override]
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        current = req.full_url if isinstance(req.full_url, str) else ""
+        if not _same_origin(current, newurl):
+            _drain(fp)
+            raise _CrossOriginRedirect()
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        return redirected if isinstance(redirected, urllib.request.Request) else None
+
+
+def _open_probe(request: urllib.request.Request, timeout: float) -> Any:
+    """Open one health request directly, never through an ambient proxy."""
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _SameOriginRedirect,
+    )
+    return opener.open(request, timeout=timeout)
+
+
 def probe_url(
     url: str,
     *,
@@ -50,12 +88,15 @@ def probe_url(
     """Return ok, degraded, refused, tls, auth, or timeout. Does not return the body.
 
     Only a 2xx response is ok. 401 and 403 are auth. 5xx is degraded.
-    Any other HTTP status is refused.
+    Any other HTTP status, including a redirect to another origin, is refused.
+    Same-origin redirects are followed. The bearer is not sent to the other host.
     """
     request = urllib.request.Request(url, headers=dict(headers or {}), method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _open_probe(request, timeout) as response:
             status = int(response.status)
+    except _CrossOriginRedirect:
+        return "refused"
     except urllib.error.HTTPError as exc:
         status = int(exc.code)
     except urllib.error.URLError as exc:
@@ -72,6 +113,8 @@ def probe_url(
         return "ok"
     if status >= 500:
         return "degraded"
+    if 300 <= status < 400:
+        return "refused"
     return "refused"
 
 
@@ -220,6 +263,32 @@ def gateway_status(name: str, env: Mapping[str, str] | None = None) -> dict[str,
 
 def _row(code: str, reason: str, name: str) -> dict[str, Any]:
     return {"ok": False, "error": f"{code}: {reason}", "gateway": name}
+
+
+def _origin(url: str) -> tuple[str, str, int] | None:
+    """``(scheme, host, port)`` for an http(s) URL, else ``None``."""
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    host = parts.hostname.lower() if isinstance(parts.hostname, str) else ""
+    if scheme not in ("http", "https") or not host:
+        return None
+    port = parts.port if parts.port is not None else 443 if scheme == "https" else 80
+    return scheme, host, port
+
+
+def _same_origin(left: str, right: str) -> bool:
+    origin = _origin(left)
+    return origin is not None and origin == _origin(right)
+
+
+def _drain(fp: Any) -> None:
+    with contextlib.suppress(Exception):
+        fp.read()
+    with contextlib.suppress(Exception):
+        fp.close()
 
 
 def _url_kind(exc: urllib.error.URLError) -> str:

@@ -1050,6 +1050,7 @@ def default_registry(
                         str(redteam_node.get("bearer_token_file") or ""),
                     ),
                     roe=grant,
+                    policy=policy,
                 )
             ),
             allowed=grant_tool_allowlist(grant) if grant is not None else None,

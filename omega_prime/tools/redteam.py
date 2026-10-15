@@ -133,14 +133,9 @@ def resolve_bearer_token(
         return ""
 
 
-def _saved_gateway_policy(name: str, url: str) -> dict[str, Any] | None:
-    """Refuse a saved gateway whose host the shipped seat policy forbids.
-
-    The constructor default is not checked here. That URL is operator
-    configuration, not a chat-supplied binding.
-    """
+def _package_seat_policy() -> Any:
+    """Seat policy beside this package, for callers that have no runtime policy."""
     from pathlib import Path
-    from urllib.parse import urlsplit
 
     from omega_prime.policy.policy import SeatPolicy
 
@@ -151,14 +146,31 @@ def _saved_gateway_policy(name: str, url: str) -> dict[str, Any] | None:
         / "omega-prime.json"
     )
     try:
-        policy = SeatPolicy.load(path)
+        return SeatPolicy.load(path)
     except (OSError, ValueError):
+        return None
+
+
+def _saved_gateway_policy(
+    name: str, url: str, policy: Any = None
+) -> dict[str, Any] | None:
+    """Refuse a saved gateway whose host the active seat policy forbids.
+
+    ``policy`` is the seat ``load_runtime`` loaded from ``--root``. Callers
+    without one fall back to the policy file beside this package. The
+    constructor default is not checked here. That URL is operator
+    configuration, not a chat-supplied binding.
+    """
+    from urllib.parse import urlsplit
+
+    active = policy if policy is not None else _package_seat_policy()
+    if active is None:
         return None
     try:
         host = urlsplit(url).hostname or ""
     except ValueError:
         host = ""
-    if host and policy.allows_host(host):
+    if host and active.allows_host(host):
         return None
     shown = host or "that host"
     return _error(
@@ -215,6 +227,7 @@ class RedteamContext:
     timeout: float = 30.0
     request: Any = None  # injected transport; default is the stdlib impl
     roe: dict[str, Any] | None = None  # signed grant kept from the guard
+    policy: Any = None  # seat from load_runtime; None uses the package file
 
 
 class RedteamClient:
@@ -222,6 +235,9 @@ class RedteamClient:
 
     def __init__(self, ctx: RedteamContext) -> None:
         self.ctx = ctx
+        # Gateway a successful mission_start actually called. Later calls,
+        # including mission_stop, stay there until that stop succeeds.
+        self._mission_gateway: str | None = None
 
     def _headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -237,12 +253,14 @@ class RedteamClient:
         """``(base, None)`` or ``("", refusal row)`` — the upstream gate."""
         from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
 
+        if self._mission_gateway:
+            return self._mission_gateway, None
         blocked = gateway_block("redteam")
         if blocked is not None:
             return "", blocked
         saved = ready_gateway_url("redteam")
         if saved:
-            refused = _saved_gateway_policy("redteam", saved)
+            refused = _saved_gateway_policy("redteam", saved, self.ctx.policy)
             if refused is not None:
                 return "", refused
         base = (saved or self.ctx.gateway_url or "").strip().rstrip("/")
@@ -306,7 +324,12 @@ class RedteamClient:
             )
         if _sidecar_current == "RUNNING":
             _sidecar_note("IDLE", "run-completed")
-        return {"ok": bool(200 <= status < 300), "status": status, "data": data}
+        result = {"ok": bool(200 <= status < 300), "status": status, "data": data}
+        if result["ok"] and path == "/api/mission/start":
+            self._mission_gateway = base
+        elif result["ok"] and path == "/api/mission/stop":
+            self._mission_gateway = None
+        return result
 
     def _grant_or_error(self, tool: str | None) -> dict[str, Any] | None:
         """Signed-grant enforcement at call time: window, then allowlist.
