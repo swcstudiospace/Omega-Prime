@@ -1239,6 +1239,121 @@ def test_external_stop_does_not_stop_the_new_gateway(
     assert calls[-1] == ("http://127.0.0.1:9102", "/api/operators/list")
 
 
+def test_pinned_probe_waits_for_kill_switch_and_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path))
+    binding = fresh_binding()
+    binding["gateways"]["redteam"] = {
+        "state": "ready",
+        "url": "http://127.0.0.1:9101",
+    }
+    save_binding(binding, _env(tmp_path))
+    calls: list[tuple[str, str]] = []
+
+    def request(
+        base: str,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> tuple[int, dict[str, Any]]:
+        del method, payload, headers, timeout
+        calls.append((base, path))
+        if path != "/api/mission/start":
+            raise AssertionError(path)
+        return 200, {"missionId": "m-1"}
+
+    client = RedteamClient(
+        RedteamContext(
+            gateway_url="http://127.0.0.1:1",
+            bearer_token=SENTINEL,
+            request=request,
+            policy=_policy(["127.0.0.1"]),
+        )
+    )
+    assert client.mission_start(name="engagement")["ok"] is True
+    binding["gateways"]["redteam"]["url"] = "http://127.0.0.1:9102"
+    save_binding(binding, _env(tmp_path))
+    monkeypatch.setenv("OMEGA_PRIME_REDTEAM_KILL", "1")
+    assert client.status()["mission"]["error"].startswith("killed:")
+    assert client.providers()["llm"]["error"].startswith("killed:")
+    hats = client.hats_list()
+    assert hats["ok"] is False
+    assert hats["grants"]["error"].startswith("killed:")
+    monkeypatch.delenv("OMEGA_PRIME_REDTEAM_KILL", raising=False)
+    client.ctx.roe = {
+        "effective_until": "2000-01-01T00:00:00Z",
+        "authorized_targets": [{"host": "127.0.0.1", "tools": ["tempest_status"]}],
+    }
+    assert "roe-expired" in client.status()["mission"]["error"]
+    assert "roe-expired" in client.mission_stop()["error"]
+    assert calls == [("http://127.0.0.1:9101", "/api/mission/start")]
+
+
+def test_hat_dispatch_stays_on_the_gateway_that_spawned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path))
+    binding = fresh_binding()
+    binding["gateways"]["redteam"] = {
+        "state": "ready",
+        "url": "http://127.0.0.1:9101",
+    }
+    save_binding(binding, _env(tmp_path))
+    calls: list[tuple[str, str]] = []
+    ended = {"value": False}
+
+    def request(
+        base: str,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> tuple[int, dict[str, Any]]:
+        del method, payload, headers, timeout
+        calls.append((base, path))
+        if path == "/api/mission/status":
+            if ended["value"]:
+                return 200, {"active": False, "phase": "idle", "mission": None}
+            return 200, {"mission": "m-1", "active": True, "phase": "running"}
+        if path == "/api/operators/spawn":
+            ended["value"] = True
+            return 200, {"operator": {"id": "op-1"}}
+        return 200, {"accepted": True}
+
+    client = RedteamClient(
+        RedteamContext(
+            gateway_url="http://127.0.0.1:1",
+            bearer_token=SENTINEL,
+            request=request,
+            policy=_policy(["127.0.0.1"]),
+        )
+    )
+    assert client.mission_start(name="engagement")["ok"] is True
+    binding["gateways"]["redteam"]["url"] = "http://127.0.0.1:9102"
+    save_binding(binding, _env(tmp_path))
+    body = client.hat_dispatch(hat="recon", task="scan the edge")
+    assert body["ok"] is True
+    assert body["operatorId"] == "op-1"
+    assert calls == [
+        ("http://127.0.0.1:9101", "/api/mission/start"),
+        ("http://127.0.0.1:9101", "/api/mission/status"),
+        ("http://127.0.0.1:9101", "/api/operators/spawn"),
+        ("http://127.0.0.1:9101", "/api/operators/op-1/task"),
+    ]
+    ended["value"] = True
+    follow = client.hat_dispatch(hat="recon", task="again")
+    assert follow["ok"] is True
+    assert calls[-3:] == [
+        ("http://127.0.0.1:9101", "/api/mission/status"),
+        ("http://127.0.0.1:9102", "/api/operators/spawn"),
+        ("http://127.0.0.1:9102", "/api/operators/op-1/task"),
+    ]
+
+
 def test_skipped_gateways_do_not_use_the_default_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

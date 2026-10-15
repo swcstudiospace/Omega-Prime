@@ -321,18 +321,20 @@ class RedteamClient:
             headers["Authorization"] = f"Bearer {self.ctx.bearer_token}"
         return headers
 
-    def _refusal(self) -> dict[str, Any] | None:
+    def _refusal(self, tool: str | None = None) -> dict[str, Any] | None:
         """Refusal row for composed tools, checked before any transport call."""
-        return self._base_or_error()[1]
+        return self._base_or_error(tool)[1]
 
-    def _base_or_error(self) -> tuple[str, dict[str, Any] | None]:
+    def _base_or_error(
+        self, tool: str | None = None
+    ) -> tuple[str, dict[str, Any] | None]:
         """``(base, None)`` or ``("", refusal row)`` — the upstream gate."""
-        pinned = self._pinned_gateway()
+        pinned = self._pinned_gateway(tool)
         if pinned:
             return pinned, None
         return self._configured_base()
 
-    def _pinned_gateway(self) -> str | None:
+    def _pinned_gateway(self, tool: str | None = None) -> str | None:
         """Pinned mission gateway, or None once that mission has ended.
 
         A saved binding that still names this gateway is not asked again.
@@ -344,14 +346,14 @@ class RedteamClient:
         it stays on this gateway, and a status that already says the
         mission ended is answered locally instead of stopping the new one.
         A transport error or an unclear body keeps the pin. The kill switch
-        skips this read.
+        and a grant that would refuse ``tool`` both skip this read.
         """
         pinned = self._mission_gateway
-        if not pinned or _kill_switch_set():
+        if not pinned or _kill_switch_set() or self._grant_or_error(tool) is not None:
             return pinned
         if not self._binding_moved(pinned):
             return pinned
-        if self._mission_still_running(pinned):
+        if self._mission_still_running(pinned, tool):
             return pinned
         self._mission_gateway = None
         return None
@@ -364,7 +366,12 @@ class RedteamClient:
             return False
         return saved.rstrip("/") != pinned.rstrip("/")
 
-    def _mission_still_running(self, base: str) -> bool:
+    def _mission_still_running(self, base: str, tool: str | None = None) -> bool:
+        # The caller already checked these. Repeat them at the request so a
+        # status read cannot leave with a bearer token when the kill switch
+        # is set or the signed grant would refuse the tool.
+        if _kill_switch_set() or self._grant_or_error(tool) is not None:
+            return True
         request = self.ctx.request or _http_request
         try:
             status, data = request(
@@ -416,6 +423,7 @@ class RedteamClient:
         path: str,
         payload: dict[str, Any] | None = None,
         tool: str | None = None,
+        bound_gateway: str | None = None,
     ) -> dict[str, Any]:
         # Kill switch aborts in-flight runs at the gateway call boundary,
         # before any transport I/O. Transition logging is best-effort and
@@ -430,22 +438,32 @@ class RedteamClient:
             )
         # A stop never follows a binding change onto another gateway.
         # If the pinned gateway already reports the mission ended, answer
-        # here and leave the new gateway's mission alone.
-        if path == "/api/mission/stop" and self._mission_gateway:
+        # here and leave the new gateway's mission alone. The grant is
+        # checked before that status read. ``bound_gateway`` is a gateway
+        # this tool already chose, so a later request in the same call
+        # cannot move to a newly saved binding.
+        if (
+            bound_gateway is None
+            and path == "/api/mission/stop"
+            and self._mission_gateway
+        ):
             pinned = self._mission_gateway
-            if self._binding_moved(pinned) and not self._mission_still_running(pinned):
+            if self._binding_moved(pinned):
                 grant_refusal = self._grant_or_error(tool)
                 if grant_refusal is not None:
                     return grant_refusal
-                self._mission_gateway = None
-                return {
-                    "ok": True,
-                    "status": 200,
-                    "data": {"active": False, "mission": None},
-                }
+                if not self._mission_still_running(pinned, tool):
+                    self._mission_gateway = None
+                    return {
+                        "ok": True,
+                        "status": 200,
+                        "data": {"active": False, "mission": None},
+                    }
             base, refusal = pinned, None
+        elif bound_gateway is not None:
+            base, refusal = bound_gateway, None
         else:
-            base, refusal = self._base_or_error()
+            base, refusal = self._base_or_error(tool)
         if refusal is not None:
             return refusal
         grant_refusal = self._grant_or_error(tool)
@@ -480,7 +498,9 @@ class RedteamClient:
 
         No grant (direct client use, or the guard resolved none) keeps
         historical behavior. The kill switch and the gateway refusal run
-        first — this check never precedes them.
+        first — this check never precedes them. A pinned status read is
+        not a refusal: it is skipped when this check would refuse, so an
+        expired or disallowed grant never contacts the old gateway.
         """
         from omega_prime.redteam.roe import grant_expired, grant_tool_allowlist
 
@@ -523,7 +543,7 @@ class RedteamClient:
 
     def status(self) -> dict[str, Any]:
         """Mission + provider status; two GETs composed like the upstream case."""
-        refusal = self._refusal()
+        refusal = self._refusal("tempest_status")
         if refusal is not None:
             return refusal
         return {
@@ -589,7 +609,7 @@ class RedteamClient:
 
     def providers(self) -> dict[str, Any]:
         """Provider + subscription-session state; two GETs composed."""
-        refusal = self._refusal()
+        refusal = self._refusal("tempest_providers")
         if refusal is not None:
             return refusal
         return {
@@ -625,7 +645,7 @@ class RedteamClient:
 
     def hats_list(self) -> dict[str, Any]:
         """Specialist hats and parent teams, projected live from tool grants."""
-        refusal = self._refusal()
+        refusal = self._refusal("tempest_hats_list")
         if refusal is not None:
             return refusal
         grants = self._get("/api/teams/tool-grants", tool="tempest_hats_list")
@@ -674,9 +694,21 @@ class RedteamClient:
             return {"ok": False, "error": "hat required"}
         if not isinstance(task, str) or not task:
             return {"ok": False, "error": "task required"}
-        spawned = self._post(
-            "/api/operators/spawn", {"archetype": hat}, tool="tempest_hat_dispatch"
-        )
+        # One gateway for the spawn and the task. Resolving again after the
+        # spawn would follow a binding change, or drop the pin when an
+        # external stop lands between the two posts, and the task would
+        # then carry A's operator id onto B.
+        base, refusal = self._base_or_error("tempest_hat_dispatch")
+        if refusal is not None:
+            spawned: dict[str, Any] = refusal
+        else:
+            spawned = self._call(
+                "POST",
+                "/api/operators/spawn",
+                {"archetype": hat},
+                tool="tempest_hat_dispatch",
+                bound_gateway=base,
+            )
         if not spawned.get("ok"):
             detail = spawned.get("error") or f"HTTP {spawned.get('status')}"
             return _error(
@@ -706,10 +738,12 @@ class RedteamClient:
             if isinstance(mission_id, str) and mission_id
             else task
         )
-        tasked = self._post(
+        tasked = self._call(
+            "POST",
             f"/api/operators/{urllib.parse.quote(operator_id, safe='')}/task",
             {"taskName": task[:120], "taskDescription": quoted},
             tool="tempest_hat_dispatch",
+            bound_gateway=base,
         )
         if not tasked.get("ok"):
             detail = tasked.get("error") or f"HTTP {tasked.get('status')}"
