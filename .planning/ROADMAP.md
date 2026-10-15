@@ -148,10 +148,10 @@ Plans:
   3. Root `CHANGELOG.md` has a v20 entry under Unreleased with existing history untouched, and the root `LICENSE` is byte-for-byte unchanged
   4. `docs/SUMMARY.md` lists the developer guide exactly once, and every new page resolves through the existing link test
 
-**Plans:** 2 plans
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 99-01-PLAN.md — Developer guide move, SUMMARY and docs index, re-pointed docs links
+- [x] 99-01-PLAN.md — Developer guide move, SUMMARY and docs index, re-pointed docs links
 - [ ] 99-02-PLAN.md — Grok-Bot-first root README, CHANGELOG v20 entry, outside link repair
 
 ### Phase 100: Verification gate

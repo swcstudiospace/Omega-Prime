@@ -44,9 +44,9 @@ Defaults, because the request did not settle them:
 
 ## Root documents
 
-- [ ] **ROOT-01**: Root `README.md` opens Grok-Bot-first with the install prompt link, the follow-up link, the on-Bot stdio command line (required by the existing setup test) and the license badge. The developer content (Architecture, Quickstart, Configuration, Build, Layout, Contributing) moves to `docs/developer-guide.md`, with every relative link fixed and no content dropped.
-- [ ] **ROOT-02**: Root `CHANGELOG.md` gets a v20 entry under Unreleased. Existing history is not rewritten.
-- [ ] **ROOT-03**: `docs/SUMMARY.md` lists the developer guide once, and every new page resolves through the existing link test.
+- [x] **ROOT-01**: Root `README.md` opens Grok-Bot-first with the install prompt link, the follow-up link, the on-Bot stdio command line (required by the existing setup test) and the license badge. The developer content (Architecture, Quickstart, Configuration, Build, Layout, Contributing) moves to `docs/developer-guide.md`, with every relative link fixed and no content dropped.
+- [x] **ROOT-02**: Root `CHANGELOG.md` gets a v20 entry under Unreleased. Existing history is not rewritten.
+- [x] **ROOT-03**: `docs/SUMMARY.md` lists the developer guide once, and every new page resolves through the existing link test.
 
 ## Verification and claim discipline
 
@@ -73,9 +73,9 @@ Defaults, because the request did not settle them:
 | INS-01 | Phase 98 | Pending |
 | INS-02 | Phase 98 | Pending |
 | INS-03 | Phase 98 | Pending |
-| ROOT-01 | Phase 99 | Pending |
-| ROOT-02 | Phase 99 | Pending |
-| ROOT-03 | Phase 99 | Pending |
+| ROOT-01 | Phase 99 | Complete |
+| ROOT-02 | Phase 99 | Complete |
+| ROOT-03 | Phase 99 | Complete |
 | QA-01 | Phase 100 | Pending |
 | QA-02 | Phase 100 | Pending |
 
