@@ -166,9 +166,7 @@ def test_every_omega_command_name_has_a_command_file() -> None:
     assert sent == set(EXPECTED_FOLLOW_UP.values())
 
 
-def test_each_follow_up_prompt_sends_one_command_and_states_what_it_does_not_prove() -> (
-    None
-):
+def test_each_follow_up_prompt_sends_one_command_and_lists_limits() -> None:
     """Each follow-up prompt sends one command as its whole message and lists limits."""
     prompts = _follow_up_prompts()
     assert len(prompts) == 5
