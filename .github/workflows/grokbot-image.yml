@@ -54,13 +54,14 @@ on:
 permissions:
   contents: read
 
-# Validation stays cancellable, but an explicit manual publication run must
-# never be cancelled by newer validation pushes: it runs in its own
-# non-cancelling group. The publish job below keeps its own non-cancelling
-# group as well.
+# Queue a newer validation push instead of cancelling the run already in
+# progress. A cancelled run stays on the commit, and the ship gate treats
+# any CANCELLED check as a failure even after a later run of that commit
+# passes. An explicit publication still uses its own group. The publish job
+# below keeps its own non-cancelling group as well.
 concurrency:
   group: grokbot-image-${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && inputs.publish == true && '-publish' || '' }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs.publish != true }}
+  cancel-in-progress: false
 
 jobs:
   image:

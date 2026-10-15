@@ -11,9 +11,12 @@ on:
 permissions:
   contents: read
 
+# Queue a newer push instead of cancelling the run already in progress.
+# A cancelled run stays on the commit, and the ship gate treats any
+# CANCELLED check as a failure even after a later run of that commit passes.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   verify:
