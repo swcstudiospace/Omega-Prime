@@ -110,9 +110,11 @@ class DeskDriver:
 
         Reloads the store from disk (a store another process wrote is never
         clobbered), then runs each due ``desk_lead_pass`` and ``purple_cycle``
-        job once. A failure is printed loudly and retried on the next tick;
-        the thread never dies on one bad store, and one kind's failure does
-        not skip the other.
+        job once. Purple cycles load that install config
+        (``self.path`` is ``root/cron/jobs.json``, so the install root is
+        ``self.path.parent.parent``). A failure is printed loudly and retried
+        on the next tick; the thread never dies on one bad store, and one
+        kind's failure does not skip the other.
         """
         store: JobStore | None = None
         try:
@@ -126,7 +128,7 @@ class DeskDriver:
         try:
             if store is None:
                 store = JobStore(self.path)
-            tick_purple_cycles(store, self._clock())
+            tick_purple_cycles(store, self._clock(), root=self.path.parent.parent)
         except Exception as exc:  # loud, non-fatal: the next tick retries
             print(
                 f"desk-pass driver: purple-cycle tick failed: {type(exc).__name__}: {exc}",

@@ -1030,7 +1030,7 @@ def _purple_occurrence_cycle_id(job: dict) -> str:
     return cycle_id
 
 
-def _default_purple_cycle_runner(job: dict) -> Any:
+def _default_purple_cycle_runner(job: dict, root: Path | None = None) -> Any:
     """Run one cycle in the job's plan or run mode. Never apply."""
     from omega_prime.grokbot import purple_cycle
 
@@ -1042,6 +1042,7 @@ def _default_purple_cycle_runner(job: dict) -> Any:
         mode=mode,
         steps=steps,
         cycle_id=_purple_occurrence_cycle_id(job),
+        root=root,
     )
 
 
@@ -1049,6 +1050,8 @@ def tick_purple_cycles(
     store: JobStore,
     now: int | float,
     runner: Callable[[dict], Any] | None = None,
+    *,
+    root: Path | None = None,
 ) -> list[dict]:
     """Run each due purple cycle once, in order.
 
@@ -1057,7 +1060,9 @@ def tick_purple_cycles(
     saved before the runner starts. ``runner(job)`` defaults to
     :func:`_default_purple_cycle_runner`, which calls
     ``omega_prime.grokbot.purple_cycle.run_cycle`` in the job's ``plan``
-    or ``run`` mode and never ``apply``. A failed cycle result is stored
+    or ``run`` mode and never ``apply``. ``root`` is the install directory
+    whose ``omega-prime.json`` the cycle must load; it is passed only to
+    that default runner. A failed cycle result is stored
     on the job history as ``failed`` and is omitted from the returned
     list (that list is the successful runs). After a run, ``due_at``
     advances by ``interval_seconds``, so a second tick at the same
@@ -1087,9 +1092,11 @@ def tick_purple_cycles(
             continue
         job["claimed_at"] = stamp
         store._save()
-        cycle_runner = runner or _default_purple_cycle_runner
         try:
-            result = cycle_runner(job)
+            if runner is None:
+                result = _default_purple_cycle_runner(job, root=root)
+            else:
+                result = runner(job)
         except Exception as exc:
             result = {
                 "ok": False,

@@ -78,8 +78,9 @@ def run(args: str, env: Mapping[str, str]) -> dict[str, Any]:
 
     Grant paths and the optional gateway URL come only from the host
     environment. A missing grant is passed as ``None`` so the lifecycle
-    check fails closed. Concurrent grants are ready only when every one
-    of them is. Nothing is written.
+    check fails closed. One usable grant is enough, matching
+    ``authorize_all``: an expired or missing spare does not block.
+    Nothing is written.
     """
     if args.strip():
         raise Error("bad_args", {"usage": USAGE})
@@ -94,14 +95,28 @@ def run(args: str, env: Mapping[str, str]) -> dict[str, Any]:
     now = datetime.now(UTC)
     primary = grants[0] if grants else None
     report = check_readiness(primary, now, gateway_url=gateway)
-    if report.get("roe_state") == "IDLE":
+    usable = report.get("roe_state") == "IDLE"
+    if not usable:
         for extra in grants[1:]:
             lifecycle = check_roe_lifecycle(extra, now)
-            if lifecycle.get("state") not in READY_LIFECYCLE_STATES:
-                report = dict(report)
-                report["roe_state"] = "BLOCKED"
-                report["ready_for_live"] = False
+            if lifecycle.get("state") in READY_LIFECYCLE_STATES:
+                usable = True
                 break
+    if usable and report.get("roe_state") != "IDLE":
+        suites_loaded = report.get("suites_loaded")
+        live = (
+            report.get("gateway_reachable") is True
+            and isinstance(suites_loaded, int)
+            and not isinstance(suites_loaded, bool)
+            and suites_loaded > 0
+        )
+        report = dict(report)
+        report["roe_state"] = "IDLE"
+        report["ready_for_live"] = live
+    elif not usable:
+        report = dict(report)
+        report["roe_state"] = "BLOCKED"
+        report["ready_for_live"] = False
     return {key: report[key] for key in _KEYS}
 
 

@@ -130,7 +130,7 @@ def test_roe_files_replace_the_single_file(monkeypatch: Any, tmp_path: Path) -> 
     assert report["ready_for_live"] is True
 
 
-def test_a_later_grant_blocks_readiness(monkeypatch: Any, tmp_path: Path) -> None:
+def test_an_unready_spare_does_not_block(monkeypatch: Any, tmp_path: Path) -> None:
     _seal(monkeypatch, True)
 
     def _capture(
@@ -159,6 +159,105 @@ def test_a_later_grant_blocks_readiness(monkeypatch: Any, tmp_path: Path) -> Non
         "",
         {ROE_FILES_ENV_VAR: f"{first}, {second}"},
     )
+    assert report["roe_state"] == "IDLE"
+    assert report["ready_for_live"] is True
+
+
+def test_a_ready_spare_unblocks_an_expired_primary(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    _seal(monkeypatch, True)
+
+    def _capture(
+        artifact: Any, now: Any, *, gateway_url: Any = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        del artifact, now, gateway_url, kwargs
+        return {
+            "roe_state": "BLOCKED",
+            "gateway_reachable": True,
+            "suites_loaded": 1,
+            "suites_total": 1,
+            "ready_for_live": False,
+        }
+
+    def _valid(path: Any, now: Any, audit_log: Any = None) -> dict[str, Any]:
+        del path, now, audit_log
+        return {"state": "valid"}
+
+    monkeypatch.setattr("omega_prime.grokbot.roe_lifecycle.check_readiness", _capture)
+    monkeypatch.setattr("omega_prime.grokbot.roe_lifecycle.check_roe_lifecycle", _valid)
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    report = redteam_readiness.run(
+        "",
+        {ROE_FILES_ENV_VAR: f"{first}, {second}"},
+    )
+    assert report["roe_state"] == "IDLE"
+    assert report["ready_for_live"] is True
+
+
+def test_a_ready_spare_with_a_down_gateway_is_idle_but_not_live(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    _seal(monkeypatch, True)
+
+    def _capture(
+        artifact: Any, now: Any, *, gateway_url: Any = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        del artifact, now, gateway_url, kwargs
+        return {
+            "roe_state": "BLOCKED",
+            "gateway_reachable": False,
+            "suites_loaded": 1,
+            "suites_total": 1,
+            "ready_for_live": False,
+        }
+
+    def _valid(path: Any, now: Any, audit_log: Any = None) -> dict[str, Any]:
+        del path, now, audit_log
+        return {"state": "valid"}
+
+    monkeypatch.setattr("omega_prime.grokbot.roe_lifecycle.check_readiness", _capture)
+    monkeypatch.setattr("omega_prime.grokbot.roe_lifecycle.check_roe_lifecycle", _valid)
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    report = redteam_readiness.run(
+        "",
+        {ROE_FILES_ENV_VAR: f"{first}, {second}"},
+    )
+    assert report["roe_state"] == "IDLE"
+    assert report["ready_for_live"] is False
+    assert report["gateway_reachable"] is False
+
+
+def test_every_grant_unready_stays_blocked(monkeypatch: Any, tmp_path: Path) -> None:
+    _seal(monkeypatch, True)
+
+    def _capture(
+        artifact: Any, now: Any, *, gateway_url: Any = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        del artifact, now, gateway_url, kwargs
+        return {
+            "roe_state": "BLOCKED",
+            "gateway_reachable": True,
+            "suites_loaded": 1,
+            "suites_total": 1,
+            "ready_for_live": False,
+        }
+
+    def _expired(path: Any, now: Any, audit_log: Any = None) -> dict[str, Any]:
+        del path, now, audit_log
+        return {"state": "expired"}
+
+    monkeypatch.setattr("omega_prime.grokbot.roe_lifecycle.check_readiness", _capture)
+    monkeypatch.setattr(
+        "omega_prime.grokbot.roe_lifecycle.check_roe_lifecycle", _expired
+    )
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    report = redteam_readiness.run(
+        "",
+        {ROE_FILES_ENV_VAR: f"{first}, {second}"},
+    )
     assert report["roe_state"] == "BLOCKED"
     assert report["ready_for_live"] is False
-    assert report["gateway_reachable"] is True

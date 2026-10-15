@@ -128,7 +128,7 @@ def test_desk_driver_fires_a_due_purple_cycle(
 ) -> None:
     calls: list[str] = []
 
-    def runner(job: dict) -> dict[str, object]:
+    def runner(job: dict, root: Path | None = None) -> dict[str, object]:
         calls.append(str(job["mode"]))
         return {"ok": True, "exit": 0, "state": "completed"}
 
@@ -150,7 +150,7 @@ def test_scheduler_service_runs_purple_cycles_not_the_model(
 ) -> None:
     calls: list[str] = []
 
-    def runner(job: dict) -> dict[str, object]:
+    def runner(job: dict, root: Path | None = None) -> dict[str, object]:
         calls.append(str(job["mode"]))
         return {"ok": True, "exit": 0, "state": "completed"}
 
@@ -175,6 +175,23 @@ def test_scheduler_service_runs_purple_cycles_not_the_model(
     ran_at = store.jobs[0]["last_ran_at"]
     assert isinstance(ran_at, float)
     assert store.jobs[0]["due_at"] > ran_at
+
+
+def test_desk_driver_passes_the_install_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[object] = []
+
+    def fake_run_cycle(**kwargs: object) -> dict[str, object]:
+        seen.append(kwargs["root"])
+        return {"ok": True, "exit": 0, "state": "completed"}
+
+    monkeypatch.setattr("omega_prime.grokbot.purple_cycle.run_cycle", fake_run_cycle)
+    install = tmp_path / "install"
+    store = JobStore(install / "cron" / "jobs.json")
+    schedule_purple_cycle(store, due_at=1000, interval_seconds=60, mode="plan")
+    DeskDriver(install, clock=lambda: 1000.0).tick_once()
+    assert seen == [install.resolve()]
 
 
 def test_second_tick_before_next_due_does_not_run(tmp_path: Path) -> None:
