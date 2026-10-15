@@ -6,13 +6,13 @@ Command: [`/omega-doctor`](../../../plugin/commands/omega-doctor.md)
 
 Evidence level: local proof for the command's own tool result. A live Bot run is UNPROVEN until the [user UAT](../../../../../docs/grok-bot-native.md#user-uat) rows are recorded.
 
-Send this as the whole message:
+Send exactly this one command as the whole message:
 
 ```text
 /omega-doctor
-
-The command loads and returns the doctor checks. Read the checks in order. Find the first whose green is false (skip prompt and skills when no doctor_context was supplied by the caller). Report that check name and detail and stop.
 ```
+
+The command loads and returns the doctor checks. Triage (find first red, skipping prompt/skills when no doctor_context) is a separate step the Bot performs after the command returns.
 
 The Bot calls the `omega_command` tool of the `omega-prime` server with that text, as the [prompting contract](../../../SETUP.md#prompting-contract) states.
 

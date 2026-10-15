@@ -7,13 +7,13 @@ Command: [`/omega-code-review`](../../../plugin/commands/omega-code-review.md)
 
 Evidence level: local proof for the command's own tool result. A live Bot run is UNPROVEN until the [user UAT](../../../../../docs/grok-bot-native.md#user-uat) rows are recorded.
 
-Replace the placeholder, then send this as the whole message:
+Replace the placeholder, then send exactly this one command as the whole message:
 
 ```text
 /omega-code-review <file, diff or branch named in the review request>
-
-The command loads the review instructions and returns checks. Use those instructions and checks to review the target and report the findings.
 ```
+
+The command loads the review instructions and returns checks. The Bot performs the review as a separate step using the returned data.
 
 The Bot calls the `omega_command` tool of the `omega-prime` server with that text, as the [prompting contract](../../../SETUP.md#prompting-contract) states.
 
