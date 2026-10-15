@@ -3,7 +3,7 @@
 ### v20 — Grok-Bot-first root
 
 - Root `README.md` is Grok-Bot-first: install prompt link, follow-up prompt index link, declared stdio command, and license badge up front.
-- Developer content (Architecture, Quickstart, Configuration, Build from source, Layout, Contributing) moved to `docs/developer-guide.md` with re-rooted relative links; no content dropped.
+- Developer content (Architecture, Quickstart, Configuration, Build from source, Layout, Contributing) moved to `docs/developer-guide.md` with re-rooted relative links; no content dropped. Verified by `.venv/bin/python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q`, exit 0, 31 passed.
 - `docs/SUMMARY.md` indexes the developer guide.
 - Live Grok Bot import stays UNPROVEN until the 77.1 UAT rows run.
 

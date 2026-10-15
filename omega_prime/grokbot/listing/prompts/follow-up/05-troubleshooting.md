@@ -16,13 +16,15 @@ The Bot calls the `omega_command` tool of the `omega-prime` server with that tex
 
 ## Triage steps
 
+The command loads and returns the doctor checks; triage against those checks is a separate step the Bot performs.
+
 1. Send the command above as the whole message.
 2. Show the operator the full result, unchanged.
 3. Read the `checks` object in the order shown. Find the first check whose `green` is `false`, report that check's name and its detail, and stop there.
 4. If every check is green, say so and stop.
 5. Send no other command. Do not ask the Bot to repair, register or install anything.
 
-The `prompt` and `skills` flags are not install faults until the caller supplies the observed `prompt_sha256` and `installed_skills` values, because this command supplies no `doctor_context`.
+The copied message supplies no `doctor_context`, so the `prompt` and `skills` flags stay false until the caller supplies the observed `prompt_sha256` and `installed_skills` values.
 
 ## What this does not prove
 
