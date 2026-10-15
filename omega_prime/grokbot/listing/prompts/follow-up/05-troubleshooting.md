@@ -22,6 +22,8 @@ The Bot calls the `omega_command` tool of the `omega-prime` server with that tex
 4. If every check is green, say so and stop.
 5. Send no other command. Do not ask the Bot to repair, register or install anything.
 
+The `prompt` and `skills` flags are not install faults until the caller supplies the observed `prompt_sha256` and `installed_skills` values, because this command supplies no `doctor_context`.
+
 ## What this does not prove
 
 - The red check names where to look. It does not name the root cause.

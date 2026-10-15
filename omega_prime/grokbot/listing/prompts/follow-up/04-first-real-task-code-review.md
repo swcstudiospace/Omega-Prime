@@ -1,6 +1,6 @@
 # First real task
 
-This prompt runs a first real review. Name a file, diff or branch in place of the placeholder before you send it.
+This prompt starts a first real review. Name a file, diff or branch in place of the placeholder before you send it.
 
 Command: [`/omega-code-review`](../../../plugin/commands/omega-code-review.md)
 
@@ -13,6 +13,8 @@ Replace the placeholder, then send this as the whole message:
 ```
 
 The Bot calls the `omega_command` tool of the `omega-prime` server with that text, as the [prompting contract](../../../SETUP.md#prompting-contract) states.
+
+The command loads the review instructions and returns checks for the file, diff or branch you named. It does not review the code. The review is a separate step: after the command returns, the Bot performs the review against those instructions.
 
 ## What this does not prove
 

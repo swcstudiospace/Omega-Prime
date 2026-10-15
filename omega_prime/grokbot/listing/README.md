@@ -26,10 +26,10 @@ Each row names its evidence level and its source file.
 
 | Claim | Evidence level | Source |
 | --- | --- | --- |
-| The declared stdio command in [mcp.json](../../../mcp.json) starts and answers `/omega-help` on a checkout | local proof | [plugin.py](../../tooling/plugin.py), function `verify_stdio`; launcher [grokbot-1click.sh](../../scripts/grokbot-1click.sh) |
-| The generated plugin files match their sources | local proof | [plugin.py](../../tooling/plugin.py) |
+| The stdio verifier spawns the declared [mcp.json](../../../mcp.json) command and checks its `initialize` and `/omega-help` replies. The recorded tests use a stub host, not the real launcher on a checkout | local proof | Observed run: `.venv/bin/python -m pytest omega_prime/tests/test_grokbot_plugin.py -q -k 'verify_stdio or stdio'`, exit 0 (4 passed). Source: [plugin.py](../../tooling/plugin.py), function `verify_stdio`; launcher [grokbot-1click.sh](../../scripts/grokbot-1click.sh) |
+| The generated plugin files match their sources at the recorded check | local proof | Observed run: `.venv/bin/python -m omega_prime.tooling.plugin --check`, exit 0 (65 generated files up to date). Source: [plugin.py](../../tooling/plugin.py) |
 | The readiness report accounts for every roster tool with no Grok account and no live credentials | local proof | [Local validation](../../../docs/local-validation.md) |
-| Prime capability families are off until enabled | optional capability | [README](../../../README.md), Configuration |
+| Prime capability families are off until enabled | optional capability | [Developer guide](../../../docs/developer-guide.md#configuration), Configuration |
 | The Red Team backend is started separately and never auto-launched by Omega Prime | optional capability | [Red team module](../../../docs/red-team.md) |
 | A custom Command (stdio) server runs on the computer each Bot conversation uses | UNPROVEN | Documented source [team bots](https://docs.x.ai/grok-bot/team-bots); [SETUP.md](../SETUP.md), section 1 Evidence paragraph. No route in this repository exercises it |
 | The Bot adds the server itself, and a live Bot runs the install prompt | UNPROVEN | [user UAT](../../../docs/grok-bot-native.md#user-uat), rows 1 and 5 |

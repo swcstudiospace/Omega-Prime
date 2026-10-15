@@ -31,6 +31,8 @@ After installing, work through the [follow-up prompts](omega_prime/grokbot/listi
 <!-- Compatibility anchor: older links point at README.md#build-from-source-both-toolchains; the canonical instructions now live in docs/developer-guide.md. -->
 <a id="build-from-source-both-toolchains"></a>
 
+Build from source instructions for both toolchains are in the [developer guide](docs/developer-guide.md#build-from-source-both-toolchains).
+
 [![license](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
 ## License
