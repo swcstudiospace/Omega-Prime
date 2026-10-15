@@ -95,3 +95,66 @@ def test_render_raster_usage_errors_exit_2(tmp_path: Path, args: list[str]) -> N
     assert result.returncode == 2
     assert result.stderr.startswith("usage: render_raster.py")
     assert not log.exists(), "a usage error must not reach the renderer"
+
+
+ICON_SIZES: tuple[int, ...] = (16, 32, 64, 128, 192, 256, 512)
+ICON_DIR = ROOT / "omega_prime" / "grokbot" / "listing" / "icons"
+ICON_SOURCE = ROOT / "assets" / "icon.svg"
+
+
+def _icon_failures(icon_dir: Path, source: Path) -> list[str]:
+    """Every way the icon set disagrees with ``source``; empty when it matches."""
+    digest = hashlib.sha256(source.read_bytes()).hexdigest().encode()
+    failures: list[str] = []
+    for size in ICON_SIZES:
+        name = f"icon-{size}.png"
+        path = icon_dir / name
+        if not path.is_file():
+            failures.append(f"{name} is missing")
+        elif _png_size(path) != (size, size):
+            failures.append(f"{name} is not {size} by {size}")
+        elif _png_texts(path.read_bytes()).get(b"omega-source-sha256") != [digest]:
+            failures.append(
+                f"{name} was not rendered from the current icon.svg; run "
+                f"python3 omega_prime/scripts/render_raster.py --size {size} "
+                f"--out omega_prime/grokbot/listing/icons/{name} assets/icon.svg"
+            )
+    expected = {f"icon-{size}.png" for size in ICON_SIZES}
+    for extra in sorted(p.name for p in icon_dir.iterdir()):
+        if extra not in expected:
+            failures.append(f"unexpected file {extra}")
+    return failures
+
+
+def test_icon_rasters_match_the_current_brand_svg() -> None:
+    assert _icon_failures(ICON_DIR, ICON_SOURCE) == []
+
+
+def test_stale_icon_raster_is_reported(tmp_path: Path) -> None:
+    icons = tmp_path / "icons"
+    icons.mkdir()
+    for path in ICON_DIR.iterdir():
+        (icons / path.name).write_bytes(path.read_bytes())
+    edited = tmp_path / "icon.svg"
+    edited.write_bytes(ICON_SOURCE.read_bytes() + b"<!-- edited -->")
+
+    failures = _icon_failures(icons, edited)
+
+    assert len(failures) == len(ICON_SIZES)
+    assert failures[0].startswith(
+        "icon-16.png was not rendered from the current icon.svg"
+    )
+
+
+def test_icon_check_flags_missing_and_extra_files(tmp_path: Path) -> None:
+    icons = tmp_path / "icons"
+    icons.mkdir()
+    for path in ICON_DIR.iterdir():
+        (icons / path.name).write_bytes(path.read_bytes())
+    (icons / "icon-32.png").unlink()
+    (icons / "icon-48.png").write_bytes(b"")
+
+    assert _icon_failures(icons, ICON_SOURCE) == [
+        "icon-32.png is missing",
+        "unexpected file icon-48.png",
+    ]
