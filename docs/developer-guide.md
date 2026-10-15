@@ -87,7 +87,7 @@ and add a custom Command MCP server running
 `bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`.
 A Cursor Teams/Enterprise team marketplace can import the repository as a
 secondary route (`.cursor-plugin/`, root `mcp.json`). Live import on a Grok
-Bot or Cursor account is unproven until you run the
+Bot or Cursor account is UNPROVEN until you run the
 [user UAT](grok-bot-native.md#user-uat) rows. The template is
 [OMEGA_PRIME.md](../omega_prime/grokbot/templates/OMEGA_PRIME.md). Registering a
 host and actually attaching an authorized account/model remain seat-side
