@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-label="Omega Prime banner" aria-labelledby="banner-title banner-desc">
+  <title id="banner-title">Omega Prime banner</title>
+  <desc id="banner-desc">Teal-to-violet hexagonal node mark beside the words Omega Prime, the tagline One Grok programming bot., the line Local proof: MCP tool host and readiness report, and the evidence-level legend Evidence levels: local proof, optional capability, unproven external.</desc>
+  <defs>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <radialGradient id="ground" cx="0.28" cy="0.45" r="0.9">
+      <stop offset="0" stop-color="#161d27"/>
+      <stop offset="1" stop-color="#0b0e13"/>
+    </radialGradient>
+    <pattern id="dots" width="36" height="36" patternUnits="userSpaceOnUse">
+      <circle cx="3" cy="3" r="2.2" fill="#ffffff" opacity="0.05"/>
+    </pattern>
+  </defs>
+  <rect x="0" y="0" width="1200" height="400" rx="28" fill="url(#ground)"/>
+  <rect x="0" y="0" width="1200" height="400" rx="28" fill="url(#dots)"/>
+  <rect x="0" y="0" width="1200" height="400" rx="28" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="2"/>
+  <g transform="translate(64,64)">
+    <g fill="none" stroke="url(#edge)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M136 8 L247 72 L247 200 L136 264 L25 200 L25 72 Z"/>
+    </g>
+    <g fill="#0d1117" stroke="url(#edge)" stroke-width="9">
+      <circle cx="136" cy="8" r="22"/>
+      <circle cx="247" cy="72" r="22"/>
+      <circle cx="247" cy="200" r="22"/>
+      <circle cx="136" cy="264" r="22"/>
+      <circle cx="25" cy="200" r="22"/>
+      <circle cx="25" cy="72" r="22"/>
+    </g>
+    <g fill="none" stroke="#2dd4bf" stroke-opacity="0.55" stroke-width="7" stroke-linecap="round">
+      <path d="M136 76 L188 106 L188 166 L136 196 L84 166 L84 106 Z"/>
+    </g>
+    <circle cx="136" cy="136" r="26" fill="url(#edge)"/>
+  </g>
+  <text x="400" y="168" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="84" font-weight="800" letter-spacing="5" fill="#f0f3f6">Omega Prime</text>
+  <rect x="404" y="196" width="180" height="8" rx="4" fill="url(#edge)"/>
+  <text x="400" y="262" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="36" font-weight="400" fill="#9aa4b2">One Grok programming bot.</text>
+  <text x="400" y="318" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="26" font-weight="400" fill="#9aa4b2">Local proof: MCP tool host and readiness report</text>
+  <text x="400" y="354" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="20" font-weight="400" fill="#9aa4b2">Evidence levels: local proof, optional capability, unproven external</text>
+</svg>
