@@ -1,63 +1,82 @@
-# Requirements: v16 Enterprise Hardening and Continuous Verification
+# Requirements: v20 Grok Bot launch kit
 
-Approved 2026-10-13. Execution: autonomous GSD phase loop under `/gsd-autonomous` (user instruction: continue without validation; grey areas resolved by documented defaults in `.planning/decisions.md`). Evidence base: `.planning/recon-evidence.md` (verified 2026-10-13, HEAD df14512).
+Accepted 2026-10-15 from the request for marketing, banner, icons, README,
+CHANGELOG and LICENSE for the Grok Bot, plus the install prompt and follow-up
+prompts. User decisions (AskQuestion, 2026-10-15):
 
-## Purple-team sidecar
+- Grok-Bot-facing files live in a new folder `omega_prime/grokbot/listing/`,
+  and the root `README.md` is replaced with a Grok-Bot-first version. The
+  developer README content is kept under `docs/`, so nothing is lost.
+- The root `LICENSE` (AGPL-3.0-only, matching `.cursor-plugin/plugin.json`)
+  stays byte-for-byte unchanged. The listing folder gets a licensing notice
+  only.
+- The follow-up prompts use the standard drafted set (INS-02).
+- Tracked as a new milestone, then executed by `gsd-autonomous`.
 
-- [x] **SIDE-01**: Maintainer receives automated pin freshness for the T3MP3ST submodule: Dependabot `gitsubmodule` PRs, CI provenance/equivalence/surface-drift checks, and a Node-dependency supply-chain audit, so constant upstream upgrades cannot silently rot the sidecar. (U1, plan-01)
-- [x] **SIDE-02**: The sidecar fails closed: no start without a present, unexpired rules-of-engagement artifact (BLOCKED, nonzero exit), a working kill switch, and logged IDLE/RUNNING/DEGRADED/BLOCKED/ERROR transitions. Ships BLOCKED per user decision 2026-10-13 — no live engagement until the user signs the artifact. (U1, plan-01)
-- [x] **SIDE-03**: Adversarial coverage is versioned data with detection validation and a findings pipeline: cases tagged technique/severity/expected behavior, passes require observed detection matching expectation, findings dedupe into tracked work items, and version drift reports DEGRADED. (U1, plan-01)
+Defaults, because the request did not settle them:
 
-## Release
+- No research phase (`workflow.research` is false). The evidence base is the
+  repository itself: `docs/marketing.md`, `omega_prime/grokbot/SETUP.md`,
+  `mcp.json`, `.cursor-plugin/plugin.json` and the Phase 78 assets.
+- Icons are exported from the existing brand (`assets/icon.svg`). No new mark
+  is designed.
+- `README.md` must keep the on-Bot stdio command. The test
+  `test_setup_prompts_run_the_declared_stdio_command` requires it.
+- Live Grok Bot import stays **UNPROVEN** in every new file until the user
+  runs the six 77.1 UAT rows.
 
-- [x] **REL-01**: Maintainer can publish the hardened image through the `grokbot-image-publish` protected environment via manual `workflow_dispatch`, with checksum/image-id binding and retained evidence; publication stays manual and default-off. (U2, plan-02)
-- [x] **REL-02**: A staged rollout path with `deploy.py check()` staging-first promotion evidence and a documented, exercised one-step rollback (previous digest) exists. (U2, plan-02)
+## Listing package
 
-## Observability
+- [ ] **LST-01**: `omega_prime/grokbot/listing/README.md` is the Grok Bot listing page: what it is, the Bot-driven install prompt (linked, not duplicated), the follow-up prompts, claim limits and evidence levels, each claim with a source file.
+- [ ] **LST-02**: `omega_prime/grokbot/listing/CHANGELOG.md` follows Keep a Changelog. It has a `v20` entry for this kit and points to the root `CHANGELOG.md` for the history of the repository.
+- [ ] **LST-03**: `omega_prime/grokbot/listing/LICENSE.md` is a licensing notice that names AGPL-3.0-only, the copyright holder and the root `LICENSE` file. It contains no new license text, and the root `LICENSE` is unchanged.
 
-- [x] **OBS-01**: Optional OTLP telemetry export ships as an extra dependency, off by default, leaving the zero-dependency `/metrics` surface and its auth guarantees unchanged; export failure never degrades local metrics/logging/audit. (U3, plan-03)
-- [x] **OBS-02**: SLOs for serve availability, tool-call p99 latency and denial-rate budget are defined with alert rules, and a nightly scheduled readiness-profile run alerts on regression. (U3, plan-03)
+## Brand assets
 
-## Token lifecycle and cost
+- [x] **BRD-01**: `omega_prime/grokbot/listing/icons/` holds PNG exports of `assets/icon.svg` at 16, 32, 64, 128, 192, 256 and 512 px, rendered through the existing `omega_prime/scripts/render_raster.py` path. The SVG's SHA-256 is recorded so a stale raster fails a test.
+- [x] **BRD-02**: `omega_prime/grokbot/listing/banner.svg` and a PNG derivative carry the listing title and tagline. The text names only verified capabilities and the evidence level (no live-Grok claim), and the contrast matches the Phase 78 banner.
 
-- [x] **TOK-01**: Host-token rotation is automated: replacement minting with a configurable overlap window, cron-heartbeat scheduling, audit-chain rotation events, live-reload honored, old token dead at window end. (U4, plan-04)
-- [x] **TOK-02**: Per-caller usage quotas are enforced soft-then-hard (report-only → warnings → hard caps) with usage reporting visible through `/metrics`; report-only mode enforces nothing. (U7, plan-07)
+## Install and follow-up prompts
 
-## Sandboxed execution
+- [ ] **INS-01**: `omega_prime/grokbot/listing/prompts/install.md` contains the install task block verbatim from `omega_prime/grokbot/SETUP.md` section 1. A test fails when they drift. The stdio command equals the one declared in `mcp.json`.
+- [ ] **INS-02**: `omega_prime/grokbot/listing/prompts/follow-up/` holds five prompts: verify the install, a `/omega-help` tour, a `/omega-doctor` health check, a first real task through `/omega-code-review`, and troubleshooting through the Bot's own diagnostics. Each prompt names the exact `/omega-*` command it sends and states what it does not prove.
+- [ ] **INS-03**: A test fails when a follow-up prompt names a `/omega-*` command that has no file in `omega_prime/grokbot/plugin/commands/`, or when a prompt file is missing from the index.
 
-- [x] **SAND-01**: The OpenShell sandbox policy is generated from the seat policy (generated-and-tested replaces hand-maintained), with writable paths matching Omega home/root defaults. (U5, plan-05)
-- [x] **SAND-02**: Verification and execute paths run inside OpenShell sandboxes where available; quality receipts bind to the recorded executed command and exit status; sandbox-unavailable outcomes are explicitly degraded, never silent passes. (U5, plan-05)
+## Root documents
 
-## Evaluation
+- [ ] **ROOT-01**: Root `README.md` opens Grok-Bot-first with the install prompt link, the follow-up link, the on-Bot stdio command line (required by the existing setup test) and the license badge. The developer content (Architecture, Quickstart, Configuration, Build, Layout, Contributing) moves to `docs/developer-guide.md`, with every relative link fixed and no content dropped.
+- [ ] **ROOT-02**: Root `CHANGELOG.md` gets a v20 entry under Unreleased. Existing history is not rewritten.
+- [ ] **ROOT-03**: `docs/SUMMARY.md` lists the developer guide once, and every new page resolves through the existing link test.
 
-- [x] **EVAL-01**: Scored rubric eval cases run beside the deterministic suite with persistent per-case history showing trends. (U6, plan-06)
-- [x] **EVAL-02**: A nightly scheduled eval workflow surfaces regressions; the deterministic step remains the blocking push/PR gate; any live-model judge requires an explicit flag and makes no network calls without it. (U6, plan-06)
+## Verification and claim discipline
+
+- [ ] **QA-01**: The new and changed docs pass `ruff check`, `ruff format --check`, `mypy omega_prime/`, the full pytest suite, `omega_prime.tooling.catalog --check` and `omega_prime.tooling.plugin --check`.
+- [ ] **QA-02**: No file claims a live Grok Bot connection, a published icon, a marketplace listing, a measured number or a screenshot. Each factual claim cites a canonical file, and any unexecuted route is labelled UNPROVEN.
 
 ## Out of scope
 
-- Live purple-team engagements without the user-signed rules-of-engagement artifact (ships BLOCKED).
-- Testing, scanning or probing anything other than Omega Prime's own assets; no third-party targets.
-- Replacing the bot's framework, model provider or hosting platform; no Railway resource changes.
-- Native Bot palette / MCP prompts+resources (SEED-010), Agent Swarm bridge (SEED-003), Substrate transport fixes (SEED-002) — v17 candidates (decision log 2026-10-13).
-- The six live 77.1 Grok Bot import UAT rows — user-side, deferred until after the next Grok Bot upload (STATE.md Deferred Verification).
-- Automatic publication or deployment: publication remains manual behind the protected environment.
+- Changing the root `LICENSE` text or the license choice. Changing it needs a legal decision.
+- Designing a new icon mark. The existing brand is reused.
+- Marketplace publication, a website, outreach campaigns, a hosted deployment or a published container image.
+- Running the 77.1 live UAT rows. They stay user-owned.
+- Screenshots of a live Bot session.
 
 ## Traceability
 
-| Requirement | Phase | Update | Status |
-|-------------|-------|--------|--------|
-| SIDE-01 | 79 | U1 | Complete |
-| SIDE-02 | 79 | U1 | Complete |
-| SIDE-03 | 79 | U1 | Complete |
-| REL-01 | 80 | U2 | Complete |
-| REL-02 | 80 | U2 | Complete |
-| OBS-01 | 81 | U3 | Complete |
-| OBS-02 | 81 | U3 | Complete |
-| TOK-01 | 82 | U4 | Complete |
-| TOK-02 | 82 | U7 | Complete |
-| SAND-01 | 83 | U5 | Complete |
-| SAND-02 | 83 | U5 | Complete |
-| EVAL-01 | 84 | U6 | Complete |
-| EVAL-02 | 84 | U6 | Complete |
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| BRD-01 | Phase 97 | Complete |
+| BRD-02 | Phase 97 | Complete |
+| LST-01 | Phase 98 | Pending |
+| LST-02 | Phase 98 | Pending |
+| LST-03 | Phase 98 | Pending |
+| INS-01 | Phase 98 | Pending |
+| INS-02 | Phase 98 | Pending |
+| INS-03 | Phase 98 | Pending |
+| ROOT-01 | Phase 99 | Pending |
+| ROOT-02 | Phase 99 | Pending |
+| ROOT-03 | Phase 99 | Pending |
+| QA-01 | Phase 100 | Pending |
+| QA-02 | Phase 100 | Pending |
 
-Coverage: 13 requirements, each mapped once to phases 79-84 and update plans plan-01..07.
+Coverage: 13/13 v20 requirements mapped to exactly one phase.

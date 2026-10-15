@@ -1,12 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v16 — Enterprise Hardening and Continuous Verification",
+  "milestone": "v20 — Grok Bot launch kit (In progress)",
   "phases": [],
   "next": {
-    "command": "/gsd:progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step (plan phase 98)",
+    "reason": "Phase 98 of 4 — needs a plan"
   },
-  "updated_at": "2026-10-13T04:49:21.851Z"
+  "updated_at": "2026-10-15T12:14:52.401Z"
 }

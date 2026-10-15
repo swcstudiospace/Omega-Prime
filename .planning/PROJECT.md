@@ -26,9 +26,19 @@ v9 milestone: SOTA upgrade — the same one-agent product brought to state-of-th
 
 v10 milestone: Prime merge — the third agent joins. Prime Agent (`prime-agent/`, PrimeIntellect, MIT, pinned `967eb13f`) contributes its differentiating logic — RLM subagent recursion (`rlm.spawn`/`collect`), the continual harness (`/refine` with snapshots and rollback), goals/heartbeats/autonomous mode, and agent-to-agent messaging — behavior-ported into the one Python agent per the v1–v9 precedent. The Rust workspace stays as an ignored read-only checkout and CI-built parity oracle. The repo relicenses to AGPL-3.0 (Spectrum Web Co 2026) and hardens to enterprise open-source standards. User decisions (2026-10-08): behavior-port architecture (no PyO3 boundary exists upstream; one-Python-process rule stands), capability-merge loop design, AGPL-3.0 relicense, degrade-with-warning for Prime capability failures.
 
-## Current Milestone: none
+## Current Milestone: v20 Grok Bot launch kit
 
-v16 is complete and archived (audit PASS 13/13, `.planning/milestones/v16-MILESTONE-AUDIT.md`; run package `.planning/package/DELIVERABLE.md`). The purple-team sidecar ships BLOCKED: no live engagement until the user signs a rules-of-engagement artifact. Start the next milestone with `/gsd:new-milestone` (v17 candidates: SEED-010 native palette, SEED-003 swarm bridge, SEED-002 substrate fixes). Phase 77.1's live Grok Bot import UAT (six rows) stays deferred until the user runs it on `main`; resume it with `/gsd:verify-work 77.1`.
+**Goal:** Ship the public-facing collateral for the Grok Bot distribution: a Grok-Bot-focused README and CHANGELOG, a listing folder with icons and banner, an install prompt, and a set of follow-up prompts. Every claim keeps the existing evidence levels (local proof, optional capability, unproven external). Live Grok Bot import stays UNPROVEN until the user runs the UAT rows.
+
+**Target features:**
+- Grok-Bot listing folder with its own README, CHANGELOG and licensing notice
+- Icon set and banner exported from the existing brand (`assets/icon.svg`, `assets/banner.svg`)
+- Install prompt and follow-up prompts, sourced from the existing setup route
+- Root README rewritten for the Grok Bot audience; the developer README is kept under `docs/`
+
+Decisions (2026-10-15, user): new listing files in a new folder and a replaced root README; keep the AGPL-3.0 LICENSE unchanged; draft the standard follow-up prompt set; track as a new milestone. v19 is archived to `.planning/milestones/v19-phases/`.
+
+v19 is complete (phase 96, installer bindings). Phase 77.1's live Grok Bot import UAT (six rows) stays deferred until the user runs it on `main`; resume it with `/gsd:verify-work 77.1`.
 
 ## Last Milestone: v16 Enterprise Hardening and Continuous Verification (shipped 2026-10-13)
 

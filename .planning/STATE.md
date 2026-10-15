@@ -1,21 +1,21 @@
 ---
 gsd_state_version: "1.0"
-milestone: v19
-milestone_name: Installer bindings
-status: Milestone complete
-stopped_at: v19 phase 96 verified. Phase 77.1 live UAT stays user-owned.
-last_updated: "2026-10-15T05:30:00.000Z"
+milestone: v20
+milestone_name: Grok Bot launch kit (In progress)
+current_phase: 98
+current_phase_name: Listing package and prompts
+status: planning
+stopped_at: Phase 97 complete, ready to plan Phase 98
+last_updated: "2026-10-15T12:14:52.380Z"
 last_activity: 2026-10-15
-last_activity_desc: Per-install Linear, Notion, and optional gateway setup (graph ut-mv925n7i-6a9cd5f0)
-state_head: 034a08a
+last_activity_desc: Phase 97 complete, transitioned to Phase 98
+state_head: f3beb8866ba77963cdfe624cc95247804a6805ac
 progress:
-  total_phases: 1
+  total_phases: 4
   completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
-  percent: 100
-current_phase: 96
-current_plan: null
+  total_plans: 2
+  completed_plans: 2
+  percent: 25
 ---
 
 # Project State
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 
 ## Current Position
 
-Phase: Milestone v19 complete (phase 96).
-Plan: -
-Status: Milestone complete. Phase 77.1 stays verification_deferred_human. Do not re-execute phases 85-96. Do not mark 77.1 passed.
-Last activity: 2026-10-15 - installer bindings verified. Pytest 4679 passed, 3 skipped.
+Phase: 98 — Listing package and prompts
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-10-15 — Phase 97 complete, transitioned to Phase 98
 
 ## Closeout
 
@@ -144,7 +144,7 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ## Session
 
 **Last session:** 2026-10-12
-**Stopped at:** Phase 84 complete — all phases complete
+**Stopped at:** Phase 97 complete, ready to plan Phase 98
 **Resume file:** .planning/milestones/v15-phases/77.1-grok-bot-import-packaging/77.1-UAT.md
 
 ## Operator Next Steps
