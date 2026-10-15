@@ -1,5 +1,12 @@
 ## Unreleased
 
+### v20 — Grok-Bot-first root
+
+- Root `README.md` is Grok-Bot-first: install prompt link, follow-up prompt index link, declared stdio command, and license badge up front.
+- Developer content (Architecture, Quickstart, Configuration, Build from source, Layout, Contributing) moved to `docs/developer-guide.md` with re-rooted relative links; no content dropped.
+- `docs/SUMMARY.md` indexes the developer guide.
+- Live Grok Bot import stays UNPROVEN until the 77.1 UAT rows run.
+
 - Slash commands: curated 24 -> 27 and total 58 -> 61. Added `/omega-redteam-conflicts`, `/omega-redteam-readiness`, and `/omega-audit`. Findings accept `--jsonl`. `durable_status` reports cycle and sync backlog. Purple-cycle jobs can be scheduled, and a live cycle takes a file lock plus an optional deadline.
 
 # Changelog
