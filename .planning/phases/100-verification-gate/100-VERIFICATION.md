@@ -4,7 +4,7 @@ verified: 2026-10-15T15:30:00Z
 status: passed
 score: 5/5 must-haves verified
 covered_files: [".planning/phases/100-verification-gate/100-01-PLAN.md", ".planning/phases/100-verification-gate/100-01-SUMMARY.md", ".planning/phases/100-verification-gate/100-CONTEXT.md", "LICENSE", "README.md", "CHANGELOG.md", "docs/SUMMARY.md", "docs/developer-guide.md", "omega_prime/grokbot/listing/README.md", "omega_prime/grokbot/listing/CHANGELOG.md", "omega_prime/grokbot/listing/LICENSE.md", "omega_prime/grokbot/listing/prompts/install.md", "omega_prime/grokbot/listing/prompts/follow-up/INDEX.md", "omega_prime/grokbot/listing/prompts/follow-up/01-verify-install.md", "omega_prime/grokbot/listing/prompts/follow-up/02-help-tour.md", "omega_prime/grokbot/listing/prompts/follow-up/03-health-check.md", "omega_prime/grokbot/listing/prompts/follow-up/04-first-real-task-code-review.md", "omega_prime/grokbot/listing/prompts/follow-up/05-troubleshooting.md"]
-covered_digest: "v1:sha256:0df0cef2b34d5296923fc7478d32454180e65b3f6a03e1a7fb28557792df3a65"
+covered_digest: "v3:sha256:244adb3e3a8a09e9fd62351bb10775bf1db355e2d7155834ed131cd8715bfaa8"
 behavior_unverified: 0
 overrides_applied: 0
 gaps: []

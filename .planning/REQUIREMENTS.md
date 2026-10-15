@@ -27,9 +27,9 @@ Defaults, because the request did not settle them:
 
 ## Listing package
 
-- [ ] **LST-01**: `omega_prime/grokbot/listing/README.md` is the Grok Bot listing page: what it is, the Bot-driven install prompt (linked, not duplicated), the follow-up prompts, claim limits and evidence levels, each claim with a source file.
-- [ ] **LST-02**: `omega_prime/grokbot/listing/CHANGELOG.md` follows Keep a Changelog. It has a `v20` entry for this kit and points to the root `CHANGELOG.md` for the history of the repository.
-- [ ] **LST-03**: `omega_prime/grokbot/listing/LICENSE.md` is a licensing notice that names AGPL-3.0-only, the copyright holder and the root `LICENSE` file. It contains no new license text, and the root `LICENSE` is unchanged.
+- [x] **LST-01**: `omega_prime/grokbot/listing/README.md` is the Grok Bot listing page: what it is, the Bot-driven install prompt (linked, not duplicated), the follow-up prompts, claim limits and evidence levels, each claim with a source file.
+- [x] **LST-02**: `omega_prime/grokbot/listing/CHANGELOG.md` follows Keep a Changelog. It has a `v20` entry for this kit and points to the root `CHANGELOG.md` for the history of the repository.
+- [x] **LST-03**: `omega_prime/grokbot/listing/LICENSE.md` is a licensing notice that names AGPL-3.0-only, the copyright holder and the root `LICENSE` file. It contains no new license text, and the root `LICENSE` is unchanged.
 
 ## Brand assets
 
@@ -38,9 +38,9 @@ Defaults, because the request did not settle them:
 
 ## Install and follow-up prompts
 
-- [ ] **INS-01**: `omega_prime/grokbot/listing/prompts/install.md` contains the install task block verbatim from `omega_prime/grokbot/SETUP.md` section 1. A test fails when they drift. The stdio command equals the one declared in `mcp.json`.
-- [ ] **INS-02**: `omega_prime/grokbot/listing/prompts/follow-up/` holds five prompts: verify the install, a `/omega-help` tour, a `/omega-doctor` health check, a first real task through `/omega-code-review`, and troubleshooting through the Bot's own diagnostics. Each prompt names the exact `/omega-*` command it sends and states what it does not prove.
-- [ ] **INS-03**: A test fails when a follow-up prompt names a `/omega-*` command that has no file in `omega_prime/grokbot/plugin/commands/`, or when a prompt file is missing from the index.
+- [x] **INS-01**: `omega_prime/grokbot/listing/prompts/install.md` contains the install task block verbatim from `omega_prime/grokbot/SETUP.md` section 1. A test fails when they drift. The stdio command equals the one declared in `mcp.json`.
+- [x] **INS-02**: `omega_prime/grokbot/listing/prompts/follow-up/` holds five prompts: verify the install, a `/omega-help` tour, a `/omega-doctor` health check, a first real task through `/omega-code-review`, and troubleshooting through the Bot's own diagnostics. Each prompt names the exact `/omega-*` command it sends and states what it does not prove.
+- [x] **INS-03**: A test fails when a follow-up prompt names a `/omega-*` command that has no file in `omega_prime/grokbot/plugin/commands/`, or when a prompt file is missing from the index.
 
 ## Root documents
 
@@ -50,8 +50,8 @@ Defaults, because the request did not settle them:
 
 ## Verification and claim discipline
 
-- [ ] **QA-01**: The new and changed docs pass `ruff check`, `ruff format --check`, `mypy omega_prime/`, the full pytest suite, `omega_prime.tooling.catalog --check` and `omega_prime.tooling.plugin --check`.
-- [ ] **QA-02**: No file claims a live Grok Bot connection, a published icon, a marketplace listing, a measured number or a screenshot. Each factual claim cites a canonical file, and any unexecuted route is labelled UNPROVEN.
+- [x] **QA-01**: The new and changed docs pass `ruff check`, `ruff format --check`, `mypy omega_prime/`, the full pytest suite, `omega_prime.tooling.catalog --check` and `omega_prime.tooling.plugin --check`.
+- [x] **QA-02**: No file claims a live Grok Bot connection, a published icon, a marketplace listing, a measured number or a screenshot. Each factual claim cites a canonical file, and any unexecuted route is labelled UNPROVEN.
 
 ## Out of scope
 
@@ -67,16 +67,16 @@ Defaults, because the request did not settle them:
 |-------------|-------|--------|
 | BRD-01 | Phase 97 | Complete |
 | BRD-02 | Phase 97 | Complete |
-| LST-01 | Phase 98 | Pending |
-| LST-02 | Phase 98 | Pending |
-| LST-03 | Phase 98 | Pending |
-| INS-01 | Phase 98 | Pending |
-| INS-02 | Phase 98 | Pending |
-| INS-03 | Phase 98 | Pending |
+| LST-01 | Phase 98 | Complete |
+| LST-02 | Phase 98 | Complete |
+| LST-03 | Phase 98 | Complete |
+| INS-01 | Phase 98 | Complete |
+| INS-02 | Phase 98 | Complete |
+| INS-03 | Phase 98 | Complete |
 | ROOT-01 | Phase 99 | Complete |
 | ROOT-02 | Phase 99 | Complete |
 | ROOT-03 | Phase 99 | Complete |
-| QA-01 | Phase 100 | Pending |
-| QA-02 | Phase 100 | Pending |
+| QA-01 | Phase 100 | Complete |
+| QA-02 | Phase 100 | Complete |
 
 Coverage: 13/13 v20 requirements mapped to exactly one phase.

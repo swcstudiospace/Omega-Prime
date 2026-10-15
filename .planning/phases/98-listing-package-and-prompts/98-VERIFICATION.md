@@ -4,7 +4,7 @@ verified: 2026-10-15T13:57:02Z
 status: passed
 score: 4/4 success criteria verified
 covered_files: [".planning/phases/98-listing-package-and-prompts/98-01-PLAN.md", ".planning/phases/98-listing-package-and-prompts/98-02-PLAN.md", "LICENSE", "mcp.json", "omega_prime/grokbot/SETUP.md", "omega_prime/grokbot/listing/CHANGELOG.md", "omega_prime/grokbot/listing/LICENSE.md", "omega_prime/grokbot/listing/README.md", "omega_prime/grokbot/listing/prompts/follow-up/01-verify-install.md", "omega_prime/grokbot/listing/prompts/follow-up/02-help-tour.md", "omega_prime/grokbot/listing/prompts/follow-up/03-health-check.md", "omega_prime/grokbot/listing/prompts/follow-up/04-first-real-task-code-review.md", "omega_prime/grokbot/listing/prompts/follow-up/05-troubleshooting.md", "omega_prime/grokbot/listing/prompts/follow-up/INDEX.md", "omega_prime/grokbot/listing/prompts/install.md", "omega_prime/tests/test_grokbot_listing.py", "omega_prime/tests/test_grokbot_listing_assets.py"]
-covered_digest: "v1:sha256:f4e68a9e014b657d9866e89ddd9a28b1b72120e474c6800637d5ee08eb02aee5"
+covered_digest: "v3:sha256:318c5c124a73375a0998b192ad313494e3403a90633d587774dc3206df5915b7"
 behavior_unverified: 0
 overrides_applied: 0
 gaps: []
