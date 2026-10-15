@@ -70,13 +70,17 @@ class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
         return redirected if isinstance(redirected, urllib.request.Request) else None
 
 
-def _open_probe(request: urllib.request.Request, timeout: float) -> Any:
-    """Open one health request directly, never through an ambient proxy."""
-    opener = urllib.request.build_opener(
+def _probe_opener() -> urllib.request.OpenerDirector:
+    """Health opener: no ambient proxy, and no cross-origin redirect."""
+    return urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         _SameOriginRedirect,
     )
-    return opener.open(request, timeout=timeout)
+
+
+def _open_probe(request: urllib.request.Request, timeout: float) -> Any:
+    """Open one health request directly, never through an ambient proxy."""
+    return _probe_opener().open(request, timeout=timeout)
 
 
 def probe_url(

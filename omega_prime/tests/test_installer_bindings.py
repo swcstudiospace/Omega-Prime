@@ -8,10 +8,9 @@ import email.message
 import io
 import json
 import stat
-import threading
 import urllib.error
+import urllib.request
 from collections.abc import Mapping
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,6 +26,9 @@ from omega_prime.integrations.contract import (
     schema_gaps,
 )
 from omega_prime.integrations.gateways import (
+    _CrossOriginRedirect,
+    _probe_opener,
+    _SameOriginRedirect,
     gateway_status,
     health_url,
     probe_gateway,
@@ -737,87 +739,73 @@ def test_probe_rejects_server_errors_and_sends_the_bearer(monkeypatch) -> None:
     assert seen == ["http://127.0.0.1:9/health"]
 
 
-def _serve(handler: type[BaseHTTPRequestHandler]) -> HTTPServer:
-    server = HTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
+def _redirect(current: str, location: str) -> urllib.request.Request | None:
+    """Run the opener's redirect handler in memory. No socket is opened."""
+    opener = _probe_opener()
+    installed = opener.handlers  # type: ignore[attr-defined]
+    handler = next(item for item in installed if isinstance(item, _SameOriginRedirect))
+    request = urllib.request.Request(
+        current,
+        headers={"Authorization": f"Bearer {SENTINEL}"},
+        method="GET",
+    )
+    return handler.redirect_request(
+        request,
+        io.BytesIO(b""),
+        302,
+        "Found",
+        email.message.Message(),
+        location,
+    )
 
 
-def test_probe_refuses_a_cross_origin_redirect() -> None:
-    seen: list[str] = []
+def test_probe_refuses_a_cross_origin_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = "http://127.0.0.1:9/health"
+    other = "http://127.0.0.2:9/taken"
+    with pytest.raises(_CrossOriginRedirect):
+        _redirect(origin, other)
 
-    class Stolen(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            seen.append(self.headers.get("Authorization", ""))
-            self.send_response(200)
-            self.end_headers()
+    def open_probe(request: urllib.request.Request, timeout: float = 3.0) -> Any:
+        del timeout
+        assert request.get_header("Authorization") == f"Bearer {SENTINEL}"
+        _redirect(request.full_url, other)
+        raise AssertionError("cross-origin redirect was followed")
 
-        def log_message(self, fmt: str, *args: object) -> None:
-            del fmt, args
-
-    class Bounce(BaseHTTPRequestHandler):
-        location = ""
-
-        def do_GET(self) -> None:
-            self.send_response(302)
-            self.send_header("Location", Bounce.location)
-            self.end_headers()
-
-        def log_message(self, fmt: str, *args: object) -> None:
-            del fmt, args
-
-    stolen = _serve(Stolen)
-    bounce = _serve(Bounce)
-    Bounce.location = f"http://127.0.0.1:{stolen.server_address[1]}/taken"
-    try:
-        result = probe_url(
-            f"http://127.0.0.1:{bounce.server_address[1]}/health",
-            headers={"Authorization": f"Bearer {SENTINEL}"},
-            timeout=2,
-        )
-    finally:
-        bounce.shutdown()
-        stolen.shutdown()
-        bounce.server_close()
-        stolen.server_close()
-    assert result == "refused"
-    assert seen == []
-    assert SENTINEL not in "".join(seen)
+    monkeypatch.setattr("omega_prime.integrations.gateways._open_probe", open_probe)
+    assert (
+        probe_url(origin, headers={"Authorization": f"Bearer {SENTINEL}"}) == "refused"
+    )
 
 
-def test_probe_follows_a_same_origin_redirect() -> None:
-    seen: list[tuple[str, str]] = []
+def test_probe_follows_a_same_origin_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = "http://127.0.0.1:9/health"
+    redirected = _redirect(origin, "http://127.0.0.1:9/healthz")
+    assert isinstance(redirected, urllib.request.Request)
+    assert redirected.full_url == "http://127.0.0.1:9/healthz"
+    assert redirected.get_header("Authorization") == f"Bearer {SENTINEL}"
 
-    class Health(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            seen.append((self.path, self.headers.get("Authorization", "")))
-            if self.path == "/health":
-                self.send_response(302)
-                self.send_header("Location", "/healthz")
-                self.end_headers()
-                return
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
+    class Ok:
+        status = 200
 
-        def log_message(self, fmt: str, *args: object) -> None:
-            del fmt, args
+        def __enter__(self) -> Ok:
+            return self
 
-    server = _serve(Health)
-    try:
-        result = probe_url(
-            f"http://127.0.0.1:{server.server_address[1]}/health",
-            headers={"Authorization": f"Bearer {SENTINEL}"},
-            timeout=2,
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-    assert result == "ok"
-    assert seen == [
-        ("/health", f"Bearer {SENTINEL}"),
-        ("/healthz", f"Bearer {SENTINEL}"),
-    ]
+        def __exit__(self, *args: object) -> Literal[False]:
+            return False
+
+    def open_probe(request: urllib.request.Request, timeout: float = 3.0) -> Any:
+        del timeout
+        followed = _redirect(request.full_url, "http://127.0.0.1:9/healthz")
+        assert followed is not None
+        assert followed.get_header("Authorization") == f"Bearer {SENTINEL}"
+        return Ok()
+
+    monkeypatch.setattr("omega_prime.integrations.gateways._open_probe", open_probe)
+    assert probe_url(origin, headers={"Authorization": f"Bearer {SENTINEL}"}) == "ok"
 
 
 def test_create_issue_does_not_retry_a_timeout() -> None:
@@ -1094,7 +1082,7 @@ def test_mission_stop_stays_on_the_gateway_that_started_it(
         "url": "http://127.0.0.1:9101",
     }
     save_binding(binding, _env(tmp_path))
-    bases: list[str] = []
+    bases: list[tuple[str, str]] = []
     stop_status = {"code": 500}
 
     def request(
@@ -1106,7 +1094,9 @@ def test_mission_stop_stays_on_the_gateway_that_started_it(
         timeout: float,
     ) -> tuple[int, dict[str, Any]]:
         del method, payload, headers, timeout
-        bases.append(base)
+        bases.append((base, path))
+        if path == "/api/mission/status":
+            return 200, {"mission": "m-1", "active": True}
         if path == "/api/mission/stop":
             return stop_status["code"], {}
         return 200, {"missionId": "m-1"}
@@ -1125,14 +1115,78 @@ def test_mission_stop_stays_on_the_gateway_that_started_it(
     assert client.mission_stop()["ok"] is False
     assert client.operators_list()["ok"] is True
     assert bases == [
-        "http://127.0.0.1:9101",
-        "http://127.0.0.1:9101",
-        "http://127.0.0.1:9101",
+        ("http://127.0.0.1:9101", "/api/mission/start"),
+        ("http://127.0.0.1:9101", "/api/mission/status"),
+        ("http://127.0.0.1:9101", "/api/mission/stop"),
+        ("http://127.0.0.1:9101", "/api/mission/status"),
+        ("http://127.0.0.1:9101", "/api/operators/list"),
     ]
     stop_status["code"] = 200
     assert client.mission_stop()["ok"] is True
     assert client.operators_list()["ok"] is True
-    assert bases[-2:] == ["http://127.0.0.1:9101", "http://127.0.0.1:9102"]
+    assert bases[-3:] == [
+        ("http://127.0.0.1:9101", "/api/mission/status"),
+        ("http://127.0.0.1:9101", "/api/mission/stop"),
+        ("http://127.0.0.1:9102", "/api/operators/list"),
+    ]
+
+
+def test_external_stop_releases_the_pinned_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path))
+    binding = fresh_binding()
+    binding["gateways"]["redteam"] = {
+        "state": "ready",
+        "url": "http://127.0.0.1:9101",
+    }
+    save_binding(binding, _env(tmp_path))
+    calls: list[tuple[str, str]] = []
+    active = {"value": True}
+    fail_status = {"value": False}
+
+    def request(
+        base: str,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> tuple[int, dict[str, Any]]:
+        del method, payload, headers, timeout
+        calls.append((base, path))
+        if path == "/api/mission/status":
+            if fail_status["value"]:
+                raise TimeoutError("status")
+            if active["value"]:
+                return 200, {"mission": "m-1", "active": True, "phase": "running"}
+            return 200, {"active": False, "mission": None, "phase": "idle"}
+        return 200, {"missionId": "m-1"}
+
+    client = RedteamClient(
+        RedteamContext(
+            gateway_url="http://127.0.0.1:1",
+            bearer_token=SENTINEL,
+            request=request,
+            policy=_policy(["127.0.0.1"]),
+        )
+    )
+    assert client.mission_start(name="engagement")["ok"] is True
+    binding["gateways"]["redteam"]["url"] = "http://127.0.0.1:9102"
+    save_binding(binding, _env(tmp_path))
+    fail_status["value"] = True
+    assert client.operators_list()["ok"] is True
+    assert calls[-2:] == [
+        ("http://127.0.0.1:9101", "/api/mission/status"),
+        ("http://127.0.0.1:9101", "/api/operators/list"),
+    ]
+    fail_status["value"] = False
+    active["value"] = False
+    assert client.mission_start(name="next")["ok"] is True
+    assert calls[-2:] == [
+        ("http://127.0.0.1:9101", "/api/mission/status"),
+        ("http://127.0.0.1:9102", "/api/mission/start"),
+    ]
 
 
 def test_skipped_gateways_do_not_use_the_default_url(

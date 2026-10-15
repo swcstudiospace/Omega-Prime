@@ -181,6 +181,81 @@ def _saved_gateway_policy(
     )
 
 
+# Words the mission-status document uses for a mission this client may still
+# have to stop, and words that mean that mission is already over. Pause and
+# park keep the pin: the mission still lives on the gateway that started it.
+_MISSION_RUNNING = frozenset(
+    {
+        "active",
+        "running",
+        "started",
+        "paused",
+        "parked",
+        "resumed",
+        "in_progress",
+        "in-progress",
+    }
+)
+_MISSION_ENDED = frozenset(
+    {
+        "idle",
+        "stopped",
+        "none",
+        "inactive",
+        "ended",
+        "complete",
+        "completed",
+        "absent",
+    }
+)
+
+
+def _status_says_ended(status: int, data: Any) -> bool:
+    """True only when a mission-status body says the active mission is over.
+
+    Anything else, including a transport-level failure the caller handles
+    before this, keeps the pin. A stop must not move to a newly saved
+    gateway while the original mission might still be running.
+    """
+    if not isinstance(status, int) or not 200 <= status < 300:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("active") is True:
+        return False
+    if data.get("active") is False or data.get("idle") is True:
+        return True
+    for key in ("phase", "status", "state"):
+        token = data.get(key)
+        if not isinstance(token, str):
+            continue
+        word = token.strip().lower()
+        if word in _MISSION_RUNNING:
+            return False
+        if word in _MISSION_ENDED:
+            return True
+    mission = data.get("mission")
+    if isinstance(mission, str) and mission.strip():
+        return False
+    if isinstance(mission, dict):
+        if mission.get("active") is True:
+            return False
+        if mission.get("active") is False:
+            return True
+        ident = mission.get("id") or mission.get("missionId")
+        if isinstance(ident, str) and ident.strip():
+            return False
+    return mission is None and "mission" in data and not _mission_id(data)
+
+
+def _mission_id(data: Mapping[str, Any]) -> str:
+    for key in ("missionId", "mission_id"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _http_request(
     base_url: str,
     method: str,
@@ -236,7 +311,8 @@ class RedteamClient:
     def __init__(self, ctx: RedteamContext) -> None:
         self.ctx = ctx
         # Gateway a successful mission_start actually called. Later calls,
-        # including mission_stop, stay there until that stop succeeds.
+        # including mission_stop, stay there until that stop succeeds or the
+        # gateway itself reports the mission has ended.
         self._mission_gateway: str | None = None
 
     def _headers(self) -> dict[str, str]:
@@ -251,10 +327,58 @@ class RedteamClient:
 
     def _base_or_error(self) -> tuple[str, dict[str, Any] | None]:
         """``(base, None)`` or ``("", refusal row)`` — the upstream gate."""
+        pinned = self._pinned_gateway()
+        if pinned:
+            return pinned, None
+        return self._configured_base()
+
+    def _pinned_gateway(self) -> str | None:
+        """Pinned mission gateway, or None once that mission has ended.
+
+        A saved binding that still names this gateway is not asked again.
+        When the operator points the binding at another gateway, this asks
+        the pinned one ``GET /api/mission/status`` (the documented status
+        read, the same document a direct ``POST /api/mission/stop`` updates).
+        An explicit idle or stopped status drops the pin so the next call,
+        including ``mission_start``, follows the new binding. A transport
+        error or an unclear body keeps the pin.
+        """
+        pinned = self._mission_gateway
+        if not pinned:
+            return None
+        if not self._binding_moved(pinned):
+            return pinned
+        if self._mission_still_running(pinned):
+            return pinned
+        self._mission_gateway = None
+        return None
+
+    def _binding_moved(self, pinned: str) -> bool:
         from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
 
-        if self._mission_gateway:
-            return self._mission_gateway, None
+        saved = ready_gateway_url("redteam")
+        if gateway_block("redteam") is None and not saved:
+            return False
+        return saved.rstrip("/") != pinned.rstrip("/")
+
+    def _mission_still_running(self, base: str) -> bool:
+        request = self.ctx.request or _http_request
+        try:
+            status, data = request(
+                base,
+                "GET",
+                "/api/mission/status",
+                None,
+                self._headers(),
+                self.ctx.timeout,
+            )
+        except (OSError, http.client.HTTPException, TimeoutError, ValueError):
+            return True
+        return not _status_says_ended(status, data)
+
+    def _configured_base(self) -> tuple[str, dict[str, Any] | None]:
+        from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
+
         blocked = gateway_block("redteam")
         if blocked is not None:
             return "", blocked
