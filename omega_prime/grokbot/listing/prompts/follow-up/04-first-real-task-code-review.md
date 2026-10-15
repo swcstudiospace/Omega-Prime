@@ -11,11 +11,11 @@ Replace the placeholder, then send this as the whole message:
 
 ```text
 /omega-code-review <file, diff or branch named in the review request>
+
+The command loads the review instructions and returns checks. Use those instructions and checks to review the target and report the findings.
 ```
 
 The Bot calls the `omega_command` tool of the `omega-prime` server with that text, as the [prompting contract](../../../SETUP.md#prompting-contract) states.
-
-The command loads the review instructions and returns checks for the file, diff or branch you named. It does not review the code. The review is a separate step the Bot performs after the command returns.
 
 ## What this does not prove
 
