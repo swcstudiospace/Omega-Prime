@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from omega_prime import mcp_server
-from omega_prime.grokbot.audit import GrokBotAuditTracer
+from omega_prime.grokbot.audit import GrokBotAuditTracer, default_audit_path
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = ROOT / "omega_prime" / "contracts"
@@ -97,7 +97,7 @@ def test_stdio_serves_with_runtime_and_approvals(
     loaded: list[tuple[Path, Path, bool, list[tuple[str, str]]]] = []
     served: list[object] = []
 
-    def _load_runtime(root, home, *, no_roster, approvals, work_root=None):
+    def _load_runtime(root, home, *, no_roster, approvals, work_root=None, env=None):
         loaded.append((root, home, no_roster, list(approvals)))
         return runtime
 
@@ -133,6 +133,58 @@ def test_stdio_serves_with_runtime_and_approvals(
         )
     ]
     assert served == ["server:['read_file']"]
+
+
+def test_stdio_stamps_the_resolved_audit_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _load_runtime(
+        root: Path,
+        home: Path,
+        *,
+        no_roster: bool,
+        approvals: object,
+        work_root: object = None,
+        env: dict[str, str] | None = None,
+    ) -> SimpleNamespace:
+        del home, no_roster, approvals, work_root
+        captured["root"] = root
+        captured["env"] = env
+        return SimpleNamespace(registry=object(), roster=["read_file"])
+
+    async def _serve(server: object) -> None:
+        del server
+
+    monkeypatch.setattr(mcp_server, "load_runtime", _load_runtime)
+    monkeypatch.setattr(mcp_server, "build_server", lambda *_a, **_k: "server")
+    monkeypatch.setattr(mcp_server, "_serve", _serve)
+    log = tmp_path / "audit.jsonl"
+    assert (
+        mcp_server.main(
+            [
+                "--root",
+                str(tmp_path),
+                "--home",
+                str(tmp_path),
+                "--no-roster",
+                "--audit-log",
+                str(log),
+            ]
+        )
+        == 0
+    )
+    assert captured["env"]["OMEGA_PRIME_AUDIT_LOG"] == str(log)
+    assert (
+        mcp_server.main(
+            ["--root", str(tmp_path), "--home", str(tmp_path), "--no-roster"]
+        )
+        == 0
+    )
+    assert captured["env"]["OMEGA_PRIME_AUDIT_LOG"] == str(
+        default_audit_path(tmp_path.resolve())
+    )
 
 
 def test_stdio_real_runtime_reaches_serve(
@@ -572,8 +624,9 @@ def test_stdio_ignores_sse_enterprise_flags(
         no_roster: bool,
         approvals: object,
         work_root: object = None,
+        env: object = None,
     ):
-        del root, home, no_roster, approvals, work_root
+        del root, home, no_roster, approvals, work_root, env
         return SimpleNamespace(registry=object(), roster=["read_file"])
 
     async def _serve(server: object) -> None:

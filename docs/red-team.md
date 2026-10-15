@@ -164,14 +164,14 @@ for the gate mechanics and the `--approve` flag.
 
 ## Slash commands
 
-The sidecar harness is driven through twelve curated commands (all routed
+The sidecar harness is driven through fifteen curated commands (all routed
 via `omega_command`, like every other `/omega-*` command):
 
 | Command | Effect |
 | --- | --- |
 | `/omega-redteam-run --suite <name>` | Evaluate the fail-closed gate, then run one simulation suite. |
 | `/omega-redteam-status` | Show harness state and recent transitions. Read-only. |
-| `/omega-redteam-findings [--limit N]` | Tail recent findings. Read-only. |
+| `/omega-redteam-findings [--limit N] [--jsonl]` | Tail recent findings. Read-only. `--jsonl` adds `finding/1` text and writes no file. |
 | `/omega-redteam-triage <dedupe-hash> --rationale <text>` | Append one triage proposal to the review queue. |
 | `/omega-redteam-roe-create --operator <name> --days <N> --key-file <path>` | Write one unsigned Rules-of-Engagement artifact. |
 | `/omega-redteam-roe-sign --artifact <path> --key-file <path>` | Sign one Rules-of-Engagement artifact with a key file and print the install command. |
@@ -181,6 +181,9 @@ via `omega_command`, like every other `/omega-*` command):
 | `/omega-redteam-coverage [--jsonl] [--since <RFC3339>]` | Read-only per-class coverage rows (class, cases, runs, wins, pass_pct, gaps, verdict, tier, weight, earned, possible); `--jsonl` adds the JSONL text. |
 | `/omega-redteam-sync-plan` | Plan the next findings sync with zero tracker calls and zero writes: what would sync, what quiet hours or the sync budget hold, and grant conflicts. Each list is capped at 20 entries with a `<name>_total` count. |
 | `/omega-redteam-cycle [--run] [--steps <a,b>]` | Plan the purple cycle (default, pure) or run it with `--run`: refresh the release-watch state, audit a newly released upstream tag (audit-only), write a checkpoint and a ledger row. The result carries no file paths. |
+| `/omega-redteam-conflicts` | List Rules-of-Engagement grant conflicts from the host env. Read-only. Basenames only, capped at 20. |
+| `/omega-redteam-readiness` | Report `roe_state`, gateway reachability, and loaded suites. Read-only. Never starts an engagement. |
+| `/omega-audit [--tail N]` | Verify the tamper-evident tool-call audit chain. Read-only. A missing log is empty, not success. |
 
 BLOCKED is fail-closed: `/omega-redteam-run` checks the harness state
 first and refuses with `harness_blocked` unless the state is `IDLE` —
@@ -190,8 +193,9 @@ then appends one `PROPOSAL` row (`dedupe_hash`, `rationale`, timestamp,
 proposer `operator`) to `review-queue.ndjson`. Applying the verdict is a
 separate operator step; the command itself changes no finding.
 
-`/omega-redteam-report`, `/omega-redteam-coverage` and
-`/omega-redteam-sync-plan` are read-only: they read the reports directory
+`/omega-redteam-report`, `/omega-redteam-coverage`,
+`/omega-redteam-sync-plan`, `/omega-redteam-conflicts`, `/omega-redteam-readiness` and
+`/omega-audit` are read-only: they read the reports directory
 and the configuration and write nothing. `/omega-redteam-cycle` plans by
 default and plan mode is pure; with `--run` it only refreshes the
 release-watch state, audits a newly released upstream tag without applying

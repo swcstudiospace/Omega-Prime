@@ -142,8 +142,8 @@ def _call(env: dict[str, str], text: str) -> dict[str, Any]:
 
 
 def test_registration_order_usage_and_catalog() -> None:
-    assert len(COMMANDS) == 24
-    assert [spec.name for spec in COMMANDS[-4:]] == NEW_NAMES
+    assert len(COMMANDS) == 27
+    assert [spec.name for spec in COMMANDS[-7:-3]] == NEW_NAMES
     by_name = {spec.name: spec for spec in COMMANDS}
     catalog = {row["name"]: row for row in command_catalog()}
     for module in MODULES:

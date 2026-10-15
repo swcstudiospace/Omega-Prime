@@ -351,6 +351,8 @@ def test_durable_status_gains_roe_block(tmp_path, monkeypatch):
         "entry_count",
         "last_run_id",
         "workflow_checkpoints",
+        "cycle",
+        "sync_backlog",
     ):
         assert key in body
     assert set(body["roe"]) == {"state", "days_remaining", "effective_until"}

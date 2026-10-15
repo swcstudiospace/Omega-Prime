@@ -440,21 +440,26 @@ def create_sse_app(
     host_patterns = _unique(host_patterns)
     origins = _unique(origins)
 
+    tracer = (
+        audit if audit is not None else GrokBotAuditTracer(default_audit_path(root))
+    )
+    # Slash commands see the log this host actually writes. `--audit-log` is
+    # not copied into the process environment, and the default is this root,
+    # not `OMEGA_PRIME_STATE_DIR` or the current directory.
+    command_env = dict(os.environ if env is None else env)
+    command_env["OMEGA_PRIME_AUDIT_LOG"] = str(tracer.log_path)
     runtime: Runtime = load_runtime(
         root,
         home,
         no_roster=no_roster,
         approvals=approvals,
-        env=env,
+        env=command_env,
         work_root=work_root,
     )
     # The registry already holds this log. Swap the clock on the same object so
     # TTL checks inside tool dispatch see the injected clock.
     if clock is not None:
         runtime.approval_log._clock = clock
-    tracer = (
-        audit if audit is not None else GrokBotAuditTracer(default_audit_path(root))
-    )
     if clock is None:
         request_limiter = RateLimiter(rate_limit, global_rate_limit)
         tool_limiter = RateLimiter(tool_rate_limit)

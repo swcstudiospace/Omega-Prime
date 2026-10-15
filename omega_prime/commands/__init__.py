@@ -5,7 +5,7 @@
 A command is the whole user message: ``/omega-help``, not a sentence that
 mentions it. Execution goes through the registry. A tool error stays an error.
 
-The 24 curated commands come first. Generated commands follow, one per
+The 27 curated commands come first. Generated commands follow, one per
 checked-in skill and routine (``omega_prime.commands.generated``). A skill
 command returns that skill's instructions. A routine command whose exact stem
 is a workflow runs that workflow; any other routine returns its text.
@@ -138,7 +138,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         "omega-redteam-findings",
-        "/omega-redteam-findings [--limit N]",
+        "/omega-redteam-findings [--limit N] [--jsonl]",
         "Tail recent red-team harness findings. Read-only.",
         "The user asks for red-team findings or detections.",
     ),
@@ -212,6 +212,24 @@ COMMANDS: tuple[CommandSpec, ...] = (
             "dispatches findings."
         ),
         "The user asks to plan or run the purple-team operations cycle.",
+    ),
+    CommandSpec(
+        "omega-redteam-conflicts",
+        "/omega-redteam-conflicts",
+        "List Rules-of-Engagement grant conflicts. Read-only.",
+        "The user asks whether red-team grants conflict.",
+    ),
+    CommandSpec(
+        "omega-redteam-readiness",
+        "/omega-redteam-readiness",
+        "Report whether a live red-team run is ready. Read-only.",
+        "The user asks if the red-team gateway and Rules of Engagement are ready.",
+    ),
+    CommandSpec(
+        "omega-audit",
+        "/omega-audit [--tail N]",
+        "Verify the tamper-evident tool-call audit chain.",
+        "The user asks to verify or tail the audit log.",
     ),
 )
 
@@ -408,6 +426,12 @@ def _run(
         return _redteam(name, args, env, "sync_plan")
     if name == "omega-redteam-cycle":
         return _redteam(name, args, env, "cycle")
+    if name == "omega-redteam-conflicts":
+        return _redteam(name, args, env, "conflicts")
+    if name == "omega-redteam-readiness":
+        return _redteam(name, args, env, "readiness")
+    if name == "omega-audit":
+        return _redteam(name, args, env, "audit")
     return _fail(name, "unknown_command", {"commands": _command_names()})
 
 
@@ -424,6 +448,9 @@ _REDTEAM_MODULES = {
     "coverage": "omega_prime.commands.redteam_coverage",
     "sync_plan": "omega_prime.commands.redteam_sync_plan",
     "cycle": "omega_prime.commands.redteam_cycle",
+    "conflicts": "omega_prime.commands.redteam_conflicts",
+    "readiness": "omega_prime.commands.redteam_readiness",
+    "audit": "omega_prime.commands.audit_chain",
 }
 
 
