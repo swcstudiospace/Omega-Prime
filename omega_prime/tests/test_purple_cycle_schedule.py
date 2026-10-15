@@ -8,9 +8,12 @@ from pathlib import Path
 
 import pytest
 
+from omega_prime.cron.apscheduler_backend import SchedulerService
+from omega_prime.cron.desk_driver import DeskDriver
 from omega_prime.cron.scheduler import (
     PURPLE_CYCLE_KIND,
     JobStore,
+    _default_purple_cycle_runner,
     clear_purple_cycle,
     list_purple_cycles,
     schedule_purple_cycle,
@@ -94,6 +97,84 @@ def test_tick_runs_due_once_and_records_failure(tmp_path: Path) -> None:
     assert plain["last_ran_at"] is None
     tick_purple_cycles(store, 10, runner=runner)
     assert calls == ["plan"]
+
+
+def test_each_due_time_keeps_its_own_cycle_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def fake_run_cycle(**kwargs: object) -> dict[str, object]:
+        cycle_id = kwargs.get("cycle_id")
+        assert isinstance(cycle_id, str)
+        seen.append(cycle_id)
+        assert kwargs.get("force_new", False) is False
+        return {"ok": True, "exit": 0, "state": "completed"}
+
+    monkeypatch.setattr("omega_prime.grokbot.purple_cycle.run_cycle", fake_run_cycle)
+    job = {"id": "abc123", "mode": "run", "steps": None, "due_at": 1000}
+    _default_purple_cycle_runner(job)
+    _default_purple_cycle_runner(job)
+    job["due_at"] = 2000
+    _default_purple_cycle_runner(job)
+    assert seen[0] == seen[1]
+    assert seen[0] != seen[2]
+    assert "1000" in seen[0]
+    assert "2000" in seen[2]
+
+
+def test_desk_driver_fires_a_due_purple_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def runner(job: dict) -> dict[str, object]:
+        calls.append(str(job["mode"]))
+        return {"ok": True, "exit": 0, "state": "completed"}
+
+    monkeypatch.setattr(
+        "omega_prime.cron.scheduler._default_purple_cycle_runner", runner
+    )
+    root = tmp_path / "install"
+    store = JobStore(root / "cron" / "jobs.json")
+    schedule_purple_cycle(store, due_at=1000, interval_seconds=60, mode="plan")
+    DeskDriver(root, clock=lambda: 1000.0).tick_once()
+    assert calls == ["plan"]
+    saved = list_purple_cycles(JobStore(root / "cron" / "jobs.json"))
+    assert saved[0]["last_ran_at"] == 1000.0
+    assert saved[0]["due_at"] == 1060.0
+
+
+def test_scheduler_service_runs_purple_cycles_not_the_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def runner(job: dict) -> dict[str, object]:
+        calls.append(str(job["mode"]))
+        return {"ok": True, "exit": 0, "state": "completed"}
+
+    monkeypatch.setattr(
+        "omega_prime.cron.scheduler._default_purple_cycle_runner", runner
+    )
+    store = JobStore(tmp_path / "jobs.json")
+    schedule_purple_cycle(store, due_at=1, interval_seconds=3600, mode="run")
+    seen: list[str] = []
+
+    def _model(prompt: str) -> str:
+        seen.append(prompt)
+        return "nope"
+
+    service = SchedulerService(store, _model)
+    try:
+        service.start()
+    finally:
+        service.stop()
+    assert calls == ["run"]
+    assert seen == []
+    ran_at = store.jobs[0]["last_ran_at"]
+    assert isinstance(ran_at, float)
+    assert store.jobs[0]["due_at"] > ran_at
 
 
 def test_second_tick_before_next_due_does_not_run(tmp_path: Path) -> None:

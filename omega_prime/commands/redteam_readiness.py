@@ -18,6 +18,7 @@ WHEN = (
 )
 
 ROE_FILE_ENV_VAR = "OMEGA_PRIME_REDTEAM_ROE_FILE"
+ROE_FILES_ENV_VAR = "OMEGA_PRIME_REDTEAM_ROE_FILES"
 GATEWAY_URL_ENV_VAR = "OMEGA_PRIME_REDTEAM_GATEWAY_URL"
 
 _KEYS = (
@@ -46,20 +47,61 @@ def _first(env: Mapping[str, str], name: str) -> str:
     return value
 
 
+def _listed(env: Mapping[str, str], name: str) -> list[str]:
+    """Comma-separated paths. Caller env wins over the process environment."""
+    raw = env.get(name)
+    if raw is None or not str(raw).strip():
+        raw = os.environ.get(name) or ""
+    found: list[str] = []
+    for entry in str(raw).split(","):
+        text = entry.strip()
+        if text and text not in found:
+            found.append(text)
+    return found
+
+
+def _effective_grants(env: Mapping[str, str]) -> list[str]:
+    """Same replacement rule as ``redteam_roe_files``.
+
+    A non-empty ``OMEGA_PRIME_REDTEAM_ROE_FILES`` list is the active set.
+    The single-file variable is the fallback only when that list is empty.
+    """
+    listed = _listed(env, ROE_FILES_ENV_VAR)
+    if listed:
+        return listed
+    single = _first(env, ROE_FILE_ENV_VAR)
+    return [single] if single else []
+
+
 def run(args: str, env: Mapping[str, str]) -> dict[str, Any]:
     """Probe readiness. Any argument is rejected before the probe runs.
 
-    The artifact path and optional gateway URL come only from the host
-    environment. A missing artifact is passed as ``None`` so the lifecycle
-    check fails closed. Nothing is written.
+    Grant paths and the optional gateway URL come only from the host
+    environment. A missing grant is passed as ``None`` so the lifecycle
+    check fails closed. Concurrent grants are ready only when every one
+    of them is. Nothing is written.
     """
     if args.strip():
         raise Error("bad_args", {"usage": USAGE})
-    from omega_prime.grokbot.roe_lifecycle import check_readiness
+    from omega_prime.grokbot.roe_lifecycle import (
+        READY_LIFECYCLE_STATES,
+        check_readiness,
+        check_roe_lifecycle,
+    )
 
-    artifact = _first(env, ROE_FILE_ENV_VAR) or None
+    grants = _effective_grants(env)
     gateway = _first(env, GATEWAY_URL_ENV_VAR) or None
-    report = check_readiness(artifact, datetime.now(UTC), gateway_url=gateway)
+    now = datetime.now(UTC)
+    primary = grants[0] if grants else None
+    report = check_readiness(primary, now, gateway_url=gateway)
+    if report.get("roe_state") == "IDLE":
+        for extra in grants[1:]:
+            lifecycle = check_roe_lifecycle(extra, now)
+            if lifecycle.get("state") not in READY_LIFECYCLE_STATES:
+                report = dict(report)
+                report["roe_state"] = "BLOCKED"
+                report["ready_for_live"] = False
+                break
     return {key: report[key] for key in _KEYS}
 
 

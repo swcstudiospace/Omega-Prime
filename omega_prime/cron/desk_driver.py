@@ -29,7 +29,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from omega_prime.cron.scheduler import JobStore, run_desk_lead_passes
+from omega_prime.cron.scheduler import (
+    JobStore,
+    run_desk_lead_passes,
+    tick_purple_cycles,
+)
 
 DEFAULT_INTERVAL_SECONDS = 60.0
 """Seconds between desk-pass ticks. Passes themselves run only when due."""
@@ -105,16 +109,27 @@ class DeskDriver:
         """One serialized tick over the shared job file.
 
         Reloads the store from disk (a store another process wrote is never
-        clobbered), then runs each due ``desk_lead_pass`` job once. A failure
-        is printed loudly and retried on the next tick; the thread never dies
-        on one bad store.
+        clobbered), then runs each due ``desk_lead_pass`` and ``purple_cycle``
+        job once. A failure is printed loudly and retried on the next tick;
+        the thread never dies on one bad store, and one kind's failure does
+        not skip the other.
         """
+        store: JobStore | None = None
         try:
             store = JobStore(self.path)
             run_desk_lead_passes(store, self._clock(), self.parent, self.work_root)
         except Exception as exc:  # loud, non-fatal: the next tick retries
             print(
                 f"desk-pass driver: tick failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+        try:
+            if store is None:
+                store = JobStore(self.path)
+            tick_purple_cycles(store, self._clock())
+        except Exception as exc:  # loud, non-fatal: the next tick retries
+            print(
+                f"desk-pass driver: purple-cycle tick failed: {type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
 

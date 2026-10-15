@@ -1577,6 +1577,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
+    from omega_prime.grokbot.audit import default_audit_path
+
+    resolved_audit = args.audit_log if args.audit_log else default_audit_path(root)
+    host_env = dict(os.environ)
+    host_env["OMEGA_PRIME_AUDIT_LOG"] = str(resolved_audit)
 
     def _fail(reason: object) -> int:
         print(f"omega-prime-mcp-server: {reason}", file=sys.stderr)
@@ -1634,6 +1639,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_insecure_no_auth=args.allow_insecure_no_auth,
             audit=audit,
             approvals=approvals,
+            env=host_env,
             max_body_bytes=args.max_body_bytes,
             shutdown_grace=args.shutdown_grace,
             token_store_path=args.token_store,
@@ -1657,6 +1663,7 @@ def main(argv: list[str] | None = None) -> int:
             args.home,
             no_roster=args.no_roster,
             approvals=approvals,
+            env=host_env,
             work_root=args.work_root,
         )
     except ValueError as exc:

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,27 @@ def test_flipped_byte_is_broken_and_omits_tail(tmp_path: Path) -> None:
     assert "tail" not in result
     assert "read_file" not in str(result)
     assert log_file.read_bytes() == before
+
+
+def test_tampered_rotated_backup_is_broken(tmp_path: Path) -> None:
+    log_file = tmp_path / "audit.jsonl"
+    tracer = GrokBotAuditTracer(log_file, max_bytes=1, backups=2)
+    tracer.log_event("tool_call", tool_name="read_file", status="ok")
+    tracer.log_event("tool_call", tool_name="read_file", status="ok")
+    tracer.log_event("tool_call", tool_name="read_file", status="ok")
+    backup = tmp_path / "audit.jsonl.1"
+    assert backup.is_file()
+    record = json.loads(backup.read_text(encoding="utf-8").splitlines()[0])
+    record["caller"] = "mallory"
+    backup.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert GrokBotAuditTracer(log_file).verify_integrity()[0] is True
+
+    result = run("", _env(log_file))
+
+    assert result["ok"] is False
+    assert result["status"] == "broken"
+    assert "tail" not in result
+    assert "mallory" not in str(result)
 
 
 def test_bad_args_do_not_create_a_file(tmp_path: Path) -> None:

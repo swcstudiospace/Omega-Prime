@@ -93,5 +93,81 @@ def test_checkpoint_and_open_finding_are_read_only(tmp_path: Path, monkeypatch) 
     assert body["cycle"]["pending_tag"] == "await-review"
     assert isinstance(body["cycle"]["age_seconds"], int)
     assert body["sync_backlog"]["trackers"]["default"]["depth"] == 1
+    age = body["sync_backlog"]["trackers"]["default"]["oldest_age_seconds"]
+    assert isinstance(age, int) and age > 1_000
     assert again["sync_backlog"]["trackers"]["default"]["depth"] == 1
     assert again["cycle"]["id"] == "cycle-7"
+
+
+def test_unfinished_checkpoint_without_status_is_incomplete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    reports = tmp_path / "reports"
+    workflows = reports / "purple-cycle" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "purple-cycle-job-1000-run.json").write_text(
+        json.dumps(
+            {
+                "done": 1,
+                "state": {
+                    "cycle_id": "purple-cycle-job-1000-run",
+                    "mode": "run",
+                    "selected": ["preflight"],
+                    "steps": [{"name": "preflight", "status": "ok"}],
+                    "blocked": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    body = _status(tmp_path, monkeypatch, reports)
+    assert body["cycle"]["id"] == "purple-cycle-job-1000-run"
+    assert body["cycle"]["state"] == "incomplete"
+
+
+def test_run_cycle_checkpoint_reports_completed(tmp_path: Path, monkeypatch) -> None:
+    from omega_prime.grokbot.purple_cycle import run_cycle
+
+    reports = tmp_path / "reports"
+    monkeypatch.setattr(
+        "omega_prime.grokbot.pin_bump.audit_scheduled_job",
+        lambda *_args, **_kwargs: {"verdict": "unchanged"},
+    )
+    result = run_cycle(
+        mode="run",
+        root=tmp_path / "root",
+        reports_dir=reports,
+        config={"redteam": {"findings_sync": {"enabled": False}}},
+        env={
+            "OMEGA_PRIME_REDTEAM_ENABLED": "1",
+            "OMEGA_PRIME_REDTEAM_ROE_REQUIRED": "0",
+        },
+        fetch=lambda: [{"name": "v1.0.0", "commit": {"sha": "sha-v1.0.0"}}],
+    )
+    assert result["state"] == "completed"
+    checkpoint = json.loads(Path(result["checkpoint"]).read_text(encoding="utf-8"))
+    assert "status" not in checkpoint
+    assert "outcome" not in checkpoint.get("state", {})
+    body = _status(tmp_path, monkeypatch, reports)
+    assert body["cycle"]["id"] == result["cycle_id"]
+    assert body["cycle"]["state"] == "completed"
+
+
+def test_record_finding_ts_sets_backlog_age(tmp_path: Path, monkeypatch) -> None:
+    from sidecar.findings import record_finding
+
+    reports = tmp_path / "reports"
+    record_finding(
+        "case-1",
+        "prompt-injection",
+        "low",
+        "none",
+        "detected",
+        "observed text",
+        directory=reports,
+    )
+    body = _status(tmp_path, monkeypatch, reports)
+    tracker = body["sync_backlog"]["trackers"]["default"]
+    assert tracker["depth"] == 1
+    assert isinstance(tracker["oldest_age_seconds"], int)
+    assert 0 <= tracker["oldest_age_seconds"] < 120

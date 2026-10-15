@@ -8,6 +8,7 @@ is due again at ``now + interval_seconds``.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import stat
@@ -979,6 +980,56 @@ def _purple_cycle_failed(result: Any) -> bool:
     return exit_code != 0
 
 
+def _due_token(due: Any) -> str:
+    """Stable checkpoint token for one scheduled due time."""
+    if isinstance(due, bool) or not isinstance(due, (int, float)):
+        return "na"
+    if due != due or due in (float("inf"), float("-inf")):
+        return "na"
+    whole = int(due)
+    if whole == due:
+        return str(whole)
+    return format(float(due), "f").replace("-", "m").replace(".", "p")
+
+
+def _occurrence_token(value: Any, fallback: str) -> str:
+    """Keep a job id inside the checkpoint-id alphabet."""
+    text = value.strip() if isinstance(value, str) else ""
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in text)
+    cleaned = cleaned.strip(".-")
+    if not cleaned or not cleaned[0].isalnum():
+        return fallback
+    return cleaned[:80]
+
+
+def _purple_occurrence_cycle_id(job: dict) -> str:
+    """Durable id for this due time. A retry of the same due time matches it.
+
+    The default purple-cycle id is the UTC date, so every ``run`` tick that
+    day resumes the first completed checkpoint and records success without
+    doing the work. The due time stays put until the runner returns, so a
+    crash retry of this occurrence still resumes, and the next interval does not.
+    """
+    from omega_prime.grokbot.purple_cycle import STEP_NAMES
+
+    mode = job.get("mode")
+    if mode not in _PURPLE_CYCLE_MODES:
+        raise ValueError("purple cycle mode must be 'plan' or 'run'")
+    steps = job.get("steps")
+    if isinstance(steps, (list, tuple)) and not isinstance(steps, str):
+        selected = [name for name in STEP_NAMES if name in steps]
+    else:
+        selected = list(STEP_NAMES)
+    cycle_id = (
+        "purple-cycle-"
+        f"{_occurrence_token(job.get('id'), 'job')}-{_due_token(job.get('due_at'))}-{mode}"
+    )
+    if selected != list(STEP_NAMES):
+        digest = hashlib.sha256(",".join(selected).encode("ascii")).hexdigest()
+        cycle_id += f"-s{digest[:8]}"
+    return cycle_id
+
+
 def _default_purple_cycle_runner(job: dict) -> Any:
     """Run one cycle in the job's plan or run mode. Never apply."""
     from omega_prime.grokbot import purple_cycle
@@ -987,7 +1038,11 @@ def _default_purple_cycle_runner(job: dict) -> Any:
     if mode not in _PURPLE_CYCLE_MODES:
         raise ValueError("purple cycle mode must be 'plan' or 'run'")
     steps = job.get("steps")
-    return purple_cycle.run_cycle(mode=mode, steps=steps)
+    return purple_cycle.run_cycle(
+        mode=mode,
+        steps=steps,
+        cycle_id=_purple_occurrence_cycle_id(job),
+    )
 
 
 def tick_purple_cycles(

@@ -255,6 +255,28 @@ def test_missing_roster_is_refused(tmp_path: Path) -> None:
         create_sse_app(repo, env={}, audit=GrokBotAuditTracer(tmp_path / "a.jsonl"))
 
 
+def test_omega_audit_reads_the_host_log(tmp_path: Path) -> None:
+    log = tmp_path / "audit" / "audit.jsonl"
+    tracer = GrokBotAuditTracer(log)
+    tracer.log_event("tool_call", tool_name="read_file", status="ok")
+    app = _app(
+        tmp_path,
+        audit=tracer,
+        env={
+            "OMEGA_PRIME_STATE_DIR": str(tmp_path / "state"),
+            "OMEGA_PRIME_AUDIT_LOG": str(tmp_path / "other.jsonl"),
+        },
+    )
+    raw = app.state.runtime.registry.dispatch(
+        "omega_command", {"command": "/omega-audit"}
+    )
+    body = json.loads(raw)
+    assert body["ok"] is True
+    assert body["result"]["status"] == "verified"
+    assert body["result"]["verified"] >= 1
+    assert not (tmp_path / "other.jsonl").exists()
+
+
 def test_approve_is_honoured_by_the_remote_runtime(tmp_path: Path) -> None:
     call = ("discord_send", {"channel_id": 1, "text": "hello"})
 

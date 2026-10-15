@@ -86,7 +86,7 @@ def run(args: str, env: Mapping[str, str]) -> dict[str, Any]:
     path = _log_path(env)
     if not path.is_file():
         return {"ok": False, "verified": 0, "status": "empty"}
-    ok, count, message = GrokBotAuditTracer(path).verify_integrity()
+    ok, count, message = GrokBotAuditTracer(path).verify_integrity(include_rotated=True)
     if not ok:
         return {
             "ok": False,

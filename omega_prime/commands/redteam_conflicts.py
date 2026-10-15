@@ -26,17 +26,21 @@ _MORE_RE = re.compile(r"(\d{1,9}) more conflicts not listed", re.ASCII)
 
 
 def _grant_paths(env: Mapping[str, str]) -> list[str]:
-    """Configured grant paths, single file first, blanks dropped, order kept."""
-    paths: list[str] = []
-    single = (env.get(ROE_FILE_ENV_VAR) or "").strip()
-    if single:
-        paths.append(single)
-    listed = env.get(ROE_FILES_ENV_VAR) or ""
-    for entry in listed.split(","):
+    """Effective grant paths. A non-empty list replaces the single file.
+
+    Same replacement rule as ``redteam_roe_files``: when
+    ``OMEGA_PRIME_REDTEAM_ROE_FILES`` names anything, the legacy single
+    file is not an active grant and must not produce conflicts.
+    """
+    listed: list[str] = []
+    for entry in (env.get(ROE_FILES_ENV_VAR) or "").split(","):
         text = entry.strip()
-        if text and text not in paths:
-            paths.append(text)
-    return paths
+        if text and text not in listed:
+            listed.append(text)
+    if listed:
+        return listed
+    single = (env.get(ROE_FILE_ENV_VAR) or "").strip()
+    return [single] if single else []
 
 
 def _basename(name: Any) -> str:

@@ -81,6 +81,39 @@ def test_conflicts_are_basenames_only(tmp_path: Path) -> None:
     assert "/" not in labels
 
 
+def test_files_list_replaces_the_single_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def _capture(paths: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        seen["paths"] = list(paths)
+        return []
+
+    monkeypatch.setattr("omega_prime.grokbot.roe_lifecycle.grant_conflicts", _capture)
+    active = tmp_path / "active.json"
+    other = tmp_path / "other.json"
+    stale = tmp_path / "stale.json"
+    result = run(
+        "",
+        {
+            "OMEGA_PRIME_REDTEAM_ROE_FILE": str(stale),
+            "OMEGA_PRIME_REDTEAM_ROE_FILES": f"{active}, {other}",
+        },
+    )
+    assert result == {"conflicts": [], "total": 0, "truncated": 0}
+    assert seen["paths"] == [str(active), str(other)]
+    blank = run(
+        "",
+        {
+            "OMEGA_PRIME_REDTEAM_ROE_FILE": str(stale),
+            "OMEGA_PRIME_REDTEAM_ROE_FILES": " , ",
+        },
+    )
+    assert blank["total"] == 0
+    assert seen["paths"] == [str(stale)]
+
+
 def test_detector_exception_is_detector_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
         raise RuntimeError("secret /var/roe/grant.json")

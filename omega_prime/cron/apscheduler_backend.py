@@ -19,8 +19,13 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from omega_prime.cron.scheduler import (
     DESK_LEAD_KIND,
     PIN_BUMP_SCHEDULE_KIND,
+    PURPLE_CYCLE_KIND,
     JobStore,
+    tick_purple_cycles,
 )
+
+#: Kinds this service must not send to the model runner. Each has its own tick.
+_SKIP_KINDS = (DESK_LEAD_KIND, PIN_BUMP_SCHEDULE_KIND, PURPLE_CYCLE_KIND)
 
 
 class SchedulerService:
@@ -46,10 +51,11 @@ class SchedulerService:
         now = self._clock()
         # Desk lead passes are another driver's jobs (DeskDriver); ticking
         # them here would burn a model call per pass. Pin-bump schedules
-        # are owned by tick_pin_bump_schedules for the same reason.
-        ran = self.store.tick(
-            now, self.runner, skip_kinds=(DESK_LEAD_KIND, PIN_BUMP_SCHEDULE_KIND)
-        )
+        # are owned by tick_pin_bump_schedules. Purple cycles are owned by
+        # tick_purple_cycles: the model runner must not consume them, and
+        # this process is a running scheduler so the ticker has to fire here.
+        ran = self.store.tick(now, self.runner, skip_kinds=_SKIP_KINDS)
+        tick_purple_cycles(self.store, now)
         for job in self.store.jobs:
             if job.get("completed"):
                 continue
@@ -93,11 +99,9 @@ class SchedulerService:
         # `tick` is single-threaded (claim by exact `now`); concurrent fires
         # must not interleave inside it.
         with self._lock:
-            self.store.tick(
-                self._clock(),
-                self.runner,
-                skip_kinds=(DESK_LEAD_KIND, PIN_BUMP_SCHEDULE_KIND),
-            )
+            now = self._clock()
+            self.store.tick(now, self.runner, skip_kinds=_SKIP_KINDS)
+            tick_purple_cycles(self.store, now)
 
 
 def _at(timestamp: float) -> datetime:

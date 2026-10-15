@@ -1524,6 +1524,31 @@ def test_blocked_apply_is_retried_after_the_kill_switch_clears(dirs, pin) -> Non
 # --- 4. cycle identity and checkpoint validation ------------------------------
 
 
+def test_explicit_cycle_id_does_not_resume_a_different_occurrence(
+    dirs, pin, counters
+) -> None:
+    first_id = "purple-cycle-job-1000-run"
+    second_id = "purple-cycle-job-2000-run"
+    first = _cycle(dirs, cycle_id=first_id)
+    assert first["cycle_id"] == first_id
+    assert first["state"] == "completed"
+    assert counters["preflight"] == 1
+    second = _cycle(dirs, cycle_id=second_id)
+    assert second["cycle_id"] == second_id
+    assert second["resumed"] is False
+    assert second["state"] == "completed"
+    assert counters["preflight"] == 2
+    retried = _cycle(dirs, cycle_id=first_id)
+    assert retried["resumed"] is True
+    assert retried["state"] == "completed"
+    assert counters["preflight"] == 2
+
+
+def test_bad_cycle_id_is_rejected_before_work() -> None:
+    with pytest.raises(ValueError, match="cycle_id"):
+        run_cycle(cycle_id="not an id")
+
+
 def test_default_selection_keeps_the_plain_cycle_id(dirs, pin) -> None:
     explicit = _cycle(dirs, mode="plan", steps=list(reversed(STEP_NAMES)))
     assert explicit["cycle_id"] == "purple-cycle-20261014-plan"

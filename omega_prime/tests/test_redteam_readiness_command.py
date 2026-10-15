@@ -17,6 +17,7 @@ from omega_prime.commands import redteam_readiness
 from sidecar import simulation
 
 ROE_FILE_ENV_VAR = "OMEGA_PRIME_REDTEAM_ROE_FILE"
+ROE_FILES_ENV_VAR = "OMEGA_PRIME_REDTEAM_ROE_FILES"
 GATEWAY_URL_ENV_VAR = "OMEGA_PRIME_REDTEAM_GATEWAY_URL"
 _KEYS = (
     "roe_state",
@@ -42,6 +43,7 @@ def _seal(monkeypatch: Any, reachable: bool) -> None:
     )
     monkeypatch.setattr(simulation, "run_suite", _run_suite)
     monkeypatch.delenv(ROE_FILE_ENV_VAR, raising=False)
+    monkeypatch.delenv(ROE_FILES_ENV_VAR, raising=False)
     monkeypatch.delenv(GATEWAY_URL_ENV_VAR, raising=False)
 
 
@@ -94,3 +96,69 @@ def test_missing_artifact_passes_none_and_writes_nothing(
     assert "extra" not in report
     assert report["ready_for_live"] is False
     assert list(tmp_path.iterdir()) == []
+
+
+def test_roe_files_replace_the_single_file(monkeypatch: Any, tmp_path: Path) -> None:
+    _seal(monkeypatch, True)
+    seen: list[Any] = []
+
+    def _capture(
+        artifact: Any, now: Any, *, gateway_url: Any = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        del now, gateway_url, kwargs
+        seen.append(artifact)
+        return {
+            "roe_state": "IDLE",
+            "gateway_reachable": True,
+            "suites_loaded": 1,
+            "suites_total": 1,
+            "ready_for_live": True,
+        }
+
+    monkeypatch.setattr("omega_prime.grokbot.roe_lifecycle.check_readiness", _capture)
+    active = tmp_path / "active.json"
+    stale = tmp_path / "stale.json"
+    report = redteam_readiness.run(
+        "",
+        {
+            ROE_FILE_ENV_VAR: str(stale),
+            ROE_FILES_ENV_VAR: str(active),
+        },
+    )
+    assert seen == [str(active)]
+    assert report["roe_state"] == "IDLE"
+    assert report["ready_for_live"] is True
+
+
+def test_a_later_grant_blocks_readiness(monkeypatch: Any, tmp_path: Path) -> None:
+    _seal(monkeypatch, True)
+
+    def _capture(
+        artifact: Any, now: Any, *, gateway_url: Any = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        del artifact, now, gateway_url, kwargs
+        return {
+            "roe_state": "IDLE",
+            "gateway_reachable": True,
+            "suites_loaded": 1,
+            "suites_total": 1,
+            "ready_for_live": True,
+        }
+
+    def _blocked(path: Any, now: Any, audit_log: Any = None) -> dict[str, Any]:
+        del path, now, audit_log
+        return {"state": "missing"}
+
+    monkeypatch.setattr("omega_prime.grokbot.roe_lifecycle.check_readiness", _capture)
+    monkeypatch.setattr(
+        "omega_prime.grokbot.roe_lifecycle.check_roe_lifecycle", _blocked
+    )
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    report = redteam_readiness.run(
+        "",
+        {ROE_FILES_ENV_VAR: f"{first}, {second}"},
+    )
+    assert report["roe_state"] == "BLOCKED"
+    assert report["ready_for_live"] is False
+    assert report["gateway_reachable"] is True

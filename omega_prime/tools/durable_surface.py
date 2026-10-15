@@ -225,8 +225,8 @@ def _cycle_id(document: dict[str, Any], stem: str) -> str | None:
     return stem or None
 
 
-def _cycle_state(document: dict[str, Any]) -> str | None:
-    """Status or outcome string written on the checkpoint, when one exists."""
+def _explicit_cycle_state(document: dict[str, Any]) -> str | None:
+    """A status string when the checkpoint actually carries one."""
     for key in ("status", "outcome"):
         value = document.get(key)
         if isinstance(value, str) and value:
@@ -240,6 +240,43 @@ def _cycle_state(document: dict[str, Any]) -> str | None:
             if isinstance(value, str) and value:
                 return value
     return None
+
+
+def _derived_cycle_state(document: dict[str, Any]) -> str | None:
+    """Outcome from a real ``run_workflow`` checkpoint.
+
+    Those files store ``done`` plus ``state.steps`` and ``state.blocked``.
+    They do not store the result's ``status`` or ``outcome``. A finished
+    cycle has recorded every step function. An unfinished one stopped
+    before a failed or blocked step, which is not written into the file.
+    """
+    nested = document.get("state")
+    if not isinstance(nested, dict):
+        return None
+    steps = nested.get("steps")
+    if not isinstance(steps, list):
+        return None
+    records = [rec for rec in steps if isinstance(rec, dict)]
+    if any(rec.get("status") == "error" for rec in records):
+        return "failed"
+    if nested.get("blocked") or any(rec.get("status") == "blocked" for rec in records):
+        return "blocked"
+    done = document.get("done")
+    if isinstance(done, bool) or not isinstance(done, int) or done <= 0 or not records:
+        return None
+    from omega_prime.grokbot.purple_cycle import STEP_NAMES
+
+    if done == len(STEP_NAMES) and len(records) == len(STEP_NAMES):
+        return "completed"
+    return "incomplete"
+
+
+def _cycle_state(document: dict[str, Any]) -> str | None:
+    """Cycle outcome from the checkpoint, or None when it has no state."""
+    explicit = _explicit_cycle_state(document)
+    if explicit is not None:
+        return explicit
+    return _derived_cycle_state(document)
 
 
 def _pending_tag(reports_dir: Path) -> str | None:
@@ -288,8 +325,7 @@ def _cycle_block(reports_dir: Path, *, now: float | None = None) -> dict[str, An
     }
 
 
-def _row_timestamp(row: dict[str, Any]) -> float | None:
-    raw = row.get("timestamp")
+def _parse_timestamp(raw: Any) -> float | None:
     if isinstance(raw, bool) or raw is None:
         return None
     if isinstance(raw, (int, float)):
@@ -306,6 +342,15 @@ def _row_timestamp(row: dict[str, Any]) -> float | None:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=UTC)
         return parsed.timestamp()
+    return None
+
+
+def _row_timestamp(row: dict[str, Any]) -> float | None:
+    """Finding time. ``record_finding`` stores RFC3339 in ``ts``."""
+    for key in ("ts", "timestamp"):
+        parsed = _parse_timestamp(row.get(key))
+        if parsed is not None:
+            return parsed
     return None
 
 

@@ -150,6 +150,8 @@ _TAG_RE = re.compile(r"v[0-9]+(?:\.[0-9]+)+(?:[._-][0-9A-Za-z._-]*)?")
 _MAX_TAG_LENGTH = 64
 #: Stored step reasons are short lowercase vocabulary words.
 _REASON_RE = re.compile(r"[a-z0-9-]{1,40}")
+#: Checkpoint ids accepted by ``omega_prime.durable.workflows``.
+_CYCLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _KEY_RE = re.compile(r"[a-z0-9_]{1,40}")
 _RECORD_KEYS = frozenset({"name", "status", "exit", "reason", "detail"})
 #: Largest serialized step ``detail`` and longest list inside it.
@@ -1205,6 +1207,7 @@ def run_cycle(
     now: datetime | None = None,
     steps: Sequence[str] | None = None,
     force_new: bool = False,
+    cycle_id: str | None = None,
     runner: Any = None,
     pin_run: Any = None,
     fetch: Callable[[], Any] | None = None,
@@ -1219,6 +1222,10 @@ def run_cycle(
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; expected one of {MODES}")
+    if cycle_id is not None and (
+        not isinstance(cycle_id, str) or _CYCLE_ID_RE.fullmatch(cycle_id) is None
+    ):
+        raise ValueError("cycle_id must be a checkpoint id")
     deadline_seconds = _checked_deadline(mode, deadline_seconds)
     if steps is None:
         selected = list(STEP_NAMES)
@@ -1231,12 +1238,13 @@ def run_cycle(
         selected = [name for name in STEP_NAMES if name in set(steps)]
     current = _as_utc(now if now is not None else _utc_now())
     environ: Mapping[str, str] = env if env is not None else os.environ
-    cycle_id = f"purple-cycle-{current:%Y%m%d}-{mode}"
-    if selected != list(STEP_NAMES):
-        digest = hashlib.sha256(",".join(selected).encode("ascii")).hexdigest()
-        cycle_id += f"-s{digest[:8]}"
-    if force_new:
-        cycle_id += f"-{current:%H%M%S}"
+    if cycle_id is None:
+        cycle_id = f"purple-cycle-{current:%Y%m%d}-{mode}"
+        if selected != list(STEP_NAMES):
+            digest = hashlib.sha256(",".join(selected).encode("ascii")).hexdigest()
+            cycle_id += f"-s{digest[:8]}"
+        if force_new:
+            cycle_id += f"-{current:%H%M%S}"
     resolved_config: dict[str, Any] | None
     if config is not None:
         resolved_config = dict(config)
