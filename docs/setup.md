@@ -91,7 +91,7 @@ saved output — `--token` exists only as a deprecated flag that warns because
 | `X_API_TOKEN` | X connector tools | host env, `X_API_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/X_API_TOKEN` (mode 0600) |
 | `TELEGRAM_BOT_TOKEN` | Telegram connector tools | host env, `TELEGRAM_BOT_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/TELEGRAM_BOT_TOKEN` (mode 0600) |
 | `DISCORD_BOT_TOKEN` | Discord connector tools | host env, `DISCORD_BOT_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/DISCORD_BOT_TOKEN` (mode 0600) |
-| GitHub token | Reviews, ship PRs | host via `gh auth`, or `GH_TOKEN` / `GITHUB_TOKEN` via the file rule above |
+| GitHub CLI | Reviews, ship PRs | `gh auth login`, or `GH_TOKEN` in the environment of the process that runs `gh`. `gh` does not read `GH_TOKEN_FILE` or `$OMEGA_PRIME_STATE_DIR/secrets/GH_TOKEN` |
 | `SUBSTRATE_TOKEN` | Substrate brief/events/memory | host env, `SUBSTRATE_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/SUBSTRATE_TOKEN` (mode 0600) |
 | `HINDSIGHT_API_KEY` | Shared Hindsight episodic memory, only when `HINDSIGHT_URL` is set | host env, `HINDSIGHT_API_KEY_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/HINDSIGHT_API_KEY` (mode 0600) |
 | `RAILWAY_TOKEN` | Railway status and logs | host env, `RAILWAY_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/RAILWAY_TOKEN` (mode 0600) |

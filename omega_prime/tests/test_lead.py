@@ -847,6 +847,21 @@ def test_doctor_check_preserves_expected_sha(tmp_path: Path):
     assert again["checks"]["prompt"]["green"] is True
 
 
+def test_doctor_check_does_not_write_the_roster(tmp_path: Path):
+    registry = ToolRegistry()
+    ctx = _ctx(tmp_path, registry=registry)
+    client = LeadClient(ctx)
+    register_lead_tools(registry, client)
+    assert ctx.roster is not None
+    assert not ctx.roster.path.exists()
+    client.doctor("check")
+    assert not ctx.roster.path.exists()
+    client.doctor("install_prompt")
+    before = ctx.roster.path.read_bytes()
+    client.doctor("check", prompt_sha256="0" * 64, installed_skills=["lead-pack"])
+    assert ctx.roster.path.read_bytes() == before
+
+
 # -- Phase 75 re-review WR-04: roster saves through the shared atomic path ---
 # Every roster mutation must reach the same atomic-write helper the intake
 # store uses, so a crash mid-save never leaves a torn file that breaks every

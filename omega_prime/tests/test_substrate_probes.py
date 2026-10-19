@@ -140,6 +140,18 @@ def test_main_exit_code_on_failure() -> None:
     assert main([], {}, transport) == 1
 
 
+def test_unset_hindsight_url_skips_a_broken_credential_file(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-key"
+    config = config_from_env({"HINDSIGHT_API_KEY_FILE": str(missing)})
+    assert config["hindsight_url"] == ""
+    assert config["hindsight_token"] == ""
+    report = run_probes(config, _FakeTransport([{}, ""]))
+    assert report["passed"] is True
+    assert report["probes"]["hindsight_health"]["detail"] == (
+        "disabled (HINDSIGHT_URL unset)"
+    )
+
+
 def test_unset_hindsight_url_does_not_call_the_remote_bank() -> None:
     config = config_from_env({})
     assert config["hindsight_url"] == ""
@@ -172,6 +184,15 @@ def test_config_defaults_and_precedence() -> None:
     )
     assert fallback["substrate_token"] == "g"
     assert fallback["substrate_token_name"] == "SUBSTRATE_TOKEN_GROK_BOT"
-    assert fallback["hindsight_token"] == "t"
+    assert fallback["hindsight_url"] == ""
+    assert fallback["hindsight_token"] == ""
+    enabled = config_from_env(
+        {
+            "SUBSTRATE_TOKEN_GROK_BOT": "g",
+            "HINDSIGHT_URL": "http://127.0.0.1:9",
+            "HINDSIGHT_API_TOKEN": "t",
+        }
+    )
+    assert enabled["hindsight_token"] == "t"
     report = run_probes(config, _FakeTransport([{}, "", {}, {}]))
     assert "anonymous" in format_report(report, config)

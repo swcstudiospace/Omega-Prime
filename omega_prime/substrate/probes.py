@@ -36,7 +36,12 @@ def config_from_env(env: Any = None) -> dict:
         if isinstance(hindsight_raw, str) and hindsight_raw.strip()
         else ""
     ) or DEFAULT_HINDSIGHT_URL
-    hindsight_token, hindsight_token_name = _named_secret(source, HINDSIGHT_TOKEN_ENVS)
+    # An unset URL disables the bank. Do not read its credential: a missing
+    # or badly mode-checked HINDSIGHT_*_FILE would raise here and block the
+    # substrate probes that should still run.
+    hindsight_token, hindsight_token_name = (
+        _named_secret(source, HINDSIGHT_TOKEN_ENVS) if hindsight_url else ("", "")
+    )
     return {
         "substrate_url": substrate_url,
         "substrate_token": substrate_token,

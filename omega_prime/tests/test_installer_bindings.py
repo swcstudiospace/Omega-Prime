@@ -7,6 +7,7 @@ from __future__ import annotations
 import email.message
 import io
 import json
+import os
 import stat
 import urllib.error
 import urllib.request
@@ -737,6 +738,40 @@ def test_probe_rejects_server_errors_and_sends_the_bearer(monkeypatch) -> None:
         == "ok"
     )
     assert seen == ["http://127.0.0.1:9/health"]
+
+
+def test_substrate_probe_sends_a_file_backed_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = tmp_path / "SUBSTRATE_TOKEN"
+    secret.write_text("file-token\n", encoding="utf-8")
+    os.chmod(secret, 0o600)
+    seen: list[str | None] = []
+
+    class Ok:
+        status = 200
+
+        def __enter__(self) -> Ok:
+            return self
+
+        def __exit__(self, *args: object) -> Literal[False]:
+            return False
+
+    def capture(request: Any, timeout: float = 3.0) -> Any:
+        del timeout
+        seen.append(request.get_header("Authorization"))
+        return Ok()
+
+    monkeypatch.setattr("omega_prime.integrations.gateways._open_probe", capture)
+    assert (
+        probe_gateway(
+            "substrate",
+            "http://127.0.0.1:9",
+            {"SUBSTRATE_TOKEN_FILE": str(secret)},
+        )
+        == "ok"
+    )
+    assert seen == ["Bearer file-token"]
 
 
 def _redirect(current: str, location: str) -> urllib.request.Request | None:

@@ -122,9 +122,10 @@ def _looks_like_generic_token(candidate: str) -> bool:
 
     Flags runs of 32+ token-alphabet characters with mixed character classes
     and high per-character entropy. Pure-hex digests, UUIDs, low-diversity
-    runs (padding, repeats), and git refs whose own segments are not tokens
+    runs (padding, repeats), and git refs whose branch suffix is not a token
     are excluded so integrity metadata in manifests and logs does not trip
-    the gate. A ref segment that itself has token shape still trips.
+    the gate. The suffix is one string, slashes included, so a token split
+    by ``/`` still trips.
     """
     if _git_ref_metadata(candidate):
         return False
@@ -132,10 +133,13 @@ def _looks_like_generic_token(candidate: str) -> bool:
 
 
 def _git_ref_metadata(candidate: str) -> bool:
-    """True for ``refs/<kind>/...`` when no segment has token shape.
+    """True for ``refs/<kind>/<suffix>`` when the suffix is not a token.
 
     ``/`` belongs to the token alphabet, so ``refs/heads/<long-branch>`` is
     one candidate. The structural prefix is provenance, same as a digest.
+    The branch suffix is scanned as one string, slashes included: splitting
+    on ``/`` and checking each piece would let a token through when every
+    piece is shorter than 32 characters.
     """
     parts = candidate.split("/")
     if len(parts) < 3 or parts[0] != "refs" or parts[1] not in _GIT_REF_KINDS:
@@ -144,7 +148,8 @@ def _git_ref_metadata(candidate: str) -> bool:
         return False
     if not all(_REF_SEGMENT_RE.fullmatch(part) for part in parts[2:]):
         return False
-    return all(not _token_shape(part) for part in parts)
+    suffix = "/".join(parts[2:])
+    return not _token_shape(suffix)
 
 
 def _token_shape(candidate: str) -> bool:

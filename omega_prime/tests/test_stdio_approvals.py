@@ -2,12 +2,15 @@
 # Copyright (C) 2026 Spectrum Web Co
 """Human grants for gated tools on the stdio route.
 
-The file is read at startup. The process never writes it. The bot cannot
-name itself as the approver. lead_doctor check stays a read.
+The file is read at startup. The process never writes it. A file in the
+state directory is not a grant. The bytes must match a digest the person
+pinned. The bot cannot name itself as the approver. lead_doctor check
+stays a read and does not write the roster.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,15 +36,21 @@ def _grant(path: Path, text: str, mode: int = 0o600) -> Path:
     return path
 
 
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def test_loader_refuses_the_bot_and_a_file_inside_the_repo(tmp_path: Path) -> None:
     outside = _grant(tmp_path / "state" / "approvals", f"lead_doctor:{BOT_ID}\n")
     with pytest.raises(ValueError, match="person"):
-        load_approvals_file(outside, repo_root=tmp_path / "repo")
+        load_approvals_file(
+            outside, repo_root=tmp_path / "repo", digest=_digest(outside), env={}
+        )
 
     repo = tmp_path / "repo"
     inside = _grant(repo / "approvals", "lead_intake_next:operator\n")
     with pytest.raises(ValueError, match="outside the repository"):
-        load_approvals_file(inside, repo_root=repo)
+        load_approvals_file(inside, repo_root=repo, digest=_digest(inside), env={})
 
 
 def test_loader_refuses_a_world_readable_file_and_never_writes(tmp_path: Path) -> None:
@@ -51,7 +60,9 @@ def test_loader_refuses_a_world_readable_file_and_never_writes(tmp_path: Path) -
         mode=0o644,
     )
     with pytest.raises(ValueError, match="chmod 600"):
-        load_approvals_file(path, repo_root=tmp_path / "repo")
+        load_approvals_file(
+            path, repo_root=tmp_path / "repo", digest=_digest(path), env={}
+        )
     source = Path(load_approvals_file.__code__.co_filename).read_text(encoding="utf-8")
     assert "write_text" not in source
     assert "atomic_write" not in source
@@ -63,7 +74,7 @@ def test_file_grant_allows_a_gated_tool_and_check_does_not_need_one(
 ) -> None:
     state = tmp_path / "state"
     path = _grant(state / "approvals", "lead_intake_next:operator\n# note\n")
-    grants = load_approvals_file(path, repo_root=ROOT)
+    grants = load_approvals_file(path, repo_root=ROOT, digest=_digest(path), env={})
     assert grants == [("lead_intake_next", "operator")]
     env = {"OMEGA_PRIME_STATE_DIR": str(state)}
     runtime = load_runtime(
@@ -85,13 +96,14 @@ def test_file_grant_allows_a_gated_tool_and_check_does_not_need_one(
     assert blocked["error"] == "approval required"
 
 
-def test_stdio_launcher_forwards_the_file_and_does_not_create_one(
+def test_stdio_launcher_ignores_the_state_dir_and_forwards_a_pinned_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = tmp_path / "state"
-    path = _grant(state / "approvals", "x_post:operator\n")
+    planted = _grant(state / "approvals", "x_post:operator\n")
     monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(state))
     monkeypatch.delenv("OMEGA_PRIME_APPROVALS_FILE", raising=False)
+    monkeypatch.delenv("OMEGA_PRIME_APPROVALS_SHA256", raising=False)
     seen: list[list[str]] = []
 
     def fake_call(cmd: list[str]) -> int:
@@ -100,19 +112,36 @@ def test_stdio_launcher_forwards_the_file_and_does_not_create_one(
 
     monkeypatch.setattr(oneclick.subprocess, "call", fake_call)
     assert main(["--skip-doctor"]) == 0
-    assert seen[0][seen[0].index("--approvals-file") + 1] == str(path)
+    assert "--approvals-file" not in seen[0]
     assert "--approve" not in seen[0]
-    assert resolve_approvals_path() == path
+    assert resolve_approvals_path() is None
+    assert planted.is_file()
 
-    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path / "empty"))
+    outside = _grant(tmp_path / "operator" / "approvals", "x_post:operator\n")
+    digest = _digest(outside)
+    monkeypatch.setenv("OMEGA_PRIME_APPROVALS_FILE", str(outside))
+    monkeypatch.setenv("OMEGA_PRIME_APPROVALS_SHA256", digest)
     seen.clear()
     assert main(["--skip-doctor"]) == 0
-    assert "--approvals-file" not in seen[0]
-    assert not (tmp_path / "empty" / "approvals").exists()
+    cmd = seen[0]
+    assert cmd[cmd.index("--approvals-file") + 1] == str(outside)
+    assert cmd[cmd.index("--approvals-sha256") + 1] == digest
+    assert "--approve" not in cmd
+
+    monkeypatch.setenv("OMEGA_PRIME_APPROVALS_SHA256", "0" * 64)
+    seen.clear()
+    assert main(["--skip-doctor"]) == 2
+    assert seen == []
+
+    monkeypatch.setenv("OMEGA_PRIME_APPROVALS_FILE", str(planted))
+    monkeypatch.setenv("OMEGA_PRIME_APPROVALS_SHA256", _digest(planted))
+    assert main(["--skip-doctor"]) == 2
 
 
 def test_self_approver_names_are_refused(tmp_path: Path) -> None:
     for approver in ("assistant", "model", "self", "Bot-00-Omega-Prime"):
         path = _grant(tmp_path / approver / "approvals", f"x_post:{approver}\n")
         with pytest.raises(ValueError, match="person"):
-            load_approvals_file(path, repo_root=tmp_path / "repo")
+            load_approvals_file(
+                path, repo_root=tmp_path / "repo", digest=_digest(path), env={}
+            )

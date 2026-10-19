@@ -41,6 +41,7 @@ from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.cron.desk_driver import DeskDriver
 from omega_prime.grokbot.approvals_file import (
     load_approvals_file,
+    resolve_approvals_digest,
     resolve_approvals_path,
 )
 from omega_prime.grokbot.interceptors import (
@@ -1480,8 +1481,18 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="PATH",
         help=(
-            "mode 0600 file of TOOL:APPROVER lines, outside the repository. "
-            "A person writes it. The process only reads it, at startup."
+            "mode 0600 file of TOOL:APPROVER lines, outside the repository "
+            "and outside OMEGA_PRIME_STATE_DIR. A person writes it. The "
+            "process only reads it, at startup."
+        ),
+    )
+    parser.add_argument(
+        "--approvals-sha256",
+        default=None,
+        metavar="HEX",
+        help=(
+            "sha256 of --approvals-file. A person sets it. A mismatch "
+            "refuses to start. OMEGA_PRIME_APPROVALS_SHA256 is the fallback."
         ),
     )
     parser.add_argument(
@@ -1675,9 +1686,16 @@ def main(argv: list[str] | None = None) -> int:
 
     approvals: list[tuple[str, str]] = []
     approvals_path = resolve_approvals_path(args.approvals_file)
+    approvals_digest = resolve_approvals_digest(args.approvals_sha256)
+    if approvals_digest and approvals_path is None:
+        return _fail("OMEGA_PRIME_APPROVALS_SHA256 is set without an approvals file")
     if approvals_path is not None:
         try:
-            approvals.extend(load_approvals_file(approvals_path, repo_root=root))
+            approvals.extend(
+                load_approvals_file(
+                    approvals_path, repo_root=root, digest=approvals_digest
+                )
+            )
         except ValueError as exc:
             return _fail(exc)
     for item in args.approve:
