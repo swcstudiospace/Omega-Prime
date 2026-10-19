@@ -51,9 +51,10 @@ _TURN_TIMEOUT = 120.0
 class EngineError(Exception):
     """The engine refused or the omp process failed. ``reason`` is stable."""
 
-    def __init__(self, reason: str, detail: str = "") -> None:
+    def __init__(self, reason: str, detail: str = "", *, started: bool = False) -> None:
         self.reason = reason
         self.detail = detail or reason
+        self.started = started
         super().__init__(self.detail)
 
 
@@ -73,6 +74,7 @@ class EngineResult:
     stats: dict[str, Any] = field(default_factory=dict)
     sandbox: str = ""
     commands: list[str] = field(default_factory=list)
+    started: bool = False
 
 
 def resolve_omp(env: Mapping[str, str]) -> str | None:
@@ -266,20 +268,29 @@ def run(
             timeout=timeout if timeout is not None else _TURN_TIMEOUT,
             tmux=tmux,
         )
-    except (EngineError, PlanNotAllowed, SandboxUnavailable) as exc:
-        reason = getattr(exc, "reason", None)
-        if reason is None:
-            reason = (
-                "plan_not_allowed"
-                if isinstance(exc, PlanNotAllowed)
-                else "sandbox_unavailable"
-            )
+    except (EngineError, PlanNotAllowed, SandboxUnavailable, OSError) as exc:
+        reason: str | None
+        if isinstance(exc, OSError):
+            reason = "process"
+            detail = f"omp closed the pipe: {type(exc).__name__}"
+            started = False
+        else:
+            reason = getattr(exc, "reason", None)
+            if reason is None:
+                reason = (
+                    "plan_not_allowed"
+                    if isinstance(exc, PlanNotAllowed)
+                    else "sandbox_unavailable"
+                )
+            detail = str(getattr(exc, "detail", None) or exc)
+            started = bool(getattr(exc, "started", False))
         return EngineResult(
             False,
             token,
             reason=str(reason),
-            detail=str(getattr(exc, "detail", None) or exc),
+            detail=detail,
             events_path=str(directory / "events.jsonl"),
+            started=started,
         )
 
 
@@ -315,9 +326,9 @@ def _run(
     choice = select(env, usage, requested=plan)
     profile = directory / "profile"
     profile.mkdir(parents=True, exist_ok=True)
-    mcp_path = write_mcp_json(profile)
     skills = skills_dir()
     work = Path(cwd).resolve() if cwd is not None else Path.cwd()
+    mcp_path = write_mcp_json(profile, work_root=work)
     prompt_text = _system(system_prompt)
     argv = [
         binary,
@@ -344,6 +355,8 @@ def _run(
         unsandboxed_override=unsandboxed,
     )
     events_path = directory / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.touch(exist_ok=True)
     write_json(
         directory / "session.json",
         {
@@ -371,6 +384,8 @@ def _run(
     )
     session = OmpSession(proc, events_path)
     commands: list[str] = []
+    started = False
+    stats: dict[str, Any] = {}
     try:
         session.wait_type("ready", _READY_TIMEOUT)
         commands.append(
@@ -391,9 +406,9 @@ def _run(
         )
         commands.append(_roundtrip(session, "set_thinking_level", level=thinking))
         prompt_id = session.send("prompt", message=prompt, streamingBehavior="steer")
+        started = True
         commands.append("prompt")
         _accept_prompt(session, prompt_id, timeout)
-        stats: dict[str, Any] = {}
         try:
             stats_id = session.send("get_session_stats")
             commands.append("get_session_stats")
@@ -403,6 +418,16 @@ def _run(
                 stats = data
         except EngineError:
             stats = {}
+    except OSError as exc:
+        raise EngineError(
+            "process",
+            f"omp closed the pipe: {type(exc).__name__}",
+            started=started,
+        ) from exc
+    except EngineError as exc:
+        if started:
+            exc.started = True
+        raise
     finally:
         session.close()
     text, usage_map, cost = _collect_output(session.events)
@@ -476,13 +501,27 @@ def _accept_prompt(session: OmpSession, command_id: str, timeout: float) -> None
         raise EngineError("timeout", "timed out waiting for agent_end")
 
 
+def _sum_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(left)
+    for key, value in right.items():
+        current = merged.get(key)
+        if isinstance(value, bool) or isinstance(current, bool):
+            continue
+        if isinstance(value, (int, float)) and isinstance(current, (int, float)):
+            merged[key] = current + value
+        elif key not in merged:
+            merged[key] = value
+    return merged
+
+
 def _collect_output(
     events: list[dict[str, Any]],
 ) -> tuple[str, dict[str, Any], float | None]:
     deltas: list[str] = []
     ended = ""
     usage: dict[str, Any] = {}
-    cost: float | None = None
+    cost = 0.0
+    saw_cost = False
     for event in events:
         kind = event.get("type")
         if kind == "message_update":
@@ -495,11 +534,12 @@ def _collect_output(
                 ended = piece
             found, found_cost = usage_of(event)
             if found:
-                usage = found
+                usage = _sum_usage(usage, found)
             if found_cost is not None:
-                cost = found_cost
+                cost += found_cost
+                saw_cost = True
     text = ended or "".join(deltas)
-    return text, usage, cost
+    return text, usage, cost if saw_cost else None
 
 
 def session_steer(session: OmpSession, message: str) -> dict[str, Any]:

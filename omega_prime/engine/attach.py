@@ -12,6 +12,7 @@ from typing import Any
 from omega_prime.engine.omp_driver import EngineResult, probe, run
 
 _OFF = frozenset({"0", "off", "python", "false", "no"})
+_TRANSCRIPT_CHARS = 4_000
 _REQUIRED = frozenset({"omp", "on", "1", "required", "true", "yes"})
 _NON_LIVE = frozenset({"ScriptedModel", "FakeModel", "FakeProvider"})
 
@@ -52,6 +53,50 @@ def _prompt_text(user_message: Any) -> str:
         return str(user_message)[:100000]
 
 
+def _restricted(agent: Any) -> bool:
+    """Plan mode and narrowed tool maps stay on the Python loop.
+
+    The MCP bridge serves the installation roster. It does not apply
+    ``plan_mode`` refusals or a ``child_tool_hook``. A hand-built tool map,
+    or an Omega Prime agent constructed with a roster, is a restriction.
+    ``engine_full_tools`` marks a registry-wide agent that the roster already
+    covers.
+    """
+    if getattr(agent, "plan_mode", False):
+        return True
+    if getattr(agent, "child_tool_hook", None) is not None:
+        return True
+    if getattr(agent, "tool_roster", None) is not None:
+        return True
+    if getattr(agent, "engine_full_tools", False):
+        return False
+    tools = getattr(agent, "tools", None)
+    return isinstance(tools, dict) and len(tools) > 0
+
+
+def _with_history(user_message: Any, conversation_history: list | None) -> str:
+    """Send the prior transcript with the latest request."""
+    latest = _prompt_text(user_message)
+    if not conversation_history:
+        return latest
+    lines: list[str] = []
+    for row in conversation_history[-40:]:
+        if not isinstance(row, dict):
+            continue
+        role = row.get("role")
+        if role not in {"system", "user", "assistant"}:
+            continue
+        content = row.get("content")
+        text = content if isinstance(content, str) else _prompt_text(content)
+        if not text:
+            continue
+        lines.append(f"{role}: {text[:_TRANSCRIPT_CHARS]}")
+    if not lines:
+        return latest
+    transcript = "\n".join(lines)
+    return f"Prior transcript:\n{transcript}\n\nCurrent request:\n{latest}"[:100000]
+
+
 def _mapping(env: Mapping[str, str] | None) -> Mapping[str, str]:
     if env is None:
         return os.environ
@@ -65,17 +110,22 @@ def route_turn(
     system_message: str | None,
     conversation_history: list | None,
     env: Mapping[str, str] | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Run one turn on omp, or return None so the caller keeps the Python loop.
 
     Auto mode uses omp only when a binary, an allowlisted plan, and a sandbox
     are all present, and only for a live provider model. Required mode refuses
     instead of calling that provider. Scripted and fake models stay on the
-    Python loop unless ``agent.force_engine`` is set.
+    Python loop unless ``agent.force_engine`` is set. Plan mode and a narrowed
+    tool map always stay on the Python loop. Once the prompt has been sent,
+    a later failure is returned instead of falling back to Python.
     """
     mapping = _mapping(env)
     mode = engine_mode(mapping)
     forced = bool(getattr(agent, "force_engine", False))
+    if _restricted(agent):
+        return None
     if mode == "off" and not forced:
         return None
     if not forced and not _live_model(getattr(agent, "model", None)):
@@ -85,7 +135,7 @@ def route_turn(
         if not ready:
             return None
     result = run(
-        _prompt_text(user_message),
+        _with_history(user_message, conversation_history),
         cwd=getattr(agent, "engine_cwd", None),
         system_prompt=system_message,
         thinking=getattr(agent, "engine_thinking", None),
@@ -94,10 +144,12 @@ def route_turn(
         job_id=getattr(agent, "engine_job_id", None),
     )
     if not result.ok:
-        if mode == "required" or forced:
-            return _refused(agent, user_message, conversation_history, result)
+        if mode == "required" or forced or result.started:
+            return _refused(
+                agent, user_message, conversation_history, result, task_id=task_id
+            )
         return None
-    return _accepted(user_message, conversation_history, result)
+    return _accepted(user_message, conversation_history, result, task_id=task_id)
 
 
 def _history(user_message: Any, conversation_history: list | None, text: str) -> list:
@@ -107,28 +159,47 @@ def _history(user_message: Any, conversation_history: list | None, text: str) ->
     return messages
 
 
+def _engine_body(result: EngineResult) -> dict[str, Any]:
+    return {
+        "job_id": result.job_id,
+        "plan": result.plan,
+        "provider": result.provider,
+        "model": result.model,
+        "events": result.events_path,
+        "cost": result.cost,
+        "usage": result.usage,
+        "sandbox": result.sandbox,
+        "started": result.started,
+    }
+
+
+def _stamp(result: dict[str, Any], task_id: str | None) -> dict[str, Any]:
+    if task_id is not None:
+        result["task_id"] = task_id
+    return result
+
+
 def _accepted(
-    user_message: Any, conversation_history: list | None, result: EngineResult
+    user_message: Any,
+    conversation_history: list | None,
+    result: EngineResult,
+    *,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     messages = _history(user_message, conversation_history, result.final_text)
-    return {
-        "final_response": result.final_text,
-        "messages": messages,
-        "api_call_count": 1,
-        "interrupted": False,
-        "failed": False,
-        "turn_exit_reason": "engine",
-        "engine": {
-            "job_id": result.job_id,
-            "plan": result.plan,
-            "provider": result.provider,
-            "model": result.model,
-            "events": result.events_path,
-            "cost": result.cost,
-            "usage": result.usage,
-            "sandbox": result.sandbox,
+    return _stamp(
+        {
+            "final_response": result.final_text,
+            "messages": messages,
+            "api_calls": 1,
+            "completed": True,
+            "interrupted": False,
+            "failed": False,
+            "turn_exit_reason": "text_response(finish_reason=engine)",
+            "engine": _engine_body(result),
         },
-    }
+        task_id,
+    )
 
 
 def _refused(
@@ -136,23 +207,36 @@ def _refused(
     user_message: Any,
     conversation_history: list | None,
     result: EngineResult,
+    *,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     del agent
     text = f"engine refused: {result.reason}"
     messages = _history(user_message, conversation_history, text)
-    return {
-        "final_response": text,
-        "messages": messages,
-        "api_call_count": 0,
-        "interrupted": False,
-        "failed": True,
-        "turn_exit_reason": result.reason or "engine",
-        "engine": {"reason": result.reason, "detail": result.detail},
-    }
+    return _stamp(
+        {
+            "final_response": text,
+            "messages": messages,
+            "api_calls": 0,
+            "completed": False,
+            "interrupted": False,
+            "failed": True,
+            "turn_exit_reason": result.reason or "engine",
+            "engine": {
+                "reason": result.reason,
+                "detail": result.detail,
+                "started": result.started,
+            },
+        },
+        task_id,
+    )
 
 
 def delegate_via_engine(
-    goal: str, *, env: Mapping[str, str] | None = None
+    goal: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    cwd: str | None = None,
 ) -> str | None:
     """JSON summary from omp, or None when the Python child path should run."""
     mapping = _mapping(env)
@@ -164,9 +248,9 @@ def delegate_via_engine(
         return None
     if not ready and mode == "required":
         return json.dumps({"error": reason}, ensure_ascii=False)
-    result = run(goal, env=mapping)
+    result = run(goal, env=mapping, cwd=cwd)
     if not result.ok:
-        if mode == "required":
+        if mode == "required" or result.started:
             return json.dumps(
                 {"error": result.reason or "engine", "detail": result.detail},
                 ensure_ascii=False,
@@ -178,9 +262,14 @@ def delegate_via_engine(
     )
 
 
-def desk_engine_dispatch(goal: str, env: Mapping[str, str]) -> dict[str, Any] | None:
+def desk_engine_dispatch(
+    goal: str,
+    env: Mapping[str, str],
+    *,
+    cwd: str | None = None,
+) -> dict[str, Any] | None:
     """One desk ticket on omp. None means keep the existing blocked path."""
-    raw = delegate_via_engine(goal, env=env)
+    raw = delegate_via_engine(goal, env=env, cwd=cwd)
     if raw is None:
         return None
     try:
@@ -225,15 +314,24 @@ def desk_engine_dispatch(goal: str, env: Mapping[str, str]) -> dict[str, Any] | 
     }
 
 
+def _required_miss(env: Mapping[str, str], reason: str) -> dict[str, Any]:
+    body: dict[str, Any] = {"used": False, "reason": reason}
+    if engine_mode(env) == "required":
+        body["failed"] = True
+        body["error"] = reason
+    return body
+
+
 def ultrathink_engine(
     plan: Mapping[str, Any], env: Mapping[str, str]
 ) -> dict[str, Any]:
     """Run a resolved ultrathink spec on omp when the engine is ready."""
-    ready, reason = probe(env)
-    if engine_mode(env) == "off":
+    mode = engine_mode(env)
+    if mode == "off":
         return {"used": False, "reason": "off"}
+    ready, reason = probe(env)
     if not ready:
-        return {"used": False, "reason": reason}
+        return _required_miss(env, reason)
     if not plan.get("found"):
         return {"used": False, "reason": "no_plan"}
     spec = plan.get("spec_path")
@@ -252,11 +350,15 @@ def ultrathink_engine(
         system_prompt="Ultrathink turn. Stay inside the spec.",
     )
     if not result.ok:
-        return {
+        body = {
             "used": False,
             "reason": result.reason or "engine",
             "detail": result.detail,
         }
+        if engine_mode(env) == "required" or result.started:
+            body["failed"] = True
+            body["error"] = result.reason or "engine"
+        return body
     return {
         "used": True,
         "job_id": result.job_id,

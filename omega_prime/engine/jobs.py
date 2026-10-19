@@ -146,6 +146,40 @@ _PASS_ENV = (
     "MUSE_API_KEY",
     "CURSOR_API_KEY",
     "OMEGA_PRIME_STATE_DIR",
+    "OMEGA_PRIME_WORK_ROOT",
+)
+
+# Connector settings the stdio MCP server reads. omp inherits this narrow
+# set and the MCP child inherits it from omp. Values are not written to
+# mcp.json. Model HTTP credentials beyond the provider keys above are not
+# added here.
+_CONNECTOR_ENV = (
+    "X_API_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN",
+    "ULTRATHINK_ROOT",
+    "OMEGA_PRIME_PACKS_JSON",
+    "OMEGA_PRIME_PACK_API_BASES_JSON",
+    "SUBSTRATE_URL",
+    "SUBSTRATE_TOKEN",
+    "SUBSTRATE_TOKEN_GROK_BOT",
+    "HINDSIGHT_URL",
+    "HINDSIGHT_API_KEY",
+    "HINDSIGHT_API_TOKEN",
+    "RAILWAY_TOKEN",
+    "OMEGA_PRIME_RAILWAY_PROJECTS",
+    "GREPTILE_API_KEY",
+    "GREPTILE_GITHUB_TOKEN",
+    "VERCEL_TOKEN",
+    "PLAY_CONSOLE_TOKEN",
+    "ASC_KEY_ID",
+    "ASC_ISSUER_ID",
+    "ASC_PRIVATE_KEY",
+    "OMEGA_PRIME_DESK_BUS_URL",
+    "OMEGA_PRIME_DESK_DOCS_INDEX",
+    "OMEGA_PRIME_DESK_NOTIFY_URL",
+    "OMEGA_PRIME_DESK_CHILD_MODEL",
+    "OMEGA_PRIME_DESK_CHILD_PROVIDER",
 )
 
 
@@ -156,10 +190,14 @@ def child_env(env: Mapping[str, str]) -> dict[str, str]:
     fake binary can be configured without opening the rest of the process env.
     """
     child: dict[str, str] = {}
-    for name in _PASS_ENV:
+    for name in (*_PASS_ENV, *_CONNECTOR_ENV):
         value = env.get(name)
         if isinstance(value, str) and value:
             child[name] = value
+        file_name = f"{name}_FILE"
+        file_value = env.get(file_name)
+        if isinstance(file_value, str) and file_value:
+            child[file_name] = file_value
     for name, value in env.items():
         if name.startswith("OMEGA_FAKE_OMP_") and isinstance(value, str):
             child[name] = value

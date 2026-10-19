@@ -387,6 +387,16 @@ The `omega watch JOB` console script is the same command. When `tmux` is on
 The engine uses bubblewrap when `bwrap` is on `PATH`. Without bubblewrap it
 refuses to start unless `OMEGA_PRIME_ENGINE_UNSANDBOXED=1` is set.
 
+The session `mcp.json` starts `python -m omega_prime.mcp_server` with
+`--root` set to this installation and `--work-root` set to the checkout.
+Connector settings already in the environment (`X_API_TOKEN`,
+`TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, `SUBSTRATE_TOKEN`, and the other
+desk client variables) are passed through to that process. They are not
+written into `mcp.json`. Plan mode, a narrowed tool roster, and a
+`child_tool_hook` stay on the Python loop so those turns do not receive
+tools the caller removed. `omega watch JOB --follow` waits until the job
+ends; pass `--timeout` to bound that wait.
+
 `OMEGA_PRIME_ENGINE=omp` makes the conversation loop, delegate, desk-lead
 pass, and ultrathink turn require the engine. Unset, or `auto`, uses the
 engine when omp, an allowlisted plan, and a sandbox are all available, and

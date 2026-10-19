@@ -57,14 +57,24 @@ def tail(
     path: Path,
     *,
     follow: bool = False,
-    timeout: float = 2.0,
+    timeout: float | None = None,
     write=sys.stdout,
 ) -> int:
-    """Print the feed. With ``follow``, wait until ``agent_end`` or ``timeout``."""
+    """Print the feed. With ``follow``, wait until ``agent_end``.
+
+    ``timeout`` bounds that wait. ``None`` waits until the job ends.
+    """
     seen = 0
     ended = False
-    deadline = time.monotonic() + timeout
+    deadline = None if timeout is None else time.monotonic() + timeout
     while True:
+        if not path.is_file():
+            if not follow:
+                return 1
+            if deadline is not None and time.monotonic() >= deadline:
+                return 1
+            time.sleep(0.05)
+            continue
         events = list(iter_events(path))
         for event in events[seen:]:
             write.write(format_event(event) + "\n")
@@ -74,7 +84,7 @@ def tail(
         seen = len(events)
         if not follow or ended:
             break
-        if time.monotonic() >= deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             break
         time.sleep(0.05)
     return 0 if path.is_file() else 1
@@ -85,7 +95,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("job", help="Job id under the state jobs directory")
     parser.add_argument("--follow", action="store_true")
     parser.add_argument("--state-dir", default=None)
-    parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Seconds to follow. Omit it to wait until agent_end.",
+    )
     args = parser.parse_args(argv)
     env = {}
     if args.state_dir:

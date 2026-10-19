@@ -162,14 +162,19 @@ def run_conversation(
     try:
         from omega_prime.engine.attach import route_turn
 
-        routed = route_turn(
-            agent,
-            user_message,
-            system_message=system_message,
-            conversation_history=conversation_history,
-        )
+        history = conversation_history if conversation_history is not None else None
+        since = len(history) if history is not None else 0
+        routed = None
+        if not _engine_preempted(agent):
+            routed = route_turn(
+                agent,
+                user_message,
+                system_message=system_message,
+                conversation_history=history,
+                task_id=task_id,
+            )
         if routed is not None:
-            return routed
+            return _seal_engine_turn(agent, routed, since)
         system_message = _open_substrate(agent, user_message, system_message)
         result = _run_conversation_turn(
             agent,
@@ -182,6 +187,82 @@ def run_conversation(
         return result
     finally:
         lease.release()
+
+
+def _engine_preempted(agent: Agent) -> bool:
+    """True when a shared stop already applies, so omp must not start."""
+    interrupt = agent.interrupt
+    if interrupt is not None and interrupt.is_set():
+        return True
+    budget = agent.budget
+    if (
+        budget is not None
+        and budget is not agent._turn_budget
+        and budget.remaining <= 0
+    ):
+        return True
+    pause = agent.pause_gate
+    return bool(pause is not None and not pause.wait_until_resumed(interrupt))
+
+
+def _token_usage(raw: Any) -> dict[str, int] | None:
+    """Map an omp usage object onto the loop's token counters."""
+    if not isinstance(raw, dict):
+        return None
+    known = {}
+    for key in ("total_tokens", "prompt_tokens", "completion_tokens"):
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            known[key] = value
+    if known:
+        return known
+    prompt = raw.get("input")
+    if prompt is None:
+        prompt = raw.get("input_tokens")
+    completion = raw.get("output")
+    if completion is None:
+        completion = raw.get("output_tokens")
+    mapped: dict[str, int] = {}
+    if isinstance(prompt, int) and not isinstance(prompt, bool) and prompt >= 0:
+        mapped["prompt_tokens"] = prompt
+    if (
+        isinstance(completion, int)
+        and not isinstance(completion, bool)
+        and completion >= 0
+    ):
+        mapped["completion_tokens"] = completion
+    return mapped or None
+
+
+def _seal_engine_turn(agent: Agent, routed: dict, since: int) -> dict:
+    """Journal the engine turn and charge goal and autonomous accounting."""
+    messages = routed.get("messages")
+    rows = messages if isinstance(messages, list) else []
+    run_id = _begin_journal(agent)
+    _journal_new_rows(agent, run_id, rows, since)
+    hooks = getattr(agent, "prime_hooks", None)
+    if getattr(hooks, "present", True) is False:
+        hooks = None
+    if hooks is not None:
+        engine = routed.get("engine")
+        raw = engine.get("usage") if isinstance(engine, dict) else None
+        charged = accounting_usage([_token_usage(raw)])
+        goal = evaluate_goal(hooks, agent, charged, turn_id=run_id)
+        report = goal.get("report") if isinstance(goal, dict) else None
+        if report is not None:
+            routed["goal_completion"] = report
+        auto = evaluate_autonomous(hooks, agent, routed, turn_id=run_id)
+        verdict = auto.get("verdict") if isinstance(auto, dict) else None
+        if isinstance(verdict, dict) and verdict.get("action") == "stop":
+            routed["autonomous_stop"] = verdict
+        if charged is not None:
+            routed["usage"] = charged
+    budget = agent.budget
+    if budget is not None:
+        budget.consume()
+    emit(agent, "turn_end", turn_exit_reason=routed.get("turn_exit_reason"))
+    _finish_journal(agent, run_id, routed)
+    return routed
 
 
 def _run_conversation_turn(

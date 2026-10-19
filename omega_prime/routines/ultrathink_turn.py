@@ -124,8 +124,10 @@ def _engine_annotation(
 def execute_ultrathink(env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Resolve this turn's plan. An empty env does not scan the process home."""
     if env is None:
+        mapping: Mapping[str, str] = os.environ
         plan = resolve_turn_plan()
     elif not env:
+        mapping = env
         plan = {
             "found": False,
             "plan_path": None,
@@ -134,9 +136,14 @@ def execute_ultrathink(env: Mapping[str, str] | None = None) -> dict[str, Any]:
             "stale": False,
         }
     else:
+        mapping = env
         plan = resolve_turn_plan(env=dict(env))
     plan["publishes"] = False
-    plan["engine"] = _engine_annotation(plan, env if env is not None else {})
+    plan["engine"] = _engine_annotation(plan, mapping)
+    engine = plan["engine"]
+    if isinstance(engine, dict) and engine.get("failed"):
+        plan["failed"] = True
+        plan["error"] = engine.get("error") or engine.get("reason") or "engine"
     return plan
 
 

@@ -340,11 +340,17 @@ def select(
     def rank(item: Decision) -> tuple[int, float, int]:
         quota = quotas.get(item.plan)
         auth = 1 if item.auth == "api_key" else 0
-        if quota is None or quota.remaining is None:
+        if quota is None:
             return (1, 0.0, auth)
-        if quota.remaining > 0:
-            return (2, quota.remaining, auth)
-        return (0, 0.0, auth)
+        if quota.remaining is not None:
+            if quota.remaining > 0:
+                return (2, float(quota.remaining), auth)
+            return (0, 0.0, auth)
+        if quota.percent is not None:
+            if quota.percent >= 100:
+                return (0, 0.0, auth)
+            return (2, 100.0 - float(quota.percent), auth)
+        return (1, 0.0, auth)
 
     chosen = max(allowed, key=rank)
     return Choice(chosen, quotas.get(chosen.plan))

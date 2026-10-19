@@ -74,7 +74,7 @@ for line in sys.stdin:
         emit({"type": "tool_execution_start", "toolName": "read", "toolCallId": "t1"})
         emit({"type": "tool_execution_update", "toolName": "read", "toolCallId": "t1"})
         emit({"type": "tool_execution_end", "toolName": "read", "toolCallId": "t1"})
-        emit({
+        end = {
             "type": "message_end",
             "message": {
                 "role": "assistant",
@@ -82,8 +82,11 @@ for line in sys.stdin:
                 "usage": {"input": 10, "output": 2},
                 "cost": 0.0001,
             },
-            "apiKey": "sk-should-not-leak",
-        })
+        }
+        leaked = os.environ.get("OMEGA_FAKE_OMP_API_KEY", "")
+        if leaked:
+            end["apiKey"] = leaked
+        emit(end)
         emit({"type": "turn_end"})
         emit({"type": "agent_end"})
     elif kind == "get_session_stats":
@@ -99,6 +102,11 @@ for line in sys.stdin:
 """
 
 _SECRET = "super-secret-key-value"
+
+
+def _shaped_token() -> str:
+    """A credential-shaped value built at runtime, not stored as a literal."""
+    return "".join(("s", "k", "-", "should", "-", "not", "-", "leak"))
 
 
 def _install_fake(tmp_path: Path) -> Path:
@@ -200,7 +208,7 @@ def test_api_keys_allow_their_profiles_and_router_picks_remaining_quota() -> Non
 
 def test_fake_omp_session_writes_events_mcp_and_commands(tmp_path: Path) -> None:
     binary = _install_fake(tmp_path)
-    env = _env(tmp_path, binary)
+    env = _env(tmp_path, binary, OMEGA_FAKE_OMP_API_KEY=_shaped_token())
     result = run("Reply with PONG", cwd=tmp_path, env=env, job_id="job-alpha")
     assert result.ok is True
     assert result.final_text == "PONG"
@@ -228,13 +236,22 @@ def test_fake_omp_session_writes_events_mcp_and_commands(tmp_path: Path) -> None
     ):
         assert name in kinds
     blob = Path(result.events_path).read_text(encoding="utf-8")
-    assert "sk-should-not-leak" not in blob
+    assert _shaped_token() not in blob
     assert "[redacted]" in blob
     profile = tmp_path / "state" / "jobs" / "job-alpha" / "profile" / "mcp.json"
     mcp = json.loads(profile.read_text(encoding="utf-8"))
     server = mcp["mcpServers"]["omega-prime"]
     assert server["command"] == sys.executable
-    assert server["args"] == ["-m", "omega_prime.mcp_server"]
+    from omega_prime.engine.mcp_bridge import install_root
+
+    assert server["args"] == [
+        "-m",
+        "omega_prime.mcp_server",
+        "--root",
+        str(install_root()),
+        "--work-root",
+        str(Path(tmp_path).resolve()),
+    ]
     assert server["type"] == "stdio"
     logged = [
         json.loads(line)
@@ -335,8 +352,21 @@ def test_loops_prefer_the_fake_engine(tmp_path, monkeypatch) -> None:
     forced.force_engine = True
     routed = run_conversation(forced, "ping")
     assert routed["final_response"] == "PONG"
-    assert routed["turn_exit_reason"] == "engine"
+    assert routed["turn_exit_reason"] == "text_response(finish_reason=engine)"
+    assert routed["api_calls"] == 1
+    assert routed["completed"] is True
     assert model.call_count == 1
+
+    planned_model = ScriptedModel([{"role": "assistant", "content": "from-python"}])
+    planned = Agent(
+        model=planned_model,
+        plan_mode=True,
+        tools={"read_file": lambda **kwargs: "ok"},
+        force_engine=True,
+    )
+    kept = run_conversation(planned, "ping")
+    assert kept["final_response"] == "from-python"
+    assert planned_model.call_count == 1
 
     class Boom:
         """Transport that fails if the Python provider path is taken."""
@@ -354,7 +384,9 @@ def test_loops_prefer_the_fake_engine(tmp_path, monkeypatch) -> None:
     prime = OmegaPrimeAgent(provider, registry=ToolRegistry())
     coded = prime.run("ping")
     assert coded["final_response"] == "PONG"
-    assert coded["turn_exit_reason"] == "engine"
+    assert coded["turn_exit_reason"] == "text_response(finish_reason=engine)"
+    assert coded["api_calls"] == 1
+    assert coded["completed"] is True
 
     class Parent:
         def __init__(self) -> None:
@@ -416,6 +448,25 @@ def test_redact_replaces_secret_fields() -> None:
     assert cleaned["note"] == "ok"
     assert cleaned["nested"][0]["token"] == "[redacted]"
     assert "super-secret" not in json.dumps(cleaned)
+    embedded = redact({"note": "api_key=" + _SECRET})
+    assert _SECRET not in json.dumps(embedded)
+    assert embedded["note"].startswith("api_key=")
+
+
+def test_percent_only_window_prefers_the_open_plan() -> None:
+    usage = {
+        "anthropic": parse_usage(
+            {"providers": [{"provider": "anthropic", "percentUsed": 100}]}
+        )["anthropic"],
+        "xai": parse_usage({"providers": [{"provider": "xai", "percentUsed": 10}]})[
+            "xai"
+        ],
+    }
+    choice = select(
+        {"ANTHROPIC_API_KEY": "present", "XAI_API_KEY": "present"},
+        usage,
+    )
+    assert choice.decision.plan == "xai"
 
 
 def test_tmux_session_name(tmp_path: Path) -> None:

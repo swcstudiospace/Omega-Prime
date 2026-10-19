@@ -12,6 +12,8 @@ import json
 import re
 from typing import Any
 
+from omega_prime.credentials.redact import redact_text
+
 #: omp 18.x is the protocol this driver was written against.
 OMP_SUPPORTED_MAJOR = 18
 
@@ -112,10 +114,7 @@ def redact(value: Any) -> Any:
     if isinstance(value, list):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        lowered = value.lower()
-        if lowered.startswith("bearer ") or lowered.startswith("sk-"):
-            return "[redacted]"
-        return value
+        return redact_text(value)
     return value
 
 

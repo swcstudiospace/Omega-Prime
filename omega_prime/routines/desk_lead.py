@@ -92,12 +92,23 @@ def make_dispatch(
             if env is not None:
                 from omega_prime.engine.attach import desk_engine_dispatch
 
-                routed = desk_engine_dispatch(goal, env)
+                routed = desk_engine_dispatch(
+                    goal,
+                    env,
+                    cwd=None if work_root is None else str(work_root),
+                )
                 if routed is not None:
                     receipt = routed.get("receipt")
                     if routed.get("status") == "done" and isinstance(receipt, dict):
                         receipt["task_id"] = ticket_id
                         receipt["bot"] = bot
+                    elif routed.get("status") == "blocked" and not isinstance(
+                        receipt, dict
+                    ):
+                        reason = str(routed.get("reason") or "engine refused")
+                        routed["receipt"] = _failure_receipt(
+                            bot, ticket_id, "omp --mode rpc", reason, reason
+                        )
                     return routed
             reason = "no parent agent shim: no provider environment configured"
             return {
