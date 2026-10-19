@@ -140,6 +140,11 @@ def load_turns(path: Path) -> list[dict]:
     return turns
 
 
+def growth_skills_root() -> Path:
+    """The skills directory ``skill_view`` reads: the install's ``omega_prime/skills``."""
+    return Path(__file__).resolve().parents[1] / "skills"
+
+
 def execute_nightly(
     env: Mapping[str, str] | None = None,
     *,
@@ -147,7 +152,12 @@ def execute_nightly(
     skills_root: str | Path | None = None,
     directory: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run one nightly pass. Does not publish. Missing turns review nothing."""
+    """Run one nightly pass. Does not publish. Missing turns review nothing.
+
+    Created skills go to the install ``omega_prime/skills`` directory that
+    ``skill_view`` reads, unless ``skills_root`` is set. The state directory
+    stores only the review checkpoint.
+    """
     root = Path(directory) if directory is not None else state_dir(env)
     if root is None:
         return {
@@ -158,7 +168,7 @@ def execute_nightly(
             "total_created": 0,
             "publishes": False,
         }
-    skills = Path(skills_root) if skills_root is not None else root / "skills"
+    skills = Path(skills_root) if skills_root is not None else growth_skills_root()
     path = Path(turns_path) if turns_path is not None else root / "nightly-turns.json"
     try:
         turns = load_turns(path)
@@ -203,4 +213,10 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["execute_nightly", "load_turns", "main", "nightly_pass"]
+__all__ = [
+    "execute_nightly",
+    "growth_skills_root",
+    "load_turns",
+    "main",
+    "nightly_pass",
+]

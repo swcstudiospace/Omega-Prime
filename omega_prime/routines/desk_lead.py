@@ -308,35 +308,118 @@ def run_lead_pass(
     }
 
 
+_INSTALL_ROOT = Path(__file__).resolve().parents[2]
+_WORK_ROOT_ENV = "OMEGA_PRIME_WORK_ROOT"
+_CHILD_MODEL_ENV = "OMEGA_PRIME_DESK_CHILD_MODEL"
+
+
+class _ConfiguredParent:
+    """Child-model shim for a lead pass that has no tool registry.
+
+    ``child_model`` and ``tools`` are the parent contract
+    :func:`omega_prime.agent.delegate.delegate_task` reads. The MCP server
+    uses ``_DeskParent`` when a registry is available; this object is that
+    contract for the CLI.
+    """
+
+    def __init__(self, model: Any) -> None:
+        self.child_model = model
+        self.tools: dict[str, Any] = {}
+        self.delegate_depth = 0
+        self.journal = None
+
+
+def host_intake_path(
+    env: Mapping[str, str] | None = None,
+    *,
+    state_dir_path: str | Path | None = None,
+) -> Path | None:
+    """The intake file the lead tools open, or None when no host is named.
+
+    ``state_dir_path`` and ``OMEGA_PRIME_STATE_DIR`` win, matching
+    :func:`desk_intake_path`. Otherwise the file is
+    ``<work root>/omega_prime/state/intake.json`` from
+    ``OMEGA_PRIME_WORK_ROOT`` or the install root — the same path
+    ``lead_intake_next`` uses. ``HOME`` marks a live host; it does not
+    move the queue to ``~/.local/state``. An empty caller env returns
+    None so a unit test does not create a queue in the working tree.
+    """
+    if state_dir_path is not None:
+        return desk_intake_path(state_dir=state_dir_path)
+    mapping: Mapping[str, str] = os.environ if env is None else env
+    configured = mapping.get(STATE_DIR_ENV, "").strip()
+    if configured:
+        return desk_intake_path(state_dir=configured)
+    if not (
+        mapping.get(_WORK_ROOT_ENV, "").strip()
+        or mapping.get("HOME", "").strip()
+        or mapping.get("XDG_STATE_HOME", "").strip()
+    ):
+        return None
+    from omega_prime.mcp_server import resolve_work_root
+
+    # Empty state_dir skips the process env, so the passed mapping wins.
+    return desk_intake_path(resolve_work_root(_INSTALL_ROOT, mapping), state_dir="")
+
+
+def _configured_parent(env: Mapping[str, str], registry: Any | None) -> Any | None:
+    """The host's child model, or None when no model is configured."""
+    if not str(env.get(_CHILD_MODEL_ENV) or "").strip():
+        return None
+    from omega_prime.mcp_server import _desk_child_model, _DeskParent
+
+    model = _desk_child_model(dict(env), None)
+    if model is None:
+        return None
+    if registry is not None and callable(getattr(registry, "schemas", None)):
+        return _DeskParent(registry, model)
+    return _ConfiguredParent(model)
+
+
+def _dispatch_root(env: Mapping[str, str]) -> Path | None:
+    raw = env.get(_WORK_ROOT_ENV, "").strip()
+    if raw:
+        return Path(raw)
+    if env.get("HOME", "").strip() or env.get("XDG_STATE_HOME", "").strip():
+        return _INSTALL_ROOT
+    return None
+
+
 def execute_desk_lead(
     env: Mapping[str, str] | None = None,
     *,
     limit: int = 5,
     state_dir_path: str | Path | None = None,
+    registry: Any | None = None,
 ) -> dict[str, Any]:
     """Run one lead pass. Without a child model, tickets stay blocked.
 
     An empty caller env does not write ``omega_prime/state`` in the working
-    tree. A live host uses ``OMEGA_PRIME_STATE_DIR`` or ``HOME``.
+    tree. A live host reads the same intake file as the lead tools. A
+    configured ``OMEGA_PRIME_DESK_CHILD_MODEL`` is the dispatch parent;
+    tickets stay blocked only when that model is absent.
     """
-    from omega_prime.routines import state_dir
-
-    if state_dir_path is not None:
-        root: Path | None = Path(state_dir_path)
-    else:
-        root = state_dir(env)
-    if root is None:
+    path = host_intake_path(env, state_dir_path=state_dir_path)
+    if path is None:
         return {
             "error": "not_configured",
-            "reason": "Set OMEGA_PRIME_STATE_DIR (or HOME) before the desk-lead pass.",
+            "reason": (
+                "Set OMEGA_PRIME_STATE_DIR or OMEGA_PRIME_WORK_ROOT, or run "
+                "with HOME set, before the desk-lead pass."
+            ),
             "tickets": [],
             "receipts": [],
             "invalid": [],
             "report": "",
             "publishes": False,
         }
-    intake = IntakeStore(desk_intake_path(state_dir=root))
-    outcome = run_lead_pass(intake, make_dispatch(None), limit=limit)
+    mapping: Mapping[str, str] = os.environ if env is None else env
+    intake = IntakeStore(path)
+    outcome = run_lead_pass(
+        intake,
+        make_dispatch(_configured_parent(mapping, registry), _dispatch_root(mapping)),
+        limit=limit,
+    )
     outcome["publishes"] = False
     return outcome
 
@@ -364,6 +447,7 @@ __all__ = [
     "STATE_DIR_ENV",
     "desk_intake_path",
     "execute_desk_lead",
+    "host_intake_path",
     "main",
     "make_dispatch",
     "run_lead_pass",

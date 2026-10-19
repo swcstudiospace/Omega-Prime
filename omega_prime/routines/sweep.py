@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from omega_prime.routines import state_dir
+from omega_prime.tools.x import XError
 
 _ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
@@ -189,14 +190,39 @@ def _posts_from_file(path: Path) -> list[dict]:
     return [row for row in posts if isinstance(row, dict)]
 
 
+class _DispatchedMentions:
+    """Mentions read through the host registry. No private X client."""
+
+    def __init__(self, registry: Any) -> None:
+        self._registry = registry
+
+    def mentions(
+        self, user_id: str | None = None, max_results: int = 10
+    ) -> dict[str, Any]:
+        from omega_prime.commands.workflows import dispatch_tool
+
+        arguments: dict[str, Any] = {"max_results": max_results}
+        if user_id:
+            arguments["user_id"] = user_id
+        payload = dispatch_tool(self._registry, "x_mentions", arguments)
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if error:
+            raise XError(str(error))
+        return payload
+
+
 def _mentions_client(
-    env: Mapping[str, str], mentions_path: str | Path | None
+    env: Mapping[str, str],
+    mentions_path: str | Path | None,
+    registry: Any | None = None,
 ) -> Any | None:
     if mentions_path:
         return _FileMentions(_posts_from_file(Path(mentions_path)))
     configured = env.get("OMEGA_PRIME_SWEEP_MENTIONS", "").strip()
     if configured:
         return _FileMentions(_posts_from_file(Path(configured)))
+    if registry is not None:
+        return _DispatchedMentions(registry)
     token = env.get("X_API_TOKEN", "").strip()
     if not token:
         return None
@@ -214,8 +240,13 @@ def execute_sweep(
     user_id: str | None = None,
     max_results: int = 10,
     client: Any | None = None,
+    registry: Any | None = None,
 ) -> dict[str, Any]:
-    """Draft replies for fresh mentions. This function never publishes."""
+    """Draft replies for fresh mentions. This function never publishes.
+
+    A ``registry`` reads mentions through ``x_mentions``. A denied dispatch
+    is returned as ``sweep_failed`` and is not replaced with a private client.
+    """
     mapping: Mapping[str, str] = os.environ if env is None else env
     root = Path(directory) if directory is not None else state_dir(env)
     if root is None:
@@ -230,7 +261,9 @@ def execute_sweep(
         }
     try:
         reader = (
-            client if client is not None else _mentions_client(mapping, mentions_path)
+            client
+            if client is not None
+            else _mentions_client(mapping, mentions_path, registry)
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         return {
@@ -267,7 +300,7 @@ def execute_sweep(
             user_id=user_id,
             max_results=max_results,
         )
-    except ValueError as exc:
+    except (ValueError, XError) as exc:
         return {
             "error": "sweep_failed",
             "reason": str(exc),

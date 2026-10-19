@@ -33,8 +33,8 @@ Calling a gateway tool?
 ├─ Is it in your tools/list right now?      NO ──▶ It does not exist for you. Ask LEAD. §1
 ├─ kind: read?  Empty result + reason ──▶ Fail-open. Record the reason; do not treat empty as "none". §2
 ├─ kind: write? Error ──▶ Fail-closed. Nothing happened. One retry only if the reason says so. §2
-├─ gates: [g5]? ──▶ rollback_plan + approval_id required (PD-5). §3
-├─ gates: [g6]? ──▶ approval_id required; echoed into the audit event. §3
+├─ gates: [g5]? ──▶ External gateway: rollback_plan + approval_id on the call (PD-5). Served tool: those fields stay on the receipt. §3
+├─ gates: [g6]? ──▶ External gateway: approval_id on the call. Served tool: receipt only. §3
 ├─ Took > 20 s? ──▶ The call was cut. Bound the inputs and split the work. §4
 ├─ 403? ──▶ Wrong seat endpoint. Stop. Tell LEAD. §5
 ├─ not_configured? ──▶ Upstream credential not provided. `unverified`, no browser workaround. §5
@@ -82,10 +82,16 @@ An `approval_id` is a reference to an approval that exists. Typing a plausible s
 the schema is a PD-5 breach with an audit trail attached to it. If you do not have one, you do
 not make the call.
 
-Tools carrying these tags today: `web_vercel_promote` (g5), `web_vercel_rollback` (g5),
-`infra_railway_redeploy` (g5), `mob_play_staged_rollout` (g5 g6), `mob_play_halt_rollout` (g6),
-`mob_appstore_phased_release` (g5 g6), `mob_appstore_pause_release` (g6). Your roster file is
-authoritative if this list drifts.
+On an external gateway, `g5` and `g6` fields are tool arguments. On the served Omega Prime
+registry they are not. `infra_railway_redeploy` accepts only `project`, `service`, and
+`prior_deployment_id`. Put `approval_id` and `rollback_plan` on the receipt. The registry
+rejects any other argument (`additionalProperties: false`). The host approval log still gates
+that tool; the id is not an argument.
+
+Tools carrying these tags on an external gateway today: `web_vercel_promote` (g5),
+`web_vercel_rollback` (g5), `infra_railway_redeploy` (g5), `mob_play_staged_rollout` (g5 g6),
+`mob_play_halt_rollout` (g6), `mob_appstore_phased_release` (g5 g6),
+`mob_appstore_pause_release` (g6). Your roster file is authoritative if this list drifts.
 
 ### §4 The 20-second deadline
 
@@ -128,10 +134,9 @@ already holds it; you never supply one (PD-4).
 infra_railway_status {project: {{RAILWAY_PROJECT}}}                    → prior deployment id dpl_7f…
 approval obtained via LEAD ↔ the operator 1:1; id {{APPROVAL_ID}}
 infra_railway_redeploy {project: {{RAILWAY_PROJECT}}, service: {{RAILWAY_SERVICE}},
-  prior_deployment_id: "dpl_7f…", approval_id: "{{APPROVAL_ID}}",
-  rollback_plan: "Redeploy dpl_7f… from the dashboard; under 2 min; no schema change"}
+  prior_deployment_id: "dpl_7f…"}
 → ok, new deployment id
-Receipt: approvals=[{{APPROVAL_ID}}], rollback_plan as above, command tail recorded
+Receipt: approvals=[{{APPROVAL_ID}}], rollback_plan="Redeploy dpl_7f… from the dashboard; under 2 min; no schema change", command tail recorded
 ```
 
 **Bad — ANDROID gets `not_configured` from `mob_play_track_status`.**
@@ -174,8 +179,8 @@ surface. One 403 is a misconfiguration; the response is `skills/desk-bootstrap` 
 
 | Rule | Gate or directive | Why |
 |---|---|---|
-| `rollback_plan` on g5 tools | G-5 | The gateway refuses without it; the receipt must carry the same plan |
-| `approval_id` on g5/g6 tools; echoed into the event | G-6, PD-5 | Approval is recorded in two places that must agree |
+| `rollback_plan` on an external g5 call, and on the receipt for a served tool | G-5 | The external gateway refuses without it. A served tool rejects it as an argument; the receipt still carries the plan |
+| `approval_id` on an external g5/g6 call, and on the receipt for a served tool | G-6, PD-5 | Approval is recorded in two places that must agree. It is not an argument of `infra_railway_redeploy` |
 | No secrets in arguments | G-3, PD-4 | Arguments are hashed into an audit row and may transit upstreams |
 | Roster changes go through contract review | G-4 | Every seat is a consumer of `contracts/tool-rosters/**` |
 | Roster count 10–15 (≤ 20 with a pack); g5/g6 tools carry their fields | G-7 | The same band doctor checks at runtime |

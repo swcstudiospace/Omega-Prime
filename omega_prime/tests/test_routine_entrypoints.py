@@ -5,15 +5,29 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from omega_prime.routines.desk_lead import execute_desk_lead
+from omega_prime.agent.model import ScriptedModel
+from omega_prime.commands.workflows import run_workflow
+from omega_prime.routines.desk_lead import execute_desk_lead, host_intake_path
 from omega_prime.routines.desk_lead import main as desk_main
-from omega_prime.routines.nightly import execute_nightly
+from omega_prime.routines.nightly import execute_nightly, growth_skills_root
 from omega_prime.routines.nightly import main as nightly_main
 from omega_prime.routines.sweep import execute_sweep
 from omega_prime.routines.sweep import main as sweep_main
 from omega_prime.routines.ultrathink_turn import execute_ultrathink
 from omega_prime.routines.ultrathink_turn import main as plan_main
-from omega_prime.tools.x import XClient
+from omega_prime.skills_runtime.manager import skill_view
+from omega_prime.tools.lead import IntakeStore
+from omega_prime.tools.x import XClient, XError
+
+
+class _Registry:
+    def __init__(self, script: list[dict]) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.script = list(script)
+
+    def dispatch(self, name: str, arguments: dict) -> str:
+        self.calls.append((name, dict(arguments)))
+        return json.dumps(self.script.pop(0))
 
 
 def test_nightly_cli_reviews_a_turns_file(tmp_path: Path) -> None:
@@ -102,3 +116,233 @@ def test_desk_lead_cli_on_an_empty_queue(tmp_path: Path) -> None:
     blocked = execute_desk_lead({})
     assert blocked["error"] == "not_configured"
     assert blocked["publishes"] is False
+    assert host_intake_path({}) is None
+
+
+def test_home_reads_the_served_intake_not_xdg_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    install = tmp_path / "install"
+    monkeypatch.setattr("omega_prime.routines.desk_lead._INSTALL_ROOT", install)
+    home = tmp_path / "home"
+    served = install / "omega_prime" / "state" / "intake.json"
+    IntakeStore(served).submit("from the served queue")
+    result = execute_desk_lead({"HOME": str(home)}, limit=1)
+    assert result["tickets"][0]["ask"] == "from the served queue"
+    assert result["tickets"][0]["status"] == "blocked"
+    assert "no parent agent shim" in result["tickets"][0]["reason"]
+    assert not (home / ".local").exists()
+
+
+def test_work_root_and_state_dir_select_the_served_queue(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    state = tmp_path / "state"
+    home = tmp_path / "home"
+    IntakeStore(work / "omega_prime" / "state" / "intake.json").submit("work order")
+    work_result = execute_desk_lead(
+        {"HOME": str(home), "OMEGA_PRIME_WORK_ROOT": str(work)}, limit=1
+    )
+    assert work_result["tickets"][0]["ask"] == "work order"
+    IntakeStore(state / "intake.json").submit("state order")
+    state_result = execute_desk_lead(
+        {
+            "HOME": str(home),
+            "OMEGA_PRIME_WORK_ROOT": str(work),
+            "OMEGA_PRIME_STATE_DIR": str(state),
+        },
+        limit=1,
+    )
+    assert state_result["tickets"][0]["ask"] == "state order"
+    assert not (home / ".local").exists()
+
+
+def test_configured_child_model_dispatches_the_ticket(
+    tmp_path: Path, monkeypatch
+) -> None:
+    work = tmp_path / "work"
+    IntakeStore(work / "omega_prime" / "state" / "intake.json").submit("add a banner")
+    model = ScriptedModel([{"role": "assistant", "content": "banner added"}])
+
+    def fake_model(env: dict, policy: object) -> ScriptedModel:
+        assert env["OMEGA_PRIME_DESK_CHILD_MODEL"] == "scripted"
+        assert policy is None
+        return model
+
+    monkeypatch.setattr("omega_prime.mcp_server._desk_child_model", fake_model)
+    result = execute_desk_lead(
+        {
+            "OMEGA_PRIME_WORK_ROOT": str(work),
+            "OMEGA_PRIME_DESK_CHILD_MODEL": "scripted",
+            "XAI_API_KEY": "not-used",
+        },
+        limit=1,
+    )
+    assert result["tickets"][0]["status"] == "done"
+    assert result["publishes"] is False
+    assert any("add a banner" in json.dumps(seen) for seen in model.seen)
+
+
+def test_configured_child_uses_the_host_registry(tmp_path: Path, monkeypatch) -> None:
+    work = tmp_path / "work"
+    IntakeStore(work / "omega_prime" / "state" / "intake.json").submit("add a banner")
+    model = ScriptedModel([{"role": "assistant", "content": "banner added"}])
+
+    class HostRegistry:
+        def __init__(self) -> None:
+            self.schemas_called = 0
+
+        def schemas(self) -> list[dict]:
+            self.schemas_called += 1
+            return []
+
+    host = HostRegistry()
+    monkeypatch.setattr(
+        "omega_prime.mcp_server._desk_child_model", lambda env, policy: model
+    )
+    result = execute_desk_lead(
+        {
+            "OMEGA_PRIME_WORK_ROOT": str(work),
+            "OMEGA_PRIME_DESK_CHILD_MODEL": "scripted",
+        },
+        limit=1,
+        registry=host,
+    )
+    assert result["tickets"][0]["status"] == "done"
+    assert host.schemas_called >= 1
+
+
+def test_named_model_without_a_provider_still_blocks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    work = tmp_path / "work"
+    IntakeStore(work / "omega_prime" / "state" / "intake.json").submit("fix login")
+    monkeypatch.setattr(
+        "omega_prime.mcp_server._desk_child_model", lambda env, policy: None
+    )
+    result = execute_desk_lead(
+        {
+            "OMEGA_PRIME_WORK_ROOT": str(work),
+            "OMEGA_PRIME_DESK_CHILD_MODEL": "scripted",
+        },
+        limit=1,
+    )
+    assert result["tickets"][0]["status"] == "blocked"
+    assert "no parent agent shim" in result["tickets"][0]["reason"]
+    assert result["publishes"] is False
+
+
+def test_nightly_writes_skills_where_skill_view_reads(
+    tmp_path: Path, monkeypatch
+) -> None:
+    skills = tmp_path / "omega_prime" / "skills"
+    monkeypatch.setattr(
+        "omega_prime.routines.nightly.growth_skills_root", lambda: skills
+    )
+    assert growth_skills_root().name == "skills"
+    turns = [
+        {
+            "id": "t1",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "please save as a skill name:deploy the steps",
+                },
+                {
+                    "role": "tool",
+                    "content": "run ./deploy.sh --prod",
+                    "is_error": False,
+                },
+            ],
+        }
+    ]
+    result = execute_nightly(
+        {"HOME": str(tmp_path / "home")},
+        turns_path=_write_turns(tmp_path, turns),
+        directory=tmp_path / "state",
+    )
+    assert result["total_created"] == 1
+    viewed = json.loads(skill_view("deploy", skills_root=skills))
+    assert "run ./deploy.sh --prod" in viewed["content"]
+    assert not (tmp_path / "state" / "skills").exists()
+    assert (skills / "deploy" / "SKILL.md").is_file()
+
+
+def test_growth_skills_root_is_the_install_directory() -> None:
+    root = growth_skills_root()
+    assert root == Path(__file__).resolve().parents[1] / "skills"
+    assert (root / "desk-gateway" / "SKILL.md").is_file()
+
+
+def test_sweep_x_error_is_sweep_failed(tmp_path: Path) -> None:
+    class Boom:
+        def mentions(self, user_id: str | None = None, max_results: int = 10) -> dict:
+            raise XError("mentions unavailable")
+
+    result = execute_sweep({}, directory=tmp_path, client=Boom())
+    assert result["error"] == "sweep_failed"
+    assert result["reason"] == "mentions unavailable"
+    assert result["drafts"] == []
+    assert result["publishes"] is False
+
+
+def test_denied_x_mentions_does_not_open_a_private_client(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class PrivateClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("private X client")
+
+    monkeypatch.setattr("omega_prime.tools.x.XClient", PrivateClient)
+    registry = _Registry([{"error": "policy forbids x_mentions"}])
+    token = "super-secret-token"
+    result = execute_sweep(
+        {"X_API_TOKEN": token},
+        directory=tmp_path,
+        registry=registry,
+    )
+    assert registry.calls[0][0] == "x_mentions"
+    assert result["error"] == "sweep_failed"
+    assert result["drafts"] == []
+    assert result["publishes"] is False
+    assert token not in json.dumps(result)
+    workflow = run_workflow(
+        "sweep",
+        _Registry([{"error": "policy forbids x_mentions"}]),
+        {"X_API_TOKEN": token, "OMEGA_PRIME_STATE_DIR": str(tmp_path / "state")},
+    )
+    step = workflow["steps"][0]["result"]
+    assert step["error"] == "sweep_failed"
+    assert step["publishes"] is False
+    assert token not in json.dumps(workflow)
+
+
+def test_dispatched_mentions_stay_drafts(tmp_path: Path) -> None:
+    registry = _Registry([{"posts": [{"id": "m9", "text": "hello there"}]}])
+    result = execute_sweep(
+        {"X_API_TOKEN": "super-secret-token"},
+        directory=tmp_path,
+        registry=registry,
+    )
+    assert result["publishes"] is False
+    assert result["drafts"][0]["text"].startswith("[draft-only]")
+    assert registry.calls == [("x_mentions", {"max_results": 10})]
+
+
+def test_served_redeploy_example_keeps_gate_fields_on_the_receipt() -> None:
+    text = (growth_skills_root() / "desk-gateway" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    call_at = text.index("infra_railway_redeploy {")
+    call = text[call_at : text.index("Receipt:", call_at)]
+    assert "approval_id" not in call
+    assert "rollback_plan" not in call
+    assert "prior_deployment_id" in call
+    receipt = text[text.index("Receipt:", call_at) : text.index("```", call_at)]
+    assert "{{APPROVAL_ID}}" in receipt
+    assert "rollback_plan" in receipt
+
+
+def _write_turns(tmp_path: Path, turns: list[dict]) -> Path:
+    path = tmp_path / "turns.json"
+    path.write_text(json.dumps(turns), encoding="utf-8")
+    return path
