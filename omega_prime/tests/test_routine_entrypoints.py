@@ -6,17 +6,29 @@ import json
 from pathlib import Path
 
 from omega_prime.agent.model import ScriptedModel
+from omega_prime.commands.context import nested_dispatch_scope, served_roster_scope
 from omega_prime.commands.workflows import run_workflow
-from omega_prime.routines.desk_lead import execute_desk_lead, host_intake_path
+from omega_prime.routines.desk_lead import (
+    _configured_parent,
+    execute_desk_lead,
+    host_intake_path,
+)
 from omega_prime.routines.desk_lead import main as desk_main
-from omega_prime.routines.nightly import execute_nightly, growth_skills_root
+from omega_prime.routines.nightly import (
+    execute_nightly,
+    growth_skills_root,
+    nightly_pass,
+    writable_skills_root,
+)
 from omega_prime.routines.nightly import main as nightly_main
 from omega_prime.routines.sweep import execute_sweep
 from omega_prime.routines.sweep import main as sweep_main
 from omega_prime.routines.ultrathink_turn import execute_ultrathink
 from omega_prime.routines.ultrathink_turn import main as plan_main
 from omega_prime.skills_runtime.manager import skill_view
+from omega_prime.tools.growth import register_growth_tools
 from omega_prime.tools.lead import IntakeStore
+from omega_prime.tools.registry import ToolRegistry
 from omega_prime.tools.x import XClient, XError
 
 
@@ -156,19 +168,10 @@ def test_work_root_and_state_dir_select_the_served_queue(tmp_path: Path) -> None
     assert not (home / ".local").exists()
 
 
-def test_configured_child_model_dispatches_the_ticket(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_cli_without_a_registry_leaves_the_ticket_open(tmp_path: Path) -> None:
     work = tmp_path / "work"
-    IntakeStore(work / "omega_prime" / "state" / "intake.json").submit("add a banner")
-    model = ScriptedModel([{"role": "assistant", "content": "banner added"}])
-
-    def fake_model(env: dict, policy: object) -> ScriptedModel:
-        assert env["OMEGA_PRIME_DESK_CHILD_MODEL"] == "scripted"
-        assert policy is None
-        return model
-
-    monkeypatch.setattr("omega_prime.mcp_server._desk_child_model", fake_model)
+    store = IntakeStore(work / "omega_prime" / "state" / "intake.json")
+    record = store.submit("add a banner")
     result = execute_desk_lead(
         {
             "OMEGA_PRIME_WORK_ROOT": str(work),
@@ -177,9 +180,106 @@ def test_configured_child_model_dispatches_the_ticket(
         },
         limit=1,
     )
-    assert result["tickets"][0]["status"] == "done"
+    assert result["tickets"][0]["status"] == "blocked"
+    assert "no parent agent shim" in result["tickets"][0]["reason"]
     assert result["publishes"] is False
+    reopened = store.get(record["intake_id"])
+    assert reopened is not None
+    assert reopened["status"] == "open"
+
+
+def test_child_model_uses_the_registry_policy(tmp_path: Path, monkeypatch) -> None:
+    work = tmp_path / "work"
+    IntakeStore(work / "omega_prime" / "state" / "intake.json").submit("add a banner")
+    policy = object()
+    model = ScriptedModel([{"role": "assistant", "content": "banner added"}])
+
+    class Host:
+        def schemas(self) -> list[dict]:
+            return []
+
+    host = Host()
+    host.policy = policy
+
+    def fake_model(env: dict, got: object) -> ScriptedModel:
+        assert got is policy
+        assert env["OMEGA_PRIME_DESK_CHILD_MODEL"] == "scripted"
+        return model
+
+    monkeypatch.setattr("omega_prime.mcp_server._desk_child_model", fake_model)
+    result = execute_desk_lead(
+        {
+            "OMEGA_PRIME_WORK_ROOT": str(work),
+            "OMEGA_PRIME_DESK_CHILD_MODEL": "scripted",
+        },
+        limit=1,
+        registry=host,
+    )
+    assert result["tickets"][0]["status"] == "done"
     assert any("add a banner" in json.dumps(seen) for seen in model.seen)
+
+
+def test_host_child_model_is_reused(monkeypatch) -> None:
+    model = ScriptedModel([{"role": "assistant", "content": "banner added"}])
+
+    class Parent:
+        child_model = model
+        journal = "desk-journal"
+
+    class Driver:
+        parent = Parent()
+
+    class Host:
+        def __init__(self) -> None:
+            self.runtime_bindings = {"desk_driver": Driver()}
+            self.policy = object()
+
+        def schemas(self) -> list[dict]:
+            return []
+
+    def boom(env: dict, policy: object) -> object:
+        raise AssertionError("built a second child model")
+
+    monkeypatch.setattr("omega_prime.mcp_server._desk_child_model", boom)
+    parent = _configured_parent({}, Host())
+    assert parent is not None
+    assert parent.child_model is model
+    assert parent.journal == "desk-journal"
+
+
+def test_child_tools_follow_the_served_roster(monkeypatch) -> None:
+    model = ScriptedModel([])
+
+    class Host:
+        policy = None
+
+        def schemas(self) -> list[dict]:
+            return [
+                {"function": {"name": "run_terminal"}},
+                {"function": {"name": "lead_doctor"}},
+            ]
+
+        def dispatch(self, name: str, arguments: dict) -> str:
+            raise AssertionError(name)
+
+    monkeypatch.setattr(
+        "omega_prime.mcp_server._desk_child_model", lambda env, policy: model
+    )
+    parent = _configured_parent({"OMEGA_PRIME_DESK_CHILD_MODEL": "scripted"}, Host())
+    assert parent is not None
+    calls: list[tuple[str, dict]] = []
+
+    def nested(tool: str, arguments: dict) -> str:
+        calls.append((tool, arguments))
+        return json.dumps({"ok": True})
+
+    with served_roster_scope(frozenset({"lead_doctor"})):
+        tools = parent.tools
+        assert set(tools) == {"lead_doctor"}
+        with nested_dispatch_scope(nested):
+            body = json.loads(tools["lead_doctor"](action="check"))
+    assert body == {"ok": True}
+    assert calls == [("lead_doctor", {"action": "check"})]
 
 
 def test_configured_child_uses_the_host_registry(tmp_path: Path, monkeypatch) -> None:
@@ -216,6 +316,13 @@ def test_named_model_without_a_provider_still_blocks(
 ) -> None:
     work = tmp_path / "work"
     IntakeStore(work / "omega_prime" / "state" / "intake.json").submit("fix login")
+
+    class Host:
+        policy = None
+
+        def schemas(self) -> list[dict]:
+            return []
+
     monkeypatch.setattr(
         "omega_prime.mcp_server._desk_child_model", lambda env, policy: None
     )
@@ -225,6 +332,7 @@ def test_named_model_without_a_provider_still_blocks(
             "OMEGA_PRIME_DESK_CHILD_MODEL": "scripted",
         },
         limit=1,
+        registry=Host(),
     )
     assert result["tickets"][0]["status"] == "blocked"
     assert "no parent agent shim" in result["tickets"][0]["reason"]
@@ -235,6 +343,7 @@ def test_nightly_writes_skills_where_skill_view_reads(
     tmp_path: Path, monkeypatch
 ) -> None:
     skills = tmp_path / "omega_prime" / "skills"
+    skills.parent.mkdir(parents=True)
     monkeypatch.setattr(
         "omega_prime.routines.nightly.growth_skills_root", lambda: skills
     )
@@ -265,6 +374,92 @@ def test_nightly_writes_skills_where_skill_view_reads(
     assert "run ./deploy.sh --prod" in viewed["content"]
     assert not (tmp_path / "state" / "skills").exists()
     assert (skills / "deploy" / "SKILL.md").is_file()
+
+
+def test_read_only_install_writes_skills_on_the_state_volume(
+    tmp_path: Path, monkeypatch
+) -> None:
+    install = tmp_path / "omega_prime" / "skills"
+    install.mkdir(parents=True)
+    shipped = install / "shipped"
+    shipped.mkdir()
+    (shipped / "SKILL.md").write_text("shipped body\n", encoding="utf-8")
+    install.chmod(0o555)
+    state = tmp_path / "state"
+    monkeypatch.setattr(
+        "omega_prime.routines.nightly.growth_skills_root", lambda: install
+    )
+    turns = [
+        {
+            "id": "t1",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "please save as a skill name:deploy the steps",
+                },
+                {
+                    "role": "tool",
+                    "content": "run ./deploy.sh --prod",
+                    "is_error": False,
+                },
+            ],
+        }
+    ]
+    try:
+        result = execute_nightly(
+            {"OMEGA_PRIME_STATE_DIR": str(state)},
+            turns_path=_write_turns(tmp_path, turns),
+            directory=state,
+        )
+        assert result["total_created"] == 1
+        assert writable_skills_root(install, {"OMEGA_PRIME_STATE_DIR": str(state)}) == (
+            state / "skills"
+        )
+        viewed = json.loads(skill_view("deploy", skills_root=state / "skills"))
+        assert "run ./deploy.sh --prod" in viewed["content"]
+        registry = ToolRegistry()
+        register_growth_tools(
+            registry,
+            skills_root=state / "skills",
+            skills_fallback=install,
+            memory_dir=tmp_path / "memory",
+            session_db=tmp_path / "sessions.db",
+        )
+        shipped_view = json.loads(registry.dispatch("skill_view", {"name": "shipped"}))
+        created_view = json.loads(registry.dispatch("skill_view", {"name": "deploy"}))
+        assert "shipped body" in shipped_view["content"]
+        assert "run ./deploy.sh --prod" in created_view["content"]
+    finally:
+        install.chmod(0o755)
+
+
+def test_failed_skill_save_stays_unreviewed(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    skills.chmod(0o555)
+    turns = [
+        {
+            "id": "t1",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "please save as a skill name:deploy the steps",
+                },
+                {"role": "tool", "content": "run ./deploy.sh", "is_error": False},
+            ],
+        }
+    ]
+    try:
+        failed = nightly_pass(tmp_path / "state", skills, turns)
+        assert failed["reviewed"] == []
+        assert failed["created"] == []
+        assert failed["failed"] == ["t1"]
+        skills.chmod(0o755)
+        saved = nightly_pass(tmp_path / "state", skills, turns)
+        assert saved["reviewed"] == ["t1"]
+        assert saved["total_created"] == 1
+    finally:
+        skills.chmod(0o755)
 
 
 def test_growth_skills_root_is_the_install_directory() -> None:

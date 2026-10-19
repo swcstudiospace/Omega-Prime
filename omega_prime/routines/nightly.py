@@ -2,7 +2,8 @@
 
 Each turn maps onto `review_turn`: the last non-steer user row becomes the
 request text, tool rows become success/output pairs. Earned turns get
-skills; every reviewed turn checkpoints so re-runs skip it. No model call —
+skills; every reviewed turn checkpoints so re-runs skip it. A failed
+save stays unreviewed. No model call —
 the curator's earned-rule decides.
 """
 
@@ -43,6 +44,7 @@ def nightly_pass(
     reviewed = set(state["reviewed"])
     created: list[dict] = []
     fresh: list[str] = []
+    failed: list[str] = []
     for turn in turns:
         turn_id = turn["id"]
         if turn_id in reviewed:
@@ -51,13 +53,23 @@ def nightly_pass(
         outcome = review_turn(
             skills_root=skills_root, user_text=user_text, tool_results=tool_results
         )
+        if outcome.get("error"):
+            failed.append(turn_id)
+            continue
         if outcome.get("created"):
             created.append({"turn_id": turn_id, "path": outcome.get("path")})
         reviewed.add(turn_id)
         fresh.append(turn_id)
         state["reviewed"] = sorted(reviewed)
         _write(directory, state)
-    return {"created": created, "reviewed": fresh, "total_created": len(created)}
+    result: dict[str, Any] = {
+        "created": created,
+        "reviewed": fresh,
+        "total_created": len(created),
+    }
+    if failed:
+        result["failed"] = failed
+    return result
 
 
 def _map(messages: list) -> tuple[str, list[dict]]:
@@ -141,8 +153,35 @@ def load_turns(path: Path) -> list[dict]:
 
 
 def growth_skills_root() -> Path:
-    """The skills directory ``skill_view`` reads: the install's ``omega_prime/skills``."""
+    """The shipped skills directory: the install's ``omega_prime/skills``."""
     return Path(__file__).resolve().parents[1] / "skills"
+
+
+def writable_skills_root(
+    install: str | Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Where a new skill is written, and where ``skill_view`` reads it.
+
+    The install directory wins when this process can create a skill there.
+    A read-only install uses ``<state>/skills`` so the nightly pass and the
+    host's growth tools share the volume the container can write.
+    """
+    target = Path(install) if install is not None else growth_skills_root()
+    if _directory_writable(target):
+        return target
+    state = state_dir(env)
+    if state is None:
+        return target
+    return Path(state) / "skills"
+
+
+def _directory_writable(path: Path) -> bool:
+    """True when a skill directory can be created here. Does not create one."""
+    if path.is_dir():
+        return os.access(path, os.W_OK | os.X_OK)
+    parent = path.parent
+    return parent.is_dir() and os.access(parent, os.W_OK | os.X_OK)
 
 
 def execute_nightly(
@@ -154,9 +193,9 @@ def execute_nightly(
 ) -> dict[str, Any]:
     """Run one nightly pass. Does not publish. Missing turns review nothing.
 
-    Created skills go to the install ``omega_prime/skills`` directory that
-    ``skill_view`` reads, unless ``skills_root`` is set. The state directory
-    stores only the review checkpoint.
+    Created skills go to the writable skills directory ``skill_view`` reads,
+    unless ``skills_root`` is set. A failed save is not checkpointed, so a
+    later pass can retry it. The state directory stores the review checkpoint.
     """
     root = Path(directory) if directory is not None else state_dir(env)
     if root is None:
@@ -168,7 +207,11 @@ def execute_nightly(
             "total_created": 0,
             "publishes": False,
         }
-    skills = Path(skills_root) if skills_root is not None else growth_skills_root()
+    skills = (
+        Path(skills_root)
+        if skills_root is not None
+        else writable_skills_root(growth_skills_root(), env)
+    )
     path = Path(turns_path) if turns_path is not None else root / "nightly-turns.json"
     try:
         turns = load_turns(path)
@@ -219,4 +262,5 @@ __all__ = [
     "load_turns",
     "main",
     "nightly_pass",
+    "writable_skills_root",
 ]

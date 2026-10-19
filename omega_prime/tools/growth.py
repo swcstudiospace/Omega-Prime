@@ -6,6 +6,7 @@ does not send those paths. ``dispatch`` returns the JSON strings the functions r
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ def register_growth_tools(
     memory_dir: str | Path,
     session_db: str | Path,
     memory_store: MemoryStore | None = None,
+    skills_fallback: str | Path | None = None,
 ) -> list[str]:
     """Register the four growth tools. Handlers close over the three paths.
 
@@ -49,6 +51,7 @@ def register_growth_tools(
     manager.add_provider(provider)
     sessions = SessionStore(session_db)
     root = skills_root
+    shipped = None if skills_fallback is None else Path(skills_fallback)
 
     def skill_manage(
         action: str,
@@ -69,7 +72,10 @@ def register_growth_tools(
         )
 
     def skill_view(name: str) -> str:
-        return view_skill(name, skills_root=root)
+        primary = view_skill(name, skills_root=root)
+        if shipped is None or not _skill_missing(primary):
+            return primary
+        return view_skill(name, skills_root=shipped)
 
     def memory(
         action: str | None = None,
@@ -101,6 +107,18 @@ def register_growth_tools(
         description, parameters = _SCHEMAS[name]
         registry.register(name, description, parameters, handlers[name])
     return list(GROWTH_TOOL_NAMES)
+
+
+def _skill_missing(payload: str) -> bool:
+    """True when ``skill_view`` did not find the name in that root."""
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(parsed, dict) or parsed.get("success") is True:
+        return False
+    error = parsed.get("error")
+    return isinstance(error, str) and "not found" in error.lower()
 
 
 def _object(properties: dict, required: list[str]) -> dict:

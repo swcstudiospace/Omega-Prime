@@ -313,20 +313,50 @@ _WORK_ROOT_ENV = "OMEGA_PRIME_WORK_ROOT"
 _CHILD_MODEL_ENV = "OMEGA_PRIME_DESK_CHILD_MODEL"
 
 
-class _ConfiguredParent:
-    """Child-model shim for a lead pass that has no tool registry.
+class _HostScopedParent:
+    """Child parent whose tools re-enter the host call path.
 
-    ``child_model`` and ``tools`` are the parent contract
-    :func:`omega_prime.agent.delegate.delegate_task` reads. The MCP server
-    uses ``_DeskParent`` when a registry is available; this object is that
-    contract for the CLI.
+    ``child_model`` is the host's model when the registry already has one,
+    so ticket text uses that transport and credential broker. Tool calls go
+    through :func:`omega_prime.commands.workflows.dispatch_tool`, which
+    honors the active roster and interceptors. Names outside the served
+    roster are not offered.
     """
 
-    def __init__(self, model: Any) -> None:
+    def __init__(self, model: Any, registry: Any, journal: Any = None) -> None:
         self.child_model = model
-        self.tools: dict[str, Any] = {}
+        self._registry = registry
         self.delegate_depth = 0
-        self.journal = None
+        self.journal = journal
+
+    @property
+    def tools(self) -> dict[str, Any]:
+        from omega_prime.commands.context import get_served_roster
+        from omega_prime.commands.workflows import dispatch_tool
+
+        roster = get_served_roster()
+        policy = getattr(self._registry, "policy", None)
+        allows = getattr(policy, "allows_tool", None)
+        names: list[str] = []
+        for item in self._registry.schemas():
+            function = item.get("function") if isinstance(item, dict) else None
+            name = function.get("name") if isinstance(function, dict) else None
+            if not isinstance(name, str) or name == "":
+                continue
+            if roster is not None and name not in roster:
+                continue
+            if callable(allows) and not allows(name):
+                continue
+            names.append(name)
+
+        def _call(tool: str) -> Any:
+            def run(**arguments: Any) -> str:
+                payload = dispatch_tool(self._registry, tool, arguments)
+                return json.dumps(payload)
+
+            return run
+
+        return {name: _call(name) for name in names}
 
 
 def host_intake_path(
@@ -362,18 +392,41 @@ def host_intake_path(
     return desk_intake_path(resolve_work_root(_INSTALL_ROOT, mapping), state_dir="")
 
 
-def _configured_parent(env: Mapping[str, str], registry: Any | None) -> Any | None:
-    """The host's child model, or None when no model is configured."""
-    if not str(env.get(_CHILD_MODEL_ENV) or "").strip():
+def _host_child_model(registry: Any) -> Any | None:
+    bindings = getattr(registry, "runtime_bindings", None)
+    if not isinstance(bindings, dict):
         return None
-    from omega_prime.mcp_server import _desk_child_model, _DeskParent
+    driver = bindings.get("desk_driver")
+    parent = getattr(driver, "parent", None)
+    return getattr(parent, "child_model", None)
 
-    model = _desk_child_model(dict(env), None)
+
+def _host_journal(registry: Any) -> Any:
+    bindings = getattr(registry, "runtime_bindings", None)
+    if not isinstance(bindings, dict):
+        return None
+    driver = bindings.get("desk_driver")
+    return getattr(getattr(driver, "parent", None), "journal", None)
+
+
+def _configured_parent(env: Mapping[str, str], registry: Any | None) -> Any | None:
+    """The host parent, or None when this pass cannot run a child.
+
+    A CLI without a registry stays blocked: an empty tool map would still
+    mark the intake done. A registry reuses the host's child model so the
+    seat policy and credential broker stay on the call. A registry that has
+    no host model yet builds one with that registry's policy.
+    """
+    if registry is None or not callable(getattr(registry, "schemas", None)):
+        return None
+    model = _host_child_model(registry)
+    if model is None and str(env.get(_CHILD_MODEL_ENV) or "").strip():
+        from omega_prime.mcp_server import _desk_child_model
+
+        model = _desk_child_model(dict(env), getattr(registry, "policy", None))
     if model is None:
         return None
-    if registry is not None and callable(getattr(registry, "schemas", None)):
-        return _DeskParent(registry, model)
-    return _ConfiguredParent(model)
+    return _HostScopedParent(model, registry, _host_journal(registry))
 
 
 def _dispatch_root(env: Mapping[str, str]) -> Path | None:
@@ -395,9 +448,9 @@ def execute_desk_lead(
     """Run one lead pass. Without a child model, tickets stay blocked.
 
     An empty caller env does not write ``omega_prime/state`` in the working
-    tree. A live host reads the same intake file as the lead tools. A
-    configured ``OMEGA_PRIME_DESK_CHILD_MODEL`` is the dispatch parent;
-    tickets stay blocked only when that model is absent.
+    tree.     A live host reads the same intake file as the lead tools. A child
+    runs only through a registry, using the host model and the served
+    roster. Without that registry, tickets stay blocked.
     """
     path = host_intake_path(env, state_dir_path=state_dir_path)
     if path is None:
