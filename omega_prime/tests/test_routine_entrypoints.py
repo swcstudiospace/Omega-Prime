@@ -195,11 +195,13 @@ def test_child_model_uses_the_registry_policy(tmp_path: Path, monkeypatch) -> No
     model = ScriptedModel([{"role": "assistant", "content": "banner added"}])
 
     class Host:
+        def __init__(self, policy: object) -> None:
+            self.policy = policy
+
         def schemas(self) -> list[dict]:
             return []
 
-    host = Host()
-    host.policy = policy
+    host = Host(policy)
 
     def fake_model(env: dict, got: object) -> ScriptedModel:
         assert got is policy
