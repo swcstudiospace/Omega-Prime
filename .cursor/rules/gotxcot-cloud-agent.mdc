@@ -1,0 +1,16 @@
+---
+description: Always-apply planning contract for cloud agents. AGENTS.md is the long form.
+alwaysApply: true
+---
+
+# Cloud agent planning
+
+`AGENTS.md` is the long form of this rule. Follow that file. Cursor loads this rule on every turn; other agent runtimes read `AGENTS.md`.
+
+- Detect a second uplift when the prompt has one XML root (`BUILD_PROMPT`, `FIX_PROMPT`, `RESEARCH_PROMPT`, `CHANGE_PROMPT`, or `UPLIFTED_PROMPT`) and that root has an `ISSUES` child containing `TASK`, `ISSUE`, and `SUBISSUE` elements.
+- Execute `ISSUE` nodes in topological order and their `SUBISSUE` steps as the plan. When the prompt gives no dependencies, use ascending `nodeId`. Do not re-run the graph. Honour scope, out of scope, constraints, acceptance criteria, clarifications, and tracker gaps.
+- With no `ISSUES` block, write a lightweight plan before the first edit: 5 to 8 nodes (first `understand`, last `synthesize`, at least one `critique`) and 4 to 8 numbered steps per node. A trivial edit still gets 5 nodes and 4 short steps. Put the plan in the PR body. Do not create tracker rows.
+- Cite Linear identifiers from the prompt in commit trailers (`Refs: <linearId>`, `Node: <nodeId> step <n>`). Cite those identifiers and the prompt's Notion URLs in the PR body. When the prompt has none, write `no tracker IDs provided`.
+- Before any completion claim, write `.receipts/<bot-id>/<task-id>.json` using [verification-receipts](../../omega_prime/skills/verification-receipts/SKILL.md). List `rule adherence by future agents` under `unverified`.
+- Resolve every touched path against [omega_prime/ownership.yaml](../../omega_prime/ownership.yaml) before editing (last match wins). Feature branch and draft PR only. Never merge, enable auto-merge, or force-push. Never print or commit secrets.
+- An explicit prompt instruction overrides this rule on scope only. It never overrides ownership, no-merge, no-secrets, or the receipt.

@@ -1,0 +1,190 @@
+{
+  "task_id": "ut-mvf5uq6p-aa6c2043",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-19T11:25:00Z",
+  "completed_at": "2026-10-19T11:55:00Z",
+  "commands": [
+    {
+      "cmd": "git ls-tree -r --name-only main | grep -E '(^|/)\\.cursor/|^AGENTS\\.md$'; test $? -eq 1",
+      "exit_code": 0,
+      "duration_s": 0.019,
+      "output_tail": ""
+    },
+    {
+      "cmd": "python3 -c \"import yaml, pathlib; d=yaml.safe_load(pathlib.Path('omega_prime/ownership.yaml').read_text()); assert d['version']==1; assert list(d['bots'])==['bot-00-omega-prime']; assert d['paths'][0]['pattern']=='**' and d['paths'][0]['owner']=='bot-00-omega-prime'; print(d['paths'][0]['owner'])\"",
+      "exit_code": 0,
+      "duration_s": 0.033,
+      "output_tail": "bot-00-omega-prime"
+    },
+    {
+      "cmd": "python3 -m omega_prime.tooling.catalog --check",
+      "exit_code": 0,
+      "duration_s": 2.972,
+      "output_tail": "catalog --check: /workspace/docs/tool-catalog.md up to date"
+    },
+    {
+      "cmd": "python3 -m omega_prime.tooling.plugin --check",
+      "exit_code": 0,
+      "duration_s": 3.001,
+      "output_tail": "plugin --check: 65 generated files up to date"
+    },
+    {
+      "cmd": "python3 -m omega_prime.tooling.prompt_format --check",
+      "exit_code": 0,
+      "duration_s": 0.092,
+      "output_tail": "prompt_format --check: all prompts conform to the XML standard"
+    },
+    {
+      "cmd": "bash omega_prime/scripts/assemble-prompts.sh --check",
+      "exit_code": 0,
+      "duration_s": 0.182,
+      "output_tail": "assemble-prompts --check: OMEGA_PRIME up to date"
+    },
+    {
+      "cmd": "python3 -m omega_prime.tooling.catalog --check",
+      "exit_code": 0,
+      "duration_s": 2.898,
+      "output_tail": "catalog --check: /workspace/docs/tool-catalog.md up to date"
+    },
+    {
+      "cmd": "python3 -m omega_prime.tooling.plugin --check",
+      "exit_code": 0,
+      "duration_s": 2.888,
+      "output_tail": "plugin --check: 65 generated files up to date"
+    },
+    {
+      "cmd": "python3 -m omega_prime.tooling.prompt_format --check",
+      "exit_code": 0,
+      "duration_s": 0.084,
+      "output_tail": "prompt_format --check: all prompts conform to the XML standard"
+    },
+    {
+      "cmd": "bash omega_prime/scripts/assemble-prompts.sh --check",
+      "exit_code": 0,
+      "duration_s": 0.145,
+      "output_tail": "assemble-prompts --check: OMEGA_PRIME up to date"
+    },
+    {
+      "cmd": "python3 -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q",
+      "exit_code": 0,
+      "duration_s": 0.867,
+      "output_tail": "...............................                                          [100%]\n31 passed in 0.60s"
+    },
+    {
+      "cmd": "git grep -n -E -I -- 'SPE-[0-9]|linear\\.app|app\\.notion\\.com|notion\\.so|collection://|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|railway\\.app|ts\\.net|tailscale\\.com|\\brailway\\b|\\btailscale\\b|ghp_[A-Za-z0-9]|github_pat_|AKIA[0-9A-Z]{16}|xox[baprs]-|sk-[A-Za-z0-9]{20,}|BEGIN (RSA |OPENSSH )?PRIVATE|api[_-]?key[[:space:]]*[:=]|password[[:space:]]*[:=]|secret[[:space:]]*[:=]' -- .cursor/rules/gotxcot-cloud-agent.mdc AGENTS.md; test $? -eq 1",
+      "exit_code": 0,
+      "duration_s": 0.005,
+      "output_tail": ""
+    },
+    {
+      "cmd": "git grep -n -E 'AGENTS\\.md|\\.cursor/rules' -- omega_prime/tooling omega_prime/assemble.py omega_prime/scripts/assemble-prompts.sh .github/workflows/ci.yml; test $? -eq 1",
+      "exit_code": 0,
+      "duration_s": 0.003,
+      "output_tail": ""
+    },
+    {
+      "cmd": "git diff --name-only main",
+      "exit_code": 0,
+      "duration_s": 0.004,
+      "output_tail": ".cursor/rules/gotxcot-cloud-agent.mdc\n.receipts/bot-00-omega-prime/ut-mvf5uq6p-aa6c2043.json\nAGENTS.md"
+    },
+    {
+      "cmd": "python3 -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q",
+      "exit_code": 0,
+      "duration_s": 0.6,
+      "output_tail": "...............................                                          [100%]\n31 passed in 0.60s"
+    },
+    {
+      "cmd": "gh api repos/swcstudiospace/omes-bot/pulls/39/reviews --jq '.[] | select(.user.login==\"greptile-apps[bot]\") | {state, commit_id, body}'",
+      "exit_code": 0,
+      "duration_s": 0.516,
+      "output_tail": "state APPROVED commit a7eddd5278ac6ef2d9dbde541ab946320183f47f body contains greptile-auto-approve"
+    },
+    {
+      "cmd": "gh api repos/swcstudiospace/omes-bot/commits/a7eddd5278ac6ef2d9dbde541ab946320183f47f/check-runs --jq '.check_runs[] | select(.name==\"Greptile Review\") | {conclusion, title: .output.title, summary: .output.summary}'",
+      "exit_code": 0,
+      "duration_s": 0.509,
+      "output_tail": "conclusion success; title Apex review; 3 files reviewed, 0 comments added"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "main has no .cursor/ path and no root AGENTS.md",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "omega_prime/ownership.yaml is version 1, names only bot-00-omega-prime, and its first pattern is ** owned by that bot",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "catalog --check exits 0 with the new guidance files absent",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "plugin --check exits 0 with the new guidance files absent",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "prompt_format --check exits 0 with the new guidance files absent",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "assemble-prompts.sh --check exits 0 with the new guidance files absent",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "catalog --check exits 0 with the new guidance files present",
+      "evidence_command_index": 6
+    },
+    {
+      "claim": "plugin --check exits 0 with the new guidance files present",
+      "evidence_command_index": 7
+    },
+    {
+      "claim": "prompt_format --check exits 0 with the new guidance files present",
+      "evidence_command_index": 8
+    },
+    {
+      "claim": "assemble-prompts.sh --check exits 0 with the new guidance files present",
+      "evidence_command_index": 9
+    },
+    {
+      "claim": "test_docs.py and test_public_repo.py pass with root AGENTS.md present (31 passed)",
+      "evidence_command_index": 10
+    },
+    {
+      "claim": "The two guidance files contain no Linear issue ids, Notion URLs, host names, or secret-shaped tokens",
+      "evidence_command_index": 11
+    },
+    {
+      "claim": "The catalog, plugin, prompt-format, and assembly entry points and the docs CI job do not reference AGENTS.md or .cursor/rules",
+      "evidence_command_index": 12
+    },
+    {
+      "claim": "The diff against main is only the two guidance files and this receipt",
+      "evidence_command_index": 13
+    },
+    {
+      "claim": "Docs and public-repo tests still pass after the node-order clarification",
+      "evidence_command_index": 14
+    },
+    {
+      "claim": "Greptile auto-approved commit a7eddd5 at confidence 5/5 with no new comments",
+      "evidence_command_index": 15
+    }
+  ],
+  "unverified": [
+    "approved_by is not-yet-reviewed because no reviewer has signed this receipt",
+    "rule adherence by future agents",
+    "README.md and docs/SUMMARY.md were not edited to link AGENTS.md; that link is a follow-up so this change stays file-disjoint from the other open PRs"
+  ],
+  "files_changed": [
+    ".cursor/rules/gotxcot-cloud-agent.mdc",
+    "AGENTS.md",
+    ".receipts/bot-00-omega-prime/ut-mvf5uq6p-aa6c2043.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "Revert the branch. The change adds guidance files and this receipt only.",
+  "approvals": [],
+  "approved_by": "not-yet-reviewed"
+}
