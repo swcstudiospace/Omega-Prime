@@ -58,6 +58,14 @@ _UUID_RE = re.compile(
     r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
     r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
 )
+#: Hierarchical Git refs. ``/`` is in the token alphabet, so ``refs/heads/``
+#: plus an ordinary branch name is one 32+ character candidate even when no
+#: component is a token. ``refs/pull/38/merge`` and ``refs/heads/main`` stay
+#: under that length; a long branch name does not.
+_GIT_REF_RE = re.compile(
+    r"\Arefs/(?:heads|tags)(?:/[A-Za-z0-9._-]+)+\Z"
+    r"|\Arefs/pull/[0-9]+/(?:merge|head)\Z"
+)
 
 _MIN_CANDIDATE_LEN = 32
 _MIN_ENTROPY_BITS = 4.2
@@ -120,12 +128,19 @@ def _looks_like_generic_token(candidate: str) -> bool:
     and high per-character entropy. Pure-hex digests, UUIDs, and
     low-diversity runs (padding, repeats) are excluded so integrity metadata
     in manifests and logs does not trip the gate.
+
+    A hierarchical Git ref is judged per component. ``/`` stays inside the
+    token alphabet for every other string, so a base64 blob or a cache path
+    that contains a slash is unchanged. A ref component that itself meets
+    this test still trips.
     """
     text = candidate.strip("=").strip()
     if len(text) < _MIN_CANDIDATE_LEN:
         return False
     if _HEX_RE.match(text) or _UUID_RE.match(text):
         return False
+    if _GIT_REF_RE.fullmatch(text):
+        return any(_looks_like_generic_token(part) for part in text.split("/") if part)
     if len(set(text)) <= 4:
         return False
     classes = sum(

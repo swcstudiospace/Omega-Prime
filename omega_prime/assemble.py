@@ -24,6 +24,7 @@ from typing import Any
 PLACEHOLDER_RE = re.compile(r"\{\{[A-Z0-9_:]+\}\}")
 BULLET_RE = re.compile(r"^-\s+([a-z0-9][a-z0-9-]*)\b")
 TOOL_LINE_RE = re.compile(r'^\s*<tool\s+name="([^"]+)"\s*/>\s*$')
+_XML_DECLARATION_RE = re.compile(r"<\?xml[^?]*\?>\s*")
 
 SEAT_SOURCE = "bot-00-omega-prime.xml"
 SEAT_NAME = "OMEGA_PRIME"
@@ -78,6 +79,23 @@ def disabled_family_tools(config: dict[str, Any] | None) -> set[str]:
     if not redteam_enabled(config):
         disabled.update(REDTEAM_TOOL_NAMES)
     return disabled
+
+
+def _without_declaration(text: str) -> str:
+    """Drop one leading XML declaration so two sources can share a root."""
+    stripped = text.lstrip("\ufeff")
+    return _XML_DECLARATION_RE.sub("", stripped, count=1).strip("\n")
+
+
+def one_document(core: str, body: str) -> str:
+    """One well-formed document: a single declaration and an ``<omega_prime>`` root."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<omega_prime>\n"
+        f"{_without_declaration(core)}\n"
+        f"{_without_declaration(body)}\n"
+        "</omega_prime>\n"
+    )
 
 
 def filter_disabled_tools(text: str, disabled: set[str]) -> str:
@@ -143,11 +161,11 @@ def render(root: Path, roster_path: Path, config: dict[str, Any] | None = None) 
         raise SystemExit(f"assemble-prompts: missing {core_path}")
     if not body_path.is_file():
         raise SystemExit(f"assemble-prompts: missing {body_path}")
-    text = substitute(core_path.read_text(encoding="utf-8"), roster).rstrip()
-    text += "\n" + substitute(body_path.read_text(encoding="utf-8"), roster)
-    if not text.endswith("\n"):
-        text += "\n"
-    text = filter_disabled_tools(text, disabled_family_tools(config))
+    core = substitute(core_path.read_text(encoding="utf-8"), roster)
+    body = substitute(body_path.read_text(encoding="utf-8"), roster)
+    text = filter_disabled_tools(
+        one_document(core, body), disabled_family_tools(config)
+    )
     left = unfilled(text)
     if left:
         where = "; ".join(f"{name} at line {line_no}" for line_no, name in left[:5])

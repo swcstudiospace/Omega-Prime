@@ -48,7 +48,7 @@ WORKFLOW_ROUTINES = {
     "omega-python-clean": "python-clean",
     "omega-connectors-routine": "connectors",
 }
-TEXT_ROUTINES = {
+RUNNER_ROUTINES = {
     "omega-desk-lead": "desk-lead",
     "omega-nightly": "nightly",
     "omega-sweep": "sweep",
@@ -337,17 +337,20 @@ def test_workflow_routines_match_their_curated_twin(name: str, curated: str) -> 
     assert body["result"] == expected["result"]
 
 
-@pytest.mark.parametrize(("name", "stem"), sorted(TEXT_ROUTINES.items()))
-def test_other_routines_load_their_text_without_dispatch(name: str, stem: str) -> None:
+@pytest.mark.parametrize(("name", "workflow"), sorted(RUNNER_ROUTINES.items()))
+def test_runner_routines_execute_and_ignore_args_as_paths(
+    name: str, workflow: str
+) -> None:
     registry = RecordingRegistry()
     body = execute_command(f"/{name} today", registry, {})
-    source = f"omega_prime/routines/{stem}.md"
-    assert body["ok"] is True, body
-    assert body["result"]["kind"] == "routine"
-    assert body["result"]["source"] == source
-    assert body["result"]["instructions"] == (ROOT / source).read_text(encoding="utf-8")
-    assert body["result"]["args"] == "today"
+    direct = run_workflow(workflow, RecordingRegistry(), {})
+    assert body["ok"] is direct["ok"]
+    assert body["result"] == direct
     assert registry.calls == []
+    encoded = json.dumps(body)
+    assert "today" not in encoded
+    assert "/etc/passwd" not in encoded
+    assert body["result"]["workflow"] == workflow
 
 
 def test_args_are_never_used_as_a_path() -> None:
@@ -359,8 +362,8 @@ def test_args_are_never_used_as_a_path() -> None:
     assert body["result"]["instructions"] == _body_after_frontmatter(text)
     assert body["result"]["args"] == "../../etc/passwd"
     routine = execute_command("/omega-desk-lead /etc/passwd", registry, {})
-    assert routine["ok"] is True, routine
-    assert routine["result"]["source"] == "omega_prime/routines/desk-lead.md"
+    assert "/etc/passwd" not in json.dumps(routine)
+    assert routine["result"]["workflow"] == "desk-lead"
     assert registry.calls == []
 
 

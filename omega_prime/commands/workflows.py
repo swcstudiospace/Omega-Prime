@@ -19,7 +19,17 @@ _DOCTOR_CONTEXT_KEYS = ("prompt_sha256", "installed_skills")
 
 SEED_PATH = Path(__file__).resolve().parent / "seeds" / "memory.txt"
 HINDSIGHT_PREFIX = "[hindsight:omega-prime-lead] "
-WORKFLOW_NAMES = ("onboard", "python-clean", "connectors", "desk")
+WORKFLOW_NAMES = (
+    "onboard",
+    "python-clean",
+    "connectors",
+    "desk",
+    "nightly",
+    "sweep",
+    "ultrathink",
+    "desk-lead",
+)
+_ROUTINE_LOCALS = ("nightly", "sweep", "ultrathink", "desk-lead")
 
 
 def validated_doctor_context(value: Any) -> dict[str, Any]:
@@ -258,7 +268,39 @@ def _workflows(
             Step("lead_intake_next", False, tool="lead_intake_next", arguments={}),
         ),
         "connectors": (Step("connectors", False, local="connectors"),),
+        "nightly": (Step("nightly_pass", True, local="nightly"),),
+        "sweep": (Step("sweep_mentions", True, local="sweep"),),
+        "ultrathink": (Step("resolve_turn_plan", True, local="ultrathink"),),
+        "desk-lead": (Step("run_lead_pass", True, local="desk-lead"),),
     }
+
+
+def _run_routine(name: str, env: Mapping[str, str], registry: Any) -> dict[str, Any]:
+    """Run one routine in-process. Sweep cannot publish from this path.
+
+    Sweep mentions go through ``x_mentions`` on ``registry``. A denied read
+    is the result; the routine does not open its own X client.
+    """
+    try:
+        if name == "nightly":
+            from omega_prime.routines.nightly import execute_nightly
+
+            return execute_nightly(env)
+        if name == "sweep":
+            from omega_prime.routines.sweep import execute_sweep
+
+            return execute_sweep(env, registry=registry)
+        if name == "ultrathink":
+            from omega_prime.routines.ultrathink_turn import execute_ultrathink
+
+            return execute_ultrathink(env)
+        if name == "desk-lead":
+            from omega_prime.routines.desk_lead import execute_desk_lead
+
+            return execute_desk_lead(env, registry=registry)
+    except Exception as exc:
+        return {"error": "routine_failed", "reason": f"{type(exc).__name__}: {exc}"}
+    return {"error": "routine_failed", "reason": f"unknown routine {name}"}
 
 
 def _run_step(step: Step, registry: Any, env: Mapping[str, str]) -> dict[str, Any]:
@@ -267,6 +309,8 @@ def _run_step(step: Step, registry: Any, env: Mapping[str, str]) -> dict[str, An
             return seed_memory(registry)
         if step.local == "connectors":
             return connector_requests(env)
+        if step.local in _ROUTINE_LOCALS:
+            return _run_routine(step.local, env, registry)
         if step.tool is None:
             return {"error": "dispatch_failed", "reason": "step has no tool"}
         return dispatch_tool(registry, step.tool, step.arguments or {})

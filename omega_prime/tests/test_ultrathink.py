@@ -161,6 +161,16 @@ def test_resolve_turn_plan(tmp_path):
     assert resolve_turn_plan(state_dirs=[first])["found"] is False
     assert resolve_turn_plan(state_dirs=[tmp_path / "missing"])["found"] is False
     assert resolve_turn_plan(env={"HOME": str(tmp_path)})["found"] is False
+    state = tmp_path / "state"
+    (state / "ultrathink").mkdir(parents=True)
+    (state / "ultrathink" / "last-plan.json").write_text(
+        json.dumps({"specPath": str(spec)}), encoding="utf-8"
+    )
+    preferred = resolve_turn_plan(
+        env={"HOME": str(tmp_path), "OMEGA_PRIME_STATE_DIR": str(state)}
+    )
+    assert preferred["found"] is True
+    assert preferred["plan_path"].endswith("ultrathink/last-plan.json")
     import os as _os
     import time as _time
 

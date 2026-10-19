@@ -39,9 +39,9 @@ def review_turn(
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        return {"created": False, "path": None}
+        return {"created": False, "path": None, "error": "skill_write_failed"}
     if not isinstance(parsed, dict) or parsed.get("success") is not True:
-        return {"created": False, "path": None}
+        return {"created": False, "path": None, "error": "skill_write_failed"}
     path = parsed.get("path")
     return {"created": True, "path": path if isinstance(path, str) else None}
 

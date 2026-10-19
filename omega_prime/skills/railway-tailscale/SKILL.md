@@ -7,6 +7,10 @@ gates: [G-5, G-6]
 <skill name="railway-tailscale" version="1">
 # Railway over Tailscale
 
+## Served tools
+
+Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+
 ## When this applies (L1)
 
 INFRA only. The five Railway services (Ultrathink: GreptimeDB, TimescaleDB, DragonflyDB; Agent
@@ -22,7 +26,7 @@ Standing up or changing the Railway ↔ VPS path?
 ├─ New project or environment ──▶ One forwarder per project/environment. §1–§2
 ├─ Adding a service to reach ──▶ New CONNECTION_MAPPING_n on that project's forwarder. §2
 ├─ ACL change ──▶ Tags only: tag:railway-forwarder, tag:vps, tag:admin. §3
-├─ Cutting the VPS over ──▶ Verify (desk_tailscale_status, desk_db_health) → env → restart →
+├─ Cutting the VPS over ──▶ Verify (infra_tailscale_status, infra_db_health) → env → restart →
 │                           verify again → retire public exposure under G-6 with approval. §4–§5
 ├─ Something broke after cutover ──▶ Roll back: revert env by file, restart; re-create the proxy
 │                                     or domain if it was already removed. §6
@@ -60,8 +64,8 @@ confirm names and ports in n1 before deploying):
 
 | Forwarder | Mappings |
 |---|---|
-| `ultrathink-production-tailscale-forwarder` | `4000:greptimedb.railway.internal:4000` (HTTP SQL), `4001:…:4001` (gRPC), `4003:…:4003` (PG wire), `5432:timescaledb.railway.internal:5432`, `6379:dragonfly.railway.internal:6379` |
-| `agent-substrate-production-tailscale-forwarder` | `8888:hindsight-api.railway.internal:8888`, `9380:ragflow.railway.internal:9380`, optionally `80:ragflow.railway.internal:80` |
+| `{{TAILSCALE_FORWARDER_DATA}}` | `4000:{{RAILWAY_GREPTIME_HOST}}:4000` (HTTP SQL), `4001:…:4001` (gRPC), `4003:…:4003` (PG wire), `5432:{{RAILWAY_TIMESCALE_HOST}}:5432`, `6379:{{RAILWAY_DRAGONFLY_HOST}}:6379` |
+| `{{TAILSCALE_FORWARDER_APPS}}` | `8888:{{RAILWAY_HINDSIGHT_HOST}}:8888`, `9380:{{RAILWAY_RAGFLOW_HOST}}:9380`, optionally `80:{{RAILWAY_RAGFLOW_HOST}}:80` |
 
 Traffic inside the tailnet is WireGuard-encrypted, so plaintext service ports on the forwarder hop
 are acceptable. Hindsight and RAGFlow still require their bearer keys: the tailnet replaces the
@@ -73,38 +77,38 @@ public exposure, not the application auth.
 |---|---|
 | `tag:railway-forwarder` | Both forwarders (via the auth key) |
 | `tag:vps` | The VPS |
-| `tag:admin` | Ove's Mac mini and XPS |
+| `tag:admin` | The operator's admin devices (`{{ADMIN_DEVICES}}`) |
 
 Grants: `tag:vps → tag:railway-forwarder` on the mapped ports; `tag:admin → tag:railway-forwarder`
 on the same; nothing else. Deny by default. A grant to `*` or to an untagged node is an ACL
 change QUALITY should see before it is applied, because it widens who can reach a database.
 
-Check the `railway-app` node (100.77.7.42) in n1: a deprecated subnet router or exit node is
+Check the `{{TAILSCALE_LEGACY_NODE_NAME}}` node ({{TAILSCALE_LEGACY_NODE}}) in n1: a deprecated subnet router or exit node is
 retired under G-6 after the forwarders are verified; an existing forwarder is adopted, not duplicated.
 
 ### §4 Verify before touching the VPS
 
-1. `desk_tailscale_status` — both forwarders online, this node tagged `tag:vps`, mapped ports reachable.
-2. From the VPS shell (`skills/platforms/remote-dev-machine`; SSH is INFRA-owned ops): `psql` to
-   `ultrathink-production-tailscale-forwarder:5432`, `curl` to `:4000` and to
-   `agent-substrate-production-tailscale-forwarder:8888/health` and `:9380`. Record each exit code.
-3. `desk_db_health` — five services green over the tailnet names, before any env changes.
+1. `infra_tailscale_status` — both forwarders online, this node tagged `tag:vps`, mapped ports reachable.
+2. From the VPS shell (`skills/remote-dev-machine`; SSH is INFRA-owned ops): `psql` to
+   `{{TAILSCALE_FORWARDER_DATA}}:5432`, `curl` to `:4000` and to
+   `{{TAILSCALE_FORWARDER_APPS}}:8888/health` and `:9380`. Record each exit code.
+3. `infra_db_health` — five services green over the tailnet names, before any env changes.
 
 If any probe fails here, stop. The cutover has nothing to cut over to yet.
 
 ### §5 Cutover order
 
-1. Edit `/etc/substrate/substrate.env` and `/etc/desk-gateway/gateway.env`: `GREPTIME_URL`,
+1. Edit `{{VPS_SUBSTRATE_ENV}}` and `{{VPS_GATEWAY_ENV}}`: `GREPTIME_URL`,
    `SUBSTRATE_PG_URL`, `DRAGONFLY_URL`, `HINDSIGHT_URL`, `RAGFLOW_URL` to the forwarder names.
    Keep a dated copy of each file beside it; that copy is the rollback.
-2. Restart `substrate-mcp` and `desk-gateway`. `desk_vps_units` shows them active.
-3. Verify again: `desk_db_health` green; `desk_event_emit` lands; `desk_brief` returns. Record
+2. Restart `{{VPS_UNIT_SUBSTRATE}}` and `{{VPS_UNIT_GATEWAY}}`. `infra_vps_units` shows them active.
+3. Verify again: `infra_db_health` green; `lead_event_emit` lands; `lead_brief` returns. Record
    the calls.
 4. Only now retire public exposure (G-6): delete the TimescaleDB TCP proxy and the Greptime
    public domain, in the Railway dashboard or CLI. There is deliberately no gateway tool for
    this; it is a human-approved destructive change with an `approval_id` obtained through LEAD
-   and recorded in the receipt. Keep `hindsight-ui` on a Railway domain behind its access key
-   only if Ove wants browser access without the tailnet.
+   and recorded in the receipt. Keep `{{RAILWAY_BROWSER_SERVICE}}` on a Railway domain behind its access key
+   only if the operator wants browser access without the tailnet.
 5. Verify a third time. A service still reachable on its public address is a step 4 that did not
    finish.
 
@@ -115,7 +119,7 @@ that no longer answers, and the outage lasts until someone notices.
 
 | Symptom | Action | Time | Data |
 |---|---|---|---|
-| `desk_db_health` red after restart | Restore the dated env copies; restart the units | Minutes | None |
+| `infra_db_health` red after restart | Restore the dated env copies; restart the units | Minutes | None |
 | Public proxy or domain already removed and needed back | Re-create the TCP proxy / domain in Railway; the new proxy has a **new** host and port, so update the env accordingly | Minutes | None; the database did not move |
 | Forwarder unhealthy | Redeploy it (the volume keeps its identity); if it re-registers as a new machine, the volume was missing | Minutes | None |
 
@@ -123,11 +127,11 @@ None of these has a data implication; the services never moved. Say so in the re
 
 ### §7 The receipt
 
-`.receipts/bot-05-infrastructure/<task>.json` with: `desk_tailscale_status` output tail; each port
-probe with exit code; `desk_db_health` before and after; the env diff **by variable name only**
-(never the values); `desk_vps_units` after restart; the Railway proxy/domain removal (CLI output
+`.receipts/bot-05-infrastructure/<task>.json` with: `infra_tailscale_status` output tail; each port
+probe with exit code; `infra_db_health` before and after; the env diff **by variable name only**
+(never the values); `infra_vps_units` after restart; the Railway proxy/domain removal (CLI output
 or screenshot reference); `approvals` with the G-6 approval id; `rollback_plan` from §6;
-`unverified` for anything not exercised (staging environment, `railway-app` disposition, ACL
+`unverified` for anything not exercised (staging environment, `{{TAILSCALE_LEGACY_NODE_NAME}}` disposition, ACL
 from the admin machines if not probed). `TS_AUTHKEY`, database passwords and bearer keys are
 never in the receipt, a template, a message or a tool argument (G-3, PD-4).
 
@@ -138,12 +142,12 @@ never in the receipt, a template, a message or a tool argument (G-3, PD-4).
 **Good — ordering that survives a bad mapping.**
 
 ```
-desk_tailscale_status → agent-substrate forwarder online; port 9380 unreachable
-curl agent-substrate-production-tailscale-forwarder:9380 → exit 7          ← mapping typo found
+infra_tailscale_status → {{TAILSCALE_FORWARDER_APPS}} online; port 9380 unreachable
+curl {{TAILSCALE_FORWARDER_APPS}}:9380 → exit 7          ← mapping typo found
 fix CONNECTION_MAPPING_2 in Railway → redeploy forwarder → curl → exit 0
-desk_db_health → 5/5 green (public addresses still in env; nothing cut over yet)
-edit env (dated copies kept) → restart → desk_vps_units active → desk_db_health 5/5
-approval via LEAD → apr-… → delete TCP proxy + Greptime domain → desk_db_health 5/5
+infra_db_health → 5/5 green (public addresses still in env; nothing cut over yet)
+edit env (dated copies kept) → restart → infra_vps_units active → infra_db_health 5/5
+approval via LEAD → {{APPROVAL_ID}} → delete TCP proxy + Greptime domain → infra_db_health 5/5
 receipt: probes, env names, approval id, rollback plan, unverified: ["staging not built"]
 ```
 
@@ -171,7 +175,7 @@ removed before the new one was proven. The order in §5 exists for this case.
 | ACL grant to `*` | Any tailnet node can reach a database | Tag-to-tag grants only; QUALITY sees widenings |
 | Secret in receipt or message | Key or password in a JSON tail | Names only; rotate what leaked |
 | Bot computer on the tailnet | Bot depends on a desktop being awake; holds a route to databases | Bots use the gateway over normal egress |
-| `railway-app` left as an unknown node | Untagged node with unknown reach | Identify in n1; adopt or retire under G-6 |
+| `{{TAILSCALE_LEGACY_NODE_NAME}}` left as an unknown node | Untagged node with unknown reach | Identify in n1; adopt or retire under G-6 |
 
 ---
 
