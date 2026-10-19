@@ -348,6 +348,52 @@ never the raw label). Denials still surface on
 `python -m omega_prime.grokbot.audit verify` and confirm the newest record
 is `token_rotated` with no token material in the file.
 
+## 9. omp engine
+
+The coding loop can run on [omp](https://omp.sh) (`oh-my-pi`, major 18) over
+its RPC mode. Omega Prime supplies the tools, skills, prompts, and loop
+policy. omp performs the inference through its own provider logins or API
+keys. The Python process does not call model HTTP APIs for that path.
+
+Install omp 18.x and sign in with `omp login` for the plans you intend to
+use, or export the API key for that provider in the host environment. The
+engine reads remaining quota with `omp usage --json`.
+
+The default compliance allowlist is empty. A plan is used only when it is
+allowlisted:
+
+| Plan | How it becomes allowlisted |
+| --- | --- |
+| Z.ai | `OMEGA_PRIME_OMP_ALLOW_ZAI=1` (the `ZAI_API_KEY` variable alone does not allow it) |
+| xAI | `XAI_API_KEY`, or `OMEGA_PRIME_OMP_ALLOW_XAI=1` for the subscription opt-in |
+| Anthropic | `ANTHROPIC_API_KEY` only. Subscription OAuth is never allowlisted |
+| Muse | `META_API_KEY` or `MUSE_API_KEY` only. Subscription OAuth is never allowlisted |
+| Cursor | `CURSOR_API_KEY`, or `OMEGA_PRIME_OMP_ALLOW_CURSOR=1` for the subscription opt-in |
+
+`omega_capacity` reports each plan's remaining quota and whether it is
+allowlisted. It does not return key values.
+
+Each run writes `$OMEGA_PRIME_STATE_DIR/jobs/<id>/events.jsonl` (or
+`~/.omega-prime/jobs/<id>/events.jsonl`). Tail it with:
+
+```bash
+python -m omega_prime.engine.watch JOB --follow
+```
+
+The `omega watch JOB` console script is the same command. When `tmux` is on
+`PATH`, the engine also opens a session named `omega-<job>`. Set
+`OMEGA_PRIME_ENGINE_TMUX=0` to skip that session.
+
+The engine uses bubblewrap when `bwrap` is on `PATH`. Without bubblewrap it
+refuses to start unless `OMEGA_PRIME_ENGINE_UNSANDBOXED=1` is set.
+
+`OMEGA_PRIME_ENGINE=omp` makes the conversation loop, delegate, desk-lead
+pass, and ultrathink turn require the engine. Unset, or `auto`, uses the
+engine when omp, an allowlisted plan, and a sandbox are all available, and
+otherwise keeps the existing Python loop. `OMEGA_PRIME_ENGINE=off` keeps the
+Python loop. Dispatch backends (`omega_dispatch`, job status, job cancel,
+and the fleet client) are a later change.
+
 ## Contributor CI
 
 The `verify`, `lint`, and `types` jobs each run on Python 3.12, 3.13,

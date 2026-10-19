@@ -44,7 +44,7 @@ def test_flags_off_omit_rlm_and_messaging(tmp_path: Path, monkeypatch) -> None:
     assert set(MESSAGING_TOOL_NAMES).isdisjoint(names)
     roster = roster_names(ROSTER.read_text(encoding="utf-8"))
     served = [name for name in roster if name in names]
-    assert len(served) == 117
+    assert len(served) == 118
 
 
 def test_rlm_flag_serves_not_configured_without_a_provider(
@@ -97,7 +97,7 @@ def test_all_prime_flags_serve_the_roster(tmp_path: Path, monkeypatch) -> None:
     from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
 
     assert served == roster - set(REDTEAM_TOOL_NAMES)
-    assert len(roster) == 168
+    assert len(roster) == 169
 
 
 def test_signed_roe_completes_the_roster(tmp_path: Path, monkeypatch) -> None:
@@ -125,4 +125,4 @@ def test_signed_roe_completes_the_roster(tmp_path: Path, monkeypatch) -> None:
     served = _names(registry)
     roster = set(load_roster_names(ROSTER))
     assert served == roster
-    assert len(roster) == 168
+    assert len(roster) == 169

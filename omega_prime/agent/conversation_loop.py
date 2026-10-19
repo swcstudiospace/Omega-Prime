@@ -88,6 +88,10 @@ class Agent:
     registry's ``runtime_bindings`` (or ``None``). ``None`` keeps the exact
     pre-v10 turn: no implicit continuation, no usage accounting, no extra
     result keys.
+
+    Engine: ``force_engine`` sends a scripted or fake model through the omp
+    RPC driver when the binary and allowlist are ready. Auto mode otherwise
+    leaves those models on the Python loop.
     """
 
     model: Model
@@ -109,6 +113,7 @@ class Agent:
     magic_keywords: Any | None = None
     substrate: Any | None = None
     prime_hooks: Any | None = None
+    force_engine: bool = False
     delegate_depth: int = 0
     max_depth: int = 2
     max_children: int = 1
@@ -155,6 +160,16 @@ def run_conversation(
         agent.lease = lease
     lease.acquire(wait=wait)
     try:
+        from omega_prime.engine.attach import route_turn
+
+        routed = route_turn(
+            agent,
+            user_message,
+            system_message=system_message,
+            conversation_history=conversation_history,
+        )
+        if routed is not None:
+            return routed
         system_message = _open_substrate(agent, user_message, system_message)
         result = _run_conversation_turn(
             agent,

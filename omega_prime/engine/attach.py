@@ -1,0 +1,274 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Spectrum Web Co
+"""Prefer the omp engine from the existing loops, and fall back when it is not ready."""
+
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Mapping
+from typing import Any
+
+from omega_prime.engine.omp_driver import EngineResult, probe, run
+
+_OFF = frozenset({"0", "off", "python", "false", "no"})
+_REQUIRED = frozenset({"omp", "on", "1", "required", "true", "yes"})
+_NON_LIVE = frozenset({"ScriptedModel", "FakeModel", "FakeProvider"})
+
+
+def engine_mode(env: Mapping[str, str]) -> str:
+    raw = str(env.get("OMEGA_PRIME_ENGINE", "auto")).strip().lower()
+    if raw in _OFF:
+        return "off"
+    if raw in _REQUIRED:
+        return "required"
+    return "auto"
+
+
+def _live_model(model: Any) -> bool:
+    current = model
+    for _ in range(5):
+        if current is None:
+            return False
+        name = type(current).__name__
+        module = type(current).__module__
+        if name in _NON_LIVE:
+            return False
+        if module.startswith("omega_prime.providers."):
+            return True
+        nxt = getattr(current, "provider", None)
+        if nxt is None or nxt is current:
+            return False
+        current = nxt
+    return False
+
+
+def _prompt_text(user_message: Any) -> str:
+    if isinstance(user_message, str):
+        return user_message
+    try:
+        return json.dumps(user_message, ensure_ascii=False, default=str)[:100000]
+    except TypeError:
+        return str(user_message)[:100000]
+
+
+def _mapping(env: Mapping[str, str] | None) -> Mapping[str, str]:
+    if env is None:
+        return os.environ
+    return env
+
+
+def route_turn(
+    agent: Any,
+    user_message: Any,
+    *,
+    system_message: str | None,
+    conversation_history: list | None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Run one turn on omp, or return None so the caller keeps the Python loop.
+
+    Auto mode uses omp only when a binary, an allowlisted plan, and a sandbox
+    are all present, and only for a live provider model. Required mode refuses
+    instead of calling that provider. Scripted and fake models stay on the
+    Python loop unless ``agent.force_engine`` is set.
+    """
+    mapping = _mapping(env)
+    mode = engine_mode(mapping)
+    forced = bool(getattr(agent, "force_engine", False))
+    if mode == "off" and not forced:
+        return None
+    if not forced and not _live_model(getattr(agent, "model", None)):
+        return None
+    if mode == "auto" and not forced:
+        ready, _reason = probe(mapping)
+        if not ready:
+            return None
+    result = run(
+        _prompt_text(user_message),
+        cwd=getattr(agent, "engine_cwd", None),
+        system_prompt=system_message,
+        thinking=getattr(agent, "engine_thinking", None),
+        plan=getattr(agent, "engine_plan", None),
+        env=mapping,
+        job_id=getattr(agent, "engine_job_id", None),
+    )
+    if not result.ok:
+        if mode == "required" or forced:
+            return _refused(agent, user_message, conversation_history, result)
+        return None
+    return _accepted(user_message, conversation_history, result)
+
+
+def _history(user_message: Any, conversation_history: list | None, text: str) -> list:
+    messages = conversation_history if conversation_history is not None else []
+    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "assistant", "content": text})
+    return messages
+
+
+def _accepted(
+    user_message: Any, conversation_history: list | None, result: EngineResult
+) -> dict[str, Any]:
+    messages = _history(user_message, conversation_history, result.final_text)
+    return {
+        "final_response": result.final_text,
+        "messages": messages,
+        "api_call_count": 1,
+        "interrupted": False,
+        "failed": False,
+        "turn_exit_reason": "engine",
+        "engine": {
+            "job_id": result.job_id,
+            "plan": result.plan,
+            "provider": result.provider,
+            "model": result.model,
+            "events": result.events_path,
+            "cost": result.cost,
+            "usage": result.usage,
+            "sandbox": result.sandbox,
+        },
+    }
+
+
+def _refused(
+    agent: Any,
+    user_message: Any,
+    conversation_history: list | None,
+    result: EngineResult,
+) -> dict[str, Any]:
+    del agent
+    text = f"engine refused: {result.reason}"
+    messages = _history(user_message, conversation_history, text)
+    return {
+        "final_response": text,
+        "messages": messages,
+        "api_call_count": 0,
+        "interrupted": False,
+        "failed": True,
+        "turn_exit_reason": result.reason or "engine",
+        "engine": {"reason": result.reason, "detail": result.detail},
+    }
+
+
+def delegate_via_engine(
+    goal: str, *, env: Mapping[str, str] | None = None
+) -> str | None:
+    """JSON summary from omp, or None when the Python child path should run."""
+    mapping = _mapping(env)
+    mode = engine_mode(mapping)
+    if mode == "off":
+        return None
+    ready, reason = probe(mapping)
+    if not ready and mode != "required":
+        return None
+    if not ready and mode == "required":
+        return json.dumps({"error": reason}, ensure_ascii=False)
+    result = run(goal, env=mapping)
+    if not result.ok:
+        if mode == "required":
+            return json.dumps(
+                {"error": result.reason or "engine", "detail": result.detail},
+                ensure_ascii=False,
+            )
+        return None
+    return json.dumps(
+        {"summary": result.final_text, "engine": "omp", "job_id": result.job_id},
+        ensure_ascii=False,
+    )
+
+
+def desk_engine_dispatch(goal: str, env: Mapping[str, str]) -> dict[str, Any] | None:
+    """One desk ticket on omp. None means keep the existing blocked path."""
+    raw = delegate_via_engine(goal, env=env)
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if isinstance(error, str) and error:
+        return {
+            "status": "blocked",
+            "reason": error,
+            "engine": "omp",
+        }
+    summary = payload.get("summary")
+    if not isinstance(summary, str):
+        return None
+    return {
+        "status": "done",
+        "summary": summary,
+        "engine": "omp",
+        "job_id": payload.get("job_id"),
+        "receipt": {
+            "commands": [
+                {
+                    "cmd": "omp --mode rpc",
+                    "exit_code": 0,
+                    "output_tail": summary[-2000:],
+                }
+            ],
+            "claims": [
+                {
+                    "claim": "desk ticket ran on the omp engine",
+                    "evidence_command_index": 0,
+                }
+            ],
+            "unverified": ["the omp final text is not independently re-executed"],
+            "destructive": False,
+            "approved_by": None,
+        },
+    }
+
+
+def ultrathink_engine(
+    plan: Mapping[str, Any], env: Mapping[str, str]
+) -> dict[str, Any]:
+    """Run a resolved ultrathink spec on omp when the engine is ready."""
+    ready, reason = probe(env)
+    if engine_mode(env) == "off":
+        return {"used": False, "reason": "off"}
+    if not ready:
+        return {"used": False, "reason": reason}
+    if not plan.get("found"):
+        return {"used": False, "reason": "no_plan"}
+    spec = plan.get("spec_path")
+    if not isinstance(spec, str) or not spec:
+        return {"used": False, "reason": "no_spec"}
+    path = _spec_path(spec)
+    if path is None or not path.is_file():
+        return {"used": False, "reason": "no_spec"}
+    try:
+        text = path.read_text(encoding="utf-8")[:100000]
+    except OSError:
+        return {"used": False, "reason": "no_spec"}
+    result = run(
+        "Carry out this ultrathink spec.\n\n" + text,
+        env=env,
+        system_prompt="Ultrathink turn. Stay inside the spec.",
+    )
+    if not result.ok:
+        return {
+            "used": False,
+            "reason": result.reason or "engine",
+            "detail": result.detail,
+        }
+    return {
+        "used": True,
+        "job_id": result.job_id,
+        "plan": result.plan,
+        "final_text": result.final_text[:2000],
+    }
+
+
+def _spec_path(spec: str):
+    from pathlib import Path
+
+    try:
+        return Path(spec)
+    except (TypeError, ValueError):
+        return None

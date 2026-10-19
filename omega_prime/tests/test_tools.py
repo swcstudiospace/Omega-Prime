@@ -10,6 +10,7 @@ from pathlib import Path
 from omega_prime.tooling.roster import roster_names
 from omega_prime.tools.agent_message import MESSAGING_TOOL_NAMES
 from omega_prime.tools.autonomous import AUTONOMOUS_TOOL_NAMES
+from omega_prime.tools.capacity import CAPACITY_TOOL_NAMES
 from omega_prime.tools.clarify import ClarifyLog, clarify
 from omega_prime.tools.coding import CODING_TOOL_NAMES, register_coding_tools
 from omega_prime.tools.cron_admin import CRON_ADMIN_TOOL_NAMES
@@ -437,6 +438,7 @@ def test_roster_lists_exactly_the_names_register_coding_tools_registers(tmp_path
         + CRON_ADMIN_TOOL_NAMES
         + LEARNING_TOOL_NAMES
         + DURABLE_TOOL_NAMES
+        + CAPACITY_TOOL_NAMES
         + RLM_TOOL_NAMES
         + HARNESS_TOOL_NAMES
         + GOAL_TOOL_NAMES

@@ -112,6 +112,15 @@ def resolve_turn_plan(
     }
 
 
+def _engine_annotation(
+    plan: Mapping[str, Any], env: Mapping[str, str]
+) -> dict[str, Any]:
+    """omp run for this spec, or a fallback reason when the engine is not ready."""
+    from omega_prime.engine.attach import ultrathink_engine
+
+    return ultrathink_engine(plan, env)
+
+
 def execute_ultrathink(env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Resolve this turn's plan. An empty env does not scan the process home."""
     if env is None:
@@ -127,6 +136,7 @@ def execute_ultrathink(env: Mapping[str, str] | None = None) -> dict[str, Any]:
     else:
         plan = resolve_turn_plan(env=dict(env))
     plan["publishes"] = False
+    plan["engine"] = _engine_annotation(plan, env if env is not None else {})
     return plan
 
 
@@ -144,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.state_dir:
         plan = resolve_turn_plan(state_dirs=[args.state_dir])
         plan["publishes"] = False
+        plan["engine"] = _engine_annotation(plan, os.environ)
     else:
         plan = execute_ultrathink(os.environ)
     json.dump(plan, sys.stdout)

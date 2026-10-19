@@ -42,6 +42,12 @@ def delegate_task(
             f"batch of {len(goals)} tasks exceeds max_children {max_children}"
         )
     if getattr(parent, "child_model", None) is None:
+        if len(goals) == 1 and not background:
+            from omega_prime.engine.attach import delegate_via_engine
+
+            routed = delegate_via_engine(goals[0])
+            if routed is not None:
+                return routed
         return _error("parent.child_model is required")
     if background:
         handle = uuid.uuid4().hex
