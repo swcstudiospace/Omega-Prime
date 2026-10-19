@@ -43,11 +43,14 @@ def delegate_task(
         )
     if getattr(parent, "child_model", None) is None:
         if len(goals) == 1 and not background:
-            from omega_prime.engine.attach import delegate_via_engine
+            from omega_prime.engine.attach import _restricted, delegate_via_engine
 
-            routed = delegate_via_engine(goals[0])
-            if routed is not None:
-                return routed
+            # A plan-mode parent, a child_tool_hook, or a narrowed tool map
+            # must not receive the full MCP registry.
+            if not _restricted(parent):
+                routed = delegate_via_engine(goals[0])
+                if routed is not None:
+                    return routed
         return _error("parent.child_model is required")
     if background:
         handle = uuid.uuid4().hex

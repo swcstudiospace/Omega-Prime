@@ -44,6 +44,10 @@ All notable changes to this project are documented here. Format follows
   100,000 characters, when the prior transcript is long. A failed launch
   records `job_end` so `omega watch --follow` stops. That write is
   best-effort: a full state disk still returns the original failure.
+  `--follow` waits for the event file instead of exiting while omp is
+  still starting. Plan mode, a `child_tool_hook`, and a narrowed tool map
+  stay on the Python loop, including a delegate whose parent has no
+  child model.
 
 #### Follow-up
 

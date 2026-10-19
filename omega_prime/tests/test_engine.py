@@ -10,6 +10,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -77,6 +78,14 @@ for line in sys.stdin:
     kind = cmd.get("type")
     cid = cmd.get("id")
     if kind == "prompt":
+        if os.environ.get("OMEGA_FAKE_OMP_EXIT_AFTER_PROMPT") == "1":
+            emit({"id": cid, "type": "response", "command": "prompt", "success": True})
+            emit({
+                "type": "tool_execution_end",
+                "toolName": "write_file",
+                "toolCallId": "t1",
+            })
+            raise SystemExit(0)
         reply = os.environ.get("OMEGA_FAKE_OMP_REPLY", "PONG")
         emit({"id": cid, "type": "response", "command": "prompt", "success": True})
         emit({"type": "agent_start"})
@@ -649,3 +658,103 @@ def test_refusal_before_the_event_file_writes_no_job_end(tmp_path: Path) -> None
     assert result.reason == "not_configured"
     assert result.started is False
     assert not (tmp_path / "state" / "jobs" / "job-missing" / "events.jsonl").exists()
+
+
+def _omp_commands(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    commands = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        cmd = row.get("cmd")
+        if isinstance(cmd, str):
+            commands.append(cmd)
+    return commands
+
+
+def test_plan_mode_and_child_hook_never_start_omp(tmp_path, monkeypatch) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary, OMEGA_PRIME_ENGINE="omp")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    log = tmp_path / "omp-log.jsonl"
+
+    def drop_writes(tools: dict) -> None:
+        tools.pop("write_file", None)
+
+    hooked = Agent(
+        model=ScriptedModel([{"role": "assistant", "content": "from-python"}]),
+        tools={
+            "write_file": lambda **kwargs: "wrote",
+            "read_file": lambda **kwargs: "ok",
+        },
+    )
+    hooked.force_engine = True
+    hooked.child_tool_hook = drop_writes
+    kept = run_conversation(hooked, "edit the file")
+    assert kept["final_response"] == "from-python"
+    assert "prompt" not in _omp_commands(log)
+
+    class Parent:
+        def __init__(self) -> None:
+            self.child_model = None
+            self.delegate_depth = 0
+            self.tools = {"write_file": lambda **kwargs: "wrote"}
+            self.child_tool_hook = drop_writes
+            self.plan_mode = True
+
+    raw = json.loads(delegate_task(Parent(), "edit the file"))
+    assert "error" in raw
+    assert "prompt" not in _omp_commands(log)
+
+
+def test_started_engine_does_not_fall_back_to_python(tmp_path, monkeypatch) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_FAKE_OMP_EXIT_AFTER_PROMPT="1",
+        OMEGA_PRIME_ENGINE="auto",
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    class Boom:
+        def post(self, url: str, headers: dict, body: dict) -> dict:
+            raise AssertionError("provider HTTP was called")
+
+        def get(self, url: str, headers: dict, params: dict) -> dict:
+            raise AssertionError("provider HTTP was called")
+
+        def stream(self, url: str, headers: dict, body: dict) -> Iterator[str]:
+            raise AssertionError("provider HTTP was called")
+
+    provider = ProviderModel(GrokProvider(), "grok-4", Boom(), api_key="k")
+    agent = Agent(model=provider)
+    refused = run_conversation(agent, "append a line")
+    assert refused["failed"] is True
+    assert refused["api_calls"] == 0
+    assert refused["engine"]["started"] is True
+    assert refused["completed"] is False
+
+
+def test_follow_waits_for_the_event_file(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    path = state / "jobs" / "job-wait" / "events.jsonl"
+
+    def publish() -> None:
+        time.sleep(0.2)
+        path.parent.mkdir(parents=True)
+        path.write_text('{"type":"job_end","ok":false}\n', encoding="utf-8")
+
+    threading.Thread(target=publish, daemon=True).start()
+    started = time.monotonic()
+    code = watch_main(
+        ["job-wait", "--follow", "--state-dir", str(state), "--timeout", "5"]
+    )
+    assert code == 0
+    assert time.monotonic() - started >= 0.15
+    missing = watch_main(["job-absent", "--state-dir", str(state)])
+    assert missing == 1

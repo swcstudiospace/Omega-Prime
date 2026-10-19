@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"{exc}\n")
         return 2
     path = directory / "events.jsonl"
-    if not path.is_file():
+    if not path.is_file() and not args.follow:
         sys.stderr.write("no event feed for that job\n")
         return 1
     return tail(path, follow=args.follow, timeout=args.timeout)

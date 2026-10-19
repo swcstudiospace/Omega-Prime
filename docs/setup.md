@@ -394,9 +394,9 @@ Connector settings already in the environment (`X_API_TOKEN`,
 desk client variables) are passed through to that process. They are not
 written into `mcp.json`. Plan mode, a narrowed tool roster, and a
 `child_tool_hook` stay on the Python loop so those turns do not receive
-tools the caller removed. `omega watch JOB --follow` waits until the job
-ends (`agent_end`, or `job_end` when a launch fails after the event file
-exists). Pass `--timeout` to bound that wait. A refusal before the prompt
+tools the caller removed. `omega watch JOB --follow` waits for the event file to appear, then until
+the job ends (`agent_end`, or `job_end` when a launch fails after the event
+file exists). Pass `--timeout` to bound that wait. A refusal before the prompt
 is sent does not spend a caller-supplied iteration budget.
 
 `OMEGA_PRIME_ENGINE=omp` makes the conversation loop, delegate, desk-lead
