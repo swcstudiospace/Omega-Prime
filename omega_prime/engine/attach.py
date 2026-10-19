@@ -13,6 +13,7 @@ from omega_prime.engine.omp_driver import EngineResult, probe, run
 
 _OFF = frozenset({"0", "off", "python", "false", "no"})
 _TRANSCRIPT_CHARS = 4_000
+_PROMPT_LIMIT = 100_000
 _REQUIRED = frozenset({"omp", "on", "1", "required", "true", "yes"})
 _NON_LIVE = frozenset({"ScriptedModel", "FakeModel", "FakeProvider"})
 
@@ -92,9 +93,16 @@ def _with_history(user_message: Any, conversation_history: list | None) -> str:
             continue
         lines.append(f"{role}: {text[:_TRANSCRIPT_CHARS]}")
     if not lines:
-        return latest
+        return latest[:_PROMPT_LIMIT]
+    footer = f"\n\nCurrent request:\n{latest}"
+    if len(footer) >= _PROMPT_LIMIT:
+        return latest[:_PROMPT_LIMIT]
+    header = "Prior transcript:\n"
+    room = _PROMPT_LIMIT - len(header) - len(footer)
     transcript = "\n".join(lines)
-    return f"Prior transcript:\n{transcript}\n\nCurrent request:\n{latest}"[:100000]
+    if len(transcript) > room:
+        transcript = transcript[-room:]
+    return f"{header}{transcript}{footer}"
 
 
 def _mapping(env: Mapping[str, str] | None) -> Mapping[str, str]:

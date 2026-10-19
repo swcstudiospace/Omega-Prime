@@ -2,7 +2,7 @@
   "task_id": "ut-tn5r1e-a1fleet1",
   "bot": "bot-00-omega-prime",
   "started_at": "2026-10-19T14:00:00Z",
-  "completed_at": "2026-10-19T14:40:00Z",
+  "completed_at": "2026-10-19T15:50:00Z",
   "commands": [
     {
       "cmd": "/tmp/omega-venv/bin/python -m mypy omega_prime/",
@@ -57,12 +57,12 @@
     {
       "cmd": "/tmp/omega-venv/bin/python -m pytest omega_prime/tests/test_engine.py -q --tb=line",
       "exit_code": 0,
-      "output_tail": "10 passed in 0.75s"
+      "output_tail": "17 passed"
     },
     {
       "cmd": "/tmp/omega-venv/bin/python -m pytest omega_prime/tests -q --tb=line",
       "exit_code": 0,
-      "output_tail": "4738 passed, 20 skipped, 16 warnings in 239.06s"
+      "output_tail": "4745 passed, 20 skipped, 16 warnings in 193.88s"
     }
   ],
   "claims": [
@@ -107,11 +107,11 @@
       "evidence_command_index": 9
     },
     {
-      "claim": "hermetic fake-omp engine tests pass, including allowlist refusal, the MCP bridge, and loop re-points",
+      "claim": "hermetic fake-omp engine tests pass, including allowlist refusal, the MCP bridge, loop re-points, caller-budget refusals, the current request, and job_end",
       "evidence_command_index": 10
     },
     {
-      "claim": "the existing suite stays green: 4738 passed, 20 skipped",
+      "claim": "the existing suite stays green: 4745 passed, 20 skipped",
       "evidence_command_index": 11
     }
   ],

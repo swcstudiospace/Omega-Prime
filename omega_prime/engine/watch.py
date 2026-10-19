@@ -60,9 +60,11 @@ def tail(
     timeout: float | None = None,
     write=sys.stdout,
 ) -> int:
-    """Print the feed. With ``follow``, wait until ``agent_end``.
+    """Print the feed. With ``follow``, wait until the job ends.
 
-    ``timeout`` bounds that wait. ``None`` waits until the job ends.
+    ``agent_end`` is a finished omp turn. ``job_end`` is the driver's
+    record that the process stopped without one. ``timeout`` bounds the
+    wait. ``None`` waits until one of those events.
     """
     seen = 0
     ended = False
@@ -79,7 +81,7 @@ def tail(
         for event in events[seen:]:
             write.write(format_event(event) + "\n")
             write.flush()
-            if event.get("type") == "agent_end":
+            if event.get("type") in {"agent_end", "job_end"}:
                 ended = True
         seen = len(events)
         if not follow or ended:
@@ -99,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         "--timeout",
         type=float,
         default=None,
-        help="Seconds to follow. Omit it to wait until agent_end.",
+        help="Seconds to follow. Omit it to wait until the job ends.",
     )
     args = parser.parse_args(argv)
     env = {}

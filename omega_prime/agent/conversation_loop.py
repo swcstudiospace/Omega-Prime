@@ -258,7 +258,10 @@ def _seal_engine_turn(agent: Agent, routed: dict, since: int) -> dict:
         if charged is not None:
             routed["usage"] = charged
     budget = agent.budget
-    if budget is not None:
+    calls = routed.get("api_calls")
+    engine = routed.get("engine")
+    started = bool(engine.get("started")) if isinstance(engine, dict) else False
+    if budget is not None and ((isinstance(calls, int) and calls > 0) or started):
         budget.consume()
     emit(agent, "turn_end", turn_exit_reason=routed.get("turn_exit_reason"))
     _finish_journal(agent, run_id, routed)

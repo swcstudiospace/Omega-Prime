@@ -4,18 +4,26 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from omega_prime.agent.conversation_loop import Agent, run_conversation
+from omega_prime.agent.budget import IterationBudget
+from omega_prime.agent.conversation_loop import (
+    Agent,
+    _seal_engine_turn,
+    run_conversation,
+)
 from omega_prime.agent.delegate import delegate_task
 from omega_prime.agent.model import ScriptedModel
 from omega_prime.agent.runtime import OmegaPrimeAgent
+from omega_prime.engine.attach import _PROMPT_LIMIT, _TRANSCRIPT_CHARS, _with_history
 from omega_prime.engine.jobs import maybe_tmux
 from omega_prime.engine.omp_driver import OmpSession, run, session_abort, session_steer
 from omega_prime.engine.plan_router import (
@@ -26,6 +34,7 @@ from omega_prime.engine.plan_router import (
 )
 from omega_prime.engine.protocol import redact
 from omega_prime.engine.watch import main as watch_main
+from omega_prime.engine.watch import tail
 from omega_prime.providers.base import ProviderModel
 from omega_prime.providers.grok import GrokProvider
 from omega_prime.routines.desk_lead import make_dispatch
@@ -57,6 +66,8 @@ if "usage" in args:
     print(os.environ.get("OMEGA_FAKE_OMP_USAGE", '{"providers":[]}'))
     raise SystemExit(0)
 emit({"type": "ready"})
+if os.environ.get("OMEGA_FAKE_OMP_EXIT_AFTER_READY") == "1":
+    raise SystemExit(0)
 for line in sys.stdin:
     text = line.strip()
     if not text:
@@ -499,3 +510,110 @@ def test_tmux_session_name(tmp_path: Path) -> None:
     text = log.read_text(encoding="utf-8")
     assert "omega-job-watch" in text
     assert "omega_prime.engine.watch" in text
+
+
+def test_refused_launch_does_not_spend_the_caller_budget(tmp_path, monkeypatch) -> None:
+    missing = tmp_path / "missing-omp"
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    env = _env(tmp_path, missing, OMEGA_PRIME_ENGINE="required")
+    env["PATH"] = str(empty)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    budget = IterationBudget(1)
+    model = ScriptedModel([{"role": "assistant", "content": "from-python"}])
+    agent = Agent(model=model, budget=budget)
+    agent.force_engine = True
+    refused = run_conversation(agent, "ping")
+    assert refused["failed"] is True
+    assert refused["api_calls"] == 0
+    assert refused["engine"]["started"] is False
+    assert budget.remaining == 1
+    assert model.call_count == 0
+
+
+def test_successful_engine_turn_spends_one_caller_iteration(
+    tmp_path, monkeypatch
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary, OMEGA_PRIME_ENGINE="auto")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    budget = IterationBudget(1)
+    model = ScriptedModel([{"role": "assistant", "content": "from-python"}])
+    agent = Agent(model=model, budget=budget)
+    agent.force_engine = True
+    routed = run_conversation(agent, "ping")
+    assert routed["final_response"] == "PONG"
+    assert routed["api_calls"] == 1
+    assert routed["engine"]["started"] is True
+    assert budget.remaining == 0
+    assert model.call_count == 0
+
+
+def test_started_failure_spends_the_caller_budget() -> None:
+    budget = IterationBudget(1)
+    agent = Agent(
+        model=ScriptedModel([{"role": "assistant", "content": "from-python"}]),
+        budget=budget,
+    )
+    _seal_engine_turn(
+        agent,
+        {
+            "messages": [
+                {"role": "user", "content": "ping"},
+                {"role": "assistant", "content": "engine refused: process"},
+            ],
+            "api_calls": 0,
+            "engine": {"started": True},
+            "turn_exit_reason": "process",
+            "final_response": "engine refused: process",
+        },
+        0,
+    )
+    assert budget.remaining == 0
+
+
+def test_current_request_survives_a_long_transcript() -> None:
+    history = [
+        {"role": "assistant", "content": "x" * _TRANSCRIPT_CHARS} for _ in range(30)
+    ]
+    sentinel = "CURRENT-REQUEST-SENTINEL"
+    text = _with_history(sentinel, history)
+    assert text.endswith("Current request:\n" + sentinel)
+    assert len(text) <= _PROMPT_LIMIT
+    huge = "Q" * (_PROMPT_LIMIT + 50)
+    truncated = _with_history(huge, history)
+    assert truncated == huge[:_PROMPT_LIMIT]
+
+
+def test_failed_launch_records_job_end_and_follow_stops(tmp_path: Path) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary, OMEGA_FAKE_OMP_EXIT_AFTER_READY="1")
+    result = run("ping", env=env, job_id="job-died", timeout=5)
+    assert result.ok is False
+    assert result.started is False
+    events = _events(Path(result.events_path))
+    assert events[-1]["type"] == "job_end"
+    assert events[-1]["ok"] is False
+    assert "agent_end" not in {row["type"] for row in events}
+    buf = io.StringIO()
+    started = time.monotonic()
+    code = tail(Path(result.events_path), follow=True, write=buf)
+    elapsed = time.monotonic() - started
+    assert code == 0
+    assert elapsed < 2
+    assert "job_end" in buf.getvalue()
+
+
+def test_refusal_before_the_event_file_writes_no_job_end(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-omp"
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    env = _env(tmp_path, missing)
+    env["PATH"] = str(empty)
+    result = run("ping", env=env, job_id="job-missing")
+    assert result.ok is False
+    assert result.reason == "not_configured"
+    assert result.started is False
+    assert not (tmp_path / "state" / "jobs" / "job-missing" / "events.jsonl").exists()

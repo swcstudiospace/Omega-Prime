@@ -39,6 +39,10 @@ All notable changes to this project are documented here. Format follows
 - Conversation, delegate, the prime-agent coding path, desk-lead, and
   ultrathink prefer the engine when it is ready and keep the previous
   behaviour when it is not.
+- A refusal before the prompt is sent does not spend a caller-supplied
+  iteration budget. The prompt keeps the current request when the prior
+  transcript is long. A failed launch records `job_end` so `omega watch
+  --follow` stops.
 
 #### Follow-up
 
