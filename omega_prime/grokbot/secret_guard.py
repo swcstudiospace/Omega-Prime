@@ -122,34 +122,35 @@ def _looks_like_generic_token(candidate: str) -> bool:
 
     Flags runs of 32+ token-alphabet characters with mixed character classes
     and high per-character entropy. Pure-hex digests, UUIDs, low-diversity
-    runs (padding, repeats), and git refs whose branch suffix is not a token
-    are excluded so integrity metadata in manifests and logs does not trip
-    the gate. The suffix is one string, slashes included, so a token split
-    by ``/`` still trips.
+    runs (padding, repeats), and git refs whose branch suffix and segments
+    are not tokens are excluded so integrity metadata in manifests and logs
+    does not trip the gate. The suffix is one string, slashes included, and
+    each segment is checked too: padding must not hide either one.
     """
-    if _git_ref_metadata(candidate):
-        return False
+    branch = _git_ref_branch(candidate)
+    if branch is not None:
+        suffix = "/".join(branch)
+        return _token_shape(suffix) or any(_token_shape(part) for part in branch)
     return _token_shape(candidate)
 
 
-def _git_ref_metadata(candidate: str) -> bool:
-    """True for ``refs/<kind>/<suffix>`` when the suffix is not a token.
+def _git_ref_branch(candidate: str) -> list[str] | None:
+    """Branch segments of a ``refs/<kind>/...`` candidate, or None.
 
     ``/`` belongs to the token alphabet, so ``refs/heads/<long-branch>`` is
     one candidate. The structural prefix is provenance, same as a digest.
-    The branch suffix is scanned as one string, slashes included: splitting
-    on ``/`` and checking each piece would let a token through when every
-    piece is shorter than 32 characters.
+    Callers scan the joined suffix and each segment. The joined suffix
+    catches a token split by ``/``. Each segment catches a token hidden by
+    repeated padding that pulls the whole string under the entropy cutoff.
     """
     parts = candidate.split("/")
     if len(parts) < 3 or parts[0] != "refs" or parts[1] not in _GIT_REF_KINDS:
-        return False
+        return None
     if any(part == "" for part in parts):
-        return False
+        return None
     if not all(_REF_SEGMENT_RE.fullmatch(part) for part in parts[2:]):
-        return False
-    suffix = "/".join(parts[2:])
-    return not _token_shape(suffix)
+        return None
+    return parts[2:]
 
 
 def _token_shape(candidate: str) -> bool:

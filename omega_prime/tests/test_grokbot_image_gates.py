@@ -439,6 +439,25 @@ def test_push_ref_evidence_passes_and_a_token_branch_still_refuses(
     assert "token-pattern" in str(split_caught.value)
     assert split not in str(split_caught.value)
 
+    # Repeated padding drops the joined suffix under the entropy cutoff
+    # while leaving an intact token segment. Both have to trip.
+    padded = "a" * 21 + "/" + token_branch
+    with pytest.raises(SecretLeakError) as padded_caught:
+        dump_evidence_json(
+            tmp_path / "padded.json",
+            _evidence_record(ref="refs/heads/" + padded),
+        )
+    assert "token-pattern" in str(padded_caught.value)
+    assert token_branch not in str(padded_caught.value)
+    heavier = "a" * 40 + "/" + token_branch
+    with pytest.raises(SecretLeakError) as heavier_caught:
+        dump_evidence_json(
+            tmp_path / "heavier.json",
+            _evidence_record(ref="refs/heads/" + heavier),
+        )
+    assert "token-pattern" in str(heavier_caught.value)
+    assert token_branch not in str(heavier_caught.value)
+
 
 def test_evidence_file_with_a_secret_refuses(tmp_path: Path) -> None:
     path = tmp_path / "evidence.json"
