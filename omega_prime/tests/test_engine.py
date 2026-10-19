@@ -24,7 +24,7 @@ from omega_prime.agent.delegate import delegate_task
 from omega_prime.agent.model import ScriptedModel
 from omega_prime.agent.runtime import OmegaPrimeAgent
 from omega_prime.engine.attach import _PROMPT_LIMIT, _TRANSCRIPT_CHARS, _with_history
-from omega_prime.engine.jobs import maybe_tmux
+from omega_prime.engine.jobs import append_event, maybe_tmux
 from omega_prime.engine.omp_driver import OmpSession, run, session_abort, session_steer
 from omega_prime.engine.plan_router import (
     PlanNotAllowed,
@@ -585,6 +585,16 @@ def test_current_request_survives_a_long_transcript() -> None:
     huge = "Q" * (_PROMPT_LIMIT + 50)
     truncated = _with_history(huge, history)
     assert truncated == huge[:_PROMPT_LIMIT]
+    # A request that leaves no room must not keep the prior transcript.
+    # ``s[-0:]`` is ``s``, so a zero room used to return the whole history.
+    packed = "Q" * (_PROMPT_LIMIT - len("Prior transcript:\n\n\nCurrent request:\n"))
+    capped = _with_history(packed, history)
+    assert len(capped) <= _PROMPT_LIMIT
+    assert "Prior transcript:" not in capped
+    assert capped == packed
+    tighter = _with_history(packed + "Z", history)
+    assert len(tighter) <= _PROMPT_LIMIT
+    assert "Prior transcript:" not in tighter
 
 
 def test_failed_launch_records_job_end_and_follow_stops(tmp_path: Path) -> None:
@@ -604,6 +614,28 @@ def test_failed_launch_records_job_end_and_follow_stops(tmp_path: Path) -> None:
     assert code == 0
     assert elapsed < 2
     assert "job_end" in buf.getvalue()
+
+
+def test_job_end_write_failure_still_returns_the_original_result(
+    tmp_path, monkeypatch
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary, OMEGA_FAKE_OMP_EXIT_AFTER_READY="1")
+    real = append_event
+
+    def fail_job_end(path: Path, event: dict[str, object]) -> None:
+        if event.get("type") == "job_end":
+            raise OSError("disk full")
+        real(path, event)
+
+    monkeypatch.setattr("omega_prime.engine.omp_driver.append_event", fail_job_end)
+    result = run("ping", env=env, job_id="job-full", timeout=5)
+    assert result.ok is False
+    assert result.reason != ""
+    assert result.started is False
+    events = _events(Path(result.events_path))
+    assert events
+    assert events[-1]["type"] != "job_end"
 
 
 def test_refusal_before_the_event_file_writes_no_job_end(tmp_path: Path) -> None:

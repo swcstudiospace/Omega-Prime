@@ -99,6 +99,9 @@ def _with_history(user_message: Any, conversation_history: list | None) -> str:
         return latest[:_PROMPT_LIMIT]
     header = "Prior transcript:\n"
     room = _PROMPT_LIMIT - len(header) - len(footer)
+    # ``transcript[-0:]`` is the whole string, so a full request must drop history.
+    if room <= 0:
+        return latest[:_PROMPT_LIMIT]
     transcript = "\n".join(lines)
     if len(transcript) > room:
         transcript = transcript[-room:]

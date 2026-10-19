@@ -285,11 +285,12 @@ def run(
             detail = str(getattr(exc, "detail", None) or exc)
             started = bool(getattr(exc, "started", False))
         events_path = directory / "events.jsonl"
-        if events_path.is_file():
-            append_event(
-                events_path,
-                {"type": "job_end", "ok": False, "reason": str(reason or "engine")},
-            )
+        with contextlib.suppress(OSError):
+            if events_path.is_file():
+                append_event(
+                    events_path,
+                    {"type": "job_end", "ok": False, "reason": str(reason or "engine")},
+                )
         return EngineResult(
             False,
             token,
