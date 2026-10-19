@@ -2,7 +2,7 @@
   "task_id": "ut-mvf5uq6p-aa6c2043",
   "bot": "bot-00-omega-prime",
   "started_at": "2026-10-19T11:25:00Z",
-  "completed_at": "2026-10-19T11:35:30Z",
+  "completed_at": "2026-10-19T11:50:00Z",
   "commands": [
     {
       "cmd": "git ls-tree -r --name-only main | grep -E '(^|/)\\.cursor/|^AGENTS\\.md$'; test $? -eq 1",
@@ -87,6 +87,12 @@
       "exit_code": 0,
       "duration_s": 0.004,
       "output_tail": ".cursor/rules/gotxcot-cloud-agent.mdc\n.receipts/bot-00-omega-prime/ut-mvf5uq6p-aa6c2043.json\nAGENTS.md"
+    },
+    {
+      "cmd": "python3 -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q",
+      "exit_code": 0,
+      "duration_s": 0.6,
+      "output_tail": "...............................                                          [100%]\n31 passed in 0.60s"
     }
   ],
   "claims": [
@@ -145,12 +151,16 @@
     {
       "claim": "The diff against main is only the two guidance files and this receipt",
       "evidence_command_index": 13
+    },
+    {
+      "claim": "Docs and public-repo tests still pass after the node-order clarification",
+      "evidence_command_index": 14
     }
   ],
   "unverified": [
     "approved_by is not-yet-reviewed because no reviewer has signed this receipt",
     "rule adherence by future agents",
-    "Greptile outcome \u2014 no review has been recorded for this change yet",
+    "Greptile outcome \u2014 one P2 on node order was addressed; the follow-up review is not recorded yet",
     "README.md and docs/SUMMARY.md were not edited to link AGENTS.md; that link is a follow-up so this change stays file-disjoint from the other open PRs"
   ],
   "files_changed": [

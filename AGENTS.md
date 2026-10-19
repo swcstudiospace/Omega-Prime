@@ -22,7 +22,7 @@ A prompt with several XML roots fails the test. A prompt whose `ISSUES` block la
 When the detection test passes, execute the graph that is already in the prompt:
 
 1. Read scope, out of scope, constraints, acceptance criteria, clarifications, and tracker gaps before editing.
-2. Execute `ISSUE` nodes in topological order. `dependsOn` is the order. A node with an empty `dependsOn` may start first.
+2. Execute `ISSUE` nodes in topological order using dependency data supplied in the prompt. When that data is absent, execute nodes by ascending `nodeId` (`n1`, `n2`, and so on). [gotxcot-uplift](omega_prime/skills/gotxcot-uplift/SKILL.md) only permits a dependency on an earlier id.
 3. Execute each node's numbered `SUBISSUE` steps in order. The steps are the plan. Do not replace them with a new graph.
 4. Keep tracker identifiers out of committed guidance files. They belong in commit trailers and the PR body.
 
