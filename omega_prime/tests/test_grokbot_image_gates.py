@@ -11,6 +11,7 @@ counts are pinned here.
 from __future__ import annotations
 
 import json
+import string
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,7 @@ from omega_prime.grokbot.image_gates import (
     PublishGateEvidence,
     admit_conformance_report,
     archive_checksum_matches,
+    dump_evidence_json,
     evaluate_publish_gate,
     image_id_matches,
     load_evidence_json,
@@ -396,6 +398,20 @@ def test_evidence_file_with_wrong_schema_refuses(tmp_path: Path) -> None:
     path.write_text(json.dumps(record), encoding="utf-8")
     with pytest.raises(EvidenceError):
         load_evidence_json(path)
+
+
+def test_long_branch_ref_roundtrips_through_the_evidence_gate(tmp_path: Path) -> None:
+    """Push events record refs/heads/<branch>. A long name is not a secret."""
+    ref = "refs/heads/cursor/publish-template-gaps-5913"
+    path = dump_evidence_json(tmp_path / "evidence.json", _evidence_record(ref=ref))
+    assert load_evidence_json(path)["ref"] == ref
+
+
+def test_token_shaped_branch_component_refuses(tmp_path: Path) -> None:
+    component = string.ascii_lowercase + string.digits
+    record = _evidence_record(ref="refs/heads/" + component)
+    with pytest.raises(SecretLeakError):
+        dump_evidence_json(tmp_path / "evidence.json", record)
 
 
 def test_evidence_file_with_a_secret_refuses(tmp_path: Path) -> None:
