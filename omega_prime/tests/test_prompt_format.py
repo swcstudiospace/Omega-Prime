@@ -22,6 +22,15 @@ def test_repo_prompts_conform_to_xml_standard() -> None:
     assert check(REPO_ROOT) == []
 
 
+def test_assembled_prompt_is_one_xml_document() -> None:
+    path = REPO_ROOT / "omega_prime" / "prompts-assembled" / "OMEGA_PRIME.xml"
+    text = path.read_text(encoding="utf-8")
+    assert text.count("<?xml") == 1
+    element = ET.parse(path).getroot()
+    assert element.tag == "omega_prime"
+    assert [child.tag for child in element][:2] == ["core_directives", "agent"]
+
+
 def test_unwrapped_skill_body_is_named(tmp_path: Path) -> None:
     skill = tmp_path / "omega_prime" / "skills" / "bad-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)

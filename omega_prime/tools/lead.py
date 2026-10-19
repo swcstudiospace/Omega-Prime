@@ -999,19 +999,8 @@ class LeadClient:
             else "substrate is not configured",
         }
         green = all(c["green"] for c in checks.values())
-        if self.ctx.roster is not None:
-            outcome: dict[str, Any] = {
-                "green": green,
-                "checks": {k: v["green"] for k, v in checks.items()},
-            }
-            # Preserve the installed expected prompt digest: a check must
-            # never erase its own prerequisite, and the expected value is
-            # only ever set by install_prompt/repair from rendered bytes —
-            # never derived from a caller-supplied claim.
-            prior_expected = expected.get("expected_prompt_sha256")
-            if prior_expected is not None:
-                outcome["expected_prompt_sha256"] = prior_expected
-            self.ctx.roster.doctor_result("lead", outcome)
+        # check is ungated and must not write the roster. install_prompt and
+        # repair are the actions that record expected_prompt_sha256.
         return {"green": green, "seat": "Omega Prime", "checks": checks}
 
     def intake_next(self, origin: str | None = None) -> dict[str, Any]:
@@ -1473,7 +1462,8 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
         ),
     ),
     "lead_doctor": (
-        "Check, register, or repair seat integrity. Requires approval.",
+        "Check seat integrity (read-only). register, install_prompt, and "
+        "repair still require a human approval.",
         _object(
             {
                 "action": _string("check, register, install_prompt, or repair."),

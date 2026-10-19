@@ -1,4 +1,8 @@
-"""Episodic memory against the Railway Hindsight service.
+"""Episodic memory against a configured Hindsight service.
+
+The base URL defaults to empty, which means the remote bank is disabled.
+Callers pass ``HINDSIGHT_URL`` when they operate their own service. There is
+no hosted default.
 
 ``HindsightService`` speaks the hindsight-api bank routes — retain, recall,
 reflect, knowledge-page search — on the shared ``ultrathink`` bank. The
@@ -18,7 +22,7 @@ from omega_prime.memory.hindsight import _check_bank
 from omega_prime.providers.http import HttpTransport
 
 DEFAULT_BANK = "ultrathink"
-DEFAULT_BASE_URL = "https://hindsight-api-production-014d.up.railway.app"
+DEFAULT_BASE_URL = ""
 
 _HINDSIGHT_PROVIDER = SimpleNamespace(
     name="hindsight",

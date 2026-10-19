@@ -7,9 +7,13 @@ gates: []
 <skill name="ragflow-docs" version="1">
 # RAGFlow Docs
 
+## Served tools
+
+Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+
 ## When this applies (L1)
 
-`desk_docs_search` searches the desk's document datasets in RAGFlow and returns chunks, each with
+`lead_docs_search` searches the desk's document datasets in RAGFlow and returns chunks, each with
 a source path and the commit it was ingested from. **Docs search finds where; the file is the
 fact.** A chunk is not a repository fact until you have opened the file it points to (PD-1). The
 index is rebuilt on merge to `main`, so a chunk can lag the file, and a chunk is a fragment with
@@ -19,15 +23,14 @@ its surroundings removed.
 Need something from the docs?
 │
 ├─ You know the file ──▶ Open it. Search adds nothing. §3
-├─ You know the topic, not the file ──▶ desk_docs_search → open the file at the cited commit. §3
+├─ You know the topic, not the file ──▶ lead_docs_search → open the file at the cited commit. §3
 ├─ The ticket names a repo ──▶ Pass repo: so the product dataset is searched too. §2
 ├─ About to quote or cite ──▶ Cite path + commit from the result, quote from the file. §4
 ├─ Search returned nothing ──▶ Absence from the index is not absence from the repo. Grep or open. §5
 └─ Empty result with a reason ──▶ Fail-open. Note the reason; fall back to the file. §5
 ```
 
-Datasets: `programming-desk`, `agent-substrate`, `agent-skills`, and one per product repo
-(KanbanOS, Desk Lanes, ClippyOS, Auctioning). Receipts, secrets and transcripts are never
+Datasets: `{{RAGFLOW_DATASET_DESK}}`, `{{RAGFLOW_DATASET_SUBSTRATE}}`, `{{RAGFLOW_DATASET_SKILLS}}`, and one dataset per product repo (`{{RAGFLOW_DATASET_PRODUCT}}`). Receipts, secrets and transcripts are never
 ingested, so do not look for them here.
 
 ---
@@ -50,18 +53,18 @@ Each hit is a chunk: a heading-bounded slice of a Markdown, YAML or XML file, wi
 
 | Dataset | Contents | Search when |
 |---|---|---|
-| `programming-desk` | This repo: `docs/`, `skills/`, `contracts/`, `prompts/`, ADRs | Desk policy, gates, rosters, skills |
-| `agent-substrate` | Substrate docs: data planes, tailnet, MCP server, planning | Memory, events, docs plane, VPS services |
-| `agent-skills` | The shared skills library other agents mine into | A technique another team already documented |
+| `{{RAGFLOW_DATASET_DESK}}` | This repo: `docs/`, `skills/`, `contracts/`, `prompts/`, ADRs | Desk policy, gates, rosters, skills |
+| `{{RAGFLOW_DATASET_SUBSTRATE}}` | Substrate docs: data planes, tailnet, MCP server, planning | Memory, events, docs plane, VPS services |
+| `{{RAGFLOW_DATASET_SKILLS}}` | The shared skills library other agents mine into | A technique another team already documented |
 | `<product>` | One per product repo | Product behaviour, release notes, API docs for the ticket's app |
 
-`desk_docs_search` always searches `programming-desk` and `agent-substrate`. Pass `repo` (for
+`lead_docs_search` always searches `{{RAGFLOW_DATASET_DESK}}` and `{{RAGFLOW_DATASET_SUBSTRATE}}`. Pass `repo` (for
 example `swcstudiospace/kanbanos`) to add the product dataset the ticket names. Without it, a
 KanbanOS question is answered from desk docs alone and the miss looks like absence.
 
 ### §3 Search, open, then use
 
-1. `desk_docs_search {query, repo?, limit?}`. Keep `query` a phrase, not a keyword soup; the
+1. `lead_docs_search {query, repo?, limit?}`. Keep `query` a phrase, not a keyword soup; the
    retriever is semantic plus BM25 and does better with "how a receipt records a failing
    reproduction" than with "receipt fail".
 2. Read the hits for `source` and `commit`. Pick the file, not the sentence.
@@ -81,6 +84,9 @@ docs/quality-gates.md @ 3b9e1c2 §G-5 — "A plan names the command, the recover
 data implications."
 ```
 
+`docs/quality-gates.md` in that example is the programming-desk copy:
+`https://github.com/swcstudiospace/programming-desk/blob/main/docs/quality-gates.md`.
+
 - `path @ commit` comes from the search result; the quoted text comes from the file at that
   commit (or at `main`, stated as such).
 - Never quote a chunk as if it were the current file. If you only have the chunk, say "per the
@@ -95,7 +101,7 @@ transcripts, uncommitted branches, or anything merged since the last ingest. A m
 means "not indexed", never "does not exist". Fall back to grep on the checkout or to opening the
 likely file.
 
-`desk_docs_search` is a `read` tool: on an upstream failure it returns an empty result with a
+`lead_docs_search` is a `read` tool: on an upstream failure it returns an empty result with a
 `reason` (`skills/desk-gateway` §2). Record the reason if it affected the work, and proceed from
 the files. The docs plane down is an inconvenience; a claim built on its silence is a defect.
 
@@ -106,31 +112,36 @@ the files. The docs plane down is an inconvenience; a claim built on its silence
 **Good — SYSTEMS needs the intake queue's idempotency window.**
 
 ```
-desk_docs_search {query: "how long processed idempotency keys are kept for desk intake"}
-→ hit: docs/handoff-contracts.md @ a41f… (programming-desk), score 0.82
-→ hit: docs/upgrade-plan-desk-v2.md @ c07d… (programming-desk), score 0.79
+lead_docs_search {query: "how long processed idempotency keys are kept for desk intake"}
+→ hit: docs/handoff-contracts.md @ a41f… ({{RAGFLOW_DATASET_DESK}}), score 0.82
+→ hit: docs/upgrade-plan-desk-v2.md @ c07d… ({{RAGFLOW_DATASET_DESK}}), score 0.79
 git show a41f…:docs/handoff-contracts.md   → "processed keys are retained for 30 days"
 git show origin/main:docs/handoff-contracts.md → same line
 Cites: docs/handoff-contracts.md @ a41f… — "retained for 30 days"
 ```
 
+Those paths live in the programming-desk repository
+(`https://github.com/swcstudiospace/programming-desk/blob/main/docs/handoff-contracts.md`,
+`https://github.com/swcstudiospace/programming-desk/blob/main/docs/upgrade-plan-desk-v2.md`).
+Open the file the hit names. Do not treat the URL as a git path.
+
 **Bad — same question.**
 
 ```
-desk_docs_search {query: "idempotency"}
+lead_docs_search {query: "idempotency"}
 → first hit chunk: a table row mentioning "idempotency_key ... optional"
 Seat writes: "Per the docs, the idempotency key is optional for intake."
 ```
 
 The top chunk was the agent-bus tool table in `skills/trackplan-dispatch`, which describes a
-different component's optional argument; the intake contract in `docs/handoff-contracts.md` was
+different component's optional argument; the intake contract in `https://github.com/swcstudiospace/programming-desk/blob/main/docs/handoff-contracts.md` was
 the second hit. The seat quoted a fragment about the wrong system as a fact about the queue.
 Opening either file would have shown the mismatch in one glance.
 
 **Bad — a miss read as absence.**
 
 ```
-desk_docs_search {query: "kanbanos push notification test device labels"}   (no repo passed)
+lead_docs_search {query: "kanbanos push notification test device labels"}   (no repo passed)
 → 0 hits
 Seat writes: "There is no documentation of test device labels."
 ```

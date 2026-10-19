@@ -28,7 +28,7 @@ appears under `omega_prime/`.
 | --- | --- | --- |
 | `SUBSTRATE_URL` | substrate-mcp base URL (must be an `http`/`https` URL) | `http://127.0.0.1:7410` |
 | `SUBSTRATE_TOKEN` | bearer token (or `SUBSTRATE_TOKEN_GROK_BOT`) | — |
-| `HINDSIGHT_URL` | hindsight-api base URL | `https://hindsight-api-production-014d.up.railway.app` |
+| `HINDSIGHT_URL` | hindsight-api base URL | unset, which disables the remote bank. Set your own `http`/`https` URL to enable it. There is no hosted default. |
 | `HINDSIGHT_API_KEY` | bearer token (or `HINDSIGHT_API_TOKEN`) | — |
 
 Auth resolution order in `omega_prime/substrate/client.py`: an explicitly

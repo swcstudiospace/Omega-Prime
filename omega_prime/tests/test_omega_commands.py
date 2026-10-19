@@ -266,7 +266,8 @@ def test_real_doctor_extra_context_runs_a_missing_check(tmp_path: Path) -> None:
     assert body["result"]["green"] is False, body
 
 
-def test_real_doctor_context_cannot_bypass_approval(tmp_path: Path) -> None:
+def test_real_doctor_check_runs_without_a_grant(tmp_path: Path) -> None:
+    """The read-only check is ungated. A write still needs a human grant."""
     registry, env = _real_registry(tmp_path)
     body = execute_command(
         "/omega-doctor",
@@ -275,7 +276,17 @@ def test_real_doctor_context_cannot_bypass_approval(tmp_path: Path) -> None:
         doctor_context={"prompt_sha256": "abc", "installed_skills": ["lead-pack"]},
     )
     assert body["ok"] is False, body
-    assert body["result"]["error"] == "approval required", body
+    assert body["error"] == "doctor_failed", body
+    assert body["result"].get("error") != "approval required"
+    assert body["result"].get("green") is False
+    denied = json.loads(
+        registry.dispatch(
+            "lead_doctor",
+            {"action": "register", "agent_uuid": "phase-75-09-seat"},
+        )
+    )
+    assert denied["error"] == "approval required", denied
+    assert denied["tool"] == "lead_doctor"
 
 
 def test_real_desk_without_context_stays_incomplete(tmp_path: Path) -> None:

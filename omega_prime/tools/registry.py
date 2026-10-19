@@ -5,7 +5,9 @@ schema for its parameters, and a handler. ``dispatch`` always returns a JSON str
 An unknown name becomes a JSON error and does not raise. Handlers return
 JSON-serializable objects, which this module encodes, or a JSON string, which is
 returned unchanged. A tool marked ``requires_approval`` does not run until the
-registry's approval log has approved that name.
+registry's approval log has approved that name. ``lead_doctor`` with action
+``check`` (the default) is the read-only diagnostic exception: the mutating
+actions stay gated, and nothing here can grant an approval.
 """
 
 from __future__ import annotations
@@ -104,7 +106,11 @@ class ToolRegistry:
             self._record(name, "denied", reason="policy forbids")
             return _dump({"error": f"policy forbids {name}", "tool": name})
         try:
-            if tool.requires_approval and not _has_approval(self._approval_log, name):
+            if (
+                tool.requires_approval
+                and not _read_only_diagnostic(name, arguments)
+                and not _has_approval(self._approval_log, name)
+            ):
                 self._record(name, "denied", reason="approval required")
                 return _dump({"error": "approval required", "tool": name})
             payload = _call(tool.handler, _arguments(arguments))
@@ -182,6 +188,23 @@ def _schema(tool: _Tool) -> dict:
 
 def _dump(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _read_only_diagnostic(name: str, arguments: Any) -> bool:
+    """True for a gated tool's read-only action. Writes stay gated.
+
+    ``lead_doctor`` ``check`` is what ``/omega-doctor`` and the doctor step of
+    ``/omega-desk`` run. ``register``, ``install_prompt`` and ``repair`` are
+    not exempt. A missing action is ``check``. Any other shape stays gated.
+    """
+    if name != "lead_doctor":
+        return False
+    if arguments is None:
+        return True
+    if not isinstance(arguments, dict):
+        return False
+    action = arguments.get("action", "check")
+    return action == "check"
 
 
 def _has_approval(log: Any, name: str) -> bool:

@@ -38,10 +38,16 @@ build/
 # Subagent-driven-development scratch
 .superpowers/
 
- # Runtime artifacts (created on runs, never committed)
- omega_prime/sessions.db
- .substrate/
- .omega-evals/
+# Runtime artifacts (created on runs, never committed).
+# omega_prime/memory/ is the Python package, not a data directory.
+# A host with OMEGA_PRIME_STATE_DIR writes notes under that directory.
+# These two names are what a state-dir-less run would drop beside the package.
+omega_prime/sessions.db
+omega_prime/state/
+omega_prime/memory/MEMORY.md
+omega_prime/memory/USER.md
+.substrate/
+.omega-evals/
 
 # Prime family state the tool host writes under --root (docs/driving-the-bot.md)
 /goals/

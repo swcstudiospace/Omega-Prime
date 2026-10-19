@@ -93,7 +93,7 @@ ROOT_PLUGIN_SET = (
     LOCK_REL,
     HTTPS_EXAMPLE,
 )
-EXPECTED_COMMANDS = 61
+EXPECTED_COMMANDS = 62
 SKILL_COMMAND = "omega-code-review"
 GITLINK, SYMLINK = "160000", "120000"
 FIRST_REPLY_TIMEOUT = 300.0
@@ -514,7 +514,7 @@ def test_overlay_is_the_tracked_working_tree(fresh_clone: FreshClone) -> None:
 def test_declared_command_answers_help_and_a_generated_skill(
     fresh_clone: FreshClone,
 ) -> None:
-    """R22 + R24: early initialize, /omega-help (61) and /omega-code-review."""
+    """R22 + R24: early initialize, /omega-help (62) and /omega-code-review."""
     tree = fresh_clone
     raw, argv = tree.declared()
     assert sum(part.count(PLUGIN_ROOT_VAR) for part in raw) == 1

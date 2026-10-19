@@ -24,13 +24,15 @@ pushed your own copy:
 <task name="setup-omega-prime" version="1">
 <goal>Set up Omega Prime on your own computer.</goal>
 <steps>
-<step n="1">In your shell: git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git /workspace/omega-prime</step>
-<step n="2">bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap-only
+<step n="1">In your shell: git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/omes-bot.git /workspace/omes-bot
+No release tag is published yet, so <release-tag> is the placeholder. Do not clone main. Substitute the tag when one exists.</step>
+<step n="2">bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --bootstrap-only
+Then bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --verify --json
 Wait for exit 0. On exit 10, 11 or 12, show me the JSON class line it
 printed on stderr and stop.</step>
 <step n="3">Add a custom MCP server of type Command, named omega-prime, with no
 environment variables, running exactly:
-bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio
+bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio
 If you cannot add MCP servers yourself, tell me that exact command so I
 can add it in your settings.</step>
 <step n="4">Check that the omega-prime server lists the omega_command tool, then call
@@ -42,11 +44,14 @@ omega_command with the command /omega-help and show me the result.</step>
 
 What each step does:
 
-1. A recursive clone into the Bot's durable `/workspace` populates the
-   pinned submodules. The launcher resolves the repository from its own
-   location, so the server command needs only the clone's absolute path.
+1. A recursive clone of a pinned release tag into the Bot's durable
+   `/workspace` populates the pinned submodules. No git tag is published
+   yet (checked 2026-10-19), so the prompt's `<release-tag>` is a
+   placeholder and `main` is not the pin. The launcher resolves the
+   repository from its own location, so the server command needs only
+   the clone's absolute path.
 2. `--bootstrap-only` runs the bootstrap ahead of time and exits 0: a locked
-   install into `/workspace/omega-prime/.venv` from `requirements-lock.txt`,
+   install into `/workspace/omes-bot/.venv` from `requirements-lock.txt`,
    the `prime-agent` submodule only, and the generated plugin `--check`.
    Running it first means the MCP server's first start finds a matching
    completion stamp and skips the install. Failures exit 10
@@ -57,7 +62,7 @@ What each step does:
 3. The server command is the root `mcp.json` entry,
    `bash ${CURSOR_PLUGIN_ROOT}/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`,
    with `${CURSOR_PLUGIN_ROOT}` replaced by the absolute path
-   `/workspace/omega-prime`. It carries no `env` and nothing credential-shaped,
+   `/workspace/omes-bot`. It carries no `env` and nothing credential-shaped,
    because a Command server with environment variables or credential-looking
    arguments runs only in the owner's own chat. `--bootstrap` reruns the
    bootstrap on every start (only an import probe and the plugin `--check`
@@ -133,6 +138,39 @@ skill library may persist until you remove it (UNPROVEN, user UAT row 4).
 Whether a live Bot follows this contract, and whether `/omega-*` entries
 appear natively in its `/` menu, is user UAT row 4.
 
+## Install configuration
+
+Skills shipped in this repository do not contain a person's name, a VPS
+address, a device, an approval id, or this install's Railway, Tailscale,
+or RAGflow names. Fill the placeholders for your install and keep the
+values out of git:
+
+| Placeholder | Used by | What to put |
+| --- | --- | --- |
+| `REMOTE_DEV_USER`, `REMOTE_DEV_HOST` | `skills/remote-dev-machine` | SSH user and host. No address is shipped. |
+| `ADMIN_DEVICES` | `skills/railway-tailscale` | Machines that carry `tag:admin`. |
+| `RAGFLOW_DATASET_DESK`, `RAGFLOW_DATASET_SUBSTRATE`, `RAGFLOW_DATASET_SKILLS`, `RAGFLOW_DATASET_PRODUCT` | `skills/ragflow-docs` | Dataset names `lead_docs_search` should query. |
+| `RAILWAY_PROJECT`, `RAILWAY_SERVICE`, `TAILSCALE_FORWARDER_DATA`, `TAILSCALE_FORWARDER_APPS`, and the `RAILWAY_*_HOST` names | `skills/railway-tailscale`, `skills/desk-gateway` | This install's project, service, and forwarder names. |
+| `APPROVAL_ID` | gated infra and web tools | A new recorded approval for the change in front of you. |
+| `NOTION_TASK_GRAPH_COLLECTION` | `skills/trackplan-dispatch` | The Notion collection URL for task graphs. |
+| `AGENT_DATA_DIR` | `skills/desk-bootstrap` | Directory that holds `agents/<uuid>/`. |
+
+Call the person running the install "the operator".
+
+Weekday routines a new install can create, each prompt calling
+`omega_command` (see `grokbot/templates/OMEGA_PRIME.md`):
+
+| Routine | Command | Suggested cron |
+| --- | --- | --- |
+| desk-lead | `/omega-desk-lead` | `15 9 * * 1-5` |
+| ultrathink | `/omega-ultrathink-routine` | `30 9 * * 1-5` |
+| sweep (drafts only, never publishes) | `/omega-sweep` | `0 16 * * 1-5` |
+| nightly | `/omega-nightly` | `0 18 * * 1-5` |
+
+The same entry points run in a shell: `python -m omega_prime.routines.desk_lead`,
+`python -m omega_prime.routines.ultrathink_turn`, `python -m omega_prime.routines.sweep`,
+and `python -m omega_prime.routines.nightly`.
+
 ## 2. Secrets
 
 Omega Prime never asks for secrets in chat. Add each value where the
@@ -140,13 +178,16 @@ connector asks for it (Grok Bot settings or your host's env):
 
 | Secret | Needed for | Where it goes |
 | --- | --- | --- |
-| `XAI_API_KEY` | Grok model calls outside Grok Bot | host env, resolved via the credential broker |
-| `X_API_TOKEN` | X connector tools | host env, read by the tool host |
-| `TELEGRAM_BOT_TOKEN` | Telegram connector tools | host env, read by the tool host |
-| `DISCORD_BOT_TOKEN` | Discord connector tools | host env, read by the tool host |
-| GitHub token | Greptile reviews, ship PRs | host via `gh auth` |
-| `SUBSTRATE_TOKEN` | Substrate brief/events/memory (surface grok-bot) | host env, resolved via the credential broker |
-| `HINDSIGHT_API_KEY` | Shared Hindsight episodic memory | host env, resolved via the credential broker |
+| `XAI_API_KEY` | Grok model calls outside Grok Bot | host env, `XAI_API_KEY_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/XAI_API_KEY` (mode 0600). Same `*_FILE` rule for `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` |
+| `X_API_TOKEN` | X connector tools | host env, `X_API_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/X_API_TOKEN` (mode 0600) |
+| `TELEGRAM_BOT_TOKEN` | Telegram connector tools | host env, `TELEGRAM_BOT_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/TELEGRAM_BOT_TOKEN` (mode 0600) |
+| `DISCORD_BOT_TOKEN` | Discord connector tools | host env, `DISCORD_BOT_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/DISCORD_BOT_TOKEN` (mode 0600) |
+| GitHub CLI | Greptile reviews, ship PRs | `gh auth login`, or `GH_TOKEN` in the environment of the process that runs `gh`. `gh` does not read `GH_TOKEN_FILE` or `$OMEGA_PRIME_STATE_DIR/secrets/GH_TOKEN` |
+| `SUBSTRATE_TOKEN` | Substrate brief/events/memory (surface grok-bot) | host env, `SUBSTRATE_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/SUBSTRATE_TOKEN` (mode 0600). `SUBSTRATE_TOKEN_GROK_BOT` uses the same rule |
+| `HINDSIGHT_API_KEY` | Shared Hindsight episodic memory, only after `HINDSIGHT_URL` is set | host env, `HINDSIGHT_API_KEY_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/HINDSIGHT_API_KEY` (mode 0600). `HINDSIGHT_API_TOKEN` uses the same rule |
+| `RAILWAY_TOKEN` | Railway status and logs | host env, `RAILWAY_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/RAILWAY_TOKEN` (mode 0600) |
+| `VERCEL_TOKEN` | Vercel deployments | host env, `VERCEL_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/VERCEL_TOKEN` (mode 0600) |
+| `GREPTILE_API_KEY` | Greptile review and knowledge-base sync | host env, `GREPTILE_API_KEY_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/GREPTILE_API_KEY` (mode 0600). `GREPTILE_GITHUB_TOKEN` uses the same rule |
 | `MCP_AUTH_TOKEN` | Bearer token Grok Bot presents to a remote tool host (HTTPS alternative only; the stdio Command entry needs none) | host env or a 0600 `--token-file` (never argv); on the Bot, a Remote HTTPS Bot secret |
 | `NOTION_TOKEN` | Notion Task dashboard. Read, update, and insert content on the duplicated database only. | host env, or a mode 0600 file named by `NOTION_TOKEN_FILE` |
 | `LINEAR_API_KEY` | Linear team and issue actions for this install | host env, or a mode 0600 file named by `LINEAR_API_KEY_FILE` |
@@ -156,8 +197,9 @@ template (`docs/notion-task-dashboard.md`), the Notion connection, the
 Linear team, and an optional gateway. Reply with the verb it asks for.
 Unset gateways are a valid steady state after you reply `skip-gateway`.
 
-`SUBSTRATE_URL` (default `http://127.0.0.1:7410`) and `HINDSIGHT_URL`
-(default the Railway hindsight-api) override where those two clients point.
+`SUBSTRATE_URL` (default `http://127.0.0.1:7410`) overrides the substrate
+client. `HINDSIGHT_URL` defaults to unset, which disables the remote bank.
+Set it only to a service you operate. It has no hosted default.
 
 Configure only the integrations you intend to use. Failure behavior is
 operation-specific: some tools return `not_configured`, some refuse or return

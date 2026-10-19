@@ -19,7 +19,17 @@ _DOCTOR_CONTEXT_KEYS = ("prompt_sha256", "installed_skills")
 
 SEED_PATH = Path(__file__).resolve().parent / "seeds" / "memory.txt"
 HINDSIGHT_PREFIX = "[hindsight:omega-prime-lead] "
-WORKFLOW_NAMES = ("onboard", "python-clean", "connectors", "desk")
+WORKFLOW_NAMES = (
+    "onboard",
+    "python-clean",
+    "connectors",
+    "desk",
+    "nightly",
+    "sweep",
+    "ultrathink",
+    "desk-lead",
+)
+_ROUTINE_LOCALS = ("nightly", "sweep", "ultrathink", "desk-lead")
 
 
 def validated_doctor_context(value: Any) -> dict[str, Any]:
@@ -57,55 +67,55 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "id": "x",
         "env": ("X_API_TOKEN",),
         "mode": "all",
-        "ask": "Set X_API_TOKEN on the host so the X connector can read mentions. Do not paste it into chat.",
+        "ask": "Set X_API_TOKEN, X_API_TOKEN_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/X_API_TOKEN (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "telegram",
         "env": ("TELEGRAM_BOT_TOKEN",),
         "mode": "all",
-        "ask": "Set TELEGRAM_BOT_TOKEN on the host so the Telegram connector can read updates. Do not paste it into chat.",
+        "ask": "Set TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_TOKEN_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/TELEGRAM_BOT_TOKEN (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "discord",
         "env": ("DISCORD_BOT_TOKEN",),
         "mode": "all",
-        "ask": "Set DISCORD_BOT_TOKEN on the host so the Discord connector can read messages. Do not paste it into chat.",
+        "ask": "Set DISCORD_BOT_TOKEN, DISCORD_BOT_TOKEN_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/DISCORD_BOT_TOKEN (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "delegate",
         "env": ("XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
         "mode": "any",
-        "ask": "Set one of XAI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY on the host so /omega-delegate can run a child. Do not paste it into chat.",
+        "ask": "Set one delegate key (XAI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY), its *_FILE variant, or the matching file under $OMEGA_PRIME_STATE_DIR/secrets/ (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "substrate",
         "env": ("SUBSTRATE_TOKEN", "SUBSTRATE_TOKEN_GROK_BOT"),
         "mode": "any",
-        "ask": "Set SUBSTRATE_TOKEN or SUBSTRATE_TOKEN_GROK_BOT on the host so briefs and events can reach substrate. Do not paste it into chat.",
+        "ask": "Set SUBSTRATE_TOKEN or SUBSTRATE_TOKEN_GROK_BOT, the matching *_FILE variable, or the file under $OMEGA_PRIME_STATE_DIR/secrets/ (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "hindsight",
         "env": ("HINDSIGHT_API_KEY", "HINDSIGHT_API_TOKEN"),
         "mode": "any",
-        "ask": "Set HINDSIGHT_API_KEY or HINDSIGHT_API_TOKEN on the host for the shared episodic bank. Do not paste it into chat.",
+        "ask": "Set HINDSIGHT_API_KEY or HINDSIGHT_API_TOKEN, the matching *_FILE variable, or the file under $OMEGA_PRIME_STATE_DIR/secrets/ (mode 0600). HINDSIGHT_URL stays unset until you run your own service. Do not paste a secret into chat.",
     },
     {
         "id": "railway",
         "env": ("RAILWAY_TOKEN",),
         "mode": "all",
-        "ask": "Set RAILWAY_TOKEN on the host for Railway status and logs. Do not paste it into chat.",
+        "ask": "Set RAILWAY_TOKEN, RAILWAY_TOKEN_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/RAILWAY_TOKEN (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "greptile",
         "env": ("GREPTILE_API_KEY",),
         "mode": "all",
-        "ask": "Set GREPTILE_API_KEY on the host for Greptile review. Do not paste it into chat.",
+        "ask": "Set GREPTILE_API_KEY, GREPTILE_API_KEY_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/GREPTILE_API_KEY (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "vercel",
         "env": ("VERCEL_TOKEN",),
         "mode": "all",
-        "ask": "Set VERCEL_TOKEN on the host for Vercel deployments. Do not paste it into chat.",
+        "ask": "Set VERCEL_TOKEN, VERCEL_TOKEN_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/VERCEL_TOKEN (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "play",
@@ -258,7 +268,39 @@ def _workflows(
             Step("lead_intake_next", False, tool="lead_intake_next", arguments={}),
         ),
         "connectors": (Step("connectors", False, local="connectors"),),
+        "nightly": (Step("nightly_pass", True, local="nightly"),),
+        "sweep": (Step("sweep_mentions", True, local="sweep"),),
+        "ultrathink": (Step("resolve_turn_plan", True, local="ultrathink"),),
+        "desk-lead": (Step("run_lead_pass", True, local="desk-lead"),),
     }
+
+
+def _run_routine(name: str, env: Mapping[str, str], registry: Any) -> dict[str, Any]:
+    """Run one routine in-process. Sweep cannot publish from this path.
+
+    Sweep mentions go through ``x_mentions`` on ``registry``. A denied read
+    is the result; the routine does not open its own X client.
+    """
+    try:
+        if name == "nightly":
+            from omega_prime.routines.nightly import execute_nightly
+
+            return execute_nightly(env)
+        if name == "sweep":
+            from omega_prime.routines.sweep import execute_sweep
+
+            return execute_sweep(env, registry=registry)
+        if name == "ultrathink":
+            from omega_prime.routines.ultrathink_turn import execute_ultrathink
+
+            return execute_ultrathink(env)
+        if name == "desk-lead":
+            from omega_prime.routines.desk_lead import execute_desk_lead
+
+            return execute_desk_lead(env, registry=registry)
+    except Exception as exc:
+        return {"error": "routine_failed", "reason": f"{type(exc).__name__}: {exc}"}
+    return {"error": "routine_failed", "reason": f"unknown routine {name}"}
 
 
 def _run_step(step: Step, registry: Any, env: Mapping[str, str]) -> dict[str, Any]:
@@ -267,6 +309,8 @@ def _run_step(step: Step, registry: Any, env: Mapping[str, str]) -> dict[str, An
             return seed_memory(registry)
         if step.local == "connectors":
             return connector_requests(env)
+        if step.local in _ROUTINE_LOCALS:
+            return _run_routine(step.local, env, registry)
         if step.tool is None:
             return {"error": "dispatch_failed", "reason": "step has no tool"}
         return dispatch_tool(registry, step.tool, step.arguments or {})
@@ -328,8 +372,9 @@ def _present(env: Mapping[str, str], names: tuple[str, ...], mode: str) -> bool:
 
 
 def _filled(env: Mapping[str, str], name: str) -> bool:
-    value = env.get(name)
-    return isinstance(value, str) and value.strip() != ""
+    from omega_prime.integrations.binding import secret_configured
+
+    return secret_configured(env, name)
 
 
 __all__ = [

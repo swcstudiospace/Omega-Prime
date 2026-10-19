@@ -7,6 +7,10 @@ gates: [G-5, G-6, G-7]
 <skill name="desk-gateway" version="1">
 # Desk Gateway
 
+## Served tools
+
+Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+
 ## Omega Prime adaptation
 
 Omega Prime has no Desk Gateway: tools come from the in-process registry
@@ -29,8 +33,8 @@ Calling a gateway tool?
 ├─ Is it in your tools/list right now?      NO ──▶ It does not exist for you. Ask LEAD. §1
 ├─ kind: read?  Empty result + reason ──▶ Fail-open. Record the reason; do not treat empty as "none". §2
 ├─ kind: write? Error ──▶ Fail-closed. Nothing happened. One retry only if the reason says so. §2
-├─ gates: [g5]? ──▶ rollback_plan + approval_id required (PD-5). §3
-├─ gates: [g6]? ──▶ approval_id required; echoed into the audit event. §3
+├─ gates: [g5]? ──▶ External gateway: rollback_plan + approval_id on the call (PD-5). Served tool: those fields stay on the receipt. §3
+├─ gates: [g6]? ──▶ External gateway: approval_id on the call. Served tool: receipt only. §3
 ├─ Took > 20 s? ──▶ The call was cut. Bound the inputs and split the work. §4
 ├─ 403? ──▶ Wrong seat endpoint. Stop. Tell LEAD. §5
 ├─ not_configured? ──▶ Upstream credential not provided. `unverified`, no browser workaround. §5
@@ -71,17 +75,23 @@ receipt; do not guess at the cause.
 
 | Tag | Required inputs | Where they come from |
 |---|---|---|
-| `g5` | `rollback_plan`, `approval_id` | The plan is yours and must satisfy G-5 (command, recovery time, data implications). The approval id is a recorded human approval, obtained the way `core-directives` routes it: build seats ask in the group or via LEAD; LEAD surfaces it to Ove |
+| `g5` | `rollback_plan`, `approval_id` | The plan is yours and must satisfy G-5 (command, recovery time, data implications). The approval id is a recorded human approval, obtained the way `core-directives` routes it: build seats ask in the group or via LEAD; LEAD surfaces it to the operator |
 | `g6` | `approval_id` | Same approval path. The id is echoed into the audit event, which is how the receipt and the event log agree |
 
 An `approval_id` is a reference to an approval that exists. Typing a plausible string to satisfy
 the schema is a PD-5 breach with an audit trail attached to it. If you do not have one, you do
 not make the call.
 
-Tools carrying these tags today: `desk_vercel_promote` (g5), `desk_vercel_rollback` (g5),
-`desk_railway_redeploy` (g5), `desk_play_staged_rollout` (g5 g6), `desk_play_halt_rollout` (g6),
-`desk_appstore_phased_release` (g5 g6), `desk_appstore_pause_release` (g6). Your roster file is
-authoritative if this list drifts.
+On an external gateway, `g5` and `g6` fields are tool arguments. On the served Omega Prime
+registry they are not. `infra_railway_redeploy` accepts only `project`, `service`, and
+`prior_deployment_id`. Put `approval_id` and `rollback_plan` on the receipt. The registry
+rejects any other argument (`additionalProperties: false`). The host approval log still gates
+that tool; the id is not an argument.
+
+Tools carrying these tags on an external gateway today: `web_vercel_promote` (g5),
+`web_vercel_rollback` (g5), `infra_railway_redeploy` (g5), `mob_play_staged_rollout` (g5 g6),
+`mob_play_halt_rollout` (g6), `mob_appstore_phased_release` (g5 g6),
+`mob_appstore_pause_release` (g6). Your roster file is authoritative if this list drifts.
 
 ### §4 The 20-second deadline
 
@@ -89,7 +99,7 @@ Every call is cut at 20 seconds, under the MCP client's own deadline, so the cli
 error rather than a hang. Consequences:
 
 - Bound inputs that have a bound: `limit`, `lines`, `since_hours`, `timeout_sec` (for
-  `desk_bus_wait_job`, poll in slices rather than one long wait).
+  `lead_bus_wait`, poll in slices rather than one long wait).
 - Split a large question into several calls; three calls that return beat one that is cut.
 - A cut read returns empty with a `reason` naming the deadline. Treat it as §2, not as "the data
   is empty".
@@ -121,16 +131,15 @@ already holds it; you never supply one (PD-4).
 **Good — INFRA redeploys a Railway service.**
 
 ```
-desk_railway_status {project: agent-substrate}                    → prior deployment id dpl_7f…
-approval obtained via LEAD ↔ Ove 1:1; id apr-2026-09-30-014
-desk_railway_redeploy {project: agent-substrate, service: hindsight-api,
-  prior_deployment_id: "dpl_7f…", approval_id: "apr-2026-09-30-014",
-  rollback_plan: "Redeploy dpl_7f… from the dashboard; under 2 min; no schema change"}
+infra_railway_status {project: {{RAILWAY_PROJECT}}}                    → prior deployment id dpl_7f…
+approval obtained via LEAD ↔ the operator 1:1; id {{APPROVAL_ID}}
+infra_railway_redeploy {project: {{RAILWAY_PROJECT}}, service: {{RAILWAY_SERVICE}},
+  prior_deployment_id: "dpl_7f…"}
 → ok, new deployment id
-Receipt: approvals=[apr-2026-09-30-014], rollback_plan as above, command tail recorded
+Receipt: approvals=[{{APPROVAL_ID}}], rollback_plan="Redeploy dpl_7f… from the dashboard; under 2 min; no schema change", command tail recorded
 ```
 
-**Bad — ANDROID gets `not_configured` from `desk_play_track_status`.**
+**Bad — ANDROID gets `not_configured` from `mob_play_track_status`.**
 
 ```
 → {error: not_configured, reason: "play developer api credential not provided"}
@@ -140,10 +149,10 @@ Seat opens the Play Console in the browser with a personal account, reads the tr
 
 The number may be right and the receipt cannot prove it: the read is un-audited, the credential
 was never the seat's to use, and the claim is unverifiable by re-running the receipt. Correct
-response: `unverified: ["Play track state not read — desk_play_track_status not_configured"]`,
+response: `unverified: ["Play track state not read — mob_play_track_status not_configured"]`,
 and tell LEAD so INFRA can add the credential to the gateway env.
 
-**Bad — WEB gets 403 from `desk_vercel_deployments` and tries `/mcp/systems`.**
+**Bad — WEB gets 403 from `web_vercel_deployments` and tries `/mcp/systems`.**
 
 The second endpoint is also 403 and now two audit rows show a seat probing another seat's
 surface. One 403 is a misconfiguration; the response is `skills/desk-bootstrap` §1, not a search.
@@ -170,8 +179,8 @@ surface. One 403 is a misconfiguration; the response is `skills/desk-bootstrap` 
 
 | Rule | Gate or directive | Why |
 |---|---|---|
-| `rollback_plan` on g5 tools | G-5 | The gateway refuses without it; the receipt must carry the same plan |
-| `approval_id` on g5/g6 tools; echoed into the event | G-6, PD-5 | Approval is recorded in two places that must agree |
+| `rollback_plan` on an external g5 call, and on the receipt for a served tool | G-5 | The external gateway refuses without it. A served tool rejects it as an argument; the receipt still carries the plan |
+| `approval_id` on an external g5/g6 call, and on the receipt for a served tool | G-6, PD-5 | Approval is recorded in two places that must agree. It is not an argument of `infra_railway_redeploy` |
 | No secrets in arguments | G-3, PD-4 | Arguments are hashed into an audit row and may transit upstreams |
 | Roster changes go through contract review | G-4 | Every seat is a consumer of `contracts/tool-rosters/**` |
 | Roster count 10–15 (≤ 20 with a pack); g5/g6 tools carry their fields | G-7 | The same band doctor checks at runtime |

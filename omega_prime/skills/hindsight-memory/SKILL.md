@@ -7,10 +7,14 @@ gates: [G-2, G-3]
 <skill name="hindsight-memory" version="1">
 # Hindsight Memory
 
+## Served tools
+
+Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+
 ## When this applies (L1)
 
-The desk's memory plane is Hindsight, reached only through the gateway: `desk_brief` at turn
-start, `desk_memory_recall` when you need a fact, `desk_memory_retain` when you have one worth
+The desk's memory plane is Hindsight, reached only through the gateway: `lead_brief` at turn
+start, `lead_memory_recall` when you need a fact, `lead_memory_retain` when you have one worth
 keeping. Banks: `pd-<seat>` is yours to write; `pd-desk` is shared, written by LEAD and QUALITY,
 read by all; `pd-lead-reports` is LEAD's. A weekly `reflect` prunes banks into mental models
 without your involvement.
@@ -53,14 +57,14 @@ its receipt path, and they retain it into `pd-desk`. Writing "the team decided X
 makes it invisible to everyone but ANDROID and unreviewable by QUALITY.
 
 A new team starts with an empty `pd-<seat>` and inherits `pd-desk`'s environment facts through
-`desk_brief`. Nothing else carries over from a template.
+`lead_brief`. Nothing else carries over from a template.
 
 ### §2 What to retain, what never
 
 | Retain | Example content | Never | Why not |
 |---|---|---|---|
 | Decisions with their receipt | "Chose staged rollout 10% → 50% → 100% for KanbanOS 2.3; halt on crash-free < 99.5%" + `receipt_path` | Secrets | Redaction is a backstop, not a licence; a retained token is a rotated token |
-| Environment facts | "API 26 emulator is the only one on the dev box; API 34 needs the Mac mini" + `source` or receipt | Unverified claims | Recall would replay the guess as a fact to your future self (PD-1) |
+| Environment facts | "The dev box has one emulator image; a newer API needs {{ADMIN_DEVICES}}" + `source` or receipt | Unverified claims | Recall would replay the guess as a fact to your future self (PD-1) |
 | Verified commands | "`./gradlew :app:lintDebug` takes 4 min; `lintBaseline` grows silently" + receipt | Other seats' work | Their bank, their receipt; you would be remembering hearsay |
 | Review risks and outcomes | "App Review rejected 2.2 for background-location text; fixed by …" + `source` | Transcripts, chat summaries, whole files | Memory is for facts you will need again; documents live in RAGFlow, evidence in receipts |
 
@@ -71,10 +75,10 @@ prune.
 ### §3 Retain call shape
 
 ```
-desk_memory_retain {
+lead_memory_retain {
   content:      "…one fact, plainly stated, with the numbers that matter…",   (8–8000 chars)
   receipt_path: ".receipts/bot-03-android/kanbanos-2.3-rollout.json",        ← or source
-  source:       "https://github.com/swcstudiospace/kanbanos/blob/<sha>/docs/release.md",
+  source:       "https://github.com/<org>/<repo>/blob/<sha>/docs/<file>.md",
   graph_id:     "ut-…", task_id: "kanbanos-2.3-rollout",
   tags:         ["kanbanos", "rollout", "play"]
 }
@@ -88,9 +92,9 @@ desk_memory_retain {
 
 ### §4 Recall and the brief
 
-`desk_brief` runs at turn start (the gateway caches it five minutes; pass `refresh: true` after
+`lead_brief` runs at turn start (the gateway caches it five minutes; pass `refresh: true` after
 you retain something you need in the same turn). It returns the substrate brief for the Graph ID,
-recall from your bank and `pd-desk`, and your open tickets. `desk_memory_recall` with a `query`
+recall from your bank and `pd-desk`, and your open tickets. `lead_memory_recall` with a `query`
 answers a specific question; `include_shared: false` narrows to your own bank.
 
 Recall is retrieval, not verification. A recalled command is a command to run again; a recalled
@@ -120,8 +124,8 @@ correction with the new receipt; reflect resolves contradictions towards the new
 
 ```
 receipt written: .receipts/bot-04-ios/kanbanos-2.3-testflight.json (build 412 processed 38 min)
-desk_memory_retain {content: "KanbanOS TestFlight processing takes 30–40 min for builds with
-  the new asset catalog; poll desk_testflight_status no sooner than 30 min after upload",
+lead_memory_retain {content: "KanbanOS TestFlight processing takes 30–40 min for builds with
+  the new asset catalog; poll mob_testflight_status no sooner than 30 min after upload",
   receipt_path: ".receipts/bot-04-ios/kanbanos-2.3-testflight.json",
   graph_id: "ut-…", task_id: "kanbanos-2.3-testflight", tags: ["kanbanos", "testflight"]}
 ```
@@ -132,9 +136,9 @@ the receipt path tells a reviewer exactly where the number came from.
 **Bad — same seat, same afternoon.**
 
 ```
-desk_memory_retain {content: "ASC key for kanbanos is AKIA… / team id 7X…; TestFlight is slow"}
+lead_memory_retain {content: "ASC key for kanbanos is AKIA… / team id 7X…; TestFlight is slow"}
 → refused: receipt_path or source required
-desk_memory_retain {content: "TestFlight is slow", source: "https://example.com"}
+lead_memory_retain {content: "TestFlight is slow", source: "https://example.com"}
 ```
 
 The first call would have sent a key through the redactor (and the audit log records the attempt).

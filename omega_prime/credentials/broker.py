@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from omega_prime.credentials.redact import redact_text
+from omega_prime.integrations.binding import secret_value
 from omega_prime.providers.base import ProviderError
 
 
@@ -37,8 +38,11 @@ class CredentialBroker:
             return ""
         names = list(getattr(provider, "env_vars", ()) or ())
         for name in names:
-            value = self._env.get(name)
-            if isinstance(value, str) and value:
+            try:
+                value = secret_value(self._env, name)
+            except ValueError as exc:
+                raise ProviderError(str(exc)) from None
+            if value:
                 if value not in self._resolved:
                     self._resolved.append(value)
                 return value

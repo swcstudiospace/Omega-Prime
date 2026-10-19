@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from omega_prime.providers.base import ProviderError
 from omega_prime.substrate import probes
 from omega_prime.substrate.probes import (
@@ -13,6 +15,7 @@ from omega_prime.substrate.probes import (
 
 SUB_TOKEN = "sub-secret-1"
 HS_TOKEN = "hs-secret-2"
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class _FakeTransport:
@@ -137,6 +140,40 @@ def test_main_exit_code_on_failure() -> None:
     assert main([], {}, transport) == 1
 
 
+def test_unset_hindsight_url_skips_a_broken_credential_file(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-key"
+    config = config_from_env({"HINDSIGHT_API_KEY_FILE": str(missing)})
+    assert config["hindsight_url"] == ""
+    assert config["hindsight_token"] == ""
+    report = run_probes(config, _FakeTransport([{}, ""]))
+    assert report["passed"] is True
+    assert report["probes"]["hindsight_health"]["detail"] == (
+        "disabled (HINDSIGHT_URL unset)"
+    )
+
+
+def test_unset_hindsight_url_does_not_call_the_remote_bank() -> None:
+    config = config_from_env({})
+    assert config["hindsight_url"] == ""
+    transport = _FakeTransport([{}, ""])
+    report = run_probes(config, transport)
+    assert report["passed"] is True
+    assert report["probes"]["hindsight_health"]["detail"] == (
+        "disabled (HINDSIGHT_URL unset)"
+    )
+    assert len(transport.requests) == 2
+    watched = (
+        ROOT.joinpath("omega_prime/memory/hindsight_service.py"),
+        ROOT.joinpath("omega_prime/substrate/probes.py"),
+        ROOT.joinpath("docs/substrate.md"),
+        ROOT.joinpath("omega_prime/grokbot/SETUP.md"),
+    )
+    for path in watched:
+        text = path.read_text(encoding="utf-8")
+        assert "hindsight-api-production-014d" not in text, path
+        assert "up.railway.app" not in text, path
+
+
 def test_config_defaults_and_precedence() -> None:
     config = config_from_env({})
     assert config["substrate_url"] == probes.DEFAULT_SUBSTRATE_URL
@@ -147,6 +184,15 @@ def test_config_defaults_and_precedence() -> None:
     )
     assert fallback["substrate_token"] == "g"
     assert fallback["substrate_token_name"] == "SUBSTRATE_TOKEN_GROK_BOT"
-    assert fallback["hindsight_token"] == "t"
+    assert fallback["hindsight_url"] == ""
+    assert fallback["hindsight_token"] == ""
+    enabled = config_from_env(
+        {
+            "SUBSTRATE_TOKEN_GROK_BOT": "g",
+            "HINDSIGHT_URL": "http://127.0.0.1:9",
+            "HINDSIGHT_API_TOKEN": "t",
+        }
+    )
+    assert enabled["hindsight_token"] == "t"
     report = run_probes(config, _FakeTransport([{}, "", {}, {}]))
     assert "anonymous" in format_report(report, config)

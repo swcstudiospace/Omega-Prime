@@ -22,30 +22,26 @@ HINDSIGHT_URL_ENV = "HINDSIGHT_URL"
 HINDSIGHT_TOKEN_ENVS = ("HINDSIGHT_API_KEY", "HINDSIGHT_API_TOKEN")
 
 DEFAULT_SUBSTRATE_URL = "http://127.0.0.1:7410"
-DEFAULT_HINDSIGHT_URL = "https://hindsight-api-production-014d.up.railway.app"
+DEFAULT_HINDSIGHT_URL = ""
 
 
 def config_from_env(env: Any = None) -> dict:
     """Read probe config. Values stay in the dict; callers never print them."""
     source = env if env is not None else os.environ
-    substrate_token = ""
-    substrate_token_name = ""
-    for name in SUBSTRATE_TOKEN_ENVS:
-        value = source.get(name, "")
-        if isinstance(value, str) and value:
-            substrate_token = value
-            substrate_token_name = name
-            break
-    hindsight_token = ""
-    hindsight_token_name = ""
-    for name in HINDSIGHT_TOKEN_ENVS:
-        value = source.get(name, "")
-        if isinstance(value, str) and value:
-            hindsight_token = value
-            hindsight_token_name = name
-            break
+    substrate_token, substrate_token_name = _named_secret(source, SUBSTRATE_TOKEN_ENVS)
     substrate_url = source.get(SUBSTRATE_URL_ENV, "") or DEFAULT_SUBSTRATE_URL
-    hindsight_url = source.get(HINDSIGHT_URL_ENV, "") or DEFAULT_HINDSIGHT_URL
+    hindsight_raw = source.get(HINDSIGHT_URL_ENV, "")
+    hindsight_url = (
+        hindsight_raw
+        if isinstance(hindsight_raw, str) and hindsight_raw.strip()
+        else ""
+    ) or DEFAULT_HINDSIGHT_URL
+    # An unset URL disables the bank. Do not read its credential: a missing
+    # or badly mode-checked HINDSIGHT_*_FILE would raise here and block the
+    # substrate probes that should still run.
+    hindsight_token, hindsight_token_name = (
+        _named_secret(source, HINDSIGHT_TOKEN_ENVS) if hindsight_url else ("", "")
+    )
     return {
         "substrate_url": substrate_url,
         "substrate_token": substrate_token,
@@ -82,24 +78,30 @@ def run_probes(config: dict, transport: Any) -> dict:
         _brief_detail,
         secrets,
     )
-    probes["hindsight_health"] = _probe(
-        lambda: transport.get(
-            _join(config["hindsight_url"], "/health"),
-            _auth(config.get("hindsight_token")),
-            {},
-        ),
-        _health_detail,
-        secrets,
-    )
-    probes["hindsight_version"] = _probe(
-        lambda: transport.get(
-            _join(config["hindsight_url"], "/version"),
-            _auth(config.get("hindsight_token")),
-            {},
-        ),
-        _version_detail,
-        secrets,
-    )
+    hindsight_url = config.get("hindsight_url") or ""
+    if isinstance(hindsight_url, str) and hindsight_url.strip():
+        probes["hindsight_health"] = _probe(
+            lambda: transport.get(
+                _join(hindsight_url, "/health"),
+                _auth(config.get("hindsight_token")),
+                {},
+            ),
+            _health_detail,
+            secrets,
+        )
+        probes["hindsight_version"] = _probe(
+            lambda: transport.get(
+                _join(hindsight_url, "/version"),
+                _auth(config.get("hindsight_token")),
+                {},
+            ),
+            _version_detail,
+            secrets,
+        )
+    else:
+        skipped = {"ok": True, "detail": "disabled (HINDSIGHT_URL unset)"}
+        probes["hindsight_health"] = dict(skipped)
+        probes["hindsight_version"] = dict(skipped)
     passed = all(probe["ok"] for probe in probes.values())
     return {"probes": probes, "passed": passed}
 
@@ -125,6 +127,17 @@ def main(argv: list[str] | None = None, env: Any = None, transport: Any = None) 
     report = run_probes(config, transport)
     print(format_report(report, config))
     return 0 if report["passed"] else 1
+
+
+def _named_secret(source: Any, names: tuple[str, ...]) -> tuple[str, str]:
+    """First configured token among ``names``. ``*_FILE`` and the state dir count."""
+    from omega_prime.integrations.binding import secret_value
+
+    for name in names:
+        value = secret_value(source, name)
+        if value:
+            return value, name
+    return "", ""
 
 
 def _probe(call: Any, describe: Any, secrets: list[str]) -> dict:

@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<omega_prime>
 <!--
   Shared core directives. Prepended to the Omega Prime seat prompt.
   One bot. ownership.yaml can grow later; these rules already apply.
@@ -140,7 +141,6 @@
   </where_complexity_lives>
 
 </core_directives>
-<?xml version="1.0" encoding="UTF-8"?>
 <!-- Omega Prime — one programming agent. Prepend prompts/_shared/core-directives.xml. -->
 <agent id="bot-00-omega-prime" version="1.1">
 
@@ -162,12 +162,15 @@
     command's underlying tools. Load a skill only from the path attribute
     below. Follow a routine only from the path attribute below.
     Report completion only with a receipt.
-    When Linear or Notion is not ready, the first action is omega_command
-    /omega-connectors. Show that result before other work. Never ask the
-    user to paste a token into chat.
+    A freshly imported bot follows skills/getting-started/SKILL.md before
+    other setup: clone the pinned release, bootstrap, and ask the owner to
+    add the stdio server. When Linear or Notion is not ready, the first
+    action after that is omega_command /omega-connectors. Show that result
+    before other work. Never ask the user to paste a token into chat.
   </mission>
 
   <skills root="skills">
+    <skill path="skills/getting-started/SKILL.md" load="always">Fresh import. Clone the pinned release, bootstrap, ask the owner to add the stdio server, then request secrets through cards.</skill>
     <skill path="skills/omega-commands/SKILL.md" load="always">Slash commands. A message that is only /omega-... is omega_command.</skill>
     <skill path="skills/verification-receipts/SKILL.md" load="always">Receipt shape. A claim needs a command and an exit code.</skill>
     <skill path="skills/desk-gateway/SKILL.md" load="always">Roster is the tool contract. Reads fail open. Writes fail closed.</skill>
@@ -370,3 +373,4 @@
   </absorbed_seats>
 
 </agent>
+</omega_prime>

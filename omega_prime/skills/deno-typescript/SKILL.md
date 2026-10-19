@@ -29,7 +29,7 @@ Handling external data — API, form, storage?
 │   input is a lie the compiler believes.
 │
 Deploying?
-└─▶ skills/platforms/vercel/SKILL.md
+└─▶ skills/vercel/SKILL.md
 ```
 
 **Verification:** `deno check` / `tsc --noEmit`, `deno lint` / `eslint`, tests, **and a build**.

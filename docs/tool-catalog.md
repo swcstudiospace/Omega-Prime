@@ -329,7 +329,7 @@ Append a lead event; forward when configured. Requires approval.
 - Approval: required
 - Required params: none
 
-Check, register, or repair seat integrity. Requires approval.
+Check seat integrity (read-only). register, install_prompt, and repair still require a human approval.
 
 ## lead_render_prompt
 

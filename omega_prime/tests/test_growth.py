@@ -701,3 +701,74 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
     )
     assert remembered["success"] is True
     assert "via dispatch" in MemoryStore(tmp_path / "memory").memory_entries
+
+
+def test_missing_writable_root_still_views_the_shipped_skill(tmp_path: Path) -> None:
+    shipped = tmp_path / "shipped"
+    (shipped / "desk-gateway").mkdir(parents=True)
+    (shipped / "desk-gateway" / "SKILL.md").write_text(
+        "shipped body\n", encoding="utf-8"
+    )
+    registry = ToolRegistry()
+    register_growth_tools(
+        registry,
+        skills_root=tmp_path / "state" / "skills",
+        skills_fallback=shipped,
+        memory_dir=tmp_path / "memory",
+        session_db=tmp_path / "sessions.db",
+    )
+    viewed = _load(registry.dispatch("skill_view", {"name": "desk-gateway"}))
+    assert viewed["success"] is True
+    assert "shipped body" in viewed["content"]
+    absent = _load(registry.dispatch("skill_view", {"name": "not-shipped"}))
+    assert absent["success"] is False
+    assert absent["error"] == "Skill 'not-shipped' not found."
+
+
+def test_create_refuses_a_name_that_exists_only_in_the_shipped_root(
+    tmp_path: Path,
+) -> None:
+    shipped = tmp_path / "shipped"
+    (shipped / "desk-gateway").mkdir(parents=True)
+    (shipped / "desk-gateway" / "SKILL.md").write_text(
+        "shipped body\n", encoding="utf-8"
+    )
+    writable = tmp_path / "state" / "skills"
+    writable.mkdir(parents=True)
+    registry = ToolRegistry()
+    register_growth_tools(
+        registry,
+        skills_root=writable,
+        skills_fallback=shipped,
+        memory_dir=tmp_path / "memory",
+        session_db=tmp_path / "sessions.db",
+    )
+    blocked = _load(
+        registry.dispatch(
+            "skill_manage",
+            {
+                "action": "create",
+                "name": "desk-gateway",
+                "content": _skill("desk-gateway", "Hide the original.", "new\n"),
+            },
+        )
+    )
+    assert blocked == {
+        "success": False,
+        "error": "A skill named 'desk-gateway' already exists.",
+    }
+    assert not (writable / "desk-gateway").exists()
+    created = _load(
+        registry.dispatch(
+            "skill_manage",
+            {
+                "action": "create",
+                "name": "deploy",
+                "content": _skill("deploy", "Use when deploying.", "steps\n"),
+            },
+        )
+    )
+    assert created["success"] is True
+    assert (writable / "deploy" / "SKILL.md").is_file()
+    still = _load(registry.dispatch("skill_view", {"name": "desk-gateway"}))
+    assert still["content"] == "shipped body\n"

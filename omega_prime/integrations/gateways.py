@@ -20,6 +20,7 @@ from omega_prime.integrations.binding import (
     GATEWAY_NAMES,
     binding_path,
     load_binding,
+    secret_value,
 )
 
 Probe = str
@@ -126,8 +127,11 @@ def gateway_probe_headers(name: str, env: Mapping[str, str]) -> dict[str, str]:
     """Authorization header the live client would send, or an empty mapping."""
     token = ""
     if name == "substrate":
-        raw = env.get("SUBSTRATE_TOKEN") or env.get("SUBSTRATE_TOKEN_GROK_BOT") or ""
-        token = raw.strip() if isinstance(raw, str) else ""
+        # Same resolver as the live client: plain env, NAME_FILE, or the
+        # mode 0600 file under $OMEGA_PRIME_STATE_DIR/secrets/.
+        token = secret_value(env, "SUBSTRATE_TOKEN") or secret_value(
+            env, "SUBSTRATE_TOKEN_GROK_BOT"
+        )
     elif name == "redteam":
         raw = env.get("T3MP3ST_BEARER_TOKEN") or ""
         token = raw.strip() if isinstance(raw, str) else ""

@@ -43,7 +43,6 @@ _SKILLS_DIR = "omega_prime/skills"
 _ROUTINES_DIR = "omega_prime/routines"
 _COMMANDS_DIR = "omega_prime/grokbot/plugin/commands"
 
-_XML_DECLARATION_RE = re.compile(r"<\?xml.*?\?>", re.DOTALL)
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
 _ASSEMBLED_PLACEHOLDERS: tuple[str, ...] = (
@@ -95,40 +94,6 @@ def _seat_prompt_problems(root: Path) -> list[str]:
     return problems
 
 
-def _strip_assembled_declarations(text: str) -> str:
-    body = text
-    leading = _XML_DECLARATION_RE.match(body)
-    if leading is not None:
-        body = body[leading.end() :]
-    # Find the first root tag, skipping comments before it.
-    cursor = body
-    while True:
-        cursor = cursor.lstrip()
-        if cursor.startswith("<!--"):
-            end = cursor.find("-->")
-            if end == -1:
-                return body
-            cursor = cursor[end + 3 :]
-            continue
-        break
-    root_match = re.match(r"<([A-Za-z_][\w.:-]*)", cursor)
-    if root_match is None:
-        return body
-    close = f"</{root_match.group(1)}>"
-    close_index = body.find(close)
-    if close_index == -1:
-        return body
-    after = body[close_index + len(close) :]
-    stripped_after = after.lstrip()
-    if stripped_after.startswith("<?xml"):
-        declaration = _XML_DECLARATION_RE.match(stripped_after)
-        if declaration is not None:
-            body = (
-                body[: close_index + len(close)] + stripped_after[declaration.end() :]
-            )
-    return body
-
-
 def _assembled_problems(root: Path) -> list[str]:
     problems: list[str] = []
     text = _read(root, _ASSEMBLED_PATH, problems)
@@ -139,19 +104,27 @@ def _assembled_problems(root: Path) -> list[str]:
             problems.append(
                 f"{_ASSEMBLED_PATH}: unfilled placeholder remains: {placeholder}"
             )
-    # The assembled file concatenates two documents, each with its own
-    # declaration; strip only a declaration at the file start and one
-    # immediately after the first root's closing tag before wrapping.
-    body = _strip_assembled_declarations(text)
+    if text.count("<?xml") != 1:
+        problems.append(f"{_ASSEMBLED_PATH}: must contain exactly one XML declaration")
+    path = root / _ASSEMBLED_PATH
     try:
-        element = ET.fromstring(f"<assembled>{body}</assembled>")
+        element = ET.parse(path).getroot()
     except ET.ParseError as exc:
         problems.append(f"{_ASSEMBLED_PATH}: does not parse as XML: {exc}")
+        return problems
+    except OSError as exc:
+        problems.append(f"{_ASSEMBLED_PATH}: cannot read file: {exc}")
+        return problems
+    if element.tag != "omega_prime":
+        problems.append(
+            f"{_ASSEMBLED_PATH}: root element must be <omega_prime>, "
+            f"found <{element.tag}>"
+        )
         return problems
     roots = [child.tag for child in element]
     if roots[:2] != ["core_directives", "agent"]:
         problems.append(
-            f"{_ASSEMBLED_PATH}: first two element roots must be "
+            f"{_ASSEMBLED_PATH}: first two child elements must be "
             f"<core_directives> then <agent>, found {roots[:2]}"
         )
     return problems
