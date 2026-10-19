@@ -709,7 +709,7 @@ If a row fails, use the other route: the Bot-driven setup in
 
 | # | Check | How | Status |
 | --- | --- | --- | --- |
-| 1 | The default Grok Bot clones the repository into `/workspace/omega-prime`, `--bootstrap-only` exits 0, and the custom Command server is added (by the Bot or by you) | Send the setup prompt; confirm `tools/list` shows `omega_command` and `/omega-help` answers. Note whether a Bot made from a shared template already had the server | UNPROVEN |
+| 1 | The default Grok Bot clones the pinned release (`--branch <release-tag>`, not `main`; no tag is published yet, so `<release-tag>` is the placeholder) into `/workspace/omes-bot`, `--bootstrap-only` exits 0, and the custom Command server is added (by the Bot or by you) | Send the setup prompt; confirm `tools/list` shows `omega_command` and `/omega-help` answers. Note whether a Bot made from a shared template already had the server | UNPROVEN |
 | 2 | Cursor Teams/Enterprise Import from Repo lists `omega-prime` | Cursor dashboard → Plugins & MCPs → Team Marketplaces → Add Marketplace → Import from Repo with the GitHub URL | UNPROVEN |
 | 3 | Grok Bot shows the plugin as team-provided or installable, and its `omega-prime` server connects | Open the Bot after row 2 | UNPROVEN |
 | 4 | Whole-message `/omega-help` and `/omega-code-review` run `omega_command` | Type each as the whole message. Record which `/omega-*` entries and plugin skills appear natively in `/`, whether skills load with their extra frontmatter keys, and whether old `secrets-handling` or `supply-chain` copies remain in your private skill library | UNPROVEN |

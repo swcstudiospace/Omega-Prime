@@ -1,6 +1,11 @@
 ## Unreleased
 
 - Slash commands: curated 24 -> 27 and total 58 -> 61. Added `/omega-redteam-conflicts`, `/omega-redteam-readiness`, and `/omega-audit`. Findings accept `--jsonl`. `durable_status` reports cycle and sync backlog. Purple-cycle jobs can be scheduled, and a live cycle takes a file lock plus an optional deadline.
+- Install docs pin the clone to `/workspace/omes-bot` and a `<release-tag>` placeholder (no tag existed on 2026-10-19; do not clone `main`).
+- `skills/getting-started` walks a fresh import through clone, `--bootstrap-only`, `--verify --json`, the stdio Command server with no env, `/omega-help`, and secret-request cards. Connector tokens resolve from `NAME`, `NAME_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/NAME` (mode 0600).
+- Stdio gated tools read a mode 0600 approvals file outside the repo at startup. The launcher forwards `--approvals-file` and never `--approve`. The process does not write the file, and an approver that names the bot is refused. `lead_doctor` action `check` is ungated; register, install, and repair stay gated.
+- `HINDSIGHT_URL` defaults to unset, which disables the remote bank. There is no hosted default.
+- Runtime files `omega_prime/sessions.db`, `omega_prime/state/`, `omega_prime/memory/MEMORY.md`, and `omega_prime/memory/USER.md` are gitignored. The `omega_prime/memory/` package stays tracked.
 
 # Changelog
 

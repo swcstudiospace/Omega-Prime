@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from omega_prime.providers.base import ProviderError
 from omega_prime.substrate import probes
 from omega_prime.substrate.probes import (
@@ -13,6 +15,7 @@ from omega_prime.substrate.probes import (
 
 SUB_TOKEN = "sub-secret-1"
 HS_TOKEN = "hs-secret-2"
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class _FakeTransport:
@@ -135,6 +138,28 @@ def test_secrets_never_in_report_or_output(capsys) -> None:
 def test_main_exit_code_on_failure() -> None:
     transport = _FakeTransport([ProviderError("down"), "", {}, {}])
     assert main([], {}, transport) == 1
+
+
+def test_unset_hindsight_url_does_not_call_the_remote_bank() -> None:
+    config = config_from_env({})
+    assert config["hindsight_url"] == ""
+    transport = _FakeTransport([{}, ""])
+    report = run_probes(config, transport)
+    assert report["passed"] is True
+    assert report["probes"]["hindsight_health"]["detail"] == (
+        "disabled (HINDSIGHT_URL unset)"
+    )
+    assert len(transport.requests) == 2
+    watched = (
+        ROOT.joinpath("omega_prime/memory/hindsight_service.py"),
+        ROOT.joinpath("omega_prime/substrate/probes.py"),
+        ROOT.joinpath("docs/substrate.md"),
+        ROOT.joinpath("omega_prime/grokbot/SETUP.md"),
+    )
+    for path in watched:
+        text = path.read_text(encoding="utf-8")
+        assert "hindsight-api-production-014d" not in text, path
+        assert "up.railway.app" not in text, path
 
 
 def test_config_defaults_and_precedence() -> None:

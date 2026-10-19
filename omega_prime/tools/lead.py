@@ -1473,7 +1473,8 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
         ),
     ),
     "lead_doctor": (
-        "Check, register, or repair seat integrity. Requires approval.",
+        "Check seat integrity (read-only). register, install_prompt, and "
+        "repair still require a human approval.",
         _object(
             {
                 "action": _string("check, register, install_prompt, or repair."),

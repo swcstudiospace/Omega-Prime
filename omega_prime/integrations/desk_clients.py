@@ -591,10 +591,10 @@ def _require_token(token: str, service: str) -> str:
 
 
 def _env_token(env: Mapping[str, Any], name: str) -> str | None:
-    value = env.get(name)
-    if not isinstance(value, str):
-        return None
-    text = value.strip()
+    """``NAME``, ``NAME_FILE``, or ``$OMEGA_PRIME_STATE_DIR/secrets/NAME``."""
+    from omega_prime.integrations.binding import secret_value
+
+    text = secret_value(env, name)
     return text or None
 
 

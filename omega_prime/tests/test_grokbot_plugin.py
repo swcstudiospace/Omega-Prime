@@ -332,7 +332,7 @@ def test_every_rendered_text_passes_the_secret_gate_as_str() -> None:
 
 
 def test_every_checked_in_skill_has_platform_valid_frontmatter() -> None:
-    assert len(SKILLS) == 27
+    assert len(SKILLS) == 28
     for folder in SKILLS:
         mapping = _frontmatter(
             (ROOT / "omega_prime" / "skills" / folder / "SKILL.md").read_text(
@@ -347,7 +347,7 @@ def test_every_checked_in_skill_has_platform_valid_frontmatter() -> None:
 
 def test_every_command_file_routes_to_omega_command_with_its_exact_text() -> None:
     files = sorted((ROOT / COMMANDS_DIR).glob("*.md"))
-    assert len(files) == 61
+    assert len(files) == 62
     for path in files:
         text = path.read_text(encoding="utf-8")
         mapping = _frontmatter(text)
@@ -367,7 +367,7 @@ def test_catalog_has_58_entries_with_exactly_the_five_suffixed_names() -> None:
     assert [spec.name for spec in COMMANDS] == CURATED
     assert len(ROUTINES) == 7
     names = {spec.name for spec in plugin.catalog(ROOT)}
-    assert len(names) == 61 == len(CURATED) + len(SKILLS) + len(ROUTINES)
+    assert len(names) == 62 == len(CURATED) + len(SKILLS) + len(ROUTINES)
     assert names == _expected_names()
     generated = names - set(CURATED)
     suffixed = {name for name in generated if name.endswith(("-skill", "-routine"))}

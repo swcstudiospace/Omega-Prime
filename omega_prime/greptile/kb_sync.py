@@ -287,8 +287,10 @@ def main(argv: list[str] | None = None, env: Any = None, opener: Any = None) -> 
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
     source = env if env is not None else os.environ
-    token = source.get("GREPTILE_API_KEY", "")
-    if not isinstance(token, str) or not token:
+    from omega_prime.integrations.binding import secret_value
+
+    token = secret_value(source, "GREPTILE_API_KEY")
+    if not token:
         print("kb-sync: GREPTILE_API_KEY is not set — nothing to sync", file=sys.stderr)
         return 2
     base_url = source.get("GREPTILE_MCP_URL", "") or DEFAULT_MCP_URL

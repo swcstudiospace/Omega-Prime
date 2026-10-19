@@ -617,7 +617,7 @@ def _checked_secret(
         return resolve_secret(env, name)
     raw = env.get(name, "")
     if not isinstance(raw, str) or not raw.strip():
-        return None, None
+        return resolve_secret(env, name)
     provider = SimpleNamespace(name=name.lower(), requires_key=True, env_vars=(name,))
     try:
         token = CredentialBroker(policy, env).key_for(provider, url)

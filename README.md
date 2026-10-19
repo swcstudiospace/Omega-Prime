@@ -90,10 +90,12 @@ running the suite; it does not require running the retained failing Rust tests.
 Preparing a Grok Bot seat? Follow [setup](docs/setup.md) and the operator
 reference [grokbot/SETUP.md](omega_prime/grokbot/SETUP.md). Its section 1 is
 the primary route: a copy-paste prompt that asks the default Grok Bot to
-clone this repository recursively into `/workspace/omega-prime`, run
-`bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap-only`,
+clone this repository recursively at a pinned release tag into
+`/workspace/omes-bot` (`git clone --recurse-submodules --branch <release-tag>`,
+not `main`; no tag is published yet, so `<release-tag>` is the placeholder),
+run `bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --bootstrap-only`,
 and add a custom Command MCP server running
-`bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`.
+`bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`.
 A Cursor Teams/Enterprise team marketplace can import the repository as a
 secondary route (`.cursor-plugin/`, root `mcp.json`). Live import on a Grok
 Bot or Cursor account is unproven until you run the

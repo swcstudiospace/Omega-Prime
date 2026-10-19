@@ -60,7 +60,7 @@ def _expected() -> dict[str, tuple[str, str]]:
     """Generated name -> (kind, stem), derived from the checked-in files."""
     skills = sorted(path.parent.name for path in SKILLS.glob("*/SKILL.md"))
     routines = sorted(path.stem for path in ROUTINES.glob("*.md"))
-    assert len(skills) == 27, skills
+    assert len(skills) == 28, skills
     assert len(routines) == 7, routines
     expected: dict[str, tuple[str, str]] = {}
     for kind, stems in (("skill", skills), ("routine", routines)):
@@ -143,7 +143,7 @@ def test_help_lists_curated_then_generated(tmp_path: Path) -> None:
     assert body["ok"] is True, body
     names = [row["name"] for row in body["result"]["commands"]]
     expected = _expected()
-    assert len(names) == 61
+    assert len(names) == 62
     assert names[:27] == CURATED
     assert names[27:] == sorted(expected)
     suffixed = [name for name in names[27:] if name.endswith(("-skill", "-routine"))]
@@ -195,7 +195,7 @@ def test_two_renders_are_byte_identical_in_separate_processes(tmp_path: Path) ->
         renders.append(done.stdout)
     assert renders[0] == renders[1]
     rows = json.loads(renders[0])
-    assert len(rows) == 34
+    assert len(rows) == 35
     assert [row["name"] for row in rows] == sorted(row["name"] for row in rows)
 
 
@@ -276,7 +276,7 @@ def test_every_generated_skill_returns_its_instructions() -> None:
     skills = {
         name: stem for name, (kind, stem) in _expected().items() if kind == "skill"
     }
-    assert len(skills) == 27
+    assert len(skills) == 28
     for name, stem in skills.items():
         registry = RecordingRegistry()
         body = execute_command(f"/{name} focus on tests", registry, {})
