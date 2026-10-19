@@ -140,9 +140,7 @@ def _looks_like_generic_token(candidate: str) -> bool:
     if _HEX_RE.match(text) or _UUID_RE.match(text):
         return False
     if _GIT_REF_RE.fullmatch(text):
-        return any(
-            _looks_like_generic_token(part) for part in text.split("/") if part
-        )
+        return any(_looks_like_generic_token(part) for part in text.split("/") if part)
     if len(set(text)) <= 4:
         return False
     classes = sum(
