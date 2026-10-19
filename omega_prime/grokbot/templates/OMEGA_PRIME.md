@@ -77,13 +77,28 @@ shared Hindsight bank. Unwired installs run fully local.
 
 ## Routines
 
-- desk-lead — intake, tickets, dispatch, receipts — paused for prompt install and seat register. Memory, tools, and substrate are green once the host is built; `register` and `install_prompt` are the remaining doctor checks.
-- nightly — curator pass over transcripts
-- sweep — queue reply drafts; does not publish
-- ultrathink — resolve this turn's plan before acting
+Create these as Grok Bot routines. Each prompt calls `omega_command`. Weekday cron is the suggested schedule; change the hour to the install's timezone.
+
+- desk-lead — intake, tickets, dispatch, receipts. Prompt: call omega_command with `/omega-desk-lead`. Suggested cron `15 9 * * 1-5`. Also `python -m omega_prime.routines.desk_lead`.
+- nightly — curator pass over transcripts in `$OMEGA_PRIME_STATE_DIR/nightly-turns.json`. Prompt: call omega_command with `/omega-nightly`. Suggested cron `0 18 * * 1-5`. Also `python -m omega_prime.routines.nightly`.
+- sweep — queue reply drafts; does not publish. Prompt: call omega_command with `/omega-sweep`. Suggested cron `0 16 * * 1-5`. Also `python -m omega_prime.routines.sweep`.
+- ultrathink — resolve this turn's plan before acting. Prompt: call omega_command with `/omega-ultrathink-routine`. Suggested cron `30 9 * * 1-5`. Also `python -m omega_prime.routines.ultrathink_turn`.
 - onboard — first run: doctor, roster, seed memory, connector requests
 - python-clean — ruff and compileall on this package
 - connectors — list missing connector env names; never take a secret in chat
+
+## Install configuration
+
+Skills use these placeholders. Set them for the install (host env, a private note, or `grokbot/SETUP.md`). Do not put personal names, device names, approval ids, or infrastructure hostnames into a skill.
+
+- `REMOTE_DEV_USER` and `REMOTE_DEV_HOST` — SSH target for `skills/remote-dev-machine`. No address is shipped.
+- `ADMIN_DEVICES` — machines tagged `tag:admin` on the tailnet.
+- `RAGFLOW_DATASET_DESK`, `RAGFLOW_DATASET_SUBSTRATE`, `RAGFLOW_DATASET_SKILLS`, `RAGFLOW_DATASET_PRODUCT` — document datasets `lead_docs_search` may query.
+- `RAILWAY_PROJECT`, `RAILWAY_SERVICE`, `TAILSCALE_FORWARDER_DATA`, `TAILSCALE_FORWARDER_APPS`, `RAILWAY_GREPTIME_HOST`, `RAILWAY_TIMESCALE_HOST`, `RAILWAY_DRAGONFLY_HOST`, `RAILWAY_HINDSIGHT_HOST`, `RAILWAY_RAGFLOW_HOST`, `TAILSCALE_LEGACY_NODE`, `TAILSCALE_LEGACY_NODE_NAME`, `VPS_UNIT_SUBSTRATE`, `VPS_UNIT_GATEWAY`, `VPS_SUBSTRATE_ENV`, `VPS_GATEWAY_ENV`, `RAILWAY_BROWSER_SERVICE` — this install's Railway and Tailscale names.
+- `APPROVAL_ID` — a fresh recorded approval for this change. Never reuse an example id.
+- `NOTION_TASK_GRAPH_COLLECTION` — the Notion collection for task graphs.
+- `AGENT_DATA_DIR` — the directory that holds `agents/<uuid>/`.
+- The operator is "the operator". Skills do not name a person.
 
 ## Avatar
 

@@ -8,14 +8,18 @@ the curator's earned-rule decides.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import os
+import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from omega_prime.agent.curator import review_turn
+from omega_prime.routines import state_dir
 
 
 def nightly_pass(
@@ -116,4 +120,87 @@ def _write(directory: str | Path, state: dict) -> None:
         raise
 
 
-__all__ = ["nightly_pass"]
+def load_turns(path: Path) -> list[dict]:
+    """Turns from a JSON list, or from an object with a ``turns`` array.
+
+    A missing file is an empty pass, not an error.
+    """
+    if not path.is_file():
+        return []
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read turns {path}: {exc}") from exc
+    if isinstance(document, list):
+        turns = document
+    elif isinstance(document, dict) and isinstance(document.get("turns"), list):
+        turns = document["turns"]
+    else:
+        raise ValueError("turns file must be a list or an object with turns")
+    return turns
+
+
+def execute_nightly(
+    env: Mapping[str, str] | None = None,
+    *,
+    turns_path: str | Path | None = None,
+    skills_root: str | Path | None = None,
+    directory: str | Path | None = None,
+) -> dict[str, Any]:
+    """Run one nightly pass. Does not publish. Missing turns review nothing."""
+    root = Path(directory) if directory is not None else state_dir(env)
+    if root is None:
+        return {
+            "error": "not_configured",
+            "reason": "Set OMEGA_PRIME_STATE_DIR (or HOME) before the nightly pass.",
+            "created": [],
+            "reviewed": [],
+            "total_created": 0,
+            "publishes": False,
+        }
+    skills = Path(skills_root) if skills_root is not None else root / "skills"
+    path = Path(turns_path) if turns_path is not None else root / "nightly-turns.json"
+    try:
+        turns = load_turns(path)
+        result = nightly_pass(root, skills, turns)
+    except ValueError as exc:
+        return {
+            "error": "invalid_turns",
+            "reason": str(exc),
+            "created": [],
+            "reviewed": [],
+            "total_created": 0,
+            "publishes": False,
+        }
+    result["turns_path"] = str(path)
+    result["publishes"] = False
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m omega_prime.routines.nightly``."""
+    parser = argparse.ArgumentParser(prog="python -m omega_prime.routines.nightly")
+    parser.add_argument("--state-dir", default=None)
+    parser.add_argument("--skills-root", default=None)
+    parser.add_argument(
+        "--turns",
+        default=None,
+        help="JSON list of turns, or an object with a turns array",
+    )
+    args = parser.parse_args(argv)
+    result = execute_nightly(
+        os.environ,
+        turns_path=args.turns,
+        skills_root=args.skills_root,
+        directory=args.state_dir,
+    )
+    json.dump(result, sys.stdout)
+    sys.stdout.write("\n")
+    return 0 if not result.get("error") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = ["execute_nightly", "load_turns", "main", "nightly_pass"]

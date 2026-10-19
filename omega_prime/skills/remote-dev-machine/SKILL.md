@@ -9,9 +9,9 @@ gates: [G-6]
 
 ## L1 — Summary
 
-**Host:** `{{REMOTE_DEV_HOST}}` (currently configured as `root@187.77.130.10`)
+**Host:** `{{REMOTE_DEV_USER}}@{{REMOTE_DEV_HOST}}`. Set both in the install configuration (`grokbot/SETUP.md`). Do not hardcode an address.
 
-**Shared machine. Currently accessed as root. That combination means no safety net:** no
+**Shared machine. If `{{REMOTE_DEV_USER}}` is root, there is no safety net:** no
 permission boundary between a mistyped path and the operating system, no attribution of who ran
 what, and no undo. A `rm -rf` with a variable that expanded to empty removes the system rather
 than erroring.

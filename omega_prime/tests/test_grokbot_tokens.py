@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import threading
 from pathlib import Path
@@ -260,6 +261,55 @@ def test_wrong_version_denies_everyone(token_file: Path) -> None:
     assert store.verify(plaintext) is None
     assert store.degraded is True
     assert store.degraded_reason == "unsupported token file version"
+
+
+def _pin_mtime(path: Path, mtime_ns: int) -> None:
+    os.utime(path, ns=(mtime_ns, mtime_ns))
+
+
+def test_same_size_atomic_rewrite_inside_one_mtime_tick_reloads(
+    token_file: Path,
+) -> None:
+    """An atomic replace with the same size and mtime must still be noticed."""
+    plaintext, record = create_token(token_file, scopes=["read"])
+    store = FileTokenStore(token_file, reload_interval=0)
+    assert store.verify(plaintext) is not None
+    before = token_file.stat()
+    atomic_write_json(token_file, {"version": 2, "tokens": [record.to_json()]})
+    _pin_mtime(token_file, before.st_mtime_ns)
+    after = token_file.stat()
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_ino != before.st_ino
+    assert store.verify(plaintext) is None
+    assert store.degraded is True
+    assert store.degraded_reason == "unsupported token file version"
+
+
+def test_inplace_same_inode_same_size_rewrite_reloads(token_file: Path) -> None:
+    """A same-inode rewrite that also keeps mtime and size must still reload."""
+    plaintext, record = create_token(token_file, scopes=["read"])
+    store = FileTokenStore(token_file, reload_interval=0)
+    assert store.verify(plaintext) is not None
+    before = token_file.stat()
+    original = token_file.read_text(encoding="utf-8")
+    rewritten = original.replace('"version": 1', '"version": 2', 1)
+    assert rewritten != original
+    assert len(rewritten.encode("utf-8")) == len(original.encode("utf-8"))
+    with token_file.open("r+", encoding="utf-8") as handle:
+        handle.seek(0)
+        handle.write(rewritten)
+        handle.flush()
+        os.fsync(handle.fileno())
+    _pin_mtime(token_file, before.st_mtime_ns)
+    after = token_file.stat()
+    assert after.st_ino == before.st_ino
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert store.verify(plaintext) is None
+    assert store.degraded is True
+    assert store.degraded_reason == "unsupported token file version"
+    assert record.id
 
 
 def test_bad_record_denies_everyone(token_file: Path) -> None:

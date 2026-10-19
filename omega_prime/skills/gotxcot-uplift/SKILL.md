@@ -8,7 +8,7 @@ bots: [bot-00-omega-prime]
 
 **Owner:** Programming Lead (bot-00). LEAD orchestrates this skill. Specialists execute tickets. This skill never invents product-code ownership and never edits specialist paths.
 
-**Policy:** `docs/gotxcot-cloud-pipeline.md`.  
+**Policy:** `https://github.com/swcstudiospace/programming-desk/blob/main/docs/gotxcot-cloud-pipeline.md`.  
 **Constants:** `vendor/ultrathink-policy/constants.ts` (`MIN_NODES=5`, `MAX_NODES=8`, `MIN_STEPS=4`, `MAX_STEPS=8`).  
 **Kickoff concepts:** `vendor/ultrathink-policy/kickoff-checklist.md` (desk override of upstream `ultrathink-kickoff`).  
 **Next skill, only after this one finishes:** `skills/trackplan-dispatch`.
@@ -19,7 +19,7 @@ bots: [bot-00-omega-prime]
 
 ## When to use / when not
 
-**Use when** Ove (or another operator) drops a real build, fix, research, or change ask on LEAD and the work should be tracked densely before anyone writes code.
+**Use when** the operator drops a real build, fix, research, or change ask on LEAD and the work should be tracked densely before anyone writes code.
 
 **Do not use when:**
 
@@ -210,7 +210,7 @@ Open `skills/trackplan-dispatch` with:
 
 Map nodes to seats only when you write specialist tickets (Lane C): `ownership.yaml`, one owner per path, contract-first if a node crosses seats. You still do not write the product code.
 
-Write a Lead receipt under `.receipts/bot-00-programming-lead/` for the orchestration you actually performed (uplift source, node count, step counts, tracker gaps, dispatch pointer). Do not invent specialist test commands. Do not tell Ove the feature is done.
+Write a Lead receipt under `.receipts/bot-00-programming-lead/` for the orchestration you actually performed (uplift source, node count, step counts, tracker gaps, dispatch pointer). Do not invent specialist test commands. Do not tell the operator the feature is done.
 
 ---
 
@@ -233,11 +233,11 @@ Write a Lead receipt under `.receipts/bot-00-programming-lead/` for the orchestr
 
 | Path | Role |
 |---|---|
-| `docs/gotxcot-cloud-pipeline.md` | Authoritative flow |
+| `https://github.com/swcstudiospace/programming-desk/blob/main/docs/gotxcot-cloud-pipeline.md` | Authoritative flow |
 | `vendor/ultrathink-policy/README.md` | VPS constant and prompt string diffs |
 | `vendor/ultrathink-policy/kickoff-checklist.md` | Tracker materialization |
 | `skills/gotxcot-uplift/xml-roots.md` | Root picker and density checks |
 | `skills/trackplan-dispatch/SKILL.md` | Dispatch after stage 5 |
-| `docs/desk-operating-model.md` | Specialist ticket shape |
+| `https://github.com/swcstudiospace/programming-desk/blob/main/docs/desk-operating-model.md` | Specialist ticket shape |
 | `ownership.yaml` | Who may implement |
 </skill>

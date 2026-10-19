@@ -7,36 +7,40 @@ gates: [G-4, G-7]
 <skill name="tool-packs" version="1">
 # Tool Packs
 
+## Served tools
+
+Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+
 ## Omega Prime adaptation
 
 Omega Prime loads packs with `app_tools_load {app, task_id}` (approval
 required) and calls the pack through the `app_*` backends
 (`app_api_smoke`, `app_push_test`, …) — no connector refresh, no
 per-seat tool lists. The 20-live-tools ceiling still holds and
-unloading still closes the ticket's pack. Read `desk_app_tools_load`
+unloading still closes the ticket's pack. Read `app_tools_load`
 below as `app_tools_load`.
 
 ## When this applies (L1)
 
 A tool pack is a contract-defined bundle of at most five application-specific tools
 (`contracts/tool-packs/<app>.yaml`) that a seat loads for the life of one ticket and unloads when
-the ticket closes. `desk_app_tools_load {app, task_id}` turns a pack on;
-`desk_app_tools_load {app, task_id, unload: true}` turns it off. **Live tools per seat never
+the ticket closes. `app_tools_load {app, task_id}` turns a pack on;
+`app_tools_load {app, task_id, unload: true}` turns it off. **Live tools per seat never
 exceed 20** (15 roster + 5 pack), and the gateway refuses the call that would cross the line.
 
 Packs today: `kanbanos`, `desklanes`, `clippyos`, each for seats `web`, `android`, `ios`. The
 load tool sits on the ANDROID and IOS rosters (`packs_allowed: true`); WEB is a declared consumer
-but its roster does not carry `desk_app_tools_load`, so WEB reaches a pack only through the pack
+but its roster does not carry `app_tools_load`, so WEB reaches a pack only through the pack
 connector fallback in §3.
 
 ```
 Ticket needs an app's tools (smoke, flags, push test, crash reports, product data)?
 │
 ├─ Pack loaded for another ticket?      YES ──▶ Unload it first; the ceiling is per seat. §2
-├─ desk_app_tools_load {app, task_id}   ──▶ Tools appear on the next tools/list. §3
+├─ app_tools_load {app, task_id}   ──▶ Tools appear on the next tools/list. §3
 │     Not visible? Refresh the connector. Still not? Enable /mcp/<seat>/packs/<app>. §3
 ├─ Use the tools under skills/desk-gateway rules (kinds, reasons, deadline). §4
-└─ Ticket closes ──▶ desk_app_tools_load {app, task_id, unload: true}. §5
+└─ Ticket closes ──▶ app_tools_load {app, task_id, unload: true}. §5
 
 Need a tool no pack has? ──▶ Contract change, QUALITY, consumers ack. Never a browser workaround. §6
 ```
@@ -65,12 +69,12 @@ is authoritative when this table drifts.
 
 1. Confirm no other pack is loaded: your `tools/list` count should be 10–15. If it is above 15,
    another pack is live; unload it (§5) or the load is refused for crossing 20.
-2. `desk_app_tools_load {app: "kanbanos", task_id: "<the ticket id>"}`. Use the real ticket id
+2. `app_tools_load {app: "kanbanos", task_id: "<the ticket id>"}`. Use the real ticket id
    (Linear id or graph slug); the gateway writes it to `tool_pack_state` and the audit event.
 3. The result names the tools added. Only one pack at a time: 15 + 5 = 20, so a second pack has
    nowhere to go.
 
-`desk_app_tools_load` is a `write` tool and fails closed: an error means nothing was loaded.
+`app_tools_load` is a `write` tool and fails closed: an error means nothing was loaded.
 The `reason` will say either that the pack's `seats:` list does not include you, or that the
 load would take you past 20 live tools. Neither is a retry.
 
@@ -105,11 +109,11 @@ every call audited, no secrets in arguments (`skills/desk-gateway`). Two pack-sp
 When the ticket closes (PR opened and receipt written, or the ticket is handed back):
 
 ```
-desk_app_tools_load {app: "kanbanos", task_id: "<same ticket id>", unload: true}
+app_tools_load {app: "kanbanos", task_id: "<same ticket id>", unload: true}
 ```
 
 Then confirm `tools/list` is back to 10–15. A pack left loaded keeps the seat above 15 with no
-open ticket, which `desk_doctor check` reports on the Tools row and which blocks the next load.
+open ticket, which `lead_doctor check` reports on the Tools row and which blocks the next load.
 If the fallback connector was used, disable it from Marketplace → Your plugins as well.
 
 ### §6 Authoring a pack
@@ -126,8 +130,8 @@ Packs are contracts. The rules:
 | No secrets, hosts or project ids in the file | The contract is public to every seat and every template recipient (G-3) |
 | SYSTEMS implements the backend after the contract merges | Code before contract means the contract describes what was built, not what was agreed |
 
-Propose a new pack or a change with `desk_contract_propose` (SYSTEMS) or a PR to QUALITY; the
-consuming seats answer with `desk_contract_ack`. Do not add a tool by editing the gateway alone.
+Propose a new pack or a change with `sys_contract_propose` (SYSTEMS) or a PR to QUALITY; the
+consuming seats answer with `qua_contract_ack`. Do not add a tool by editing the gateway alone.
 
 ---
 
@@ -137,20 +141,20 @@ consuming seats answer with `desk_contract_ack`. Do not add a tool by editing th
 
 ```
 tools/list → 15
-desk_app_tools_load {app: "kanbanos", task_id: "SPE-214"} → added 5 tools
+app_tools_load {app: "kanbanos", task_id: "SPE-214"} → added 5 tools
 tools/list → 20 (after connector refresh)
 kanbanos_api_smoke {environment: staging}  → 200, v2.3.1, 140 ms
 kanbanos_feature_flags {environment: staging} → {…}
 kanbanos_crash_reports {platform: android, since_hours: 48} → 3 groups
 … receipt written, PR opened …
-desk_app_tools_load {app: "kanbanos", task_id: "SPE-214", unload: true}
+app_tools_load {app: "kanbanos", task_id: "SPE-214", unload: true}
 tools/list → 15
 ```
 
 **Bad — same seat, next week.**
 
 ```
-desk_app_tools_load {app: "desklanes", task_id: "SPE-231"} → error, reason: 20 tools already live
+app_tools_load {app: "desklanes", task_id: "SPE-231"} → error, reason: 20 tools already live
 Seat: "gateway bug", opens the Desk Lanes admin in the browser instead
 ```
 
@@ -169,7 +173,7 @@ old pack, load the new one, and the same work takes two calls.
 | Wrong `task_id` | Audit ties the smoke to the wrong ticket | Use the ticket's real id on load and unload |
 | Tools not visible | Load succeeded, `tools/list` unchanged | Refresh the connector; else enable `/mcp/<seat>/packs/<app>` |
 | Fallback connector left enabled | Count stays high after unload | Disable it in Marketplace → Your plugins |
-| WEB calls `desk_app_tools_load` | Not on WEB's `tools/list` | WEB's roster has no load tool; use the pack connector |
+| WEB calls `app_tools_load` | Not on WEB's `tools/list` | WEB's roster has no load tool; use the pack connector |
 | Browser instead of pack | Un-audited product read | Load the pack; if no pack has the tool, §6 |
 | Sixth tool in a pack | G-7 fails the contract | Split the app into two packs or drop a tool |
 | Backend before contract | Tool exists on the gateway, absent from the contract | Contract PR first; consumers ack; then code |

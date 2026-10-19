@@ -18,9 +18,11 @@ test-only shape: production callers always pass a closure.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
-from collections.abc import Callable
+import sys
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -306,10 +308,63 @@ def run_lead_pass(
     }
 
 
+def execute_desk_lead(
+    env: Mapping[str, str] | None = None,
+    *,
+    limit: int = 5,
+    state_dir_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Run one lead pass. Without a child model, tickets stay blocked.
+
+    An empty caller env does not write ``omega_prime/state`` in the working
+    tree. A live host uses ``OMEGA_PRIME_STATE_DIR`` or ``HOME``.
+    """
+    from omega_prime.routines import state_dir
+
+    if state_dir_path is not None:
+        root: Path | None = Path(state_dir_path)
+    else:
+        root = state_dir(env)
+    if root is None:
+        return {
+            "error": "not_configured",
+            "reason": "Set OMEGA_PRIME_STATE_DIR (or HOME) before the desk-lead pass.",
+            "tickets": [],
+            "receipts": [],
+            "invalid": [],
+            "report": "",
+            "publishes": False,
+        }
+    intake = IntakeStore(desk_intake_path(state_dir=root))
+    outcome = run_lead_pass(intake, make_dispatch(None), limit=limit)
+    outcome["publishes"] = False
+    return outcome
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m omega_prime.routines.desk_lead``."""
+    parser = argparse.ArgumentParser(prog="python -m omega_prime.routines.desk_lead")
+    parser.add_argument("--state-dir", default=None)
+    parser.add_argument("--limit", type=int, default=5)
+    args = parser.parse_args(argv)
+    result = execute_desk_lead(
+        os.environ, limit=args.limit, state_dir_path=args.state_dir
+    )
+    json.dump(result, sys.stdout)
+    sys.stdout.write("\n")
+    return 0 if not result.get("error") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
 __all__ = [
     "DEFAULT_BOT",
     "STATE_DIR_ENV",
     "desk_intake_path",
+    "execute_desk_lead",
+    "main",
     "make_dispatch",
     "run_lead_pass",
 ]

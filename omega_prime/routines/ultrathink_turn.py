@@ -8,9 +8,12 @@ exception: there is simply no plan for this turn.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +24,10 @@ def _candidates(env: dict[str, str]) -> list[Path]:
     hermes_home = env.get("HERMES_HOME", str(Path(home) / ".hermes"))
     xdg = env.get("XDG_CONFIG_HOME", str(Path(home) / ".config"))
     ordered: list[str] = []
+    if env.get("OMEGA_PRIME_STATE_DIR"):
+        ordered.append(
+            str(Path(env["OMEGA_PRIME_STATE_DIR"]) / "ultrathink" / "last-plan.json")
+        )
     if env.get("ULTRATHINK_STATE_DIR"):
         ordered.append(str(Path(env["ULTRATHINK_STATE_DIR"]) / "last-plan.json"))
     if env.get("GROK_PLUGIN_DATA"):
@@ -103,3 +110,46 @@ def resolve_turn_plan(
         "spec_exists": False,
         "stale": False,
     }
+
+
+def execute_ultrathink(env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Resolve this turn's plan. An empty env does not scan the process home."""
+    if env is None:
+        plan = resolve_turn_plan()
+    elif not env:
+        plan = {
+            "found": False,
+            "plan_path": None,
+            "spec_path": None,
+            "spec_exists": False,
+            "stale": False,
+        }
+    else:
+        plan = resolve_turn_plan(env=dict(env))
+    plan["publishes"] = False
+    return plan
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m omega_prime.routines.ultrathink_turn``."""
+    parser = argparse.ArgumentParser(
+        prog="python -m omega_prime.routines.ultrathink_turn"
+    )
+    parser.add_argument(
+        "--state-dir",
+        default=None,
+        help="Directory that contains last-plan.json (defaults to host plan paths)",
+    )
+    args = parser.parse_args(argv)
+    if args.state_dir:
+        plan = resolve_turn_plan(state_dirs=[args.state_dir])
+        plan["publishes"] = False
+    else:
+        plan = execute_ultrathink(os.environ)
+    json.dump(plan, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

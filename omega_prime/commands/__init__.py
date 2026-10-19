@@ -102,7 +102,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "omega-workflow",
         "/omega-workflow <name>",
         "Run a named workflow.",
-        "The user names a workflow: onboard, python-clean, connectors, or desk.",
+        "The user names a workflow: onboard, python-clean, connectors, desk, nightly, sweep, ultrathink, or desk-lead.",
         needs_args=True,
     ),
     CommandSpec(
@@ -519,8 +519,6 @@ def _run_generated(
     if not path.is_file():
         return missing
     stem = PurePosixPath(spec.source).stem
-    if spec.kind == "routine" and stem in WORKFLOW_NAMES:
-        return _workflow(spec.name, stem, registry, env, dict(doctor_context))
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -561,6 +559,8 @@ def _run_generated(
                 "source_invalid",
                 {"kind": spec.kind, "source": spec.source},
             )
+        if stem in WORKFLOW_NAMES:
+            return _workflow(spec.name, stem, registry, env, dict(doctor_context))
     return _ok(
         spec.name,
         {
