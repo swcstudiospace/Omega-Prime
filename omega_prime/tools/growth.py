@@ -61,6 +61,14 @@ def register_growth_tools(
         old_string: str | None = None,
         new_string: str | None = None,
     ) -> str:
+        if action == "create" and shipped is not None and _skill_present(shipped, name):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"A skill named '{name}' already exists.",
+                },
+                ensure_ascii=False,
+            )
         return manage_skill(
             action,
             name,
@@ -109,8 +117,21 @@ def register_growth_tools(
     return list(GROWTH_TOOL_NAMES)
 
 
+def _skill_present(root: Path, name: str) -> bool:
+    """True when ``skill_view`` reads ``name`` from ``root``."""
+    try:
+        parsed = json.loads(view_skill(name, skills_root=root))
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("success") is True
+
+
 def _skill_missing(payload: str) -> bool:
-    """True when ``skill_view`` did not find the name in that root."""
+    """True when ``skill_view`` did not find the name in that root.
+
+    A missing skills directory is the same as a missing name: the shipped
+    root is still the copy to read.
+    """
     try:
         parsed = json.loads(payload)
     except json.JSONDecodeError:
@@ -118,7 +139,10 @@ def _skill_missing(payload: str) -> bool:
     if not isinstance(parsed, dict) or parsed.get("success") is True:
         return False
     error = parsed.get("error")
-    return isinstance(error, str) and "not found" in error.lower()
+    if not isinstance(error, str):
+        return False
+    lowered = error.lower()
+    return "not found" in lowered or "not a directory" in lowered
 
 
 def _object(properties: dict, required: list[str]) -> dict:
