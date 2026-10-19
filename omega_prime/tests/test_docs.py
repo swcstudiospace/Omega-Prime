@@ -269,7 +269,7 @@ def test_setup_prompts_run_the_declared_stdio_command():
     ].values()
     declared = " ".join([server["command"], *server["args"]])
     assert "${CURSOR_PLUGIN_ROOT}" in declared
-    on_bot = declared.replace("${CURSOR_PLUGIN_ROOT}", "/workspace/omega-prime")
+    on_bot = declared.replace("${CURSOR_PLUGIN_ROOT}", "/workspace/omes-bot")
     for doc in (
         "omega_prime/grokbot/SETUP.md",
         "omega_prime/grokbot/templates/OMEGA_PRIME.md",

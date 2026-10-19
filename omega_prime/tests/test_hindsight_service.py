@@ -196,6 +196,21 @@ def test_bad_bank_and_base_url() -> None:
     assert HindsightService("https://hs.local/").base_url == "https://hs.local"
 
 
+def test_default_base_url_is_unset_and_refuses_to_construct() -> None:
+    from pathlib import Path
+
+    from omega_prime.memory.hindsight_service import DEFAULT_BASE_URL
+
+    assert DEFAULT_BASE_URL == ""
+    with pytest.raises(ValueError, match="non-empty"):
+        HindsightService()
+    body = (
+        Path(__file__).resolve().parents[1] / "memory" / "hindsight_service.py"
+    ).read_text(encoding="utf-8")
+    assert "hindsight-api-production" not in body
+    assert "up.railway.app" not in body
+
+
 def test_token_never_leaks() -> None:
     service, _ = _service([ProviderError(f"bad key {TOKEN}")])
     with pytest.raises(HindsightError) as exc:

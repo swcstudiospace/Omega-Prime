@@ -40,12 +40,18 @@ from omega_prime.commands.context import (
 )
 from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.cron.desk_driver import DeskDriver
+from omega_prime.grokbot.approvals_file import (
+    load_approvals_file,
+    resolve_approvals_digest,
+    resolve_approvals_path,
+)
 from omega_prime.grokbot.interceptors import (
     ToolCall,
     ToolCallInterceptor,
     call_from_context,
     run_tool_call,
 )
+from omega_prime.integrations.binding import secret_value
 from omega_prime.integrations.desk_clients import (
     clients_from_env,
     guarded_browser_factory,
@@ -328,7 +334,7 @@ def _desk_child_model(env: dict, policy: Any) -> Any:
             (
                 candidate
                 for _, candidate in _DESK_CHILD_PROVIDERS
-                if any(env.get(name) for name in candidate.env_vars)
+                if any(_secret_present(env, name) for name in candidate.env_vars)
             ),
             None,
         )
@@ -339,8 +345,17 @@ def _desk_child_model(env: dict, policy: Any) -> Any:
         return ProviderModel(
             provider, model_name, transport, broker=CredentialBroker(policy, env)
         )
-    key = next((env[name] for name in provider.env_vars if env.get(name)), "")
+    key = ""
+    for name in provider.env_vars:
+        found = secret_value(env, name)
+        if found:
+            key = found
+            break
     return ProviderModel(provider, model_name, transport, api_key=key)
+
+
+def _secret_present(env: Mapping[str, str], name: str) -> bool:
+    return bool(secret_value(env, name))
 
 
 class _DeskSubstrate:
@@ -856,23 +871,25 @@ def default_registry(
     register_omega_command_tools(registry, env)
     register_platform_tools(registry, home=home)
     register_ide_tools(registry, root, jail=None if work == root else work)
-    x_token = env.get("X_API_TOKEN", "")
+    x_token = secret_value(env, "X_API_TOKEN")
     register_x_tools(
         registry,
         XClient(transport=_UrllibXTransport() if x_token else None, token=x_token),
     )
     register_telegram_tools(
-        registry, TelegramClient(make_bot=None, token=env.get("TELEGRAM_BOT_TOKEN", ""))
+        registry,
+        TelegramClient(make_bot=None, token=secret_value(env, "TELEGRAM_BOT_TOKEN")),
     )
     register_discord_tools(
         registry,
-        DiscordClient(make_client=None, token=env.get("DISCORD_BOT_TOKEN", "")),
+        DiscordClient(make_client=None, token=secret_value(env, "DISCORD_BOT_TOKEN")),
+    )
+    substrate_token = secret_value(env, "SUBSTRATE_TOKEN") or secret_value(
+        env, "SUBSTRATE_TOKEN_GROK_BOT"
     )
     substrate_client = SubstrateClient(
         env.get("SUBSTRATE_URL", "") or SUBSTRATE_DEFAULT_URL,
-        token=env.get("SUBSTRATE_TOKEN", "")
-        or env.get("SUBSTRATE_TOKEN_GROK_BOT", "")
-        or None,
+        token=substrate_token or None,
         honor_binding=True,
         binding_env=env,
         policy=policy,
@@ -900,9 +917,7 @@ def default_registry(
                 docs_index=_DeskDocsIndex(
                     SubstrateClient(
                         docs_url,
-                        token=env.get("SUBSTRATE_TOKEN", "")
-                        or env.get("SUBSTRATE_TOKEN_GROK_BOT", "")
-                        or None,
+                        token=substrate_token or None,
                     )
                 )
                 if docs_url
@@ -1474,6 +1489,26 @@ def main(argv: list[str] | None = None) -> int:
         help="pre-approve one gated tool (repeatable)",
     )
     parser.add_argument(
+        "--approvals-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "mode 0600 file of TOOL:APPROVER lines, outside the repository "
+            "and outside OMEGA_PRIME_STATE_DIR. A person writes it. The "
+            "process only reads it, at startup."
+        ),
+    )
+    parser.add_argument(
+        "--approvals-sha256",
+        default=None,
+        metavar="HEX",
+        help=(
+            "sha256 of --approvals-file. A person sets it. A mismatch "
+            "refuses to start. OMEGA_PRIME_APPROVALS_SHA256 is the fallback."
+        ),
+    )
+    parser.add_argument(
         "--transport",
         choices=["stdio", "sse"],
         default="stdio",
@@ -1663,6 +1698,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     approvals: list[tuple[str, str]] = []
+    approvals_path = resolve_approvals_path(args.approvals_file)
+    approvals_digest = resolve_approvals_digest(args.approvals_sha256)
+    if approvals_digest and approvals_path is None:
+        return _fail("OMEGA_PRIME_APPROVALS_SHA256 is set without an approvals file")
+    if approvals_path is not None:
+        try:
+            approvals.extend(
+                load_approvals_file(
+                    approvals_path, repo_root=root, digest=approvals_digest
+                )
+            )
+        except ValueError as exc:
+            return _fail(exc)
     for item in args.approve:
         tool, _, approver = item.partition(":")
         if not tool or not approver:

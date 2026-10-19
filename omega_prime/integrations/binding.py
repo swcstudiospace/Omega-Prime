@@ -99,24 +99,72 @@ def save_binding(binding: dict[str, Any], env: Mapping[str, str] | None = None) 
     atomic_write_json(path, _sanitize(binding))
 
 
-def resolve_secret(env: Mapping[str, str], name: str) -> tuple[str | None, str | None]:
+def resolve_secret(env: Mapping[str, Any], name: str) -> tuple[str | None, str | None]:
     """Return ``(value, error)``. The error names the env var, never the value.
 
     ``name`` is the env var. ``name + "_FILE"`` is a mode 0600 file path.
+    When both are unset, ``$OMEGA_PRIME_STATE_DIR/secrets/<name>`` is the
+    same kind of file. A published Command server carries no env, so that
+    directory is how a fresh install supplies a connector token.
     """
     raw = env.get(name, "")
     if isinstance(raw, str) and raw.strip():
         return raw.strip(), None
     file_key = name + "_FILE"
     file_value = env.get(file_key, "")
-    if not isinstance(file_value, str) or not file_value.strip():
+    if isinstance(file_value, str) and file_value.strip():
+        try:
+            return read_secret_file(file_value.strip()), None
+        except ValueError:
+            return None, (
+                f"{file_key} is missing, empty, or not mode 0600. "
+                "Fix the file on the host. Do not paste the secret into chat."
+            )
+    return _state_dir_secret(env, name)
+
+
+def secret_value(env: Mapping[str, Any], name: str) -> str:
+    """The resolved secret, or ``""`` when nothing is configured.
+
+    A configured file that cannot be read raises ``ValueError``. The message
+    names the variable, never the secret.
+    """
+    value, error = resolve_secret(env, name)
+    if error:
+        raise ValueError(error)
+    return value or ""
+
+
+def secret_configured(env: Mapping[str, Any], name: str) -> bool:
+    """True when a value is readable, or a file is configured but unreadable.
+
+    An unreadable file is still "configured": the connector must not ask the
+    operator to paste the secret into chat.
+    """
+    try:
+        return bool(secret_value(env, name))
+    except ValueError:
+        return True
+
+
+def _state_dir_secret(
+    env: Mapping[str, Any], name: str
+) -> tuple[str | None, str | None]:
+    if not name.isidentifier():
+        return None, None
+    state = env.get("OMEGA_PRIME_STATE_DIR", "")
+    if not isinstance(state, str) or not state.strip():
+        return None, None
+    path = Path(state.strip()).expanduser() / "secrets" / name
+    if not path.exists():
         return None, None
     try:
-        return read_secret_file(file_value.strip()), None
+        return read_secret_file(path), None
     except ValueError:
         return None, (
-            f"{file_key} is missing, empty, or not mode 0600. "
-            "Fix the file on the host. Do not paste the secret into chat."
+            f"{name} under OMEGA_PRIME_STATE_DIR/secrets is missing, empty, "
+            "or not mode 0600. Fix the file on the host. Do not paste the "
+            "secret into chat."
         )
 
 

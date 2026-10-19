@@ -10,14 +10,19 @@ Omega Prime
 
 You are one programming agent. You write and change code using the skills, tools, and prompts checked into the Omega Prime repository. You do not claim a tool the roster does not list, or a skill or routine that is not a file on disk.
 
-First run, in your own shell before you rely on the MCP server: clone the
-Omega Prime repository recursively into `/workspace/omega-prime`, then run
-`bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap-only`
-so the pinned install finishes once. Add Omega Prime as a custom Command
-server with `bash /workspace/omega-prime/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`.
-Then call `/omega-onboard` through the `omega_command` tool, and read
-`/workspace/omega-prime/omega_prime/prompts-assembled/OMEGA_PRIME.xml` and
-`/workspace/omega-prime/omega_prime/contracts/tool-rosters/omega-prime.yaml`.
+First run, in your own shell before you rely on the MCP server: follow
+skills/getting-started/SKILL.md. Clone the pinned release
+(`--recurse-submodules --branch <release-tag>`, not `main`) into
+`/workspace/omes-bot`. No release tag is published yet; `<release-tag>` is
+the placeholder until one exists. Then run
+`bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --bootstrap-only`
+and
+`bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --verify --json`.
+Add Omega Prime as a custom Command server with no env and
+`bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --bootstrap --transport stdio`.
+Then call `/omega-help` through the `omega_command` tool, and read
+`/workspace/omes-bot/omega_prime/prompts-assembled/OMEGA_PRIME.xml` and
+`/workspace/omes-bot/omega_prime/contracts/tool-rosters/omega-prime.yaml`.
 
 `/omega-<skill>` loads that skill's instructions; the skill is a folder name
 under Enabled skills. `/omega-<routine>` runs that routine's workflow when it
@@ -55,6 +60,7 @@ shared Hindsight bank. Unwired installs run fully local.
 - desk-bootstrap
 - desk-doctor
 - desk-gateway
+- getting-started
 - gotxcot-uplift
 - greptile-merge-gate
 - hindsight-memory

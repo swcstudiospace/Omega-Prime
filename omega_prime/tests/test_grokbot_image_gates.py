@@ -400,18 +400,66 @@ def test_evidence_file_with_wrong_schema_refuses(tmp_path: Path) -> None:
         load_evidence_json(path)
 
 
-def test_long_branch_ref_roundtrips_through_the_evidence_gate(tmp_path: Path) -> None:
-    """Push events record refs/heads/<branch>. A long name is not a secret."""
-    ref = "refs/heads/cursor/publish-template-gaps-5913"
-    path = dump_evidence_json(tmp_path / "evidence.json", _evidence_record(ref=ref))
-    assert load_evidence_json(path)["ref"] == ref
+def test_push_ref_evidence_passes_and_a_token_branch_still_refuses(
+    tmp_path: Path,
+) -> None:
+    """A long push ref is provenance. A token-shaped branch segment is not.
 
+    ``github.ref`` on ``push`` is ``refs/heads/<branch>``. ``/`` is in the
+    token alphabet, so a branch at least as long as
+    ``cursor/grokbot-publish-gaps-0615`` is one 32+ candidate and used to
+    trip ``dump_evidence_json``. Pull-request refs (``refs/pull/N/merge``)
+    and ``refs/heads/main`` stay under that length, which is why only the
+    push-event image job failed.
+    """
+    for ref in (
+        "refs/heads/cursor/grokbot-publish-gaps-0615",
+        "refs/heads/cursor/publish-template-gaps-5913",
+    ):
+        path = tmp_path / "evidence.json"
+        written = dump_evidence_json(path, _evidence_record(event="push", ref=ref))
+        loaded = load_evidence_json(written)
+        assert loaded["ref"] == ref
+        assert loaded["event"] == "push"
 
-def test_token_shaped_branch_component_refuses(tmp_path: Path) -> None:
-    component = string.ascii_lowercase + string.digits
-    record = _evidence_record(ref="refs/heads/" + component)
-    with pytest.raises(SecretLeakError):
-        dump_evidence_json(tmp_path / "evidence.json", record)
+    token_branch = string.ascii_lowercase + string.digits
+    with pytest.raises(SecretLeakError) as caught:
+        dump_evidence_json(
+            tmp_path / "secret.json",
+            _evidence_record(ref="refs/heads/" + token_branch),
+        )
+    assert "token-pattern" in str(caught.value)
+    assert token_branch not in str(caught.value)
+
+    # A slash in the middle makes each piece shorter than 32. The segments
+    # joined back together are still the token, so the split must not pass.
+    split = token_branch[:18] + "/" + token_branch[18:]
+    with pytest.raises(SecretLeakError) as split_caught:
+        dump_evidence_json(
+            tmp_path / "split.json",
+            _evidence_record(ref="refs/heads/" + split),
+        )
+    assert "token-pattern" in str(split_caught.value)
+    assert split not in str(split_caught.value)
+
+    # Repeated padding drops the joined suffix under the entropy cutoff
+    # while leaving an intact token segment. Both have to trip.
+    padded = "a" * 21 + "/" + token_branch
+    with pytest.raises(SecretLeakError) as padded_caught:
+        dump_evidence_json(
+            tmp_path / "padded.json",
+            _evidence_record(ref="refs/heads/" + padded),
+        )
+    assert "token-pattern" in str(padded_caught.value)
+    assert token_branch not in str(padded_caught.value)
+    heavier = "a" * 40 + "/" + token_branch
+    with pytest.raises(SecretLeakError) as heavier_caught:
+        dump_evidence_json(
+            tmp_path / "heavier.json",
+            _evidence_record(ref="refs/heads/" + heavier),
+        )
+    assert "token-pattern" in str(heavier_caught.value)
+    assert token_branch not in str(heavier_caught.value)
 
 
 def test_evidence_file_with_a_secret_refuses(tmp_path: Path) -> None:

@@ -34,6 +34,11 @@ from urllib.parse import urlsplit
 from omega_prime.grokbot import doctor as _doctor
 from omega_prime.grokbot import receipts as _receipts
 from omega_prime.grokbot import rerun as _rerun
+from omega_prime.grokbot.approvals_file import (
+    load_approvals_file,
+    resolve_approvals_digest,
+    resolve_approvals_path,
+)
 from omega_prime.grokbot.manifest import generate_manifest
 from omega_prime.grokbot.security import (
     SecurityConfigError,
@@ -296,6 +301,8 @@ def run_oneclick(
     force: bool = False,
     resume: bool = False,
     work_root: Path | None = None,
+    approvals_file: Path | None = None,
+    approvals_sha256: str | None = None,
 ) -> int:
     """Execute the 1-click workflow."""
     sse = transport == "sse"
@@ -533,8 +540,27 @@ def run_oneclick(
         _announce_generated_token(token, token_file)
 
     print(f"Starting Omega Prime MCP Tool Host ({transport})...", file=say, flush=True)
+    approvals_path = resolve_approvals_path(approvals_file)
+    approvals_digest = resolve_approvals_digest(approvals_sha256)
+    if approvals_digest and approvals_path is None:
+        return _fail("OMEGA_PRIME_APPROVALS_SHA256 is set without an approvals file")
+    file_grants: list[tuple[str, str]] = []
+    if approvals_path is not None:
+        try:
+            file_grants = load_approvals_file(
+                approvals_path, repo_root=root, digest=approvals_digest
+            )
+        except ValueError as exc:
+            return _fail(str(exc))
     if not sse:
         cmd = [sys.executable, "-m", "omega_prime.mcp_server", "--root", str(root)]
+        if approvals_path is not None:
+            cmd += [
+                "--approvals-file",
+                str(approvals_path),
+                "--approvals-sha256",
+                approvals_digest,
+            ]
         if audit_log is not None:
             cmd += ["--audit-log", str(audit_log)]
         if work_root is not None:
@@ -567,6 +593,7 @@ def run_oneclick(
             allowed_origins=tuple(allowed_origins),
             allow_insecure_no_auth=allow_insecure_no_auth,
             audit=audit,
+            approvals=file_grants,
             token_store_path=token_store_path,
             log_format=log_format,
             work_root=work_root,
@@ -969,6 +996,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Repo the desk tools act on (forwarded to the stdio and SSE host; "
         "default: OMEGA_PRIME_WORK_ROOT, else the install root)",
     )
+    parser.add_argument(
+        "--approvals-file",
+        type=Path,
+        default=None,
+        help=(
+            "mode 0600 TOOL:APPROVER file outside the repository and outside "
+            "OMEGA_PRIME_STATE_DIR. Forwarded to the stdio host. Never written "
+            "by this process. A file under the state directory is not loaded."
+        ),
+    )
+    parser.add_argument(
+        "--approvals-sha256",
+        default=None,
+        help=(
+            "sha256 of --approvals-file. A person sets it (or "
+            "OMEGA_PRIME_APPROVALS_SHA256). A mismatch refuses to start."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -1006,6 +1051,8 @@ def main(argv: list[str] | None = None) -> int:
         force=args.force,
         resume=args.resume,
         work_root=args.work_root.resolve() if args.work_root is not None else None,
+        approvals_file=args.approvals_file,
+        approvals_sha256=args.approvals_sha256,
     )
 
 

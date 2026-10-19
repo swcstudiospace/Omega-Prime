@@ -67,55 +67,55 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "id": "x",
         "env": ("X_API_TOKEN",),
         "mode": "all",
-        "ask": "Set X_API_TOKEN on the host so the X connector can read mentions. Do not paste it into chat.",
+        "ask": "Set X_API_TOKEN, X_API_TOKEN_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/X_API_TOKEN (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "telegram",
         "env": ("TELEGRAM_BOT_TOKEN",),
         "mode": "all",
-        "ask": "Set TELEGRAM_BOT_TOKEN on the host so the Telegram connector can read updates. Do not paste it into chat.",
+        "ask": "Set TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_TOKEN_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/TELEGRAM_BOT_TOKEN (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "discord",
         "env": ("DISCORD_BOT_TOKEN",),
         "mode": "all",
-        "ask": "Set DISCORD_BOT_TOKEN on the host so the Discord connector can read messages. Do not paste it into chat.",
+        "ask": "Set DISCORD_BOT_TOKEN, DISCORD_BOT_TOKEN_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/DISCORD_BOT_TOKEN (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "delegate",
         "env": ("XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
         "mode": "any",
-        "ask": "Set one of XAI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY on the host so /omega-delegate can run a child. Do not paste it into chat.",
+        "ask": "Set one delegate key (XAI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY), its *_FILE variant, or the matching file under $OMEGA_PRIME_STATE_DIR/secrets/ (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "substrate",
         "env": ("SUBSTRATE_TOKEN", "SUBSTRATE_TOKEN_GROK_BOT"),
         "mode": "any",
-        "ask": "Set SUBSTRATE_TOKEN or SUBSTRATE_TOKEN_GROK_BOT on the host so briefs and events can reach substrate. Do not paste it into chat.",
+        "ask": "Set SUBSTRATE_TOKEN or SUBSTRATE_TOKEN_GROK_BOT, the matching *_FILE variable, or the file under $OMEGA_PRIME_STATE_DIR/secrets/ (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "hindsight",
         "env": ("HINDSIGHT_API_KEY", "HINDSIGHT_API_TOKEN"),
         "mode": "any",
-        "ask": "Set HINDSIGHT_API_KEY or HINDSIGHT_API_TOKEN on the host for the shared episodic bank. Do not paste it into chat.",
+        "ask": "Set HINDSIGHT_API_KEY or HINDSIGHT_API_TOKEN, the matching *_FILE variable, or the file under $OMEGA_PRIME_STATE_DIR/secrets/ (mode 0600). HINDSIGHT_URL stays unset until you run your own service. Do not paste a secret into chat.",
     },
     {
         "id": "railway",
         "env": ("RAILWAY_TOKEN",),
         "mode": "all",
-        "ask": "Set RAILWAY_TOKEN on the host for Railway status and logs. Do not paste it into chat.",
+        "ask": "Set RAILWAY_TOKEN, RAILWAY_TOKEN_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/RAILWAY_TOKEN (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "greptile",
         "env": ("GREPTILE_API_KEY",),
         "mode": "all",
-        "ask": "Set GREPTILE_API_KEY on the host for Greptile review. Do not paste it into chat.",
+        "ask": "Set GREPTILE_API_KEY, GREPTILE_API_KEY_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/GREPTILE_API_KEY (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "vercel",
         "env": ("VERCEL_TOKEN",),
         "mode": "all",
-        "ask": "Set VERCEL_TOKEN on the host for Vercel deployments. Do not paste it into chat.",
+        "ask": "Set VERCEL_TOKEN, VERCEL_TOKEN_FILE, or $OMEGA_PRIME_STATE_DIR/secrets/VERCEL_TOKEN (mode 0600). Do not paste it into chat.",
     },
     {
         "id": "play",
@@ -372,8 +372,9 @@ def _present(env: Mapping[str, str], names: tuple[str, ...], mode: str) -> bool:
 
 
 def _filled(env: Mapping[str, str], name: str) -> bool:
-    value = env.get(name)
-    return isinstance(value, str) and value.strip() != ""
+    from omega_prime.integrations.binding import secret_configured
+
+    return secret_configured(env, name)
 
 
 __all__ = [

@@ -36,9 +36,14 @@ The repository is `swcstudiospace/omes-bot` (see `[project.urls]` in
 empty, so clone recursively:
 
 ```bash
-git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git omega-prime
-cd omega-prime
+git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/omes-bot.git /workspace/omes-bot
+cd /workspace/omes-bot
 ```
+
+`<release-tag>` is a placeholder. This repository has no git tag yet
+(checked 2026-10-19). Do not clone `main`. Substitute the tag when one
+is published. `/workspace/omes-bot` is the only install path the Bot
+instructions use.
 
 Inside an existing checkout, populate afterwards instead:
 
@@ -82,13 +87,16 @@ saved output — `--token` exists only as a deprecated flag that warns because
 
 | Secret | Needed for | Where it goes |
 | --- | --- | --- |
-| `XAI_API_KEY` | Grok model calls outside a Grok Bot seat | host env, resolved via the credential broker |
-| `X_API_TOKEN` | X connector tools | host env, read by the tool host |
-| `TELEGRAM_BOT_TOKEN` | Telegram connector tools | host env, read by the tool host |
-| `DISCORD_BOT_TOKEN` | Discord connector tools | host env, read by the tool host |
-| GitHub token | Reviews, ship PRs | host via `gh auth` |
-| `SUBSTRATE_TOKEN` | Substrate brief/events/memory | host env, resolved via the credential broker |
-| `HINDSIGHT_API_KEY` | Shared Hindsight episodic memory | host env, resolved via the credential broker |
+| `XAI_API_KEY` | Grok model calls outside a Grok Bot seat | host env, `XAI_API_KEY_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/XAI_API_KEY` (mode 0600). The same `*_FILE` rule covers `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, and `GITHUB_TOKEN` |
+| `X_API_TOKEN` | X connector tools | host env, `X_API_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/X_API_TOKEN` (mode 0600) |
+| `TELEGRAM_BOT_TOKEN` | Telegram connector tools | host env, `TELEGRAM_BOT_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/TELEGRAM_BOT_TOKEN` (mode 0600) |
+| `DISCORD_BOT_TOKEN` | Discord connector tools | host env, `DISCORD_BOT_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/DISCORD_BOT_TOKEN` (mode 0600) |
+| GitHub CLI | Reviews, ship PRs | `gh auth login`, or `GH_TOKEN` in the environment of the process that runs `gh`. `gh` does not read `GH_TOKEN_FILE` or `$OMEGA_PRIME_STATE_DIR/secrets/GH_TOKEN` |
+| `SUBSTRATE_TOKEN` | Substrate brief/events/memory | host env, `SUBSTRATE_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/SUBSTRATE_TOKEN` (mode 0600) |
+| `HINDSIGHT_API_KEY` | Shared Hindsight episodic memory, only when `HINDSIGHT_URL` is set | host env, `HINDSIGHT_API_KEY_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/HINDSIGHT_API_KEY` (mode 0600) |
+| `RAILWAY_TOKEN` | Railway status and logs | host env, `RAILWAY_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/RAILWAY_TOKEN` (mode 0600) |
+| `VERCEL_TOKEN` | Vercel deployments | host env, `VERCEL_TOKEN_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/VERCEL_TOKEN` (mode 0600) |
+| `GREPTILE_API_KEY` | Greptile review | host env, `GREPTILE_API_KEY_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/GREPTILE_API_KEY` (mode 0600) |
 | `MCP_AUTH_TOKEN` or `--token-file` | Bearer token a remote tool host requires | host env or a `0600` file (never `argv`) |
 | `NOTION_TOKEN` or `NOTION_TOKEN_FILE` | Notion Task dashboard (read, update, and insert content) | host env, or a mode 0600 file path |
 | `LINEAR_API_KEY` or `LINEAR_API_KEY_FILE` | Linear team selection and issue create | host env, or a mode 0600 file path |
@@ -97,8 +105,10 @@ Configure only the integrations you intend to use. Availability and failure
 behavior are tool-specific: some tools return `not_configured`, readiness
 accounts for named prerequisites, and some clients raise or degrade reads.
 See [substrate](substrate.md) and [connectors](connectors.md) for those contracts.
-`SUBSTRATE_URL` (default `http://127.0.0.1:7410`) and `HINDSIGHT_URL` override
-the respective peers; `omega_prime/grokbot/SETUP.md` has the full secret table.
+`SUBSTRATE_URL` (default `http://127.0.0.1:7410`) overrides the substrate
+peer. `HINDSIGHT_URL` defaults to unset, which disables the remote bank;
+set it only to a service you operate. `omega_prime/grokbot/SETUP.md` has the
+full secret table.
 
 Send `/omega-connectors` to walk installer setup: the Notion template in
 [notion-task-dashboard.md](notion-task-dashboard.md), then Notion, then

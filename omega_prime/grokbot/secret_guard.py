@@ -58,14 +58,11 @@ _UUID_RE = re.compile(
     r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
     r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
 )
-#: Hierarchical Git refs. ``/`` is in the token alphabet, so ``refs/heads/``
-#: plus an ordinary branch name is one 32+ character candidate even when no
-#: component is a token. ``refs/pull/38/merge`` and ``refs/heads/main`` stay
-#: under that length; a long branch name does not.
-_GIT_REF_RE = re.compile(
-    r"\Arefs/(?:heads|tags)(?:/[A-Za-z0-9._-]+)+\Z"
-    r"|\Arefs/pull/[0-9]+/(?:merge|head)\Z"
-)
+#: A git ref segment. ``/`` is in the token alphabet, so a long
+#: ``refs/heads/<branch>`` is one candidate; only these characters are a ref.
+#: ``refs/pull/N/merge`` and ``refs/heads/main`` stay under 32 characters.
+_REF_SEGMENT_RE = re.compile(r"\A[A-Za-z0-9._\-]+\Z")
+_GIT_REF_KINDS = frozenset({"heads", "tags", "remotes", "pull"})
 
 _MIN_CANDIDATE_LEN = 32
 _MIN_ENTROPY_BITS = 4.2
@@ -125,22 +122,51 @@ def _looks_like_generic_token(candidate: str) -> bool:
     """Conservative bare-token heuristic for what audit patterns miss.
 
     Flags runs of 32+ token-alphabet characters with mixed character classes
-    and high per-character entropy. Pure-hex digests, UUIDs, and
-    low-diversity runs (padding, repeats) are excluded so integrity metadata
-    in manifests and logs does not trip the gate.
-
-    A hierarchical Git ref is judged per component. ``/`` stays inside the
-    token alphabet for every other string, so a base64 blob or a cache path
-    that contains a slash is unchanged. A ref component that itself meets
-    this test still trips.
+    and high per-character entropy. Pure-hex digests, UUIDs, low-diversity
+    runs (padding, repeats), and git refs whose branch segments are not
+    tokens are excluded so integrity metadata in manifests and logs does not
+    trip the gate. A token split by ``/`` is judged with the slashes removed,
+    and each segment is judged on its own, so padding cannot hide either
+    one. ``/`` stays in the token alphabet for every string that is not a
+    git ref.
     """
+    branch = _git_ref_branch(candidate)
+    if branch is not None:
+        if any(_token_shape(part) for part in branch):
+            return True
+        # ``/`` is one extra symbol. On an ordinary branch name it can lift
+        # the joined suffix over the entropy cutoff by itself. A token with
+        # a slash inserted is still a token once those slashes are removed.
+        return _token_shape("".join(branch))
+    return _token_shape(candidate)
+
+
+def _git_ref_branch(candidate: str) -> list[str] | None:
+    """Branch segments of a ``refs/<kind>/...`` candidate, or None.
+
+    ``/`` belongs to the token alphabet, so ``refs/heads/<long-branch>`` is
+    one candidate. The structural prefix is provenance, same as a digest.
+    Callers scan each segment, and the segments joined with the slashes
+    removed. A segment catches a token hidden by repeated padding. The
+    joined text catches a token split by ``/``.
+    """
+    parts = candidate.split("/")
+    if len(parts) < 3 or parts[0] != "refs" or parts[1] not in _GIT_REF_KINDS:
+        return None
+    if any(part == "" for part in parts):
+        return None
+    if not all(_REF_SEGMENT_RE.fullmatch(part) for part in parts[2:]):
+        return None
+    return parts[2:]
+
+
+def _token_shape(candidate: str) -> bool:
+    """The entropy heuristic for one candidate, with no ref special case."""
     text = candidate.strip("=").strip()
     if len(text) < _MIN_CANDIDATE_LEN:
         return False
     if _HEX_RE.match(text) or _UUID_RE.match(text):
         return False
-    if _GIT_REF_RE.fullmatch(text):
-        return any(_looks_like_generic_token(part) for part in text.split("/") if part)
     if len(set(text)) <= 4:
         return False
     classes = sum(
