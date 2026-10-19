@@ -18,9 +18,11 @@ test-only shape: production callers always pass a closure.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
-from collections.abc import Callable
+import sys
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -306,10 +308,200 @@ def run_lead_pass(
     }
 
 
+_INSTALL_ROOT = Path(__file__).resolve().parents[2]
+_WORK_ROOT_ENV = "OMEGA_PRIME_WORK_ROOT"
+_CHILD_MODEL_ENV = "OMEGA_PRIME_DESK_CHILD_MODEL"
+
+
+class _HostScopedParent:
+    """Child parent whose tools re-enter the host call path.
+
+    ``child_model`` is the host's model when the registry already has one,
+    so ticket text uses that transport and credential broker. Tool calls go
+    through :func:`omega_prime.commands.workflows.dispatch_tool`, which
+    honors the active roster and interceptors. Names outside the served
+    roster are not offered.
+    """
+
+    def __init__(self, model: Any, registry: Any, journal: Any = None) -> None:
+        self.child_model = model
+        self._registry = registry
+        self.delegate_depth = 0
+        self.journal = journal
+
+    @property
+    def tools(self) -> dict[str, Any]:
+        from omega_prime.commands.context import get_served_roster
+        from omega_prime.commands.workflows import dispatch_tool
+
+        roster = get_served_roster()
+        policy = getattr(self._registry, "policy", None)
+        allows = getattr(policy, "allows_tool", None)
+        names: list[str] = []
+        for item in self._registry.schemas():
+            function = item.get("function") if isinstance(item, dict) else None
+            name = function.get("name") if isinstance(function, dict) else None
+            if not isinstance(name, str) or name == "":
+                continue
+            if roster is not None and name not in roster:
+                continue
+            if callable(allows) and not allows(name):
+                continue
+            names.append(name)
+
+        def _call(tool: str) -> Any:
+            def run(**arguments: Any) -> str:
+                payload = dispatch_tool(self._registry, tool, arguments)
+                return json.dumps(payload)
+
+            return run
+
+        return {name: _call(name) for name in names}
+
+
+def host_intake_path(
+    env: Mapping[str, str] | None = None,
+    *,
+    state_dir_path: str | Path | None = None,
+) -> Path | None:
+    """The intake file the lead tools open, or None when no host is named.
+
+    ``state_dir_path`` and ``OMEGA_PRIME_STATE_DIR`` win, matching
+    :func:`desk_intake_path`. Otherwise the file is
+    ``<work root>/omega_prime/state/intake.json`` from
+    ``OMEGA_PRIME_WORK_ROOT`` or the install root — the same path
+    ``lead_intake_next`` uses. ``HOME`` marks a live host; it does not
+    move the queue to ``~/.local/state``. An empty caller env returns
+    None so a unit test does not create a queue in the working tree.
+    """
+    if state_dir_path is not None:
+        return desk_intake_path(state_dir=state_dir_path)
+    mapping: Mapping[str, str] = os.environ if env is None else env
+    configured = mapping.get(STATE_DIR_ENV, "").strip()
+    if configured:
+        return desk_intake_path(state_dir=configured)
+    if not (
+        mapping.get(_WORK_ROOT_ENV, "").strip()
+        or mapping.get("HOME", "").strip()
+        or mapping.get("XDG_STATE_HOME", "").strip()
+    ):
+        return None
+    from omega_prime.mcp_server import resolve_work_root
+
+    # Empty state_dir skips the process env, so the passed mapping wins.
+    return desk_intake_path(resolve_work_root(_INSTALL_ROOT, mapping), state_dir="")
+
+
+def _host_child_model(registry: Any) -> Any | None:
+    bindings = getattr(registry, "runtime_bindings", None)
+    if not isinstance(bindings, dict):
+        return None
+    driver = bindings.get("desk_driver")
+    parent = getattr(driver, "parent", None)
+    return getattr(parent, "child_model", None)
+
+
+def _host_journal(registry: Any) -> Any:
+    bindings = getattr(registry, "runtime_bindings", None)
+    if not isinstance(bindings, dict):
+        return None
+    driver = bindings.get("desk_driver")
+    return getattr(getattr(driver, "parent", None), "journal", None)
+
+
+def _configured_parent(env: Mapping[str, str], registry: Any | None) -> Any | None:
+    """The host parent, or None when this pass cannot run a child.
+
+    A CLI without a registry stays blocked: an empty tool map would still
+    mark the intake done. A registry reuses the host's child model so the
+    seat policy and credential broker stay on the call. A registry that has
+    no host model yet builds one with that registry's policy.
+    """
+    if registry is None or not callable(getattr(registry, "schemas", None)):
+        return None
+    model = _host_child_model(registry)
+    if model is None and str(env.get(_CHILD_MODEL_ENV) or "").strip():
+        from omega_prime.mcp_server import _desk_child_model
+
+        model = _desk_child_model(dict(env), getattr(registry, "policy", None))
+    if model is None:
+        return None
+    return _HostScopedParent(model, registry, _host_journal(registry))
+
+
+def _dispatch_root(env: Mapping[str, str]) -> Path | None:
+    raw = env.get(_WORK_ROOT_ENV, "").strip()
+    if raw:
+        return Path(raw)
+    if env.get("HOME", "").strip() or env.get("XDG_STATE_HOME", "").strip():
+        return _INSTALL_ROOT
+    return None
+
+
+def execute_desk_lead(
+    env: Mapping[str, str] | None = None,
+    *,
+    limit: int = 5,
+    state_dir_path: str | Path | None = None,
+    registry: Any | None = None,
+) -> dict[str, Any]:
+    """Run one lead pass. Without a child model, tickets stay blocked.
+
+    An empty caller env does not write ``omega_prime/state`` in the working
+    tree.     A live host reads the same intake file as the lead tools. A child
+    runs only through a registry, using the host model and the served
+    roster. Without that registry, tickets stay blocked.
+    """
+    path = host_intake_path(env, state_dir_path=state_dir_path)
+    if path is None:
+        return {
+            "error": "not_configured",
+            "reason": (
+                "Set OMEGA_PRIME_STATE_DIR or OMEGA_PRIME_WORK_ROOT, or run "
+                "with HOME set, before the desk-lead pass."
+            ),
+            "tickets": [],
+            "receipts": [],
+            "invalid": [],
+            "report": "",
+            "publishes": False,
+        }
+    mapping: Mapping[str, str] = os.environ if env is None else env
+    intake = IntakeStore(path)
+    outcome = run_lead_pass(
+        intake,
+        make_dispatch(_configured_parent(mapping, registry), _dispatch_root(mapping)),
+        limit=limit,
+    )
+    outcome["publishes"] = False
+    return outcome
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m omega_prime.routines.desk_lead``."""
+    parser = argparse.ArgumentParser(prog="python -m omega_prime.routines.desk_lead")
+    parser.add_argument("--state-dir", default=None)
+    parser.add_argument("--limit", type=int, default=5)
+    args = parser.parse_args(argv)
+    result = execute_desk_lead(
+        os.environ, limit=args.limit, state_dir_path=args.state_dir
+    )
+    json.dump(result, sys.stdout)
+    sys.stdout.write("\n")
+    return 0 if not result.get("error") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
 __all__ = [
     "DEFAULT_BOT",
     "STATE_DIR_ENV",
     "desk_intake_path",
+    "execute_desk_lead",
+    "host_intake_path",
+    "main",
     "make_dispatch",
     "run_lead_pass",
 ]

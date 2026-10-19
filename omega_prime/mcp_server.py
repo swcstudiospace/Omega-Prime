@@ -36,6 +36,7 @@ from omega_prime.commands.context import (
     nested_depth,
     nested_depth_frame,
     nested_dispatch_scope,
+    served_roster_scope,
 )
 from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.cron.desk_driver import DeskDriver
@@ -73,7 +74,7 @@ from omega_prime.substrate.client import (
     SubstrateClient,
     SubstrateError,
 )
-from omega_prime.tooling.fs import read_secret_file
+from omega_prime.tooling.fs import ensure_private_dir, read_secret_file
 from omega_prime.tooling.roster import roster_names
 from omega_prime.tools.approvals import ApprovalLog
 from omega_prime.tools.coding import register_coding_tools
@@ -820,7 +821,10 @@ def default_registry(
     coding_root = work if work != root else root / "omega_prime"
     register_coding_tools(registry, coding_root, policy=policy)
     # `OMEGA_PRIME_STATE_DIR` moves the growth stores and the desk stores out
-    # of the (possibly read-only) source tree; skills stay under the root.
+    # of the (possibly read-only) source tree. New skills follow that volume
+    # when the install skills directory cannot be written. The state skills
+    # directory is created before the tools are registered so a read can fall
+    # through to the shipped copy, and creating a shipped name is refused.
     state_dir = env.get("OMEGA_PRIME_STATE_DIR")
     state_value = state_dir if isinstance(state_dir, str) and state_dir else ""
     if state_value:
@@ -832,9 +836,16 @@ def default_registry(
     # DESK-01: one MemoryStore instance shared by the growth tools and the
     # lead pack, so `lead_memory_recall` sees what the growth tools retain.
     memory_store = MemoryStore(memory_dir)
+    from omega_prime.routines.nightly import writable_skills_root
+
+    install_skills = root / "omega_prime" / "skills"
+    skills_root = writable_skills_root(install_skills, env)
+    if skills_root != install_skills:
+        ensure_private_dir(skills_root)
     register_growth_tools(
         registry,
-        skills_root=root / "omega_prime" / "skills",
+        skills_root=skills_root,
+        skills_fallback=install_skills if skills_root != install_skills else None,
         memory_dir=memory_dir,
         session_db=session_db,
         memory_store=memory_store,
@@ -1295,7 +1306,9 @@ def call_tool_handler(
             if allowed is not None and name not in allowed:
                 return json.dumps({"error": f"policy forbids {name}", "tool": name})
             with nested_dispatch_scope(_reenter):
-                return registry.dispatch(name, arguments)
+                roster_names = frozenset(allowed) if allowed is not None else None
+                with served_roster_scope(roster_names):
+                    return registry.dispatch(name, arguments)
 
         call = call_from_context(ctx, name, arguments, transport=transport)
         # ``is_error`` follows the payload: a null ``error`` is a status field,

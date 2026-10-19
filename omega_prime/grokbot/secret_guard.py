@@ -60,6 +60,7 @@ _UUID_RE = re.compile(
 )
 #: A git ref segment. ``/`` is in the token alphabet, so a long
 #: ``refs/heads/<branch>`` is one candidate; only these characters are a ref.
+#: ``refs/pull/N/merge`` and ``refs/heads/main`` stay under 32 characters.
 _REF_SEGMENT_RE = re.compile(r"\A[A-Za-z0-9._\-]+\Z")
 _GIT_REF_KINDS = frozenset({"heads", "tags", "remotes", "pull"})
 
@@ -122,15 +123,21 @@ def _looks_like_generic_token(candidate: str) -> bool:
 
     Flags runs of 32+ token-alphabet characters with mixed character classes
     and high per-character entropy. Pure-hex digests, UUIDs, low-diversity
-    runs (padding, repeats), and git refs whose branch suffix and segments
-    are not tokens are excluded so integrity metadata in manifests and logs
-    does not trip the gate. The suffix is one string, slashes included, and
-    each segment is checked too: padding must not hide either one.
+    runs (padding, repeats), and git refs whose branch segments are not
+    tokens are excluded so integrity metadata in manifests and logs does not
+    trip the gate. A token split by ``/`` is judged with the slashes removed,
+    and each segment is judged on its own, so padding cannot hide either
+    one. ``/`` stays in the token alphabet for every string that is not a
+    git ref.
     """
     branch = _git_ref_branch(candidate)
     if branch is not None:
-        suffix = "/".join(branch)
-        return _token_shape(suffix) or any(_token_shape(part) for part in branch)
+        if any(_token_shape(part) for part in branch):
+            return True
+        # ``/`` is one extra symbol. On an ordinary branch name it can lift
+        # the joined suffix over the entropy cutoff by itself. A token with
+        # a slash inserted is still a token once those slashes are removed.
+        return _token_shape("".join(branch))
     return _token_shape(candidate)
 
 
@@ -139,9 +146,9 @@ def _git_ref_branch(candidate: str) -> list[str] | None:
 
     ``/`` belongs to the token alphabet, so ``refs/heads/<long-branch>`` is
     one candidate. The structural prefix is provenance, same as a digest.
-    Callers scan the joined suffix and each segment. The joined suffix
-    catches a token split by ``/``. Each segment catches a token hidden by
-    repeated padding that pulls the whole string under the entropy cutoff.
+    Callers scan each segment, and the segments joined with the slashes
+    removed. A segment catches a token hidden by repeated padding. The
+    joined text catches a token split by ``/``.
     """
     parts = candidate.split("/")
     if len(parts) < 3 or parts[0] != "refs" or parts[1] not in _GIT_REF_KINDS:

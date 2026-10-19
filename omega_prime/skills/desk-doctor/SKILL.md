@@ -1,22 +1,26 @@
 ---
 name: desk-doctor
-description: "Run and read the desk integrity report (desk_doctor check): prompt SHA, skills, memory bank, tool roster, connector, roster registration."
+description: "Run and read the desk integrity report (lead_doctor check): prompt SHA, skills, memory bank, tool roster, connector, roster registration."
 bots: [bot-00-omega-prime]
 gates: [G-7]
 ---
 <skill name="desk-doctor" version="1">
 # Desk Doctor
 
+## Served tools
+
+Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+
 ## Omega Prime adaptation
 
-Omega Prime runs `lead_doctor` instead of `desk_doctor`, against the one
+Omega Prime runs `lead_doctor` (the external gateway called this `desk_doctor`), against the one
 Omega Prime roster — no gateway, no seats. The checks below (prompt,
 skills, memory, roster, registration) are the same checks;
 `prompt_sha256` refers to `prompts-assembled/OMEGA_PRIME.xml`.
 
 ## When this applies (L1)
 
-`/desk doctor` is `desk_doctor` with `action: check`. It is the integrity report for one seat: is
+`/desk doctor` is `lead_doctor` with `action: check`. It is the integrity report for one seat: is
 the installed prompt the one the gateway rendered, are the skills present, does memory work, is
 the tool list the roster, is the connector bound to the right seat, is the team registered, and
 does the substrate answer. Run it after bootstrap, after any prompt or roster tag change, when a
@@ -31,7 +35,7 @@ Running /desk doctor?
 │
 ├─ All rows green ──▶ Record the result tail in the current receipt if one is open. Done.
 │
-├─ Prompt or Connector red ──▶ desk_doctor {action: repair}, then check again. §3
+├─ Prompt or Connector red ──▶ lead_doctor {action: repair}, then check again. §3
 │                              Still red? Report to LEAD with the row text. Do not hand-edit.
 │
 ├─ Skills, Tools, Memory, Roster or Substrate red ──▶ Not repairable from this seat. §2
@@ -50,7 +54,7 @@ to make them green by editing what they measure.
 
 ### §1 Running it
 
-Call `desk_doctor` with:
+Call `lead_doctor` with:
 
 | Input | Value | Why it matters |
 |---|---|---|
@@ -67,18 +71,18 @@ memory or from a previous run; the point is to detect a file that changed.
 |---|---|---|---|
 | Prompt | Hash equals the gateway render of `prompts-assembled/<SEAT>.xml` at the roster version; no `{{…}}` | File edited, truncated, stale tag, or rendered before the roster was complete | `repair`, then `check`. Still red → LEAD |
 | Skills | Every `<skill path=…>` in the prompt resolves to a library name; versions match the tag | A skill missing from the private library, or an old version | LEAD → QUALITY (skills owner). Add or update the skill from the desk pack; do not write your own copy |
-| Memory | Hindsight `/health` reachable through the gateway; bank `pd-<seat>` exists; redacted retain/recall probe round-trips | Bank missing, Hindsight down, or forwarder path broken | LEAD → SYSTEMS (bank) or INFRA (tailnet). Keep working; `desk_brief` falls through uncached |
-| Tools | `tools/list` count within 10–15, or ≤ 20 with a pack loaded, and equal to `contracts/tool-rosters/<seat>.yaml`; every g5/g6 tool marked | Roster drift, a stale pack still loaded, or a gateway build behind the contract | Stale pack → `desk_app_tools_load` with `unload: true` (`skills/tool-packs`). Otherwise LEAD → QUALITY |
+| Memory | Hindsight `/health` reachable through the gateway; bank `pd-<seat>` exists; redacted retain/recall probe round-trips | Bank missing, Hindsight down, or forwarder path broken | LEAD → SYSTEMS (bank) or INFRA (tailnet). Keep working; `lead_brief` falls through uncached |
+| Tools | `tools/list` count within 10–15, or ≤ 20 with a pack loaded, and equal to `contracts/tool-rosters/<seat>.yaml`; every g5/g6 tool marked | Roster drift, a stale pack still loaded, or a gateway build behind the contract | Stale pack → `app_tools_load` with `unload: true` (`skills/tool-packs`). Otherwise LEAD → QUALITY |
 | Connector | OAuth token valid for `seat:<name>`; a probe to another seat's endpoint returns 403 | Token expired, wrong seat endpoint, or the cross-seat probe did not 403 | `repair` (re-auth). Wrong endpoint → remove and re-add per `skills/desk-bootstrap` §1. Probe not 403 → tell LEAD at once; that is a gateway defect |
-| Roster | Channel id registered; LEAD in the group; QUALITY out; seven UUIDs; heartbeat within 24 h | A seat never registered, QUALITY was added to the group, or a seat has been silent | LEAD: `desk_roster_status` names the seat. That seat re-runs bootstrap §2 |
-| Substrate | `desk_event_emit` lands in Greptime; `desk_docs_search` returns a hit for "verification receipt" | Event log or docs plane unreachable | LEAD → INFRA (`desk_db_health`) or SYSTEMS (ingest). Reads fail open meanwhile; writes fail closed |
+| Roster | Channel id registered; LEAD in the group; QUALITY out; seven UUIDs; heartbeat within 24 h | A seat never registered, QUALITY was added to the group, or a seat has been silent | LEAD: `lead_roster_status` names the seat. That seat re-runs bootstrap §2 |
+| Substrate | `lead_event_emit` lands in Greptime; `lead_docs_search` returns a hit for "verification receipt" | Event log or docs plane unreachable | LEAD → INFRA (`infra_db_health`) or SYSTEMS (ingest). Reads fail open meanwhile; writes fail closed |
 
 The row text names the check that failed. Report it verbatim. A paraphrase ("memory is broken")
 loses the detail the owning seat needs and costs a round trip.
 
 ### §3 What `repair` does, and only that
 
-`desk_doctor` with `action: repair`:
+`lead_doctor` with `action: repair`:
 
 1. Re-runs `install_prompt` and returns the fresh render for you to write and re-hash.
 2. Re-initiates connector auth for `seat:<name>`.
@@ -89,7 +93,7 @@ on it: one `repair`, one `check`, then escalate.
 
 ### §4 Where the result goes
 
-The gateway records the last doctor result per seat; LEAD reads it in `desk_roster_status`. When
+The gateway records the last doctor result per seat; LEAD reads it in `lead_roster_status`. When
 a receipt is open (bootstrap, a prompt uplift, a roster bump), add the `check` call to
 `commands` with its output tail so the receipt shows the seat was green at the time. A doctor run
 is evidence about the seat, not about the work, so it never substitutes for the task's own
@@ -102,12 +106,12 @@ verification commands (G-2).
 **Good — IOS after a roster version bump.**
 
 ```
-desk_doctor {action: check, prompt_sha256: 9f3c…, installed_skills: [desk-bootstrap, desk-doctor,
+lead_doctor {action: check, prompt_sha256: 9f3c…, installed_skills: [desk-bootstrap, desk-doctor,
              verification-receipts, ios, tool-packs, …]}
 → Prompt RED  "installed sha 9f3c… ≠ render 41a0… at roster v1.1.0"
 → six rows green
-desk_doctor {action: repair}  → new XML → written → sha256sum → 41a0…
-desk_doctor {action: check, prompt_sha256: 41a0…, installed_skills: […]} → all green
+lead_doctor {action: repair}  → new XML → written → sha256sum → 41a0…
+lead_doctor {action: check, prompt_sha256: 41a0…, installed_skills: […]} → all green
 Receipt: commands[3..5] = the two checks and the repair; claim "seat green at v1.1.0" cites [5]
 ```
 
@@ -143,7 +147,7 @@ ceiling for the next ticket, and the next load is refused. Unload, re-check, mov
 | Hand-editing the prompt | Green today, drift tomorrow | `repair`; never merge by hand |
 | Repair loop | Same non-Prompt row red after `repair` | One repair, one check, then LEAD |
 | Paraphrased row | Owning seat asks "which check?" | Quote the row text |
-| Stale pack | Tools row over 15 with no open ticket | `desk_app_tools_load` with `unload: true` |
+| Stale pack | Tools row over 15 with no open ticket | `app_tools_load` with `unload: true` |
 | Cross-seat probe not 403 | Connector row red with "probe returned 200" | Tell LEAD immediately; do not use the gateway until QUALITY clears it |
 | Doctor as task evidence | Receipt cites a doctor run for "tests pass" | Doctor proves the seat, not the work (G-2 §3) |
 | "Fixing" a gate row | Receipt or gate script edited to turn a row green | PD-3 breach. The row is a blocker for LEAD |

@@ -66,6 +66,9 @@ else:
     _fcntl = _fcntl_module
 
 FORMAT_VERSION = 1
+# mtime_ns, size, inode, sha256. Inode catches an atomic replace inside one
+# mtime tick; the hash catches an in-place rewrite that keeps the inode.
+_FileSignature = tuple[int, int, int, bytes]
 TOKEN_ID_PREFIX = "tok_"
 DEFAULT_RELOAD_INTERVAL = 1.0
 DEFAULT_CLI_SCOPES = (SCOPE_READ, SCOPE_CALL)
@@ -636,6 +639,15 @@ def _entry_from_record(record: TokenRecord) -> _Entry:
     )
 
 
+def _file_signature(info: os.stat_result, data: bytes) -> _FileSignature:
+    return (
+        int(info.st_mtime_ns),
+        int(info.st_size),
+        int(info.st_ino),
+        hashlib.sha256(data).digest(),
+    )
+
+
 class FileTokenStore(TokenStore):
     """A `TokenStore` backed by the hashed token file; live-reloading, fail closed."""
 
@@ -652,7 +664,7 @@ class FileTokenStore(TokenStore):
         self._reload_interval = reload_interval
         self._lock = threading.Lock()
         self._file_entries: tuple[_Entry, ...] = ()
-        self._signature: tuple[int, int] | None = None
+        self._signature: _FileSignature | None = None
         self._last_check = 0.0
         self._degraded_reason: str | None = None
         with self._lock:
@@ -685,7 +697,7 @@ class FileTokenStore(TokenStore):
         except OSError as exc:
             self._fail(f"token file unreadable ({type(exc).__name__})", None)
             return
-        signature = (info.st_mtime_ns, info.st_size)
+        signature = _file_signature(info, data)
         try:
             records = _parse_file(data)
         except TokenFileError as exc:
@@ -695,7 +707,7 @@ class FileTokenStore(TokenStore):
         self._signature = signature
         self._degraded_reason = None
 
-    def _fail(self, reason: str, signature: tuple[int, int] | None) -> None:
+    def _fail(self, reason: str, signature: _FileSignature | None) -> None:
         self._file_entries = ()
         self._signature = signature
         self._degraded_reason = reason
@@ -706,18 +718,33 @@ class FileTokenStore(TokenStore):
             elapsed = now - self._last_check
             if elapsed >= self._reload_interval or elapsed < 0:
                 self._last_check = now
-                try:
-                    info = self.path.stat()
-                except OSError:
-                    current: tuple[int, int] | None = None
-                else:
-                    current = (info.st_mtime_ns, info.st_size)
-                if current is None:
-                    if self._degraded_reason != "token file not found":
-                        self._reload()
-                elif current != self._signature:
+                if not self._stat_matches():
                     self._reload()
             return self._file_entries
+
+    def _stat_matches(self) -> bool:
+        """False when the file changed, including a same-size rewrite in one mtime tick.
+
+        ``(st_mtime_ns, st_size)`` misses an atomic replace that lands inside
+        the filesystem's mtime resolution. The inode catches that replace.
+        A content hash catches an in-place rewrite that keeps the inode too.
+        """
+        try:
+            info = self.path.stat()
+        except OSError:
+            if self._degraded_reason != "token file not found":
+                return False
+            return self._signature is None
+        if self._signature is None:
+            return False
+        identity = (int(info.st_mtime_ns), int(info.st_size), int(info.st_ino))
+        if identity != self._signature[:3]:
+            return False
+        try:
+            digest = hashlib.sha256(self.path.read_bytes()).digest()
+        except OSError:
+            return False
+        return digest == self._signature[3]
 
     def verify(self, presented: str | None) -> Principal | None:
         """The principal for a valid, unexpired, unrevoked token; else None.

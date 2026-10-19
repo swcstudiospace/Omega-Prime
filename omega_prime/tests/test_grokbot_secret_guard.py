@@ -234,6 +234,33 @@ def test_non_path_pathlike_follows_file_contract(tmp_path: Path):
     assert "0600-violation" in str(excinfo.value)
 
 
+def test_hierarchical_git_ref_is_not_a_bare_token():
+    """A long branch ref is metadata. ``/`` must not glue the prefix into a token."""
+    ref = "refs/heads/cursor/publish-template-gaps-5913"
+    assert_no_secrets(json.dumps({"ref": ref}, sort_keys=True), "image-evidence")
+    assert_no_secrets("refs/pull/38/merge", "image-evidence")
+    assert_no_secrets("refs/tags/v1.2.3", "image-evidence")
+
+
+def test_git_ref_with_a_token_component_still_rejects():
+    ref = "refs/heads/" + _GENERIC_RUN
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(ref, "image-evidence")
+    message = str(excinfo.value)
+    assert "token-pattern" in message
+    assert _GENERIC_RUN not in message
+    assert ref not in message
+
+
+def test_slash_inside_a_non_ref_token_still_rejects():
+    """``/`` stays a token character outside a Git ref, so base64 is unchanged."""
+    token = _synthetic_body(24) + "/" + _synthetic_body(24, start=9)
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(token, "image-evidence")
+    assert "token-pattern" in str(excinfo.value)
+    assert token not in str(excinfo.value)
+
+
 def test_generic_slash_path_rejects_without_echo(tmp_path: Path):
     with pytest.raises(SecretLeakError) as excinfo:
         assert_no_secrets(_GENERIC_PATH, "diag")

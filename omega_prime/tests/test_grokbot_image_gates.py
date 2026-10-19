@@ -412,12 +412,15 @@ def test_push_ref_evidence_passes_and_a_token_branch_still_refuses(
     and ``refs/heads/main`` stay under that length, which is why only the
     push-event image job failed.
     """
-    ref = "refs/heads/cursor/grokbot-publish-gaps-0615"
-    path = tmp_path / "evidence.json"
-    written = dump_evidence_json(path, _evidence_record(event="push", ref=ref))
-    loaded = load_evidence_json(written)
-    assert loaded["ref"] == ref
-    assert loaded["event"] == "push"
+    for ref in (
+        "refs/heads/cursor/grokbot-publish-gaps-0615",
+        "refs/heads/cursor/publish-template-gaps-5913",
+    ):
+        path = tmp_path / "evidence.json"
+        written = dump_evidence_json(path, _evidence_record(event="push", ref=ref))
+        loaded = load_evidence_json(written)
+        assert loaded["ref"] == ref
+        assert loaded["event"] == "push"
 
     token_branch = string.ascii_lowercase + string.digits
     with pytest.raises(SecretLeakError) as caught:
@@ -428,8 +431,8 @@ def test_push_ref_evidence_passes_and_a_token_branch_still_refuses(
     assert "token-pattern" in str(caught.value)
     assert token_branch not in str(caught.value)
 
-    # A slash in the middle makes each piece shorter than 32. The suffix is
-    # still one candidate, so the split token must not pass as a ref.
+    # A slash in the middle makes each piece shorter than 32. The segments
+    # joined back together are still the token, so the split must not pass.
     split = token_branch[:18] + "/" + token_branch[18:]
     with pytest.raises(SecretLeakError) as split_caught:
         dump_evidence_json(

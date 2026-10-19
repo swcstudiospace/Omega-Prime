@@ -2,20 +2,25 @@
 
 Each turn maps onto `review_turn`: the last non-steer user row becomes the
 request text, tool rows become success/output pairs. Earned turns get
-skills; every reviewed turn checkpoints so re-runs skip it. No model call —
+skills; every reviewed turn checkpoints so re-runs skip it. A failed
+save stays unreviewed. No model call —
 the curator's earned-rule decides.
 """
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import os
+import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from omega_prime.agent.curator import review_turn
+from omega_prime.routines import state_dir
 
 
 def nightly_pass(
@@ -39,6 +44,7 @@ def nightly_pass(
     reviewed = set(state["reviewed"])
     created: list[dict] = []
     fresh: list[str] = []
+    failed: list[str] = []
     for turn in turns:
         turn_id = turn["id"]
         if turn_id in reviewed:
@@ -47,13 +53,23 @@ def nightly_pass(
         outcome = review_turn(
             skills_root=skills_root, user_text=user_text, tool_results=tool_results
         )
+        if outcome.get("error"):
+            failed.append(turn_id)
+            continue
         if outcome.get("created"):
             created.append({"turn_id": turn_id, "path": outcome.get("path")})
         reviewed.add(turn_id)
         fresh.append(turn_id)
         state["reviewed"] = sorted(reviewed)
         _write(directory, state)
-    return {"created": created, "reviewed": fresh, "total_created": len(created)}
+    result: dict[str, Any] = {
+        "created": created,
+        "reviewed": fresh,
+        "total_created": len(created),
+    }
+    if failed:
+        result["failed"] = failed
+    return result
 
 
 def _map(messages: list) -> tuple[str, list[dict]]:
@@ -116,4 +132,135 @@ def _write(directory: str | Path, state: dict) -> None:
         raise
 
 
-__all__ = ["nightly_pass"]
+def load_turns(path: Path) -> list[dict]:
+    """Turns from a JSON list, or from an object with a ``turns`` array.
+
+    A missing file is an empty pass, not an error.
+    """
+    if not path.is_file():
+        return []
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read turns {path}: {exc}") from exc
+    if isinstance(document, list):
+        turns = document
+    elif isinstance(document, dict) and isinstance(document.get("turns"), list):
+        turns = document["turns"]
+    else:
+        raise ValueError("turns file must be a list or an object with turns")
+    return turns
+
+
+def growth_skills_root() -> Path:
+    """The shipped skills directory: the install's ``omega_prime/skills``."""
+    return Path(__file__).resolve().parents[1] / "skills"
+
+
+def writable_skills_root(
+    install: str | Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Where a new skill is written, and where ``skill_view`` reads it.
+
+    The install directory wins when this process can create a skill there.
+    A read-only install uses ``<state>/skills`` so the nightly pass and the
+    host's growth tools share the volume the container can write.
+    """
+    target = Path(install) if install is not None else growth_skills_root()
+    if _directory_writable(target):
+        return target
+    state = state_dir(env)
+    if state is None:
+        return target
+    return Path(state) / "skills"
+
+
+def _directory_writable(path: Path) -> bool:
+    """True when a skill directory can be created here. Does not create one."""
+    if path.is_dir():
+        return os.access(path, os.W_OK | os.X_OK)
+    parent = path.parent
+    return parent.is_dir() and os.access(parent, os.W_OK | os.X_OK)
+
+
+def execute_nightly(
+    env: Mapping[str, str] | None = None,
+    *,
+    turns_path: str | Path | None = None,
+    skills_root: str | Path | None = None,
+    directory: str | Path | None = None,
+) -> dict[str, Any]:
+    """Run one nightly pass. Does not publish. Missing turns review nothing.
+
+    Created skills go to the writable skills directory ``skill_view`` reads,
+    unless ``skills_root`` is set. A failed save is not checkpointed, so a
+    later pass can retry it. The state directory stores the review checkpoint.
+    """
+    root = Path(directory) if directory is not None else state_dir(env)
+    if root is None:
+        return {
+            "error": "not_configured",
+            "reason": "Set OMEGA_PRIME_STATE_DIR (or HOME) before the nightly pass.",
+            "created": [],
+            "reviewed": [],
+            "total_created": 0,
+            "publishes": False,
+        }
+    skills = (
+        Path(skills_root)
+        if skills_root is not None
+        else writable_skills_root(growth_skills_root(), env)
+    )
+    path = Path(turns_path) if turns_path is not None else root / "nightly-turns.json"
+    try:
+        turns = load_turns(path)
+        result = nightly_pass(root, skills, turns)
+    except ValueError as exc:
+        return {
+            "error": "invalid_turns",
+            "reason": str(exc),
+            "created": [],
+            "reviewed": [],
+            "total_created": 0,
+            "publishes": False,
+        }
+    result["turns_path"] = str(path)
+    result["publishes"] = False
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m omega_prime.routines.nightly``."""
+    parser = argparse.ArgumentParser(prog="python -m omega_prime.routines.nightly")
+    parser.add_argument("--state-dir", default=None)
+    parser.add_argument("--skills-root", default=None)
+    parser.add_argument(
+        "--turns",
+        default=None,
+        help="JSON list of turns, or an object with a turns array",
+    )
+    args = parser.parse_args(argv)
+    result = execute_nightly(
+        os.environ,
+        turns_path=args.turns,
+        skills_root=args.skills_root,
+        directory=args.state_dir,
+    )
+    json.dump(result, sys.stdout)
+    sys.stdout.write("\n")
+    return 0 if not result.get("error") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = [
+    "execute_nightly",
+    "growth_skills_root",
+    "load_turns",
+    "main",
+    "nightly_pass",
+    "writable_skills_root",
+]

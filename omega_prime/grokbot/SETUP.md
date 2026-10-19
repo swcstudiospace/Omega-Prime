@@ -138,6 +138,39 @@ skill library may persist until you remove it (UNPROVEN, user UAT row 4).
 Whether a live Bot follows this contract, and whether `/omega-*` entries
 appear natively in its `/` menu, is user UAT row 4.
 
+## Install configuration
+
+Skills shipped in this repository do not contain a person's name, a VPS
+address, a device, an approval id, or this install's Railway, Tailscale,
+or RAGflow names. Fill the placeholders for your install and keep the
+values out of git:
+
+| Placeholder | Used by | What to put |
+| --- | --- | --- |
+| `REMOTE_DEV_USER`, `REMOTE_DEV_HOST` | `skills/remote-dev-machine` | SSH user and host. No address is shipped. |
+| `ADMIN_DEVICES` | `skills/railway-tailscale` | Machines that carry `tag:admin`. |
+| `RAGFLOW_DATASET_DESK`, `RAGFLOW_DATASET_SUBSTRATE`, `RAGFLOW_DATASET_SKILLS`, `RAGFLOW_DATASET_PRODUCT` | `skills/ragflow-docs` | Dataset names `lead_docs_search` should query. |
+| `RAILWAY_PROJECT`, `RAILWAY_SERVICE`, `TAILSCALE_FORWARDER_DATA`, `TAILSCALE_FORWARDER_APPS`, and the `RAILWAY_*_HOST` names | `skills/railway-tailscale`, `skills/desk-gateway` | This install's project, service, and forwarder names. |
+| `APPROVAL_ID` | gated infra and web tools | A new recorded approval for the change in front of you. |
+| `NOTION_TASK_GRAPH_COLLECTION` | `skills/trackplan-dispatch` | The Notion collection URL for task graphs. |
+| `AGENT_DATA_DIR` | `skills/desk-bootstrap` | Directory that holds `agents/<uuid>/`. |
+
+Call the person running the install "the operator".
+
+Weekday routines a new install can create, each prompt calling
+`omega_command` (see `grokbot/templates/OMEGA_PRIME.md`):
+
+| Routine | Command | Suggested cron |
+| --- | --- | --- |
+| desk-lead | `/omega-desk-lead` | `15 9 * * 1-5` |
+| ultrathink | `/omega-ultrathink-routine` | `30 9 * * 1-5` |
+| sweep (drafts only, never publishes) | `/omega-sweep` | `0 16 * * 1-5` |
+| nightly | `/omega-nightly` | `0 18 * * 1-5` |
+
+The same entry points run in a shell: `python -m omega_prime.routines.desk_lead`,
+`python -m omega_prime.routines.ultrathink_turn`, `python -m omega_prime.routines.sweep`,
+and `python -m omega_prime.routines.nightly`.
+
 ## 2. Secrets
 
 Omega Prime never asks for secrets in chat. Add each value where the

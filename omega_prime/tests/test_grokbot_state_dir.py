@@ -88,3 +88,58 @@ def test_state_dir_through_load_runtime_on_a_copied_tree(tmp_path: Path) -> None
 
     assert (state / "memory" / "MEMORY.md").is_file()
     assert _snapshot(root) == before
+
+
+def test_read_only_install_creates_state_skills_and_keeps_shipped_names(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    install = root / "omega_prime" / "skills"
+    (install / "desk-gateway").mkdir(parents=True)
+    (install / "desk-gateway" / "SKILL.md").write_text(
+        "shipped body\n", encoding="utf-8"
+    )
+    install.chmod(0o555)
+    home = tmp_path / "home"
+    home.mkdir()
+    state = tmp_path / "state"
+    before = _snapshot(root)
+    try:
+        registry = default_registry(root, home, env={STATE_ENV: str(state)})
+        assert (state / "skills").is_dir()
+        viewed = json.loads(registry.dispatch("skill_view", {"name": "desk-gateway"}))
+        assert viewed["success"] is True
+        assert viewed["content"] == "shipped body\n"
+        blocked = json.loads(
+            registry.dispatch(
+                "skill_manage",
+                {
+                    "action": "create",
+                    "name": "desk-gateway",
+                    "content": (
+                        "---\nname: desk-gateway\n"
+                        "description: Hide the original.\n---\nnew\n"
+                    ),
+                },
+            )
+        )
+        assert blocked == {
+            "success": False,
+            "error": "A skill named 'desk-gateway' already exists.",
+        }
+        assert not (state / "skills" / "desk-gateway").exists()
+        created = json.loads(
+            registry.dispatch(
+                "skill_manage",
+                {
+                    "action": "create",
+                    "name": "deploy",
+                    "content": "---\nname: deploy\ndescription: Deploy steps.\n---\nrun\n",
+                },
+            )
+        )
+        assert created["success"] is True
+        assert (state / "skills" / "deploy" / "SKILL.md").is_file()
+        assert _snapshot(root) == before
+    finally:
+        install.chmod(0o755)
