@@ -58,6 +58,10 @@ _UUID_RE = re.compile(
     r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
     r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
 )
+#: A git ref segment. ``/`` is in the token alphabet, so a long
+#: ``refs/heads/<branch>`` is one candidate; only these characters are a ref.
+_REF_SEGMENT_RE = re.compile(r"\A[A-Za-z0-9._\-]+\Z")
+_GIT_REF_KINDS = frozenset({"heads", "tags", "remotes", "pull"})
 
 _MIN_CANDIDATE_LEN = 32
 _MIN_ENTROPY_BITS = 4.2
@@ -117,10 +121,34 @@ def _looks_like_generic_token(candidate: str) -> bool:
     """Conservative bare-token heuristic for what audit patterns miss.
 
     Flags runs of 32+ token-alphabet characters with mixed character classes
-    and high per-character entropy. Pure-hex digests, UUIDs, and
-    low-diversity runs (padding, repeats) are excluded so integrity metadata
-    in manifests and logs does not trip the gate.
+    and high per-character entropy. Pure-hex digests, UUIDs, low-diversity
+    runs (padding, repeats), and git refs whose own segments are not tokens
+    are excluded so integrity metadata in manifests and logs does not trip
+    the gate. A ref segment that itself has token shape still trips.
     """
+    if _git_ref_metadata(candidate):
+        return False
+    return _token_shape(candidate)
+
+
+def _git_ref_metadata(candidate: str) -> bool:
+    """True for ``refs/<kind>/...`` when no segment has token shape.
+
+    ``/`` belongs to the token alphabet, so ``refs/heads/<long-branch>`` is
+    one candidate. The structural prefix is provenance, same as a digest.
+    """
+    parts = candidate.split("/")
+    if len(parts) < 3 or parts[0] != "refs" or parts[1] not in _GIT_REF_KINDS:
+        return False
+    if any(part == "" for part in parts):
+        return False
+    if not all(_REF_SEGMENT_RE.fullmatch(part) for part in parts[2:]):
+        return False
+    return all(not _token_shape(part) for part in parts)
+
+
+def _token_shape(candidate: str) -> bool:
+    """The entropy heuristic for one candidate, with no ref special case."""
     text = candidate.strip("=").strip()
     if len(text) < _MIN_CANDIDATE_LEN:
         return False

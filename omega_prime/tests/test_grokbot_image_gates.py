@@ -11,6 +11,7 @@ counts are pinned here.
 from __future__ import annotations
 
 import json
+import string
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,7 @@ from omega_prime.grokbot.image_gates import (
     PublishGateEvidence,
     admit_conformance_report,
     archive_checksum_matches,
+    dump_evidence_json,
     evaluate_publish_gate,
     image_id_matches,
     load_evidence_json,
@@ -396,6 +398,35 @@ def test_evidence_file_with_wrong_schema_refuses(tmp_path: Path) -> None:
     path.write_text(json.dumps(record), encoding="utf-8")
     with pytest.raises(EvidenceError):
         load_evidence_json(path)
+
+
+def test_push_ref_evidence_passes_and_a_token_branch_still_refuses(
+    tmp_path: Path,
+) -> None:
+    """A long push ref is provenance. A token-shaped branch segment is not.
+
+    ``github.ref`` on ``push`` is ``refs/heads/<branch>``. ``/`` is in the
+    token alphabet, so a branch at least as long as
+    ``cursor/grokbot-publish-gaps-0615`` is one 32+ candidate and used to
+    trip ``dump_evidence_json``. Pull-request refs (``refs/pull/N/merge``)
+    and ``refs/heads/main`` stay under that length, which is why only the
+    push-event image job failed.
+    """
+    ref = "refs/heads/cursor/grokbot-publish-gaps-0615"
+    path = tmp_path / "evidence.json"
+    written = dump_evidence_json(path, _evidence_record(event="push", ref=ref))
+    loaded = load_evidence_json(written)
+    assert loaded["ref"] == ref
+    assert loaded["event"] == "push"
+
+    token_branch = string.ascii_lowercase + string.digits
+    with pytest.raises(SecretLeakError) as caught:
+        dump_evidence_json(
+            tmp_path / "secret.json",
+            _evidence_record(ref="refs/heads/" + token_branch),
+        )
+    assert "token-pattern" in str(caught.value)
+    assert token_branch not in str(caught.value)
 
 
 def test_evidence_file_with_a_secret_refuses(tmp_path: Path) -> None:

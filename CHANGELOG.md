@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Image evidence accepts a long `refs/heads/<branch>` push ref. `/` stays in the token alphabet, and a ref segment that itself has token shape still trips the secret gate.
 - Slash commands: curated 24 -> 27 and total 58 -> 61. Added `/omega-redteam-conflicts`, `/omega-redteam-readiness`, and `/omega-audit`. Findings accept `--jsonl`. `durable_status` reports cycle and sync backlog. Purple-cycle jobs can be scheduled, and a live cycle takes a file lock plus an optional deadline.
 - Install docs pin the clone to `/workspace/omes-bot` and a `<release-tag>` placeholder (no tag existed on 2026-10-19; do not clone `main`).
 - `skills/getting-started` walks a fresh import through clone, `--bootstrap-only`, `--verify --json`, the stdio Command server with no env, `/omega-help`, and secret-request cards. Connector tokens resolve from `NAME`, `NAME_FILE`, or `$OMEGA_PRIME_STATE_DIR/secrets/NAME` (mode 0600).
