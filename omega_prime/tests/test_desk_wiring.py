@@ -25,7 +25,7 @@ from omega_prime.cron.scheduler import (
     list_desk_lead_passes,
     schedule_desk_lead_pass,
 )
-from omega_prime.integrations.binding import fresh_binding, save_binding
+from omega_prime.integrations.binding import binding_path, fresh_binding, save_binding
 from omega_prime.mcp_server import (
     _DeskParent,
     default_registry,
@@ -53,11 +53,20 @@ def test_help_advertises_work_root():
     assert "--work-root" in proc.stdout
 
 
-def test_lead_doctor_green_on_memory_tools_substrate_without_credentials(tmp_path):
-    # `lead_doctor` is a gated tool (its register/repair actions mutate the
-    # roster seat), so a host grants approval up front (`--approve`), the way
-    # every other lead_doctor construction in this suite does. No credentials
-    # are involved: memory/tools/substrate go green on the shared seams.
+def test_lead_doctor_reports_unconfigured_memory_sources(tmp_path, monkeypatch):
+    class FailingSubstrateTransport:
+        def __init__(self):
+            self.calls = []
+
+        def post_mcp(self, url, headers, body):
+            self.calls.append((url, headers, body))
+            raise OSError("scripted transport failure")
+
+    transport = FailingSubstrateTransport()
+    monkeypatch.setattr(
+        "omega_prime.mcp_server.SubstrateClient",
+        lambda *args, **kwargs: SubstrateClient(*args, transport=transport, **kwargs),
+    )
     log = ApprovalLog()
     log.approve("lead_doctor", "ada")
     registry = default_registry(
@@ -71,6 +80,95 @@ def test_lead_doctor_green_on_memory_tools_substrate_without_credentials(tmp_pat
     assert checks["memory"]["green"] is True
     assert checks["tools"]["green"] is True
     assert checks["substrate"]["green"] is True
+    assert checks["substrate"]["state"] == "not_configured"
+    assert checks["substrate"]["attempted"] is False
+    assert checks["memory_backends"] == {
+        "green": True,
+        "selected_backend": "local",
+        "configuration": {
+            "local": "empty",
+            "substrate": "not_configured",
+            "hindsight": "not_configured",
+        },
+        "sources": {
+            "local": {"state": "empty", "attempted": True},
+            "substrate": {
+                "state": "not_configured",
+                "attempted": False,
+                "error": "substrate gateway is not configured",
+            },
+            "hindsight": {"state": "not_configured", "attempted": False},
+        },
+    }
+
+
+def test_shared_memory_resolves_substrate_configured_after_startup(
+    tmp_path, monkeypatch
+):
+    class FailingSubstrateTransport:
+        def __init__(self):
+            self.calls = []
+
+        def post_mcp(self, url, headers, body):
+            self.calls.append((url, headers, body))
+            raise OSError("scripted transport failure")
+
+    transport = FailingSubstrateTransport()
+    monkeypatch.setattr(
+        "omega_prime.mcp_server.SubstrateClient",
+        lambda *args, **kwargs: SubstrateClient(*args, transport=transport, **kwargs),
+    )
+    state = tmp_path / "state"
+    env = {"OMEGA_PRIME_STATE_DIR": str(state)}
+    registry = default_registry(ROOT, tmp_path / "home", env=env)
+
+    before = json.loads(
+        registry.dispatch("lead_memory_recall", {"query": "before connector"})
+    )
+    assert before["backends"]["substrate"]["state"] == "not_configured"
+    assert before["backends"]["substrate"]["attempted"] is False
+    assert transport.calls == []
+
+    retained_before = json.loads(
+        registry.dispatch(
+            "memory",
+            {
+                "action": "add",
+                "target": "memory",
+                "content": "local before connector",
+            },
+        )
+    )
+    assert retained_before.get("ok") is True, retained_before
+    assert transport.calls == []
+    binding = fresh_binding()
+    binding["gateways"]["substrate"] = {
+        "state": "ready",
+        "url": "https://substrate.example",
+    }
+    binding_path(env).write_text(json.dumps(binding), encoding="utf-8")
+
+    after = json.loads(
+        registry.dispatch("lead_memory_recall", {"query": "after connector"})
+    )
+    assert transport.calls
+    assert transport.calls[0][0] == "https://substrate.example/mcp"
+    assert after["backends"]["substrate"]["state"] == "unreachable"
+    assert after["backends"]["substrate"]["attempted"] is True
+    assert after["backends"]["substrate"]["error"] == "substrate transport failed"
+    retained_after = json.loads(
+        registry.dispatch(
+            "memory",
+            {
+                "action": "add",
+                "target": "memory",
+                "content": "retained after connector",
+            },
+        )
+    )
+    assert retained_after.get("ok") is False, retained_after
+    assert retained_after.get("local_saved") is True, retained_after
+    assert transport.calls[-1][0] == "https://substrate.example/mcp"
 
 
 def test_shared_memory_store_identity(tmp_path):
@@ -86,15 +184,30 @@ def test_shared_memory_store_identity(tmp_path):
             {
                 "action": "add",
                 "target": "memory",
-                "content": "[hindsight:omega-prime-lead] desk-wiring sentinel",
+                "content": "desk-wiring sentinel",
             },
         )
     )
-    assert kept.get("success") is True, kept
+    assert kept.get("ok") is True, kept
     recall = json.loads(
         registry.dispatch("lead_memory_recall", {"query": "desk-wiring sentinel"})
     )
-    assert "desk-wiring sentinel" in json.dumps(recall)
+    assert any(
+        "desk-wiring sentinel" in entry["content"] for entry in recall["results"]
+    )
+    assert set(recall) == {
+        "selected_backend",
+        "scope",
+        "repo",
+        "backends",
+        "results",
+    }
+    assert recall["selected_backend"] == "local"
+    assert recall["scope"] == "default"
+    assert recall["repo"] is None
+    assert recall["backends"]["local"] == {"state": "answered", "attempted": True}
+    assert recall["backends"]["substrate"]["state"] == "not_configured"
+    assert recall["backends"]["hindsight"]["state"] == "not_configured"
 
 
 def test_desk_stores_live_under_state_dir(tmp_path):
@@ -315,9 +428,19 @@ def test_warm_registry_consumes_independent_intake_and_acks(tmp_path):
         )
     )
     assert registered["registered"] == ["lead"]
-    installed = json.loads(
-        registry.dispatch("lead_doctor", {"action": "install_prompt"})
-    )
+    from unittest.mock import patch
+
+    from omega_prime.tools.lead import LeadClient
+
+    prompt_text = "<seat/>"
+    rendered = {
+        "sha256": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
+        "prompt": prompt_text,
+    }
+    with patch.object(LeadClient, "render_prompt", return_value=rendered):
+        installed = json.loads(
+            registry.dispatch("lead_doctor", {"action": "install_prompt"})
+        )
     assert installed["prompt"] and isinstance(installed["sha256"], str)
     assert (
         installed["sha256"] == hashlib.sha256(installed["prompt"].encode()).hexdigest()
@@ -474,7 +597,10 @@ def test_production_registry_solo_routes_lead_planes_and_reports_outage(
     event_error = json.loads(
         registry.dispatch("lead_event_emit", {"kind": "offline-event"})
     )
-    assert "substrate unreachable" in docs_error["error"]
+    # Phase 97 error contract: the outage is reported with its state label,
+    # never as empty results or a localhost fallback.
+    assert docs_error["error"].startswith("upstream_error: unreachable:")
+    assert "substrate offline" in docs_error["error"]
     assert event_error["local_mirror"] is True
     assert (state / "events.ndjson").read_text(encoding="utf-8").count("\n") == 2
 

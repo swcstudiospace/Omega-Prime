@@ -45,7 +45,7 @@ class _FakeTransport:
 def _config(**overrides) -> dict:
     config = config_from_env(
         {
-            "SUBSTRATE_URL": "http://sub.local",
+            "SUBSTRATE_URL": "https://sub.local",
             "SUBSTRATE_TOKEN": SUB_TOKEN,
             "HINDSIGHT_URL": "https://hs.local",
             "HINDSIGHT_API_KEY": HS_TOKEN,
@@ -94,8 +94,8 @@ def test_probes_are_read_only() -> None:
     run_probes(_config(), transport)
     calls = [(request["method"], request["url"]) for request in transport.requests]
     assert calls == [
-        ("GET", "http://sub.local/healthz"),
-        ("POST", "http://sub.local/brief"),
+        ("GET", "https://sub.local/healthz"),
+        ("POST", "https://sub.local/brief"),
         ("GET", "https://hs.local/health"),
         ("GET", "https://hs.local/version"),
     ]
@@ -125,7 +125,7 @@ def test_secrets_never_in_report_or_output(capsys) -> None:
     assert HS_TOKEN not in text
     assert "SUBSTRATE_TOKEN" in text and "HINDSIGHT_API_KEY" in text
     env = {
-        "SUBSTRATE_URL": "http://sub.local",
+        "SUBSTRATE_URL": "https://sub.local",
         "SUBSTRATE_TOKEN": SUB_TOKEN,
         "HINDSIGHT_URL": "https://hs.local",
         "HINDSIGHT_API_KEY": HS_TOKEN,
@@ -142,26 +142,30 @@ def test_main_exit_code_on_failure() -> None:
 
 def test_unset_hindsight_url_skips_a_broken_credential_file(tmp_path: Path) -> None:
     missing = tmp_path / "missing-key"
-    config = config_from_env({"HINDSIGHT_API_KEY_FILE": str(missing)})
+    config = config_from_env(
+        {"SUBSTRATE_URL": "local", "HINDSIGHT_API_KEY_FILE": str(missing)}
+    )
     assert config["hindsight_url"] == ""
     assert config["hindsight_token"] == ""
-    report = run_probes(config, _FakeTransport([{}, ""]))
-    assert report["passed"] is True
-    assert report["probes"]["hindsight_health"]["detail"] == (
-        "disabled (HINDSIGHT_URL unset)"
-    )
-
-
-def test_unset_hindsight_url_does_not_call_the_remote_bank() -> None:
-    config = config_from_env({})
-    assert config["hindsight_url"] == ""
     transport = _FakeTransport([{}, ""])
     report = run_probes(config, transport)
     assert report["passed"] is True
     assert report["probes"]["hindsight_health"]["detail"] == (
         "disabled (HINDSIGHT_URL unset)"
     )
-    assert len(transport.requests) == 2
+
+
+def test_unset_hindsight_url_does_not_call_remote_bank_and_unset_substrate() -> None:
+    config = config_from_env({})
+    assert config["hindsight_url"] == ""
+    transport = _FakeTransport([])
+    report = run_probes(config, transport)
+    assert report["passed"] is False
+    assert report["probes"]["hindsight_health"]["detail"] == (
+        "disabled (HINDSIGHT_URL unset)"
+    )
+    assert report["probes"]["substrate_health"]["detail"] == "not_configured"
+    assert transport.requests == []
     watched = (
         ROOT.joinpath("omega_prime/memory/hindsight_service.py"),
         ROOT.joinpath("omega_prime/substrate/probes.py"),
@@ -176,7 +180,8 @@ def test_unset_hindsight_url_does_not_call_the_remote_bank() -> None:
 
 def test_config_defaults_and_precedence() -> None:
     config = config_from_env({})
-    assert config["substrate_url"] == probes.DEFAULT_SUBSTRATE_URL
+    assert config["substrate_url"] is None
+    assert config["substrate_error"] == "not_configured"
     assert config["hindsight_url"] == probes.DEFAULT_HINDSIGHT_URL
     assert config["substrate_token"] == ""
     fallback = config_from_env(
@@ -186,13 +191,47 @@ def test_config_defaults_and_precedence() -> None:
     assert fallback["substrate_token_name"] == "SUBSTRATE_TOKEN_GROK_BOT"
     assert fallback["hindsight_url"] == ""
     assert fallback["hindsight_token"] == ""
-    enabled = config_from_env(
-        {
-            "SUBSTRATE_TOKEN_GROK_BOT": "g",
-            "HINDSIGHT_URL": "http://127.0.0.1:9",
-            "HINDSIGHT_API_TOKEN": "t",
-        }
+    generic_wins = config_from_env(
+        {"SUBSTRATE_TOKEN": "generic", "SUBSTRATE_TOKEN_GROK_BOT": "fallback"}
     )
-    assert enabled["hindsight_token"] == "t"
-    report = run_probes(config, _FakeTransport([{}, "", {}, {}]))
-    assert "anonymous" in format_report(report, config)
+    assert generic_wins["substrate_token"] == "generic"
+    assert generic_wins["substrate_token_name"] == "SUBSTRATE_TOKEN"
+    report = run_probes(config, _FakeTransport([]))
+    assert not report["passed"]
+    assert report["probes"]["substrate_health"]["detail"] == "not_configured"
+    assert _FakeTransport([]).requests == []
+
+
+def test_substrate_token_file_uses_existing_secret_resolution(tmp_path: Path) -> None:
+    secret_file = tmp_path / "substrate-token"
+    secret_file.write_text("file-token\n", encoding="utf-8")
+    secret_file.chmod(0o600)
+    config = config_from_env(
+        {"SUBSTRATE_URL": "https://sub.local", "SUBSTRATE_TOKEN_FILE": str(secret_file)}
+    )
+    assert config["substrate_token"] == "file-token"
+    assert config["substrate_token_name"] == "SUBSTRATE_TOKEN"
+
+
+def test_substrate_urls_are_validated_without_requests() -> None:
+    for raw in ("http://sub.local", "https://user:secret@sub.local", "not a url"):
+        config = config_from_env({"SUBSTRATE_URL": raw})
+        transport = _FakeTransport([])
+        report = run_probes(config, transport)
+        assert report["probes"]["substrate_health"] == {
+            "ok": False,
+            "detail": "unsafe substrate URL",
+        }
+        assert raw not in format_report(report, config)
+        assert transport.requests == []
+
+
+def test_explicit_local_probe_opt_in_uses_loopback_fake_transport() -> None:
+    config = config_from_env({"SUBSTRATE_URL": "local"})
+    assert config["substrate_url"] == "http://127.0.0.1:7410"
+    transport = _FakeTransport([{}, ""])
+    run_probes(config, transport)
+    assert [request["url"] for request in transport.requests] == [
+        "http://127.0.0.1:7410/healthz",
+        "http://127.0.0.1:7410/brief",
+    ]

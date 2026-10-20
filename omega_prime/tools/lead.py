@@ -29,9 +29,18 @@ from types import ModuleType
 from typing import Any
 
 from omega_prime.credentials.redact import redact_text, redact_value
-from omega_prime.memory.hindsight import Hindsight
+from omega_prime.memory.backends import (
+    MemoryBackends,
+    normalize_content,
+    resolve_memory_backends,
+    validate_query,
+    validate_scope_repo,
+)
+from omega_prime.memory.recall import recall_memory
+from omega_prime.memory.retain import retain_memory
 from omega_prime.memory.store import MemoryStore
 from omega_prime.receipts import ReceiptError, load_executions, validate_receipt
+from omega_prime.settings import SettingsResult
 from omega_prime.tooling.fs import atomic_write_text, ensure_private_dir
 from omega_prime.tools.registry import ToolRegistry
 
@@ -546,10 +555,21 @@ class LeadContext:
     root: str | Path = "."
     registry: Any = None
     memory: MemoryStore | None = None
+    memory_backends: MemoryBackends | None = None
+    # Called before each memory operation so backends follow connector
+    # settings saved after startup (for example a newly connected Substrate).
+    memory_refresh: Callable[[], None] | None = None
+    memory_scope: str = "default"
+    memory_repo: str | None = None
+    hindsight: Any = None
     intake: IntakeStore | None = None
     roster: RosterStore | None = None
     events: EventStore | None = None
     substrate: Any = None
+    substrate_configured: bool = False
+    substrate_error: str | None = None
+    substrate_auth_configured: bool = False
+    settings_status: SettingsResult | None = None
     bus: Any = None
     docs_index: Any = None
     notify: Any = None
@@ -634,6 +654,19 @@ class LeadClient:
             "note": "a chunk is not a repository fact until the file is opened",
         }
 
+    def _memory_backends(self) -> MemoryBackends:
+        if self.ctx.memory_backends is not None:
+            if self.ctx.memory_refresh is not None:
+                self.ctx.memory_refresh()
+            return self.ctx.memory_backends
+        return resolve_memory_backends(
+            local_store=self.ctx.memory,
+            substrate=self.ctx.substrate,
+            hindsight=self.ctx.hindsight,
+            scope=self.ctx.memory_scope,
+            repo=self.ctx.memory_repo,
+        )
+
     def memory_recall(
         self,
         query: str,
@@ -641,44 +674,51 @@ class LeadClient:
         include_shared: bool = True,
         banks: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Recall Omega Prime memory banks matching `query` (case-insensitive)."""
-        if not isinstance(query, str) or query == "":
-            raise ValueError("query must be a non-empty string")
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            raise ValueError("limit must be a positive integer")
-        if self.ctx.memory is None:
-            return {
-                "banks": [],
-                "results": [],
-                "error": "not_configured: memory store is missing",
-            }
-        own = "omega-prime-lead"
-        names = (
-            list(banks)
-            if banks
-            else ([own] + (["omega-prime-desk"] if include_shared else []))
-        )
-        legacy_aliases = {
-            "omega-prime-lead": "omes-lead",
-            "omega-prime-desk": "omes-desk",
-        }
-        results = []
-        for bank in names:
-            entries = list(Hindsight(self.ctx.memory, bank).recall(query, limit=limit))
-            legacy_bank = legacy_aliases.get(bank)
-            if legacy_bank and len(entries) < limit:
-                legacy_entries = Hindsight(self.ctx.memory, legacy_bank).recall(
-                    query, limit=limit - len(entries)
-                )
-                seen_texts = set(entries)
-                for le in legacy_entries:
-                    if le not in seen_texts:
-                        entries.append(le)
-                        seen_texts.add(le)
-            results.append(
-                {"bank": bank, "entries": [redact_value(e) for e in entries]}
+        """Recall tenant-filtered memory from every configured read backend."""
+        if (
+            self.ctx.memory is None
+            and self.ctx.memory_backends is None
+            and self.ctx.substrate is None
+            and self.ctx.hindsight is None
+        ):
+            validate_query(query, limit)
+            scope, repo = validate_scope_repo(
+                self.ctx.memory_scope, self.ctx.memory_repo
             )
-        return {"banks": names, "results": results}
+            if not isinstance(include_shared, bool):
+                raise ValueError("include_shared must be a boolean")
+            if banks is not None and (
+                not isinstance(banks, list)
+                or any(
+                    not isinstance(bank, str)
+                    or not bank
+                    or bank != bank.strip()
+                    or any(char in bank for char in "[]\r\n")
+                    for bank in banks
+                )
+            ):
+                raise ValueError("banks must be a list of non-empty bank names")
+            return {
+                "selected_backend": "local",
+                "scope": scope,
+                "repo": repo,
+                "backends": {
+                    "local": {"state": "not_configured", "attempted": False},
+                    "substrate": {"state": "not_configured", "attempted": False},
+                    "hindsight": {"state": "not_configured", "attempted": False},
+                },
+                "results": [],
+            }
+        backends = self._memory_backends()
+        return recall_memory(
+            backends,
+            query,
+            scope=backends.trusted_scope,
+            repo=backends.trusted_repo,
+            limit=limit,
+            banks=banks,
+            include_shared=include_shared,
+        )
 
     def ownership_resolve(self, paths: list[str]) -> dict[str, Any]:
         """Resolve each path's owner from ownership.yaml (last match wins)."""
@@ -852,7 +892,7 @@ class LeadClient:
         graph_id: str | None = None,
         task_id: str | None = None,
     ) -> dict[str, Any]:
-        """Keep one memory entry. Needs evidence; secrets are refused."""
+        """Keep one evidenced memory entry through the shared retain service."""
         if not isinstance(content, str) or content.strip() == "":
             raise ValueError("content must be a non-empty string")
         if not receipt_path and not source:
@@ -862,29 +902,51 @@ class LeadClient:
                 "secret_refused",
                 "content contains a credential shape; remove it and retry",
             )
-        if self.ctx.memory is None:
+        if self.ctx.memory is None and self.ctx.memory_backends is None:
             return _error("not_configured", "memory store is missing")
-        bits = ["[pack:lead]", content.strip()]
-        for label, value in (
-            ("receipt_path", receipt_path),
-            ("source", source),
-            ("graph_id", graph_id),
-            ("task_id", task_id),
+        canonical_content = normalize_content(content)
+        metadata = [
+            (label, value)
+            for label, value in (
+                ("receipt_path", receipt_path),
+                ("source", source),
+                ("graph_id", graph_id),
+                ("task_id", task_id),
+            )
+            if value
+        ]
+        if tags and any(
+            isinstance(tag, str) and redact_text(f"[{tag}]") != f"[{tag}]"
+            for tag in tags
         ):
-            if value:
-                bits.append(f"[{label}:{value}]")
-        for tag in tags or []:
-            bits.append(f"[{tag}]")
-        joined = " ".join(bits)
-        if redact_text(joined) != joined:
             return _error(
                 "secret_refused",
                 "content contains a credential shape; remove it and retry",
             )
-        kept = Hindsight(self.ctx.memory, "omega-prime-lead").retain(joined)
-        if not kept.get("ok"):
-            return _error("store_refused", str(kept.get("reason", "store refused")))
-        return {"ok": True, "bank": "omega-prime-lead"}
+        checked_text = " ".join(
+            [canonical_content, *(f"{label}:{value}" for label, value in metadata)]
+        )
+        if redact_text(checked_text) != checked_text:
+            return _error(
+                "secret_refused",
+                "content contains a credential shape; remove it and retry",
+            )
+        backends = self._memory_backends()
+        result = retain_memory(
+            backends,
+            canonical_content,
+            scope=backends.trusted_scope,
+            repo=backends.trusted_repo,
+            kind="fact",
+            source=source,
+            receipt_path=receipt_path,
+            tags=tags,
+            graph_id=graph_id,
+            task_id=task_id,
+        )
+        if result.get("local_saved") is True:
+            self.ctx._brief_cache.clear()
+        return result
 
     def event_emit(
         self,
@@ -986,20 +1048,101 @@ class LeadClient:
             "declared": declared,
             "missing": missing,
         }
+        probe = self.memory_recall("doctor connectivity probe", limit=1)
+        backends = self._memory_backends()
+        source_checks = probe.get("backends", {})
+        local_status = source_checks.get("local", {})
+        substrate_status = source_checks.get("substrate", {})
+        selected_backend = probe.get("selected_backend", backends.selected_backend)
+        substrate_state = substrate_status.get("state", "not_configured")
+        hindsight_status = source_checks.get("hindsight", {})
+        hindsight_state = hindsight_status.get("state", "not_configured")
         checks["memory"] = {
-            "green": self.ctx.memory is not None,
-            "detail": "" if self.ctx.memory is not None else "memory store is missing",
+            "green": local_status.get("state") in {"answered", "empty"},
+            "detail": "read-only recall probe",
+        }
+        checks["memory_backends"] = {
+            "green": local_status.get("state") in {"answered", "empty"}
+            and (
+                selected_backend != "hindsight"
+                or (
+                    hindsight_state in {"answered", "empty"}
+                    and hindsight_status.get("attempted") is True
+                )
+            ),
+            "selected_backend": probe.get(
+                "selected_backend", backends.selected_backend
+            ),
+            "configuration": {
+                "local": backends.states.get("local", "not_configured"),
+                "substrate": backends.states.get("substrate", "not_configured"),
+                "hindsight": backends.states.get("hindsight", "not_configured"),
+            },
+            "sources": {
+                name: {
+                    "state": row.get("state", "not_configured"),
+                    "attempted": row.get("attempted", False),
+                    **(
+                        {"error": redact_text(str(row["error"]))[:300]}
+                        if row.get("error")
+                        else {}
+                    ),
+                }
+                for name, row in source_checks.items()
+            },
         }
         live = len(self.ctx.registry.schemas()) if self.ctx.registry is not None else 0
         base = len(LEAD_TOOL_NAMES)
         checks["tools"] = {"green": live >= base, "pack": base, "live": live}
         packs = sorted(self.ctx.roster.packs) if self.ctx.roster else []
         checks["roster"] = {"green": "lead" in packs, "registered": packs}
+        substrate_detail = (
+            "configured only; reachability not checked"
+            if self.ctx.substrate_configured
+            else (self.ctx.substrate_error or "substrate gateway is not configured")
+            + "; set SUBSTRATE_URL via process environment or settings file"
+        )
+        if self.ctx.substrate_configured and not self.ctx.substrate_auth_configured:
+            substrate_detail += "; anonymous mode"
         checks["substrate"] = {
-            "green": self.ctx.substrate is not None,
-            "detail": ""
-            if self.ctx.substrate is not None
-            else "substrate is not configured",
+            "green": (
+                substrate_state in {"answered", "empty"}
+                and substrate_status.get("attempted") is True
+            )
+            or (
+                substrate_state == "not_configured" and selected_backend != "substrate"
+            ),
+            "configured": self.ctx.substrate_configured,
+            "auth_configured": self.ctx.substrate_auth_configured,
+            "state": substrate_state,
+            "attempted": substrate_status.get("attempted", False),
+            "detail": f"read-only memory probe: {substrate_state}; {substrate_detail}",
+        }
+        status = self.ctx.settings_status
+        status_name = (
+            getattr(status, "status", "missing") if status is not None else "missing"
+        )
+        loaded_names = (
+            tuple(getattr(status, "loaded_names", ())) if status is not None else ()
+        )
+        rejected_names = (
+            tuple(getattr(status, "rejected_names", ())) if status is not None else ()
+        )
+        reasons = tuple(getattr(status, "reasons", ())) if status is not None else ()
+        settings_green = status_name in ("missing", "loaded")
+        checks["settings"] = {
+            "green": settings_green,
+            "status": status_name,
+            "loaded_names": list(loaded_names),
+            "rejected_names": list(rejected_names),
+            "reasons": list(reasons),
+            "detail": (
+                "optional settings file not present"
+                if status_name == "missing"
+                else "settings loaded"
+                if status_name == "loaded"
+                else "settings rejected; process environment only"
+            ),
         }
         green = all(c["green"] for c in checks.values())
         # Optional Desk planes are informational; their absence never makes
@@ -1132,6 +1275,7 @@ class LeadClient:
         action: str,
         surface: str | None = None,
         note: str | None = None,
+        lease_id: str | None = None,
     ) -> dict[str, Any]:
         """Claim, release, or complete one graph node."""
         if action not in GRAPH_ACTIONS:
@@ -1143,14 +1287,21 @@ class LeadClient:
             or node_id == ""
         ):
             raise ValueError("graph_id and node_id must be non-empty strings")
+        if action in ("release", "complete") and (
+            not isinstance(lease_id, str) or lease_id == ""
+        ):
+            raise ValueError("lease_id is required for release and complete actions")
         if self.ctx.substrate is None:
             return _error("not_configured", "substrate is not configured")
         tool = GRAPH_ACTIONS[action]
         payload: dict[str, Any] = {
             "graph_id": graph_id,
             "node_id": node_id,
-            "session_id": f"grok-bot:{surface or 'lead'}:{graph_id}",
         }
+        if action == "claim":
+            payload["session_id"] = f"grok-bot:{surface or 'lead'}:{graph_id}"
+        else:
+            payload["lease_id"] = lease_id
         if action == "complete":
             payload["result"] = {
                 "summary": note or "completed via Omega Prime lead pack",
@@ -1339,7 +1490,7 @@ def register_lead_tools(registry: ToolRegistry, client: LeadClient) -> list[str]
         "lead_graph_register": lambda graph_id, repo, nodes=None: _wrap(
             client.graph_register, graph_id, repo, nodes=nodes
         ),
-        "lead_graph_state": lambda graph_id, node_id, action, surface=None, note=None: (
+        "lead_graph_state": lambda graph_id, node_id, action, surface=None, note=None, lease_id=None: (
             _wrap(
                 client.graph_state,
                 graph_id,
@@ -1347,6 +1498,7 @@ def register_lead_tools(registry: ToolRegistry, client: LeadClient) -> list[str]
                 action,
                 surface=surface,
                 note=note,
+                lease_id=lease_id,
             )
         ),
         "lead_bus_start": lambda runtime, goal, provider=None, idempotency_key=None: (
@@ -1433,7 +1585,7 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
         ),
     ),
     "lead_memory_recall": (
-        "Recall memory banks matching a query. Read-only.",
+        "Recall matching entries across configured memory backends. Read-only.",
         _object(
             {
                 "query": _string("Search text."),
@@ -1524,7 +1676,8 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
                 "graph_id": _string("Graph id."),
                 "node_id": _string("Node id."),
                 "action": _string("claim, release, or complete."),
-                "surface": _string("Surface name."),
+                "lease_id": _string("Lease id required for release or complete."),
+                "surface": _string("Surface name, for claims."),
                 "note": _string("Completion note."),
             },
             ["graph_id", "node_id", "action"],

@@ -1,0 +1,135 @@
+{
+  "task_id": "phase97-execution",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T14:51:02Z",
+  "completed_at": "2026-10-20T17:25:07Z",
+  "scope": "Phase 97 local implementation and verification; no settings writes, token provisioning, connector restart, VPS/Railway access, push, PR, merge, or deployment.",
+  "commands": [
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:$PATH ruff check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "All checks passed!"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:$PATH ruff format --check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "591 files already formatted"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:$PATH mypy omega_prime/",
+      "exit_code": 0,
+      "output_tail": "Success: no issues found in 464 source files"
+    },
+    {
+      "cmd": "OMEGA_PRIME_SETTINGS_FILE=/tmp/phase97-settings-absent PYTHONPATH=/workspace/omes-bot-wt/p1 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_desk_wiring.py::test_warm_registry_consumes_independent_intake_and_acks omega_prime/tests/test_grokbot_cli.py::test_sse_receives_approvals_and_defaults omega_prime/tests/test_grokbot_cli.py::test_sse_forwards_limits omega_prime/tests/test_grokbot_cli.py::test_dockerfile_cmd_is_accepted omega_prime/tests/test_grokbot_readiness.py::test_cli_full_local_profile -q",
+      "exit_code": 0,
+      "duration_s": 16.97,
+      "output_tail": "5 passed"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:$PATH OMEGA_PRIME_SETTINGS_FILE=/tmp/phase97-settings-absent PYTHONPATH=/workspace/omes-bot-wt/p1 pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "duration_s": 228.34,
+      "output_tail": "27 failed, 4831 passed, 11 skipped, 15 warnings; all 27 failing test identifiers match the baseline in .planning/phases/97-substrate-direct-connect/97-RESEARCH.md; zero new failures"
+    },
+    {
+      "cmd": "OMEGA_PRIME_SETTINGS_FILE=/tmp/phase97-settings-absent PYTHONPATH=/workspace/omes-bot-wt/p1 /workspace/omes-bot/.venv/bin/python -m omega_prime.tooling.catalog --check",
+      "exit_code": 0,
+      "output_tail": "docs/tool-catalog.md up to date"
+    },
+    {
+      "cmd": "OMEGA_PRIME_SETTINGS_FILE=/tmp/phase97-settings-absent PYTHONPATH=/workspace/omes-bot-wt/p1 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q",
+      "exit_code": 0,
+      "duration_s": 0.66,
+      "output_tail": "31 passed"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Ruff lint passes for omega_prime/.",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "The repository Python sources are formatted and type-check with no mypy issues.",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "Previously failing lead prompt, SSE option-forwarding, and isolated readiness regressions pass.",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "The full suite has zero new failures compared with the recorded base; the 27 known base failures remain.",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "Generated tool catalog is current.",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "Documentation and public-repository test suites pass after the final documentation edit.",
+      "evidence_command_index": 6
+    }
+  ],
+  "unverified": [
+    "Current Agent Substrate MCP mount/path, server version, tool schemas, and response compatibility; no authoritative current source or schema was accessible, so Phase 97 verification remains deferred.",
+    "Live Substrate endpoint reachability/authentication and real Grok Bot behavior; the VPS is unavailable and live verification is operator-owned.",
+    "Live settings file contents were not intentionally inspected or written; some early focused tests before the explicit path override may have consulted the default settings path, but no values were captured or emitted. All final gates used a missing /tmp override.",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/phases/97-substrate-direct-connect/97-VALIDATION.md",
+    "CHANGELOG.md",
+    "docs/setup.md",
+    "docs/substrate.md",
+    "docs/tool-catalog.md",
+    "omega_prime/agent/conversation_loop.py",
+    "omega_prime/agent/delegate.py",
+    "omega_prime/engine/attach.py",
+    "omega_prime/engine/lanes.py",
+    "omega_prime/engine/omp_driver.py",
+    "omega_prime/grokbot/SETUP.md",
+    "omega_prime/grokbot/local_validation.py",
+    "omega_prime/grokbot/remote.py",
+    "omega_prime/mcp_server.py",
+    "omega_prime/providers/http.py",
+    "omega_prime/settings.py",
+    "omega_prime/setup_check.py",
+    "omega_prime/substrate/client.py",
+    "omega_prime/substrate/probes.py",
+    "omega_prime/tests/test_desk_wiring.py",
+    "omega_prime/tests/test_engine.py",
+    "omega_prime/tests/test_grokbot_cli.py",
+    "omega_prime/tests/test_grokbot_readiness.py",
+    "omega_prime/tests/test_grokbot_remote.py",
+    "omega_prime/tests/test_installer_bindings.py",
+    "omega_prime/tests/test_lanes.py",
+    "omega_prime/tests/test_lead.py",
+    "omega_prime/tests/test_mcp_server.py",
+    "omega_prime/tests/test_omega_commands.py",
+    "omega_prime/tests/test_settings.py",
+    "omega_prime/tests/test_setup_check.py",
+    "omega_prime/tests/test_substrate.py",
+    "omega_prime/tests/test_substrate_probes.py",
+    "omega_prime/tests/test_substrate_session.py",
+    "omega_prime/tests/test_transports.py",
+    "omega_prime/tools/lead.py",
+    "omega_prime/tools/substrate_tools.py",
+    ".receipts/bot-00-omega-prime/phase97-execution.json"
+  ],
+  "contract_changes": [
+    "Substrate wire argument mappings follow the supplied audit expectations; current upstream compatibility remains unverified.",
+    "Settings loader and configuration diagnostics are local application contracts; no live operator configuration was changed.",
+    "Engine turn and default local-lane duration limits are removed; existing operational I/O and resource limits remain."
+  ],
+  "ownership_resolution": {
+    "source": "omega_prime/ownership.yaml",
+    "last_matching_pattern": "**",
+    "owner": "bot-00-omega-prime"
+  },
+  "trackers": "no tracker IDs provided",
+  "rollback_plan": "Revert the local Phase 97 implementation commit(s); no live settings, credentials, endpoint, or running connector state changed.",
+  "approvals": [],
+  "approved_by": null
+}

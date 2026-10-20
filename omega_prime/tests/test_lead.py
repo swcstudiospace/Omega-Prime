@@ -71,6 +71,11 @@ class FakeSubstrate:
             return {"error": self.error[0], "reason": self.error[1]}
         return {"body": {"accepted": True}}
 
+    def memory_search(self, query, scope, limit, *, repo=None):
+        if self.error:
+            raise RuntimeError(self.error[1])
+        return []
+
 
 class FakeBus:
     def __init__(self):
@@ -186,13 +191,43 @@ def test_graph_and_bus_passthrough_and_unconfigured(tmp_path: Path):
         {"node_id": "n1", "linear_identifier": "L-2", "state": "open"}
     ]
 
-    done = client.graph_state("g-1", "n1", "complete", note="all green")
+    substrate.content = {"lease_id": "lease-claimed"}
+    claimed = client.graph_state("g-1", "n1", "claim", surface="test")
+    assert claimed["action"] == "claim"
+    assert claimed["substrate"] == {"lease_id": "lease-claimed"}
+    assert substrate.calls[1] == (
+        "graph_claim",
+        {
+            "graph_id": "g-1",
+            "node_id": "n1",
+            "session_id": "grok-bot:test:g-1",
+        },
+        10,
+    )
+    released = client.graph_state("g-1", "n1", "release", lease_id="lease-1")
+    assert released["action"] == "release"
+    assert substrate.calls[2] == (
+        "graph_release",
+        {"graph_id": "g-1", "node_id": "n1", "lease_id": "lease-1"},
+        10,
+    )
+    done = client.graph_state(
+        "g-1", "n1", "complete", note="all green", lease_id="lease-2"
+    )
     assert done["action"] == "complete"
-    assert substrate.calls[1][1]["result"] == {
-        "summary": "all green",
-        "tests_pass": False,
-    }
-    assert substrate.calls[1][1]["session_id"] == "grok-bot:lead:g-1"
+    assert substrate.calls[3] == (
+        "graph_complete",
+        {
+            "graph_id": "g-1",
+            "node_id": "n1",
+            "lease_id": "lease-2",
+            "result": {"summary": "all green", "tests_pass": False},
+        },
+        10,
+    )
+    for action in ("release", "complete"):
+        with pytest.raises(ValueError, match="lease_id is required"):
+            client.graph_state("g-1", "n1", action)
 
     started = client.bus_start("local", "run tests", provider="p", idempotency_key="k")
     assert started == {"ok": True, "job": {"job_id": "job-1"}}
@@ -206,6 +241,48 @@ def test_graph_and_bus_passthrough_and_unconfigured(tmp_path: Path):
     assert "not_configured" in bare.bus_start("r", "g")["error"]
     assert "not_configured" in bare.bus_wait("j")["error"]
     assert "not_configured" in bare.docs_search("q")["error"]
+
+
+def test_graph_state_tool_schema_and_handler_accept_lease_id(tmp_path: Path):
+    substrate = FakeSubstrate()
+    client = LeadClient(_ctx(tmp_path, substrate=substrate))
+    approvals = ApprovalLog()
+    approvals.approve("lead_graph_state", "human")
+    registry = ToolRegistry(approval_log=approvals)
+    register_lead_tools(registry, client)
+
+    schema = next(
+        item
+        for item in registry.schemas()
+        if item["function"]["name"] == "lead_graph_state"
+    )
+    parameters = schema["function"]["parameters"]
+    assert "lease_id" in parameters["properties"]
+    assert "lease_id" not in parameters["required"]
+    result = json.loads(
+        registry.dispatch(
+            "lead_graph_state",
+            {
+                "graph_id": "g-1",
+                "node_id": "n1",
+                "action": "release",
+                "lease_id": "lease-1",
+            },
+        )
+    )
+    assert result["ok"] is True
+    assert substrate.calls[0] == (
+        "graph_release",
+        {"graph_id": "g-1", "node_id": "n1", "lease_id": "lease-1"},
+        10,
+    )
+    missing = json.loads(
+        registry.dispatch(
+            "lead_graph_state",
+            {"graph_id": "g-1", "node_id": "n1", "action": "complete"},
+        )
+    )
+    assert "lease_id is required" in missing["error"]
 
 
 def test_roster_status_completeness(tmp_path: Path):
@@ -272,7 +349,8 @@ def test_roster_status_absorbed_seats_from_default_json(tmp_path: Path):
     assert status["packs"] == []
 
 
-def test_doctor_register_install_and_check(tmp_path: Path):
+def test_doctor_register_install_and_check(tmp_path: Path, monkeypatch: Any):
+    monkeypatch.delenv("SUBSTRATE_URL", raising=False)
     registry = ToolRegistry()
     ctx = _ctx(tmp_path, registry=registry)
     client = LeadClient(ctx)
@@ -302,12 +380,72 @@ def test_doctor_register_install_and_check(tmp_path: Path):
     assert check["checks"]["memory"]["green"] is True
     assert check["checks"]["tools"] == {"green": True, "pack": 16, "live": 16}
     assert check["checks"]["roster"]["green"] is True
-    assert check["checks"]["substrate"]["green"] is False
-    assert check["green"] is False
-
+    assert check["checks"]["substrate"]["green"] is True
+    assert check["checks"]["substrate"]["state"] == "not_configured"
+    assert check["checks"]["substrate"]["attempted"] is False
+    assert check["green"] is True
     bare = client.doctor("check")
     assert bare["checks"]["prompt"]["green"] is False
     assert bare["checks"]["skills"]["missing"] == ["lead-pack", "debugging"]
+
+
+@pytest.mark.parametrize(
+    ("document", "expected_status", "expected_green"),
+    [
+        (None, "missing", True),
+        ('{"SUBSTRATE_URL":"https://substrate.example"}', "loaded", True),
+        ("{malformed", "malformed", False),
+        ('{"TOKEN":"value-must-not-leak"}', "rejected", False),
+    ],
+)
+def test_doctor_settings_provenance_is_value_free(
+    tmp_path: Path, document: str | None, expected_status: str, expected_green: bool
+) -> None:
+    from omega_prime.settings import load_settings
+
+    settings_path = tmp_path / "settings.json"
+    if document is not None:
+        settings_path.write_text(document, encoding="utf-8")
+    status = load_settings({}, path=settings_path)
+    registry = ToolRegistry()
+    ctx = _ctx(tmp_path / expected_status, registry=registry, settings_status=status)
+    client = LeadClient(ctx)
+    register_lead_tools(registry, client)
+    result = json.loads(registry.dispatch("lead_doctor", {"action": "check"}))
+    settings = result["checks"]["settings"]
+    assert settings["status"] == expected_status
+    assert settings["green"] is expected_green
+    assert settings["loaded_names"] == (
+        ["SUBSTRATE_URL"] if expected_status == "loaded" else []
+    )
+    encoded = json.dumps(result)
+    assert "value-must-not-leak" not in encoded
+    assert "https://substrate.example" not in encoded
+    assert "effective_env" not in encoded
+    if expected_status == "rejected":
+        assert settings["rejected_names"] == ["TOKEN"]
+        assert "rejected_keys" in settings["reasons"]
+
+
+def test_doctor_reports_configured_substrate_source_failure_and_anonymous_warning(
+    tmp_path: Path,
+) -> None:
+    client = LeadClient(
+        _ctx(
+            tmp_path,
+            substrate=FakeSubstrate(error=("unreachable", "offline")),
+            substrate_configured=True,
+            substrate_auth_configured=False,
+        )
+    )
+    result = client.doctor("check")
+    assert result["green"] is False
+    substrate = result["checks"]["substrate"]
+    assert substrate["green"] is False
+    assert substrate["configured"] is True
+    assert substrate["state"] == "unreachable"
+    assert substrate["attempted"] is True
+    assert "anonymous mode" in substrate["detail"]
 
 
 def test_render_prompt_refuses_placeholders(tmp_path: Path):
@@ -358,17 +496,55 @@ def test_memory_retain_and_recall(tmp_path: Path):
         "secret_refused"
         in client.memory_retain(f"key {FAKE_KEY}", source="chat")["error"]
     )
+    client.ctx._brief_cache["stale"] = (0, {"recall": {"results": []}})
     kept = client.memory_retain(
-        "desk uses receipts", source="chat", tags=["core"], graph_id="g-1"
+        "desk uses receipts",
+        receipt_path="receipts/abc.json",
+        source="chat",
+        tags=["core"],
+        graph_id="g-1",
+        task_id="t-1",
     )
-    assert kept == {"ok": True, "bank": "omega-prime-lead"}
+    assert kept["ok"] is True
+    assert kept["local_saved"] is True
+    assert kept["backends"] == {
+        "local": {"state": "answered", "attempted": True, "participation": "required"},
+        "substrate": {
+            "state": "not_configured",
+            "attempted": False,
+            "participation": "not_configured",
+        },
+        "hindsight": {
+            "state": "not_configured",
+            "attempted": False,
+            "participation": "not_configured",
+        },
+    }
+    assert client.ctx._brief_cache == {}
     recalled = client.memory_recall("receipts")
-    assert recalled["banks"] == ["omega-prime-lead", "omega-prime-desk"]
-    assert any(
-        "desk uses receipts" in entry for entry in recalled["results"][0]["entries"]
-    )
-    assert client.memory_recall("nothing-here")["results"][0]["entries"] == []
-    assert "not_configured" in LeadClient(LeadContext()).memory_recall("q")["error"]
+    assert "results" in recalled and "backends" in recalled
+    assert recalled["results"][0]["content"] == "desk uses receipts"
+    provenance = recalled["results"][0]["sources"][0]
+    assert provenance["backend"] == "local"
+    assert provenance["source"] == "chat"
+    assert provenance["tags"] == ["core"]
+    assert provenance["graph_id"] == "g-1"
+    assert provenance["receipt_path"] == "receipts/abc.json"
+    assert provenance["task_id"] == "t-1"
+    assert client.ctx.memory is not None
+    assert "[pack:lead]" not in client.ctx.memory.memory_entries[0]
+    assert client.memory_recall("nothing-here")["results"] == []
+    assert LeadClient(LeadContext()).memory_recall("q") == {
+        "selected_backend": "local",
+        "scope": "default",
+        "repo": None,
+        "backends": {
+            "local": {"state": "not_configured", "attempted": False},
+            "substrate": {"state": "not_configured", "attempted": False},
+            "hindsight": {"state": "not_configured", "attempted": False},
+        },
+        "results": [],
+    }
 
 
 def test_receipt_check_paths(tmp_path: Path, monkeypatch: Any):
@@ -1051,4 +1227,18 @@ def test_memory_retain_refuses_secrets_in_metadata(tmp_path: Path):
     kept = client.memory_retain(
         "clean note", source="chat", tags=["core"], graph_id="g-1"
     )
-    assert kept == {"ok": True, "bank": "omega-prime-lead"}
+    assert kept["ok"] is True
+    assert kept["local_saved"] is True
+    assert kept["backends"] == {
+        "local": {"state": "answered", "attempted": True, "participation": "required"},
+        "substrate": {
+            "state": "not_configured",
+            "attempted": False,
+            "participation": "not_configured",
+        },
+        "hindsight": {
+            "state": "not_configured",
+            "attempted": False,
+            "participation": "not_configured",
+        },
+    }

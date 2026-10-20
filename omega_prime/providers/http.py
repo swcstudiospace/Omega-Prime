@@ -25,6 +25,49 @@ from urllib.parse import urlencode, urlsplit
 from omega_prime.providers.base import ProviderError
 
 
+class _McpResponse:
+    """Context-managed HTTP response whose body remains incrementally readable."""
+
+    def __init__(
+        self, connection: Any, response: Any, status: int, headers: dict[str, str]
+    ):
+        self.status = status
+        self.headers = headers
+        self._connection = connection
+        self._response = response
+        self._closed = False
+
+    def read(self, size: int = 4096) -> bytes:
+        read1 = getattr(self._response, "read1", None)
+        if callable(read1):
+            chunk = read1(size)
+            if isinstance(chunk, bytes):
+                return chunk
+        return self._response.read(size)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            with contextlib.suppress(OSError):
+                self._connection.close()
+
+    def __enter__(self) -> _McpResponse:
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+
+class _HttpStatusError(ProviderError):
+    """A sanitized HTTP status failure with structured status metadata."""
+
+    status_code: int
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class HttpTransport:
     """POST JSON over HTTP. `max_retries` counts retries after the first try."""
 
@@ -64,6 +107,16 @@ class HttpTransport:
         merged.update(headers or {})
         return self._send("POST", url, merged, payload)
 
+    def post_text(self, url: str, headers: dict, body: dict) -> str:
+        """POST one JSON body. Return the raw UTF-8 response body."""
+        payload = json.dumps(body).encode("utf-8")
+        merged = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(payload)),
+        }
+        merged.update(headers or {})
+        return self._send_text("POST", url, merged, payload)
+
     def get(self, url: str, headers: dict, params: dict) -> dict:
         """GET one URL with a query string. Return the decoded JSON response."""
         query = urlencode(sorted((params or {}).items()), doseq=True)
@@ -83,15 +136,38 @@ class HttpTransport:
         merged.update(headers or {})
         return self._stream_lines(url, merged, payload)
 
-    def post_text(self, url: str, headers: dict, body: dict) -> str:
-        """POST one JSON body. Return the raw UTF-8 response body."""
-        payload = json.dumps(body).encode("utf-8")
+    def post_mcp(self, url: str, headers: dict, envelope: dict) -> _McpResponse:
+        """POST one MCP message without replay, retaining an incremental body."""
+        payload = json.dumps(envelope).encode("utf-8")
         merged = {
             "Content-Type": "application/json",
             "Content-Length": str(len(payload)),
+            "Accept": "application/json, text/event-stream",
         }
         merged.update(headers or {})
-        return self._send_text("POST", url, merged, payload)
+        # The MCP response negotiation is part of this dedicated transport
+        # contract and cannot be overridden by caller-supplied headers.
+        merged["Accept"] = "application/json, text/event-stream"
+        host, port, path, use_tls = _split(url)
+        if host is None:
+            raise ProviderError("cannot parse request host")
+        if self._policy is not None and not self._policy.allows_host(host):
+            raise ProviderError(f"network blocked to host {host}")
+        try:
+            connection = self._connect(host, port, self._timeout, use_tls)
+        except OSError as exc:
+            raise ProviderError("MCP transport is unreachable") from exc
+        try:
+            connection.request("POST", path, body=payload, headers=merged)
+            response = connection.getresponse()
+            seen: dict[str, str] = {}
+            for key, value in response.getheaders():
+                seen.setdefault(str(key).lower(), str(value))
+            return _McpResponse(connection, response, response.status, seen)
+        except (http.client.HTTPException, TimeoutError, OSError) as exc:
+            with contextlib.suppress(OSError):
+                connection.close()
+            raise ProviderError("MCP transport failed") from exc
 
     def _send(
         self, method: str, url: str, headers: dict, payload: bytes | None
@@ -295,7 +371,7 @@ def _check_status(status: int, url: str, headers: dict[str, str]) -> None:
     if 500 <= status <= 599:
         raise _Retryable(f"HTTP {status}")
     if 400 <= status <= 499:
-        raise ProviderError(f"HTTP {status} from {url}")
+        raise _HttpStatusError(f"HTTP {status} from {url}", status)
 
 
 def _retry_after(headers: dict[str, str]) -> float | None:

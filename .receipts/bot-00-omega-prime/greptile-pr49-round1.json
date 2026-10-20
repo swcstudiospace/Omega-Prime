@@ -1,0 +1,49 @@
+{
+  "task_id": "greptile-pr49-round1",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T18:04:29Z",
+  "completed_at": "2026-10-20T18:04:29Z",
+  "commands": [
+    {"cmd": "/workspace/omes-bot/.venv/bin/ruff check omega_prime/", "exit_code": 1, "output_tail": "Initial run reported two RUF012 findings in newly added substrate test fixtures; fixed."},
+    {"cmd": "/workspace/omes-bot/.venv/bin/ruff check omega_prime/", "exit_code": 0, "output_tail": "All checks passed."},
+    {"cmd": "/workspace/omes-bot/.venv/bin/ruff format --check omega_prime/", "exit_code": 1, "output_tail": "Five changed files required formatting; formatted those files."},
+    {"cmd": "/workspace/omes-bot/.venv/bin/ruff format omega_prime/settings.py omega_prime/substrate/client.py omega_prime/tests/test_grokbot_remote.py omega_prime/tests/test_settings.py omega_prime/tests/test_substrate_session.py", "exit_code": 0, "output_tail": "Five files reformatted."},
+    {"cmd": "/workspace/omes-bot/.venv/bin/ruff format --check omega_prime/", "exit_code": 0, "output_tail": "591 files already formatted."},
+    {"cmd": "PYTHONPATH=/workspace/omes-bot-wt/p1 /workspace/omes-bot/.venv/bin/python -m mypy omega_prime/", "exit_code": 1, "output_tail": "Initial run reported a typing issue in the new interceptor test; corrected."},
+    {"cmd": "PYTHONPATH=/workspace/omes-bot-wt/p1 /workspace/omes-bot/.venv/bin/python -m mypy omega_prime/", "exit_code": 0, "output_tail": "Success: no issues found in 464 source files."},
+    {"cmd": "PYTHONPATH=/workspace/omes-bot-wt/p1 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_engine.py omega_prime/tests/test_grokbot_oneclick.py omega_prime/tests/test_grokbot_remote.py omega_prime/tests/test_settings.py omega_prime/tests/test_setup_check.py omega_prime/tests/test_substrate_session.py -q", "exit_code": 1, "output_tail": "202 passed, 2 failed. Failures: test_oneclick_dry_run_sse (uninitialized prime-agent submodule / roster mismatch) and test_checks_pass_on_repo_root (environment setup check). Both failed on clean baseline 515c09c too."},
+    {"cmd": "PYTHONPATH=/tmp/omes-bot-pr49-baseline /workspace/omes-bot/.venv/bin/python -m pytest /tmp/omes-bot-pr49-baseline/omega_prime/tests/test_grokbot_oneclick.py::test_oneclick_dry_run_sse /tmp/omes-bot-pr49-baseline/omega_prime/tests/test_setup_check.py::test_checks_pass_on_repo_root -q", "exit_code": 1, "output_tail": "Both affected existing tests failed on clean baseline 515c09c for the same environment/setup reasons."},
+    {"cmd": "PYTHONPATH=/workspace/omes-bot-wt/p1 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests -q", "exit_code": 1, "output_tail": "4839 passed, 11 skipped, 30 failed. Failures include uninitialized prime-agent, missing prime-agent runtime files, readiness/approval setup, and the two baseline-confirmed setup failures."}
+  ],
+  "claims": [
+    {"claim": "Ruff lint and formatting gates pass after corrections.", "evidence_command_index": 1},
+    {"claim": "Mypy passes for omega_prime/.", "evidence_command_index": 6},
+    {"claim": "The touched test suite ran; its two existing setup failures reproduce on clean baseline 515c09c.", "evidence_command_index": 8},
+    {"claim": "The full suite ran and reported 4839 passed, 11 skipped, and 30 failures.", "evidence_command_index": 9}
+  ],
+  "unverified": [
+    "The other 28 full-suite failures were not individually compared against the clean baseline; output indicates missing/uninitialized prime-agent runtime and readiness environment dependencies.",
+    "No live mounted settings deployment was exercised; path behavior was covered by focused tests.",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    "omega_prime/agent/conversation_loop.py",
+    "omega_prime/engine/omp_driver.py",
+    "omega_prime/grokbot/oneclick.py",
+    "omega_prime/grokbot/remote.py",
+    "omega_prime/settings.py",
+    "omega_prime/setup_check.py",
+    "omega_prime/substrate/client.py",
+    "omega_prime/tests/test_engine.py",
+    "omega_prime/tests/test_grokbot_oneclick.py",
+    "omega_prime/tests/test_grokbot_remote.py",
+    "omega_prime/tests/test_settings.py",
+    "omega_prime/tests/test_setup_check.py",
+    "omega_prime/tests/test_substrate_session.py",
+    ".receipts/bot-00-omega-prime/greptile-pr49-round1.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": null,
+  "approvals": [],
+  "approved_by": null
+}

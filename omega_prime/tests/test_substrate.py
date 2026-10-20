@@ -7,12 +7,18 @@ import http.client
 import json
 import socket
 import threading
+import uuid
 
 import pytest
 
 from omega_prime.providers.base import ProviderError
 from omega_prime.providers.http import HttpTransport
-from omega_prime.substrate.client import SubstrateClient, SubstrateError
+from omega_prime.substrate.client import (
+    SubstrateClient,
+    SubstrateError,
+    SubstrateProtocolError,
+    SubstrateUnreachableError,
+)
 
 TOKEN = "test-mock-token"
 
@@ -35,6 +41,10 @@ class _FakeTransport:
             raise outcome
         return outcome
 
+    def post_mcp(self, url: str, headers: dict, body: dict):
+        outcome = self._next("POST", url, headers, body)
+        return _FakeMcpResponse(outcome)
+
     def post(self, url: str, headers: dict, body: dict):
         return self._next("POST", url, headers, body)
 
@@ -43,6 +53,23 @@ class _FakeTransport:
 
     def get(self, url: str, headers: dict, params: dict):
         return self._next("GET", url, headers, params)
+
+
+class _FakeMcpResponse:
+    def __init__(self, payload: dict, status: int = 200, headers: dict | None = None):
+        self.status = status
+        self.headers = {"content-type": "application/json", **(headers or {})}
+        self._body = json.dumps(payload).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return None
+
+    def read(self, size: int = 4096):
+        body, self._body = self._body[:size], self._body[size:]
+        return body
 
 
 class _FakeBroker:
@@ -66,10 +93,10 @@ class _FakeBroker:
         return text
 
 
-def _mcp_result(payload: dict) -> dict:
+def _mcp_result(payload: dict, request_id: int = 1) -> dict:
     return {
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": request_id,
         "result": {"content": [{"type": "text", "text": json.dumps(payload)}]},
     }
 
@@ -79,7 +106,7 @@ def _client(
 ) -> tuple[SubstrateClient, _FakeTransport]:
     transport = _FakeTransport(script)
     broker = None if token == "none" else _FakeBroker("" if token is None else token)
-    return SubstrateClient(transport=transport, broker=broker), transport
+    return SubstrateClient("local", transport=transport, broker=broker), transport
 
 
 def test_brief_sends_surface_and_auth() -> None:
@@ -102,10 +129,11 @@ def test_brief_fail_open_on_transport_error() -> None:
 
 def test_explicit_token_wins_and_redacts() -> None:
     transport = _FakeTransport(["# brief\n"])
-    client = SubstrateClient(transport=transport, token="explicit-abc")
+    client = SubstrateClient("local", transport=transport, token="explicit-abc")
     assert client.brief() == "# brief\n"
     assert transport.requests[0]["headers"] == {"Authorization": "Bearer explicit-abc"}
     failing = SubstrateClient(
+        "local",
         transport=_FakeTransport([ProviderError("bad explicit-abc")]),
         token="explicit-abc",
     )
@@ -143,7 +171,41 @@ def test_emit_fail_open_with_reason() -> None:
     client, _ = _client([ProviderError("connection refused")])
     result = client.emit("note", "hello")
     assert result["stored"] is False
-    assert "connection refused" in result["error"]
+    assert result == {"stored": False, "error": "substrate transport failed"}
+
+
+@pytest.mark.parametrize("state", ["skipped", "invalid", "degraded"])
+def test_blocked_saved_binding_never_falls_back(tmp_path, state: str) -> None:
+    from omega_prime.integrations.binding import fresh_binding, save_binding
+
+    env = {"OMEGA_PRIME_STATE_DIR": str(tmp_path)}
+    binding = fresh_binding()
+    binding["gateways"]["substrate"]["state"] = state
+    binding["gateways"]["substrate"]["url"] = "https://saved.example"
+    save_binding(binding, env)
+    transport = _FakeTransport([])
+    client = SubstrateClient(
+        "local", transport=transport, honor_binding=True, binding_env=env
+    )
+    assert client.brief() == ""
+    assert transport.requests == []
+
+
+def test_ready_saved_binding_precedes_constructor_url(tmp_path) -> None:
+    from omega_prime.integrations.binding import fresh_binding, save_binding
+
+    env = {"OMEGA_PRIME_STATE_DIR": str(tmp_path)}
+    binding = fresh_binding()
+    binding["gateways"]["substrate"].update(
+        {"state": "ready", "url": "https://saved.example"}
+    )
+    save_binding(binding, env)
+    transport = _FakeTransport(["brief"])
+    client = SubstrateClient(
+        "local", transport=transport, honor_binding=True, binding_env=env
+    )
+    assert client.brief() == "brief"
+    assert transport.requests[0]["url"] == "https://saved.example/brief"
 
 
 def test_memory_write_statuses_pass_through() -> None:
@@ -155,7 +217,56 @@ def test_memory_write_statuses_pass_through() -> None:
         envelope = transport.requests[0]["body"]
         assert envelope["method"] == "tools/call"
         assert envelope["params"]["name"] == "memory_write"
-        assert envelope["params"]["arguments"]["scope"] == "graph:g1"
+        arguments = envelope["params"]["arguments"]
+        assert arguments["scope"] == "graph:g1"
+        assert "expected_version" not in arguments
+        generated_key = uuid.UUID(arguments["idempotency_key"])
+        assert generated_key.version == 4
+
+
+def test_memory_write_preserves_optional_version_and_key() -> None:
+    client, transport = _client([_mcp_result({"status": "accepted"})])
+    client.memory_write(
+        "graph:g1",
+        "fact",
+        "sky is blue",
+        expected_version=7,
+        idempotency_key="caller-key",
+    )
+    arguments = transport.requests[0]["body"]["params"]["arguments"]
+    assert arguments["expected_version"] == 7
+    assert arguments["idempotency_key"] == "caller-key"
+
+
+def test_memory_write_forwards_optional_version_and_idempotency() -> None:
+    client, transport = _client([_mcp_result({"status": "accepted"})])
+    client.memory_write(
+        "graph:g1",
+        "fact",
+        "remember this",
+        idempotency_key="operation-1",
+        expected_version=7,
+    )
+    arguments = transport.requests[0]["body"]["params"]["arguments"]
+    assert arguments == {
+        "scope": "graph:g1",
+        "kind": "fact",
+        "text": "remember this",
+        "idempotency_key": "operation-1",
+        "expected_version": 7,
+    }
+
+
+def test_memory_search_forwards_repository_filter() -> None:
+    client, transport = _client([_mcp_result({"entries": []})])
+    assert client.memory_search("question", scope="team", limit=4, repo="repo-a") == []
+    arguments = transport.requests[0]["body"]["params"]["arguments"]
+    assert arguments == {
+        "query": "question",
+        "scope": "team",
+        "limit": 4,
+        "repo": "repo-a",
+    }
 
 
 def test_memory_write_fail_closed() -> None:
@@ -174,14 +285,42 @@ def test_memory_write_validates_inputs() -> None:
         client.memory_write("graph:g1", "fact", "")
 
 
-def test_memory_search_entries_and_fail_open() -> None:
+def test_memory_search_entries_and_errors() -> None:
     entries = [{"id": "m1", "text": "sky is blue"}]
-    client, _ = _client([_mcp_result({"entries": entries})])
+    client, transport = _client([_mcp_result({"entries": entries})])
     assert client.memory_search("sky") == entries
+    assert transport.requests[0]["body"]["params"]["arguments"] == {"query": "sky"}
+
+    with_repo, repo_transport = _client([_mcp_result({"entries": entries})])
+    assert with_repo.memory_search("sky", repo="owner/project") == entries
+    assert repo_transport.requests[0]["body"]["params"]["arguments"] == {
+        "query": "sky",
+        "repo": "owner/project",
+    }
     failing, _ = _client([ProviderError("down")])
-    assert failing.memory_search("sky") == []
+    with pytest.raises(SubstrateUnreachableError):
+        failing.memory_search("sky")
     with pytest.raises(ValueError):
         client.memory_search("")
+
+
+@pytest.mark.parametrize("malformed_entries", [None, {}, "not-a-list"])
+def test_memory_search_rejects_malformed_entries(malformed_entries) -> None:
+    client, _ = _client([_mcp_result({"entries": malformed_entries})])
+    with pytest.raises(SubstrateProtocolError):
+        client.memory_search("sky")
+
+
+def test_memory_search_accepts_legacy_list_result() -> None:
+    entries = [{"id": "m1", "text": "sky is blue"}]
+    client, _ = _client([_mcp_result(entries)])  # type: ignore[arg-type]
+    assert client.memory_search("sky") == entries
+
+
+def test_memory_search_rejects_missing_entries() -> None:
+    client, _ = _client([_mcp_result({})])
+    with pytest.raises(SubstrateProtocolError):
+        client.memory_search("sky")
 
 
 def test_malformed_mcp_envelope() -> None:
@@ -189,17 +328,35 @@ def test_malformed_mcp_envelope() -> None:
     with pytest.raises(SubstrateError):
         client.memory_write("graph:g1", "fact", "x")
     searching, _ = _client([{"nope": True}])
-    assert searching.memory_search("sky") == []
+    with pytest.raises(SubstrateProtocolError):
+        searching.memory_search("sky")
 
 
-def test_bad_base_url_and_surface() -> None:
-    with pytest.raises(ValueError):
-        SubstrateClient(base_url="gopher://x")
-    with pytest.raises(ValueError):
-        SubstrateClient(base_url="")
-    with pytest.raises(ValueError):
-        SubstrateClient(surface="  ")
-    assert SubstrateClient(base_url="http://h:7410/").base_url == "http://h:7410"
+def test_base_url_validation_and_unsafe_url_degradation() -> None:
+    for unsafe in (
+        "gopher://x",
+        "http://h:7410",
+        "https://user:pw@example.test",
+        "https://bad:port",
+    ):
+        client = SubstrateClient(base_url=unsafe, transport=_FakeTransport([]))
+        assert client.brief() == ""
+        assert client._resolve_base() == (None, "configured substrate URL is unsafe")
+    assert SubstrateClient(base_url="https://h:7410/").base_url == "https://h:7410"
+    assert SubstrateClient(base_url="local").base_url == "http://127.0.0.1:7410"
+
+
+def test_default_client_is_unconfigured_and_does_not_call_transport() -> None:
+    transport = _FakeTransport([])
+    client = SubstrateClient(transport=transport)
+    assert client.brief() == ""
+    assert client.emit("prompt", "test") == {
+        "stored": False,
+        "error": "not_configured: substrate gateway is not configured",
+    }
+    with pytest.raises(SubstrateError, match="not configured"):
+        client.memory_write("g", "fact", "text")
+    assert transport.requests == []
 
 
 def test_token_never_leaks_into_errors_or_results() -> None:
@@ -218,10 +375,10 @@ def test_token_never_leaks_into_errors_or_results() -> None:
 def test_docs_search_envelope_and_errors() -> None:
     body = {"ok": True, "status": 200, "body": {"chunks": []}}
     client, transport = _client([_mcp_result(body)])
-    assert client.docs_search("q") == body
+    assert client.docs_search("a question") == body
     envelope = transport.requests[0]["body"]
     assert envelope["params"]["name"] == "docs_search"
-    assert envelope["params"]["arguments"] == {"query": "q"}
+    assert envelope["params"]["arguments"] == {"question": "a question"}
     with pytest.raises(ValueError):
         client.docs_search("")
     failing, _ = _client([ProviderError("down")])
@@ -232,19 +389,27 @@ def test_docs_search_envelope_and_errors() -> None:
         malformed.docs_search("q")
 
 
-def _mcp_text(text: str) -> dict:
+def _mcp_text(text: str, request_id: int = 1) -> dict:
     return {
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": request_id,
         "result": {"content": [{"type": "text", "text": text}]},
     }
 
 
 def test_graph_claim_lease_and_validation() -> None:
-    lease = {"ok": True, "graph_id": "g", "node_id": "n", "token": "t", "expires": "e"}
+    lease = {
+        "ok": True,
+        "graph_id": "g",
+        "node_id": "n",
+        "lease_id": "lease-123",
+        "token": "t",
+        "expires": "e",
+    }
     client, transport = _client([_mcp_result(lease)])
     result = client.graph_claim("g", "n", "s1", 60)
     assert result == lease
+    assert result["lease_id"] == "lease-123"
     envelope = transport.requests[0]["body"]
     assert envelope["params"]["name"] == "graph_claim"
     assert envelope["params"]["arguments"] == {
@@ -270,29 +435,38 @@ def test_graph_claim_lease_and_validation() -> None:
 def test_graph_release_complete_text_and_heartbeat() -> None:
     client, transport = _client(
         [
-            _mcp_text("Released g/n."),
-            _mcp_text("Completed g/n."),
-            _mcp_result({"ok": True}),
+            _mcp_text("Released g/n.", request_id=1),
+            _mcp_text("Completed g/n.", request_id=2),
+            _mcp_result({"ok": True}, request_id=3),
         ]
     )
-    assert client.graph_release("g", "n") == "Released g/n."
-    assert client.graph_complete("g", "n") == "Completed g/n."
-    assert client.graph_heartbeat("g", "n", "tok") == {"ok": True}
+    assert client.graph_release("g", "n", "lease-1") == "Released g/n."
+    assert client.graph_complete("g", "n", "lease-2") == "Completed g/n."
+    assert client.graph_heartbeat("g", "n", "lease-3") == {"ok": True}
     assert [r["body"]["params"]["name"] for r in transport.requests] == [
         "graph_release",
         "graph_complete",
         "graph_heartbeat",
     ]
+    assert [r["body"]["params"]["arguments"] for r in transport.requests] == [
+        {"graph_id": "g", "node_id": "n", "lease_id": "lease-1"},
+        {"graph_id": "g", "node_id": "n", "lease_id": "lease-2"},
+        {"graph_id": "g", "node_id": "n", "lease_id": "lease-3"},
+    ]
     with pytest.raises(ValueError):
-        client.graph_release("", "n")
+        client.graph_release("", "n", "lease")
+    with pytest.raises(ValueError):
+        client.graph_release("g", "n", "")
+    with pytest.raises(ValueError):
+        client.graph_complete("g", "n", "")
     with pytest.raises(ValueError):
         client.graph_heartbeat("g", "n", "")
     failing, _ = _client([ProviderError("down")])
     with pytest.raises(SubstrateError):
-        failing.graph_release("g", "n")
+        failing.graph_release("g", "n", "lease")
     malformed, _ = _client([{"nope": True}])
     with pytest.raises(SubstrateError):
-        malformed.graph_complete("g", "n")
+        malformed.graph_complete("g", "n", "lease")
 
 
 def test_health_success() -> None:

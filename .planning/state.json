@@ -11,9 +11,9 @@
     }
   ],
   "next": {
-    "command": "/gsd:progress",
-    "label": "Resume v20 Wiring after Phase 99",
-    "reason": "Phase 99 is implemented in its isolated worktree; stop here as requested. Rebase after Phases 97/98 integrate; do not audit, complete, or clean up the milestone."
+    "command": "/skill:gsd-autonomous 97",
+    "label": "Execute Phase 97 plan",
+    "reason": "Five Phase 97 execution plans are staged (01–05); planning is complete and independent units may proceed after separate manual invocation. Authoritative upstream schema confirmation is required before server-specific implementation."
   },
   "updated_at": "2026-10-21"
 }

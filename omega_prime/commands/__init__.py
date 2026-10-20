@@ -28,7 +28,6 @@ from omega_prime.commands.generated import (
     generate_commands,
 )
 from omega_prime.commands.workflows import (
-    HINDSIGHT_PREFIX,
     WORKFLOW_NAMES,
     connector_requests,
     dispatch_tool,
@@ -68,15 +67,16 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "omega-recall",
         "/omega-recall <query>",
-        "Recall memory for a query.",
+        "Recall memory across configured backends, preserving source and state.",
         "The user asks what Omega Prime remembers about a topic.",
         needs_args=True,
     ),
     CommandSpec(
         "omega-retain",
-        "/omega-retain <text>",
-        "Store one memory entry. Refuses secrets.",
-        "The user asks to remember a fact that is not a secret.",
+        "/omega-retain --source <source> -- <content> OR "
+        "/omega-retain --receipt-path <path> -- <content>",
+        "Retain a non-secret memory entry with explicit source or receipt evidence.",
+        "The user asks to remember a fact that is not a secret and provides evidence.",
         needs_args=True,
     ),
     CommandSpec(
@@ -330,13 +330,21 @@ def execute_command(
             "error": "missing_args",
             "usage": spec.usage,
         }
-    if name == "omega-retain" and _is_secret(args):
-        return {
-            "ok": False,
-            "command": name,
-            "error": "secret_refused",
-            "reason": "Do not put a secret in chat or memory.",
-        }
+    if name == "omega-retain":
+        if _parse_retain_args(args) is None:
+            return {
+                "ok": False,
+                "command": name,
+                "error": "invalid_retain_args",
+                "usage": _BY_NAME[name].usage,
+            }
+        if _is_secret(args):
+            return {
+                "ok": False,
+                "command": name,
+                "error": "secret_refused",
+                "reason": "Do not put a secret in chat or memory.",
+            }
     context = validated_doctor_context(doctor_context)
     return _run(name, args, registry, env, context)
 
@@ -393,12 +401,12 @@ def _run(
     if name == "omega-recall":
         return _tool(name, registry, "lead_memory_recall", {"query": args})
     if name == "omega-retain":
-        content = args if args.startswith(HINDSIGHT_PREFIX) else HINDSIGHT_PREFIX + args
+        content, evidence = _parse_retain_args(args) or ("", {})
         return _tool(
             name,
             registry,
-            "memory",
-            {"action": "add", "target": "memory", "content": content},
+            "lead_memory_retain",
+            {"content": content, **evidence},
         )
     if name == "omega-delegate":
         return _tool(name, registry, "delegate_task", {"goal": args})
@@ -628,7 +636,24 @@ def _tool(
         }
     if payload.get("error"):
         return _fail(command, str(payload["error"]), payload)
+    if payload.get("ok") is False:
+        return _fail(command, str(payload.get("error") or "tool_failed"), payload)
     return _ok(command, payload)
+
+
+def _parse_retain_args(args: str) -> tuple[str, dict[str, str]] | None:
+    """Parse the only supported evidence-bearing retain command forms."""
+    match = re.fullmatch(
+        r"--(source|receipt-path)\s+(\S+)\s+--\s+([\s\S]+)",
+        args,
+    )
+    if match is None:
+        return None
+    evidence_kind, evidence_value, content = match.groups()
+    if evidence_value == "--" or not content.strip():
+        return None
+    evidence_key = "receipt_path" if evidence_kind == "receipt-path" else "source"
+    return content, {evidence_key: evidence_value}
 
 
 def _ok(command: str, result: dict[str, Any]) -> dict[str, Any]:
