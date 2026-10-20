@@ -1,0 +1,64 @@
+name: omp-sandbox
+
+# The engine's execution tier (omp-sandbox/): Node 24 TypeScript core and the
+# Rust Anda wrapper. Separate from ci.yml so the Python jobs stay unchanged.
+# Hermetic: no Podman, no OpenShell gateway, no model logins. The live e2e
+# (tests/e2e.py) needs those and runs locally only.
+
+on:
+  push:
+    paths:
+      - omp-sandbox/**
+      - .github/workflows/omp-sandbox.yml
+  pull_request:
+    paths:
+      - omp-sandbox/**
+      - .github/workflows/omp-sandbox.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omp-sandbox-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  node:
+    name: omp-sandbox node (tsc + node --test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: omp-sandbox
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: omp-sandbox/package-lock.json
+      - name: npm ci (no scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: typecheck
+        run: npm run check
+      - name: unit tests
+        run: npm test
+  rust:
+    name: omp-sandbox rust (cargo build + test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: omp-sandbox
+    steps:
+      - uses: actions/checkout@v7
+      - name: toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: omp-sandbox
+      - name: build (locked)
+        run: cargo build --locked
+      - name: test (locked)
+        run: cargo test --locked

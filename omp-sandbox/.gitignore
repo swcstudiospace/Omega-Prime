@@ -4,3 +4,4 @@ target/
 scratch/
 *.log
 sandbox/image/sandbox-agent
+.claude/

@@ -105,3 +105,8 @@ paths:
     owner: bot-00-omega-prime
   - pattern: "openapi.yaml"
     owner: bot-00-omega-prime
+  # --- Engine execution tier (omp-sandbox, imported by git subtree) ---
+  # The coding loop's sandbox: Node core + Rust Anda wrapper + workload image.
+  # Same owner today; listed so a later seat can take the tier by pattern.
+  - pattern: "omp-sandbox/**"
+    owner: bot-00-omega-prime
