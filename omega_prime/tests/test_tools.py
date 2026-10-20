@@ -16,6 +16,7 @@ from omega_prime.tools.coding import CODING_TOOL_NAMES, register_coding_tools
 from omega_prime.tools.cron_admin import CRON_ADMIN_TOOL_NAMES
 from omega_prime.tools.delegate import DELEG_TOOL_NAMES
 from omega_prime.tools.discord import DISCORD_TOOL_NAMES
+from omega_prime.tools.dispatch import DISPATCH_TOOL_NAMES
 from omega_prime.tools.durable_surface import DURABLE_TOOL_NAMES
 from omega_prime.tools.goals import GOAL_TOOL_NAMES
 from omega_prime.tools.growth import GROWTH_TOOL_NAMES
@@ -439,6 +440,7 @@ def test_roster_lists_exactly_the_names_register_coding_tools_registers(tmp_path
         + LEARNING_TOOL_NAMES
         + DURABLE_TOOL_NAMES
         + CAPACITY_TOOL_NAMES
+        + DISPATCH_TOOL_NAMES
         + RLM_TOOL_NAMES
         + HARNESS_TOOL_NAMES
         + GOAL_TOOL_NAMES

@@ -947,6 +947,30 @@ Report the cron turn journal, workflow checkpoint count, RoE lifecycle, and purp
 
 Report per-plan remaining quota from omp usage and the compliance allowlist. The default allowlist is empty. API-key profiles are listed when their environment variable is set. Anthropic and Muse subscription OAuth are never allowlisted. Values of keys are not returned. This tool does not call a model HTTP API.
 
+## omega_dispatch
+
+- Family: Engine
+- Approval: required
+- Required params: repo, prompt, confirm_token
+
+Route one JobSpec to the local sandbox lane or the coding fleet. The same fields are sent either way. Requires approval and confirm_token. The token is not stored. This tool does not call a model HTTP API.
+
+## omega_jobs_status
+
+- Family: Engine
+- Approval: not required
+- Required params: none
+
+Read coding-fleet job status. Pass job_id to poll one job and its events. Omit it to read GET /status and GET /jobs. Does not call a model HTTP API.
+
+## omega_jobs_cancel
+
+- Family: Engine
+- Approval: required
+- Required params: job_id
+
+Cancel one coding-fleet job (POST /jobs/:id/cancel). Requires approval. Does not call a model HTTP API.
+
 ## rlm_spawn
 
 - Family: RLM

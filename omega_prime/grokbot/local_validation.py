@@ -928,6 +928,8 @@ TARGETED_LOCAL_APPROVALS: tuple[tuple[str, str], ...] = (
     ("rlm_create_session", "readiness-local"),
     ("rlm_delete_subagent", "readiness-local"),
     ("rlm_rename", "readiness-local"),
+    ("omega_dispatch", "readiness-local"),
+    ("omega_jobs_cancel", "readiness-local"),
 )
 """Genuine targeted local approvals for the probe emulators.
 
@@ -939,7 +941,10 @@ unconfigured provider truthfully), local Prime cell/bash/goal/controller
 operations per prime/kernel.py local semantics, and fixture-local factory
 verbs whose genuine safe limit is the absent run_child in the fresh owned
 runtime (a grant producing spurious ok surfaces as failure; approval refusal
-would mask the real prerequisite). Never external-service authorization (no
+would mask the real prerequisite). ``omega_dispatch`` and
+``omega_jobs_cancel`` are granted so the probe can see the handler's own
+refusal (confirm token unset, fleet coordinator unset). That grant does not
+authorize a coordinator call. Never external-service authorization (no
 bus/web/vision/greptile/play/vercel/railway/x/telegram/discord/substrate/
 provider grants). The full deny/grant/revoke lifecycle stays on the loopback
 host's separate approval domain.

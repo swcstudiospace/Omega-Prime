@@ -1,6 +1,7 @@
 ## Unreleased
 
-- omp engine (Phase A1a): the coding loop can run on omp 18.x over RPC. Tools stay on the stdio MCP server, plans go through an allowlist, and `omega_capacity` reports quota. Dispatch backends are a follow-up (A1b).
+- omp engine (Phase A1a): the coding loop can run on omp 18.x over RPC. Tools stay on the stdio MCP server, plans go through an allowlist, and `omega_capacity` reports quota.
+- A1b dispatch: `omega_dispatch` (approval plus confirm token), `omega_jobs_status`, and `omega_jobs_cancel`. One JobSpec goes to the local sandbox lane or the coding fleet. The fleet client reads `FLEET_COORDINATOR_URL` and `FLEET_COORDINATOR_TOKEN` by name.
 - Image evidence accepts a long `refs/heads/<branch>` push ref. `/` stays in the token alphabet outside a git ref. Inside a ref, each segment is scanned, and the segments are scanned again with the slashes removed, so a token split by `/` or hidden behind repeated padding still trips the secret gate. An ordinary branch name whose only high-entropy symbol is the slash does not.
 - Slash commands: curated 24 -> 27 and total 58 -> 61. Added `/omega-redteam-conflicts`, `/omega-redteam-readiness`, and `/omega-audit`. Findings accept `--jsonl`. `durable_status` reports cycle and sync backlog. Purple-cycle jobs can be scheduled, and a live cycle takes a file lock plus an optional deadline.
 - Install docs pin the clone to `/workspace/omes-bot` and a `<release-tag>` placeholder (no tag existed on 2026-10-19; do not clone `main`).
@@ -49,10 +50,23 @@ All notable changes to this project are documented here. Format follows
   stay on the Python loop, including a delegate whose parent has no
   child model.
 
-#### Follow-up
+### A1b dispatch
 
-- A1b: dispatch backends (fleet, local engine, cursor fallback),
-  `omega_dispatch`, `omega_jobs_status`, and `omega_jobs_cancel`.
+#### Added
+
+- `omega_prime.engine.fleet_client`: posts one `JobSpec` to the coding-fleet
+  coordinator (`POST /jobs`), polls `GET /jobs` and job events, and answers
+  HITL on `POST /hitl/answer`. Coordinator URL and token come from
+  `FLEET_COORDINATOR_URL` and `FLEET_COORDINATOR_TOKEN` (or the matching
+  `*_FILE` names). Values are not logged.
+- `omega_prime.engine.lanes`: the same `JobSpec` chooses the local lane or
+  the fleet. Local caps are 30 minutes, 25 files, 2 concurrent jobs, 3 GiB
+  free, and one `xai-oauth` job. Rust, Go, Docker, and mobile markers force
+  the fleet. A full box spills or queues. A local job that hits a limit is
+  re-posted with its partial branch, and the receipt records the lane change.
+  The local executor in this change is a stub.
+- `omega_dispatch` requires approval and `confirm_token`.
+  `omega_jobs_status` is read-only. `omega_jobs_cancel` requires approval.
 
 ### Purple-team operator tooling (batch 18)
 

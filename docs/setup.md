@@ -403,8 +403,22 @@ is sent does not spend a caller-supplied iteration budget.
 pass, and ultrathink turn require the engine. Unset, or `auto`, uses the
 engine when omp, an allowlisted plan, and a sandbox are all available, and
 otherwise keeps the existing Python loop. `OMEGA_PRIME_ENGINE=off` keeps the
-Python loop. Dispatch backends (`omega_dispatch`, job status, job cancel,
-and the fleet client) are a later change.
+Python loop.
+
+`omega_dispatch` chooses the local sandbox lane or the coding fleet for one
+JobSpec (`repo`, `prompt`, `model`, `slash_command`, `slash_args`,
+`max_minutes`, `max_files`, and the push and pr flags). It requires approval
+and `confirm_token`. The token is `OMEGA_PRIME_DISPATCH_CONFIRM`, or the
+file named by `OMEGA_PRIME_DISPATCH_CONFIRM_FILE` when the value is unset.
+`omega_jobs_status` and `omega_jobs_cancel` read and cancel fleet jobs.
+The fleet client reads `FLEET_COORDINATOR_URL` and
+`FLEET_COORDINATOR_TOKEN` (each also accepts a `*_FILE` sibling). Those
+values are not written into job files. The local lane stays on the box for
+JS, TS, Python, and docs when the job has no Rust, Go, Docker, or mobile
+marker, at most 25 files, at most 30 minutes, at most 2 running local jobs,
+at least 3 GiB free, and at most one running `xai-oauth` job. A full box
+spills to the fleet, or queues locally when `overflow` is `queue`. A local
+job that hits a limit is re-queued to the fleet with its partial branch.
 
 ## Contributor CI
 
