@@ -49,11 +49,14 @@ def ultrathink_readiness(env: Mapping[str, str]) -> dict[str, Any]:
     if root:
         for name in ULTRATHINK_REQUIRED_BINS:
             path = Path(root) / "bin" / name
-            if not path.is_file():
-                reason = "not a file" if path.is_dir() else "missing"
-                problems.append(f"bin/{name}: {reason}")
-            elif not os.access(path, os.X_OK):
-                problems.append(f"bin/{name}: not executable")
+            try:
+                if not path.is_file():
+                    reason = "not a file" if path.is_dir() else "missing"
+                    problems.append(f"bin/{name}: {reason}")
+                elif not os.access(path, os.X_OK):
+                    problems.append(f"bin/{name}: not executable")
+            except OSError as exc:
+                problems.append(f"{path}: {exc}")
     state = (
         "not_configured"
         if not root

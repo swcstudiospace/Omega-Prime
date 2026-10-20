@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from omega_prime.sandbox import runner as sandbox_runner
 from omega_prime.sandbox.runner import (
     SandboxRunner,
     SandboxUnavailable,
@@ -142,11 +143,33 @@ def test_marked_setup_failure_raises_instead_of_recording_exit_127(tmp_path):
         runner.run(["echo", "hi"])
 
 
-def test_default_transport_marks_startup_failures(tmp_path):
-    """OSError/timeout from the default transport carries setup_error."""
-    result = default_transport(["definitely-not-a-real-binary-xyz"], timeout=5)
+def test_default_transport_passes_shell_metacharacters_as_argv(monkeypatch):
+    tricky = ["printf", "%s", "; rm -rf / && $(evil) `backtick` | true"]
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(sandbox_runner.subprocess, "run", fake_run)
+
+    assert default_transport(tricky)["exit_code"] == 0
+    assert seen["argv"] == tricky
+    assert isinstance(seen["argv"], list)
+    assert seen["kwargs"].get("shell", False) is False
+
+
+def test_default_transport_marks_startup_failures(monkeypatch):
+    def fail_to_start(argv, **kwargs):
+        raise OSError("process launch failed")
+
+    monkeypatch.setattr(sandbox_runner.subprocess, "run", fail_to_start)
+
+    result = default_transport(["echo", "hi"])
+
     assert result["exit_code"] == 127
-    assert result.get("setup_error")
+    assert result["setup_error"] == "transport startup failed: process launch failed"
 
 
 def _missing_binary_transport(calls: list):
@@ -187,6 +210,7 @@ def _selected_openshell(monkeypatch):
         assert path.is_file() and os.access(path, os.X_OK), (
             "selected OPENSHELL_BIN exists but is not an executable file"
         )
+        selected = str(path.resolve())
         monkeypatch.setattr(shutil, "which", lambda name: selected)
     return selected
 
@@ -197,9 +221,10 @@ def test_real_probe_reports_selected_executable(tmp_path, monkeypatch):
         "#!/bin/sh\nprintf 'OpenShell test version\\n'\n", encoding="utf-8"
     )
     selected.chmod(0o755)
-    monkeypatch.setenv("OPENSHELL_BIN", str(selected))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENSHELL_BIN", "custom-openshell")
 
-    assert _selected_openshell(monkeypatch) == str(selected)
+    assert _selected_openshell(monkeypatch) == str(selected.resolve())
     ok, cause = probe_openshell()
 
     assert ok is True

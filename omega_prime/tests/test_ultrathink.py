@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import omega_prime.grokbot.doctor as doctor_module
 from omega_prime.grokbot.doctor import GrokBotDoctor, summarize_checks
 from omega_prime.integrations.ultrathink import (
     READINESS_ENV_KEYS,
@@ -345,6 +346,22 @@ def test_readiness_invalid_binary_matrix(tmp_path, name, mode, reason):
     assert result["problems"] == [f"bin/{name}: {reason}"]
 
 
+def test_readiness_oserror_reports_failed_path(tmp_path, monkeypatch):
+    root = _fake_root(tmp_path)
+    failed = root / "bin" / ULTRATHINK_REQUIRED_BINS[0]
+    original_is_file = Path.is_file
+
+    def is_file(path):
+        if path == failed:
+            raise PermissionError("permission denied")
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+    result = ultrathink_readiness(_isolated_env(tmp_path, ULTRATHINK_ROOT=str(root)))
+    assert result["state"] == "root_invalid"
+    assert any(str(failed) in problem for problem in result["problems"])
+
+
 @pytest.mark.parametrize(
     "value", [None, "", "0", "false", "TRUE", "True", " true ", "yes", "on", "2"]
 )
@@ -421,6 +438,9 @@ def test_check_ultrathink_row_mapping(
         monkeypatch.delenv("ULTRATHINK_SHIP", raising=False)
     else:
         monkeypatch.setenv("ULTRATHINK_SHIP", ship_value)
+    for key in READINESS_ENV_KEYS:
+        if key not in {"HOME", "ULTRATHINK_ROOT", "ULTRATHINK_SHIP"}:
+            monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HOME", env["HOME"])
     result, detail = check_ultrathink(tmp_path)
     assert result is ok
@@ -442,7 +462,7 @@ def test_check_ultrathink_row_mapping(
         ("ready_ship_on", "PASS", "valid", "on"),
     ],
 )
-def test_doctor_ultrathink_row(tmp_path, state, status, root_kind, ship):
+def test_doctor_ultrathink_row(tmp_path, monkeypatch, state, status, root_kind, ship):
     env = _isolated_env(tmp_path)
     if root_kind == "valid":
         root = _fake_root(tmp_path)
@@ -466,6 +486,7 @@ def test_doctor_ultrathink_row(tmp_path, state, status, root_kind, ship):
     assert str(Path(env["HOME"]) / ".grok/plugin-data/ultrathink") in check.message
     assert ship_value is None or f"ULTRATHINK_SHIP={ship_value}" not in check.message
     assert (check.remediation is not None) is (status in ("WARN", "FAIL"))
+    monkeypatch.setattr(doctor_module, "_port_probe", lambda *args, **kwargs: None)
     assert [c.id for c in doctor.run_all_checks(check_port=59123)].count(
         "ultrathink_readiness"
     ) == 1
