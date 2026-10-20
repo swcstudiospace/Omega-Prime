@@ -8,7 +8,7 @@ import asyncio
 import json
 import time
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -215,3 +215,97 @@ def test_allowlisted_source_extras_are_published() -> None:
         assert snap["sources"]["agentos"]["state_entries"] == 3
 
     asyncio.run(run())
+
+
+def test_github_command_center_is_published_with_only_bounded_fields() -> None:
+    async def run() -> None:
+        extra = {
+            "command_center": {
+                "repositories": [{"name": "repo", "token": "ghp_12345678901234567890"}],
+                "ci_cd": [],
+                "recent_merges": [],
+                "meta": {"password": "secret_value"},
+                "other": "discard",
+            },
+            "other": "discard",
+        }
+        poller = DashboardPoller(
+            [CollectorSpec("github", lambda: SourceResult("github", "ok", extra=extra), 1.0, 1.0)]
+        )
+        await poller.refresh_now()
+        status = poller.snapshot()["sources"]["github"]
+        assert set(status["command_center"]) == {
+            "repositories",
+            "ci_cd",
+            "recent_merges",
+            "meta",
+        }
+        rendered = str(status)
+        assert "ghp_12345678901234567890" not in rendered
+        assert "secret_value" not in rendered
+        assert "other" not in status
+
+    asyncio.run(run())
+
+
+def test_github_timeout_exposes_error_without_mutating_cached_rows() -> None:
+    async def run() -> None:
+        calls = 0
+
+        def collect() -> SourceResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return SourceResult(
+                    "github",
+                    "ok",
+                    extra={"command_center": {"repositories": [{"name": "cached"}]}},
+                )
+            time.sleep(0.05)
+            return SourceResult("github", "ok")
+
+        poller = DashboardPoller(
+            [CollectorSpec("github", collect, 1.0, 0.001)],
+            clock=lambda: datetime(2026, 10, 21, tzinfo=UTC),
+        )
+        await poller._collect(poller.specs[0])
+        poller._build_snapshot()
+        previous = poller.snapshot()
+        assert previous is not None
+        await poller._collect(poller.specs[0])
+        poller._build_snapshot()
+        current = poller.snapshot()
+        assert current is not None
+        assert current["sources"]["github"]["status"] == "error"
+        assert current["sources"]["github"]["command_center"] == previous["sources"]["github"]["command_center"]
+
+    asyncio.run(run())
+
+
+def test_default_cli_poller_factory_receives_numbering_path(tmp_path, monkeypatch, capsys) -> None:
+    from omega_prime.dashboard import __main__ as dashboard_main
+
+    observed = {}
+
+    class FakePoller:
+        def __init__(self, specs, **kwargs):
+            observed["path"] = kwargs.get("task_ids_path")
+
+        async def refresh_now(self):
+            pass
+
+        def snapshot(self):
+            return {
+                "generated_at": "now",
+                "sources": {},
+                "active": [],
+                "pr_gate": [],
+                "waiting_on_ove": [],
+                "finished": [],
+            }
+
+    monkeypatch.setattr(dashboard_main, "DashboardPoller", FakePoller)
+    assert dashboard_main.main(["--once"], home=tmp_path) == 0
+    capsys.readouterr()
+    assert observed["path"] == tmp_path / ".omega-prime" / "dashboard" / "tasks.json"
+    assert DashboardPoller([]).task_ids_path is None

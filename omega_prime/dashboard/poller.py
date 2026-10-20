@@ -12,6 +12,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from omega_prime.dashboard.model import SourceResult, normalize_tasks
@@ -24,6 +25,7 @@ GITHUB = 60.0
 _STATUS_EXTRA = {
     "agentos": ("routing_summary", "state_entries"),
     "command_log": ("count", "last_exit_codes"),
+    "github": ("command_center",),
 }
 
 
@@ -46,9 +48,11 @@ class DashboardPoller:
         *,
         quiet_minutes: float = 15.0,
         window_hours: float = 24.0,
-        clock: Callable[[], datetime] | None = None,
         tick_s: float = 0.25,
+        clock: Callable[[], datetime] | None = None,
+        task_ids_path: Path | None = None,
     ) -> None:
+        self.task_ids_path = task_ids_path
         self.specs = list(specs)
         self.quiet_minutes = quiet_minutes
         self.window_hours = window_hours
@@ -131,24 +135,58 @@ class DashboardPoller:
             if result.source != spec.source:
                 result.source = spec.source
         except Exception as exc:
-            result = SourceResult(
-                source=spec.source, status="error", error=type(exc).__name__
-            )
+            previous = self._results.get(spec.source)
+            if spec.source == "github" and previous is not None:
+                result = SourceResult(
+                    source=spec.source,
+                    status="error",
+                    items=list(previous.items),
+                    extra=dict(previous.extra),
+                    error=type(exc).__name__,
+                    detail="last successful GitHub data retained",
+                )
+            else:
+                result = SourceResult(
+                    source=spec.source, status="error", error=type(exc).__name__
+                )
         took_ms = round((time.perf_counter() - started) * 1000.0, 2)
         self._results[spec.source] = result
         status: dict[str, Any] = {"status": result.status, "took_ms": took_ms}
+        if spec.source == "github" and result.status == "error" and result.detail:
+            status["stale"] = True
         if result.error is not None:
             status["error"] = result.error
         if result.detail is not None:
             status["detail"] = result.detail
         for key in _STATUS_EXTRA.get(spec.source, ()):
-            if key in result.extra:
-                status[key] = redact_value(result.extra[key])
+            if key not in result.extra:
+                continue
+            extra = result.extra[key]
+            if spec.source == "github" and key == "command_center":
+                if isinstance(extra, dict):
+                    extra = {
+                        name: extra[name]
+                        for name in ("repositories", "ci_cd", "recent_merges", "meta")
+                        if name in extra
+                    }
+                else:
+                    continue
+            status[key] = redact_value(extra)
         self._status[spec.source] = status
 
     def _build_snapshot(self) -> None:
         now = self.clock()
-        normalized_results: dict[str, SourceResult] = dict(self._results)
+        normalized_results = {
+            name: SourceResult(
+                result.source,
+                result.status,
+                list(result.items),
+                result.error,
+                dict(result.extra),
+                result.detail,
+            )
+            for name, result in self._results.items()
+        }
         for result in self._results.values():
             for item in result.items:
                 kind = item.get("kind")
@@ -158,12 +196,17 @@ class DashboardPoller:
                         bucket = SourceResult(kind, result.status)
                         normalized_results[kind] = bucket
                     bucket.items.append(item)
-        normalized = normalize_tasks(
+        snapshot = normalize_tasks(
             normalized_results,
             now=now,
             quiet_minutes=self.quiet_minutes,
             window_hours=self.window_hours,
-        ).to_dict()
+        )
+        if self.task_ids_path is not None:
+            from omega_prime.dashboard.task_ids import number_snapshot
+
+            snapshot = number_snapshot(snapshot, path=self.task_ids_path, now=now)
+        normalized = snapshot.to_dict()
         value = {
             "generated_at": now.isoformat(),
             "sources": self.sources_status(),

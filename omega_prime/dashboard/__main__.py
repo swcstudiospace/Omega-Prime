@@ -17,6 +17,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
+from omega_prime.dashboard.task_ids import (
+    allocate_task_id,
+    assign_task_ids,
+    next_task_id,
+)
+
 from omega_prime.dashboard.config import DashboardConfig, load_dashboard_config
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.poller import (
@@ -177,16 +183,32 @@ def main(
     poller_factory: Callable[[], DashboardPoller] | None = None,
 ) -> int:
     """Run, stop, or collect a one-shot dashboard snapshot."""
+    raw_argv = list(argv if argv is not None else sys.argv[1:])
+    base_home = home if home is not None else Path.home()
+    tasks_path = base_home / ".omega-prime" / "dashboard" / "tasks.json"
+    if raw_argv and raw_argv[0] in {"next-id", "assign-id", "assign-ids"}:
+        command = raw_argv[0]
+        if command == "next-id":
+            argparse.ArgumentParser(prog="next-id").parse_args(raw_argv[1:])
+            print(f"{next_task_id(path=tasks_path):05d}", file=stdout or sys.stdout)
+            return 0
+        if command == "assign-id":
+            assign_parser = argparse.ArgumentParser(prog="assign-id")
+            assign_parser.add_argument("--id", required=True)
+            assign_parser.add_argument("--title", required=True)
+            parsed = assign_parser.parse_args(raw_argv[1:])
+            result = allocate_task_id(path=tasks_path, identity=parsed.id, title=parsed.title, now=datetime.now(UTC))
+            print(result["display_id"], file=stdout or sys.stdout)
+            return 0
+        argparse.ArgumentParser(prog="assign-ids").parse_args(raw_argv[1:])
+        assign_task_ids(path=tasks_path, now=datetime.now(UTC))
+        return 0
     parser = argparse.ArgumentParser(description="Local read-only task dashboard")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.environ.get("OMEGA_PRIME_DASHBOARD_PORT", "7421")),
-    )
+    parser.add_argument("--port", type=int, default=int(os.environ.get("OMEGA_PRIME_DASHBOARD_PORT", "7421")))
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--stop", action="store_true")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     stderr = sys.stderr
     output = stdout if stdout is not None else sys.stdout
     if not _loopback(args.host):
@@ -254,8 +276,8 @@ def main(
             build_default_collectors(home=base_home, config=config),
             quiet_minutes=config.quiet_minutes,
             window_hours=config.window_hours,
+            task_ids_path=tasks_path,
         )
-
     factory = poller_factory if poller_factory is not None else build_poller
     if args.once:
         poller = factory()
