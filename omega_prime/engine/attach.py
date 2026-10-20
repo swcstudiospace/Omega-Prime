@@ -212,6 +212,7 @@ def _engine_body(result: EngineResult) -> dict[str, Any]:
         "provider": result.provider,
         "model": result.model,
         "events": result.events_path,
+        "usage": result.usage,
         "cost": result.cost,
         "sandbox": result.sandbox,
         "mcp_status": result.mcp_status,

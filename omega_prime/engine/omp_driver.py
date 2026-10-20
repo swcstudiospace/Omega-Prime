@@ -10,6 +10,7 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -535,8 +536,13 @@ def _run(
     maybe_tmux(job_id, env, enabled=tmux)
     skills_status = "attach_failed"
     clarify_broker: ClarifySocketBroker | None = None
+    clarify_socket_dir = (
+        tempfile.TemporaryDirectory(prefix="omp-clarify-") if mode == "rpc-ui" else None
+    )
     candidate_broker = (
-        ClarifySocketBroker(directory / "clarify.sock") if mode == "rpc-ui" else None
+        ClarifySocketBroker(Path(clarify_socket_dir.name) / "c.sock")
+        if clarify_socket_dir is not None
+        else None
     )
     try:
         recover_attachments(state_dir(env), work)
@@ -551,17 +557,26 @@ def _run(
     except (OSError, ValueError):
         attachment = None
     if attachment is not None:
-        skills_status = str(
-            attach_skills(work, attachment).get("status", "attach_failed")
-        )
-        if candidate_broker is not None:
-            try:
-                candidate_broker.start()
-                clarify_broker = candidate_broker
-            except (OSError, ValueError):
+        try:
+            skills_status = str(
+                attach_skills(work, attachment).get("status", "attach_failed")
+            )
+            if candidate_broker is not None:
+                try:
+                    candidate_broker.start()
+                    clarify_broker = candidate_broker
+                except (OSError, ValueError):
+                    attachment.release()
+                    attachment = None
+                    skills_status = "attach_failed"
+        except BaseException:
+            if clarify_broker is not None:
+                clarify_broker.close()
+            if attachment is not None:
                 attachment.release()
-                attachment = None
-                skills_status = "attach_failed"
+            if clarify_socket_dir is not None:
+                clarify_socket_dir.cleanup()
+            raise
     run_metadata["skills_status"] = skills_status
     run_metadata["clarify_status"] = (
         ("attached" if clarify_broker is not None else "attach_failed")
@@ -599,6 +614,8 @@ def _run(
             clarify_broker.close()
         if attachment is not None:
             attachment.release()
+        if clarify_socket_dir is not None:
+            clarify_socket_dir.cleanup()
         raise
     finally:
         if gate_read >= 0:
@@ -613,6 +630,8 @@ def _run(
             if clarify_broker is not None:
                 clarify_broker.close()
             attachment.release()
+            if clarify_socket_dir is not None:
+                clarify_socket_dir.cleanup()
             raise
         finally:
             os.close(gate_write)
@@ -703,6 +722,8 @@ def _run(
     finally:
         if clarify_broker is not None:
             clarify_broker.close()
+        if clarify_socket_dir is not None:
+            clarify_socket_dir.cleanup()
         session.close()
         conflicts = attachment.release() if attachment is not None else []
         run_metadata["mcp_status"] = mcp_status
@@ -1289,11 +1310,13 @@ def _accept_prompt_ui(
         while True:
             if session.agent_ended:
                 break
+            register_clarify_requests()
             if cancel_event is not None and cancel_event.is_set():
                 send_abort()
-            register_clarify_requests()
             try:
-                queued = ui_control.next_command()
+                queued = ui_control.next_command(
+                    job_id=job_id, session_generation=session_generation
+                )
             except (OSError, UIControlError) as exc:
                 raise EngineError(
                     "ui_control", "unable to read operator command queue", started=True

@@ -49,15 +49,49 @@ from omega_prime.tools.lead import IntakeStore
 from omega_prime.tools.registry import ToolRegistry
 
 _FAKE = """#!/usr/bin/env python3
-import json, os, sys
+import asyncio, json, os, sys
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 def discover(config):
     server = config["mcpServers"]["omega-prime"]
-    if server.get("type") != "stdio" or not server.get("command"):
+    command = server["command"]
+    if os.environ.get("OMEGA_FAKE_OMP_MCP_FAILURE") == "missing":
+        command = "/missing/omega-prime-mcp"
+    command_args = server.get("args", [])
+    if os.environ.get("OMEGA_FAKE_OMP_MCP_FAILURE") == "import":
+        command_args = ["-c", "import omega_prime_missing_module"]
+    mcp_env = os.environ.copy()
+    mcp_env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (server.get("cwd"), mcp_env.get("PYTHONPATH", "")))
+    )
+
+    async def _discover():
+        params = StdioServerParameters(
+            command=command,
+            args=command_args,
+            cwd=server.get("cwd"),
+            env=mcp_env,
+        )
+        async with (
+            stdio_client(params) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.list_tools()
+        return [tool.name for tool in result.tools]
+
+    try:
+        return asyncio.run(_discover())
+    except FileNotFoundError as exc:
+        log({"discovery_error": type(exc).__name__})
         return []
-    if "--work-root" not in server.get("args", []):
+    except (KeyError, ValueError) as exc:
+        log({"discovery_error": type(exc).__name__})
         return []
-    return ["omega_command"]
+    except Exception as exc:
+        log({"discovery_error": "RuntimeError"})
+        return []
 
 def emit(obj):
     sys.stdout.write(json.dumps(obj) + "\\n")
@@ -85,6 +119,7 @@ if os.environ.get("OMEGA_FAKE_OMP_DISCOVER") == "1":
         discovered = [
             f"mcp__omega-prime_{name}" for name in discover(configured)
         ]
+        log({"discovered": discovered})
     except Exception as exc:
         log({"discovery_error": type(exc).__name__})
 log({"argv": args, "cwd": os.getcwd(), "agent_dir": os.environ.get("PI_CODING_AGENT_DIR")})
@@ -236,7 +271,8 @@ def _shaped_token() -> str:
 def _install_fake(tmp_path: Path) -> Path:
     binary = tmp_path / "bin" / "omp"
     binary.parent.mkdir()
-    binary.write_text(_FAKE, encoding="utf-8")
+    fake = _FAKE.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1)
+    binary.write_text(fake, encoding="utf-8")
     binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
     return binary
 
@@ -244,6 +280,15 @@ def _install_fake(tmp_path: Path) -> Path:
 def _env(tmp_path: Path, binary: Path, **extra: str) -> dict[str, str]:
     base = {
         "PATH": str(binary.parent) + os.pathsep + os.environ.get("PATH", ""),
+        "PYTHONPATH": os.pathsep.join(
+            filter(
+                None,
+                (
+                    str(Path(__file__).resolve().parents[2]),
+                    os.environ.get("PYTHONPATH", ""),
+                ),
+            )
+        ),
         "HOME": str(tmp_path / "home"),
         "OMEGA_PRIME_STATE_DIR": str(tmp_path / "state"),
         "OMEGA_PRIME_OMP_BIN": str(binary),
@@ -349,6 +394,38 @@ def test_api_keys_allow_their_profiles_and_router_picks_remaining_quota() -> Non
         raise AssertionError("expected PlanNotAllowed")
 
 
+def test_engine_body_reads_result_fields() -> None:
+    from omega_prime.engine.attach import _engine_body
+    from omega_prime.engine.omp_driver import EngineResult
+
+    result = EngineResult(
+        True,
+        "job-engine-body",
+        usage={"input_tokens": 17, "output_tokens": 9},
+        plan="anthropic",
+        provider="anthropic",
+        model="claude",
+        events_path="/tmp/events.jsonl",
+        started=True,
+        mcp_status="attached",
+        cleanup_conflicts=["preserved config"],
+    )
+
+    assert _engine_body(result) == {
+        "job_id": "job-engine-body",
+        "plan": "anthropic",
+        "provider": "anthropic",
+        "model": "claude",
+        "events": "/tmp/events.jsonl",
+        "usage": {"input_tokens": 17, "output_tokens": 9},
+        "cost": None,
+        "sandbox": "",
+        "mcp_status": "attached",
+        "mcp_cleanup_conflicts": ["preserved config"],
+        "started": True,
+    }
+
+
 def test_fake_omp_session_discovers_configured_mcp_tools(tmp_path: Path) -> None:
     binary = _install_fake(tmp_path)
     root_mcp = tmp_path / "mcp.json"
@@ -403,6 +480,9 @@ def test_fake_omp_session_discovers_configured_mcp_tools(tmp_path: Path) -> None
         .splitlines()
     ]
     configured = next(row["project_mcp"] for row in logged if "project_mcp" in row)
+    discovered = next(row["discovered"] for row in logged if "discovered" in row)
+    assert discovered
+    assert all(name.startswith("mcp__omega-prime_") for name in discovered)
     server = configured["mcpServers"]["omega-prime"]
     assert server["command"] == sys.executable
     assert server["args"] == [
@@ -439,6 +519,32 @@ def test_fake_omp_session_discovers_configured_mcp_tools(tmp_path: Path) -> None
     assert result.mode == "rpc"
     assert result.omp_major == 18
     assert code == 0
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_error"),
+    [("missing", "FileNotFoundError"), ("import", "RuntimeError")],
+)
+def test_mcp_discovery_reports_stdio_startup_failures(
+    tmp_path: Path, failure: str, expected_error: str
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_FAKE_OMP_DISCOVER="1",
+        OMEGA_FAKE_OMP_MCP_FAILURE=failure,
+    )
+    result = run("PONG", cwd=tmp_path, env=env, job_id=f"job-mcp-{failure}")
+    assert result.ok is True
+    rows = [
+        json.loads(line)
+        for line in Path(env["OMEGA_FAKE_OMP_LOG"])
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert {"discovery_error": expected_error} in rows
+    assert {"discovered": []} in rows
 
 
 def test_rpc_ui_requires_safe_control_before_launch(tmp_path: Path) -> None:
@@ -1009,6 +1115,60 @@ def test_attachment_registers_and_cleans_owned_artifact(tmp_path: Path) -> None:
     assert not skills_dir.exists()
     assert not (work / ".omp").exists()
     assert target.read_text(encoding="utf-8") == "owned target"
+
+
+def test_attachment_preserves_in_place_modified_config(tmp_path: Path) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    attachment = mcp_bridge.try_acquire_attachment(
+        work, tmp_path / "state", "job-modified"
+    )
+    config = work / ".omp" / "mcp.json"
+    identity = config.stat().st_ino
+    config.write_bytes(config.read_bytes() + b" ")
+
+    conflicts = attachment.release()
+
+    assert any(
+        "mcp.json" in conflict and "content" in conflict for conflict in conflicts
+    )
+    assert config.stat().st_ino == identity
+    assert config.read_bytes().endswith(b" ")
+    assert attachment._journal_path.exists()
+
+
+def test_recovery_preserves_in_place_modified_config(tmp_path: Path) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    attachment = mcp_bridge.try_acquire_attachment(work, state, "job-recovery-modified")
+    config = work / ".omp" / "mcp.json"
+    identity = config.stat().st_ino
+    config.write_bytes(config.read_bytes() + b" ")
+    boot_id = (
+        Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    )
+    attachment._owner_identity = {
+        "pid": 999999999,
+        "start_time": "1",
+        "boot_id": boot_id,
+    }
+    attachment._write_journal(None)
+    os.close(attachment._omp_fd)
+    os.close(attachment._parent_fd)
+
+    conflicts = mcp_bridge.recover_attachments(state, work)
+
+    assert any(
+        "mcp.json" in conflict and "content" in conflict for conflict in conflicts
+    )
+    assert config.stat().st_ino == identity
+    assert config.read_bytes().endswith(b" ")
+    assert list((state / "mcp-attachments").glob("*.json"))
 
 
 def test_attachment_preserves_replaced_nested_user_artifact(tmp_path: Path) -> None:
@@ -1749,3 +1909,35 @@ def test_custom_omp_home_is_the_store_the_child_reads(tmp_path: Path) -> None:
     assert all(kinds.values()), kinds
     # Version probe, usage check and RPC run all read the custom login store.
     assert {row["agent_dir"] for row in rows} == {str(custom / "agent")}
+
+
+def test_cli_ui_status_renders_attachment_and_cleanup_details(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from omega_prime.engine.cli import main as cli_main
+
+    state = tmp_path / "state"
+    job = state / "jobs" / "job-status"
+    job.mkdir(parents=True)
+    events_path = job / "events.jsonl"
+    append_event(
+        events_path,
+        {"type": "ui_control_attachment", "status": "attached"},
+    )
+    append_event(
+        events_path,
+        {
+            "type": "mcp_attachment",
+            "status": "attached",
+            "cleanup_conflicts": ["cleanup failed: PermissionError"],
+        },
+    )
+
+    assert (
+        cli_main(["ui", "status", "--job", "job-status", "--state-dir", str(state)])
+        == 0
+    )
+    status_output = capsys.readouterr().out
+    assert "ui_control_attachment status=attached" in status_output
+    assert "mcp_attachment status=attached" in status_output
+    assert "cleanup_conflicts=" in status_output

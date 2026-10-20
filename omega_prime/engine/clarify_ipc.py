@@ -184,10 +184,12 @@ class ClarifySocketBroker:
 
             for completion in pending:
                 completion.reject_on_close()
-            for connection, active_completion in active:
-                if active_completion is None:
-                    with contextlib.suppress(OSError):
-                        connection.shutdown(socket.SHUT_RDWR)
+            for connection, _completion in active:
+                # A completion can already be writing a large answer. Shut down
+                # every active socket before joining so blocked reads and writes
+                # cannot keep close() waiting indefinitely.
+                with contextlib.suppress(OSError):
+                    connection.shutdown(socket.SHUT_RDWR)
 
             if server is not None:
                 with contextlib.suppress(OSError):

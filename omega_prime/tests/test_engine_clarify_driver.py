@@ -106,9 +106,9 @@ def test_rpc_ui_routes_mcp_clarify_to_one_operator_answer(tmp_path: Path, monkey
     work.mkdir()
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
-    state = tmp_path / "state"
-    state.mkdir(mode=0o700)
-    job_id = "job-clarify"
+    state = tmp_path / ("state-" + "s" * 40) / ("nested-" + "n" * 40)
+    state.mkdir(mode=0o700, parents=True)
+    job_id = "j" * 64
     binary = tmp_path / "fake-omp"
     _fake_omp(binary)
     env = {
@@ -154,6 +154,20 @@ def test_rpc_ui_routes_mcp_clarify_to_one_operator_answer(tmp_path: Path, monkey
                 )
             )
 
+    foreign_identity = {
+        "job_id": "foreign-job",
+        "session_generation": "foreign-session",
+        "turn_generation": "foreign-turn",
+        "request_id": "foreign-request",
+    }
+    with UIControlStore(
+        state,
+        writable_binds=[state / "jobs" / job_id, work],
+    ) as operator:
+        operator.register_request(
+            foreign_identity, {"method": "ask", "questions": [{"id": "q"}]}
+        )
+        operator.answer(foreign_identity, "text", "not for this session")
     worker = threading.Thread(target=execute)
     worker.start()
     pending: list[dict[str, Any]] = []
@@ -172,8 +186,9 @@ def test_rpc_ui_routes_mcp_clarify_to_one_operator_answer(tmp_path: Path, monkey
             assert pending[0]["kind"] == "ask"
             assert pending[0]["prompt"] == "Which option?"
             operator.answer(pending[0]["identity"], "text", "choose safe")
-        worker.join(timeout=5)
-        assert not worker.is_alive(), "rpc-ui clarification did not complete"
+            worker.join(timeout=5)
+            assert not worker.is_alive(), "rpc-ui clarification did not complete"
+            assert operator.status()["queued_commands"] == 1
     finally:
         if worker.is_alive():
             cancel.set()
@@ -239,3 +254,67 @@ def test_interactive_route_supplies_safe_rpc_ui_store_and_interrupt(
     assert result["final_response"] == "done"
     assert observed["mode"] == "rpc-ui"
     assert observed["cancel_event"] is interrupt
+
+
+def test_interrupt_during_skill_attach_releases_acquired_attachment(
+    tmp_path: Path, monkeypatch
+):
+    work = tmp_path / "work"
+    work.mkdir()
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    binary = tmp_path / "fake-omp"
+    _fake_omp(binary)
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(home),
+        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+        "OMEGA_PRIME_STATE_DIR": str(state),
+        "OMEGA_PRIME_OMP_BIN": str(binary),
+    }
+    choice = Choice(
+        Decision(
+            "chatgpt", "openai-codex", "gpt-6.1-sol", True, "test", "allowed", "test"
+        ),
+        None,
+    )
+    monkeypatch.setattr(omp_driver, "omp_version", lambda *_args: (18, 12, 3))
+    monkeypatch.setattr(omp_driver, "read_usage", lambda *_args: {})
+    monkeypatch.setattr(omp_driver, "select", lambda *_args, **_kwargs: choice)
+    monkeypatch.setattr(omp_driver, "sandbox_ready", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        omp_driver, "wrap", lambda argv, **_kwargs: (list(argv), "test")
+    )
+    released: list[bool] = []
+    attachment = SimpleNamespace(release=lambda: released.append(True))
+    monkeypatch.setattr(omp_driver, "recover_attachments", lambda *_args: None)
+    monkeypatch.setattr(
+        omp_driver, "try_acquire_attachment", lambda *_args, **_kwargs: attachment
+    )
+
+    def interrupt_attach(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(omp_driver, "attach_skills", interrupt_attach)
+    with UIControlStore(
+        state, writable_binds=[state / "jobs" / "job-interrupt", work]
+    ) as control:
+        try:
+            omp_driver.run(
+                "interrupt while attaching",
+                job_id="job-interrupt",
+                cwd=work,
+                mode="rpc-ui",
+                ui_control=control,
+                env=env,
+                tmux=False,
+                unsandboxed=True,
+            )
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("attach interruption did not propagate")
+
+    assert released == [True]

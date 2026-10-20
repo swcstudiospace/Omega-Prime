@@ -129,6 +129,50 @@ def _open_readonly_directory(path: Path) -> int:
         raise
 
 
+def _inspect_control_children(control_fd: int) -> None:
+    """Validate existing request and queue entries without following links."""
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    record_flags = (
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
+    for directory_name in ("requests", "queue"):
+        try:
+            directory_fd = os.open(directory_name, directory_flags, dir_fd=control_fd)
+        except FileNotFoundError:
+            continue
+        try:
+            directory_info = os.fstat(directory_fd)
+            if (
+                not stat.S_ISDIR(directory_info.st_mode)
+                or directory_info.st_uid != os.getuid()
+                or stat.S_IMODE(directory_info.st_mode) != 0o700
+            ):
+                raise ValueError(
+                    f"{directory_name} directory has unsafe type, owner or mode"
+                )
+            for name in os.listdir(directory_fd):
+                try:
+                    record_fd = os.open(name, record_flags, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    continue
+                try:
+                    record_info = os.fstat(record_fd)
+                    if (
+                        not stat.S_ISREG(record_info.st_mode)
+                        or record_info.st_uid != os.getuid()
+                        or stat.S_IMODE(record_info.st_mode) != 0o600
+                    ):
+                        raise ValueError(
+                            "control record has unsafe type, owner or mode"
+                        )
+                finally:
+                    os.close(record_fd)
+        finally:
+            os.close(directory_fd)
+
+
 def _ui_control_check(
     env: Mapping[str, str], writable_binds: Sequence[Path]
 ) -> DiagnosticCheck:
@@ -168,6 +212,7 @@ def _ui_control_check(
                 raise ValueError("control directory has an unexpected owner")
             if stat.S_IMODE(control_info.st_mode) != 0o700:
                 raise ValueError("control directory must have mode 0700")
+            _inspect_control_children(control_fd)
         finally:
             os.close(control_fd)
     except (OSError, ValueError) as exc:

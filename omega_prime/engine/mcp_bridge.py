@@ -153,6 +153,7 @@ class AcquiredAttachment:
         omp_fd: int,
         omp_identity: tuple[int, int],
         config_identity: tuple[int, int],
+        config_content: bytes,
         journal_path: Path,
         journal_identity: tuple[int, int],
         owner: str,
@@ -164,6 +165,7 @@ class AcquiredAttachment:
         self._omp_fd = omp_fd
         self._omp_identity = omp_identity
         self._config_identity = config_identity
+        self._config_content = config_content
         self._journal_path = journal_path
         self._journal_identity = journal_identity
         self._owner = owner
@@ -197,7 +199,6 @@ class AcquiredAttachment:
 
     @property
     def active(self) -> bool:
-        """Whether this lease still owns its project-local attachment."""
         return not self._released
 
     def create_directory_artifact(
@@ -219,9 +220,8 @@ class AcquiredAttachment:
         try:
             self.register_artifact(relative_path, identity)
         except BaseException:
-            if identity is not None:
-                with contextlib.suppress(OSError):
-                    _remove_artifact(self._omp_fd, relative_path, identity)
+            with contextlib.suppress(OSError):
+                _remove_artifact(self._omp_fd, relative_path, identity)
             raise
         return identity
 
@@ -244,34 +244,29 @@ class AcquiredAttachment:
         try:
             self.register_artifact(relative_path, identity)
         except BaseException:
-            if identity is not None:
-                with contextlib.suppress(OSError):
-                    _remove_artifact(self._omp_fd, relative_path, identity)
+            with contextlib.suppress(OSError):
+                _remove_artifact(self._omp_fd, relative_path, identity)
             raise
         return identity
 
     def remove_artifact(self, relative_path: str, identity: tuple[int, int]) -> None:
-        """Remove one registered artifact only while its inode still matches."""
-        if self._released:
-            raise RuntimeError("attachment lease is already released")
-        if self._artifacts.get(relative_path) != identity:
+        if self._released or self._artifacts.get(relative_path) != identity:
             raise ValueError("artifact is not owned by this attachment")
         _remove_artifact(self._omp_fd, relative_path, identity)
 
     def record_child(self, pid: int) -> None:
-        """Persist the child identity before allowing it to use the config."""
         self._child_identity = _process_identity(pid)
         self._write_journal(self._child_identity)
 
     def _write_journal(self, child: dict[str, Any] | None = None) -> None:
-        child = child if child is not None else self._child_identity
         payload = {
             "owner": self._owner,
             "owner_process": self._owner_identity,
             "work_root": str(self.work_root),
             "omp_identity": list(self._omp_identity),
             "config_identity": list(self._config_identity),
-            "child": child,
+            "config_content": self._config_content.decode("utf-8"),
+            "child": child if child is not None else self._child_identity,
             "artifacts": {
                 name: list(identity) for name, identity in self._artifacts.items()
             },
@@ -311,7 +306,6 @@ class AcquiredAttachment:
             os.close(dir_fd)
 
     def release(self) -> list[str]:
-        """Remove only matching run-owned entries after the child is reaped."""
         if self._released:
             return self.cleanup_conflicts
         conflicts: list[str] = []
@@ -330,8 +324,9 @@ class AcquiredAttachment:
             if entry is not None and (
                 (entry.st_dev, entry.st_ino) != self._config_identity
                 or not stat.S_ISREG(entry.st_mode)
+                or _read_file_at(self._omp_fd, "mcp.json") != self._config_content
             ):
-                conflicts.append("mcp.json identity changed")
+                conflicts.append("mcp.json content or identity changed")
             for name, identity in self._artifacts.items():
                 try:
                     artifact = _artifact_stat(self._omp_fd, name)
@@ -379,6 +374,15 @@ class AcquiredAttachment:
         os.close(self._omp_fd)
         os.close(self._parent_fd)
         return conflicts
+
+
+def _read_file_at(directory_fd: int, name: str) -> bytes:
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            return stream.read()
+    except BaseException:
+        raise
 
 
 def _open_dir_chain(path: Path) -> tuple[int, Path]:
@@ -442,6 +446,13 @@ def recover_attachments(state_root: Path, work_root: Path) -> list[str]:
                         ):
                             continue
                         expected = record.get("config_identity")
+                        expected_content = record.get("config_content")
+                        if not isinstance(expected_content, str):
+                            conflicts.append(
+                                f"recovery skipped {name}: missing config content"
+                            )
+                            continue
+                        expected_bytes = expected_content.encode("utf-8")
                         artifacts = record.get("artifacts", {})
                         if not isinstance(artifacts, dict):
                             continue
@@ -477,7 +488,11 @@ def recover_attachments(state_root: Path, work_root: Path) -> list[str]:
                         if config_stat is not None and (
                             [config_stat.st_dev, config_stat.st_ino] != expected
                             or not stat.S_ISREG(config_stat.st_mode)
+                            or _read_file_at(omp_fd, "mcp.json") != expected_bytes
                         ):
+                            conflicts.append(
+                                f"recovery skipped {name}: mcp.json content or identity changed"
+                            )
                             continue
                         stage = ".mcp-" + str(record["owner"]) + ".stage"
                         stage_stat = None
@@ -489,7 +504,11 @@ def recover_attachments(state_root: Path, work_root: Path) -> list[str]:
                             if stage_stat is not None and (
                                 [stage_stat.st_dev, stage_stat.st_ino] != expected
                                 or not stat.S_ISREG(stage_stat.st_mode)
+                                or _read_file_at(omp_fd, stage) != expected_bytes
                             ):
+                                conflicts.append(
+                                    f"recovery skipped {name}: staged config content or identity changed"
+                                )
                                 continue
                         for artifact_name, identity in sorted(
                             owned_artifacts,
@@ -542,6 +561,7 @@ def try_acquire_attachment(
     config_identity: tuple[int, int] | None = None
     omp_identity: tuple[int, int] | None = None
     journal_identity: tuple[int, int] | None = None
+    payload: bytes | None = None
     try:
         # State is private and exclusive; no existing job record is read or replaced.
         journal_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -605,6 +625,7 @@ def try_acquire_attachment(
                     "work_root": str(work),
                     "omp_identity": list(omp_identity),
                     "config_identity": list(config_identity),
+                    "config_content": payload.decode("utf-8"),
                     "child": None,
                     "artifacts": {},
                 },
@@ -638,6 +659,7 @@ def try_acquire_attachment(
             omp_fd,
             omp_identity,
             config_identity,
+            payload,
             journal_path,
             journal_identity,
             owner,
@@ -654,7 +676,12 @@ def try_acquire_attachment(
                                 item = os.stat(
                                     "mcp.json", dir_fd=omp_fd, follow_symlinks=False
                                 )
-                                if (item.st_dev, item.st_ino) == config_identity:
+                                if (
+                                    (item.st_dev, item.st_ino) == config_identity
+                                    and payload is not None
+                                    and stat.S_ISREG(item.st_mode)
+                                    and _read_file_at(omp_fd, "mcp.json") == payload
+                                ):
                                     os.unlink("mcp.json", dir_fd=omp_fd)
                             except FileNotFoundError:
                                 pass
@@ -670,6 +697,9 @@ def try_acquire_attachment(
                             and config_identity is not None
                             and (stage_stat.st_dev, stage_stat.st_ino)
                             == config_identity
+                            and payload is not None
+                            and stat.S_ISREG(stage_stat.st_mode)
+                            and _read_file_at(omp_fd, stage) == payload
                         ):
                             os.unlink(stage, dir_fd=omp_fd)
                         os.rmdir(".omp", dir_fd=parent_fd)

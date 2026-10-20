@@ -426,6 +426,8 @@ their values are not written into `mcp.json`. Skills are exposed as links and
 omp receives `--skills "*"` as a name glob, so native custom skill directories
 remain discoverable.
 
+If the generated `mcp.json` changes before cleanup, the engine preserves it and reports a cleanup conflict. `omega ui status --job JOB` shows attachment status and cleanup details; `omega watch JOB` renders the same attachment events.
+
 `/skill:` requires RPC or RPC-UI; the OMP `ask` tool requires RPC-UI. Interactive
 RPC-UI requests are routed to the local operator control queue, never answered
 from a policy file. Inspect pending requests with `omega ui list`; answer one
@@ -435,6 +437,8 @@ with the exact `job_id`, `session_generation`, `turn_generation`, and
 ```bash
 omega ui answer --job JOB --session SESSION --turn TURN --request REQUEST --text "operator answer"
 ```
+
+For multi-question asks, repeat `--text` once per question in displayed order; `omega ui list` shows each question id and its own choices. For a single `select` request, pass the stable `choice-N` key displayed by `omega ui list` with `--choice`, not the redacted or shortened label.
 
 The bridge adds no separate deadline for human input; the engine turn lifecycle
 still applies, and cancellation rejects pending requests. Plan mode, a narrowed

@@ -157,14 +157,14 @@ class UIControlStore:
         flags = (
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         )
-        parent_fd = os.open(self.state_root.parent, flags)
+        fd = os.open(self.state_root.anchor, flags)
         try:
-            with contextlib.suppress(FileExistsError):
-                os.mkdir(self.state_root.name, 0o700, dir_fd=parent_fd)
-            fd = os.open(self.state_root.name, flags, dir_fd=parent_fd)
-        finally:
-            os.close(parent_fd)
-        try:
+            for component in self.state_root.parts[1:]:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(component, 0o700, dir_fd=fd)
+                next_fd = os.open(component, flags, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
             info = os.fstat(fd)
             if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
                 raise UIControlError("state root has an unexpected type or owner")
@@ -353,7 +353,10 @@ class UIControlStore:
             return {"type": "ask", "answers": answers}
         if kind == "select" and method == "select" and isinstance(value, str):
             options = request.get("options")
-            if not isinstance(options, (list, tuple)) or value not in options:
+            valid = isinstance(options, (list, tuple)) and any(
+                value == _raw_option_value(option) for option in options
+            )
+            if not valid:
                 raise UIControlError(
                     "selection is not one of the request's option identities"
                 )
@@ -370,7 +373,10 @@ class UIControlStore:
         """Queue an answer only for an exact currently-pending identity."""
         key = identity_key(identity)
         request_record = self._load_request(key)
-        answer = self._validate_answer(kind, value, request_record["request"])
+        request = request_record["request"]
+        if kind == "select" and isinstance(value, str):
+            value = _selection_value(request.get("options"), value)
+        answer = self._validate_answer(kind, value, request)
         command = {"action": "answer", "identity": key, "answer": answer}
         self._enqueue(command)
         return command
@@ -439,25 +445,16 @@ class UIControlStore:
             method = request.get(
                 "method", request.get("kind", request.get("type", "unknown"))
             )
-            options = request.get("options")
-            if options is None and method == "ask":
-                questions = request.get("questions")
-                if isinstance(questions, (list, tuple)):
-                    options = [
-                        option
-                        for question in questions
-                        if isinstance(question, Mapping)
-                        and isinstance(question.get("options"), (list, tuple))
-                        for option in question["options"]
-                    ]
-            result.append(
-                {
-                    "identity": dict(identity),
-                    "kind": str(method),
-                    "prompt": _redacted_prompt(_request_prompt(request)),
-                    "options": _option_identities(options),
-                }
-            )
+            metadata: dict[str, Any] = {
+                "identity": dict(identity),
+                "kind": str(method),
+                "prompt": _redacted_prompt(_request_prompt(request)),
+            }
+            if method == "ask" and isinstance(request.get("questions"), (list, tuple)):
+                metadata["questions"] = _question_summaries(request["questions"])
+            else:
+                metadata["options"] = _option_summaries(request.get("options"))
+            result.append(metadata)
         return result
 
     def status(self, *, job: str | None = None) -> dict[str, Any]:
@@ -465,6 +462,7 @@ class UIControlStore:
         pending = self.list_pending(job=job)
         queue_fd = self._queue_dir()
         try:
+            self._discard_terminal_stale_answers(queue_fd, job_id=job)
             queued = 0
             for name in os.listdir(queue_fd):
                 if not name.endswith(".json"):
@@ -486,15 +484,71 @@ class UIControlStore:
             "queued_commands": queued,
         }
 
-    def next_command(self) -> dict[str, Any] | None:
-        """Driver queue boundary: return the next still-valid command, or None.
+    def _discard_terminal_stale_answers(
+        self,
+        queue_fd: int,
+        *,
+        job_id: str | None = None,
+        session_generation: str | None = None,
+    ) -> None:
+        request_fd = self._request_dir()
+        try:
+            for name in os.listdir(queue_fd):
+                if not name.endswith(".json"):
+                    continue
+                command = self._read_record(queue_fd, name)
+                identity_value = (
+                    command.get("identity") if isinstance(command, dict) else None
+                )
+                if (
+                    not isinstance(command, dict)
+                    or command.get("action") != "answer"
+                    or not isinstance(identity_value, dict)
+                ):
+                    continue
+                if job_id is not None and identity_value.get("job_id") != job_id:
+                    continue
+                if (
+                    session_generation is not None
+                    and identity_value.get("session_generation") != session_generation
+                ):
+                    continue
+                try:
+                    identity = identity_key(identity_value)
+                except UIControlError:
+                    continue
+                request = self._read_record(request_fd, self._record_name(identity))
+                if (
+                    isinstance(request, dict)
+                    and request.get("identity") == identity
+                    and request.get("state")
+                    in {
+                        "answered",
+                        "aborted",
+                        "rejected_stale",
+                        "send_failed",
+                        "invalidated",
+                    }
+                ):
+                    os.unlink(name, dir_fd=queue_fd)
+            os.fsync(queue_fd)
+        finally:
+            os.close(request_fd)
 
-        Stale answer/abort records are discarded and never surfaced to a driver
-        response path. A returned command is then acknowledged with
-        :meth:`acknowledge_command` after the driver has reserved its action.
-        """
+    def next_command(
+        self,
+        *,
+        job_id: str | None = None,
+        session_generation: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the next still-valid command matching optional driver identity."""
+        if session_generation is not None and job_id is None:
+            raise UIControlError("session filter requires a job id")
         queue_fd = self._queue_dir()
         try:
+            self._discard_terminal_stale_answers(
+                queue_fd, job_id=job_id, session_generation=session_generation
+            )
             for name in sorted(
                 item for item in os.listdir(queue_fd) if item.endswith(".json")
             ):
@@ -502,6 +556,17 @@ class UIControlStore:
                 if not isinstance(command, dict):
                     continue
                 action, identity = command.get("action"), command.get("identity")
+                if job_id is not None and (
+                    not isinstance(identity, dict)
+                    or identity.get("job_id", identity.get("job")) != job_id
+                ):
+                    continue
+                if session_generation is not None and (
+                    not isinstance(identity, dict)
+                    or identity.get("session_generation", identity.get("session"))
+                    != session_generation
+                ):
+                    continue
                 try:
                     if action == "answer":
                         if set(command) != {"action", "identity", "answer"}:
@@ -519,15 +584,11 @@ class UIControlStore:
                         answer_type = raw_answer.get("type")
                         if answer_type == "select":
                             validated = self._validate_answer(
-                                "select",
-                                raw_answer.get("value"),
-                                request_value,
+                                "select", raw_answer.get("value"), request_value
                             )
                         elif answer_type == "confirm":
                             validated = self._validate_answer(
-                                "confirm",
-                                raw_answer.get("confirmed"),
-                                request_value,
+                                "confirm", raw_answer.get("confirmed"), request_value
                             )
                         elif answer_type == "ask":
                             answers = raw_answer.get("answers")
@@ -671,15 +732,75 @@ def _request_prompt(request: Mapping[str, Any]) -> str:
     return ""
 
 
-def _option_identities(value: Any) -> list[str]:
+def _raw_option_value(item: Any) -> str | None:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, Mapping):
+        value = item.get("id", item.get("value"))
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _choice_keys(options: list[Any] | tuple[Any, ...]) -> list[str]:
+    values = {_raw_option_value(option) for option in options}
+    keys: list[str] = []
+    used: set[str] = set()
+    for index in range(len(options)):
+        key = f"choice-{index + 1}"
+        while key in values or key in used:
+            key += "-key"
+        keys.append(key)
+        used.add(key)
+    return keys
+
+
+def _option_summaries(value: Any) -> list[dict[str, str]]:
     if not isinstance(value, (list, tuple)):
         return []
-    ids = []
-    for item in value:
-        if isinstance(item, str):
-            ids.append(_redacted_prompt(item)[:128])
-        elif isinstance(item, Mapping):
-            identifier = item.get("id", item.get("label"))
-            if isinstance(identifier, str):
-                ids.append(_redacted_prompt(identifier)[:128])
-    return ids
+    keys = _choice_keys(value)
+    return [
+        {
+            "key": keys[index],
+            "label": _redacted_prompt(
+                item
+                if isinstance(item, str)
+                else (
+                    item.get("label", item.get("id", ""))
+                    if isinstance(item, Mapping)
+                    else ""
+                )
+            )[:128],
+        }
+        for index, item in enumerate(value)
+    ]
+
+
+def _selection_value(options: Any, choice: str) -> str:
+    if isinstance(options, (list, tuple)):
+        for key, option in zip(_choice_keys(options), options, strict=True):
+            if choice == key:
+                value = _raw_option_value(option)
+                if value is not None:
+                    return value
+    return choice
+
+
+def _question_summaries(questions: Any) -> list[dict[str, Any]]:
+    result = []
+    for question in questions:
+        if not isinstance(question, Mapping):
+            continue
+        question_id = question.get("id")
+        text = question.get("question")
+        result.append(
+            {
+                "id": question_id if isinstance(question_id, str) else "",
+                "question": _redacted_prompt(text),
+                "options": _option_summaries(question.get("options")),
+            }
+        )
+    return result
+
+
+def _option_identities(value: Any) -> list[str]:
+    return [item["label"] for item in _option_summaries(value) if item["label"]]

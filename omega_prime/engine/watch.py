@@ -45,18 +45,19 @@ def _safe_prompt(event: dict) -> str:
     return _redacted_prompt(_request_prompt(request))
 
 
-def _safe_options(request: dict) -> list[str]:
-    from omega_prime.engine.ui_control import _option_identities
+def _safe_options(request: dict) -> list[dict[str, str]]:
+    from omega_prime.engine.ui_control import _option_summaries
 
-    options = request.get("options")
-    if options is None and isinstance(request.get("questions"), (list, tuple)):
-        options = [
-            item
-            for question in request["questions"]
-            if isinstance(question, dict)
-            for item in question.get("options", ())
-        ]
-    return _option_identities(options)
+    return _option_summaries(request.get("options"))
+
+
+def _safe_questions(request: dict) -> list[dict]:
+    from omega_prime.engine.ui_control import _question_summaries
+
+    questions = request.get("questions")
+    if not isinstance(questions, (list, tuple)):
+        return []
+    return _question_summaries(questions)
 
 
 def format_event(event: dict) -> str:
@@ -80,11 +81,30 @@ def format_event(event: dict) -> str:
         prompt = _safe_prompt(event)
         if prompt:
             fields.append(f"prompt={json.dumps(prompt, ensure_ascii=False)}")
-        option_ids = _safe_options(request)
-        if option_ids:
-            fields.append(f"options={json.dumps(option_ids, ensure_ascii=False)}")
+        questions = _safe_questions(request)
+        if questions:
+            fields.append(f"questions={json.dumps(questions, ensure_ascii=False)}")
+        else:
+            option_ids = _safe_options(request)
+            if option_ids:
+                fields.append(f"options={json.dumps(option_ids, ensure_ascii=False)}")
         detail = " ".join(fields)
         return f"{kind} {detail}".rstrip()
+    if kind in {"ui_control_attachment", "mcp_attachment"}:
+        fields = [kind]
+        status = event.get("status")
+        if isinstance(status, str):
+            fields.append(f"status={status}")
+        reason = event.get("reason")
+        if isinstance(reason, str):
+            fields.append(f"reason={redact_text(reason)}")
+        conflicts = event.get("cleanup_conflicts")
+        if isinstance(conflicts, list) and conflicts:
+            safe_conflicts = [redact_text(str(item)) for item in conflicts]
+            fields.append(
+                f"cleanup_conflicts={json.dumps(safe_conflicts, ensure_ascii=False)}"
+            )
+        return " ".join(fields)
     if kind == "message_update":
         text = redact_text(assistant_text(event))
         return f"message_update {text}" if text else "message_update"

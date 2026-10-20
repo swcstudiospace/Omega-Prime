@@ -63,6 +63,10 @@ def _read_status_events(env: dict[str, str], job: str, limit: int = 20) -> list[
         "ui_rejected_stale",
         "attached",
         "attach_failed",
+        "ui_control_attachment",
+        "mcp_attachment",
+        "cleanup_conflict",
+        "cleanup_failed",
     }
     events = list(iter_events(path) or [])
     return [

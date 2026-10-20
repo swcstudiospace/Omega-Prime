@@ -371,3 +371,33 @@ def test_ui_control_health_does_not_create_missing_store(tmp_path: Path):
     assert check.status == "WARN"
     assert "RPC-UI asks are unavailable" in check.message
     assert not state.exists()
+
+
+def test_ui_control_health_checks_existing_store_children(tmp_path: Path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    control = state / "ui-control"
+    control.mkdir(mode=0o700)
+    requests = control / "requests"
+    queue = control / "queue"
+    requests.mkdir(mode=0o700)
+    queue.mkdir(mode=0o700)
+    (requests / "request.json").write_text("{}", encoding="utf-8")
+    (requests / "request.json").chmod(0o644)
+
+    check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
+
+    assert check.status == "FAIL"
+    assert "control record has unsafe type, owner or mode" in check.message
+
+
+def test_ui_control_health_allows_absent_request_and_queue_directories(
+    tmp_path: Path,
+):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    (state / "ui-control").mkdir(mode=0o700)
+
+    check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
+
+    assert check.status == "PASS"

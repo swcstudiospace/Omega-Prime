@@ -68,6 +68,22 @@ def test_installed_omp_skill_list_resolves_project_omega_gsd_and_user_skills(
     if omp is None:
         pytest.skip("installed omp CLI is required for the loader proof")
 
+    home = tmp_path / "home"
+    config = tmp_path / "config"
+    home.mkdir()
+    config.mkdir()
+    agent_dir = home / ".omp"
+    user_skills = agent_dir / "skills"
+    user_skills.mkdir(parents=True)
+
+    gsd_source = user_skills / "gsd-autonomous"
+    gsd_source.mkdir()
+    gsd_manifest = gsd_source / "SKILL.md"
+    gsd_manifest.write_text(
+        "---\nname: gsd-autonomous\ndescription: isolated native GSD fixture\n---\n",
+        encoding="utf-8",
+    )
+
     project = tmp_path / "project"
     view = project / ".omp" / "skills"
     view.mkdir(parents=True, mode=0o700)
@@ -100,12 +116,9 @@ def test_installed_omp_skill_list_resolves_project_omega_gsd_and_user_skills(
 
     env = {
         "PATH": os.environ.get("PATH", ""),
-        "HOME": os.environ.get("HOME", str(Path.home())),
-        **{
-            name: os.environ[name]
-            for name in ("PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME")
-            if name in os.environ
-        },
+        "HOME": str(home),
+        "PI_CODING_AGENT_DIR": str(agent_dir),
+        "XDG_CONFIG_HOME": str(config),
     }
 
     resolved = _list_skills(omp, project, env, "*")
@@ -117,7 +130,10 @@ def test_installed_omp_skill_list_resolves_project_omega_gsd_and_user_skills(
         expected = skill_root / name / "SKILL.md"
         assert any(path.resolve() == expected.resolve() for path in paths)
     gsd_paths = _manifest_paths(resolved, "gsd-autonomous")
-    assert gsd_paths and all(path.is_file() for path in gsd_paths)
+    assert gsd_paths and all(
+        path.resolve() == gsd_manifest.resolve() for path in gsd_paths
+    )
+
     user_paths = _manifest_paths(resolved, "user-planted")
     assert any(path.resolve() == user_manifest.resolve() for path in user_paths)
     assert guide.is_file()

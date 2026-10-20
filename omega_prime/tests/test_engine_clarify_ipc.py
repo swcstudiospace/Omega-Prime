@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import socket
@@ -320,11 +321,92 @@ def test_socket_broker_close_releases_every_pending_client(tmp_path: Path):
                 "request_id": client_id,
                 "error": "request rejected",
             }
+            or isinstance(response, (OSError, EOFError, AssertionError))
             for response in responses
-            if isinstance(response, dict)
         )
-        assert not any(isinstance(response, Exception) for response in responses)
+        with broker._lock:
+            assert not broker._active
+            assert not broker._handlers
+
     finally:
+        broker.close()
+
+
+def test_socket_broker_close_interrupts_blocked_answer_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    broker = ClarifySocketBroker(tmp_path / "clarify.sock").start()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    client.connect(broker.socket_path)
+    request_id = "abcdef0123456789abcdef0123456789"
+    client.sendall(
+        json.dumps(
+            {"type": "clarify", "request_id": request_id, "question": "question"}
+        ).encode()
+        + b"\n"
+    )
+    send_started = threading.Event()
+    original_send_json = broker._send_json
+
+    def send_large_answer(connection: socket.socket, response: dict[str, object]):
+        connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        send_started.set()
+        original_send_json(
+            connection,
+            {**response, "answer": "x" * (8 * 1024 * 1024)},
+        )
+
+    monkeypatch.setattr(broker, "_send_json", send_large_answer)
+    close_thread = threading.Thread(target=broker.close)
+    try:
+        request = _poll_request(broker)
+        request.answer("answer")
+        assert send_started.wait(timeout=2)
+        close_thread.start()
+        close_thread.join(timeout=2)
+
+        assert not close_thread.is_alive()
+        with broker._lock:
+            assert not broker._active
+            assert not broker._handlers
+    finally:
+        if close_thread.is_alive():
+            with broker._lock:
+                active = tuple(broker._active)
+            for connection in active:
+                with contextlib.suppress(OSError):
+                    connection.shutdown(socket.SHUT_RDWR)
+            close_thread.join(timeout=2)
+        client.close()
+        broker.close()
+
+
+def test_socket_broker_close_unblocks_client_with_incomplete_request(
+    tmp_path: Path,
+):
+    broker = ClarifySocketBroker(tmp_path / "clarify.sock").start()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect(broker.socket_path)
+    client.sendall(b'{"type":"clarify"')
+    try:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with broker._lock:
+                if broker._active:
+                    break
+            time.sleep(0.001)
+        else:
+            raise AssertionError("broker did not accept incomplete client")
+
+        broker.close()
+
+        assert client.recv(1) == b""
+        with broker._lock:
+            assert not broker._active
+            assert not broker._handlers
+    finally:
+        client.close()
         broker.close()
 
 
