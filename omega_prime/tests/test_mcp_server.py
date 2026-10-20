@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from omega_prime.mcp_server import (
     SERVER_NAME,
     build_server,
@@ -218,6 +220,85 @@ def test_stdio_roundtrip_through_own_client(tmp_path: Path):
     assert json.loads(text)["summary"] == {}
 
 
+def test_desk_substrate_adapts_graph_tool_results():
+    from omega_prime.mcp_server import _DeskSubstrate
+    from omega_prime.substrate.client import SubstrateError
+
+    class _Client:
+        def __init__(self):
+            self.calls = []
+            self.fail = False
+
+        def _call_tool(self, name, payload):
+            self.calls.append(("_call_tool", name, payload))
+            if self.fail:
+                raise SubstrateError("parsed tool failed")
+            return {"lease_id": "lease-1"}
+
+        def _call_tool_text(self, name, payload):
+            self.calls.append(("_call_tool_text", name, payload))
+            if self.fail:
+                raise SubstrateError("text tool failed")
+            return '{"ok":true}'
+
+    client = _Client()
+    substrate = _DeskSubstrate(client)
+    payload = {"graph_id": "g-1", "node_id": "n1", "lease_id": "lease-1"}
+    assert substrate.call_tool("graph_claim", payload) == {
+        "content": {"lease_id": "lease-1"}
+    }
+    assert substrate.call_tool("graph_heartbeat", payload) == {
+        "content": {"lease_id": "lease-1"}
+    }
+    assert substrate.call_tool("graph_release", payload) == {"content": '{"ok":true}'}
+    assert substrate.call_tool("graph_complete", payload) == {"content": '{"ok":true}'}
+    assert client.calls == [
+        ("_call_tool", "graph_claim", payload),
+        ("_call_tool", "graph_heartbeat", payload),
+        ("_call_tool_text", "graph_release", payload),
+        ("_call_tool_text", "graph_complete", payload),
+    ]
+    client.fail = True
+    assert substrate.call_tool("graph_release", payload) == {
+        "error": "upstream_error",
+        "reason": "text tool failed",
+    }
+    assert substrate.call_tool("graph_claim", payload) == {
+        "error": "upstream_error",
+        "reason": "parsed tool failed",
+    }
+
+
+def test_desk_substrate_reports_not_configured_without_transport_request():
+    from omega_prime.mcp_server import _DeskSubstrate
+    from omega_prime.substrate.client import SubstrateClient
+
+    class _NeverTransport:
+        calls = 0
+
+        def post(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("unconfigured client attempted a request")
+
+        def post_mcp(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("unconfigured client attempted a request")
+
+    transport = _NeverTransport()
+    client = SubstrateClient(transport=transport)
+    substrate = _DeskSubstrate(client)
+
+    assert substrate.call_tool("graph_claim", {"graph_id": "g", "node_id": "n"}) == {
+        "error": "not_configured",
+        "reason": "substrate gateway is not configured",
+    }
+    assert substrate.emit({"kind": "note"}) == {
+        "error": "not_configured",
+        "reason": "substrate gateway is not configured",
+    }
+    assert transport.calls == 0
+
+
 def test_call_tool_substrate_docs_search_exports_no_raw_secret():
     from omega_prime.tools.substrate_tools import register_substrate_tools
 
@@ -414,3 +495,25 @@ def test_quality_sandbox_default_policy_survives_work_root_change(
     assert explicit is not None
     assert explicit["policy"] == "/tmp/custom-policy.yaml"
     assert _quality_sandbox_from_env({}) is None
+
+
+def test_load_runtime_preserves_settings_status_and_explicit_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omega_prime.mcp_server import load_runtime
+    from omega_prime.settings import load_settings
+
+    status = load_settings({}, path=tmp_path / "absent-settings.json")
+    monkeypatch.setenv("SUBSTRATE_URL", "https://ambient.example")
+    runtime = load_runtime(
+        ROOT,
+        tmp_path,
+        no_roster=True,
+        env={},
+        work_root=tmp_path,
+        settings_status=status,
+    )
+    assert runtime.settings_status is status
+    assert runtime.registry.runtime_bindings["settings_status"] is status
+    doctor = json.loads(runtime.registry.dispatch("lead_doctor", {"action": "check"}))
+    assert doctor["checks"]["settings"]["status"] == "missing"

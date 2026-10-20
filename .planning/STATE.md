@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v20
 milestone_name: Wiring
-status: Planning complete; independent Phase 97 units ready
-stopped_at: Phase 97 execution planning complete; server-specific implementation blocked pending authoritative schema confirmation.
-last_updated: "2026-10-21"
-last_activity: 2026-10-21
-last_activity_desc: Phase 97 execution plans staged (5 total, 0 implemented); no runtime implementation started
+status: Phase 97 local implementation executed; verification deferred pending authoritative upstream MCP contract evidence.
+stopped_at: Phase 97 local verification finished; current upstream MCP mount/schema evidence is still needed before phase verification can pass.
+last_updated: "2026-10-20"
+last_activity: 2026-10-20
+last_activity_desc: Phase 97 local changes and tests executed; static/catalog gates pass, full test suite has only the 27 recorded baseline failures
 state_head: 44b28df
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 5
-  completed_plans: 0
+  completed_plans: 1
   percent: 0
 current_phase: 97
-current_plan: "01"
+current_plan: "02"
 ---
 
 # Project State
@@ -25,13 +25,13 @@ current_plan: "01"
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** v20 Wiring (Phases 97–103) is in progress; Phase 97 — substrate direct connect + settings loader + no time caps — is ready to execute: context and five execution plans staged 2026-10-21 from `/workspace/omes-bot-wiring-audit/AUDIT.md` (requirements W97-01..W97-08); upstream server schema confirmation is blocked before server-specific implementation, and no runtime code has changed for v20. v19 Installer bindings is complete (phase 96). v18 stays shipped. v17 stays shipped. Historical v17 note: every first-party prompt is wrapped in XML and `python -m omega_prime.tooling.prompt_format --check` enforces it. v1–v16 stay shipped. The only unchecked pre-v20 ROADMAP phase is 77.1, whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–18 are on main (`.planning/BATCH-01-REPORT.md` … `BAT…
+**Current focus:** v20 Wiring (Phases 97–103) is in progress. Phase 97 has local transport, settings, diagnostics, argument, and no-cap implementation with offline tests; current upstream MCP mount/schema compatibility remains unverified, so Phase 97 verification is deferred and no v20 phase is complete. v19 Installer bindings (phase 96) and v1–v19 history remain unchanged. Phase 77.1 live import UAT remains user-owned and `human_needed`.
 
 ## Current Position
 
-Phase: v20 Phase 97 — substrate direct connect + settings loader + no time caps (ready to execute; upstream server schema confirmation is blocked before server-specific implementation).
-Plan: 01 (5 total; 0 completed).
-Status: Phase 97 execution planning is complete and independent units are ready; server-specific implementation remains blocked pending authoritative schema confirmation. Run `/skill:gsd-autonomous 97` manually only when choosing to execute; planning state never auto-executes it. Phase 77.1 stays verification_deferred_human. Do not re-execute phases 85-96. Do not mark 77.1 passed. Parent-reported baseline gates: ruff check exit 0; ruff format exit 0 (589 files); mypy exit 0 (462 files); pytest exit 1 — 27 failed / 4777 passed / 11 skipped, 15 warnings, 236.78s (missing/uninitialized prime-agent, missing rlm, related oneclick/setup preflight; no new gate claim).
+Phase: v20 Phase 97 — substrate direct connect + settings loader + no time caps (local implementation executed; verification deferred on authoritative upstream MCP mount/schema evidence).
+Plan: 02 (5 total; 1 complete; local transport and argument changes are present, but server-contract preflight tasks remain open).
+Status: Local tests and static/catalog gates ran; full pytest has the same 27 baseline failures and zero new failures. Resume with authoritative MCP path/schema preflight in plans 97-02/97-03. Do not audit, complete, or clean up v20. Phase 77.1 remains `verification_deferred_human`; do not re-execute phases 85–96 or mark 77.1 passed.
 
 ## Closeout
 
@@ -58,6 +58,7 @@ Absorbing purple-team v1.5, a live gateway engagement, failing closed on an unre
 | Phase | State | Resume |
 |-------|-------|--------|
 | 77.1 | verification_deferred_human | /gsd:verify-work 77.1 |
+| 97 | verification_deferred_gaps | /gsd-plan-phase 97 --gaps |
 
 ## Deferred Items
 
@@ -142,10 +143,10 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Session
 
-**Last session:** 2026-10-21
-**Stopped at:** Phase 97 ready to execute — five plans staged, zero implemented; upstream server schema confirmation required before server-specific implementation
-**Resume file:** .planning/phases/97-substrate-direct-connect/97-01-PLAN.md
+**Last session:** 2026-10-20
+**Stopped at:** Phase 97 local implementation and offline gates; authoritative upstream MCP mount/schema evidence remains an open verification gap.
+**Resume file:** `.planning/phases/97-substrate-direct-connect/97-02-PLAN.md`
 
 ## Operator Next Steps
 
-- Manually run `/skill:gsd-autonomous 97` only when choosing to execute Phase 97. Planning is complete; independent units are ready, while server-specific implementation requires authoritative schema confirmation. No plan is auto-executed. The 77.1 live UAT rows stay user-owned (`/gsd:verify-work 77.1`).
+- Phase 97 is locally implemented but not verified against the current upstream server. Obtain authoritative MCP path/schema evidence, then resume the preflight/gap work; live endpoint verification and live settings/connector changes remain operator-owned. Phase 77.1 live UAT stays user-owned (`/gsd:verify-work 77.1`).

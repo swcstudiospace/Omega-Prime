@@ -172,6 +172,7 @@ def run_conversation(
                 system_message=system_message,
                 conversation_history=history,
                 task_id=task_id,
+                interrupt=agent.interrupt,
             )
         if routed is not None:
             return _seal_engine_turn(agent, routed, since)

@@ -13,6 +13,7 @@ import pytest
 from omega_prime.setup_check import (
     CHECKS,
     check_plugin,
+    check_substrate,
     check_template,
     main,
     run_checks,
@@ -20,6 +21,12 @@ from omega_prime.setup_check import (
 
 OMEGA_PRIME = Path(__file__).resolve().parents[1]
 ROOT = OMEGA_PRIME.parent
+
+
+@pytest.fixture(autouse=True)
+def _isolated_settings_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OMEGA_PRIME_SETTINGS_FILE", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path / "state"))
 
 
 def _mirror(root: Path) -> Path:
@@ -45,7 +52,13 @@ def _plugin_tree(root: Path) -> Path:
     return root
 
 
-def test_checks_pass_on_repo_root(monkeypatch):
+def test_checks_pass_on_repo_root(monkeypatch, tmp_path: Path):
+    from omega_prime.substrate.client import SubstrateClient
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("setup diagnostics must not contact substrate")
+
+    monkeypatch.setattr(SubstrateClient, "_mcp_post", no_network)
     for name in (
         "SUBSTRATE_URL",
         "SUBSTRATE_TOKEN",
@@ -56,6 +69,7 @@ def test_checks_pass_on_repo_root(monkeypatch):
         "ULTRATHINK_ROOT",
     ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SUBSTRATE_URL", "https://substrate.example")
     report = run_checks(ROOT)
     assert report["passed"] is True
     assert report["roster"]["ok"] is True
@@ -65,7 +79,10 @@ def test_checks_pass_on_repo_root(monkeypatch):
     assert "up to date" in report["plugin"]["detail"]
     assert report["registry"]["ok"] is True
     assert report["ultrathink"]["ok"] is None
-    assert report["substrate"]["ok"] is None
+    assert report["substrate"]["ok"] is True
+    assert "configured-only" in report["substrate"]["detail"]
+    assert "reachability not checked" in report["substrate"]["detail"]
+    assert "anonymous mode" in report["substrate"]["detail"]
     assert main(["--root", str(ROOT)]) == 0
 
 
@@ -124,9 +141,21 @@ def test_each_failure_trips_its_check(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("SUBSTRATE_URL")
     monkeypatch.setenv("SUBSTRATE_TOKEN", "fake-value")
     substrate = run_checks(fixture)["substrate"]
-    assert substrate["ok"] is True
+    assert substrate["ok"] is False
+    assert "SUBSTRATE_URL" in substrate["detail"]
     assert "fake-value" not in substrate["detail"]
-    assert "SUBSTRATE_TOKEN" in substrate["detail"]
+
+
+def test_missing_substrate_url_fails_with_actionable_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SUBSTRATE_URL", raising=False)
+    monkeypatch.delenv("SUBSTRATE_TOKEN", raising=False)
+    monkeypatch.delenv("SUBSTRATE_TOKEN_GROK_BOT", raising=False)
+    ok, detail = check_substrate(tmp_path)
+    assert ok is False
+    assert "SUBSTRATE_URL" in detail
+    assert "process environment or settings file" in detail
 
 
 def test_template_row_reports_unlisted_skills_like_the_doctor(tmp_path: Path) -> None:

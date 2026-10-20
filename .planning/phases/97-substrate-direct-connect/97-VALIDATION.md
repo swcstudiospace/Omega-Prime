@@ -1,6 +1,6 @@
 # Phase 97: Substrate direct connect — Validation
 
-**Execution status:** Not executed. This is a future parent-owned validation contract. No source, docs, tests, live settings, connectors, or external systems were changed or probed by this planning worker. The only current gate evidence is the parent-reported baseline in `97-CONTEXT.md` and `97-RESEARCH.md`.
+**Execution status:** Local implementation and offline verification ran on 2026-10-20. Static gates and generated catalog checks passed; the full suite has the same 27 baseline failures and zero new failures. Phase verification remains blocked on authoritative current Agent Substrate MCP path/schema evidence; no live endpoint or connector was touched.
 
 ## Requirements to plan/task mapping
 
@@ -17,7 +17,7 @@
 
 ## Seven acceptance criteria (SC) to plan/task mapping
 
-| Criterion | Plan/task | Proposed deterministic evidence (future test names; names do not yet exist) |
+| Criterion | Plan/task | Planned deterministic evidence targets (original plan) |
 |---|---|---|
 | SC1 SSE fake server | `97-02-T2`, `97-02-T3` | Add `test_mcp_streamable_post_parses_sse_and_reuses_session` in `omega_prime/tests/test_transports.py`; use fake/socketpair server, multiline data frames and `Mcp-Session-Id` across calls. |
 | SC2 Exact args contracts | `97-03-T2`, `97-03-T3` (schema preflight in `97-03-T1`) | Add `test_substrate_wire_arguments_and_graph_lease_flow` in `test_substrate_session.py`; add `test_lead_graph_claim_lease_reaches_mutations` in `test_lead.py`; assert memory key fields and repo optionality. Freeze server-specific fixture only after schema preflight. |
@@ -25,9 +25,9 @@
 | SC4 Settings loader matrix | `97-04-T1`, `97-04-T2`, `97-04-T4` | Add `test_settings_loader_security_and_precedence_matrix` and `test_rejected_settings_degrade_without_partial_overlay` in focused settings tests; cover each distinct rejection and ensure Main startup survives. Use temporary files/repos only; no real user config. |
 | SC5 600-minute local | `97-01-T2` | Update `test_lanes.py::test_file_and_minute_caps` (or split to `test_600_minute_spec_stays_local_without_duration_reason`) plus `test_missing_local_max_minutes_persists_json_null`; preserve file cap assertion. |
 | SC6 No 120s cut; liveness instead | `97-01-T1` | Add `test_turn_can_exceed_120_seconds_without_deadline`, `test_dead_process_is_detected_by_liveness_poll`, and `test_explicit_interrupt_cancels_running_engine` in `test_engine.py`; use fake time/events and fake process, never a 121-second sleep. No duration timeout parameter/config is added. |
-| SC7 Gates/docs | `97-05-T1`, `97-05-T2`; prior plan acceptance | Parent runs consolidated gates once all writers land and checks docs are current. Run docs/catalog tests as applicable; run catalog generator write mode only if schema descriptions change generated output. Prompt assembly check applies only if prompts are changed (not intended). |
+| SC7 Gates/docs | `97-05-T1`, `97-05-T2`; parent verification | Local gates and docs/catalog checks are recorded below; prompt assembly was not applicable because no prompts changed. Current upstream schema/path compatibility remains unverified. |
 
-Proposed test identifiers above are new acceptance targets, not observed tests and not claimed as implemented. Existing suite conventions are listed in `97-RESEARCH.md`.
+The identifiers above were proposed during planning. The implementation adds behavioral tests in the listed files; exact local runs and remaining upstream gaps are recorded below.
 
 ## Offline fake-server, engine, and connector smoke
 
@@ -39,36 +39,23 @@ Parent may run an offline integration smoke after all plans land, without access
 4. Exercise launcher/runtime against isolated temp environment, settings path, state directory, fake server, and fake connector host only. Verify missing/rejected/malformed settings startup degrades and diagnostic output is safe. Do not edit live settings, restart a live connector, mint credentials, or contact a real endpoint.
 5. Any live readiness, actual credentials, endpoint connectivity, real Grok Bot behavior, and authoritative schema unavailable from allowed evidence remain explicitly unverified. Do not call such a smoke “live verified.”
 
-## Parent-owned gates and baseline comparison
+## Parent-run gates and baseline comparison
 
-The parent runs required gates after all future implementation work has landed; this worker ran none. For copyable commands, export the environment:
+**Executed:** 2026-10-20 in `/workspace/omes-bot-wt/p1`; Python was `/workspace/omes-bot/.venv/bin/python`, `PYTHONPATH=/workspace/omes-bot-wt/p1`, and `OMEGA_PRIME_SETTINGS_FILE` pointed to a missing `/tmp` path so tests did not consult live settings.
 
-```bash
-export PATH=/workspace/omes-bot/.venv/bin:$PATH
-export PYTHONPATH=/workspace/omes-bot-wt/p1
-```
+Focused behavior coverage:
+- Engine, lane, transport, Substrate, settings, connector, doctor, setup, lead, and readiness regression set: 328 passed, 1 known setup baseline test deselected.
+- Final targeted regressions for warm lead prompt installation, SSE option forwarding, and isolated readiness: 5 passed.
 
-Python executable: `/workspace/omes-bot/.venv/bin/python`.
+Consolidated gates:
+- `ruff check omega_prime/` — exit 0.
+- `ruff format --check omega_prime/` — exit 0; 591 files already formatted.
+- `mypy omega_prime/` — exit 0; no issues in 464 source files.
+- `pytest omega_prime/tests -q` — exit 1; 27 failed, 4831 passed, 11 skipped, 15 warnings. The 27 failing test IDs exactly match the recorded baseline in `97-RESEARCH.md`; no new failures.
+- `python -m omega_prime.tooling.catalog --check` — exit 0; `docs/tool-catalog.md` current.
+- `pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q` — exit 0; 31 passed after the final documentation edit.
 
-Run focused suites for each changed behavior before the consolidated gates:
-
-```bash
-/workspace/omes-bot/.venv/bin/pytest -q omega_prime/tests/test_engine.py omega_prime/tests/test_lanes.py
-/workspace/omes-bot/.venv/bin/pytest -q omega_prime/tests/test_transports.py omega_prime/tests/test_substrate.py omega_prime/tests/test_substrate_session.py
-/workspace/omes-bot/.venv/bin/pytest -q omega_prime/tests/test_lead.py omega_prime/tests/test_mcp_server.py
-/workspace/omes-bot/.venv/bin/pytest -q omega_prime/tests/test_setup_check.py omega_prime/tests/test_grokbot_remote.py omega_prime/tests/test_omega_commands.py omega_prime/tests/test_installer_bindings.py
-```
-
-Then run the required consolidated gates:
-
-```bash
-/workspace/omes-bot/.venv/bin/ruff check omega_prime/
-/workspace/omes-bot/.venv/bin/ruff format --check omega_prime/
-/workspace/omes-bot/.venv/bin/mypy omega_prime/
-/workspace/omes-bot/.venv/bin/pytest omega_prime/tests -q
-```
-
-`bash omega_prime/scripts/assemble-prompts.sh --check` is conditional only on prompt changes; none are planned. If changed tool descriptions affect generated `docs/tool-catalog.md`, regenerate using `python -m omega_prime.tooling.catalog --out docs/tool-catalog.md` and run `python -m omega_prime.tooling.catalog --check`; otherwise leave it unchanged. Compare final pytest failure IDs against the exact 27 named baseline failures in `97-RESEARCH.md`; require zero new failures and passing new target tests, and report expected skips and final counts without requiring the baseline pass count (4777) to remain unchanged. Do not mask or opportunistically repair pre-existing failures. The final regression gates are required; this instruction does not require rerunning them merely to confirm the initial baseline.
+The prompt assembly check was not run because no prompts changed. No live endpoint, credential, live settings file, connector, VPS, or Railway resource was accessed. Current upstream MCP mount/schema compatibility is still unverified; the VPS was unavailable per the supplied context, and no authoritative current server contract was accessible.
 
 No command in test, smoke, or plan introduces an optional turn/session deadline or environment timeout override. Socket/request liveness polling is not an inference duration cap.
 
@@ -86,6 +73,6 @@ All plan implementation ownership resolves to `bot-00-omega-prime` via `**`; the
 
 ## Receipt and unverified claims
 
-After implementation and parent verification only, the required future receipt path is `.receipts/bot-00-omega-prime/phase97-execution.json`. It must distinguish code/tests from live/network evidence and list `rule adherence by future agents` under `unverified`. No receipt or completion artifact is created by this planning worker.
+The execution receipt is `.receipts/bot-00-omega-prime/phase97-execution.json`. It records local commands and gate outcomes and explicitly leaves current upstream server compatibility, live endpoint behavior, and future-agent rule adherence unverified. This is a phase execution record, not a milestone audit/completion artifact.
 
-Unverified: current upstream schema/mount/version/response types pending preflight; all real endpoint/auth/connectivity and live connector behavior; implementation acceptance and all future tests/gates; rule adherence by future agents.
+Unverified: current upstream MCP mount/schema/version/response compatibility because authoritative evidence was not accessible; live endpoint/auth/connector connectivity because the VPS is unavailable and live checks are operator-owned; rule adherence by future agents.

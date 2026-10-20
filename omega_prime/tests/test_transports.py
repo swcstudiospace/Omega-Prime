@@ -20,6 +20,7 @@ from omega_prime.providers.base import ProviderError, ProviderModel
 from omega_prime.providers.fake import FakeTransport
 from omega_prime.providers.grok import GrokProvider
 from omega_prime.providers.http import HttpTransport
+from omega_prime.substrate.client import _matching_sse_message
 from omega_prime.tools.coding import register_coding_tools
 from omega_prime.tools.registry import ToolRegistry
 
@@ -93,13 +94,21 @@ class _Fixture:
                 if not more:
                     break
                 body += more
-            with self._lock:
-                self.requests.append(
-                    {"target": lines[0], "body": json.loads(body or b"{}")}
-                )
-                status = self.statuses.pop(0) if self.statuses else 200
-                extra = self.headers.pop(0) if self.headers else ""
-                raw_body = self.raw_bodies.pop(0) if self.raw_bodies else None
+            self.requests.append(
+                {
+                    "target": lines[0],
+                    "headers": {
+                        key.lower(): value.strip()
+                        for line in lines[1:]
+                        if ":" in line
+                        for key, value in [line.split(":", 1)]
+                    },
+                    "body": json.loads(body or b"{}"),
+                }
+            )
+            status = self.statuses.pop(0) if self.statuses else 200
+            extra = self.headers.pop(0) if self.headers else ""
+            raw_body = self.raw_bodies.pop(0) if self.raw_bodies else None
             if raw_body is not None:
                 data = raw_body
             else:
@@ -350,6 +359,82 @@ def test_http_transport_streams_lines_and_retries_status_errors():
     assert len(fixture.requests) == 2
 
 
+def test_http_transport_post_text_preserves_json_request_contract():
+    body = {"surface": "grok-bot"}
+    fixture = _Fixture([200], {}, raw_bodies=[b"# brief\n"])
+    transport = HttpTransport(connect=fixture.connect)
+
+    assert transport.post_text("http://fixture.local/brief", {}, body) == "# brief\n"
+    request = fixture.requests[0]
+    assert request["headers"]["content-type"] == "application/json"
+    assert request["headers"]["content-length"] == str(
+        len(json.dumps(body).encode("utf-8"))
+    )
+    assert request["body"] == body
+
+
+def test_http_transport_mcp_exposes_incremental_response_and_accept():
+    payload = {"jsonrpc": "2.0", "id": 1, "result": {}}
+    fixture = _Fixture([200], payload)
+    transport = HttpTransport(connect=fixture.connect, max_retries=3)
+
+    with transport.post_mcp("http://fixture.local/mcp", {}, {"id": 1}) as response:
+        assert response.status == 200
+        assert response.headers["content-type"] == "application/json"
+        assert json.loads(response.read()) == payload
+
+    assert (
+        fixture.requests[0]["headers"]["accept"]
+        == "application/json, text/event-stream"
+    )
+
+
+def test_mcp_chunked_sse_returns_matching_event_before_stream_eof():
+    event = b'data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n'
+    closed = threading.Event()
+
+    def connect(_host, _port, timeout, _use_tls):
+        client_sock, server_sock = socket.socketpair()
+
+        def serve():
+            server_sock.settimeout(5)
+            try:
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    request += server_sock.recv(4096)
+                headers, body = request.split(b"\r\n\r\n", 1)
+                length = next(
+                    int(line.split(b":", 1)[1].strip())
+                    for line in headers.split(b"\r\n")
+                    if line.lower().startswith(b"content-length:")
+                )
+                while len(body) < length:
+                    body += server_sock.recv(length - len(body))
+                frame = f"{len(event):X}\r\n".encode() + event + b"\r\n"
+                server_sock.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: text/event-stream\r\n"
+                    b"Transfer-Encoding: chunked\r\n\r\n" + frame
+                )
+                while server_sock.recv(4096):
+                    pass
+            except OSError:
+                pass
+            finally:
+                closed.set()
+                server_sock.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        return _PairedConnection(client_sock, timeout)
+
+    transport = HttpTransport(connect=connect, timeout=2)
+    with transport.post_mcp("http://fixture.local/mcp", {}, {"id": 1}) as response:
+        assert _matching_sse_message(response, 1) == [
+            {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+        ]
+    assert closed.wait(timeout=2)
+
+
 def test_http_transport_stream_refuses_error_status_without_retry():
     fixture = _Fixture([404], {}, raw_bodies=[b"{}"])
     transport = HttpTransport(
@@ -358,6 +443,33 @@ def test_http_transport_stream_refuses_error_status_without_retry():
     with pytest.raises(ProviderError, match="HTTP 404"):
         list(transport.stream("http://fixture.local/chat/completions", {}, {}))
     assert len(fixture.requests) == 1
+
+
+def test_mcp_response_falls_back_to_read_for_simple_fakes():
+    class Response:
+        def read(self, size=4096):
+            assert size == 17
+            return b"fake"
+
+    from omega_prime.providers.http import _McpResponse
+
+    response = _McpResponse(object(), Response(), 200, {})
+    assert response.read(17) == b"fake"
+
+
+def test_mcp_response_uses_read1_incrementally_when_available():
+    class Response:
+        def read1(self, size=4096):
+            assert size == 17
+            return b"chunk"
+
+        def read(self, size=4096):
+            raise AssertionError("read1 should be used")
+
+    from omega_prime.providers.http import _McpResponse
+
+    response = _McpResponse(object(), Response(), 200, {})
+    assert response.read(17) == b"chunk"
 
 
 def test_loop_consumes_streamed_output_end_to_end():

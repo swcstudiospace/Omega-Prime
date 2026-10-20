@@ -75,6 +75,30 @@ All notable changes to this project are documented here. Format follows
   minute bound is stored at the local caps. Escalation posts the original
   task text; receipts stay redacted.
 
+### Substrate connection and uncapped local execution
+
+#### Added
+
+- A guarded non-secret settings file at `~/.omega-prime/settings.json`,
+  overridden only by `OMEGA_PRIME_SETTINGS_FILE`. Process environment
+  precedence, allowlisting, file safety checks, and value-free diagnostics
+  keep credentials on their existing secret paths.
+- MCP Streamable HTTP POST support with JSON/SSE response parsing, request-id
+  correlation, and session-id reuse. Argument mappings follow supplied audit
+  expectations; current upstream mount/schema compatibility remains
+  unverified.
+
+#### Changed
+
+- Substrate configuration has no silent localhost default; `local` is an
+  explicit opt-in. Missing configuration and transport/protocol/tool failures
+  are reported distinctly. Doctor/setup checks report configuration without
+  claiming reachability.
+- Engine turns and default local lanes have no duration deadline. Process and
+  pipe liveness detect failure; they do not limit inference. Other resource
+  and capacity limits remain.
+
+
 ### Purple-team operator tooling (batch 18)
 
 #### Added

@@ -95,7 +95,7 @@ Requirements: milestones/v19-REQUIREMENTS.md. Phase 77.1 live UAT stays user-own
 
 ### v20 Wiring (Phases 97–103) — in progress 2026-10-21
 
-Source evidence: `/workspace/omes-bot-wiring-audit/AUDIT.md` (read-only audit of this tree at `44b28df`). Phase 97 planning is complete and five plans are staged (0 implemented); independent units can proceed, but server-specific implementation is blocked pending authoritative upstream schema confirmation. No v20 phase is complete.
+Source evidence: `/workspace/omes-bot-wiring-audit/AUDIT.md` (read-only audit of this tree at `44b28df`). Phase 97 has offline implementation and test changes; schema/path preflight tasks in plans 97-02/97-03 remain blocked because current upstream evidence was unavailable. Phase 97 and all other v20 phases remain incomplete.
 
 **Phase 97 goal:** Connect the Omega Prime connector to Agent Substrate safely and without turn-duration caps: explicit configuration instead of a silent localhost default, streamable-HTTP/SSE transport, exact tool argument/lease/memory contracts, a guarded settings loader, honest diagnostics, and uncapped engine/lane behavior. Prove behavior against fake servers locally, with no live network dependency.
 
@@ -118,7 +118,7 @@ Source evidence: `/workspace/omes-bot-wiring-audit/AUDIT.md` (read-only audit of
 6. A turn longer than 120 seconds completes; dead-process liveness and explicit cancellation are detected without an inference deadline.
 7. Parent-run gates pass and same-phase docs cover settings, precedence, allowlist, local opt-in, uncapped semantics, and degradation.
 
-- [ ] Phase 97: Substrate direct connect + settings loader + no time caps (5 plans; 0 implemented)
+- [ ] Phase 97: Substrate direct connect + settings loader + no time caps (local implementation; upstream MCP schema/path verification deferred)
 - [ ] Phase 98: Shared memory via substrate, Hindsight fallback
 - [ ] Phase 99: Solo mode, Desk optional
 - [ ] Phase 100: omp engine wiring

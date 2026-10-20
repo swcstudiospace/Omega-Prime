@@ -46,7 +46,9 @@ from omega_prime.engine.sandbox import SandboxUnavailable, sandbox_ready, wrap
 
 _READY_TIMEOUT = 15.0
 _COMMAND_TIMEOUT = 15.0
-_TURN_TIMEOUT = 120.0
+
+
+_EOF = object()
 
 
 class EngineError(Exception):
@@ -144,9 +146,11 @@ class OmpSession:
         self.events_path = events_path
         self.events: list[dict[str, Any]] = []
         self.agent_ended = False
-        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._queue: queue.Queue[Any] = queue.Queue()
+        self._reader_error: BaseException | None = None
+        self._abort_sent = False
         self._stdout = threading.Thread(
-            target=_pump, args=(proc.stdout, self._queue), daemon=True
+            target=_pump, args=(proc.stdout, self._queue, self), daemon=True
         )
         self._stderr_parts: list[str] = []
         self._stderr = threading.Thread(
@@ -158,9 +162,9 @@ class OmpSession:
     def wait_type(self, kind: str, timeout: float) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            event = self._next(deadline - time.monotonic())
+            event = self._next(min(0.1, deadline - time.monotonic()))
             if event is None:
-                break
+                continue
             if event.get("type") == kind:
                 return event
         raise EngineError("timeout", f"timed out waiting for {kind}")
@@ -178,25 +182,15 @@ class OmpSession:
     def wait_response(self, command_id: str, timeout: float) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            event = self._next(deadline - time.monotonic())
+            event = self._next(min(0.1, deadline - time.monotonic()))
             if event is None:
-                break
+                continue
             if str(event.get("id") or "") == command_id and event.get("type") in {
                 "response",
                 "error",
             }:
                 return event
         raise EngineError("timeout", "timed out waiting for a command response")
-
-    def read_until_agent_end(self, timeout: float) -> None:
-        if self.agent_ended:
-            return
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            event = self._next(deadline - time.monotonic())
-            if event is None or self.agent_ended:
-                return
-        raise EngineError("timeout", "timed out waiting for agent_end")
 
     def close(self) -> int:
         if self.proc.stdin is not None:
@@ -212,31 +206,62 @@ class OmpSession:
         return "".join(self._stderr_parts)[-2000:]
 
     def _next(self, timeout: float) -> dict[str, Any] | None:
-        if timeout < 0:
-            return None
-        try:
-            line = self._queue.get(timeout=max(timeout, 0.01))
-        except queue.Empty:
-            return None
-        if line is None:
-            return None
-        event = loads(line)
-        if event is None:
-            return self._next(timeout)
-        self.events.append(event)
-        append_event(self.events_path, event)
-        if event.get("type") == "agent_end":
-            self.agent_ended = True
-        return event
+        deadline = time.monotonic() + max(timeout, 0.0)
+        while True:
+            try:
+                wait = min(0.1, max(0.0, deadline - time.monotonic()))
+                line = self._queue.get(timeout=wait)
+            except queue.Empty:
+                line = None
+            if line is _EOF:
+                self._raise_stream_failure()
+            if line is not None:
+                event = loads(line)
+                if event is None:
+                    continue
+                self.events.append(event)
+                append_event(self.events_path, event)
+                if event.get("type") == "agent_end":
+                    self.agent_ended = True
+                return event
+            if self.proc.poll() is not None:
+                raise EngineError(
+                    "process", f"omp exited with status {self.proc.returncode}"
+                )
+            if self._reader_error is not None:
+                self._raise_stream_failure()
+            if self._stdout.is_alive() is False:
+                self._raise_stream_failure()
+            if time.monotonic() >= deadline:
+                return None
+
+    def _raise_stream_failure(self) -> None:
+        if self._reader_error is not None:
+            raise EngineError(
+                "process",
+                f"omp stdout reader failed: {type(self._reader_error).__name__}",
+            ) from self._reader_error
+        raise EngineError("process", "omp stdout closed before agent_end")
+
+    def abort_once(self) -> None:
+        if self._abort_sent:
+            return
+        self._abort_sent = True
+        with contextlib.suppress(EngineError, OSError):
+            session_abort(self)
 
 
-def _pump(stream: Any, sink: queue.Queue[str | None]) -> None:
+def _pump(stream: Any, sink: queue.Queue[Any], session: OmpSession) -> None:
     if stream is None:
-        sink.put(None)
+        sink.put(_EOF)
         return
-    for line in stream:
-        sink.put(line)
-    sink.put(None)
+    try:
+        for line in stream:
+            sink.put(line)
+    except BaseException as exc:
+        session._reader_error = exc
+    finally:
+        sink.put(_EOF)
 
 
 def _collect(stream: Any, parts: list[str]) -> None:
@@ -258,9 +283,9 @@ def run(
     mode: str = "rpc",
     env: Mapping[str, str] | None = None,
     unsandboxed: bool | None = None,
-    timeout: float | None = None,
     tmux: bool | None = None,
     stage: str | None = None,
+    interrupt: Any | None = None,
 ) -> EngineResult:
     """Run one prompt on omp and return the assistant text, usage, and cost.
 
@@ -291,9 +316,9 @@ def run(
             mode=mode,
             env=mapping,
             unsandboxed=unsandboxed,
-            timeout=timeout if timeout is not None else _TURN_TIMEOUT,
             tmux=tmux,
             stage=stage,
+            interrupt=interrupt,
         )
     except (EngineError, PlanNotAllowed, SandboxUnavailable, OSError) as exc:
         reason: str | None
@@ -340,9 +365,9 @@ def _run(
     mode: str,
     env: Mapping[str, str],
     unsandboxed: bool | None,
-    timeout: float,
     tmux: bool | None,
     stage: str | None = None,
+    interrupt: Any | None = None,
 ) -> EngineResult:
     if mode not in MODES:
         raise EngineError("invalid_mode", "mode must be rpc or rpc-ui")
@@ -452,7 +477,7 @@ def _run(
         prompt_id = session.send("prompt", message=prompt, streamingBehavior="steer")
         started = True
         commands.append("prompt")
-        _accept_prompt(session, prompt_id, timeout)
+        _accept_prompt(session, prompt_id, interrupt)
         try:
             stats_id = session.send("get_session_stats")
             commands.append("get_session_stats")
@@ -471,6 +496,8 @@ def _run(
     except EngineError as exc:
         if started:
             exc.started = True
+        if exc.reason == "cancelled":
+            session.abort_once()
         raise
     finally:
         session.close()
@@ -527,27 +554,35 @@ def _roundtrip(session: OmpSession, kind: str, **fields: Any) -> str:
     return kind
 
 
-def _accept_prompt(session: OmpSession, command_id: str, timeout: float) -> None:
-    deadline = time.monotonic() + timeout
-    saw_response = False
-    while time.monotonic() < deadline:
-        event = session._next(deadline - time.monotonic())
-        if event is None:
-            break
-        if str(event.get("id") or "") == command_id and event.get("type") in {
-            "response",
-            "error",
-        }:
-            saw_response = True
-            if event.get("success") is False:
-                raise EngineError("protocol", "prompt was rejected")
-        if session.agent_ended and saw_response:
+def _accept_prompt(session: OmpSession, command_id: str, interrupt: Any | None) -> None:
+    while True:
+        event = session._next(0.1)
+        if (
+            event is not None
+            and str(event.get("id") or "") == command_id
+            and event.get("type") in {"response", "error"}
+            and event.get("success") is False
+        ):
+            raise EngineError("protocol", "prompt was rejected")
+        if session.agent_ended:
             return
-        if session.agent_ended and not saw_response:
-            # Some fakes emit agent_end and the response in either order.
-            return
-    if not session.agent_ended:
-        raise EngineError("timeout", "timed out waiting for agent_end")
+        if interrupt is not None and interrupt.is_set():
+            while True:
+                try:
+                    pending = session._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if pending is _EOF:
+                    session._raise_stream_failure()
+                raced = loads(pending)
+                if raced is None:
+                    continue
+                session.events.append(raced)
+                append_event(session.events_path, raced)
+                if raced.get("type") == "agent_end":
+                    session.agent_ended = True
+                    return
+            raise EngineError("cancelled", "prompt cancelled", started=True)
 
 
 def _sum_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:

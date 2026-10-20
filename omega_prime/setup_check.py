@@ -2,8 +2,9 @@
 
 `python -m omega_prime.setup_check --root <repo>`: runs the roster, template,
 assembly, plugin, registry, ultrathink, substrate, and submodule checks and
-exits 0 only when every required check passes. Skips (ultrathink/substrate
-unconfigured) are reported, never failures. An empty ``prime-agent`` checkout
+exits 0 only when every required check passes. An unconfigured ultrathink
+checkout is reported as a skip; missing substrate configuration fails with
+guidance and no reachability probe. An empty ``prime-agent`` checkout
 fails and prints ``git submodule update --init --recursive``.
 """
 
@@ -156,41 +157,43 @@ def check_ultrathink(root: Path) -> tuple[bool | None, str]:
     return True, f"ultrathink checkout ok ({configured})"
 
 
-_SUBSTRATE_URL_VARS = ("SUBSTRATE_URL", "HINDSIGHT_URL")
-_SUBSTRATE_TOKEN_VARS = (
-    "SUBSTRATE_TOKEN",
-    "SUBSTRATE_TOKEN_GROK_BOT",
-    "HINDSIGHT_API_KEY",
-    "HINDSIGHT_API_TOKEN",
-)
-
-
-def check_substrate(root: Path) -> tuple[bool | None, str]:
-    """Substrate surface env present and URL-shaped, or clearly skipped.
-
-    Names which variables are set; values are never read into the detail.
-    """
+def check_substrate(root: Path) -> tuple[bool, str]:
+    """Report saved substrate configuration without probing the endpoint."""
     del root
-    from urllib.parse import urlsplit
+    from omega_prime.integrations.binding import secret_value
+    from omega_prime.settings import load_settings
+    from omega_prime.substrate.client import SubstrateClient
 
-    for name in _SUBSTRATE_URL_VARS:
-        value = os.environ.get(name, "")
-        if not value:
-            continue
-        try:
-            parts = urlsplit(value)
-        except ValueError:
-            return False, f"{name} is not a URL"
-        if parts.scheme not in ("http", "https") or not parts.hostname:
-            return False, f"{name} is not an http(s) URL"
-    present = [
-        name
-        for name in _SUBSTRATE_URL_VARS + _SUBSTRATE_TOKEN_VARS
-        if os.environ.get(name, "")
-    ]
-    if not present:
-        return None, "substrate env not set — brief/emit stay local"
-    return True, f"substrate env set: {', '.join(present)} (values never shown)"
+    settings = load_settings(dict(os.environ))
+    env = settings.effective_env
+    if settings.status in ("malformed", "rejected"):
+        details = ", ".join(settings.reasons) or settings.status
+        if settings.rejected_names:
+            details += " (" + ", ".join(settings.rejected_names) + ")"
+        return False, f"settings {settings.status}: {details}; process environment only"
+
+    token = secret_value(env, "SUBSTRATE_TOKEN") or secret_value(
+        env, "SUBSTRATE_TOKEN_GROK_BOT"
+    )
+    client = SubstrateClient(
+        env.get("SUBSTRATE_URL") or None,
+        token=token or None,
+        honor_binding=True,
+        binding_env=env,
+    )
+    base, error = client._resolve_base()
+    if base is None:
+        return (
+            False,
+            (error or "substrate is not configured")
+            + "; set SUBSTRATE_URL via process environment or settings file",
+        )
+    detail = "substrate configured-only; reachability not checked"
+    if not token:
+        detail += "; anonymous mode"
+    if settings.status == "loaded":
+        detail += "; settings loaded: " + ", ".join(settings.loaded_names)
+    return True, detail
 
 
 CHECKS = (

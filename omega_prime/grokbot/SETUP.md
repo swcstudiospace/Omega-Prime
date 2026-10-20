@@ -197,9 +197,30 @@ template (`docs/notion-task-dashboard.md`), the Notion connection, the
 Linear team, and an optional gateway. Reply with the verb it asks for.
 Unset gateways are a valid steady state after you reply `skip-gateway`.
 
-`SUBSTRATE_URL` (default `http://127.0.0.1:7410`) overrides the substrate
-client. `HINDSIGHT_URL` defaults to unset, which disables the remote bank.
-Set it only to a service you operate. It has no hosted default.
+`SUBSTRATE_URL` has no silent localhost default. Set it to an HTTPS endpoint
+you operate, or use the explicit `SUBSTRATE_URL=local` opt-in for a local
+service at `http://127.0.0.1:7410`. Ready saved substrate bindings take
+precedence; a blocked saved binding remains blocked. `SUBSTRATE_TOKEN` is
+resolved before `SUBSTRATE_TOKEN_GROK_BOT`; without either, the client is
+anonymous and diagnostics warn. URLs with userinfo are rejected.
+
+Non-secret settings may be stored in `~/.omega-prime/settings.json`, with
+`OMEGA_PRIME_SETTINGS_FILE` as the sole path override. The only accepted
+string keys are `SUBSTRATE_URL`, `HINDSIGHT_URL`, `ULTRATHINK_ROOT`,
+`ULTRATHINK_SHIP`, and `OMEGA_PRIME_STATE_DIR`. For example, the non-secret
+Ultrathink inputs are `ULTRATHINK_ROOT=/workspace/claude-ultrathink` and
+`ULTRATHINK_SHIP=0`. Keep the file outside git worktrees and tracked paths,
+with no group/world write permission. Do not put credentials or `*_FILE`
+references in it; use the existing host secret paths instead. Process
+environment wins. Invalid settings are ignored atomically and startup
+continues with process environment only.
+
+Doctor/setup reports configuration only; they do not probe the endpoint.
+Without a URL, substrate calls report `not_configured`, not a request to
+localhost. The MCP client's current upstream mount/schema compatibility is
+unverified. Local fake-server checks are not live Grok Bot or endpoint
+verification. Do not write the live settings file or restart the connector
+without the operator.
 
 Configure only the integrations you intend to use. Failure behavior is
 operation-specific: some tools return `not_configured`, some refuse or return

@@ -695,3 +695,14 @@ def test_serve_sse_installs_the_access_filter_once(
         f for f in access_logger.filters if isinstance(f, StripQueryFromAccessLog)
     ]
     assert len(installed) == 1
+
+
+def test_sse_runtime_keeps_settings_status_at_constructor_boundary(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.settings import load_settings
+
+    status = load_settings({}, path=tmp_path / "absent-settings.json")
+    app = _app(tmp_path, env={}, settings_status=status)
+    assert app.state.runtime.settings_status is status
+    assert app.state.runtime.registry.runtime_bindings["settings_status"] is status

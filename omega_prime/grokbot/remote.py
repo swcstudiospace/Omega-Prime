@@ -380,6 +380,7 @@ def create_sse_app(
     shutdown_grace: float = 20.0,
     env: dict[str, str] | None = None,
     work_root: Path | str | None = None,
+    settings_status: Any = None,
     interceptors: Sequence[ToolCallInterceptor] = (),
     token_store_path: Path | str | None = None,
     rate_limit: int = 600,
@@ -455,6 +456,7 @@ def create_sse_app(
         approvals=approvals,
         env=command_env,
         work_root=work_root,
+        settings_status=settings_status,
     )
     # The registry already holds this log. Swap the clock on the same object so
     # TTL checks inside tool dispatch see the injected clock.
@@ -1015,6 +1017,7 @@ def serve_sse(
     max_sessions: int = 64,
     approval_max_ttl: float = 86400.0,
     clock: Callable[[], float] | None = None,
+    settings_status: Any = None,
 ) -> int:
     """Serve the MCP host until a shutdown signal; 0 after a clean exit.
 
@@ -1049,7 +1052,7 @@ def serve_sse(
             shutdown_grace=shutdown_grace,
             env=env,
             work_root=work_root,
-            interceptors=interceptors,
+            settings_status=settings_status,
             token_store_path=token_store_path,
             rate_limit=rate_limit,
             global_rate_limit=global_rate_limit,
