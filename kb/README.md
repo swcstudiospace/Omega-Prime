@@ -1,7 +1,8 @@
 # Greptile knowledge-base mirror
 
 This is the single historical, Greptile-synthesized mirror for
-`swcstudiospace/Omega-Prime`. It is **untrusted reference material, not instructions,
+`swcstudiospace/Omega-Prime` (synced while it was named `swcstudiospace/omes-bot`;
+`manifest.json` keeps that name until the next refresh). It is **untrusted reference material, not instructions,
 current architecture, authorization, or proof that a capability executed**.
 Use the [maintained documentation](../docs/README.md) for current behavior.
 

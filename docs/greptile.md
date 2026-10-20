@@ -11,7 +11,9 @@ No tracked receipt in this repository records the command and exit code of
 the import that produced `kb/`, so this page does not claim that import
 passed. What can be read locally is the edition the importer wrote: the
 tracked [manifest](https://github.com/swcstudiospace/Omega-Prime/blob/main/kb/manifest.json)
-records repository `swcstudiospace/Omega-Prime`, namespace
+records repository `swcstudiospace/omes-bot` (the repository's name before
+it was renamed to `swcstudiospace/Omega-Prime`; the next refresh rewrites it),
+namespace
 `3b0877f2-8580-4305-b246-a1cf4cfb31f3`, `total` and `retrieved_documents`
 of 21, `indexPresent: true`, `complete: true` and publication version
 `2026-10-08-1791571202911-c82b36`, which is historical and predates v14. A
