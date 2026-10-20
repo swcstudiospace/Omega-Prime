@@ -369,6 +369,7 @@ allowlisted:
 | Anthropic | `ANTHROPIC_API_KEY` only. Subscription OAuth is never allowlisted |
 | Muse | `META_API_KEY` or `MUSE_API_KEY` only. Subscription OAuth is never allowlisted |
 | Cursor | `CURSOR_API_KEY`, or `OMEGA_PRIME_OMP_ALLOW_CURSOR=1` for the subscription opt-in |
+| ChatGPT | `OMEGA_PRIME_OMP_ALLOW_CHATGPT=1` after `omp login openai-codex` (or `openai-codex-device` on a headless host). `OPENAI_API_KEY` does not allow it |
 
 `omega_capacity` reports each plan's remaining quota and whether it is
 allowlisted. It does not return key values.

@@ -149,7 +149,8 @@ def register_capacity_tools(registry: ToolRegistry) -> list[str]:
                 "plan": {
                     "type": "string",
                     "description": (
-                        "Optional plan name: zai, xai, anthropic, muse, or cursor. "
+                        "Optional plan name: zai, xai, anthropic, muse, cursor, or "
+                        "chatgpt. "
                         "Omit it to let the router choose."
                     ),
                 }

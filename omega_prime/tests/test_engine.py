@@ -765,3 +765,48 @@ def test_follow_waits_for_the_event_file(tmp_path: Path) -> None:
     assert time.monotonic() - started >= 0.15
     missing = watch_main(["job-absent", "--state-dir", str(state)])
     assert missing == 1
+
+
+def test_chatgpt_plan_is_opt_in_through_openai_codex() -> None:
+    off = {item.plan: item for item in evaluate_all({})}
+    assert off["chatgpt"].allowlisted is False
+    assert off["chatgpt"].provider == "openai-codex"
+    for name in ("OPENAI_API_KEY", "OPENAI_CODEX_OAUTH_TOKEN"):
+        keyed = {item.plan: item for item in evaluate_all({name: _SECRET})}
+        assert keyed["chatgpt"].allowlisted is False
+        assert _SECRET not in keyed["chatgpt"].reason
+    env = {"OMEGA_PRIME_OMP_ALLOW_CHATGPT": "1"}
+    opted = {item.plan: item for item in evaluate_all(env)}
+    assert opted["chatgpt"].allowlisted is True
+    assert opted["chatgpt"].auth == "subscription_opt_in"
+    assert opted["chatgpt"].model_id == "gpt-6.1-sol"
+    assert all(
+        item.allowlisted is False for name, item in opted.items() if name != "chatgpt"
+    )
+    pick = select(env, requested="chatgpt")
+    assert (pick.decision.provider, pick.decision.model_id) == (
+        "openai-codex",
+        "gpt-6.1-sol",
+    )
+    override = select(
+        {**env, "OMEGA_PRIME_OMP_MODEL_CHATGPT": "gpt-5.6-sol"}, requested="chatgpt"
+    )
+    assert override.decision.model_id == "gpt-5.6-sol"
+    try:
+        select({"OPENAI_API_KEY": _SECRET}, requested="chatgpt")
+    except PlanNotAllowed as exc:
+        assert "OMEGA_PRIME_OMP_ALLOW_CHATGPT" in exc.detail
+    else:
+        raise AssertionError("expected PlanNotAllowed")
+
+
+def test_openai_codex_usage_row_maps_to_chatgpt_plan() -> None:
+    usage = parse_usage(
+        {"providers": [{"provider": "openai-codex", "percentUsed": 25}]}
+    )
+    assert usage["chatgpt"].percent == 25
+    env = {"OMEGA_PRIME_OMP_ALLOW_CHATGPT": "1", "OMEGA_PRIME_OMP_ALLOW_ZAI": "1"}
+    usage["zai"] = parse_usage(
+        {"providers": [{"provider": "zai", "percentUsed": 100}]}
+    )["zai"]
+    assert select(env, usage).decision.plan == "chatgpt"
