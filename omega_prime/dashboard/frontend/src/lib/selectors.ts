@@ -29,7 +29,7 @@ export function observedActivity(snapshot: Snapshot): Array<{ at: string; label:
   for (const source of Object.values(snapshot.sources ?? {})) for (const value of source.items ?? []) {
     if (value && typeof value === 'object' && 'completed_at' in value) { const record = value as { completed_at?: unknown; name?: unknown; id?: unknown }; if (typeof record.completed_at === 'string') rows.push({ at: record.completed_at, label: `Check completed: ${String(record.name ?? 'check')}`, id: String(record.id ?? 'check') }) }
   }
-  const commandCenter = snapshot.sources?.github?.extra?.command_center
+  const commandCenter = snapshot.sources?.github?.command_center
   for (const merge of commandCenter?.recent_merges ?? []) if (merge.merged_at) rows.push({ at: merge.merged_at, label: `Merged ${merge.repo ?? 'repository'} #${merge.number ?? '?'}`, id: merge.id })
   for (const row of commandCenter?.ci_cd ?? []) for (const check of row.checks ?? []) if (check.completed_at) rows.push({ at: check.completed_at, label: `Check completed: ${check.name}`, id: check.id ?? `${row.id}:${check.name}` })
   return rows.filter(row => Number.isFinite(Date.parse(row.at))).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
@@ -53,7 +53,7 @@ export function sortRepositories(rows: Repository[], query: string, sort: 'name'
   })
 }
 export function githubFreshness(snapshot: Snapshot): { updatedAt: string | null; stale: boolean; partial: boolean } {
-  const meta = snapshot.sources?.github?.extra?.command_center?.meta
+  const meta = snapshot.sources?.github?.command_center?.meta
   const updatedAt = meta?.fetched_at ?? null
   const age = updatedAt ? Date.now() - Date.parse(updatedAt) : 0
   return { updatedAt, stale: Boolean(meta?.stale || (Number.isFinite(age) && age > 120_000)), partial: Boolean(meta?.partial || snapshot.sources?.github?.status === 'error' || snapshot.sources?.github?.status === 'degraded') }

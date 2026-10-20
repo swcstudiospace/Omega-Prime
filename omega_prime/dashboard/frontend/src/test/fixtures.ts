@@ -14,8 +14,7 @@ export const fixture: Snapshot = {
     local: { status: 'ok' },
     github: {
       status: 'ok',
-      extra: {
-        command_center: {
+      command_center: {
           repositories: [{
             id: 42, full_name: 'swcstudiospace/console', name: 'console',
             url: 'https://github.com/swcstudiospace/console', visibility: 'private',
@@ -32,7 +31,6 @@ export const fixture: Snapshot = {
           recent_merges: [],
           meta: { partial: false },
         },
-      },
     },
   },
 }

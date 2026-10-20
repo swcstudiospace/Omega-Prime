@@ -16,5 +16,5 @@ export type Repository = { id: number | string; full_name: string; name: string;
 export type SectionMeta = { fetched_at?: string | null; stale?: boolean; partial?: boolean; reason?: string | null }
 export type GitHubMeta = { fetched_at?: string | null; last_attempt_at?: string | null; cache_ttl_s?: number; stale?: boolean; partial?: boolean; reason?: string | null; errors?: string[]; truncated?: string[]; sections?: Record<string, SectionMeta> }
 export type CommandCenter = { repositories?: Repository[] | null; ci_cd?: CiRow[] | null; recent_merges?: Array<{ id: string; repo?: string; number?: number; title?: string; url?: string; merged_at?: string; merge_commit_sha?: string | null }> | null; meta?: GitHubMeta | null }
-export type Source = { status?: string; error?: string | null; detail?: string | null; items?: unknown[]; extra?: { command_center?: CommandCenter } }
+export type Source = { status?: string; error?: string | null; detail?: string | null; items?: unknown[]; command_center?: CommandCenter }
 export type Snapshot = { generated_at?: string | null; sources?: Record<string, Source>; active?: Task[]; pr_gate?: PrRow[]; waiting_on_ove?: WaitingItem[]; finished?: FinishedItem[] }

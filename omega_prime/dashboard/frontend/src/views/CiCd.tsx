@@ -6,7 +6,7 @@ import { safeHref } from '../lib/links'
 import { correlateWiring, githubFreshness } from '../lib/selectors'
 
 export function CiCd({ snapshot, loading, error, receivedAt, refresh }: DashboardState & { snapshot: Snapshot }) {
-  const cc = snapshot.sources?.github?.extra?.command_center
+  const cc = snapshot.sources?.github?.command_center
   const detailedRows = cc?.ci_cd ?? []
   const branchRows: CiRow[] = (cc?.repositories ?? []).flatMap(repo => repo.latest_main_ci ? [{
     id: `repo:${repo.id}:default-ci`, kind: 'branch', repo: repo.full_name,

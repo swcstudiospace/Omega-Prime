@@ -7,7 +7,7 @@ import { ViewState } from '../components/ViewState'
 import { formatSydney } from '../lib/time'
 export function Repositories({ snapshot, loading, error, receivedAt, refresh }: DashboardState & { snapshot: Snapshot }) {
   const [query, setQuery] = useState(''), [sort, setSort] = useState<'name' | 'pushed' | 'visibility'>('name')
-  const cc = snapshot.sources?.github?.extra?.command_center
+  const cc = snapshot.sources?.github?.command_center
   const repos = useMemo(() => sortRepositories(cc?.repositories ?? [], query, sort), [cc?.repositories, query, sort])
   const freshness = githubFreshness(snapshot)
   const partial = cc?.meta?.partial ? [cc.meta.reason ?? 'GitHub inventory is partial'] : freshness.partial ? ['GitHub source is degraded; local views remain available'] : []
