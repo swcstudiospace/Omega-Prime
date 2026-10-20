@@ -223,3 +223,20 @@ def test_quiet_minutes_never_below_engine_timeout(tmp_path) -> None:
     settings = tmp_path / "settings.json"
     settings.write_text('{"dashboard": {"quiet_minutes": 0.5}}')
     assert load_dashboard_config(settings).quiet_minutes == 2.0
+
+
+def test_short_lowercase_embedded_sk_runs_redact_but_task_ids_survive() -> None:
+    from secrets import choice
+    from string import ascii_lowercase
+
+    def word(n: int) -> str:
+        return "".join(choice(ascii_lowercase) for _ in range(n))
+
+    prefix = "s" + "k" + "-"
+    for lead in ("x", "7", "zz"):
+        run = prefix + word(8) + "-" + word(6)
+        out = str(redact_value(f"note {lead}{run} end", env={}))
+        assert run not in out
+        assert "[REDACTED]" in out
+    ids = ["gb:task-dashboard-1", "gb:task-dashboard-2", "desk-lead", "disk-usage"]
+    assert redact_value(ids, env={}) == ids

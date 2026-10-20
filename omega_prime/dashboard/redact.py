@@ -25,12 +25,14 @@ _ASSIGNMENT_SECRET = re.compile(
     r"(?i)(\b(?:password|passwd|pat|cookie|token|key|secret|auth|bearer)"
     r"\b['\"]?\s*[=:]\s*['\"]?)([^\s'\",;]+)"
 )
-# A word-internal "sk-" followed by a short lowercase word and short
-# lowercase/digit hyphen segments is a name, not a key (for example
-# "task-dashboard" or "task-dashboard-2"). Uppercase, underscores, or any
-# segment longer than 16 characters still go to the shared redactor.
+# Only a known English word ending in "sk" (task, desk, disk, risk, ...)
+# followed by short lowercase/digit hyphen segments is a name, not a key
+# (for example "task-dashboard" or "task-dashboard-2"). Any other
+# word-internal "sk-" run, including short lowercase ones, goes to the
+# shared redactor, as do uppercase, underscores, or segments over 16 chars.
 _INNER_SK = re.compile(
-    r"(?<=[A-Za-z0-9])sk-(?=[a-z]{1,16}(?:-[a-z0-9]{1,16})*(?:$|[^A-Za-z0-9_-]))"
+    r"\b(ta|de|di|ri|ma|ba|fla|kio|whi|du|hu|tu|bri)sk-"
+    r"(?=[a-z]{1,16}(?:-[a-z0-9]{1,16})*(?:$|[^A-Za-z0-9_-]))"
 )
 _SK_SHIELD = "\x00sk\x00"
 
@@ -79,7 +81,7 @@ def redact_value(
                 if secret:
                     item = item.replace(secret, "[REDACTED]")
             item = _ASSIGNMENT_SECRET.sub(r"\1[REDACTED]", item)
-            shielded = _INNER_SK.sub(_SK_SHIELD, item)
+            shielded = _INNER_SK.sub(lambda m: m.group(1) + _SK_SHIELD, item)
             out = redact_text(shielded, secrets)
             return out.replace(_SK_SHIELD, "sk-") if isinstance(out, str) else out
         return redact_text(item, secrets)
