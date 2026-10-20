@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Omega Prime — Task Dashboard</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-top">
+      <h1>Omega Prime — Task Dashboard</h1>
+      <time id="clock" aria-label="Current Sydney time">Loading time…</time>
+    </div>
+    <div class="header-meta">
+      <p>Last refresh: <span id="last-refresh">Waiting for snapshot</span></p>
+      <p>Connection: <span id="connection" class="connection-state" role="status">connecting</span></p>
+    </div>
+    <ul id="health-strip" class="health-strip" aria-label="Data source health"></ul>
+  </header>
+  <main>
+    <section aria-labelledby="active-heading">
+      <h2 id="active-heading">Active work</h2>
+      <div id="active-content" class="card-grid section-content" aria-live="polite"><div class="skeleton-card skeleton" aria-hidden="true"></div><div class="skeleton-card skeleton" aria-hidden="true"></div></div>
+    </section>
+    <section aria-labelledby="pr-heading">
+      <h2 id="pr-heading">PR / Greptile / CI gate</h2>
+      <div id="pr-content" class="section-content"><div class="skeleton-row skeleton" aria-hidden="true"></div></div>
+    </section>
+    <section aria-labelledby="waiting-heading">
+      <h2 id="waiting-heading">Waiting on Ove</h2>
+      <div id="waiting-content" class="card-grid section-content"><div class="skeleton-card skeleton" aria-hidden="true"></div></div>
+    </section>
+    <section aria-labelledby="finished-heading">
+      <h2 id="finished-heading">Recently finished</h2>
+      <div id="finished-content" class="section-content"><div class="skeleton-row skeleton" aria-hidden="true"></div></div>
+    </section>
+  </main>
+  <noscript><p class="noscript">JavaScript is required to load the task dashboard.</p></noscript>
+</body>
+</html>
