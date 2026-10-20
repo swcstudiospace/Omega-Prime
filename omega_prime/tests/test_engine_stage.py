@@ -194,3 +194,56 @@ def test_ultrathink_stage_from_argument_plan_or_env(tmp_path: Path) -> None:
         {**env, "OMEGA_PRIME_ENGINE_STAGE": "execute"},
     )
     assert body["stage"] == "execute"
+
+
+def test_zai_has_its_own_plan_and_build_pair() -> None:
+    from omega_prime.engine.plan_router import model_id, select
+
+    zai = {"OMEGA_PRIME_OMP_ALLOW_ZAI": "1"}
+    assert select(zai, stage="plan").decision.model_id == "glm-5.3"
+    assert select(zai, stage="execute").decision.model_id == "glm-5.3-flash"
+    # Unstaged Z.ai keeps the single default model.
+    assert select(zai, requested="zai").decision.model_id == "glm-5.3"
+    assert model_id("zai", {}) == "glm-5.3"
+    # The ChatGPT pair is unchanged, and Z.ai is still its stage fallback.
+    both = {**zai, "OMEGA_PRIME_OMP_ALLOW_CHATGPT": "1"}
+    assert select(both, stage="plan").decision.model_id == "gpt-6.1-sol"
+    assert select(both, stage="execute").decision.model_id == "gpt-6-luna"
+    exhausted = {"chatgpt": _quota(0.0)}
+    build = select(both, exhausted, stage="execute")
+    assert (build.decision.plan, build.decision.model_id) == ("zai", "glm-5.3-flash")
+    assert build.fallback_from == "chatgpt"
+    # Z.ai can be the primary for a job, not only the fallback.
+    picked = select(both, stage="execute", requested="zai")
+    assert (picked.decision.model_id, picked.fallback_from) == ("glm-5.3-flash", None)
+    # Overrides still win per stage, then per plan.
+    staged = {**zai, "OMEGA_PRIME_OMP_MODEL_ZAI_EXECUTE": "glm-5.2-flash"}
+    assert select(staged, stage="execute").decision.model_id == "glm-5.2-flash"
+    whole = {**zai, "OMEGA_PRIME_OMP_MODEL_ZAI": "glm-5.4"}
+    assert select(whole, stage="execute").decision.model_id == "glm-5.4"
+
+
+def _quota(remaining: float):
+    from omega_prime.engine.plan_router import Quota
+
+    return Quota(remaining, None, None, "5h", None, "live")
+
+
+def test_zai_stage_runs_build_on_flash(tmp_path: Path) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    env.pop("ANTHROPIC_API_KEY")
+    agent = Agent(model=ScriptedModel([]))
+    agent.force_engine = True
+    routed = route_turn(
+        agent,
+        "ping",
+        system_message=None,
+        conversation_history=None,
+        env=env,
+        stage="execute",
+    )
+    assert routed is not None
+    assert routed["engine"]["model"] == "glm-5.3-flash"
+    assert routed["engine"]["fallback_from"] == "chatgpt"
+    assert _model_arg(tmp_path) == "zai/glm-5.3-flash"
