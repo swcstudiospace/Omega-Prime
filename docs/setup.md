@@ -371,10 +371,13 @@ allowlisted:
 | Cursor | `CURSOR_API_KEY`, or `OMEGA_PRIME_OMP_ALLOW_CURSOR=1` for the subscription opt-in |
 | ChatGPT | `OMEGA_PRIME_OMP_ALLOW_CHATGPT=1` after `omp login openai-codex` (or `openai-codex-device` on a headless host). `OPENAI_API_KEY` does not allow it |
 
-The ChatGPT plan is only for the operator's own local sessions, on their own
-machine, for their own work. Do not enable it on the Railway coding fleet or
-any remote or shared runtime. Use one ChatGPT account; do not pool or rotate
-accounts or serve anyone else's requests.
+The ChatGPT plan is only for the operator's own work, with their own single
+ChatGPT account. It covers two places: local omp sessions on the operator's own
+machine, and the Railway coding fleet's opt-in ChatGPT lane, which runs only the
+operator's own jobs, at most one ChatGPT job at a time, and only when a job opts
+in. Z.ai and Grok Build stay the fleet defaults. Do not pool or rotate accounts,
+and do not serve anyone else's requests. Fleet support itself ships in the
+coding-fleet repository, not here.
 
 `omega_capacity` reports each plan's remaining quota and whether it is
 allowlisted. It does not return key values.
