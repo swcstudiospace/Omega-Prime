@@ -25,23 +25,61 @@ from pathlib import Path
 from typing import Any
 
 
+def _process_start(pid: int) -> str | None:
+    """Return a start identity for ``pid`` that changes when the pid is reused.
+
+    Linux reports the process start time in clock ticks since boot (field 22
+    of ``/proc/<pid>/stat``); combined with the boot id it tells a restarted
+    worker that happens to get the same pid (common in containers) apart
+    from the worker that saved the claim. Other platforms return ``None``.
+    """
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        fields = stat_text[stat_text.rindex(")") + 2 :].split()
+        start = fields[19]
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except (OSError, ValueError, IndexError):
+        return None
+    return f"{boot.replace(':', '')}-{start}" if start.isdigit() else None
+
+
 def _new_claim_token() -> str:
-    return f"{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex}"
+    pid = os.getpid()
+    start = _process_start(pid) or "-"
+    return f"{pid}:{start}:{threading.get_ident()}:{uuid.uuid4().hex}"
 
 
 def _claim_is_stale(token: Any) -> bool:
     """Return whether a persisted claim belongs to an exited worker."""
     if not isinstance(token, str):
         return token is not None
+    parts = token.split(":", 3)
     try:
-        pid_text, worker_text, _nonce = token.split(":", 2)
+        if len(parts) == 4:
+            pid_text, start, worker_text, _nonce = parts
+        elif len(parts) == 3:
+            # Tokens saved before the start identity was recorded.
+            pid_text, worker_text, _nonce = parts
+            start = "-"
+        else:
+            return True
         pid = int(pid_text)
         worker_id = int(worker_text)
     except (TypeError, ValueError):
         return True
     if pid <= 0 or worker_id <= 0:
         return True
+    if start != "-":
+        current = _process_start(pid)
+        if current is not None and current != start:
+            # The pid now belongs to a different process: the worker that
+            # saved this claim exited (for example across a restart).
+            return True
     if pid == os.getpid():
+        if start == "-" and _process_start(pid) is not None:
+            # A legacy token naming our own pid cannot have been saved by
+            # this process, which always records its start identity.
+            return True
         return worker_id not in {
             thread.ident
             for thread in threading.enumerate()
@@ -580,13 +618,16 @@ def tick_desk_lead_passes(
             and job.get("due_at") is not None
             and job["due_at"] <= now
         ]
+    # Read settings before any claim is saved: an invalid value must not
+    # leave a claimed occurrence behind.
+    grace = cron_lateness_grace_seconds()
     ran: list[dict] = []
     for job_id in job_ids:
         claim = store._claim(job_id, now)
         if claim is None:
             continue
         lateness = now - float(claim["scheduled_for"])
-        if lateness > cron_lateness_grace_seconds():
+        if lateness > grace:
             missed = {
                 "state": "missed",
                 "scheduled_for": claim["scheduled_for"],
@@ -766,6 +807,8 @@ def tick_roe_watchdog(store: JobStore, now: Any, checker: Any = None) -> list[di
         checker = watchdog_check
 
     checker_now, stamp = _roe_watchdog_now(now)
+    # Read settings before any claim is saved (see tick_desk_lead_passes).
+    grace = cron_lateness_grace_seconds()
     ran: list[dict] = []
     with store._store_transaction():
         job_ids = [
@@ -783,7 +826,7 @@ def tick_roe_watchdog(store: JobStore, now: Any, checker: Any = None) -> list[di
             continue
         claimed_job = claim["job"]
         lateness = stamp - float(claim["scheduled_for"])
-        if lateness > cron_lateness_grace_seconds():
+        if lateness > grace:
             missed = {
                 "state": "missed",
                 "scheduled_for": claim["scheduled_for"],
