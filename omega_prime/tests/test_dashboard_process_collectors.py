@@ -1,0 +1,225 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Spectrum Web Co
+"""Fake-only tests for process, Herdr and Podman dashboard collectors."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from omega_prime.dashboard.collectors.herdr import make_herdr_collector
+from omega_prime.dashboard.collectors.podman import make_podman_collector
+from omega_prime.dashboard.collectors.procs import make_procs_collector
+
+
+def _proc(
+    root: Path, pid: int, *, comm: str = "omp", cmdline: bytes = b"omp\0"
+) -> None:
+    path = root / str(pid)
+    path.mkdir(parents=True)
+    (path / "comm").write_text(comm, encoding="utf-8")
+    fields = ["S"] + ["0"] * 40
+    fields[19] = "100"
+    (path / "stat").write_text(
+        f"{pid} (process (with parens)) " + " ".join(fields), encoding="utf-8"
+    )
+    (path / "cmdline").write_bytes(cmdline)
+    (path / "cwd").symlink_to("/tmp/workspace")
+
+
+def test_procs_filters_allowlisted_fields_and_extracts_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _proc(tmp_path, 101, cmdline=b"omp\0--mode\0rpc\0")
+    _proc(tmp_path, 102)
+    _proc(tmp_path, 103, comm="other")
+    now = datetime.fromtimestamp(1020, UTC)
+    original = os.readlink
+
+    def guarded(path: os.PathLike[str] | str, *args: Any, **kwargs: Any) -> str:
+        assert "environ" not in os.fspath(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "readlink", guarded)
+    result = make_procs_collector(
+        proc_root=tmp_path, now_fn=lambda: now, clock_hz=10, boot_time=1000
+    )()
+    assert result.status == "ok"
+    assert {frozenset(item) for item in result.items} == {
+        frozenset({"kind", "pid", "elapsed_s", "cwd", "mode"})
+    }
+    assert [item["mode"] for item in result.items] == ["rpc", None]
+    assert all(item["elapsed_s"] == 10 for item in result.items)
+    assert result.extra == {"skipped": 0}
+
+
+def test_procs_skips_racing_pid_and_handles_missing_or_empty_root(
+    tmp_path: Path,
+) -> None:
+    _proc(tmp_path, 201)
+    (tmp_path / "201" / "stat").unlink()
+    result = make_procs_collector(
+        proc_root=tmp_path,
+        now_fn=lambda: datetime.fromtimestamp(1020, UTC),
+        clock_hz=10,
+        boot_time=1000,
+    )()
+    assert result.status == "empty"
+    assert result.extra["skipped"] == 1
+    assert (
+        make_procs_collector(proc_root=tmp_path / "missing")().status == "unavailable"
+    )
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert (
+        make_procs_collector(proc_root=empty, clock_hz=10, boot_time=1000)().status
+        == "empty"
+    )
+
+
+def test_herdr_snapshot_allowlist_redaction_and_invocation() -> None:
+    payload = {
+        "result": {
+            "snapshot": {
+                "workspaces": [
+                    {
+                        "name": "swarm-smoke",
+                        "label": "swarm-smoke",
+                        "tabs": [
+                            {
+                                "panes": [
+                                    {
+                                        "pane_id": "w2:p1",
+                                        "name": "worker",
+                                        "cwd": "/tmp/work",
+                                        "agent_status": "idle",
+                                        "terminal_title": "sk-test-secret",
+                                        "agent_session": {
+                                            "value": "/tmp/session.jsonl"
+                                        },
+                                        "unknown": "discard",
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> str:
+        calls.append(argv)
+        return json.dumps(payload)
+
+    result = make_herdr_collector(runner=runner)()
+    assert calls == [["herdr", "api", "snapshot"]]
+    assert result.status == "ok"
+    item = result.items[0]
+    assert item == {
+        "kind": "herdr_pane",
+        "pane_id": "w2:p1",
+        "workspace": "swarm-smoke",
+        "name": "worker",
+        "agent_status": "idle",
+        "cwd": "/tmp/work",
+        "terminal_title": "[REDACTED]",
+        "session_path": "/tmp/session.jsonl",
+    }
+    assert "sk-test-secret" not in json.dumps(result.items)
+
+
+def test_herdr_failure_malformed_and_empty_are_source_local() -> None:
+    def timeout(argv: list[str]) -> str:
+        raise subprocess.TimeoutExpired(argv, 3.0)
+
+    assert make_herdr_collector(runner=timeout)().status == "unavailable"
+    assert make_herdr_collector(runner=lambda argv: "{")().status == "unavailable"
+    empty = make_herdr_collector(
+        runner=lambda argv: '{"result":{"snapshot":{"workspaces":[]}}}'
+    )()
+    assert empty.status == "empty"
+    podman = make_podman_collector(runner=lambda argv: "[]")()
+    assert podman.status == "empty"
+
+
+def test_podman_parses_containers_and_invokes_read_only_argv() -> None:
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> str:
+        calls.append(argv)
+        return json.dumps(
+            [
+                {
+                    "Names": ["sandbox"],
+                    "State": "running",
+                    "Status": "Up",
+                    "Created": "today",
+                },
+                {
+                    "Names": ["supervisor"],
+                    "State": "exited",
+                    "Status": "Exited",
+                    "CreatedAt": "yesterday",
+                },
+            ]
+        )
+
+    result = make_podman_collector(runner=runner)()
+    assert calls == [["podman", "ps", "-a", "--format", "json"]]
+    assert result.status == "ok"
+    assert [item["name"] for item in result.items] == ["sandbox", "supervisor"]
+    assert result.items[0]["state"] == "running"
+    assert result.items[0]["status"] == "Up"
+    assert result.items[0]["created"] == "today"
+    assert result.items[1]["created"] == "yesterday"
+
+
+def test_podman_missing_executable_and_malformed_output_are_unknown() -> None:
+    def missing(argv: list[str]) -> str:
+        raise FileNotFoundError("podman")
+
+    assert "sandbox containers unknown" in (
+        make_podman_collector(runner=missing)().error or ""
+    )
+    malformed = make_podman_collector(runner=lambda argv: "not json")()
+    assert malformed.status == "unavailable"
+    assert "sandbox containers unknown" in (malformed.error or "")
+
+
+def test_default_runners_pass_exact_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], float]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+
+    def run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+        check: bool,
+    ) -> Completed:
+        calls.append((argv, timeout))
+        result = Completed()
+        result.stdout = (
+            '{"result":{"snapshot":{"workspaces":[]}}}' if argv[0] == "herdr" else "[]"
+        )
+        return result
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert make_herdr_collector()().status == "empty"
+    assert make_podman_collector()().status == "empty"
+    assert calls == [
+        (["herdr", "api", "snapshot"], 3.0),
+        (["podman", "ps", "-a", "--format", "json"], 5.0),
+    ]
