@@ -57,6 +57,7 @@ def test_github_collects_and_caches_prs() -> None:
     collector = make_github_collector(
         env={"GITHUB_PAT_DESK_LEAD": "fake-token"},
         transport=transport,
+        repo="swcstudiospace/omes-bot",
         now_fn=lambda: __import__("datetime").datetime.fromtimestamp(
             now[0], __import__("datetime").UTC
         ),
@@ -97,7 +98,8 @@ def test_github_body_marker_wins_over_bot_comment() -> None:
         return 200, b"[]"
 
     result = make_github_collector(
-        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport
+        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport,
+        repo="swcstudiospace/omes-bot",
     )()
     assert result.items[0]["greptile"] == "3/5"
 
@@ -113,7 +115,8 @@ def test_github_ignores_human_score_comment() -> None:
         return 200, b"[]"
 
     result = make_github_collector(
-        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport
+        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport,
+        repo="swcstudiospace/omes-bot",
     )()
     assert result.items[0]["greptile"] == "not reviewed"
 
@@ -152,7 +155,8 @@ def test_github_latest_bot_comment_beats_matching_review() -> None:
         ).encode()
 
     result = make_github_collector(
-        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport
+        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport,
+        repo="swcstudiospace/omes-bot",
     )()
     assert result.items[0]["greptile"] == "2/5"
 
@@ -171,7 +175,8 @@ def test_github_review_score_matches_capitalized_score() -> None:
         )
 
     result = make_github_collector(
-        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport
+        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport,
+        repo="swcstudiospace/omes-bot",
     )()
     assert result.items[0]["greptile"] == "4/5"
 
@@ -261,6 +266,7 @@ def test_github_zero_score_and_body_score_skips_comment_calls() -> None:
     result = make_github_collector(
         env={"GITHUB_PAT_DESK_LEAD": "token"},
         transport=_slow_pr_transport(calls, 2, 0.0),
+        repo="swcstudiospace/omes-bot",
     )()
     assert [row["greptile"] for row in result.items] == ["0/5", "0/5"]
     assert not any("/comments" in u or "/reviews" in u for u in calls)
@@ -272,6 +278,7 @@ def test_github_per_pr_calls_run_concurrently() -> None:
     result = make_github_collector(
         env={"GITHUB_PAT_DESK_LEAD": "token"},
         transport=_slow_pr_transport(calls, 16, 0.2),
+        repo="swcstudiospace/omes-bot",
     )()
     elapsed = time.monotonic() - started
     assert result.status == "ok" and len(result.items) == 16
