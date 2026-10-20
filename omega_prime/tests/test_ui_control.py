@@ -259,6 +259,27 @@ def test_status_discards_terminal_duplicate_answers_after_concurrent_cleanup(
         assert store.next_command() is None
 
 
+def test_resolved_answer_discards_later_queued_answer_before_status_and_poll(
+    tmp_path: Path,
+) -> None:
+    with _store(tmp_path) as store:
+        store.register_request(IDENTITY, {"method": "confirm", "message": "Done?"})
+        store.answer(IDENTITY, "confirm", True)
+        store.answer(IDENTITY, "confirm", False)
+
+        selected = store.next_command()
+        assert selected is not None
+        store.acknowledge_command(
+            selected["queue_id"],
+            job_id=IDENTITY["job_id"],
+            session_generation=IDENTITY["session_generation"],
+        )
+        store.resolve_request(IDENTITY, "answered")
+
+        assert store.status()["queued_commands"] == 0
+        assert store.next_command() is None
+
+
 def test_abort_requires_observed_exact_session(tmp_path: Path) -> None:
     with _store(tmp_path) as store:
         with pytest.raises(UIControlError, match="observed pending session"):

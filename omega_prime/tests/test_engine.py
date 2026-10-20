@@ -428,6 +428,8 @@ def test_engine_body_reads_result_fields() -> None:
 
 def test_engine_usage_reaches_prime_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
     import omega_prime.agent.conversation_loop as loop
+    from omega_prime.engine.attach import _accepted
+    from omega_prime.engine.omp_driver import EngineResult
 
     observed: dict[str, Any] = {}
 
@@ -441,16 +443,17 @@ def test_engine_usage_reaches_prime_evaluation(monkeypatch: pytest.MonkeyPatch) 
         model=ScriptedModel([]),
         prime_hooks=object(),
     )
-    routed = {
-        "messages": [{"role": "user", "content": "ping"}],
-        "api_calls": 1,
-        "engine": {
-            "usage": {"input_tokens": 17, "output_tokens": 9},
-            "started": True,
-        },
-        "turn_exit_reason": "engine",
-        "final_response": "done",
-    }
+    routed = _accepted(
+        "ping",
+        None,
+        EngineResult(
+            True,
+            "job-token-usage",
+            final_text="done",
+            usage={"input_tokens": 17, "output_tokens": 9},
+            started=True,
+        ),
+    )
 
     result = _seal_engine_turn(agent, routed, 0)
 
@@ -1964,12 +1967,20 @@ def test_cli_ui_status_renders_attachment_and_cleanup_details(
             "cleanup_conflicts": ["cleanup failed: PermissionError"],
         },
     )
+    # Keep relevant events visible even when ordinary watch events are newer.
+    for _ in range(25):
+        append_event(events_path, {"type": "message_update", "text": "noise"})
 
     assert (
         cli_main(["ui", "status", "--job", "job-status", "--state-dir", str(state)])
         == 0
     )
     status_output = capsys.readouterr().out
+    payload = json.loads(status_output)
     assert "ui_control_attachment status=attached" in status_output
     assert "mcp_attachment status=attached" in status_output
-    assert "cleanup_conflicts=" in status_output
+    assert any(
+        event
+        == 'mcp_attachment status=attached cleanup_conflicts=["cleanup failed: PermissionError"]'
+        for event in payload["events"]
+    )

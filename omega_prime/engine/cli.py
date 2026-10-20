@@ -68,12 +68,10 @@ def _read_status_events(env: dict[str, str], job: str, limit: int = 20) -> list[
         "cleanup_conflict",
         "cleanup_failed",
     }
-    events = list(iter_events(path) or [])
-    return [
-        format_event(event)
-        for event in events[-limit:]
-        if event.get("type") in relevant
+    events = [
+        event for event in iter_events(path) or [] if event.get("type") in relevant
     ]
+    return [format_event(event) for event in events[-limit:]]
 
 
 def _emit(payload: Any) -> None:
