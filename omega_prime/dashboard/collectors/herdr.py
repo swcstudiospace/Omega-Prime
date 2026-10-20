@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any
 
 from omega_prime.dashboard.model import SourceResult
@@ -114,12 +116,38 @@ def _collect_agents(value: Any, workspace: str | None = None) -> list[dict[str, 
     return found
 
 
+def _process_info(
+    pane_id: str, runner: Callable[[list[str]], str] | None, timeout: float
+) -> tuple[list[dict[str, Any]], Any] | None:
+    """Foreground processes and shell pid for one pane, or None on failure."""
+    argv = ["herdr", "pane", "process-info", "--pane", pane_id]
+    try:
+        raw = (
+            runner(argv)
+            if runner is not None
+            else _default_runner(argv, timeout=timeout)
+        )
+        info = json.loads(raw)["result"]["process_info"]
+        procs = [
+            proc
+            for proc in info.get("foreground_processes") or []
+            if isinstance(proc, dict)
+        ]
+        return procs, info.get("shell_pid")
+    except Exception:
+        return None
+
+
 def make_herdr_collector(
-    *, runner: Callable[[list[str]], str] | None = None, timeout: float = 3.0
+    *,
+    runner: Callable[[list[str]], str] | None = None,
+    timeout: float = 3.0,
+    lookup_budget: float = 4.0,
 ) -> Callable[[], SourceResult]:
     """Create a Herdr collector with an independent subprocess deadline."""
 
     def collect() -> SourceResult:
+        started = time.monotonic()
         try:
             output = (
                 runner(["herdr", "api", "snapshot"])
@@ -142,41 +170,35 @@ def make_herdr_collector(
             items = _collect_agents(snapshot)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return SourceResult("herdr", "unavailable", error="invalid Herdr snapshot")
-        for item in items:
-            if item.get("agent_status") in _AGENT_STATES:
-                continue
+        shell_panes = [
+            item for item in items if item.get("agent_status") not in _AGENT_STATES
+        ]
+        if shell_panes:
             # Plain shell panes: ask Herdr what runs in the foreground so the
-            # card can say working or idle instead of "unknown".
-            argv = ["herdr", "pane", "process-info", "--pane", item["pane_id"]]
-            try:
-                raw = (
-                    runner(argv)
-                    if runner is not None
-                    else _default_runner(argv, timeout=timeout)
-                )
-                info = json.loads(raw)["result"]["process_info"]
-                procs = [
+            # card can say working or idle. Lookups run concurrently under one
+            # shared deadline; a slow or failed lookup degrades only its pane.
+            remaining = max(0.1, lookup_budget - (time.monotonic() - started))
+            pool = ThreadPoolExecutor(max_workers=min(8, len(shell_panes)))
+            futures = {
+                pool.submit(
+                    _process_info, item["pane_id"], runner, min(timeout, remaining)
+                ): item
+                for item in shell_panes
+            }
+            done, _ = wait(futures, timeout=remaining)
+            pool.shutdown(wait=False, cancel_futures=True)
+            for future, item in futures.items():
+                info = future.result() if future in done else None
+                if info is None:
+                    continue
+                procs, shell_pid = info
+                job = [
                     proc
-                    for proc in info.get("foreground_processes") or []
-                    if isinstance(proc, dict)
+                    for proc in procs
+                    if proc.get("pid") != shell_pid and proc.get("name") not in _SHELLS
                 ]
-            except (
-                OSError,
-                subprocess.TimeoutExpired,
-                json.JSONDecodeError,
-                KeyError,
-                TypeError,
-                AttributeError,
-            ):
-                continue
-            shell_pid = info.get("shell_pid")
-            job = [
-                proc
-                for proc in procs
-                if proc.get("pid") != shell_pid and proc.get("name") not in _SHELLS
-            ]
-            item["foreground"] = _command_label(job[0]) if job else None
-            item["has_job"] = bool(job)
+                item["foreground"] = _command_label(job[0]) if job else None
+                item["has_job"] = bool(job)
         safe_items = redact_value(items)
         return SourceResult("herdr", "ok" if safe_items else "empty", safe_items)
 

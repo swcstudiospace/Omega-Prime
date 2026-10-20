@@ -226,8 +226,10 @@ def test_fleet_enabled_uses_two_gets_and_redacts_token(tmp_path: Path) -> None:
 
     result = make_fleet_collector(enabled=True, env_file=config, transport=transport)()
     assert result.status == "ok"
-    assert len(calls) == 2
-    assert result.extra == {"hitl_count": 3}
+    # /status, /jobs, and /hitl (which here has no `pending` list, so the
+    # count falls back to job states plus /status).
+    assert len(calls) == 3
+    assert result.extra == {"hitl_count": 3, "hitl_pending": []}
     assert token not in json.dumps(result.__dict__)
     datetime.fromisoformat(result.items[0]["age_measured_at"])
 

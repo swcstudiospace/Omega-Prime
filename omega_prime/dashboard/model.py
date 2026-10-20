@@ -561,7 +561,7 @@ def normalize_tasks(
             )
         else:
             active.append(
-                Task(task_id, title, "fleet_job", owner, "unknown", updated, updated)
+                Task(task_id, title, "fleet_job", owner, "idle", updated, updated)
             )
 
     for item in procs:
@@ -697,7 +697,23 @@ def normalize_tasks(
                     )
                 )
     fleet = sources.get("fleet")
-    if (
+    pending_hitl = fleet.extra.get("hitl_pending") if fleet else None
+    if isinstance(pending_hitl, list) and pending_hitl:
+        for entry in pending_hitl:
+            if not isinstance(entry, dict):
+                continue
+            jid = str(entry.get("job_id") or "?")
+            question = entry.get("question")
+            key = f"wait:fleet:hitl:{jid}"
+            waiting[key] = WaitingItem(
+                key,
+                f"fleet job {jid} asks: {question}"
+                if isinstance(question, str) and question
+                else f"fleet job {jid} is waiting for a HITL answer",
+                None,
+                f"fleet:{jid}",
+            )
+    elif (
         fleet
         and isinstance(fleet.extra.get("hitl_count"), int)
         and fleet.extra["hitl_count"] > 0
@@ -729,8 +745,11 @@ def normalize_tasks(
     waiting_list.sort(
         key=lambda x: (x.since is not None, x.since or "", x.id), reverse=True
     )
-    finished.sort(key=lambda x: (x.finished_at is None, x.finished_at or "", x.id))
-    finished.reverse()
+    # Dated completions newest-first; undated ones after every dated entry.
+    finished.sort(
+        key=lambda x: (x.finished_at is not None, x.finished_at or "", x.id),
+        reverse=True,
+    )
     finished = finished[:50]
     return Snapshot(active, prs, waiting_list, finished)
 

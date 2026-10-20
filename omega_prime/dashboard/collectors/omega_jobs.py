@@ -16,6 +16,27 @@ from omega_prime.dashboard.redact import redact_line, redact_value
 _LIMIT = 262144
 
 
+_SESSION_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _is_job_dir(directory: Path) -> bool:
+    """A custom-ID job dir: its session.json names the same ``job_id``.
+
+    The engine accepts caller-chosen job ids (``run(..., job_id="audit-1")``)
+    and writes ``job_id`` into ``session.json``; other directories are skipped.
+    """
+    if directory.name.startswith("."):
+        return False
+    session_path = directory / "session.json"
+    try:
+        if session_path.stat().st_size > _SESSION_MAX_BYTES:
+            return False
+        data = json.loads(session_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("job_id") == directory.name
+
+
 def make_omega_jobs_collector(
     *, jobs_root: Path, now_fn: Callable[[], datetime], window_hours: float = 24.0
 ) -> Callable[[], SourceResult]:
@@ -29,9 +50,11 @@ def make_omega_jobs_collector(
         cutoff = now_fn() - timedelta(hours=window_hours)
         items: list[dict[str, Any]] = []
         total = 0
-        for directory in sorted(jobs_root.glob("job-*")):
+        for directory in sorted(jobs_root.iterdir()):
             session_path = directory / "session.json"
-            if not session_path.is_file():
+            if not directory.is_dir() or not session_path.is_file():
+                continue
+            if not directory.name.startswith("job-") and not _is_job_dir(directory):
                 continue
             total += 1
             try:

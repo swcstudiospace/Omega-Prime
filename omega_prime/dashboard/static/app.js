@@ -6,6 +6,7 @@
   const lastRefreshEl = byId('last-refresh');
   let snapshotAt = 0;
   let eventSource = null;
+  let streamOpen = false;
   let pollingTimer = null;
   let reconnectTimer = null;
   let staleTimer = null;
@@ -229,8 +230,11 @@
   function startPolling() {
     if (pollingTimer) return;
     const poll = async () => {
+      // This handle has fired; clear it so a later startPolling can re-arm.
+      pollingTimer = null;
       await fetchSnapshot();
-      if (eventSource) return;
+      // Keep polling until a stream is actually open, not merely created.
+      if (streamOpen || pollingTimer) return;
       pollingTimer = window.setTimeout(poll, 5000);
     };
     pollingTimer = window.setTimeout(poll, 5000);
@@ -247,6 +251,7 @@
   }
   function connectStream() {
     if (eventSource) eventSource.close();
+    streamOpen = false;
     const source = new EventSource('/api/stream');
     eventSource = source;
     source.addEventListener('snapshot', (event) => {
@@ -254,10 +259,12 @@
     });
     source.onopen = () => {
       if (eventSource !== source) return;
+      streamOpen = true;
       stopPolling(); setConnection('live');
     };
     source.onerror = () => {
       if (eventSource !== source) return;
+      streamOpen = false;
       source.close(); eventSource = null;
       setConnection('reconnecting'); startPolling();
       if (reconnectTimer) window.clearInterval(reconnectTimer);

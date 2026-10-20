@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.dashboard.model import SourceResult
-from omega_prime.dashboard.redact import redact_value
+from omega_prime.dashboard.redact import redact_line, redact_value
 
 
 class _FleetEndpointPolicy:
@@ -115,7 +115,8 @@ def make_fleet_collector(
             for job in jobs:
                 if not isinstance(job, dict):
                     continue
-                state = job.get("state")
+                # The coordinator reports `status`; older shapes used `state`.
+                state = job.get("status", job.get("state"))
                 if "hitl" in str(state).lower():
                     hitl += 1
                 updated = job.get("updated_at")
@@ -138,7 +139,36 @@ def make_fleet_collector(
                         ).isoformat(),
                     }
                 )
-            if isinstance(status_data, dict):
+            # GET /hitl is the authoritative list of questions awaiting a human.
+            pending: list[dict[str, Any]] | None = None
+            with suppress(Exception):
+                hitl_data = get(f"{base}/hitl")
+                raw = (
+                    hitl_data.get("pending")
+                    if isinstance(hitl_data, dict)
+                    else hitl_data
+                )
+                if isinstance(raw, list):
+                    pending = []
+                    for entry in raw[:50]:
+                        if not isinstance(entry, dict):
+                            continue
+                        question = entry.get(
+                            "question", entry.get("prompt", entry.get("message"))
+                        )
+                        pending.append(
+                            {
+                                "job_id": str(entry.get("job_id", entry.get("id", ""))),
+                                "question": redact_line(
+                                    question, cap=160, extra=(token,)
+                                )
+                                if isinstance(question, str)
+                                else None,
+                            }
+                        )
+            if pending is not None:
+                hitl = len(pending)
+            elif isinstance(status_data, dict):
                 extra_hitl = status_data.get("hitl", status_data.get("hitl_pending", 0))
                 if isinstance(extra_hitl, int) and not isinstance(extra_hitl, bool):
                     hitl += extra_hitl
@@ -146,7 +176,11 @@ def make_fleet_collector(
                 "fleet",
                 "ok",
                 items=redact_value(items, extra=(token,), env={}),
-                extra={"hitl_count": hitl},
+                extra=redact_value(
+                    {"hitl_count": hitl, "hitl_pending": pending or []},
+                    extra=(token,),
+                    env={},
+                ),
             )
         except Exception as exc:
             return SourceResult(
