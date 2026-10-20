@@ -95,12 +95,13 @@ Requirements: milestones/v19-REQUIREMENTS.md. Phase 77.1 live UAT stays user-own
 
 ## v20 Wiring (in progress)
 
-Wiring phases 1–7 map to GSD phases 97–103. This milestone records the requested
-sequence, not evidence that earlier wiring phases have shipped.
+Wiring phases 1–7 map to GSD phases 97–103. They are built in parallel in
+separate worktrees; integration/rebase and merge order remains 97 through 103.
+Phase 99 implementation is recorded here without marking Phases 97 or 98 shipped.
 
 - [ ] Phase 97: Substrate direct connect + settings loader + no time caps
 - [ ] Phase 98: Shared memory via substrate, Hindsight fallback
-- [ ] Phase 99: Solo mode, Desk optional — current; planning only
+- [x] Phase 99: Solo mode, Desk optional — implemented locally; rebase integration pending
 - [ ] Phase 100: omp engine wiring
 - [ ] Phase 101: Real U2 LocalExecutor
 - [ ] Phase 102: Schedulers, dead modules, env docs
@@ -111,10 +112,10 @@ sequence, not evidence that earlier wiring phases have shipped.
 **Goal:** Omega Prime runs as a solo bot without requiring the Desk. Preserve
 explicitly configured Desk planes as opt-in compatibility paths; do not delete them.
 
-**Depends on:** Phase 98 (wiring phase 2), including Phase 97's substrate docs search
-contract (`question` argument). Re-read and verify prerequisites before execution;
-this planning session does not mark phases 97 or 98 complete.
-
+**Planned dependency:** Phase 98 and Phase 97's substrate docs-search wire contract
+(`question`). The operator authorized parallel phase implementation on the
+current checkout; this phase deliberately leaves `SubstrateClient.docs_search`
+unchanged. Rebase and integrate with Phase 97 before merging this phase.
 **Requirements:** G3 and G11-desk-vars from the supplied uplift (audit gap labels,
 not tracker identifiers).
 
@@ -149,17 +150,17 @@ not tracker identifiers).
    `mypy omega_prime/`; `pytest omega_prime/tests -q`; and, when prompts change,
    `bash omega_prime/scripts/assemble-prompts.sh --check`.
 
-**Out of scope:** Implementation during this planning session; deleting Desk
-code; the separate user-desk-lead connector; the full environment table
-generator (Phase 102); connector restarts, deployment, live configuration,
-pushes, PRs, or merges. No new packages or session/turn time caps.
+**Out of scope:** Deleting Desk code; the separate user-desk-lead connector; the
+full environment table generator (Phase 102); connector restarts, deployment,
+live configuration, pushes, PRs, or merges. No new packages or session/turn time
+caps.
 
-**Plans (not executed):**
+**Plans and execution:**
 
-- Wave 1: [99-01 — Solo routing and regression proof](phases/99-solo-mode-desk-optional/99-01-PLAN.md)
-- Wave 2: [99-02 — On-demand gateway prompt](phases/99-solo-mode-desk-optional/99-02-PLAN.md)
-- Wave 2: [99-03 — Repository-grounded skill links](phases/99-solo-mode-desk-optional/99-03-PLAN.md)
-- Wave 2: [99-04 — Optional Desk docs and link validation](phases/99-solo-mode-desk-optional/99-04-PLAN.md)
+- [x] [99-01 — Solo routing and regression proof](phases/99-solo-mode-desk-optional/99-01-PLAN.md)
+- [x] [99-02 — On-demand gateway prompt](phases/99-solo-mode-desk-optional/99-02-PLAN.md)
+- [x] [99-03 — Repository-grounded skill links](phases/99-solo-mode-desk-optional/99-03-PLAN.md)
+- [x] [99-04 — Optional Desk docs and link validation](phases/99-solo-mode-desk-optional/99-04-PLAN.md)
 
-Wave 2 units are file-disjoint and consume the verified Wave 1 routing contract.
-Execution is gated on Phase 97/98 prerequisites; planning is not implementation.
+Phase execution summary: [99-SUMMARY.md](phases/99-solo-mode-desk-optional/99-SUMMARY.md).
+Verification: [99-VERIFICATION.md](phases/99-solo-mode-desk-optional/99-VERIFICATION.md).

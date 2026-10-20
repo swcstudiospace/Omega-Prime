@@ -6,14 +6,14 @@
     {
       "number": 99,
       "name": "Solo mode, Desk optional",
-      "status": "planning",
+      "status": "completed",
       "directory": ".planning/phases/99-solo-mode-desk-optional"
     }
   ],
   "next": {
     "command": "/gsd:progress",
-    "label": "Review Phase 99 execution prerequisites",
-    "reason": "Four unexecuted plans exist; verify Phase 97/98 contracts before separately authorized execution"
+    "label": "Resume v20 Wiring after Phase 99",
+    "reason": "Phase 99 is implemented in its isolated worktree; stop here as requested. Rebase after Phases 97/98 integrate; do not audit, complete, or clean up the milestone."
   },
   "updated_at": "2026-10-21"
 }

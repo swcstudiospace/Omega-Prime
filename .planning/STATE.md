@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v20
 milestone_name: Wiring
-status: Planning phase 99
-stopped_at: Four Phase 99 plans authored; execution awaits verified Phase 97/98 prerequisites.
+status: Phase 99 implemented; milestone in progress
+stopped_at: Phase 99 implementation, verification, and local commit complete; stop requested before milestone audit/complete/cleanup.
 last_updated: "2026-10-21"
 last_activity: 2026-10-21
-last_activity_desc: Planning Solo mode, Desk optional (GSD 99; wiring phase 3)
+last_activity_desc: Implementing Solo mode, Desk optional (GSD 99; wiring phase 3)
 state_head: 44b28dfd50be6a63b175227a6f748def6f4bcc9c
 progress:
   total_phases: 7
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 4
-  completed_plans: 0
-  percent: 0
+  completed_plans: 4
+  percent: 14
 current_phase: 99
 current_plan: null
 ---
@@ -25,14 +25,14 @@ current_plan: null
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** v20 Wiring, Phase 99 — Solo mode, Desk optional. Planning only; no implementation authorized in this session. Phases 97–103 map to wiring phases 1–7. Phase 99 depends on Phase 98 and Phase 97's substrate `docs_search(question=...)` contract; their completion is not established in this checkout. Preserve all shipped milestones and the user-owned Phase 77.1 live UAT deferral.
+**Current focus:** v20 Wiring, Phase 99 — Solo mode, Desk optional. Phase 99 is implemented and committed locally in its own worktree. Phases 97 and 98 remain unverified/unmerged; Phase 97 owns the substrate docs-search wire mapping, which this phase intentionally did not change. Rebase this phase after its upstream integrations and resolve the API/wire seam before merge. Preserve all shipped milestones and the user-owned Phase 77.1 live UAT deferral.
 
 ## Current Position
 
 Phase: 99 — Solo mode, Desk optional (v20 Wiring).
-Plan: 99-01 through 99-04 in .planning/phases/99-solo-mode-desk-optional/ (unexecuted; Wave 1 routing, Wave 2 prompts/skills/docs).
-Status: Planning only; implementation not started. Verify Phase 97/98 prerequisites before execution, including substrate docs_search question wire mapping. Phase 77.1 stays verification_deferred_human.
-Last activity: 2026-10-21 — v20 registered; four Phase 99 plans, research, and validation matrix authored; review and artifact verification are recorded in the planning receipt.
+Plan: 99-01 through 99-04 in .planning/phases/99-solo-mode-desk-optional/ (completed).
+Status: Phase 99 locally implemented; milestone remains in progress. Verification has only documented `prime-agent`/`rlm` baseline failures. Phase 77.1 stays verification_deferred_human.
+Last activity: 2026-10-21 — implemented solo routing, on-demand Desk skill loading, skill/docs updates; verified focused tests and exact phase gates.
 
 ## Closeout
 
@@ -102,7 +102,7 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ### Roadmap Evolution
 
 - v14 Boundary alignment shipped 2026-10-10: phases 71–74, audit passed 10/10.
-- v20 Wiring opened for phases 97–103. Current planning target: Phase 99; no wiring implementation completion inferred from the roadmap.
+- v20 Wiring opened for phases 97–103. Phase 99 has been implemented in its isolated worktree; integration remains in operator-controlled merge order.
 - Count text in BND-05 and BND-06 moved from 110/147 to 117/154 with the phase 73 tools.
 - v14 application updates were merged through PR #17; v15 continues on `v15-integrated-readiness`.
 - v15 has phases 75–78 and 21 approved requirements, with no unrelated seeds or upstream changes.
@@ -145,9 +145,10 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ## Session
 
 **Last session:** 2026-10-21
-**Stopped at:** Phase 99 planning; implementation not started.
-**Resume file:** .planning/phases/99-solo-mode-desk-optional/99-01-PLAN.md
+**Stopped at:** Phase 99 implementation committed locally; milestone audit, completion, and cleanup not run per instruction.
+**Resume file:** .planning/phases/99-solo-mode-desk-optional/99-SUMMARY.md
 
 ## Operator Next Steps
 
-- Review Phase 99 plans and verify Phase 97/98 prerequisite contracts before a separately authorized execution session.
+- Rebase Phase 99 onto main after Phases 97 and 98 merge; integrate the Phase 97 substrate docs-search wire mapping without changing this phase's API call.
+- Continue later wiring phases only when requested; do not treat Phase 99 as milestone completion.

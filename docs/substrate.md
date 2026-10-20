@@ -5,8 +5,9 @@ trail, memory, and docs plane that every agent on the install uses. When
 the surface is wired, turns open with a brief of what other agents are
 doing, report their own tool trail with graph provenance, share memory
 across agents, recall episodes from Hindsight, and answer docs questions
-from RAGflow. When it is not wired, Omega Prime runs fully local — the substrate
-never blocks a turn.
+through the substrate `docs_search` tool. When it is not wired, Omega Prime
+runs locally. Substrate is an optional integration, but individual calls have
+different failure contracts; a failed write is not reported as successful.
 
 ## What is wired to what
 
@@ -40,19 +41,32 @@ broker-known secrets from error text before it is stored or returned.
 
 ## Failure behavior
 
-Fail-open calls degrade so a substrate outage never blocks a turn;
-fail-closed calls raise `SubstrateError` so no caller mistakes a lost write
-for a landed one:
+Brief and event calls fail open so an outage does not block a turn; writes
+that must be durable fail closed rather than pretending they landed:
 
 | Call | On outage |
 | --- | --- |
 | Brief (`POST /brief`) | Fail open: empty brief (`""`) |
-| Event emit (`POST /events`) | Fail open: `stored: false` plus a redacted error |
+| Event emit (`POST /events`) | Fail open at the client boundary: `stored: false` plus a redacted error |
 | Shared memory search | Fail open: empty results (`[]`) |
 | Shared memory writes, graph claim/release/complete/heartbeat | Fail closed: the caller gets an explicit error |
-| Docs search (`docs_search`) | Raises: the caller gets an explicit error, never an empty success |
+| Docs search (`docs_search`) | Raises: the caller gets an explicit error, never an empty success or local fallback |
 | Hindsight retain/recall | Falls back to the local bank-tagged store |
 | Reflect, page search | Degrade to empty |
+
+Lead-tool events are first appended to the local `events.ndjson` mirror.
+That local record remains the truthful local receipt when forwarding fails;
+the caller receives an error marked `local_mirror: true`, not a claim that
+the substrate accepted it. Event kinds are mirrored from the upstream
+substrate contract, not a separate source of truth.
+
+The public Omega Prime lead docs-search API is `lead_docs_search(query=...)`;
+the Python client keeps that `query` argument. The substrate MCP wire contract
+is distinct: Phase97's `docs_search` call sends the question as
+`question=...`, not `query=...`. This page documents the contract and does not
+claim that the wire mapping is implemented. If docs search fails, the caller
+gets an explicit error; it never returns an empty success or falls back to
+local search.
 
 Briefs are cached per session and written to `.substrate/BRIEF.md` as the
 offline fallback. Event intake carries kind/summary/surface plus caller

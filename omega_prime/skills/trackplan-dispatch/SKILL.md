@@ -8,15 +8,15 @@ bots: [bot-00-omega-prime]
 
 ## Served tools
 
-Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+Use only tools available in the Omega Prime registry. The external Desk Gateway is optional. In Solo mode, `not_configured: solo` is a terminal local blocker; it never authorizes `agent_bus_*`, Hermes, SSH, or another external transport. Use an external Desk transport only when Solo is off and Desk is explicitly configured, and only when the served tool returns `not_configured`.
 
 **Owner:** Programming Lead (bot-00). LEAD orchestrates; specialists own product paths via `ownership.yaml`. This skill never invents product-code ownership.
 
-**Desk defaults:** Linear density **Dense** (one issue per GoT node, one sub-issue per CoT step). Node target **5–8**. Step target **4–8 per node**. CoT fill that produced those steps was sequential by default. Notion collection **🧩 Agent Task Graph** (`{{NOTION_TASK_GRAPH_COLLECTION}}`). Linear team **Spectrum Web Co**. Companion docs: `https://github.com/swcstudiospace/programming-desk/blob/main/docs/gotxcot-cloud-pipeline.md`, `https://github.com/swcstudiospace/programming-desk/blob/main/docs/github-sot-orchestration.md`.
+**Desk defaults:** Linear density **Dense** (one issue per GoT node, one sub-issue per CoT step). Node target **5–8**. Step target **4–8 per node**. CoT fill that produced those steps was sequential by default. Notion collection **Agent Task Graph** (`{{NOTION_TASK_GRAPH_COLLECTION}}`). Linear team **Spectrum Web Co**. There is no verified local copy of the former Programming Desk pipeline or GitHub orchestration docs; they are not required authorities.
 
 **Prerequisite skill:** `skills/gotxcot-uplift` (first uplift → GoT → per-node CoT → kickoff → **second uplift**). This skill consumes the second uplift. It does not create it.
 
-**Status:** Skill written for the desk pack. E2E launch → PR → Greptile → QUALITY **not verified**. Lane B on Omega Prime is `lead_bus_start` then `lead_bus_wait`. An external Hermes bus (`agent_bus_*` on a connected gateway) is a fallback only when those served tools return `not_configured`. Local stdio `user-hermes` was intentionally uninstalled on the desk host on 2026-09-24; do not rebuild `hermes-mcp-bridge.mjs`. `handoff_to_hermes` is Hermes-only fallback.
+**Status:** Skill written for the desk pack. E2E launch → PR → Greptile → QUALITY **not verified**. Lane B on Omega Prime is `lead_bus_start` then `lead_bus_wait`. External Hermes bus (`agent_bus_*`) is available only when Solo is off, Desk is explicitly configured, and the served tools return `not_configured`. Local stdio `user-hermes` was intentionally uninstalled on the desk host on 2026-09-24; do not rebuild `hermes-mcp-bridge.mjs`. `handoff_to_hermes` is an explicitly configured Hermes-only fallback.
 
 ---
 
@@ -72,12 +72,12 @@ If the XML has fewer than 5 issues and no recorded fallback/gap, send it back to
 
 ## Lane selection
 
-Matches `https://github.com/swcstudiospace/programming-desk/blob/main/docs/github-sot-orchestration.md`:
+Lane selection follows the rules in this skill; no verified local copy of the former Programming Desk orchestration document is available.
 
 | `runtime` | Lane | Action |
 |---|---|---|
 | `cursor-cloud` / `cloud` / omitted | **A — Cursor Cloud Agent** | Default. Notion `Agent` = `cursor-cloud`. |
-| `hermes` | **B — VPS Hermes** | Prefer `lead_bus_start` / `lead_bus_wait`. Fall back to a connected gateway's `agent_bus_*` only when the served tools are `not_configured`. Do not reinstall stdio `user-hermes`. **Never** invent an SSH coding handoff. |
+| `hermes` | **B — VPS Hermes** | Prefer `lead_bus_start` / `lead_bus_wait`. Use a connected gateway's `agent_bus_*` only when Solo is off, Desk is explicitly configured, and the served tools return `not_configured`. `not_configured: solo` is terminal. Do not reinstall stdio `user-hermes` or invent an SSH coding handoff. |
 | Clear path ownership only | **C — Specialist** | Out of scope here → `SendToAgent`. The ticket still cites the second-uplift `<ISSUES>` URLs for the nodes that seat owns. |
 
 Lanes may compose (A/B for a node, C for a path slice). Lane B does **not** bypass G-1…G-6.
@@ -154,16 +154,10 @@ Use the Cursor Cloud Agent launch surface available to LEAD:
 | Tool | Where it lives | Use |
 |---|---|---|
 | `lead_bus_start`, `lead_bus_wait` | Omega Prime registry | Preferred Lane B control |
-| `agent_bus_health`, `agent_bus_start_job`, `agent_bus_get_job`, `agent_bus_wait_job` | External Desk Gateway or Hermes MCP, when connected | Fallback only after the served tools return `not_configured` |
+| `agent_bus_health`, `agent_bus_start_job`, `agent_bus_get_job`, `agent_bus_wait_job` | External Desk Gateway or Hermes MCP, only when Solo is off, Desk is explicitly configured, and served bus tools return `not_configured` | Conditional fallback; never for `not_configured: solo` |
 | `user-hermes` (stdio) | Uninstalled on purpose. Do not rebuild | Missing `hermes-mcp-bridge.mjs` is not a cue to recreate the script |
 
-**If `lead_bus_start` is missing and the external `agent_bus_*` tools are missing, unauthorized, or return an error: STOP.** Record the blocker. Do **not**:
-
-- Rebuild `/workspace/hermes-mcp-bridge.mjs` or reinstall stdio `user-hermes`.
-- Invent an SSH coding handoff (unless the operator explicitly routes INFRA for ops).
-- Paste the packet only into chat as the durable record.
-- Claim Hermes picked up the job without a tool result or a GitHub draft PR.
-- Call `handoff_to_hermes` for a goal that already has an Agent Bus job.
+If `lead_bus_start` is missing or returns `not_configured: solo`, stop and record the local blocker. Do not try `agent_bus_*`, Hermes, SSH, or another external transport.
 
 ### Live tools
 
@@ -174,11 +168,11 @@ Preferred path on Omega Prime:
 | `lead_bus_start` | Start one bus job. Returns the job id. Requires approval | required `runtime`, `goal`; optional `provider`, `idempotency_key` |
 | `lead_bus_wait` | Poll until the job finishes or the timeout | required `job_id`; optional `timeout_sec` (default 180), `poll_sec` |
 
-External fallback, only when those two return `not_configured` and a gateway is connected: `agent_bus_health`, `agent_bus_start_job`, `agent_bus_get_job`, `agent_bus_wait_job`. Same goal text. Do not call them first.
+External fallback, only when Solo is off, Desk is explicitly configured, and the served bus tools return `not_configured`: `agent_bus_health`, `agent_bus_start_job`, `agent_bus_get_job`, `agent_bus_wait_job`. Do not call them first or after a Solo refusal.
 
 Put the GitHub work packet and the second-uplift XML in `goal` (and keep the same text in the draft PR). A public `wss` URL may need `BUS_TOKEN` on the gateway. The token is not part of the tool result. Do not write it into the prompt, the PR, or a receipt.
 
-**`handoff_to_hermes`** is the Hermes-only durable EXECUTE fallback. Prefer `lead_bus_start` for live jobs. Use this tool only for one durable Hermes EXECUTE. Do not fire multiple handoffs in parallel for one goal. Poll `get_task`. Do not re-submit.
+**`handoff_to_hermes`** is a Hermes-only durable EXECUTE fallback. Use it only when Solo is off and Desk is explicitly configured; never use it after `not_configured: solo`. Prefer `lead_bus_start` for live jobs. Use one durable Hermes EXECUTE per goal, poll `get_task`, and do not re-submit.
 
 Live schema:
 
@@ -255,9 +249,9 @@ Honest `unverified` / `blockers` are success. Do not fabricate PR URLs, Greptile
 | Gap | Impact |
 |---|---|
 | E2E not verified | Intake → second uplift → launch → PR → Greptile → QUALITY → sync is **not** proven |
-| Lane B E2E | Served path is `lead_bus_start` / `lead_bus_wait`. External `agent_bus_*` is fallback only. This skill text does not prove a Hermes job id plus a draft PR |
+| Lane B E2E | Served path is `lead_bus_start` / `lead_bus_wait`. External `agent_bus_*` is available only when Solo is off, Desk is explicitly configured, and served bus tools return `not_configured`; this skill text does not prove a Hermes job id plus a draft PR |
 | `user-hermes` stdio | Uninstalled on the desk host 2026-09-24. Do not rebuild `hermes-mcp-bridge.mjs`. Agent Bus supersedes that bridge |
-| `handoff_to_hermes` | Hermes-only durable EXECUTE fallback. Required `goal` (string) and `messages` (array of free-form objects, typically role/content turns). Optional `title`, `priority` (default `normal`), `labels`, `tenant_id`, `idempotency_key`. Prefer `lead_bus_start` for live jobs. One handoff per goal; poll `get_task`; do not re-submit |
+| `handoff_to_hermes` | Hermes-only durable EXECUTE fallback, only when Solo is off and Desk is explicitly configured. Required `goal` (string) and `messages` (array of free-form objects); optional `title`, `priority`, `labels`, `tenant_id`, `idempotency_key`. Prefer `lead_bus_start` for live jobs. One handoff per goal; poll `get_task`; do not re-submit |
 | Cloud Agent dry-run | Launch only when the operator intends real work |
 | PR → Notion/Linear sync | Still to build. Do not invent tracker rows |
 | VPS engine constants | May still be MIN_NODES=3 until patched. Desk dispatch still requires 5–8 `<ISSUE>` nodes in the XML |
@@ -268,13 +262,11 @@ Honest `unverified` / `blockers` are success. Do not fabricate PR URLs, Greptile
 
 | Path | Role |
 |---|---|
-| `skills/gotxcot-uplift/SKILL.md` | Produces the second-uplift XML this skill requires |
-| `https://github.com/swcstudiospace/programming-desk/blob/main/docs/gotxcot-cloud-pipeline.md` | Dense policy, two uplifts |
-| `https://github.com/swcstudiospace/programming-desk/blob/main/docs/github-sot-orchestration.md` | Lanes, SoT, Greptile, Hermes |
-| `https://github.com/swcstudiospace/programming-desk/blob/main/docs/desk-operating-model.md` | Lane C ticket shape |
-| `ownership.yaml` | Path → specialist |
-| `skills/verification-receipts/SKILL.md` | G-2 receipt rules |
-| `skills/trackplan-dispatch/prompt-template.md` | Prompt scaffold |
-| `skills/greptile-merge-gate/SKILL.md` | After the draft PR exists |
-| `vendor/ultrathink-policy/constants.ts` | 5–8 nodes, 4–8 steps |
+| [GoT-CoT uplift](../gotxcot-uplift/SKILL.md) | Produces the second-uplift XML this skill requires |
+| [Ownership](../../../omega_prime/ownership.yaml) | Path → specialist |
+| [Verification receipts](../verification-receipts/SKILL.md) | Receipt rules |
+| [Prompt template](prompt-template.md) | Prompt scaffold |
+| [Greptile merge gate](../greptile-merge-gate/SKILL.md) | After the draft PR exists |
+
+No verified local copy of the former Programming Desk pipeline, GitHub orchestration, or operating-model documents is available; this skill does not treat them as required policy.
 </skill>

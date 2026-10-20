@@ -9,15 +9,11 @@ gates: [G-2, G-3]
 
 ## Served tools
 
-Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+Use only tools available in the Omega Prime registry. The external Desk Gateway is optional. In Solo mode, `not_configured: solo` is terminal and does not authorize an external transport. Use an external Desk only when Solo is off and Desk is explicitly configured, and only after a served tool returns `not_configured`.
 
 ## When this applies (L1)
 
-The desk's memory plane is Hindsight, reached only through the gateway: `lead_brief` at turn
-start, `lead_memory_recall` when you need a fact, `lead_memory_retain` when you have one worth
-keeping. Banks: `pd-<seat>` is yours to write; `pd-desk` is shared, written by LEAD and QUALITY,
-read by all; `pd-lead-reports` is LEAD's. A weekly `reflect` prunes banks into mental models
-without your involvement.
+Memory tools are accessed through the available Omega Prime tool registry, or through an explicitly configured Desk Gateway. Shared and local memory behavior depends on the configured memory service. Use `lead_brief`, `lead_memory_recall`, and `lead_memory_retain` when available; do not treat an unavailable Solo service as permission to use another transport.
 
 **Retain is refused without `receipt_path` or `source`.** That is the whole discipline in one
 schema rule: memory holds what was verified or where it was read, never what was believed.
@@ -92,9 +88,9 @@ lead_memory_retain {
 
 ### §4 Recall and the brief
 
-`lead_brief` runs at turn start (the gateway caches it five minutes; pass `refresh: true` after
-you retain something you need in the same turn). It returns the substrate brief for the Graph ID,
-recall from your bank and `pd-desk`, and your open tickets. `lead_memory_recall` with a `query`
+In configured Desk mode, `lead_brief` is cached for five minutes; pass `refresh: true` after
+retaining something needed in the same turn. It returns the substrate brief for the Graph ID,
+recall from your bank and `pd-desk`, and open tickets. `lead_memory_recall` with a `query`
 answers a specific question; `include_shared: false` narrows to your own bank.
 
 Recall is retrieval, not verification. A recalled command is a command to run again; a recalled

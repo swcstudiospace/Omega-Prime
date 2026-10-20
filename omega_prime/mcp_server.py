@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import threading
@@ -381,7 +382,10 @@ class _DeskSubstrate:
             for key, value in (event.items() if isinstance(event, dict) else ())
             if key != "kind" and value is not None
         }
-        result = self._client.emit("note", summary, **fields)
+        try:
+            result = self._client.emit("note", summary, **fields)
+        except Exception as exc:
+            return {"error": "upstream_error", "reason": str(exc)}
         if isinstance(result, dict) and result.get("stored") is False:
             return {
                 "error": "upstream_error",
@@ -405,7 +409,7 @@ class _DeskDocsIndex:
     def __init__(self, client: SubstrateClient) -> None:
         self._client = client
 
-    def __call__(self, query: str, limit: int, repo: str | None) -> list:
+    def __call__(self, query: str, limit: int, repo: str | None) -> list | dict:
         _ = repo
         result = _shape_substrate_docs(self._client, query)
         chunks = result.get("chunks") if isinstance(result, dict) else None
@@ -415,7 +419,7 @@ class _DeskDocsIndex:
                 if isinstance(result, dict) and result.get("error")
                 else "docs index returned a malformed response"
             )
-            raise RuntimeError(f"docs index failed: {reason}")
+            return {"error": reason}
         return chunks[:limit]
 
 
@@ -553,6 +557,18 @@ class _DeskBusClient:
                         "gateway": "desk_bus",
                     }
             return saved.rstrip("/"), None
+        if self._policy is not None:
+            try:
+                host = urlsplit(self._base_url).hostname or ""
+            except ValueError:
+                host = ""
+            if not host or not self._policy.allows_host(host):
+                shown = host or "that host"
+                return "", {
+                    "ok": False,
+                    "error": f"The seat policy does not allow {shown}.",
+                    "gateway": "desk_bus",
+                }
         return self._base_url, None
 
 
@@ -765,6 +781,7 @@ def default_registry(
     approval_log: Any = None,
     env: dict | None = None,
     work_root: str | Path | None = None,
+    bot_id: str = "bot-00-omega-prime",
 ) -> ToolRegistry:
     """Wire every family, including `delegate_task` on an in-process parent.
 
@@ -798,6 +815,8 @@ def default_registry(
     served but returns `not_configured: provider`.
     """
     env = dict(env or {})
+    solo_value = env.get("OMEGA_PRIME_SOLO")
+    solo = (bot_id == "bot-00-omega-prime") if solo_value is None else solo_value != "0"
     registry = ToolRegistry(approval_log=approval_log, policy=policy)
     root = Path(root)
     home = Path(home)
@@ -895,16 +914,66 @@ def default_registry(
         policy=policy,
     )
     docs_url = (env.get(DESK_DOCS_INDEX_ENV) or "").strip()
+    substrate_url = (env.get("SUBSTRATE_URL") or "").strip()
     notify_url = (env.get(DESK_NOTIFY_URL_ENV) or "").strip()
     bus_url = (env.get(DESK_BUS_URL_ENV) or "").strip()
     from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
 
     bus_saved = ready_gateway_url("desk_bus", env)
     bus_blocked = gateway_block("desk_bus", env)
+    substrate_saved = ready_gateway_url("substrate", env)
+    substrate_blocked = gateway_block("substrate", env)
+    desk_docs = (
+        _DeskDocsIndex(substrate_client)
+        if solo
+        else (
+            _DeskDocsIndex(
+                SubstrateClient(
+                    docs_url or substrate_url or SUBSTRATE_DEFAULT_URL,
+                    token=substrate_token or None,
+                    honor_binding=True,
+                    binding_env=env,
+                    policy=policy,
+                )
+            )
+            if docs_url or substrate_url or substrate_saved or substrate_blocked
+            else None
+        )
+    )
+    desk_planes = {
+        "docs": (
+            "substrate"
+            if solo
+            else (
+                "blocked"
+                if substrate_blocked is not None
+                else (
+                    "configured"
+                    if docs_url or substrate_url or substrate_saved
+                    else "not_configured"
+                )
+            )
+        ),
+        "notify": (
+            "disabled_solo"
+            if solo
+            else ("configured" if notify_url else "not_configured")
+        ),
+        "bus": (
+            "disabled_solo"
+            if solo
+            else (
+                "blocked"
+                if bus_blocked is not None
+                else ("configured" if bus_saved or bus_url else "not_configured")
+            )
+        ),
+    }
     register_lead_tools(
         registry,
         LeadClient(
             LeadContext(
+                bot_id=bot_id,
                 root=root,
                 registry=registry,
                 memory=memory_store,
@@ -914,23 +983,18 @@ def default_registry(
                 roster=RosterStore(_desk_store_path(work, state_value, "packs.json")),
                 events=EventStore(_desk_store_path(work, state_value, "events.ndjson")),
                 substrate=_DeskSubstrate(substrate_client),
-                docs_index=_DeskDocsIndex(
-                    SubstrateClient(
-                        docs_url,
-                        token=substrate_token or None,
-                    )
-                )
-                if docs_url
-                else None,
-                notify=_DeskNotifier(notify_url) if notify_url else None,
+                solo=solo,
+                desk_planes=desk_planes,
+                docs_index=desk_docs,
+                notify=_DeskNotifier(notify_url) if not solo and notify_url else None,
                 bus=(
                     _DeskBusClient(
-                        bus_saved or bus_url or "http://127.0.0.1",
+                        bus_saved or bus_url,
                         honor_binding=True,
                         binding_env=env,
                         policy=policy,
                     )
-                    if bus_blocked is not None or bus_saved or bus_url
+                    if not solo and (bus_blocked is not None or bus_saved or bus_url)
                     else None
                 ),
             )
@@ -1406,12 +1470,24 @@ def load_runtime(
     root = Path(root)
     home = Path(home) if home is not None else Path.home()
     roster: list[str] | None = None
-    if not no_roster:
-        roster_path = (
-            root / "omega_prime" / "contracts" / "tool-rosters" / "omega-prime.yaml"
-        )
+    bot_id = "bot-00-omega-prime"
+    roster_path = (
+        root / "omega_prime" / "contracts" / "tool-rosters" / "omega-prime.yaml"
+    )
+    if no_roster:
         try:
-            roster = roster_names(roster_path.read_text(encoding="utf-8"))
+            roster_text = roster_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+        else:
+            seat = re.search(r"(?m)^seat:\s*([^\s#]+)", roster_text)
+            bot_id = seat.group(1) if seat else bot_id
+    else:
+        try:
+            roster_text = roster_path.read_text(encoding="utf-8")
+            roster = roster_names(roster_text)
+            seat = re.search(r"(?m)^seat:\s*([^\s#]+)", roster_text)
+            bot_id = seat.group(1) if seat else "bot-00-omega-prime"
         except (OSError, ValueError) as exc:
             raise RuntimeConfigError(
                 f"cannot read roster {roster_path}: {exc}"
@@ -1442,6 +1518,7 @@ def load_runtime(
         approval_log=log,
         env=dict(os.environ if env is None else env),
         work_root=work_root,
+        bot_id=bot_id,
     )
     tool_names = [tool.name for tool in _mcp_tools(registry, roster)]
     gated = [name for name in tool_names if registry.approval_required(name)]
