@@ -10,6 +10,7 @@ Every started job is reaped exactly once; results are cached so a second
 
 from __future__ import annotations
 
+import math
 import subprocess
 import threading
 from pathlib import Path
@@ -27,8 +28,8 @@ class JobControl:
         self._next = 0
         self._jobs: dict[str, dict[str, Any]] = {}
 
-    def start(self, argv: list[str], *, timeout: float = 30) -> str:
-        """Spawn ``argv``. Return the job id."""
+    def start(self, argv: list[str]) -> str:
+        """Spawn ``argv``. Return the process-local job id."""
         verdict = screen_argv(argv)
         if not verdict.get("ok"):
             raise ValueError(f"job refused: {verdict.get('reason')}")
@@ -37,76 +38,151 @@ class JobControl:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=self.cwd,
+            shell=False,
         )
         with self._lock:
             self._next += 1
             job_id = f"job-{self._next}"
-            self._jobs[job_id] = {"child": child, "result": None, "timeout": timeout}
+            self._jobs[job_id] = {
+                "child": child,
+                "lock": threading.Lock(),
+                "result": None,
+            }
         return job_id
 
     def poll(self, job_id: str) -> dict:
-        """Non-blocking status. Streams surface only after exit."""
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                raise KeyError(f"unknown job: {job_id}")
+        """Return status without waiting for a running job."""
+        job = self._job(job_id)
+        with job["lock"]:
             if job["result"] is not None:
                 return {"id": job_id, **job["result"]}
             child = job["child"]
-        exit_code = child.poll()
-        if exit_code is None:
-            return {"id": job_id, "running": True}
-        return self._reap(job_id, child, exit_code)
+            if child.poll() is None:
+                return {"id": job_id, "running": True}
+            try:
+                return self._collect(job_id, job, timeout=0)
+            except subprocess.TimeoutExpired:
+                return {"id": job_id, "running": True}
 
-    def wait(self, job_id: str, timeout: float | None = None) -> dict:
-        """Block until exit or ``timeout``. A timeout leaves the job running."""
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                raise KeyError(f"unknown job: {job_id}")
+    def wait(self, job_id: str, timeout: float = 1.0) -> dict:
+        """Wait up to ``timeout`` seconds; a timeout leaves the process running."""
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+            or timeout > 30
+        ):
+            raise ValueError("timeout must be greater than 0 and no greater than 30")
+        job = self._job(job_id)
+        with job["lock"]:
             if job["result"] is not None:
                 return {"id": job_id, **job["result"]}
-            child = job["child"]
-        try:
-            exit_code = child.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            raise TimeoutError(f"job {job_id} still running") from None
-        return self._reap(job_id, child, exit_code)
+            try:
+                return self._collect(job_id, job, timeout=float(timeout))
+            except subprocess.TimeoutExpired:
+                return {"id": job_id, "running": True}
 
     def kill(self, job_id: str) -> dict:
-        """Terminate, escalate to kill, reap. Return the final status."""
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                raise KeyError(f"unknown job: {job_id}")
+        """Terminate, escalate to kill, and cache the final status."""
+        job = self._job(job_id)
+        with job["lock"]:
             if job["result"] is not None:
                 return {"id": job_id, **job["result"]}
             child = job["child"]
-        if child.poll() is None:
-            child.terminate()
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    return self._collect(job_id, job, timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    return self._collect(job_id, job, timeout=5)
             try:
-                exit_code = child.wait(timeout=5)
+                return self._collect(job_id, job, timeout=5)
             except subprocess.TimeoutExpired:
                 child.kill()
-                exit_code = child.wait(timeout=5)
-        else:
-            exit_code = child.returncode
-        assert exit_code is not None
-        return self._reap(job_id, child, exit_code)
+                return self._collect(job_id, job, timeout=5)
 
-    def _reap(self, job_id: str, child: subprocess.Popen, exit_code: int) -> dict:
-        stdout, stderr = child.communicate()
+    def shutdown(self) -> None:
+        """Terminate and reap every child still owned by this controller."""
+        with self._lock:
+            job_ids = tuple(self._jobs)
+        for job_id in job_ids:
+            self.kill(job_id)
+
+    def _job(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            raise KeyError(f"unknown job: {job_id}")
+        return job
+
+    def _collect(self, job_id: str, job: dict[str, Any], timeout: float) -> dict:
+        child = job["child"]
+        stdout, stderr = child.communicate(timeout=timeout)
         result = {
             "running": False,
-            "exit_code": exit_code,
+            "exit_code": child.returncode,
             "stdout": _text(stdout),
             "stderr": _text(stderr),
         }
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is not None:
-                job["result"] = result
+        job["result"] = result
         return {"id": job_id, **result}
+
+
+def register_exec_job_tools(registry: Any, cwd: str | Path) -> JobControl:
+    """Register approval-gated process controls and return their owner."""
+    jobs = JobControl(cwd)
+    registry.register(
+        "exec_job_start",
+        "Start a screened argv process in the configured work directory.",
+        {
+            "type": "object",
+            "properties": {
+                "argv": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["argv"],
+        },
+        lambda argv: {"id": jobs.start(argv)},
+        requires_approval=True,
+    )
+    registry.register(
+        "exec_job_poll",
+        "Check whether a process-local argv job has finished.",
+        {
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
+        },
+        jobs.poll,
+        requires_approval=True,
+    )
+    registry.register(
+        "exec_job_wait",
+        "Wait up to 30 seconds for a process-local argv job.",
+        {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "timeout": {"type": "number", "default": 1.0},
+            },
+            "required": ["job_id"],
+        },
+        lambda job_id, timeout=1.0: jobs.wait(job_id, timeout),
+        requires_approval=True,
+    )
+    registry.register(
+        "exec_job_kill",
+        "Terminate a process-local argv job.",
+        {
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
+        },
+        jobs.kill,
+        requires_approval=True,
+    )
+    return jobs
 
 
 def _text(data: bytes | None) -> str:
@@ -118,4 +194,4 @@ def _text(data: bytes | None) -> str:
         return data.decode("utf-8", errors="replace")
 
 
-__all__ = ["JobControl"]
+__all__ = ["JobControl", "register_exec_job_tools"]

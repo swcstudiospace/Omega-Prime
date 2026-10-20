@@ -82,3 +82,71 @@ def test_an_existing_store_keeps_its_file_mode(tmp_path: Path) -> None:
     os.chmod(path, 0o640)
     store.schedule("second", 2)
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_two_store_instances_cannot_claim_one_occurrence_twice(tmp_path: Path) -> None:
+
+    path = tmp_path / "jobs.json"
+    first = JobStore(path)
+    second = JobStore(path)
+    now = 1_700_000_000
+    first.schedule("one occurrence", now)
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def runner(prompt: str) -> str:
+        calls.append(prompt)
+        started.set()
+        assert release.wait(timeout=5)
+        return '{"summary":"done"}'
+
+    result: list[dict] = []
+    worker = threading.Thread(
+        target=lambda: result.extend(first.tick(now, runner, write_receipts=True))
+    )
+    worker.start()
+    assert started.wait(timeout=5)
+
+    def duplicate_runner(prompt: str) -> str:
+        calls.append(prompt)
+        return '{"summary":"duplicate"}'
+
+    assert second.tick(now, duplicate_runner, write_receipts=True) == []
+    release.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert calls == ["one occurrence"]
+    assert len(result) == 1
+    assert JobStore(path).jobs[0]["history"][-1]["scheduled_for"] == now
+
+
+def test_stale_claim_settlement_is_refused_and_preserves_unrelated_rows(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "jobs.json"
+    store = JobStore(path)
+    now = 1_700_000_000
+    job_id = store.schedule("claimed", now)
+    unrelated_id = store.schedule("unrelated future", now + 600)
+    claim = store._claim(job_id, now)
+    assert claim is not None
+
+    with store._store_transaction():
+        row = next(job for job in store.jobs if job["id"] == job_id)
+        row["claim_token"] = "new-owner"
+        row["unrelated_state"] = "kept"
+        store._save()
+
+    assert (
+        store._settle_claim(
+            claim, now, {"state": "succeeded", "summary": "stale"}, "succeeded"
+        )
+        is None
+    )
+    rows = {job["id"]: job for job in JobStore(path).jobs}
+    assert rows[job_id]["claim_token"] == "new-owner"
+    assert rows[job_id]["unrelated_state"] == "kept"
+    assert rows[job_id]["history"] == []
+    assert rows[unrelated_id]["due_at"] == now + 600

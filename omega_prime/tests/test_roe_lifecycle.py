@@ -1091,12 +1091,13 @@ def test_clear_watchdog_round_trip(tmp_path):
     assert list_roe_watchdogs(store) == []
 
 
-def test_watchdog_tick_persists_transitions_without_heartbeat(tmp_path):
+def test_watchdog_tick_persists_transitions_without_heartbeat(tmp_path, monkeypatch):
     """K11: each tick runs watchdog_check; valid->expiring->expired digests."""
+    monkeypatch.setenv("OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS", str(40 * 86400))
     store = JobStore(tmp_path / "cron" / "jobs.json")
     artifact = _write_artifact(tmp_path, _watchdog_document(30))
     job_id = schedule_roe_watchdog(
-        store, str(artifact), due_at=0, interval_seconds=86400
+        store, str(artifact), due_at=END.timestamp(), interval_seconds=86400
     )
 
     def job():
@@ -1134,7 +1135,7 @@ def test_watchdog_tick_repeats_same_state_without_digest_growth(tmp_path):
     store = JobStore(tmp_path / "cron" / "jobs.json")
     artifact = _write_artifact(tmp_path, _watchdog_document(30))
     job_id = schedule_roe_watchdog(
-        store, str(artifact), due_at=0, interval_seconds=86400
+        store, str(artifact), due_at=END.timestamp(), interval_seconds=12 * 3600
     )
     tick_roe_watchdog(store, END)
     before = list(
@@ -1150,7 +1151,10 @@ def test_watchdog_tick_missing_artifact_is_fail_closed(tmp_path):
     """K11: a missing artifact ticks missing (provide artifact), never raises."""
     store = JobStore(tmp_path / "cron" / "jobs.json")
     job_id = schedule_roe_watchdog(
-        store, str(tmp_path / "absent.json"), due_at=0, interval_seconds=60
+        store,
+        str(tmp_path / "absent.json"),
+        due_at=END.timestamp(),
+        interval_seconds=60,
     )
     ran = tick_roe_watchdog(store, END)
     assert [j["id"] for j in ran] == [job_id]
@@ -1172,7 +1176,26 @@ def test_watchdog_tick_skips_not_due_and_generic_tick_respects_skip(tmp_path):
     assert skipped == []
 
 
-# L11 multi-grant support -------------------------------------------------------
+def test_watchdog_stale_occurrence_is_missed_without_checker(tmp_path):
+    store = JobStore(tmp_path / "cron" / "jobs.json")
+    job_id = schedule_roe_watchdog(
+        store, "artifact.json", due_at=END.timestamp() - 301, interval_seconds=60
+    )
+    calls = []
+
+    ran = tick_roe_watchdog(
+        store,
+        END,
+        checker=lambda artifact, *, now: calls.append(artifact),
+    )
+
+    assert calls == []
+    assert [job["id"] for job in ran] == [job_id]
+    job = ran[0]
+    assert job["last_result"]["state"] == "missed"
+    assert job["history"][-1]["status"] == "missed"
+    assert job["due_at"] == END.timestamp() + 60
+    assert "roe_watchdog_state" not in job
 
 
 def test_watchdog_check_all_returns_per_artifact_states():
@@ -1573,3 +1596,36 @@ def test_expiry_notice_omits_renew_without_path():
     )
     for bad in (None, {}, "garbage", ["not", "a", "dict"], {"state": "bogus"}):
         assert "Renew:" not in expiry_notice_message(bad)
+
+
+def test_watchdog_claim_does_not_resurrect_concurrently_removed_job(tmp_path):
+    from threading import Event, Thread
+
+    store = JobStore(tmp_path / "cron" / "jobs.json")
+    other_store = JobStore(store.path)
+    job_id = schedule_roe_watchdog(store, "artifact.json", due_at=END.timestamp())
+    entered = Event()
+    release = Event()
+    result = []
+
+    def checker(artifact, *, now):
+        entered.set()
+        assert release.wait(timeout=5)
+        return {
+            "state": "valid",
+            "artifact_id": artifact,
+            "effective_until": None,
+            "action": "none",
+        }
+
+    worker = Thread(
+        target=lambda: result.extend(tick_roe_watchdog(store, END, checker=checker))
+    )
+    worker.start()
+    assert entered.wait(timeout=5)
+    assert other_store.remove(job_id, kind=ROE_WATCHDOG_KIND)
+    release.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert result == []
+    assert JobStore(store.path).jobs == []

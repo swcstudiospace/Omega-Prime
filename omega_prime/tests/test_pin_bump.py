@@ -29,6 +29,7 @@ import pytest
 
 from omega_prime.cron import scheduler as sched_mod
 from omega_prime.grokbot import pin_bump
+from omega_prime.tools.approvals import ApprovalLog
 
 PIN_OLD = "a" * 40
 PIN_NEW = "b" * 40
@@ -2215,6 +2216,12 @@ def _due_store(tmp_path, config, now=1000.0, cron="* * * * *", name="nightly"):
     return store
 
 
+def _approved_pin_bump_gate() -> ApprovalLog:
+    approval_log = ApprovalLog()
+    approval_log.approve(sched_mod.PIN_BUMP_APPLY_APPROVAL, "phase102-test-operator")
+    return approval_log
+
+
 def test_tick_improved_compatible_opens_bump_path(tmp_path):
     store = _due_store(tmp_path, {"to": PIN_NEW, "semver_check": True})
     calls: list[object] = []
@@ -2223,6 +2230,8 @@ def test_tick_improved_compatible_opens_bump_path(tmp_path):
         1020.0,
         audit=lambda job: {"verdict": "improved", "semver_compatible": True},
         bump=_bump_recorder(calls, record="schedule_name"),
+        approval_log=_approved_pin_bump_gate(),
+        can_apply_pin_bump=lambda: True,
     )
     assert len(ran) == 1
     assert calls == ["nightly"]
@@ -2232,6 +2241,26 @@ def test_tick_improved_compatible_opens_bump_path(tmp_path):
     assert job["last_result"]["action"] == "bump-pr"
     assert job["pin_bump_digest"][-1]["action"] == "bump-pr"
     assert job["due_at"] == 1080.0
+
+
+def test_tick_improved_requires_exact_approval_before_bump(tmp_path):
+    store = _due_store(tmp_path, {"to": PIN_NEW})
+    approval_log = ApprovalLog()
+    approval_log.approve("another_action", "phase102-test-operator")
+    calls: list[object] = []
+
+    ran = sched_mod.tick_pin_bump_schedules(
+        store,
+        1020.0,
+        audit=lambda job: {"verdict": "improved"},
+        bump=_bump_recorder(calls),
+        approval_log=approval_log,
+        can_apply_pin_bump=lambda: True,
+    )
+
+    assert len(ran) == 1
+    assert calls == []
+    assert ran[0]["last_result"]["action"] == "blocked-approval-required"
 
 
 def test_tick_regressed_records_digest_and_skips_bump(tmp_path):
@@ -2281,6 +2310,8 @@ def test_tick_improved_without_semver_check_opens_bump_path(tmp_path):
         1020.0,
         audit=lambda job: {"verdict": "improved", "semver_compatible": False},
         bump=_bump_recorder(calls),
+        approval_log=_approved_pin_bump_gate(),
+        can_apply_pin_bump=lambda: True,
     )
     assert len(ran) == 1
     assert len(calls) == 1
@@ -2314,10 +2345,12 @@ def test_tick_bump_failure_recorded_not_raised(tmp_path):
         1020.0,
         audit=lambda job: {"verdict": "improved"},
         bump=_boom,
+        approval_log=_approved_pin_bump_gate(),
+        can_apply_pin_bump=lambda: True,
     )
     assert len(ran) == 1
     assert ran[0]["last_result"]["action"] == "bump-pr-failed"
-    assert "pr exploded" in str(ran[0]["last_result"]["detail"])
+    assert ran[0]["last_result"]["detail"] == "RuntimeError"
 
 
 def test_tick_not_due_skips(tmp_path):
@@ -2337,6 +2370,8 @@ def test_tick_not_due_skips(tmp_path):
         1020.0,
         audit=lambda job: {"verdict": "improved"},
         bump=_bump_recorder(calls),
+        approval_log=_approved_pin_bump_gate(),
+        can_apply_pin_bump=lambda: True,
     )
     assert len(ran) == 1
     reran = sched_mod.tick_pin_bump_schedules(
@@ -2375,9 +2410,12 @@ def test_generic_tick_skips_pin_bump_schedules(tmp_path):
     job = sched_mod.list_pin_bump_schedules(store)[0]
     assert job.get("completed") is not True
     assert job["last_ran_at"] is None
-    # The legacy single-kind spelling keeps working alongside the new one.
-    ran = store.tick(1020.0, calls.append, skip_kind="desk_lead_pass")
-    assert [j["schedule_name"] for j in ran] == ["nightly"]
+    # The legacy skip-kind spelling cannot route specialized jobs through tick.
+    assert store.tick(1020.0, calls.append, skip_kind="desk_lead_pass") == []
+    assert calls == []
+    job = sched_mod.list_pin_bump_schedules(store)[0]
+    assert job.get("completed") is not True
+    assert job["last_ran_at"] is None
 
 
 def test_audit_scheduled_job_improved_compatible(tmp_path, capsys):
@@ -4759,3 +4797,93 @@ def test_report_to_works_through_search_only_ancestors_as_unprivileged_user(dry)
             assert dest.read_bytes().startswith(pin_bump._PIN_BUMP_REPORT_PREFIX)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+
+
+def test_pin_schedule_claim_does_not_resurrect_concurrently_removed_job(tmp_path):
+    from threading import Event, Thread
+
+    store = sched_mod.JobStore(tmp_path / "cron" / "jobs.json")
+    other_store = sched_mod.JobStore(store.path)
+    job_id = sched_mod.schedule_pin_bump(
+        store, cron_expr="* * * * *", name="nightly", now=1000
+    )
+    entered = Event()
+    release = Event()
+    result = []
+
+    def audit(job):
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"verdict": "unchanged"}
+
+    worker = Thread(
+        target=lambda: result.extend(
+            sched_mod.tick_pin_bump_schedules(store, 1020, audit=audit)
+        )
+    )
+    worker.start()
+    assert entered.wait(timeout=5)
+    assert other_store.remove(job_id, kind=sched_mod.PIN_BUMP_SCHEDULE_KIND)
+    release.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert result == []
+    assert sched_mod.JobStore(store.path).jobs == []
+
+
+def test_pin_stale_occurrence_is_missed_without_audit(tmp_path):
+    store = _due_store(tmp_path, {"to": PIN_NEW})
+    calls = []
+
+    def audit(job: dict) -> dict:
+        calls.append(job)
+        return {"verdict": "improved"}
+
+    ran = sched_mod.tick_pin_bump_schedules(
+        store,
+        1321.0,
+        audit=audit,
+    )
+    assert calls == []
+    assert len(ran) == 1
+    assert ran[0]["last_result"]["disposition"] == "missed"
+    assert ran[0]["history"][-1]["disposition"] == "missed"
+    assert ran[0]["due_at"] > 1321.0
+
+
+def test_concurrent_pin_same_name_schedules_replace_atomically(tmp_path):
+    from threading import Barrier, Thread
+
+    path = tmp_path / "cron" / "jobs.json"
+    stores = [sched_mod.JobStore(path), sched_mod.JobStore(path)]
+    start = Barrier(3)
+    scheduled = []
+
+    def create(store, expression):
+        start.wait()
+        scheduled.append(
+            sched_mod.schedule_pin_bump(
+                store, cron_expr=expression, name="nightly", now=1000
+            )
+        )
+
+    workers = [
+        Thread(target=create, args=(stores[0], "* * * * *")),
+        Thread(target=create, args=(stores[1], "*/2 * * * *")),
+    ]
+    for worker in workers:
+        worker.start()
+    start.wait()
+    for worker in workers:
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+    persisted = sched_mod.JobStore(path).jobs
+    matching = [
+        job
+        for job in persisted
+        if job.get("kind") == sched_mod.PIN_BUMP_SCHEDULE_KIND
+        and job.get("schedule_name") == "nightly"
+    ]
+    assert len(scheduled) == 2
+    assert len(matching) == 1
+    assert matching[0]["id"] in scheduled

@@ -104,11 +104,21 @@ the real Rust HTTP parser, disk-reading tool rounds, durable metadata, approval
 refusal, timeout, and unsupported options. It does not establish live-service
 authentication for every native provider.
 
-## Optional Prime tool families
+Prime tool families are normally off by default, with the explicit host
+registration exceptions documented in the tool host contract. Plugin modules
+are separate: they load only when `OMEGA_PRIME_PLUGINS=1`; off mode does not
+scan or import them. Enabled plugins are trusted local Python, unsandboxed,
+and can replace handlers and approval metadata.
 
-Every Prime tool family is default off. Enabling a family adds registrations
-through the existing connectors; it does not automatically graft Prime's
-native agent loop or session engine into the conversation loop.
+The `DeskDriver` owns desk, watchdog, pin, and purple schedules. Prompt jobs
+dispatch through an available delegate parent; without one, they write blocked
+receipts. Cron jobs that are stale when observed are receipted as missed.
+
+`exec_job_start`, `exec_job_poll`, `exec_job_wait`, and `exec_job_kill` are
+retained approval-gated registry tools. Plan mode blocks start and kill; argv
+cwd is fixed to the approved work root. Pin apply requires an exact human
+`pin_bump_apply` grant through the existing admin grant/revoke route, not
+served-tool metadata.
 
 - **Goals** (`prime.goals.enabled`): persisted objectives and ordered steps
   steer logical-turn continuation in the existing loop. Known provider usage,
@@ -119,11 +129,10 @@ native agent loop or session engine into the conversation loop.
   replaces the whole goal (objective, steps, and Prime state) after validating
   everything up front; a rejected request writes nothing. Tools: `goal_set`,
   `goal_pause`, `goal_resume`, `goal_clear`, `goal_status`.
-- **Heartbeats** (`prime.heartbeat.enabled`): one registry-owned in-process
-  APScheduler runtime routes persisted due prompts to `session_name` bindings.
-  A beat waits behind its owner's foreground lease, preserving the transcript;
-  other named sessions can progress independently. Actual callback response
-  strings are persisted. Tools: `heartbeat_set`, `heartbeat_list`, `heartbeat_clear`.
+- **Heartbeats and desk schedules**: `DeskDriver` owns desk, watchdog, pin, and
+  purple ticks. Prompt jobs dispatch through an available delegate parent; if
+  no parent is available, the job writes a blocked receipt. Stale cron jobs
+  are receipted as missed rather than run late.
 - **Autonomous mode** (`prime.autonomous.enabled`): after `autonomous_start`,
   the live driver counts logical turns and known tokens and enforces turn,
   token, and elapsed-time limits plus real argv quality gates. Gates run only

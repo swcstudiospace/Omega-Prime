@@ -22,6 +22,12 @@ from sidecar.roe import sign_artifact
 
 ROOT = Path(__file__).resolve().parents[2]
 ROSTER = ROOT / "omega_prime" / "contracts" / "tool-rosters" / "omega-prime.yaml"
+EXEC_JOB_TOOL_NAMES = (
+    "exec_job_start",
+    "exec_job_poll",
+    "exec_job_wait",
+    "exec_job_kill",
+)
 
 
 def _flags(monkeypatch, **enabled: str) -> None:
@@ -44,7 +50,14 @@ def test_flags_off_omit_rlm_and_messaging(tmp_path: Path, monkeypatch) -> None:
     assert set(MESSAGING_TOOL_NAMES).isdisjoint(names)
     roster = roster_names(ROSTER.read_text(encoding="utf-8"))
     served = [name for name in roster if name in names]
-    assert len(served) == 121
+    from omega_prime.assemble import _prime_family_tools
+    from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
+
+    gated = set(REDTEAM_TOOL_NAMES)
+    for family_tools in _prime_family_tools().values():
+        gated.update(family_tools)
+    assert set(served) == set(roster) - gated
+    assert set(EXEC_JOB_TOOL_NAMES) <= set(served)
 
 
 def test_rlm_flag_serves_not_configured_without_a_provider(
@@ -97,7 +110,7 @@ def test_all_prime_flags_serve_the_roster(tmp_path: Path, monkeypatch) -> None:
     from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
 
     assert served == roster - set(REDTEAM_TOOL_NAMES)
-    assert len(roster) == 172
+    assert set(EXEC_JOB_TOOL_NAMES) <= roster
 
 
 def test_signed_roe_completes_the_roster(tmp_path: Path, monkeypatch) -> None:
@@ -125,4 +138,4 @@ def test_signed_roe_completes_the_roster(tmp_path: Path, monkeypatch) -> None:
     served = _names(registry)
     roster = set(load_roster_names(ROSTER))
     assert served == roster
-    assert len(roster) == 172
+    assert set(EXEC_JOB_TOOL_NAMES) <= roster

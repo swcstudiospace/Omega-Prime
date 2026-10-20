@@ -403,3 +403,48 @@ def test_warm_registry_consumes_independent_intake_and_acks(tmp_path):
     assert len(lines) == 2
     assert lines[0] == f"{submitted['intake_id']}: did the thing"
     assert lines[1].startswith("t-") and lines[1].endswith(":second desk order")
+
+
+def test_typed_schedule_creation_is_atomic_with_concurrent_store_writer(
+    tmp_path, monkeypatch
+):
+    from threading import Event, Thread
+
+    path = tmp_path / "cron" / "jobs.json"
+    scheduler_store = JobStore(path)
+    concurrent_store = JobStore(path)
+    original_save = scheduler_store._save
+    entered_save = Event()
+    release_save = Event()
+    writer_started = Event()
+    created = []
+
+    def paused_save():
+        entered_save.set()
+        assert release_save.wait(timeout=5)
+        original_save()
+
+    monkeypatch.setattr(scheduler_store, "_save", paused_save)
+    scheduler = Thread(
+        target=lambda: created.append(
+            schedule_desk_lead_pass(scheduler_store, due_at=100, interval_seconds=60)
+        )
+    )
+    scheduler.start()
+    assert entered_save.wait(timeout=5)
+
+    def create_generic():
+        writer_started.set()
+        concurrent_store.schedule("concurrent", 200)
+
+    writer = Thread(target=create_generic)
+    writer.start()
+    assert writer_started.wait(timeout=5)
+    release_save.set()
+    scheduler.join(timeout=5)
+    writer.join(timeout=5)
+    assert not scheduler.is_alive()
+    assert not writer.is_alive()
+    persisted = JobStore(path).jobs
+    assert {job.get("kind") for job in persisted} == {None, "desk_lead_pass"}
+    assert len(persisted) == 2

@@ -1,4 +1,4 @@
-"""Production desk-pass driver: due ``desk_lead_pass`` jobs on a thread.
+"""Production cron driver for the scheduler kinds owned by DeskDriver.
 
 Phase 64 DESK-04. The desk pass is a cron job kind
 (``omega_prime.cron.scheduler.DESK_LEAD_KIND``) riding the same
@@ -22,6 +22,7 @@ with a failure receipt, never a fabricated success.
 from __future__ import annotations
 
 import atexit
+import math
 import sys
 import threading
 import time
@@ -32,7 +33,10 @@ from typing import Any
 from omega_prime.cron.scheduler import (
     JobStore,
     run_desk_lead_passes,
+    run_due_jobs,
+    tick_pin_bump_schedules,
     tick_purple_cycles,
+    tick_roe_watchdog,
 )
 
 DEFAULT_INTERVAL_SECONDS = 60.0
@@ -58,19 +62,25 @@ class DeskDriver:
         *,
         interval_seconds: int | float = DEFAULT_INTERVAL_SECONDS,
         clock: Callable[[], float] | None = None,
+        approval_log: Any = None,
+        can_apply_pin_bump: Callable[[], bool] | None = None,
     ) -> None:
         if (
             isinstance(interval_seconds, bool)
             or not isinstance(interval_seconds, (int, float))
+            or not math.isfinite(interval_seconds)
             or interval_seconds <= 0
         ):
-            raise ValueError("interval_seconds must be a positive number")
+            raise ValueError("interval_seconds must be a positive finite number")
         self.path = Path(root, "cron", "jobs.json").expanduser().resolve()
         self.parent = parent
         self.work_root = work_root
+        self.approval_log = approval_log
+        self.can_apply_pin_bump = can_apply_pin_bump
         self.interval_seconds = interval_seconds
         self._clock = clock or time.time
         self._stop = threading.Event()
+        self._tick_lock = threading.Lock()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._running = False
@@ -108,32 +118,51 @@ class DeskDriver:
     def tick_once(self) -> None:
         """One serialized tick over the shared job file.
 
-        Reloads the store from disk (a store another process wrote is never
-        clobbered), then runs each due ``desk_lead_pass`` and ``purple_cycle``
-        job once. Purple cycles load that install config
-        (``self.path`` is ``root/cron/jobs.json``, so the install root is
-        ``self.path.parent.parent``). A failure is printed loudly and retried
-        on the next tick; the thread never dies on one bad store, and one
-        kind's failure does not skip the other.
+        Reloads the store from disk, then evaluates the desk, generic prompt,
+        watchdog, pin-bump, and purple-cycle kinds. Each kind is isolated so
+        one failure does not prevent the remaining owners from being evaluated.
         """
-        store: JobStore | None = None
-        try:
-            store = JobStore(self.path)
-            run_desk_lead_passes(store, self._clock(), self.parent, self.work_root)
-        except Exception as exc:  # loud, non-fatal: the next tick retries
-            print(
-                f"desk-pass driver: tick failed: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-        try:
-            if store is None:
-                store = JobStore(self.path)
-            tick_purple_cycles(store, self._clock(), root=self.path.parent.parent)
-        except Exception as exc:  # loud, non-fatal: the next tick retries
-            print(
-                f"desk-pass driver: purple-cycle tick failed: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
+        ticks = (
+            (
+                "desk-pass",
+                lambda store: run_desk_lead_passes(
+                    store, self._clock(), self.parent, self.work_root
+                ),
+            ),
+            (
+                "prompt-cron",
+                lambda store: run_due_jobs(store, self._clock(), self.parent),
+            ),
+            ("roe-watchdog", lambda store: tick_roe_watchdog(store, self._clock())),
+            (
+                "pin-bump",
+                lambda store: tick_pin_bump_schedules(
+                    store,
+                    self._clock(),
+                    root=self.path.parent.parent,
+                    approval_log=self.approval_log,
+                    can_apply_pin_bump=self.can_apply_pin_bump,
+                ),
+            ),
+            (
+                "purple-cycle",
+                lambda store: tick_purple_cycles(
+                    store, self._clock(), root=self.path.parent.parent
+                ),
+            ),
+        )
+        with self._tick_lock:
+            store: JobStore | None = None
+            for kind, tick in ticks:
+                try:
+                    if store is None:
+                        store = JobStore(self.path)
+                    tick(store)
+                except Exception as exc:
+                    print(
+                        f"desk-pass driver: {kind} tick failed: {type(exc).__name__}",
+                        file=sys.stderr,
+                    )
 
     def _atexit_stop(self) -> None:
         # Interpreter shutdown must not wait on an in-flight model call; the

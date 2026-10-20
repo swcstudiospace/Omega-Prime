@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,9 @@ from omega_prime.learning.autolearn import Autolearn
 from omega_prime.learning.goals import GoalStore
 from omega_prime.session.persist import load_session, load_task, save_session, save_task
 from omega_prime.skills_runtime.manager import skill_view
-from omega_prime.tools.exec_jobs import JobControl
+from omega_prime.tools.approvals import ApprovalLog
+from omega_prime.tools.exec_jobs import JobControl, register_exec_job_tools
+from omega_prime.tools.registry import ToolRegistry
 
 
 def _tool_call(name: str, arguments: str = "{}", call_id: str = "call-1") -> dict:
@@ -242,6 +245,191 @@ def test_job_control_runs_polls_and_kills(tmp_path: Path):
 
     with pytest.raises(KeyError):
         jobs.poll("job-999")
+
+
+def test_exec_job_tools_use_approval_gated_registry_dispatch(tmp_path: Path):
+    approval_log = ApprovalLog()
+    registry = ToolRegistry(approval_log=approval_log)
+    register_exec_job_tools(registry, tmp_path)
+    names = ("exec_job_start", "exec_job_poll", "exec_job_wait", "exec_job_kill")
+    assert all(registry.approval_required(name) for name in names)
+
+    marker = tmp_path / "should-not-exist"
+    argv = [
+        sys.executable,
+        "-c",
+        f"from pathlib import Path; Path({str(marker)!r}).touch()",
+    ]
+    denied = json.loads(registry.dispatch("exec_job_start", {"argv": argv}))
+    assert denied == {"error": "approval required", "tool": "exec_job_start"}
+    assert marker.exists() is False
+
+    for name in names:
+        assert approval_log.approve(name, "operator")["approved"] is True
+    started = json.loads(
+        registry.dispatch(
+            "exec_job_start",
+            {"argv": [sys.executable, "-c", "print('job-output')"]},
+        )
+    )
+    job_id = started["id"]
+    assert (
+        json.loads(registry.dispatch("exec_job_poll", {"job_id": job_id}))["id"]
+        == job_id
+    )
+    completed = json.loads(
+        registry.dispatch("exec_job_wait", {"job_id": job_id, "timeout": 5})
+    )
+    assert completed["stdout"] == "job-output\n"
+    assert (
+        json.loads(registry.dispatch("exec_job_wait", {"job_id": job_id})) == completed
+    )
+
+    another = ToolRegistry(approval_log=approval_log)
+
+    class DenyExecStart:
+        def allows_tool(self, name: str) -> bool:
+            return name != "exec_job_start"
+
+    policy = DenyExecStart()
+    policy_registry = ToolRegistry(approval_log=approval_log, policy=policy)
+    register_exec_job_tools(policy_registry, tmp_path)
+    policy_marker = tmp_path / "policy-should-not-exist"
+    policy_denied = json.loads(
+        policy_registry.dispatch(
+            "exec_job_start",
+            {
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(policy_marker)!r}).touch()",
+                ]
+            },
+        )
+    )
+    assert policy_denied == {
+        "error": "policy forbids exec_job_start",
+        "tool": "exec_job_start",
+    }
+    assert policy_marker.exists() is False
+
+    policy_denied_job_id = "job-1"
+    denied_kill = json.loads(
+        policy_registry.dispatch("exec_job_kill", {"job_id": policy_denied_job_id})
+    )
+    assert denied_kill == {"error": f"KeyError: 'unknown job: {policy_denied_job_id}'"}
+    register_exec_job_tools(another, tmp_path)
+    assert json.loads(another.dispatch("exec_job_poll", {"job_id": job_id})) == {
+        "error": f"KeyError: 'unknown job: {job_id}'"
+    }
+
+
+def test_exec_job_wait_timeout_preserves_running_process_and_bounds_timeout(
+    tmp_path: Path,
+):
+    jobs = JobControl(tmp_path)
+    job_id = jobs.start([sys.executable, "-c", "import time; time.sleep(2)"])
+    assert jobs.wait(job_id, timeout=0.01) == {"id": job_id, "running": True}
+    assert jobs.poll(job_id) == {"id": job_id, "running": True}
+    with pytest.raises(ValueError):
+        jobs.wait(job_id, timeout=31)
+    try:
+        assert jobs.kill(job_id)["running"] is False
+    finally:
+        if jobs.poll(job_id)["running"]:
+            jobs.kill(job_id)
+
+
+def test_exec_job_kill_escalates_when_terminate_does_not_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import subprocess
+
+    import omega_prime.tools.exec_jobs as exec_jobs
+
+    class StubbornChild:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            self.returncode = -9
+
+        def communicate(self, timeout):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired(["child"], timeout)
+            return b"", b"killed"
+
+    child = StubbornChild()
+    monkeypatch.setattr(exec_jobs.subprocess, "Popen", lambda *_args, **_kwargs: child)
+    jobs = JobControl(tmp_path)
+    job_id = jobs.start([sys.executable, "-c", "pass"])
+
+    assert jobs.kill(job_id) == {
+        "id": job_id,
+        "running": False,
+        "exit_code": -9,
+        "stdout": "",
+        "stderr": "killed",
+    }
+    assert jobs.poll(job_id) == {
+        "id": job_id,
+        "running": False,
+        "exit_code": -9,
+        "stdout": "",
+        "stderr": "killed",
+    }
+
+
+def test_exec_job_drains_large_stdout_stderr_and_caches_concurrent_reaps(
+    tmp_path: Path,
+):
+    jobs = JobControl(tmp_path)
+    job_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('o' * 300000); "
+            "sys.stderr.write('e' * 300000)",
+        ]
+    )
+    barrier = threading.Barrier(5)
+    results = []
+
+    def wait_for_result():
+        barrier.wait()
+        results.append(jobs.wait(job_id, timeout=10))
+
+    workers = [threading.Thread(target=wait_for_result) for _ in range(5)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert len(results) == 5
+    assert all(result == results[0] for result in results)
+    assert len(results[0]["stdout"]) == 300000
+    assert len(results[0]["stderr"]) == 300000
+    assert jobs.poll(job_id) == results[0]
+
+
+def test_plan_mode_blocks_exec_job_start_and_kill():
+    called = []
+    tools = {
+        "exec_job_start": lambda **_kwargs: called.append("start"),
+        "exec_job_kill": lambda **_kwargs: called.append("kill"),
+        "exec_job_poll": lambda **_kwargs: called.append("poll"),
+    }
+    wrapped = apply_plan_mode(tools)
+    assert wrapped["exec_job_start"]() == "error: plan mode forbids exec_job_start"
+    assert wrapped["exec_job_kill"]() == "error: plan mode forbids exec_job_kill"
+    assert "exec_job_start" in PLAN_MODE_BLOCKED
+    assert "exec_job_kill" in PLAN_MODE_BLOCKED
+    assert "exec_job_poll" not in PLAN_MODE_BLOCKED
+    assert called == []
 
 
 def test_screen_argv_refuses_danger_and_accepts_plain():

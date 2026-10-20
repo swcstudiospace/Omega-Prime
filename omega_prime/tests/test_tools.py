@@ -7,6 +7,7 @@ import json
 import socket
 from pathlib import Path
 
+from omega_prime.tooling.catalog import EXEC_JOB_TOOL_NAMES
 from omega_prime.tooling.roster import roster_names
 from omega_prime.tools.agent_message import MESSAGING_TOOL_NAMES
 from omega_prime.tools.autonomous import AUTONOMOUS_TOOL_NAMES
@@ -424,6 +425,7 @@ def test_roster_lists_exactly_the_names_register_coding_tools_registers(tmp_path
         + OMEGA_COMMAND_TOOL_NAMES
         + PLATFORM_TOOL_NAMES
         + IDE_TOOL_NAMES
+        + EXEC_JOB_TOOL_NAMES
         + X_TOOL_NAMES
         + TELEGRAM_TOOL_NAMES
         + DISCORD_TOOL_NAMES

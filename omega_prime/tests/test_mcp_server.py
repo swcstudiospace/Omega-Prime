@@ -414,3 +414,295 @@ def test_quality_sandbox_default_policy_survives_work_root_change(
     assert explicit is not None
     assert explicit["policy"] == "/tmp/custom-policy.yaml"
     assert _quality_sandbox_from_env({}) is None
+
+
+def test_default_registry_exact_plugin_gate_and_passive_driver(
+    tmp_path: Path, monkeypatch
+):
+    from omega_prime.tools import plugins
+
+    loaded: list[tuple[Path, ToolRegistry]] = []
+    gates: list[dict] = []
+    predicate = plugins.plugins_enabled
+
+    def enabled(env):
+        gates.append(dict(env))
+        return predicate(env)
+
+    monkeypatch.setattr(plugins, "plugins_enabled", enabled)
+    monkeypatch.setattr(
+        plugins,
+        "load_plugins",
+        lambda home, registry: loaded.append((Path(home), registry)),
+    )
+    log = ApprovalLog()
+    registries = [
+        default_registry(
+            ROOT,
+            tmp_path / f"home-{value}",
+            env={"OMEGA_PRIME_PLUGINS": value},
+            approval_log=log,
+        )
+        for value in ("", "true", "1")
+    ]
+    assert [env["OMEGA_PRIME_PLUGINS"] for env in gates] == ["", "true", "1"]
+    assert loaded == [(tmp_path / "home-1", registries[2])]
+    for registry in registries:
+        driver = registry.runtime_bindings["desk_driver"]
+        assert driver._thread is None
+        assert driver.approval_log is log
+        assert driver.parent is None
+        assert not driver.can_apply_pin_bump()
+    assert log.approve("unrelated", "human")["approved"] is True
+    assert not registries[0].runtime_bindings["desk_driver"].can_apply_pin_bump()
+    assert log.approve("pin_bump_apply", "human")["approved"] is True
+    assert registries[0].runtime_bindings["desk_driver"].can_apply_pin_bump()
+    assert log.revoke("pin_bump_apply")
+    assert not registries[0].runtime_bindings["desk_driver"].can_apply_pin_bump()
+
+
+def test_exec_jobs_are_registry_local_and_denials_have_no_start_side_effect(
+    tmp_path: Path, monkeypatch
+):
+    from omega_prime.agent.modes import apply_plan_mode
+    from omega_prime.policy.policy import SeatPolicy
+    from omega_prime.tools import exec_jobs
+
+    starts: list[tuple[exec_jobs.JobControl, list[str]]] = []
+
+    def fake_start(control, argv):
+        starts.append((control, argv))
+        return "job-1"
+
+    monkeypatch.setattr(exec_jobs.JobControl, "start", fake_start)
+    log = ApprovalLog()
+    work = tmp_path / "workspace"
+    work.mkdir()
+    first = default_registry(ROOT, tmp_path, approval_log=log, work_root=work)
+    second = default_registry(ROOT, tmp_path, approval_log=log, work_root=work)
+    assert {
+        schema["function"]["name"]
+        for schema in first.schemas()
+        if schema["function"]["name"].startswith("exec_job_")
+    } == {"exec_job_start", "exec_job_poll", "exec_job_wait", "exec_job_kill"}
+
+    for name, arguments in (
+        ("exec_job_start", {"argv": ["echo", "x"]}),
+        ("exec_job_poll", {"job_id": "job-1"}),
+        ("exec_job_wait", {"job_id": "job-1"}),
+        ("exec_job_kill", {"job_id": "job-1"}),
+    ):
+        denied = json.loads(first.dispatch(name, arguments))
+        assert denied["error"] == "approval required"
+    policy = SeatPolicy(
+        {"version": 1, "tools": {"allow": []}, "paths": {}, "network": {}}
+    )
+    refused = default_registry(ROOT, tmp_path, policy=policy, approval_log=log)
+    assert (
+        "policy forbids"
+        in json.loads(refused.dispatch("exec_job_start", {"argv": ["echo", "x"]}))[
+            "error"
+        ]
+    )
+    call = call_tool_handler(first, [])
+
+    class Params:
+        def __init__(self) -> None:
+            self.name = "exec_job_start"
+            self.arguments = {"argv": ["echo", "roster-refused"]}
+
+    roster_denied = asyncio.run(call(None, Params()))
+    assert "policy forbids" in roster_denied.content[0].text
+    assert starts == []
+
+    assert log.approve("exec_job_start", "human")["approved"] is True
+    assert json.loads(first.dispatch("exec_job_start", {"argv": ["echo", "x"]})) == {
+        "id": "job-1"
+    }
+    assert json.loads(second.dispatch("exec_job_start", {"argv": ["echo", "y"]})) == {
+        "id": "job-1"
+    }
+    assert len(starts) == 2 and starts[0][0] is not starts[1][0]
+    assert all(control.cwd == str(work) for control, _argv in starts)
+    plan_calls: list[str] = []
+    plan_tools = apply_plan_mode(
+        {
+            name: (lambda **_kwargs: plan_calls.append("called"))
+            for name in ("exec_job_start", "exec_job_kill")
+        }
+    )
+    plan_tools["exec_job_start"](argv=["echo", "z"])
+    plan_tools["exec_job_kill"](job_id="job-1")
+    assert plan_calls == []
+    assert len(starts) == 2
+
+
+def test_exec_job_wait_and_kill_share_one_reap(tmp_path: Path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from omega_prime.tools.exec_jobs import JobControl
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Child:
+        returncode = 0
+
+        def __init__(self):
+            self.calls = 0
+            self.lock = threading.Lock()
+            self.terminated = 0
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout=None):
+            with self.lock:
+                self.calls += 1
+            entered.set()
+            assert release.wait(1.0)
+            return b"done", b""
+
+        def terminate(self):
+            self.terminated += 1
+
+        def kill(self):
+            raise AssertionError("finished job must not be killed")
+
+    child = Child()
+    monkeypatch.setattr(
+        "omega_prime.tools.exec_jobs.subprocess.Popen", lambda *a, **k: child
+    )
+    control = JobControl(tmp_path)
+    job_id = control.start(["echo", "done"])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        waited = pool.submit(control.wait, job_id, 1.0)
+        assert entered.wait(1.0)
+        killed = pool.submit(control.kill, job_id)
+        release.set()
+        results = [waited.result(), killed.result()]
+    assert all(result["stdout"] == "done" for result in results)
+    assert child.calls == 1
+    assert child.terminated == 0
+
+
+def test_exec_job_shutdown_terminates_and_reaps_active_fake_child(
+    tmp_path: Path, monkeypatch
+):
+    from omega_prime.tools.exec_jobs import JobControl
+
+    class Child:
+        def __init__(self):
+            self.returncode = None
+            self.terminated = 0
+            self.communicated = 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated += 1
+            self.returncode = -15
+
+        def kill(self):
+            raise AssertionError("graceful terminate should complete")
+
+        def communicate(self, timeout=None):
+            self.communicated += 1
+            return b"", b""
+
+    child = Child()
+    monkeypatch.setattr(
+        "omega_prime.tools.exec_jobs.subprocess.Popen", lambda *a, **k: child
+    )
+    control = JobControl(tmp_path)
+    control.start(["echo", "child"])
+    control.shutdown()
+    control.shutdown()
+    assert child.terminated == 1
+    assert child.communicated == 1
+
+
+def test_stdio_desk_driver_stops_once_after_normal_or_error(
+    tmp_path: Path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    import omega_prime.mcp_server as mcp_server
+
+    calls: list[str] = []
+
+    class Driver:
+        def __init__(self):
+            self.started = 0
+            self.stopped = 0
+
+        def start(self):
+            self.started += 1
+
+        def stop(self):
+            self.stopped += 1
+
+    driver = Driver()
+    job_control = SimpleNamespace(shutdown=lambda: calls.append("shutdown"))
+    registry = SimpleNamespace(
+        runtime_bindings={
+            "desk_driver": driver,
+            "exec_job_control": job_control,
+        }
+    )
+    runtime = SimpleNamespace(registry=registry, roster=None)
+    monkeypatch.setattr(mcp_server, "load_runtime", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr(mcp_server, "_desk_driver_of", lambda _runtime: driver)
+    monkeypatch.setattr(mcp_server, "build_server", lambda *args, **kwargs: object())
+    monkeypatch.setattr(mcp_server, "_serve", lambda *_args: None)
+    monkeypatch.setattr(mcp_server.asyncio, "run", lambda *_args: None)
+    assert (
+        mcp_server.main(["--root", str(ROOT), "--home", str(tmp_path), "--no-roster"])
+        == 0
+    )
+    assert driver.started == driver.stopped == 1
+    assert calls == ["shutdown"]
+
+
+def test_stdio_desk_driver_stops_once_when_serve_raises(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+
+    import omega_prime.mcp_server as mcp_server
+
+    calls: list[str] = []
+
+    class Driver:
+        def start(self):
+            calls.append("start")
+
+        def stop(self):
+            calls.append("stop")
+
+    driver = Driver()
+    job_control = SimpleNamespace(shutdown=lambda: calls.append("shutdown"))
+    runtime = SimpleNamespace(
+        registry=SimpleNamespace(
+            runtime_bindings={
+                "desk_driver": driver,
+                "exec_job_control": job_control,
+            }
+        ),
+        roster=None,
+    )
+    monkeypatch.setattr(mcp_server, "load_runtime", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr(mcp_server, "_desk_driver_of", lambda _runtime: driver)
+    monkeypatch.setattr(mcp_server, "build_server", lambda *args, **kwargs: object())
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("stdio failed")
+
+    monkeypatch.setattr(mcp_server, "_serve", fail)
+    try:
+        mcp_server.main(["--root", str(ROOT), "--home", str(tmp_path), "--no-roster"])
+    except RuntimeError as exc:
+        assert str(exc) == "stdio failed"
+    else:
+        raise AssertionError("serve failure should propagate")
+    assert calls == ["start", "stop", "shutdown"]

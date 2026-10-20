@@ -21,7 +21,7 @@
 - ✅ **v17 XML Prompt Standard** — Phases 85–88 (shipped 2026-10-14; every first-party prompt wrapped in XML tags like Programming Desk, enforced by a gate)
 - ✅ **v18 Operator posture** - Phases 89-95 (shipped 2026-10-14). Seven upgrades accepted when the operator said to continue.
 - ✅ **v19 Installer bindings** - Phase 96 (shipped 2026-10-15). A fresh install binds its own Linear and Notion, treats the existing gateways as optional, and fails setup when `prime-agent` is empty.
-- v20 Wiring — Phases 97–103 (in progress; phase 102 planning)
+- v20 Wiring — Phases 97–103 (in progress; Phase 102 locally executed and verified, pending ordered integration)
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
 `milestones/v16-phases/`.
@@ -95,11 +95,11 @@ Requirements: milestones/v19-REQUIREMENTS.md. Phase 77.1 live UAT stays user-own
 <details>
 <summary>v20 Wiring (Phases 97–103) — IN PROGRESS</summary>
 
-Goal: establish verified wiring of the substrate, memory, solo/desk modes, Omp engine, real U2 LocalExecutor, schedulers/dead-module cleanup/environment documentation, and Ultrathink integration/cleanup. Phase 102 is planned from the uplift-derived G9–G11 gaps; it depends on Phase 101, whose completion is not established in this worktree.
+Goal: establish verified wiring of the substrate, memory, solo/desk modes, Omp engine, real U2 LocalExecutor, schedulers/dead-module cleanup/environment documentation, and Ultrathink integration/cleanup. The seven wiring phases were built in parallel by operator direction; Phase 102 did not require Phase 101 to execute locally. The phase branch remains unmerged pending ordered integration.
 
 ### Phase 102: Schedulers, dead modules, and environment documentation
 
-Goal: close uplift gaps G9–G11 by wiring existing watchdog and pin-bump schedules, removing unreachable/dead modules, documenting supported environment variables, and reporting wiring status without executing scheduled work. Phase 102 depends on Phase 101; its completion is not established in this worktree.
+Goal: close uplift gaps G9–G11 by wiring existing watchdog and pin-bump schedules, routing due prompt jobs through a delegate or blocked receipt, removing unreachable/dead modules, documenting supported environment variables, and reporting wiring status without executing scheduled work. Phase 102 was executed and verified locally; it is not yet integrated.
 
 Requirements: G9-SCHED, G10-EXEC, G10-PLUGINS, G10-X, G10-REACH, G11-ENV, and G9-DOCTOR.
 
@@ -116,9 +116,9 @@ Additional safety constraints: exec-job operations remain approval-gated; plugin
 - [ ] Phase 99: Solo mode, Desk optional
 - [ ] Phase 100: omp engine wiring
 - [ ] Phase 101: Real U2 LocalExecutor
-- [ ] Phase 102: Schedulers, dead modules, env docs
+- [x] Phase 102: Schedulers, dead modules, env docs (5/5 plans) — executed and verified locally 2026-10-20; awaiting ordered rebase/merge
 - [ ] Phase 103: Ultrathink integration and cleanup
 
-Phase 102 depends on Phase 101. Draft plans: [102-01](phases/102-schedulers-dead-modules-env-docs/102-01-PLAN.md), [102-02](phases/102-schedulers-dead-modules-env-docs/102-02-PLAN.md), [102-03](phases/102-schedulers-dead-modules-env-docs/102-03-PLAN.md), [102-04](phases/102-schedulers-dead-modules-env-docs/102-04-PLAN.md), [102-05](phases/102-schedulers-dead-modules-env-docs/102-05-PLAN.md).
+The seven wiring phases were implemented in parallel by operator direction and must integrate in order 1–7. Phase 102 did not wait for Phase 101 during local execution; its branch still awaits the preceding phases' ordered integration. Draft plans: [102-01](phases/102-schedulers-dead-modules-env-docs/102-01-PLAN.md), [102-02](phases/102-schedulers-dead-modules-env-docs/102-02-PLAN.md), [102-03](phases/102-schedulers-dead-modules-env-docs/102-03-PLAN.md), [102-04](phases/102-schedulers-dead-modules-env-docs/102-04-PLAN.md), [102-05](phases/102-schedulers-dead-modules-env-docs/102-05-PLAN.md).
 
 </details>

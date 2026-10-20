@@ -80,6 +80,7 @@ from omega_prime.tools.approvals import ApprovalLog
 from omega_prime.tools.coding import register_coding_tools
 from omega_prime.tools.delegate import register_delegate_tools
 from omega_prime.tools.discord import DiscordClient, register_discord_tools
+from omega_prime.tools.exec_jobs import register_exec_job_tools
 from omega_prime.tools.growth import register_growth_tools
 from omega_prime.tools.ide import register_ide_tools
 from omega_prime.tools.infra import InfraClient, InfraContext, register_infra_tools
@@ -798,6 +799,9 @@ def default_registry(
     served but returns `not_configured: provider`.
     """
     env = dict(env or {})
+    from omega_prime.tools.plugins import load_plugins, plugins_enabled
+
+    plugins_on = plugins_enabled(env)
     registry = ToolRegistry(approval_log=approval_log, policy=policy)
     root = Path(root)
     home = Path(home)
@@ -871,6 +875,8 @@ def default_registry(
     register_omega_command_tools(registry, env)
     register_platform_tools(registry, home=home)
     register_ide_tools(registry, root, jail=None if work == root else work)
+    job_control = register_exec_job_tools(registry, cwd=work)
+    registry.runtime_bindings["exec_job_control"] = job_control
     x_token = secret_value(env, "X_API_TOKEN")
     register_x_tools(
         registry,
@@ -1100,11 +1106,25 @@ def default_registry(
     # convention (`root/cron/jobs.json`) so the desk pass and the plain cron
     # tick see one schedule file. Built last so a catch-up tick meets the
     # fully registered tool surface.
-    driver = DeskDriver(root, parent=parent, work_root=work)
+    driver = DeskDriver(
+        root,
+        parent=parent,
+        work_root=work,
+        approval_log=approval_log,
+        can_apply_pin_bump=(
+            lambda: bool(
+                approval_log is not None
+                and callable(getattr(approval_log, "is_approved", None))
+                and approval_log.is_approved("pin_bump_apply")
+            )
+        ),
+    )
     registry.runtime_bindings["desk_driver"] = driver
     # Started by the live server (stdio main / serve_sse), not here: building
     # a registry is also how doctor, setup_check, the catalog and tests
     # inspect the tool surface, and those must not spawn a ticking thread.
+    if plugins_on:
+        load_plugins(home, registry)
     return registry
 
 
@@ -1797,13 +1817,22 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         return _fail(exc)
     driver = _desk_driver_of(runtime)
-    if driver is not None:
-        driver.start()
+    bindings = getattr(runtime.registry, "runtime_bindings", {})
+    job_control = (
+        bindings.get("exec_job_control") if isinstance(bindings, dict) else None
+    )
     try:
+        if driver is not None:
+            driver.start()
         asyncio.run(_serve(build_server(runtime.registry, runtime.roster)))
     finally:
-        if driver is not None:
-            driver.stop()
+        try:
+            if driver is not None:
+                driver.stop()
+        finally:
+            shutdown = getattr(job_control, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
     return 0
 
 
