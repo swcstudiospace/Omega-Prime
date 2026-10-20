@@ -379,6 +379,22 @@ in. Z.ai and Grok Build stay the fleet defaults. Do not pool or rotate accounts,
 and do not serve anyone else's requests. Fleet support itself ships in the
 coding-fleet repository, not here.
 
+Stage routing: a run started with `stage="plan"` or `stage="execute"` tries
+the ChatGPT plan first, on `gpt-6.1-sol` for planning and `gpt-6-luna` for
+execution. It falls back to Z.ai (`glm-5.3`) when the ChatGPT plan is not
+allowlisted or its quota window is exhausted, and records the plan it fell
+back from. Override a stage model with
+`OMEGA_PRIME_OMP_MODEL_<PLAN>_<STAGE>` (for example
+`OMEGA_PRIME_OMP_MODEL_CHATGPT_EXECUTE`); `OMEGA_PRIME_OMP_MODEL_<PLAN>` still
+applies to every stage of that plan. Runs without a stage keep the router's
+usual choice.
+
+Every run uses omp's default profile, so all jobs share the host's single
+omp login store (`~/.omp/agent/agent.db`, or `OMEGA_PRIME_OMP_HOME`). The
+sandbox binds that store writable so omp can save a refreshed login. Each job
+keeps its own session directory under its job folder. The store is never
+copied: OAuth refresh tokens are single-use.
+
 `omega_capacity` reports each plan's remaining quota and whether it is
 allowlisted. It does not return key values.
 

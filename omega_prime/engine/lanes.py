@@ -485,7 +485,11 @@ class LaneRouter:
     def _write_spec(self, job_id: str, spec: JobSpec) -> None:
         """Exact spec for a later fleet post. Receipts stay redacted."""
         path = job_dir(self._env, job_id) / "spec.json"
-        atomic_write_json(path, spec.to_json())
+        payload = spec.to_json()
+        if spec.stage is not None:
+            # Local-only field; the fleet post uses ``to_json`` without it.
+            payload["stage"] = spec.stage
+        atomic_write_json(path, payload)
 
     def _read_spec(self, job_id: str) -> JobSpec:
         path = job_dir(self._env, job_id) / "spec.json"
@@ -523,6 +527,7 @@ def _base_record(job_id: str, spec: JobSpec, decision: Decision) -> dict[str, An
         "status": decision.status,
         "reasons": list(decision.reasons),
         "model": spec.model,
+        "stage": spec.stage,
         "spec": spec.to_json(),
         "changes": [],
     }
@@ -560,6 +565,7 @@ def _spec_from(payload: object) -> JobSpec:
             hitl_test=_optional_bool(payload.get("hitl_test")),
             events=_optional_bool(payload.get("events")),
             model=_optional_str(payload.get("model")),
+            stage=_optional_str(payload.get("stage")),
         )
     except (KeyError, TypeError):
         raise FleetError("invalid_spec") from None

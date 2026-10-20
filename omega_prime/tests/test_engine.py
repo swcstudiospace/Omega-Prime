@@ -810,3 +810,158 @@ def test_openai_codex_usage_row_maps_to_chatgpt_plan() -> None:
         {"providers": [{"provider": "zai", "percentUsed": 100}]}
     )["zai"]
     assert select(env, usage).decision.plan == "chatgpt"
+
+
+def test_stage_routing_falls_back_to_zai_when_chatgpt_is_gated_off() -> None:
+    env = {"OMEGA_PRIME_OMP_ALLOW_ZAI": "1", "OPENAI_API_KEY": _SECRET}
+    for stage in ("plan", "execute"):
+        pick = select(env, stage=stage)
+        assert (pick.decision.provider, pick.decision.model_id) == ("zai", "glm-5.3")
+        assert pick.stage == stage
+        assert pick.fallback_from == "chatgpt"
+        assert pick.fallback_reason == "chatgpt: off the allowlist"
+        assert _SECRET not in (pick.fallback_reason or "")
+    try:
+        select({}, stage="plan")
+    except PlanNotAllowed as exc:
+        assert "OMEGA_PRIME_OMP_ALLOW_CHATGPT" in exc.detail
+        assert "plan stage" in exc.detail
+    else:
+        raise AssertionError("expected PlanNotAllowed")
+    try:
+        select(env, stage="ship")
+    except PlanNotAllowed as exc:
+        assert "unknown stage" in exc.detail
+    else:
+        raise AssertionError("expected PlanNotAllowed")
+
+
+def test_stage_routing_falls_back_to_zai_when_chatgpt_quota_is_exhausted() -> None:
+    env = {"OMEGA_PRIME_OMP_ALLOW_CHATGPT": "1", "OMEGA_PRIME_OMP_ALLOW_ZAI": "1"}
+    full = parse_usage(
+        {"providers": [{"provider": "openai-codex", "percentUsed": 100}]}
+    )
+    pick = select(env, full, stage="execute")
+    assert pick.decision.plan == "zai"
+    assert pick.fallback_from == "chatgpt"
+    assert pick.fallback_reason == "chatgpt: quota window exhausted"
+    empty = parse_usage({"providers": [{"provider": "openai-codex", "remaining": 0}]})
+    assert select(env, empty, stage="plan").decision.plan == "zai"
+    open_window = parse_usage(
+        {"providers": [{"provider": "openai-codex", "percentUsed": 40}]}
+    )
+    kept = select(env, open_window, stage="plan")
+    assert (kept.decision.plan, kept.fallback_from) == ("chatgpt", None)
+    both_full = {
+        **full,
+        **parse_usage({"providers": [{"provider": "zai", "percentUsed": 100}]}),
+    }
+    try:
+        select(env, both_full, stage="plan")
+    except PlanNotAllowed as exc:
+        assert "exhausted" in exc.detail
+    else:
+        raise AssertionError("expected PlanNotAllowed")
+    # Without a stage the router keeps its old rule: a requested plan is used
+    # as long as it is allowlisted.
+    assert select(env, full, requested="chatgpt").decision.plan == "chatgpt"
+
+
+def test_stage_models_and_overrides() -> None:
+    env = {"OMEGA_PRIME_OMP_ALLOW_CHATGPT": "1", "OMEGA_PRIME_OMP_ALLOW_ZAI": "1"}
+    assert select(env, stage="plan").decision.model_id == "gpt-6.1-sol"
+    assert select(env, stage="execute").decision.model_id == "gpt-6-luna"
+    assert select(env, requested="chatgpt").decision.model_id == "gpt-6.1-sol"
+    staged = {**env, "OMEGA_PRIME_OMP_MODEL_CHATGPT_EXECUTE": "gpt-6-sol"}
+    assert select(staged, stage="execute").decision.model_id == "gpt-6-sol"
+    assert select(staged, stage="plan").decision.model_id == "gpt-6.1-sol"
+    whole = {**env, "OMEGA_PRIME_OMP_MODEL_CHATGPT": "gpt-5.6-sol"}
+    assert select(whole, stage="plan").decision.model_id == "gpt-5.6-sol"
+    assert select(whole, stage="execute").decision.model_id == "gpt-5.6-sol"
+    both = {**whole, "OMEGA_PRIME_OMP_MODEL_CHATGPT_PLAN": "gpt-6-astra"}
+    assert select(both, stage="plan").decision.model_id == "gpt-6-astra"
+    zai_only = {
+        "OMEGA_PRIME_OMP_ALLOW_ZAI": "1",
+        "OMEGA_PRIME_OMP_MODEL_ZAI_EXECUTE": "glm-5.3-flash",
+    }
+    assert select(zai_only, stage="execute").decision.model_id == "glm-5.3-flash"
+    assert select(zai_only, stage="plan").decision.model_id == "glm-5.3"
+    forced = select(env, stage="plan", requested="zai", fallback=())
+    assert (forced.decision.plan, forced.fallback_from) == ("zai", None)
+
+
+def _logged_argv(tmp_path: Path) -> list[str]:
+    logged = [
+        json.loads(line)
+        for line in (tmp_path / "omp-log.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    return next(row["argv"] for row in logged if "--mode" in row.get("argv", []))
+
+
+def test_stage_job_uses_stage_model_and_the_shared_login_store(tmp_path: Path) -> None:
+    binary = _install_fake(tmp_path)
+    store = tmp_path / "home" / ".omp" / "agent"
+    store.mkdir(parents=True)
+    (store / "agent.db").write_bytes(b"login-store-placeholder")
+    env = _env(tmp_path, binary, OMEGA_PRIME_OMP_ALLOW_CHATGPT="1")
+    result = run("PONG", cwd=tmp_path, env=env, job_id="job-luna", stage="execute")
+    assert result.ok is True
+    assert (result.provider, result.model) == ("openai-codex", "gpt-6-luna")
+    assert (result.stage, result.fallback_from) == ("execute", None)
+    argv = _logged_argv(tmp_path)
+    assert argv[argv.index("--model") + 1] == "openai-codex/gpt-6-luna"
+    # No per-job omp profile: omp rejects a path as a profile name, and a named
+    # profile would read ~/.omp/profiles/<name>/agent/agent.db, which has no
+    # login. Sessions still stay per job.
+    assert "--profile" not in argv
+    job = tmp_path / "state" / "jobs" / "job-luna"
+    assert argv[argv.index("--session-dir") + 1] == str(job / "sessions")
+    assert not list(job.rglob("agent.db"))
+    session = json.loads((job / "session.json").read_text(encoding="utf-8"))
+    assert (session["model"], session["stage"]) == ("gpt-6-luna", "execute")
+    fallback = run(
+        "PONG",
+        cwd=tmp_path,
+        env=_env(tmp_path, binary, OMEGA_PRIME_OMP_ALLOW_ZAI="1"),
+        job_id="job-glm",
+        stage="plan",
+    )
+    assert (fallback.provider, fallback.model) == ("zai", "glm-5.3")
+    assert fallback.fallback_from == "chatgpt"
+
+
+def test_sandbox_binds_the_shared_login_store_writable(tmp_path: Path) -> None:
+    binary = _install_fake(tmp_path)
+    store = tmp_path / "home" / ".omp"
+    (store / "agent").mkdir(parents=True)
+    bwrap = tmp_path / "bin" / "bwrap"
+    bwrap.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$@" > "$OMEGA_FAKE_OMP_BWRAP_LOG"\n'
+        'while [ "$1" != "--" ]; do shift; done\n'
+        "shift\n"
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    bwrap.chmod(bwrap.stat().st_mode | stat.S_IEXEC)
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_PRIME_ENGINE_UNSANDBOXED="0",
+        OMEGA_FAKE_OMP_BWRAP_LOG=str(tmp_path / "bwrap.txt"),
+        OMEGA_PRIME_OMP_ALLOW_CHATGPT="1",
+    )
+    result = run("PONG", cwd=tmp_path, env=env, job_id="job-store", stage="plan")
+    assert result.ok is True and result.model == "gpt-6.1-sol"
+    args = (tmp_path / "bwrap.txt").read_text(encoding="utf-8").splitlines()
+    binds = [args[i + 1] for i, item in enumerate(args) if item == "--bind"]
+    assert str(store) in binds
+    custom = tmp_path / "custom-omp"
+    custom.mkdir()
+    env["OMEGA_PRIME_OMP_HOME"] = str(custom)
+    run("PONG", cwd=tmp_path, env=env, job_id="job-custom", stage="plan")
+    args = (tmp_path / "bwrap.txt").read_text(encoding="utf-8").splitlines()
+    binds = [args[i + 1] for i, item in enumerate(args) if item == "--bind"]
+    assert str(custom) in binds and str(store) not in binds

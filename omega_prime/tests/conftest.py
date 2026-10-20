@@ -55,3 +55,17 @@ def _restore_process_loggers() -> Iterator[None]:
         logger.filters = filters
         logger.setLevel(level)
         logger.propagate = propagate
+
+
+# Plan opt-ins on the host (a dev box with OMEGA_PRIME_OMP_ALLOW_ZAI or
+# OMEGA_PRIME_OMP_ALLOW_CHATGPT set) would let a test that reads os.environ
+# route a turn through the real omp engine and spend that plan's quota. Tests
+# that need a plan pass their own env mapping or monkeypatch it back in.
+_HOST_PLAN_PREFIXES = ("OMEGA_PRIME_OMP_ALLOW_", "OMEGA_PRIME_OMP_MODEL_")
+
+
+@pytest.fixture(autouse=True)
+def _no_host_plan_opt_ins(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in list(os.environ):
+        if name.startswith(_HOST_PLAN_PREFIXES) or name == "OMEGA_PRIME_OMP_HOME":
+            monkeypatch.delenv(name, raising=False)

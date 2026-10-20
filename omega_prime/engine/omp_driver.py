@@ -68,6 +68,8 @@ class EngineResult:
     plan: str | None = None
     provider: str | None = None
     model: str | None = None
+    stage: str | None = None
+    fallback_from: str | None = None
     events_path: str = ""
     reason: str | None = None
     detail: str = ""
@@ -85,6 +87,23 @@ def resolve_omp(env: Mapping[str, str]) -> str | None:
             return str(path)
         return None
     return shutil.which("omp", path=env.get("PATH") or None)
+
+
+def omp_home(env: Mapping[str, str]) -> Path:
+    """omp's default config root, which holds the one shared login store.
+
+    ``OMEGA_PRIME_OMP_HOME`` overrides it; otherwise ``$HOME/.omp``. Jobs run on
+    omp's default profile so every job reads the same ``agent/agent.db`` login.
+    A per-job ``--profile`` would point omp at
+    ``~/.omp/profiles/<name>/agent/agent.db``, which has no login, and omp
+    rejects a path as a profile name. The store is never copied: OAuth refresh
+    tokens are single-use, so a copy would break the next refresh.
+    """
+    explicit = str(env.get("OMEGA_PRIME_OMP_HOME", "")).strip()
+    if explicit:
+        return Path(explicit)
+    home = str(env.get("HOME", "")).strip()
+    return (Path(home) if home else Path.home()) / ".omp"
 
 
 def omp_version(binary: str, env: Mapping[str, str]) -> tuple[int, int, int]:
@@ -239,8 +258,13 @@ def run(
     unsandboxed: bool | None = None,
     timeout: float | None = None,
     tmux: bool | None = None,
+    stage: str | None = None,
 ) -> EngineResult:
-    """Run one prompt on omp and return the assistant text, usage, and cost."""
+    """Run one prompt on omp and return the assistant text, usage, and cost.
+
+    ``stage`` (``plan`` or ``execute``) picks that stage's model and lets the
+    router fall back from ChatGPT to Z.ai; see ``plan_router.select``.
+    """
     mapping = dict(env if env is not None else {})
     if env is None:
         import os
@@ -267,6 +291,7 @@ def run(
             unsandboxed=unsandboxed,
             timeout=timeout if timeout is not None else _TURN_TIMEOUT,
             tmux=tmux,
+            stage=stage,
         )
     except (EngineError, PlanNotAllowed, SandboxUnavailable, OSError) as exc:
         reason: str | None
@@ -315,6 +340,7 @@ def _run(
     unsandboxed: bool | None,
     timeout: float,
     tmux: bool | None,
+    stage: str | None = None,
 ) -> EngineResult:
     if mode not in MODES:
         raise EngineError("invalid_mode", "mode must be rpc or rpc-ui")
@@ -330,7 +356,9 @@ def _run(
             "to run omp without a sandbox"
         )
     usage = read_usage(binary, env)
-    choice = select(env, usage, requested=plan)
+    choice = select(env, usage, requested=plan, stage=stage)
+    # Per-job config dir (mcp.json, process cwd). It is not an omp --profile:
+    # jobs share omp's default profile and its single login store.
     profile = directory / "profile"
     profile.mkdir(parents=True, exist_ok=True)
     skills = skills_dir()
@@ -341,8 +369,8 @@ def _run(
         binary,
         "--mode",
         mode,
-        "--profile",
-        str(profile),
+        "--session-dir",
+        str(directory / "sessions"),
         "--model",
         f"{choice.decision.provider}/{choice.decision.model_id}",
         "--thinking",
@@ -355,10 +383,15 @@ def _run(
     ]
     if skills.is_dir():
         argv.extend(["--skills", str(skills)])
+    binds = [directory, work] if work != directory else [directory]
+    store = omp_home(env)
+    if store.is_dir() and store not in binds:
+        # Writable so omp can save a refreshed login in place.
+        binds.append(store)
     wrapped, sandbox = wrap(
         argv,
         env=env,
-        binds=[directory, work] if work != directory else [directory],
+        binds=binds,
         unsandboxed_override=unsandboxed,
     )
     events_path = directory / "events.jsonl"
@@ -371,6 +404,8 @@ def _run(
             "plan": choice.decision.plan,
             "provider": choice.decision.provider,
             "model": choice.decision.model_id,
+            "stage": choice.stage,
+            "fallback_from": choice.fallback_from,
             "sandbox": sandbox,
             "mcp_json": str(mcp_path),
             "skills": str(skills) if skills.is_dir() else "",
@@ -447,6 +482,8 @@ def _run(
         plan=choice.decision.plan,
         provider=choice.decision.provider,
         model=choice.decision.model_id,
+        stage=choice.stage,
+        fallback_from=choice.fallback_from,
         events_path=str(events_path),
         stats=stats,
         sandbox=sandbox,
@@ -461,6 +498,8 @@ def _run(
             "plan": result.plan,
             "provider": result.provider,
             "model": result.model,
+            "stage": result.stage,
+            "fallback_from": result.fallback_from,
             "sandbox": sandbox,
             "mcp_json": str(mcp_path),
             "skills": str(skills) if skills.is_dir() else "",
