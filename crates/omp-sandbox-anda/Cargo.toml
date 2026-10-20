@@ -1,0 +1,17 @@
+[package]
+name = "omp-sandbox-anda"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Rust wrapper (Anda-shaped tool surface) around the omp-sandbox TypeScript core"
+
+[dependencies]
+serde_json = "1"
+
+[features]
+default = []
+# Seam only. Real Anda Engine integration needs anda_engine 0.17.x / anda_core 0.17.x,
+# which require rustc >= 1.95 (box has 1.85.1; upgrade not approved). Not compiled here.
+anda = []
+# Seam only. Real attestation needs IC-TEE (AWS Nitro Enclave) or a confidential VM.
+tee = []

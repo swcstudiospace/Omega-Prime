@@ -1,12 +1,12 @@
 // The TS core: auth-broker -> sandbox tier -> agentOS VM -> GSD-Core -> omp RPC stages.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
-import { STATE, STAGE_MODELS, MAGIC, OMP_BIN, VERSIONS, aedt, type Stage } from "./config.ts";
+import { ROOT, STATE, STAGE_MODELS, MAGIC, OMP_BIN, VERSIONS, aedt, type Stage } from "./config.ts";
 import { AuthBroker } from "./auth.ts";
 import { startTier } from "./providers/tiers.ts";
 import type { SandboxTier } from "./providers/types.ts";
-import { bootVm, vmRoundTrip } from "./vm.ts";
+import { bootVm, vmRoundTrip, SANDBOX_MOUNT } from "./vm.ts";
 import { ensureGsd } from "./gsd.ts";
 import { OmpRpcClient, StaleAnswerError, textOf, type AnswerInput, type PendingQuestion } from "./omp-rpc.ts";
 import { mockAttestation, type AttestationDoc } from "./attest.ts";
@@ -30,7 +30,7 @@ export class Core extends EventEmitter {
   stages = new Map<string, StageRec>();
   #receipts = join(STATE, "receipts");
 
-  async up(opts: { tiers?: string[] } = {}) {
+  async up(opts: { tiers?: string[]; seed?: string } = {}) {
     if (this.tier) return this.up_;
     mkdirSync(this.#receipts, { recursive: true });
     await this.broker.start();
@@ -39,11 +39,28 @@ export class Core extends EventEmitter {
     const { vm, bootMs } = await bootVm(tier); this.vm = vm;
     const roundTrip = await vmRoundTrip(vm, tier);
     const gsd = await ensureGsd(tier as any);
+    const seeded = opts.seed ? await this.#seed(opts.seed) : null;
     const probe = await this.#probeOmp();
     this.attestation = mockAttestation(tier.name, { isolation: tier.isolation });
-    this.up_ = { tier: tier.name, isolation: tier.isolation, skippedTiers: skipped, agentosBootMs: bootMs, roundTrip, gsd, omp: probe, attestation: "mock", attestationDoc: this.attestation };
+    this.up_ = { tier: tier.name, isolation: tier.isolation, skippedTiers: skipped, agentosBootMs: bootMs, roundTrip, gsd, seeded, omp: probe, attestation: "mock", attestationDoc: this.attestation };
     this.#receipt(`up-${tier.id}`, this.up_);
     return this.up_;
+  }
+
+  /** Copy a fixture project into the sandbox workdir THROUGH the agentOS VM mount, then git-init it inside the sandbox. */
+  async #seed(fixture: string) {
+    const t = this.tier!; const src = join(ROOT, fixture);
+    const rel = t.workdir.slice(t.sandboxRoot.length).replace(/^\/+/, "");
+    const files: string[] = [];
+    const walk = (d: string) => { for (const e of readdirSync(join(src, d), { withFileTypes: true })) { const r = d ? `${d}/${e.name}` : e.name; e.isDirectory() ? walk(r) : files.push(r); } };
+    walk("");
+    for (const f of files) {
+      const dir = f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : "";
+      if (dir) await this.vm.filesystem.mkdir(`${SANDBOX_MOUNT}/${rel}/${dir}`, { recursive: true }).catch(() => {});
+      await this.vm.filesystem.writeFile(`${SANDBOX_MOUNT}/${rel}/${f}`, readFileSync(join(src, f), "utf8"));
+    }
+    const g = await t.exec(["sh", "-c", "git init -q && git add -A && git -c user.name=omp-sandbox -c user.email=omp-sandbox@local commit -qm 'seed: disposable e2e fixture' && git log --oneline | head -1"], { timeoutMs: 60_000 });
+    return { fixture, files, viaVm: true, git: g.stdout.trim(), gitExit: g.code };
   }
 
   async #probeOmp() {
@@ -60,7 +77,7 @@ export class Core extends EventEmitter {
 
   #spawnOmp(model: string, thinking = "high") {
     const t = this.tier!;
-    const proc = t.spawnStdio(["omp", "--mode", "rpc", "--no-title", "--no-lsp", "--model", model, "--thinking", thinking, "--approval-mode", "yolo", "--max-time", "3600s"], { cwd: t.workdir });
+    const proc = t.spawnStdio(["omp", "--mode", "rpc-ui", "--no-title", "--no-lsp", "--model", model, "--thinking", thinking, "--approval-mode", "yolo", "--max-time", "3600s"], { cwd: t.workdir });
     return new OmpRpcClient(proc, `omp[${t.name}]`);
   }
 
