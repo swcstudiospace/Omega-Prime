@@ -231,6 +231,11 @@ class _DeskParent:
         self.max_depth = 2
         self.max_children = 1
         self.journal: Any = None
+        # The engine passes a staged run's stage to omp, and omp to this
+        # server; a staged parent delegates to the execute stage.
+        from omega_prime.engine.attach import engine_stage
+
+        self.engine_stage = engine_stage(os.environ)
 
     @property
     def tools(self) -> dict[str, Any]:

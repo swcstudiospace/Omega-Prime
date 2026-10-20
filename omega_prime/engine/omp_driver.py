@@ -441,6 +441,11 @@ def _run(
         },
     )
     maybe_tmux(job_id, env, enabled=tmux)
+    process_env = child_env(env)
+    if choice.stage is not None:
+        # omp hands its env to the omega-prime MCP server it starts, so a
+        # delegate_task from a staged turn knows to build on execute.
+        process_env["OMEGA_PRIME_ENGINE_STAGE"] = choice.stage
     proc = subprocess.Popen(
         wrapped,
         stdin=subprocess.PIPE,
@@ -448,7 +453,7 @@ def _run(
         stderr=subprocess.PIPE,
         text=True,
         cwd=str(profile),
-        env=child_env(env),
+        env=process_env,
         bufsize=1,
     )
     session = OmpSession(proc, events_path)

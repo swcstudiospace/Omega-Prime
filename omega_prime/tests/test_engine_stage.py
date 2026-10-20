@@ -247,3 +247,105 @@ def test_zai_stage_runs_build_on_flash(tmp_path: Path) -> None:
     assert routed["engine"]["model"] == "glm-5.3-flash"
     assert routed["engine"]["fallback_from"] == "chatgpt"
     assert _model_arg(tmp_path) == "zai/glm-5.3-flash"
+
+
+def test_child_stage_normalises_and_refuses_unknown() -> None:
+    from omega_prime.agent.delegate import _child_stage
+
+    class P:
+        def __init__(self, stage: object) -> None:
+            self.engine_stage = stage
+
+    assert _child_stage(P(None)) is None
+    assert _child_stage(P("  ")) is None
+    assert _child_stage(P(" PLAN ")) == "execute"
+    assert _child_stage(P("execute")) == "execute"
+    # Unknown values are not silently turned into a build.
+    assert _child_stage(P("ship")) == "ship"
+
+
+def test_staged_parent_with_child_model_builds_on_the_engine_first(
+    tmp_path: Path, monkeypatch
+) -> None:
+    env = _chatgpt_env(tmp_path, OMEGA_PRIME_ENGINE="auto")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    child = ScriptedModel([{"role": "assistant", "content": "from-python-child"}])
+
+    class Parent:
+        def __init__(self, stage: str | None) -> None:
+            self.child_model = child
+            self.delegate_depth = 0
+            self.tools: dict = {}
+            self.engine_stage = stage
+
+    raw = json.loads(delegate_task(Parent("plan"), "say PONG"))
+    assert (raw["summary"], raw["stage"], raw["model"]) == (
+        "PONG",
+        "execute",
+        "gpt-6-luna",
+    )
+    assert child.call_count == 0
+    # Unstaged parents keep their configured Python child.
+    raw = json.loads(delegate_task(Parent(None), "say hi"))
+    assert raw["summary"] == "from-python-child"
+    # A staged parent whose engine is off still falls back to the child.
+    monkeypatch.setenv("OMEGA_PRIME_ENGINE", "off")
+    child2 = ScriptedModel([{"role": "assistant", "content": "child-again"}])
+    parent = Parent("plan")
+    parent.child_model = child2
+    assert json.loads(delegate_task(parent, "say hi"))["summary"] == "child-again"
+
+
+def test_mcp_desk_parent_reads_the_stage_from_its_env(monkeypatch) -> None:
+    from omega_prime.mcp_server import _DeskParent
+    from omega_prime.tools.registry import ToolRegistry
+
+    monkeypatch.delenv("OMEGA_PRIME_ENGINE_STAGE", raising=False)
+    assert _DeskParent(ToolRegistry(), None).engine_stage is None
+    monkeypatch.setenv("OMEGA_PRIME_ENGINE_STAGE", "plan")
+    assert _DeskParent(ToolRegistry(), None).engine_stage == "plan"
+
+
+def test_staged_omp_process_env_names_the_stage(tmp_path: Path) -> None:
+    import stat as _stat
+
+    env = _chatgpt_env(tmp_path)
+    fake = Path(env["OMEGA_PRIME_OMP_BIN"])
+    wrapper = tmp_path / "bin" / "omp-env"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "${{OMEGA_PRIME_ENGINE_STAGE:-none}}" >> {tmp_path}/stage.log\n'
+        f'exec {fake} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | _stat.S_IEXEC)
+    env["OMEGA_PRIME_OMP_BIN"] = str(wrapper)
+    from omega_prime.engine.omp_driver import run
+
+    assert run("PONG", cwd=tmp_path, env=env, stage="execute").ok
+    assert run("PONG", cwd=tmp_path, env=env).ok
+    seen = (tmp_path / "stage.log").read_text("utf-8").split()
+    # --version and usage probes run unstaged; the RPC process carries the stage.
+    assert "execute" in seen
+    assert seen[-1] == "none"
+
+
+def test_execute_ultrathink_keeps_a_saved_plan_stage(tmp_path: Path) -> None:
+    from omega_prime.routines.ultrathink_turn import execute_ultrathink
+
+    env = _chatgpt_env(tmp_path, OMEGA_PRIME_ENGINE="auto")
+    spec = tmp_path / "spec.md"
+    spec.write_text("Do the small thing.\n", encoding="utf-8")
+    plan_dir = tmp_path / "state" / "ultrathink"
+    plan_dir.mkdir(parents=True)
+    (plan_dir / "last-plan.json").write_text(
+        json.dumps({"specPath": str(spec), "stage": "execute"}), encoding="utf-8"
+    )
+    turn = execute_ultrathink(env)
+    assert turn["found"] is True
+    assert turn["engine"]["used"] is True
+    assert (turn["engine"]["stage"], turn["engine"]["model"]) == (
+        "execute",
+        "gpt-6-luna",
+    )
