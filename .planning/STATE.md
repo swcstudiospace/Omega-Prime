@@ -1,20 +1,21 @@
 ---
 gsd_state_version: "1.0"
-milestone: v19
-milestone_name: Installer bindings
-status: Milestone complete
-stopped_at: v19 phase 96 verified. Phase 77.1 live UAT stays user-owned.
-last_updated: "2026-10-15T05:30:00.000Z"
-last_activity: 2026-10-15
-last_activity_desc: Per-install Linear, Notion, and optional gateway setup (graph ut-mv925n7i-6a9cd5f0)
-state_head: 034a08a
+milestone: v21
+milestone_name: Task Dashboard
+current_phase: 104
+current_phase_name: Task Dashboard
+status: executing
+stopped_at: v21 phase 104 planning in progress (task-dashboard uplift, operator-approved 2026-10-21).
+last_updated: "2026-10-20T15:25:18.047Z"
+last_activity: 2026-10-21
+last_activity_desc: v21 Task Dashboard planning — phase 104 in the feat/task-dashboard worktree
+state_head: 44b28dfd50be6a63b175227a6f748def6f4bcc9c
 progress:
   total_phases: 1
-  completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
-  percent: 100
-current_phase: 96
+  completed_phases: 0
+  total_plans: 7
+  completed_plans: 0
+  percent: 0
 current_plan: null
 ---
 
@@ -29,10 +30,10 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 
 ## Current Position
 
-Phase: Milestone v19 complete (phase 96).
+Phase: 104 (Task Dashboard) — READY TO EXECUTE
 Plan: -
-Status: Milestone complete. Phase 77.1 stays verification_deferred_human. Do not re-execute phases 85-96. Do not mark 77.1 passed.
-Last activity: 2026-10-15 - installer bindings verified. Pytest 4679 passed, 3 skipped.
+Status: Ready to execute
+Last activity: 2026-10-21 - task-dashboard uplift staged (104-UPLIFT.xml); phase 104 planning.
 
 ## Closeout
 
@@ -143,10 +144,10 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Session
 
-**Last session:** 2026-10-12
-**Stopped at:** Phase 84 complete — all phases complete
-**Resume file:** .planning/milestones/v15-phases/77.1-grok-bot-import-packaging/77.1-UAT.md
+**Last session:** 2026-10-21
+**Stopped at:** Phase 104 planning (v21 Task Dashboard)
+**Resume file:** .planning/phases/104-task-dashboard/
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- After phase 104 plans are verified: /gsd-execute-phase 104 (in the feat/task-dashboard worktree). The live dashboard run, PR and merge yes are operator steps.

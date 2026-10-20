@@ -21,6 +21,7 @@
 - ✅ **v17 XML Prompt Standard** — Phases 85–88 (shipped 2026-10-14; every first-party prompt wrapped in XML tags like Programming Desk, enforced by a gate)
 - ✅ **v18 Operator posture** - Phases 89-95 (shipped 2026-10-14). Seven upgrades accepted when the operator said to continue.
 - ✅ **v19 Installer bindings** - Phase 96 (shipped 2026-10-15). A fresh install binds its own Linear and Notion, treats the existing gateways as optional, and fails setup when `prime-agent` is empty.
+- 🔵 **v21 Task Dashboard** — Phase 104 (started 2026-10-21)
 
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
@@ -91,3 +92,41 @@ Requirements: milestones/v19-REQUIREMENTS.md. Phase 77.1 live UAT stays user-own
 - [x] Phase 96: Per-install Linear, Notion, and optional gateways (1/1 plan) - completed 2026-10-15
 
 </details>
+
+## v21 Task Dashboard
+
+One phase staged from the 2026-10-21 task-dashboard uplift (operator-approved
+01:51 AEDT). The full uplift spec is
+`.planning/phases/104-task-dashboard/104-UPLIFT.xml`. Locked decisions: the
+dashboard lives in the omes-bot package `omega_prime/dashboard/` on
+`feat/task-dashboard`; the fleet collector is implemented but OFF by default
+(enabled only via a non-secret setting); the omega-job `final_text` first line
+is shown redacted with a 120-character cap; the dashboard runs in a Herdr
+workspace "dashboard" on 127.0.0.1:7421 and the operator starts it. This
+session plans only. U7 covers docs/dashboard.md + scripts/dashboard-start.sh +
+tests; the live box run, the PR and the merge yes are operator steps.
+
+### Phase 104: Task Dashboard
+
+**Goal:** A local, read-only view of what Omega Prime is actually working on: a new `omega_prime/dashboard/` package with one collector per live work source on the box, a normaliser joining them into one Task model with redaction at every boundary, a starlette app exposing a GET-only JSON API plus an SSE stream, and one static HTML/CSS/JS page (no build step) with four sections — Active work, PR / Greptile / CI gate, Waiting on Ove, Recently finished — bound to 127.0.0.1 only, plus the `~/.omega-prime/dashboard/tasks.json` writer helper, tests, docs and a start script.
+**Requirements**: TD-01, TD-02, TD-03, TD-04, TD-05, TD-06, TD-07, TD-08
+**Success Criteria:**
+1. (a1/TD-01) `ss -ltn` shows the dashboard only on `127.0.0.1:<port>`; `--host 0.0.0.0` or any non-loopback host exits non-zero with a clear message.
+2. (a2/TD-02) With the box as observed, `/api/snapshot` lists the Herdr pane w2:p1 "swarm-smoke", the live wiring phases p1/p2/p3/p4/p6/p7 with branch and stage, the omp-sandbox e2e run with its two podman containers, and recent omega jobs, each with started and last-activity times.
+3. (a3/TD-03) The PR gate lists open omes-bot PRs with CI and Greptile columns, and later shows `fix/wiring-*` PRs once they open, without a restart.
+4. (a4/TD-04) Writing a sample `tasks.json` via the writer helper makes its tasks, `waiting_on_ove` and `finished` items appear in the page within 5s with no reload.
+5. (a5/TD-05) The seeded-secret test passes: no fake token appears in any response; `rg` over the served HTML/JS finds no innerHTML with data.
+6. (a6/TD-06) Killing herdr, stopping podman, or removing the PAT turns that source amber or red in the health strip while the other sections keep updating.
+7. (a7/TD-07) Every non-GET method returns 405, and the Host-header guard rejects a foreign Host.
+8. (a8/TD-08) ruff, mypy and pytest are green or baseline-only (recorded baseline: `test_desk_wiring`, `test_grokbot_oneclick`, `test_omega_commands` doctor tests, `test_prime_kernel_*`); all new dashboard tests pass. Greptile 5/5 + green CI + the operator's merge yes follow the phase.
+
+**Plans:** 7 plans
+
+Plans:
+- [ ] Plan 104-01 (wave 1): U4 — Task model, joins, redaction wrapper, atomic tasks.json writer + model/redaction tests (tracer)
+- [ ] Plan 104-02 (wave 2, after 104-01): U1 — file collectors (omp_sessions, wiring, sandbox_files, omega_jobs, command_log, tasks_json, agentos)
+- [ ] Plan 104-03 (wave 2, after 104-01): U2 — process collectors (procs, herdr, podman)
+- [ ] Plan 104-04 (wave 2, after 104-01): U3 — GitHub and opt-in fleet collectors
+- [ ] Plan 104-05 (wave 2, after 104-01): U5 — starlette app, GET-only API + SSE, poller, CLI, loopback guard
+- [ ] Plan 104-06 (wave 3, after 104-05): U6 — static four-section UI with health strip and SSE/polling fallback
+- [ ] Plan 104-07 (wave 4, after 104-02, 104-03, 104-04, 104-06): U7 — integration tests, docs/dashboard.md, scripts/dashboard-start.sh (live run and PR are operator steps)

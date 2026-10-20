@@ -1,0 +1,245 @@
+<!-- Copy of the task-dashboard BUILD_PROMPT (uplift graph, 7 nodes, 2026-10-21), lightly
+     sanitized for the repository: the operator's name, session model ids and one internal
+     handle were replaced ("the operator", "Sol"/"Luna"); every path, field, command and
+     contract identifier is unchanged. Operator approval 01:51 AEDT: omes-bot package
+     omega_prime/dashboard/ on feat/task-dashboard; fleet collector implemented but OFF by
+     default; redacted first line of omega job final_text capped at 120 characters; dashboard
+     runs in a Herdr workspace "dashboard" on 127.0.0.1:7421 (the operator starts it).
+     This session plans only; the live run and the PR are operator steps. -->
+<BUILD_PROMPT title="Task Dashboard: a local, read-only view of what Omega Prime is working on" repo="swcstudiospace/omes-bot" base="main" branch="feat/task-dashboard" graph_source="generated" nodes="7">
+  <ORIGINAL>/gsd-autonomous ultrathink orchestrate workflowz We should build a Dashboard inside of your computer which tells me what tasks you're actually working on? Task Dashboard. It's really hard to tell in Chat right?</ORIGINAL>
+
+  <SYSTEM_ROLE>Senior Python engineer in omes-bot, working in a local omp RPC session on the box. Sol plans with /gsd-plan-phase and Luna executes with /gsd-autonomous. You write code, tests and docs on a feature branch and stage a PR for the Greptile gate. You do not deploy, push to main, touch Railway, the VPS, system packages or connector env, and you never print secret values.</SYSTEM_ROLE>
+
+  <APP_CONTEXT>
+    <OPERATOR>Ove (Ming) runs Omega Prime as a solo bot. He follows work in Grok Bot chat and finds it hard to tell what is actually running. He views the dashboard in the box desktop browser (noVNC), not from his own machine.</OPERATOR>
+    <BOX_FACTS observed="2026-10-21 01:45 AEDT, read-only">
+      <HERDR>herdr 0.9.5, protocol 22, at ~/.local/bin/herdr. `herdr api snapshot` returns JSON under result.snapshot with workspaces, tabs, panes and agents. Each agent has pane_id, name, cwd, agent_status (idle/working/blocked), terminal_title and agent_session.value (path to the omp session .jsonl). One workspace "swarm-smoke" (w2:p1, idle) is live now.</HERDR>
+      <OMP_SESSIONS>omp at ~/.local/bin/omp. Session files are ~/.omp/agent/sessions/--&lt;cwd-slug&gt;--/&lt;ISO&gt;_&lt;uuid&gt;.jsonl, one JSON entry per line with types session (cwd, id, timestamp), title/title_change, model_change, model_usage (provider, model, usage, stopReason), thinking_level_change, message, custom, custom_message, credential_pin (hash only). Logs are ~/.omp/logs/omp.&lt;date&gt;.&lt;pid&gt;.log. ~/.omp also holds auth-broker.token and install-id; never read those.</OMP_SESSIONS>
+      <OMP_PROCESSES>Live omp processes: `--mode rpc` in /workspace/omes-bot-wt/p1, p4, p6 and p7; `--mode rpc-ui` in /workspace/omp-sandbox and in /sandbox/work (inside the OpenShell sandbox); an interactive omp in /workspace/omp-herdr-smoke; four `omp daemon brok…` processes. Their argv can carry tokens, so only pid, elapsed time, cwd (from /proc/&lt;pid&gt;/cwd) and the --mode flag are safe to show.</OMP_PROCESSES>
+      <WIRING_RUNS>Worktrees /workspace/omes-bot-wt/p1, p2, p3, p4, p6 and p7 on branches fix/wiring-p1-substrate-direct, -p2-shared-memory, -p3-solo-mode, -p4-omp-engine, -p6-schedulers-deadcode and -p7-ultrathink-cleanup. Run state is under /workspace/omes-bot-wiring-audit/runs/pN/: phase.log (lines like "HH:MM:SS sol start", "prompt sent model=…", "tool todo {…}"), sol.prompt/luna.prompt, sol.jsonl/luna.jsonl, *.summary, *.final, and sol.done/luna.done marker files. The uplifts are /workspace/omes-bot-wiring-audit/uplift/phase-N.xml. Phase 5 has no worktree yet (it waits on phase 4).</WIRING_RUNS>
+      <SANDBOX>/workspace/omp-sandbox: PROGRESS.md (timestamped lines), .state/e2e/&lt;stamp&gt;.jsonl and .stderr, .state/receipts/*.json (down-*, st-execute-*), and .state/openshell-podman/ (gateway.log, sandbox-agent logs, podman-service.log). `podman ps -a` currently shows two OpenShell containers (sandbox and supervisor, up about 18 minutes). The OpenShell gateway listens on 127.0.0.1:18081 (mTLS).</SANDBOX>
+      <OMEGA_PRIME_STATE>~/.omega-prime/command-log.jsonl holds 128 lines with keys cmd, exit_code, output_tail and cwd; cmd is raw and can hold secrets. ~/.omega-prime/jobs/job-*/ (about 40 dirs) holds session.json (job_id, ok, plan, provider, model, stage, sandbox, final_text, …), events.jsonl (omp RPC frames) and sessions/*.jsonl. omega_prime/tools/todo.py TodoStore is in-memory only, so the todo tool has nothing on disk to read.</OMEGA_PRIME_STATE>
+      <GITHUB>Open omes-bot PRs today are #37 (v20-grok-bot-launch-kit) and dependabot bumps (#3, #15, #21, #22, #24–#29). No fix/wiring-* PR is open yet. GITHUB_PAT_DESK_LEAD is available for read calls and must never appear in output, logs or HTML.</GITHUB>
+      <CODING_FLEET>/workspace/coding-fleet/bin/fleet.mjs reads ~/.config/fleet/coordinator.env and offers `status` (GET /status and /jobs?limit=20), `logs`, `hitl` and the write verbs dispatch/cancel/drain/answer. The dashboard may use the GET endpoints only.</CODING_FLEET>
+      <AGENTOS>/home/box/agentos holds gsd-routing.json, state/, adapter/ and src/. It is a read-only source for routing and state.</AGENTOS>
+      <AGENT_SWARM>/workspace/agent-swarm is on local branch feat/omp-herdr (not pushed). The swarm is being installed as an omp plugin under ~/.omp/plugins.</AGENT_SWARM>
+      <STACK>omes-bot is Python ≥3.11. Its .venv already has starlette 1.7.0 and uvicorn 0.54.0, and omega_prime/grokbot/approvals_api.py already uses starlette. omega_prime/credentials/redact.py provides redact_text and redact_value (sk-, xai-, gh*_, AKIA, Bearer and KEY=value patterns). omega_prime/engine has jobs.py, fleet_client.py, watch.py and omp_driver.py. node 20.19.2 and bun 1.4.2 are also on the box.</STACK>
+      <NETWORK>Ports already bound on 127.0.0.1 include 5900, 5920, 8791, 9242 and 18081. 0.0.0.0 has 1339, 1340, 2375, 6080, 6081, 8790, 26500 and 50052, which belong to the box. The dashboard must never join that list.</NETWORK>
+    </BOX_FACTS>
+  </APP_CONTEXT>
+
+  <SCOPE>
+    <IN>A new omes-bot package omega_prime/dashboard/ with collectors (one per source), a normaliser into a single Task model, a redaction pass, a starlette app with a JSON API and an SSE stream, one static HTML/CSS/JS page with no build step, a CLI entry (`python -m omega_prime.dashboard` and an optional `omega dashboard` subcommand), a tiny writer helper for ~/.omega-prime/dashboard/tasks.json, tests, and docs/dashboard.md.</IN>
+    <IN>Four sections: Active work, PR / Greptile / CI gate, Waiting on Ove, Recently finished.</IN>
+    <IN>A launch script that starts it user-locally (nohup, or inside a Herdr pane) on 127.0.0.1 only.</IN>
+  </SCOPE>
+
+  <CONSTRAINTS>
+    <C>Do not invent repository facts. Every path, endpoint, field and command must come from the box facts above or from a file read in this session. Mark anything else as an assumption.</C>
+    <C>Bind to 127.0.0.1 only. Refuse 0.0.0.0, ::, or any non-loopback host and exit non-zero. No tunnel, no reverse proxy, no deploy, no Railway, no VPS, and not wired into the deployed grokbot server or the Dockerfile.</C>
+    <C>Read-only. No endpoint changes state on the box, in Herdr, in omp, in podman, in GitHub or in the fleet. Only GET routes. Action buttons are out of scope and need the operator's yes later.</C>
+    <C>No new packages. Use starlette and uvicorn from the existing venv, plus the stdlib. No npm and no frontend framework. No global installs, no docker, no system changes, no sudo.</C>
+    <C>ruff, mypy and pytest stay green, or show only the recorded baseline failures.</C>
+    <C>Stay file-disjoint from the in-flight wiring branches. Touch only omega_prime/dashboard/**, its tests, docs/dashboard.md, and one additive line in engine/cli.py if needed. Rebase on main before the gate.</C>
+  </CONSTRAINTS>
+
+  <DATA_SOURCES>
+    <SOURCE id="herdr" how="subprocess `herdr api snapshot` (fallback: socket API), timeout 3s" yields="pane_id, workspace label, name, agent_status, cwd, terminal_title, agent_session path"/>
+    <SOURCE id="omp_sessions" how="tail-read ~/.omp/agent/sessions/**/*.jsonl modified within the window (default 24h)" yields="session id, cwd, title, model, thinking level, last entry timestamp, last stopReason, token usage totals"/>
+    <SOURCE id="omp_procs" how="/proc scan for comm=omp; read only /proc/pid/stat, /proc/pid/cwd and the --mode token from cmdline" yields="pid, elapsed, cwd, mode; joined to sessions by cwd"/>
+    <SOURCE id="wiring" how="git worktree list in /workspace/omes-bot, plus runs/pN/phase.log tail and *.done markers" yields="phase N, branch, head sha, stage (sol/luna/done), last log line time, todo progress parsed from `tool todo` lines"/>
+    <SOURCE id="sandbox" how="PROGRESS.md tail, newest .state/e2e/*.jsonl, .state/receipts/*.json, `podman ps -a --format json` (rootless, user socket)" yields="e2e run id, stage, container names/status/uptime, last receipt"/>
+    <SOURCE id="omega_jobs" how="~/.omega-prime/jobs/*/session.json and events.jsonl mtime" yields="job_id, model, plan, sandbox, ok, stage, final_text first line (redacted)"/>
+    <SOURCE id="command_log" how="~/.omega-prime/command-log.jsonl tail" yields="count, last exit codes and cwd only; cmd shown only after redaction and a 120-character cap"/>
+    <SOURCE id="github" how="REST GET with GITHUB_PAT_DESK_LEAD from env, cached for 60s" yields="open PRs for fix/wiring-*, feat/task-dashboard, agent-substrate, agent-swarm; draft flag, mergeable, check-run conclusions, Greptile confidence parsed from the Greptile review/comment body"/>
+    <SOURCE id="fleet" how="optional: GET /status and /jobs?limit=20 using coordinator.env, only if present; disabled flag in settings" yields="job id, state, worker, age"/>
+    <SOURCE id="agentos" how="read gsd-routing.json and state/ listing" yields="routing summary only"/>
+    <SOURCE id="tasks_json" how="~/.omega-prime/dashboard/tasks.json written by Omega Prime" yields="Grok Bot background tasks, routines, waiting-on-operator items, recently finished" assumption="true"/>
+  </DATA_SOURCES>
+
+  <TASKS_JSON_CONTRACT assumption="Grok Bot's own background-task list and routines are not readable from the box, so Omega Prime writes this file on each chat update">
+    <PATH>~/.omega-prime/dashboard/tasks.json (mode 0600, directory 0700), written atomically (tmp file plus rename).</PATH>
+    <SHAPE>{"version":1,"updated_at":ISO8601,"tasks":[{"id","title","owner":{"kind":"grokbot-executor|routine|herdr-pane|omp-session|sandbox|pr|fleet","ref"},"state":"queued|working|blocked|waiting_on_ove|done|failed","started_at","last_activity_at","progress":{"done","total"}|null,"note","links":[{"label","path_or_url"}]}],"waiting_on_ove":[{"id","ask","since","blocks"}],"finished":[{"id","title","finished_at","result":"ok|failed|stopped","receipt"}]}</SHAPE>
+    <RULES>Unknown keys are ignored. A bad file is shown as a "tasks.json unreadable" banner and never crashes the app. The writer helper omega_prime/dashboard/status_file.py validates and redacts before writing. Values never hold secrets, raw argv or env.</RULES>
+  </TASKS_JSON_CONTRACT>
+
+  <TASK_MODEL>
+    <FIELDS>id (stable, source-prefixed, e.g. herdr:w2:p1, wiring:p3, sandbox:e2e:20261021-012659, gh:omes-bot#37), title, source, owner {kind, ref, label}, state (working, blocked, idle, waiting_on_ove, done, failed, unknown), started_at, last_activity_at, progress {done,total}|null, model, detail (redacted short text), links.</FIELDS>
+    <MERGE>Join the herdr pane, omp session file and omp pid by session path or cwd, so one real piece of work is one card. Join wiring:pN to its worktree pids by cwd /workspace/omes-bot-wt/pN.</MERGE>
+    <STALENESS>working with no activity for 15 minutes or more is shown as "quiet" (amber, not red). A pid that is gone while state is working becomes "stopped?" so it is not silently hidden.</STALENESS>
+  </TASK_MODEL>
+
+  <PAGE_TASK_DASHBOARD route="/">
+    <HEADER>Title "Omega Prime — Task Dashboard", the box clock in AEDT, last refresh time, a connection dot (live, reconnecting or stale), and a per-source health strip (ok, empty, error, or disabled with the reason).</HEADER>
+    <SECTION_ACTIVE_WORK>Cards sorted by state (blocked, working, quiet, idle). Each card shows title, owner chip (Herdr pane w2:p1 / omp session / sandbox / PR / fleet / Grok Bot executor), state badge, started (relative plus AEDT), last activity, progress bar when known, model (Sol/Luna/GLM), and a "details" disclosure with redacted detail and file paths.</SECTION_ACTIVE_WORK>
+    <SECTION_PR_GATE>One row per PR: repo#number, branch, draft or ready, CI (pass, fail, pending), Greptile score n/5 or "not reviewed", mergeable or conflicting, and the merge rule note (omes-bot: 5/5 plus green CI, merge commit; coding-fleet: needs the operator's yes). Read-only. No merge button.</SECTION_PR_GATE>
+    <SECTION_WAITING_ON_OVE>Items from tasks.json waiting_on_ove, plus derived items: a PR at 5/5 with green CI ("ready for your merge yes"), a blocked Herdr pane, and a fleet HITL count. Each shows what it blocks and since when.</SECTION_WAITING_ON_OVE>
+    <SECTION_RECENTLY_FINISHED>Last 24h: wiring phases with a luna.done marker, sandbox receipts, finished omega jobs (ok true/false), exited omp sessions, merged PRs, and tasks.json finished items. Newest first, capped at 50.</SECTION_RECENTLY_FINISHED>
+    <STATES>
+      <LOADING>Skeleton cards on first paint until the first snapshot arrives.</LOADING>
+      <EMPTY>Per section, e.g. "Nothing running right now", rather than a blank area.</EMPTY>
+      <ERROR>A collector failure shows in the health strip and on that section. The other sections keep rendering.</ERROR>
+      <STALE>If SSE drops, the client falls back to polling /api/snapshot every 5s and shows "reconnecting".</STALE>
+    </STATES>
+    <ACCESSIBILITY>Semantic headings per section, state conveyed by text plus colour, keyboard-focusable disclosures, prefers-reduced-motion respected, readable at the noVNC desktop resolution, and dark theme by default.</ACCESSIBILITY>
+  </PAGE_TASK_DASHBOARD>
+
+  <API>
+    <ROUTE method="GET" path="/api/snapshot">The full normalised snapshot {generated_at, sources:{id:{status, error?, took_ms}}, active, pr_gate, waiting_on_ove, finished}.</ROUTE>
+    <ROUTE method="GET" path="/api/stream">SSE: an event "snapshot" when the content hash changes, a heartbeat comment every 15s, and a retry hint of 3000ms.</ROUTE>
+    <ROUTE method="GET" path="/healthz">{ok:true, version}.</ROUTE>
+    <NOTE>No POST, PUT, PATCH or DELETE routes exist. Anything else returns 405.</NOTE>
+  </API>
+
+  <REFRESH_LOOP>One background poller builds the snapshot. Local sources run every 3s with mtime caching, podman and herdr every 5s, GitHub every 60s, and fleet every 30s. Collectors run concurrently, each with a timeout, so one slow source cannot stall the rest. SSE clients share the cached snapshot.</REFRESH_LOOP>
+
+  <SECURITY_AND_VALIDATION>
+    <REDACTION>Every string leaving a collector passes omega_prime.credentials.redact.redact_value, then a dashboard denylist: any key or text matching TOKEN, KEY, SECRET, PASSWORD, PAT, AUTH, COOKIE or BEARER, plus the named secrets (RAILWAY_API_TOKEN, FLEET_COORDINATOR_TOKEN, GITHUB_PAT_DESK_LEAD, OMEGA_PRIME_OMP_ALLOW_CHATGPT, OMP_AUTH_BROKER*, ChatGPT tokens). Their values are replaced, never shown truncated.</REDACTION>
+    <NEVER_READ>/proc/*/environ, full /proc/*/cmdline (only the --mode token is extracted), ~/.omp/auth-broker.token, ~/.config/fleet/coordinator.env values (token held in memory only, for the fleet call), auth-bundle files, credential_pin hashes, Herdr pane_history or screen contents.</NEVER_READ>
+    <HTTP>Host header must be 127.0.0.1:&lt;port&gt; or localhost:&lt;port&gt; (DNS-rebinding guard). Strict CSP (default-src 'self'), no CORS, X-Content-Type-Options nosniff, no third-party assets, and all text inserted via textContent, never innerHTML.</HTTP>
+    <TEST>A test seeds fake secrets in a session jsonl, a command-log line, a tasks.json note and a fake argv, and asserts that none appears in /api/snapshot, /api/stream or the HTML.</TEST>
+  </SECURITY_AND_VALIDATION>
+
+  <GRACEFUL_DEGRADATION>Herdr is not installed or the server is down: source status "unavailable", and omp sessions are still shown from files. Podman socket missing: "sandbox containers unknown", and PROGRESS.md is still shown. No GitHub PAT, or a rate limit: PR gate shows the last cached data with its age, or "GitHub not configured". tasks.json missing: an info banner explaining it is filled in by Omega Prime. Malformed jsonl lines are skipped and counted.</GRACEFUL_DEGRADATION>
+
+  <RUNTIME>
+    <LAUNCH>`.venv/bin/python -m omega_prime.dashboard --host 127.0.0.1 --port 7421` (port is an assumption; it is checked free and configurable via OMEGA_PRIME_DASHBOARD_PORT). It is started with nohup, or in a dedicated Herdr workspace "dashboard" so it survives detach. A pidfile goes in ~/.omega-prime/dashboard/. It is opened in the box desktop browser at http://127.0.0.1:7421/.</LAUNCH>
+    <STOP>`python -m omega_prime.dashboard --stop` reads the pidfile. Nothing is installed system-wide.</STOP>
+  </RUNTIME>
+
+  <ACCEPTANCE_CRITERIA>
+    <AC id="a1">`ss -ltn` shows the dashboard only on 127.0.0.1:&lt;port&gt;. Starting with --host 0.0.0.0 exits non-zero with a clear message.</AC>
+    <AC id="a2">With the box as observed, /api/snapshot lists the Herdr pane w2:p1 "swarm-smoke", the live wiring phases p1/p2/p3/p4/p6/p7 with branch and stage, the omp-sandbox e2e run with its two podman containers, and recent omega jobs, each with started and last-activity times.</AC>
+    <AC id="a3">The PR gate lists open omes-bot PRs with CI and Greptile columns, and later shows fix/wiring-* PRs once they open, without a restart.</AC>
+    <AC id="a4">Writing a sample tasks.json via the writer helper makes its tasks, waiting_on_ove and finished items appear in the page within 5s with no reload.</AC>
+    <AC id="a5">The seeded-secret test passes: no fake token appears in any response. `rg` over the served HTML/JS finds no innerHTML with data.</AC>
+    <AC id="a6">Killing herdr, stopping podman, or removing the PAT turns that source amber or red in the health strip while the other sections keep updating.</AC>
+    <AC id="a7">Every non-GET method returns 405, and the Host-header guard rejects a foreign Host.</AC>
+    <AC id="a8">ruff, mypy and pytest are green or baseline-only. The PR passes Greptile 5/5 with green CI before the operator is asked for the merge yes.</AC>
+  </ACCEPTANCE_CRITERIA>
+
+  <OUT_OF_SCOPE>
+    <ITEM>Action buttons: revive, kill or restart a Herdr pane; cancel a fleet job; merge or approve a PR; restart a sandbox. These come later and need the operator's yes.</ITEM>
+    <ITEM>Any public URL, tunnel, auth system, Railway or VPS deploy, or inclusion in the grokbot server or Dockerfile.</ITEM>
+    <ITEM>Changing Grok Bot itself so it can expose its background tasks. tasks.json is the bridge.</ITEM>
+    <ITEM>Editing the wiring-phase branches, the omp-sandbox repo, agent-swarm or Herdr config.</ITEM>
+    <ITEM>Linear and Notion ticket creation (the operator did not ask for it this run).</ITEM>
+    <ITEM>Historical analytics, cost charts, or a token-usage dashboard beyond per-card totals.</ITEM>
+  </OUT_OF_SCOPE>
+
+  <ASSUMPTIONS>
+    <A>Grok Bot's background tasks and routines are visible to the dashboard only through ~/.omega-prime/dashboard/tasks.json, which Omega Prime writes on each chat update.</A>
+    <A>Port 7421 is free (not bound at 01:45 AEDT). It is configurable.</A>
+    <A>The Greptile score is parsed from the Greptile review or comment body on each PR ("Confidence score: n/5"). If it is not found, the column shows "not reviewed".</A>
+    <A>The omp session jsonl schema seen in the herdr-smoke session holds for RPC sessions too. The collector tolerates unknown entry types.</A>
+    <A>The 24h window and 15-minute "quiet" threshold are defaults, settable in ~/.omega-prime/settings.json (non-secret allowlist from wiring phase 1).</A>
+  </ASSUMPTIONS>
+
+  <AMBIGUITIES>
+    <Q id="q1" blocking="false">Should it live in omes-bot (PR through Greptile, reuses redact and starlette), or in a standalone local repo with no remote? Default: omes-bot, omega_prime/dashboard/.</Q>
+    <Q id="q2" blocking="false">Should it run inside its own Herdr workspace so it stays up forever, or as a plain nohup process? Default: Herdr workspace "dashboard".</Q>
+    <Q id="q3" blocking="false">Is coding-fleet status in scope (the Railway coordinator is reachable only if it is up)? Default: an optional collector, off until enabled.</Q>
+    <Q id="q4" blocking="false">Should the omega jobs final_text first line be shown (redacted), or only job metadata? Default: first line, redacted, 120-character cap.</Q>
+  </AMBIGUITIES>
+
+  <GOT nodes="7" source="generated">
+    <NODE id="n1" kind="understand" depends_on="" title="Inventory every live work source on the box and what each can safely reveal">
+      <rationale>
+        1. Herdr `api snapshot` gives panes and agents with agent_status and the omp session path. This is the most direct "what is running" signal for Herdr-hosted work.
+        2. omp RPC sessions started by the wiring runner and the sandbox are not Herdr panes, so they show up only as /proc entries and ~/.omp/agent/sessions jsonl files keyed by cwd slug.
+        3. Wiring progress is clearer in /workspace/omes-bot-wiring-audit/runs/pN (phase.log, *.done, *.summary) than in raw session files. That layer gives stage (sol/luna/done) and todo progress.
+        4. The sandbox has its own trail: PROGRESS.md, .state/e2e and receipts, and podman containers. Omega jobs keep session.json plus events.jsonl.
+        5. Grok Bot's executors and routines are not on disk at all. That is the gap tasks.json must fill.
+        6. argv, command-log cmd and session messages can all carry secrets, so each source needs an explicit field allowlist, not a denylist alone.
+      </rationale>
+      <conclusion>Eleven sources (see DATA_SOURCES). Safe fields per source are allowlisted. tasks.json is the only bridge for Grok Bot tasks. Process info is limited to pid, elapsed, cwd and --mode.</conclusion>
+    </NODE>
+    <NODE id="n2" kind="decompose" depends_on="n1" title="Split into collectors, normaliser, redaction, server, UI and status-file writer">
+      <rationale>
+        1. One collector module per source, each an async function returning (status, items) with its own timeout, so one failure is isolated.
+        2. A normaliser maps items into the Task model and joins herdr pane, session file and pid by session path or cwd, so one piece of work is one card.
+        3. Redaction runs at the collector boundary and again at serialisation (defence in depth), reusing credentials/redact.py.
+        4. The server is starlette with GET-only routes, an SSE stream fed from a cached snapshot, and a Host guard and loopback check at startup.
+        5. The UI is one static page with vanilla JS, an EventSource with polling fallback, and four sections.
+        6. status_file.py is a small atomic writer and validator for tasks.json that Omega Prime calls. It ships with the dashboard so the contract has one owner.
+      </rationale>
+      <conclusion>Units: U1 collectors (local files), U2 collectors (processes, herdr, podman), U3 collectors (GitHub, fleet), U4 model, normaliser and redaction, U5 server, SSE and CLI, U6 UI, U7 status_file and docs. U1–U3 are file-disjoint and can run in parallel after U4's model types land.</conclusion>
+    </NODE>
+    <NODE id="n3" kind="compare" depends_on="n1" title="Choose the stack and where the code lives">
+      <rationale>
+        1. Bun/TypeScript standalone has zero deps and a built-in server, but it would need its own redaction code and its own CI and Greptile setup, duplicating omes-bot's.
+        2. A Python standalone repo with no remote is fast to start, but it skips the Greptile gate the operator relies on, and it would import omega_prime anyway for redact.
+        3. An omes-bot module reuses starlette 1.7.0, uvicorn 0.54.0, redact_value and the engine helpers already in the venv, so no new packages are needed. The writer side (tasks.json) has to live in omes-bot regardless.
+        4. Risk for the omes-bot option: the six wiring PRs merge in order. A new omega_prime/dashboard/ directory is file-disjoint, so rebase cost is near zero if engine/cli.py is touched by one additive line or not at all.
+        5. Risk: omes-bot is deployable (Dockerfile, Railway). Keeping the dashboard as an opt-in module, never imported by the grokbot server, keeps it off production.
+      </rationale>
+      <conclusion>omes-bot, package omega_prime/dashboard/, branch feat/task-dashboard, PR through the Greptile 5/5 plus green CI gate. Python with starlette and uvicorn, stdlib only beyond that, and vanilla HTML/JS. Fallback if the operator prefers: the same code in a standalone local repo /workspace/task-dashboard with no remote.</conclusion>
+    </NODE>
+    <NODE id="n4" kind="generate" depends_on="n2,n3" title="Design the Task model, joins, states and the tasks.json contract">
+      <rationale>
+        1. Stable ids prefixed by source (herdr:, omp:, wiring:, sandbox:, job:, gh:, fleet:, gb:) let the UI diff snapshots and avoid flicker.
+        2. A state machine maps each source's vocabulary: herdr idle/working/blocked; wiring sol/luna/done markers; omega job ok true/false; PR draft/ready/merged.
+        3. Derived states: "quiet" after 15 minutes without activity, and "stopped?" when the pid is gone while the state is working. Both stay visible instead of vanishing.
+        4. Progress comes from the last omp `todo` tool frame (done/total) when present, else null. It is never faked.
+        5. The tasks.json v1 shape covers tasks, waiting_on_ove and finished, with owner kinds that include grokbot-executor and routine. Unknown keys are ignored for forward compatibility.
+        6. "Waiting on the operator" merges explicit tasks.json asks with derived ones (a PR at 5/5 and green, a blocked pane, fleet HITL), deduplicated by id.
+      </rationale>
+      <conclusion>The TASK_MODEL and TASKS_JSON_CONTRACT sections above are the spec. Snapshot hash = sha256 of the canonical JSON, used to send SSE only on change.</conclusion>
+    </NODE>
+    <NODE id="n5" kind="generate" depends_on="n4" title="Design the server, refresh loop and page">
+      <rationale>
+        1. A single poller task builds the snapshot on staggered intervals (local 3s, herdr/podman 5s, fleet 30s, GitHub 60s) with mtime caching for jsonl tails.
+        2. /api/stream uses a starlette StreamingResponse with text/event-stream, sending a snapshot on hash change, a 15s heartbeat, and a retry of 3000.
+        3. Startup refuses non-loopback hosts. Middleware enforces the Host allowlist, CSP and nosniff, and every non-GET route returns 405.
+        4. The page renders four sections from the snapshot with textContent only, relative times plus AEDT absolute, and a health strip from snapshot.sources.
+        5. Loading, empty, error and stale states are defined per section, so a dead source never blanks the page.
+      </rationale>
+      <conclusion>The API, REFRESH_LOOP and PAGE_TASK_DASHBOARD sections above. The CLI gets --host, --port, --stop and --once (prints one snapshot as JSON, for tests and debugging).</conclusion>
+    </NODE>
+    <NODE id="n6" kind="critique" depends_on="n4,n5" title="Secrets, exposure, load on a shared box, and misleading status">
+      <rationale>
+        1. Secret leak paths: argv, environ, command-log cmd, session messages, final_text and tasks.json notes. Mitigation: field allowlists, double redaction, never reading environ or auth files, and a seeded-secret test.
+        2. Exposure: the box already has several 0.0.0.0 listeners. The dashboard must be loopback-only with a Host guard against DNS rebinding from the box browser.
+        3. Load: six parallel sessions are already running. Tail-reading with mtime caching and capped file reads (last 256 KB) keeps the poller cheap. GitHub caching avoids rate limits on the PAT.
+        4. Misleading status: a "working" pane with a dead pid, or a tasks.json that Omega Prime forgot to update, could lie. Showing "stopped?", "quiet" and tasks.json age makes staleness visible.
+        5. Scope creep: action buttons are tempting (revive pane). They stay out until the operator says yes.
+        6. Greptile parsing is brittle. Showing "not reviewed" instead of guessing avoids a false 5/5.
+      </rationale>
+      <conclusion>Mitigations are folded into SECURITY_AND_VALIDATION, GRACEFUL_DEGRADATION and the acceptance criteria. Open questions: q1 repo location (default omes-bot), q2 Herdr workspace versus nohup (default Herdr), q3 fleet collector on or off (default off), q4 show the redacted final_text line (default yes, capped).</conclusion>
+    </NODE>
+    <NODE id="n7" kind="synthesize" depends_on="n3,n6" title="Plan and workflow">
+      <rationale>
+        1. Land the model, redaction and status_file first, so collectors have types and the secret test exists from day one.
+        2. The three collector units are file-disjoint and run in parallel after U4.
+        3. Server and CLI depend on the model only. The UI depends on the API shape.
+        4. Integration last: run against the real box, check the acceptance criteria, then the gates and the PR.
+      </rationale>
+      <conclusion>
+        <WORKFLOW>
+          <UNIT id="U4" files="omega_prime/dashboard/{__init__,model,redact,status_file}.py, tests/test_dashboard_model.py, tests/test_dashboard_redaction.py">Task model, joins, state mapping, redaction wrapper, atomic tasks.json writer and validator, seeded-secret fixtures.</UNIT>
+          <UNIT id="U1" depends_on="U4" files="omega_prime/dashboard/collectors/{omp_sessions,wiring,sandbox_files,omega_jobs,command_log,tasks_json,agentos}.py + tests">File-based collectors with mtime caching and tail caps.</UNIT>
+          <UNIT id="U2" depends_on="U4" files="omega_prime/dashboard/collectors/{procs,herdr,podman}.py + tests">Process scan (pid, cwd, --mode only), herdr snapshot, rootless podman ps, all with timeouts.</UNIT>
+          <UNIT id="U3" depends_on="U4" files="omega_prime/dashboard/collectors/{github,fleet}.py + tests">GitHub PR, check and Greptile read with a 60s cache; optional fleet GET with the token kept in memory.</UNIT>
+          <UNIT id="U5" depends_on="U4" files="omega_prime/dashboard/{app,poller,__main__}.py, tests/test_dashboard_app.py">Starlette app, GET-only routes, SSE, Host/CSP middleware, loopback guard, CLI flags, pidfile.</UNIT>
+          <UNIT id="U6" depends_on="U5" files="omega_prime/dashboard/static/{index.html,app.js,app.css}">Four-section page, health strip, states, EventSource with polling fallback, textContent only.</UNIT>
+          <UNIT id="U7" depends_on="U1,U2,U3,U6" files="docs/dashboard.md, scripts/dashboard-start.sh, .receipts entry">Live run on the box against a1–a7, gates, rebase on main, PR feat/task-dashboard for Greptile. Stop for the operator's merge yes.</UNIT>
+        </WORKFLOW>
+        Order: U4 → (U1 ∥ U2 ∥ U3 ∥ U5) → U6 → U7.
+      </conclusion>
+    </NODE>
+  </GOT>
+
+  <BUILD_PLAN>
+    <SESSION>Local omp RPC session (`--mode rpc-ui` so the ask tool exists) in a new worktree /workspace/omes-bot-wt/dash on feat/task-dashboard off main. Sol runs /gsd-plan-phase with this XML. Luna runs /gsd-autonomous with "ultrathink orchestrate workflowz". GLM 5.3 is the fallback. Thinking stays auto. No time cap.</SESSION>
+    <WHY_NOT_SWARM>Agent Swarm's A01 cannot hand out real swarm work until a signing key exists, so it would stop as blocked. The swarm can be used later for review agents once keyed.</WHY_NOT_SWARM>
+    <HOSTING>Optionally host the session in a Herdr workspace "task-dashboard", so it is visible in `herdr api snapshot` and therefore on the dashboard itself.</HOSTING>
+    <QUOTA>This is a seventh concurrent session alongside the six wiring lanes. If the plan rate-limits, queue it behind the next finished wiring lane.</QUOTA>
+  </BUILD_PLAN>
+
+  <NEEDS_OVE>
+    <ITEM>Approve the uplift and the omes-bot location (or pick a standalone local repo).</ITEM>
+    <ITEM>Merge yes on the dashboard PR after Greptile 5/5 and green CI.</ITEM>
+    <ITEM>Any future action buttons (revive pane, cancel job) need a separate yes.</ITEM>
+  </NEEDS_OVE>
+</BUILD_PROMPT>

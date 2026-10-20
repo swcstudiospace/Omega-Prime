@@ -1,12 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v16 — Enterprise Hardening and Continuous Verification",
+  "milestone": "v21 — Task Dashboard",
   "phases": [],
   "next": {
-    "command": "/gsd:progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd:progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 104 of 1 · 0% · executing"
   },
-  "updated_at": "2026-10-13T04:49:21.851Z"
+  "updated_at": "2026-10-20T15:25:18.070Z"
 }
