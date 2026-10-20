@@ -1,0 +1,12 @@
+import { useMemo, useState } from 'react'
+import type { Snapshot } from '../types'
+import type { DashboardState } from '../hooks/useDashboard'
+import { taskSelection, selectedTask } from '../lib/selectors'
+import { TaskDetail } from '../components/TaskDetail'
+import { ViewState } from '../components/ViewState'
+export function Tasks({ snapshot, loading, error, receivedAt, refresh, selected, onSelect }: DashboardState & { snapshot: Snapshot; selected: string | null; onSelect: (id: string | null) => void }) {
+  const [search, setSearch] = useState(''), [state, setState] = useState('all')
+  const rows = useMemo(() => taskSelection(snapshot), [snapshot])
+  const filtered = rows.filter(({ item }) => { const text = 'title' in item ? item.title : item.ask; const currentState = 'state' in item ? item.state : 'ask' in item ? 'waiting' : 'finished'; return text.toLowerCase().includes(search.toLowerCase()) && (state === 'all' || currentState.toLowerCase() === state) })
+  return <ViewState loading={loading} error={error} receivedAt={receivedAt} retry={refresh} empty={!filtered.length} emptyLabel={rows.length ? 'No task matches the current filters.' : 'No task records available.'}><div className="task-layout"><section className="panel task-list-panel"><div className="section-heading"><div><p className="eyebrow">NUMBERED WORK QUEUE</p><h2>Tasks & waits</h2></div><span className="section-count">{filtered.length} shown</span></div><label className="field-label">Search work<input value={search} onChange={event => setSearch(event.target.value)} placeholder="Title or ask" /></label><label className="field-label">State<select value={state} onChange={event => setState(event.target.value)}><option value="all">All states</option><option value="running">Running</option><option value="waiting">Waiting</option><option value="finished">Finished</option></select></label><ul className="task-list">{filtered.map(({ key, item }) => { const title = 'title' in item ? item.title : item.ask; const status = 'state' in item ? item.state : 'ask' in item ? 'Waiting' : 'Finished'; return <li key={key}><button className={`task-row ${selected === key ? 'selected' : ''}`} aria-pressed={selected === key} onClick={() => onSelect(key)}><span className="task-number">{item.display_id ?? 'ID unavailable'}</span><strong>{title}</strong><span className="state-pill">{status}</span></button></li> })}</ul></section><TaskDetail item={selectedTask(snapshot, selected)} /></div></ViewState>
+}

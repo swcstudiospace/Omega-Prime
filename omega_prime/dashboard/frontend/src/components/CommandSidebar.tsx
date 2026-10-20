@@ -1,0 +1,9 @@
+import { taskSelection } from '../lib/selectors'
+import type { Snapshot } from '../types'
+import type { View } from '../App'
+const views: Array<{ key: View; label: string; mark: string }> = [{ key: 'overview', label: 'Overview', mark: '◈' }, { key: 'tasks', label: 'Tasks', mark: '▤' }, { key: 'cicd', label: 'CI / CD', mark: '⌘' }, { key: 'repositories', label: 'Repositories', mark: '⌂' }]
+type Props = { snapshot: Snapshot; view: View; onView: (view: View) => void; selected: string | null; onSelect: (id: string) => void }
+export function CommandSidebar({ snapshot, view, onView, selected, onSelect }: Props) {
+  const rows = taskSelection(snapshot).map(({ key, item }) => ({ id: key, label: item.display_id ?? 'ID unavailable', title: 'title' in item ? item.title : item.ask }))
+  return <aside className="sidebar" aria-label="Command navigation"><a href="#main-content" className="skip-link">Skip to content</a><div className="brand"><span className="brand-mark">Ω</span><span>OMEGA <b>PRIME</b><small>COMMAND CENTER</small></span></div><nav aria-label="Main navigation">{views.map(item => <button key={item.key} className={`nav-link ${view === item.key ? 'active' : ''}`} aria-current={view === item.key ? 'page' : undefined} onClick={() => onView(item.key)}><span aria-hidden="true">{item.mark}</span>{item.label}</button>)}</nav><section className="sidebar-tasks"><h2>WORK QUEUE <span>{rows.length}</span></h2>{rows.length ? rows.map(row => <button key={row.id} title={row.title} className={`queue-link ${selected === row.id ? 'selected' : ''}`} onClick={() => onSelect(row.id)}><span>{row.label}</span><span className="truncate">{row.title}</span></button>) : <p className="subtle">No task records yet.</p>}</section><footer className="sidebar-footer"><span className="status-pip" /> Local-first · Read only</footer></aside>
+}
