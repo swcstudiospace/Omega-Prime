@@ -54,6 +54,22 @@ def _plugin_tree(root: Path) -> Path:
 
 
 def test_checks_pass_on_repo_root(monkeypatch, tmp_path: Path):
+    # The required prime-agent submodule is external checkout state. Its
+    # missing-check behavior is tested separately; keep this repo smoke test
+    # independent of whether the test runner initialized submodules.
+    monkeypatch.setattr(
+        setup_check,
+        "CHECKS",
+        tuple(
+            (
+                name,
+                (lambda _root: (True, "submodule fixture"))
+                if name == "submodules"
+                else check,
+            )
+            for name, check in CHECKS
+        ),
+    )
     from omega_prime.substrate.client import SubstrateClient
 
     def no_network(*args, **kwargs):

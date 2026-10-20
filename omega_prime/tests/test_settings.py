@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import warnings
 from pathlib import Path
 from typing import cast
@@ -9,6 +10,16 @@ from typing import cast
 import pytest
 
 import omega_prime.settings as settings
+
+
+def init_git_repo(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", "-q", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 @pytest.fixture
@@ -75,16 +86,28 @@ def test_missing_candidate_returns_before_repository_metadata(
     assert result.status == "missing"
 
 
-def test_mounted_candidate_uses_its_checkout_not_launch_directory(
+def test_mounted_candidate_checks_its_location_not_launch_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mounted = write_settings(
-        tmp_path / "mount" / "settings.json", {"SUBSTRATE_URL": "mounted"}
-    )
-    monkeypatch.chdir(tmp_path)
+    launch_checkout = tmp_path / "launch"
+    mount = tmp_path / "mount"
+    init_git_repo(launch_checkout)
+    mounted = write_settings(mount / "settings.json", {"SUBSTRATE_URL": "mounted"})
+    monkeypatch.chdir(launch_checkout)
+
+    run_git = subprocess.run
+    git_cwds: list[Path] = []
+
+    def record_git_cwd(*args, **kwargs):
+        if args and args[0] and args[0][0] == "git":
+            git_cwds.append(Path(kwargs["cwd"]))
+        return run_git(*args, **kwargs)
+
+    monkeypatch.setattr(settings.subprocess, "run", record_git_cwd)
     result = settings.load_settings({}, path=mounted)
     assert result.status == "loaded"
     assert result.effective_env["SUBSTRATE_URL"] == "mounted"
+    assert git_cwds == [mount, mount]
 
 
 def test_candidate_in_another_checkout_is_rejected(
@@ -92,16 +115,19 @@ def test_candidate_in_another_checkout_is_rejected(
 ) -> None:
     first_checkout = tmp_path / "launch-checkout"
     other_checkout = tmp_path / "other-checkout"
-    first_checkout.mkdir()
-    other_checkout.mkdir()
+    init_git_repo(first_checkout)
+    init_git_repo(other_checkout)
     candidate = write_settings(
         other_checkout / "settings.json", {"SUBSTRATE_URL": "unsafe"}
     )
-    monkeypatch.setattr(
-        settings,
-        "_worktree_metadata",
-        lambda location=None: ((other_checkout,), frozenset()),
+    subprocess.run(
+        ["git", "add", "settings.json"],
+        cwd=other_checkout,
+        check=True,
+        capture_output=True,
+        text=True,
     )
+    monkeypatch.chdir(first_checkout)
     result = settings.load_settings({}, path=candidate)
     assert result.status == "rejected"
     assert result.effective_env == {}

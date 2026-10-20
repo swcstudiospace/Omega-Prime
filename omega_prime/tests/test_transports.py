@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import http.client
+import io
 import json
 import socket
 import threading
@@ -20,7 +21,10 @@ from omega_prime.providers.base import ProviderError, ProviderModel
 from omega_prime.providers.fake import FakeTransport
 from omega_prime.providers.grok import GrokProvider
 from omega_prime.providers.http import HttpTransport
-from omega_prime.substrate.client import _matching_sse_message
+from omega_prime.substrate.client import (
+    SubstrateProtocolError,
+    _matching_sse_message,
+)
 from omega_prime.tools.coding import register_coding_tools
 from omega_prime.tools.registry import ToolRegistry
 
@@ -433,6 +437,39 @@ def test_mcp_chunked_sse_returns_matching_event_before_stream_eof():
             {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
         ]
     assert closed.wait(timeout=2)
+
+
+@pytest.mark.parametrize(
+    ("payload", "frame_end"),
+    [
+        ("{malformed}", "\n\n"),
+        ("null", "\n\n"),
+        ("true", "\n\n"),
+        ("  ", "\n\n"),
+        ("{malformed}", ""),
+        ("null", ""),
+    ],
+)
+def test_mcp_sse_malformed_nonempty_data_frames_raise_protocol_error(
+    payload: str, frame_end: str
+) -> None:
+    response = io.BytesIO(f"data: {payload}{frame_end}".encode())
+
+    with pytest.raises(SubstrateProtocolError, match="malformed SSE data"):
+        _matching_sse_message(response, 1)
+
+
+def test_mcp_sse_ignores_empty_and_valid_unrelated_frames() -> None:
+    response = io.BytesIO(
+        b"event: keep-alive\n\n"
+        b"data:\n\n"
+        b'data: {"jsonrpc":"2.0","id":2,"result":{"ignored":true}}\n\n'
+        b'data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n'
+    )
+
+    assert _matching_sse_message(response, 1) == [
+        {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+    ]
 
 
 def test_http_transport_stream_refuses_error_status_without_retry():
