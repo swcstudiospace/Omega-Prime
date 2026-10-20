@@ -1,12 +1,14 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v16 — Enterprise Hardening and Continuous Verification",
-  "phases": [],
+  "milestone": "v20 — Wiring",
+  "phases": [97, 98, 99, 100, 101, 102, 103],
+  "current_phase": 103,
+  "status": "planning",
   "next": {
-    "command": "/gsd:progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "Review the Phase 103 plan index manually (no execution)",
+    "label": "Review Phase 103 plan index",
+    "reason": "Five plans are ready; confirm the Phase 102 execution prerequisite before implementation. No plans execute automatically."
   },
-  "updated_at": "2026-10-13T04:49:21.851Z"
+  "updated_at": "2026-10-21"
 }
