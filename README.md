@@ -1,6 +1,6 @@
 ![Omega Prime banner](assets/banner.svg)
 
-[![ci](https://github.com/swcstudiospace/omes-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/swcstudiospace/omes-bot/actions/workflows/ci.yml)
+[![ci](https://github.com/swcstudiospace/Omega-Prime/actions/workflows/ci.yml/badge.svg)](https://github.com/swcstudiospace/Omega-Prime/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
@@ -52,7 +52,7 @@ the pinned Prime submodule; Node/Rust are optional capability prerequisites,
 not requirements to run the core Python tool host.
 
 ```bash
-git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git omega-prime
+git clone --recurse-submodules https://github.com/swcstudiospace/Omega-Prime.git omega-prime
 cd omega-prime
 python3.12 -m venv .venv
 .venv/bin/pip install -e '.[dev]'

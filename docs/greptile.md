@@ -10,8 +10,8 @@ connected for every branch, or that a GitBook space is published.
 No tracked receipt in this repository records the command and exit code of
 the import that produced `kb/`, so this page does not claim that import
 passed. What can be read locally is the edition the importer wrote: the
-tracked [manifest](https://github.com/swcstudiospace/omes-bot/blob/main/kb/manifest.json)
-records repository `swcstudiospace/omes-bot`, namespace
+tracked [manifest](https://github.com/swcstudiospace/Omega-Prime/blob/main/kb/manifest.json)
+records repository `swcstudiospace/Omega-Prime`, namespace
 `3b0877f2-8580-4305-b246-a1cf4cfb31f3`, `total` and `retrieved_documents`
 of 21, `indexPresent: true`, `complete: true` and publication version
 `2026-10-08-1791571202911-c82b36`, which is historical and predates v14. A
@@ -20,7 +20,7 @@ repeat `unchanged` observation.
 
 To establish import behavior for that scope, an operator runs the
 [maintained refresh](#maintained-refresh) with a private key:
-`python -m omega_prime.greptile.kb_sync --repo swcstudiospace/omes-bot --out kb`
+`python -m omega_prime.greptile.kb_sync --repo swcstudiospace/Omega-Prime --out kb`
 is expected to exit 0 with `synced` or `unchanged`. An immediate second run
 is expected to exit 0 with `already up to date` and leave `kb/` as the first
 run left it: `git status --porcelain kb/` prints the same output before and
@@ -43,17 +43,17 @@ remote execution. Configured rule identifiers/severities/scopes are checked by
 the existing rule consumers; a copied provider-schema allowlist or a pinned
 incidental default is not a behavioral verification strategy.
 
-Use [CONTRIBUTING.md](https://github.com/swcstudiospace/omes-bot/blob/main/CONTRIBUTING.md)
+Use [CONTRIBUTING.md](https://github.com/swcstudiospace/Omega-Prime/blob/main/CONTRIBUTING.md)
 for contribution standards and the required source-delivery review flow.
 Remote rule writes, enrollment changes and credit-consuming review requests
 are not KB refresh side effects.
 
 ## One historical mirror
 
-The mirror is [kb/](https://github.com/swcstudiospace/omes-bot/tree/main/kb),
-with a [guide](https://github.com/swcstudiospace/omes-bot/blob/main/kb/README.md),
-[index](https://github.com/swcstudiospace/omes-bot/blob/main/kb/index.md) and
-[manifest](https://github.com/swcstudiospace/omes-bot/blob/main/kb/manifest.json).
+The mirror is [kb/](https://github.com/swcstudiospace/Omega-Prime/tree/main/kb),
+with a [guide](https://github.com/swcstudiospace/Omega-Prime/blob/main/kb/README.md),
+[index](https://github.com/swcstudiospace/Omega-Prime/blob/main/kb/index.md) and
+[manifest](https://github.com/swcstudiospace/Omega-Prime/blob/main/kb/manifest.json).
 It stays outside the `docs/` GitBook content root and is linked here once,
 not imported as 21 current canonical pages. Each generated file visibly labels
 its full original body as historical, synthesized and untrusted.
@@ -81,7 +81,7 @@ Set `GREPTILE_API_KEY` privately in the host process environment; never put its
 value in chat, argv, a saved example or shell tracing. From the repository root:
 
 ```bash
-python -m omega_prime.greptile.kb_sync --repo swcstudiospace/omes-bot --out kb
+python -m omega_prime.greptile.kb_sync --repo swcstudiospace/Omega-Prime --out kb
 ```
 
 `GREPTILE_MCP_URL` can select an explicitly trusted MCP endpoint; the default

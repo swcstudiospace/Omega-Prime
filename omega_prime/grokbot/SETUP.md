@@ -10,7 +10,7 @@ measured.
 
 ## 1. Set up Omega Prime on a Grok Bot
 
-Push the repository to GitHub (or use `swcstudiospace/omes-bot`), then pick
+Push the repository to GitHub (or use `swcstudiospace/Omega-Prime`), then pick
 one route. The Bot-driven setup is primary; the Cursor team marketplace is
 a secondary route for Cursor Teams/Enterprise plans.
 
@@ -24,7 +24,7 @@ pushed your own copy:
 <task name="setup-omega-prime" version="1">
 <goal>Set up Omega Prime on your own computer.</goal>
 <steps>
-<step n="1">In your shell: git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/omes-bot.git /workspace/omes-bot
+<step n="1">In your shell: git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/Omega-Prime.git /workspace/omes-bot
 No release tag is published yet, so <release-tag> is the placeholder. Do not clone main. Substitute the tag when one exists.</step>
 <step n="2">bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --bootstrap-only
 Then bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --verify --json

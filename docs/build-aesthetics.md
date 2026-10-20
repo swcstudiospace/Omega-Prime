@@ -47,7 +47,7 @@ the quality pack's receipt and stamp paths refuse self-approval.
 
 ### Definitions are not execution
 
-[`ToolRegistry`](https://github.com/swcstudiospace/omes-bot/blob/main/omega_prime/tools/registry.py)
+[`ToolRegistry`](https://github.com/swcstudiospace/Omega-Prime/blob/main/omega_prime/tools/registry.py)
 separates `register`/`schemas` from `dispatch`. A family supplies actual
 definitions; the roster and policy stay aligned with their names. The
 [generated catalog](tool-catalog.md) uses `full_inventory_registry` for
@@ -97,9 +97,9 @@ stop wins in `run_before_model`. This runnable example exercises the hook
 seam, not a model call. Attach `hooks` using `extensions=hooks` when constructing
 `Agent` or `OmegaPrimeAgent` **with an actual model adapter**; `Agent.model` is
 required. See
-[`Agent`](https://github.com/swcstudiospace/omes-bot/blob/main/omega_prime/agent/conversation_loop.py)
+[`Agent`](https://github.com/swcstudiospace/Omega-Prime/blob/main/omega_prime/agent/conversation_loop.py)
 and
-[`OmegaPrimeAgent`](https://github.com/swcstudiospace/omes-bot/blob/main/omega_prime/agent/runtime.py).
+[`OmegaPrimeAgent`](https://github.com/swcstudiospace/Omega-Prime/blob/main/omega_prime/agent/runtime.py).
 
 Hooks may inspect or mutate outgoing messages and stop a round. They are
 trusted Python callables, not a sandbox. Tool extensions still belong in
