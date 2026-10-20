@@ -545,6 +545,38 @@ def test_log_format_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls[1]["token_store_path"] is None
 
 
+def test_sse_uses_file_settings_and_preserves_environment_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _recording_serve(monkeypatch)
+    monkeypatch.delenv("SUBSTRATE_URL", raising=False)
+    monkeypatch.delenv("ULTRATHINK_ROOT", raising=False)
+    monkeypatch.delenv("OMEGA_PRIME_STATE_DIR", raising=False)
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "SUBSTRATE_URL": "https://file.example",
+                "ULTRATHINK_ROOT": str(tmp_path / "ultrathink"),
+                "OMEGA_PRIME_STATE_DIR": str(tmp_path / "state"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings_path.chmod(0o600)
+    monkeypatch.setenv("OMEGA_PRIME_SETTINGS_FILE", str(settings_path))
+    assert main(_sse()) == 0
+    file_env = calls[0]["env"]
+    assert file_env["SUBSTRATE_URL"] == "https://file.example"
+    assert file_env["ULTRATHINK_ROOT"] == str(tmp_path / "ultrathink")
+    assert file_env["OMEGA_PRIME_STATE_DIR"] == str(tmp_path / "state")
+    assert calls[0]["settings_status"].status == "loaded"
+
+    monkeypatch.setenv("SUBSTRATE_URL", "https://environment.example")
+    assert main(_sse()) == 0
+    assert calls[1]["env"]["SUBSTRATE_URL"] == "https://environment.example"
+
+
 def test_self_test_conflicts_with_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["--self-test", "--dry-run"]) == 2
     captured = capsys.readouterr()

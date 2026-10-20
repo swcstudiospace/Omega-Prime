@@ -549,23 +549,32 @@ def _matching_sse_message(response: Any, request_id: Any) -> list[dict]:
             if line == "":
                 message = _parse_sse_data(data_lines)
                 data_lines = []
-                if _valid_response(message, request_id):
+                if message is not None and not isinstance(message, dict):
+                    raise SubstrateProtocolError(
+                        "substrate returned malformed SSE data"
+                    )
+                if isinstance(message, dict) and _valid_response(message, request_id):
                     return [message]
             elif line.startswith(":"):
                 continue
             elif line.startswith("data:"):
                 data_lines.append(line[5:].lstrip(" "))
     message = _parse_sse_data(data_lines)
+    if message is not None and not isinstance(message, dict):
+        raise SubstrateProtocolError("substrate returned malformed SSE data")
     return [message] if isinstance(message, dict) else []
 
 
 def _parse_sse_data(lines: list[str]) -> Any:
     if not lines:
         return None
-    try:
-        return json.loads("\n".join(lines))
-    except json.JSONDecodeError:
+    payload = "\n".join(lines)
+    if payload == "":
         return None
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        raise SubstrateProtocolError("substrate returned malformed SSE data") from None
 
 
 __all__ = [

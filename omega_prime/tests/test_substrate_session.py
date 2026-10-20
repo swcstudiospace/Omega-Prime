@@ -583,6 +583,69 @@ def test_mcp_sse_returns_matching_response_before_persistent_stream_eof():
     assert transport.response.closed
 
 
+def test_mcp_sse_malformed_complete_data_frame_is_protocol_error():
+    class Response:
+        status = 200
+
+        def __init__(self):
+            self.headers = {"content-type": "text/event-stream"}
+            self.chunks = iter([b"data: {not-json}\r\n\r\n"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self, _size=4096):
+            return next(self.chunks, b"")
+
+    class Transport:
+        def post_mcp(self, _url, _headers, _envelope):
+            return Response()
+
+    try:
+        SubstrateClient("local", transport=Transport())._mcp_post("sample", {})
+    except SubstrateProtocolError as exc:
+        assert "malformed SSE data" in str(exc)
+    else:
+        raise AssertionError("malformed complete SSE frame was not rejected")
+
+
+def test_mcp_sse_ignores_empty_and_valid_unrelated_frames():
+    class Response:
+        status = 200
+
+        def __init__(self):
+            self.headers = {"content-type": "text/event-stream"}
+            self.chunks = iter(
+                [
+                    b"data:\r\n\r\n",
+                    b'data: {"jsonrpc":"2.0","method":"notification"}\r\n\r\n',
+                    b'data: {"jsonrpc":"2.0","id":1,"result":{"content":[]}}\r\n\r\n',
+                ]
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self, _size=4096):
+            return next(self.chunks, b"")
+
+    class Transport:
+        def post_mcp(self, _url, _headers, _envelope):
+            return Response()
+
+    assert SubstrateClient("local", transport=Transport())._mcp_post("sample", {}) == {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {"content": []},
+    }
+
+
 def test_mcp_response_id_must_match_exactly():
     class WrongIdTransport:
         def post_mcp(self, _url, _headers, _envelope):

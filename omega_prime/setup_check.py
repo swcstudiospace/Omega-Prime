@@ -13,12 +13,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from omega_prime.assemble import load_roster
 from omega_prime.integrations.submodules import check_submodules
 from omega_prime.mcp_server import default_registry, roster_names
+from omega_prime.settings import SettingsResult, load_settings
 
 
 def check_roster(root: Path) -> tuple[bool, str]:
@@ -144,9 +146,13 @@ def check_registry(root: Path) -> tuple[bool, str]:
     return True, f"registry serves {len(served)} roster tools"
 
 
-def check_ultrathink(root: Path) -> tuple[bool | None, str]:
+def check_ultrathink(
+    root: Path, env: Mapping[str, str] | None = None
+) -> tuple[bool | None, str]:
     """Ultrathink checkout configured, or clearly skipped."""
-    configured = os.environ.get("ULTRATHINK_ROOT", "")
+    del root
+    effective_env = os.environ if env is None else env
+    configured = effective_env.get("ULTRATHINK_ROOT", "")
     if not configured:
         return (
             None,
@@ -157,14 +163,16 @@ def check_ultrathink(root: Path) -> tuple[bool | None, str]:
     return True, f"ultrathink checkout ok ({configured})"
 
 
-def check_substrate(root: Path) -> tuple[bool, str]:
+def check_substrate(
+    root: Path, settings: SettingsResult | None = None
+) -> tuple[bool, str]:
     """Report saved substrate configuration without probing the endpoint."""
     del root
     from omega_prime.integrations.binding import secret_value
-    from omega_prime.settings import load_settings
     from omega_prime.substrate.client import SubstrateClient
 
-    settings = load_settings(dict(os.environ))
+    if settings is None:
+        settings = load_settings(dict(os.environ))
     env = settings.effective_env
     if settings.status in ("malformed", "rejected"):
         details = ", ".join(settings.reasons) or settings.status
@@ -210,10 +218,16 @@ CHECKS = (
 
 def run_checks(root: Path) -> dict[str, Any]:
     """Run every check; `{name: {ok, detail}}` plus `passed`."""
+    settings = load_settings(dict(os.environ))
     results: dict[str, Any] = {}
     for name, fn in CHECKS:
         try:
-            ok, detail = fn(root)
+            if name == "ultrathink":
+                ok, detail = check_ultrathink(root, settings.effective_env)
+            elif name == "substrate":
+                ok, detail = check_substrate(root, settings)
+            else:
+                ok, detail = fn(root)
         except Exception as exc:
             ok, detail = False, f"{type(exc).__name__}: {exc}"
         results[name] = {"ok": ok, "detail": detail}

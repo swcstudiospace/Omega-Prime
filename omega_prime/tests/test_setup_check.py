@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from omega_prime import setup_check
 from omega_prime.setup_check import (
     CHECKS,
     check_plugin,
@@ -156,6 +157,65 @@ def test_missing_substrate_url_fails_with_actionable_guidance(
     assert ok is False
     assert "SUBSTRATE_URL" in detail
     assert "process environment or settings file" in detail
+
+
+def test_run_checks_uses_settings_file_for_ultrathink_and_substrate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _mirror(tmp_path / "configured")
+    checkout = tmp_path / "ultrathink"
+    executable = checkout / "bin" / "ultrathink-ship"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text(
+        json.dumps(
+            {
+                "ULTRATHINK_ROOT": str(checkout),
+                "SUBSTRATE_URL": "https://substrate.example",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OMEGA_PRIME_SETTINGS_FILE", str(settings_file))
+    monkeypatch.delenv("ULTRATHINK_ROOT", raising=False)
+    monkeypatch.delenv("SUBSTRATE_URL", raising=False)
+
+    original_load_settings = setup_check.load_settings
+    load_calls = 0
+
+    def tracked_load_settings(process_env):
+        nonlocal load_calls
+        load_calls += 1
+        return original_load_settings(process_env)
+
+    monkeypatch.setattr(setup_check, "load_settings", tracked_load_settings)
+    report = run_checks(fixture)
+
+    assert load_calls == 1
+    assert report["ultrathink"]["ok"] is True
+    assert str(checkout) in report["ultrathink"]["detail"]
+    assert report["substrate"]["ok"] is True
+    assert "configured-only" in report["substrate"]["detail"]
+
+
+def test_run_checks_reports_settings_file_invalid_ultrathink_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _mirror(tmp_path / "invalid-configured")
+    checkout = tmp_path / "missing-ultrathink"
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text(
+        json.dumps({"ULTRATHINK_ROOT": str(checkout)}), encoding="utf-8"
+    )
+    monkeypatch.setenv("OMEGA_PRIME_SETTINGS_FILE", str(settings_file))
+    monkeypatch.delenv("ULTRATHINK_ROOT", raising=False)
+
+    report = run_checks(fixture)
+
+    assert report["ultrathink"]["ok"] is False
+    assert str(checkout) in report["ultrathink"]["detail"]
+    assert "root not set" not in report["ultrathink"]["detail"]
 
 
 def test_template_row_reports_unlisted_skills_like_the_doctor(tmp_path: Path) -> None:

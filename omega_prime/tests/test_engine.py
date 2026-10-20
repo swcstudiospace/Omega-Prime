@@ -566,6 +566,52 @@ def test_interrupt_reaches_attach_and_delegate_engine_paths_once(
     assert _omp_commands(log).count("abort") == 1
 
 
+def test_cancelled_engine_turn_consumes_interrupt_before_next_message(
+    tmp_path: Path, monkeypatch
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_PRIME_ENGINE="required",
+        OMEGA_FAKE_OMP_BLOCK_PROMPT="1",
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    flag = InterruptFlag()
+    model = ScriptedModel([{"role": "assistant", "content": "worked"}])
+    agent = Agent(model=model, interrupt=flag, force_engine=True)
+    result: list = []
+    worker = threading.Thread(
+        target=lambda: result.append(run_conversation(agent, "cancel me")),
+        daemon=True,
+    )
+    worker.start()
+    log = Path(env["OMEGA_FAKE_OMP_LOG"])
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and "prompt" not in _omp_commands(log):
+        time.sleep(0.01)
+    assert "prompt" in _omp_commands(log)
+    flag.set("stop this turn")
+    worker.join(7)
+
+    assert not worker.is_alive()
+    cancelled = result[0]
+    assert cancelled["turn_exit_reason"] == "cancelled"
+    assert cancelled["interrupted"] is True
+    assert cancelled["interrupt_message"] == "stop this turn"
+    assert flag.is_set() is False
+    assert flag.message is None
+
+    agent.force_engine = False
+    next_turn = run_conversation(agent, "next message")
+    assert next_turn["final_response"] == "worked"
+    assert next_turn["completed"] is True
+    assert next_turn["interrupted"] is False
+    assert model.call_count == 1
+
+
 def test_agent_end_already_queued_wins_cancellation_race(tmp_path: Path) -> None:
     from omega_prime.engine.omp_driver import _accept_prompt
 
@@ -588,6 +634,83 @@ def test_agent_end_already_queued_wins_cancellation_race(tmp_path: Path) -> None
     session = RaceSession()
     _accept_prompt(cast(OmpSession, session), "prompt-id", flag)
     assert session.agent_ended
+
+
+def test_cancel_drain_is_bounded_while_producer_keeps_enqueuing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import omp_driver
+    from omega_prime.engine.omp_driver import _accept_prompt
+
+    snapshot = [
+        {"type": "message_update", "delta": {"text": "queued-one"}},
+        {"type": "message_update", "delta": {"text": "queued-two"}},
+    ]
+
+    class NoisyQueue(queue.Queue[str]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.produced = 0
+            self.remaining = 100
+            for event in snapshot:
+                self.put(json.dumps(event))
+
+        def get_nowait(self) -> str:
+            item = super().get_nowait()
+            if self.remaining:
+                self.produced += 1
+                self.remaining -= 1
+                self.put(
+                    json.dumps(
+                        {
+                            "type": "message_update",
+                            "delta": {"text": f"later-{self.produced}"},
+                        }
+                    )
+                )
+            return item
+
+    class NoisySession:
+        def __init__(self) -> None:
+            self.agent_ended = False
+            self.events_path = tmp_path / "noisy-cancel.jsonl"
+            self.events: list[dict] = []
+            self._queue = NoisyQueue()
+            self._abort_sent = False
+
+        def _next(self, timeout: float):
+            return None
+
+        def _raise_stream_failure(self) -> None:
+            raise AssertionError("no stream failure was queued")
+
+        def abort_once(self) -> None:
+            OmpSession.abort_once(cast(OmpSession, self))
+
+    session = NoisySession()
+    aborts: list[tuple[int, int]] = []
+
+    def record_abort(actual: OmpSession) -> None:
+        aborts.append((len(actual.events), actual._queue.qsize()))
+
+    monkeypatch.setattr(omp_driver, "session_abort", record_abort)
+    interrupt = InterruptFlag()
+    interrupt.set("stop")
+
+    try:
+        _accept_prompt(cast(OmpSession, session), "prompt-id", interrupt)
+    except EngineError as exc:
+        assert exc.reason == "cancelled"
+    else:
+        raise AssertionError("prompt cancellation was not reported")
+
+    session.abort_once()
+
+    assert aborts == [(2, 2)]
+    assert session._queue.produced == 2
+    assert session._queue.remaining == 98
+    assert session.events == snapshot
+    assert _events(session.events_path) == snapshot
 
 
 def test_loops_prefer_the_fake_engine(tmp_path, monkeypatch) -> None:

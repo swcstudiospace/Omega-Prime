@@ -16,7 +16,9 @@ def git_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Pa
     root = tmp_path / "worktree"
     root.mkdir()
     monkeypatch.setattr(
-        settings, "_worktree_metadata", lambda: ((root,), frozenset({"tracked.json"}))
+        settings,
+        "_worktree_metadata",
+        lambda candidate=None: ((root,), frozenset({"tracked.json"})),
     )
     return tmp_path, root
 
@@ -59,6 +61,50 @@ def test_missing_default_override_and_injected_paths_are_silent(
         ).status
         == "missing"
     )
+
+
+def test_missing_candidate_returns_before_repository_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "_worktree_metadata",
+        lambda candidate=None: (_ for _ in ()).throw(AssertionError("metadata called")),
+    )
+    result = settings.load_settings({}, path=tmp_path / "absent.json")
+    assert result.status == "missing"
+
+
+def test_mounted_candidate_uses_its_checkout_not_launch_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mounted = write_settings(
+        tmp_path / "mount" / "settings.json", {"SUBSTRATE_URL": "mounted"}
+    )
+    monkeypatch.chdir(tmp_path)
+    result = settings.load_settings({}, path=mounted)
+    assert result.status == "loaded"
+    assert result.effective_env["SUBSTRATE_URL"] == "mounted"
+
+
+def test_candidate_in_another_checkout_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_checkout = tmp_path / "launch-checkout"
+    other_checkout = tmp_path / "other-checkout"
+    first_checkout.mkdir()
+    other_checkout.mkdir()
+    candidate = write_settings(
+        other_checkout / "settings.json", {"SUBSTRATE_URL": "unsafe"}
+    )
+    monkeypatch.setattr(
+        settings,
+        "_worktree_metadata",
+        lambda location=None: ((other_checkout,), frozenset()),
+    )
+    result = settings.load_settings({}, path=candidate)
+    assert result.status == "rejected"
+    assert result.effective_env == {}
 
 
 def test_exact_allowlist_strings_and_presence_precedence(git_guard) -> None:
@@ -173,13 +219,17 @@ def test_linked_worktree_pointer_and_tracked_path_metadata_are_honored(
     )
     candidate = write_settings(linked / "config.json", {})
     monkeypatch.setattr(
-        settings, "_worktree_metadata", lambda: ((root, linked), frozenset())
+        settings,
+        "_worktree_metadata",
+        lambda candidate=None: ((root, linked), frozenset()),
     )
     assert settings.load_settings({}, path=candidate).status == "rejected"
 
     tracked = write_settings(root / "tracked.json", {})
     monkeypatch.setattr(
-        settings, "_worktree_metadata", lambda: ((root,), frozenset({"tracked.json"}))
+        settings,
+        "_worktree_metadata",
+        lambda candidate=None: ((root,), frozenset({"tracked.json"})),
     )
     assert settings.load_settings({}, path=tracked).status == "rejected"
 
@@ -206,7 +256,7 @@ def test_safety_provenance_failure_fails_closed_without_causes(
     base, _ = git_guard
     path = write_settings(base / "settings.json", {"SUBSTRATE_URL": "must-not-load"})
 
-    def fail_metadata():
+    def fail_metadata(candidate=None):
         raise RuntimeError("private provenance detail")
 
     monkeypatch.setattr(settings, "_worktree_metadata", fail_metadata)

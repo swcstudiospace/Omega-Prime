@@ -567,7 +567,8 @@ def _accept_prompt(session: OmpSession, command_id: str, interrupt: Any | None) 
         if session.agent_ended:
             return
         if interrupt is not None and interrupt.is_set():
-            while True:
+            pending_count = session._queue.qsize()
+            for _ in range(pending_count):
                 try:
                     pending = session._queue.get_nowait()
                 except queue.Empty:

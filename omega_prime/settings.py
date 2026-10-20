@@ -154,11 +154,13 @@ def _same_file_identity(path: Path, info: os.stat_result) -> bool:
 
 def _guard_and_open(candidate: Path) -> tuple[Path, int]:
     lexical = Path(os.path.abspath(candidate))
-    # Obtain git identity and tracked metadata before examining settings bytes.
-    roots, tracked = _worktree_metadata()
-    if not roots or not tracked:
-        raise OSError("unproven repository metadata")
+    # Preserve the missing-file result without consulting repository metadata.
+    lexical.lstat()
     resolved = lexical.resolve(strict=True)
+    lexical_roots, lexical_tracked = _worktree_metadata(lexical)
+    resolved_roots, resolved_tracked = _worktree_metadata(resolved)
+    roots = tuple(dict.fromkeys((*lexical_roots, *resolved_roots)))
+    tracked = lexical_tracked | resolved_tracked
     for root in roots:
         root_lexical = Path(os.path.abspath(root))
         root_real = root_lexical.resolve(strict=True)
@@ -199,16 +201,22 @@ def _within(path: Path, root: Path) -> bool:
         return False
 
 
-def _worktree_metadata() -> tuple[tuple[Path, ...], frozenset[str]]:
-    """Resolve only Git-reported worktrees and their tracked paths; never scan globally."""
-    current = Path(
-        subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    )
+def _worktree_metadata(
+    candidate: Path | None = None,
+) -> tuple[tuple[Path, ...], frozenset[str]]:
+    """Resolve Git-reported worktrees and tracked paths for the candidate checkout."""
+    try:
+        current = Path(
+            subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=candidate.parent if candidate is not None else None,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except subprocess.CalledProcessError:
+        return (), frozenset()
     listing = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
         cwd=current,
@@ -220,7 +228,6 @@ def _worktree_metadata() -> tuple[tuple[Path, ...], frozenset[str]]:
     for line in listing.splitlines():
         if line.startswith("worktree "):
             root = Path(line[9:])
-            # Linked worktrees are validated through their .git pointer file.
             marker = root / ".git"
             if marker.is_file():
                 pointer = marker.read_text(encoding="utf-8")
