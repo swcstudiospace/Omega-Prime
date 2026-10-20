@@ -8,6 +8,9 @@ import contextlib
 import json
 import os
 import tempfile
+import fcntl
+import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -73,6 +76,9 @@ def _links(value: Any, prefix: str) -> list[dict[str, str]]:
     return result
 
 
+def _canonical_identity(identity: str) -> str:
+    return identity if ":" in identity else f"tasks:{identity}"
+
 def _validated(data: dict[str, Any]) -> dict[str, Any]:
     if data.get("version") != 1:
         raise ValueError("version must equal 1")
@@ -107,9 +113,7 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"{prefix}.state is invalid")
                 item["state"] = state
                 item["started_at"] = _optional_string(row, "started_at", prefix)
-                item["last_activity_at"] = _optional_string(
-                    row, "last_activity_at", prefix
-                )
+                item["last_activity_at"] = _optional_string(row, "last_activity_at", prefix)
                 item["progress"] = _progress(row.get("progress"), prefix)
                 item["note"] = _optional_string(row, "note", prefix)
                 item["links"] = _links(row.get("links", []), prefix)
@@ -123,35 +127,164 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"{prefix}.result is invalid")
                 item["result"] = result
                 item["receipt"] = _optional_string(row, "receipt", prefix)
+            if "seq" in row:
+                seq = row["seq"]
+                if isinstance(seq, bool) or not isinstance(seq, int) or seq <= 0:
+                    raise ValueError(f"{prefix}.seq must be a positive integer")
+                item["seq"] = seq
             clean.append(item)
         out[category] = clean
+
+    next_seq = data.get("next_seq", 1)
+    if isinstance(next_seq, bool) or not isinstance(next_seq, int) or next_seq <= 0:
+        raise ValueError("next_seq must be a positive integer")
+    registry = data.get("identity_registry", {})
+    if not isinstance(registry, dict):
+        raise ValueError("identity_registry must be an object")
+    clean_registry: dict[str, Any] = {}
+    seq_owner: dict[int, str] = {}
+    for key, record in registry.items():
+        if not isinstance(key, str) or len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
+            raise ValueError("identity_registry key invalid")
+        if not isinstance(record, dict):
+            raise ValueError("identity_registry record invalid")
+        seq = record.get("seq")
+        title = record.get("title")
+        timeline = record.get("timeline")
+        last_state = record.get("last_state")
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq <= 0:
+            raise ValueError("registry seq must be a positive integer")
+        if not isinstance(title, str) or not isinstance(timeline, list):
+            raise ValueError("registry history invalid")
+        if last_state is not None and not isinstance(last_state, str):
+            raise ValueError("registry last_state invalid")
+        clean_timeline: list[dict[str, str]] = []
+        for event in timeline:
+            if not isinstance(event, dict) or set(event) != {"at", "state"}:
+                raise ValueError("registry timeline event invalid")
+            at, state = event["at"], event["state"]
+            if not isinstance(at, str) or not isinstance(state, str):
+                raise ValueError("registry timeline event fields invalid")
+            try:
+                datetime.fromisoformat(at.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError("registry timeline timestamp invalid") from exc
+            clean_timeline.append({"at": at, "state": state})
+        if seq in seq_owner:
+            raise ValueError("duplicate sequence ownership")
+        seq_owner[seq] = key
+        clean_registry[key] = {
+            "seq": seq,
+            "title": title,
+            "timeline": clean_timeline,
+            "last_state": last_state,
+        }
+    row_owner: dict[int, str] = {}
+    for category in ("tasks", "waiting_on_ove", "finished"):
+        for row in out[category]:
+            seq = row.get("seq")
+            if seq is None:
+                continue
+            key = hashlib.sha256(_canonical_identity(row["id"]).encode("utf-8")).hexdigest()
+            if seq in row_owner and row_owner[seq] != key:
+                raise ValueError("duplicate sequence ownership")
+            row_owner[seq] = key
+            if key in clean_registry and clean_registry[key]["seq"] != seq:
+                raise ValueError("row sequence conflicts with identity registry")
+            if seq in seq_owner and seq_owner[seq] != key:
+                raise ValueError("row sequence conflicts with identity registry")
+    out["next_seq"] = max(next_seq, max(seq_owner, default=0) + 1, max(row_owner, default=0) + 1)
+    out["identity_registry"] = clean_registry
     return out
 
 
-def write_tasks(data: dict[str, Any], *, path: Path) -> Path:
-    """Validate and atomically persist a redacted tasks.json document."""
-    safe = redact_value(_validated(data))
-    payload = (json.dumps(safe, sort_keys=True, separators=(",", ":")) + "\n").encode()
+@contextmanager
+def locked_tasks(path: Path, *, write: bool):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
+    lock_path = path.with_name(path.name + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("tasks document must be an object")
+            data = _validated(data)
+        else:
+            data = _validated({
+                "version": 1,
+                "updated_at": datetime.now().isoformat(),
+                "tasks": [],
+                "waiting_on_ove": [],
+                "finished": [],
+                "next_seq": 1,
+                "identity_registry": {},
+            })
+        yield data
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _write_locked(data: dict[str, Any], path: Path) -> Path:
+    safe = redact_value(_validated(data))
+    payload = (json.dumps(safe, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    try:
+        if path.read_bytes() == payload:
+            return path
+    except FileNotFoundError:
+        pass
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
+            stream.write(payload); stream.flush(); os.fsync(stream.fileno())
         os.replace(tmp_name, path)
         dir_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        try: os.fsync(dir_fd)
+        finally: os.close(dir_fd)
     except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp_name)
+        with contextlib.suppress(FileNotFoundError): os.unlink(tmp_name)
         raise
     return path
+
+
+def write_tasks(data: dict[str, Any], *, path: Path) -> Path:
+    with locked_tasks(path, write=True) as current:
+        candidate = _validated(data)
+        registry = {key: dict(record) for key, record in current["identity_registry"].items()}
+        for key, incoming in candidate["identity_registry"].items():
+            existing = registry.get(key)
+            if existing is None:
+                registry[key] = incoming
+                continue
+            if existing["seq"] != incoming["seq"]:
+                raise ValueError("identity sequence cannot be reassigned")
+            known = {(event["at"], event["state"]) for event in existing["timeline"]}
+            for event in incoming["timeline"]:
+                if (event["at"], event["state"]) not in known:
+                    existing["timeline"].append(event)
+                    known.add((event["at"], event["state"]))
+            existing["title"] = incoming["title"]
+            if incoming["last_state"] is not None:
+                existing["last_state"] = incoming["last_state"]
+        candidate["identity_registry"] = registry
+        candidate["next_seq"] = max(
+            candidate["next_seq"],
+            current["next_seq"],
+            max((record["seq"] for record in registry.values()), default=0) + 1,
+        )
+        for category in ("tasks", "waiting_on_ove", "finished"):
+            for row in candidate[category]:
+                key = hashlib.sha256(_canonical_identity(row["id"]).encode("utf-8")).hexdigest()
+                record = registry.get(key)
+                if record is not None:
+                    if "seq" in row and row["seq"] != record["seq"]:
+                        raise ValueError("row sequence conflicts with identity registry")
+                    row["seq"] = record["seq"]
+        return _write_locked(candidate, path)
 
 
 def read_tasks(path: Path) -> TasksFileResult:

@@ -145,7 +145,7 @@ def test_writer_redacts_permissions_atomic_and_unknown_keys(tmp_path) -> None:
     raw = path.read_text()
     assert all(secret not in raw for secret in SECRETS)
     assert "unknown" not in raw
-    assert list(path.parent.iterdir()) == [path]
+    assert sorted(entry.name for entry in path.parent.iterdir()) == ["tasks.json", "tasks.json.lock"]
     result = read_tasks(path)
     assert result.status == "ok" and result.data is not None
     assert all(secret not in json.dumps(result.data) for secret in SECRETS)
@@ -157,6 +157,47 @@ def test_writer_redacts_permissions_atomic_and_unknown_keys(tmp_path) -> None:
     result = read_tasks(path)
     assert result.status == "ok" and "extra" not in (result.data or {})
 
+
+
+def test_bridge_rejects_bad_sequence_and_registry_without_overwriting(tmp_path) -> None:
+    path = tmp_path / "tasks.json"
+    write_tasks(document(), path=path)
+    original = path.read_bytes()
+    for seq in (True, 0, -1, 1.5):
+        invalid = document()
+        invalid["tasks"][0]["seq"] = seq
+        try:
+            write_tasks(invalid, path=path)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid sequence accepted")
+        assert path.read_bytes() == original
+
+
+def test_bridge_redacts_registry_history_values(tmp_path) -> None:
+    import hashlib
+
+    path = tmp_path / "tasks.json"
+    data = document()
+    identity = data["tasks"][0]["id"]
+    key = hashlib.sha256(f"tasks:{identity}".encode()).hexdigest()
+    data["tasks"][0]["seq"] = 1
+    data.update(
+        next_seq=2,
+        identity_registry={
+            key: {
+                "seq": 1,
+                "title": "TOKEN=secret",
+                "timeline": [{"at": "2026-10-21T00:00:00+00:00", "state": "TOKEN=secret"}],
+                "last_state": "TOKEN=secret",
+            }
+        },
+    )
+    write_tasks(data, path=path)
+    raw = path.read_text()
+    assert "TOKEN=secret" not in raw
+    assert key in raw
 
 def test_reader_missing_malformed_and_writer_validation(tmp_path) -> None:
     assert read_tasks(tmp_path / "absent").status == "missing"
