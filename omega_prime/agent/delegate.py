@@ -49,7 +49,9 @@ def delegate_task(
             # must not receive the full MCP registry.
             if not _restricted(parent):
                 routed = delegate_via_engine(
-                    goals[0], interrupt=getattr(parent, "interrupt", None)
+                    goals[0],
+                    interrupt=getattr(parent, "interrupt", None),
+                    stage=_child_stage(parent),
                 )
                 if routed is not None:
                     return routed
@@ -67,6 +69,18 @@ def delegate_task(
         return json.dumps({"pending": True, "handle": handle}, ensure_ascii=False)
     summaries = _run_goals(parent, goals, max_depth, max_children)
     return _foreground(summaries)
+
+
+def _child_stage(parent: Any) -> str | None:
+    """A staged parent hands its children the ``execute`` stage.
+
+    Delegated goals are build work: a Sol-planning parent delegates to the
+    Luna execute model. An unstaged parent leaves the choice to
+    ``OMEGA_PRIME_ENGINE_STAGE``.
+    """
+    if getattr(parent, "engine_stage", None):
+        return "execute"
+    return None
 
 
 def join_delegate(handle: str) -> str:
