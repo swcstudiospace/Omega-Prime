@@ -800,3 +800,82 @@ def test_validation_happens_before_any_source_io(tmp_path):
     assert store.load_calls == 0
     assert substrate.calls == []
     assert hindsight.calls == []
+
+
+class _LimitedHindsight(Hindsight):
+    """Honors ``limit`` like HindsightService, which truncates its results."""
+
+    def recall(self, query, *, limit):
+        return super().recall(query, limit=limit)[:limit]
+
+
+class _LimitedSubstrate(Substrate):
+    def memory_search(self, query, scope, limit, *, repo=None):
+        return super().memory_search(query, scope, limit, repo=repo)[:limit]
+
+
+def test_hindsight_duplicates_do_not_use_up_the_result_limit(tmp_path):
+    hits = [{"text": "same fact"}] * 25 + [{"text": "distinct fact"}]
+    hindsight = _LimitedHindsight(hits)
+    backends = resolve_memory_backends(
+        local_store=MemoryStore(tmp_path / "memory"),
+        hindsight=hindsight,
+        environ={},
+    )
+
+    result = recall_memory(backends, "fact", scope="default", repo=None, limit=2)
+
+    assert [hit["content"] for hit in result["results"]] == [
+        "same fact",
+        "distinct fact",
+    ]
+    assert [limit for _query, limit in hindsight.calls] == [20, 80]
+
+
+def test_out_of_scope_substrate_hits_do_not_use_up_the_result_limit(tmp_path):
+    hits = [
+        {"text": f"other tenant {index}", "scope": "elsewhere"} for index in range(20)
+    ] + [{"text": "first team fact"}, {"text": "second team fact"}]
+    substrate = _LimitedSubstrate(hits)
+    backends = resolve_memory_backends(
+        local_store=MemoryStore(tmp_path / "memory"),
+        substrate=substrate,
+        scope="team",
+        environ={},
+    )
+
+    result = recall_memory(backends, "fact", scope="team", repo=None, limit=2)
+
+    assert [hit["content"] for hit in result["results"]] == [
+        "first team fact",
+        "second team fact",
+    ]
+    assert [call[2] for call in substrate.calls] == [20, 80]
+
+
+def test_full_window_with_enough_unique_hits_is_fetched_once(tmp_path):
+    hindsight = _LimitedHindsight([{"text": f"fact {index}"} for index in range(30)])
+    backends = resolve_memory_backends(
+        local_store=MemoryStore(tmp_path / "memory"),
+        hindsight=hindsight,
+        environ={},
+    )
+
+    result = recall_memory(backends, "fact", scope="default", repo=None, limit=2)
+
+    assert [hit["content"] for hit in result["results"]] == ["fact 0", "fact 1"]
+    assert [limit for _query, limit in hindsight.calls] == [20]
+
+
+def test_widening_stops_when_the_source_runs_out(tmp_path):
+    hindsight = _LimitedHindsight([{"text": "only fact"}] * 20)
+    backends = resolve_memory_backends(
+        local_store=MemoryStore(tmp_path / "memory"),
+        hindsight=hindsight,
+        environ={},
+    )
+
+    result = recall_memory(backends, "fact", scope="default", repo=None, limit=2)
+
+    assert [hit["content"] for hit in result["results"]] == ["only fact"]
+    assert [limit for _query, limit in hindsight.calls] == [20, 80]

@@ -1010,6 +1010,7 @@ def default_registry(
                 registry=registry,
                 memory=memory_store,
                 memory_backends=memory_backends,
+                memory_refresh=refresh_memory_substrate,
                 intake=IntakeStore(
                     desk_intake_path(work, state_dir=state_value or None)
                 ),

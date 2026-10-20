@@ -434,3 +434,56 @@ def test_real_slash_retain_reports_remote_failure_and_recall_keeps_local(
         row for row in recalled["result"]["results"] if row["content"] == content
     )
     assert any(source["backend"] == "local" for source in entry["sources"])
+
+
+def test_substrate_connected_after_startup_is_used_by_lead_memory(
+    tmp_path, monkeypatch
+):
+    import omega_prime.mcp_server as server
+
+    clients = []
+
+    def make_substrate(url, **kwargs):
+        client = _FakeSubstrate(url or "", **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(server, "SubstrateClient", make_substrate)
+    approval_log = ApprovalLog()
+    registry = default_registry(
+        ROOT,
+        tmp_path / "home",
+        approval_log=approval_log,
+        env={"OMEGA_PRIME_STATE_DIR": str(tmp_path / "state")},
+    )
+    substrate = clients[0]
+    approval_log.approve("lead_memory_retain", "ada")
+    before = json.loads(
+        registry.dispatch(
+            "lead_memory_retain",
+            {"content": "kept before connecting", "source": "integration test"},
+        )
+    )
+    assert before["backends"]["substrate"]["state"] == "not_configured"
+    assert substrate.writes == []
+
+    # A connector saved in the same process (/omega-connectors gateway
+    # substrate) makes the live binding resolve; memory must follow it.
+    substrate.base_url = "local"
+
+    after = json.loads(
+        registry.dispatch(
+            "lead_memory_retain",
+            {"content": "kept after connecting", "source": "integration test"},
+        )
+    )
+    assert after["ok"] is True
+    assert len(substrate.writes) == 1
+    recalled = json.loads(
+        registry.dispatch("lead_memory_recall", {"query": "substrate integration"})
+    )
+    assert recalled["backends"]["substrate"] == {
+        "state": "answered",
+        "attempted": True,
+    }
+    assert recalled["results"][0]["content"] == "substrate integration hit"

@@ -39,6 +39,11 @@ def error_type(error: Any) -> str | None:
 _BACKEND_NAMES = ("local", "substrate", "hindsight")
 _DEFAULT_BANKS = ("omega-prime-lead", "ultrathink", "omega-prime-desk")
 _LEGACY_BANKS = {"omega-prime-lead": "omes-lead", "omega-prime-desk": "omes-desk"}
+# Remote sources are over-fetched because duplicates and out-of-scope hits are
+# dropped after the fetch. A full window is widened up to this many hits.
+_SOURCE_FETCH_FACTOR = 10
+_SOURCE_FETCH_GROWTH = 4
+_SOURCE_FETCH_MAX = 1000
 
 
 def recall_memory(
@@ -220,6 +225,47 @@ def recall_memory(
             return hit_scope == scope and hit_repo == repo
         return hit_repo is None and (hit_scope is None or hit_scope == scope)
 
+    def eligible_digests(name: str, payload: list[Any]) -> set[str]:
+        """Content digests of the hits that recall would keep from ``payload``."""
+        digests: set[str] = set()
+        for hit in payload:
+            if not isinstance(hit, dict) or not isinstance(hit.get("text"), str):
+                continue
+            marker_value = hit.get("source_event" if name == "substrate" else "context")
+            has_marker = isinstance(marker_value, str) and marker_value.startswith(
+                _REMOTE_METADATA_MARKER
+            )
+            trusted_metadata = remote_metadata(hit, name)
+            if has_marker and trusted_metadata is None:
+                continue
+            if not in_scope(hit, trusted_metadata):
+                continue
+            normalized = normalize_content(hit["text"])
+            if normalized:
+                digests.add(f"sha256:{content_hash(normalized)}")
+        return digests
+
+    def fetch_enough(name: str, fetch: Any) -> Any:
+        """Fetch until ``limit`` unique eligible results exist or the source ends.
+
+        The final limit applies after scope filtering and deduplication, so a
+        full fetch window that still leaves fewer than ``limit`` unique results
+        is widened instead of letting duplicates use up the slots.
+        """
+        ceiling = max(_SOURCE_FETCH_MAX, limit * _SOURCE_FETCH_FACTOR)
+        source_limit = limit * _SOURCE_FETCH_FACTOR
+        while True:
+            payload = fetch(source_limit)
+            if (
+                not isinstance(payload, list)
+                or len(payload) < source_limit
+                or source_limit >= ceiling
+            ):
+                return payload
+            if len(set(merged) | eligible_digests(name, payload)) >= limit:
+                return payload
+            source_limit = min(source_limit * _SOURCE_FETCH_GROWTH, ceiling)
+
     def source_response_state(
         name: str, payload: Any, fallback_bank: str | None = None
     ) -> None:
@@ -342,9 +388,10 @@ def recall_memory(
     if backends.substrate is not None:
         statuses["substrate"] = {"state": "empty", "attempted": True}
         try:
-            source_limit = limit * 10
-            payload = backends.substrate.memory_search(
-                query, scope, source_limit, repo=repo
+            substrate = backends.substrate
+            payload = fetch_enough(
+                "substrate",
+                lambda size: substrate.memory_search(query, scope, size, repo=repo),
             )
             source_response_state("substrate", payload)
         except Exception as exc:
@@ -362,7 +409,10 @@ def recall_memory(
     if backends.hindsight is not None:
         statuses["hindsight"] = {"state": "empty", "attempted": True}
         try:
-            payload = backends.hindsight.recall(query, limit=limit * 10)
+            hindsight = backends.hindsight
+            payload = fetch_enough(
+                "hindsight", lambda size: hindsight.recall(query, limit=size)
+            )
             source_response_state(
                 "hindsight",
                 payload,

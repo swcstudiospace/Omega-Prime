@@ -556,6 +556,9 @@ class LeadContext:
     registry: Any = None
     memory: MemoryStore | None = None
     memory_backends: MemoryBackends | None = None
+    # Called before each memory operation so backends follow connector
+    # settings saved after startup (for example a newly connected Substrate).
+    memory_refresh: Callable[[], None] | None = None
     memory_scope: str = "default"
     memory_repo: str | None = None
     hindsight: Any = None
@@ -647,6 +650,8 @@ class LeadClient:
 
     def _memory_backends(self) -> MemoryBackends:
         if self.ctx.memory_backends is not None:
+            if self.ctx.memory_refresh is not None:
+                self.ctx.memory_refresh()
             return self.ctx.memory_backends
         return resolve_memory_backends(
             local_store=self.ctx.memory,
