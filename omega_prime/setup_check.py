@@ -218,12 +218,20 @@ CHECKS = (
 
 def run_checks(root: Path) -> dict[str, Any]:
     """Run every check; `{name: {ok, detail}}` plus `passed`."""
-    settings = load_settings(dict(os.environ))
+    settings_error: str | None = None
+    try:
+        settings = load_settings(dict(os.environ))
+    except Exception as exc:
+        settings = None
+        settings_error = f"{type(exc).__name__}: {exc}"
     results: dict[str, Any] = {}
     for name, fn in CHECKS:
         try:
             if name == "ultrathink":
-                ok, detail = check_ultrathink(root, settings.effective_env)
+                env = settings.effective_env if settings is not None else os.environ
+                ok, detail = check_ultrathink(root, env)
+            elif name == "substrate" and settings_error is not None:
+                ok, detail = False, f"settings load failed: {settings_error}"
             elif name == "substrate":
                 ok, detail = check_substrate(root, settings)
             else:

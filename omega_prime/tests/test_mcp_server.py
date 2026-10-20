@@ -517,3 +517,43 @@ def test_load_runtime_preserves_settings_status_and_explicit_env(
     assert runtime.registry.runtime_bindings["settings_status"] is status
     doctor = json.loads(runtime.registry.dispatch("lead_doctor", {"action": "check"}))
     assert doctor["checks"]["settings"]["status"] == "missing"
+
+
+def test_main_approval_validation_uses_effective_state_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import hashlib
+
+    from omega_prime.mcp_server import main
+
+    settings_home = tmp_path / "home"
+    settings_dir = settings_home / ".omega-prime"
+    settings_dir.mkdir(parents=True)
+    settings_file = settings_dir / "settings.json"
+    settings_file.write_text(
+        json.dumps({"OMEGA_PRIME_STATE_DIR": str(tmp_path / "saved-state")}),
+        encoding="utf-8",
+    )
+    settings_file.chmod(0o600)
+    process_state = tmp_path / "process-state"
+    process_state.mkdir()
+    monkeypatch.setenv("HOME", str(settings_home))
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(process_state))
+    approvals = process_state / "approvals.txt"
+    content = "read_file:admin\n"
+    approvals.write_text(content, encoding="utf-8")
+    approvals.chmod(0o600)
+
+    result = main(
+        [
+            "--root",
+            str(OMEGA_PRIME),
+            "--approvals-file",
+            str(approvals),
+            "--approvals-sha256",
+            hashlib.sha256(content.encode()).hexdigest(),
+        ]
+    )
+
+    assert result == 2
+    assert "outside OMEGA_PRIME_STATE_DIR" in capsys.readouterr().err

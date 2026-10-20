@@ -215,8 +215,14 @@ def _worktree_metadata(
                 text=True,
             ).stdout.strip()
         )
-    except subprocess.CalledProcessError:
-        return (), frozenset()
+    except subprocess.CalledProcessError as exc:
+        # Git uses a nonzero status both outside a repository and when it
+        # cannot inspect a checkout (for example, dubious ownership). Only
+        # the explicit non-repository diagnostic is safe to treat as absence.
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        if "not a git repository" in stderr.lower():
+            return (), frozenset()
+        raise
     listing = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
         cwd=current,

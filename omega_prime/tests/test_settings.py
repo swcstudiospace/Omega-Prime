@@ -23,6 +23,25 @@ def init_git_repo(path: Path) -> None:
 
 
 @pytest.fixture
+def git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Initialize an isolated repo without inheriting the caller's Git paths."""
+    for variable in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    init_git_repo(tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
 def git_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     root = tmp_path / "worktree"
     root.mkdir()
@@ -114,6 +133,16 @@ def test_candidate_in_another_checkout_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first_checkout = tmp_path / "launch-checkout"
+    for variable in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+    ):
+        monkeypatch.delenv(variable, raising=False)
     other_checkout = tmp_path / "other-checkout"
     init_git_repo(first_checkout)
     init_git_repo(other_checkout)
@@ -313,3 +342,33 @@ def test_open_identity_race_fails_closed(git_guard, monkeypatch) -> None:
     assert result.status == "rejected"
     assert result.effective_env == {}
     assert "must-not-load" not in repr(result)
+
+
+def test_git_discovery_errors_reject_candidate_and_git_paths_are_isolated(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert "GIT_INDEX_FILE" not in os.environ
+    assert "GIT_DIR" not in os.environ
+    candidate = write_settings(
+        git_repo / "settings.json", {"SUBSTRATE_URL": "must-not-load"}
+    )
+
+    subprocess.run(
+        ["git", "add", "settings.json"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    def fail_discovery(*args, **kwargs):
+        raise subprocess.CalledProcessError(
+            128,
+            args[0],
+            stderr="fatal: detected dubious ownership in repository",
+        )
+
+    monkeypatch.setattr(settings.subprocess, "run", fail_discovery)
+    result = settings.load_settings({}, path=candidate)
+    assert result.status == "rejected"
+    assert result.effective_env == {}

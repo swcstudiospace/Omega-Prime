@@ -551,7 +551,10 @@ def run_oneclick(
     if approvals_path is not None:
         try:
             file_grants = load_approvals_file(
-                approvals_path, repo_root=root, digest=approvals_digest
+                approvals_path,
+                repo_root=root,
+                digest=approvals_digest,
+                env=effective_env,
             )
         except ValueError as exc:
             return _fail(str(exc))

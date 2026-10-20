@@ -1749,7 +1749,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             approvals.extend(
                 load_approvals_file(
-                    approvals_path, repo_root=root, digest=approvals_digest
+                    approvals_path,
+                    repo_root=root,
+                    digest=approvals_digest,
+                    env=host_env,
                 )
             )
         except ValueError as exc:

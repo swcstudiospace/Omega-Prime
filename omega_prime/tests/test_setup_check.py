@@ -234,6 +234,32 @@ def test_run_checks_reports_settings_file_invalid_ultrathink_checkout(
     assert "root not set" not in report["ultrathink"]["detail"]
 
 
+def test_run_checks_contains_settings_load_error_and_runs_every_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names = tuple(name for name, _ in CHECKS)
+    monkeypatch.setattr(
+        setup_check,
+        "CHECKS",
+        tuple((name, lambda _root: (True, "ran")) for name in names),
+    )
+    monkeypatch.setattr(
+        setup_check,
+        "load_settings",
+        lambda _env: (_ for _ in ()).throw(ValueError("bad optional settings path")),
+    )
+    monkeypatch.delenv("ULTRATHINK_ROOT", raising=False)
+
+    report = run_checks(tmp_path)
+
+    assert set(report) == {*names, "passed"}
+    assert report["passed"] is False
+    assert report["substrate"]["ok"] is False
+    assert "settings load failed: ValueError" in report["substrate"]["detail"]
+    assert report["roster"] == {"ok": True, "detail": "ran"}
+    assert report["ultrathink"]["ok"] is None
+
+
 def test_template_row_reports_unlisted_skills_like_the_doctor(tmp_path: Path) -> None:
     """IN-04: the row covers both directions, not just template gaps."""
     fixture = _mirror(tmp_path / "unlisted")
