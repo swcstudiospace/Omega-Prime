@@ -10,17 +10,51 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import math
 import os
 import stat
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+
+def _new_claim_token() -> str:
+    return f"{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex}"
+
+
+def _claim_is_stale(token: Any) -> bool:
+    """Return whether a persisted claim belongs to an exited worker."""
+    if not isinstance(token, str):
+        return token is not None
+    try:
+        pid_text, worker_text, _nonce = token.split(":", 2)
+        pid = int(pid_text)
+        worker_id = int(worker_text)
+    except (TypeError, ValueError):
+        return True
+    if pid <= 0 or worker_id <= 0:
+        return True
+    if pid == os.getpid():
+        return worker_id not in {
+            thread.ident
+            for thread in threading.enumerate()
+            if thread.is_alive() and thread.ident is not None
+        }
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
 
 HISTORY_LIMIT = 20
 
@@ -141,17 +175,21 @@ class JobStore:
                 for entry in history
             )
             due_at = job.get("due_at")
+            token = job.get("claim_token")
+            if token is not None:
+                if not _claim_is_stale(token):
+                    return None
+                job["claim_token"] = None
+                job["claimed_at"] = None
             if (
                 job.get("kind") != kind
                 or job.get("completed")
                 or due_at is None
                 or due_at > now
-                or job.get("claim_token") is not None
-                or job.get("claimed_at") == now
                 or already_run
             ):
                 return None
-            token = uuid.uuid4().hex
+            token = _new_claim_token()
             scheduled_for = job["due_at"]
             job["claim_token"] = token
             job["claimed_at"] = now
@@ -220,14 +258,16 @@ class JobStore:
                 ),
                 None,
             )
-            due_at = job.get("due_at") if job is not None else None
-            if (
-                job is None
-                or job.get("completed")
-                or due_at is None
-                or due_at > now
-                or job.get("claim_token") is not None
-            ):
+            if job is None:
+                return None
+            token = job.get("claim_token")
+            if token is not None:
+                if not _claim_is_stale(token):
+                    return None
+                job["claim_token"] = None
+                job["claimed_at"] = None
+            due_at = job.get("due_at")
+            if job.get("completed") or due_at is None or due_at > now:
                 return None
             history = job.get("history")
             if isinstance(history, list) and any(
@@ -238,7 +278,7 @@ class JobStore:
             ):
                 return None
             due_at = job["due_at"]
-            token = uuid.uuid4().hex
+            token = _new_claim_token()
             job["claim_token"] = token
             job["claimed_at"] = now
             self._save()
@@ -308,6 +348,7 @@ class JobStore:
             skipped.update(skip_kinds)
         if skip_kind is not None:
             skipped.add(skip_kind)
+        grace = cron_lateness_grace_seconds()
         with self._store_transaction():
             job_ids = [
                 job["id"]
@@ -324,7 +365,7 @@ class JobStore:
             claim = self._claim(job_id, now)
             if claim is None:
                 continue
-            if now - float(claim["scheduled_for"]) > cron_lateness_grace_seconds():
+            if now - float(claim["scheduled_for"]) > grace:
                 missed = {
                     "state": "missed",
                     "scheduled_for": claim["scheduled_for"],
@@ -1167,7 +1208,8 @@ def tick_pin_bump_schedules(
                     action = "blocked-approval-required"
                 else:
                     bump_seam = bump or (lambda j: _default_pin_bump_apply(j, root))
-                    bump_result = bump_seam(job)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        bump_result = bump_seam(job)
                     action = "bump-pr" if bump_result == 0 else "bump-pr-failed"
             except Exception as exc:
                 bump_result = type(exc).__name__

@@ -32,6 +32,58 @@ def test_schedule_and_list_heartbeat(tmp_path):
     assert len(list_heartbeats(_store(tmp_path))) == 1
 
 
+def test_heartbeat_kind_and_session_are_persisted_together(tmp_path, monkeypatch):
+    from threading import Event, Thread
+
+    path = tmp_path / "cron" / "jobs.json"
+    scheduler_store = JobStore(path)
+    generic_store = JobStore(path)
+    original_save = scheduler_store._save
+    save_entered = Event()
+    release_save = Event()
+    generic_started = Event()
+    job_ids = []
+    generic_ran = []
+
+    def paused_save():
+        save_entered.set()
+        assert release_save.wait(timeout=5)
+        original_save()
+
+    monkeypatch.setattr(scheduler_store, "_save", paused_save)
+    scheduler = Thread(
+        target=lambda: job_ids.append(
+            schedule_heartbeat(
+                scheduler_store,
+                "sess-atomic",
+                "check in",
+                interval_seconds=60,
+                due_at=1000,
+            )
+        )
+    )
+    scheduler.start()
+    assert save_entered.wait(timeout=5)
+
+    def generic_tick():
+        generic_started.set()
+        generic_ran.extend(generic_store.tick(1000, lambda _prompt: "generic"))
+
+    generic = Thread(target=generic_tick)
+    generic.start()
+    assert generic_started.wait(timeout=5)
+    release_save.set()
+    scheduler.join(timeout=5)
+    generic.join(timeout=5)
+    assert not scheduler.is_alive()
+    assert not generic.is_alive()
+
+    assert generic_ran == []
+    persisted = next(job for job in JobStore(path).jobs if job["id"] == job_ids[0])
+    assert persisted["kind"] == HEARTBEAT_KIND
+    assert persisted["session"] == "sess-atomic"
+
+
 def test_heartbeat_requires_interval_and_session(tmp_path):
     store = _store(tmp_path)
     with pytest.raises(ValueError, match="interval"):

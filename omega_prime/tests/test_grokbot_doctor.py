@@ -136,14 +136,20 @@ def test_unknown_prefix_like_roster_tool_is_not_flag_gated(
     monkeypatch.setattr(
         mcp_server, "roster_names", lambda _text: [known, "rlm_unknown"]
     )
-    monkeypatch.setattr(
-        mcp_server,
-        "default_registry",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            schemas=lambda: [], runtime_bindings={}
-        ),
+    observed_env = {}
+
+    def make_registry(*_args, **kwargs):
+        observed_env.update(kwargs["env"])
+        return SimpleNamespace(schemas=lambda: [], runtime_bindings={})
+
+    monkeypatch.setattr(mcp_server, "default_registry", make_registry)
+    doctor = GrokBotDoctor(
+        tmp_path,
+        env={"OMEGA_PRIME_PLUGINS": "1", "OMEGA_PRIME_PRIME_RLM_ENABLED": "1"},
     )
-    check = GrokBotDoctor(tmp_path, env={})._check_roster()
+    check = doctor._check_roster()
+    assert observed_env["OMEGA_PRIME_PRIME_RLM_ENABLED"] == "1"
+    assert observed_env["OMEGA_PRIME_PLUGINS"] == "0"
     assert check.status == "WARN"
     assert "rlm_unknown" in check.message
     assert known not in check.message
@@ -182,7 +188,7 @@ def test_redteam_availability_requires_supplied_authorization_metadata(tmp_path)
         enabled, registered_tools=set(), runtime_bindings={"sidecar_state": "IDLE"}
     )
     assert authorized_missing.status == "FAIL"
-    assert "expected tools are missing" in authorized_missing.message
+    assert "no allowed tools are registered" in authorized_missing.message
 
     served = doctor._check_redteam_availability(
         enabled,
@@ -190,7 +196,53 @@ def test_redteam_availability_requires_supplied_authorization_metadata(tmp_path)
         runtime_bindings={"sidecar_state": "IDLE"},
     )
     assert served.status == "PASS"
-    assert "all expected tools are registered" in served.message
+    assert "all registered authorized tools" in served.message
+
+
+def test_redteam_authorization_accepts_registered_allowed_subset(tmp_path):
+    doctor = GrokBotDoctor(tmp_path, env={})
+    (tmp_path / "omega-prime.json").write_text(
+        json.dumps({"redteam": {"enabled": True}}), encoding="utf-8"
+    )
+    enabled = load_config(tmp_path, env={})
+
+    check = doctor._check_redteam_availability(
+        enabled,
+        registered_tools={next(iter(REDTEAM_TOOL_NAMES))},
+        runtime_bindings={"sidecar_state": "IDLE"},
+    )
+
+    assert check.status == "PASS"
+
+
+def test_registry_bindings_refresh_each_collection_unless_caller_supplied(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    from omega_prime import mcp_server
+
+    roster = tmp_path / "omega_prime/contracts/tool-rosters/omega-prime.yaml"
+    roster.parent.mkdir(parents=True)
+    roster.write_text("tools: []\n", encoding="utf-8")
+    bindings = iter([{"prime_heartbeat": "first"}, {"prime_heartbeat": "second"}])
+    monkeypatch.setattr(mcp_server, "roster_names", lambda _text: [])
+    monkeypatch.setattr(
+        mcp_server,
+        "default_registry",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            schemas=lambda: [], runtime_bindings=next(bindings)
+        ),
+    )
+    doctor = GrokBotDoctor(tmp_path, env={})
+
+    doctor._check_roster()
+    assert doctor.runtime_bindings == {"prime_heartbeat": "first"}
+    doctor._check_roster()
+    assert doctor.runtime_bindings == {"prime_heartbeat": "second"}
+
+    supplied = {"prime_heartbeat": "caller"}
+    caller_doctor = GrokBotDoctor(tmp_path, env={}, runtime_bindings=supplied)
+    caller_doctor._check_roster()
+    assert caller_doctor.runtime_bindings is supplied
 
 
 def test_scheduled_job_report_is_redacted_and_store_read_only(tmp_path):
@@ -279,7 +331,7 @@ def test_scheduled_job_report_observes_supplied_bindings_not_ticks(tmp_path):
     bindings = {
         "desk_driver": object(),
         "delegate_parent": object(),
-        "heartbeat_runtime": object(),
+        "prime_heartbeat": object(),
         "heartbeat_sessions": ["private-session-marker"],
     }
     check = GrokBotDoctor(tmp_path, env={})._check_scheduled_jobs(
@@ -289,6 +341,48 @@ def test_scheduled_job_report_observes_supplied_bindings_not_ticks(tmp_path):
     assert "In-process binding metadata was supplied" in check.message
     assert "a runner tick was not observed" in check.message
     assert "lack supplied binding metadata" not in check.message
+
+
+def test_prompt_schedule_requires_both_driver_bindings(tmp_path):
+    path = tmp_path / "cron/jobs.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps({"jobs": [{"kind": "prompt", "due_at": 3000, "completed": False}]}),
+        encoding="utf-8",
+    )
+    config = load_config(tmp_path, env={})
+    doctor = GrokBotDoctor(tmp_path, env={})
+
+    missing = doctor._check_scheduled_jobs(
+        config, runtime_bindings={"desk_driver": object()}, now=2000
+    )
+    present = doctor._check_scheduled_jobs(
+        config,
+        runtime_bindings={"desk_driver": object(), "delegate_parent": object()},
+        now=2000,
+    )
+
+    assert "Delivery runner not observed" in missing.message
+    assert "In-process binding metadata was supplied" in present.message
+    assert "runner tick was not observed" in present.message
+
+
+def test_scheduled_jobs_require_real_prime_heartbeat_binding(tmp_path):
+    config = load_config(tmp_path, env={})
+    path = tmp_path / "cron/jobs.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {"jobs": [{"kind": "heartbeat", "due_at": 3000, "completed": False}]}
+        ),
+        encoding="utf-8",
+    )
+    check = GrokBotDoctor(tmp_path, env={})._check_scheduled_jobs(
+        config, runtime_bindings={"heartbeat": object()}, now=2000
+    )
+
+    assert "Delivery runner not observed" in check.message
+
     assert "private-session-marker" not in check.message
 
 

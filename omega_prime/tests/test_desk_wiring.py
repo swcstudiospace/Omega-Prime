@@ -448,3 +448,36 @@ def test_typed_schedule_creation_is_atomic_with_concurrent_store_writer(
     persisted = JobStore(path).jobs
     assert {job.get("kind") for job in persisted} == {None, "desk_lead_pass"}
     assert len(persisted) == 2
+
+
+def test_scheduled_pin_bump_output_does_not_reach_stdout(tmp_path, capsys):
+    from omega_prime.cron.scheduler import (
+        JobStore,
+        schedule_pin_bump,
+        tick_pin_bump_schedules,
+    )
+
+    store = JobStore(tmp_path / "cron" / "jobs.json")
+    job_id = schedule_pin_bump(store, cron_expr="* * * * *", name="quiet", now=0)
+
+    class Approved:
+        @staticmethod
+        def is_approved(_capability):
+            return True
+
+    def bump(_job):
+        print("pin-bump output")
+        return 0
+
+    ran = tick_pin_bump_schedules(
+        store,
+        60,
+        audit=lambda _job: {"verdict": "improved"},
+        bump=bump,
+        approval_log=Approved(),
+        can_apply_pin_bump=lambda: True,
+    )
+
+    assert capsys.readouterr().out == ""
+    assert ran[0]["id"] == job_id
+    assert ran[0]["last_result"]["action"] == "bump-pr"

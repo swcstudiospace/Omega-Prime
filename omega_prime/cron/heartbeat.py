@@ -45,14 +45,13 @@ def schedule_heartbeat(
         raise ValueError("session must be a non-empty string")
     if isinstance(interval_seconds, bool) or interval_seconds <= 0:
         raise ValueError("a heartbeat needs a positive interval_seconds")
-    job_id = store.schedule(prompt, due_at, interval_seconds=interval_seconds)
-    for job in store.jobs:
-        if isinstance(job, dict) and job.get("id") == job_id:
-            job["kind"] = HEARTBEAT_KIND
-            job["session"] = session
-            break
-    store._save()
-    return job_id
+    return store._schedule_typed(
+        prompt,
+        due_at,
+        interval_seconds=interval_seconds,
+        kind=HEARTBEAT_KIND,
+        session=session,
+    )
 
 
 def list_heartbeats(store: JobStore) -> list[dict]:

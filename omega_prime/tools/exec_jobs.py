@@ -10,9 +10,13 @@ Every started job is reaped exactly once; results are cached so a second
 
 from __future__ import annotations
 
+import contextlib
 import math
+import os
+import signal
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -39,15 +43,30 @@ class JobControl:
             stderr=subprocess.PIPE,
             cwd=self.cwd,
             shell=False,
+            start_new_session=os.name == "posix",
         )
+        job: dict[str, Any] = {
+            "child": child,
+            "lock": threading.Lock(),
+            "result": None,
+            "stdout": [],
+            "stderr": [],
+            "readers": [],
+        }
+        for name in ("stdout", "stderr"):
+            stream = getattr(child, name)
+            if stream is not None:
+                reader = threading.Thread(
+                    target=_drain,
+                    args=(stream, job[name]),
+                    daemon=True,
+                )
+                job["readers"].append(reader)
+                reader.start()
         with self._lock:
             self._next += 1
             job_id = f"job-{self._next}"
-            self._jobs[job_id] = {
-                "child": child,
-                "lock": threading.Lock(),
-                "result": None,
-            }
+            self._jobs[job_id] = job
         return job_id
 
     def poll(self, job_id: str) -> dict:
@@ -59,10 +78,7 @@ class JobControl:
             child = job["child"]
             if child.poll() is None:
                 return {"id": job_id, "running": True}
-            try:
-                return self._collect(job_id, job, timeout=0)
-            except subprocess.TimeoutExpired:
-                return {"id": job_id, "running": True}
+            return self._collect(job_id, job, timeout=0)
 
     def wait(self, job_id: str, timeout: float = 1.0) -> dict:
         """Wait up to ``timeout`` seconds; a timeout leaves the process running."""
@@ -90,17 +106,11 @@ class JobControl:
             if job["result"] is not None:
                 return {"id": job_id, **job["result"]}
             child = job["child"]
-            if child.poll() is None:
-                child.terminate()
-                try:
-                    return self._collect(job_id, job, timeout=5)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    return self._collect(job_id, job, timeout=5)
+            _signal_job(child, signal.SIGTERM)
             try:
                 return self._collect(job_id, job, timeout=5)
             except subprocess.TimeoutExpired:
-                child.kill()
+                _signal_job(child, signal.SIGKILL)
                 return self._collect(job_id, job, timeout=5)
 
     def shutdown(self) -> None:
@@ -108,7 +118,19 @@ class JobControl:
         with self._lock:
             job_ids = tuple(self._jobs)
         for job_id in job_ids:
-            self.kill(job_id)
+            try:
+                self.kill(job_id)
+            except Exception:
+                # Keep shutdown progressing, but make a best-effort hard cleanup
+                # of this job in case termination or collection only partly ran.
+                try:
+                    job = self._job(job_id)
+                    _signal_job(job["child"], signal.SIGKILL)
+                    with job["lock"]:
+                        if job["result"] is None:
+                            self._collect(job_id, job, timeout=5)
+                except Exception:
+                    continue
 
     def _job(self, job_id: str) -> dict[str, Any]:
         with self._lock:
@@ -119,15 +141,47 @@ class JobControl:
 
     def _collect(self, job_id: str, job: dict[str, Any], timeout: float) -> dict:
         child = job["child"]
-        stdout, stderr = child.communicate(timeout=timeout)
+        started = time.monotonic()
+        child.wait(timeout=timeout)
+        for reader in job["readers"]:
+            remaining = max(0.0, timeout - (time.monotonic() - started))
+            reader.join(timeout=remaining)
+            if reader.is_alive():
+                if timeout > 0:
+                    raise subprocess.TimeoutExpired(child.args, timeout)
+                return {"id": job_id, "running": True}
         result = {
             "running": False,
             "exit_code": child.returncode,
-            "stdout": _text(stdout),
-            "stderr": _text(stderr),
+            "stdout": _text(b"".join(job["stdout"])),
+            "stderr": _text(b"".join(job["stderr"])),
         }
         job["result"] = result
         return {"id": job_id, **result}
+
+
+def _drain(stream: Any, chunks: list[bytes]) -> None:
+    """Continuously drain a child pipe so a full pipe cannot block its writer."""
+    try:
+        while True:
+            chunk = os.read(stream.fileno(), 64 * 1024)
+            if not chunk:
+                return
+            chunks.append(chunk)
+    finally:
+        stream.close()
+
+
+def _signal_job(child: subprocess.Popen, signum: int) -> None:
+    """Signal the process group so descendants cannot retain the job's pipes."""
+    if os.name == "posix":
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, signum)
+    elif child.poll() is None:
+        if signum == signal.SIGTERM:
+            child.terminate()
+        else:
+            child.kill()
 
 
 def register_exec_job_tools(registry: Any, cwd: str | Path) -> JobControl:

@@ -231,97 +231,97 @@
     "omega_prime/commands/redteam_readiness.py:_first": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "60083bd50ff722cb37c6abb8b019157d537cb40c7dc8456c14242ab4ce3ab4d0",
+      "source_sha256": "c62bfac722fffbd877935fa985c49140616f5fd853505077f1b7a3299998efa5",
       "suffixes": []
     },
     "omega_prime/commands/redteam_readiness.py:_listed": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "508150c4c79b2f3fedb42f020d83cd23f470d39444550edf120dd9ac29120e2d",
+      "source_sha256": "98e6fb4f1ed563c45ca8787b32d5c63e8ebd37a4f2f5edbd7ef5a4f98465fae0",
       "suffixes": []
     },
     "omega_prime/commands/redteam_roe_check.py:_first": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "60083bd50ff722cb37c6abb8b019157d537cb40c7dc8456c14242ab4ce3ab4d0",
+      "source_sha256": "c62bfac722fffbd877935fa985c49140616f5fd853505077f1b7a3299998efa5",
       "suffixes": []
     },
     "omega_prime/engine/fleet_client.py:read_named_secret": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "cd669e6b7290c952d8c183490721b5990c940f8f6f47de6cc505467b7d1895ef",
+      "source_sha256": "fc01ae0b0dee1827c21a26cbd1b02646918357eb1101ea4040b922a071baec17",
       "suffixes": ["_FILE"]
     },
     "omega_prime/engine/jobs.py:flag": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "cebd4f3392e7c5004277455b847c7eaa7c6f2803c153b6c9827a2299ca770d14",
+      "source_sha256": "2d632e1ff4081ce29e4c6052dca1f80fe1e47e922f93761892f83f2738d496e1",
       "suffixes": []
     },
     "omega_prime/engine/jobs.py:falsy": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "3b484d8a2ccb84cba8b70ff33557fa6aa4e605300f8c5c002179a8f613a5df30",
+      "source_sha256": "ba2888a4b45e4f5447adcac8cdd686e2f4ebdeeee996b81f0e4a56c4b7bc4fbe",
       "suffixes": []
     },
     "omega_prime/engine/plan_router.py:_present": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "47a50da153240d8d3e76cdef18c5d6bb3a2f8e72a626f24cc941033855e00d0f",
+      "source_sha256": "2d119c28efd891ca2a9dfebf9bec129a695f7997dcfbd934fc36e6a5eb368b46",
       "suffixes": []
     },
     "omega_prime/integrations/binding.py:resolve_secret": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "a757e0d98fffc83ba51f223b548ad0237ecd0fe8caa023cb44ada2b44f2ad191",
+      "source_sha256": "08a87f64c81fb99954227d83b3ae0b81996db3d58b1af87ffa7fd1c2badeff70",
       "suffixes": ["_FILE"]
     },
     "omega_prime/integrations/binding.py:secret_value": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "ca9bb36e70a2dd68d234c46e9b4f5d12defe62cc647c92f0396f8aede0b898b4",
+      "source_sha256": "94d503b3a2fd21f7b0720ae5edadf73eeb474365245831d81cb1257c16463c60",
       "suffixes": ["_FILE"]
     },
     "omega_prime/integrations/desk_clients.py:_env_token": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "e06e8c19bcac330f738de37ec3042a40da7451fed54ad4a708ae9f850df06fe4",
+      "source_sha256": "f2a7c53b501e7d3d2981b54446eba6a27a5ae23b19df7176c965dce58ef916e4",
       "suffixes": ["_FILE"]
     },
     "omega_prime/integrations/binding.py:secret_configured": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "0cbece036bb6648165dc604e94d7704a7cdc3ab9d3330dddec5daf88702db14a",
+      "source_sha256": "8990ce7c866521501a55398b95451a45ac824b852ee6dd1afa0d6f87bd85021d",
       "suffixes": ["_FILE"]
     },
     "omega_prime/commands/workflows.py:_present": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "cc74ff4dd451a45a525ab68013df1fa348d88ff2601d95e7c59f7a5a7d0a5e1b",
+      "source_sha256": "643313aa432f09d0ee03a4594b11ef0a83793fa32f7e9f1c50a55759c627e797",
       "suffixes": []
     },
     "omega_prime/commands/workflows.py:_filled": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "ec4b08ce06485445732ada9d5855f8a74ebf14d87e9832d6965c1a7d8c1963d3",
+      "source_sha256": "6b754310600a7548e1b324fb9bb5b6d1413145074ef1f5d1bef1de8c6aeed00d",
       "suffixes": ["_FILE"]
     },
     "omega_prime/integrations/setup.py:_checked_secret": {
       "name_arg": 2,
       "env_arg": 1,
-      "source_sha256": "89c9f0ee8abb08b7f53383c9ede7d1f221c6c87d88affc1eff1f169d7ed398d1",
+      "source_sha256": "4384725446ca12c88307a86226293cce2ecd8a26f801af73059da5523f55d77f",
       "suffixes": ["_FILE"]
     },
     "omega_prime/mcp_server.py:_json_env": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "8dd782bc9b7afefdbb9164ae153d9fe4dcf0e32ddf31cf70135caed4653c3034",
+      "source_sha256": "1d7b42959391b12c791eeee39621da6785bfb7fb8d87465362afc367b3cc7e88",
       "suffixes": []
     },
     "omega_prime/mcp_server.py:_secret_present": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "05a498abe4bdb5ecf67ea5934ff51c0c7bb42134549e0ce43b4d3317518a199c",
+      "source_sha256": "2048d543a98d7e03d1684665d756ac0bc05bebbe61330a89417d0a44966e832f",
       "suffixes": ["_FILE"]
     }
   },
@@ -329,7 +329,7 @@
     {
       "site": "omega_prime/config.py:275:environment.items",
       "symbol": "_env_overrides",
-      "source_sha256": "d675d48f835136ded6b6a6963f5ea5dff6a63d71627d1da7ce4b1085376fb22f",
+      "source_sha256": "af58ce1a14bdd12b51ea2a30734f445fb6f62415c78d9f86f33f3a689888bb07",
       "names": [
         "OMEGA_PRIME_PRIME_RLM_ENABLED", "OMEGA_PRIME_PRIME_HARNESS_ENABLED",
         "OMEGA_PRIME_PRIME_GOALS_ENABLED", "OMEGA_PRIME_PRIME_HEARTBEAT_ENABLED",
@@ -356,7 +356,7 @@
     {
       "site": "omega_prime/engine/plan_router.py:108:mapping.get",
       "symbol": "model_id",
-      "source_sha256": "b21d8789d58f5a1a14e2b9c6f9a9e652c7b42888c430e80119ffcc24cca630e9",
+      "source_sha256": "8e752ab8c2102d4f24c6e0b10a29fa4c9064eb630c8454f0511415972cb5059e",
       "names": [
         "OMEGA_PRIME_OMP_MODEL_ZAI", "OMEGA_PRIME_OMP_MODEL_XAI",
         "OMEGA_PRIME_OMP_MODEL_ANTHROPIC", "OMEGA_PRIME_OMP_MODEL_MUSE",
@@ -373,7 +373,7 @@
     {
       "site": "omega_prime/engine/plan_router.py:111:mapping.get",
       "symbol": "model_id",
-      "source_sha256": "b21d8789d58f5a1a14e2b9c6f9a9e652c7b42888c430e80119ffcc24cca630e9",
+      "source_sha256": "8e752ab8c2102d4f24c6e0b10a29fa4c9064eb630c8454f0511415972cb5059e",
       "names": [
         "OMEGA_PRIME_OMP_MODEL_ZAI", "OMEGA_PRIME_OMP_MODEL_XAI",
         "OMEGA_PRIME_OMP_MODEL_ANTHROPIC", "OMEGA_PRIME_OMP_MODEL_MUSE",
@@ -384,7 +384,7 @@
     {
       "site": "omega_prime/grokbot/manifest.py:243:mapping.get",
       "symbol": "prime_family_flags",
-      "source_sha256": "871fb33ce353c43f4c8ca8794a4c6aaaca86c4cd8c64fc24845a14f0fbce68cc",
+      "source_sha256": "dc6e4c09d6dcab4e34ca6f410a0f236204476e849bd8bedead5c133c08289cd0",
       "names": [
         "OMEGA_PRIME_PRIME_RLM_ENABLED",
         "OMEGA_PRIME_PRIME_HARNESS_ENABLED",
@@ -399,7 +399,7 @@
     {
       "site": "omega_prime/commands/workflows.py:152:helper:omega_prime/commands/workflows.py:_present",
       "symbol": "connector_requests",
-      "source_sha256": "3e248633cb6de8bb7b76c70e409a3ef25b08f0eb7113e02d5ddc052f30dbba42",
+      "source_sha256": "5e3c73619bbb1d2f5f4bd7944b4ca1fe69e43f669bf0b974174e1d05cf47ef88",
       "names": [
         "X_API_TOKEN", "X_API_TOKEN_FILE",
         "TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN_FILE",
@@ -424,7 +424,7 @@
     {
       "site": "omega_prime/mcp_server.py:338:helper:omega_prime/mcp_server.py:_secret_present",
       "symbol": "_desk_child_model",
-      "source_sha256": "a4f2b082969f7d4bed6be79ac9da259ab08a28fe460670c2515a5c04157e3b56",
+      "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
         "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_FILE",
         "XAI_API_KEY", "XAI_API_KEY_FILE",
@@ -437,7 +437,7 @@
     {
       "site": "omega_prime/mcp_server.py:351:helper:omega_prime/integrations/binding.py:secret_value",
       "symbol": "_desk_child_model",
-      "source_sha256": "a4f2b082969f7d4bed6be79ac9da259ab08a28fe460670c2515a5c04157e3b56",
+      "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
         "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_FILE",
         "XAI_API_KEY", "XAI_API_KEY_FILE",
@@ -450,7 +450,7 @@
     {
       "site": "omega_prime/credentials/broker.py:42:helper:omega_prime/integrations/binding.py:secret_value",
       "symbol": "key_for",
-      "source_sha256": "81bed986af6a1da2f0a2ade2f5331b7e80baeeb74d1eaec0439a5c1d4882f5e3",
+      "source_sha256": "b7d89e2cb040723a073ee5e5618063c341c0af6cce334b8aba3c15ef010b7024",
       "names": [
         "AI_GATEWAY_API_KEY", "AI_GATEWAY_API_KEY_FILE",
         "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_FILE",
@@ -487,9 +487,9 @@
       "reason": "Enumerates finite provider.env_vars credentials consumed by the approved credential broker, including protected-file selectors."
     },
     {
-      "site": "omega_prime/grokbot/doctor.py:931:mapping.get",
+      "site": "omega_prime/grokbot/doctor.py:930:mapping.get",
       "symbol": "_check_connector_secrets",
-      "source_sha256": "623567c09f24e8548c78c8f09590068e0d9bb1bc11dc161e0520416fe1a79232",
+      "source_sha256": "da9adca5c1daa73671631474854e3d6ba5d0f29547adfe97bc64e7c398dea84e",
       "names": [
         "XAI_API_KEY",
         "X_API_TOKEN",
@@ -505,7 +505,7 @@
     {
       "site": "omega_prime/engine/jobs.py:207:environment.items",
       "symbol": "child_env",
-      "source_sha256": "e4977f2567a65d55d31c315d75645a3f8b7ed56e4845a2a5c4ee366223b344e9",
+      "source_sha256": "66bbaa94289708bd30b8c66db94ad357667826ac001dbec82321331819d5ca59",
       "classification": "excluded",
       "reason": "Forwards arbitrary OMEGA_FAKE_OMP_ values exclusively to isolated fake-engine child processes; not operator configuration."
     }
@@ -514,35 +514,35 @@
     {
       "site": "omega_prime/scripts/ci_receipt.py:45:os.environ.subscription",
       "symbol": "record_exit",
-      "source_sha256": "da48151b976f3982f6af5d501fdc30d9352fd4fea6b97a903e9f1c72cd2dc9dc",
+      "source_sha256": "82633e6f1b276fd7cc5ecaaf1198ff04244d2f1b5997ba60ba4d18ffb871f2a0",
       "names": ["GITHUB_OUTPUT"],
       "reason": "Reads GITHUB_OUTPUT only to append the CI action exit-code output receipt."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:52:os.environ.subscription",
       "symbol": "cmd_identity",
-      "source_sha256": "84c9b0e584ceb5480d47ca9a84daa330be0eb73ae3c794c36e7e143d172ed117",
+      "source_sha256": "a73ab3bb9c81f038ab74a418422c5156fddbf8b82ae7a380e9b2b45f6a755dce",
       "names": ["REQUESTED_PYTHON"],
       "reason": "Reads REQUESTED_PYTHON only as CI interpreter identity receipt metadata."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:61:os.environ.get",
       "symbol": "cmd_identity",
-      "source_sha256": "84c9b0e584ceb5480d47ca9a84daa330be0eb73ae3c794c36e7e143d172ed117",
+      "source_sha256": "a73ab3bb9c81f038ab74a418422c5156fddbf8b82ae7a380e9b2b45f6a755dce",
       "names": ["SETUP_PYTHON_VERSION"],
       "reason": "Reads SETUP_PYTHON_VERSION only as optional CI interpreter identity receipt metadata."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:62:os.environ.get",
       "symbol": "cmd_identity",
-      "source_sha256": "84c9b0e584ceb5480d47ca9a84daa330be0eb73ae3c794c36e7e143d172ed117",
+      "source_sha256": "a73ab3bb9c81f038ab74a418422c5156fddbf8b82ae7a380e9b2b45f6a755dce",
       "names": ["SETUP_PYTHON_PATH"],
       "reason": "Reads SETUP_PYTHON_PATH only as optional CI interpreter identity receipt metadata."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:73:os.environ.get",
       "symbol": "cmd_identity",
-      "source_sha256": "84c9b0e584ceb5480d47ca9a84daa330be0eb73ae3c794c36e7e143d172ed117",
+      "source_sha256": "a73ab3bb9c81f038ab74a418422c5156fddbf8b82ae7a380e9b2b45f6a755dce",
       "names": [
         "GITHUB_REPOSITORY", "GITHUB_WORKFLOW", "GITHUB_RUN_ID", "GITHUB_RUN_NUMBER",
         "GITHUB_RUN_ATTEMPT", "GITHUB_JOB", "GITHUB_EVENT_NAME", "GITHUB_REF",
@@ -553,140 +553,140 @@
     {
       "site": "omega_prime/scripts/ci_receipt.py:482:os.environ.get",
       "symbol": "cmd_retention",
-      "source_sha256": "5c16184fcbd6362c5e8707d2c0590607b509a34dd37374c11e2dbce36acb765f",
+      "source_sha256": "417be890963faaf197165aee3713fd46eb4d866c3fa5b1c25c6e6e457683567b",
       "names": ["RUNNER_TEMP"],
       "reason": "Reads RUNNER_TEMP only to constrain CI retained-evidence paths."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:543:os.environ.subscription",
       "symbol": "cmd_summary",
-      "source_sha256": "f902fb4e0104654b910a730a20e932cc817975f9c22f9fca5b550b23301f3678",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
       "names": ["STEPS_JSON"],
       "reason": "Reads STEPS_JSON only as serialized CI step outcomes for the summary receipt."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:544:os.environ.subscription",
       "symbol": "cmd_summary",
-      "source_sha256": "f902fb4e0104654b910a730a20e932cc817975f9c22f9fca5b550b23301f3678",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
       "names": ["JOB_STATUS"],
       "reason": "Reads JOB_STATUS only as the GitHub Actions job outcome protocol."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:547:os.environ.subscription",
       "symbol": "cmd_summary",
-      "source_sha256": "f902fb4e0104654b910a730a20e932cc817975f9c22f9fca5b550b23301f3678",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
       "names": ["STAGES"],
       "reason": "Reads STAGES only as CI step names used to build the summary receipt."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:581:os.environ.get",
       "symbol": "cmd_summary",
-      "source_sha256": "f902fb4e0104654b910a730a20e932cc817975f9c22f9fca5b550b23301f3678",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
       "names": ["GITHUB_JOB"],
       "reason": "Reads GITHUB_JOB only as job identity metadata in the CI receipt."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:582:os.environ.subscription",
       "symbol": "cmd_summary",
-      "source_sha256": "f902fb4e0104654b910a730a20e932cc817975f9c22f9fca5b550b23301f3678",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
       "names": ["REQUESTED_PYTHON"],
       "reason": "Reads REQUESTED_PYTHON only as interpreter identity metadata in the CI receipt."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:586:os.environ.get",
       "symbol": "cmd_summary",
-      "source_sha256": "f902fb4e0104654b910a730a20e932cc817975f9c22f9fca5b550b23301f3678",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
       "names": ["GUARD_TESTCASE"],
       "reason": "Reads GUARD_TESTCASE only to select an optional CI JUnit guard."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:593:os.environ.subscription",
       "symbol": "cmd_summary",
-      "source_sha256": "f902fb4e0104654b910a730a20e932cc817975f9c22f9fca5b550b23301f3678",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
       "names": ["RUNNER_TEMP"],
       "reason": "Reads RUNNER_TEMP only to locate the CI suite JUnit report."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:610:os.environ.subscription",
       "symbol": "cmd_summary",
-      "source_sha256": "f902fb4e0104654b910a730a20e932cc817975f9c22f9fca5b550b23301f3678",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
       "names": ["GUARD_CLASSNAME"],
       "reason": "Reads GUARD_CLASSNAME only to select the named CI JUnit testcase."
     },
     {
       "site": "omega_prime/scripts/ci_receipt.py:611:os.environ.subscription",
       "symbol": "cmd_summary",
-      "source_sha256": "f902fb4e0104654b910a730a20e932cc817975f9c22f9fca5b550b23301f3678",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
       "names": ["GUARD_NAME"],
       "reason": "Reads GUARD_NAME only to select the named CI JUnit testcase."
     },
     {
       "site": "omega_prime/grokbot/local_validation.py:1515:os.environ.subscription",
       "symbol": "_run_profile",
-      "source_sha256": "e6d3396a8b21ca93d08a6ccf6293d2ca42bd009c9ce306b19352658f36a2cfa0",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
       "names": ["READINESS_INSTALL"],
       "reason": "Fixture-only path input for isolated local readiness validation."
     },
     {
       "site": "omega_prime/grokbot/local_validation.py:1516:os.environ.get",
       "symbol": "_run_profile",
-      "source_sha256": "e6d3396a8b21ca93d08a6ccf6293d2ca42bd009c9ce306b19352658f36a2cfa0",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
       "names": ["READINESS_INCLUDE_PRIME"],
       "reason": "Fixture-only toggle for isolated local readiness validation."
     },
     {
       "site": "omega_prime/grokbot/local_validation.py:1517:os.environ.get",
       "symbol": "_run_profile",
-      "source_sha256": "e6d3396a8b21ca93d08a6ccf6293d2ca42bd009c9ce306b19352658f36a2cfa0",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
       "names": ["READINESS_PRIME_MISSING"],
       "reason": "Fixture-only input for isolated local readiness validation."
     },
     {
       "site": "omega_prime/grokbot/local_validation.py:1519:os.environ.get",
       "symbol": "_run_profile",
-      "source_sha256": "e6d3396a8b21ca93d08a6ccf6293d2ca42bd009c9ce306b19352658f36a2cfa0",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
       "names": ["READINESS_SOURCE"],
       "reason": "Fixture-only checkout path for isolated local readiness validation."
     },
     {
       "site": "omega_prime/grokbot/local_validation.py:1520:os.environ.subscription",
       "symbol": "_run_profile",
-      "source_sha256": "e6d3396a8b21ca93d08a6ccf6293d2ca42bd009c9ce306b19352658f36a2cfa0",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
       "names": ["READINESS_BASE"],
       "reason": "Fixture-only path input for isolated local readiness validation."
     },
     {
       "site": "omega_prime/grokbot/local_validation.py:1522:os.environ.subscription",
       "symbol": "_run_profile",
-      "source_sha256": "e6d3396a8b21ca93d08a6ccf6293d2ca42bd009c9ce306b19352658f36a2cfa0",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
       "names": ["READINESS_HOME"],
       "reason": "Fixture-only path input for isolated local readiness validation."
     },
     {
       "site": "omega_prime/grokbot/local_validation.py:1523:os.environ.subscription",
       "symbol": "_run_profile",
-      "source_sha256": "e6d3396a8b21ca93d08a6ccf6293d2ca42bd009c9ce306b19352658f36a2cfa0",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
       "names": ["READINESS_WORK"],
       "reason": "Fixture-only path input for isolated local readiness validation."
     },
     {
       "site": "omega_prime/grokbot/local_validation.py:1524:os.environ.subscription",
       "symbol": "_run_profile",
-      "source_sha256": "e6d3396a8b21ca93d08a6ccf6293d2ca42bd009c9ce306b19352658f36a2cfa0",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
       "names": ["READINESS_STATE"],
       "reason": "Fixture-only path input for isolated local readiness validation."
     },
     {
       "site": "omega_prime/grokbot/local_validation.py:1525:os.environ.subscription",
       "symbol": "_run_profile",
-      "source_sha256": "e6d3396a8b21ca93d08a6ccf6293d2ca42bd009c9ce306b19352658f36a2cfa0",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
       "names": ["READINESS_AUDIT"],
       "reason": "Fixture-only path input for isolated local readiness validation."
     },
     {
       "site": "omega_prime/grokbot/local_validation.py:1526:os.environ.subscription",
       "symbol": "_run_profile",
-      "source_sha256": "e6d3396a8b21ca93d08a6ccf6293d2ca42bd009c9ce306b19352658f36a2cfa0",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
       "names": ["READINESS_COMMAND_LOG"],
       "reason": "Fixture-only path input for isolated local readiness validation."
     }
@@ -694,28 +694,28 @@
   "metadata": {
     "token_selectors": [
       {
-        "site": "omega_prime/mcp_server.py:1850:args.token_env",
+        "site": "omega_prime/mcp_server.py:1851:args.token_env",
         "symbol": "_resolve_token",
-        "source_sha256": "9f79fb3f729fd962af98ce95bca9a1a5937bd591d214078d54d245f57c4bc23d",
+        "source_sha256": "e04ec502c56de9c37869762a3519cac3470f599f455c9ec1b3343026091652d7",
         "reason": "The caller-selected environment key is an arbitrary MCP bearer-token selector, not a concrete setting name."
       },
       {
         "site": "omega_prime/grokbot/oneclick.py:256:token_env",
         "symbol": "_resolve_token",
-        "source_sha256": "dffa372f324c4614bdf3283ae49e4627415acc5942543ed84daa30bc7eeb937e",
+        "source_sha256": "71330b28e111b323141f85f64c37224eb239f42b8cf738da190a4c8aaab5b5fe",
         "reason": "The token_env argument selects an arbitrary bearer credential after file and argv token sources."
       }
       ,
       {
         "site": "omega_prime/grokbot/manifest.py:445:args.token_env",
         "symbol": "main",
-        "source_sha256": "2b97b10465d688a9e48d64a034eba39a99e50d7aee5e9c09934b478c791bf6c8",
+        "source_sha256": "f9944acb43fc785c8770c5d1eaadcce23e4dc75f2355528bf4b17e01f2942e83",
         "reason": "The CLI-selected token_env is checked only for bearer authentication presence; its name is arbitrary."
       },
       {
         "site": "omega_prime/grokbot/verify.py:938:env_name",
         "symbol": "_load_secret",
-        "source_sha256": "152f38d8c89a9a7b03ef1b07484de07ac76f53fc84bdc465ae7a6f33aac45310",
+        "source_sha256": "7b6742601de88c3336a8dea70e81fb9d018bd35bb8685ed5b7c800fdbcfcd6d1",
         "reason": "The CLI-selected env_name identifies an arbitrary verification secret and is not an inventory name."
       }
     ]

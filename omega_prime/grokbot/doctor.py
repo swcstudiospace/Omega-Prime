@@ -133,6 +133,7 @@ class GrokBotDoctor:
         self.root = root or find_repo_root()
         self.env: Mapping[str, str] = os.environ if env is None else env
         self.runtime_bindings = runtime_bindings
+        self._uses_provided_runtime_bindings = runtime_bindings is not None
         self._registered_tool_names: set[str] | None = None
 
     def run_all_checks(
@@ -143,6 +144,8 @@ class GrokBotDoctor:
         auth_enabled: bool = False,
     ) -> list[DiagnosticCheck]:
         checks: list[DiagnosticCheck] = []
+        if not self._uses_provided_runtime_bindings:
+            self.runtime_bindings = None
         self._registered_tool_names = None
         checks.extend(self._check_python())
         checks.append(self._check_venv())
@@ -382,10 +385,12 @@ class GrokBotDoctor:
             from omega_prime.mcp_server import default_registry, roster_names
 
             roster = roster_names(path.read_text(encoding="utf-8"))
-            registry = default_registry(self.root, Path.home(), env={})
+            registry_env = dict(self.env)
+            registry_env["OMEGA_PRIME_PLUGINS"] = "0"
+            registry = default_registry(self.root, Path.home(), env=registry_env)
             registered = {item["function"]["name"] for item in registry.schemas()}
             self._registered_tool_names = registered
-            if self.runtime_bindings is None:
+            if not self._uses_provided_runtime_bindings:
                 self.runtime_bindings = registry.runtime_bindings
             gated_names = _gated_tool_names()
         except Exception as exc:
@@ -605,28 +610,22 @@ class GrokBotDoctor:
                 message="Red Team authorization was observed; tool registration was not observed.",
                 remediation="Inspect the already-constructed registry in the owning runtime.",
             )
-        missing = sorted(set(REDTEAM_TOOL_NAMES) - registered)
-        if missing:
-            shown = ", ".join(missing[:_MAX_LISTED])
-            extra = (
-                f" (+{len(missing) - _MAX_LISTED} more)"
-                if len(missing) > _MAX_LISTED
-                else ""
-            )
+        authorized_tools = set(REDTEAM_TOOL_NAMES) & registered
+        if not authorized_tools:
             return DiagnosticCheck(
                 id="redteam_availability",
                 category="Red Team",
                 title="Red Team Availability",
                 status="FAIL",
-                message=f"Red Team is authorized but expected tools are missing: {shown}{extra}.",
-                remediation="Register the exact authorized Red Team tools.",
+                message="Red Team is authorized but no allowed tools are registered.",
+                remediation="Register at least one tool from the authorized Red Team allowlist.",
             )
         return DiagnosticCheck(
             id="redteam_availability",
             category="Red Team",
             title="Red Team Availability",
             status="PASS",
-            message="Red Team authorization was observed and all expected tools are registered.",
+            message="Red Team authorization was observed and all registered authorized tools are available.",
         )
 
     def _check_scheduled_jobs(
@@ -735,9 +734,9 @@ class GrokBotDoctor:
             )
             messages.append(f"Scheduled family disabled by configuration ({disabled}).")
         required_bindings = {
+            **{kind: ("prime_heartbeat",) for kind in _HEARTBEAT_JOB_KINDS},
+            **{kind: ("desk_driver",) for kind in _DESK_DRIVER_JOB_KINDS},
             "prompt": ("desk_driver", "delegate_parent"),
-            **{kind: ("heartbeat_runtime",) for kind in _HEARTBEAT_JOB_KINDS},
-            **{kind: ("desk_driver",) for kind in _DESK_DRIVER_JOB_KINDS - {"prompt"}},
         }
         unobserved = [
             kind

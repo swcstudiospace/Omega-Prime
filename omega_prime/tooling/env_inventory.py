@@ -16,6 +16,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+
+def ast_source_digest(node: ast.AST) -> str:
+    """SHA-256 of a node's AST dump, identical across Python 3.12, 3.13 and 3.14.
+
+    Python 3.13 started omitting empty fields from ``ast.dump``; ``show_empty``
+    restores the 3.12 shape so committed policy digests match on every CI version.
+    """
+    if sys.version_info >= (3, 13):
+        dumped = ast.dump(node, include_attributes=False, show_empty=True)
+    else:
+        dumped = ast.dump(node, include_attributes=False)
+    return hashlib.sha256(dumped.encode()).hexdigest()
+
+
 _POLICY = "omega_prime/tooling/env_inventory_policy.json"
 _EXCLUSION_FILES = frozenset(
     {"omega_prime/scripts/ci_receipt.py", "omega_prime/grokbot/local_validation.py"}
@@ -420,9 +434,28 @@ class _FileCollector:
                                     attribute
                                 )
 
+    def _is_environment_snapshot(
+        self, node: ast.AST, context: ast.AST | None = None
+    ) -> bool:
+        at = context or node
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "copy"
+            and self._is_os_environ(node.func.value, at)
+        ):
+            return True
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "dict"
+            and len(node.args) == 1
+            and self._is_os_environ(node.args[0], at)
+        )
+
     def _is_receiver(self, node: ast.AST, context: ast.AST | None = None) -> bool:
         at = context or node
-        if self._is_os_environ(node, at):
+        if self._is_os_environ(node, at) or self._is_environment_snapshot(node, at):
             return True
         if isinstance(node, ast.IfExp):
             return self._is_receiver(node.body, at) or self._is_receiver(
@@ -483,13 +516,7 @@ class _FileCollector:
             if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
             else ""
         )
-        digest = (
-            hashlib.sha256(
-                ast.dump(scope, include_attributes=False).encode()
-            ).hexdigest()
-            if scope
-            else ""
-        )
+        digest = ast_source_digest(scope) if scope else ""
         return symbol, digest
 
     def _excluded(
@@ -1004,10 +1031,7 @@ def collect(root: Path, policy: dict[str, Any]) -> list[Finding]:
             definitions = helper_definitions.get(helper, [])
             if (
                 len(definitions) != 1
-                or hashlib.sha256(
-                    ast.dump(definitions[0], include_attributes=False).encode()
-                ).hexdigest()
-                != config["source_sha256"]
+                or ast_source_digest(definitions[0]) != config["source_sha256"]
             ):
                 errors.append(
                     InventoryError(_POLICY, 1, helper, "InvalidHelperDefinition")

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import json
 import os
 import subprocess
@@ -14,6 +13,7 @@ import pytest
 from omega_prime.tooling.env_inventory import (
     InventoryError,
     _purpose_map,
+    ast_source_digest,
     collect,
     render,
 )
@@ -58,9 +58,7 @@ def _helper_entry(
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name == symbol
     )
-    digest = hashlib.sha256(
-        ast.dump(function, include_attributes=False).encode()
-    ).hexdigest()
+    digest = ast_source_digest(function)
     return {
         f"omega_prime/consumer.py:{symbol}": {
             "name_arg": name_arg,
@@ -138,6 +136,41 @@ def configured(env: Mapping[str, str]):
     assert len({(item.name, item.path, item.line) for item in findings}) == len(
         findings
     )
+
+
+def test_environment_snapshots_from_copy_and_dict_are_inventoried(
+    tmp_path: Path,
+) -> None:
+    root = _tree(
+        tmp_path,
+        """
+import os
+copy_snapshot = os.environ.copy()
+dict_snapshot = dict(os.environ)
+copy_snapshot.get("OMEGA_COPY_GET")
+copy_snapshot["OMEGA_COPY_ITEM"]
+dict_snapshot.get("OMEGA_DICT_GET")
+dict_snapshot["OMEGA_DICT_ITEM"]
+""",
+        policy={
+            "purposes": {
+                name: f"Reads the {name} snapshot setting."
+                for name in (
+                    "OMEGA_COPY_GET",
+                    "OMEGA_COPY_ITEM",
+                    "OMEGA_DICT_GET",
+                    "OMEGA_DICT_ITEM",
+                )
+            }
+        },
+    )
+
+    assert [item.name for item in _collect(root)] == [
+        "OMEGA_COPY_GET",
+        "OMEGA_COPY_ITEM",
+        "OMEGA_DICT_GET",
+        "OMEGA_DICT_ITEM",
+    ]
 
 
 def test_ordinary_mappings_json_writes_constants_comments_fixtures_and_child_code_are_ignored(
@@ -218,7 +251,6 @@ def test_token_selector_is_reviewed_but_never_emitted_as_an_inventory_name(
     tmp_path: Path,
 ) -> None:
     import ast
-    import hashlib
 
     source = "import os\n\ndef read(args):\n    return os.environ.get(args.token_env)\n"
     function = next(
@@ -226,9 +258,7 @@ def test_token_selector_is_reviewed_but_never_emitted_as_an_inventory_name(
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.FunctionDef)
     )
-    digest = hashlib.sha256(
-        ast.dump(function, include_attributes=False).encode()
-    ).hexdigest()
+    digest = ast_source_digest(function)
     policy = {
         "metadata": {
             "token_selectors": [
@@ -450,16 +480,13 @@ def test_dynamic_inventory_site_is_bound_to_exact_function_source(
     tmp_path: Path,
 ) -> None:
     import ast
-    import hashlib
 
     source = "from typing import Mapping\ndef get(env: Mapping[str, str]):\n    return env.get(make_name())\n"
     tree = ast.parse(source)
     function = next(
         node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
     )
-    digest = hashlib.sha256(
-        ast.dump(function, include_attributes=False).encode()
-    ).hexdigest()
+    digest = ast_source_digest(function)
     policy = {
         "purposes": {"OMEGA_DYNAMIC": "Selects a reviewed dynamic test setting."},
         "dynamic": [
@@ -483,16 +510,13 @@ def test_dynamic_inventory_site_is_bound_to_exact_function_source(
 
 def test_source_bound_supplements_and_exact_ci_exclusions(tmp_path: Path) -> None:
     import ast
-    import hashlib
 
     source = "import os\ndef receipt():\n    return os.environ['CI_TEST_KEY']\n"
     ci_tree = ast.parse(source)
     function = next(
         node for node in ast.walk(ci_tree) if isinstance(node, ast.FunctionDef)
     )
-    digest = hashlib.sha256(
-        ast.dump(function, include_attributes=False).encode()
-    ).hexdigest()
+    digest = ast_source_digest(function)
     root = _tree(
         tmp_path,
         "pass\n",
@@ -535,9 +559,7 @@ def test_source_bound_supplements_and_exact_ci_exclusions(tmp_path: Path) -> Non
     dynamic_function = next(
         node for node in ast.walk(dynamic_tree) if isinstance(node, ast.FunctionDef)
     )
-    dynamic_digest = hashlib.sha256(
-        ast.dump(dynamic_function, include_attributes=False).encode()
-    ).hexdigest()
+    dynamic_digest = ast_source_digest(dynamic_function)
     root = _tree(
         tmp_path / "supplement-case",
         dynamic,

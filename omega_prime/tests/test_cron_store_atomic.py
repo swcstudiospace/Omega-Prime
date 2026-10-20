@@ -150,3 +150,61 @@ def test_stale_claim_settlement_is_refused_and_preserves_unrelated_rows(
     assert rows[job_id]["unrelated_state"] == "kept"
     assert rows[job_id]["history"] == []
     assert rows[unrelated_id]["due_at"] == now + 600
+
+
+def test_worker_restart_recovers_persisted_claim_token(tmp_path: Path) -> None:
+    path = tmp_path / "jobs.json"
+    store = JobStore(path)
+    now = 1_700_000_000
+    job_id = store.schedule("recover after restart", now)
+    claims = []
+    worker = threading.Thread(target=lambda: claims.append(store._claim(job_id, now)))
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert claims[0] is not None
+
+    ran = JobStore(path).tick(now, lambda _prompt: "recovered")
+
+    assert [job["id"] for job in ran] == [job_id]
+    recovered = JobStore(path).jobs[0]
+    assert recovered["claim_token"] is None
+    assert recovered["last_result"] == "recovered"
+
+
+def test_typed_claim_recovers_after_worker_thread_exits(tmp_path: Path) -> None:
+    path = tmp_path / "jobs.json"
+    store = JobStore(path)
+    now = 1_700_000_000
+    kind = "typed-recovery-test"
+    job_id = store._schedule_typed("recover typed claim", now, kind=kind)
+    claims = []
+    worker = threading.Thread(
+        target=lambda: claims.append(store._claim_typed(job_id, kind, now))
+    )
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    abandoned = claims[0]
+    assert abandoned is not None
+
+    recovered = JobStore(path)._claim_typed(job_id, kind, now)
+
+    assert recovered is not None
+    assert recovered["job"]["id"] == job_id
+    assert recovered["token"] != abandoned["token"]
+
+
+def test_invalid_lateness_grace_does_not_leave_a_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = JobStore(tmp_path / "jobs.json")
+    job_id = store.schedule("must remain unclaimed", 100)
+    monkeypatch.setenv("OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS", "invalid")
+
+    with pytest.raises(ValueError, match="OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS"):
+        store.tick(100, lambda _prompt: "unexpected")
+
+    row = next(job for job in JobStore(store.path).jobs if job["id"] == job_id)
+    assert row["claim_token"] is None
+    assert row["claimed_at"] is None

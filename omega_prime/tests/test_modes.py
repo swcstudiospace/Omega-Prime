@@ -340,49 +340,42 @@ def test_exec_job_wait_timeout_preserves_running_process_and_bounds_timeout(
             jobs.kill(job_id)
 
 
-def test_exec_job_kill_escalates_when_terminate_does_not_finish(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    import subprocess
+def test_exec_job_kill_escalates_when_terminate_does_not_finish(tmp_path: Path):
+    import signal
+    import time
 
-    import omega_prime.tools.exec_jobs as exec_jobs
-
-    class StubbornChild:
-        returncode = None
-
-        def poll(self):
-            return self.returncode
-
-        def terminate(self):
-            pass
-
-        def kill(self):
-            self.returncode = -9
-
-        def communicate(self, timeout):
-            if self.returncode is None:
-                raise subprocess.TimeoutExpired(["child"], timeout)
-            return b"", b"killed"
-
-    child = StubbornChild()
-    monkeypatch.setattr(exec_jobs.subprocess, "Popen", lambda *_args, **_kwargs: child)
     jobs = JobControl(tmp_path)
-    job_id = jobs.start([sys.executable, "-c", "pass"])
+    ready_file = tmp_path / "child-ready"
+    job_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import pathlib, signal, sys, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "pathlib.Path(sys.argv[1]).write_text('ready'); "
+                "time.sleep(30)"
+            ),
+            str(ready_file),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_file.exists(), "child did not finish starting"
 
-    assert jobs.kill(job_id) == {
-        "id": job_id,
-        "running": False,
-        "exit_code": -9,
-        "stdout": "",
-        "stderr": "killed",
-    }
-    assert jobs.poll(job_id) == {
-        "id": job_id,
-        "running": False,
-        "exit_code": -9,
-        "stdout": "",
-        "stderr": "killed",
-    }
+        result = jobs.kill(job_id)
+        assert result == {
+            "id": job_id,
+            "running": False,
+            "exit_code": -signal.SIGKILL,
+            "stdout": "",
+            "stderr": "",
+        }
+        assert jobs.poll(job_id) == result
+    finally:
+        jobs.shutdown()
 
 
 def test_exec_job_drains_large_stdout_stderr_and_caches_concurrent_reaps(

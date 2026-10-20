@@ -5,6 +5,8 @@ from __future__ import annotations
 import difflib
 import json
 import socket
+import sys
+import time
 from pathlib import Path
 
 from omega_prime.tooling.catalog import EXEC_JOB_TOOL_NAMES
@@ -19,6 +21,7 @@ from omega_prime.tools.delegate import DELEG_TOOL_NAMES
 from omega_prime.tools.discord import DISCORD_TOOL_NAMES
 from omega_prime.tools.dispatch import DISPATCH_TOOL_NAMES
 from omega_prime.tools.durable_surface import DURABLE_TOOL_NAMES
+from omega_prime.tools.exec_jobs import JobControl
 from omega_prime.tools.goals import GOAL_TOOL_NAMES
 from omega_prime.tools.growth import GROWTH_TOOL_NAMES
 from omega_prime.tools.harness import HARNESS_TOOL_NAMES
@@ -452,3 +455,98 @@ def test_roster_lists_exactly_the_names_register_coding_tools_registers(tmp_path
         + KERNEL_TOOL_NAMES
         + REDTEAM_TOOL_NAMES
     )
+
+
+def test_exec_job_poll_reports_an_exited_child_without_blocking(tmp_path: Path):
+    jobs = JobControl(tmp_path)
+    job_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(0.05); print('finished')",
+        ]
+    )
+    deadline = time.monotonic() + 3
+    result = jobs.poll(job_id)
+    while result.get("running") and time.monotonic() < deadline:
+        time.sleep(0.01)
+        result = jobs.poll(job_id)
+
+    assert result["running"] is False
+    assert result["exit_code"] == 0
+    assert result["stdout"].strip() == "finished"
+
+
+def test_exec_job_poll_collects_complete_output_after_both_readers_finish(
+    tmp_path: Path,
+):
+    jobs = JobControl(tmp_path)
+    payload_size = 2 * 1024 * 1024
+    job_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            "import os; data=b'x'*65536; "
+            "[(os.write(1,data), os.write(2,data)) for _ in range(32)]",
+        ]
+    )
+
+    deadline = time.monotonic() + 10
+    result = jobs.poll(job_id)
+    while result.get("running") and time.monotonic() < deadline:
+        time.sleep(0.01)
+        result = jobs.poll(job_id)
+
+    assert result["running"] is False
+    assert result["exit_code"] == 0
+    assert result["stdout"] == "x" * payload_size
+    assert result["stderr"] == "x" * payload_size
+
+
+def test_exec_job_drains_noisy_stdout_and_stderr_while_running(tmp_path: Path):
+    jobs = JobControl(tmp_path)
+    job_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            "import os; data=b'x'*65536; "
+            "[(os.write(1,data), os.write(2,data)) for _ in range(32)]",
+        ]
+    )
+
+    result = jobs.wait(job_id, timeout=10)
+
+    assert result["running"] is False
+    assert result["exit_code"] == 0
+    assert len(result["stdout"]) == 2 * 1024 * 1024
+    assert len(result["stderr"]) == 2 * 1024 * 1024
+
+
+def test_exec_job_shutdown_continues_after_a_job_cleanup_error(tmp_path: Path):
+    jobs = JobControl(tmp_path)
+    first_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess,sys,time; "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+            "time.sleep(30)",
+        ]
+    )
+    second_id = jobs.start([sys.executable, "-c", "import time; time.sleep(30)"])
+    original_kill = jobs.kill
+    killed: list[str] = []
+
+    def fail_first_then_kill(job_id: str) -> dict:
+        if job_id == first_id:
+            raise OSError("simulated cleanup failure")
+        result = original_kill(job_id)
+        killed.append(job_id)
+        return result
+
+    jobs.kill = fail_first_then_kill  # type: ignore[method-assign]
+    try:
+        jobs.shutdown()
+        assert second_id in killed
+    finally:
+        original_kill(first_id)

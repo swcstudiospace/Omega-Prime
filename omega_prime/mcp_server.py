@@ -1056,8 +1056,9 @@ def default_registry(
     # configured bearer_token_file) — but only after the Phase 79 sidecar
     # guard authorizes the run. Kill switch first, then default-off, then
     # signed-RoE resolution; BLOCKED always means zero registrations.
-    sidecar_state, _sidecar_cause = _evaluate_redteam_guard(config, env)
+    sidecar_state, sidecar_cause = _evaluate_redteam_guard(config, env)
     registry.runtime_bindings["sidecar_state"] = sidecar_state
+    registry.runtime_bindings["sidecar_cause"] = sidecar_cause
     if sidecar_state == "IDLE":
         from omega_prime.redteam.roe import grant_tool_allowlist
         from omega_prime.tools.redteam import (

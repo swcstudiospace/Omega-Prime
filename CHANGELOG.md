@@ -20,6 +20,7 @@ All notable changes to this project are documented here. Format follows
 
 - Phase 102-03 tool contracts: `DeskDriver` owns desk/watchdog/pin/purple schedules; prompt jobs dispatch through an available delegate parent or write blocked receipts, and stale cron jobs are receipted missed. Retain the approval-gated registry-local `exec_job_*` tools, with plan-mode start/kill blocked and argv cwd fixed to the approved work root. Pin apply requires an exact human `pin_bump_apply` grant via the existing admin grant/revoke route. Plugins load only for exact `OMEGA_PRIME_PLUGINS=1`; they are trusted, unsandboxed local Python and can replace handlers/approval metadata. Documented default-off family exceptions; X remains urllib transport without posting behavior changes.
 - Phase 102-05 diagnostics: doctor reports exact Prime-family availability, separate Red Team authorization metadata, and pending schedule kinds/counts/overdue status without ticking or dispatching. Standalone runner status is reported as “not observed by this diagnostic,” not absent. Adds the generated production-Python environment inventory and its CI drift check.
+- Review fixes: reclaim abandoned scheduler claims and validate settings before claims; create heartbeat metadata atomically; isolate scheduled pin-bump output; drain exec-job pipes continuously and clean up remaining jobs on shutdown errors; align doctor diagnostics with supplied environments, grants, and runtime bindings; inventory copied environment snapshots.
 
 ### omp engine (Phase A1a)
 
