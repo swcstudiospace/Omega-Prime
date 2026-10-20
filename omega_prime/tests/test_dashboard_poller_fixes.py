@@ -261,11 +261,11 @@ def test_github_timeout_exposes_error_without_mutating_cached_rows() -> None:
                     "ok",
                     extra={"command_center": {"repositories": [{"name": "cached"}]}},
                 )
-            time.sleep(0.05)
+            time.sleep(0.1)
             return SourceResult("github", "ok")
 
         poller = DashboardPoller(
-            [CollectorSpec("github", collect, 1.0, 0.001)],
+            [CollectorSpec("github", collect, 1.0, 0.05)],
             clock=lambda: datetime(2026, 10, 21, tzinfo=UTC),
         )
         await poller._collect(poller.specs[0])
