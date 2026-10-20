@@ -107,7 +107,7 @@ status: complete
 2. **Task 2: Include all generated assets/fonts/notices in the Python package** — `6e36b55` (`chore`).
 3. **Task 3: Prove shared redacted API/SSE and end-to-end local operation** — `81ceea8` (`test`).
 
-No metadata/state/roadmap commit was made; this execution was limited to the requested task commits and the requested summary/receipt artifacts.
+The three implementation task commits are listed above. The requested summary and receipt were recorded in evidence commits `7f6e0c6` and `78af4e2`. No `STATE.md`, `ROADMAP.md`, or `REQUIREMENTS.md` was changed, per scope.
 
 ## Verification
 
