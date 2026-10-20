@@ -232,3 +232,40 @@ def test_rebuilds_do_not_move_measured_timestamps() -> None:
         right = next(task for task in second.active if task.id == task_id)
         assert left.started_at == right.started_at == expected
         assert left.last_activity_at == right.last_activity_at == expected
+def test_task_like_records_expose_default_numbering_and_wiring_fields() -> None:
+    task = normalize_tasks(
+        {
+            "tasks_json": SourceResult(
+                "tasks_json",
+                "ok",
+                extra={
+                    "tasks": [
+                        {
+                            "id": "bridge",
+                            "title": "Bridge task",
+                            "state": "working",
+                            "owner": {"kind": "human", "ref": "owner"},
+                        }
+                    ],
+                    "waiting_on_ove": [],
+                    "finished": [],
+                },
+            )
+        },
+        now=NOW,
+    ).active[0].to_dict()
+    assert task["seq"] is None
+    assert task["display_id"] is None
+    assert task["timeline"] == []
+    assert task["wiring"] is None
+
+
+def test_waiting_and_finished_model_fields_are_additive() -> None:
+    from omega_prime.dashboard.model import FinishedItem, WaitingItem
+
+    waiting = WaitingItem("ask:1", "Need input", None, "").to_dict()
+    finished = FinishedItem("tasks:done", "Done", None, "ok").to_dict()
+    assert waiting["seq"] is None and waiting["display_id"] is None
+    assert waiting["timeline"] == [] and waiting["related_task_id"] is None
+    assert finished["seq"] is None and finished["display_id"] is None
+    assert finished["timeline"] == [] and finished["wiring"] is None

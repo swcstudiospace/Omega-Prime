@@ -47,6 +47,8 @@ def make_tasks_json_collector(
                         "tasks": data["tasks"],
                         "waiting_on_ove": data["waiting_on_ove"],
                         "finished": data["finished"],
+                        "identity_registry": data.get("identity_registry", {}),
+                        "next_seq": data.get("next_seq", 1),
                         "age_s": result.age_s,
                     },
                 )

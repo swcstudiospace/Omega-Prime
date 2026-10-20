@@ -225,3 +225,32 @@ def test_agentos_routing_summary(tmp_path: Path) -> None:
         )().status
         == "unavailable"
     )
+
+
+def test_tasks_json_collector_preserves_validated_numbering_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "tasks.json"
+    write_tasks(
+        {
+            "version": 1,
+            "updated_at": _NOW.isoformat(),
+            "tasks": [
+                {
+                    "id": "tasks:stable",
+                    "title": "Stable",
+                    "owner": {"kind": "human", "ref": "owner"},
+                    "state": "working",
+                    "seq": 7,
+                }
+            ],
+            "waiting_on_ove": [],
+            "finished": [],
+            "next_seq": 8,
+            "identity_registry": {},
+        },
+        path=path,
+    )
+    result = make_tasks_json_collector(tasks_path=path, now_fn=_clock)()
+    assert result.status == "ok"
+    assert result.extra["tasks"][0]["seq"] == 7
+    assert result.extra["next_seq"] == 8
+    assert result.extra["identity_registry"] == {}

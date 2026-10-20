@@ -54,6 +54,15 @@ def _dict(obj: Any, names: tuple[str, ...]) -> dict[str, Any]:
     return _safe({name: getattr(obj, name) for name in names})
 
 
+def _wiring(item: Mapping[str, Any]) -> dict[str, str | None]:
+    return {
+        "phase": item.get("phase") if isinstance(item.get("phase"), str) else None,
+        "branch": item.get("branch") if isinstance(item.get("branch"), str) else None,
+        "head_sha": item.get("head_sha") if isinstance(item.get("head_sha"), str) else None,
+        "stage": item.get("stage") if isinstance(item.get("stage"), str) else None,
+        "repo": item.get("repo") if isinstance(item.get("repo"), str) else None,
+    }
+
 @dataclass
 class Owner:
     kind: str
@@ -77,6 +86,10 @@ class Task:
     model: str | None = None
     detail: str | None = None
     links: tuple[dict[str, str], ...] = ()
+    seq: int | None = None
+    display_id: str | None = None
+    timeline: list[dict[str, str]] = field(default_factory=list)
+    wiring: dict[str, str | None] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _safe(
@@ -94,6 +107,10 @@ class Task:
                 "model": self.model,
                 "detail": self.detail,
                 "links": list(self.links),
+                "seq": self.seq,
+                "display_id": self.display_id,
+                "timeline": self.timeline,
+                "wiring": self.wiring,
             }
         )
 
@@ -132,6 +149,10 @@ class WaitingItem:
     ask: str
     since: str | None
     blocks: str
+    seq: int | None = None
+    display_id: str | None = None
+    timeline: list[dict[str, str]] = field(default_factory=list)
+    related_task_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _dict(self, tuple(self.__dataclass_fields__))
@@ -145,6 +166,10 @@ class FinishedItem:
     result: str
     receipt: str | None = None
     summary: str | None = None
+    seq: int | None = None
+    display_id: str | None = None
+    timeline: list[dict[str, str]] = field(default_factory=list)
+    wiring: dict[str, str | None] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _dict(self, tuple(self.__dataclass_fields__))
@@ -263,9 +288,10 @@ def normalize_tasks(
         ):
             detail.append(f"tokens in/out {usage['input']}/{usage['output']}")
         detail.extend(proc_detail(pane.get("cwd")))
+        task_identity = f"herdr:{pid}"
         active.append(
             Task(
-                f"herdr:{pid}",
+                task_identity,
                 str(pane.get("name") or pane.get("terminal_title") or pid),
                 "herdr_pane",
                 Owner("herdr-pane", pid, f"Herdr pane {pid}"),
@@ -279,7 +305,10 @@ def normalize_tasks(
         )
         if state == "blocked":
             key = f"wait:herdr:{pid}"
-            waiting[key] = WaitingItem(key, "blocked pane", stamp, pid)
+            task_identity = f"herdr:{pid}"
+            waiting[key] = WaitingItem(
+                key, "blocked pane", stamp, pid, related_task_id=task_identity
+            )
 
     for i, s in enumerate(sessions):
         if i in claimed or not isinstance(s.get("session_path"), str):
@@ -349,7 +378,13 @@ def normalize_tasks(
         stamp = item.get("last_log_ts")
         if item.get("stage") == "done":
             finished.append(
-                FinishedItem(f"wiring:{phase}", f"Wiring phase {phase}", stamp, "ok")
+                FinishedItem(
+                    f"wiring:{phase}",
+                    f"Wiring phase {phase}",
+                    stamp,
+                    "ok",
+                    wiring=_wiring(item),
+                )
             )
             continue
         if item.get("stage") not in {"sol", "luna"}:
@@ -360,7 +395,11 @@ def normalize_tasks(
         if not running and not recent:
             finished.append(
                 FinishedItem(
-                    f"wiring:{phase}", f"Wiring phase {phase}", stamp, "stopped"
+                    f"wiring:{phase}",
+                    f"Wiring phase {phase}",
+                    stamp,
+                    "stopped",
+                    wiring=_wiring(item),
                 )
             )
             continue
@@ -386,6 +425,7 @@ def normalize_tasks(
                 None,
                 "; ".join(details) or None,
                 links,
+                wiring=_wiring(item),
             )
         )
 
@@ -594,9 +634,10 @@ def normalize_tasks(
             title = str(t.get("title", task_id))
             links_value = t.get("links", [])
             links = tuple(links_value) if isinstance(links_value, list) else ()
+            identity = task_id if ":" in task_id else f"tasks:{task_id}"
             active.append(
                 Task(
-                    f"tasks:{task_id}",
+                    identity,
                     title,
                     "tasks_json",
                     Owner(kind, ref, str(owner_data.get("label", ref))),
@@ -612,7 +653,7 @@ def normalize_tasks(
             if state == "done":
                 finished.append(
                     FinishedItem(
-                        f"tasks:{task_id}",
+                        identity,
                         title,
                         t.get("last_activity_at"),
                         "ok",
