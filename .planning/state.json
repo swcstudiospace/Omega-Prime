@@ -1,12 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v16 — Enterprise Hardening and Continuous Verification",
-  "phases": [],
+  "milestone": "v20 — Wiring",
+  "phases": [97, 98, 99, 100, 101, 102, 103],
   "next": {
-    "command": "/gsd:progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd-autonomous",
+    "label": "Execute Phase 100 in a separate authorized session",
+    "reason": "Six reviewed plans; begin with 100-00 prerequisite checks. No implementation has started."
   },
-  "updated_at": "2026-10-13T04:49:21.851Z"
+  "updated_at": "2026-10-21"
 }

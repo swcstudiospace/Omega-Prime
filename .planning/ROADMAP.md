@@ -21,6 +21,7 @@
 - ✅ **v17 XML Prompt Standard** — Phases 85–88 (shipped 2026-10-14; every first-party prompt wrapped in XML tags like Programming Desk, enforced by a gate)
 - ✅ **v18 Operator posture** - Phases 89-95 (shipped 2026-10-14). Seven upgrades accepted when the operator said to continue.
 - ✅ **v19 Installer bindings** - Phase 96 (shipped 2026-10-15). A fresh install binds its own Linear and Notion, treats the existing gateways as optional, and fails setup when `prime-agent` is empty.
+- **v20 Wiring** — Phases 97–103 (in progress; Phase 100 planned, not executed)
 
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
@@ -91,3 +92,83 @@ Requirements: milestones/v19-REQUIREMENTS.md. Phase 77.1 live UAT stays user-own
 - [x] Phase 96: Per-install Linear, Notion, and optional gateways (1/1 plan) - completed 2026-10-15
 
 </details>
+
+## v20 Wiring (in progress)
+
+Wiring phases 1–7 map to GSD phases 97–103. This milestone registration does
+not verify or re-execute earlier wiring work. Phase 100 depends on wiring
+phase 3 (GSD 99); confirm its merged behavior before implementation.
+
+- [ ] Phase 97: Substrate direct connect + settings loader + no time caps
+- [ ] Phase 98: Shared memory via substrate, Hindsight fallback
+- [ ] Phase 99: Solo mode, Desk optional
+- [ ] Phase 100: omp engine wiring — six reviewed plans; execution not started
+- [ ] Phase 101: Real U2 LocalExecutor
+- [ ] Phase 102: Schedulers, dead modules, env docs
+- [ ] Phase 103: Ultrathink integration and cleanup
+
+### Phase 100: omp engine wiring
+
+**Goal:** Resolve uplift gaps G4/G5: attach Omega Prime MCP tools and real
+skills to the omp engine session, and bridge rpc-ui asks to Ove live through
+clarify without stale replies, user-config damage, or session/turn time caps.
+
+**Depends on:** Phase 99 (wiring phase 3); verify prerequisite behavior at
+execution time. G6/time-cap removal belongs to Phase 97, not this phase.
+
+**Requirements** (local planning labels, not tracker identifiers):
+
+- **ENG-100-01 — MCP discovery:** Place generated MCP configuration where
+  omp actually reads it; resolve the server command without
+  `CURSOR_PLUGIN_ROOT`. Emit `attached` or `attach_failed`; attachment
+  failure is reported while the session continues without Omega tools.
+- **ENG-100-02 — Ownership and cleanup:** Merge safely or back off on existing
+  project configuration. Restore the prior work-tree `.omp/mcp.json` state;
+  remove only run-owned artifacts, including on error/cancellation. Never
+  mutate global `~/.omp/agent/mcp.json` or copy/print the shared login store.
+  Generated configuration contains no secret values.
+- **ENG-100-03 — Skills:** Expose real GSD and Omega skills through omp's
+  discovery paths; `--skills` is a name glob, never a directory path.
+- **ENG-100-04 — Live HITL:** In rpc-ui, receive `extension_ui_request`,
+  route ask/select/confirm to Ove through clarify, validate answers against
+  each request's schema, and emit `extension_ui_response` with its id.
+  Live clarify is the decided default, not policy-file answers.
+- **ENG-100-05 — Request lifecycle:** Track job/session/request identity;
+  answer once, reject stale/duplicate answers, expose `ui_pending`,
+  `ui_answered`, and `ui_rejected_stale`. Human waits have no deadline;
+  cancellation/abort remains usable.
+- **ENG-100-06 — Compatibility and safety:** Accept `max`, confirmed in
+  installed omp 18.8.4 help and by the operator. Preserve shared login and
+  model-role behavior. No new packages, session/turn caps, live-config
+  changes, deployment, or LocalExecutor work. No policy-file auto-approval
+  of sends, merges, or deploys.
+- **ENG-100-07 — Verification and docs:** Document that `/skill:` needs
+  rpc or rpc-ui and ask needs rpc-ui. Prove discovered tools, loaded skills,
+  request lifecycle, and config restoration; run exact CI gates and name
+  any independently established pre-existing baseline failures.
+
+**Success criteria** (implementation acceptance, not achieved by planning):
+
+1. A session tool-list test (`get_state` or fake omp) contains Omega Prime tools.
+2. A test proves real GSD and Omega skills load, with `--skills` a glob, not a path.
+3. A fake rpc-ui session answers an ask once, rejects a stale answer, and
+   completes without hanging; validation, duplicate, and cancellation cases
+   preserve the request lifecycle.
+4. Work-tree `.omp/mcp.json` returns to its prior state after a run, with
+   existing user configuration and shared login untouched.
+5. Docs state mode requirements. Ruff check, Ruff format check, mypy, and
+   the complete Omega Prime test suite are green or baseline-only, with
+   prompt assembly checked if prompts change.
+
+**Plans:** Six reviewed execution plans; structural validation passed. None executed.
+Index: [Phase 100 plans](phases/100-omp-engine-wiring/100-OVERVIEW.md).
+
+- [ ] 100-00 — Installed-contract evidence and prerequisite checks (wave 1)
+- [ ] 100-01 — MCP attachment and ownership-aware cleanup (wave 2)
+- [ ] 100-03 — UI protocol and clarification lifecycle service (wave 2, parallel with 01)
+- [ ] 100-02 — Real skills discovery and name-glob selection (wave 3)
+- [ ] 100-04 — Production rpc-ui/HITL routing and operator controls (wave 4)
+- [ ] 100-05 — Docs, integrated verification, and execution receipt (wave 5)
+
+**Out of scope:** Phase 101 LocalExecutor; the external agentOS runner
+(note only); Phase 97 time-cap removal; deployments and connector restarts.
