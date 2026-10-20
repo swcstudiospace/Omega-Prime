@@ -67,6 +67,19 @@ The manifests pin both Rivet packages to 0.4.3. Source inspection found that the
 - bwrap reports `0.12.0`. A minimal `--unshare-all` launch with only runtime directories mounted completed with exit code 0, without mounting a host home or credential store. This proves namespace creation for that probe, not application policy enforcement or inference.
 - The project-local GSD tool reports `{"packageName":"@opengsd/gsd-core","version":"1.18.0"}`. Initialization metadata reports a brownfield code starting point, no planning artifacts, no nested worktree or subrepositories, and GSD persona files installed under `.claude/agents`.
 
+### Source-verified execution gates
+
+Research is recorded in `.planning/research/`; these corrections supersede incompatible assumptions in the supplied brief without changing its required behavior:
+
+1. **Rust prerequisite:** mandatory `anda_db_schema` 0.14.0 and `anda_db` 0.14.2 declare Rust 1.95. rustc 1.85.1 cannot support the unmodified selected graph. The matching published server/core releases are 0.17.0/0.17.1, not invented 0.17.4 counterparts. A newer compiler is necessary, not proof of a successful application build; no upgrade is authorized. [Published manifest](https://docs.rs/crate/anda_db_schema/0.14.0/source/Cargo.toml)
+2. **GSD layout conflict:** GSD 1.18.0 `--claude --local` writes `.claude/commands/gsd-*.md`, whereas the required `/skill:gsd-*` surface needs actual skills. Do not call file commands equivalent or silently generate substitute skills, install globally, change versions, or use the pi path. The requirement remains blocked until an authorized compatible installation/layout is established. [Selected installer](https://github.com/open-gsd/gsd-core/blob/v1.18.0/bin/install.js)
+3. **Interactive launch conflict:** omp 18.8.4 enables the built-in tool UI for `rpc-ui`, not plain `rpc`; `set_ask_dialog` changes payload shape, not tool availability. Preserve the requested question behavior and record launch-mode resolution as a gate, rather than silently changing the required invocation. [Launch source](https://github.com/can1357/oh-my-pi/blob/v18.8.4/packages/coding-agent/src/main.ts)
+4. **GSD agent compatibility:** omp intentionally excludes direct `.claude/agents` definitions. A real native/plugin role-discovery and workflow-tool compatibility path must be established; skill/menu visibility and inline impersonation of required agents are not acceptance. [Discovery source](https://github.com/can1357/oh-my-pi/blob/v18.8.4/packages/coding-agent/src/task/discovery.ts)
+5. **Provider hazards:** the selected agentOS package resolves host functions before sandbox expansion, a source-ordering hazard requiring an actual VM-mediated check. OpenShell 0.1.4 limits cumulative piped stdin to 4 MiB, so a long-lived RPC transport is not assumed unlimited. Neither finding has been reproduced as a live application failure in this initialization. See the exact contracts and source links in `research/ARCHITECTURE.md`.
+6. **Authentication topology:** only the trusted gateway receives the broker capability. Sandboxed omp uses the documented `pi-native` transport with a gateway base URL and gateway-only bearer; account pools are routing, not authorization. Current direct-broker source does not establish the required credential boundary. Reachability, endpoint enforcement, and effective provider/model identity remain runtime gates. [Selected documentation](https://github.com/can1357/oh-my-pi/blob/v18.8.4/docs/auth-broker-gateway.md)
+
+During research, scouts also observed newly present `Cargo.toml`, `Cargo.lock`, and `crates/omp-sandbox-anda/` files. Their wrapper declares no actual Anda engine/server dependencies; an empty feature or metadata tool list is not the requested integration. These intervening repository changes are not this initialization's edits and must be preserved.
+
 ### Product boundaries
 
 The agentOS VM is an embedded library runtime and does not provide the Linux/Bun runtime omp requires. omp must execute outside the VM in the selected sandbox. The required VM integration remains an observable part of acceptance, not a decorative extra process.
@@ -90,12 +103,12 @@ The agentOS VM is an embedded library runtime and does not provide the Linux/Bun
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
 | Embedded agentOS 0.4.3 with external sandbox provider | Required host integration is library-only; omp needs real Linux outside the VM | Decided; runtime acceptance pending |
-| Node 24 core controls Bun omp through RPC | Avoid importing Bun-only SDK code into Node; preserve interactive session control | Decided; schemas/transport must be source-verified |
-| Rust Anda wrapper with no direct inference | Expose local tools while keeping all provider access and workflows in omp | Decided; dependency build/server integration pending |
+| Node 24 core controls Bun omp through RPC | Avoid importing Bun-only SDK code into Node; preserve interactive session control | Decided boundary; plain-rpc versus built-in ask launch contract unresolved |
+| Rust Anda wrapper with no direct inference | Expose local tools while keeping all provider access and workflows in omp | Blocked on compiler prerequisite; actual graph/server build remains unverified |
 | OpenShell CLI 0.1.4; no token-gated TS SDK | Stable documented CLI avoids GitHub package credentials and unsupported source build | Decided; live compute unavailable/unverified |
 | Prefer verified bwrap for the authorized local degraded tier | Minimal namespace launch works; avoids repeating the recorded KVM fault or changing privileges | Probe passed; application isolation/inference pending |
-| Exact project-local GSD 1.18.0 Claude skills | Required skill discovery and invocation differ from the pi extension path | Host project runtime identified; sandbox install/discovery pending |
-| Gateway/broker authentication only | Protect single-use refresh tokens and existing host login ownership | Decided; endpoint restrictions and sandbox reachability pending |
+| Exact project-local GSD 1.18.0 Claude skills | Required skill discovery and invocation differ from the pi extension path | Blocked: selected Claude-local installer emits commands, not required skills |
+| Gateway/broker authentication only | Protect provider secrets and existing host login ownership | Source contract resolved; gateway wiring, policy, and sandbox inference unverified |
 | Every local receipt says attestation=mock | Hardware trust is unavailable; failure/degraded receipts must remain honest | Decided; implementation verification pending |
 | Initialization uses automatic defaults and local-only commits | Supplied brief resolves product decisions and permits automatic planning; no publication permission follows | Applied during initialization |
 
@@ -108,4 +121,4 @@ After each phase transition: move requirements to Validated only with recorded b
 After each milestone: review every section, core value, scope boundaries, and evidence. Retain ownership/consent/security constraints unless Ove explicitly changes them.
 
 ---
-*Last updated: 2026-10-21 after project initialization preflight*
+*Last updated: 2026-10-21 after source-grounded initialization research*
