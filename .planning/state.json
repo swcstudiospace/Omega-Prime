@@ -4,11 +4,11 @@
   "milestone": "v20 — Wiring",
   "phases": [97, 98, 99, 100, 101, 102, 103],
   "current_phase": 103,
-  "status": "planning",
+  "status": "in_progress",
   "next": {
-    "command": "Review the Phase 103 plan index manually (no execution)",
-    "label": "Review Phase 103 plan index",
-    "reason": "Five plans are ready; confirm the Phase 102 execution prerequisite before implementation. No plans execute automatically."
+    "command": "Continue v20 Wiring phases 97–102",
+    "label": "Continue v20 Wiring",
+    "reason": "Phase 103 is implemented on this branch; phases 97–102 remain unverified here. Full-suite verification requires an initialized prime-agent submodule and resolution of the unregistered Tempest tools."
   },
   "updated_at": "2026-10-21"
 }

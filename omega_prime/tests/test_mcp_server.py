@@ -200,6 +200,72 @@ def test_roster_call_refusal_policy_and_env(tmp_path: Path):
     assert "not_configured" not in status.get("error", "")
 
 
+def test_ultrathink_registry_uses_explicit_ship_env(tmp_path: Path, monkeypatch):
+    from omega_prime.tools.ultrathink import ULT_TOOL_NAMES
+
+    root = tmp_path / "ultrathink"
+    runner_calls = []
+
+    def fake_run(argv, timeout=120):
+        runner_calls.append((list(argv), timeout))
+        return {
+            "exit_code": 0,
+            "stdout": '{"ok": true}',
+            "stderr": "",
+        }
+
+    monkeypatch.setattr("omega_prime.tools.ultrathink._default_run", fake_run)
+    monkeypatch.setenv("ULTRATHINK_SHIP", "1")
+    log = ApprovalLog()
+    assert log.approve("ult_ship_pr", "ada").get("approved") is True
+    disabled = default_registry(
+        ROOT,
+        tmp_path / "home",
+        env={"ULTRATHINK_ROOT": str(root)},
+        approval_log=log,
+    )
+
+    class Params:
+        def __init__(self):
+            self.name = "ult_ship_pr"
+            self.arguments = {"state": "plan.json"}
+
+    denied = asyncio.run(call_tool_handler(disabled)(None, Params()))
+    assert denied.is_error is True
+    assert "ship_disabled" in denied.content[0].text
+    assert runner_calls == []
+
+    listed = asyncio.run(list_tools_handler(disabled, list(ULT_TOOL_NAMES))(None, None))
+    assert [tool.name for tool in listed.tools] == list(ULT_TOOL_NAMES)
+    disabled_schemas = {
+        schema["function"]["name"]: schema["function"]
+        for schema in disabled.schemas()
+        if schema["function"]["name"] in ULT_TOOL_NAMES
+    }
+
+    monkeypatch.delenv("ULTRATHINK_SHIP")
+    enabled_log = ApprovalLog()
+    assert enabled_log.approve("ult_ship_pr", "ada").get("approved") is True
+    enabled = default_registry(
+        ROOT,
+        tmp_path / "home",
+        env={"ULTRATHINK_ROOT": str(root), "ULTRATHINK_SHIP": "true"},
+        approval_log=enabled_log,
+    )
+    ran = asyncio.run(call_tool_handler(enabled)(None, Params()))
+    assert ran.is_error in (False, None)
+    assert json.loads(ran.content[0].text)["ok"] is True
+    assert runner_calls == [
+        ([str(root / "bin" / "ultrathink-ship"), "pr", "--state", "plan.json"], 120)
+    ]
+    enabled_schemas = {
+        schema["function"]["name"]: schema["function"]
+        for schema in enabled.schemas()
+        if schema["function"]["name"] in ULT_TOOL_NAMES
+    }
+    assert enabled_schemas == disabled_schemas
+
+
 def test_stdio_roundtrip_through_own_client(tmp_path: Path):
     from omega_prime.tools.mcp_session import mcp_session_call
 

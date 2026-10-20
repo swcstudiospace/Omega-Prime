@@ -29,6 +29,7 @@ from omega_prime.grokbot.manifest import (
     lint_template,
 )
 from omega_prime.grokbot.security import is_loopback_host
+from omega_prime.integrations.ultrathink import ultrathink_readiness
 
 TOKEN_ENV = "MCP_AUTH_TOKEN"
 RECOMMENDED_TOKEN_LENGTH = 32
@@ -119,7 +120,41 @@ class GrokBotDoctor:
         checks.append(self._check_bind_exposure(host, auth_enabled))
         checks.append(self._check_token_strength())
         checks.append(self._check_connector_secrets())
+        checks.append(self._check_ultrathink())
         return checks
+
+    def _check_ultrathink(self) -> DiagnosticCheck:
+        readiness = ultrathink_readiness(self.env)
+        state = readiness["state"]
+        root = readiness["root"] or "ULTRATHINK_ROOT not set"
+        ship = "on" if readiness["ship_enabled"] else "off"
+        message = (
+            f"Ultrathink {state}: {root}; ship {ship}; "
+            f"plan discovery dir: {readiness['preferred_state_dir']}"
+        )
+        if readiness["problems"]:
+            message += "; " + "; ".join(readiness["problems"])
+        if state == "not_configured":
+            status = "WARN"
+            remediation = "Set ULTRATHINK_ROOT to the Ultrathink checkout to enable the bridge tools."
+        elif state == "root_invalid":
+            status = "FAIL"
+            remediation = (
+                "Point ULTRATHINK_ROOT at a checkout whose bin/ultrathink, "
+                "bin/ultrathink-mcp, and bin/ultrathink-ship are regular executable "
+                "files (check permissions)."
+            )
+        else:
+            status = "PASS"
+            remediation = None
+        return DiagnosticCheck(
+            id="ultrathink_readiness",
+            category="Integrations",
+            title="Ultrathink Integration Readiness",
+            status=status,
+            message=message,
+            remediation=remediation,
+        )
 
     # -- runtime ----------------------------------------------------------
 

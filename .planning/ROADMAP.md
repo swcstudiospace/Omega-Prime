@@ -95,10 +95,9 @@ Requirements: milestones/v19-REQUIREMENTS.md. Phase 77.1 live UAT stays user-own
 <details>
 <summary>v20 Wiring (Phases 97–103) — IN PROGRESS</summary>
 
-Stage models/PR45 and the seven wiring phases are planning context only; this
-milestone makes no claim that any phase is implemented. Requirements use local
-traceability IDs (not tracker IDs). Phases 97–102 remain unplanned; phase 103
-has five plans and no implementation is complete.
+Stage models/PR45 and the seven wiring phases frame this milestone. This branch
+implements phase 103 only; phases 97–102 remain unverified here. Requirements
+use local traceability IDs (not tracker IDs).
 
 - [ ] Phase 97: Substrate direct connect + settings loader + no time caps (0 plans)
 - [ ] Phase 98: Shared memory via substrate, Hindsight fallback (0 plans)
@@ -106,7 +105,7 @@ has five plans and no implementation is complete.
 - [ ] Phase 100: omp engine wiring (0 plans)
 - [ ] Phase 101: Real U2 LocalExecutor (0 plans)
 - [ ] Phase 102: Schedulers, dead modules, env docs (0 plans)
-- [ ] Phase 103: Ultrathink integration and cleanup (5 plans; planning only)
+- [x] Phase 103: Ultrathink integration and cleanup (five plans executed; implementation committed locally; full suite: 4830 passed, 20 skipped, 17 failed in this worktree. Failures include uninitialized `prime-agent` dependencies and unregistered Tempest tools; see phase handoff).
 
 **Goal:** Integrate the independently authored Ultrathink bridge without
 vendoring its upstream implementation, preserving safe default-off ship

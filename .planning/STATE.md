@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 milestone: v20
 milestone_name: Wiring
 status: In progress
-stopped_at: v20 phase 103 planning ready; phase 102 execution prerequisite not verified.
+stopped_at: v20 phase 103 implemented; full pytest has 17 failures in this worktree, including uninitialized prime-agent dependencies and unregistered Tempest tools.
 last_updated: "2026-10-21"
 last_activity: 2026-10-21
-last_activity_desc: v20 phase 103 planning; five plans ready, none executed
+last_activity_desc: v20 phase 103 implemented and locally committed; focused tests and smoke passed; full suite remains environment/sibling-scope blocked
 progress:
   total_phases: 7
-  completed_phases: null
+  completed_phases: 1
   total_plans: 5
-  completed_plans: 0
-  percent: null
+  completed_plans: 5
+  percent: 14.3
 current_phase: 103
 current_plan: null
 ---
@@ -24,14 +24,14 @@ current_plan: null
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** v20 Wiring is in progress; this branch contains planning metadata only. Scope: wire the v20 stage-model work referenced by PR #45 (merge is present in local history; no runtime verification in this session). Phase 103, Ultrathink integration and cleanup, is being planned; no plan has been executed. Phases 97–102 are not verified, and phase 102 execution is a prerequisite not verified here. v19 Installer bindings remains shipped at phase 96; its historical closeout and verification evidence are retained below. Phase 77.1 live import UAT remains user-owned and `human_needed`.
+**Current focus:** v20 Wiring remains in progress. This branch implements phase 103 only; phases 97–102 remain unverified here. Phase 103's Ultrathink readiness/ship gate, doctor, optional-test cleanup, docs, and milestone updates are implemented. Ruff, format, mypy, docs/public tests and fake-root smoke passed; full pytest reports 4830 passed, 20 skipped, 17 failed, including uninitialized `prime-agent` dependencies and unregistered Tempest tools. No live Ultrathink/provider/connector verification is claimed. v19 Installer bindings remains shipped at phase 96; its historical closeout and verification evidence are retained below. Phase 77.1 live import UAT remains user-owned and `human_needed`.
 
 ## Current Position
 
 Phase: v20 Wiring, phase 103 — Ultrathink integration and cleanup.
-Plan: five plans ready; none executed (planning only).
-Status: In progress. This branch contains planning metadata only; phases 97–102 are not verified, and phase 102 execution prerequisite is not verified. No live verification is claimed.
-Last activity: 2026-10-21 — v20 phase 103 planning; five plans ready, none executed.
+Plan: Five plans executed; phase 103 implementation complete on this branch.
+Status: v20 remains in progress; phases 97–102 are unverified. Ruff, Ruff format, mypy, docs/public tests, and fake-root smoke passed. Full pytest is not green in this uninitialized-submodule worktree (4830 passed, 20 skipped, 17 failed). No live verification is claimed.
+Last activity: 2026-10-21 — phase 103 implementation and local verification; committed on the current branch.
 ### v20 milestone scope and phases
 
 Seven phases cover the stage-model wiring scope referenced by PR #45 (merge is present in local history; runtime behavior was not verified in this session). Completion of phases 97–102 is unknown/not verified.
@@ -42,7 +42,7 @@ Seven phases cover the stage-model wiring scope referenced by PR #45 (merge is p
 100. omp engine wiring.
 101. Real U2 LocalExecutor.
 102. Schedulers, dead modules, env docs.
-103. Ultrathink integration and cleanup (five plans ready; planning only; no plan executed).
+103. Ultrathink integration and cleanup (five plans executed; local implementation complete; full-suite failures recorded above).
 
 ## Historical v19 Closeout
 
@@ -158,9 +158,9 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ## Session
 
 **Last session:** 2026-10-21
-**Stopped at:** v20 phase 103 planning ready; no plan executed.
-**Resume file:** Phase 103 plan index; review plans, then verify the Phase 102 execution prerequisite before any implementation.
+**Stopped at:** v20 phase 103 implementation committed; full pytest has environment/sibling-scope failures; phases 97–102 remain unverified.
+**Resume file:** Continue v20 Wiring phases 97–102; initialize `prime-agent` in a safe verification checkout and address the unregistered Tempest tools before claiming a green full suite.
 
 ## Operator Next Steps
 
-- Review the Phase 103 plan index and confirm the Phase 102 execution prerequisite before implementation. Planning readiness does not execute plans; do not treat phases 97–102 as complete or phase 103 as implemented.
+- Phase 103 is implemented on this branch. Before claiming full-suite verification, initialize the pinned `prime-agent` submodule in a safe verification checkout and address the unregistered Tempest tool failures; phases 97–102 remain unverified here.

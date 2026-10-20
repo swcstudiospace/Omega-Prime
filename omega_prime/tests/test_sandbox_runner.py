@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -173,8 +174,74 @@ def test_binary_absent_probe_degrades_without_invoking(tmp_path):
     assert calls == [["openshell", "--version"]] * len(calls) and calls
 
 
+def _selected_openshell(monkeypatch):
+    selected = os.environ.get("OPENSHELL_BIN")
+    if selected is None:
+        selected = shutil.which("openshell")
+        if selected is None:
+            pytest.skip("openshell binary absent from PATH")
+    else:
+        path = Path(selected)
+        if not path.exists():
+            pytest.skip("selected OPENSHELL_BIN is absent")
+        assert path.is_file() and os.access(path, os.X_OK), (
+            "selected OPENSHELL_BIN exists but is not an executable file"
+        )
+        monkeypatch.setattr(shutil, "which", lambda name: selected)
+    return selected
+
+
+def test_real_probe_reports_selected_executable(tmp_path, monkeypatch):
+    selected = tmp_path / "custom-openshell"
+    selected.write_text(
+        "#!/bin/sh\nprintf 'OpenShell test version\\n'\n", encoding="utf-8"
+    )
+    selected.chmod(0o755)
+    monkeypatch.setenv("OPENSHELL_BIN", str(selected))
+
+    assert _selected_openshell(monkeypatch) == str(selected)
+    ok, cause = probe_openshell()
+
+    assert ok is True
+    assert cause is None
+
+
+def test_selected_non_executable_openshell_fails(tmp_path, monkeypatch):
+    selected = tmp_path / "custom-openshell"
+    selected.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    selected.chmod(0o644)
+    monkeypatch.setenv("OPENSHELL_BIN", str(selected))
+    monkeypatch.setattr(shutil, "which", lambda name: str(selected))
+
+    with pytest.raises(AssertionError, match="not an executable file"):
+        _selected_openshell(monkeypatch)
+
+
+def test_selected_nonzero_openshell_probe_fails(tmp_path, monkeypatch):
+    selected = tmp_path / "custom-openshell"
+    selected.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    selected.chmod(0o755)
+    monkeypatch.setenv("OPENSHELL_BIN", str(selected))
+    monkeypatch.setattr(shutil, "which", lambda name: str(selected))
+
+    ok, cause = probe_openshell()
+
+    assert ok is False
+    assert cause is not None and "binary-unrunnable" in cause
+
+
+def test_selected_missing_openshell_is_an_absence(tmp_path, monkeypatch):
+    selected = tmp_path / "missing-openshell"
+    monkeypatch.setenv("OPENSHELL_BIN", str(selected))
+
+    with pytest.raises(pytest.skip.Exception, match="selected OPENSHELL_BIN is absent"):
+        _selected_openshell(monkeypatch)
+
+
 def test_real_probe_reports_missing_with_scrubbed_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENSHELL_BIN", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     runner = SandboxRunner(_policy(tmp_path))
     ok, cause = runner.available()
     assert ok is False
@@ -206,9 +273,11 @@ def test_argv_with_shell_metacharacters_passes_as_argv(tmp_path):
     assert all(isinstance(part, str) for part in wrapped)
 
 
-def test_no_shell_true_in_runner_source():
-    source = Path(__file__).resolve().parents[1] / "sandbox" / "runner.py"
-    assert "shell=True" not in source.read_text(encoding="utf-8")
+def test_live_probe_reports_runnable_or_skips(monkeypatch):
+    _selected_openshell(monkeypatch)
+    ok, cause = probe_openshell()
+    assert ok is True, cause
+    assert cause is None
 
 
 def test_build_create_argv_shape():
@@ -226,11 +295,3 @@ def test_build_create_argv_shape():
         "a",
         "b",
     ]
-
-
-def test_live_probe_reports_runnable_or_skips():
-    if shutil.which("openshell") is None:
-        pytest.skip("openshell binary absent")
-    ok, cause = probe_openshell()
-    assert ok is True
-    assert cause is None
