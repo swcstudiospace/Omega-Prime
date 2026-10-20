@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from omega_prime.credentials.broker import CredentialBroker
+from omega_prime.dashboard.config import DEFAULT_GITHUB_REPO
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.redact import redact_value
 
@@ -43,7 +44,7 @@ def make_github_collector(
     transport: Callable[[str, Mapping[str, str]], tuple[int, bytes]] | None = None,
     now_fn: Callable[[], datetime] | None = None,
     cache_ttl: float = 60.0,
-    repo: str = "swcstudiospace/omes-bot",
+    repo: str = DEFAULT_GITHUB_REPO,
 ) -> Callable[[], SourceResult]:
     """Create a cached, PAT-authenticated GitHub collector."""
     send = transport or _request

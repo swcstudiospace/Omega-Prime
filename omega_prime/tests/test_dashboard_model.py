@@ -122,7 +122,7 @@ def test_wiring_join_done_and_waiting_derivation() -> None:
             "github_pr",
             [
                 {
-                    "repo": "swcstudiospace/omes-bot",
+                    "repo": "swcstudiospace/Omega-Prime",
                     "number": 5,
                     "title": "T",
                     "draft": False,
@@ -142,7 +142,7 @@ def test_wiring_join_done_and_waiting_derivation() -> None:
     assert isinstance(detail, str)
     assert "pid 9" in detail
     assert {w.id for w in snap.waiting_on_ove} == {
-        "wait:gh:swcstudiospace/omes-bot#5",
+        "wait:gh:swcstudiospace/Omega-Prime#5",
         "wait:herdr:p",
         "wait:fleet:hitl",
     }

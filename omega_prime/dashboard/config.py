@@ -5,11 +5,14 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 MIN_QUIET_MINUTES = 2.0
+DEFAULT_GITHUB_REPO = "swcstudiospace/Omega-Prime"
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 
 
 @dataclass(frozen=True)
@@ -17,6 +20,7 @@ class DashboardConfig:
     window_hours: float = 24.0
     quiet_minutes: float = 15.0
     fleet_enabled: bool = False
+    github_repo: str = DEFAULT_GITHUB_REPO
 
 
 def load_dashboard_config(path: Path | None = None) -> DashboardConfig:
@@ -44,4 +48,7 @@ def load_dashboard_config(path: Path | None = None) -> DashboardConfig:
         values.get("fleet_enabled")
         if isinstance(values.get("fleet_enabled"), bool)
         else False,
+        repo
+        if isinstance(repo := values.get("github_repo"), str) and _REPO_RE.match(repo)
+        else DEFAULT_GITHUB_REPO,
     )

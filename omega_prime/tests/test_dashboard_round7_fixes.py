@@ -234,3 +234,56 @@ def test_fallback_polling_resumes_after_stream_retries(tmp_path: Path) -> None:
     ).stdout
     counts = json.loads(out.strip().splitlines()[-1])
     assert counts["after"] - counts["before"] >= 3, counts
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "swcstudiospace/Omega-Prime",
+        "SWCSTUDIOSPACE/omega-prime",
+        "swcstudiospace/omes-bot",
+    ],
+)
+def test_merge_rule_matches_renamed_repo_case_insensitively(repo: str) -> None:
+    pr = {
+        "kind": "github_pr",
+        "repo": repo,
+        "number": 47,
+        "ci": "pass",
+        "greptile": "1/5",
+    }
+    snap = normalize_tasks(
+        {"github_pr": SourceResult("github_pr", "ok", [pr])}, now=NOW
+    )
+    assert snap.pr_gate[0].merge_rule == "Greptile 5/5 + green CI, merge commit"
+
+
+def test_unrelated_repo_still_needs_ove() -> None:
+    pr = {"kind": "github_pr", "repo": "someone/else", "number": 1}
+    snap = normalize_tasks(
+        {"github_pr": SourceResult("github_pr", "ok", [pr])}, now=NOW
+    )
+    assert snap.pr_gate[0].merge_rule == "needs Ove's yes"
+
+
+def test_github_repo_defaults_to_omega_prime_and_reads_settings(tmp_path: Path) -> None:
+    from omega_prime.dashboard.collectors.github import make_github_collector
+    from omega_prime.dashboard.config import DEFAULT_GITHUB_REPO, load_dashboard_config
+
+    assert DEFAULT_GITHUB_REPO == "swcstudiospace/Omega-Prime"
+    settings = tmp_path / "settings.json"
+    assert load_dashboard_config(settings).github_repo == DEFAULT_GITHUB_REPO
+    settings.write_text('{"dashboard": {"github_repo": "acme/widgets"}}')
+    assert load_dashboard_config(settings).github_repo == "acme/widgets"
+    settings.write_text('{"dashboard": {"github_repo": "../../etc"}}')
+    assert load_dashboard_config(settings).github_repo == DEFAULT_GITHUB_REPO
+
+    urls: list[str] = []
+
+    def transport(url: str, headers: Any) -> tuple[int, bytes]:
+        urls.append(url)
+        return 200, b"[]"
+
+    pat = "x" + token_hex(8)
+    make_github_collector(env={"GITHUB_PAT_DESK_LEAD": pat}, transport=transport)()
+    assert urls and "/repos/swcstudiospace/Omega-Prime/" in urls[0]

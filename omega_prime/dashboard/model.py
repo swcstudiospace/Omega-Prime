@@ -195,6 +195,11 @@ def _recent(stamp: Any, now: datetime, window: float) -> float | None:
 _KNOWN_COMMANDS = {"omega_prime.dashboard": "Dashboard server"}
 
 
+# Repos whose PRs follow the Greptile 5/5 + green CI merge rule. The repo was
+# renamed from omes-bot to Omega-Prime; GitHub names compare case-insensitively.
+_MERGE_RULE_REPOS = {"swcstudiospace/omega-prime", "swcstudiospace/omes-bot"}
+
+
 def _pane_title(pane: dict[str, Any], pane_id: str) -> str:
     """Readable title naming what runs in a Herdr pane."""
     if isinstance(pane.get("name"), str) and pane["name"]:
@@ -606,7 +611,7 @@ def normalize_tasks(
             ci,
             gt,
             "Greptile 5/5 + green CI, merge commit"
-            if repo == "swcstudiospace/omes-bot"
+            if repo.lower() in _MERGE_RULE_REPOS
             else "needs Ove's yes",
             item.get("updated_at"),
         )

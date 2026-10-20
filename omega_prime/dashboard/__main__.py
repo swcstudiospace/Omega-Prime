@@ -113,7 +113,12 @@ def build_default_collectors(
         [
             CollectorSpec("herdr", make_herdr_collector(), HERDR_PODMAN, 5.0),
             CollectorSpec("podman", make_podman_collector(), HERDR_PODMAN, 5.0),
-            CollectorSpec("github", make_github_collector(now_fn=now_fn), GITHUB, 15.0),
+            CollectorSpec(
+                "github",
+                make_github_collector(now_fn=now_fn, repo=config.github_repo),
+                GITHUB,
+                15.0,
+            ),
         ]
     )
     specs.append(
