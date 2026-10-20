@@ -79,7 +79,10 @@ _MARKER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "go",
         re.compile(
-            r"(?i)(?:\bgo\b|\bgolang\b|go\.mod|go\.sum|(?:^|[\s/])[^/\s]+\.go\b)"
+            r"(?i)(?:\bgolang\b|go\.mod|go\.sum|(?:^|[\s/])[^/\s]+\.go\b|"
+            r"\bgo\s+(?:service|module|code|lang|language|package|file|test|"
+            r"program|app|toolchain|compiler|library|source|backend)s?\b|"
+            r"\b(?:in|using|with|via|to)\s+go\b)"
         ),
     ),
     ("docker", re.compile(r"(?i)(?:\bdocker\b|dockerfile|docker-compose)")),
@@ -282,8 +285,12 @@ class LaneRouter:
                 spec = _with_local_caps(spec, self._limits)
             record = _base_record(job_id, spec, decision)
             if decision.lane == "local":
-                self._write_lane(job_id, record)
-                self._write_spec(job_id, spec)
+                try:
+                    self._write_spec(job_id, spec)
+                    self._write_lane(job_id, record)
+                except Exception:
+                    self._drop_reservation(job_id)
+                    raise
         if decision.lane == "local":
             return self._start_local(job_id, spec, record)
         return self._submit_fleet(job_id, spec, record)
@@ -447,6 +454,33 @@ class LaneRouter:
 
     def _write_lane(self, job_id: str, record: dict[str, Any]) -> None:
         self._write_json(job_id, "lane.json", record)
+
+    def _drop_reservation(self, job_id: str) -> None:
+        """Free a slot when the reservation did not finish.
+
+        A running ``lane.json`` counts against the local cap, so a failed
+        follow-up write must not leave that status behind.
+        """
+        root = job_dir(self._env, job_id)
+        lane = root / "lane.json"
+        spec_path = root / "spec.json"
+        if lane.is_file():
+            try:
+                payload = json.loads(lane.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                payload = {"id": job_id, "lane": "local"}
+            if isinstance(payload, dict):
+                payload["status"] = "failed"
+                payload["error"] = "reservation_failed"
+                try:
+                    self._write_lane(job_id, payload)
+                except OSError:
+                    return
+            return
+        try:
+            spec_path.unlink()
+        except OSError:
+            return
 
     def _write_spec(self, job_id: str, spec: JobSpec) -> None:
         """Exact spec for a later fleet post. Receipts stay redacted."""

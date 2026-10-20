@@ -2,7 +2,7 @@
   "task_id": "SPE-17041",
   "bot": "bot-00-omega-prime",
   "started_at": "2026-10-20T10:03:00Z",
-  "completed_at": "2026-10-20T11:05:36Z",
+  "completed_at": "2026-10-20T11:20:00Z",
   "commands": [
     {
       "cmd": "/tmp/omega-venv/bin/python -m mypy omega_prime/",
@@ -68,7 +68,7 @@
       "cmd": "/tmp/omega-venv/bin/python -m pytest omega_prime/tests -q --tb=line",
       "exit_code": 0,
       "duration_s": 193,
-      "output_tail": "4780 passed, 20 skipped, 16 warnings in 193.11s"
+      "output_tail": "4781 passed, 20 skipped, 16 warnings in 189.80s"
     }
   ],
   "claims": [
@@ -113,7 +113,7 @@
       "evidence_command_index": 9
     },
     {
-      "claim": "the suite passes, including hermetic fleet-client and lane tests: 4780 passed, 20 skipped",
+      "claim": "the suite passes, including hermetic fleet-client and lane tests: 4781 passed, 20 skipped",
       "evidence_command_index": 10
     }
   ],

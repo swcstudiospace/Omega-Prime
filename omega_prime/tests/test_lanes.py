@@ -162,8 +162,17 @@ def test_cloud_markers_force_the_fleet() -> None:
 
 
 def test_ordinary_words_are_not_cloud_markers() -> None:
-    for prompt in ("trust the docs", "a good module", "previous notes"):
-        decision = choose_lane(_spec(prompt=prompt), ROOMY, limits=LIMITS)
+    for prompt in (
+        "trust the docs",
+        "a good module",
+        "previous notes",
+        "go ahead and fix the Python test",
+    ):
+        decision = choose_lane(
+            _spec(prompt=prompt),
+            BoxSnapshot(free_bytes=4 * GIB, languages=("python",)),
+            limits=LIMITS,
+        )
         assert decision.lane == "local", prompt
 
 
@@ -254,6 +263,31 @@ def test_queue_does_not_start_the_executor(tmp_path) -> None:
     record = router.dispatch(_spec(), overflow="queue")
     assert record["status"] == "queued"
     assert executor.jobs == []
+
+
+def test_a_failed_spec_write_does_not_hold_a_local_slot(tmp_path, monkeypatch) -> None:
+    real = atomic_write_json
+
+    def fail_spec(path, obj, **kwargs):
+        if str(path).endswith("spec.json"):
+            raise OSError("disk full")
+        return real(path, obj, **kwargs)
+
+    monkeypatch.setattr("omega_prime.engine.lanes.atomic_write_json", fail_spec)
+    router, _env = _router(tmp_path)
+    try:
+        router.dispatch(_spec(), languages=("python",))
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected the spec write to fail")
+    jobs = tmp_path / "jobs"
+    lanes = list(jobs.glob("*/lane.json")) if jobs.is_dir() else []
+    assert lanes == []
+    monkeypatch.setattr("omega_prime.engine.lanes.atomic_write_json", real)
+    again = router.dispatch(_spec(), languages=("python",))
+    assert again["lane"] == "local"
+    assert again["status"] == "running"
 
 
 def test_missing_bounds_are_filled_with_the_local_caps(tmp_path) -> None:
