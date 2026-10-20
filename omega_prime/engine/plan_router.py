@@ -24,6 +24,7 @@ _DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-5",
     "muse": "muse-spark-1.2",
     "cursor": "auto",
+    "chatgpt": "gpt-6.1-sol",
 }
 
 _PROVIDERS = {
@@ -32,6 +33,7 @@ _PROVIDERS = {
     "anthropic": "anthropic",
     "muse": "muse-code",
     "cursor": "cursor",
+    "chatgpt": "openai-codex",
 }
 
 
@@ -180,6 +182,8 @@ def _evaluate(plan: str, env: Mapping[str, str]) -> Decision:
             "Muse subscription via omp is not allowed. Set META_API_KEY or "
             "MUSE_API_KEY. OMEGA_PRIME_OMP_ALLOW_MUSE does not enable it.",
         )
+    if plan == "chatgpt":
+        return _chatgpt(plan, provider, model, env)
     if _present(env, "CURSOR_API_KEY"):
         return Decision(
             plan,
@@ -209,6 +213,37 @@ def _evaluate(plan: str, env: Mapping[str, str]) -> Decision:
         "ambiguous",
         "Cursor via omp is off the allowlist. Set CURSOR_API_KEY or "
         "OMEGA_PRIME_OMP_ALLOW_CURSOR=1.",
+    )
+
+
+def _chatgpt(plan: str, provider: str, model: str, env: Mapping[str, str]) -> Decision:
+    """ChatGPT plan through omp's ``openai-codex`` login.
+
+    Only the opt-in flag allows it. ``OPENAI_API_KEY`` belongs to the separate
+    ``openai`` developer API route, and ``OPENAI_CODEX_OAUTH_TOKEN`` alone is
+    a credential, not consent, so neither allows this plan.
+    """
+    if flag(env, "OMEGA_PRIME_OMP_ALLOW_CHATGPT"):
+        return Decision(
+            plan,
+            provider,
+            model,
+            True,
+            "subscription_opt_in",
+            "ambiguous",
+            "ChatGPT plan via omp (openai-codex) is opt-in "
+            "(OMEGA_PRIME_OMP_ALLOW_CHATGPT=1).",
+        )
+    return Decision(
+        plan,
+        provider,
+        model,
+        False,
+        "none",
+        "ambiguous",
+        "ChatGPT plan via omp (openai-codex) is off the allowlist. "
+        "OPENAI_API_KEY and OPENAI_CODEX_OAUTH_TOKEN do not allow it. Set "
+        "OMEGA_PRIME_OMP_ALLOW_CHATGPT=1 to opt in.",
     )
 
 
@@ -256,6 +291,8 @@ def _plan_name(row: dict[str, Any]) -> str | None:
     text = raw.strip().lower()
     if text in {"muse-code", "muse_code"}:
         return "muse"
+    if text in {"openai-codex", "openai_codex", "codex"}:
+        return "chatgpt"
     if text in _DEFAULT_MODELS:
         return text
     return None
@@ -333,7 +370,7 @@ def select(
             "Set an API key (ANTHROPIC_API_KEY, XAI_API_KEY, META_API_KEY, "
             "MUSE_API_KEY, CURSOR_API_KEY) or an opt-in flag "
             "(OMEGA_PRIME_OMP_ALLOW_ZAI, OMEGA_PRIME_OMP_ALLOW_XAI, "
-            "OMEGA_PRIME_OMP_ALLOW_CURSOR). Anthropic and Muse subscription "
+            "OMEGA_PRIME_OMP_ALLOW_CURSOR, OMEGA_PRIME_OMP_ALLOW_CHATGPT). Anthropic and Muse subscription "
             "OAuth stay off."
         )
 

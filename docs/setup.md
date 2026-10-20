@@ -369,6 +369,15 @@ allowlisted:
 | Anthropic | `ANTHROPIC_API_KEY` only. Subscription OAuth is never allowlisted |
 | Muse | `META_API_KEY` or `MUSE_API_KEY` only. Subscription OAuth is never allowlisted |
 | Cursor | `CURSOR_API_KEY`, or `OMEGA_PRIME_OMP_ALLOW_CURSOR=1` for the subscription opt-in |
+| ChatGPT | `OMEGA_PRIME_OMP_ALLOW_CHATGPT=1` after `omp login openai-codex` (or `openai-codex-device` on a headless host). `OPENAI_API_KEY` does not allow it |
+
+The ChatGPT plan is only for the operator's own work, with their own single
+ChatGPT account. It covers two places: local omp sessions on the operator's own
+machine, and the Railway coding fleet's opt-in ChatGPT lane, which runs only the
+operator's own jobs, at most one ChatGPT job at a time, and only when a job opts
+in. Z.ai and Grok Build stay the fleet defaults. Do not pool or rotate accounts,
+and do not serve anyone else's requests. Fleet support itself ships in the
+coding-fleet repository, not here.
 
 `omega_capacity` reports each plan's remaining quota and whether it is
 allowlisted. It does not return key values.

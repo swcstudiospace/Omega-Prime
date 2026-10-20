@@ -106,8 +106,8 @@ def _capacity(probe: ReadinessProbe) -> None:
         else set()
     )
     probe.check(
-        names == {"zai", "xai", "anthropic", "muse", "cursor"},
-        "omega_capacity must list the five coding plans",
+        names == {"zai", "xai", "anthropic", "muse", "cursor", "chatgpt"},
+        "omega_capacity must list the six coding plans",
     )
     encoded = json.dumps(body, ensure_ascii=False)
     probe.check(
@@ -117,7 +117,7 @@ def _capacity(probe: ReadinessProbe) -> None:
     probe.record(
         "capacity:allowlist",
         ("omega_capacity",),
-        "omega_capacity listed five plans and refused Anthropic and Muse "
+        "omega_capacity listed six plans and refused Anthropic and Muse "
         "subscription OAuth; no model HTTP call",
     )
 
