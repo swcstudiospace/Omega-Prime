@@ -4,12 +4,39 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.redact import redact_line, redact_value
+
+_SUMMARY_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _e2e_result(path: Path) -> dict[str, object]:
+    """Pass/fail counts from the run's ``<id>.summary.json`` once it exists.
+
+    The e2e harness writes the summary only after the run ends, so its
+    presence marks the run finished; every check must be ok to pass.
+    """
+    summary = path.with_name(f"{path.stem}.summary.json")
+    try:
+        if summary.stat().st_size > _SUMMARY_MAX_BYTES:
+            return {}
+        data = json.loads(summary.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return {}
+    checks = data.get("checks") if isinstance(data, dict) else None
+    if not isinstance(checks, list) or not checks:
+        return {}
+    passed = sum(1 for c in checks if isinstance(c, dict) and c.get("ok") is True)
+    return {
+        "result": "passed" if passed == len(checks) else "failed",
+        "checks_passed": passed,
+        "checks_total": len(checks),
+    }
 
 
 def make_sandbox_files_collector(
@@ -83,6 +110,7 @@ def make_sandbox_files_collector(
                         "path": str(path),
                         "stage": None,
                     }
+                    | _e2e_result(path)
                 )
             )
         receipt_dir = sandbox_root / ".state" / "receipts"

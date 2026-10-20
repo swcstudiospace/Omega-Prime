@@ -22,6 +22,28 @@ def _default_runner(argv: list[str], *, timeout: float) -> str:
     return result.stdout
 
 
+_AGENT_STATES = {"idle", "working", "blocked", "done"}
+_SHELLS = {"sh", "bash", "zsh", "fish", "dash"}
+
+
+def _command_label(proc: dict[str, Any]) -> str:
+    """Short, non-secret label for a foreground process: name plus module."""
+    argv = proc.get("argv")
+    parts = [str(a) for a in argv] if isinstance(argv, list) else []
+    name = str(proc.get("name") or (parts[0] if parts else "process"))
+    if "-m" in parts and parts.index("-m") + 1 < len(parts):
+        return f"{name} -m {parts[parts.index('-m') + 1]}"[:80]
+    script = next(
+        (
+            a
+            for a in parts[1:]
+            if (not a.startswith("-") and "/" in a) or a.endswith(".sh")
+        ),
+        None,
+    )
+    return f"{name} {script.rsplit('/', 1)[-1]}"[:80] if script else name[:80]
+
+
 def _text(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
@@ -63,6 +85,11 @@ def _collect_agents(value: Any, workspace: str | None = None) -> list[dict[str, 
                     "terminal_title": _text(node.get("terminal_title")),
                     "session_path": _text(session),
                 }
+                | (
+                    {"label": _text(node.get("label"))}
+                    if _text(node.get("label")) and not _text(node.get("name"))
+                    else {}
+                )
             )
         child_scope = inherited_workspace or (
             label
@@ -115,6 +142,41 @@ def make_herdr_collector(
             items = _collect_agents(snapshot)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return SourceResult("herdr", "unavailable", error="invalid Herdr snapshot")
+        for item in items:
+            if item.get("agent_status") in _AGENT_STATES:
+                continue
+            # Plain shell panes: ask Herdr what runs in the foreground so the
+            # card can say working or idle instead of "unknown".
+            argv = ["herdr", "pane", "process-info", "--pane", item["pane_id"]]
+            try:
+                raw = (
+                    runner(argv)
+                    if runner is not None
+                    else _default_runner(argv, timeout=timeout)
+                )
+                info = json.loads(raw)["result"]["process_info"]
+                procs = [
+                    proc
+                    for proc in info.get("foreground_processes") or []
+                    if isinstance(proc, dict)
+                ]
+            except (
+                OSError,
+                subprocess.TimeoutExpired,
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                AttributeError,
+            ):
+                continue
+            shell_pid = info.get("shell_pid")
+            job = [
+                proc
+                for proc in procs
+                if proc.get("pid") != shell_pid and proc.get("name") not in _SHELLS
+            ]
+            item["foreground"] = _command_label(job[0]) if job else None
+            item["has_job"] = bool(job)
         safe_items = redact_value(items)
         return SourceResult("herdr", "ok" if safe_items else "empty", safe_items)
 

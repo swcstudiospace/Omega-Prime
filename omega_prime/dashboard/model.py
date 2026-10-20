@@ -192,6 +192,28 @@ def _recent(stamp: Any, now: datetime, window: float) -> float | None:
         return None
 
 
+_KNOWN_COMMANDS = {"omega_prime.dashboard": "Dashboard server"}
+
+
+def _pane_title(pane: dict[str, Any], pane_id: str) -> str:
+    """Readable title naming what runs in a Herdr pane."""
+    if isinstance(pane.get("name"), str) and pane["name"]:
+        return str(pane["name"])
+    fg = pane.get("foreground")
+    if isinstance(fg, str):
+        for module, title in _KNOWN_COMMANDS.items():
+            if f"-m {module}" in fg:
+                return title
+    label = pane.get("label")
+    if isinstance(label, str) and label.strip():
+        words = label.replace("_", " ").replace("-", " ").split()
+        human = " ".join(words)
+        return human[:1].upper() + human[1:] + (f" ({pane_id})" if fg is None else "")
+    if isinstance(pane.get("terminal_title"), str) and pane["terminal_title"]:
+        return str(pane["terminal_title"])
+    return f"Herdr pane {pane_id}"
+
+
 def normalize_tasks(
     sources: Mapping[str, SourceResult],
     *,
@@ -222,7 +244,7 @@ def normalize_tasks(
 
     def proc_detail(cwd: Any) -> list[str]:
         return [
-            f"pid {p['pid']} ({p.get('mode') or 'unknown'})"
+            f"pid {p['pid']}" + (f" ({p['mode']})" if p.get("mode") else "")
             for p in procs
             if cwd is not None and p.get("cwd") == cwd and "pid" in p
         ]
@@ -247,7 +269,14 @@ def normalize_tasks(
         if sess:
             claimed.add(sess[0])
         status = pane.get("agent_status")
-        state = status if status in {"idle", "working", "blocked"} else "unknown"
+        if status in {"idle", "working", "blocked"}:
+            state = str(status)
+        elif status == "done":
+            state = "idle"
+        else:
+            # A plain shell pane: a live foreground job means working, a bare
+            # shell (or no process info) means idle. Never "unknown".
+            state = "working" if pane.get("has_job") else "idle"
         stamp = s.get("last_ts")
         if (
             state == "working"
@@ -262,11 +291,16 @@ def normalize_tasks(
             and isinstance(usage.get("output"), int)
         ):
             detail.append(f"tokens in/out {usage['input']}/{usage['output']}")
-        detail.extend(proc_detail(pane.get("cwd")))
+        if isinstance(pane.get("foreground"), str):
+            detail.append(f"runs {pane['foreground']}")
+        elif "has_job" in pane:
+            detail.append("idle shell, no job running")
+        if status in {"idle", "working", "blocked"}:
+            detail.extend(proc_detail(pane.get("cwd")))
         active.append(
             Task(
                 f"herdr:{pid}",
-                str(pane.get("name") or pane.get("terminal_title") or pid),
+                _pane_title(pane, pid),
                 "herdr_pane",
                 Owner("herdr-pane", pid, f"Herdr pane {pid}"),
                 state,
@@ -393,6 +427,24 @@ def normalize_tasks(
         rid = item.get("run_id")
         age = _recent(item.get("last_ts"), now, window_hours)
         if not isinstance(rid, str) or age is None or age > window_hours:
+            continue
+        result = item.get("result")
+        if result in {"passed", "failed"}:
+            passed, total = item.get("checks_passed"), item.get("checks_total")
+            counts = (
+                f" {passed}/{total}"
+                if isinstance(passed, int) and isinstance(total, int)
+                else ""
+            )
+            finished.append(
+                FinishedItem(
+                    f"sandbox:e2e:{rid}",
+                    f"Sandbox E2E {rid}",
+                    item.get("last_ts"),
+                    str(result),
+                    summary=("ALL PASS" if result == "passed" else "FAILED") + counts,
+                )
+            )
             continue
         active.append(
             Task(
@@ -583,9 +635,9 @@ def normalize_tasks(
                     "waiting_on_ove": "waiting_on_ove",
                     "done": "done",
                     "failed": "failed",
-                }.get(state_value, "unknown")
+                }.get(state_value, "idle")
             else:
-                state = "unknown"
+                state = "idle"
             owner_data = t.get("owner")
             if not isinstance(owner_data, dict):
                 owner_data = {}
@@ -594,6 +646,20 @@ def normalize_tasks(
             title = str(t.get("title", task_id))
             links_value = t.get("links", [])
             links = tuple(links_value) if isinstance(links_value, list) else ()
+            if state in {"done", "failed"}:
+                # Ended work lives only under Recently finished.
+                finished.append(
+                    FinishedItem(
+                        f"tasks:{task_id}",
+                        title,
+                        t.get("last_activity_at"),
+                        "ok" if state == "done" else "failed",
+                        summary=t.get("note")
+                        if isinstance(t.get("note"), str)
+                        else None,
+                    )
+                )
+                continue
             active.append(
                 Task(
                     f"tasks:{task_id}",
@@ -609,15 +675,6 @@ def normalize_tasks(
                     links,
                 )
             )
-            if state == "done":
-                finished.append(
-                    FinishedItem(
-                        f"tasks:{task_id}",
-                        title,
-                        t.get("last_activity_at"),
-                        "ok",
-                    )
-                )
         for raw in task_source.extra.get("waiting_on_ove", []):
             if isinstance(raw, dict) and isinstance(raw.get("id"), str):
                 ident = raw["id"] if ":" in raw["id"] else f"tasks:{raw['id']}"
