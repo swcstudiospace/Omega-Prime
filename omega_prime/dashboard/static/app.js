@@ -23,13 +23,13 @@
     if (!value) return '—';
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return text(value);
-    return new Intl.DateTimeFormat('en-AU', {timeZone: 'Australia/Sydney', dateStyle: 'medium', timeStyle: 'short', timeZoneName: 'short'}).format(date);
+    return new Intl.DateTimeFormat('en-AU', {timeZone: 'Australia/Sydney', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short'}).format(date);
   };
   const relativeTime = (value) => {
     if (!value) return '—';
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return text(value);
-    const seconds = Math.round((date.getTime() - Date.now()) / 1000);
+    const seconds = Math.round((Date.now() - date.getTime()) / 1000);
     const abs = Math.abs(seconds);
     let amount, unit;
     if (abs < 60) { amount = abs; unit = 'second'; }

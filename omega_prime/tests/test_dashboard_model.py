@@ -96,8 +96,12 @@ def test_session_quiet_stopped_and_exit_paths() -> None:
         )
     }
     snap = normalize_tasks(src, now=NOW)
-    assert {x.state for x in snap.active} == {"quiet", "stopped?"}
-    assert snap.finished[0].result == "stopped"
+    # A quiet session with no live omp process is reported as exited.
+    assert {x.state for x in snap.active} == {"stopped?"}
+    assert {(x.id, x.result) for x in snap.finished} == {
+        ("omp:old", "stopped"),
+        ("omp:exit", "stopped"),
+    }
 
 
 def test_wiring_join_done_and_waiting_derivation() -> None:

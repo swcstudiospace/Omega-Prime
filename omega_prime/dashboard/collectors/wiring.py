@@ -96,7 +96,8 @@ def make_wiring_collector(
                         else _tail_lines(log)
                     )
                     cache[log] = (stat.st_mtime_ns, stat.st_size, lines)
-                    now = now_fn()
+                    # phase.log stamps are box-local wall-clock times.
+                    now = now_fn().astimezone()
                     starts = [
                         line
                         for line in lines

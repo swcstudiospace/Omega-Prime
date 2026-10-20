@@ -135,7 +135,8 @@ def _loopback(host: str) -> bool:
 def _serve(app: Any, host: str, port: int) -> None:
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port)
+    # Open SSE streams never end on their own; cap the drain on shutdown.
+    uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=3)
 
 
 def main(

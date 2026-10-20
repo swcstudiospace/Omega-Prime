@@ -43,10 +43,17 @@ class _SSEResponse(Response):
         )
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        # Response.__init__ adds "content-length: 0" for an empty body; a
+        # streaming response must not send it or clients read zero bytes.
+        headers = [
+            (key, value)
+            for key, value in self.raw_headers
+            if key.lower() != b"content-length"
+        ]
         start = {
             "type": "http.response.start",
             "status": self.status_code,
-            "headers": self.raw_headers,
+            "headers": headers,
         }
         await send(start)
         try:

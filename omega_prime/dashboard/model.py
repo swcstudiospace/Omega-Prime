@@ -205,6 +205,9 @@ def normalize_tasks(
             if cwd is not None and p.get("cwd") == cwd and "pid" in p
         ]
 
+    def live(cwd: Any) -> bool:
+        return cwd is not None and any(p.get("cwd") == cwd for p in procs)
+
     for pane in pane_rows:
         pid = pane.get("pane_id")
         if not isinstance(pid, str):
@@ -285,6 +288,13 @@ def normalize_tasks(
             and not any(p.get("cwd") == s.get("cwd") for p in procs)
         ):
             state = "stopped?"
+        if state == "quiet" and not live(s.get("cwd")):
+            # Quiet with no omp process in its cwd (or no cwd recorded, as in
+            # subagent session files): treat the session as exited.
+            finished.append(
+                FinishedItem(f"omp:{sid}", str(title), s.get("last_ts"), "stopped")
+            )
+            continue
         detail = []
         usage = s.get("usage")
         if isinstance(usage, dict):
@@ -319,7 +329,16 @@ def normalize_tasks(
         if item.get("stage") not in {"sol", "luna"}:
             continue
         age = _recent(stamp, now, window_hours)
-        state = "working" if age is not None and age * 60 < quiet_minutes else "quiet"
+        running = live(item.get("worktree"))
+        recent = age is not None and age * 60 < quiet_minutes
+        if not running and not recent:
+            finished.append(
+                FinishedItem(
+                    f"wiring:{phase}", f"Wiring phase {phase}", stamp, "stopped"
+                )
+            )
+            continue
+        state = "working" if running or recent else "quiet"
         details = [
             x for x in (item.get("branch"), item.get("head_sha")) if isinstance(x, str)
         ] + proc_detail(item.get("worktree"))
@@ -406,7 +425,13 @@ def normalize_tasks(
         age = _recent(stamp, now, window_hours)
         if age is None or age > window_hours:
             continue
-        state = "working" if age * 60 < quiet_minutes else "quiet"
+        if age * 60 >= quiet_minutes:
+            # No result and no recent activity: the job never reported back.
+            finished.append(
+                FinishedItem(f"job:{jid}", f"omega job {jid}", stamp, "stopped")
+            )
+            continue
+        state = "working"
         job_bits = [item.get("final_text_line"), item.get("model"), item.get("plan")]
         job_detail = "; ".join(str(x) for x in job_bits if x)
         job_links = item.get("links")
