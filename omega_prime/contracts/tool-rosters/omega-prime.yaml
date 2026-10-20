@@ -11,7 +11,8 @@
 # register_infra_tools, then Quality names from register_quality_tools,
 # then App names from register_packs_tools, then Ultrathink
 # names from register_ultrathink_tools, then Substrate names from
-# register_substrate_tools, then RLM names from register_rlm_tools
+# register_substrate_tools, then omega_capacity from
+# register_capacity_tools, then RLM names from register_rlm_tools
 # (gated: prime.rlm.enabled, default off — registered only when enabled),
 # then Harness names from register_harness_tools
 # (gated: prime.harness.enabled, default off — registered only when enabled),
@@ -149,6 +150,7 @@ tools:
   - advisor_note
   - advisor_render
   - durable_status
+  - omega_capacity
   - rlm_spawn
   - rlm_collect
   - rlm_list_subagents

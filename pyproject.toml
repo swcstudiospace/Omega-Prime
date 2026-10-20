@@ -41,6 +41,9 @@ dev = [
   "pytest>=8.0",
 ]
 
+[project.scripts]
+omega = "omega_prime.engine.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/swcstudiospace/omes-bot"
 Repository = "https://github.com/swcstudiospace/omes-bot"

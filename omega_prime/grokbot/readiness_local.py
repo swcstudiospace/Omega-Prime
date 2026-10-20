@@ -80,11 +80,46 @@ def run(probe: ReadinessProbe) -> None:
     _mcp_interop(probe)
     _ide_browser_devices(probe)
     _negatives(probe)
+    _capacity(probe)
 
 
 def _result(probe: ReadinessProbe, name: str, arguments: dict[str, Any]) -> Any:
     """Dispatch through production and return the unchanged envelope result."""
     return probe.call(name, arguments)["result"]
+
+
+def _capacity(probe: ReadinessProbe) -> None:
+    """Exercise ``omega_capacity`` without calling a model HTTP API."""
+    body = _result(probe, "omega_capacity", {})
+    probe.check(isinstance(body, dict), "omega_capacity must return an object")
+    assert isinstance(body, dict)
+    allow = body.get("allowlist")
+    probe.check(
+        isinstance(allow, dict)
+        and allow.get("refused_subscription_oauth") == ["anthropic", "muse"],
+        "omega_capacity must refuse Anthropic and Muse subscription OAuth",
+    )
+    plans = body.get("plans")
+    names = (
+        {row.get("plan") for row in plans if isinstance(row, dict)}
+        if isinstance(plans, list)
+        else set()
+    )
+    probe.check(
+        names == {"zai", "xai", "anthropic", "muse", "cursor"},
+        "omega_capacity must list the five coding plans",
+    )
+    encoded = json.dumps(body, ensure_ascii=False)
+    probe.check(
+        "sk-" not in encoded and "Bearer " not in encoded,
+        "omega_capacity must not return a credential",
+    )
+    probe.record(
+        "capacity:allowlist",
+        ("omega_capacity",),
+        "omega_capacity listed five plans and refused Anthropic and Muse "
+        "subscription OAuth; no model HTTP call",
+    )
 
 
 def _files(probe: ReadinessProbe) -> None:

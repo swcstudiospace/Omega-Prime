@@ -98,6 +98,11 @@ class OmegaPrimeAgent(Agent):
             tools={name: _dispatcher(registry, name) for name in names},
             **loop_options,
         )
+        # A roster narrows the tool map. None means the full registry, which
+        # the omp MCP roster is allowed to serve. Plan mode still stays off
+        # the engine.
+        self.tool_roster = None if roster is None else tuple(names)
+        self.engine_full_tools = roster is None
         # Heartbeat glue (61-02 surface, consumed directly). When a heartbeat
         # binding exists, bind this live runner before starting the
         # registry-owned runtime so beats re-enter this same transcript.

@@ -1,5 +1,6 @@
 ## Unreleased
 
+- omp engine (Phase A1a): the coding loop can run on omp 18.x over RPC. Tools stay on the stdio MCP server, plans go through an allowlist, and `omega_capacity` reports quota. Dispatch backends are a follow-up (A1b).
 - Image evidence accepts a long `refs/heads/<branch>` push ref. `/` stays in the token alphabet outside a git ref. Inside a ref, each segment is scanned, and the segments are scanned again with the slashes removed, so a token split by `/` or hidden behind repeated padding still trips the secret gate. An ordinary branch name whose only high-entropy symbol is the slash does not.
 - Slash commands: curated 24 -> 27 and total 58 -> 61. Added `/omega-redteam-conflicts`, `/omega-redteam-readiness`, and `/omega-audit`. Findings accept `--jsonl`. `durable_status` reports cycle and sync backlog. Purple-cycle jobs can be scheduled, and a live cycle takes a file lock plus an optional deadline.
 - Install docs pin the clone to `/workspace/omes-bot` and a `<release-tag>` placeholder (no tag existed on 2026-10-19; do not clone `main`).
@@ -15,6 +16,43 @@ All notable changes to this project are documented here. Format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.html).
 
 ## [Unreleased]
+
+### omp engine (Phase A1a)
+
+#### Added
+
+- `omega_prime.engine`: an omp RPC driver (`prompt`, `steer`, `abort`,
+  `set_model`, `set_thinking_level`, `set_event_filter`, `get_session_stats`)
+  that streams events to `$OMEGA_PRIME_STATE_DIR/jobs/<id>/events.jsonl`.
+  `python -m omega_prime.engine.watch` tails that feed. A tmux session
+  `omega-<job>` is optional (`OMEGA_PRIME_ENGINE_TMUX`).
+- Per-session `mcp.json` starts `python -m omega_prime.mcp_server` and points
+  omp at `omega_prime/skills`. Approvals and audit stay in the registry.
+- Plan router for zai, xai, anthropic, muse, and cursor. The default
+  allowlist is empty. API-key profiles are allowlisted when their environment
+  variable is set. Anthropic and Muse subscription OAuth are never
+  allowlisted. Z.ai, xAI, and Cursor subscription use are opt-in flags.
+- Bubblewrap sandbox. Without `bwrap` the engine refuses unless
+  `OMEGA_PRIME_ENGINE_UNSANDBOXED=1`.
+- `omega_capacity` on the tool roster. It reports remaining quota from
+  `omp usage --json` and the allowlist. It does not call a model HTTP API.
+- Conversation, delegate, the prime-agent coding path, desk-lead, and
+  ultrathink prefer the engine when it is ready and keep the previous
+  behaviour when it is not.
+- A refusal before the prompt is sent does not spend a caller-supplied
+  iteration budget. The prompt keeps the current request, and stays within
+  100,000 characters, when the prior transcript is long. A failed launch
+  records `job_end` so `omega watch --follow` stops. That write is
+  best-effort: a full state disk still returns the original failure.
+  `--follow` waits for the event file instead of exiting while omp is
+  still starting. Plan mode, a `child_tool_hook`, and a narrowed tool map
+  stay on the Python loop, including a delegate whose parent has no
+  child model.
+
+#### Follow-up
+
+- A1b: dispatch backends (fleet, local engine, cursor fallback),
+  `omega_dispatch`, `omega_jobs_status`, and `omega_jobs_cancel`.
 
 ### Purple-team operator tooling (batch 18)
 

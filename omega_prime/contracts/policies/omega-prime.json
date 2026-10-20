@@ -134,6 +134,7 @@
       "advisor_note",
       "advisor_render",
       "durable_status",
+      "omega_capacity",
       "rlm_spawn",
       "rlm_collect",
       "rlm_list_subagents",

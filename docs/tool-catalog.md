@@ -939,6 +939,14 @@ Render several advisor notes as escaped advisory lines.
 
 Report the cron turn journal, workflow checkpoint count, RoE lifecycle, and purple-team engagement posture digest.
 
+## omega_capacity
+
+- Family: Engine
+- Approval: not required
+- Required params: none
+
+Report per-plan remaining quota from omp usage and the compliance allowlist. The default allowlist is empty. API-key profiles are listed when their environment variable is set. Anthropic and Muse subscription OAuth are never allowlisted. Values of keys are not returned. This tool does not call a model HTTP API.
+
 ## rlm_spawn
 
 - Family: RLM

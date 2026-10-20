@@ -42,6 +42,15 @@ def delegate_task(
             f"batch of {len(goals)} tasks exceeds max_children {max_children}"
         )
     if getattr(parent, "child_model", None) is None:
+        if len(goals) == 1 and not background:
+            from omega_prime.engine.attach import _restricted, delegate_via_engine
+
+            # A plan-mode parent, a child_tool_hook, or a narrowed tool map
+            # must not receive the full MCP registry.
+            if not _restricted(parent):
+                routed = delegate_via_engine(goals[0])
+                if routed is not None:
+                    return routed
         return _error("parent.child_model is required")
     if background:
         handle = uuid.uuid4().hex

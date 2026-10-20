@@ -31,6 +31,7 @@ from omega_prime.tools.autonomous import (
     AUTONOMOUS_TOOL_NAMES,
     register_autonomous_tools,
 )
+from omega_prime.tools.capacity import CAPACITY_TOOL_NAMES, register_capacity_tools
 from omega_prime.tools.coding import CODING_TOOL_NAMES, register_coding_tools
 from omega_prime.tools.cron_admin import (
     CRON_ADMIN_TOOL_NAMES,
@@ -635,6 +636,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
     register_cron_admin_tools(registry, tmp_path)
     register_learning_surface_tools(registry, tmp_path)
     register_durable_surface_tools(registry, tmp_path)
+    register_capacity_tools(registry)
     register_rlm_tools(
         registry,
         OmegaPrimeAgent(
@@ -680,6 +682,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
         + CRON_ADMIN_TOOL_NAMES
         + LEARNING_TOOL_NAMES
         + DURABLE_TOOL_NAMES
+        + CAPACITY_TOOL_NAMES
         + RLM_TOOL_NAMES
         + HARNESS_TOOL_NAMES
         + GOAL_TOOL_NAMES

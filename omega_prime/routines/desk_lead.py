@@ -62,6 +62,7 @@ def make_dispatch(
     work_root: str | Path | None = None,
     *,
     bot: str = DEFAULT_BOT,
+    env: Mapping[str, str] | None = None,
 ) -> Callable[[dict], dict]:
     """Build the production dispatch closure for :func:`run_lead_pass`.
 
@@ -78,13 +79,6 @@ def make_dispatch(
     def dispatch(ticket: dict) -> dict:
         ticket_id = str(ticket.get("ticket_id") or "ticket")
         cmd = "delegate_task(goal=desk ticket)"
-        if parent is None:
-            reason = "no parent agent shim: no provider environment configured"
-            return {
-                "status": "blocked",
-                "reason": reason,
-                "receipt": _failure_receipt(bot, ticket_id, cmd, reason, reason),
-            }
         ask = str(ticket.get("ask") or "").strip()
         root_line = f"Work root: {work_root}\n" if work_root is not None else ""
         goal = (
@@ -94,6 +88,34 @@ def make_dispatch(
             "Do the work with your tools inside the work root, then reply "
             "with a short final report of what you changed and verified."
         )
+        if parent is None:
+            if env is not None:
+                from omega_prime.engine.attach import desk_engine_dispatch
+
+                routed = desk_engine_dispatch(
+                    goal,
+                    env,
+                    cwd=None if work_root is None else str(work_root),
+                )
+                if routed is not None:
+                    receipt = routed.get("receipt")
+                    if routed.get("status") == "done" and isinstance(receipt, dict):
+                        receipt["task_id"] = ticket_id
+                        receipt["bot"] = bot
+                    elif routed.get("status") == "blocked" and not isinstance(
+                        receipt, dict
+                    ):
+                        reason = str(routed.get("reason") or "engine refused")
+                        routed["receipt"] = _failure_receipt(
+                            bot, ticket_id, "omp --mode rpc", reason, reason
+                        )
+                    return routed
+            reason = "no parent agent shim: no provider environment configured"
+            return {
+                "status": "blocked",
+                "reason": reason,
+                "receipt": _failure_receipt(bot, ticket_id, cmd, reason, reason),
+            }
         from omega_prime.agent.delegate import delegate_task  # late import: no cycle
 
         try:
@@ -470,7 +492,11 @@ def execute_desk_lead(
     intake = IntakeStore(path)
     outcome = run_lead_pass(
         intake,
-        make_dispatch(_configured_parent(mapping, registry), _dispatch_root(mapping)),
+        make_dispatch(
+            _configured_parent(mapping, registry),
+            _dispatch_root(mapping),
+            env=mapping,
+        ),
         limit=limit,
     )
     outcome["publishes"] = False
