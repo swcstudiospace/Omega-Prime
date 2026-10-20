@@ -318,6 +318,9 @@ class FleetClient:
             if exc.code != "not_configured":
                 self._secret_error = exc.code
             return False
+        except OSError:
+            self._secret_error = "secret_unreadable"
+            return False
         return True
 
     def configuration_error(self) -> str:
@@ -444,8 +447,11 @@ class FleetClient:
             self._policy, host
         ):
             raise FleetError("host_not_allowed")
+        _refuse_loose_token_file(self._env)
         try:
             token = self._broker.key_for(_FleetCredential(), url)
+        except OSError:
+            raise FleetError("secret_unreadable") from None
         except ProviderError as exc:
             raise _broker_error(exc) from None
         if not isinstance(token, str) or not token:
@@ -454,15 +460,51 @@ class FleetClient:
 
 
 def _broker_error(exc: ProviderError) -> FleetError:
-    """Map a broker failure to a code. The broker text can name a path."""
+    """Map a broker failure to a code. The broker text can name a path.
+
+    The shared resolver describes every rejected file as missing, empty, or
+    not mode 0600. That phrase is not a permissions failure. Only the
+    resolver's own group/other wording is.
+    """
     text = str(exc).lower()
     if "no credential for host" in text:
         return FleetError("host_not_allowed")
-    if "group/other" in text or "chmod" in text or "mode 0600" in text:
+    if "group/other" in text or "chmod" in text:
         return FleetError("secret_permissions")
     if "no credential for" in text:
         return FleetError("not_configured")
     return FleetError("secret_unreadable")
+
+
+def _refuse_loose_token_file(env: Mapping[str, str]) -> None:
+    """Reject a group-readable token file before the broker reads it.
+
+    A direct env value wins, matching the resolver. A missing file is left
+    for the broker so this check does not turn absence into a permissions
+    error. The file contents are not read here.
+    """
+    direct = env.get("FLEET_COORDINATOR_TOKEN", "")
+    if isinstance(direct, str) and direct.strip():
+        return
+    path_text = env.get("FLEET_COORDINATOR_TOKEN_FILE", "")
+    if not isinstance(path_text, str) or not path_text.strip():
+        state = env.get("OMEGA_PRIME_STATE_DIR", "")
+        if not isinstance(state, str) or not state.strip():
+            return
+        candidate = (
+            Path(state.strip()).expanduser() / "secrets" / "FLEET_COORDINATOR_TOKEN"
+        )
+        if not candidate.exists():
+            return
+        path = candidate
+    else:
+        path = Path(path_text.strip())
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return
+    if stat.S_IMODE(mode) & 0o077:
+        raise FleetError("secret_permissions")
 
 
 def _loopback(hostname: str) -> bool:

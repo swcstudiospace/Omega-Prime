@@ -68,7 +68,9 @@ All notable changes to this project are documented here. Format follows
 - `omega_dispatch` requires approval and `confirm_token`.
   `omega_jobs_status` is read-only. `omega_jobs_cancel` requires approval.
   The coordinator token is resolved by the credential broker, and only after
-  `SeatPolicy.allows_host` allows that host. A local reservation is locked
+  `SeatPolicy.allows_host` allows that host. A token file that cannot be
+  read stays a fleet error. A missing or empty file is not reported as a
+  permissions failure. A local reservation is locked
   in the state directory. A local job with no file or
   minute bound is stored at the local caps. Escalation posts the original
   task text; receipts stay redacted.

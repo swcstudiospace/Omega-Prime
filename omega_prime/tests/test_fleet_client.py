@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import urllib.request
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -20,6 +21,7 @@ from omega_prime.engine.fleet_client import (
     read_named_secret,
 )
 from omega_prime.policy.policy import SeatPolicy
+from omega_prime.tools.capacity import fleet_status
 
 TOKEN = "fleet-test-token"
 SPEC = JobSpec(
@@ -159,6 +161,83 @@ def test_token_file_is_read_and_a_loose_file_is_refused(tmp_path) -> None:
     loose = FleetClient(env, FakeTransport(handler), policy=_allow("fleet.example"))
     assert loose.configured() is False
     assert loose.configuration_error() == "secret_permissions"
+
+
+def test_missing_or_empty_token_file_is_not_a_permissions_error(tmp_path) -> None:
+    def handler(method, url, headers, body):
+        del method, url, headers, body
+        raise AssertionError("transport was called")
+
+    missing = FleetClient(
+        {
+            "FLEET_COORDINATOR_URL": "https://fleet.example",
+            "FLEET_COORDINATOR_TOKEN_FILE": str(tmp_path / "absent"),
+        },
+        FakeTransport(handler),
+        policy=_allow("fleet.example"),
+    )
+    assert missing.configured() is False
+    assert missing.configuration_error() == "secret_unreadable"
+    empty = tmp_path / "empty"
+    empty.write_text("", encoding="utf-8")
+    empty.chmod(0o600)
+    blank = FleetClient(
+        {
+            "FLEET_COORDINATOR_URL": "https://fleet.example",
+            "FLEET_COORDINATOR_TOKEN_FILE": str(empty),
+        },
+        FakeTransport(handler),
+        policy=_allow("fleet.example"),
+    )
+    assert blank.configured() is False
+    assert blank.configuration_error() == "secret_unreadable"
+
+
+def test_unreadable_private_token_file_stays_inside_fleet_error(
+    monkeypatch, tmp_path
+) -> None:
+    path = tmp_path / "token"
+    path.write_text(TOKEN + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    real_read = Path.read_text
+
+    def guarded(
+        self: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> str:
+        if self == path:
+            raise PermissionError("denied")
+        return real_read(self, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", guarded)
+
+    def handler(method, url, headers, body):
+        del method, url, headers, body
+        raise AssertionError("transport was called")
+
+    env = {
+        "FLEET_COORDINATOR_URL": "https://fleet.example",
+        "FLEET_COORDINATOR_TOKEN_FILE": str(path),
+    }
+    client = FleetClient(env, FakeTransport(handler), policy=_allow("fleet.example"))
+    assert client.configured() is False
+    assert client.configuration_error() == "secret_unreadable"
+    try:
+        client.submit(SPEC)
+    except FleetError as exc:
+        assert exc.code == "secret_unreadable"
+        assert "denied" not in str(exc)
+        assert TOKEN not in str(exc)
+    else:
+        raise AssertionError("expected secret_unreadable")
+
+    monkeypatch.setattr(
+        "omega_prime.engine.fleet_client.seat_policy",
+        lambda: _allow("fleet.example"),
+    )
+    report = fleet_status(env)
+    assert report == {"status": "not_configured", "reason": "secret_unreadable"}
 
 
 def test_status_events_hitl_and_cancel_use_the_coordinator_routes() -> None:
