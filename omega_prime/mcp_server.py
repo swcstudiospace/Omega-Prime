@@ -861,6 +861,91 @@ def default_registry(
     # DESK-01: one MemoryStore instance shared by the growth tools and the
     # lead pack, so `lead_memory_recall` sees what the growth tools retain.
     memory_store = MemoryStore(memory_dir)
+    from omega_prime.integrations.gateways import (
+        gateway_block,
+        ready_gateway_url,
+    )
+    from omega_prime.memory.backends import resolve_memory_backends
+    from omega_prime.memory.hindsight_service import HindsightService
+    from omega_prime.memory.retain import retain_memory
+
+    substrate_token = secret_value(env, "SUBSTRATE_TOKEN") or secret_value(
+        env, "SUBSTRATE_TOKEN_GROK_BOT"
+    )
+    # SubstrateClient is the authoritative phase-97 endpoint resolver. Keep
+    # the same raw client for desk operations and memory; never infer a default.
+    substrate_client = SubstrateClient(
+        env.get("SUBSTRATE_URL") or None,
+        token=substrate_token or None,
+        honor_binding=True,
+        binding_env=env,
+        policy=policy,
+    )
+    substrate_url, substrate_error = substrate_client._resolve_base()
+    hindsight = None
+    hindsight_construction_error = None
+    hindsight_url = str(env.get("HINDSIGHT_URL") or "").strip()
+    if hindsight_url:
+        try:
+            hindsight = HindsightService(
+                hindsight_url,
+                broker=CredentialBroker(policy, env),
+                transport=HttpTransport(policy=policy, max_retries=0),
+                policy=policy,
+            )
+        except Exception:
+            hindsight_construction_error = "configured Hindsight service is invalid"
+    memory_backends = resolve_memory_backends(
+        local_store=memory_store,
+        # Do not expose an unresolved binding-aware client as a configured
+        # backend. It is attached immediately before memory operations when a
+        # live binding resolves to a usable endpoint.
+        substrate=substrate_client if substrate_url and not substrate_error else None,
+        hindsight=hindsight,
+        substrate_url=substrate_url,
+        hindsight_url=hindsight_url or None,
+        environ=env,
+    )
+    if substrate_error:
+        memory_backends.errors["substrate"] = substrate_error
+        memory_backends.states["substrate"] = (
+            "not_configured" if "not configured" in substrate_error else "unreachable"
+        )
+    if hindsight_construction_error:
+        memory_backends.errors["hindsight"] = hindsight_construction_error
+        memory_backends.states["hindsight"] = "unreachable"
+
+    def refresh_memory_substrate() -> None:
+        """Resolve live connector settings immediately before a memory call."""
+        base, error = substrate_client._resolve_base()
+        if base and error is None:
+            memory_backends.substrate = substrate_client
+            memory_backends.errors.pop("substrate", None)
+            memory_backends.states["substrate"] = "empty"
+        else:
+            memory_backends.substrate = None
+            if error is not None:
+                message = str(error)
+                memory_backends.errors["substrate"] = message
+                memory_backends.states["substrate"] = (
+                    "not_configured" if "not configured" in message else "unreachable"
+                )
+            else:
+                memory_backends.errors["substrate"] = (
+                    "substrate gateway is not configured"
+                )
+                memory_backends.states["substrate"] = "not_configured"
+
+    def growth_retain(content: str) -> dict[str, Any]:
+        refresh_memory_substrate()
+        return retain_memory(
+            memory_backends,
+            content,
+            scope=memory_backends.trusted_scope,
+            repo=memory_backends.trusted_repo,
+            kind="fact",
+        )
+
     from omega_prime.routines.nightly import writable_skills_root
 
     install_skills = root / "omega_prime" / "skills"
@@ -874,6 +959,7 @@ def default_registry(
         memory_dir=memory_dir,
         session_db=session_db,
         memory_store=memory_store,
+        retain_memory=growth_retain,
     )
     # DESK-03: delegate_task is served here (roster order: after growth), on
     # an in-process parent shim. Without a provider env the parent stays None
@@ -909,21 +995,10 @@ def default_registry(
         registry,
         DiscordClient(make_client=None, token=secret_value(env, "DISCORD_BOT_TOKEN")),
     )
-    substrate_token = secret_value(env, "SUBSTRATE_TOKEN") or secret_value(
-        env, "SUBSTRATE_TOKEN_GROK_BOT"
-    )
-    substrate_client = SubstrateClient(
-        env.get("SUBSTRATE_URL") or None,
-        token=substrate_token or None,
-        honor_binding=True,
-        binding_env=env,
-        policy=policy,
-    )
-    substrate_base, substrate_error = substrate_client._resolve_base()
+    substrate_base = substrate_url
     docs_url = (env.get(DESK_DOCS_INDEX_ENV) or "").strip()
     notify_url = (env.get(DESK_NOTIFY_URL_ENV) or "").strip()
     bus_url = (env.get(DESK_BUS_URL_ENV) or "").strip()
-    from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
 
     bus_saved = ready_gateway_url("desk_bus", env)
     bus_blocked = gateway_block("desk_bus", env)
@@ -934,6 +1009,8 @@ def default_registry(
                 root=root,
                 registry=registry,
                 memory=memory_store,
+                memory_backends=memory_backends,
+                memory_refresh=refresh_memory_substrate,
                 intake=IntakeStore(
                     desk_intake_path(work, state_dir=state_value or None)
                 ),
@@ -955,7 +1032,7 @@ def default_registry(
                 notify=_DeskNotifier(notify_url) if notify_url else None,
                 bus=(
                     _DeskBusClient(
-                        bus_saved or bus_url or "http://127.0.0.1",
+                        bus_saved or bus_url or "",
                         honor_binding=True,
                         binding_env=env,
                         policy=policy,
@@ -1135,6 +1212,14 @@ def default_registry(
     # Started by the live server (stdio main / serve_sse), not here: building
     # a registry is also how doctor, setup_check, the catalog and tests
     # inspect the tool surface, and those must not spawn a ticking thread.
+    dispatch = registry.dispatch
+
+    def dispatch_with_memory_refresh(name: str, arguments: Any = None) -> str:
+        if name in {"lead_memory_recall", "lead_doctor"}:
+            refresh_memory_substrate()
+        return dispatch(name, arguments)
+
+    registry.dispatch = dispatch_with_memory_refresh  # type: ignore[method-assign]
     return registry
 
 

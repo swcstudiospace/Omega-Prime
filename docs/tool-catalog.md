@@ -297,7 +297,7 @@ Keep one memory entry. Needs receipt_path or source. Requires approval.
 - Approval: not required
 - Required params: query
 
-Recall memory banks matching a query. Read-only.
+Recall matching entries across configured memory backends. Read-only.
 
 ## lead_ownership_resolve
 
