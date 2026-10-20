@@ -1,0 +1,7 @@
+# PROGRESS (omp-sandbox)
+- 2026-10-21 00:03 AEDT KVM: sudo groupadd -g 103 kvm && sudo usermod -aG kvm box (gid 103 had no /etc/group entry). Child processes use sg kvm -c.
+- 00:03 OpenShell v0.1.4 binaries (openshell, -gateway, -driver-vm, -supervisor, -sandbox) downloaded to ~/.local/opt/openshell/0.1.4/bin; sha256 OK against release checksum files (no signatures published on the release).
+- 00:05 Gateway: `openshell-gateway --compute-driver vm` needs a sandbox launch-signing bundle (`openshell-gateway generate-certs --output-dir ~/.local/state/openshell-vm/tls`) and then user auth -> ran with loopback mTLS (127.0.0.1:18081). README drift: `guest_tls_ca` must be in [openshell.gateway], not [openshell.drivers.vm].
+- 00:07 VM driver needs mke2fs/mkfs.ext4 (e2fsprogs not on box). Used `apt-get download` + `dpkg-deb -x` into ~/.local/opt/e2fsprogs (user-local, no dpkg install, no system change), PATH only for the gateway.
+- 00:08 MicroVM create -> image pull + rootfs OK, then "VM killed by signal 11". dmesg: `kernel BUG at arch/x86/kvm/x86.c:702` (kvm_spurious_fault in vmx_vcpu_create, Comm: libkrun VM). The box is itself a VM and nested VMX faults in the host kernel. STOPPED the MicroVM branch (no retries, a kernel oops on a shared box). Gateway stopped, sandbox deleted, `openshell sandbox list` -> none.
+- `openshell sandbox exec` (help, 0.1.4): gRPC exec, streams output, exits with remote code, `--tty/--no-tty`, piped stdin documented (`echo hello | openshell sandbox exec -n x -- cat`). Not verified live (no working VM).
