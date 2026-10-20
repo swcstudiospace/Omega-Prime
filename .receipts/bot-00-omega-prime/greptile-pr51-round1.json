@@ -1,0 +1,107 @@
+{
+  "task_id": "greptile-pr51-round1",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T19:50:53Z",
+  "completed_at": "2026-10-20T20:06:26Z",
+  "finding_validity": [
+    { "finding": "Recall exposes stored secrets", "valid": true },
+    { "finding": "Memory add publishes secrets", "valid": true },
+    { "finding": "Own-bank recall misses new notes", "valid": true },
+    { "finding": "Ordinary notes fail doctor", "valid": true },
+    { "finding": "Edits choose the wrong note", "valid": true },
+    { "finding": "Stale edits strip record fields", "valid": true },
+    { "finding": "Failed publication reports success", "valid": true },
+    { "finding": "Doctor ignores failed Hindsight", "valid": true },
+    { "finding": "Remote writes lose repo identity", "valid": true },
+    { "finding": "Recall limits before removing duplicates", "valid": true },
+    { "finding": "Unreadable memory looks empty", "valid": true },
+    { "finding": "Refused example actually succeeds", "valid": true },
+    { "finding": "Hindsight setup omits host permission", "valid": true }
+  ],
+  "commands": [
+    {
+      "cmd": "ruff check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "All checks passed!"
+    },
+    {
+      "cmd": "ruff format --check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "595 files already formatted"
+    },
+    {
+      "cmd": "mypy omega_prime/",
+      "exit_code": 0,
+      "output_tail": "Success: no issues found in 468 source files"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p2 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_growth.py omega_prime/tests/test_memory_integration.py omega_prime/tests/test_memory_recall.py omega_prime/tests/test_memory_retain.py -q",
+      "exit_code": 0,
+      "output_tail": "53 passed in 5.33s"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p2 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "output_tail": "32 failed, 4861 passed, 11 skipped, 15 warnings; environment lacked initialized submodules and had an ambient Hindsight API key"
+    },
+    {
+      "cmd": "git submodule update --init --recursive",
+      "exit_code": 0,
+      "output_tail": "Initialized the prime-agent and redteam submodules at their pinned revisions"
+    },
+    {
+      "cmd": "env -u HINDSIGHT_API_KEY -u HINDSIGHT_API_TOKEN PYTHONPATH=/workspace/omes-bot-wt/p2 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "output_tail": "5 failed, 4879 passed, 20 skipped; doctor prompt installation used the system Python because VIRTUAL_ENV was unset"
+    },
+    {
+      "cmd": "env -u HINDSIGHT_API_KEY -u HINDSIGHT_API_TOKEN VIRTUAL_ENV=/workspace/omes-bot/.venv PYTHONPATH=/workspace/omes-bot-wt/p2 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests -q",
+      "exit_code": 0,
+      "output_tail": "4884 passed, 20 skipped, 15 warnings in 201.09s"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Ruff lint passes",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "Ruff formatting check passes",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "Mypy passes for omega_prime",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "All touched memory regression tests pass",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "The complete omega_prime test suite passes with required runtime environment configured",
+      "evidence_command_index": 7
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Live Substrate and Hindsight services were not exercised; remote metadata behavior was covered by local test doubles"
+  ],
+  "files_changed": [
+    "docs/substrate.md",
+    "omega_prime/grokbot/SETUP.md",
+    "omega_prime/memory/provider.py",
+    "omega_prime/memory/recall.py",
+    "omega_prime/memory/retain.py",
+    "omega_prime/skills/hindsight-memory/SKILL.md",
+    "omega_prime/tests/test_growth.py",
+    "omega_prime/tests/test_memory_integration.py",
+    "omega_prime/tests/test_memory_recall.py",
+    "omega_prime/tests/test_memory_retain.py",
+    "omega_prime/tools/lead.py",
+    ".receipts/bot-00-omega-prime/greptile-pr51-round1.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": null,
+  "approvals": [],
+  "approved_by": "independent review pending"
+}

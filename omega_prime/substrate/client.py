@@ -58,9 +58,13 @@ class SubstrateNotConfiguredError(SubstrateError):
 class SubstrateUnauthorizedError(SubstrateError):
     """The MCP endpoint rejected authentication."""
 
+    status = "unauthorized"
+
 
 class SubstrateUnreachableError(SubstrateError):
     """The MCP endpoint could not be reached."""
+
+    status = "unreachable"
 
 
 class SubstrateProtocolError(SubstrateError):
@@ -175,6 +179,7 @@ class SubstrateClient:
             return {"stored": False, "error": "substrate returned no event body"}
         return result
 
+    # Phase-98 argument seam; phase 97 retains transport and response ownership.
     def memory_write(
         self,
         scope: str,
@@ -208,14 +213,16 @@ class SubstrateClient:
         )
         return self._call_tool("memory_write", arguments)
 
+    # Phase-98 repository filter; phase 97 retains transport and response ownership.
     def memory_search(
         self,
         query: str,
         scope: str | None = None,
         limit: int | None = None,
+        *,
         repo: str | None = None,
     ) -> list:
-        """Call ``memory_search``. Fail-open: failures return ``[]``."""
+        """Call ``memory_search``. Failures raise ``SubstrateError``."""
         if not isinstance(query, str) or query == "":
             raise ValueError("query must be a non-empty string")
         arguments: dict[str, Any] = {"query": query}
@@ -225,10 +232,7 @@ class SubstrateClient:
             arguments["limit"] = limit
         if repo is not None:
             arguments["repo"] = repo
-        try:
-            result = self._call_tool("memory_search", arguments)
-        except SubstrateError:
-            return []
+        result = self._call_tool("memory_search", arguments)
         entries = result.get("entries", result)
         return entries if isinstance(entries, list) else []
 

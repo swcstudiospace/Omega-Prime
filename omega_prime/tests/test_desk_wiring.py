@@ -50,11 +50,7 @@ def test_help_advertises_work_root():
     assert "--work-root" in proc.stdout
 
 
-def test_lead_doctor_green_on_memory_tools_substrate_without_credentials(tmp_path):
-    # `lead_doctor` is a gated tool (its register/repair actions mutate the
-    # roster seat), so a host grants approval up front (`--approve`), the way
-    # every other lead_doctor construction in this suite does. No credentials
-    # are involved: memory/tools/substrate go green on the shared seams.
+def test_lead_doctor_reports_configured_memory_sources(tmp_path):
     log = ApprovalLog()
     log.approve("lead_doctor", "ada")
     registry = default_registry(
@@ -70,7 +66,30 @@ def test_lead_doctor_green_on_memory_tools_substrate_without_credentials(tmp_pat
     checks = result["checks"]
     assert checks["memory"]["green"] is True
     assert checks["tools"]["green"] is True
-    assert checks["substrate"]["green"] is True
+    assert checks["substrate"]["green"] is False
+    assert checks["substrate"]["state"] == "unreachable"
+    assert checks["substrate"]["attempted"] is True
+    assert checks["memory_backends"] == {
+        "green": True,
+        "selected_backend": "local",
+        "configuration": {
+            "local": "empty",
+            "substrate": "empty",
+            "hindsight": "not_configured",
+        },
+        "sources": {
+            "local": {"state": "empty", "attempted": True},
+            "substrate": {
+                "state": "unreachable",
+                "attempted": True,
+                "error": "substrate transport failed",
+            },
+            "hindsight": {"state": "not_configured", "attempted": False},
+        },
+    }
+    assert checks["substrate"]["detail"].startswith(
+        "read-only memory probe: unreachable"
+    )
 
 
 def test_shared_memory_store_identity(tmp_path):
@@ -86,15 +105,30 @@ def test_shared_memory_store_identity(tmp_path):
             {
                 "action": "add",
                 "target": "memory",
-                "content": "[hindsight:omega-prime-lead] desk-wiring sentinel",
+                "content": "desk-wiring sentinel",
             },
         )
     )
-    assert kept.get("success") is True, kept
+    assert kept.get("ok") is True, kept
     recall = json.loads(
         registry.dispatch("lead_memory_recall", {"query": "desk-wiring sentinel"})
     )
-    assert "desk-wiring sentinel" in json.dumps(recall)
+    assert any(
+        "desk-wiring sentinel" in entry["content"] for entry in recall["results"]
+    )
+    assert set(recall) == {
+        "selected_backend",
+        "scope",
+        "repo",
+        "backends",
+        "results",
+    }
+    assert recall["selected_backend"] == "local"
+    assert recall["scope"] == "default"
+    assert recall["repo"] is None
+    assert recall["backends"]["local"] == {"state": "answered", "attempted": True}
+    assert recall["backends"]["substrate"]["state"] == "not_configured"
+    assert recall["backends"]["hindsight"]["state"] == "not_configured"
 
 
 def test_desk_stores_live_under_state_dir(tmp_path):
@@ -292,7 +326,7 @@ def test_warm_registry_consumes_independent_intake_and_acks(tmp_path):
     in-progress claim — never null/empty while the file holds the order.
     """
     state = tmp_path / "state"
-    env = {"OMEGA_PRIME_STATE_DIR": str(state), "SUBSTRATE_URL": "local"}
+    env = {"OMEGA_PRIME_STATE_DIR": str(state)}
     runtime = load_runtime(
         ROOT,
         tmp_path / "home",

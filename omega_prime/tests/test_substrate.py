@@ -13,7 +13,12 @@ import pytest
 
 from omega_prime.providers.base import ProviderError
 from omega_prime.providers.http import HttpTransport
-from omega_prime.substrate.client import SubstrateClient, SubstrateError
+from omega_prime.substrate.client import (
+    SubstrateClient,
+    SubstrateError,
+    SubstrateProtocolError,
+    SubstrateUnreachableError,
+)
 
 TOKEN = "test-mock-token"
 
@@ -233,6 +238,37 @@ def test_memory_write_preserves_optional_version_and_key() -> None:
     assert arguments["idempotency_key"] == "caller-key"
 
 
+def test_memory_write_forwards_optional_version_and_idempotency() -> None:
+    client, transport = _client([_mcp_result({"status": "accepted"})])
+    client.memory_write(
+        "graph:g1",
+        "fact",
+        "remember this",
+        idempotency_key="operation-1",
+        expected_version=7,
+    )
+    arguments = transport.requests[0]["body"]["params"]["arguments"]
+    assert arguments == {
+        "scope": "graph:g1",
+        "kind": "fact",
+        "text": "remember this",
+        "idempotency_key": "operation-1",
+        "expected_version": 7,
+    }
+
+
+def test_memory_search_forwards_repository_filter() -> None:
+    client, transport = _client([_mcp_result({"entries": []})])
+    assert client.memory_search("question", scope="team", limit=4, repo="repo-a") == []
+    arguments = transport.requests[0]["body"]["params"]["arguments"]
+    assert arguments == {
+        "query": "question",
+        "scope": "team",
+        "limit": 4,
+        "repo": "repo-a",
+    }
+
+
 def test_memory_write_fail_closed() -> None:
     client, _ = _client([ProviderError("down")])
     with pytest.raises(SubstrateError):
@@ -249,7 +285,7 @@ def test_memory_write_validates_inputs() -> None:
         client.memory_write("graph:g1", "fact", "")
 
 
-def test_memory_search_entries_and_fail_open() -> None:
+def test_memory_search_entries_and_errors() -> None:
     entries = [{"id": "m1", "text": "sky is blue"}]
     client, transport = _client([_mcp_result({"entries": entries})])
     assert client.memory_search("sky") == entries
@@ -262,7 +298,8 @@ def test_memory_search_entries_and_fail_open() -> None:
         "repo": "owner/project",
     }
     failing, _ = _client([ProviderError("down")])
-    assert failing.memory_search("sky") == []
+    with pytest.raises(SubstrateUnreachableError):
+        failing.memory_search("sky")
     with pytest.raises(ValueError):
         client.memory_search("")
 
@@ -272,7 +309,8 @@ def test_malformed_mcp_envelope() -> None:
     with pytest.raises(SubstrateError):
         client.memory_write("graph:g1", "fact", "x")
     searching, _ = _client([{"nope": True}])
-    assert searching.memory_search("sky") == []
+    with pytest.raises(SubstrateProtocolError):
+        searching.memory_search("sky")
 
 
 def test_base_url_validation_and_unsafe_url_degradation() -> None:
