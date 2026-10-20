@@ -1,12 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v16 — Enterprise Hardening and Continuous Verification",
+  "milestone": "v20 — Wiring",
   "phases": [],
   "next": {
-    "command": "/gsd:progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/skill:gsd-autonomous 97",
+    "label": "Execute Phase 97 plan",
+    "reason": "Five Phase 97 execution plans are staged (01–05); planning is complete and independent units may proceed after separate manual invocation. Authoritative upstream schema confirmation is required before server-specific implementation."
   },
-  "updated_at": "2026-10-13T04:49:21.851Z"
+  "updated_at": "2026-10-21"
 }
