@@ -1,0 +1,10 @@
+Aceternity UI attribution
+
+The Command Center sidebar and summary-card hover treatments are independently
+adapted from Aceternity UI Sidebar and Card Hover Effect references.
+Source: https://ui.aceternity.com/components/sidebar
+Source: https://ui.aceternity.com/components/card-hover-effect
+
+These are adapted, restyled application components; upstream source files are
+not redistributed here. The upstream reference permits use in end products and
+prohibits redistribution of its source component files.
