@@ -229,6 +229,8 @@ Write a Lead receipt under `.receipts/bot-00-programming-lead/` for the orchestr
 
 ## References
 
+| Path | Role |
+|---|---|
 | [XML root and density guidance](xml-roots.md) | Local root picker and density checks |
 | [Trackplan dispatch](../trackplan-dispatch/SKILL.md) | Dispatch after stage 5 |
 | [Ownership](../../../omega_prime/ownership.yaml) | Who may implement |
