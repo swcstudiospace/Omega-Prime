@@ -450,6 +450,78 @@ def test_typed_schedule_creation_is_atomic_with_concurrent_store_writer(
     assert len(persisted) == 2
 
 
+def test_heartbeat_schedule_is_atomic_with_generic_cron_reader(tmp_path, monkeypatch):
+    from threading import Event, Thread
+
+    from omega_prime.cron.heartbeat import schedule_heartbeat
+    from omega_prime.cron.scheduler import run_due_jobs
+
+    path = tmp_path / "cron" / "jobs.json"
+    scheduler_store = JobStore(path)
+    reader_store = JobStore(path)
+    original_save = scheduler_store._save
+    entered_save = Event()
+    release_save = Event()
+    reader_finished = Event()
+    scheduled = []
+    ran = []
+
+    def paused_save():
+        entered_save.set()
+        assert release_save.wait(timeout=5)
+        original_save()
+
+    monkeypatch.setattr(scheduler_store, "_save", paused_save)
+    scheduler = Thread(
+        target=lambda: scheduled.append(
+            schedule_heartbeat(
+                scheduler_store,
+                "named-session",
+                "check in",
+                interval_seconds=60,
+                due_at=100,
+            )
+        )
+    )
+    scheduler.start()
+    assert entered_save.wait(timeout=5)
+
+    def read_due_jobs():
+        ran.extend(run_due_jobs(reader_store, 100))
+        reader_finished.set()
+
+    reader = Thread(target=read_due_jobs)
+    reader.start()
+    try:
+        assert not reader_finished.wait(timeout=0.1)
+    finally:
+        release_save.set()
+        scheduler.join(timeout=5)
+        reader.join(timeout=5)
+
+    assert not scheduler.is_alive()
+    assert not reader.is_alive()
+    assert reader_finished.is_set()
+    assert ran == []
+    persisted = JobStore(path).jobs
+    assert persisted == [
+        {
+            "id": scheduled[0],
+            "prompt": "check in",
+            "due_at": 100,
+            "interval_seconds": 60,
+            "completed": False,
+            "last_result": None,
+            "last_ran_at": None,
+            "history": [],
+            "claimed_at": None,
+            "claim_token": None,
+            "kind": "session_heartbeat",
+            "session": "named-session",
+        }
+    ]
+
+
 def test_scheduled_pin_bump_output_does_not_reach_stdout(tmp_path, capsys):
     from omega_prime.cron.scheduler import (
         JobStore,
