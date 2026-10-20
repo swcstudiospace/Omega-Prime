@@ -1054,6 +1054,7 @@ def serve_sse(
             work_root=work_root,
             interceptors=interceptors,
             settings_status=settings_status,
+            token_store_path=token_store_path,
             rate_limit=rate_limit,
             global_rate_limit=global_rate_limit,
             tool_rate_limit=tool_rate_limit,
