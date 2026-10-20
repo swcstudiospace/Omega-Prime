@@ -66,6 +66,14 @@
       "evidence_command_index": 8
     }
   ],
+  "finding_assessments": [
+    {"finding": 1, "decision": "Stale against this checkout; omp_driver passes job_id and session_generation to next_command, and tests cover preserving foreign-job commands."},
+    {"finding": 2, "decision": "Valid historical issue; _engine_body currently forwards result.usage and the engine-body test asserts it."},
+    {"finding": 3, "decision": "Valid historical issue; terminal stale answer cleanup is implemented and duplicate-answer cleanup is tested."},
+    {"finding": 4, "decision": "Stale against this checkout; test_engine_skills_real creates isolated HOME/config/agent directories and a gsd-autonomous fixture."},
+    {"finding": 5, "decision": "Invalid against this checkout; doctor checks existing requests and queue children without following symlinks and enforces owner/mode."},
+    {"finding": 6, "decision": "Valid historical issue; current CLI/watch event selection and formatting expose attachment status and cleanup conflicts, with tests."}
+  ],
   "unverified": [
     "rule adherence by future agents",
     "Live multi-process contention across separate engine jobs was not run; the current filtered command behavior is covered by the existing queue and driver tests.",
