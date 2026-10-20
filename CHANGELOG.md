@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Omega Prime Command Center (Phase 105): the loopback-only dashboard now serves a self-hosted React interface with Overview, Tasks, CI/CD and Repositories views, durable server-issued task numbers, bounded cached GitHub evidence, local licensed fonts, and a retained `/legacy` route. The built assets remain static; GitHub parity, visual browser review, signed sandbox evidence and real-data screenshots are still unverified.
 - omp engine (Phase A1a): the coding loop can run on omp 18.x over RPC. Tools stay on the stdio MCP server, plans go through an allowlist, and `omega_capacity` reports quota.
 - A1b dispatch: `omega_dispatch` (approval plus confirm token), `omega_jobs_status`, and `omega_jobs_cancel`. One JobSpec goes to the local sandbox lane or the coding fleet. The fleet client reads `FLEET_COORDINATOR_URL` by name. `FLEET_COORDINATOR_TOKEN` is resolved by the credential broker after `SeatPolicy.allows_host`.
 - Image evidence accepts a long `refs/heads/<branch>` push ref. `/` stays in the token alphabet outside a git ref. Inside a ref, each segment is scanned, and the segments are scanned again with the slashes removed, so a token split by `/` or hidden behind repeated padding still trips the secret gate. An ordinary branch name whose only high-entropy symbol is the slash does not.
