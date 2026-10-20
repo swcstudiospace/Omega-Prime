@@ -50,11 +50,14 @@ def test_default_cc_and_legacy_routes_serve_only_expected_assets() -> None:
         assert "Command Center · Omega Prime" in page.text
         assert page.headers["content-type"].startswith("text/html")
         assert page.headers["cache-control"] == "no-cache"
-        assert client.get("/cc/", headers=HOST).text == page.text
+        _assert_security(page)
+        cc_page = client.get("/cc/", headers=HOST)
+        assert cc_page.text == page.text
+        _assert_security(cc_page)
         redirect = client.get("/cc", headers=HOST, follow_redirects=False)
         assert redirect.status_code == 308
         assert redirect.headers["location"] == "/cc/"
-
+        _assert_security(redirect)
         legacy = client.get("/legacy", headers=HOST)
         assert legacy.status_code == 200
         assert "Omega Prime — Task Dashboard" in legacy.text
@@ -155,3 +158,33 @@ def test_method_host_and_ipv6_guards_cover_page_and_asset_routes() -> None:
             _assert_security(response)
         assert client.get("/", headers={"host": "[::1]:7421"}).status_code == 200
         assert client.get("/", headers={"host": "127.0.0.1:7421"}).status_code == 200
+
+
+def test_duplicate_host_headers_are_rejected_with_security_headers() -> None:
+    app = _app()
+    starts: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        await asyncio.Event().wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.start":
+            starts.append(message)
+
+    scope: dict[str, object] = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "raw_path": b"/",
+        "headers": [
+            (b"host", b"127.0.0.1:7421"),
+            (b"host", b"127.0.0.1:7421"),
+        ],
+        "query_string": b"",
+    }
+    asyncio.run(app(scope, receive, send))
+    assert starts[0]["status"] == 403
+    headers = {key.decode(): value.decode() for key, value in starts[0]["headers"]}
+    assert "default-src 'self'" in headers["content-security-policy"]
+    assert headers["x-content-type-options"] == "nosniff"

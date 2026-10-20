@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import subprocess
 from datetime import UTC, datetime
@@ -232,7 +233,9 @@ def test_composite_snapshot_guards_redaction_and_sse(tmp_path: Path) -> None:
         assert "content-security-policy" in response.headers
         assert response.headers["x-content-type-options"] == "nosniff"
         html = client.get("/", headers={"host": "127.0.0.1:7421"}).text
-        assert "Omega Prime — Task Dashboard" in html
+        assert "Command Center · Omega Prime" in html
+        legacy = client.get("/legacy", headers={"host": "127.0.0.1:7421"}).text
+        assert "Omega Prime — Task Dashboard" in legacy
         for secret in (
             _SESSION_SECRET,
             _JOB_SECRET,
@@ -242,8 +245,8 @@ def test_composite_snapshot_guards_redaction_and_sse(tmp_path: Path) -> None:
         ):
             assert secret not in response.text
             assert secret not in html
-        for method in ("POST", "PUT", "PATCH", "DELETE", "HEAD"):
-            for path in ("/", "/api/snapshot", "/healthz"):
+        for method in ("POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+            for path in ("/", "/cc/", "/legacy", "/cc/assets/index-DIGTqjrX.css", "/api/snapshot", "/healthz"):
                 assert (
                     client.request(
                         method, path, headers={"host": "127.0.0.1:7421"}
@@ -336,3 +339,116 @@ def test_degraded_sources_do_not_hide_healthy_snapshot(tmp_path: Path) -> None:
     assert poller.sources_status()["herdr"]["status"] == "unavailable"
     assert poller.sources_status()["podman"]["status"] == "unavailable"
     assert poller.sources_status()["github"]["status"] == "error"
+
+
+def test_snapshot_api_and_named_sse_share_redacted_nested_github_data() -> None:
+    secret = "ghp_" + token_hex(16)
+    github_payload = {
+        "repositories": [
+            {
+                "name": "omes-bot",
+                "visibility": "private",
+                "description": "token=" + secret,
+                "access_token": secret,
+            }
+        ],
+        "ci_cd": [
+            {
+                "name": "check",
+                "conclusion": "success",
+                "details_url": "https://example.invalid/check?token=" + secret,
+            }
+        ],
+        "recent_merges": [
+            {
+                "title": "safe merge",
+                "comment": "credential " + secret,
+                "url": "https://example.invalid/merge/" + secret,
+            }
+        ],
+        "meta": {"fetched_at": NOW.isoformat(), "age_seconds": 0},
+        "ignored_future_field": secret,
+    }
+    poller = DashboardPoller(
+        [
+            _spec(
+                "github",
+                lambda: SourceResult(
+                    "github",
+                    "ok",
+                    items=[
+                        {
+                            "kind": "github_pr",
+                            "repo": "swcstudiospace/omes-bot",
+                            "number": 47,
+                            "title": "aggregate PR",
+                        }
+                    ],
+                    extra={"command_center": github_payload},
+                ),
+            )
+        ],
+        clock=lambda: NOW,
+    )
+    asyncio.run(poller.refresh_now())
+    app = create_app(poller)
+    host = [(b"host", b"127.0.0.1:7421")]
+
+    with TestClient(app) as client:
+        response = client.get("/api/snapshot", headers={"host": "127.0.0.1:7421"})
+        assert response.status_code == 200
+        snapshot = response.json()
+        assert set(snapshot) == {
+            "generated_at",
+            "sources",
+            "active",
+            "pr_gate",
+            "waiting_on_ove",
+            "finished",
+        }
+        nested = snapshot["sources"]["github"]["command_center"]
+        assert set(nested) == {"repositories", "ci_cd", "recent_merges", "meta"}
+        assert snapshot["pr_gate"][0]["title"] == "aggregate PR"
+
+    async def read_one_event() -> str:
+        chunks: asyncio.Queue[str] = asyncio.Queue()
+
+        async def receive() -> dict[str, object]:
+            await asyncio.Event().wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict[str, object]) -> None:
+            body = message.get("body", b"")
+            if isinstance(body, bytes) and body:
+                chunks.put_nowait(body.decode("utf-8"))
+
+        scope: dict[str, object] = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/stream",
+            "raw_path": b"/api/stream",
+            "headers": host,
+            "query_string": b"",
+        }
+        stream_task = asyncio.create_task(app(scope, receive, send))
+        received = ""
+        try:
+            async with asyncio.timeout(2):
+                while "data: " not in received:
+                    received += await chunks.get()
+        finally:
+            stream_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stream_task
+        return received
+
+    event = asyncio.run(read_one_event())
+    assert "retry: 3000" in event
+    assert "event: snapshot" in event
+    frame = next(line.removeprefix("data: ") for line in event.splitlines() if line.startswith("data: "))
+    streamed = json.loads(frame)
+    assert streamed == snapshot
+    assert streamed["sources"]["github"]["command_center"] == nested
+    assert secret not in response.text
+    assert secret not in event
+    assert "ignored_future_field" not in event
