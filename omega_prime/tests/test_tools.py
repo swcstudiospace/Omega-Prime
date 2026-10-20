@@ -477,11 +477,10 @@ def test_exec_job_poll_reports_an_exited_child_without_blocking(tmp_path: Path):
     assert result["stdout"].strip() == "finished"
 
 
-def test_exec_job_poll_collects_complete_output_after_both_readers_finish(
+def test_exec_job_poll_bounds_output_after_both_readers_finish(
     tmp_path: Path,
 ):
     jobs = JobControl(tmp_path)
-    payload_size = 2 * 1024 * 1024
     job_id = jobs.start(
         [
             sys.executable,
@@ -499,11 +498,17 @@ def test_exec_job_poll_collects_complete_output_after_both_readers_finish(
 
     assert result["running"] is False
     assert result["exit_code"] == 0
-    assert result["stdout"] == "x" * payload_size
-    assert result["stderr"] == "x" * payload_size
+    retained_size = 1024 * 1024
+    assert result["stdout"] == "x" * retained_size
+    assert result["stderr"] == "x" * retained_size
+    job = jobs._job(job_id)
+    assert len(job["stdout"]) == 0
+    assert len(job["stderr"]) == 0
 
 
-def test_exec_job_drains_noisy_stdout_and_stderr_while_running(tmp_path: Path):
+def test_exec_job_drains_noisy_stdout_and_stderr_with_bounded_retention(
+    tmp_path: Path,
+):
     jobs = JobControl(tmp_path)
     job_id = jobs.start(
         [
@@ -518,8 +523,8 @@ def test_exec_job_drains_noisy_stdout_and_stderr_while_running(tmp_path: Path):
 
     assert result["running"] is False
     assert result["exit_code"] == 0
-    assert len(result["stdout"]) == 2 * 1024 * 1024
-    assert len(result["stderr"]) == 2 * 1024 * 1024
+    assert len(result["stdout"]) == 1024 * 1024
+    assert len(result["stderr"]) == 1024 * 1024
 
 
 def test_exec_job_shutdown_continues_after_a_job_cleanup_error(tmp_path: Path):

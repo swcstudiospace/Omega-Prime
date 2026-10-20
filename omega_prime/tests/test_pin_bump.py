@@ -2479,7 +2479,7 @@ def test_audit_scheduled_job_broken_config_fail_closed(tmp_path):
     assert pin_bump.audit_scheduled_job(None, root=tmp_path)["verdict"] == "error"
 
 
-def test_apply_scheduled_bump_forces_open_pr(tmp_path, capsys):
+def test_apply_scheduled_bump_forces_open_pr_without_stdout(tmp_path, capsys):
     root = _write_fixture_root(
         tmp_path,
         with_saved_old_audit=True,
@@ -2487,14 +2487,28 @@ def test_apply_scheduled_bump_forces_open_pr(tmp_path, capsys):
     )
     run = FakeRun()
     # Stored config never asked for --open-pr; the scheduled apply opens
-    # the normal bump PR path anyway.
+    # the normal bump PR path anyway, without writing CLI progress to stdout.
     rc = pin_bump.apply_scheduled_bump({"to": PIN_NEW}, root=root, run=run)
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
     assert rc == 0
+    assert captured.out == ""
     verbs = [cmd for cmd, _ in run.cmds]
     assert ["git", "checkout", "-b", f"pin-bump-{PIN_NEW[:7]}"] in verbs
     assert any(cmd[:2] == ["gh", "pr"] for cmd in verbs)
-    assert "https://example.test/pr/1" in out
+
+
+def test_apply_scheduled_bump_preserves_stderr(tmp_path, monkeypatch, capsys):
+    def noisy_bump(*_args, **_kwargs):
+        print("progress")
+        print("diagnostic", file=sys.stderr)
+        return pin_bump.EXIT_BUMP_FAILED
+
+    monkeypatch.setattr(pin_bump, "bump", noisy_bump)
+    rc = pin_bump.apply_scheduled_bump({"to": PIN_NEW}, root=tmp_path)
+    captured = capsys.readouterr()
+    assert rc == pin_bump.EXIT_BUMP_FAILED
+    assert captured.out == ""
+    assert captured.err == "diagnostic\n"
 
 
 # --rollback mode (M9) ----------------------------------------------------------

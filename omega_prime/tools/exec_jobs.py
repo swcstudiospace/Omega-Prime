@@ -49,8 +49,8 @@ class JobControl:
             "child": child,
             "lock": threading.Lock(),
             "result": None,
-            "stdout": [],
-            "stderr": [],
+            "stdout": bytearray(),
+            "stderr": bytearray(),
             "readers": [],
         }
         for name in ("stdout", "stderr"):
@@ -153,23 +153,31 @@ class JobControl:
         result = {
             "running": False,
             "exit_code": child.returncode,
-            "stdout": _text(b"".join(job["stdout"])),
-            "stderr": _text(b"".join(job["stderr"])),
+            "stdout": _text(job["stdout"]),
+            "stderr": _text(job["stderr"]),
         }
+        # Keep the cached text result, not a second copy of raw output bytes.
+        job["stdout"].clear()
+        job["stderr"].clear()
         job["result"] = result
         return {"id": job_id, **result}
 
 
-def _drain(stream: Any, chunks: list[bytes]) -> None:
-    """Continuously drain a child pipe so a full pipe cannot block its writer."""
+def _drain(stream: Any, output: bytearray) -> None:
+    """Continuously drain a child pipe while retaining only bounded output."""
     try:
         while True:
             chunk = os.read(stream.fileno(), 64 * 1024)
             if not chunk:
                 return
-            chunks.append(chunk)
+            remaining = _MAX_OUTPUT_BYTES - len(output)
+            if remaining > 0:
+                output.extend(chunk[:remaining])
     finally:
         stream.close()
+
+
+_MAX_OUTPUT_BYTES = 1024 * 1024
 
 
 def _signal_job(child: subprocess.Popen, signum: int) -> None:
@@ -239,7 +247,7 @@ def register_exec_job_tools(registry: Any, cwd: str | Path) -> JobControl:
     return jobs
 
 
-def _text(data: bytes | None) -> str:
+def _text(data: bytes | bytearray | None) -> str:
     if not data:
         return ""
     try:

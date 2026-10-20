@@ -759,9 +759,9 @@ def test_serve_sse_desk_driver_stops_once_after_normal_or_error(
     }
     if fail:
         with pytest.raises(RuntimeError, match="serve failed"):
-            serve_sse(ROOT, port=_free_port(), **kwargs)
+            serve_sse(ROOT, port=8000, **kwargs)
     else:
-        assert serve_sse(ROOT, port=_free_port(), **kwargs) == 0
+        assert serve_sse(ROOT, port=8000, **kwargs) == 0
     assert driver.started == 1
     assert driver.stopped == 1
     assert shutdowns == ["shutdown"]

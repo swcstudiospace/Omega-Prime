@@ -124,6 +124,47 @@ def test_enabled_prime_family_missing_exact_tools_fails(tmp_path):
     assert _prime_family_tools()["rlm"][0] in check.message
 
 
+def test_roster_uses_supplied_family_environment_without_loading_plugins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    roster_path = tmp_path / "omega_prime/contracts/tool-rosters/omega-prime.yaml"
+    roster_path.parent.mkdir(parents=True)
+    roster_path.write_text("tools: []\n", encoding="utf-8")
+    from omega_prime import mcp_server
+    from omega_prime.tools import plugins
+
+    rlm_tool = _prime_family_tools()["rlm"][0]
+    monkeypatch.setattr(mcp_server, "roster_names", lambda _text: [rlm_tool])
+    monkeypatch.setenv("OMEGA_PRIME_PRIME_RLM_ENABLED", "1")
+    monkeypatch.setenv("OMEGA_PRIME_PLUGINS", "1")
+    loaded_plugins = []
+    monkeypatch.setattr(
+        plugins, "load_plugins", lambda *args, **kwargs: loaded_plugins.append(True)
+    )
+
+    doctor = GrokBotDoctor(
+        tmp_path,
+        env={
+            "OMEGA_PRIME_PRIME_RLM_ENABLED": "0",
+            "OMEGA_PRIME_PLUGINS": "1",
+        },
+    )
+    check = doctor._check_roster()
+    rlm_check = next(
+        item
+        for item in doctor._check_prime_family_availability(
+            doctor._load_family_config(), registered_tools=doctor._registered_tool_names
+        )
+        if item.id == "prime_family_rlm"
+    )
+
+    assert check.status == "PASS"
+    assert doctor._registered_tool_names is not None
+    assert rlm_tool not in doctor._registered_tool_names
+    assert "disabled by configuration" in rlm_check.message
+    assert loaded_plugins == []
+
+
 def test_unknown_prefix_like_roster_tool_is_not_flag_gated(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):

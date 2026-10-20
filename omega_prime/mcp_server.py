@@ -766,6 +766,7 @@ def default_registry(
     approval_log: Any = None,
     env: dict | None = None,
     work_root: str | Path | None = None,
+    prime_config: Any = None,
 ) -> ToolRegistry:
     """Wire every family, including `delegate_task` on an in-process parent.
 
@@ -1018,7 +1019,7 @@ def default_registry(
     from omega_prime.tools.harness import register_harness_tools
     from omega_prime.tools.heartbeat import register_heartbeat_tools
 
-    config = load_config(root)
+    config = prime_config if prime_config is not None else load_config(root)
     if prime_enabled(config, "harness"):
         register_harness_tools(registry, root)
     if prime_enabled(config, "goals"):

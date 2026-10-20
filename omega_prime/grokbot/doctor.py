@@ -382,12 +382,19 @@ class GrokBotDoctor:
             / "omega-prime.yaml"
         )
         try:
+            from omega_prime.config import load_config
             from omega_prime.mcp_server import default_registry, roster_names
 
             roster = roster_names(path.read_text(encoding="utf-8"))
             registry_env = dict(self.env)
             registry_env["OMEGA_PRIME_PLUGINS"] = "0"
-            registry = default_registry(self.root, Path.home(), env=registry_env)
+            config = load_config(self.root, env=registry_env)
+            registry = default_registry(
+                self.root,
+                Path.home(),
+                env=registry_env,
+                prime_config=config,
+            )
             registered = {item["function"]["name"] for item in registry.schemas()}
             self._registered_tool_names = registered
             if not self._uses_provided_runtime_bindings:
