@@ -166,6 +166,13 @@ export class OpenShellPodmanTier implements SandboxTier {
     throw new TierUnavailable("openshell-podman", "gateway did not become ready with the podman driver");
   }
 
+  /** Sandboxes on this gateway other than ours. Unknown (gateway unreachable) counts as "none" only if the gateway is gone. */
+  async #otherSandboxes(): Promise<string[]> {
+    const l = await os(["sandbox", "list"], { timeoutMs: 30_000 });
+    if (l.code !== 0) return this.#gw && this.#gw.exitCode === null ? ["<unknown: sandbox list failed>"] : [];
+    return l.stdout.split("\n").map((x) => x.trim().split(/\s+/)[0] ?? "").filter((n) => n && n !== this.id && !/^(NAME|No)$/i.test(n));
+  }
+
   async #waitReady() {
     for (let i = 0; i < 240; i++) {
       const l = await os(["sandbox", "list"], { timeoutMs: 30_000 });
@@ -249,8 +256,15 @@ export class OpenShellPodmanTier implements SandboxTier {
     }
     await sleep(500);
     for (const pid of pids) if (pidAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} }
-    await stopProc(this.#gw); await stopProc(this.#svc);
-    for (const [what, p] of [["gateway", this.#gw], ["podman service", this.#svc]] as const) if (p?.pid && pidAlive(p.pid)) leftovers.push(`${what} pid ${p.pid}`);
+    // The gateway and Podman service this tier started are shared with any other wrapper that reused them
+    // (`#ensureGateway` adopts a running one). Stop them only when no other sandbox is still registered.
+    const others = this.#gw || this.#svc ? await this.#otherSandboxes() : [];
+    if (others.length) {
+      this.info.sharedServicesLeftRunning = { reason: `${others.length} other sandbox(es) still use the gateway`, gatewayPid: this.#gw?.pid ?? null, podmanServicePid: this.#svc?.pid ?? null };
+    } else {
+      await stopProc(this.#gw); await stopProc(this.#svc);
+      for (const [what, p] of [["gateway", this.#gw], ["podman service", this.#svc]] as const) if (p?.pid && pidAlive(p.pid)) leftovers.push(`${what} pid ${p.pid}`);
+    }
     leftovers.push(...pids.filter(pidAlive).map((p) => `pid ${p}`));
     return { leftovers };
   }

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { STATE, NODE24_BIN, BUN_EXE, BUN_INSTALL, SANDBOX_AGENT_BIN } from "../config.ts";
 import { freePort } from "../auth.ts";
-import { execCapture, pidAlive, rid, waitHttp } from "./util.ts";
+import { execCapture, groupAlive, killTree, rid, waitHttp } from "./util.ts";
 import type { SandboxTier } from "./types.ts";
 
 export class LocalTier implements SandboxTier {
@@ -20,6 +20,8 @@ export class LocalTier implements SandboxTier {
   #agent: ChildProcessWithoutNullStreams | null = null;
   #url = ""; #token = randomBytes(18).toString("hex");
   #children = new Set<ChildProcessWithoutNullStreams>();
+  /** Every process group this tier started (each spawn leads its own group, so descendants are owned too). */
+  #groups = new Set<number>();
 
   #fullEnv(extra: Record<string, string> = {}) {
     return { HOME: join(this.hostRoot, "home"), PATH: `${join(this.hostRoot, "bin")}:${NODE24_BIN}:/usr/local/bin:/usr/bin:/bin`, LANG: "C.UTF-8", TERM: "dumb", OMP_SANDBOX: "1", ...this.#env, ...extra };
@@ -30,25 +32,29 @@ export class LocalTier implements SandboxTier {
     for (const d of ["work", "home", "bin"]) mkdirSync(join(this.hostRoot, d), { recursive: true });
     for (const [t, n] of [[BUN_EXE, "bun"], [join(BUN_INSTALL, "bin", "omp"), "omp"]]) { const p = join(this.hostRoot, "bin", n); if (!existsSync(p)) symlinkSync(t, p); }
     const port = await freePort(); this.#url = `http://127.0.0.1:${port}`;
-    this.#agent = spawn(SANDBOX_AGENT_BIN, ["server", "--host", "127.0.0.1", "--port", String(port), "--token", this.#token, "--no-telemetry"], { cwd: this.hostRoot, env: this.#fullEnv(), stdio: ["pipe", "pipe", "pipe"] });
+    this.#agent = spawn(SANDBOX_AGENT_BIN, ["server", "--host", "127.0.0.1", "--port", String(port), "--token", this.#token, "--no-telemetry"], { cwd: this.hostRoot, env: this.#fullEnv(), stdio: ["pipe", "pipe", "pipe"], detached: true });
+    this.#groups.add(this.#agent.pid!);
     this.#agent.stdout.resume(); this.#agent.stderr.resume();
     await waitHttp(`${this.#url}/v1/health`, this.#token, 30_000);
   }
   sandboxAgent() { return { baseUrl: this.#url, token: this.#token }; }
   spawnStdio(argv: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
-    const p = spawn(argv[0], argv.slice(1), { cwd: opts.cwd ?? this.workdir, env: this.#fullEnv(opts.env), stdio: ["pipe", "pipe", "pipe"] });
+    const p = spawn(argv[0], argv.slice(1), { cwd: opts.cwd ?? this.workdir, env: this.#fullEnv(opts.env), stdio: ["pipe", "pipe", "pipe"], detached: true });
+    if (p.pid) this.#groups.add(p.pid);
+    // The group stays tracked after the leader exits: background descendants still belong to it.
     this.#children.add(p); p.once("exit", () => this.#children.delete(p)); return p;
   }
   exec(argv: string[], opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; input?: string } = {}) {
-    return execCapture(argv[0], argv.slice(1), { cwd: opts.cwd ?? this.workdir, env: this.#fullEnv(opts.env), timeoutMs: opts.timeoutMs ?? 600_000, input: opts.input });
+    return execCapture(argv[0], argv.slice(1), { cwd: opts.cwd ?? this.workdir, env: this.#fullEnv(opts.env), timeoutMs: opts.timeoutMs ?? 600_000, input: opts.input, killGroup: true });
   }
-  owned() { return { hostRoot: this.hostRoot, sandboxAgentPid: this.#agent?.pid ?? null, children: [...this.#children].map((c) => c.pid) }; }
+  owned() { return { hostRoot: this.hostRoot, sandboxAgentPid: this.#agent?.pid ?? null, children: [...this.#children].map((c) => c.pid), processGroups: [...this.#groups] }; }
   async dispose() {
-    const pids = [this.#agent?.pid, ...[...this.#children].map((c) => c.pid)].filter(Boolean) as number[];
-    for (const c of [...this.#children]) c.kill("SIGTERM"); this.#agent?.kill("SIGTERM");
+    const groups = [...this.#groups];
+    for (const g of groups) killTree(g, "SIGTERM");
     await new Promise((r) => setTimeout(r, 1500));
-    for (const pid of pids) if (pidAlive(pid)) try { process.kill(pid, "SIGKILL"); } catch {}
+    for (const g of groups) if (groupAlive(g)) killTree(g, "SIGKILL");
+    await new Promise((r) => setTimeout(r, 300));
     if (!process.env.OMP_SANDBOX_KEEP_WS) rmSync(this.hostRoot, { recursive: true, force: true });
-    return { leftovers: pids.filter(pidAlive).map((p) => `pid ${p}`) };
+    return { leftovers: groups.filter(groupAlive).map((g) => `process group ${g}`) };
   }
 }

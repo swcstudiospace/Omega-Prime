@@ -32,8 +32,8 @@ jobs:
       run:
         working-directory: omp-sandbox
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24"
           cache: npm
@@ -52,13 +52,26 @@ jobs:
       run:
         working-directory: omp-sandbox
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # The signed-access test drives the real Node core, so the rust job needs Node and the npm deps too.
+      # OMP_SANDBOX_REQUIRE_NODE=1 makes that test fail (not skip) if Node is missing.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: omp-sandbox/package-lock.json
+      - name: npm ci (no scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: point the Anda test at Node
+        run: echo "OMP_SANDBOX_NODE=$(command -v node)" >> "$GITHUB_ENV"
       - name: toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: omp-sandbox
       - name: build (locked)
         run: cargo build --locked
       - name: test (locked)
+        env:
+          OMP_SANDBOX_REQUIRE_NODE: "1"
         run: cargo test --locked

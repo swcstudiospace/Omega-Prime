@@ -117,10 +117,19 @@ export class OmpRpcClient extends EventEmitter {
   async prompt(message: string, timeoutMs = 0) {
     const id = `p-${randomBytes(4).toString("hex")}`;
     const done = this.#wait(`prompt_result:${id}`, timeoutMs);
+    // Observe `done` now: if the child exits before admission both waiters reject, and an unobserved
+    // rejection would crash the core even though the caller handles the admission error.
+    done.catch(() => {});
     const accepted = this.#wait(`response:${id}`, 60_000);
-    this.send({ id, type: "prompt", message });
-    const acc = await accepted;
-    if (acc.success === false) throw new Error(`${this.label}: prompt rejected: ${acc.error ?? ""}`);
+    try {
+      this.send({ id, type: "prompt", message });
+      const acc = await accepted;
+      if (acc.success === false) throw new Error(`${this.label}: prompt rejected: ${acc.error ?? ""}`);
+    } catch (e) {
+      this.#waiters.delete(`prompt_result:${id}`); this.#waiters.delete(`response:${id}`);
+      accepted.catch(() => {});
+      throw e;
+    }
     return done;
   }
 

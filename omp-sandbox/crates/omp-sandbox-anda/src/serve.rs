@@ -82,6 +82,8 @@ out({ event: "ready" });
     #[tokio::test(flavor = "multi_thread")]
     async fn signed_controller_allowed_everything_else_refused() {
         if std::process::Command::new(std::env::var("OMP_SANDBOX_NODE").unwrap_or_else(|_| format!("{}/tools/node24/bin/node", std::env::var("HOME").unwrap()))).arg("--version").output().is_err() {
+            // CI sets OMP_SANDBOX_REQUIRE_NODE=1 so a missing Node fails the signed-access test instead of skipping it.
+            if std::env::var("OMP_SANDBOX_REQUIRE_NODE").as_deref() == Ok("1") { panic!("OMP_SANDBOX_REQUIRE_NODE=1 but node is not runnable (set OMP_SANDBOX_NODE)"); }
             eprintln!("skipping: node not found"); return;
         }
         let root = std::env::temp_dir().join(format!("osa-serve-{}", std::process::id()));
