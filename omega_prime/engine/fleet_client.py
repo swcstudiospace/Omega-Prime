@@ -22,12 +22,15 @@ client:
 The coordinator reads ``Authorization: Bearer`` (``src/shared/util.ts``
 ``bearer``). This client sends that header and no other credential header.
 ``FLEET_COORDINATOR_URL`` and ``FLEET_COORDINATOR_TOKEN`` are read by name.
-A ``*_FILE`` sibling is used when the value itself is unset. Values are not
-logged, stored on the spec, or copied into errors.
+A ``*_FILE`` sibling is used when the value itself is unset. The token is
+resolved through the credential broker, and only after the seat policy
+allows the coordinator host. Plain HTTP is refused except on loopback.
+Values are not logged, stored on the spec, or copied into errors.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -40,7 +43,10 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
 
+from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.engine.protocol import redact
+from omega_prime.policy.policy import SeatPolicy
+from omega_prime.providers.base import ProviderError
 
 _REPO_OK = re.compile(r"^[^/\s]+/[^/\s]+$")
 _BRANCH_OK = re.compile(r"^[A-Za-z0-9._/-]+$")
@@ -253,6 +259,28 @@ def read_named_secret(env: Mapping[str, str], name: str) -> str:
     return text.strip()
 
 
+class _FleetCredential:
+    """Env name the broker resolves for the coordinator. Not a model provider."""
+
+    name = "fleet-coordinator"
+    requires_key = True
+    env_vars = ("FLEET_COORDINATOR_TOKEN",)
+
+
+def seat_policy() -> SeatPolicy:
+    """The shipped seat policy. A missing file allows no hosts."""
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "contracts"
+        / "policies"
+        / "omega-prime.json"
+    )
+    try:
+        return SeatPolicy.load(path)
+    except (OSError, ValueError):
+        return SeatPolicy({"version": 1})
+
+
 class FleetClient:
     """HTTP client. A missing URL or token means the fleet lane is unset."""
 
@@ -260,9 +288,12 @@ class FleetClient:
         self,
         env: Mapping[str, str] | None = None,
         transport: Transport | None = None,
+        policy: Any | None = None,
     ) -> None:
         self._env = env if env is not None else os.environ
         self._transport = transport if transport is not None else UrllibTransport()
+        self._policy = policy if policy is not None else seat_policy()
+        self._broker = CredentialBroker(self._policy, self._env)
         self._secret_error: str | None = None
 
     def configured(self) -> bool:
@@ -367,7 +398,13 @@ class FleetClient:
         if not self.configured():
             raise FleetError(self.configuration_error() or "not_configured")
         url = _join(read_named_secret(self._env, "FLEET_COORDINATOR_URL"), path, query)
-        token = read_named_secret(self._env, "FLEET_COORDINATOR_TOKEN")
+        host = urlsplit(url).hostname or ""
+        if not self._policy.allows_host(host):
+            raise FleetError("host_not_allowed")
+        try:
+            token = self._broker.key_for(_FleetCredential(), url)
+        except ProviderError:
+            raise FleetError("not_configured") from None
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {token}",
@@ -390,6 +427,15 @@ class FleetClient:
         return cleaned
 
 
+def _loopback(hostname: str) -> bool:
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 def _job_path(job_id: str) -> str:
     if not isinstance(job_id, str) or _JOB_ID_OK.fullmatch(job_id) is None:
         raise FleetError("invalid_job_id")
@@ -410,6 +456,8 @@ def _join(base: str, path: str, query: Mapping[str, str] | None) -> str:
     parts = urlsplit(base.strip())
     if parts.scheme not in {"http", "https"} or not parts.hostname:
         raise FleetError("invalid_coordinator_url")
+    if parts.scheme == "http" and not _loopback(parts.hostname):
+        raise FleetError("insecure_coordinator_url")
     if parts.username or parts.password or "@" in parts.netloc:
         raise FleetError("invalid_coordinator_url")
     suffix = path if path.startswith("/") else f"/{path}"
@@ -430,5 +478,6 @@ __all__ = [
     "Transport",
     "UrllibTransport",
     "read_named_secret",
+    "seat_policy",
     "validate_spec",
 ]

@@ -412,8 +412,12 @@ and `confirm_token`. The token is `OMEGA_PRIME_DISPATCH_CONFIRM`, or the
 file named by `OMEGA_PRIME_DISPATCH_CONFIRM_FILE` when the value is unset.
 `omega_jobs_status` and `omega_jobs_cancel` read and cancel fleet jobs.
 The fleet client reads `FLEET_COORDINATOR_URL` and
-`FLEET_COORDINATOR_TOKEN` (each also accepts a `*_FILE` sibling). Those
-values are not written into job files. The local lane stays on the box for
+`FLEET_COORDINATOR_TOKEN` (each also accepts a `*_FILE` sibling). The token
+is resolved through the credential broker, and the coordinator host must be
+listed in the seat policy `network.hosts` or the call is refused. Plain HTTP
+is accepted only for a loopback host. Those values are not written into job
+files. A local job that omits `max_files` or `max_minutes` is stored with
+the caps below. The local lane stays on the box for
 JS, TS, Python, and docs when the job has no Rust, Go, Docker, or mobile
 marker, at most 25 files, at most 30 minutes, at most 2 running local jobs,
 at least 3 GiB free, and at most one running `xai-oauth` job. A full box

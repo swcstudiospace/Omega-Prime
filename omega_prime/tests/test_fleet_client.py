@@ -5,9 +5,8 @@
 from __future__ import annotations
 
 import json
-import threading
+import urllib.request
 from collections.abc import Mapping
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from omega_prime.engine.fleet_client import (
@@ -15,6 +14,7 @@ from omega_prime.engine.fleet_client import (
     FleetError,
     HttpResponse,
     JobSpec,
+    UrllibTransport,
 )
 
 TOKEN = "fleet-test-token"
@@ -49,6 +49,14 @@ class FakeTransport:
         return self.handler(method, url, headers, body)
 
 
+class _Hosts:
+    def __init__(self, hosts: tuple[str, ...] = ("fleet.example", "127.0.0.1")) -> None:
+        self._hosts = {host.lower() for host in hosts}
+
+    def allows_host(self, host: str) -> bool:
+        return isinstance(host, str) and host.lower() in self._hosts
+
+
 def _client(handler, **env: str) -> tuple[FleetClient, FakeTransport]:
     base = {
         "FLEET_COORDINATOR_URL": "https://fleet.example",
@@ -56,7 +64,7 @@ def _client(handler, **env: str) -> tuple[FleetClient, FakeTransport]:
     }
     base.update(env)
     transport = FakeTransport(handler)
-    return FleetClient(base, transport), transport
+    return FleetClient(base, transport, policy=_Hosts()), transport
 
 
 def _ok(payload: dict) -> HttpResponse:
@@ -131,10 +139,10 @@ def test_token_file_is_read_and_a_loose_file_is_refused(tmp_path) -> None:
         "FLEET_COORDINATOR_URL": "https://fleet.example",
         "FLEET_COORDINATOR_TOKEN_FILE": str(path),
     }
-    client = FleetClient(env, FakeTransport(handler))
+    client = FleetClient(env, FakeTransport(handler), policy=_Hosts())
     assert client.submit(SPEC)["id"] == "job-3"
     path.chmod(0o644)
-    loose = FleetClient(env, FakeTransport(handler))
+    loose = FleetClient(env, FakeTransport(handler), policy=_Hosts())
     assert loose.configured() is False
     assert loose.configuration_error() == "secret_permissions"
 
@@ -239,44 +247,78 @@ def test_protected_branch_and_bad_repo_are_rejected() -> None:
         raise AssertionError("expected invalid_branch")
 
 
-def test_urllib_transport_posts_to_a_local_coordinator() -> None:
-    seen: dict[str, object] = {}
+def test_remote_http_is_refused_before_the_transport() -> None:
+    def handler(method, url, headers, body):
+        del method, url, headers, body
+        raise AssertionError("transport was called")
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length)
-            seen["path"] = self.path
-            seen["auth"] = self.headers.get("Authorization")
-            seen["body"] = raw
-            payload = json.dumps(
-                {"jobs": [{"id": "job-9", "status": "queued"}]}
-            ).encode()
-            self.send_response(201)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def log_message(self, fmt: str, *args: object) -> None:
-            del fmt, args
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    port = server.server_address[1]
+    client, _transport = _client(handler, FLEET_COORDINATOR_URL="http://fleet.example")
     try:
-        client = FleetClient(
-            {
-                "FLEET_COORDINATOR_URL": f"http://127.0.0.1:{port}",
-                "FLEET_COORDINATOR_TOKEN": TOKEN,
-            }
-        )
-        job = client.submit(JobSpec(repo="acme/widget", prompt="fix the test"))
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-    assert job["id"] == "job-9"
-    assert seen["path"] == "/jobs"
-    assert seen["auth"] == f"Bearer {TOKEN}"
-    assert json.loads(seen["body"])["repo"] == "acme/widget"  # type: ignore[arg-type]
+        client.submit(JobSpec(repo="acme/widget", prompt="docs"))
+    except FleetError as exc:
+        assert exc.code == "insecure_coordinator_url"
+    else:
+        raise AssertionError("expected insecure_coordinator_url")
+
+
+def test_shipped_policy_blocks_an_unlisted_host() -> None:
+    def handler(method, url, headers, body):
+        del method, url, headers, body
+        raise AssertionError("transport was called")
+
+    client = FleetClient(
+        {
+            "FLEET_COORDINATOR_URL": "https://fleet.example",
+            "FLEET_COORDINATOR_TOKEN": TOKEN,
+        },
+        FakeTransport(handler),
+    )
+    try:
+        client.submit(JobSpec(repo="acme/widget", prompt="docs"))
+    except FleetError as exc:
+        assert exc.code == "host_not_allowed"
+        assert TOKEN not in str(exc)
+    else:
+        raise AssertionError("expected host_not_allowed")
+
+
+def test_urllib_transport_uses_a_scripted_opener(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status = 201
+
+        def read(self) -> bytes:
+            return b'{"jobs":[{"id":"job-9"}]}'
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    class _Opener:
+        def open(self, request: urllib.request.Request, timeout: float) -> _Response:
+            del timeout
+            captured["url"] = request.full_url
+            captured["data"] = request.data
+            captured["auth"] = request.get_header("Authorization")
+            return _Response()
+
+    def build_opener(*handlers: object) -> _Opener:
+        captured["handlers"] = handlers
+        return _Opener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    response = UrllibTransport().request(
+        "POST",
+        "https://fleet.example/jobs",
+        {"Authorization": f"Bearer {TOKEN}"},
+        b"{}",
+    )
+    assert response.status == 201
+    assert captured["url"] == "https://fleet.example/jobs"
+    assert captured["auth"] == f"Bearer {TOKEN}"
+    handlers = captured["handlers"]
+    assert isinstance(handlers, tuple)
+    assert any(isinstance(item, urllib.request.ProxyHandler) for item in handlers)

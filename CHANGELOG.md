@@ -67,6 +67,10 @@ All notable changes to this project are documented here. Format follows
   The local executor in this change is a stub.
 - `omega_dispatch` requires approval and `confirm_token`.
   `omega_jobs_status` is read-only. `omega_jobs_cancel` requires approval.
+  The coordinator host must be in the seat policy `network.hosts`. A local
+  reservation is locked in the state directory. A local job with no file or
+  minute bound is stored at the local caps. Escalation posts the original
+  task text; receipts stay redacted.
 
 ### Purple-team operator tooling (batch 18)
 

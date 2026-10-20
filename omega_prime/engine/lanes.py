@@ -29,10 +29,16 @@ import json
 import os
 import re
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows
+    _fcntl = None  # type: ignore[assignment]
 
 from omega_prime.engine.fleet_client import (
     FleetClient,
@@ -70,7 +76,12 @@ _LOCAL_LANGUAGES = frozenset(
 _ESCALATION_REASONS = frozenset({"vm_limit", "unsupported_toolchain", "time_cap"})
 _MARKER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("rust", re.compile(r"(?i)(?:\brust\b|\.rs\b|cargo\.toml)")),
-    ("go", re.compile(r"(?i)(?:\bgolang\b|go\.mod|go\.sum|(?:^|[\s/])[^/\s]+\.go\b)")),
+    (
+        "go",
+        re.compile(
+            r"(?i)(?:\bgo\b|\bgolang\b|go\.mod|go\.sum|(?:^|[\s/])[^/\s]+\.go\b)"
+        ),
+    ),
     ("docker", re.compile(r"(?i)(?:\bdocker\b|dockerfile|docker-compose)")),
     (
         "mobile",
@@ -261,14 +272,20 @@ class LaneRouter:
         overflow: str = "spill",
     ) -> dict[str, Any]:
         """Choose a lane and start or queue the job. Returns a redacted record."""
-        box = self.snapshot(
-            languages=languages, paths=paths, extra_markers=extra_markers
-        )
-        decision = choose_lane(spec, box, limits=self._limits, overflow=overflow)
-        job_id = _local_id()
-        record = _base_record(job_id, spec, decision)
+        with self._reservation():
+            box = self.snapshot(
+                languages=languages, paths=paths, extra_markers=extra_markers
+            )
+            decision = choose_lane(spec, box, limits=self._limits, overflow=overflow)
+            job_id = _local_id()
+            if decision.lane == "local":
+                spec = _with_local_caps(spec, self._limits)
+            record = _base_record(job_id, spec, decision)
+            if decision.lane == "local":
+                self._write_lane(job_id, record)
+                self._write_spec(job_id, spec)
         if decision.lane == "local":
-            return self._accept_local(job_id, spec, record)
+            return self._start_local(job_id, spec, record)
         return self._submit_fleet(job_id, spec, record)
 
     def escalate(
@@ -286,7 +303,7 @@ class LaneRouter:
             raise FleetError("already_escalated")
         if current.get("lane") != "local":
             raise FleetError("not_local")
-        spec = _spec_from(current.get("spec"))
+        spec = self._read_spec(job_id)
         posted = replace(spec, branch=partial_branch)
         validate_spec(posted)
         fleet_job = self._client.submit(posted)
@@ -334,10 +351,9 @@ class LaneRouter:
             extra_markers=extra_markers,
         )
 
-    def _accept_local(
+    def _start_local(
         self, job_id: str, spec: JobSpec, record: dict[str, Any]
     ) -> dict[str, Any]:
-        self._write_lane(job_id, record)
         append_event(
             self._events_path(job_id),
             {
@@ -410,8 +426,40 @@ class LaneRouter:
             raise FleetError("unknown_job")
         return payload
 
+    @contextmanager
+    def _reservation(self) -> Iterator[None]:
+        """Exclusive lock from the capacity read through the local reservation.
+
+        The lock file lives in the state directory, so two MCP processes that
+        share that directory cannot both accept a local slot.
+        """
+        root = state_dir(self._env)
+        root.mkdir(parents=True, exist_ok=True)
+        handle = (root / "lanes.lock").open("a+")
+        try:
+            if _fcntl is not None:
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+            yield
+        finally:
+            if _fcntl is not None:
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+            handle.close()
+
     def _write_lane(self, job_id: str, record: dict[str, Any]) -> None:
         self._write_json(job_id, "lane.json", record)
+
+    def _write_spec(self, job_id: str, spec: JobSpec) -> None:
+        """Exact spec for a later fleet post. Receipts stay redacted."""
+        path = job_dir(self._env, job_id) / "spec.json"
+        atomic_write_json(path, spec.to_json())
+
+    def _read_spec(self, job_id: str) -> JobSpec:
+        path = job_dir(self._env, job_id) / "spec.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise FleetError("invalid_spec") from None
+        return _spec_from(payload)
 
     def _write_json(self, job_id: str, name: str, payload: dict[str, Any]) -> None:
         path = job_dir(self._env, job_id) / name
@@ -419,6 +467,15 @@ class LaneRouter:
 
     def _events_path(self, job_id: str) -> Path:
         return job_dir(self._env, job_id) / "events.jsonl"
+
+
+def _with_local_caps(spec: JobSpec, limits: LaneLimits) -> JobSpec:
+    """Fill missing local bounds with the approved caps. Over-cap jobs never arrive here."""
+    minutes = limits.max_minutes if spec.max_minutes is None else spec.max_minutes
+    files = limits.max_files if spec.max_files is None else spec.max_files
+    if minutes == spec.max_minutes and files == spec.max_files:
+        return spec
+    return replace(spec, max_minutes=minutes, max_files=files)
 
 
 def _local_id() -> str:

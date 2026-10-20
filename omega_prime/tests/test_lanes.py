@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 
@@ -31,6 +32,14 @@ LIMITS = LaneLimits()
 ROOMY = BoxSnapshot(free_bytes=4 * GIB)
 TOKEN = "fleet-test-token"
 CONFIRM = "confirm-test-token"
+
+
+class _Hosts:
+    def __init__(self, hosts: tuple[str, ...]) -> None:
+        self._hosts = {host.lower() for host in hosts}
+
+    def allows_host(self, host: str) -> bool:
+        return isinstance(host, str) and host.lower() in self._hosts
 
 
 def _spec(
@@ -103,7 +112,11 @@ def _router(
         "FLEET_COORDINATOR_URL": "https://fleet.example",
         "FLEET_COORDINATOR_TOKEN": TOKEN,
     }
-    client = FleetClient(env, transport or _Transport())
+    client = FleetClient(
+        env,
+        transport or _Transport(),
+        policy=_Hosts(("fleet.example",)),
+    )
     router = LaneRouter(
         env,
         client=client,
@@ -136,6 +149,7 @@ def test_cloud_markers_force_the_fleet() -> None:
         ("update docs", ("service/go.mod",)),
         ("notes", ("android/app/src",)),
         ("ship the ios app", ()),
+        ("Fix the Go service", ()),
     ]
     for prompt, paths in cases:
         decision = choose_lane(
@@ -240,6 +254,71 @@ def test_queue_does_not_start_the_executor(tmp_path) -> None:
     record = router.dispatch(_spec(), overflow="queue")
     assert record["status"] == "queued"
     assert executor.jobs == []
+
+
+def test_missing_bounds_are_filled_with_the_local_caps(tmp_path) -> None:
+    router, env = _router(tmp_path)
+    spec = JobSpec(
+        repo="acme/widget", prompt="fix the python test", model="zai/glm-4.5"
+    )
+    record = router.dispatch(spec, languages=("python",))
+    assert record["lane"] == "local"
+    stored = json.loads((job_dir(env, record["id"]) / "spec.json").read_text())
+    assert stored["max_minutes"] == 30
+    assert stored["max_files"] == 25
+
+
+def test_local_slot_is_reserved_before_another_dispatch(tmp_path) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def memory() -> int:
+        entered.set()
+        assert release.wait(timeout=2)
+        return 4 * GIB
+
+    router, _env = _router(tmp_path)
+    router._memory = memory
+    router._limits = LaneLimits(max_parallel=1)
+    first: list[dict[str, object]] = []
+    second: list[dict[str, object]] = []
+
+    def run_first() -> None:
+        first.append(router.dispatch(_spec(), languages=("python",)))
+
+    def run_second() -> None:
+        second.append(router.dispatch(_spec(), languages=("python",)))
+
+    left = threading.Thread(target=run_first)
+    left.start()
+    assert entered.wait(timeout=2)
+    right = threading.Thread(target=run_second)
+    right.start()
+    right.join(timeout=0.3)
+    assert right.is_alive()
+    release.set()
+    left.join(timeout=2)
+    right.join(timeout=2)
+    assert first[0]["status"] == "running"
+    assert second[0]["lane"] == "fleet"
+    reasons = second[0]["reasons"]
+    assert isinstance(reasons, list)
+    assert "max_parallel" in reasons
+
+
+def test_escalation_keeps_the_original_task_text(tmp_path) -> None:
+    transport = _Transport()
+    router, env = _router(tmp_path, transport, _Start())
+    prompt = "change token=old to token=new"
+    started = router.dispatch(_spec(prompt=prompt), languages=("python",))
+    spec_text = (job_dir(env, started["id"]) / "spec.json").read_text()
+    assert prompt in spec_text
+    lane_text = (job_dir(env, started["id"]) / "lane.json").read_text()
+    assert "token=old" not in lane_text
+    router.escalate(started["id"], reason="time_cap", partial_branch="fleet/partial-1")
+    assert transport.bodies[-1]["prompt"] == prompt
+    receipt = (job_dir(env, started["id"]) / "receipt.json").read_text()
+    assert "token=old" not in receipt
 
 
 def test_escalation_posts_the_partial_branch_and_records_the_lane_change(
@@ -406,6 +485,10 @@ def test_status_and_cancel_tools_use_the_client(monkeypatch) -> None:
 
     monkeypatch.setenv("FLEET_COORDINATOR_URL", "https://fleet.example")
     monkeypatch.setenv("FLEET_COORDINATOR_TOKEN", TOKEN)
+    monkeypatch.setattr(
+        "omega_prime.engine.fleet_client.seat_policy",
+        lambda: _Hosts(("fleet.example",)),
+    )
     monkeypatch.setattr("omega_prime.engine.fleet_client.UrllibTransport", Scripted)
     status = json.loads(registry.dispatch("omega_jobs_status", {}))
     assert status["coordinator"]["draining"] is False
