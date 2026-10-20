@@ -426,6 +426,38 @@ def test_engine_body_reads_result_fields() -> None:
     }
 
 
+def test_engine_usage_reaches_prime_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
+    import omega_prime.agent.conversation_loop as loop
+
+    observed: dict[str, Any] = {}
+
+    def evaluate_goal(_hooks: Any, _agent: Any, usage: Any, **_kwargs: Any) -> dict:
+        observed["usage"] = usage
+        return {}
+
+    monkeypatch.setattr(loop, "evaluate_goal", evaluate_goal)
+    monkeypatch.setattr(loop, "evaluate_autonomous", lambda *_args, **_kwargs: {})
+    agent = Agent(
+        model=ScriptedModel([]),
+        prime_hooks=object(),
+    )
+    routed = {
+        "messages": [{"role": "user", "content": "ping"}],
+        "api_calls": 1,
+        "engine": {
+            "usage": {"input_tokens": 17, "output_tokens": 9},
+            "started": True,
+        },
+        "turn_exit_reason": "engine",
+        "final_response": "done",
+    }
+
+    result = _seal_engine_turn(agent, routed, 0)
+
+    assert observed["usage"] == {"total_tokens": 26}
+    assert result["usage"] == {"total_tokens": 26}
+
+
 def test_fake_omp_session_discovers_configured_mcp_tools(tmp_path: Path) -> None:
     binary = _install_fake(tmp_path)
     root_mcp = tmp_path / "mcp.json"

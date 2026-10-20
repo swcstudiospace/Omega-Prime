@@ -634,15 +634,32 @@ class UIControlStore:
         finally:
             os.close(queue_fd)
 
-    def acknowledge_command(self, queue_id: str) -> None:
-        """Remove a consumed queue item using a no-follow descriptor-relative unlink."""
+    def acknowledge_command(
+        self,
+        queue_id: str,
+        *,
+        job_id: str,
+        session_generation: str,
+    ) -> None:
+        """Remove a queue item only after confirming its exact driver session."""
         if (
             not isinstance(queue_id, str)
             or re.fullmatch(r"[a-f0-9]{32}\.json", queue_id) is None
         ):
             raise UIControlError("invalid queue record id")
+        scope = _session_key(job_id, session_generation)
         queue_fd = self._queue_dir()
         try:
+            command = self._read_record(queue_fd, queue_id)
+            identity = command.get("identity") if isinstance(command, dict) else None
+            if (
+                not isinstance(identity, dict)
+                or identity.get("job_id") != scope["job_id"]
+                or identity.get("session_generation") != scope["session_generation"]
+            ):
+                raise UIControlError(
+                    "queue item does not belong to this driver session"
+                )
             os.unlink(queue_id, dir_fd=queue_fd)
             os.fsync(queue_fd)
         finally:

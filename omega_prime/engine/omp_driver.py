@@ -1110,7 +1110,11 @@ def _accept_prompt_ui(
                 "ui_control", "control queue item has no queue_id", started=True
             )
         try:
-            ui_control.acknowledge_command(queue_id)
+            ui_control.acknowledge_command(
+                queue_id,
+                job_id=job_id,
+                session_generation=session_generation,
+            )
         except (OSError, UIControlError) as exc:
             raise EngineError(
                 "ui_control", "unable to acknowledge operator command", started=True
@@ -1122,15 +1126,16 @@ def _accept_prompt_ui(
         raw_identity = command.get("identity")
         if not isinstance(raw_identity, Mapping):
             record_rejected({}, "invalid_identity")
-            acknowledge(command)
+            return
+        if (
+            raw_identity.get("job_id") != job_id
+            or raw_identity.get("session_generation") != session_generation
+        ):
+            record_rejected(raw_identity, "wrong_session")
             return
         if action == "abort":
-            if (
-                raw_identity.get("job_id") != job_id
-                or raw_identity.get("session_generation") != session_generation
-                or set(raw_identity) != {"job_id", "session_generation"}
-            ):
-                record_rejected(raw_identity, "wrong_session")
+            if set(raw_identity) != {"job_id", "session_generation"}:
+                record_rejected(raw_identity, "invalid_identity")
                 acknowledge(command)
                 return
             acknowledge(command)
@@ -1164,13 +1169,7 @@ def _accept_prompt_ui(
             record_rejected(raw_identity, "invalid_identity")
             acknowledge(command)
             return
-        if (
-            identity.job_id != job_id
-            or identity.session_generation != session_generation
-            or identity.turn_generation != turn_generation
-        ):
-            if identity.job_id == job_id:
-                resolve_store(identity, "rejected_stale")
+        if identity.turn_generation != turn_generation:
             record_rejected(raw_identity, "wrong_session")
             acknowledge(command)
             return
@@ -1227,7 +1226,11 @@ def _accept_prompt_ui(
 
         def send_response(response: dict[str, Any]) -> None:
             nonlocal acknowledged, write_attempted
-            ui_control.acknowledge_command(queue_id)
+            ui_control.acknowledge_command(
+                queue_id,
+                job_id=job_id,
+                session_generation=session_generation,
+            )
             acknowledged = True
             write_attempted = True
             session.send_frame(response)

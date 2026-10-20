@@ -403,25 +403,31 @@ def test_ui_control_health_allows_absent_request_and_queue_directories(
     assert check.status == "PASS"
 
 
-@pytest.mark.parametrize("unsafe_child", ["queue_mode", "requests_symlink"])
+@pytest.mark.parametrize(
+    ("unsafe_child", "unsafe_type"),
+    [
+        ("queue", "mode"),
+        ("requests", "mode"),
+        ("queue", "symlink"),
+        ("requests", "symlink"),
+    ],
+)
 def test_ui_control_health_fails_for_unsafe_child_directory(
-    tmp_path: Path, unsafe_child: str
+    tmp_path: Path, unsafe_child: str, unsafe_type: str
 ):
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
     control = state / "ui-control"
     control.mkdir(mode=0o700)
-    requests = control / "requests"
-    queue = control / "queue"
-    requests.mkdir(mode=0o700)
-    queue.mkdir(mode=0o700)
-    if unsafe_child == "queue_mode":
-        queue.chmod(0o755)
+    child = control / unsafe_child
+    child.mkdir(mode=0o700)
+    if unsafe_type == "mode":
+        child.chmod(0o755)
     else:
-        requests.rmdir()
-        target = tmp_path / "requests-target"
+        child.rmdir()
+        target = tmp_path / f"{unsafe_child}-target"
         target.mkdir(mode=0o700)
-        requests.symlink_to(target, target_is_directory=True)
+        child.symlink_to(target, target_is_directory=True)
 
     check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
 

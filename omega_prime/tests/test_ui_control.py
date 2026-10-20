@@ -170,11 +170,66 @@ def test_filtered_command_scan_preserves_unmatched_records(tmp_path: Path) -> No
         )
         assert selected is not None
         assert selected["identity"] == IDENTITY
-        store.acknowledge_command(selected["queue_id"])
+        store.acknowledge_command(
+            selected["queue_id"],
+            job_id=IDENTITY["job_id"],
+            session_generation=IDENTITY["session_generation"],
+        )
         unfiltered = store.next_command()
 
     assert unfiltered is not None
     assert unfiltered["identity"] == other_identity
+
+
+@pytest.mark.parametrize("action", ["answer", "abort"])
+def test_acknowledgement_preserves_cross_job_commands(
+    tmp_path: Path, action: str
+) -> None:
+    other_identity = {**IDENTITY, "job_id": "job-other"}
+    with _store(tmp_path) as store:
+        store.register_request(
+            other_identity, {"method": "confirm", "message": "Other job?"}
+        )
+        if action == "answer":
+            store.answer(other_identity, "confirm", True)
+        else:
+            store.abort(other_identity["job_id"], other_identity["session_generation"])
+        queued = store.next_command()
+        assert queued is not None
+        with pytest.raises(UIControlError, match="does not belong"):
+            store.acknowledge_command(
+                queued["queue_id"],
+                job_id=IDENTITY["job_id"],
+                session_generation=IDENTITY["session_generation"],
+            )
+        assert store.next_command() is not None
+
+
+def test_acknowledgement_preserves_same_job_other_session_answer(
+    tmp_path: Path,
+) -> None:
+    other_identity = {**IDENTITY, "session_generation": "session-other"}
+    with _store(tmp_path) as store:
+        store.register_request(
+            other_identity, {"method": "confirm", "message": "Other session?"}
+        )
+        store.answer(other_identity, "confirm", True)
+        assert (
+            store.next_command(
+                job_id=IDENTITY["job_id"],
+                session_generation=IDENTITY["session_generation"],
+            )
+            is None
+        )
+        queued = store.next_command()
+        assert queued is not None
+        with pytest.raises(UIControlError, match="does not belong"):
+            store.acknowledge_command(
+                queued["queue_id"],
+                job_id=IDENTITY["job_id"],
+                session_generation=IDENTITY["session_generation"],
+            )
+        assert store.next_command() is not None
 
 
 def test_status_discards_terminal_duplicate_answers_after_concurrent_cleanup(
