@@ -32,6 +32,7 @@ from omega_prime.credentials.redact import redact_text, redact_value
 from omega_prime.memory.hindsight import Hindsight
 from omega_prime.memory.store import MemoryStore
 from omega_prime.receipts import ReceiptError, load_executions, validate_receipt
+from omega_prime.settings import SettingsResult
 from omega_prime.tooling.fs import atomic_write_text, ensure_private_dir
 from omega_prime.tools.registry import ToolRegistry
 
@@ -550,6 +551,10 @@ class LeadContext:
     roster: RosterStore | None = None
     events: EventStore | None = None
     substrate: Any = None
+    substrate_configured: bool = False
+    substrate_error: str | None = None
+    substrate_auth_configured: bool = False
+    settings_status: SettingsResult | None = None
     bus: Any = None
     docs_index: Any = None
     notify: Any = None
@@ -992,11 +997,45 @@ class LeadClient:
         checks["tools"] = {"green": live >= base, "pack": base, "live": live}
         packs = sorted(self.ctx.roster.packs) if self.ctx.roster else []
         checks["roster"] = {"green": "lead" in packs, "registered": packs}
+        substrate_detail = (
+            "configured only; reachability not checked"
+            if self.ctx.substrate_configured
+            else (self.ctx.substrate_error or "substrate gateway is not configured")
+            + "; set SUBSTRATE_URL via process environment or settings file"
+        )
+        if self.ctx.substrate_configured and not self.ctx.substrate_auth_configured:
+            substrate_detail += "; anonymous mode"
         checks["substrate"] = {
-            "green": self.ctx.substrate is not None,
-            "detail": ""
-            if self.ctx.substrate is not None
-            else "substrate is not configured",
+            "green": self.ctx.substrate_configured,
+            "configured": self.ctx.substrate_configured,
+            "auth_configured": self.ctx.substrate_auth_configured,
+            "detail": substrate_detail,
+        }
+        status = self.ctx.settings_status
+        status_name = (
+            getattr(status, "status", "missing") if status is not None else "missing"
+        )
+        loaded_names = (
+            tuple(getattr(status, "loaded_names", ())) if status is not None else ()
+        )
+        rejected_names = (
+            tuple(getattr(status, "rejected_names", ())) if status is not None else ()
+        )
+        reasons = tuple(getattr(status, "reasons", ())) if status is not None else ()
+        settings_green = status_name in ("missing", "loaded")
+        checks["settings"] = {
+            "green": settings_green,
+            "status": status_name,
+            "loaded_names": list(loaded_names),
+            "rejected_names": list(rejected_names),
+            "reasons": list(reasons),
+            "detail": (
+                "optional settings file not present"
+                if status_name == "missing"
+                else "settings loaded"
+                if status_name == "loaded"
+                else "settings rejected; process environment only"
+            ),
         }
         green = all(c["green"] for c in checks.values())
         # check is ungated and must not write the roster. install_prompt and
@@ -1123,6 +1162,7 @@ class LeadClient:
         action: str,
         surface: str | None = None,
         note: str | None = None,
+        lease_id: str | None = None,
     ) -> dict[str, Any]:
         """Claim, release, or complete one graph node."""
         if action not in GRAPH_ACTIONS:
@@ -1134,14 +1174,21 @@ class LeadClient:
             or node_id == ""
         ):
             raise ValueError("graph_id and node_id must be non-empty strings")
+        if action in ("release", "complete") and (
+            not isinstance(lease_id, str) or lease_id == ""
+        ):
+            raise ValueError("lease_id is required for release and complete actions")
         if self.ctx.substrate is None:
             return _error("not_configured", "substrate is not configured")
         tool = GRAPH_ACTIONS[action]
         payload: dict[str, Any] = {
             "graph_id": graph_id,
             "node_id": node_id,
-            "session_id": f"grok-bot:{surface or 'lead'}:{graph_id}",
         }
+        if action == "claim":
+            payload["session_id"] = f"grok-bot:{surface or 'lead'}:{graph_id}"
+        else:
+            payload["lease_id"] = lease_id
         if action == "complete":
             payload["result"] = {
                 "summary": note or "completed via Omega Prime lead pack",
@@ -1328,7 +1375,7 @@ def register_lead_tools(registry: ToolRegistry, client: LeadClient) -> list[str]
         "lead_graph_register": lambda graph_id, repo, nodes=None: _wrap(
             client.graph_register, graph_id, repo, nodes=nodes
         ),
-        "lead_graph_state": lambda graph_id, node_id, action, surface=None, note=None: (
+        "lead_graph_state": lambda graph_id, node_id, action, surface=None, note=None, lease_id=None: (
             _wrap(
                 client.graph_state,
                 graph_id,
@@ -1336,6 +1383,7 @@ def register_lead_tools(registry: ToolRegistry, client: LeadClient) -> list[str]
                 action,
                 surface=surface,
                 note=note,
+                lease_id=lease_id,
             )
         ),
         "lead_bus_start": lambda runtime, goal, provider=None, idempotency_key=None: (
@@ -1513,7 +1561,8 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
                 "graph_id": _string("Graph id."),
                 "node_id": _string("Node id."),
                 "action": _string("claim, release, or complete."),
-                "surface": _string("Surface name."),
+                "lease_id": _string("Lease id required for release or complete."),
+                "surface": _string("Surface name, for claims."),
                 "note": _string("Completion note."),
             },
             ["graph_id", "node_id", "action"],

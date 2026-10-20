@@ -1,12 +1,12 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v21 — Task Dashboard",
+  "milestone": "v20 — Wiring",
   "phases": [],
   "next": {
-    "command": "/gsd:progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 104 of 1 · 0% · executing"
+    "command": "/skill:gsd-autonomous 97",
+    "label": "Execute Phase 97 plan",
+    "reason": "Five Phase 97 execution plans are staged (01–05); planning is complete and independent units may proceed after separate manual invocation. Authoritative upstream schema confirmation is required before server-specific implementation."
   },
-  "updated_at": "2026-10-20T15:25:18.070Z"
+  "updated_at": "2026-10-21"
 }

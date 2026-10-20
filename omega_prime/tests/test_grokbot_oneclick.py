@@ -1,5 +1,6 @@
 """Tests for Grok Bot 1-Click Launcher."""
 
+import hashlib
 import itertools
 import json
 import os
@@ -61,6 +62,86 @@ def test_oneclick_dry_run_sse(tmp_path: Path):
     assert data["mcp_server"]["transport"] == "sse"
     assert data["mcp_server"]["url"] == "http://127.0.0.1:59125/sse"
     assert data["mcp_server"]["auth"]["type"] == "bearer"
+
+
+def test_sse_host_receives_saved_settings_with_process_env_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    settings_dir = tmp_path / ".omega-prime"
+    settings_dir.mkdir()
+    settings_file = settings_dir / "settings.json"
+    settings_file.write_text(
+        json.dumps(
+            {
+                "SUBSTRATE_URL": "https://saved.example",
+                "ULTRATHINK_ROOT": str(tmp_path / "saved-root"),
+                "OMEGA_PRIME_STATE_DIR": str(tmp_path / "saved-state"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings_file.chmod(0o600)
+    monkeypatch.setenv("OMEGA_PRIME_SETTINGS_FILE", str(settings_file))
+    monkeypatch.delenv("SUBSTRATE_URL", raising=False)
+    monkeypatch.delenv("OMEGA_PRIME_STATE_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("ULTRATHINK_ROOT", str(tmp_path / "process-root"))
+    host: dict[str, Any] = {}
+
+    def fake_serve_sse(**kwargs: Any) -> int:
+        host.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("omega_prime.grokbot.remote.serve_sse", fake_serve_sse)
+
+    assert (
+        run_oneclick(
+            find_repo_root(),
+            transport="sse",
+            auth_token=TOKEN,
+            skip_doctor=True,
+        )
+        == 0
+    )
+
+    assert host["env"]["SUBSTRATE_URL"] == "https://saved.example"
+    assert host["env"]["ULTRATHINK_ROOT"] == str(tmp_path / "process-root")
+    assert host["env"]["OMEGA_PRIME_STATE_DIR"] == str(tmp_path / "saved-state")
+
+
+def test_sse_approval_validation_uses_saved_state_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    settings_dir = tmp_path / ".omega-prime"
+    settings_dir.mkdir()
+    state_dir = tmp_path / "saved-state"
+    settings_file = settings_dir / "settings.json"
+    settings_file.write_text(
+        json.dumps({"OMEGA_PRIME_STATE_DIR": str(state_dir)}),
+        encoding="utf-8",
+    )
+    settings_file.chmod(0o600)
+    monkeypatch.setenv("OMEGA_PRIME_SETTINGS_FILE", str(settings_file))
+    monkeypatch.delenv("SUBSTRATE_URL", raising=False)
+    monkeypatch.delenv("OMEGA_PRIME_STATE_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    approvals = state_dir / "approvals.txt"
+    approvals.parent.mkdir()
+    content = "read_file:admin\n"
+    approvals.write_text(content, encoding="utf-8")
+    approvals.chmod(0o600)
+
+    result = run_oneclick(
+        find_repo_root(),
+        transport="sse",
+        auth_token=TOKEN,
+        skip_doctor=True,
+        approvals_file=approvals,
+        approvals_sha256=hashlib.sha256(content.encode()).hexdigest(),
+    )
+
+    assert result != 0
+    assert "outside OMEGA_PRIME_STATE_DIR" in capsys.readouterr().err
 
 
 @pytest.fixture(autouse=True)
@@ -543,6 +624,38 @@ def test_log_format_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
     assert main(_sse()) == 0
     assert calls[1]["log_format"] == "text"
     assert calls[1]["token_store_path"] is None
+
+
+def test_sse_uses_file_settings_and_preserves_environment_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _recording_serve(monkeypatch)
+    monkeypatch.delenv("SUBSTRATE_URL", raising=False)
+    monkeypatch.delenv("ULTRATHINK_ROOT", raising=False)
+    monkeypatch.delenv("OMEGA_PRIME_STATE_DIR", raising=False)
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "SUBSTRATE_URL": "https://file.example",
+                "ULTRATHINK_ROOT": str(tmp_path / "ultrathink"),
+                "OMEGA_PRIME_STATE_DIR": str(tmp_path / "state"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings_path.chmod(0o600)
+    monkeypatch.setenv("OMEGA_PRIME_SETTINGS_FILE", str(settings_path))
+    assert main(_sse()) == 0
+    file_env = calls[0]["env"]
+    assert file_env["SUBSTRATE_URL"] == "https://file.example"
+    assert file_env["ULTRATHINK_ROOT"] == str(tmp_path / "ultrathink")
+    assert file_env["OMEGA_PRIME_STATE_DIR"] == str(tmp_path / "state")
+    assert calls[0]["settings_status"].status == "loaded"
+
+    monkeypatch.setenv("SUBSTRATE_URL", "https://environment.example")
+    assert main(_sse()) == 0
+    assert calls[1]["env"]["SUBSTRATE_URL"] == "https://environment.example"
 
 
 def test_self_test_conflicts_with_dry_run(capsys: pytest.CaptureFixture[str]) -> None:

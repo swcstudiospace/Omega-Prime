@@ -48,7 +48,9 @@ def delegate_task(
             # A plan-mode parent, a child_tool_hook, or a narrowed tool map
             # must not receive the full MCP registry.
             if not _restricted(parent):
-                routed = delegate_via_engine(goals[0])
+                routed = delegate_via_engine(
+                    goals[0], interrupt=getattr(parent, "interrupt", None)
+                )
                 if routed is not None:
                     return routed
         return _error("parent.child_model is required")

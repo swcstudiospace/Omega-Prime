@@ -67,12 +67,15 @@ from omega_prime.providers.http import HttpTransport
 from omega_prime.providers.ollama import OllamaProvider
 from omega_prime.providers.openai import OpenAIProvider
 from omega_prime.routines.desk_lead import desk_intake_path
-from omega_prime.substrate.client import (
-    DEFAULT_BASE_URL as SUBSTRATE_DEFAULT_URL,
-)
+from omega_prime.settings import SettingsResult, load_settings
 from omega_prime.substrate.client import (
     SubstrateClient,
     SubstrateError,
+    SubstrateNotConfiguredError,
+    SubstrateProtocolError,
+    SubstrateToolError,
+    SubstrateUnauthorizedError,
+    SubstrateUnreachableError,
 )
 from omega_prime.tooling.fs import ensure_private_dir, read_secret_file
 from omega_prime.tooling.roster import roster_names
@@ -370,7 +373,7 @@ class _DeskSubstrate:
     graph claims hit the actual substrate plane.
     """
 
-    def __init__(self, client: SubstrateClient) -> None:
+    def __init__(self, client: Any) -> None:
         self._client = client
 
     def emit(self, event: Any) -> dict:
@@ -383,9 +386,15 @@ class _DeskSubstrate:
         }
         result = self._client.emit("note", summary, **fields)
         if isinstance(result, dict) and result.get("stored") is False:
+            message = str(result.get("error") or "event not accepted")
+            error = (
+                "not_configured"
+                if message.startswith("not_configured:")
+                else "upstream_error"
+            )
             return {
-                "error": "upstream_error",
-                "reason": str(result.get("error") or "event not accepted"),
+                "error": error,
+                "reason": message.removeprefix("not_configured: ").strip(),
             }
         return {"body": result}
 
@@ -394,9 +403,23 @@ class _DeskSubstrate:
         # carries one so injected fakes can honor it.
         _ = timeout
         try:
+            if name in {"graph_release", "graph_complete"}:
+                return {"content": self._client._call_tool_text(name, payload)}
             return {"content": self._client._call_tool(name, payload)}
         except SubstrateError as exc:
-            return {"error": "upstream_error", "reason": str(exc)}
+            if isinstance(exc, SubstrateNotConfiguredError):
+                error = "not_configured"
+            elif isinstance(exc, SubstrateUnauthorizedError):
+                error = "unauthorized"
+            elif isinstance(exc, SubstrateUnreachableError):
+                error = "unreachable"
+            elif isinstance(exc, SubstrateProtocolError):
+                error = "protocol_error"
+            elif isinstance(exc, SubstrateToolError):
+                error = "tool_error"
+            else:
+                error = "upstream_error"
+            return {"error": error, "reason": str(exc)}
 
 
 class _DeskDocsIndex:
@@ -765,6 +788,7 @@ def default_registry(
     approval_log: Any = None,
     env: dict | None = None,
     work_root: str | Path | None = None,
+    settings_status: SettingsResult | None = None,
 ) -> ToolRegistry:
     """Wire every family, including `delegate_task` on an in-process parent.
 
@@ -799,6 +823,7 @@ def default_registry(
     """
     env = dict(env or {})
     registry = ToolRegistry(approval_log=approval_log, policy=policy)
+    registry.runtime_bindings["settings_status"] = settings_status
     root = Path(root)
     home = Path(home)
     work = resolve_work_root(root, env, work_root)
@@ -888,12 +913,13 @@ def default_registry(
         env, "SUBSTRATE_TOKEN_GROK_BOT"
     )
     substrate_client = SubstrateClient(
-        env.get("SUBSTRATE_URL", "") or SUBSTRATE_DEFAULT_URL,
+        env.get("SUBSTRATE_URL") or None,
         token=substrate_token or None,
         honor_binding=True,
         binding_env=env,
         policy=policy,
     )
+    substrate_base, substrate_error = substrate_client._resolve_base()
     docs_url = (env.get(DESK_DOCS_INDEX_ENV) or "").strip()
     notify_url = (env.get(DESK_NOTIFY_URL_ENV) or "").strip()
     bus_url = (env.get(DESK_BUS_URL_ENV) or "").strip()
@@ -914,6 +940,10 @@ def default_registry(
                 roster=RosterStore(_desk_store_path(work, state_value, "packs.json")),
                 events=EventStore(_desk_store_path(work, state_value, "events.ndjson")),
                 substrate=_DeskSubstrate(substrate_client),
+                substrate_configured=substrate_base is not None,
+                substrate_error=substrate_error,
+                substrate_auth_configured=bool(substrate_token),
+                settings_status=settings_status,
                 docs_index=_DeskDocsIndex(
                     SubstrateClient(
                         docs_url,
@@ -1372,6 +1402,7 @@ class Runtime:
     # answers `not_configured: provider`).
     work_root: Path
     parent: Any
+    settings_status: SettingsResult | None = None
 
 
 def _desk_driver_of(runtime: object) -> DeskDriver | None:
@@ -1396,6 +1427,7 @@ def load_runtime(
     approvals: Sequence[tuple[str, str]] = (),
     env: Mapping[str, str] | None = None,
     work_root: str | Path | None = None,
+    settings_status: SettingsResult | None = None,
 ) -> Runtime:
     """Load roster, seat policy and approvals, then build the registry.
 
@@ -1435,13 +1467,15 @@ def load_runtime(
             raise RuntimeConfigError(
                 f"cannot pre-approve {tool}: {outcome.get('error')}"
             )
+    settings_env = dict(os.environ if env is None else env)
     registry = default_registry(
         root,
         home,
         policy=policy,
         approval_log=log,
-        env=dict(os.environ if env is None else env),
+        env=settings_env,
         work_root=work_root,
+        settings_status=settings_status,
     )
     tool_names = [tool.name for tool in _mcp_tools(registry, roster)]
     gated = [name for name in tool_names if registry.approval_required(name)]
@@ -1458,6 +1492,7 @@ def load_runtime(
             root, dict(os.environ if env is None else env), work_root
         ),
         parent=registry.runtime_bindings.get("delegate_parent"),
+        settings_status=settings_status,
     )
 
 
@@ -1695,7 +1730,10 @@ def main(argv: list[str] | None = None) -> int:
     from omega_prime.grokbot.audit import default_audit_path
 
     resolved_audit = args.audit_log if args.audit_log else default_audit_path(root)
-    host_env = dict(os.environ)
+    process_env = dict(os.environ)
+    process_env["OMEGA_PRIME_AUDIT_LOG"] = str(resolved_audit)
+    settings = load_settings(process_env)
+    host_env = dict(settings.effective_env)
     host_env["OMEGA_PRIME_AUDIT_LOG"] = str(resolved_audit)
 
     def _fail(reason: object) -> int:
@@ -1711,7 +1749,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             approvals.extend(
                 load_approvals_file(
-                    approvals_path, repo_root=root, digest=approvals_digest
+                    approvals_path,
+                    repo_root=root,
+                    digest=approvals_digest,
+                    env=host_env,
                 )
             )
         except ValueError as exc:
@@ -1767,9 +1808,9 @@ def main(argv: list[str] | None = None) -> int:
             allow_insecure_no_auth=args.allow_insecure_no_auth,
             audit=audit,
             approvals=approvals,
-            env=host_env,
             max_body_bytes=args.max_body_bytes,
-            shutdown_grace=args.shutdown_grace,
+            env=host_env,
+            settings_status=settings,
             token_store_path=args.token_store,
             rate_limit=args.rate_limit,
             global_rate_limit=args.global_rate_limit,
@@ -1783,6 +1824,7 @@ def main(argv: list[str] | None = None) -> int:
             session_idle_timeout=args.session_idle_timeout,
             max_sessions=args.max_sessions,
             approval_max_ttl=args.approval_max_ttl,
+            shutdown_grace=args.shutdown_grace,
         )
 
     try:
@@ -1793,6 +1835,7 @@ def main(argv: list[str] | None = None) -> int:
             approvals=approvals,
             env=host_env,
             work_root=args.work_root,
+            settings_status=settings,
         )
     except ValueError as exc:
         return _fail(exc)

@@ -1409,7 +1409,7 @@ def test_skipped_gateways_do_not_use_the_default_url(
             raise AssertionError("network")
 
     substrate = SubstrateClient(
-        "http://127.0.0.1:1",
+        "https://substrate.example",
         transport=Transport(),
         honor_binding=True,
         binding_env=_env(tmp_path),

@@ -105,10 +105,10 @@ Configure only the integrations you intend to use. Availability and failure
 behavior are tool-specific: some tools return `not_configured`, readiness
 accounts for named prerequisites, and some clients raise or degrade reads.
 See [substrate](substrate.md) and [connectors](connectors.md) for those contracts.
-`SUBSTRATE_URL` (default `http://127.0.0.1:7410`) overrides the substrate
-peer. `HINDSIGHT_URL` defaults to unset, which disables the remote bank;
-set it only to a service you operate. `omega_prime/grokbot/SETUP.md` has the
-full secret table.
+`SUBSTRATE_URL` has no default; set an HTTPS endpoint you operate or use
+the explicit `SUBSTRATE_URL=local` loopback opt-in. `HINDSIGHT_URL` defaults
+to unset, which disables the remote bank; set it only to a service you
+operate. `omega_prime/grokbot/SETUP.md` has the full secret table.
 
 Send `/omega-connectors` to walk installer setup: the Notion template in
 [notion-task-dashboard.md](notion-task-dashboard.md), then Notion, then
@@ -419,10 +419,16 @@ Connector settings already in the environment (`X_API_TOKEN`,
 desk client variables) are passed through to that process. They are not
 written into `mcp.json`. Plan mode, a narrowed tool roster, and a
 `child_tool_hook` stay on the Python loop so those turns do not receive
-tools the caller removed. `omega watch JOB --follow` waits for the event file to appear, then until
-the job ends (`agent_end`, or `job_end` when a launch fails after the event
-file exists). Pass `--timeout` to bound that wait. A refusal before the prompt
-is sent does not spend a caller-supplied iteration budget.
+tools the caller removed.
+
+`omega watch JOB --follow` waits for the event file to appear, then until the
+job ends (`agent_end`, or `job_end` when a launch fails after the event file
+exists). Pass `--timeout` only to bound this observer's wait; it does not stop
+the engine turn. A started turn has no duration deadline: the driver polls
+process and pipe liveness until `agent_end` or the existing explicit
+interrupt, and reports a clear failure if the process or stream dies. This
+polling detects state; it is not a timeout. Bounded readiness, RPC command,
+transport, and cleanup waits remain separate and do not limit active inference.
 
 `OMEGA_PRIME_ENGINE=omp` makes the conversation loop, delegate, desk-lead
 pass, and ultrathink turn require the engine. Unset, or `auto`, uses the
@@ -441,13 +447,16 @@ The fleet client reads `FLEET_COORDINATOR_URL` and
 is resolved through the credential broker, and the coordinator host must be
 listed in the seat policy `network.hosts` or the call is refused. Plain HTTP
 is accepted only for a loopback host. Those values are not written into job
-files. A local job that omits `max_files` or `max_minutes` is stored with
-the caps below. The local lane stays on the box for
-JS, TS, Python, and docs when the job has no Rust, Go, Docker, or mobile
-marker, at most 25 files, at most 60 minutes, at most 2 running local jobs,
-at least 3 GiB free, and at most one running `xai-oauth` job. A full box
-spills to the fleet, or queues locally when `overflow` is `queue`. A local
-job that hits a limit is re-queued to the fleet with its partial branch.
+files. A local job that omits `max_files` receives the 25-file default;
+`max_minutes` remains unset (`None`) unless an operator explicitly configures
+a minute classification limit. A 600-minute spec does not spill under the
+default limits. The local lane stays on the box for JS, TS, Python, and docs
+when the job has no Rust, Go, Docker, or mobile marker, at most 25 files, at
+most 2 running local jobs, at least 3 GiB free, and at most one running
+`xai-oauth` job. A full box spills to the fleet, or queues locally when
+`overflow` is `queue`. Resource or configured classification limits still
+apply; a local job that hits one is re-queued to the fleet with its partial
+branch.
 
 ## Contributor CI
 

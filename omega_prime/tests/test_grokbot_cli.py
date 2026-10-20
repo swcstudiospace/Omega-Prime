@@ -97,7 +97,16 @@ def test_stdio_serves_with_runtime_and_approvals(
     loaded: list[tuple[Path, Path, bool, list[tuple[str, str]]]] = []
     served: list[object] = []
 
-    def _load_runtime(root, home, *, no_roster, approvals, work_root=None, env=None):
+    def _load_runtime(
+        root,
+        home,
+        *,
+        no_roster,
+        approvals,
+        work_root=None,
+        env=None,
+        settings_status=None,
+    ):
         loaded.append((root, home, no_roster, list(approvals)))
         return runtime
 
@@ -148,8 +157,9 @@ def test_stdio_stamps_the_resolved_audit_log(
         approvals: object,
         work_root: object = None,
         env: dict[str, str] | None = None,
+        settings_status: object = None,
     ) -> SimpleNamespace:
-        del home, no_roster, approvals, work_root
+        del home, no_roster, approvals, work_root, settings_status
         captured["root"] = root
         captured["env"] = env
         return SimpleNamespace(registry=object(), roster=["read_file"])
@@ -625,8 +635,9 @@ def test_stdio_ignores_sse_enterprise_flags(
         approvals: object,
         work_root: object = None,
         env: object = None,
+        settings_status: object = None,
     ):
-        del root, home, no_roster, approvals, work_root, env
+        del root, home, no_roster, approvals, work_root, env, settings_status
         return SimpleNamespace(registry=object(), roster=["read_file"])
 
     async def _serve(server: object) -> None:
