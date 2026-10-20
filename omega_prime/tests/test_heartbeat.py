@@ -5,10 +5,18 @@ from __future__ import annotations
 import pytest
 
 from omega_prime.cron.heartbeat import (
+    COVERAGE_ALERT_KIND,
+    ENGAGEMENT_DIGEST_KIND,
     HEARTBEAT_KIND,
+    RELEASE_WATCH_KIND,
+    ROE_EXPIRY_KIND,
     clear_heartbeat,
     list_heartbeats,
+    schedule_coverage_alert,
+    schedule_engagement_digest,
     schedule_heartbeat,
+    schedule_release_watch,
+    schedule_roe_expiry,
     tick_heartbeats,
 )
 from omega_prime.cron.scheduler import JobStore
@@ -82,6 +90,43 @@ def test_heartbeat_kind_and_session_are_persisted_together(tmp_path, monkeypatch
     persisted = next(job for job in JobStore(path).jobs if job["id"] == job_ids[0])
     assert persisted["kind"] == HEARTBEAT_KIND
     assert persisted["session"] == "sess-atomic"
+
+
+def test_other_heartbeat_schedules_use_atomic_typed_storage(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+
+    def reject_split_schedule(*args, **kwargs):
+        raise AssertionError("typed heartbeat schedules must not use schedule()")
+
+    monkeypatch.setattr(store, "schedule", reject_split_schedule)
+    artifact_path = str(tmp_path / "roe.json")
+    jobs = [
+        (
+            schedule_roe_expiry(store, artifact_path, interval_seconds=60, due_at=0),
+            ROE_EXPIRY_KIND,
+            {"artifact_path": artifact_path},
+        ),
+        (
+            schedule_engagement_digest(store, interval_seconds=60, due_at=0),
+            ENGAGEMENT_DIGEST_KIND,
+            {},
+        ),
+        (
+            schedule_release_watch(store, interval_seconds=60, due_at=0),
+            RELEASE_WATCH_KIND,
+            {},
+        ),
+        (
+            schedule_coverage_alert(store, interval_seconds=60, due_at=0),
+            COVERAGE_ALERT_KIND,
+            {},
+        ),
+    ]
+
+    persisted = {job["id"]: job for job in JobStore(store.path).jobs}
+    for job_id, kind, metadata in jobs:
+        assert persisted[job_id]["kind"] == kind
+        assert {key: persisted[job_id][key] for key in metadata} == metadata
 
 
 def test_heartbeat_requires_interval_and_session(tmp_path):

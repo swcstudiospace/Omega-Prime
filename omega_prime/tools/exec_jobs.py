@@ -51,6 +51,8 @@ class JobControl:
             "result": None,
             "stdout": bytearray(),
             "stderr": bytearray(),
+            "stdout_truncated": False,
+            "stderr_truncated": False,
             "readers": [],
         }
         for name in ("stdout", "stderr"):
@@ -58,7 +60,7 @@ class JobControl:
             if stream is not None:
                 reader = threading.Thread(
                     target=_drain,
-                    args=(stream, job[name]),
+                    args=(stream, job[name], job, f"{name}_truncated"),
                     daemon=True,
                 )
                 job["readers"].append(reader)
@@ -155,6 +157,8 @@ class JobControl:
             "exit_code": child.returncode,
             "stdout": _text(job["stdout"]),
             "stderr": _text(job["stderr"]),
+            "stdout_truncated": job["stdout_truncated"],
+            "stderr_truncated": job["stderr_truncated"],
         }
         # Keep the cached text result, not a second copy of raw output bytes.
         job["stdout"].clear()
@@ -163,7 +167,12 @@ class JobControl:
         return {"id": job_id, **result}
 
 
-def _drain(stream: Any, output: bytearray) -> None:
+def _drain(
+    stream: Any,
+    output: bytearray,
+    job: dict[str, Any],
+    truncated_key: str,
+) -> None:
     """Continuously drain a child pipe while retaining only bounded output."""
     try:
         while True:
@@ -173,6 +182,8 @@ def _drain(stream: Any, output: bytearray) -> None:
             remaining = _MAX_OUTPUT_BYTES - len(output)
             if remaining > 0:
                 output.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                job[truncated_key] = True
     finally:
         stream.close()
 

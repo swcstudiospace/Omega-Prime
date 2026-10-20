@@ -442,7 +442,7 @@ class _FileCollector:
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "copy"
-            and self._is_os_environ(node.func.value, at)
+            and self._is_receiver(node.func.value, at)
         ):
             return True
         return (
@@ -450,7 +450,7 @@ class _FileCollector:
             and isinstance(node.func, ast.Name)
             and node.func.id == "dict"
             and len(node.args) == 1
-            and self._is_os_environ(node.args[0], at)
+            and self._is_receiver(node.args[0], at)
         )
 
     def _is_receiver(self, node: ast.AST, context: ast.AST | None = None) -> bool:

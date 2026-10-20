@@ -372,6 +372,8 @@ def test_exec_job_kill_escalates_when_terminate_does_not_finish(tmp_path: Path):
             "exit_code": -signal.SIGKILL,
             "stdout": "",
             "stderr": "",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
         }
         assert jobs.poll(job_id) == result
     finally:
@@ -407,6 +409,54 @@ def test_exec_job_drains_large_stdout_stderr_and_caches_concurrent_reaps(
     assert len(results[0]["stdout"]) == 300000
     assert len(results[0]["stderr"]) == 300000
     assert jobs.poll(job_id) == results[0]
+
+
+@pytest.mark.parametrize("collection", ["poll", "wait", "kill"])
+def test_exec_job_reports_per_stream_truncation_in_every_result(
+    tmp_path: Path, collection: str
+):
+    import time
+
+    jobs = JobControl(tmp_path)
+    ready_file = tmp_path / "output-ready"
+    script = (
+        "import os, pathlib, sys, time; "
+        "os.write(1, b'o' * (1024 * 1024 + 1)); "
+        "os.write(2, b'e' * (1024 * 1024)); "
+        "pathlib.Path(sys.argv[1]).write_text('ready'); "
+        "time.sleep(30)"
+        if collection == "kill"
+        else (
+            "import os, pathlib, sys; "
+            "os.write(1, b'o' * (1024 * 1024 + 1)); "
+            "os.write(2, b'e' * (1024 * 1024)); "
+            "pathlib.Path(sys.argv[1]).write_text('ready')"
+        )
+    )
+    job_id = jobs.start([sys.executable, "-c", script, str(ready_file)])
+    if collection == "kill":
+        deadline = time.monotonic() + 5
+        while not ready_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_file.exists(), "child did not finish writing output"
+        result = jobs.kill(job_id)
+    elif collection == "wait":
+        result = jobs.wait(job_id, timeout=10)
+    else:
+        deadline = time.monotonic() + 10
+        result = jobs.poll(job_id)
+        while result.get("running") and time.monotonic() < deadline:
+            time.sleep(0.01)
+            result = jobs.poll(job_id)
+
+    assert result["running"] is False
+    assert result["stdout"] == "o" * (1024 * 1024)
+    assert result["stderr"] == "e" * (1024 * 1024)
+    assert result["stdout_truncated"] is True
+    assert result["stderr_truncated"] is False
+    assert jobs.poll(job_id) == result
+    assert jobs.wait(job_id, timeout=1) == result
+    assert jobs.kill(job_id) == result
 
 
 def test_plan_mode_blocks_exec_job_start_and_kill():

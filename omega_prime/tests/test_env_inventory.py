@@ -173,6 +173,41 @@ dict_snapshot["OMEGA_DICT_ITEM"]
     ]
 
 
+def test_environment_snapshots_follow_environment_aliases_and_nested_copies(
+    tmp_path: Path,
+) -> None:
+    root = _tree(
+        tmp_path,
+        """
+import os as operating_system
+from os import environ as imported_environment
+environment_alias = operating_system.environ
+copied_alias = environment_alias.copy()
+nested_snapshot = dict(copied_alias.copy())
+imported_snapshot = dict(imported_environment)
+copied_alias.get("OMEGA_ALIAS_COPY")
+nested_snapshot["OMEGA_NESTED_DICT"]
+imported_snapshot.get("OMEGA_IMPORTED_DICT")
+""",
+        policy={
+            "purposes": {
+                name: f"Reads the {name} snapshot setting."
+                for name in (
+                    "OMEGA_ALIAS_COPY",
+                    "OMEGA_NESTED_DICT",
+                    "OMEGA_IMPORTED_DICT",
+                )
+            }
+        },
+    )
+
+    assert [item.name for item in _collect(root)] == [
+        "OMEGA_ALIAS_COPY",
+        "OMEGA_IMPORTED_DICT",
+        "OMEGA_NESTED_DICT",
+    ]
+
+
 def test_ordinary_mappings_json_writes_constants_comments_fixtures_and_child_code_are_ignored(
     tmp_path: Path,
 ) -> None:
