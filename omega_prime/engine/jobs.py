@@ -183,6 +183,12 @@ _CONNECTOR_ENV = (
 )
 
 
+def omp_home_override(env: Mapping[str, str]) -> Path | None:
+    """The ``OMEGA_PRIME_OMP_HOME`` config root, or ``None`` for omp's default."""
+    explicit = str(env.get("OMEGA_PRIME_OMP_HOME", "")).strip()
+    return Path(explicit) if explicit else None
+
+
 def child_env(env: Mapping[str, str]) -> dict[str, str]:
     """Environment handed to omp. Credential values stay out of argv.
 
@@ -201,5 +207,11 @@ def child_env(env: Mapping[str, str]) -> dict[str, str]:
     for name, value in env.items():
         if name.startswith("OMEGA_FAKE_OMP_") and isinstance(value, str):
             child[name] = value
+    override = omp_home_override(env)
+    if override is not None:
+        # omp reads its login store (agent.db) from PI_CODING_AGENT_DIR, which
+        # defaults to $HOME/.omp/agent. Point it at the override so usage
+        # checks and RPC runs use the same store the sandbox binds.
+        child["PI_CODING_AGENT_DIR"] = str(override / "agent")
     child.setdefault("PATH", os.defpath)
     return child

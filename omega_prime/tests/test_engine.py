@@ -59,7 +59,7 @@ def log(row):
         handle.write(json.dumps(row) + "\\n")
 
 args = sys.argv[1:]
-log({"argv": args, "cwd": os.getcwd()})
+log({"argv": args, "cwd": os.getcwd(), "agent_dir": os.environ.get("PI_CODING_AGENT_DIR")})
 if "--version" in args:
     print(os.environ.get("OMEGA_FAKE_OMP_VERSION", "18.8.4"))
     raise SystemExit(0)
@@ -965,3 +965,37 @@ def test_sandbox_binds_the_shared_login_store_writable(tmp_path: Path) -> None:
     args = (tmp_path / "bwrap.txt").read_text(encoding="utf-8").splitlines()
     binds = [args[i + 1] for i, item in enumerate(args) if item == "--bind"]
     assert str(custom) in binds and str(store) not in binds
+
+
+def test_custom_omp_home_is_the_store_the_child_reads(tmp_path: Path) -> None:
+    binary = _install_fake(tmp_path)
+    (tmp_path / "home" / ".omp" / "agent").mkdir(parents=True)
+    custom = tmp_path / "custom-omp"
+    (custom / "agent").mkdir(parents=True)
+    log = tmp_path / "omp-log.jsonl"
+    env = _env(tmp_path, binary, OMEGA_PRIME_OMP_ALLOW_CHATGPT="1")
+    run("PONG", cwd=tmp_path, env=env, job_id="job-default", stage="plan")
+    rows = [
+        row
+        for row in map(json.loads, log.read_text(encoding="utf-8").splitlines())
+        if "argv" in row
+    ]
+    # Default: omp resolves $HOME/.omp/agent itself; nothing overrides it.
+    assert rows and all(row["agent_dir"] is None for row in rows)
+    log.unlink()
+    env["OMEGA_PRIME_OMP_HOME"] = str(custom)
+    result = run("PONG", cwd=tmp_path, env=env, job_id="job-custom", stage="plan")
+    assert result.ok is True
+    rows = [
+        row
+        for row in map(json.loads, log.read_text(encoding="utf-8").splitlines())
+        if "argv" in row
+    ]
+    kinds = {
+        "version": [r for r in rows if "--version" in r["argv"]],
+        "usage": [r for r in rows if "usage" in r["argv"]],
+        "rpc": [r for r in rows if "--mode" in r["argv"]],
+    }
+    assert all(kinds.values()), kinds
+    # Version probe, usage check and RPC run all read the custom login store.
+    assert {row["agent_dir"] for row in rows} == {str(custom / "agent")}

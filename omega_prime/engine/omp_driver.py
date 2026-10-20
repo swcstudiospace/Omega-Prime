@@ -21,6 +21,7 @@ from omega_prime.engine.jobs import (
     child_env,
     job_dir,
     maybe_tmux,
+    omp_home_override,
     state_dir,
     write_json,
 )
@@ -92,16 +93,17 @@ def resolve_omp(env: Mapping[str, str]) -> str | None:
 def omp_home(env: Mapping[str, str]) -> Path:
     """omp's default config root, which holds the one shared login store.
 
-    ``OMEGA_PRIME_OMP_HOME`` overrides it; otherwise ``$HOME/.omp``. Jobs run on
+    ``OMEGA_PRIME_OMP_HOME`` overrides it (``child_env`` then hands omp
+    ``PI_CODING_AGENT_DIR=<override>/agent``); otherwise ``$HOME/.omp``. Jobs run on
     omp's default profile so every job reads the same ``agent/agent.db`` login.
     A per-job ``--profile`` would point omp at
     ``~/.omp/profiles/<name>/agent/agent.db``, which has no login, and omp
     rejects a path as a profile name. The store is never copied: OAuth refresh
     tokens are single-use, so a copy would break the next refresh.
     """
-    explicit = str(env.get("OMEGA_PRIME_OMP_HOME", "")).strip()
-    if explicit:
-        return Path(explicit)
+    override = omp_home_override(env)
+    if override is not None:
+        return override
     home = str(env.get("HOME", "")).strip()
     return (Path(home) if home else Path.home()) / ".omp"
 
