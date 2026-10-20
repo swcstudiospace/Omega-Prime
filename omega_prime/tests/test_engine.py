@@ -292,7 +292,14 @@ def test_fake_omp_session_writes_events_mcp_and_commands(tmp_path: Path) -> None
 
 def test_sandbox_refuses_without_bwrap_and_wraps_when_present(tmp_path: Path) -> None:
     binary = _install_fake(tmp_path)
-    env = _env(tmp_path, binary, OMEGA_PRIME_ENGINE_UNSANDBOXED="0")
+    # Point the bwrap lookup at a path that does not exist, so the refusal
+    # holds on hosts that ship bubblewrap on PATH (the CI runner does not).
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_PRIME_ENGINE_UNSANDBOXED="0",
+        OMEGA_PRIME_BWRAP_BIN=str(tmp_path / "no-bwrap"),
+    )
     refused = run("PONG", cwd=tmp_path, env=env, job_id="job-bare")
     assert refused.ok is False
     assert refused.reason == "sandbox_unavailable"
