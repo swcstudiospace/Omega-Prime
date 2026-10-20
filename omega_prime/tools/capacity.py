@@ -110,22 +110,20 @@ def capacity_report(
 
 
 def fleet_status(env: Mapping[str, str]) -> dict[str, Any]:
-    """Read fleet status only when the A1b client is installed."""
-    del env
+    """Read ``GET /status`` when the fleet coordinator settings are present."""
+    from omega_prime.engine.fleet_client import FleetClient, FleetError
+
+    client = FleetClient(env)
+    if not client.configured():
+        return {
+            "status": "not_configured",
+            "reason": client.configuration_error() or "not_configured",
+        }
     try:
-        from omega_prime.dispatch import fleet as fleet_module
-    except ImportError:
-        return {"status": "not_configured", "reason": "fleet client is A1b"}
-    reader = getattr(fleet_module, "status", None)
-    if not callable(reader):
-        return {"status": "not_configured", "reason": "fleet client is A1b"}
-    try:
-        payload = reader()
-    except Exception:
-        return {"status": "not_configured", "reason": "fleet client is A1b"}
-    if isinstance(payload, dict):
-        return payload
-    return {"status": "not_configured", "reason": "fleet client is A1b"}
+        payload = client.coordinator_status()
+    except FleetError as exc:
+        return {"status": "unavailable", "reason": exc.code}
+    return payload
 
 
 def register_capacity_tools(registry: ToolRegistry) -> list[str]:

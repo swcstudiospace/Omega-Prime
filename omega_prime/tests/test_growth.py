@@ -43,6 +43,7 @@ from omega_prime.tools.discord import (
     DiscordClient,
     register_discord_tools,
 )
+from omega_prime.tools.dispatch import DISPATCH_TOOL_NAMES, register_dispatch_tools
 from omega_prime.tools.durable_surface import (
     DURABLE_TOOL_NAMES,
     register_durable_surface_tools,
@@ -637,6 +638,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
     register_learning_surface_tools(registry, tmp_path)
     register_durable_surface_tools(registry, tmp_path)
     register_capacity_tools(registry)
+    register_dispatch_tools(registry)
     register_rlm_tools(
         registry,
         OmegaPrimeAgent(
@@ -683,6 +685,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
         + LEARNING_TOOL_NAMES
         + DURABLE_TOOL_NAMES
         + CAPACITY_TOOL_NAMES
+        + DISPATCH_TOOL_NAMES
         + RLM_TOOL_NAMES
         + HARNESS_TOOL_NAMES
         + GOAL_TOOL_NAMES

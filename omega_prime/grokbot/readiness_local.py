@@ -81,6 +81,7 @@ def run(probe: ReadinessProbe) -> None:
     _ide_browser_devices(probe)
     _negatives(probe)
     _capacity(probe)
+    _dispatch_lane(probe)
 
 
 def _result(probe: ReadinessProbe, name: str, arguments: dict[str, Any]) -> Any:
@@ -119,6 +120,57 @@ def _capacity(probe: ReadinessProbe) -> None:
         ("omega_capacity",),
         "omega_capacity listed six plans and refused Anthropic and Muse "
         "subscription OAuth; no model HTTP call",
+    )
+
+
+def _refused(probe: ReadinessProbe, name: str, arguments: dict[str, Any]) -> Any:
+    """Call a tool whose honest result is an error object, not a raise."""
+    if probe.emulator is None:
+        raise AssertionError("probe has no emulator")
+    outcome = probe.emulator.execute_tool(name, arguments)
+    probe.check(
+        outcome.get("status") == "error" and isinstance(outcome.get("result"), dict),
+        f"{name} must return an error object, got {outcome.get('status')}",
+    )
+    result = outcome.get("result")
+    return result if isinstance(result, dict) else {}
+
+
+def _dispatch_lane(probe: ReadinessProbe) -> None:
+    """Exercise the lane tools with the coordinator and confirm token unset.
+
+    The isolated child environment never copies the parent process
+    environment, so these calls stop before any coordinator HTTP request.
+    """
+    dispatched = _refused(
+        probe,
+        "omega_dispatch",
+        {
+            "repo": "acme/widget",
+            "prompt": "fix the python test",
+            "confirm_token": "readiness-local-confirm",
+            "languages": ["python"],
+        },
+    )
+    probe.check(
+        dispatched.get("error") == "confirm_rejected",
+        "omega_dispatch must reject a confirm token when none is configured",
+    )
+    status = _refused(probe, "omega_jobs_status", {})
+    probe.check(
+        status.get("error") == "not_configured",
+        "omega_jobs_status must report the coordinator unset",
+    )
+    cancelled = _refused(probe, "omega_jobs_cancel", {"job_id": "local-probe"})
+    probe.check(
+        cancelled.get("error") == "not_configured",
+        "omega_jobs_cancel must report the coordinator unset",
+    )
+    probe.record(
+        "dispatch:lane-refusal",
+        ("omega_dispatch", "omega_jobs_status", "omega_jobs_cancel"),
+        "omega_dispatch rejected the confirm token; job status and cancel "
+        "reported the fleet coordinator unset; no coordinator HTTP call",
     )
 
 

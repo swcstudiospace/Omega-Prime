@@ -990,8 +990,10 @@ def default_registry(
     register_learning_surface_tools(registry, root / "omega_prime")
     register_durable_surface_tools(registry, root)
     from omega_prime.tools.capacity import register_capacity_tools
+    from omega_prime.tools.dispatch import register_dispatch_tools
 
     register_capacity_tools(registry)
+    register_dispatch_tools(registry)
     # Prime capability families are config-gated (default off): a disabled
     # family is not registered and is absent from the offered roster (LOOP-05).
     # RLM registers on the desk parent when its flag is on. Without a child

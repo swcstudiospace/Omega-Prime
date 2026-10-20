@@ -22,6 +22,7 @@ from omega_prime.tools.coding import CODING_TOOL_NAMES
 from omega_prime.tools.cron_admin import CRON_ADMIN_TOOL_NAMES
 from omega_prime.tools.delegate import DELEG_TOOL_NAMES
 from omega_prime.tools.discord import DISCORD_TOOL_NAMES
+from omega_prime.tools.dispatch import DISPATCH_TOOL_NAMES
 from omega_prime.tools.durable_surface import DURABLE_TOOL_NAMES
 from omega_prime.tools.goals import GOAL_TOOL_NAMES
 from omega_prime.tools.growth import GROWTH_TOOL_NAMES
@@ -68,7 +69,7 @@ FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Cron", CRON_ADMIN_TOOL_NAMES),
     ("Learning", LEARNING_TOOL_NAMES),
     ("Durable", DURABLE_TOOL_NAMES),
-    ("Engine", CAPACITY_TOOL_NAMES),
+    ("Engine", (*CAPACITY_TOOL_NAMES, *DISPATCH_TOOL_NAMES)),
     ("RLM", RLM_TOOL_NAMES),
     ("Harness", HARNESS_TOOL_NAMES),
     ("Goals", GOAL_TOOL_NAMES),

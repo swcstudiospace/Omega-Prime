@@ -1,0 +1,103 @@
+{
+  "task_id": "SPE-17041",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T10:03:00Z",
+  "completed_at": "2026-10-20T11:52:00Z",
+  "commands": [
+    {
+      "cmd": "/tmp/omega-venv/bin/python -m mypy omega_prime/ && /tmp/omega-venv/bin/python -m ruff check omega_prime/ && /tmp/omega-venv/bin/python -m ruff format --check omega_prime/ && /tmp/omega-venv/bin/python -m omega_prime.tooling.catalog --check && /tmp/omega-venv/bin/python -m omega_prime.tooling.plugin --check && /tmp/omega-venv/bin/python -m omega_prime.tooling.prompt_format --check && VIRTUAL_ENV=/tmp/omega-venv bash omega_prime/scripts/assemble-prompts.sh --check && /tmp/omega-venv/bin/python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q --tb=line && /tmp/omega-venv/bin/python -m omega_prime.setup_check --root . && /tmp/omega-venv/bin/python -m omega_prime.evals.runner omega_prime/evals/cases && /tmp/omega-venv/bin/python -m pytest omega_prime/tests -q --tb=line",
+      "exit_code": 0,
+      "duration_s": 205,
+      "output_tail": "4784 passed, 20 skipped, 16 warnings in 190.27s"
+    },
+    {
+      "cmd": "/tmp/omega-venv/bin/python -m ruff check omega_prime/engine/lanes.py omega_prime/tests/test_lanes.py && /tmp/omega-venv/bin/python -m ruff format --check omega_prime/engine/lanes.py omega_prime/tests/test_lanes.py docs/setup.md CHANGELOG.md && /tmp/omega-venv/bin/python -m mypy omega_prime/engine/lanes.py omega_prime/tests/test_lanes.py && /tmp/omega-venv/bin/python -m pytest omega_prime/tests/test_lanes.py omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q --tb=short",
+      "exit_code": 0,
+      "duration_s": 2,
+      "output_tail": "50 passed in 1.01s"
+    },
+    {
+      "cmd": "/tmp/omega-venv/bin/python -m pytest omega_prime/tests -q --tb=line",
+      "exit_code": 0,
+      "duration_s": 189,
+      "output_tail": "4784 passed, 20 skipped, 16 warnings in 188.98s"
+    },
+    {
+      "cmd": "/tmp/omega-venv/bin/python -m mypy omega_prime/ && /tmp/omega-venv/bin/python -m ruff check omega_prime/ && /tmp/omega-venv/bin/python -m ruff format --check omega_prime/ && /tmp/omega-venv/bin/python -m pytest omega_prime/tests -q --tb=line",
+      "exit_code": 0,
+      "duration_s": 193,
+      "output_tail": "4786 passed, 20 skipped, 16 warnings in 188.10s"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "mypy, ruff check, and ruff format --check on omega_prime/ all exit 0, including fleet_client.py, lanes.py, and the fleet tests",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "catalog --check, plugin --check, prompt_format --check, and assemble-prompts.sh --check exit 0",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "docs and public-repo tests pass (31 passed)",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "setup_check exits 0 and the registry serves 121 roster tools",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "eval cases pass (26 passed, 0 failed)",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "The suite passes: 4784 passed, 20 skipped. Fleet tests use a fake transport. The bearer is the CredentialBroker key, and an unlisted host raises host_not_allowed before the token is read. Ordinary 'to go' stays on the local lane.",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "LaneLimits.max_minutes defaults to 60. A 60-minute job stays local, a 61-minute job goes to the fleet, and a missing minute bound is stored as 60. The 25-file cap is unchanged. The suite after that edit is 4784 passed, 20 skipped.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "An unreadable mode-0600 token file makes configured() return false with secret_unreadable, and fleet_status returns that code instead of raising. A missing or empty token file is secret_unreadable, while a group-readable file stays secret_permissions. The suite is 4786 passed, 20 skipped.",
+      "evidence_command_index": 3
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Greptile 5/5 is not yet recorded on this commit",
+    "no live fleet coordinator call; the client was proven against a fake transport",
+    "GET /jobs, event, HITL, and cancel handler bodies after POST /jobs in coding-fleet server.ts at 2c6a99f were not in the readable source slice; those routes follow bin/fleet.mjs and db.ts at that commit",
+    "desk brief and ownership tools returned 522; path ownership was resolved from omega_prime/ownership.yaml"
+  ],
+  "files_changed": [
+    ".receipts/bot-00-omega-prime/SPE-17041.json",
+    "CHANGELOG.md",
+    "docs/setup.md",
+    "docs/tool-catalog.md",
+    "omega_prime/contracts/policies/omega-prime.json",
+    "omega_prime/contracts/tool-rosters/omega-prime.yaml",
+    "omega_prime/engine/fleet_client.py",
+    "omega_prime/engine/lanes.py",
+    "omega_prime/grokbot/local_validation.py",
+    "omega_prime/grokbot/readiness_local.py",
+    "omega_prime/mcp_server.py",
+    "omega_prime/tests/test_fleet_client.py",
+    "omega_prime/tests/test_growth.py",
+    "omega_prime/tests/test_lanes.py",
+    "omega_prime/tests/test_prime_family_serving.py",
+    "omega_prime/tests/test_tools.py",
+    "omega_prime/tooling/catalog.py",
+    "omega_prime/tools/capacity.py",
+    "omega_prime/tools/dispatch.py"
+  ],
+  "contract_changes": [
+    "omega_prime/contracts/tool-rosters/omega-prime.yaml",
+    "omega_prime/contracts/policies/omega-prime.json",
+    "docs/tool-catalog.md"
+  ],
+  "rollback_plan": "Revert the branch. omega_capacity keeps reporting fleet status not_configured when FLEET_COORDINATOR_URL or FLEET_COORDINATOR_TOKEN is unset. The local executor is a stub and does not spawn omp.",
+  "approvals": [],
+  "approved_by": "not-yet-reviewed",
+  "destructive": false
+}
