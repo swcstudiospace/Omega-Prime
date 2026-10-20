@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 milestone: v20
 milestone_name: Wiring
-status: Planned
-stopped_at: Phase 100 plans reviewed; implementation not started. Execute prerequisite plan 100-00 in a separately authorized session.
-last_updated: "2026-10-21"
-last_activity: 2026-10-21
-last_activity_desc: Six Phase 100 plans reviewed and structurally validated; planning-only receipt recorded
+status: In Progress
+stopped_at: Phase 100 completed and committed; stop before milestone audit, completion, or cleanup as requested.
+last_updated: "2026-10-20"
+last_activity: 2026-10-20
+last_activity_desc: Phase 100 MCP, skills, and rpc-ui wiring implemented and verified; full suite has only the exact 27 documented prime-agent baseline failures
 progress:
   total_phases: 7
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 6
-  completed_plans: 0
-  percent: 0
+  completed_plans: 6
+  percent: 14
 current_phase: 100
 current_plan: null
 ---
@@ -24,14 +24,14 @@ current_plan: null
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** v20 Wiring, Phase 100 (wiring phase 4): MCP and skill attachment plus the rpc-ui clarify HITL bridge. Planning only in this session; no implementation or runtime verification is claimed. Live asks route to Ove by default; installed omp 18.8.4 accepts thinking level `max`. Phases 97–99 are registered but not re-executed or marked complete by this planning session; verify Phase 99 prerequisite behavior before implementation. v1–v19 remain shipped. Phase 77.1 live import UAT remains user-owned and `human_needed`; do not mark it passed. Historical evidence below retains its original scope and is not evidence for Phase 100.
+**Current focus:** v20 Wiring, Phase 100 complete. The operator-directed parallel execution bypassed Phase 97–99 verification/merge gates without marking those phases complete. Phase 100's full suite has only its exact documented 27 failures from the uninitialized `prime-agent` submodule. Live asks route to Ove by default. Phase 97 owns the unchanged `omp_driver._TURN_TIMEOUT`; Phase 100 adds no session/turn caps. v1–v19 remain shipped. Phase 77.1 live import UAT remains user-owned and `human_needed`; do not mark it passed.
 
 ## Current Position
 
 Phase: 100 — omp engine wiring (v20 Wiring; phases 97–103).
-Plan: Six reviewed execution plans (100-00 through 100-05); none executed.
-Status: Planning only. Do not execute plans in this session. Phase 77.1 stays verification_deferred_human; do not re-execute phases 85–96.
-Last activity: 2026-10-21 — v20 registered; Phase 100 plans and evidence reviewed. Receipt: .receipts/bot-00-omega-prime/gsd-plan-phase-100.json. Execution prerequisites remain unverified.
+Plan: Six reviewed Phase 100 plans executed; all six complete.
+Status: Phase 100 complete; v20 remains in progress. Do not audit, complete, or clean up the milestone in this run.
+Last activity: 2026-10-20 — Phase 100 verified and committed locally. Evidence: .planning/phases/100-omp-engine-wiring/100-SUMMARY.md; receipt: .receipts/bot-00-omega-prime/phase-100-omp-engine-wiring.json. Phases 97–99 remain unverified/unmerged in this worktree per the parallel-mode instruction.
 
 ## Closeout
 
@@ -142,10 +142,10 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Session
 
-**Last session:** 2026-10-21
-**Stopped at:** Phase 100 planning complete; implementation not started.
-**Resume file:** .planning/phases/100-omp-engine-wiring/100-OVERVIEW.md
+**Last session:** 2026-10-20
+**Stopped at:** Phase 100 complete; stop requested before milestone audit, completion, or cleanup.
+**Resume file:** .planning/phases/100-omp-engine-wiring/100-SUMMARY.md
 
 ## Operator Next Steps
 
-- Read the Phase 100 overview, then run 100-00's installed-contract, GSD-source, and Phase 97/99 prerequisite checks in a separately authorized execution session. Do not bypass missing required evidence.
+- Continue with Phase 101 under its own authorization. Phase 100 did not verify or mark Phases 97–99 complete.

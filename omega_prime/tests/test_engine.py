@@ -14,6 +14,9 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from omega_prime.agent.budget import IterationBudget
 from omega_prime.agent.conversation_loop import (
@@ -34,6 +37,7 @@ from omega_prime.engine.plan_router import (
     select,
 )
 from omega_prime.engine.protocol import redact
+from omega_prime.engine.ui_control import UIControlError, UIControlStore
 from omega_prime.engine.watch import main as watch_main
 from omega_prime.engine.watch import tail
 from omega_prime.providers.base import ProviderModel
@@ -47,6 +51,14 @@ from omega_prime.tools.registry import ToolRegistry
 _FAKE = """#!/usr/bin/env python3
 import json, os, sys
 
+def discover(config):
+    server = config["mcpServers"]["omega-prime"]
+    if server.get("type") != "stdio" or not server.get("command"):
+        return []
+    if "--work-root" not in server.get("args", []):
+        return []
+    return ["omega_command"]
+
 def emit(obj):
     sys.stdout.write(json.dumps(obj) + "\\n")
     sys.stdout.flush()
@@ -59,7 +71,26 @@ def log(row):
         handle.write(json.dumps(row) + "\\n")
 
 args = sys.argv[1:]
+mode = args[args.index("--mode") + 1] if "--mode" in args else "rpc"
+subscribed_events = []
+work = args[args.index("--cwd") + 1] if "--cwd" in args else os.getcwd()
+configured = None
+discovered = []
+if os.environ.get("OMEGA_FAKE_OMP_DISCOVER") == "1":
+    project_mcp = os.path.join(work, ".omp", "mcp.json")
+    try:
+        with open(project_mcp, encoding="utf-8") as handle:
+            configured = json.load(handle)
+            log({"project_mcp": configured})
+        discovered = [
+            f"mcp__omega-prime_{name}" for name in discover(configured)
+        ]
+    except Exception as exc:
+        log({"discovery_error": type(exc).__name__})
 log({"argv": args, "cwd": os.getcwd(), "agent_dir": os.environ.get("PI_CODING_AGENT_DIR")})
+if "--help" in args:
+    print("Usage: omp --thinking {off,minimal,low,medium,high,xhigh,max}")
+    raise SystemExit(0)
 if "--version" in args:
     print(os.environ.get("OMEGA_FAKE_OMP_VERSION", "18.8.4"))
     raise SystemExit(0)
@@ -74,10 +105,75 @@ for line in sys.stdin:
     if not text:
         continue
     cmd = json.loads(text)
-    log({"cmd": cmd.get("type")})
+    log({"cmd": cmd.get("type"), "id": cmd.get("id"), "events": cmd.get("events")})
     kind = cmd.get("type")
     cid = cmd.get("id")
-    if kind == "prompt":
+    if kind == "set_event_filter":
+        subscribed_events = cmd.get("events", [])
+        emit({"id": cid, "type": "response", "command": kind, "success": True})
+    elif kind == "prompt":
+        if (
+            mode == "rpc-ui"
+            and os.environ.get("OMEGA_FAKE_OMP_UI_ENABLED") == "1"
+            and os.environ.get("OMEGA_FAKE_OMP_UI_DISABLED") != "1"
+        ):
+            external_id = "rpc-external-104"
+            method = os.environ.get("OMEGA_FAKE_OMP_UI_METHOD", "select")
+            request: dict[str, object] = {
+                "type": "extension_ui_request",
+                "id": external_id,
+                "method": method,
+            }
+            if method == "ask":
+                request["questions"] = [
+                    {
+                        "id": "route",
+                        "question": "Which route should be used?",
+                        "options": [{"label": "safe"}, {"label": "fast"}],
+                    }
+                ]
+            elif method == "confirm":
+                request.update({"title": "Confirm route", "message": "Use safe route?"})
+            else:
+                request.update({
+                    "title": "Choose a route with token=ui-temporary-value",
+                    "options": ["fast", "safe"],
+                })
+            emit(request)
+            if os.environ.get("OMEGA_FAKE_OMP_UI_EOF") == "1":
+                raise SystemExit(0)
+            while True:
+                answer_line = sys.stdin.readline()
+                if not answer_line:
+                    raise SystemExit(0)
+                answer_cmd = json.loads(answer_line)
+                answer_kind = answer_cmd.get("type")
+                log({
+                    "cmd": answer_kind,
+                    "id": answer_cmd.get("id"),
+                    "events": answer_cmd.get("events"),
+                })
+                if answer_kind == "abort":
+                    emit({
+                        "id": answer_cmd.get("id"),
+                        "type": "response",
+                        "command": "abort",
+                        "success": True,
+                    })
+                    emit({
+                        "id": cid,
+                        "type": "response",
+                        "command": "prompt",
+                        "success": True,
+                    })
+                    emit({"type": "agent_end"})
+                    raise SystemExit(0)
+                if (
+                    answer_kind == "extension_ui_response"
+                    and answer_cmd.get("id") == external_id
+                ):
+                    log({"ui_response": answer_cmd})
+                    break
         if os.environ.get("OMEGA_FAKE_OMP_EXIT_AFTER_PROMPT") == "1":
             emit({"id": cid, "type": "response", "command": "prompt", "success": True})
             emit({
@@ -109,6 +205,14 @@ for line in sys.stdin:
         emit(end)
         emit({"type": "turn_end"})
         emit({"type": "agent_end"})
+    elif kind == "get_state":
+        emit({
+            "id": cid,
+            "type": "response",
+            "command": kind,
+            "success": True,
+            "data": {"dumpTools": discovered},
+        })
     elif kind == "get_session_stats":
         emit({
             "id": cid,
@@ -169,6 +273,25 @@ def _events(path: Path) -> list[dict]:
     return rows
 
 
+def _ui_store(tmp_path: Path) -> UIControlStore:
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    return UIControlStore(
+        tmp_path / "operator-state",
+        writable_binds=[work, tmp_path / "state", tmp_path / "home"],
+    )
+
+
+def _wait_for_ui_pending(store: UIControlStore, job_id: str) -> dict[str, Any]:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        pending = store.list_pending(job=job_id)
+        if pending:
+            return pending[0]
+        time.sleep(0.01)
+    raise AssertionError("fake OMP did not publish its UI request")
+
+
 def test_default_allowlist_is_empty_and_keys_do_not_unlock_subscriptions() -> None:
     empty = {item.plan: item for item in evaluate_all({})}
     assert all(item.allowlisted is False for item in empty.values())
@@ -226,9 +349,17 @@ def test_api_keys_allow_their_profiles_and_router_picks_remaining_quota() -> Non
         raise AssertionError("expected PlanNotAllowed")
 
 
-def test_fake_omp_session_writes_events_mcp_and_commands(tmp_path: Path) -> None:
+def test_fake_omp_session_discovers_configured_mcp_tools(tmp_path: Path) -> None:
     binary = _install_fake(tmp_path)
-    env = _env(tmp_path, binary, OMEGA_FAKE_OMP_API_KEY=_shaped_token())
+    root_mcp = tmp_path / "mcp.json"
+    root_contents = b"root omp config remains separate"
+    root_mcp.write_bytes(root_contents)
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_FAKE_OMP_API_KEY=_shaped_token(),
+        OMEGA_FAKE_OMP_DISCOVER="1",
+    )
     result = run("Reply with PONG", cwd=tmp_path, env=env, job_id="job-alpha")
     assert result.ok is True
     assert result.final_text == "PONG"
@@ -239,9 +370,11 @@ def test_fake_omp_session_writes_events_mcp_and_commands(tmp_path: Path) -> None
         "set_event_filter",
         "set_model",
         "set_thinking_level",
+        "get_state",
         "prompt",
         "get_session_stats",
     ]
+    assert result.mcp_status == "attached"
     assert result.stats.get("turns") == 1
     kinds = [row["type"] for row in _events(Path(result.events_path))]
     for name in (
@@ -258,12 +391,20 @@ def test_fake_omp_session_writes_events_mcp_and_commands(tmp_path: Path) -> None
     blob = Path(result.events_path).read_text(encoding="utf-8")
     assert _shaped_token() not in blob
     assert "[redacted]" in blob
-    profile = tmp_path / "state" / "jobs" / "job-alpha" / "profile" / "mcp.json"
-    mcp = json.loads(profile.read_text(encoding="utf-8"))
-    server = mcp["mcpServers"]["omega-prime"]
-    assert server["command"] == sys.executable
+    project_mcp = tmp_path / ".omp" / "mcp.json"
+    assert result.mcp_status == "attached"
+    assert root_mcp.read_bytes() == root_contents
     from omega_prime.engine.mcp_bridge import install_root
 
+    logged = [
+        json.loads(line)
+        for line in (tmp_path / "omp-log.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    configured = next(row["project_mcp"] for row in logged if "project_mcp" in row)
+    server = configured["mcpServers"]["omega-prime"]
+    assert server["command"] == sys.executable
     assert server["args"] == [
         "-m",
         "omega_prime.mcp_server",
@@ -273,21 +414,630 @@ def test_fake_omp_session_writes_events_mcp_and_commands(tmp_path: Path) -> None
         str(Path(tmp_path).resolve()),
     ]
     assert server["type"] == "stdio"
-    logged = [
-        json.loads(line)
-        for line in (tmp_path / "omp-log.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-    ]
+    assert server["cwd"] == str(install_root())
+    assert "CURSOR_PLUGIN_ROOT" not in json.dumps(configured)
+    events = _events(Path(result.events_path))
+    assert any(
+        row.get("type") == "mcp_attachment" and row.get("status") == "attached"
+        for row in events
+    )
+    assert not project_mcp.exists()
+    assert not (tmp_path / ".omp").exists()
     argv = next(row["argv"] for row in logged if "--mode" in row.get("argv", []))
     assert "--mode" in argv and "rpc" in argv
+    assert "--cwd" in argv and argv[argv.index("--cwd") + 1] == str(tmp_path.resolve())
     assert "--skills" in argv
     skills = argv[argv.index("--skills") + 1]
-    assert skills.endswith("omega_prime/skills")
+    assert skills == "*"
     commands = [row.get("cmd") for row in logged if "cmd" in row]
     assert commands == result.commands
+    rpc_filter = next(
+        row["events"] for row in logged if row.get("cmd") == "set_event_filter"
+    )
+    assert "extension_ui_request" not in rpc_filter
     code = watch_main(["job-alpha", "--state-dir", str(tmp_path / "state")])
+    assert result.mode == "rpc"
+    assert result.omp_major == 18
     assert code == 0
+
+
+def test_rpc_ui_requires_safe_control_before_launch(tmp_path: Path) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary)
+    result = run(
+        "Choose a route",
+        cwd=tmp_path,
+        env=env,
+        job_id="job-ui-missing",
+        mode="rpc-ui",
+    )
+    assert result.ok is False
+    assert result.reason == "ui_control_unavailable"
+    assert not Path(env["OMEGA_FAKE_OMP_LOG"]).exists()
+    events = _events(Path(result.events_path))
+    assert any(
+        row.get("type") == "ui_control_attachment"
+        and row.get("status") == "attach_failed"
+        for row in events
+    )
+    session = json.loads(
+        (tmp_path / "state" / "jobs" / "job-ui-missing" / "session.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert session["mode"] == "rpc-ui"
+    assert session["ui_summary"]["status"] == "attach_failed"
+
+
+def test_rpc_ui_dispatches_one_original_id_response_through_control_store(
+    tmp_path: Path,
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary, OMEGA_FAKE_OMP_VERSION="18.12.3")
+    env["OMEGA_FAKE_OMP_UI_ENABLED"] = "1"
+    job_id = "job-ui-answer"
+    with _ui_store(tmp_path) as store:
+        failures: list[BaseException] = []
+
+        def queue_answer() -> None:
+            try:
+                pending = _wait_for_ui_pending(store, job_id)
+                identity = pending["identity"]
+                stale = {**identity, "turn_generation": "old-turn"}
+                with pytest.raises(UIControlError):
+                    store.answer(stale, "select", "safe")
+                with pytest.raises(UIControlError):
+                    store.answer(identity, "select", "not-an-option")
+                store.answer(identity, "select", "safe")
+            except BaseException as exc:
+                failures.append(exc)
+
+        operator = threading.Thread(target=queue_answer, daemon=True)
+        operator.start()
+        result = run(
+            "Choose a route",
+            cwd=tmp_path / "work",
+            env=env,
+            job_id=job_id,
+            mode="rpc-ui",
+            thinking="max",
+            ui_control=store,
+            timeout=5,
+        )
+        operator.join(5)
+        assert not operator.is_alive()
+        assert not failures
+        assert result.ok is True
+        assert result.final_text == "PONG"
+        assert result.mode == "rpc-ui"
+        assert result.omp_major == 18
+        assert result.ui_summary == {
+            "status": "attached",
+            "pending": 0,
+            "answered": 1,
+            "rejected_stale": 0,
+            "aborted": 0,
+        }
+        events = _events(Path(result.events_path))
+        ui_types = [row["type"] for row in events if row["type"].startswith("ui_")]
+        assert ui_types.index("ui_pending") < ui_types.index("ui_answered")
+        assert any(
+            row.get("type") == "ui_control_attachment"
+            and row.get("status") == "attached"
+            for row in events
+        )
+        pending_event = next(row for row in events if row["type"] == "ui_pending")
+        identity = pending_event["identity"]
+        assert identity["job_id"] == job_id
+        assert len(identity["session_generation"]) == 32
+        assert len(identity["turn_generation"]) == 32
+        assert identity["session_generation"] != identity["turn_generation"]
+        assert identity["request_id"] == "rpc-external-104"
+        rendered_pending = json.dumps(pending_event)
+        assert "ui-temporary-value" not in rendered_pending
+        assert "token=[REDACTED]" in rendered_pending
+        rows = [
+            json.loads(line)
+            for line in Path(env["OMEGA_FAKE_OMP_LOG"])
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        responses = [row["ui_response"] for row in rows if "ui_response" in row]
+        assert responses == [
+            {
+                "type": "extension_ui_response",
+                "id": "rpc-external-104",
+                "value": "safe",
+            }
+        ]
+        assert sum(row.get("cmd") == "extension_ui_response" for row in rows) == 1
+        filter_events = next(
+            row["events"] for row in rows if row.get("cmd") == "set_event_filter"
+        )
+        assert "extension_ui_request" in filter_events
+        with pytest.raises(UIControlError):
+            store.answer(identity, "select", "safe")
+        assert store.status(job=job_id)["pending_count"] == 0
+    session = json.loads(
+        (tmp_path / "state" / "jobs" / job_id / "session.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert session["mode"] == "rpc-ui"
+    assert session["omp_major"] == 18
+    assert session["mcp_status"] == result.mcp_status
+    assert session["ui_summary"] == result.ui_summary
+    argv = next(row["argv"] for row in rows if "--mode" in row.get("argv", []))
+    assert argv[argv.index("--thinking") + 1] == "max"
+
+
+@pytest.mark.parametrize(
+    ("method", "answer_kind", "answer_value", "expected"),
+    [
+        (
+            "confirm",
+            "confirm",
+            False,
+            {
+                "type": "extension_ui_response",
+                "id": "rpc-external-104",
+                "confirmed": False,
+            },
+        ),
+        (
+            "ask",
+            "text",
+            "use the safe route",
+            {
+                "type": "extension_ui_response",
+                "id": "rpc-external-104",
+                "answers": [
+                    {
+                        "id": "route",
+                        "selectedOptions": [],
+                        "customInput": "use the safe route",
+                    }
+                ],
+            },
+        ),
+    ],
+)
+def test_rpc_ui_dispatches_confirm_and_ask_answers(
+    tmp_path: Path,
+    method: str,
+    answer_kind: str,
+    answer_value: object,
+    expected: dict[str, object],
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary)
+    env["OMEGA_FAKE_OMP_UI_METHOD"] = method
+    env["OMEGA_FAKE_OMP_UI_ENABLED"] = "1"
+    job_id = f"job-ui-{method}"
+    with _ui_store(tmp_path) as store:
+        failures: list[BaseException] = []
+
+        def queue_answer() -> None:
+            try:
+                pending = _wait_for_ui_pending(store, job_id)
+                store.answer(pending["identity"], answer_kind, answer_value)
+            except BaseException as exc:
+                failures.append(exc)
+
+        operator = threading.Thread(target=queue_answer, daemon=True)
+        operator.start()
+        result = run(
+            "Answer the UI request",
+            cwd=tmp_path / "work",
+            env=env,
+            job_id=job_id,
+            mode="rpc-ui",
+            ui_control=store,
+            timeout=5,
+        )
+        operator.join(5)
+        assert not operator.is_alive()
+        assert not failures
+        assert result.ok is True
+        assert result.ui_summary["answered"] == 1
+        rows = [
+            json.loads(line)
+            for line in Path(env["OMEGA_FAKE_OMP_LOG"])
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        responses = [row["ui_response"] for row in rows if "ui_response" in row]
+        assert responses == [expected]
+        assert sum(row.get("cmd") == "extension_ui_response" for row in rows) == 1
+        assert store.status(job=job_id)["pending_count"] == 0
+
+
+def test_rpc_ui_queued_abort_invalidates_pending_request_and_aborts_once(
+    tmp_path: Path,
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary)
+    env["OMEGA_FAKE_OMP_UI_ENABLED"] = "1"
+    job_id = "job-ui-abort"
+    with _ui_store(tmp_path) as store:
+        failures: list[BaseException] = []
+        identities: list[dict[str, object]] = []
+
+        def queue_abort() -> None:
+            try:
+                pending = _wait_for_ui_pending(store, job_id)
+                identity = pending["identity"]
+                identities.append(identity)
+                store.abort(job_id, identity["session_generation"])
+            except BaseException as exc:
+                failures.append(exc)
+
+        operator = threading.Thread(target=queue_abort, daemon=True)
+        operator.start()
+        result = run(
+            "Choose a route",
+            cwd=tmp_path / "work",
+            env=env,
+            job_id=job_id,
+            mode="rpc-ui",
+            ui_control=store,
+            timeout=5,
+        )
+        operator.join(5)
+        assert not operator.is_alive()
+        assert not failures
+        assert result.ok is False
+        assert result.reason == "aborted"
+        assert result.ui_summary["aborted"] == 1
+        assert result.ui_summary["pending"] == 0
+        with pytest.raises(UIControlError):
+            store.answer(identities[0], "select", "safe")
+        commands = [
+            row["cmd"]
+            for row in (
+                json.loads(line)
+                for line in Path(env["OMEGA_FAKE_OMP_LOG"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            )
+            if "cmd" in row
+        ]
+        assert commands.count("abort") == 1
+        assert "extension_ui_response" not in commands
+        events = _events(Path(result.events_path))
+        assert any(row.get("type") == "ui_rejected_stale" for row in events)
+
+
+def test_rpc_ui_cancel_sends_one_abort_and_marks_request_aborted(
+    tmp_path: Path,
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary)
+    env["OMEGA_FAKE_OMP_UI_ENABLED"] = "1"
+    job_id = "job-ui-cancel"
+    cancel_event = threading.Event()
+    with _ui_store(tmp_path) as store:
+        failures: list[BaseException] = []
+
+        def cancel_after_pending() -> None:
+            try:
+                _wait_for_ui_pending(store, job_id)
+                cancel_event.set()
+            except BaseException as exc:
+                failures.append(exc)
+
+        operator = threading.Thread(target=cancel_after_pending, daemon=True)
+        operator.start()
+        result = run(
+            "Choose a route",
+            cwd=tmp_path / "work",
+            env=env,
+            job_id=job_id,
+            mode="rpc-ui",
+            ui_control=store,
+            cancel_event=cancel_event,
+            timeout=5,
+        )
+        operator.join(5)
+        assert not operator.is_alive()
+        assert not failures
+        assert result.ok is False
+        assert result.reason == "aborted"
+        assert result.ui_summary["aborted"] == 1
+        commands = [
+            row["cmd"]
+            for row in (
+                json.loads(line)
+                for line in Path(env["OMEGA_FAKE_OMP_LOG"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            )
+            if "cmd" in row
+        ]
+        assert commands.count("abort") == 1
+        assert "extension_ui_response" not in commands
+
+
+def test_rpc_ui_eof_resolves_pending_request_instead_of_waiting_for_timeout(
+    tmp_path: Path,
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_FAKE_OMP_UI_EOF="1",
+        OMEGA_FAKE_OMP_UI_ENABLED="1",
+    )
+    job_id = "job-ui-eof"
+    with _ui_store(tmp_path) as store:
+        result = run(
+            "Choose a route",
+            cwd=tmp_path / "work",
+            env=env,
+            job_id=job_id,
+            mode="rpc-ui",
+            ui_control=store,
+            timeout=5,
+        )
+        assert result.ok is False
+        assert result.reason == "process"
+        assert result.started is True
+        assert store.status(job=job_id)["pending_count"] == 0
+        events = _events(Path(result.events_path))
+        assert any(row.get("type") == "ui_rejected_stale" for row in events)
+
+
+def test_rpc_ui_writer_failure_does_not_retry_response(
+    tmp_path: Path, monkeypatch
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary)
+    env["OMEGA_FAKE_OMP_UI_ENABLED"] = "1"
+    job_id = "job-ui-write-failed"
+    writes: list[dict[str, object]] = []
+    original_send_frame = OmpSession.send_frame
+
+    def fail_ui_response(self: OmpSession, payload: dict[str, object]) -> None:
+        if payload.get("type") == "extension_ui_response":
+            writes.append(payload)
+            raise BrokenPipeError("test UI response failure")
+        original_send_frame(self, payload)
+
+    monkeypatch.setattr(OmpSession, "send_frame", fail_ui_response)
+    with _ui_store(tmp_path) as store:
+        failures: list[BaseException] = []
+
+        def queue_answer() -> None:
+            try:
+                pending = _wait_for_ui_pending(store, job_id)
+                store.answer(pending["identity"], "select", "safe")
+            except BaseException as exc:
+                failures.append(exc)
+
+        operator = threading.Thread(target=queue_answer, daemon=True)
+        operator.start()
+        result = run(
+            "Choose a route",
+            cwd=tmp_path / "work",
+            env=env,
+            job_id=job_id,
+            mode="rpc-ui",
+            ui_control=store,
+            timeout=5,
+        )
+        operator.join(5)
+        assert not operator.is_alive()
+        assert not failures
+        assert result.ok is False
+        assert result.reason == "ui_send_failed"
+        assert len(writes) == 1
+        assert store.status(job=job_id)["pending_count"] == 0
+
+
+def test_omp_18_12_help_and_rpc_launch_preserve_thinking_max(tmp_path: Path) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary, OMEGA_FAKE_OMP_VERSION="18.12.3")
+    help_result = subprocess.run(
+        [str(binary), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    version_result = subprocess.run(
+        [str(binary), "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert "max" in help_result.stdout
+    assert version_result.stdout.strip() == "18.12.3"
+    result = run(
+        "Reply with PONG",
+        cwd=tmp_path,
+        env=env,
+        job_id="job-max",
+        thinking="max",
+    )
+    assert result.ok is True
+    assert result.omp_major == 18
+    argv = next(
+        row["argv"]
+        for row in (
+            json.loads(line)
+            for line in Path(env["OMEGA_FAKE_OMP_LOG"])
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        if "--mode" in row.get("argv", [])
+    )
+    assert argv[argv.index("--thinking") + 1] == "max"
+
+
+def test_existing_project_mcp_config_is_preserved_and_attachment_backs_off(
+    tmp_path: Path,
+) -> None:
+    binary = _install_fake(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    config_dir = work / ".omp"
+    config_dir.mkdir()
+    config = config_dir / "mcp.json"
+    original = b'{"mcpServers":{"user-server":{"type":"stdio","command":"keep"}}}\n'
+    config.write_bytes(original)
+    mode = config.stat().st_mode
+    root_config = work / "mcp.json"
+    root_config.write_bytes(b"root config remains separate\n")
+    result = run(
+        "continue without MCP",
+        cwd=work,
+        env=_env(tmp_path, binary),
+        job_id="job-existing",
+    )
+    assert result.ok is True
+    assert result.final_text == "PONG"
+    assert result.mcp_status == "attach_failed"
+    assert config.read_bytes() == original
+    assert config.stat().st_mode == mode
+    assert root_config.read_bytes() == b"root config remains separate\n"
+    assert not list(config_dir.glob(".omega-prime-owner-*"))
+    events = [
+        row
+        for row in _events(Path(result.events_path))
+        if row.get("type") == "mcp_attachment"
+    ]
+    assert len(events) == 1 and events[0]["status"] == "attach_failed"
+    commands = [
+        row["cmd"] for row in _events(tmp_path / "omp-log.jsonl") if "cmd" in row
+    ]
+    assert commands.count("prompt") == 1
+
+
+def test_attachment_crash_before_spawn_recovers_only_dead_owner(tmp_path: Path) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    attachment = mcp_bridge.try_acquire_attachment(work, state, "job-crash")
+    skills_dir = work / ".omp" / "skills"
+    skills_dir.mkdir()
+    target = work / "python-target"
+    target.write_text("target", encoding="utf-8")
+    link = skills_dir / "python"
+    link.symlink_to(target)
+    dir_stat = skills_dir.stat(follow_symlinks=False)
+    link_stat = link.stat(follow_symlinks=False)
+    attachment.register_artifact(".omp/skills", (dir_stat.st_dev, dir_stat.st_ino))
+    attachment.register_artifact(
+        ".omp/skills/python", (link_stat.st_dev, link_stat.st_ino)
+    )
+    boot_id = (
+        Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    )
+    attachment._owner_identity = {
+        "pid": 999999999,
+        "start_time": "1",
+        "boot_id": boot_id,
+    }
+    attachment._write_journal(None)
+    os.close(attachment._omp_fd)
+    os.close(attachment._parent_fd)
+
+    assert mcp_bridge.recover_attachments(state, work) == []
+    assert not (work / ".omp").exists()
+    assert not list((state / "mcp-attachments").glob("*.json"))
+    assert target.read_text(encoding="utf-8") == "target"
+
+
+def test_attachment_post_journal_failure_unwinds_owned_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    original_link = mcp_bridge.os.link
+
+    def fail_after_journal(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mcp_bridge.os, "link", fail_after_journal)
+    interrupted = False
+    try:
+        mcp_bridge.try_acquire_attachment(work, state, "job-interrupted")
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        monkeypatch.setattr(mcp_bridge.os, "link", original_link)
+    assert interrupted
+    assert not (work / ".omp").exists()
+    assert not list((state / "mcp-attachments").glob("*.json"))
+
+
+def test_attachment_registers_and_cleans_owned_artifact(tmp_path: Path) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    target = work / "target"
+    target.write_text("owned target", encoding="utf-8")
+    attachment = mcp_bridge.try_acquire_attachment(
+        work, tmp_path / "state", "job-artifact"
+    )
+    skills_dir = work / ".omp" / "skills"
+    skills_dir.mkdir()
+    artifact = skills_dir / "python"
+    artifact.symlink_to(target)
+    directory = skills_dir.stat(follow_symlinks=False)
+    prepared = artifact.stat(follow_symlinks=False)
+    attachment.register_artifact(".omp/skills", (directory.st_dev, directory.st_ino))
+    attachment.register_artifact(
+        ".omp/skills/python", (prepared.st_dev, prepared.st_ino)
+    )
+    journal = json.loads(attachment._journal_path.read_text(encoding="utf-8"))
+    assert journal["artifacts"][".omp/skills"] == [directory.st_dev, directory.st_ino]
+    assert journal["artifacts"][".omp/skills/python"] == [
+        prepared.st_dev,
+        prepared.st_ino,
+    ]
+
+    assert attachment.release() == []
+    assert not artifact.exists()
+    assert not skills_dir.exists()
+    assert not (work / ".omp").exists()
+    assert target.read_text(encoding="utf-8") == "owned target"
+
+
+def test_attachment_preserves_replaced_nested_user_artifact(tmp_path: Path) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    first_target = work / "first"
+    user_target = work / "user"
+    first_target.write_text("owned", encoding="utf-8")
+    user_target.write_text("user", encoding="utf-8")
+    attachment = mcp_bridge.try_acquire_attachment(
+        work, tmp_path / "state", "job-conflict"
+    )
+    skills_dir = work / ".omp" / "skills"
+    skills_dir.mkdir()
+    artifact = skills_dir / "python"
+    artifact.symlink_to(first_target)
+    identity = artifact.stat(follow_symlinks=False)
+    attachment.register_artifact(
+        ".omp/skills/python", (identity.st_dev, identity.st_ino)
+    )
+
+    artifact.unlink()
+    artifact.symlink_to(user_target)
+    assert attachment.release()
+    assert artifact.resolve() == user_target
+    assert (work / ".omp" / "mcp.json").is_file()
+    assert user_target.read_text(encoding="utf-8") == "user"
 
 
 def test_sandbox_refuses_without_bwrap_and_wraps_when_present(tmp_path: Path) -> None:

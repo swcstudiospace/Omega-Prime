@@ -44,7 +44,9 @@ execution.
 
 ## 2. Parent-observed installed omp evidence (help only; internals unverified)
 
-The parent session ran `omp --help` for v18.8.4. It showed:
+The parent session reported an earlier `omp --help` observation for v18.8.4;
+that historical observation is superseded for the current worktree by
+installed omp 18.12.3 (18.x). Current help evidence lists `max`.
 
 - `--cwd` selects the directory to start in and overrides launch cwd.
   The help does not establish MCP discovery roots or config precedence;
@@ -98,16 +100,16 @@ Ove transport. UI confirmation must not become connector-tool approval.
 
 ## 5. Timeout mismatch (recorded discrepancy)
 
-The uplift states time caps were removed in wiring phase 1 (GSD Phase 97, this
-milestone's registration does not verify it). Current engine source still
-contains timeout arguments: `_READY_TIMEOUT = 15.0`, `_COMMAND_TIMEOUT = 15.0`,
-`_TURN_TIMEOUT = 120.0` (`omega_prime/engine/omp_driver.py:47-49`), and
-`_accept_prompt` waits under one absolute deadline (`omp_driver.py:522-550`).
-Phase 100 must not expand into cap removal nor add new caps; at the same time
-a 120-second turn deadline must never terminate an uncapped human wait. The
-UI plans (03/04) must treat "compatible uncapped wait contract" as a
-prerequisite from Phase 97 and record the discrepancy outcome; plan 100-00
-verifies prerequisite history before implementation.
+The uplift states time caps were removed in wiring phase 1 (GSD Phase 97).
+Current engine source still contains `_READY_TIMEOUT = 15.0`,
+`_COMMAND_TIMEOUT = 15.0`, `_TURN_TIMEOUT = 120.0`
+(`omega_prime/engine/omp_driver.py:47-49`), and `_accept_prompt` waits under
+one absolute deadline (`omp_driver.py:522-550`). This is a historical
+discrepancy only, not a Phase 100 prerequisite: the operator authorizes
+proceeding without Phase 97–99 verification/merge gates. Preserve the existing
+`_TURN_TIMEOUT` and related arguments in this worktree and add no caps. A
+pending ask has no separate bridge deadline but may end at the existing outer
+turn timeout until Phase 97 merges.
 
 ## 6. Baseline gates observed by the planning session
 

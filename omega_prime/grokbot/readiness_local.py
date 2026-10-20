@@ -1973,13 +1973,16 @@ def _negatives(probe: ReadinessProbe) -> None:
 
     clarified = _result(probe, "clarify", {"question": "75-05 baseline ready?"})
     probe.check(
-        clarified.get("question") == "75-05 baseline ready?",
-        f"clarify must echo the recorded question, got {clarified}",
+        clarified
+        == {
+            "answer": "Emulator stand-in answer: proceed to the operator-selected phase."
+        },
+        f"clarify emulator stand-in returned an unexpected answer: {clarified}",
     )
     probe.record(
-        "clarify effect-free echo",
+        "clarify deterministic emulator stand-in",
         ("clarify",),
-        "question recorded and returned unchanged; no user interrupt in this slice",
+        "the readiness emulator uses a scripted answer; this is not a live operator round trip",
     )
 
     bad_receipt = {

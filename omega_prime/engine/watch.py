@@ -10,14 +10,83 @@ import sys
 import time
 from pathlib import Path
 
+from omega_prime.credentials.redact import redact_text
 from omega_prime.engine.jobs import JobPathError, job_dir
 from omega_prime.engine.protocol import assistant_text, usage_of
 
 
+def _event_identity(event: dict) -> dict[str, str]:
+    raw_identity = event.get("identity")
+    source = raw_identity if isinstance(raw_identity, dict) else event
+    aliases = {
+        "job": ("job", "job_id"),
+        "session": ("session", "session_generation", "session_id"),
+        "turn": ("turn", "turn_generation", "turn_id"),
+        "request": ("request", "request_id", "external_request_id"),
+    }
+    result = {}
+    for name, candidates in aliases.items():
+        value = next(
+            (source.get(key) for key in candidates if isinstance(source.get(key), str)),
+            None,
+        )
+        if value is not None:
+            result[name] = "".join(
+                char if char.isprintable() else "?" for char in value
+            )
+    return result
+
+
+def _safe_prompt(event: dict) -> str:
+    from omega_prime.engine.ui_control import _redacted_prompt, _request_prompt
+
+    raw_request = event.get("request")
+    request = raw_request if isinstance(raw_request, dict) else event
+    return _redacted_prompt(_request_prompt(request))
+
+
+def _safe_options(request: dict) -> list[str]:
+    from omega_prime.engine.ui_control import _option_identities
+
+    options = request.get("options")
+    if options is None and isinstance(request.get("questions"), (list, tuple)):
+        options = [
+            item
+            for question in request["questions"]
+            if isinstance(question, dict)
+            for item in question.get("options", ())
+        ]
+    return _option_identities(options)
+
+
 def format_event(event: dict) -> str:
     kind = str(event.get("type") or "event")
+    if kind in {
+        "ui_pending",
+        "ui_answered",
+        "ui_rejected_stale",
+        "attached",
+        "attach_failed",
+    }:
+        identity = _event_identity(event)
+        fields = [f"{key}={value}" for key, value in identity.items()]
+        raw_request = event.get("request")
+        request = raw_request if isinstance(raw_request, dict) else event
+        request_kind = request.get(
+            "kind", request.get("method", request.get("request_kind"))
+        )
+        if isinstance(request_kind, str):
+            fields.append(f"kind={request_kind[:40]}")
+        prompt = _safe_prompt(event)
+        if prompt:
+            fields.append(f"prompt={json.dumps(prompt, ensure_ascii=False)}")
+        option_ids = _safe_options(request)
+        if option_ids:
+            fields.append(f"options={json.dumps(option_ids, ensure_ascii=False)}")
+        detail = " ".join(fields)
+        return f"{kind} {detail}".rstrip()
     if kind == "message_update":
-        text = assistant_text(event)
+        text = redact_text(assistant_text(event))
         return f"message_update {text}" if text else "message_update"
     if kind == "message_end":
         usage, cost = usage_of(event)

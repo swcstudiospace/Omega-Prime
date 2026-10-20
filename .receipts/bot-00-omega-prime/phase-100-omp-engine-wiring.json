@@ -1,0 +1,167 @@
+{
+  "task_id": "phase-100-omp-engine-wiring",
+  "bot": "bot-00-omega-prime",
+  "completed_at": "2026-10-20T17:41:09Z",
+  "commands": [
+    {
+      "cmd": "ruff check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "All checks passed!"
+    },
+    {
+      "cmd": "ruff format --check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "599 files already formatted"
+    },
+    {
+      "cmd": "mypy omega_prime/",
+      "exit_code": 0,
+      "output_tail": "Success: no issues found in 472 source files"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; export PYTHONPATH=/workspace/omes-bot-wt/p4; ruff check omega_prime/ && ruff format --check omega_prime/ && mypy omega_prime/ && pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "output_tail": "27 failed, 4867 passed, 11 skipped, 15 warnings in 206.20s; the 27 failing node IDs exactly match 100-VALIDATION.md §6 and are caused by the uninitialized prime-agent submodule"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_engine.py -k 'fake_omp_session_discovers_configured_mcp_tools or loops_prefer_the_fake_engine or successful_engine_turn_spends_one_caller_iteration or rpc_ui_' -q",
+      "exit_code": 0,
+      "output_tail": "11 passed, 32 deselected"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_engine_clarify_driver.py omega_prime/tests/test_engine_skills.py omega_prime/tests/test_engine_clarify_ipc.py -q",
+      "exit_code": 0,
+      "output_tail": "29 passed"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_engine_skills_real.py -q",
+      "exit_code": 0,
+      "output_tail": "1 passed"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_grokbot_readiness.py::test_cli_full_local_profile -q",
+      "exit_code": 0,
+      "output_tail": "1 passed"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_hitl.py -q && PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m omega_prime.tooling.catalog --check",
+      "exit_code": 0,
+      "output_tail": "27 passed; docs/tool-catalog.md up to date"
+    },
+    {
+      "cmd": "test ! -e .omp/mcp.json && test ! -e .omp/.mcp.json",
+      "exit_code": 0,
+      "output_tail": "Both project MCP configuration paths are absent after the run"
+    },
+    {
+      "cmd": "omp --version",
+      "exit_code": 0,
+      "output_tail": "omp/18.12.3"
+    },
+    {
+      "cmd": "omp --help",
+      "exit_code": 0,
+      "output_tail": "Installed v18.12.3 help confirms --skills is a name-glob filter and thinking level max is accepted"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Ruff lint, formatting, and mypy pass on the final source.",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "The full suite has only the exact 27 documented prime-agent baseline failures; 4867 tests pass and 11 skip.",
+      "evidence_command_index": 3,
+      "expects_failure": true
+    },
+    {
+      "claim": "Fake engine behavior covers configured MCP tool discovery and rpc-ui ask lifecycle without hanging.",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "Driver, skill-attachment, and clarify-IPC tests pass.",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "The installed omp loader resolves real Omega, GSD, and user skills through the project skill view.",
+      "evidence_command_index": 6
+    },
+    {
+      "claim": "The isolated local readiness profile passes with the deterministic emulator operator stand-in.",
+      "evidence_command_index": 7
+    },
+    {
+      "claim": "HITL tests pass and the generated tool catalog is current.",
+      "evidence_command_index": 8
+    },
+    {
+      "claim": "No generated project MCP config remains in the worktree.",
+      "evidence_command_index": 9
+    },
+    {
+      "claim": "The installed engine is omp 18.12.3; its help accepts max and documents skills as a name glob.",
+      "evidence_command_index": 10
+    }
+  ],
+  "unverified": [
+    "Live Ove operator round trip was not exercised; local rpc-ui behavior used a fake engine and tests.",
+    "No provider/model-backed session or production connector session was run.",
+    "Actual live connector, deployment, and external operator control were not exercised.",
+    "Post-SIGKILL process cleanup was not tested as an OS-level kill scenario.",
+    "Prompt assembly check was not run because prompt sources did not change.",
+    "Phases 97-99 remain unverified/unmerged in this worktree per the parallel-mode instruction.",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    ".planning/STATE.md",
+    ".planning/ROADMAP.md",
+    ".planning/phases/100-omp-engine-wiring/100-00-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-01-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-02-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-03-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-04-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-05-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-CONTEXT.md",
+    ".planning/phases/100-omp-engine-wiring/100-OVERVIEW.md",
+    ".planning/phases/100-omp-engine-wiring/100-RESEARCH.md",
+    ".planning/phases/100-omp-engine-wiring/100-VALIDATION.md",
+    ".planning/phases/100-omp-engine-wiring/100-EVIDENCE.md",
+    ".planning/phases/100-omp-engine-wiring/100-02-VERIFICATION.md",
+    ".planning/phases/100-omp-engine-wiring/100-SUMMARY.md",
+    ".receipts/bot-00-omega-prime/phase-100-ui-hitl-service.json",
+    ".receipts/bot-00-omega-prime/phase-100-omp-engine-wiring.json",
+    "docs/driving-the-bot.md",
+    "docs/setup.md",
+    "docs/tool-catalog.md",
+    "omega_prime/engine/attach.py",
+    "omega_prime/engine/cli.py",
+    "omega_prime/engine/clarify_ipc.py",
+    "omega_prime/engine/hitl.py",
+    "omega_prime/engine/mcp_bridge.py",
+    "omega_prime/engine/omp_driver.py",
+    "omega_prime/engine/protocol.py",
+    "omega_prime/engine/skills_attach.py",
+    "omega_prime/engine/ui_control.py",
+    "omega_prime/engine/watch.py",
+    "omega_prime/grokbot/doctor.py",
+    "omega_prime/grokbot/emulator.py",
+    "omega_prime/grokbot/readiness_local.py",
+    "omega_prime/mcp_server.py",
+    "omega_prime/tests/test_engine.py",
+    "omega_prime/tests/test_engine_clarify_driver.py",
+    "omega_prime/tests/test_engine_clarify_ipc.py",
+    "omega_prime/tests/test_engine_skills.py",
+    "omega_prime/tests/test_engine_skills_real.py",
+    "omega_prime/tests/test_grokbot_doctor.py",
+    "omega_prime/tests/test_grokbot_e2e.py",
+    "omega_prime/tests/test_hitl.py",
+    "omega_prime/tests/test_tools.py",
+    "omega_prime/tests/test_ui_control.py",
+    "omega_prime/tools/clarify.py",
+    "omega_prime/tools/coding.py"
+  ],
+  "contract_changes": [],
+  "rollback_plan": null,
+  "approvals": [],
+  "approved_by": null
+}

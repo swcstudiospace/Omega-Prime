@@ -4,7 +4,13 @@
 
 Planning only. This session may change planning artifacts and its verification receipt, not application code, tests, prompts, installed tools, live settings, or runtime configuration. Execution belongs to a separately authorized session. Work stays in this worktree on its existing feature branch. Commit locally; never push, open a PR, merge, deploy, restart the connector, or touch external checkouts/system configuration.
 
-v20 Wiring maps wiring phases 1–7 to GSD phases 97–103. This is wiring phase 4. Phase 99 (Solo mode, Desk optional) is the prerequisite; registration is not proof it completed. The supplied uplift says time caps were removed in wiring phase 1. Current engine source still contains timeout arguments: record this discrepancy and verify prerequisite history before implementation; do not expand Phase 100 into time-cap removal or introduce new caps.
+v20 Wiring maps wiring phases 1–7 to GSD phases 97–103. This is wiring phase
+4. The operator authorizes Phase 100 to proceed without checking Phase 97–99
+verification or merge gates. Preserve Phase 97's existing
+`omp_driver._TURN_TIMEOUT` and related arguments in this worktree; do not
+remove that cap or add any new session/turn caps. Pending asks have no
+separate bridge deadline, but may end at the existing outer turn timeout
+until Phase 97 merges.
 
 ## Source of truth
 
@@ -15,8 +21,13 @@ The referenced external wiring audit is outside the permitted worktree and was n
 ## Fixed operator decisions
 
 - rpc-ui asks route to Ove live via clarify HITL by default. Do not add a policy-file answer source as the default or substitute one for live delivery. A policy feature is not required for this phase; if retained from existing code, it cannot approve sends, merges, or deploys.
-- Installed `omp --help` reports v18.8.4 and thinking levels `off, minimal, low, medium, high, xhigh, max, auto`. `max` is accepted. Do not re-open that ambiguity or silently add unrelated `auto` support.
-- `/skill:` needs rpc or rpc-ui; ask needs rpc-ui. No session/turn time caps, including human-answer deadlines. Cancellation must remain usable while a human answer is pending.
+- Installed `omp` is observed at version 18.12.3 (installed 18.x); its
+  observed `--help` lists thinking levels `off, minimal, low, medium, high,
+  xhigh, max, auto`, so `max` is accepted. No model session is required to
+  establish support. Do not silently add unrelated `auto` support.
+- `/skill:` needs rpc or rpc-ui; ask needs rpc-ui. No separate deadline is
+  added for human answers. Cancellation must remain usable while an ask is
+  pending.
 - Do not copy or print the omp login store; link only if the chosen attachment strategy needs a link. Preserve shared model-role configuration and auth behavior.
 
 ## Requirements and acceptance

@@ -40,6 +40,7 @@ from omega_prime.commands.context import (
 )
 from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.cron.desk_driver import DeskDriver
+from omega_prime.engine.clarify_ipc import ClarifySocketClient
 from omega_prime.grokbot.approvals_file import (
     load_approvals_file,
     resolve_approvals_digest,
@@ -819,7 +820,12 @@ def default_registry(
     # DESK-02: a distinct work root is itself the coding workspace; the
     # default keeps the shipped `root/omega_prime` jail.
     coding_root = work if work != root else root / "omega_prime"
-    register_coding_tools(registry, coding_root, policy=policy)
+    register_coding_tools(
+        registry,
+        coding_root,
+        policy=policy,
+        interaction=ClarifySocketClient.from_env(env),
+    )
     # `OMEGA_PRIME_STATE_DIR` moves the growth stores and the desk stores out
     # of the (possibly read-only) source tree. New skills follow that volume
     # when the install skills directory cannot be written. The state skills

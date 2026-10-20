@@ -351,9 +351,11 @@ is `token_rotated` with no token material in the file.
 ## 9. omp engine
 
 The coding loop can run on [omp](https://omp.sh) (`oh-my-pi`, major 18) over
-its RPC mode. Omega Prime supplies the tools, skills, prompts, and loop
-policy. omp performs the inference through its own provider logins or API
-keys. The Python process does not call model HTTP APIs for that path.
+RPC or RPC-UI. Omega Prime supplies its tools and skills through the
+project-local attachment. omp performs inference through its own provider
+logins or API keys; the Python process does not call model HTTP APIs for this
+path. Interactive conversation turns use RPC-UI; direct non-interactive engine
+calls use RPC unless their caller requests RPC-UI.
 
 Install omp 18.x and sign in with `omp login` for the plans you intend to
 use, or export the API key for that provider in the host environment. The
@@ -412,17 +414,36 @@ The `omega watch JOB` console script is the same command. When `tmux` is on
 The engine uses bubblewrap when `bwrap` is on `PATH`. Without bubblewrap it
 refuses to start unless `OMEGA_PRIME_ENGINE_UNSANDBOXED=1` is set.
 
-The session `mcp.json` starts `python -m omega_prime.mcp_server` with
+For each run, the engine acquires an exclusive project-local
+`<work-root>/.omp/mcp.json` attachment and an additive `.omp/skills` view.
+The attachment is removed after the child exits; only files created by that
+run are eligible for cleanup. If `.omp` already exists or cannot be safely
+owned, the engine preserves it and continues with MCP tools reported as
+`attach_failed`. The MCP entry starts `python -m omega_prime.mcp_server` with
 `--root` set to this installation and `--work-root` set to the checkout.
-Connector settings already in the environment (`X_API_TOKEN`,
-`TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, `SUBSTRATE_TOKEN`, and the other
-desk client variables) are passed through to that process. They are not
-written into `mcp.json`. Plan mode, a narrowed tool roster, and a
-`child_tool_hook` stay on the Python loop so those turns do not receive
-tools the caller removed. `omega watch JOB --follow` waits for the event file to appear, then until
-the job ends (`agent_end`, or `job_end` when a launch fails after the event
-file exists). Pass `--timeout` to bound that wait. A refusal before the prompt
-is sent does not spend a caller-supplied iteration budget.
+Connector settings already in the environment are passed to that process;
+their values are not written into `mcp.json`. Skills are exposed as links and
+omp receives `--skills "*"` as a name glob, so native custom skill directories
+remain discoverable.
+
+`/skill:` requires RPC or RPC-UI; the OMP `ask` tool requires RPC-UI. Interactive
+RPC-UI requests are routed to the local operator control queue, never answered
+from a policy file. Inspect pending requests with `omega ui list`; answer one
+with the exact `job_id`, `session_generation`, `turn_generation`, and
+`request_id` shown in that output, for example:
+
+```bash
+omega ui answer --job JOB --session SESSION --turn TURN --request REQUEST --text "operator answer"
+```
+
+The bridge adds no separate deadline for human input; the engine turn lifecycle
+still applies, and cancellation rejects pending requests. Plan mode, a narrowed
+tool roster, and a `child_tool_hook` stay on the Python loop so those turns do
+not receive tools the caller removed. `omega watch JOB --follow` waits for the
+event file to appear, then until the job ends (`agent_end`, or `job_end` when a
+launch fails after the event file exists). Pass `--timeout` to bound that wait.
+A refusal before the prompt is sent does not spend a caller-supplied iteration
+budget.
 
 `OMEGA_PRIME_ENGINE=omp` makes the conversation loop, delegate, desk-lead
 pass, and ultrathink turn require the engine. Unset, or `auto`, uses the

@@ -20,7 +20,7 @@ Validation model and observed baseline: `100-VALIDATION.md`.
 | `100-01-PLAN.md` — `100-01` | 2 | MCP attachment: work-tree `.omp/mcp.json` exclusive-owner lease with safe backoff, discovery-based `attached`/`attach_failed`, outer cleanup/crash-recovery lifecycle | `[100-00]` | per its frontmatter | ENG-100-01, ENG-100-02 |
 | `100-02-PLAN.md` — `100-02` | 3 | Skills: real discovery roots via supported additive path, `--skills` name globs from checked-in catalog, real GSD exposure and proof, user sources preserved | `[100-01]` | per its frontmatter | ENG-100-03 |
 | `100-03-PLAN.md` — `100-03` | 2 | UI protocol/service only: verified rpc-ui envelope types/validation/event filter, `max` (never `auto`), live clarification service boundary, request-lifecycle state machine | `[100-00]` | per its frontmatter | ENG-100-04, ENG-100-05 (service half) |
-| `100-04-PLAN.md` — `100-04` | 4 | UI driver/caller/control: single-owner dispatcher, production caller interaction context, operator delivery/reply/cancel, status/watch, uncapped human waits | `[100-02, 100-03]` | per its frontmatter | ENG-100-04, ENG-100-05 (integration half), ENG-100-06 caps boundary |
+| `100-04-PLAN.md` — `100-04` | 4 | UI driver/caller/control: single-owner dispatcher, production caller interaction context, operator delivery/reply/cancel, status/watch; pending asks have no separate bridge deadline, but the preserved outer turn timeout still applies | `[100-02, 100-03]` | per its frontmatter | ENG-100-04, ENG-100-05 (integration half), ENG-100-06 caps boundary |
 | `100-05-PLAN.md` — `100-05` | 5 | Docs, integrated proof, exact four gates, verification receipt | `[100-04]` | per its frontmatter | ENG-100-07 (+ proof of record for 01-06) |
 Execution order (waves): 100-00 → {100-01 ∥ 100-03} → 100-02 → 100-04
 → 100-05.
@@ -73,8 +73,8 @@ planning; all are future execution claims.
 
 ## Execution stop conditions (missing prerequisites — stop and report, never shrink scope or fabricate)
 
-1. **Phase 99 prerequisite not confirmed** at execution time (ROADMAP
-   registration is not proof): stop before any code change.
+1. Phase 97–99 verification or merge status is not a Phase 100 stop
+   condition, per the operator's parallel-worktree override.
 2. **Installed protocol unavailable**: 100-00 cannot establish the
    loader/discovery contract or provider-free rpc-ui
    `extension_ui_request`/`extension_ui_response` fixtures from permitted
@@ -84,9 +84,10 @@ planning; all are future execution claims.
    provider-free resolution proof: execution is BLOCKED; no placeholder, fake
    skill, hardcoded historical path, glob invention, skip, or unverified
    acceptance waiver.
-4. **No-cap prerequisite incompatible**: Phase 97's uncapped-turn behavior is
-   not landed and verified: stop; 100-04 consumes it and does not implement a
-   Phase 100 substitute.
+4. Phase 100 preserves the existing Phase 97 `_TURN_TIMEOUT` and related
+   arguments and adds no new cap. A pending ask has no separate bridge
+   deadline but may end at the existing outer turn timeout until Phase 97
+   merges; do not claim uncapped outer-turn behavior.
 5. **New phase-caused regression**: route to the responsible 100-01..100-04
    owner for scoped repair, then main-agent re-verification of the affected
    wave union. Do not repair the unrelated 27-node environmental baseline;
@@ -97,10 +98,10 @@ planning; all are future execution claims.
 - Environment: existing `/workspace/omes-bot/.venv/bin/python`, venv `bin` on
   `PATH`, `PYTHONPATH=/workspace/omes-bot-wt/p4`, run from this worktree; no
   package installs; never read/print secrets or the omp login store.
-- Scope guards: no global `~/.omp/agent/mcp.json` mutation, no session/turn
-  caps (consume verified uncapped Phase 97 behavior or block), no `auto`
-  thinking level, no policy-file approval of sends/merges/deploys, no Phase 101
-  LocalExecutor work, no connector restarts or deployments.
+- Scope guards: no global `~/.omp/agent/mcp.json` mutation; preserve the
+  existing `_TURN_TIMEOUT` and related arguments; add no session/turn caps;
+  no `auto` thinking level; no policy-file approval of sends/merges/deploys,
+  no Phase 101 LocalExecutor work, no connector restarts or deployments.
 - Local commits only (`Refs: no tracker IDs provided`); never push, open a
   PR, merge, or enable auto-merge.
 - Verification receipt before any completion claim (plan 05, using the

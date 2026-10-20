@@ -21,7 +21,7 @@
 - ✅ **v17 XML Prompt Standard** — Phases 85–88 (shipped 2026-10-14; every first-party prompt wrapped in XML tags like Programming Desk, enforced by a gate)
 - ✅ **v18 Operator posture** - Phases 89-95 (shipped 2026-10-14). Seven upgrades accepted when the operator said to continue.
 - ✅ **v19 Installer bindings** - Phase 96 (shipped 2026-10-15). A fresh install binds its own Linear and Notion, treats the existing gateways as optional, and fails setup when `prime-agent` is empty.
-- **v20 Wiring** — Phases 97–103 (in progress; Phase 100 planned, not executed)
+- **v20 Wiring** — Phases 97–103 (in progress; Phase 100 complete; later phases remain open)
 
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
@@ -96,13 +96,14 @@ Requirements: milestones/v19-REQUIREMENTS.md. Phase 77.1 live UAT stays user-own
 ## v20 Wiring (in progress)
 
 Wiring phases 1–7 map to GSD phases 97–103. This milestone registration does
-not verify or re-execute earlier wiring work. Phase 100 depends on wiring
-phase 3 (GSD 99); confirm its merged behavior before implementation.
+not verify or re-execute earlier wiring work. The operator explicitly
+authorizes Phase 100 to proceed in parallel without Phase 97–99 verification
+or merge gates.
 
 - [ ] Phase 97: Substrate direct connect + settings loader + no time caps
 - [ ] Phase 98: Shared memory via substrate, Hindsight fallback
 - [ ] Phase 99: Solo mode, Desk optional
-- [ ] Phase 100: omp engine wiring — six reviewed plans; execution not started
+- [x] Phase 100: omp engine wiring — six reviewed plans (6/6) — completed 2026-10-20; exact 27-test `prime-agent` baseline only
 - [ ] Phase 101: Real U2 LocalExecutor
 - [ ] Phase 102: Schedulers, dead modules, env docs
 - [ ] Phase 103: Ultrathink integration and cleanup
@@ -111,10 +112,13 @@ phase 3 (GSD 99); confirm its merged behavior before implementation.
 
 **Goal:** Resolve uplift gaps G4/G5: attach Omega Prime MCP tools and real
 skills to the omp engine session, and bridge rpc-ui asks to Ove live through
-clarify without stale replies, user-config damage, or session/turn time caps.
+clarify without stale replies or user-config damage. Preserve the existing
+outer turn timeout and add no new session/turn caps.
 
-**Depends on:** Phase 99 (wiring phase 3); verify prerequisite behavior at
-execution time. G6/time-cap removal belongs to Phase 97, not this phase.
+**Depends on:** Phase 99 (wiring phase 3) in the original milestone
+structure, but the operator authorizes this Phase 100 run to proceed without
+Phase 97–99 verification or merge gates. Phase 97 owns changes to the existing
+turn timeout; preserve it here and add no new caps.
 
 **Requirements** (local planning labels, not tracker identifiers):
 
@@ -135,13 +139,15 @@ execution time. G6/time-cap removal belongs to Phase 97, not this phase.
   Live clarify is the decided default, not policy-file answers.
 - **ENG-100-05 — Request lifecycle:** Track job/session/request identity;
   answer once, reject stale/duplicate answers, expose `ui_pending`,
-  `ui_answered`, and `ui_rejected_stale`. Human waits have no deadline;
-  cancellation/abort remains usable.
-- **ENG-100-06 — Compatibility and safety:** Accept `max`, confirmed in
-  installed omp 18.8.4 help and by the operator. Preserve shared login and
-  model-role behavior. No new packages, session/turn caps, live-config
-  changes, deployment, or LocalExecutor work. No policy-file auto-approval
-  of sends, merges, or deploys.
+  `ui_answered`, and `ui_rejected_stale`. No separate bridge deadline is
+  added; the existing outer turn timeout may end a pending ask until Phase 97
+  merges. Cancellation/abort remains usable.
+- **ENG-100-06 — Compatibility and safety:** Accept `max`, confirmed by
+  observed installed omp 18.12.3 (`18.x`) `--help`; `--help` lists `max`.
+  No model session is required to establish support. Preserve shared login and
+  model-role behavior. No new packages or caps, live-config changes,
+  deployment, or LocalExecutor work. No policy-file auto-approval of sends,
+  merges, or deploys.
 - **ENG-100-07 — Verification and docs:** Document that `/skill:` needs
   rpc or rpc-ui and ask needs rpc-ui. Prove discovered tools, loaded skills,
   request lifecycle, and config restoration; run exact CI gates and name
@@ -160,15 +166,14 @@ execution time. G6/time-cap removal belongs to Phase 97, not this phase.
    the complete Omega Prime test suite are green or baseline-only, with
    prompt assembly checked if prompts change.
 
-**Plans:** Six reviewed execution plans; structural validation passed. None executed.
-Index: [Phase 100 plans](phases/100-omp-engine-wiring/100-OVERVIEW.md).
+**Plans:** Six reviewed execution plans; all six executed and verified. Phase 100 is complete. The v20 milestone remains in progress.
 
-- [ ] 100-00 — Installed-contract evidence and prerequisite checks (wave 1)
-- [ ] 100-01 — MCP attachment and ownership-aware cleanup (wave 2)
-- [ ] 100-03 — UI protocol and clarification lifecycle service (wave 2, parallel with 01)
-- [ ] 100-02 — Real skills discovery and name-glob selection (wave 3)
-- [ ] 100-04 — Production rpc-ui/HITL routing and operator controls (wave 4)
-- [ ] 100-05 — Docs, integrated verification, and execution receipt (wave 5)
+- [x] 100-00 — Installed-contract evidence and prerequisite decisions (wave 1)
+- [x] 100-01 — MCP attachment and ownership-aware cleanup (wave 2)
+- [x] 100-03 — UI protocol and clarification lifecycle service (wave 2, parallel with 01)
+- [x] 100-02 — Real skills discovery and name-glob selection (wave 3)
+- [x] 100-04 — Production rpc-ui/HITL routing and operator controls (wave 4)
+- [x] 100-05 — Docs, integrated verification, and execution receipt (wave 5)
 
 **Out of scope:** Phase 101 LocalExecutor; the external agentOS runner
 (note only); Phase 97 time-cap removal; deployments and connector restarts.

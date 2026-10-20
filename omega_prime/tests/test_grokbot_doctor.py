@@ -26,6 +26,7 @@ NEW_CHECK_IDS = (
     "bind_exposure",
     "token_strength",
     "connector_secrets",
+    "ui_control_health",
 )
 
 
@@ -303,3 +304,70 @@ def test_main_human_output(
     )
     assert doctor_module.main([]) == 0
     assert "All preflight checks passed" in capsys.readouterr().out
+
+
+def test_ui_control_health_passes_for_existing_private_store(tmp_path: Path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    control = state / "ui-control"
+    control.mkdir(mode=0o700)
+
+    check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
+
+    assert check.id == "ui_control_health"
+    assert check.status == "PASS"
+    assert str(control) in check.message
+    assert "mode=0700" in check.message
+
+
+def test_ui_control_health_fails_when_control_overlaps_writable_bind(tmp_path: Path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    (state / "ui-control").mkdir(mode=0o700)
+    env = {
+        "OMEGA_PRIME_STATE_DIR": str(state),
+        "OMEGA_PRIME_WORK_ROOT": str(state / "ui-control" / "child"),
+    }
+
+    check = GrokBotDoctor(env=env)._check_ui_control()
+
+    assert check.status == "FAIL"
+    assert "overlaps" in check.message
+
+
+def test_ui_control_health_fails_for_unwritable_control_mode(tmp_path: Path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    control = state / "ui-control"
+    control.mkdir(mode=0o700)
+    control.chmod(0o500)
+
+    check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
+
+    assert check.status == "FAIL"
+    assert "mode 0700" in check.message
+
+
+def test_ui_control_health_fails_for_unsafe_symlink_path(tmp_path: Path):
+    actual_state = tmp_path / "actual-state"
+    actual_state.mkdir(mode=0o700)
+    (actual_state / "ui-control").mkdir(mode=0o700)
+    state_link = tmp_path / "state-link"
+    state_link.symlink_to(actual_state, target_is_directory=True)
+
+    check = GrokBotDoctor(
+        env={"OMEGA_PRIME_STATE_DIR": str(state_link)}
+    )._check_ui_control()
+
+    assert check.status == "FAIL"
+    assert "symlink" in check.message
+
+
+def test_ui_control_health_does_not_create_missing_store(tmp_path: Path):
+    state = tmp_path / "missing-state"
+
+    check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
+
+    assert check.status == "WARN"
+    assert "RPC-UI asks are unavailable" in check.message
+    assert not state.exists()

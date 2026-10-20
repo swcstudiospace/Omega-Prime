@@ -25,7 +25,7 @@ document was written.
 | --- | --- | --- | --- |
 | 1 | Session tool-list contains Omega Prime tools | 100-01 (fixtures from 100-00) | Extended fake resolves the effective `--cwd` independently of process cwd, reads only the intended project MCP location, performs real MCP initialize + tools/list via the already-used SDK, and exposes discovered names through the agreed session-state response; assert Omega-specific `omega_command` plus a representative read tool. Negative: JSON only under `jobs/<id>/profile` discovers no Omega tools. Plus `test_mcp_server.py:203-218`-style own-client roundtrip through the *configured* command with work checkout outside install root. |
 | 2 | Real GSD and Omega skills load; `--skills` is a glob, not a path | 100-02 (sources/evidence from 100-00) | Actual provider-free resolution proves Omega, user-seeded, and real GSD skill resolution with canonical source paths; missing sources or proof interface BLOCK execution and criterion 2 remains unsatisfied. |
-| 3 | Fake rpc-ui ask answered once, stale rejected, no hang | 100-03 (protocol/service), 100-04 (driver/control) | Fake blocks completion until production reply entrypoint delivers human answer; exactly one `extension_ui_response` with original external request id; duplicate/stale/cross-job answers rejected with zero response frames; cancel while pending reaches child, invalidates request, later reply stale; validation failure remains pending; wait beyond old 120s threshold stays pending without autoanswer; completion without hang. |
+| 3 | Fake rpc-ui ask answered once, stale rejected, cancellation responsive | 100-03 (protocol/service), 100-04 (driver/control) | Fake blocks completion until production reply entrypoint delivers human answer; exactly one `extension_ui_response` with original external request id; duplicate/stale/cross-job answers rejected with zero response frames; cancel while pending reaches child, invalidates request, later reply stale; validation failure remains pending; no separate bridge deadline or timeout cap is added. The existing `_TURN_TIMEOUT` remains unchanged, so a sufficiently prolonged ask may end at that outer timeout until Phase 97 merges. |
 | 4 | Work-tree `.omp/mcp.json` restored; user config and shared login untouched | 100-01 | Byte/mode/inode/type/symlink-target snapshot before/after across pre-existing-config matrix (§3); run-owned artifacts removed only when identity permits; child must be proven reaped before releasing ownership; user replacement preserved and cleanup conflict reported. |
 | 5 | Mode docs + green/baseline-only gates (+ prompt check if prompts changed) | 100-05 | Docs state `/skill:` needs rpc/rpc-ui and ask needs rpc-ui; exact four gates run with outcomes; prompt gate only if prompts changed; catalog checked after 04 regeneration. |
 
@@ -84,9 +84,10 @@ writable bind; absent/unsafe/unsandboxed isolation stops interaction rather
 than degrading to answers. CLI confirmation accepts explicit true or false.
 Confirm answers do not alter global approval logs or authorize connector
 sends. Production context is constructed at composition root, not only tests.
-`max` is accepted; `auto` is never added. Preserve shared login, started-failure
-no-replay and uncapped Phase 97 turn behavior, including non-UI waits and work
-after an answer; unresolved prerequisite blocks execution.
+`max` is accepted; `auto` is never added. Preserve shared login,
+started-failure no-replay and the existing Phase 97 `_TURN_TIMEOUT` and related
+arguments; add no separate session/turn cap. A pending ask may end at that
+outer timeout until Phase 97 merges.
 
 ## 4. Task-to-test mapping
 
