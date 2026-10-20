@@ -2,8 +2,8 @@
   "task_id": "phase97-execution",
   "bot": "bot-00-omega-prime",
   "started_at": "2026-10-20T14:51:02Z",
-  "completed_at": "2026-10-20T17:23:58Z",
-  "scope": "Phase 97 local implementation and verification only; no live settings, tokens, connector, VPS, Railway, push, PR, merge, or deployment actions.",
+  "completed_at": "2026-10-20T17:25:07Z",
+  "scope": "Phase 97 local implementation and verification; no settings writes, token provisioning, connector restart, VPS/Railway access, push, PR, merge, or deployment.",
   "commands": [
     {
       "cmd": "PATH=/workspace/omes-bot/.venv/bin:$PATH ruff check omega_prime/",
@@ -73,7 +73,7 @@
   "unverified": [
     "Current Agent Substrate MCP mount/path, server version, tool schemas, and response compatibility; no authoritative current source or schema was accessible, so Phase 97 verification remains deferred.",
     "Live Substrate endpoint reachability/authentication and real Grok Bot behavior; the VPS is unavailable and live verification is operator-owned.",
-    "Live ~/.omega-prime/settings.json contents, token provisioning, connector restart, and the supplied runtime configuration values; none were read or written.",
+    "Live settings file contents were not intentionally inspected or written; some early focused tests before the explicit path override may have consulted the default settings path, but no values were captured or emitted. All final gates used a missing /tmp override.",
     "rule adherence by future agents"
   ],
   "files_changed": [

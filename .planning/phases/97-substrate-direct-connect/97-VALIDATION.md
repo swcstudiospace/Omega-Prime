@@ -55,7 +55,7 @@ Consolidated gates:
 - `python -m omega_prime.tooling.catalog --check` — exit 0; `docs/tool-catalog.md` current.
 - `pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q` — exit 0; 31 passed after the final documentation edit.
 
-The prompt assembly check was not run because no prompts changed. No live endpoint, credential, live settings file, connector, VPS, or Railway resource was accessed. Current upstream MCP mount/schema compatibility is still unverified; the VPS was unavailable per the supplied context, and no authoritative current server contract was accessible.
+The prompt assembly check was not run because no prompts changed. No live endpoint, credential provisioning, live settings write, connector restart, VPS, or Railway resource was accessed. Some early focused tests before the explicit settings-path override may have consulted the default settings path, but no values were captured or emitted; all final gates used a missing `/tmp` override. Current upstream MCP mount/schema compatibility remains unverified because authoritative current server evidence was inaccessible.
 
 No command in test, smoke, or plan introduces an optional turn/session deadline or environment timeout override. Socket/request liveness polling is not an inference duration cap.
 
