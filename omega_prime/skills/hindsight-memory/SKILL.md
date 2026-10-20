@@ -131,10 +131,9 @@ Each source reports one of `answered`, `empty`, `not_configured`,
 `unreachable`, or `unauthorized`. A source failure is not an empty result and
 does not suppress valid hits from other sources.
 
-**Current integration limit:** on this branch, `SubstrateClient.memory_search`
-still collapses `SubstrateError` to `[]`. A Substrate transport failure may
-therefore look empty until phase 97's source-aware contract is rebased; do not
-interpret an empty result as proof of healthy reachability yet.
+Substrate client errors now propagate from `memory_search`; transport and
+protocol failures are reported as source failures, not empty results. An empty
+list means the search succeeded and found no entries.
 
 Recall is retrieval, not verification. Re-run a recalled command or re-check
 an environment fact against current evidence before relying on it.

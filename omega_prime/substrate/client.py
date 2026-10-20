@@ -16,7 +16,7 @@ import json
 import uuid
 from collections.abc import Mapping
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal, overload
 from urllib.parse import urlsplit
 
 from omega_prime.providers.http import HttpTransport
@@ -232,9 +232,15 @@ class SubstrateClient:
             arguments["limit"] = limit
         if repo is not None:
             arguments["repo"] = repo
-        result = self._call_tool("memory_search", arguments)
-        entries = result.get("entries", result)
-        return entries if isinstance(entries, list) else []
+        result = self._call_tool("memory_search", arguments, allow_list=True)
+        if isinstance(result, list):
+            return result
+        entries = result.get("entries")
+        if not isinstance(entries, list):
+            raise SubstrateProtocolError(
+                "substrate memory_search returned malformed entries"
+            )
+        return entries
 
     def docs_search(self, query: str) -> dict:
         """Call ``docs_search``. Failures raise ``SubstrateError``."""
@@ -296,7 +302,19 @@ class SubstrateClient:
             raise SubstrateProtocolError("substrate tool returned a malformed result")
         return text
 
-    def _call_tool(self, name: str, arguments: dict) -> dict:
+    @overload
+    def _call_tool(
+        self, name: str, arguments: dict, *, allow_list: Literal[False] = False
+    ) -> dict: ...
+
+    @overload
+    def _call_tool(
+        self, name: str, arguments: dict, *, allow_list: Literal[True]
+    ) -> dict | list: ...
+
+    def _call_tool(
+        self, name: str, arguments: dict, *, allow_list: bool = False
+    ) -> dict | list:
         """One MCP ``tools/call`` round trip. Failures raise ``SubstrateError``."""
         text = _tool_text(self._mcp_post(name, arguments))
         if text is None:
@@ -307,9 +325,9 @@ class SubstrateClient:
             raise SubstrateProtocolError(
                 "substrate tool returned invalid JSON"
             ) from None
-        if not isinstance(decoded, dict):
-            raise SubstrateProtocolError("substrate tool returned no result object")
-        return decoded
+        if isinstance(decoded, dict) or (allow_list and isinstance(decoded, list)):
+            return decoded
+        raise SubstrateProtocolError("substrate tool returned no result object")
 
     def _mcp_post(self, name: str, arguments: dict) -> Any:
         """POST and validate one MCP response, using only scoped session state."""

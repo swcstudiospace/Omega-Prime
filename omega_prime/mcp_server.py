@@ -897,7 +897,10 @@ def default_registry(
             hindsight_construction_error = "configured Hindsight service is invalid"
     memory_backends = resolve_memory_backends(
         local_store=memory_store,
-        substrate=substrate_client if substrate_url else None,
+        # Do not expose an unresolved binding-aware client as a configured
+        # backend. It is attached immediately before memory operations when a
+        # live binding resolves to a usable endpoint.
+        substrate=substrate_client if substrate_url and not substrate_error else None,
         hindsight=hindsight,
         substrate_url=substrate_url,
         hindsight_url=hindsight_url or None,
@@ -912,7 +915,29 @@ def default_registry(
         memory_backends.errors["hindsight"] = hindsight_construction_error
         memory_backends.states["hindsight"] = "unreachable"
 
+    def refresh_memory_substrate() -> None:
+        """Resolve live connector settings immediately before a memory call."""
+        base, error = substrate_client._resolve_base()
+        if base and error is None:
+            memory_backends.substrate = substrate_client
+            memory_backends.errors.pop("substrate", None)
+            memory_backends.states["substrate"] = "empty"
+        else:
+            memory_backends.substrate = None
+            if error is not None:
+                message = str(error)
+                memory_backends.errors["substrate"] = message
+                memory_backends.states["substrate"] = (
+                    "not_configured" if "not configured" in message else "unreachable"
+                )
+            else:
+                memory_backends.errors["substrate"] = (
+                    "substrate gateway is not configured"
+                )
+                memory_backends.states["substrate"] = "not_configured"
+
     def growth_retain(content: str) -> dict[str, Any]:
+        refresh_memory_substrate()
         return retain_memory(
             memory_backends,
             content,
@@ -1186,6 +1211,14 @@ def default_registry(
     # Started by the live server (stdio main / serve_sse), not here: building
     # a registry is also how doctor, setup_check, the catalog and tests
     # inspect the tool surface, and those must not spawn a ticking thread.
+    dispatch = registry.dispatch
+
+    def dispatch_with_memory_refresh(name: str, arguments: Any = None) -> str:
+        if name in {"lead_memory_recall", "lead_doctor"}:
+            refresh_memory_substrate()
+        return dispatch(name, arguments)
+
+    registry.dispatch = dispatch_with_memory_refresh  # type: ignore[method-assign]
     return registry
 
 

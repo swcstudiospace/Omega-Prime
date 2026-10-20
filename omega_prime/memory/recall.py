@@ -129,7 +129,11 @@ def recall_memory(
         return True
 
     def source_row(
-        backend: str, hit: dict[str, Any], *, fallback_bank: str | None = None
+        backend: str,
+        hit: dict[str, Any],
+        *,
+        fallback_bank: str | None = None,
+        trusted_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         row: dict[str, Any] = {"backend": backend}
         for key, value in hit.items():
@@ -141,21 +145,29 @@ def recall_memory(
                     and isinstance(value, str)
                     and value.startswith(_REMOTE_METADATA_MARKER)
                 )
+                and not (
+                    key in {"scope", "repo"}
+                    and (trusted_metadata is None or key not in trusted_metadata)
+                )
+                and not (
+                    key == "source"
+                    and (trusted_metadata is None or key not in trusted_metadata)
+                )
             ):
                 row[key] = value
+        if trusted_metadata is not None:
+            row.update(trusted_metadata)
         if fallback_bank is not None and "bank" not in row:
             row["bank"] = fallback_bank
         return row
 
-    def in_scope(hit: dict[str, Any], backend: str) -> bool:
-        hit_scope = hit.get("scope")
-        hit_repo = hit.get("repo")
+    def remote_metadata(hit: dict[str, Any], backend: str) -> dict[str, Any] | None:
         candidates = (
             (hit.get("source_event"),)
             if backend == "substrate"
             else (hit.get("context"),)
         )
-        metadata: tuple[str, str | None] | None = None
+        metadata: dict[str, Any] | None = None
         for candidate in candidates:
             if not isinstance(candidate, str) or not candidate.startswith(
                 _REMOTE_METADATA_MARKER
@@ -164,32 +176,45 @@ def recall_memory(
             try:
                 decoded = json.loads(candidate[len(_REMOTE_METADATA_MARKER) :])
                 if not isinstance(decoded, dict):
-                    return False
+                    return None
                 metadata_scope_value = decoded.get("scope")
                 metadata_repo_value = decoded.get("repo")
                 if not isinstance(metadata_scope_value, str):
-                    return False
+                    return None
                 if metadata_repo_value is not None and not isinstance(
                     metadata_repo_value, str
                 ):
-                    return False
+                    return None
                 trusted_scope, trusted_repo = validate_scope_repo(
                     metadata_scope_value, metadata_repo_value
                 )
+                trusted = {"scope": trusted_scope, "repo": trusted_repo}
+                if "source" in decoded:
+                    source = decoded["source"]
+                    if source is not None and not isinstance(source, str):
+                        return None
+                    trusted["source"] = source
             except (TypeError, ValueError):
-                return False
-            trusted_metadata = (trusted_scope, trusted_repo)
-            if metadata is not None and metadata != trusted_metadata:
-                return False
-            metadata = trusted_metadata
+                return None
+            if metadata is not None and metadata != trusted:
+                return None
+            metadata = trusted
+        return metadata
 
-        if metadata is not None:
-            metadata_scope, metadata_repo = metadata
+    def in_scope(
+        hit: dict[str, Any],
+        trusted_metadata: dict[str, Any] | None,
+    ) -> bool:
+        hit_scope = hit.get("scope")
+        hit_repo = hit.get("repo")
+        if trusted_metadata is not None:
+            metadata_scope = trusted_metadata["scope"]
+            metadata_repo = trusted_metadata["repo"]
             if hit_scope is not None and hit_scope != metadata_scope:
                 return False
             if hit_repo is not None and hit_repo != metadata_repo:
                 return False
-            hit_scope, hit_repo = metadata
+            hit_scope, hit_repo = metadata_scope, metadata_repo
         elif repo is not None:
             # Backend response fields and caller-controlled tags are not proof of
             # repository ownership. Repo-scoped remote hits need retained metadata.
@@ -220,12 +245,24 @@ def recall_memory(
             if not isinstance(hit, dict) or not isinstance(hit.get("text"), str):
                 malformed = True
                 continue
-            if not in_scope(hit, name):
+            marker_value = hit.get("source_event" if name == "substrate" else "context")
+            has_marker = isinstance(marker_value, str) and marker_value.startswith(
+                _REMOTE_METADATA_MARKER
+            )
+            trusted_metadata = remote_metadata(hit, name)
+            if has_marker and trusted_metadata is None:
+                continue
+            if not in_scope(hit, trusted_metadata):
                 continue
             found = (
                 add(
                     hit["text"],
-                    source_row(name, hit, fallback_bank=fallback_bank),
+                    source_row(
+                        name,
+                        hit,
+                        fallback_bank=fallback_bank,
+                        trusted_metadata=trusted_metadata,
+                    ),
                 )
                 or found
             )

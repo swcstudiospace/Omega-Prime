@@ -304,6 +304,25 @@ def test_memory_search_entries_and_errors() -> None:
         client.memory_search("")
 
 
+@pytest.mark.parametrize("malformed_entries", [None, {}, "not-a-list"])
+def test_memory_search_rejects_malformed_entries(malformed_entries) -> None:
+    client, _ = _client([_mcp_result({"entries": malformed_entries})])
+    with pytest.raises(SubstrateProtocolError):
+        client.memory_search("sky")
+
+
+def test_memory_search_accepts_legacy_list_result() -> None:
+    entries = [{"id": "m1", "text": "sky is blue"}]
+    client, _ = _client([_mcp_result(entries)])  # type: ignore[arg-type]
+    assert client.memory_search("sky") == entries
+
+
+def test_memory_search_rejects_missing_entries() -> None:
+    client, _ = _client([_mcp_result({})])
+    with pytest.raises(SubstrateProtocolError):
+        client.memory_search("sky")
+
+
 def test_malformed_mcp_envelope() -> None:
     client, _ = _client([{"jsonrpc": "2.0", "id": 1}])
     with pytest.raises(SubstrateError):

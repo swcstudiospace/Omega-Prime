@@ -253,7 +253,6 @@ def test_remote_hits_merge_with_stable_source_order_and_full_provenance(tmp_path
                     "scope": "team",
                     "repo": "repo-a",
                     "score": 0.8,
-                    "source": "substrate-index",
                     "evidence": {"path": "docs/a"},
                 },
                 {
@@ -263,7 +262,6 @@ def test_remote_hits_merge_with_stable_source_order_and_full_provenance(tmp_path
                     "scope": "team",
                     "repo": "repo-a",
                     "score": 0.9,
-                    "source": "hindsight-observation",
                 },
             ],
         }
@@ -419,6 +417,58 @@ def test_hindsight_marker_metadata_restores_remote_scope_and_repo(tmp_path):
     result = recall_memory(backends, "fact", scope="team", repo="repo-a", limit=10)
 
     assert [hit["content"] for hit in result["results"]] == ["same repo fact"]
+
+
+def test_remote_marker_metadata_is_preserved_as_trusted_provenance(tmp_path):
+    store = MemoryStore(tmp_path / "memory")
+    marker = "omega-memory:v1:" + json.dumps(
+        {"scope": "team", "repo": "repo-a", "source": "trusted-source"}
+    )
+    substrate = Substrate(
+        [
+            {
+                "text": "substrate fact",
+                "source": "untrusted-source",
+                "source_event": marker,
+            }
+        ]
+    )
+    hindsight = Hindsight(
+        [
+            {
+                "text": "hindsight fact",
+                "source": "untrusted-source",
+                "context": marker,
+            }
+        ]
+    )
+    backends = resolve_memory_backends(
+        local_store=store,
+        substrate=substrate,
+        hindsight=hindsight,
+        scope="team",
+        repo="repo-a",
+        environ={},
+    )
+
+    result = recall_memory(backends, "fact", scope="team", repo="repo-a", limit=5)
+
+    sources = {hit["content"]: hit["sources"][0] for hit in result["results"]}
+    assert sources == {
+        "substrate fact": {
+            "backend": "substrate",
+            "scope": "team",
+            "repo": "repo-a",
+            "source": "trusted-source",
+        },
+        "hindsight fact": {
+            "backend": "hindsight",
+            "bank": "remote-bank",
+            "scope": "team",
+            "repo": "repo-a",
+            "source": "trusted-source",
+        },
+    }
 
 
 def test_remote_response_cannot_spoof_repository_metadata(tmp_path):

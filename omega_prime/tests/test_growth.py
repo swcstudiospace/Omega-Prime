@@ -1003,6 +1003,57 @@ def test_provider_reloads_before_editing_record_from_second_store(
     assert edited.task_id == record.task_id
 
 
+def test_stale_plain_lookup_cannot_raw_replace_a_versioned_record(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "memory"
+    provider_store = MemoryStore(directory)
+    assert provider_store.add("memory", "stale lookup fact")["success"]
+    provider = BuiltinMemoryProvider(provider_store)
+    second_store = MemoryStore(directory)
+    record = LocalRecord(
+        bank="ultrathink",
+        scope="user",
+        repo="repo",
+        kind="memory",
+        content="stale lookup fact",
+        source="second store",
+        receipt_path="receipts/stale-lookup.json",
+        tags=("preserve", "stale-lookup"),
+        graph_id="graph-stale-lookup",
+        task_id="task-stale-lookup",
+    )
+    assert second_store.replace(
+        "memory", "stale lookup fact", encode_local_record(record)
+    )["success"]
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "memory",
+            {
+                "action": "replace",
+                "target": "memory",
+                "old_text": "stale lookup fact",
+                "content": "fresh lookup fact",
+            },
+        )
+    )
+
+    assert result["success"]
+    updated = decode_local_record(provider_store.memory_entries[0], "ultrathink")
+    assert isinstance(updated, LocalRecord)
+    assert updated.content == "fresh lookup fact"
+    assert updated.bank == record.bank
+    assert updated.scope == record.scope
+    assert updated.repo == record.repo
+    assert updated.kind == record.kind
+    assert updated.source == record.source
+    assert updated.receipt_path == record.receipt_path
+    assert updated.tags == record.tags
+    assert updated.graph_id == record.graph_id
+    assert updated.task_id == record.task_id
+
+
 def test_provider_reloads_before_removing_record_from_second_store(
     tmp_path: Path,
 ) -> None:
