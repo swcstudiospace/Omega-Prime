@@ -64,6 +64,9 @@ omega_prime = [
   "**/*.xml",
   "**/*.sh",
   "dashboard/static/*",
+  "dashboard/static/cc/index.html",
+  "dashboard/static/cc/assets/*",
+  "dashboard/static/cc/licenses/*",
 ]
 
 [tool.pytest.ini_options]

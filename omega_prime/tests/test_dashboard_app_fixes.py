@@ -22,18 +22,68 @@ from omega_prime.dashboard.poller import DashboardPoller
 NOW = datetime(2026, 10, 21, tzinfo=UTC)
 
 
-def test_package_data_ships_dashboard_static_assets() -> None:
+def test_package_data_build_py_collects_nested_dashboard_assets(
+    tmp_path: Path,
+) -> None:
+    import importlib.util
     import tomllib
+
+    if importlib.util.find_spec("setuptools") is None:
+        pytest.skip("setuptools is unavailable; real package-data collection cannot run")
+
+    from setuptools import Distribution
+    from setuptools.command.build_py import build_py
 
     root = Path(__file__).resolve().parents[2]
     data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    package_data = data["tool"]["setuptools"]["package-data"]["omega_prime"]
-    assert "dashboard/static/*" in package_data
-    static = root / "omega_prime" / "dashboard" / "static"
-    assert (static / "index.html").is_file()
-    assert (static / "app.js").is_file()
-    assert (static / "app.css").is_file()
+    patterns = data["tool"]["setuptools"]["package-data"]["omega_prime"]
+    dist = Distribution(
+        {
+            "packages": ["omega_prime", "omega_prime.dashboard"],
+            "package_dir": {"omega_prime": str(root / "omega_prime")},
+            "package_data": {"omega_prime": patterns},
+        }
+    )
+    command = build_py(dist)
+    command.build_lib = str(tmp_path / "lib")
+    command.ensure_finalized()
+    command.run()
 
+    packaged = Path(command.build_lib) / "omega_prime" / "dashboard" / "static"
+    actual = root / "omega_prime" / "dashboard" / "static"
+    expected = {
+        actual / "index.html",
+        actual / "app.js",
+        actual / "app.css",
+        actual / "cc" / "index.html",
+        *(
+            file
+            for folder in ("assets", "licenses")
+            for file in (actual / "cc" / folder).iterdir()
+            if file.is_file()
+        ),
+    }
+    for source in expected:
+        assert (packaged / source.relative_to(actual)).is_file(), source
+    assert not list(packaged.rglob("*.map"))
+    assert not list(packaged.rglob("node_modules"))
+
+    import omega_prime.dashboard.app as app_module
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        app_module,
+        "__file__",
+        str(Path(command.build_lib) / "omega_prime" / "dashboard" / "app.py"),
+    )
+    try:
+        with TestClient(create_app(_poller())) as client:
+            host = {"host": "127.0.0.1:7421"}
+            page = client.get("/", headers=host)
+            assert page.status_code == 200
+            assert client.get("/cc/assets/index-DIGTqjrX.css", headers=host).status_code == 200
+    finally:
+        monkeypatch.undo()
 
 def _pidfile(home: Path) -> Path:
     return home / ".omega-prime" / "dashboard" / "dashboard.pid"
