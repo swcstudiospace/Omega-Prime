@@ -80,6 +80,30 @@ def test_denylist_and_benign_keys() -> None:
     )
 
 
+def test_assignment_secrets_are_redacted_in_strings_and_nested_values() -> None:
+    values = (
+        ("password=hunter2", "password=[REDACTED]"),
+        ("PAT=ghp_x", "PAT=[REDACTED]"),
+        ("COOKIE: c1", "COOKIE: [REDACTED]"),
+        ("token: abc123", "token: [REDACTED]"),
+        ("secret='qwerty'", "secret='[REDACTED]'"),
+        ("bearer xyz", "bearer xyz"),
+    )
+    for value, expected in values:
+        redacted = redact_value(value, env={})
+        assert redacted == expected
+        assert (
+            redact_value({"task": {"note": value}}, env={})["task"]["note"] == expected
+        )
+        assert redact_value(redacted, env={}) == redacted
+    assert redact_value("path=/etc/x monkey=see author: Ove", env={}) == (
+        "path=/etc/x monkey=see author: Ove"
+    )
+    assert redact_value("task-dashboard password=hunter2", env={}) == (
+        "task-dashboard password=[REDACTED]"
+    )
+
+
 def test_line_first_line_and_cap() -> None:
     assert redact_line("first\nsecond") == "first"
     assert redact_line("x" * 150) == "x" * 120
@@ -99,7 +123,12 @@ def test_writer_redacts_permissions_atomic_and_unknown_keys(tmp_path) -> None:
     assert result.status == "ok" and result.data is not None
     assert all(secret not in json.dumps(result.data) for secret in SECRETS)
     path.write_text(json.dumps({"version": 1, "extra": "kept"}))
-    assert read_tasks(path).data == {"version": 1, "extra": "kept"}
+    assert read_tasks(path).status == "unreadable"
+    valid = document()
+    valid["extra"] = "kept"
+    path.write_text(json.dumps(valid))
+    result = read_tasks(path)
+    assert result.status == "ok" and "extra" not in (result.data or {})
 
 
 def test_reader_missing_malformed_and_writer_validation(tmp_path) -> None:

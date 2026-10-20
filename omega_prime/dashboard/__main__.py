@@ -116,10 +116,14 @@ def build_default_collectors(
             CollectorSpec("github", make_github_collector(now_fn=now_fn), GITHUB, 15.0),
         ]
     )
-    if config.fleet_enabled:
-        specs.append(
-            CollectorSpec("fleet", make_fleet_collector(enabled=True), FLEET, 15.0)
+    specs.append(
+        CollectorSpec(
+            "fleet",
+            make_fleet_collector(enabled=config.fleet_enabled),
+            FLEET,
+            15.0,
         )
+    )
     return specs
 
 
@@ -130,6 +134,30 @@ def _loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _process_start_time(pid: int) -> int | None:
+    """Return a process' Linux start time (stat field 22), if readable."""
+    try:
+        fields = (
+            (Path("/proc") / str(pid) / "stat")
+            .read_text(encoding="ascii")
+            .rsplit(")", 1)[1]
+            .split()
+        )
+        return int(fields[19])
+    except (OSError, UnicodeError, IndexError, ValueError):
+        return None
+
+
+def _parse_pidfile(contents: str) -> tuple[int, int] | None:
+    parts = contents.split()
+    if len(parts) != 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
 
 
 def _serve(app: Any, host: str, port: int) -> None:
@@ -171,21 +199,54 @@ def main(
     pidfile = base_home / ".omega-prime" / "dashboard" / "dashboard.pid"
     if args.stop:
         try:
-            pid = int(pidfile.read_text(encoding="ascii").strip())
+            identity = _parse_pidfile(pidfile.read_text(encoding="ascii"))
         except FileNotFoundError:
             print("no dashboard pidfile", file=stderr)
             return 1
-        except (OSError, ValueError):
+        except (OSError, UnicodeError):
             print("invalid dashboard pidfile", file=stderr)
+            return 1
+        if identity is None:
+            print("invalid dashboard pidfile", file=stderr)
+            return 1
+        pid, recorded_start = identity
+        current_start = _process_start_time(pid)
+        if current_start is None:
+            print("dashboard process already stopped", file=stderr)
+            with suppress(FileNotFoundError):
+                pidfile.unlink()
+            return 0
+        if current_start != recorded_start:
+            print(
+                "pidfile refers to a different process; refusing",
+                file=stderr,
+            )
             return 1
         try:
             (signal_fn or os.kill)(pid, signal.SIGTERM)
         except ProcessLookupError:
             print("dashboard process already stopped", file=stderr)
+            with suppress(FileNotFoundError):
+                pidfile.unlink()
         except OSError as exc:
             print(f"could not stop dashboard: {type(exc).__name__}", file=stderr)
             return 1
         return 0
+    if not args.once:
+        try:
+            previous = _parse_pidfile(pidfile.read_text(encoding="ascii"))
+        except FileNotFoundError:
+            previous = None
+        except (OSError, UnicodeError):
+            print("invalid dashboard pidfile", file=stderr)
+            return 1
+        if (
+            previous is not None
+            and previous[0] != os.getpid()
+            and _process_start_time(previous[0]) == previous[1]
+        ):
+            print(f"dashboard already running (pid {previous[0]})", file=stderr)
+            return 1
     config = load_dashboard_config(base_home / ".omega-prime" / "settings.json")
 
     def build_poller() -> DashboardPoller:
@@ -207,18 +268,28 @@ def main(
     poller = factory()
     from omega_prime.dashboard.app import create_app
 
-    app = create_app(poller, port=args.port)
+    app = create_app(poller, port=args.port, host=args.host)
+    pid = os.getpid()
+    start = _process_start_time(pid)
+    if start is None:
+        print("could not determine dashboard process start time", file=stderr)
+        return 1
     pidfile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         os.chmod(pidfile.parent, 0o700)
         descriptor = os.open(pidfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w", encoding="ascii") as pid_stream:
-            pid_stream.write(f"{os.getpid()}\n")
+            pid_stream.write(f"{pid} {start}\n")
         os.chmod(pidfile, 0o600)
         (serve or _serve)(app, args.host, args.port)
     finally:
-        with suppress(FileNotFoundError):
-            pidfile.unlink()
+        try:
+            current_identity = _parse_pidfile(pidfile.read_text(encoding="ascii"))
+        except (OSError, UnicodeError):
+            current_identity = None
+        if current_identity == (pid, start):
+            with suppress(FileNotFoundError):
+                pidfile.unlink()
     return 0
 
 

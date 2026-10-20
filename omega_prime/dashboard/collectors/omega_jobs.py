@@ -19,8 +19,7 @@ _LIMIT = 262144
 def make_omega_jobs_collector(
     *, jobs_root: Path, now_fn: Callable[[], datetime], window_hours: float = 24.0
 ) -> Callable[[], SourceResult]:
-    """Build a cached collector for recent job metadata files."""
-    cache: dict[Path, tuple[int, int, dict[str, Any] | None]] = {}
+    cache: dict[Path, tuple[int, int, int, int, dict[str, Any] | None]] = {}
 
     def collect() -> SourceResult:
         if not jobs_root.exists():
@@ -44,9 +43,20 @@ def make_omega_jobs_collector(
                 if last < cutoff:
                     continue
                 stat = session_path.stat()
+                event_path = directory / "events.jsonl"
+                event_stat = event_path.stat() if event_path.is_file() else None
+                event_key = (
+                    (event_stat.st_mtime_ns, event_stat.st_size)
+                    if event_stat
+                    else (0, 0)
+                )
                 cached = cache.get(session_path)
-                if cached and cached[:2] == (stat.st_mtime_ns, stat.st_size):
-                    row = cached[2]
+                if cached and cached[:4] == (
+                    stat.st_mtime_ns,
+                    stat.st_size,
+                    *event_key,
+                ):
+                    row = cached[4]
                 else:
                     with session_path.open("rb") as stream:
                         stream.seek(max(0, stat.st_size - _LIMIT))
@@ -57,6 +67,38 @@ def make_omega_jobs_collector(
                     data = json.loads(raw.decode("utf-8", errors="replace"))
                     if not isinstance(data, dict):
                         continue
+                    ok = data.get("ok") if isinstance(data.get("ok"), bool) else None
+                    if event_stat:
+                        with event_path.open("rb") as stream:
+                            stream.seek(max(0, event_stat.st_size - _LIMIT))
+                            event_raw = stream.read(_LIMIT)
+                        if (
+                            event_stat.st_size > _LIMIT
+                            and event_raw
+                            and not event_raw.startswith(b"\n")
+                        ):
+                            pos = event_raw.find(b"\n")
+                            event_raw = b"" if pos < 0 else event_raw[pos + 1 :]
+                        terminal: dict[str, Any] | None = None
+                        for line in event_raw.splitlines():
+                            try:
+                                event = json.loads(
+                                    line.decode("utf-8", errors="replace")
+                                )
+                            except json.JSONDecodeError:
+                                continue
+                            if isinstance(event, dict) and event.get("type") in {
+                                "job_end",
+                                "agent_end",
+                            }:
+                                terminal = event
+                        if terminal:
+                            ok = (
+                                terminal.get("ok")
+                                if terminal.get("type") == "job_end"
+                                and isinstance(terminal.get("ok"), bool)
+                                else terminal.get("type") == "agent_end"
+                            )
                     final = data.get("final_text")
                     row = redact_value(
                         {
@@ -69,15 +111,18 @@ def make_omega_jobs_collector(
                             "provider": data.get("provider"),
                             "sandbox": data.get("sandbox"),
                             "stage": data.get("stage"),
-                            "ok": data.get("ok")
-                            if isinstance(data.get("ok"), bool)
-                            else None,
+                            "ok": ok,
                             "final_text_line": redact_line(final, cap=120),
                             "started_at": data.get("started_at"),
                             "last_activity_at": last.isoformat(),
                         }
                     )
-                    cache[session_path] = (stat.st_mtime_ns, stat.st_size, row)
+                    cache[session_path] = (
+                        stat.st_mtime_ns,
+                        stat.st_size,
+                        *event_key,
+                        row,
+                    )
                 if row is not None:
                     row["last_activity_at"] = last.isoformat()
                     items.append(row)

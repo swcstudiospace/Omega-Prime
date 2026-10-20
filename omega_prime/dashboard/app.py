@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
-from collections.abc import AsyncIterator, Mapping, MutableMapping
+from collections.abc import AsyncIterator, Coroutine, Mapping, MutableMapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from starlette.applications import Starlette
 from starlette.responses import FileResponse, JSONResponse, Response
@@ -28,10 +30,10 @@ _SECURITY_HEADERS = {
 class _SSEResponse(Response):
     """Stream server-sent events directly over ASGI.
 
-    starlette's StreamingResponse races a disconnect listener against the
-    body stream; under the TestClient portal that listener never observes
-    a disconnect and the response never starts. Streaming start/chunks/
-    final-frame by hand keeps SSE testable and keeps cancellation honest.
+    The disconnect listener is raced against each next event, so a quiet
+    heartbeat gap still ends promptly when the client disconnects. Streaming
+    start/chunks/final-frame by hand keeps SSE testable and keeps cancellation
+    honest.
     """
 
     def __init__(
@@ -56,8 +58,44 @@ class _SSEResponse(Response):
             "headers": headers,
         }
         await send(start)
+
+        disconnected = asyncio.Event()
+
+        async def listen_for_disconnect() -> None:
+            while True:
+                message = await receive()
+                if message.get("type") == "http.disconnect":
+                    disconnected.set()
+                    return
+
+        listener = asyncio.create_task(listen_for_disconnect())
+        disconnect_waiter = asyncio.create_task(disconnected.wait())
+        next_event: asyncio.Task[str] | None = None
         try:
-            async for chunk in self.events:
+            while True:
+                next_event = asyncio.create_task(
+                    cast("Coroutine[Any, Any, str]", anext(self.events))
+                )
+                done, _ = await asyncio.wait(
+                    {next_event, disconnect_waiter},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if disconnect_waiter in done:
+                    next_event.cancel()
+                    with suppress(asyncio.CancelledError, StopAsyncIteration):
+                        await next_event
+                    next_event = None
+                    await send(
+                        {"type": "http.response.body", "body": b"", "more_body": False}
+                    )
+                    return
+
+                completed_event = next_event
+                next_event = None
+                try:
+                    chunk = completed_event.result()
+                except StopAsyncIteration:
+                    break
                 body = (
                     chunk
                     if isinstance(chunk, bytes | memoryview)
@@ -66,21 +104,42 @@ class _SSEResponse(Response):
                 await send(
                     {"type": "http.response.body", "body": body, "more_body": True}
                 )
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
         except BaseException:
             with suppress(Exception):
                 await send(
                     {"type": "http.response.body", "body": b"", "more_body": False}
                 )
             raise
-        await send({"type": "http.response.body", "body": b"", "more_body": False})
+        finally:
+            if next_event is not None:
+                next_event.cancel()
+                with suppress(asyncio.CancelledError, StopAsyncIteration):
+                    await next_event
+            listener.cancel()
+            with suppress(asyncio.CancelledError):
+                await listener
+            disconnect_waiter.cancel()
+            with suppress(asyncio.CancelledError):
+                await disconnect_waiter
 
 
 class _DashboardGuards:
     """Enforce GET-only, exact loopback Host and response security headers."""
 
-    def __init__(self, app: Any, port: int) -> None:
+    def __init__(self, app: Any, port: int, host: str) -> None:
         self.app = app
         self.allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if isinstance(address, ipaddress.IPv6Address):
+            self.allowed_hosts.add(f"[{host.lower()}]:{port}")
+        else:
+            selected_host = f"{host}:{port}".lower()
+            if selected_host not in self.allowed_hosts:
+                self.allowed_hosts.add(selected_host)
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -143,7 +202,11 @@ def _empty_snapshot() -> dict[str, Any]:
 
 
 def create_app(
-    poller: DashboardPoller, *, port: int = 7421, heartbeat_s: float = 15.0
+    poller: DashboardPoller,
+    *,
+    port: int = 7421,
+    host: str = "127.0.0.1",
+    heartbeat_s: float = 15.0,
 ) -> Starlette:
     """Build the local dashboard application around a shared poller."""
     static_dir = Path(__file__).resolve().parent / "static"
@@ -209,5 +272,5 @@ def create_app(
             Route("/healthz", health, methods=["GET"]),
         ],
     )
-    app.add_middleware(_DashboardGuards, port=port)
+    app.add_middleware(_DashboardGuards, port=port, host=host)
     return app

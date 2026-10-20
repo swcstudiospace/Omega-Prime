@@ -47,7 +47,10 @@ def test_github_collects_and_caches_prs() -> None:
             ).encode()
         if "/check-runs" in url:
             return 200, b'{"check_runs":[{"conclusion":"success"}]}'
-        return 200, b'[{"body":"Confidence score: 4/5"}]'
+        return (
+            200,
+            b'[{"user":{"login":"greptile-apps[bot]"},"created_at":"2026-01-01T00:00:00Z","body":"Confidence score: 4/5"}]',
+        )
 
     collector = make_github_collector(
         env={"GITHUB_PAT_DESK_LEAD": "fake-token"},
@@ -63,6 +66,133 @@ def test_github_collects_and_caches_prs() -> None:
     count = len(calls)
     collector()
     assert len(calls) == count
+
+
+def test_github_body_marker_wins_over_bot_comment() -> None:
+    def transport(url: str, headers: Any) -> tuple[int, bytes]:
+        if "/pulls?" in url:
+            return 200, json.dumps(
+                [
+                    {
+                        "number": 1,
+                        "head": {"sha": "head"},
+                        "body": "<!-- greptile_confidence_score: 3 -->",
+                    }
+                ]
+            ).encode()
+        if "/check-runs" in url:
+            return 200, b'{"check_runs":[]}'
+        if "/comments" in url:
+            return 200, json.dumps(
+                [
+                    {
+                        "user": {"login": "greptile-apps[bot]"},
+                        "body": "Confidence Score: 5/5",
+                        "created_at": "2026-01-01",
+                    }
+                ]
+            ).encode()
+        return 200, b"[]"
+
+    result = make_github_collector(
+        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport
+    )()
+    assert result.items[0]["greptile"] == "3/5"
+
+
+def test_github_ignores_human_score_comment() -> None:
+    def transport(url: str, headers: Any) -> tuple[int, bytes]:
+        if "/pulls?" in url:
+            return 200, b'[{"number":1,"head":{"sha":"head"}}]'
+        if "/check-runs" in url:
+            return 200, b'{"check_runs":[]}'
+        if "/comments" in url:
+            return 200, b'[{"user":{"login":"human"},"body":"Confidence Score: 5/5"}]'
+        return 200, b"[]"
+
+    result = make_github_collector(
+        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport
+    )()
+    assert result.items[0]["greptile"] == "not reviewed"
+
+
+def test_github_latest_bot_comment_beats_matching_review() -> None:
+    def transport(url: str, headers: Any) -> tuple[int, bytes]:
+        if "/pulls?" in url:
+            return 200, b'[{"number":1,"head":{"sha":"head"}}]'
+        if "/check-runs" in url:
+            return 200, b'{"check_runs":[]}'
+        if "/comments" in url:
+            return 200, json.dumps(
+                [
+                    {
+                        "user": {"login": "greptile-apps[bot]"},
+                        "body": "Confidence Score: 2/5",
+                        "created_at": "2026-02-01",
+                    }
+                ]
+            ).encode()
+        return 200, json.dumps(
+            [
+                {
+                    "user": {"login": "greptile-apps[bot]"},
+                    "commit_id": "head",
+                    "body": "Confidence Score: 5/5",
+                    "submitted_at": "2026-01-01",
+                },
+                {
+                    "user": {"login": "greptile-apps[bot]"},
+                    "commit_id": "old",
+                    "body": "Confidence Score: 1/5",
+                    "submitted_at": "2026-03-01",
+                },
+            ]
+        ).encode()
+
+    result = make_github_collector(
+        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport
+    )()
+    assert result.items[0]["greptile"] == "2/5"
+
+
+def test_github_review_score_matches_capitalized_score() -> None:
+    def transport(url: str, headers: Any) -> tuple[int, bytes]:
+        if "/pulls?" in url:
+            return 200, b'[{"number":1,"head":{"sha":"head"}}]'
+        if "/check-runs" in url:
+            return 200, b'{"check_runs":[]}'
+        if "/comments" in url:
+            return 200, b"[]"
+        return (
+            200,
+            b'[{"user":{"login":"greptile-apps[bot]"},"commit_id":"head","body":"Confidence Score: 4/5"}]',
+        )
+
+    result = make_github_collector(
+        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport
+    )()
+    assert result.items[0]["greptile"] == "4/5"
+
+
+def test_fleet_disallowed_url_is_unavailable_without_request(tmp_path: Path) -> None:
+    config = tmp_path / "coordinator.env"
+    config.write_text(
+        "FLEET_COORDINATOR_URL=not-a-url\nFLEET_COORDINATOR_TOKEN=secret\n",
+        encoding="utf-8",
+    )
+    calls: list[Any] = []
+
+    def transport(url: str, headers: Any) -> tuple[int, bytes]:
+        calls.append((url, headers))
+        return (200, b"{}")
+
+    result = make_fleet_collector(
+        enabled=True,
+        env_file=config,
+        transport=transport,
+    )()
+    assert result.status == "unavailable"
+    assert calls == []
 
 
 def test_fleet_disabled_without_io() -> None:

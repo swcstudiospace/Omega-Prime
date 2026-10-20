@@ -43,11 +43,15 @@ def test_sse_response_sends_no_content_length() -> None:
         yield "retry: 3000\n\n"
 
     sent: list[dict[str, Any]] = []
+    first_body = asyncio.Event()
 
     async def send(message: dict[str, Any]) -> None:
         sent.append(message)
+        if message.get("more_body"):
+            first_body.set()
 
     async def receive() -> dict[str, Any]:
+        await first_body.wait()
         return {"type": "http.disconnect"}
 
     asyncio.run(_SSEResponse(events())({"type": "http"}, receive, send))
@@ -154,6 +158,24 @@ def _js_helpers() -> str:
         assert match, name
         parts.append(match.group(0))
     return "const text = (v) => String(v);\n" + "\n".join(parts)
+
+
+def test_health_reason_and_finished_summary_are_rendered() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "dashboard" / "static" / "app.js"
+    ).read_text(encoding="utf-8")
+    health = source[
+        source.index("const reason = source.error") : source.index("strip.append(chip)")
+    ]
+    assert "source.error || source.detail" in health
+    assert "'missing', 'unreadable'" in health
+    finished = source[
+        source.index("function renderFinished") : source.index(
+            "function renderSnapshot"
+        )
+    ]
+    assert "item.summary" in finished
+    assert "'finished-summary'" in finished
 
 
 def test_client_time_helpers_do_not_throw() -> None:

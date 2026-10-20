@@ -102,11 +102,14 @@ def make_omp_sessions_collector(
                                 session["last_ts"] = stamp
                             except ValueError:
                                 pass
-                        if typ == "session" and "session_id" not in session:
-                            session["session_id"] = data.get("id") or data.get(
-                                "session_id"
-                            )
-                            session["started_at"] = data.get("timestamp") or stamp
+                        if typ == "session":
+                            if "session_id" not in session:
+                                session["session_id"] = data.get("id") or data.get(
+                                    "session_id"
+                                )
+                                session["started_at"] = data.get("timestamp") or stamp
+                            if isinstance(data.get("cwd"), str):
+                                session["cwd"] = data["cwd"]
                         elif typ in {"title", "title_change"}:
                             session["title"] = data.get("title")
                         elif typ == "model_change":
@@ -123,9 +126,18 @@ def make_omp_sessions_collector(
                                         "output", usage.get("output_tokens", 0)
                                     ),
                                 }
-                            stop_reason = data.get("stopReason")
-                            if stop_reason is not None:
-                                session["stop_reason"] = stop_reason
+                        # Only terminal custom records end sessions; model_usage
+                        # stopReason values describe individual model turns.
+                        elif typ == "custom" and data.get("kind") in {
+                            "signal",
+                            "normal",
+                        }:
+                            kind = data["kind"]
+                            session["stop_reason"] = (
+                                "stopped"
+                                if kind == "signal"
+                                else str(data.get("reason") or "normal")
+                            )
                         elif typ == "thinking_level_change":
                             session["thinking_level"] = data.get(
                                 "thinkingLevel", data.get("thinking_level")

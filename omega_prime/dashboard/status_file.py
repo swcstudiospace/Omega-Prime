@@ -166,6 +166,7 @@ def read_tasks(path: Path) -> TasksFileResult:
         data = json.loads(raw)
         if not isinstance(data, dict) or data.get("version") != 1:
             raise ValueError("tasks file must be a version 1 object")
+        data = _validated(data)
     except (json.JSONDecodeError, ValueError) as exc:
         return TasksFileResult("unreadable", error=redact_value(str(exc)))
     try:

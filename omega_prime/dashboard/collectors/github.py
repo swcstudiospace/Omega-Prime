@@ -7,15 +7,27 @@ from __future__ import annotations
 import json
 import os
 import re
+import types
 import urllib.request
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.redact import redact_value
 
-_SCORE = re.compile(r"Confidence score:\s*([1-5])\s*/\s*5")
+_SCORE = re.compile(r"Confidence score:\s*([1-5])\s*/\s*5", re.IGNORECASE)
+_BODY_SCORE = re.compile(
+    r"<!--\s*greptile_confidence_score:\s*([1-5])\s*-->", re.IGNORECASE
+)
+
+
+class _GitHubEndpointPolicy:
+    """Allow credentials only for GitHub's API host."""
+
+    def allows_host(self, host: str) -> bool:
+        return host == "api.github.com"
 
 
 def _request(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
@@ -47,7 +59,19 @@ def make_github_collector(
 
     def collect() -> SourceResult:
         nonlocal cache, fetched
-        token = (os.environ if env is None else env).get("GITHUB_PAT_DESK_LEAD", "")
+        try:
+            provider = types.SimpleNamespace(
+                name="github-dashboard",
+                requires_key=True,
+                env_vars=("GITHUB_PAT_DESK_LEAD",),
+            )
+            token = str(
+                CredentialBroker(
+                    _GitHubEndpointPolicy(), env=os.environ if env is None else env
+                ).key_for(provider, "https://api.github.com/")
+            ).strip()
+        except Exception:
+            token = ""
         if not token:
             return SourceResult("github", "unavailable", error="GitHub not configured")
         now = clock()
@@ -92,19 +116,57 @@ def make_github_collector(
                     ci = "pass"
                 else:
                     ci = "pending"
-                bodies: list[str] = []
-                for endpoint in (
-                    f"{base}/issues/{number}/comments",
-                    f"{base}/pulls/{number}/reviews",
-                ):
-                    records = get(endpoint, headers)
-                    if isinstance(records, list):
-                        bodies.extend(
-                            str(record.get("body", ""))
-                            for record in records
-                            if isinstance(record, dict)
-                        )
-                matches = _SCORE.findall("\n".join(bodies))
+                comments = get(f"{base}/issues/{number}/comments", headers)
+                reviews = get(f"{base}/pulls/{number}/reviews", headers)
+                head_sha = head.get("sha")
+                body = pr.get("body")
+                body_match = _BODY_SCORE.search(body) if isinstance(body, str) else None
+                score = body_match.group(1) if body_match else ""
+                if not score:
+                    # Latest greptile-apps[bot] result for the current head:
+                    # bot reviews pinned to this head sha and bot comments,
+                    # ordered by timestamp so an older review cannot override
+                    # a newer comment. Human comments are ignored entirely.
+                    candidates: list[tuple[str, str]] = []
+                    if isinstance(reviews, list):
+                        for record in reviews:
+                            if (
+                                isinstance(record, dict)
+                                and isinstance(record.get("user"), dict)
+                                and record["user"].get("login") == "greptile-apps[bot]"
+                                and record.get("commit_id") == head_sha
+                                and isinstance(record.get("body"), str)
+                            ):
+                                candidates.append(
+                                    (
+                                        str(
+                                            record.get("submitted_at")
+                                            or record.get("created_at")
+                                            or ""
+                                        ),
+                                        record["body"],
+                                    )
+                                )
+                    if isinstance(comments, list):
+                        for record in comments:
+                            if (
+                                isinstance(record, dict)
+                                and isinstance(record.get("user"), dict)
+                                and record["user"].get("login") == "greptile-apps[bot]"
+                                and isinstance(record.get("body"), str)
+                            ):
+                                candidates.append(
+                                    (
+                                        str(record.get("created_at") or ""),
+                                        record["body"],
+                                    )
+                                )
+                    candidates.sort(key=lambda pair: pair[0])
+                    for _, text in reversed(candidates):
+                        match = _SCORE.search(text)
+                        if match:
+                            score = match.group(1)
+                            break
                 item = {
                     "kind": "github_pr",
                     "repo": repo,
@@ -114,7 +176,7 @@ def make_github_collector(
                     "draft": bool(pr.get("draft")),
                     "mergeable": pr.get("mergeable"),
                     "ci": ci,
-                    "greptile": f"{matches[-1]}/5" if matches else "not reviewed",
+                    "greptile": f"{score}/5" if score else "not reviewed",
                     "updated_at": pr.get("updated_at"),
                     "url": pr.get("html_url"),
                 }

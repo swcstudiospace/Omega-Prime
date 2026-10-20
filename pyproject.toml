@@ -56,7 +56,15 @@ where = ["."]
 include = ["omega_prime*"]
 
 [tool.setuptools.package-data]
-omega_prime = ["**/*.md", "**/*.yaml", "**/*.yml", "**/*.json", "**/*.xml", "**/*.sh"]
+omega_prime = [
+  "**/*.md",
+  "**/*.yaml",
+  "**/*.yml",
+  "**/*.json",
+  "**/*.xml",
+  "**/*.sh",
+  "dashboard/static/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["omega_prime/tests"]

@@ -15,9 +15,9 @@ Alternatively run `scripts/dashboard-start.sh`. The operator may run it under `n
 
 ## Security model
 
-Only GET routes are supported; other methods receive 405. The server refuses `0.0.0.0`, `::`, and non-loopback bind addresses. An exact Host allowlist checks the expected loopback host and port to guard against DNS rebinding. Responses include a restrictive CSP (`default-src 'self'`) and `X-Content-Type-Options: nosniff`; there is no CORS policy. Redaction is applied at collector and output boundaries: denylist-keyed fields, recognized credential patterns, and named environment secrets are redacted. `[REDACTED]` is never truncated away.
+Only GET routes are supported; other methods receive 405. The server refuses `0.0.0.0`, `::`, and non-loopback bind addresses. An exact Host allowlist checks the expected loopback host and port to guard against DNS rebinding. Responses include a restrictive CSP (`default-src 'self'`) and `X-Content-Type-Options: nosniff`; there is no CORS policy. Redaction is applied at collector and output boundaries: denylist-keyed fields, recognized credential patterns, and named environment secrets are redacted. GitHub and fleet credentials resolve through the repository's `CredentialBroker`, with a single-host allowlist checking the destination. Tokens stay in memory only and are never logged. `[REDACTED]` is never truncated away.
 
-The dashboard never reads `/proc/*/environ`, full process arguments beyond the `--mode` value, `auth-broker.token`, `coordinator.env` values, pane history, or screen contents. It does not issue remote writes or provide action buttons.
+The dashboard never reads `/proc/*/environ`, full process arguments beyond the `--mode` value, `auth-broker.token`, pane history, or screen contents. Fleet reads only the configured coordinator URL and broker-resolved token from `coordinator.env`. It does not issue remote writes or provide action buttons.
 
 ## API
 

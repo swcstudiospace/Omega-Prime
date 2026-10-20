@@ -280,7 +280,10 @@ def test_cli_loopback_port_once_stop_and_pidfile(
     assert main(["--stop"], home=tmp_path) == 1
     pidfile = tmp_path / ".omega-prime" / "dashboard" / "dashboard.pid"
     pidfile.parent.mkdir(parents=True, exist_ok=True)
-    pidfile.write_text("1234\n", encoding="ascii")
+    from omega_prime.dashboard import __main__ as dashboard_main
+
+    monkeypatch.setattr(dashboard_main, "_process_start_time", lambda pid: 5678)
+    pidfile.write_text("1234 5678\n", encoding="ascii")
     signalled: list[tuple[int, int]] = []
     assert (
         main(
@@ -291,6 +294,7 @@ def test_cli_loopback_port_once_stop_and_pidfile(
         == 0
     )
     assert signalled == [(1234, signal.SIGTERM)]
+    pidfile.unlink()
 
     modes: list[tuple[int, int]] = []
 
@@ -345,6 +349,7 @@ def test_sse_emits_retry_snapshot_and_update() -> None:
         events: asyncio.Queue[str] = asyncio.Queue()
 
         async def receive() -> dict[str, object]:
+            await asyncio.Event().wait()
             return {"type": "http.disconnect"}
 
         async def send(message: MutableMapping[str, Any]) -> None:

@@ -1,0 +1,123 @@
+{
+  "task_id": "greptile-round1-task-dashboard",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T00:00:00Z",
+  "completed_at": "2026-10-21T00:00:00Z",
+  "commands": [
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/dash /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests -q -k dashboard",
+      "exit_code": 0,
+      "duration_s": 7,
+      "output_tail": "75 passed, 4815 deselected"
+    },
+    {
+      "cmd": "/workspace/omes-bot/.venv/bin/ruff check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 1,
+      "output_tail": "All checks passed!"
+    },
+    {
+      "cmd": "/workspace/omes-bot/.venv/bin/ruff format --check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 1,
+      "output_tail": "625 files already formatted"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/dash /workspace/omes-bot/.venv/bin/mypy omega_prime/",
+      "exit_code": 0,
+      "duration_s": 3,
+      "output_tail": "Success: no issues found in 496 source files"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/dash /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "duration_s": 200,
+      "output_tail": "32 failed, 4847 passed, 11 skipped"
+    },
+    {
+      "cmd": "git stash push -m baseline-check && PYTHONPATH=/workspace/omes-bot-wt/dash /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_prime_native.py omega_prime/tests/test_setup_check.py -q && git stash pop",
+      "exit_code": 1,
+      "duration_s": 5,
+      "output_tail": "11 failed, 10 passed (identical failures on the unmodified tree; stash restored)"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "All 75 dashboard tests pass, including 7 new regression files for the Greptile round-1 findings",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "ruff check and ruff format --check pass on omega_prime/",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "ruff format passes after one orchestrator-side format pass over the union of changed files",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "mypy passes with no issues in 496 source files",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "The full pytest run adds no new failures: every failing file (test_desk_wiring, test_grokbot_oneclick, test_omega_commands, test_prime_kernel_*, test_prime_native, test_setup_check) is a documented or stash-verified pre-existing failure",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "test_prime_native (10) and test_setup_check (1) fail identically with all changes stashed, proving they are environment-pre-existing, not caused by this round",
+      "evidence_command_index": 5
+    }
+  ],
+  "unverified": [
+    "Live behaviour against real GitHub/fleet coordinators (tests use scripted transports only)",
+    "UI rendering in a real browser (app.js changes verified by source assertions and helper extraction only)",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    "omega_prime/dashboard/collectors/wiring.py",
+    "omega_prime/dashboard/collectors/omp_sessions.py",
+    "omega_prime/dashboard/collectors/omega_jobs.py",
+    "omega_prime/dashboard/collectors/github.py",
+    "omega_prime/dashboard/collectors/fleet.py",
+    "omega_prime/dashboard/model.py",
+    "omega_prime/dashboard/poller.py",
+    "omega_prime/dashboard/status_file.py",
+    "omega_prime/dashboard/redact.py",
+    "omega_prime/dashboard/app.py",
+    "omega_prime/dashboard/__main__.py",
+    "omega_prime/dashboard/static/app.js",
+    "pyproject.toml",
+    "docs/dashboard.md",
+    "omega_prime/tests/test_dashboard_app.py",
+    "omega_prime/tests/test_dashboard_live_fixes.py",
+    "omega_prime/tests/test_dashboard_redaction.py",
+    "omega_prime/tests/test_dashboard_remote_collectors.py",
+    "omega_prime/tests/test_dashboard_file_collectors.py",
+    "omega_prime/tests/test_dashboard_model.py",
+    "omega_prime/tests/test_dashboard_wiring_fixes.py",
+    "omega_prime/tests/test_dashboard_sessions_fixes.py",
+    "omega_prime/tests/test_dashboard_jobs_model_fixes.py",
+    "omega_prime/tests/test_dashboard_poller_fixes.py",
+    "omega_prime/tests/test_dashboard_app_fixes.py"
+  ],
+  "contract_changes": [
+    "FinishedItem gains a summary field (receipt retained); finished omega-job rows now carry the redacted final-text first line",
+    "dashboard.pid format changed from '<pid>' to '<pid> <proc-start-time>'; --stop refuses legacy or mismatched pidfiles",
+    "create_app gains a host parameter; SSE responses terminate on http.disconnect",
+    "read_tasks now fully validates the v1 document on read and returns unreadable for bad shapes",
+    "omp sessions: stop_reason now comes only from terminal custom records (kind signal/normal), not model_usage stopReason; session cwd preserved",
+    "github/fleet tokens resolve through CredentialBroker with single-host allowlists"
+  ],
+  "rollback_plan": "git revert of this commit restores the prior dashboard behaviour; no data migrations involved",
+  "baseline_failures": {
+    "documented": [
+      "test_desk_wiring",
+      "test_grokbot_oneclick",
+      "test_omega_commands doctor tests",
+      "test_prime_kernel_*"
+    ],
+    "stash_verified_pre_existing": [
+      "test_prime_native (missing prime-agent/Cargo.toml in this worktree)",
+      "test_setup_check::test_checks_pass_on_repo_root"
+    ]
+  }
+}

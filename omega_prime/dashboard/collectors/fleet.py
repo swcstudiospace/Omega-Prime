@@ -5,15 +5,28 @@
 from __future__ import annotations
 
 import json
+import types
 import urllib.request
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.redact import redact_value
+
+
+class _FleetEndpointPolicy:
+    """Allow credentials only for the configured coordinator host."""
+
+    def __init__(self, host: str) -> None:
+        self._host = host
+
+    def allows_host(self, host: str) -> bool:
+        return bool(self._host) and host == self._host
 
 
 def _request(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
@@ -62,11 +75,20 @@ def make_fleet_collector(
         base = (
             values.get("FLEET_COORDINATOR_URL") or values.get("COORDINATOR_URL") or ""
         ).rstrip("/")
-        token = (
-            values.get("FLEET_COORDINATOR_TOKEN")
-            or values.get("COORDINATOR_TOKEN")
-            or ""
-        )
+        try:
+            host = urlsplit(base).hostname or ""
+            provider = types.SimpleNamespace(
+                name="fleet-coordinator-dashboard",
+                requires_key=True,
+                env_vars=("FLEET_COORDINATOR_TOKEN", "COORDINATOR_TOKEN"),
+            )
+            token = str(
+                CredentialBroker(_FleetEndpointPolicy(host), env=values).key_for(
+                    provider, base
+                )
+            ).strip()
+        except Exception:
+            token = ""
         if not base or not token:
             return SourceResult(
                 "fleet", "unavailable", error="fleet coordinator not configured"

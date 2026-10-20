@@ -21,6 +21,10 @@ LOCAL_SOURCES = 3.0
 HERDR_PODMAN = 5.0
 FLEET = 30.0
 GITHUB = 60.0
+_STATUS_EXTRA = {
+    "agentos": ("routing_summary", "state_entries"),
+    "command_log": ("count", "last_exit_codes"),
+}
 
 
 @dataclass(frozen=True)
@@ -57,7 +61,7 @@ class DashboardPoller:
         self._changed = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._next_due: dict[str, float] = {}
-        self._pass_lock = asyncio.Lock()
+        self._in_flight: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         """Start the background polling loop once."""
@@ -65,34 +69,49 @@ class DashboardPoller:
             self._task = asyncio.create_task(self.run_forever())
 
     async def stop(self) -> None:
-        """Cancel and await the polling loop, if running."""
+        """Cancel and await the polling loop and its in-flight collectors."""
         if self._task is not None:
             self._task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
+        tasks = tuple(self._in_flight)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def run_forever(self) -> None:
         """Run scheduled collectors until cancelled."""
         while True:
             await asyncio.sleep(self.tick_s)
             now = time.monotonic()
-            due = [
-                spec
-                for spec in self.specs
-                if now >= self._next_due.get(spec.source, 0.0)
-            ]
-            if due:
-                await self._run_specs(due)
-                after = time.monotonic()
-                for spec in due:
-                    self._next_due[spec.source] = after + max(0.0, spec.interval_s)
+            for spec in self.specs:
+                if now < self._next_due.get(spec.source, 0.0):
+                    continue
+                self._next_due[spec.source] = now + max(0.0, spec.interval_s)
+                task = asyncio.create_task(self._run_one(spec))
+                self._in_flight.add(task)
+                task.add_done_callback(self._in_flight.discard)
+
+    async def _run_one(self, spec: CollectorSpec) -> None:
+        await self._collect(spec)
+        self._maybe_build()
 
     async def _run_specs(self, specs: list[CollectorSpec]) -> None:
-        async with self._pass_lock:
-            await asyncio.gather(*(self._collect(spec) for spec in specs))
-            if all(spec.source in self._results for spec in self.specs):
-                self._build_snapshot()
+        await asyncio.gather(*(self._run_one(spec) for spec in specs))
+
+    def _maybe_build(self) -> None:
+        if not all(spec.source in self._results for spec in self.specs):
+            return
+        try:
+            self._status.pop("normalization", None)
+            self._build_snapshot()
+        except Exception as exc:
+            self._status["normalization"] = {
+                "status": "error",
+                "error": f"normalize failed: {type(exc).__name__}",
+            }
 
     async def _collect(self, spec: CollectorSpec) -> None:
         started = time.perf_counter()
@@ -115,6 +134,9 @@ class DashboardPoller:
             status["error"] = result.error
         if result.detail is not None:
             status["detail"] = result.detail
+        for key in _STATUS_EXTRA.get(spec.source, ()):
+            if key in result.extra:
+                status[key] = redact_value(result.extra[key])
         self._status[spec.source] = status
 
     def _build_snapshot(self) -> None:

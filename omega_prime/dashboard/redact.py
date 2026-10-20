@@ -21,6 +21,10 @@ _NAMED_SECRET_ENV = (
 )
 _DENIED = {"token", "key", "secret", "password", "pat", "auth", "cookie", "bearer"}
 _HUMPS = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_ASSIGNMENT_SECRET = re.compile(
+    r"(?i)(\b(?:password|passwd|pat|cookie|token|key|secret|auth|bearer)"
+    r"\b['\"]?\s*[=:]\s*['\"]?)([^\s'\",;]+)"
+)
 # The shared ``sk-`` pattern has no left word boundary, so names such as
 # "task-dashboard" would lose their tail. Shield word-internal "sk-" first.
 _INNER_SK = re.compile(r"(?<=[A-Za-z0-9])sk-")
@@ -70,6 +74,7 @@ def redact_value(
             for secret in secrets:
                 if secret:
                     item = item.replace(secret, "[REDACTED]")
+            item = _ASSIGNMENT_SECRET.sub(r"\1[REDACTED]", item)
             shielded = _INNER_SK.sub(_SK_SHIELD, item)
             out = redact_text(shielded, secrets)
             return out.replace(_SK_SHIELD, "sk-") if isinstance(out, str) else out

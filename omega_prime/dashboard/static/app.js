@@ -70,7 +70,8 @@
         const status = text(source.status, 'unknown');
         const chip = node('li', undefined, `health-chip health-${status.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}`);
         chip.append(node('strong', id), node('span', status));
-        if (['disabled', 'unavailable', 'error'].includes(status)) chip.append(node('span', source.error || source.detail || 'No further information', 'health-reason'));
+        const reason = source.error || source.detail;
+        if (reason || ['disabled', 'unavailable', 'error', 'missing', 'unreadable'].includes(status)) chip.append(node('span', reason || 'No further information', 'health-reason'));
         strip.append(chip);
       } catch (error) { console.error('Could not render source health', error); }
     });
@@ -192,6 +193,7 @@
         if (!item || typeof item !== 'object') return;
         const row = node('li', undefined, 'finished-row');
         row.append(node('span', item.title, 'finished-title'), timeLabel(item.finished_at), badge(item.result, 'Result: '));
+        if (item.summary) row.append(node('span', item.summary, 'finished-summary'));
         if (item.receipt) row.append(node('code', item.receipt, 'receipt'));
         list.append(row);
       } catch (error) { console.error('Could not render finished item', error); }

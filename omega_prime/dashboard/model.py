@@ -21,7 +21,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePath
 from typing import Any
 
@@ -132,6 +132,7 @@ class FinishedItem:
     finished_at: str | None
     result: str
     receipt: str | None = None
+    summary: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _dict(self, tuple(self.__dataclass_fields__))
@@ -194,9 +195,18 @@ def normalize_tasks(
     waiting: dict[str, WaitingItem] = {}
     finished: list[FinishedItem] = []
     sessions = _items(sources, "omp_session")
-    procs = _items(sources, "omp_proc")
-    claimed: set[int] = set()
     pane_rows = _items(sources, "herdr_pane")
+    procs = _items(sources, "omp_proc")
+    matched_cwds = (
+        {item.get("cwd") for item in pane_rows if isinstance(item.get("cwd"), str)}
+        | {item.get("cwd") for item in sessions if isinstance(item.get("cwd"), str)}
+        | {
+            item.get("worktree")
+            for item in _items(sources, "wiring")
+            if isinstance(item.get("worktree"), str)
+        }
+    )
+    claimed: set[int] = set()
 
     def proc_detail(cwd: Any) -> list[str]:
         return [
@@ -419,6 +429,11 @@ def normalize_tasks(
                     f"omega job {jid}",
                     stamp,
                     "ok" if item.get("ok") else "failed",
+                    summary=(
+                        item.get("final_text_line")
+                        if isinstance(item.get("final_text_line"), str)
+                        else None
+                    ),
                 )
             )
             continue
@@ -428,7 +443,17 @@ def normalize_tasks(
         if age * 60 >= quiet_minutes:
             # No result and no recent activity: the job never reported back.
             finished.append(
-                FinishedItem(f"job:{jid}", f"omega job {jid}", stamp, "stopped")
+                FinishedItem(
+                    f"job:{jid}",
+                    f"omega job {jid}",
+                    stamp,
+                    "stopped",
+                    summary=(
+                        item.get("final_text_line")
+                        if isinstance(item.get("final_text_line"), str)
+                        else None
+                    ),
+                )
             )
             continue
         state = "working"
@@ -451,6 +476,64 @@ def normalize_tasks(
             )
         )
 
+    for item in _items(sources, "fleet"):
+        jid = item.get("job_id")
+        if not isinstance(jid, str):
+            continue
+        state_text = str(item.get("state") or "").lower()
+        age_s = item.get("age_s")
+        updated = (
+            (now - timedelta(seconds=float(age_s))).isoformat()
+            if isinstance(age_s, (int, float))
+            else None
+        )
+        task_id = f"fleet:{jid}"
+        title = f"fleet job {jid}"
+        owner = Owner("fleet", jid, title)
+        if "hitl" in state_text:
+            active.append(
+                Task(task_id, title, "fleet_job", owner, "blocked", updated, updated)
+            )
+        elif any(word in state_text for word in ("done", "complete", "succeed")):
+            finished.append(FinishedItem(task_id, title, updated, "ok"))
+        elif any(word in state_text for word in ("fail", "error", "cancel", "abort")):
+            finished.append(FinishedItem(task_id, title, updated, "failed"))
+        elif any(word in state_text for word in ("run", "active", "work", "progress")):
+            active.append(
+                Task(task_id, title, "fleet_job", owner, "working", updated, updated)
+            )
+        elif any(word in state_text for word in ("queue", "pend", "wait")):
+            active.append(
+                Task(task_id, title, "fleet_job", owner, "idle", updated, updated)
+            )
+        else:
+            active.append(
+                Task(task_id, title, "fleet_job", owner, "unknown", updated, updated)
+            )
+
+    for item in procs:
+        pid, cwd = item.get("pid"), item.get("cwd")
+        if not isinstance(pid, int) or not isinstance(cwd, str) or cwd in matched_cwds:
+            continue
+        elapsed_s = item.get("elapsed_s")
+        stamp = (
+            (now - timedelta(seconds=float(elapsed_s))).isoformat()
+            if isinstance(elapsed_s, (int, float))
+            else None
+        )
+        mode = item.get("mode")
+        active.append(
+            Task(
+                f"proc:{pid}",
+                f"omp process {pid}",
+                "omp_proc",
+                Owner("omp-proc", str(pid), f"omp process {pid}"),
+                "working",
+                stamp,
+                stamp,
+                detail=f"mode {mode}" if mode else "unmatched process",
+            )
+        )
     for item in _items(sources, "github_pr"):
         repo, number = item.get("repo"), item.get("number")
         if not isinstance(repo, str) or not isinstance(number, int):

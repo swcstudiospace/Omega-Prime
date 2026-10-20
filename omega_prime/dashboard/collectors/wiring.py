@@ -25,7 +25,7 @@ def _default_runner(args: list[str]) -> str:
     ).stdout
 
 
-def _tail_lines(path: Path) -> list[str]:
+def _log_lines(path: Path) -> list[str]:
     size = path.stat().st_size
     with path.open("rb") as stream:
         stream.seek(max(0, size - _LIMIT))
@@ -33,7 +33,7 @@ def _tail_lines(path: Path) -> list[str]:
     if size > _LIMIT and data and not data.startswith(b"\n"):
         pos = data.find(b"\n")
         data = b"" if pos < 0 else data[pos + 1 :]
-    return data.decode("utf-8", errors="replace").splitlines()[-64:]
+    return data.decode("utf-8", errors="replace").splitlines()
 
 
 def make_wiring_collector(
@@ -54,7 +54,9 @@ def make_wiring_collector(
                 "wiring", "unavailable", error=f"{repo_root}: path not found"
             )
         try:
-            output = run(["git", "worktree", "list", "--porcelain"])
+            output = run(
+                ["git", "-C", str(repo_root), "worktree", "list", "--porcelain"]
+            )
             worktrees: dict[str, tuple[str, str | None]] = {}
             current_path: str | None = None
             for line in output.splitlines():
@@ -90,23 +92,24 @@ def make_wiring_collector(
                 if log.is_file():
                     stat = log.stat()
                     cached = cache.get(log)
-                    lines = (
+                    all_lines = (
                         cached[2]
                         if cached and cached[:2] == (stat.st_mtime_ns, stat.st_size)
-                        else _tail_lines(log)
+                        else _log_lines(log)
                     )
-                    cache[log] = (stat.st_mtime_ns, stat.st_size, lines)
+                    cache[log] = (stat.st_mtime_ns, stat.st_size, all_lines)
+                    lines = all_lines[-64:]
                     # phase.log stamps are box-local wall-clock times.
                     now = now_fn().astimezone()
                     starts = [
                         line
-                        for line in lines
-                        if re.search(r"\b[0-9]{2}:[0-9]{2}:[0-9]{2}\b.*\bstart\b", line)
+                        for line in all_lines
+                        if re.search(r"\b(sol|luna)\s+start\b", line)
                     ]
                     if starts:
-                        who = re.search(r"\b(sol|luna)\s+start\b", starts[-1])
-                        if who:
-                            stage = who.group(1)
+                        match = re.search(r"\b(sol|luna)\s+start\b", starts[-1])
+                        if match:
+                            stage = match.group(1)
                     if (directory / "luna.done").exists():
                         stage = "done"
                     elif (directory / "sol.done").exists():
@@ -129,14 +132,19 @@ def make_wiring_collector(
                         if lines
                         else []
                     )
+                    stamp_dt = datetime.fromtimestamp(stat.st_mtime).astimezone()
                     if times:
                         hour, minute, second = (int(x) for x in times[-1])
-                        stamp_dt = now.replace(
+                        stamp_dt = stamp_dt.replace(
                             hour=hour, minute=minute, second=second, microsecond=0
                         )
-                        if stamp_dt > now + timedelta(minutes=5):
-                            stamp_dt -= timedelta(days=1)
-                        stamp = stamp_dt.isoformat()
+                    if stamp_dt > now + timedelta(minutes=5):
+                        stamp_dt -= timedelta(days=1)
+                    stamp = stamp_dt.isoformat()
+                    if stage != "done" and stamp_dt < now - timedelta(
+                        hours=window_hours
+                    ):
+                        continue
                 head = None
                 if worktree:
                     try:

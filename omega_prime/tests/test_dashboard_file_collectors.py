@@ -63,7 +63,8 @@ def test_omp_sessions_parses_tail_and_caches(tmp_path: Path) -> None:
     assert result.items[0]["title"] == "A title"
     assert result.items[0]["model"] == "m2"
     assert result.items[0]["usage"] == {"input": 4, "output": 5}
-    assert result.items[0]["stop_reason"] == "done"
+    assert "stop_reason" not in result.items[0]
+    assert result.items[0]["cwd"] == "/tmp/work"
     assert result.items[0]["progress"] == {"done": 2, "total": 3}
     assert result.extra == {"malformed": 1}
     assert collect() == result
