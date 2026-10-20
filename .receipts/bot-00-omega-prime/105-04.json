@@ -2,7 +2,7 @@
   "task_id": "105-04",
   "bot": "bot-00-omega-prime",
   "started_at": null,
-  "completed_at": "2026-10-20T23:03:47Z",
+  "completed_at": "2026-10-20T23:05:16Z",
   "commands": [
     {
       "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_command_center_static.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_live_fixes.py",
@@ -40,7 +40,22 @@
       "output_tail": "next-id printed 00002 twice without changing bridge bytes or mtime; assignment persisted 00001 - W4 Smoke Task; API, named SSE, and post-restart API all exposed that display_id. Root and legacy pages responded."
     },
     {
-      "cmd": "browser.open local Command Center URL with managed Chromium",
+      "cmd": "Initial isolated CLI smoke expectation: separate python3 -m omega_prime.dashboard next-id processes against a seeded task bridge",
+      "exit_code": 1,
+      "output_tail": "The smoke harness initially expected 00001 but observed the correct non-consuming 00002 preview after pending backfill; bridge bytes and mtime were unchanged."
+    },
+    {
+      "cmd": "Initial isolated live API/SSE smoke compared separately polled JSON and SSE snapshots for full equality",
+      "exit_code": 1,
+      "output_tail": "The assertions observed different generated_at timestamps because snapshots were read on different poll intervals; later deterministic integration test verified equality for a single snapshot."
+    },
+    {
+      "cmd": "browser.open local dashboard URL with wait_until=networkidle",
+      "exit_code": 1,
+      "output_tail": "Browser bridge rejected networkidle as an invalid navigation wait condition."
+    },
+    {
+      "cmd": "browser.open local Command Center URL with managed Chromium using wait_until=domcontentloaded",
       "exit_code": 1,
       "output_tail": "Browser service could not install Chromium because it could not connect to the download endpoint; no UI interaction or screenshot was performed."
     }
