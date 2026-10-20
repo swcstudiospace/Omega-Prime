@@ -82,7 +82,7 @@ _MARKER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(?i)(?:\bgolang\b|go\.mod|go\.sum|(?:^|[\s/])[^/\s]+\.go\b|"
             r"\bgo\s+(?:service|module|code|lang|language|package|file|test|"
             r"program|app|toolchain|compiler|library|source|backend)s?\b|"
-            r"\b(?:in|using|with|via|to)\s+go\b)"
+            r"\b(?:in|using|with|via)\s+go\b)"
         ),
     ),
     ("docker", re.compile(r"(?i)(?:\bdocker\b|dockerfile|docker-compose)")),

@@ -22,6 +22,7 @@ from omega_prime.engine.lanes import (
     LaneRouter,
     choose_lane,
 )
+from omega_prime.policy.policy import SeatPolicy
 from omega_prime.tooling.fs import atomic_write_json
 from omega_prime.tools.approvals import ApprovalLog
 from omega_prime.tools.dispatch import register_dispatch_tools
@@ -34,12 +35,8 @@ TOKEN = "fleet-test-token"
 CONFIRM = "confirm-test-token"
 
 
-class _Hosts:
-    def __init__(self, hosts: tuple[str, ...]) -> None:
-        self._hosts = {host.lower() for host in hosts}
-
-    def allows_host(self, host: str) -> bool:
-        return isinstance(host, str) and host.lower() in self._hosts
+def _allow(*hosts: str) -> SeatPolicy:
+    return SeatPolicy({"version": 1, "network": {"hosts": list(hosts)}})
 
 
 def _spec(
@@ -115,7 +112,7 @@ def _router(
     client = FleetClient(
         env,
         transport or _Transport(),
-        policy=_Hosts(("fleet.example",)),
+        policy=_allow("fleet.example"),
     )
     router = LaneRouter(
         env,
@@ -150,6 +147,8 @@ def test_cloud_markers_force_the_fleet() -> None:
         ("notes", ("android/app/src",)),
         ("ship the ios app", ()),
         ("Fix the Go service", ()),
+        ("the parser is written in go", ()),
+        ("using go for the small library", ()),
     ]
     for prompt, paths in cases:
         decision = choose_lane(
@@ -167,6 +166,7 @@ def test_ordinary_words_are_not_cloud_markers() -> None:
         "a good module",
         "previous notes",
         "go ahead and fix the Python test",
+        "ready to go and fix the Python test",
     ):
         decision = choose_lane(
             _spec(prompt=prompt),
@@ -521,7 +521,7 @@ def test_status_and_cancel_tools_use_the_client(monkeypatch) -> None:
     monkeypatch.setenv("FLEET_COORDINATOR_TOKEN", TOKEN)
     monkeypatch.setattr(
         "omega_prime.engine.fleet_client.seat_policy",
-        lambda: _Hosts(("fleet.example",)),
+        lambda: _allow("fleet.example"),
     )
     monkeypatch.setattr("omega_prime.engine.fleet_client.UrllibTransport", Scripted)
     status = json.loads(registry.dispatch("omega_jobs_status", {}))

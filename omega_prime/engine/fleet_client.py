@@ -21,10 +21,11 @@ client:
 
 The coordinator reads ``Authorization: Bearer`` (``src/shared/util.ts``
 ``bearer``). This client sends that header and no other credential header.
-``FLEET_COORDINATOR_URL`` and ``FLEET_COORDINATOR_TOKEN`` are read by name.
-A ``*_FILE`` sibling is used when the value itself is unset. The token is
-resolved through the credential broker, and only after the seat policy
-allows the coordinator host. Plain HTTP is refused except on loopback.
+``FLEET_COORDINATOR_URL`` is read by name. ``FLEET_COORDINATOR_TOKEN`` is
+not. The credential broker resolves that token, including a ``*_FILE``
+sibling, and only after ``SeatPolicy.allows_host`` allows the coordinator
+host. A host that is not allowed fails closed before the token is read.
+Plain HTTP is refused except on loopback.
 Values are not logged, stored on the spec, or copied into errors.
 """
 
@@ -288,24 +289,36 @@ class FleetClient:
         self,
         env: Mapping[str, str] | None = None,
         transport: Transport | None = None,
-        policy: Any | None = None,
+        policy: SeatPolicy | None = None,
     ) -> None:
         self._env = env if env is not None else os.environ
         self._transport = transport if transport is not None else UrllibTransport()
-        self._policy = policy if policy is not None else seat_policy()
-        self._broker = CredentialBroker(self._policy, self._env)
+        loaded = policy if isinstance(policy, SeatPolicy) else seat_policy()
+        self._policy = loaded
+        self._broker = CredentialBroker(loaded, self._env)
         self._secret_error: str | None = None
 
     def configured(self) -> bool:
-        """True when both settings resolve. A bad file is not configured."""
+        """True when the URL resolves and the broker can read the token.
+
+        A host the seat policy does not allow is not configured. The token
+        value is not kept.
+        """
+        self._secret_error = None
         try:
-            url = read_named_secret(self._env, "FLEET_COORDINATOR_URL")
-            token = read_named_secret(self._env, "FLEET_COORDINATOR_TOKEN")
+            base = read_named_secret(self._env, "FLEET_COORDINATOR_URL")
         except FleetError as exc:
             self._secret_error = exc.code
             return False
-        self._secret_error = None
-        return bool(url) and bool(token)
+        if not base:
+            return False
+        try:
+            self._credential(_join(base, "/", None))
+        except FleetError as exc:
+            if exc.code != "not_configured":
+                self._secret_error = exc.code
+            return False
+        return True
 
     def configuration_error(self) -> str:
         """``not_configured`` or the secret-file code. No values."""
@@ -395,16 +408,14 @@ class FleetClient:
         body: dict[str, Any] | None = None,
         query: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        if not self.configured():
-            raise FleetError(self.configuration_error() or "not_configured")
-        url = _join(read_named_secret(self._env, "FLEET_COORDINATOR_URL"), path, query)
-        host = urlsplit(url).hostname or ""
-        if not self._policy.allows_host(host):
-            raise FleetError("host_not_allowed")
         try:
-            token = self._broker.key_for(_FleetCredential(), url)
-        except ProviderError:
-            raise FleetError("not_configured") from None
+            base = read_named_secret(self._env, "FLEET_COORDINATOR_URL")
+        except FleetError:
+            raise
+        if not base:
+            raise FleetError("not_configured")
+        url = _join(base, path, query)
+        token = self._credential(url)
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {token}",
@@ -425,6 +436,33 @@ class FleetClient:
         if not isinstance(cleaned, dict):
             raise FleetError("invalid_response")
         return cleaned
+
+    def _credential(self, url: str) -> str:
+        """Token for one coordinator URL. The host gate runs before the lookup."""
+        host = urlsplit(url).hostname or ""
+        if not isinstance(self._policy, SeatPolicy) or not SeatPolicy.allows_host(
+            self._policy, host
+        ):
+            raise FleetError("host_not_allowed")
+        try:
+            token = self._broker.key_for(_FleetCredential(), url)
+        except ProviderError as exc:
+            raise _broker_error(exc) from None
+        if not isinstance(token, str) or not token:
+            raise FleetError("not_configured")
+        return token
+
+
+def _broker_error(exc: ProviderError) -> FleetError:
+    """Map a broker failure to a code. The broker text can name a path."""
+    text = str(exc).lower()
+    if "no credential for host" in text:
+        return FleetError("host_not_allowed")
+    if "group/other" in text or "chmod" in text or "mode 0600" in text:
+        return FleetError("secret_permissions")
+    if "no credential for" in text:
+        return FleetError("not_configured")
+    return FleetError("secret_unreadable")
 
 
 def _loopback(hostname: str) -> bool:

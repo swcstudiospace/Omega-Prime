@@ -6,16 +6,20 @@ from __future__ import annotations
 
 import json
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from typing import Any, cast
 from urllib.parse import urlsplit
 
+from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.engine.fleet_client import (
     FleetClient,
     FleetError,
     HttpResponse,
     JobSpec,
     UrllibTransport,
+    read_named_secret,
 )
+from omega_prime.policy.policy import SeatPolicy
 
 TOKEN = "fleet-test-token"
 SPEC = JobSpec(
@@ -49,12 +53,22 @@ class FakeTransport:
         return self.handler(method, url, headers, body)
 
 
-class _Hosts:
-    def __init__(self, hosts: tuple[str, ...] = ("fleet.example", "127.0.0.1")) -> None:
-        self._hosts = {host.lower() for host in hosts}
+def _allow(*hosts: str) -> SeatPolicy:
+    return SeatPolicy({"version": 1, "network": {"hosts": list(hosts)}})
 
-    def allows_host(self, host: str) -> bool:
-        return isinstance(host, str) and host.lower() in self._hosts
+
+def _expect_host_denied(
+    checks: tuple[tuple[Callable[..., object], tuple[object, ...]], ...],
+) -> None:
+    """Each call must raise ``host_not_allowed`` and must not echo the token."""
+    for method, args in checks:
+        try:
+            method(*args)
+        except FleetError as exc:
+            assert exc.code == "host_not_allowed"
+            assert TOKEN not in str(exc)
+        else:
+            raise AssertionError("expected host_not_allowed")
 
 
 def _client(handler, **env: str) -> tuple[FleetClient, FakeTransport]:
@@ -64,7 +78,7 @@ def _client(handler, **env: str) -> tuple[FleetClient, FakeTransport]:
     }
     base.update(env)
     transport = FakeTransport(handler)
-    return FleetClient(base, transport, policy=_Hosts()), transport
+    return FleetClient(base, transport, policy=_allow("fleet.example")), transport
 
 
 def _ok(payload: dict) -> HttpResponse:
@@ -139,10 +153,10 @@ def test_token_file_is_read_and_a_loose_file_is_refused(tmp_path) -> None:
         "FLEET_COORDINATOR_URL": "https://fleet.example",
         "FLEET_COORDINATOR_TOKEN_FILE": str(path),
     }
-    client = FleetClient(env, FakeTransport(handler), policy=_Hosts())
+    client = FleetClient(env, FakeTransport(handler), policy=_allow("fleet.example"))
     assert client.submit(SPEC)["id"] == "job-3"
     path.chmod(0o644)
-    loose = FleetClient(env, FakeTransport(handler), policy=_Hosts())
+    loose = FleetClient(env, FakeTransport(handler), policy=_allow("fleet.example"))
     assert loose.configured() is False
     assert loose.configuration_error() == "secret_permissions"
 
@@ -322,3 +336,108 @@ def test_urllib_transport_uses_a_scripted_opener(monkeypatch) -> None:
     handlers = captured["handlers"]
     assert isinstance(handlers, tuple)
     assert any(isinstance(item, urllib.request.ProxyHandler) for item in handlers)
+
+
+def test_token_comes_from_the_credential_broker(monkeypatch) -> None:
+    """The bearer is the broker key. The token name is not read here."""
+    looked_up: list[tuple[str, tuple[str, ...], str]] = []
+
+    def key_for(self: CredentialBroker, provider: Any, url: str) -> str:
+        del self
+        looked_up.append((provider.name, tuple(provider.env_vars), url))
+        return "broker-issued"
+
+    def named(env: Mapping[str, str], name: str) -> str:
+        assert name == "FLEET_COORDINATOR_URL"
+        return read_named_secret(env, name)
+
+    monkeypatch.setattr(CredentialBroker, "key_for", key_for)
+    monkeypatch.setattr("omega_prime.engine.fleet_client.read_named_secret", named)
+
+    def handler(method, url, headers, body):
+        del method, url, body
+        assert headers["Authorization"] == "Bearer broker-issued"
+        return HttpResponse(201, json.dumps({"jobs": [{"id": "job-broker"}]}).encode())
+
+    client, transport = _client(handler)
+    assert client.submit(SPEC)["id"] == "job-broker"
+    assert len(transport.calls) == 1
+    assert looked_up == [
+        (
+            "fleet-coordinator",
+            ("FLEET_COORDINATOR_TOKEN",),
+            "https://fleet.example/jobs",
+        )
+    ]
+    assert TOKEN not in json.dumps(looked_up)
+
+
+def test_disallowed_host_fails_closed_before_the_token_is_read(monkeypatch) -> None:
+    """SeatPolicy.allows_host runs first. A miss does not read the token."""
+
+    def named(env: Mapping[str, str], name: str) -> str:
+        assert name == "FLEET_COORDINATOR_URL"
+        return read_named_secret(env, name)
+
+    def secret_value(env: Mapping[str, str], name: str) -> str:
+        del env, name
+        raise AssertionError("token was read for a refused host")
+
+    monkeypatch.setattr("omega_prime.engine.fleet_client.read_named_secret", named)
+    monkeypatch.setattr("omega_prime.credentials.broker.secret_value", secret_value)
+
+    def handler(method, url, headers, body):
+        del method, url, headers, body
+        raise AssertionError("transport was called")
+
+    spec = JobSpec(repo="acme/widget", prompt="docs")
+    for policy in (_allow(), _allow("other.example")):
+        client = FleetClient(
+            {
+                "FLEET_COORDINATOR_URL": "https://fleet.example",
+                "FLEET_COORDINATOR_TOKEN": TOKEN,
+            },
+            FakeTransport(handler),
+            policy=policy,
+        )
+        _expect_host_denied(
+            (
+                (client.submit, (spec,)),
+                (client.list_jobs, ()),
+                (client.get_job, ("job-1",)),
+                (client.events, ("job-1",)),
+                (client.poll, ("job-1",)),
+                (client.coordinator_status, ()),
+                (client.hitl_pending, ()),
+                (client.answer_hitl, ("job-1", "yes")),
+                (client.cancel, ("job-1",)),
+            )
+        )
+        assert client.configured() is False
+        assert client.configuration_error() == "host_not_allowed"
+
+
+def test_a_stand_in_policy_cannot_allow_the_host() -> None:
+    class StandIn:
+        def allows_host(self, host: str) -> bool:
+            del host
+            return True
+
+    def handler(method, url, headers, body):
+        del method, url, headers, body
+        raise AssertionError("transport was called")
+
+    client = FleetClient(
+        {
+            "FLEET_COORDINATOR_URL": "https://fleet.example",
+            "FLEET_COORDINATOR_TOKEN": TOKEN,
+        },
+        FakeTransport(handler),
+        policy=cast(Any, StandIn()),
+    )
+    try:
+        client.submit(JobSpec(repo="acme/widget", prompt="docs"))
+    except FleetError as exc:
+        assert exc.code == "host_not_allowed"
+    else:
+        raise AssertionError("expected host_not_allowed")
