@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -176,11 +177,29 @@ def test_filtered_command_scan_preserves_unmatched_records(tmp_path: Path) -> No
     assert unfiltered["identity"] == other_identity
 
 
-def test_status_discards_only_answers_for_terminal_requests(tmp_path: Path) -> None:
+def test_status_discards_terminal_duplicate_answers_after_concurrent_cleanup(
+    tmp_path: Path, monkeypatch
+) -> None:
     with _store(tmp_path) as store:
         store.register_request(IDENTITY, {"method": "confirm", "message": "Done?"})
         store.answer(IDENTITY, "confirm", True)
+        store.answer(IDENTITY, "confirm", False)
         store.resolve_request(IDENTITY, "answered")
+
+        original_unlink = os.unlink
+        deleted_by_concurrent_scan = False
+
+        def unlink_after_competing_scan(name, *, dir_fd):
+            nonlocal deleted_by_concurrent_scan
+            if deleted_by_concurrent_scan:
+                original_unlink(name, dir_fd=dir_fd)
+                raise FileNotFoundError(name)
+            deleted_by_concurrent_scan = True
+            return original_unlink(name, dir_fd=dir_fd)
+
+        monkeypatch.setattr(
+            "omega_prime.engine.ui_control.os.unlink", unlink_after_competing_scan
+        )
         assert store.status()["queued_commands"] == 0
         assert store.next_command() is None
 

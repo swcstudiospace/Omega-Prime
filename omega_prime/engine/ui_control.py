@@ -530,7 +530,8 @@ class UIControlStore:
                         "invalidated",
                     }
                 ):
-                    os.unlink(name, dir_fd=queue_fd)
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(name, dir_fd=queue_fd)
             os.fsync(queue_fd)
         finally:
             os.close(request_fd)
