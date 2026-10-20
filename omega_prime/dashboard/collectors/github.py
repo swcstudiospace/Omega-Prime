@@ -10,6 +10,7 @@ import re
 import types
 import urllib.request
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
@@ -17,9 +18,9 @@ from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.redact import redact_value
 
-_SCORE = re.compile(r"Confidence score:\s*([1-5])\s*/\s*5", re.IGNORECASE)
+_SCORE = re.compile(r"Confidence score:\s*([0-5])\s*/\s*5", re.IGNORECASE)
 _BODY_SCORE = re.compile(
-    r"<!--\s*greptile_confidence_score:\s*([1-5])\s*-->", re.IGNORECASE
+    r"<!--\s*greptile_confidence_score:\s*([0-5])\s*-->", re.IGNORECASE
 )
 
 
@@ -92,9 +93,10 @@ def make_github_collector(
             items: list[dict[str, Any]] = []
             if not isinstance(prs, list):
                 raise ValueError("payload")
-            for pr in prs:
+
+            def one(pr: Any) -> dict[str, Any] | None:
                 if not isinstance(pr, dict):
-                    continue
+                    return None
                 number = pr.get("number")
                 head_value = pr.get("head")
                 head = head_value if isinstance(head_value, dict) else {}
@@ -116,13 +118,14 @@ def make_github_collector(
                     ci = "pass"
                 else:
                     ci = "pending"
-                comments = get(f"{base}/issues/{number}/comments", headers)
-                reviews = get(f"{base}/pulls/{number}/reviews", headers)
                 head_sha = head.get("sha")
                 body = pr.get("body")
                 body_match = _BODY_SCORE.search(body) if isinstance(body, str) else None
                 score = body_match.group(1) if body_match else ""
                 if not score:
+                    # Only fetch reviews/comments when the PR body has no score.
+                    comments = get(f"{base}/issues/{number}/comments", headers)
+                    reviews = get(f"{base}/pulls/{number}/reviews", headers)
                     # Latest greptile-apps[bot] result for the current head:
                     # bot reviews pinned to this head sha and bot comments,
                     # ordered by timestamp so an older review cannot override
@@ -180,7 +183,13 @@ def make_github_collector(
                     "updated_at": pr.get("updated_at"),
                     "url": pr.get("html_url"),
                 }
-                items.append(redact_value(item, extra=(token,), env={}))
+                return dict(redact_value(item, extra=(token,), env={}))
+
+            # Per-PR calls run concurrently so 13+ PRs fit inside the
+            # collector timeout instead of ~40 sequential round trips.
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                rows = list(pool.map(one, prs))
+            items.extend(row for row in rows if row is not None)
             cache, fetched = items, now
             return SourceResult("github", "ok", items=items)
         except Exception as exc:

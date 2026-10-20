@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -229,3 +230,50 @@ def test_fleet_enabled_uses_two_gets_and_redacts_token(tmp_path: Path) -> None:
     assert result.extra == {"hitl_count": 3}
     assert token not in json.dumps(result.__dict__)
     datetime.fromisoformat(result.items[0]["age_measured_at"])
+
+
+def _slow_pr_transport(
+    calls: list[str], prs: int, delay: float
+) -> Callable[[str, Any], tuple[int, bytes]]:
+    def transport(url: str, headers: Any) -> tuple[int, bytes]:
+        calls.append(url)
+        if "/pulls?" in url:
+            return 200, json.dumps(
+                [
+                    {
+                        "number": n,
+                        "head": {"sha": f"h{n}"},
+                        "body": "<!-- greptile_confidence_score:0 -->",
+                    }
+                    for n in range(prs)
+                ]
+            ).encode()
+        time.sleep(delay)
+        if "/check-runs" in url:
+            return 200, b'{"check_runs":[]}'
+        return 200, b"[]"
+
+    return transport
+
+
+def test_github_zero_score_and_body_score_skips_comment_calls() -> None:
+    calls: list[str] = []
+    result = make_github_collector(
+        env={"GITHUB_PAT_DESK_LEAD": "token"},
+        transport=_slow_pr_transport(calls, 2, 0.0),
+    )()
+    assert [row["greptile"] for row in result.items] == ["0/5", "0/5"]
+    assert not any("/comments" in u or "/reviews" in u for u in calls)
+
+
+def test_github_per_pr_calls_run_concurrently() -> None:
+    calls: list[str] = []
+    started = time.monotonic()
+    result = make_github_collector(
+        env={"GITHUB_PAT_DESK_LEAD": "token"},
+        transport=_slow_pr_transport(calls, 16, 0.2),
+    )()
+    elapsed = time.monotonic() - started
+    assert result.status == "ok" and len(result.items) == 16
+    # 16 sequential check-run calls would take 3.2s.
+    assert elapsed < 1.5
