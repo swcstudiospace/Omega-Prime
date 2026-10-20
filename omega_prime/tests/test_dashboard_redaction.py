@@ -46,7 +46,10 @@ def document() -> dict:
 
 
 def test_flag_like_env_values_are_not_secret_substrings() -> None:
-    env = {"OMEGA_PRIME_OMP_ALLOW_CHATGPT": "1", "GITHUB_PAT_DESK_LEAD": "ghp_LongFakeTokenValue"}
+    env = {
+        "OMEGA_PRIME_OMP_ALLOW_CHATGPT": "1",
+        "GITHUB_PAT_DESK_LEAD": "ghp_LongFakeTokenValue",
+    }
     text = "job-5563f17a ran with ghp_LongFakeTokenValue"
     result = redact_value(text, env=env)
     assert "job-5563f17a" in result

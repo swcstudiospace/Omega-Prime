@@ -134,7 +134,9 @@ def test_wiring_join_done_and_waiting_derivation() -> None:
         "fleet": source("fleet", [], {"hitl_count": 2}),
     }
     snap = normalize_tasks(src, now=NOW)
-    assert "pid 9" in next(t.detail for t in snap.active if t.id == "wiring:p1")
+    detail = next(t.detail for t in snap.active if t.id == "wiring:p1")
+    assert isinstance(detail, str)
+    assert "pid 9" in detail
     assert {w.id for w in snap.waiting_on_ove} == {
         "wait:gh:swcstudiospace/omes-bot#5",
         "wait:herdr:p",

@@ -10,8 +10,10 @@ import io
 import json
 import signal
 import time
+from collections.abc import MutableMapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -345,7 +347,7 @@ def test_sse_emits_retry_snapshot_and_update() -> None:
         async def receive() -> dict[str, object]:
             return {"type": "http.disconnect"}
 
-        async def send(message: dict[str, object]) -> None:
+        async def send(message: MutableMapping[str, Any]) -> None:
             if message["type"] == "http.response.start":
                 assert message["status"] == 200
                 headers = {

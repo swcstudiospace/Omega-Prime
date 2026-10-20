@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -14,10 +15,12 @@ from omega_prime.dashboard.collectors.github import make_github_collector
 
 def test_github_missing_token_makes_no_calls() -> None:
     calls: list[Any] = []
-    result = make_github_collector(
-        env={},
-        transport=lambda url, headers: calls.append((url, headers)) or (200, b"[]"),
-    )()
+
+    def fake_transport(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
+        calls.append((url, headers))
+        return (200, b"[]")
+
+    result = make_github_collector(env={}, transport=fake_transport)()
     assert result.status == "unavailable"
     assert calls == []
 
