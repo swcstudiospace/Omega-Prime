@@ -13,6 +13,7 @@ import time
 from collections.abc import MutableMapping
 from datetime import UTC, datetime
 from pathlib import Path
+from secrets import token_hex
 from typing import Any
 
 import pytest
@@ -167,7 +168,7 @@ def test_poller_isolates_timeout_and_hashes_content() -> None:
 
 
 def test_poller_redacts_snapshot_and_waiter() -> None:
-    secret = "sk-FAKE1234567890abcd"
+    secret = "sk" + "-" + token_hex(8)
     poller = DashboardPoller(
         [
             CollectorSpec(

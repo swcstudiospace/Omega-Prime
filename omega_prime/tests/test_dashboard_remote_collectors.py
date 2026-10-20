@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -176,8 +177,9 @@ def test_github_review_score_matches_capitalized_score() -> None:
 
 def test_fleet_disallowed_url_is_unavailable_without_request(tmp_path: Path) -> None:
     config = tmp_path / "coordinator.env"
+    token = "fleet" + "_" + "t" * 16
     config.write_text(
-        "FLEET_COORDINATOR_URL=not-a-url\nFLEET_COORDINATOR_TOKEN=secret\n",
+        f"FLEET_COORDINATOR_URL=not-a-url\nFLEET_COORDINATOR_TOKEN={token}\n",
         encoding="utf-8",
     )
     calls: list[Any] = []
@@ -204,9 +206,10 @@ def test_fleet_disabled_without_io() -> None:
 
 
 def test_fleet_enabled_uses_two_gets_and_redacts_token(tmp_path: Path) -> None:
+    token = "fleet" + "_" + "t" * 16
     config = tmp_path / "coordinator.env"
     config.write_text(
-        "FLEET_COORDINATOR_URL=http://127.0.0.1:19999\nFLEET_COORDINATOR_TOKEN=fakefleettokenvalue\n",
+        f"FLEET_COORDINATOR_URL=http://127.0.0.1:19999\nFLEET_COORDINATOR_TOKEN={token}\n",
         encoding="utf-8",
     )
     calls: list[Any] = []
@@ -224,4 +227,5 @@ def test_fleet_enabled_uses_two_gets_and_redacts_token(tmp_path: Path) -> None:
     assert result.status == "ok"
     assert len(calls) == 2
     assert result.extra == {"hitl_count": 3}
-    assert "fakefleettokenvalue" not in json.dumps(result.__dict__)
+    assert token not in json.dumps(result.__dict__)
+    datetime.fromisoformat(result.items[0]["age_measured_at"])

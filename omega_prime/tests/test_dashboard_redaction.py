@@ -6,19 +6,20 @@ from __future__ import annotations
 
 import json
 import os
+from secrets import token_hex
 
 from omega_prime.dashboard.config import DashboardConfig, load_dashboard_config
 from omega_prime.dashboard.redact import redact_line, redact_value
 from omega_prime.dashboard.status_file import read_tasks, write_tasks
 
 SECRETS = (
-    "sk-FAKE1234567890abcd",
-    "xai-FAKEFAKEFAKE1",
-    "ghp_FAKEFAKEFAKEFAKEFAKE",
-    "AKIAFAKEFAKEFAKEFAKE",
-    "Bearer FAKE.TOKEN.VALUE",
-    "TOKEN=superfakevalue",
-    "API_KEY: fakekeyvalue123",
+    "sk" + "-" + token_hex(10),
+    "xai" + "-" + token_hex(8),
+    "gh" + "p_" + "x" * 36,
+    "AKIA" + token_hex(8).upper(),
+    "Bearer " + token_hex(9) + ".x",
+    "TOKEN=" + token_hex(8),
+    "API_KEY: " + token_hex(8),
 )
 
 
@@ -46,14 +47,40 @@ def document() -> dict:
 
 
 def test_flag_like_env_values_are_not_secret_substrings() -> None:
+    pat = "gh" + "p_" + "L" * 18
     env = {
         "OMEGA_PRIME_OMP_ALLOW_CHATGPT": "1",
-        "GITHUB_PAT_DESK_LEAD": "ghp_LongFakeTokenValue",
+        "GITHUB_PAT_DESK_LEAD": pat,
     }
-    text = "job-5563f17a ran with ghp_LongFakeTokenValue"
+    text = "job-5563f17a ran with " + pat
     result = redact_value(text, env=env)
     assert "job-5563f17a" in result
-    assert "ghp_LongFakeTokenValue" not in result
+    assert pat not in result
+
+
+def test_embedded_sk_keys_with_digits_or_case_are_redacted() -> None:
+    embedded = "sk" + "-" + token_hex(8)
+    text = "prefix" + embedded
+    result = redact_value(text, env={})
+    assert embedded not in result
+    assert "[REDACTED]" in result
+
+    caps = "sk" + "-" + "Abc" + token_hex(6)
+    text = "prefix" + caps
+    result = redact_value(text, env={})
+    assert caps not in result
+    assert "[REDACTED]" in result
+
+    us = "sk" + "-" + token_hex(4) + "_" + token_hex(4)
+    text = "prefix" + us
+    result = redact_value(text, env={})
+    assert us not in result
+    assert "[REDACTED]" in result
+
+
+def test_benign_word_internal_sk_names_survive() -> None:
+    text = "branch feat/task-dashboard phase task-dashboard-ui"
+    assert redact_value(text, env={}) == text
 
 
 def test_denylist_and_benign_keys() -> None:

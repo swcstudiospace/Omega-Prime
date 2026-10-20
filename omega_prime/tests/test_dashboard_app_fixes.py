@@ -22,6 +22,19 @@ from omega_prime.dashboard.poller import DashboardPoller
 NOW = datetime(2026, 10, 21, tzinfo=UTC)
 
 
+def test_package_data_ships_dashboard_static_assets() -> None:
+    import tomllib
+
+    root = Path(__file__).resolve().parents[2]
+    data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    package_data = data["tool"]["setuptools"]["package-data"]["omega_prime"]
+    assert "dashboard/static/*" in package_data
+    static = root / "omega_prime" / "dashboard" / "static"
+    assert (static / "index.html").is_file()
+    assert (static / "app.js").is_file()
+    assert (static / "app.css").is_file()
+
+
 def _pidfile(home: Path) -> Path:
     return home / ".omega-prime" / "dashboard" / "dashboard.pid"
 

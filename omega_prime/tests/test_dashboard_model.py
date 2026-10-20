@@ -96,12 +96,12 @@ def test_session_quiet_stopped_and_exit_paths() -> None:
         )
     }
     snap = normalize_tasks(src, now=NOW)
-    # A quiet session with no live omp process is reported as exited.
-    assert {x.state for x in snap.active} == {"stopped?"}
-    assert {(x.id, x.result) for x in snap.finished} == {
-        ("omp:old", "stopped"),
-        ("omp:exit", "stopped"),
+    # Unknown cwd keeps a quiet session active; a known missing cwd is stopped?.
+    assert {x.id: x.state for x in snap.active} == {
+        "omp:old": "quiet",
+        "omp:live": "stopped?",
     }
+    assert {(x.id, x.result) for x in snap.finished} == {("omp:exit", "stopped")}
 
 
 def test_wiring_join_done_and_waiting_derivation() -> None:
@@ -176,3 +176,59 @@ def test_tasks_json_state_mapping_and_order() -> None:
         ("tasks:5", "failed"),
     ]
     assert any(x.id == "tasks:4" for x in snap.finished)
+
+
+def test_omega_job_never_finishes_from_quiet_minutes_alone() -> None:
+    snap = normalize_tasks(
+        {
+            "omega_job": source(
+                "omega_job",
+                [
+                    {
+                        "job_id": "late",
+                        "ok": None,
+                        "last_activity_at": (NOW - timedelta(hours=2)).isoformat(),
+                    }
+                ],
+            )
+        },
+        now=NOW,
+    )
+    assert not any(item.id == "job:late" for item in snap.finished)
+    assert [(item.id, item.state) for item in snap.active] == [("job:late", "quiet")]
+
+
+def test_rebuilds_do_not_move_measured_timestamps() -> None:
+    t0 = datetime(2026, 10, 21, 10, 0, tzinfo=UTC)
+    sources = {
+        "fleet": source(
+            "fleet",
+            [
+                {
+                    "job_id": "f",
+                    "state": "running",
+                    "age_s": 10,
+                    "age_measured_at": t0.isoformat(),
+                }
+            ],
+        ),
+        "omp_proc": source(
+            "omp_proc",
+            [
+                {
+                    "pid": 9,
+                    "cwd": "/un",
+                    "elapsed_s": 7,
+                    "elapsed_measured_at": t0.isoformat(),
+                }
+            ],
+        ),
+    }
+    first = normalize_tasks(sources, now=t0 + timedelta(hours=1))
+    second = normalize_tasks(sources, now=t0 + timedelta(hours=2))
+    for task_id, age in (("fleet:f", 10), ("proc:9", 7)):
+        expected = (t0 - timedelta(seconds=age)).isoformat()
+        left = next(task for task in first.active if task.id == task_id)
+        right = next(task for task in second.active if task.id == task_id)
+        assert left.started_at == right.started_at == expected
+        assert left.last_activity_at == right.last_activity_at == expected

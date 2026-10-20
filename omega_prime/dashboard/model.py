@@ -5,14 +5,14 @@
 Item kind registry (keys optional unless marked req; unknown keys ignored):
 - herdr_pane: pane_id(req), workspace, name, agent_status, cwd, terminal_title, session_path
 - omp_session: session_path(req), session_id, cwd, title, model, thinking_level, started_at, last_ts, stop_reason, usage{input,output}, progress{done,total}
-- omp_proc: pid(req), elapsed_s, cwd, mode
+- omp_proc: pid(req), elapsed_s, elapsed_measured_at, cwd, mode
 - wiring: phase(req), branch, head_sha, stage, last_log_ts, progress, worktree
 - sandbox_e2e: run_id(req), last_ts, path, stage
 - sandbox_receipt: name(req), last_ts, path
 - sandbox_container: name(req), state, status, created
 - omega_job: job_id(req), model, plan, provider, sandbox, ok, stage, final_text_line, started_at, last_activity_at
 - github_pr: repo(req), number(req), title, branch, draft, mergeable, ci, greptile, merge_rule, updated_at, url
-- fleet_job: job_id(req), state, worker, age_s
+- fleet_job: job_id(req), state, worker, age_s, age_measured_at
 """
 
 from __future__ import annotations
@@ -36,6 +36,18 @@ def _iso(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return value.isoformat()
+
+
+def _anchor(stamp: Any) -> datetime | None:
+    if not isinstance(stamp, str):
+        return None
+    try:
+        value = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value
 
 
 def _dict(obj: Any, names: tuple[str, ...]) -> dict[str, Any]:
@@ -298,9 +310,13 @@ def normalize_tasks(
             and not any(p.get("cwd") == s.get("cwd") for p in procs)
         ):
             state = "stopped?"
-        if state == "quiet" and not live(s.get("cwd")):
-            # Quiet with no omp process in its cwd (or no cwd recorded, as in
-            # subagent session files): treat the session as exited.
+        if (
+            state == "quiet"
+            and isinstance(s.get("cwd"), str)
+            and not live(s.get("cwd"))
+        ):
+            # Uncertain work stays quiet; only a known cwd with a reliable
+            # process check proves the session exited.
             finished.append(
                 FinishedItem(f"omp:{sid}", str(title), s.get("last_ts"), "stopped")
             )
@@ -440,23 +456,7 @@ def normalize_tasks(
         age = _recent(stamp, now, window_hours)
         if age is None or age > window_hours:
             continue
-        if age * 60 >= quiet_minutes:
-            # No result and no recent activity: the job never reported back.
-            finished.append(
-                FinishedItem(
-                    f"job:{jid}",
-                    f"omega job {jid}",
-                    stamp,
-                    "stopped",
-                    summary=(
-                        item.get("final_text_line")
-                        if isinstance(item.get("final_text_line"), str)
-                        else None
-                    ),
-                )
-            )
-            continue
-        state = "working"
+        state = "working" if age * 60 < quiet_minutes else "quiet"
         job_bits = [item.get("final_text_line"), item.get("model"), item.get("plan")]
         job_detail = "; ".join(str(x) for x in job_bits if x)
         job_links = item.get("links")
@@ -482,8 +482,9 @@ def normalize_tasks(
             continue
         state_text = str(item.get("state") or "").lower()
         age_s = item.get("age_s")
+        measured = _anchor(item.get("age_measured_at"))
         updated = (
-            (now - timedelta(seconds=float(age_s))).isoformat()
+            ((measured or now) - timedelta(seconds=float(age_s))).isoformat()
             if isinstance(age_s, (int, float))
             else None
         )
@@ -516,8 +517,9 @@ def normalize_tasks(
         if not isinstance(pid, int) or not isinstance(cwd, str) or cwd in matched_cwds:
             continue
         elapsed_s = item.get("elapsed_s")
+        measured = _anchor(item.get("elapsed_measured_at"))
         stamp = (
-            (now - timedelta(seconds=float(elapsed_s))).isoformat()
+            ((measured or now) - timedelta(seconds=float(elapsed_s))).isoformat()
             if isinstance(elapsed_s, (int, float))
             else None
         )

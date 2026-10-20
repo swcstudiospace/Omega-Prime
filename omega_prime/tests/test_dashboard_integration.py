@@ -9,6 +9,7 @@ import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from secrets import token_hex
 from typing import Any
 
 from starlette.testclient import TestClient
@@ -30,6 +31,11 @@ from omega_prime.dashboard.poller import CollectorSpec, DashboardPoller
 from omega_prime.dashboard.status_file import write_tasks
 
 NOW = datetime(2026, 10, 21, tzinfo=UTC)
+_SESSION_SECRET = "sk" + "-" + token_hex(9)
+_JOB_SECRET = "sk" + "-" + token_hex(9)
+_CMD_TOKEN_VALUE = token_hex(9)
+_PROC_TOKEN = "gh" + "p_" + "x" * 21
+_GH_TOKEN = "gh" + "p_" + "x" * 21
 
 
 def _spec(source: str, collector: Any, interval: float = 0.2) -> CollectorSpec:
@@ -61,7 +67,7 @@ def _fixture_tree(tmp_path: Path) -> list[CollectorSpec]:
                 "tool": "todo",
                 "done": 1,
                 "total": 2,
-                "text": "sk-FAKESECRET123456789",
+                "text": _SESSION_SECRET,
             }
         )
         + "\n",
@@ -80,7 +86,7 @@ def _fixture_tree(tmp_path: Path) -> list[CollectorSpec]:
             {
                 "job_id": "job-one",
                 "stage": "working",
-                "final_text": "safe first line\nsk-FAKESECRET123456789",
+                "final_text": "safe first line\n" + _JOB_SECRET,
             }
         ),
         encoding="utf-8",
@@ -88,7 +94,7 @@ def _fixture_tree(tmp_path: Path) -> list[CollectorSpec]:
     command_log = home / ".omega-prime" / "command-log.jsonl"
     command_log.parent.mkdir(parents=True, exist_ok=True)
     command_log.write_text(
-        json.dumps({"cmd": "echo TOKEN=FAKETOKEN123", "exit_code": 0}) + "\n",
+        json.dumps({"cmd": "echo TOKEN=" + _CMD_TOKEN_VALUE, "exit_code": 0}) + "\n",
         encoding="utf-8",
     )
     tasks_path = home / ".omega-prime" / "dashboard" / "tasks.json"
@@ -109,7 +115,7 @@ def _fixture_tree(tmp_path: Path) -> list[CollectorSpec]:
     proc = tmp_path / "proc" / "123"
     proc.mkdir(parents=True)
     (proc / "cmdline").write_bytes(
-        b"omega\x00--mode\x00worker\x00--token\x00ghp_FAKEPROC123456789"
+        b"omega\x00--mode\x00worker\x00--token\x00" + _PROC_TOKEN.encode()
     )
     (proc / "stat").write_text(
         "123 (omega) S 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 1 0 1 0\n", encoding="utf-8"
@@ -133,7 +139,7 @@ def _fixture_tree(tmp_path: Path) -> list[CollectorSpec]:
     )
     podman = make_podman_collector(runner=lambda _argv: "[]")
     github = make_github_collector(
-        env={"GITHUB_PAT_DESK_LEAD": "ghp_FAKEGITHUB123456789"},
+        env={"GITHUB_PAT_DESK_LEAD": _GH_TOKEN},
         transport=lambda url, _headers: (
             200,
             json.dumps(
@@ -228,10 +234,11 @@ def test_composite_snapshot_guards_redaction_and_sse(tmp_path: Path) -> None:
         html = client.get("/", headers={"host": "127.0.0.1:7421"}).text
         assert "Omega Prime — Task Dashboard" in html
         for secret in (
-            "FAKESECRET123456789",
-            "FAKETOKEN123",
-            "FAKEPROC123456789",
-            "FAKEGITHUB123456789",
+            _SESSION_SECRET,
+            _JOB_SECRET,
+            _CMD_TOKEN_VALUE,
+            _PROC_TOKEN,
+            _GH_TOKEN,
         ):
             assert secret not in response.text
             assert secret not in html

@@ -62,6 +62,7 @@ class DashboardPoller:
         self._task: asyncio.Task[None] | None = None
         self._next_due: dict[str, float] = {}
         self._in_flight: set[asyncio.Task[None]] = set()
+        self._running: set[str] = set()
 
     async def start(self) -> None:
         """Start the background polling loop once."""
@@ -89,14 +90,20 @@ class DashboardPoller:
             for spec in self.specs:
                 if now < self._next_due.get(spec.source, 0.0):
                     continue
+                if spec.source in self._running:
+                    continue
                 self._next_due[spec.source] = now + max(0.0, spec.interval_s)
                 task = asyncio.create_task(self._run_one(spec))
                 self._in_flight.add(task)
                 task.add_done_callback(self._in_flight.discard)
 
     async def _run_one(self, spec: CollectorSpec) -> None:
-        await self._collect(spec)
-        self._maybe_build()
+        self._running.add(spec.source)
+        try:
+            await self._collect(spec)
+            self._maybe_build()
+        finally:
+            self._running.discard(spec.source)
 
     async def _run_specs(self, specs: list[CollectorSpec]) -> None:
         await asyncio.gather(*(self._run_one(spec) for spec in specs))

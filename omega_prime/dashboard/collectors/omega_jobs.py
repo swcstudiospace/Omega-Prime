@@ -87,10 +87,12 @@ def make_omega_jobs_collector(
                                 )
                             except json.JSONDecodeError:
                                 continue
-                            if isinstance(event, dict) and event.get("type") in {
-                                "job_end",
-                                "agent_end",
-                            }:
+                            if not isinstance(event, dict):
+                                continue
+                            etype = event.get("type")
+                            if etype in {"job_start", "agent_start", "ready"}:
+                                terminal = None
+                            elif etype in {"job_end", "agent_end"}:
                                 terminal = event
                         if terminal:
                             ok = (

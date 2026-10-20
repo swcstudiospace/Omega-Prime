@@ -77,6 +77,55 @@ def test_slow_source_does_not_block_fast_source() -> None:
     asyncio.run(run())
 
 
+def test_one_in_flight_call_per_source() -> None:
+    async def run() -> None:
+        inside = False
+        calls = 0
+        reentered: list[int] = []
+        fast_calls = 0
+
+        def slow() -> SourceResult:
+            nonlocal inside, calls
+            calls += 1
+            if inside:
+                reentered.append(calls)
+            inside = True
+            time.sleep(0.25)
+            inside = False
+            return SourceResult("slow", "ok")
+
+        def fast() -> SourceResult:
+            nonlocal fast_calls
+            fast_calls += 1
+            return SourceResult("fast", "ok")
+
+        poller = DashboardPoller(
+            [
+                CollectorSpec("slow", slow, 0.05, 5.0),
+                CollectorSpec("fast", fast, 0.05, 5.0),
+            ],
+            tick_s=0.01,
+        )
+        await poller.start()
+        try:
+            await asyncio.sleep(0.18)
+            assert reentered == []
+            assert calls == 1
+            assert fast_calls >= 2
+
+            async def wait_for_second_call() -> None:
+                while calls < 2:
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_second_call(), timeout=1.5)
+            assert calls >= 2
+            assert reentered == []
+        finally:
+            await poller.stop()
+
+    asyncio.run(run())
+
+
 def test_normalization_failure_keeps_last_snapshot_and_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

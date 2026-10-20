@@ -91,6 +91,9 @@ def make_procs_collector(
                         "kind": "omp_proc",
                         "pid": int(entry.name),
                         "elapsed_s": elapsed,
+                        "elapsed_measured_at": datetime.fromtimestamp(
+                            now, tz=UTC
+                        ).isoformat(),
                         "cwd": cwd,
                         "mode": mode,
                     }

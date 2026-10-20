@@ -123,3 +123,40 @@ def test_unchanged_session_file_uses_cached_row(tmp_path: Path) -> None:
     second = collect()
 
     assert second.items[0] is first.items[0]
+
+
+def test_large_session_file_keeps_header_cwd_from_file_start(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "sessions" / "large.jsonl"
+    records: list[dict[str, object]] = [
+        {"type": "session", "timestamp": _STAMP, "data": {"id": "big", "cwd": "/work"}}
+    ]
+    records.extend(
+        {"type": "message", "data": {"n": index, "filler": "x" * 60}}
+        for index in range(4000)
+    )
+    records.append({"type": "model_usage", "timestamp": _STAMP, "data": {"model": "m"}})
+    _write_session(path, records)
+
+    row = _collect(path)
+
+    assert row["cwd"] == "/work"
+    assert row["session_id"] == "big"
+    assert row["started_at"] == _STAMP
+    assert "stop_reason" not in row
+
+
+def test_small_file_without_session_record_stays_headerless(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "sessions" / "headerless.jsonl"
+    _write_session(
+        path,
+        [{"type": "model_usage", "timestamp": _STAMP, "data": {"model": "m"}}],
+    )
+
+    row = _collect(path)
+
+    assert "cwd" not in row
+    assert "session_id" not in row

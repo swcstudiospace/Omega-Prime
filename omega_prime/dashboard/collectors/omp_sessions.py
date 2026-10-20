@@ -76,8 +76,9 @@ def make_omp_sessions_collector(
                             items.append(row)
                         continue
                     malformed_before = malformed
+                    tail_lines = _tail(path)
                     records: list[dict[str, Any]] = []
-                    for line in _tail(path):
+                    for line in tail_lines:
                         try:
                             record = json.loads(line)
                         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -91,6 +92,9 @@ def make_omp_sessions_collector(
                         "usage": {},
                         "progress": None,
                     }
+                    header_in_tail = any(
+                        record.get("type") == "session" for record in records
+                    )
                     for record in records:
                         typ = record.get("type")
                         data_value = record.get("data")
@@ -142,6 +146,45 @@ def make_omp_sessions_collector(
                             session["thinking_level"] = data.get(
                                 "thinkingLevel", data.get("thinking_level")
                             )
+                    if not header_in_tail:
+                        with path.open("rb") as stream:
+                            head = stream.read(_LIMIT)
+                        if len(head) == _LIMIT:
+                            head = head[: head.rfind(b"\n") + 1]
+                            for line in head.decode(
+                                "utf-8", errors="replace"
+                            ).splitlines():
+                                try:
+                                    record = json.loads(line)
+                                except json.JSONDecodeError:
+                                    continue
+                                if (
+                                    not isinstance(record, dict)
+                                    or record.get("type") != "session"
+                                ):
+                                    continue
+                                data_value = record.get("data")
+                                data = (
+                                    data_value
+                                    if isinstance(data_value, dict)
+                                    else record
+                                )
+                                stamp = record.get("timestamp")
+                                if "session_id" not in session:
+                                    session_id = data.get("id") or data.get(
+                                        "session_id"
+                                    )
+                                    if session_id is not None:
+                                        session["session_id"] = session_id
+                                if "started_at" not in session:
+                                    started_at = data.get("timestamp") or (
+                                        stamp if isinstance(stamp, str) else None
+                                    )
+                                    if started_at is not None:
+                                        session["started_at"] = started_at
+                                if isinstance(data.get("cwd"), str):
+                                    session.setdefault("cwd", data["cwd"])
+                                break
                     for record in reversed(records):
                         progress = _todo(record)
                         if progress is not None:

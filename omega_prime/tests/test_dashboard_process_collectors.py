@@ -9,6 +9,7 @@ import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from secrets import token_hex
 from typing import Any
 
 import pytest
@@ -52,8 +53,11 @@ def test_procs_filters_allowlisted_fields_and_extracts_mode(
     )()
     assert result.status == "ok"
     assert {frozenset(item) for item in result.items} == {
-        frozenset({"kind", "pid", "elapsed_s", "cwd", "mode"})
+        frozenset({"kind", "pid", "elapsed_s", "elapsed_measured_at", "cwd", "mode"})
     }
+    measured_at = datetime.fromisoformat(result.items[0]["elapsed_measured_at"])
+    assert measured_at.tzinfo is not None
+    assert abs((measured_at - now).total_seconds()) <= 2
     assert [item["mode"] for item in result.items] == ["rpc", None]
     assert all(item["elapsed_s"] == 10 for item in result.items)
     assert result.extra == {"skipped": 0}
@@ -84,6 +88,7 @@ def test_procs_skips_racing_pid_and_handles_missing_or_empty_root(
 
 
 def test_herdr_snapshot_allowlist_redaction_and_invocation() -> None:
+    leak = "sk" + "-" + token_hex(6)
     payload = {
         "result": {
             "snapshot": {
@@ -99,7 +104,7 @@ def test_herdr_snapshot_allowlist_redaction_and_invocation() -> None:
                                         "name": "worker",
                                         "cwd": "/tmp/work",
                                         "agent_status": "idle",
-                                        "terminal_title": "sk-test-secret",
+                                        "terminal_title": leak,
                                         "agent_session": {
                                             "value": "/tmp/session.jsonl"
                                         },
@@ -133,7 +138,7 @@ def test_herdr_snapshot_allowlist_redaction_and_invocation() -> None:
         "terminal_title": "[REDACTED]",
         "session_path": "/tmp/session.jsonl",
     }
-    assert "sk-test-secret" not in json.dumps(result.items)
+    assert leak not in json.dumps(result.items)
 
 
 def test_herdr_failure_malformed_and_empty_are_source_local() -> None:

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -36,6 +37,75 @@ def test_job_terminal_event_overrides_session_and_invalidates_cache(
     )
     assert [(item.id, item.result) for item in snapshot.finished] == [
         ("job:one", "failed")
+    ]
+
+
+def test_retried_job_ignores_previous_run_terminal(tmp_path: Path) -> None:
+    directory = tmp_path / "job-retry"
+    directory.mkdir()
+    (directory / "session.json").write_text(
+        json.dumps(
+            {
+                "job_id": "retry",
+                "stage": "working",
+                "last_activity_at": NOW.isoformat(),
+                "started_at": NOW.isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (directory / "events.jsonl").write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {"type": "agent_end"},
+                {"type": "agent_start"},
+                {"type": "turn_start"},
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    # The collector derives last_activity_at from file mtimes; pin them to the
+    # test clock so the fixture does not expire against the fixed NOW.
+    os.utime(directory / "events.jsonl", (NOW.timestamp(), NOW.timestamp()))
+    row = make_omega_jobs_collector(jobs_root=tmp_path, now_fn=lambda: NOW)().items[0]
+    assert row["ok"] is None
+    snapshot = normalize_tasks(
+        {"omega_job": SourceResult("omega_job", "ok", [row])},
+        now=NOW,
+        quiet_minutes=60,
+    )
+    active = {task.id: task for task in snapshot.active}
+    assert active["job:retry"].state == "working"
+    assert all(task.id != "job:retry" for task in snapshot.finished)
+
+
+def test_terminal_after_restart_still_counts(tmp_path: Path) -> None:
+    directory = tmp_path / "job-retry2"
+    directory.mkdir()
+    (directory / "session.json").write_text(
+        json.dumps({"job_id": "retry2", "stage": "working"}),
+        encoding="utf-8",
+    )
+    (directory / "events.jsonl").write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {"type": "agent_start"},
+                {"type": "job_end", "ok": False},
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    row = make_omega_jobs_collector(jobs_root=tmp_path, now_fn=lambda: NOW)().items[0]
+    assert row["ok"] is False
+    snapshot = normalize_tasks(
+        {"omega_job": SourceResult("omega_job", "ok", [row])}, now=NOW
+    )
+    assert [(task.id, task.result) for task in snapshot.finished] == [
+        ("job:retry2", "failed")
     ]
 
 

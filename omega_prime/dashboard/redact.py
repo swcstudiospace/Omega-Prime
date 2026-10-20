@@ -25,9 +25,10 @@ _ASSIGNMENT_SECRET = re.compile(
     r"(?i)(\b(?:password|passwd|pat|cookie|token|key|secret|auth|bearer)"
     r"\b['\"]?\s*[=:]\s*['\"]?)([^\s'\",;]+)"
 )
-# The shared ``sk-`` pattern has no left word boundary, so names such as
-# "task-dashboard" would lose their tail. Shield word-internal "sk-" first.
-_INNER_SK = re.compile(r"(?<=[A-Za-z0-9])sk-")
+# The lowercase-and-hyphen branch-name run after word-internal "sk-" is
+# benign (for example "task-dashboard"); keys mixing digits, uppercase, or
+# underscores are not exempt.
+_INNER_SK = re.compile(r"(?<=[A-Za-z0-9])sk-(?=[a-z-]*(?:$|[^A-Za-z0-9_-]))")
 _SK_SHIELD = "\x00sk\x00"
 
 

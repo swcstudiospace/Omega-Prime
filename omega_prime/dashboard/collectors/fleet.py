@@ -133,6 +133,9 @@ def make_fleet_collector(
                         "state": state,
                         "worker": job.get("worker"),
                         "age_s": age,
+                        "age_measured_at": datetime.fromtimestamp(
+                            now, tz=UTC
+                        ).isoformat(),
                     }
                 )
             if isinstance(status_data, dict):

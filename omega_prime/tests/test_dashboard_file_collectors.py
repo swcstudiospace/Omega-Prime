@@ -8,6 +8,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from secrets import token_hex
 
 from omega_prime.dashboard.collectors.agentos import make_agentos_collector
 from omega_prime.dashboard.collectors.command_log import make_command_log_collector
@@ -19,6 +20,7 @@ from omega_prime.dashboard.collectors.wiring import make_wiring_collector
 from omega_prime.dashboard.status_file import write_tasks
 
 _NOW = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
+_TOK = "TOKEN=" + token_hex(8)
 
 
 def _clock() -> datetime:
@@ -141,9 +143,7 @@ def test_wiring_collects_phases_and_handles_runner_error(tmp_path: Path) -> None
 def test_sandbox_files_progress_e2e_and_receipts(tmp_path: Path) -> None:
     root = tmp_path / "sandbox"
     root.mkdir()
-    (root / "PROGRESS.md").write_text(
-        "older\n latest TOKEN=sekritfake\n", encoding="utf-8"
-    )
+    (root / "PROGRESS.md").write_text("older\n latest " + _TOK, encoding="utf-8")
     _dump(root / ".state" / "e2e" / "run-1.jsonl", {"ok": True})
     _dump(root / ".state" / "receipts" / "receipt.json", {"ok": True})
     result = make_sandbox_files_collector(sandbox_root=root, now_fn=_clock)()
@@ -162,7 +162,7 @@ def test_omega_jobs_final_text_activity_and_recency(tmp_path: Path) -> None:
     job = root / "job-1"
     _dump(
         job / "session.json",
-        {"model": "m", "ok": True, "final_text": "line one\nline two TOKEN=sekritfake"},
+        {"model": "m", "ok": True, "final_text": "line one\nline two " + _TOK},
     )
     (job / "events.jsonl").write_text("", encoding="utf-8")
     result = make_omega_jobs_collector(jobs_root=root, now_fn=_clock)()
@@ -174,14 +174,13 @@ def test_omega_jobs_final_text_activity_and_recency(tmp_path: Path) -> None:
 def test_command_log_redacts_and_tasks_status(tmp_path: Path) -> None:
     log = tmp_path / "commands.jsonl"
     log.write_text(
-        json.dumps({"cmd": "echo TOKEN=fakevalue123", "exit_code": 2, "cwd": "/tmp"})
-        + "\n",
+        json.dumps({"cmd": "echo " + _TOK, "exit_code": 2, "cwd": "/tmp"}) + "\n",
         encoding="utf-8",
     )
     result = make_command_log_collector(log_path=log, now_fn=_clock)()
     assert result.extra["count"] == 1
     assert result.extra["last_exit_codes"] == [2]
-    assert "fakevalue123" not in json.dumps(result.extra)
+    assert _TOK not in json.dumps(result.extra)
     assert (
         make_command_log_collector(
             log_path=tmp_path / "missing", now_fn=_clock

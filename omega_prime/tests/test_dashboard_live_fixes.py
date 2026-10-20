@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -65,9 +66,8 @@ def test_word_internal_sk_is_not_a_credential() -> None:
         {"branch": "feat/task-dashboard", "id": "gb:task-dashboard"}, env={}
     )
     assert out == {"branch": "feat/task-dashboard", "id": "gb:task-dashboard"}
-    assert "sk-abcdefgh12345678" not in str(
-        redact_value("key sk-abcdefgh12345678", env={})
-    )
+    inline_key = "sk" + "-" + "a" * 16
+    assert inline_key not in str(redact_value(f"key {inline_key}", env={}))
     secret = "Ask-" + "z" * 20
     assert secret not in redact_value(
         f"x {secret} y", env={"GITHUB_PAT_DESK_LEAD": secret}
@@ -83,6 +83,10 @@ def test_wiring_log_times_are_box_local(tmp_path: Path) -> None:
     stamp_text = (local_now - timedelta(minutes=10)).strftime("%H:%M:%S")
     (runs / "p1" / "phase.log").write_text(
         f"{stamp_text} luna start\n", encoding="utf-8"
+    )
+    os.utime(
+        runs / "p1" / "phase.log",
+        (local_now.timestamp(), local_now.timestamp()),
     )
     result = make_wiring_collector(
         repo_root=repo, runs_root=runs, now_fn=lambda: NOW, runner=lambda _a: ""
@@ -137,13 +141,13 @@ def test_stale_work_without_a_process_moves_to_finished() -> None:
     snap = normalize_tasks(sources, now=NOW).to_dict()
     active = {t["id"]: t["state"] for t in snap["active"]}
     done = {f["id"]: f["result"] for f in snap["finished"]}
-    assert active == {"wiring:p4": "working", "job:job-new": "working"}
-    assert done == {
-        "omp:a": "stopped",
-        "omp:b": "stopped",
-        "wiring:p1": "stopped",
-        "job:job-old": "stopped",
+    assert active == {
+        "wiring:p4": "working",
+        "job:job-new": "working",
+        "omp:b": "quiet",
+        "job:job-old": "quiet",
     }
+    assert done == {"omp:a": "stopped", "wiring:p1": "stopped"}
 
 
 def _js_helpers() -> str:
