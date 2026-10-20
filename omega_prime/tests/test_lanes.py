@@ -535,3 +535,18 @@ def test_status_and_cancel_tools_use_the_client(monkeypatch) -> None:
     register_dispatch_tools(approved)
     cancelled = json.loads(approved.dispatch("omega_jobs_cancel", {"job_id": "job-1"}))
     assert cancelled["job"]["status"] == "cancelled"
+
+
+def test_job_spec_stage_is_validated_and_kept_local() -> None:
+    from omega_prime.engine.lanes import _spec_from
+
+    payload = {"repo": "swcstudiospace/omes-bot", "prompt": "plan it", "stage": "plan"}
+    spec = _spec_from(payload)
+    assert spec.stage == "plan"
+    assert "stage" not in spec.to_json()
+    try:
+        _spec_from({**payload, "stage": "ship"})
+    except FleetError as exc:
+        assert "invalid_stage" in str(exc)
+    else:
+        raise AssertionError("expected FleetError")

@@ -45,6 +45,7 @@ from typing import Any, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from omega_prime.credentials.broker import CredentialBroker
+from omega_prime.engine.plan_router import STAGES
 from omega_prime.engine.protocol import redact
 from omega_prime.policy.policy import SeatPolicy
 from omega_prime.providers.base import ProviderError
@@ -90,6 +91,10 @@ class JobSpec:
     hitl_test: bool | None = None
     events: bool | None = None
     model: str | None = None
+    # GSD stage (``plan`` or ``execute``) for the local omp lane's model
+    # routing. Local only: ``to_json`` leaves it out because the coordinator
+    # does not take it; the fleet gets an explicit ``model`` instead.
+    stage: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         """JSON object for ``POST /jobs``. Unset fields are left out."""
@@ -153,6 +158,8 @@ def validate_spec(spec: JobSpec) -> None:
     for link in spec.links:
         if not isinstance(link, str) or not link.strip():
             raise FleetError("invalid_links")
+    if spec.stage is not None and spec.stage not in STAGES:
+        raise FleetError("invalid_stage")
 
 
 def _branch_ok(branch: str) -> bool:

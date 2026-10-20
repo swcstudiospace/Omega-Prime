@@ -55,3 +55,34 @@ def _restore_process_loggers() -> Iterator[None]:
         logger.filters = filters
         logger.setLevel(level)
         logger.propagate = propagate
+
+
+# Tests must not touch the network. With the engine on "auto", a test that
+# reads os.environ and runs a live provider model could route its turn through
+# the real omp binary: host plan opt-ins (OMEGA_PRIME_OMP_ALLOW_*) or host API
+# keys (XAI_API_KEY, ZAI_API_KEY, ...) would then spend real quota and replace
+# scripted results with live replies. So the engine is off by default, host
+# plan, model and login-store settings are dropped, and host provider keys are
+# removed. Engine tests opt back in by passing their own env mapping (or
+# monkeypatching OMEGA_PRIME_ENGINE and the keys they need).
+_HOST_PLAN_PREFIXES = ("OMEGA_PRIME_OMP_", "PI_CODING_AGENT_DIR", "PI_CONFIG_DIR")
+_HOST_PROVIDER_KEYS = (
+    "ZAI_API_KEY",
+    "XAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "META_API_KEY",
+    "MUSE_API_KEY",
+    "CURSOR_API_KEY",
+    "OPENAI_API_KEY",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in list(os.environ):
+        if name.startswith(_HOST_PLAN_PREFIXES):
+            monkeypatch.delenv(name, raising=False)
+    for name in _HOST_PROVIDER_KEYS:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(f"{name}_FILE", raising=False)
+    monkeypatch.setenv("OMEGA_PRIME_ENGINE", "off")

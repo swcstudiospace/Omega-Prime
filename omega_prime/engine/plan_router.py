@@ -36,6 +36,16 @@ _PROVIDERS = {
     "chatgpt": "openai-codex",
 }
 
+# Stage defaults. Planning runs on the stronger model, execution on the
+# faster one. Operators override them with OMEGA_PRIME_OMP_MODEL_<PLAN>_<STAGE>.
+STAGES = ("plan", "execute")
+_STAGE_MODELS: dict[str, dict[str, str]] = {
+    "chatgpt": {"plan": "gpt-6.1-sol", "execute": "gpt-6-luna"},
+}
+# Stage routing tries these plans in order. Z.ai GLM covers ChatGPT when the
+# ChatGPT plan is gated off or its quota window is exhausted.
+_STAGE_PREFERENCE = ("chatgpt", "zai")
+
 
 class PlanNotAllowed(Exception):
     """The requested plan, or every plan, is outside the allowlist."""
@@ -70,24 +80,52 @@ class Quota:
 class Choice:
     decision: Decision
     quota: Quota | None
+    stage: str | None = None
+    # Plan the stage asked for first, when a fallback plan was used instead.
+    fallback_from: str | None = None
+    fallback_reason: str | None = None
 
 
 def _present(env: Mapping[str, str], name: str) -> bool:
     return bool(str(env.get(name, "")).strip())
 
 
-def model_id(plan: str, env: Mapping[str, str]) -> str:
+def _check_stage(stage: str | None) -> None:
+    if stage is not None and stage not in STAGES:
+        raise PlanNotAllowed(f"unknown stage {stage!r}; expected one of {STAGES}")
+
+
+def model_id(plan: str, env: Mapping[str, str], stage: str | None = None) -> str:
+    """Model for ``plan``, optionally for one stage.
+
+    Order: ``OMEGA_PRIME_OMP_MODEL_<PLAN>_<STAGE>``, then
+    ``OMEGA_PRIME_OMP_MODEL_<PLAN>``, then the stage default, then the plan
+    default.
+    """
+    _check_stage(stage)
+    if stage is not None:
+        name = f"OMEGA_PRIME_OMP_MODEL_{plan.upper()}_{stage.upper()}"
+        staged = str(env.get(name, "")).strip()
+        if staged:
+            return staged
     override = str(env.get(f"OMEGA_PRIME_OMP_MODEL_{plan.upper()}", "")).strip()
-    return override or _DEFAULT_MODELS[plan]
+    if override:
+        return override
+    if stage is not None and stage in _STAGE_MODELS.get(plan, {}):
+        return _STAGE_MODELS[plan][stage]
+    return _DEFAULT_MODELS[plan]
 
 
-def evaluate_all(env: Mapping[str, str]) -> tuple[Decision, ...]:
-    return tuple(_evaluate(plan, env) for plan in _DEFAULT_MODELS)
+def evaluate_all(
+    env: Mapping[str, str], stage: str | None = None
+) -> tuple[Decision, ...]:
+    _check_stage(stage)
+    return tuple(_evaluate(plan, env, stage) for plan in _DEFAULT_MODELS)
 
 
-def _evaluate(plan: str, env: Mapping[str, str]) -> Decision:
+def _evaluate(plan: str, env: Mapping[str, str], stage: str | None = None) -> Decision:
     provider = _PROVIDERS[plan]
-    model = model_id(plan, env)
+    model = model_id(plan, env, stage)
     if plan == "zai":
         allowed = flag(env, "OMEGA_PRIME_OMP_ALLOW_ZAI")
         return Decision(
@@ -341,20 +379,38 @@ def _quota(row: dict[str, Any]) -> Quota:
     )
 
 
+def _exhausted(quota: Quota | None) -> bool:
+    if quota is None:
+        return False
+    if quota.remaining is not None:
+        return quota.remaining <= 0
+    return quota.percent is not None and quota.percent >= 100
+
+
 def select(
     env: Mapping[str, str],
     usage: Mapping[str, Quota] | None = None,
     *,
     requested: str | None = None,
+    stage: str | None = None,
+    fallback: tuple[str, ...] | None = None,
 ) -> Choice:
     """Pick one allowlisted plan.
 
-    A requested plan is used only when it is allowlisted. Otherwise the
-    allowlisted plan with remaining quota wins. An exhausted window loses to
-    an unknown window. API-key profiles win ties.
+    Without ``stage``: a requested plan is used only when it is allowlisted.
+    Otherwise the allowlisted plan with remaining quota wins. An exhausted
+    window loses to an unknown window. API-key profiles win ties.
+
+    With ``stage`` (``plan`` or ``execute``): the stage model of each plan is
+    used, and plans are tried in order, starting with ``requested`` (default
+    ChatGPT), then ``fallback`` (default Z.ai). A plan is skipped when it is
+    off the allowlist or its quota window is exhausted. The choice records
+    which plan it fell back from.
     """
     quotas = dict(usage or {})
-    decisions = evaluate_all(env)
+    decisions = evaluate_all(env, stage)
+    if stage is not None:
+        return _select_stage(decisions, quotas, stage, requested, fallback)
     if requested is not None:
         name = requested.strip().lower()
         match = next((item for item in decisions if item.plan == name), None)
@@ -391,6 +447,43 @@ def select(
 
     chosen = max(allowed, key=rank)
     return Choice(chosen, quotas.get(chosen.plan))
+
+
+def _select_stage(
+    decisions: tuple[Decision, ...],
+    quotas: Mapping[str, Quota],
+    stage: str,
+    requested: str | None,
+    fallback: tuple[str, ...] | None,
+) -> Choice:
+    first = (requested or _STAGE_PREFERENCE[0]).strip().lower()
+    rest = _STAGE_PREFERENCE[1:] if fallback is None else fallback
+    order: list[str] = []
+    for name in (first, *(item.strip().lower() for item in rest)):
+        if name not in order:
+            order.append(name)
+    by_plan = {item.plan: item for item in decisions}
+    skipped: list[str] = []
+    for name in order:
+        match = by_plan.get(name)
+        if match is None:
+            raise PlanNotAllowed(f"unknown plan {name!r}")
+        if not match.allowlisted:
+            skipped.append(f"{name}: off the allowlist")
+            continue
+        if _exhausted(quotas.get(name)):
+            skipped.append(f"{name}: quota window exhausted")
+            continue
+        if name == first:
+            return Choice(match, quotas.get(name), stage)
+        return Choice(match, quotas.get(name), stage, first, "; ".join(skipped))
+    head = by_plan[first]
+    detail = (
+        head.reason if not head.allowlisted else f"{first} quota window is exhausted"
+    )
+    raise PlanNotAllowed(
+        f"no plan can run the {stage} stage ({'; '.join(skipped)}). {detail}"
+    )
 
 
 def read_usage(binary: str, env: Mapping[str, str]) -> dict[str, Quota]:
