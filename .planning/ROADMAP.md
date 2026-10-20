@@ -129,8 +129,8 @@ Source evidence: `/workspace/omes-bot-wiring-audit/AUDIT.md` (read-only audit of
 
 ## v21 Task Dashboard
 
-One phase staged from the 2026-10-21 task-dashboard uplift (operator-approved
-01:51 AEDT). The full uplift spec is
+Phase 104 was staged from the 2026-10-21 task-dashboard uplift (operator-approved
+01:51 AEDT); Phase 105 plans its Command Center upgrade. The Phase 104 uplift is
 `.planning/phases/104-task-dashboard/104-UPLIFT.xml`. Locked decisions: the
 dashboard lives in the omes-bot package `omega_prime/dashboard/` on
 `feat/task-dashboard`; the fleet collector is implemented but OFF by default
@@ -169,3 +169,27 @@ Phase 104 implemented on `feat/task-dashboard` (commits beeae56, d5505cd,
 c20a0ee): dashboard tests green, ruff/mypy/format green, full suite at the
 recorded baseline. The live box run (a1-a7 observation), rebase, push, PR,
 Greptile 5/5 and the merge yes remain operator steps.
+
+### Phase 105: Omega Prime Command Center
+
+**Goal:** Upgrade the Phase 104 read-only dashboard to a white-and-purple Command Center with persistent numbered tasks, cached organisation repositories and PR checks, and a self-hosted React static app, preserving every PR #47 security guarantee.
+**Depends on:** Phase 104 (unmerged PR #47; branch `feat/command-center` stays stacked).
+**Requirements:** a1, a2, a3, a4, a5, a6, a7
+**Contract:** `.planning/phases/105-command-center/105-UPLIFT.xml`
+**Plans:** 5 file-disjoint plans; planning only in this session.
+**Wave 1**
+- [ ] 105-01-PLAN.md — W1: stable task sequence allocation, CLI and snapshot fields.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 105-02-PLAN.md — W2 (after W1): cached read-only GitHub organisation repositories, PR checks and reviewed-commit scores.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 105-03-PLAN.md — W3 (after W2): React/TypeScript/Vite/Tailwind shell, four views, local fonts, adapted motion, tests and committed build.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 105-04-PLAN.md — W4 (after W3): default static app, legacy fallback, MIME/cache/CSP and security regression coverage.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 105-05-PLAN.md — W5 (after W4): Command Center documentation, attributions and final offline verification.
+
+Cross-cutting constraints: no product implementation during planning; no runtime Node or external-origin CSP; no network in Python tests; no write actions in the server/UI. Outer driver owns signed sandbox evidence (a6), live GitHub parity (a2/a3), screenshots (a7), export/push/draft PR and Greptile loop. No merge.
