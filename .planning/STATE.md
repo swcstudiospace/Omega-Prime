@@ -1,21 +1,21 @@
 ---
 gsd_state_version: "1.0"
-milestone: v19
-milestone_name: Installer bindings
-status: Milestone complete
-stopped_at: v19 phase 96 verified. Phase 77.1 live UAT stays user-owned.
-last_updated: "2026-10-15T05:30:00.000Z"
-last_activity: 2026-10-15
-last_activity_desc: Per-install Linear, Notion, and optional gateway setup (graph ut-mv925n7i-6a9cd5f0)
-state_head: 034a08a
+milestone: v20
+milestone_name: Wiring
+status: Phase 97 local implementation executed; verification deferred pending authoritative upstream MCP contract evidence.
+stopped_at: Phase 97 local verification finished; current upstream MCP mount/schema evidence is still needed before phase verification can pass.
+last_updated: "2026-10-20"
+last_activity: 2026-10-20
+last_activity_desc: Phase 97 local changes and tests executed; static/catalog gates pass, full test suite has only the 27 recorded baseline failures
+state_head: 0b1fad3
 progress:
-  total_phases: 1
-  completed_phases: 1
-  total_plans: 1
+  total_phases: 7
+  completed_phases: 0
+  total_plans: 5
   completed_plans: 1
-  percent: 100
-current_phase: 96
-current_plan: null
+  percent: 0
+current_phase: 97
+current_plan: "02"
 ---
 
 # Project State
@@ -25,14 +25,13 @@ current_plan: null
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** v19 Installer bindings is complete (phase 96). v18 stays shipped. v17 stays shipped. Historical v17 note: every first-party prompt is wrapped in XML and `python -m omega_prime.tooling.prompt_format --check` enforces it. v1–v16 stay shipped. The only unchecked ROADMAP phase is 77.1, whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–18 are on main (`.planning/BATCH-01-REPORT.md` … `BATCH-18-REPORT.md`); batch 19 was not the accepted seven. The accepted seven are implemented as v18 phases 89-95. `ci / lint` on main was RED from batch 05 to 17 (21 ruff errors the batch reports had called clean) and was repaired in PR #31: every batch gate MUST run the exact CI commands (`ruff check omega_prime/`, `ruff format --check omega_prime/`, `mypy omega_prime/`, full pytest, plus the docs/plugin/catalog checks). The red-team pin is `f6d2fc2` (purple-team v1.4); `redteam-node-audit` has been GREEN with 0 advisories since batch 03, and upstream v1.5 has not shipped. v16 "Enterprise Hardening and Continuous Verification" is complete and archived (audit PASS 13/13; `.planning/milestones/v16-MILESTONE-AUDIT.md`): purple-team sidecar hardened and refresh-automated (ships BLOCKED), protected publish environment live, OTLP/SLOs, token rotation + quotas, sandboxed verification gates, live evals with regression tracking. Self-contained run package: `.planning/package/DELIVERABLE.md`. Operator next actions: sign the rules-of-engagement artifact to unblock live purple-team engagements; approve the first `workflow_dispatch publish:true` run; run the six deferred 77.1 live UAT rows after the next Grok Bot upload (`/gsd:verify-work 77.1`).
+**Current focus:** v20 Wiring (Phases 97–103) is in progress. Phase 97 has local transport, settings, diagnostics, argument, and no-cap implementation with offline tests; current upstream MCP mount/schema compatibility remains unverified, so Phase 97 verification is deferred and no v20 phase is complete. v19 Installer bindings (phase 96) and v1–v19 history remain unchanged. Phase 77.1 live import UAT remains user-owned and `human_needed`.
 
 ## Current Position
 
-Phase: Milestone v19 complete (phase 96).
-Plan: -
-Status: Milestone complete. Phase 77.1 stays verification_deferred_human. Do not re-execute phases 85-96. Do not mark 77.1 passed.
-Last activity: 2026-10-15 - installer bindings verified. Pytest 4679 passed, 3 skipped.
+Phase: v20 Phase 97 — substrate direct connect + settings loader + no time caps (local implementation executed; verification deferred on authoritative upstream MCP mount/schema evidence).
+Plan: 02 (5 total; 1 complete; local transport and argument changes are present, but server-contract preflight tasks remain open).
+Status: Local tests and static/catalog gates ran; full pytest has the same 27 baseline failures and zero new failures. Resume with authoritative MCP path/schema preflight in plans 97-02/97-03. Do not audit, complete, or clean up v20. Phase 77.1 remains `verification_deferred_human`; do not re-execute phases 85–96 or mark 77.1 passed.
 
 ## Closeout
 
@@ -59,6 +58,7 @@ Absorbing purple-team v1.5, a live gateway engagement, failing closed on an unre
 | Phase | State | Resume |
 |-------|-------|--------|
 | 77.1 | verification_deferred_human | /gsd:verify-work 77.1 |
+| 97 | verification_deferred_gaps | /gsd-plan-phase 97 --gaps |
 
 ## Deferred Items
 
@@ -143,10 +143,10 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Session
 
-**Last session:** 2026-10-12
-**Stopped at:** Phase 84 complete — all phases complete
-**Resume file:** .planning/milestones/v15-phases/77.1-grok-bot-import-packaging/77.1-UAT.md
+**Last session:** 2026-10-20
+**Stopped at:** Phase 97 local implementation and offline gates; authoritative upstream MCP mount/schema evidence remains an open verification gap.
+**Resume file:** `.planning/phases/97-substrate-direct-connect/97-02-PLAN.md`
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Phase 97 is locally implemented but not verified against the current upstream server. Obtain authoritative MCP path/schema evidence, then resume the preflight/gap work; live endpoint verification and live settings/connector changes remain operator-owned. Phase 77.1 live UAT stays user-owned (`/gsd:verify-work 77.1`).

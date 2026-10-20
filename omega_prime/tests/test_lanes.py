@@ -43,7 +43,7 @@ def _spec(
     *,
     prompt: str = "fix the python test",
     model: str = "zai/glm-4.5",
-    max_minutes: int = 15,
+    max_minutes: int | None = 15,
     max_files: int = 3,
     slash_command: str | None = None,
     slash_args: str | None = None,
@@ -176,12 +176,17 @@ def test_ordinary_words_are_not_cloud_markers() -> None:
         assert decision.lane == "local", prompt
 
 
-def test_file_and_minute_caps() -> None:
-    assert choose_lane(_spec(max_files=25, max_minutes=60), ROOMY).lane == "local"
+def test_file_cap_and_optional_minute_limit() -> None:
+    assert choose_lane(_spec(max_files=25, max_minutes=600), ROOMY).lane == "local"
     files = choose_lane(_spec(max_files=26), ROOMY)
     assert files.lane == "fleet" and "max_files" in files.reasons
-    minutes = choose_lane(_spec(max_minutes=61), ROOMY)
-    assert minutes.lane == "fleet" and "max_minutes" in minutes.reasons
+    long_job = choose_lane(_spec(max_minutes=600), ROOMY)
+    assert long_job.lane == "local"
+    assert "max_minutes" not in long_job.reasons
+    limited = choose_lane(
+        _spec(max_minutes=61), ROOMY, limits=LaneLimits(max_minutes=60)
+    )
+    assert limited.lane == "fleet" and "max_minutes" in limited.reasons
 
 
 def test_other_languages_go_to_the_fleet() -> None:
@@ -247,12 +252,13 @@ def test_dispatch_fleet_posts_the_same_spec(tmp_path) -> None:
     transport = _Transport()
     executor = _Start()
     router, _env = _router(tmp_path, transport, executor)
-    spec = _spec(prompt="port the rust parser", max_files=4)
+    spec = _spec(prompt="port the rust parser", max_files=4, max_minutes=None)
     record = router.dispatch(spec)
     assert record["lane"] == "fleet"
     assert record["fleet_job_id"] == "fleet-1"
     assert executor.jobs == []
     assert transport.bodies == [spec.to_json()]
+    assert "max_minutes" not in transport.bodies[0]
 
 
 def test_queue_does_not_start_the_executor(tmp_path) -> None:
@@ -290,15 +296,17 @@ def test_a_failed_spec_write_does_not_hold_a_local_slot(tmp_path, monkeypatch) -
     assert again["status"] == "running"
 
 
-def test_missing_bounds_are_filled_with_the_local_caps(tmp_path) -> None:
+def test_missing_minute_bound_stays_null_in_local_spec(tmp_path) -> None:
     router, env = _router(tmp_path)
     spec = JobSpec(
         repo="acme/widget", prompt="fix the python test", model="zai/glm-4.5"
     )
     record = router.dispatch(spec, languages=("python",))
     assert record["lane"] == "local"
-    stored = json.loads((job_dir(env, record["id"]) / "spec.json").read_text())
-    assert stored["max_minutes"] == 60
+    spec_path = job_dir(env, record["id"]) / "spec.json"
+    stored = json.loads(spec_path.read_text())
+    assert stored["max_minutes"] is None
+    assert router._read_spec(record["id"]).max_minutes is None
     assert stored["max_files"] == 25
 
 

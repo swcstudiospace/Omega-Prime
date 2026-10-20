@@ -7,7 +7,7 @@ Local work stays on the box only when every gate holds:
 - no cloud-only marker (Rust, Go, Docker, mobile)
 - declared languages are JS, TS, Python, or docs
 - ``max_files`` is at most 25
-- ``max_minutes`` is at most 60
+- ``max_minutes`` is unlimited unless an operator configures a limit
 - fewer than 2 running local jobs
 - at least 3 GiB of free memory
 - at most one running local ``xai-oauth`` job
@@ -16,9 +16,9 @@ A full box does not wait. The default is to spill that job to the fleet.
 ``overflow="queue"`` records it as a queued local job instead.
 
 The local executor in this unit is a stub. U2 supplies the agentOS runner
-behind ``LocalExecutor``. A local job that hits a VM limit, an unsupported
-toolchain, or the time cap is re-posted to the fleet with its partial
-branch. The job receipt records that lane change.
+behind ``LocalExecutor``. A local job that hits a VM limit or an unsupported
+toolchain is re-posted to the fleet with its partial branch. The job receipt
+records that lane change.
 
 Nothing here calls a model HTTP API.
 """
@@ -114,9 +114,9 @@ class StubLocalExecutor:
 
 @dataclass(frozen=True)
 class LaneLimits:
-    """Caps Ove approved for the local lane."""
+    """Operator-configurable classification limits; unset minutes are unlimited."""
 
-    max_minutes: int = 60
+    max_minutes: int | None = None
     max_files: int = 25
     max_parallel: int = 2
     min_free_bytes: int = 3 * _GIB
@@ -178,7 +178,11 @@ def _class_reasons(
         reasons.append("language")
     if spec.max_files is not None and spec.max_files > limits.max_files:
         reasons.append("max_files")
-    if spec.max_minutes is not None and spec.max_minutes > limits.max_minutes:
+    if (
+        limits.max_minutes is not None
+        and spec.max_minutes is not None
+        and spec.max_minutes > limits.max_minutes
+    ):
         reasons.append("max_minutes")
     return tuple(reasons)
 
@@ -483,9 +487,10 @@ class LaneRouter:
             return
 
     def _write_spec(self, job_id: str, spec: JobSpec) -> None:
-        """Exact spec for a later fleet post. Receipts stay redacted."""
+        """Persist the local spec, recording an unset minute limit as JSON null."""
         path = job_dir(self._env, job_id) / "spec.json"
         payload = spec.to_json()
+        payload["max_minutes"] = spec.max_minutes
         if spec.stage is not None:
             # Local-only field; the fleet post uses ``to_json`` without it.
             payload["stage"] = spec.stage
@@ -508,8 +513,12 @@ class LaneRouter:
 
 
 def _with_local_caps(spec: JobSpec, limits: LaneLimits) -> JobSpec:
-    """Fill missing local bounds with the approved caps. Over-cap jobs never arrive here."""
-    minutes = limits.max_minutes if spec.max_minutes is None else spec.max_minutes
+    """Fill missing local bounds; minutes stay unset unless explicitly capped."""
+    minutes = (
+        spec.max_minutes
+        if spec.max_minutes is not None or limits.max_minutes is None
+        else limits.max_minutes
+    )
     files = limits.max_files if spec.max_files is None else spec.max_files
     if minutes == spec.max_minutes and files == spec.max_files:
         return spec

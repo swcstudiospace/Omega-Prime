@@ -188,11 +188,17 @@ def test_registered_omega_command_forwards_doctor_context(tmp_path: Path) -> Non
     assert missing["error"] == "doctor_failed", missing
 
 
-def _real_registry(tmp_path: Path, *approvals: str) -> tuple[ToolRegistry, dict]:
+def _real_registry(
+    tmp_path: Path,
+    *approvals: str,
+    substrate_url: str | None = "https://substrate.example",
+) -> tuple[ToolRegistry, dict]:
     log = ApprovalLog()
     for tool in approvals:
         assert log.approve(tool, "phase-75-09").get("approved") is True
     env = {"OMEGA_PRIME_STATE_DIR": str(tmp_path / "state")}
+    if substrate_url is not None:
+        env["SUBSTRATE_URL"] = substrate_url
     return default_registry(ROOT, tmp_path / "home", approval_log=log, env=env), env
 
 
@@ -206,9 +212,21 @@ def _prepared_seat(registry: ToolRegistry) -> tuple[str, list[str]]:
     probed = json.loads(registry.dispatch("lead_doctor", {"action": "check"}))
     declared = probed["checks"]["skills"]["declared"]
     assert isinstance(declared, list) and declared, probed
-    installed = json.loads(
-        registry.dispatch("lead_doctor", {"action": "install_prompt"})
-    )
+    from unittest.mock import patch
+
+    from omega_prime.tools.lead import LeadClient
+
+    # The command tests exercise doctor context, not prompt generation or the
+    # optional assembler dependencies.
+    prompt_text = "<seat/>"
+    rendered = {
+        "sha256": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
+        "prompt": prompt_text,
+    }
+    with patch.object(LeadClient, "render_prompt", return_value=rendered):
+        installed = json.loads(
+            registry.dispatch("lead_doctor", {"action": "install_prompt"})
+        )
     sha256 = installed.get("sha256")
     prompt = installed.get("prompt")
     assert isinstance(sha256, str) and sha256, installed.keys()
@@ -229,6 +247,46 @@ def test_real_doctor_contextual_health_and_repeat(tmp_path: Path) -> None:
     repeat = execute_command("/omega-doctor", registry, env, doctor_context=context)
     assert repeat["ok"] is True, repeat
     assert repeat["result"]["green"] is True, repeat
+
+
+def test_real_doctor_configured_https_is_configuration_only_without_network(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.substrate.client import SubstrateClient
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("doctor must not contact substrate")
+
+    monkeypatch.setattr(SubstrateClient, "_mcp_post", no_network)
+    registry, env = _real_registry(tmp_path, "lead_doctor")
+    sha, declared = _prepared_seat(registry)
+    result = execute_command(
+        "/omega-doctor",
+        registry,
+        env,
+        doctor_context={"prompt_sha256": sha, "installed_skills": declared},
+    )
+    assert result["ok"] is True, result
+    substrate = result["result"]["checks"]["substrate"]
+    assert substrate["configured"] is True
+    assert "configured only" in substrate["detail"]
+    assert "reachability not checked" in substrate["detail"]
+
+
+def test_real_doctor_missing_url_fails_separately(tmp_path: Path) -> None:
+    registry, env = _real_registry(tmp_path, "lead_doctor", substrate_url=None)
+    sha, declared = _prepared_seat(registry)
+    result = execute_command(
+        "/omega-doctor",
+        registry,
+        env,
+        doctor_context={"prompt_sha256": sha, "installed_skills": declared},
+    )
+    assert result["ok"] is False
+    substrate = result["result"]["checks"]["substrate"]
+    assert substrate["green"] is False
+    assert "SUBSTRATE_URL" in substrate["detail"]
+    assert "settings file" in substrate["detail"]
 
 
 def test_real_doctor_missing_context_stays_unhealthy_and_preserves_sha(

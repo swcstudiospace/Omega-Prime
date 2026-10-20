@@ -21,7 +21,6 @@ SUBSTRATE_TOKEN_ENVS = ("SUBSTRATE_TOKEN", "SUBSTRATE_TOKEN_GROK_BOT")
 HINDSIGHT_URL_ENV = "HINDSIGHT_URL"
 HINDSIGHT_TOKEN_ENVS = ("HINDSIGHT_API_KEY", "HINDSIGHT_API_TOKEN")
 
-DEFAULT_SUBSTRATE_URL = "http://127.0.0.1:7410"
 DEFAULT_HINDSIGHT_URL = ""
 
 
@@ -29,7 +28,15 @@ def config_from_env(env: Any = None) -> dict:
     """Read probe config. Values stay in the dict; callers never print them."""
     source = env if env is not None else os.environ
     substrate_token, substrate_token_name = _named_secret(source, SUBSTRATE_TOKEN_ENVS)
-    substrate_url = source.get(SUBSTRATE_URL_ENV, "") or DEFAULT_SUBSTRATE_URL
+    raw_substrate_url = source.get(SUBSTRATE_URL_ENV)
+    try:
+        from omega_prime.substrate.client import _check_base_url
+
+        substrate_url = _check_base_url(raw_substrate_url)
+        substrate_error = None if substrate_url else "not_configured"
+    except ValueError:
+        substrate_url = None
+        substrate_error = "unsafe substrate URL"
     hindsight_raw = source.get(HINDSIGHT_URL_ENV, "")
     hindsight_url = (
         hindsight_raw
@@ -44,6 +51,7 @@ def config_from_env(env: Any = None) -> dict:
     )
     return {
         "substrate_url": substrate_url,
+        "substrate_error": substrate_error,
         "substrate_token": substrate_token,
         "substrate_token_name": substrate_token_name,
         "hindsight_url": hindsight_url,
@@ -60,24 +68,34 @@ def run_probes(config: dict, transport: Any) -> dict:
         if isinstance(value, str) and value
     ]
     probes: dict[str, dict] = {}
-    probes["substrate_health"] = _probe(
-        lambda: transport.get(
-            _join(config["substrate_url"], "/healthz"),
-            _auth(config.get("substrate_token")),
-            {},
-        ),
-        _health_detail,
-        secrets,
-    )
-    probes["substrate_brief"] = _probe(
-        lambda: transport.post_text(
-            _join(config["substrate_url"], "/brief"),
-            _auth(config.get("substrate_token")),
-            {"surface": "grok-bot"},
-        ),
-        _brief_detail,
-        secrets,
-    )
+    substrate_error = config.get("substrate_error")
+    if substrate_error or not config.get("substrate_url"):
+        detail = (
+            "not_configured"
+            if substrate_error == "not_configured"
+            else "unsafe substrate URL"
+        )
+        probes["substrate_health"] = {"ok": False, "detail": detail}
+        probes["substrate_brief"] = {"ok": False, "detail": detail}
+    else:
+        probes["substrate_health"] = _probe(
+            lambda: transport.get(
+                _join(config["substrate_url"], "/healthz"),
+                _auth(config.get("substrate_token")),
+                {},
+            ),
+            _health_detail,
+            secrets,
+        )
+        probes["substrate_brief"] = _probe(
+            lambda: transport.post_text(
+                _join(config["substrate_url"], "/brief"),
+                _auth(config.get("substrate_token")),
+                {"surface": "grok-bot"},
+            ),
+            _brief_detail,
+            secrets,
+        )
     hindsight_url = config.get("hindsight_url") or ""
     if isinstance(hindsight_url, str) and hindsight_url.strip():
         probes["hindsight_health"] = _probe(

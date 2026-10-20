@@ -61,7 +61,10 @@ def test_lead_doctor_green_on_memory_tools_substrate_without_credentials(tmp_pat
         ROOT,
         tmp_path / "home",
         approval_log=log,
-        env={"OMEGA_PRIME_STATE_DIR": str(tmp_path / "state")},
+        env={
+            "OMEGA_PRIME_STATE_DIR": str(tmp_path / "state"),
+            "SUBSTRATE_URL": "local",
+        },
     )
     result = json.loads(registry.dispatch("lead_doctor", {}))
     checks = result["checks"]
@@ -289,7 +292,7 @@ def test_warm_registry_consumes_independent_intake_and_acks(tmp_path):
     in-progress claim — never null/empty while the file holds the order.
     """
     state = tmp_path / "state"
-    env = {"OMEGA_PRIME_STATE_DIR": str(state)}
+    env = {"OMEGA_PRIME_STATE_DIR": str(state), "SUBSTRATE_URL": "local"}
     runtime = load_runtime(
         ROOT,
         tmp_path / "home",
@@ -312,9 +315,19 @@ def test_warm_registry_consumes_independent_intake_and_acks(tmp_path):
         )
     )
     assert registered["registered"] == ["lead"]
-    installed = json.loads(
-        registry.dispatch("lead_doctor", {"action": "install_prompt"})
-    )
+    from unittest.mock import patch
+
+    from omega_prime.tools.lead import LeadClient
+
+    prompt_text = "<seat/>"
+    rendered = {
+        "sha256": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
+        "prompt": prompt_text,
+    }
+    with patch.object(LeadClient, "render_prompt", return_value=rendered):
+        installed = json.loads(
+            registry.dispatch("lead_doctor", {"action": "install_prompt"})
+        )
     assert installed["prompt"] and isinstance(installed["sha256"], str)
     assert (
         installed["sha256"] == hashlib.sha256(installed["prompt"].encode()).hexdigest()

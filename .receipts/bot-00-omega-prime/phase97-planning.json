@@ -1,0 +1,221 @@
+{
+  "task_id": "phase97-planning",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T14:19:35.274379+00:00",
+  "completed_at": "2026-10-20T14:50:21.819365+00:00",
+  "scope": "Planning only: v20 Wiring milestone registration, Phase 97 executable plans and validation; no implementation or live configuration changes.",
+  "commands": [
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p1 ruff check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.08,
+      "output_tail": "All checks passed!",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p1 ruff format --check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.11,
+      "output_tail": "589 files already formatted",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p1 mypy omega_prime/",
+      "exit_code": 0,
+      "duration_s": 1.3,
+      "output_tail": "Success: no issues found in 462 source files",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p1 pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "duration_s": 239.98,
+      "output_tail": "27 failed, 4777 passed, 11 skipped, 15 warnings in 236.78s",
+      "failed_tests": [
+        "omega_prime/tests/test_grokbot_oneclick.py::test_oneclick_dry_run_sse",
+        "omega_prime/tests/test_prime_kernel_boundary.py::test_read_only_skill_list_still_returns_the_skills",
+        "omega_prime/tests/test_prime_kernel_boundary.py::test_read_only_crates_still_reports_the_workspace",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_namespace_persists_across_cells",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_cell_output_is_returned_and_never_written_to_the_process_streams",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_cell_exit_requests_are_cell_errors_and_the_kernel_keeps_working",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_cell_spawn_uses_in_process_host",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_cell_child_answer_visible_only_through_collect",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_factory_help_while_disabled",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_validate_spec_rejects_empty",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_enable_factory_keeps_help",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_run_bash_echo",
+        "omega_prime/tests/test_prime_kernel_host.py::test_prime_kernel_host_round_trip",
+        "omega_prime/tests/test_prime_kernel_skills.py::test_list_skills_marks_edit_importable_and_factory_markdown_only",
+        "omega_prime/tests/test_prime_kernel_skills.py::test_load_skill_edit_replaces_a_unique_string",
+        "omega_prime/tests/test_prime_kernel_skills.py::test_list_skills_does_not_import_attach_image",
+        "omega_prime/tests/test_prime_native.py::test_native_status_accepts_unbuilt_extension",
+        "omega_prime/tests/test_prime_native.py::test_goal_bindings_follow_pa_core",
+        "omega_prime/tests/test_prime_native.py::test_autonomous_run_uses_pa_core_limits",
+        "omega_prime/tests/test_prime_native.py::test_protocol_parse_and_encode_use_the_rust_frames",
+        "omega_prime/tests/test_prime_native.py::test_heartbeat_schedule_and_deferral",
+        "omega_prime/tests/test_prime_native.py::test_refinement_history_round_trip",
+        "omega_prime/tests/test_prime_native.py::test_goal_apply_uses_pa_core_transitions",
+        "omega_prime/tests/test_prime_native.py::test_slash_parsers_match_pa_core",
+        "omega_prime/tests/test_prime_native.py::test_native_tool_validation_rejects_missing_required_argument",
+        "omega_prime/tests/test_prime_native.py::test_kernel_tools_call_the_rust_commands",
+        "omega_prime/tests/test_setup_check.py::test_checks_pass_on_repo_root"
+      ],
+      "phase": "baseline"
+    },
+    {
+      "cmd": "gh api repos/swcstudiospace/agent-substrate --jq '{default_branch:.default_branch,pushed_at:.pushed_at}'",
+      "exit_code": 4,
+      "duration_s": 0.12,
+      "output_tail": "GitHub CLI automation requires GH_TOKEN; authenticated schema access unavailable."
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p1 /workspace/omes-bot/.venv/bin/python -c 'import json,re,subprocess,sys\nfrom pathlib import Path\nimport yaml\nroot=Path.cwd(); phase=root/'\"'\"'.planning/phases/97-substrate-direct-connect'\"'\"'\nroadmap=(root/'\"'\"'.planning/ROADMAP.md'\"'\"').read_text(); state=(root/'\"'\"'.planning/STATE.md'\"'\"').read_text()\nassert '\"'\"'v20 Wiring'\"'\"' in roadmap\nfor n in range(97,104): assert f'\"'\"'Phase {n}:'\"'\"' in roadmap, n\nassert re.search(r'\"'\"'current_phase:\\s*97\\b'\"'\"',state)\nassert re.search(r'\"'\"'milestone:\\s*v20\\b'\"'\"',state)\nassert re.search(r'\"'\"'completed_phases:\\s*0\\b'\"'\"',state)\nmachine=json.loads((root/'\"'\"'.planning/state.json'\"'\"').read_text()); assert '\"'\"'v20'\"'\"' in machine['\"'\"'milestone'\"'\"']; assert machine['\"'\"'next'\"'\"']['\"'\"'command'\"'\"']=='\"'\"'/skill:gsd-autonomous 97'\"'\"',machine['\"'\"'next'\"'\"']['\"'\"'command'\"'\"']\nplans=sorted(phase.glob('\"'\"'97-*-PLAN.md'\"'\"')); assert len(plans)==5, [p.name for p in plans]\nmeta={}; requirements=set(); bywave={}\nfor p in plans:\n text=p.read_text(); assert text.startswith('\"'\"'---\\n'\"'\"'),p\n fm=yaml.safe_load(text.split('\"'\"'---'\"'\"',2)[1]); key='\"'\"'97-'\"'\"'+str(fm['\"'\"'plan'\"'\"']).zfill(2); assert key not in meta\n assert fm['\"'\"'type'\"'\"']=='\"'\"'execute'\"'\"'; assert fm['\"'\"'autonomous'\"'\"'] is True\n for field in ['\"'\"'truths'\"'\"','\"'\"'key_links'\"'\"']:\n  assert all(isinstance(v,str) for v in fm['\"'\"'must_haves'\"'\"'][field]),(p,field,'\"'\"'quote YAML strings containing colon'\"'\"')\n assert isinstance(fm['\"'\"'wave'\"'\"'],int); assert fm['\"'\"'files_modified'\"'\"']; assert fm['\"'\"'requirements'\"'\"']; assert fm['\"'\"'must_haves'\"'\"']\n for tag in ['\"'\"'objective'\"'\"','\"'\"'context'\"'\"','\"'\"'tasks'\"'\"','\"'\"'verification'\"'\"','\"'\"'output'\"'\"']: assert f'\"'\"'<{tag}>'\"'\"' in text and f'\"'\"'</{tag}>'\"'\"' in text,(p,tag)\n assert re.search(r'\"'\"'<task\\b'\"'\"',text),p\n task_ids=re.findall(r'\"'\"'<task\\b[^>]*\\bid=\"([^\"]+)\"'\"'\"',text)\n assert len(task_ids)==len(re.findall(r'\"'\"'<task\\b'\"'\"',text)),(p,'\"'\"'missing stable task id'\"'\"')\n assert task_ids==[key+'\"'\"'-T'\"'\"'+str(n) for n in range(1,len(task_ids)+1)],(p,task_ids)\n for task_body in re.findall(r'\"'\"'<task\\b[^>]*>(.*?)</task>'\"'\"',text,re.S):\n  for field in ['\"'\"'name'\"'\"','\"'\"'read_first'\"'\"','\"'\"'files'\"'\"','\"'\"'action'\"'\"','\"'\"'acceptance_criteria'\"'\"','\"'\"'verify'\"'\"','\"'\"'done'\"'\"']: assert '\"'\"'<'\"'\"'+field+'\"'\"'>'\"'\"' in task_body and '\"'\"'</'\"'\"'+field+'\"'\"'>'\"'\"' in task_body,(p,field,'\"'\"'missing task field'\"'\"')\n for section in re.findall(r'\"'\"'<context>(.*?)</context>'\"'\"',text,re.S):\n  for ref in re.findall(r'\"'\"'^@([^\\s<>]+)'\"'\"',section,re.M): assert (root/ref).exists(),(p,'\"'\"'broken context reference'\"'\"',ref)\n requirements.update(fm['\"'\"'requirements'\"'\"']); meta[key]=fm\n for path in fm['\"'\"'files_modified'\"'\"']:\n  k=(fm['\"'\"'wave'\"'\"'],path); assert k not in bywave,(p,path,bywave.get(k)); bywave[k]=p.name\nfor key,fm in meta.items():\n for dep in fm.get('\"'\"'depends_on'\"'\"',[]):\n  assert dep in meta,(key,dep); assert meta[dep]['\"'\"'wave'\"'\"']<fm['\"'\"'wave'\"'\"'],(key,dep)\nassert requirements=={f'\"'\"'W97-{n:02}'\"'\"' for n in range(1,9)},requirements\ncontext=(phase/'\"'\"'97-CONTEXT.md'\"'\"').read_text(); validation=(phase/'\"'\"'97-VALIDATION.md'\"'\"').read_text(); research=(phase/'\"'\"'97-RESEARCH.md'\"'\"').read_text()\nassert '\"'\"'~/.omega-prime/settings.json'\"'\"' in context and '\"'\"'OMEGA_PRIME_SETTINGS_FILE'\"'\"' in context\nfor n in range(1,9): assert f'\"'\"'W97-{n:02}'\"'\"' in validation,(n,'\"'\"'validation'\"'\"')\nfor n in range(1,8): assert f'\"'\"'SC{n}'\"'\"' in validation,(n,'\"'\"'success criterion'\"'\"')\nall_ids=set()\nfor p in plans: all_ids.update(re.findall(r'\"'\"'<task\\b[^>]*\\bid=\"([^\"]+)\"'\"'\"',p.read_text()))\nfor ref in re.findall(r'\"'\"'97-0[1-5]-T[0-9]+'\"'\"',validation): assert ref in all_ids,('\"'\"'bad task reference'\"'\"',ref)\nassert '\"'\"'gsd-autonomous97'\"'\"' not in context+state+str(machine)\nplanned_new={'\"'\"'omega_prime/settings.py'\"'\"','\"'\"'omega_prime/tests/test_settings.py'\"'\"'}\nfor fm in meta.values():\n for path in fm['\"'\"'files_modified'\"'\"']: assert (root/path).exists() or path in planned_new,('\"'\"'unfounded planned target'\"'\"',path)\nfor node in ['\"'\"'understand'\"'\"','\"'\"'milestone'\"'\"','\"'\"'plan'\"'\"','\"'\"'critique'\"'\"','\"'\"'synthesize'\"'\"']: assert node in context\nchanged=subprocess.check_output(['\"'\"'git'\"'\"','\"'\"'diff'\"'\"','\"'\"'--name-only'\"'\"'],text=True).splitlines()\nuntracked=subprocess.check_output(['\"'\"'git'\"'\"','\"'\"'ls-files'\"'\"','\"'\"'--others'\"'\"','\"'\"'--exclude-standard'\"'\"'],text=True).splitlines()\nfor path in changed+untracked:\n assert path.startswith(('\"'\"'.planning/'\"'\"','\"'\"'.receipts/bot-00-omega-prime/'\"'\"')),path\n content=(root/path).read_text()\n assert all(line.rstrip()==line for line in content.splitlines()),('\"'\"'trailing whitespace'\"'\"',path)\n assert content.endswith('\"'\"'\\n'\"'\"') and not content.endswith('\"'\"'\\n\\n'\"'\"'),('\"'\"'EOF whitespace'\"'\"',path)\nprint('\"'\"'PASS: v20 phases97-103, Phase97 pointer, five structured plans, acyclic waves, disjoint same-wave paths, eight requirements, seven success criteria, planning-only changes'\"'\"')\n'",
+      "exit_code": 0,
+      "duration_s": 0.057,
+      "output_tail": "PASS: v20 phases97-103, Phase97 pointer, five structured plans, acyclic waves, disjoint same-wave paths, eight requirements, seven success criteria, planning-only changes"
+    },
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p1 ruff check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.06,
+      "output_tail": "All checks passed!",
+      "phase": "final"
+    },
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p1 ruff format --check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.06,
+      "output_tail": "589 files already formatted",
+      "phase": "final"
+    },
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p1 mypy omega_prime/",
+      "exit_code": 0,
+      "duration_s": 1.6,
+      "output_tail": "Success: no issues found in 462 source files",
+      "phase": "final"
+    },
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p1 pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "duration_s": 211.23,
+      "output_tail": "27 failed, 4777 passed, 11 skipped, 15 warnings in 208.01s",
+      "failed_tests": [
+        "omega_prime/tests/test_grokbot_oneclick.py::test_oneclick_dry_run_sse",
+        "omega_prime/tests/test_prime_kernel_boundary.py::test_read_only_skill_list_still_returns_the_skills",
+        "omega_prime/tests/test_prime_kernel_boundary.py::test_read_only_crates_still_reports_the_workspace",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_namespace_persists_across_cells",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_cell_output_is_returned_and_never_written_to_the_process_streams",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_cell_exit_requests_are_cell_errors_and_the_kernel_keeps_working",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_cell_spawn_uses_in_process_host",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_cell_child_answer_visible_only_through_collect",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_factory_help_while_disabled",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_validate_spec_rejects_empty",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_enable_factory_keeps_help",
+        "omega_prime/tests/test_prime_kernel_cells.py::test_run_bash_echo",
+        "omega_prime/tests/test_prime_kernel_host.py::test_prime_kernel_host_round_trip",
+        "omega_prime/tests/test_prime_kernel_skills.py::test_list_skills_marks_edit_importable_and_factory_markdown_only",
+        "omega_prime/tests/test_prime_kernel_skills.py::test_load_skill_edit_replaces_a_unique_string",
+        "omega_prime/tests/test_prime_kernel_skills.py::test_list_skills_does_not_import_attach_image",
+        "omega_prime/tests/test_prime_native.py::test_native_status_accepts_unbuilt_extension",
+        "omega_prime/tests/test_prime_native.py::test_goal_bindings_follow_pa_core",
+        "omega_prime/tests/test_prime_native.py::test_autonomous_run_uses_pa_core_limits",
+        "omega_prime/tests/test_prime_native.py::test_protocol_parse_and_encode_use_the_rust_frames",
+        "omega_prime/tests/test_prime_native.py::test_heartbeat_schedule_and_deferral",
+        "omega_prime/tests/test_prime_native.py::test_refinement_history_round_trip",
+        "omega_prime/tests/test_prime_native.py::test_goal_apply_uses_pa_core_transitions",
+        "omega_prime/tests/test_prime_native.py::test_slash_parsers_match_pa_core",
+        "omega_prime/tests/test_prime_native.py::test_native_tool_validation_rejects_missing_required_argument",
+        "omega_prime/tests/test_prime_native.py::test_kernel_tools_call_the_rust_commands",
+        "omega_prime/tests/test_setup_check.py::test_checks_pass_on_repo_root"
+      ],
+      "phase": "final"
+    },
+    {
+      "cmd": "/workspace/omes-bot/.venv/bin/python -c 'import json,sys; b=json.loads(sys.argv[1]); f=json.loads(sys.argv[2]); assert len(b)==len(f)==27; assert sorted(b)==sorted(f); print('\"'\"'PASS: observed final pytest failure IDs exactly match all 27 baseline failures; no additional failures'\"'\"')' '[\"omega_prime/tests/test_grokbot_oneclick.py::test_oneclick_dry_run_sse\", \"omega_prime/tests/test_prime_kernel_boundary.py::test_read_only_skill_list_still_returns_the_skills\", \"omega_prime/tests/test_prime_kernel_boundary.py::test_read_only_crates_still_reports_the_workspace\", \"omega_prime/tests/test_prime_kernel_cells.py::test_namespace_persists_across_cells\", \"omega_prime/tests/test_prime_kernel_cells.py::test_cell_output_is_returned_and_never_written_to_the_process_streams\", \"omega_prime/tests/test_prime_kernel_cells.py::test_cell_exit_requests_are_cell_errors_and_the_kernel_keeps_working\", \"omega_prime/tests/test_prime_kernel_cells.py::test_cell_spawn_uses_in_process_host\", \"omega_prime/tests/test_prime_kernel_cells.py::test_cell_child_answer_visible_only_through_collect\", \"omega_prime/tests/test_prime_kernel_cells.py::test_factory_help_while_disabled\", \"omega_prime/tests/test_prime_kernel_cells.py::test_validate_spec_rejects_empty\", \"omega_prime/tests/test_prime_kernel_cells.py::test_enable_factory_keeps_help\", \"omega_prime/tests/test_prime_kernel_cells.py::test_run_bash_echo\", \"omega_prime/tests/test_prime_kernel_host.py::test_prime_kernel_host_round_trip\", \"omega_prime/tests/test_prime_kernel_skills.py::test_list_skills_marks_edit_importable_and_factory_markdown_only\", \"omega_prime/tests/test_prime_kernel_skills.py::test_load_skill_edit_replaces_a_unique_string\", \"omega_prime/tests/test_prime_kernel_skills.py::test_list_skills_does_not_import_attach_image\", \"omega_prime/tests/test_prime_native.py::test_native_status_accepts_unbuilt_extension\", \"omega_prime/tests/test_prime_native.py::test_goal_bindings_follow_pa_core\", \"omega_prime/tests/test_prime_native.py::test_autonomous_run_uses_pa_core_limits\", \"omega_prime/tests/test_prime_native.py::test_protocol_parse_and_encode_use_the_rust_frames\", \"omega_prime/tests/test_prime_native.py::test_heartbeat_schedule_and_deferral\", \"omega_prime/tests/test_prime_native.py::test_refinement_history_round_trip\", \"omega_prime/tests/test_prime_native.py::test_goal_apply_uses_pa_core_transitions\", \"omega_prime/tests/test_prime_native.py::test_slash_parsers_match_pa_core\", \"omega_prime/tests/test_prime_native.py::test_native_tool_validation_rejects_missing_required_argument\", \"omega_prime/tests/test_prime_native.py::test_kernel_tools_call_the_rust_commands\", \"omega_prime/tests/test_setup_check.py::test_checks_pass_on_repo_root\"]' '[\"omega_prime/tests/test_grokbot_oneclick.py::test_oneclick_dry_run_sse\", \"omega_prime/tests/test_prime_kernel_boundary.py::test_read_only_skill_list_still_returns_the_skills\", \"omega_prime/tests/test_prime_kernel_boundary.py::test_read_only_crates_still_reports_the_workspace\", \"omega_prime/tests/test_prime_kernel_cells.py::test_namespace_persists_across_cells\", \"omega_prime/tests/test_prime_kernel_cells.py::test_cell_output_is_returned_and_never_written_to_the_process_streams\", \"omega_prime/tests/test_prime_kernel_cells.py::test_cell_exit_requests_are_cell_errors_and_the_kernel_keeps_working\", \"omega_prime/tests/test_prime_kernel_cells.py::test_cell_spawn_uses_in_process_host\", \"omega_prime/tests/test_prime_kernel_cells.py::test_cell_child_answer_visible_only_through_collect\", \"omega_prime/tests/test_prime_kernel_cells.py::test_factory_help_while_disabled\", \"omega_prime/tests/test_prime_kernel_cells.py::test_validate_spec_rejects_empty\", \"omega_prime/tests/test_prime_kernel_cells.py::test_enable_factory_keeps_help\", \"omega_prime/tests/test_prime_kernel_cells.py::test_run_bash_echo\", \"omega_prime/tests/test_prime_kernel_host.py::test_prime_kernel_host_round_trip\", \"omega_prime/tests/test_prime_kernel_skills.py::test_list_skills_marks_edit_importable_and_factory_markdown_only\", \"omega_prime/tests/test_prime_kernel_skills.py::test_load_skill_edit_replaces_a_unique_string\", \"omega_prime/tests/test_prime_kernel_skills.py::test_list_skills_does_not_import_attach_image\", \"omega_prime/tests/test_prime_native.py::test_native_status_accepts_unbuilt_extension\", \"omega_prime/tests/test_prime_native.py::test_goal_bindings_follow_pa_core\", \"omega_prime/tests/test_prime_native.py::test_autonomous_run_uses_pa_core_limits\", \"omega_prime/tests/test_prime_native.py::test_protocol_parse_and_encode_use_the_rust_frames\", \"omega_prime/tests/test_prime_native.py::test_heartbeat_schedule_and_deferral\", \"omega_prime/tests/test_prime_native.py::test_refinement_history_round_trip\", \"omega_prime/tests/test_prime_native.py::test_goal_apply_uses_pa_core_transitions\", \"omega_prime/tests/test_prime_native.py::test_slash_parsers_match_pa_core\", \"omega_prime/tests/test_prime_native.py::test_native_tool_validation_rejects_missing_required_argument\", \"omega_prime/tests/test_prime_native.py::test_kernel_tools_call_the_rust_commands\", \"omega_prime/tests/test_setup_check.py::test_checks_pass_on_repo_root\"]'",
+      "exit_code": 0,
+      "duration_s": 0.03,
+      "output_tail": "PASS: observed final pytest failure IDs exactly match all 27 baseline failures; no additional failures"
+    },
+    {
+      "cmd": "git diff --check",
+      "exit_code": 0,
+      "duration_s": 0.006,
+      "output_tail": "No whitespace errors."
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Planning artifacts validate v20 phases 97–103, Phase 97 state, five typed structured plans, stable task fields/IDs, acyclic file-disjoint waves, eight requirements, seven success criteria, existing context links, and planning-only changed paths.",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "Final Ruff lint passes.",
+      "evidence_command_index": 6
+    },
+    {
+      "claim": "Final Ruff formatting check passes for 589 files.",
+      "evidence_command_index": 7
+    },
+    {
+      "claim": "Final mypy check passes for 462 source files.",
+      "evidence_command_index": 8
+    },
+    {
+      "claim": "Baseline full pytest is not green: 27 failed, 4777 passed and 11 skipped; named failures are retained.",
+      "evidence_command_index": 3,
+      "expects_failure": true
+    },
+    {
+      "claim": "Final full pytest remains baseline-only red: 27 failed, 4777 passed and 11 skipped.",
+      "evidence_command_index": 9,
+      "expects_failure": true
+    },
+    {
+      "claim": "Observed final pytest failure identifiers exactly equal the 27 baseline identifiers; no additional failures appeared.",
+      "evidence_command_index": 10
+    },
+    {
+      "claim": "Tracked patch whitespace check passes; planning smoke also checks untracked planning-file whitespace.",
+      "evidence_command_index": 11
+    },
+    {
+      "claim": "Authenticated GitHub schema retrieval is unavailable through the CLI in this environment.",
+      "evidence_command_index": 4,
+      "expects_failure": true
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Phase 97 runtime implementation and its proposed acceptance regressions: planning only; no production code or tests changed.",
+    "Current Agent Substrate main schema, grok-bot MCP mount, initialization/version and response types: public GitHub reads returned 404; authenticated CLI metadata retrieval exited 4. Plans block server-specific production changes and phase completion until authoritative evidence is obtained.",
+    "Live Substrate connectivity/authentication, actual connector restart, token minting and live settings: not attempted and outside scope.",
+    "Full pytest is not green: the same 27 pre-existing failures remain, including missing prime-agent/rlm/preflight and boundary payload failures; no submodule initialization or unrelated repair performed.",
+    "Native gsd-plan-phase skill execution and native GSD checker: skill unavailable; repository-style YAML/XML plans were checked with the recorded Python artifact smoke.",
+    "Prompt assembly not run: no prompts changed; the user gate is conditional on prompt changes."
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/state.json",
+    ".planning/phases/97-substrate-direct-connect/97-CONTEXT.md",
+    ".planning/phases/97-substrate-direct-connect/97-RESEARCH.md",
+    ".planning/phases/97-substrate-direct-connect/97-VALIDATION.md",
+    ".planning/phases/97-substrate-direct-connect/97-01-PLAN.md",
+    ".planning/phases/97-substrate-direct-connect/97-02-PLAN.md",
+    ".planning/phases/97-substrate-direct-connect/97-03-PLAN.md",
+    ".planning/phases/97-substrate-direct-connect/97-04-PLAN.md",
+    ".planning/phases/97-substrate-direct-connect/97-05-PLAN.md",
+    ".receipts/bot-00-omega-prime/phase97-planning.json"
+  ],
+  "contract_changes": [],
+  "ownership_resolution": {
+    "source": "omega_prime/ownership.yaml",
+    "last_matching_pattern": "**",
+    "owner": "bot-00-omega-prime"
+  },
+  "trackers": "no tracker IDs provided",
+  "rollback_plan": "Revert this planning-only commit; no runtime code or live configuration cutover is included.",
+  "approvals": [],
+  "approved_by": null
+}

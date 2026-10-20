@@ -186,13 +186,43 @@ def test_graph_and_bus_passthrough_and_unconfigured(tmp_path: Path):
         {"node_id": "n1", "linear_identifier": "L-2", "state": "open"}
     ]
 
-    done = client.graph_state("g-1", "n1", "complete", note="all green")
+    substrate.content = {"lease_id": "lease-claimed"}
+    claimed = client.graph_state("g-1", "n1", "claim", surface="test")
+    assert claimed["action"] == "claim"
+    assert claimed["substrate"] == {"lease_id": "lease-claimed"}
+    assert substrate.calls[1] == (
+        "graph_claim",
+        {
+            "graph_id": "g-1",
+            "node_id": "n1",
+            "session_id": "grok-bot:test:g-1",
+        },
+        10,
+    )
+    released = client.graph_state("g-1", "n1", "release", lease_id="lease-1")
+    assert released["action"] == "release"
+    assert substrate.calls[2] == (
+        "graph_release",
+        {"graph_id": "g-1", "node_id": "n1", "lease_id": "lease-1"},
+        10,
+    )
+    done = client.graph_state(
+        "g-1", "n1", "complete", note="all green", lease_id="lease-2"
+    )
     assert done["action"] == "complete"
-    assert substrate.calls[1][1]["result"] == {
-        "summary": "all green",
-        "tests_pass": False,
-    }
-    assert substrate.calls[1][1]["session_id"] == "grok-bot:lead:g-1"
+    assert substrate.calls[3] == (
+        "graph_complete",
+        {
+            "graph_id": "g-1",
+            "node_id": "n1",
+            "lease_id": "lease-2",
+            "result": {"summary": "all green", "tests_pass": False},
+        },
+        10,
+    )
+    for action in ("release", "complete"):
+        with pytest.raises(ValueError, match="lease_id is required"):
+            client.graph_state("g-1", "n1", action)
 
     started = client.bus_start("local", "run tests", provider="p", idempotency_key="k")
     assert started == {"ok": True, "job": {"job_id": "job-1"}}
@@ -206,6 +236,48 @@ def test_graph_and_bus_passthrough_and_unconfigured(tmp_path: Path):
     assert "not_configured" in bare.bus_start("r", "g")["error"]
     assert "not_configured" in bare.bus_wait("j")["error"]
     assert "not_configured" in bare.docs_search("q")["error"]
+
+
+def test_graph_state_tool_schema_and_handler_accept_lease_id(tmp_path: Path):
+    substrate = FakeSubstrate()
+    client = LeadClient(_ctx(tmp_path, substrate=substrate))
+    approvals = ApprovalLog()
+    approvals.approve("lead_graph_state", "human")
+    registry = ToolRegistry(approval_log=approvals)
+    register_lead_tools(registry, client)
+
+    schema = next(
+        item
+        for item in registry.schemas()
+        if item["function"]["name"] == "lead_graph_state"
+    )
+    parameters = schema["function"]["parameters"]
+    assert "lease_id" in parameters["properties"]
+    assert "lease_id" not in parameters["required"]
+    result = json.loads(
+        registry.dispatch(
+            "lead_graph_state",
+            {
+                "graph_id": "g-1",
+                "node_id": "n1",
+                "action": "release",
+                "lease_id": "lease-1",
+            },
+        )
+    )
+    assert result["ok"] is True
+    assert substrate.calls[0] == (
+        "graph_release",
+        {"graph_id": "g-1", "node_id": "n1", "lease_id": "lease-1"},
+        10,
+    )
+    missing = json.loads(
+        registry.dispatch(
+            "lead_graph_state",
+            {"graph_id": "g-1", "node_id": "n1", "action": "complete"},
+        )
+    )
+    assert "lease_id is required" in missing["error"]
 
 
 def test_roster_status_completeness(tmp_path: Path):
@@ -304,10 +376,67 @@ def test_doctor_register_install_and_check(tmp_path: Path):
     assert check["checks"]["roster"]["green"] is True
     assert check["checks"]["substrate"]["green"] is False
     assert check["green"] is False
-
     bare = client.doctor("check")
     assert bare["checks"]["prompt"]["green"] is False
     assert bare["checks"]["skills"]["missing"] == ["lead-pack", "debugging"]
+
+
+@pytest.mark.parametrize(
+    ("document", "expected_status", "expected_green"),
+    [
+        (None, "missing", True),
+        ('{"SUBSTRATE_URL":"https://substrate.example"}', "loaded", True),
+        ("{malformed", "malformed", False),
+        ('{"TOKEN":"value-must-not-leak"}', "rejected", False),
+    ],
+)
+def test_doctor_settings_provenance_is_value_free(
+    tmp_path: Path, document: str | None, expected_status: str, expected_green: bool
+) -> None:
+    from omega_prime.settings import load_settings
+
+    settings_path = tmp_path / "settings.json"
+    if document is not None:
+        settings_path.write_text(document, encoding="utf-8")
+    status = load_settings({}, path=settings_path)
+    registry = ToolRegistry()
+    ctx = _ctx(tmp_path / expected_status, registry=registry, settings_status=status)
+    client = LeadClient(ctx)
+    register_lead_tools(registry, client)
+    result = json.loads(registry.dispatch("lead_doctor", {"action": "check"}))
+    settings = result["checks"]["settings"]
+    assert settings["status"] == expected_status
+    assert settings["green"] is expected_green
+    assert settings["loaded_names"] == (
+        ["SUBSTRATE_URL"] if expected_status == "loaded" else []
+    )
+    encoded = json.dumps(result)
+    assert "value-must-not-leak" not in encoded
+    assert "https://substrate.example" not in encoded
+    assert "effective_env" not in encoded
+    if expected_status == "rejected":
+        assert settings["rejected_names"] == ["TOKEN"]
+        assert "rejected_keys" in settings["reasons"]
+
+
+def test_doctor_reports_configured_only_substrate_and_anonymous_warning(
+    tmp_path: Path,
+) -> None:
+    client = LeadClient(
+        _ctx(
+            tmp_path,
+            substrate=object(),
+            substrate_configured=True,
+            substrate_auth_configured=False,
+        )
+    )
+    result = client.doctor("check")
+    substrate = result["checks"]["substrate"]
+    assert substrate["green"] is True
+    assert substrate["configured"] is True
+    assert "configured only" in substrate["detail"]
+    assert "reachability not checked" in substrate["detail"]
+    assert "anonymous mode" in substrate["detail"]
 
 
 def test_render_prompt_refuses_placeholders(tmp_path: Path):

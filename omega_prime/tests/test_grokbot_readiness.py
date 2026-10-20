@@ -1059,7 +1059,10 @@ def test_missing_prime_resources_become_named_prerequisites(tmp_path: Path) -> N
         assert (layout.install / ".omega-readiness-inventory.json").is_file()
 
 
-def test_cli_full_local_profile(sentinel_env: dict[str, str], tmp_path: Path) -> None:
+def test_cli_full_local_profile(
+    sentinel_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUBSTRATE_URL", "local")
     report_path = tmp_path / "report.json"
     completed = subprocess.run(
         [
