@@ -105,7 +105,7 @@ def test_missing_candidate_returns_before_repository_metadata(
     assert result.status == "missing"
 
 
-def test_mounted_candidate_checks_its_location_not_launch_checkout(
+def test_outside_settings_loads_with_deterministic_git_locale(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     launch_checkout = tmp_path / "launch"
@@ -114,19 +114,29 @@ def test_mounted_candidate_checks_its_location_not_launch_checkout(
     mounted = write_settings(mount / "settings.json", {"SUBSTRATE_URL": "mounted"})
     monkeypatch.chdir(launch_checkout)
 
+    monkeypatch.setenv("LANGUAGE", "fr")
+    monkeypatch.setenv("LC_ALL", "fr_FR.UTF-8")
     run_git = subprocess.run
-    git_cwds: list[Path] = []
+    git_calls: list[tuple[Path, dict[str, str]]] = []
 
-    def record_git_cwd(*args, **kwargs):
+    def record_git_environment(*args, **kwargs):
         if args and args[0] and args[0][0] == "git":
-            git_cwds.append(Path(kwargs["cwd"]))
+            git_calls.append((Path(kwargs["cwd"]), kwargs["env"]))
         return run_git(*args, **kwargs)
 
-    monkeypatch.setattr(settings.subprocess, "run", record_git_cwd)
+    monkeypatch.setattr(settings.subprocess, "run", record_git_environment)
+    settings._worktree_metadata(launch_checkout / "settings.json")
+    assert len(git_calls) >= 3
+    assert all(env["LC_ALL"] == "C" for _, env in git_calls)
+    assert all(env["LANGUAGE"] == "fr" for _, env in git_calls)
+    git_calls.clear()
+
     result = settings.load_settings({}, path=mounted)
     assert result.status == "loaded"
     assert result.effective_env["SUBSTRATE_URL"] == "mounted"
-    assert git_cwds == [mount, mount]
+    assert [cwd for cwd, _ in git_calls] == [mount, mount]
+    assert all(env["LC_ALL"] == "C" for _, env in git_calls)
+    assert all(env["LANGUAGE"] == "fr" for _, env in git_calls)
 
 
 def test_candidate_in_another_checkout_is_rejected(

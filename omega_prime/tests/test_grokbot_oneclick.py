@@ -81,6 +81,9 @@ def test_sse_host_receives_saved_settings_with_process_env_precedence(
         encoding="utf-8",
     )
     settings_file.chmod(0o600)
+    monkeypatch.setenv("OMEGA_PRIME_SETTINGS_FILE", str(settings_file))
+    monkeypatch.delenv("SUBSTRATE_URL", raising=False)
+    monkeypatch.delenv("OMEGA_PRIME_STATE_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ULTRATHINK_ROOT", str(tmp_path / "process-root"))
     host: dict[str, Any] = {}
@@ -118,6 +121,9 @@ def test_sse_approval_validation_uses_saved_state_directory(
         encoding="utf-8",
     )
     settings_file.chmod(0o600)
+    monkeypatch.setenv("OMEGA_PRIME_SETTINGS_FILE", str(settings_file))
+    monkeypatch.delenv("SUBSTRATE_URL", raising=False)
+    monkeypatch.delenv("OMEGA_PRIME_STATE_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     approvals = state_dir / "approvals.txt"
     approvals.parent.mkdir()

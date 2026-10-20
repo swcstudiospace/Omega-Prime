@@ -205,6 +205,8 @@ def _worktree_metadata(
     candidate: Path | None = None,
 ) -> tuple[tuple[Path, ...], frozenset[str]]:
     """Resolve Git-reported worktrees and tracked paths for the candidate checkout."""
+    git_env = os.environ.copy()
+    git_env["LC_ALL"] = "C"
     try:
         current = Path(
             subprocess.run(
@@ -213,6 +215,7 @@ def _worktree_metadata(
                 check=True,
                 capture_output=True,
                 text=True,
+                env=git_env,
             ).stdout.strip()
         )
     except subprocess.CalledProcessError as exc:
@@ -229,6 +232,7 @@ def _worktree_metadata(
         check=True,
         capture_output=True,
         text=True,
+        env=git_env,
     ).stdout
     roots: list[Path] = []
     for line in listing.splitlines():
@@ -246,6 +250,7 @@ def _worktree_metadata(
                     check=True,
                     capture_output=True,
                     text=True,
+                    env=git_env,
                 ).stdout.strip()
             )
             roots.append(checked)
@@ -259,6 +264,7 @@ def _worktree_metadata(
             check=True,
             capture_output=True,
             text=True,
+            env=git_env,
         ).stdout
         tracked.update(line for line in output.splitlines() if line)
     return tuple(roots), frozenset(tracked)
