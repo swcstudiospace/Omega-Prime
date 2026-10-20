@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, parse_qs
 from omega_prime.dashboard.collectors.github import make_github_collector
 
 ORG = "https://api.github.com/orgs/swcstudiospace/repos"
-TARGETS = ("omes-bot", "coding-fleet")
+TARGETS = ("Omega-Prime", "coding-fleet")
 
 
 def test_default_scope_projects_org_pr_branch_checks_and_actual_merges():
@@ -23,7 +23,7 @@ def test_default_scope_projects_org_pr_branch_checks_and_actual_merges():
         if path == "/orgs/swcstudiospace/repos":
             return 200, json.dumps([
                 {"id": 1, "full_name": "swcstudiospace/coding-fleet", "name": "coding-fleet", "html_url": "https://github.com/swcstudiospace/coding-fleet", "visibility": "public", "default_branch": "main", "pushed_at": "2026-10-19T00:00:00Z", "language": "Python", "open_issues_count": 9},
-                {"id": 2, "full_name": "swcstudiospace/omes-bot", "name": "omes-bot", "html_url": "https://github.com/swcstudiospace/omes-bot", "visibility": "private", "default_branch": "trunk", "pushed_at": None, "language": "Python", "open_issues_count": 3},
+                {"id": 2, "full_name": "swcstudiospace/Omega-Prime", "name": "Omega-Prime", "html_url": "https://github.com/swcstudiospace/Omega-Prime", "visibility": "private", "default_branch": "trunk", "pushed_at": None, "language": "Python", "open_issues_count": 3},
                 {"id": 3, "full_name": "swcstudiospace/other", "name": "other", "default_branch": "main"},
             ]).encode()
         if path.endswith("/pulls"):
@@ -49,7 +49,7 @@ def test_default_scope_projects_org_pr_branch_checks_and_actual_merges():
 
     result = make_github_collector(env={"GITHUB_PAT_DESK_LEAD": "fixture-secret"}, transport=transport, now_fn=lambda: now)()
     cc = result.extra["command_center"]
-    assert {r["name"] for r in cc["repositories"]} == {"coding-fleet", "omes-bot", "other"}
+    assert {r["name"] for r in cc["repositories"]} == {"coding-fleet", "Omega-Prime", "other"}
     other = next(r for r in cc["repositories"] if r["name"] == "other")
     assert other["open_pr_count"] == 1
     assert {row["repo"] for row in cc["ci_cd"] if row["kind"] == "pull_request"} == {f"swcstudiospace/{x}" for x in TARGETS}
@@ -85,3 +85,17 @@ def test_comment_score_has_unknown_reviewed_sha_and_old_head_review_is_not_curre
     assert review["source"] == "comment"
     assert review["reviewed_sha"] is None
     assert result.items[0]["greptile"] == "4/5"
+
+
+def test_default_env_reads_process_environment(monkeypatch):
+    """env=None (the production path) must read os.environ, not degrade to 'GitHub not configured'."""
+    monkeypatch.setenv("GITHUB_PAT_DESK_LEAD", "fixture-secret")
+    seen = []
+
+    def transport(url, headers):
+        seen.append(headers.get("Authorization"))
+        return 200, b"[]"
+
+    result = make_github_collector(transport=transport, repo="swcstudiospace/Omega-Prime")()
+    assert result.error != "GitHub not configured"
+    assert seen and all(h == "Bearer fixture-secret" for h in seen)

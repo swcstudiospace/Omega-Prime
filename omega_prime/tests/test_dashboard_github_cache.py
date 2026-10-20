@@ -85,13 +85,13 @@ def test_one_target_failure_retains_only_that_repository_while_other_refreshes()
     def transport(url, headers):
         if "/orgs/" in url:
             return 200, json.dumps([
-                {"id": 1, "full_name": "swcstudiospace/omes-bot", "name": "omes-bot", "default_branch": "main"},
+                {"id": 1, "full_name": "swcstudiospace/Omega-Prime", "name": "Omega-Prime", "default_branch": "main"},
                 {"id": 2, "full_name": "swcstudiospace/coding-fleet", "name": "coding-fleet", "default_branch": "main"},
             ]).encode()
         if "/pulls?" in url:
             if "/coding-fleet/pulls?" in url and mode[0] == "fail":
                 return 403, b"private"
-            name = "coding-fleet" if "/coding-fleet/" in url else "omes-bot"
+            name = "coding-fleet" if "/coding-fleet/" in url else "Omega-Prime"
             title = "old-fleet" if name == "coding-fleet" else ("new-omes" if mode[0] == "fail" else "old-omes")
             return 200, json.dumps([{"id": 3, "number": 5, "title": title, "head": {"sha": "head"}, "body": "<!-- greptile_confidence_score: 0 -->"}]).encode()
         if "/check-runs" in url:
@@ -106,7 +106,7 @@ def test_one_target_failure_retains_only_that_repository_while_other_refreshes()
     result = collector()
     rows = {row["repo"]: row["title"] for row in result.extra["command_center"]["ci_cd"] if row["kind"] == "pull_request"}
     assert rows["swcstudiospace/coding-fleet"] == "old-fleet"
-    assert rows["swcstudiospace/omes-bot"] == "new-omes"
+    assert rows["swcstudiospace/Omega-Prime"] == "new-omes"
     assert result.extra["command_center"]["meta"]["sections"]["ci_cd"]["stale"] is True
 
 def test_greptile_request_failure_is_partial_not_missing_review_evidence():

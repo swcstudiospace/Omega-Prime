@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import time
 import re
@@ -30,7 +31,7 @@ _SCORE = re.compile(r"Confidence score:\s*([0-5])\s*/\s*5", re.IGNORECASE)
 _BODY_SCORE = re.compile(r"<!--\s*greptile_confidence_score:\s*([0-5])\s*-->", re.IGNORECASE)
 API = "https://api.github.com"
 ORG = "swcstudiospace"
-TARGETS = (f"{ORG}/omes-bot", f"{ORG}/coding-fleet")
+TARGETS = (f"{ORG}/Omega-Prime", f"{ORG}/coding-fleet")  # omes-bot was renamed; the API 301s and redirects are refused
 
 _SAFE_REPO = re.compile(r"^swcstudiospace/[A-Za-z0-9_.-]{1,100}$")
 _SAFE_REF = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
