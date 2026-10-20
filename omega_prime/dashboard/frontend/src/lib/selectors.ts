@@ -38,10 +38,10 @@ export function correlateWiring(row: CiRow, tasks: Array<Task | FinishedItem>): 
   if (!row.branch || !row.head_sha) return []
   const matches = tasks.filter(task => {
     const wiring = task.wiring
-    if (!wiring || wiring.branch !== row.branch || !wiring.sha) return false
+    if (!wiring || wiring.branch !== row.branch || !wiring.head_sha) return false
     if (row.repo && (!wiring.repo || wiring.repo.toLowerCase() !== row.repo.toLowerCase())) return false
     if (!row.repo && wiring.repo) return false
-    return row.head_sha!.startsWith(wiring.sha) || wiring.sha.startsWith(row.head_sha!)
+    return row.head_sha!.startsWith(wiring.head_sha) || wiring.head_sha.startsWith(row.head_sha!)
   })
   return matches.length === 1 ? matches : []
 }

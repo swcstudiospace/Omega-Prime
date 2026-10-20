@@ -1,6 +1,6 @@
 export type TimelineEntry = { at: string; state: string }
 export type LinkRecord = { label: string; url: string }
-export type Wiring = { phase: string | null; stage: string | null; merge_order: string | null; repo?: string | null; branch?: string | null; sha?: string | null }
+export type Wiring = { phase: string | null; stage: string | null; repo: string | null; branch: string | null; head_sha: string | null }
 export type Task = {
   id: string; title: string; source: string; owner?: { kind?: string; ref?: string; label?: string } | null
   state: string; started_at?: string | null; last_activity_at?: string | null
