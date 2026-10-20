@@ -60,7 +60,7 @@ anda = ready.get("anda") or {}
 check("Anda engine server up on loopback (real anda_engine)", ready.get("server_pid") and str(anda.get("addr", "")).startswith("http://127.0.0.1:") and anda.get("engine"),
       {"server_pid": ready.get("server_pid"), "addr": anda.get("addr"), "engine": anda.get("engine"), "controller": anda.get("controller"), "auth": anda.get("auth")})
 
-up = call("up", {"seed": "tests/fixtures/demo"}, 900)
+up = call("up", {"seed": os.path.join(ROOT, "tests", "fixtures", "demo")}, 900)
 u = up.get("result", {})
 check("up ok", up.get("ok"), up.get("error"))
 check("agentOS VM booted + sandbox round trip", u.get("roundTrip", {}).get("match") and u.get("roundTrip", {}).get("hostFnExit") == 0, {"bootMs": u.get("agentosBootMs"), "hostFn": u.get("roundTrip", {}).get("hostFnStdout", "")[:120]})

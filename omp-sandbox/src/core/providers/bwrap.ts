@@ -20,12 +20,13 @@ export class BwrapTier implements SandboxTier {
   readonly workdir = "/sbx/work";
   readonly isolation = "bubblewrap: ro /usr,/etc; tmpfs /home + ro toolchains; private /sbx and /tmp; unshared pid/ipc/uts; shared network and kernel";
   readonly hostRoot: string;
+  readonly workspaceHostPath: string | null;
   #env: Record<string, string> = {};
   #agent: ChildProcessWithoutNullStreams | null = null;
   #agentUrl = ""; #agentToken = randomBytes(18).toString("hex");
   #children = new Set<ChildProcessWithoutNullStreams>();
 
-  constructor(hostRoot?: string) { this.hostRoot = hostRoot ?? join(STATE, "ws", this.id); }
+  constructor(hostRoot?: string, workspaceHostPath?: string | null) { this.hostRoot = hostRoot ?? join(STATE, "ws", this.id); this.workspaceHostPath = workspaceHostPath ?? null; }
 
   #argv(cmd: string[], env: Record<string, string>, cwd = this.workdir) {
     const a = [
@@ -36,6 +37,8 @@ export class BwrapTier implements SandboxTier {
       "--ro-bind", dirname(NODE24_BIN), dirname(NODE24_BIN),
       "--ro-bind", dirname(SANDBOX_AGENT_BIN), "/opt/sandbox-agent",
       "--bind", this.hostRoot, this.sandboxRoot,
+      // A job worktree replaces the private work dir (later binds win); the rest of /sbx stays private.
+      ...(this.workspaceHostPath ? ["--bind", this.workspaceHostPath, this.workdir] : []),
       "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev",
       "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--hostname", "omp-sandbox", "--die-with-parent",
       "--clearenv",

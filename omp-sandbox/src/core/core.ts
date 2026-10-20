@@ -1,8 +1,8 @@
 // The TS core: auth-broker -> sandbox tier -> agentOS VM -> GSD-Core -> omp RPC stages.
-import { mkdirSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
-import { ROOT, STATE, STAGE_MODELS, MAGIC, OMP_BIN, VERSIONS, aedt, stageRoute, type Stage } from "./config.ts";
+import { STATE, STAGE_MODELS, MAGIC, OMP_BIN, VERSIONS, aedt, stageRoute, type Stage } from "./config.ts";
 import { AuthBroker } from "./auth.ts";
 import { startTier } from "./providers/tiers.ts";
 import type { SandboxTier } from "./providers/types.ts";
@@ -11,6 +11,7 @@ import { ensureGsd } from "./gsd.ts";
 import { OmpRpcClient, StaleAnswerError, textOf, type AnswerInput, type PendingQuestion } from "./omp-rpc.ts";
 import { mockAttestation, type AttestationDoc } from "./attest.ts";
 import { rid } from "./providers/util.ts";
+import { allowedDir, seedFiles, PathRefused, SEED_ROOTS, WORKSPACE_ROOTS } from "./paths.ts";
 
 export type StageStatus = "starting" | "running" | "waiting" | "completed" | "failed" | "aborted";
 type StageRec = {
@@ -32,37 +33,44 @@ export class Core extends EventEmitter {
   stages = new Map<string, StageRec>();
   #receipts = join(STATE, "receipts");
 
-  async up(opts: { tiers?: string[]; seed?: string } = {}) {
+  /**
+   * `workspace_host_path`: an absolute host directory under an allowlisted root (WORKSPACE_ROOTS), bind-mounted
+   * read-write at the tier's workdir (/sandbox/work on openshell-podman). Changes land directly in that host tree.
+   * `seed`: an absolute fixture directory under SEED_ROOTS, copied (binary-safe, no .git/.venv/node_modules, no
+   * symlinks) into an empty workdir. The two are mutually exclusive. Paths are checked before anything starts.
+   */
+  async up(opts: { tiers?: string[]; seed?: string; workspace_host_path?: string } = {}) {
     if (this.tier) return this.up_;
+    if (opts.seed !== undefined && opts.workspace_host_path !== undefined) throw new PathRefused("seed and workspace_host_path are mutually exclusive");
+    const workspace = opts.workspace_host_path !== undefined ? allowedDir(opts.workspace_host_path, WORKSPACE_ROOTS, "workspace_host_path") : null;
+    const seedSrc = opts.seed !== undefined ? allowedDir(opts.seed, SEED_ROOTS, "seed") : null;
     mkdirSync(this.#receipts, { recursive: true });
     await this.broker.start();
-    const { tier, skipped } = await startTier(this.broker.env, opts.tiers as any);
+    const { tier, skipped } = await startTier(this.broker.env, opts.tiers as any, { workspaceHostPath: workspace });
     this.tier = tier as any; this.skipped = skipped;
     const { vm, bootMs } = await bootVm(tier); this.vm = vm;
     const roundTrip = await vmRoundTrip(vm, tier);
     const gsd = await ensureGsd(tier as any);
-    const seeded = opts.seed ? await this.#seed(opts.seed) : null;
+    const seeded = seedSrc ? await this.#seed(seedSrc) : null;
     const probe = await this.#probeOmp();
     this.attestation = mockAttestation(tier.name, { isolation: tier.isolation });
-    this.up_ = { tier: tier.name, isolation: tier.isolation, skippedTiers: skipped, agentosBootMs: bootMs, roundTrip, gsd, seeded, omp: probe, attestation: "mock", attestationDoc: this.attestation };
+    this.up_ = { tier: tier.name, isolation: tier.isolation, skippedTiers: skipped, agentosBootMs: bootMs, roundTrip, gsd, seeded, workspace: workspace ? { hostPath: workspace, sandboxPath: tier.workdir, mode: "bind-rw" } : null, omp: probe, attestation: "mock", attestationDoc: this.attestation };
     this.#receipt(`up-${tier.id}`, this.up_);
     return this.up_;
   }
 
-  /** Copy a fixture project into the sandbox workdir THROUGH the agentOS VM mount, then git-init it inside the sandbox. */
-  async #seed(fixture: string) {
-    const t = this.tier!; const src = join(ROOT, fixture);
+  /** Copy a fixture project (already allowlist-resolved) into the sandbox workdir THROUGH the agentOS VM mount as raw bytes, then git-init it inside the sandbox. */
+  async #seed(src: string) {
+    const t = this.tier!;
     const rel = t.workdir.slice(t.sandboxRoot.length).replace(/^\/+/, "");
-    const files: string[] = [];
-    const walk = (d: string) => { for (const e of readdirSync(join(src, d), { withFileTypes: true })) { const r = d ? `${d}/${e.name}` : e.name; e.isDirectory() ? walk(r) : files.push(r); } };
-    walk("");
+    const { files, skipped } = seedFiles(src);
     for (const f of files) {
-      const dir = f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : "";
+      const dir = f.rel.includes("/") ? f.rel.slice(0, f.rel.lastIndexOf("/")) : "";
       if (dir) await this.vm.filesystem.mkdir(`${SANDBOX_MOUNT}/${rel}/${dir}`, { recursive: true }).catch(() => {});
-      await this.vm.filesystem.writeFile(`${SANDBOX_MOUNT}/${rel}/${f}`, readFileSync(join(src, f), "utf8"));
+      await this.vm.filesystem.writeFile(`${SANDBOX_MOUNT}/${rel}/${f.rel}`, new Uint8Array(f.data));
     }
     const g = await t.exec(["sh", "-c", "git init -q && git add -A && git -c user.name=omp-sandbox -c user.email=omp-sandbox@local commit -qm 'seed: disposable e2e fixture' && git log --oneline | head -1"], { timeoutMs: 60_000 });
-    return { fixture, files, viaVm: true, git: g.stdout.trim(), gitExit: g.code };
+    return { fixture: src, files: files.map((f) => f.rel), bytes: files.reduce((n, f) => n + f.data.length, 0), skipped, viaVm: true, git: g.stdout.trim(), gitExit: g.code };
   }
 
   async #probeOmp() {
