@@ -21,6 +21,7 @@
 - ✅ **v17 XML Prompt Standard** — Phases 85–88 (shipped 2026-10-14; every first-party prompt wrapped in XML tags like Programming Desk, enforced by a gate)
 - ✅ **v18 Operator posture** - Phases 89-95 (shipped 2026-10-14). Seven upgrades accepted when the operator said to continue.
 - ✅ **v19 Installer bindings** - Phase 96 (shipped 2026-10-15). A fresh install binds its own Linear and Notion, treats the existing gateways as optional, and fails setup when `prime-agent` is empty.
+- **v20 Wiring** — Phases 97–103 (in progress). Seven wiring phases; Phase 99 planning is current. Implementation remains pending.
 
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
@@ -91,3 +92,74 @@ Requirements: milestones/v19-REQUIREMENTS.md. Phase 77.1 live UAT stays user-own
 - [x] Phase 96: Per-install Linear, Notion, and optional gateways (1/1 plan) - completed 2026-10-15
 
 </details>
+
+## v20 Wiring (in progress)
+
+Wiring phases 1–7 map to GSD phases 97–103. This milestone records the requested
+sequence, not evidence that earlier wiring phases have shipped.
+
+- [ ] Phase 97: Substrate direct connect + settings loader + no time caps
+- [ ] Phase 98: Shared memory via substrate, Hindsight fallback
+- [ ] Phase 99: Solo mode, Desk optional — current; planning only
+- [ ] Phase 100: omp engine wiring
+- [ ] Phase 101: Real U2 LocalExecutor
+- [ ] Phase 102: Schedulers, dead modules, env docs
+- [ ] Phase 103: Ultrathink integration and cleanup
+
+### Phase 99: Solo mode, Desk optional
+
+**Goal:** Omega Prime runs as a solo bot without requiring the Desk. Preserve
+explicitly configured Desk planes as opt-in compatibility paths; do not delete them.
+
+**Depends on:** Phase 98 (wiring phase 2), including Phase 97's substrate docs search
+contract (`question` argument). Re-read and verify prerequisites before execution;
+this planning session does not mark phases 97 or 98 complete.
+
+**Requirements:** G3 and G11-desk-vars from the supplied uplift (audit gap labels,
+not tracker identifiers).
+
+1. Resolve `OMEGA_PRIME_SOLO` once during runtime construction: default on for
+   bot-00; `=0` restores configured Desk planes. Do not change other seats' defaults.
+2. Route solo `lead_docs_search` through the shared substrate client and
+   `docs_search(question=...)`; route events through substrate emit. Unsupported
+   bus operations report `not_configured: solo` with an actionable hint.
+3. Use Desk bus operations only with solo off and explicit, permitted Desk
+   configuration. Remove the literal `127.0.0.1` bus fallback, including blocked
+   binding construction. Doctor reports solo state and disabled Desk planes.
+4. Make desk-gateway skill loading on-demand in source prompts/core directives;
+   regenerate assembled prompts with the existing assembly tooling.
+5. Replace programming-desk skill-document dependencies with verified
+   substrate-hosted or existing in-repo references. If neither exists, remove
+   the link with a note; fix the dead `docs/quality-gates.md` reference.
+6. Document all five Desk environment variables as optional/legacy, plus solo
+   flag semantics. Preserve the separate child/delegation behavior unless a
+   Desk-plane dependency requires a scoped change.
+
+**Success criteria:**
+
+1. No code path connects to a literal `127.0.0.1` bus URL.
+2. Deterministic tests prove solo docs search and events use a fake substrate,
+   and solo off with Desk configuration uses the Desk planes. A substrate
+   outage reports unreachable clearly without a localhost fallback.
+3. The assembled bot-00 prompt no longer loads desk-gateway always.
+4. Skill link validation finds no dead in-repo references; Desk environment
+   variables are documented as optional.
+5. Exact repository gates are green or only named, evidenced baseline failures:
+   `ruff check omega_prime/`; `ruff format --check omega_prime/`;
+   `mypy omega_prime/`; `pytest omega_prime/tests -q`; and, when prompts change,
+   `bash omega_prime/scripts/assemble-prompts.sh --check`.
+
+**Out of scope:** Implementation during this planning session; deleting Desk
+code; the separate user-desk-lead connector; the full environment table
+generator (Phase 102); connector restarts, deployment, live configuration,
+pushes, PRs, or merges. No new packages or session/turn time caps.
+
+**Plans (not executed):**
+
+- Wave 1: [99-01 — Solo routing and regression proof](phases/99-solo-mode-desk-optional/99-01-PLAN.md)
+- Wave 2: [99-02 — On-demand gateway prompt](phases/99-solo-mode-desk-optional/99-02-PLAN.md)
+- Wave 2: [99-03 — Repository-grounded skill links](phases/99-solo-mode-desk-optional/99-03-PLAN.md)
+- Wave 2: [99-04 — Optional Desk docs and link validation](phases/99-solo-mode-desk-optional/99-04-PLAN.md)
+
+Wave 2 units are file-disjoint and consume the verified Wave 1 routing contract.
+Execution is gated on Phase 97/98 prerequisites; planning is not implementation.

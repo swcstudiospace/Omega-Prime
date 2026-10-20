@@ -1,0 +1,192 @@
+{
+  "task_id": "phase-99-plan",
+  "bot": "bot-00-omega-prime",
+  "session_date": "2026-10-21",
+  "completed_at": "2026-10-20T14:40:53.203413+00:00",
+  "scope": "Planning only; Phase 99 solo mode/optional Desk. No implementation source, test, prompt, skill, generated output, or operator docs changed.",
+  "baseline_revision": "44b28dfd50be6a63b175227a6f748def6f4bcc9c",
+  "branch": "fix/wiring-p3-solo-mode",
+  "trackers": "no tracker IDs provided",
+  "commands": [
+    {
+      "cmd": "ruff check omega_prime/",
+      "exit_code": 127,
+      "duration_s": 0.03,
+      "output_tail": "command not found: ruff",
+      "environment": "Initial tool shell; exported environment did not persist between calls."
+    },
+    {
+      "cmd": "ruff format --check omega_prime/",
+      "exit_code": 127,
+      "duration_s": 0.02,
+      "output_tail": "command not found: ruff",
+      "environment": "Initial tool shell; not the designated venv."
+    },
+    {
+      "cmd": "mypy omega_prime/",
+      "exit_code": 127,
+      "duration_s": 0.02,
+      "output_tail": "command not found: mypy",
+      "environment": "Initial tool shell; not the designated venv."
+    },
+    {
+      "cmd": "pytest omega_prime/tests -q",
+      "exit_code": 2,
+      "duration_s": 7.95,
+      "output_tail": "63 collection errors: missing dependencies under the wrong interpreter. Corrected invocation below.",
+      "environment": "Initial tool shell selected the system interpreter, not the designated venv."
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p3 VIRTUAL_ENV=/workspace/omes-bot/.venv && ruff check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.23,
+      "output_tail": "All checks passed!"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p3 VIRTUAL_ENV=/workspace/omes-bot/.venv && ruff format --check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.26,
+      "output_tail": "589 files already formatted"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p3 VIRTUAL_ENV=/workspace/omes-bot/.venv && mypy omega_prime/",
+      "exit_code": 0,
+      "duration_s": 54.84,
+      "output_tail": "Success: no issues found in 462 source files"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p3 VIRTUAL_ENV=/workspace/omes-bot/.venv && pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "duration_s": 237.33,
+      "output_tail": "27 failed, 4777 passed, 11 skipped, 15 warnings. Missing/empty prime-agent checkout and rlm/runtime files; all 27 failure node IDs recorded in 99-VALIDATION.md.",
+      "output_artifact": "artifact://16",
+      "baseline_revision": "44b28dfd50be6a63b175227a6f748def6f4bcc9c"
+    },
+    {
+      "cmd": [
+        "/workspace/omes-bot/.venv/bin/python",
+        "-c",
+        "from pathlib import Path\nimport json,re,yaml\nroot=Path('.')\np=root/'.planning/phases/99-solo-mode-desk-optional'\nplans={}\nfor n in range(1,5):\n    key=f'99-{n:02}'\n    path=p/f'{key}-PLAN.md'\n    text=path.read_text()\n    meta=yaml.safe_load(text.split('---',2)[1])\n    assert meta['phase']=='99-solo-mode-desk-optional'\n    assert meta['plan']==f'{n:02}' and meta['type']=='execute'\n    assert meta['wave']==(1 if n==1 else 2)\n    assert meta['depends_on']==([] if n==1 else ['99-01'])\n    assert set(meta['requirements']) <= {'G3','G11-desk-vars'}\n    assert meta['must_haves']['truths'] and meta['must_haves']['artifacts']\n    assert all(isinstance(x,str) for group in ['truths','artifacts','key_links'] for x in meta['must_haves'][group]),key\n    tasks=re.findall(r'<task type=\"auto\">(.*?)</task>',text,re.S)\n    assert 1<=len(tasks)<=3\n    for task in tasks:\n        for tag in ['name','files','action','verify','done']:\n            assert f'<{tag}>' in task and f'</{tag}>' in task,(key,tag)\n    for target in re.findall(r'^@([^\\n]+)',text,re.M):\n        assert (root/target).exists(),(key,target)\n    assert '$PWD/.venv' not in text and ' .venv/bin/python' not in text,key\n    plans[key]=meta\nseen={}\nfor key,meta in plans.items():\n    for name in meta['files_modified']:\n        assert name not in seen,(key,name,seen.get(name))\n        seen[name]=key\nfor name in ['99-CONTEXT.md','99-RESEARCH.md','99-VALIDATION.md']:\n    assert (p/name).is_file()\nvalidation=(p/'99-VALIDATION.md').read_text()\nassert 'PYTHONPATH=/workspace/omes-bot-wt/p3' in validation\nassert '/workspace/omes-bot/.venv/bin' in validation\nassert len(set(re.findall(r'omega_prime/tests/[^` \\n]+::[^` \\n]+',validation)))==27\ncontext=(p/'99-CONTEXT.md').read_text()\nnodes=re.findall(r'^### n[1-5] (.+)$',context,re.M)\nassert len(nodes)==5 and nodes[0]=='understand' and nodes[-1]=='synthesize' and 'critique' in nodes\nfor section in re.split(r'^### n[1-5] .+$',context,flags=re.M)[1:]:\n    steps=re.findall(r'^\\d+\\. ',section.split('## Verification ownership')[0],re.M)\n    assert 4<=len(steps)<=8\nprint('PASS: four executable GSD plans; valid YAML/task sections/context paths; acyclic 1+3 waves; disjoint source ownership; designated interpreter; all 27 baseline failure IDs; five-node fallback plan')\n"
+      ],
+      "exit_code": 0,
+      "output_tail": "PASS: four executable GSD plans; valid YAML/task sections/context paths; acyclic 1+3 waves; disjoint source ownership; designated interpreter; all 27 baseline failure IDs; five-node fallback plan",
+      "check": "plan_schema",
+      "cwd": "/workspace/omes-bot-wt/p3",
+      "env": {
+        "PYTHONPATH": "/workspace/omes-bot-wt/p3"
+      }
+    },
+    {
+      "cmd": [
+        "/workspace/omes-bot/.venv/bin/python",
+        "-c",
+        "from pathlib import Path\nfrom omega_prime.tests.test_docs import _broken_links\np=Path('.planning/phases/99-solo-mode-desk-optional')\nissues=[]\nfor file in sorted(p.glob('99-*-PLAN.md')):\n    text=file.read_text()\n    for tag in ['objective','context','tasks','verification','output','name','files','action','verify','done']:\n        if text.count('<'+tag+'>')!=text.count('</'+tag+'>'):\n            issues.append(str(file)+': unbalanced '+tag)\n    issues.extend(str(file)+': '+e for e in _broken_links(file,text))\nprint('\\n'.join(issues) if issues else 'PASS: balanced planning tags and all Markdown links resolve')\nraise SystemExit(bool(issues))\n"
+      ],
+      "exit_code": 0,
+      "output_tail": "PASS: balanced planning tags and all Markdown links resolve",
+      "check": "balanced_tags_and_links",
+      "cwd": "/workspace/omes-bot-wt/p3",
+      "env": {
+        "PYTHONPATH": "/workspace/omes-bot-wt/p3"
+      }
+    },
+    {
+      "cmd": [
+        "/workspace/omes-bot/.venv/bin/python",
+        "-c",
+        "from pathlib import Path\nimport yaml\nissues=[]\nfor file in Path('.planning/phases/99-solo-mode-desk-optional').glob('99-*-PLAN.md'):\n    meta=yaml.safe_load(file.read_text().split('---',2)[1])\n    for group in ['truths','artifacts','key_links']:\n        for i,item in enumerate(meta['must_haves'][group]):\n            if not isinstance(item,str):\n                issues.append(f'{file}: must_haves.{group}[{i}] is {type(item).__name__}, must be string')\nprint('\\n'.join(issues) if issues else 'PASS: GSD must_haves values are strings')\nraise SystemExit(bool(issues))\n"
+      ],
+      "exit_code": 0,
+      "output_tail": "PASS: GSD must_haves values are strings",
+      "check": "yaml_types",
+      "cwd": "/workspace/omes-bot-wt/p3",
+      "env": {
+        "PYTHONPATH": "/workspace/omes-bot-wt/p3"
+      }
+    },
+    {
+      "cmd": [
+        "/workspace/omes-bot/.venv/bin/python",
+        "-c",
+        "from pathlib import Path\nimport json, subprocess, yaml\nroot=Path('.')\ntracked=subprocess.check_output(['git','diff','--name-only','HEAD'],text=True).splitlines()\nuntracked=subprocess.check_output(['git','ls-files','--others','--exclude-standard'],text=True).splitlines()\nallowed={'.planning/ROADMAP.md','.planning/STATE.md','.planning/state.json','.receipts/bot-00-omega-prime/phase-99-plan.json'}\nchanged=sorted(set(tracked+untracked))\nfor name in changed:\n    assert name in allowed or name.startswith('.planning/phases/99-solo-mode-desk-optional/'),name\nassert changed\nroadmap=(root/'.planning/ROADMAP.md').read_text()\nfor n in range(97,104):\n    assert f'- [ ] Phase {n}:' in roadmap,n\nstate=yaml.safe_load((root/'.planning/STATE.md').read_text().split('---',2)[1])\nassert state['current_phase']==99 and state['progress']['total_plans']==4\nassert state['progress']['completed_phases']==0 and state['progress']['completed_plans']==0\nmachine=json.loads((root/'.planning/state.json').read_text())\nassert machine['phases'][0]['number']==99\nassert 'Four unexecuted plans' in machine['next']['reason']\nfrom omega_prime.tests.test_docs import _broken_links\nassert not _broken_links(root/'.planning/ROADMAP.md',roadmap)\nprint('PASS: all changed paths are Phase 99 planning/state/receipt only; 7 unexecuted milestone phases; 4 unexecuted plans; roadmap links resolve')\nprint('\\n'.join(changed))\n"
+      ],
+      "exit_code": 0,
+      "output_tail": "PASS: all changed paths are Phase 99 planning/state/receipt only; 7 unexecuted milestone phases; 4 unexecuted plans; roadmap links resolve\n.planning/ROADMAP.md\n.planning/STATE.md\n.planning/phases/99-solo-mode-desk-optional/99-01-PLAN.md\n.planning/phases/99-solo-mode-desk-optional/99-02-PLAN.md\n.planning/phases/99-solo-mode-desk-optional/99-03-PLAN.md\n.planning/phases/99-solo-mode-desk-optional/99-04-PLAN.md\n.planning/phases/99-solo-mode-desk-optional/99-CONTEXT.md\n.planning/phases/99-solo-mode-desk-optional/99-RESEARCH.md\n.planning/phases/99-solo-mode-desk-optional/99-VALIDATION.md\n.planning/state.json",
+      "check": "planning_only_scope",
+      "cwd": "/workspace/omes-bot-wt/p3",
+      "env": {
+        "PYTHONPATH": "/workspace/omes-bot-wt/p3"
+      }
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Ruff lint passes on the unchanged implementation tree.",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "Ruff formatting check passes for 589 implementation files.",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "Mypy passes for 462 source files.",
+      "evidence_command_index": 6
+    },
+    {
+      "claim": "The designated-venv full-suite baseline is not green: 27 named failures, 4777 passes, 11 skips; baseline failures are retained, not hidden or repaired by this planning change.",
+      "evidence_command_index": 7,
+      "expects_failure": true
+    },
+    {
+      "claim": "Four GSD execute plans have valid metadata/tasks/context paths, 1+3 dependency waves, disjoint declared files, designated Python commands, and all 27 baseline failure IDs recorded.",
+      "evidence_command_index": 8
+    },
+    {
+      "claim": "Planning tags are balanced and planning Markdown links resolve.",
+      "evidence_command_index": 9
+    },
+    {
+      "claim": "GSD must_haves truth/artifact/key-link metadata entries are strings rather than unintended YAML mappings.",
+      "evidence_command_index": 10
+    },
+    {
+      "claim": "All observed changed paths are planning/state/receipt only; v20 lists seven unexecuted phases, state points to Phase 99 with four unexecuted plans, and roadmap plan links resolve.",
+      "evidence_command_index": 11
+    }
+  ],
+  "review_corrections": [
+    "Kept Phase 97 docs question wire change outside Phase 99 implementation scope; required prerequisite stop.",
+    "Corrected wrong worktree-local venv paths and named exact future proof commands.",
+    "Corrected malformed planning task tags and colon-bearing YAML scalars; final structural/type checks pass.",
+    "Kept ordinary Markdown path/anchor semantics separate from package-root skill conventions and inline-code inventory.",
+    "Recorded 27 baseline node IDs and parent-only generated-output ownership."
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Phase 99 runtime behavior: implementation was explicitly not authorized or performed in this session.",
+    "Phase 97/98 completion and upstream substrate question wire contract: current client still sends query; execution must stop until prerequisite evidence is verified.",
+    "Full pytest suite is not green in this worktree: 27 retained baseline failures tied to missing/empty prime-agent and runtime files. No submodule initialization or package installation was attempted.",
+    "No live substrate or Desk calls, connector restart, deployment, push, PR, merge, or operator configuration change.",
+    "The external wiring audit was outside the authorized worktree and not read; supplied audit claims were checked against local source instead.",
+    "Prompt assembly/generator checks were not rerun because this session changed no prompt, skill, generator, or generated output.",
+    "No secret-scanner claim; live secret/configuration values were not inspected."
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/state.json",
+    ".planning/phases/99-solo-mode-desk-optional/99-CONTEXT.md",
+    ".planning/phases/99-solo-mode-desk-optional/99-RESEARCH.md",
+    ".planning/phases/99-solo-mode-desk-optional/99-01-PLAN.md",
+    ".planning/phases/99-solo-mode-desk-optional/99-02-PLAN.md",
+    ".planning/phases/99-solo-mode-desk-optional/99-03-PLAN.md",
+    ".planning/phases/99-solo-mode-desk-optional/99-04-PLAN.md",
+    ".planning/phases/99-solo-mode-desk-optional/99-VALIDATION.md",
+    ".receipts/bot-00-omega-prime/phase-99-plan.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "Revert the local planning commit; no runtime or live configuration changes require rollback.",
+  "approvals": [],
+  "approved_by": null,
+  "destructive": false
+}

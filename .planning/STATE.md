@@ -1,20 +1,20 @@
 ---
 gsd_state_version: "1.0"
-milestone: v19
-milestone_name: Installer bindings
-status: Milestone complete
-stopped_at: v19 phase 96 verified. Phase 77.1 live UAT stays user-owned.
-last_updated: "2026-10-15T05:30:00.000Z"
-last_activity: 2026-10-15
-last_activity_desc: Per-install Linear, Notion, and optional gateway setup (graph ut-mv925n7i-6a9cd5f0)
-state_head: 034a08a
+milestone: v20
+milestone_name: Wiring
+status: Planning phase 99
+stopped_at: Four Phase 99 plans authored; execution awaits verified Phase 97/98 prerequisites.
+last_updated: "2026-10-21"
+last_activity: 2026-10-21
+last_activity_desc: Planning Solo mode, Desk optional (GSD 99; wiring phase 3)
+state_head: 44b28dfd50be6a63b175227a6f748def6f4bcc9c
 progress:
-  total_phases: 1
-  completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
-  percent: 100
-current_phase: 96
+  total_phases: 7
+  completed_phases: 0
+  total_plans: 4
+  completed_plans: 0
+  percent: 0
+current_phase: 99
 current_plan: null
 ---
 
@@ -25,14 +25,14 @@ current_plan: null
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** v19 Installer bindings is complete (phase 96). v18 stays shipped. v17 stays shipped. Historical v17 note: every first-party prompt is wrapped in XML and `python -m omega_prime.tooling.prompt_format --check` enforces it. v1–v16 stay shipped. The only unchecked ROADMAP phase is 77.1, whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–18 are on main (`.planning/BATCH-01-REPORT.md` … `BATCH-18-REPORT.md`); batch 19 was not the accepted seven. The accepted seven are implemented as v18 phases 89-95. `ci / lint` on main was RED from batch 05 to 17 (21 ruff errors the batch reports had called clean) and was repaired in PR #31: every batch gate MUST run the exact CI commands (`ruff check omega_prime/`, `ruff format --check omega_prime/`, `mypy omega_prime/`, full pytest, plus the docs/plugin/catalog checks). The red-team pin is `f6d2fc2` (purple-team v1.4); `redteam-node-audit` has been GREEN with 0 advisories since batch 03, and upstream v1.5 has not shipped. v16 "Enterprise Hardening and Continuous Verification" is complete and archived (audit PASS 13/13; `.planning/milestones/v16-MILESTONE-AUDIT.md`): purple-team sidecar hardened and refresh-automated (ships BLOCKED), protected publish environment live, OTLP/SLOs, token rotation + quotas, sandboxed verification gates, live evals with regression tracking. Self-contained run package: `.planning/package/DELIVERABLE.md`. Operator next actions: sign the rules-of-engagement artifact to unblock live purple-team engagements; approve the first `workflow_dispatch publish:true` run; run the six deferred 77.1 live UAT rows after the next Grok Bot upload (`/gsd:verify-work 77.1`).
+**Current focus:** v20 Wiring, Phase 99 — Solo mode, Desk optional. Planning only; no implementation authorized in this session. Phases 97–103 map to wiring phases 1–7. Phase 99 depends on Phase 98 and Phase 97's substrate `docs_search(question=...)` contract; their completion is not established in this checkout. Preserve all shipped milestones and the user-owned Phase 77.1 live UAT deferral.
 
 ## Current Position
 
-Phase: Milestone v19 complete (phase 96).
-Plan: -
-Status: Milestone complete. Phase 77.1 stays verification_deferred_human. Do not re-execute phases 85-96. Do not mark 77.1 passed.
-Last activity: 2026-10-15 - installer bindings verified. Pytest 4679 passed, 3 skipped.
+Phase: 99 — Solo mode, Desk optional (v20 Wiring).
+Plan: 99-01 through 99-04 in .planning/phases/99-solo-mode-desk-optional/ (unexecuted; Wave 1 routing, Wave 2 prompts/skills/docs).
+Status: Planning only; implementation not started. Verify Phase 97/98 prerequisites before execution, including substrate docs_search question wire mapping. Phase 77.1 stays verification_deferred_human.
+Last activity: 2026-10-21 — v20 registered; four Phase 99 plans, research, and validation matrix authored; review and artifact verification are recorded in the planning receipt.
 
 ## Closeout
 
@@ -102,6 +102,7 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ### Roadmap Evolution
 
 - v14 Boundary alignment shipped 2026-10-10: phases 71–74, audit passed 10/10.
+- v20 Wiring opened for phases 97–103. Current planning target: Phase 99; no wiring implementation completion inferred from the roadmap.
 - Count text in BND-05 and BND-06 moved from 110/147 to 117/154 with the phase 73 tools.
 - v14 application updates were merged through PR #17; v15 continues on `v15-integrated-readiness`.
 - v15 has phases 75–78 and 21 approved requirements, with no unrelated seeds or upstream changes.
@@ -143,10 +144,10 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Session
 
-**Last session:** 2026-10-12
-**Stopped at:** Phase 84 complete — all phases complete
-**Resume file:** .planning/milestones/v15-phases/77.1-grok-bot-import-packaging/77.1-UAT.md
+**Last session:** 2026-10-21
+**Stopped at:** Phase 99 planning; implementation not started.
+**Resume file:** .planning/phases/99-solo-mode-desk-optional/99-01-PLAN.md
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Review Phase 99 plans and verify Phase 97/98 prerequisite contracts before a separately authorized execution session.

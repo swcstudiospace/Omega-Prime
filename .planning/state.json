@@ -1,12 +1,19 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v16 — Enterprise Hardening and Continuous Verification",
-  "phases": [],
+  "milestone": "v20 — Wiring",
+  "phases": [
+    {
+      "number": 99,
+      "name": "Solo mode, Desk optional",
+      "status": "planning",
+      "directory": ".planning/phases/99-solo-mode-desk-optional"
+    }
+  ],
   "next": {
     "command": "/gsd:progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "label": "Review Phase 99 execution prerequisites",
+    "reason": "Four unexecuted plans exist; verify Phase 97/98 contracts before separately authorized execution"
   },
-  "updated_at": "2026-10-13T04:49:21.851Z"
+  "updated_at": "2026-10-21"
 }
