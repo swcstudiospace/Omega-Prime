@@ -204,3 +204,14 @@ def test_client_time_helpers_do_not_throw() -> None:
     absolute, relative = json.loads(out)
     assert "03:00" in absolute
     assert relative == "2 minutes ago"
+
+
+def test_numbered_task_ids_stay_distinct_and_embedded_keys_redact() -> None:
+    from secrets import token_hex
+
+    ids = ["gb:task-dashboard-1", "gb:task-dashboard-2", "feat/task-dashboard"]
+    assert redact_value(ids, env={}) == ids
+    embedded = "x" + "sk" + "-" + token_hex(10)
+    assert embedded[1:] not in str(redact_value(f"note {embedded}", env={}))
+    long_lower = "a" + "sk" + "-" + "q" * 24
+    assert long_lower[1:] not in str(redact_value(long_lower, env={}))

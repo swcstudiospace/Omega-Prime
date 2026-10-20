@@ -25,10 +25,13 @@ _ASSIGNMENT_SECRET = re.compile(
     r"(?i)(\b(?:password|passwd|pat|cookie|token|key|secret|auth|bearer)"
     r"\b['\"]?\s*[=:]\s*['\"]?)([^\s'\",;]+)"
 )
-# The lowercase-and-hyphen branch-name run after word-internal "sk-" is
-# benign (for example "task-dashboard"); keys mixing digits, uppercase, or
-# underscores are not exempt.
-_INNER_SK = re.compile(r"(?<=[A-Za-z0-9])sk-(?=[a-z-]*(?:$|[^A-Za-z0-9_-]))")
+# A word-internal "sk-" followed by a short lowercase word and short
+# lowercase/digit hyphen segments is a name, not a key (for example
+# "task-dashboard" or "task-dashboard-2"). Uppercase, underscores, or any
+# segment longer than 16 characters still go to the shared redactor.
+_INNER_SK = re.compile(
+    r"(?<=[A-Za-z0-9])sk-(?=[a-z]{1,16}(?:-[a-z0-9]{1,16})*(?:$|[^A-Za-z0-9_-]))"
+)
 _SK_SHIELD = "\x00sk\x00"
 
 
