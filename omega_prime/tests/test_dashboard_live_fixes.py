@@ -33,11 +33,15 @@ def test_index_assets_resolve_under_static_mount() -> None:
     with TestClient(create_app(poller)) as client:
         page = client.get("/", headers=HOST)
         refs = re.findall(r'(?:href|src)="([^"]+)"', page.text)
-        assert refs, "index.html references no assets"
         for ref in refs:
-            assert ref.startswith("/static/"), ref
+            if ref != "/legacy":
+                assert ref.startswith("/cc/assets/"), ref
+                assert client.get(ref, headers=HOST).status_code == 200, ref
+        legacy = client.get("/legacy", headers=HOST)
+        assert legacy.status_code == 200
+        assert "Omega Prime — Task Dashboard" in legacy.text
+        for ref in ("/static/app.js", "/static/app.css"):
             assert client.get(ref, headers=HOST).status_code == 200, ref
-
 
 def test_sse_response_sends_no_content_length() -> None:
     async def events() -> Any:

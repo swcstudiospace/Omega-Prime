@@ -21,7 +21,7 @@ from omega_prime.dashboard import __version__
 from omega_prime.dashboard.poller import DashboardPoller
 
 _SECURITY_HEADERS = {
-    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'",
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
 }
@@ -210,8 +210,9 @@ def create_app(
 ) -> Starlette:
     """Build the local dashboard application around a shared poller."""
     static_dir = Path(__file__).resolve().parent / "static"
-    index_path = static_dir / "index.html"
-
+    legacy_index = static_dir / "index.html"
+    cc_dir = static_dir / "cc"
+    cc_index = cc_dir / "index.html"
     @asynccontextmanager
     async def lifespan(_: Starlette) -> AsyncIterator[None]:
         await poller.start()
@@ -220,10 +221,81 @@ def create_app(
         finally:
             await poller.stop()
 
+    async def unavailable() -> Response:
+        return Response(
+            '<!doctype html><title>Command Center unavailable</title>'
+            '<p>The built Command Center is unavailable. '
+            '<a href="/legacy">Open the legacy dashboard</a>.</p>',
+            status_code=503,
+            media_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def index(_: Any) -> Response:
-        if not index_path.is_file():
+        if not cc_index.is_file():
+            return await unavailable()
+        return FileResponse(
+            cc_index, media_type="text/html", headers={"Cache-Control": "no-cache"}
+        )
+
+    async def legacy(_: Any) -> Response:
+        if not legacy_index.is_file():
             return Response("not found", status_code=404)
-        return FileResponse(index_path)
+        return FileResponse(
+            legacy_index, media_type="text/html", headers={"Cache-Control": "no-cache"}
+        )
+
+    async def cc_redirect(_: Any) -> Response:
+        return Response(
+            status_code=308,
+            headers={"Location": "/cc/"},
+        )
+
+    async def cc_asset(request: Any) -> Response:
+        relative = request.path_params["asset_path"]
+        parts = relative.split("/")
+        if (
+            not relative
+            or any(part in {"", ".", ".."} or part.startswith(".") for part in parts)
+            or relative.endswith((".map",))
+            or "node_modules" in parts
+        ):
+            return Response("not found", status_code=404)
+        if len(parts) == 2 and parts[0] == "assets":
+            suffix = Path(parts[1]).suffix.lower()
+            if suffix not in {".js", ".css", ".woff2"}:
+                return Response("not found", status_code=404)
+        elif len(parts) == 2 and parts[0] == "licenses" and parts[1].endswith(".txt"):
+            suffix = ".txt"
+        else:
+            return Response("not found", status_code=404)
+        target = (cc_dir / relative).resolve()
+        if not target.is_relative_to(cc_dir.resolve()) or not target.is_file():
+            return Response("not found", status_code=404)
+        media_type = {
+            ".js": "text/javascript",
+            ".css": "text/css",
+            ".woff2": "font/woff2",
+            ".txt": "text/plain",
+        }[suffix]
+        headers = {}
+        if suffix != ".txt" and any(
+            len(part) >= 8 and "-" in part for part in parts
+        ):
+            headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            headers["Cache-Control"] = "no-cache"
+        return FileResponse(target, media_type=media_type, headers=headers)
+
+    async def legacy_asset(request: Any) -> Response:
+        name = request.path_params["asset_name"]
+        if name not in {"app.js", "app.css"}:
+            return Response("not found", status_code=404)
+        target = (static_dir / name).resolve()
+        if not target.is_relative_to(static_dir.resolve()) or not target.is_file():
+            return Response("not found", status_code=404)
+        media_type = "text/javascript" if name.endswith(".js") else "text/css"
+        return FileResponse(target, media_type=media_type, headers={"Cache-Control": "no-cache"})
 
     async def snapshot(_: Any) -> Response:
         value = poller.snapshot() or _empty_snapshot()
@@ -262,11 +334,11 @@ def create_app(
         lifespan=lifespan,
         routes=[
             Route("/", index, methods=["GET"]),
-            Mount(
-                "/static",
-                app=StaticFiles(directory=static_dir, check_dir=False),
-                name="static",
-            ),
+            Route("/cc", cc_redirect, methods=["GET"]),
+            Route("/cc/", index, methods=["GET"]),
+            Route("/cc/{asset_path:path}", cc_asset, methods=["GET"]),
+            Route("/legacy", legacy, methods=["GET"]),
+            Route("/static/{asset_name}", legacy_asset, methods=["GET"]),
             Route("/api/snapshot", snapshot, methods=["GET"]),
             Route("/api/stream", stream, methods=["GET"]),
             Route("/healthz", health, methods=["GET"]),

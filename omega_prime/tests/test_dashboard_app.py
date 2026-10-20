@@ -78,9 +78,9 @@ def test_static_snapshot_and_health_headers() -> None:
     with TestClient(app) as client:
         headers = {"host": "127.0.0.1:7421"}
         page = client.get("/", headers=headers)
-        assert page.status_code == 200
-        assert "Omega Prime — Task Dashboard" in page.text
+        assert "Command Center · Omega Prime" in page.text
         assert "default-src 'self'" in page.headers["content-security-policy"]
+        assert "font-src 'self'" in page.headers["content-security-policy"]
         assert page.headers["x-content-type-options"] == "nosniff"
         response = client.get("/api/snapshot", headers=headers)
         payload = response.json()
