@@ -3,3 +3,4 @@ target/
 .state/
 scratch/
 *.log
+sandbox/image/sandbox-agent

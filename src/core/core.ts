@@ -77,7 +77,7 @@ export class Core extends EventEmitter {
 
   #spawnOmp(model: string, thinking = "high") {
     const t = this.tier!;
-    const proc = t.spawnStdio(["omp", "--mode", "rpc-ui", "--no-title", "--no-lsp", "--model", model, "--thinking", thinking, "--approval-mode", "yolo", "--max-time", "3600s"], { cwd: t.workdir });
+    const proc = t.spawnStdio(["omp", "--mode", "rpc-ui", "--no-title", "--no-lsp", "--model", model, "--thinking", thinking, "--approval-mode", "yolo"], { cwd: t.workdir });
     return new OmpRpcClient(proc, `omp[${t.name}]`);
   }
 
@@ -103,7 +103,8 @@ export class Core extends EventEmitter {
     });
     c.on("frame", (f) => {
       if (f.type === "message_end" && f.message?.role === "assistant") { const t = textOf(f.message); if (t) rec.lastText = t.slice(-4000); }
-      if (f.type === "agent_start" || f.type === "turn_start") if (rec.status !== "waiting") rec.status = "running";
+      // Never overwrite a requested abort (frames keep arriving while omp winds down).
+      if (f.type === "agent_start" || f.type === "turn_start") if (rec.status === "starting" || rec.status === "running") rec.status = "running";
     });
     await c.command("set_ask_dialog", { enabled: true }, 60_000);
     rec.status = "running";
@@ -116,6 +117,7 @@ export class Core extends EventEmitter {
       this.emit("event", { event: "fallback", stageId: rec.id, from: model, to: fb, reason: r.error?.message ?? r.status });
       return this.#drive(rec, message, fb, thinking);
     }
+    if (r.status === "aborted" && st() !== "aborted") rec.status = "aborted";
     if (st() !== "aborted") rec.status = r.status === "completed" ? "completed" : "failed";
     if (r.status !== "completed" && st() !== "aborted") rec.error = r.error?.message ?? `prompt_result status=${r.status}`;
     await c.close();
@@ -127,7 +129,7 @@ export class Core extends EventEmitter {
     if (!rec.client || ["completed", "failed", "aborted"].includes(rec.status)) throw new StaleAnswerError(requestId, `stage ${stageId} is ${rec.status}`);
     const r = rec.client.answer(requestId, input);
     const q = rec.questions.find((x) => x.requestId === requestId); if (q) { q.answered = input; q.answeredAt = aedt(); }
-    if (rec.client.pendingQuestions.length === 0) rec.status = "running";
+    if (rec.client.pendingQuestions.length === 0 && rec.status === "waiting") rec.status = "running";
     return r;
   }
 

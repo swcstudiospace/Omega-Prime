@@ -10,6 +10,7 @@ os.makedirs(f"{ROOT}/.state/e2e", exist_ok=True)
 LOG = open(f"{ROOT}/.state/e2e/{TS}.jsonl", "w")
 BIN = f"{ROOT}/target/release/omp-sandbox-anda"
 FAST = "--fast" in sys.argv  # skip the execute stage
+ABORT_ONLY = "--abort-only" in sys.argv  # up -> abort stage -> down
 
 def log(kind, obj):
     LOG.write(json.dumps({"t": time.strftime("%H:%M:%S"), "kind": kind, "obj": obj}) + "\n"); LOG.flush()
@@ -39,9 +40,9 @@ def call(tool, args=None, timeout=900):
         if o.get("event") == "__eof__": raise SystemExit("wrapper exited")
     raise TimeoutError(tool)
 
-def next_event(pred, timeout):
-    end = time.time() + timeout
-    while time.time() < end:
+def next_event(pred, timeout=None):
+    end = None if timeout is None else time.time() + timeout
+    while end is None or time.time() < end:
         for i, e in enumerate(pending_events):
             if pred(e): return pending_events.pop(i)
         try: pending_events.append(q.get(timeout=5))
@@ -64,13 +65,28 @@ check("sandbox tier", u.get("tier"), {"tier": u.get("tier"), "skipped": u.get("s
 check("omp RPC lists GSD-Core 1.18.0 commands", (u.get("omp") or {}).get("gsdCommands", 0) >= 60, u.get("omp"))
 check("fixture seeded via VM mount + git in sandbox", (u.get("seeded") or {}).get("gitExit") == 0, u.get("seeded"))
 check("up attestation=mock", up.get("attestation") == "mock" and u.get("attestation") == "mock")
-hostroot = (call("sandbox_status").get("result", {}).get("owned") or {}).get("hostRoot")
+owned0 = call("sandbox_status").get("result", {}).get("owned") or {}
+hostroot = owned0.get("hostRoot")
+osbox = owned0.get("sandbox") if u.get("tier") == "openshell-podman" else None  # OpenShell sandbox name
+OPENSHELL = os.path.expanduser("~/.local/opt/openshell/0.1.4/bin/openshell")
+def sbx(cmd):
+    """Run a shell command inside the OpenShell sandbox's workdir (host-side check, not via the wrapper)."""
+    r = subprocess.run([OPENSHELL, "sandbox", "exec", "-n", osbox, "--no-tty", "--no-login-shell", "--workdir", "/sandbox/work", "--", "sh", "-c", cmd],
+                       capture_output=True, text=True, env={**os.environ, "OPENSHELL_TELEMETRY_ENABLED": "false"})
+    return r.stdout
+if osbox:
+    check("tier is OpenShell on rootless Podman", (owned0.get("info") or {}).get("podman", {}).get("rootless") is True and len((owned0.get("info") or {}).get("containers") or []) == 2,
+          {k: (owned0.get("info") or {}).get(k) for k in ("podman", "gateway", "containers")})
 
 def run_stage(stage, cmd, task, timeout, on_question=None, abort_after=None):
     r = call("run_gsd_stage", {"stage": stage, "gsd_command": cmd, "task": task}, 60)
     sid = r["result"]["stageId"]; t0 = time.time(); aborted = False
     while True:
-        e = next_event(lambda e: e.get("stageId") == sid or e.get("event") == "__eof__", timeout)
+        try:
+            e = next_event(lambda e: e.get("stageId") == sid or e.get("event") == "__eof__", 10 if abort_after else timeout)
+        except TimeoutError:
+            e = {}
+        if e.get("event") == "__eof__": raise SystemExit("wrapper exited mid-stage")
         if e.get("event") == "question" and on_question: on_question(sid, e)
         elif e.get("event") == "question":
             call("answer_question", {"stage_id": sid, "request_id": e["requestId"]})
@@ -79,6 +95,7 @@ def run_stage(stage, cmd, task, timeout, on_question=None, abort_after=None):
             aborted = True; R["abort_call"] = call("abort", {"stage_id": sid}, 120)
     return sid, e, call("sandbox_status", {"stage_id": sid})["result"]
 
+if ABORT_ONLY: FAST = True
 # --- plan stage on Sol with a real ask-dialog question + stale answer
 qa = {}
 def on_q(sid, e):
@@ -101,23 +118,27 @@ FIRST, before reading or planning anything, call the `ask` tool exactly once wit
 Then plan phase 1 using the chosen language (e.g. French -> `Bonjour, NAME !`; adjust GREET-01 text accordingly).
 Exactly one plan (01-01). No research, no plan-checker loop, no further questions of any kind (never ask in plain text).
 Commit the plan locally. Never push, never open a PR, no network installs."""
-sid, done, st = run_stage("plan", "gsd-plan-phase", PLAN_TASK, 2400, on_question=on_q)
-R["plan"] = {"stageId": sid, "done": done, "status": st}
-check("plan stage completed", st["status"] == "completed", {"status": st["status"], "error": st.get("error")})
-check("plan stage model = openai-codex/gpt-6.1-sol", "openai-codex/gpt-6.1-sol" in st["modelsSeen"], st["modelsSeen"])
-check("real ask-dialog question answered", qa.get("answer", {}).get("ok"), {k: qa.get(k) for k in ("method", "question", "options", "picked")})
-check("stale answer rejected", qa.get("stale", {}).get("ok") is False and qa["stale"].get("code") == "stale_answer", qa.get("stale"))
-check("unknown request id rejected", qa.get("bogus", {}).get("ok") is False and qa["bogus"].get("code") == "stale_answer", qa.get("bogus"))
-if hostroot:
-    plans = glob.glob(f"{hostroot}/work/.planning/phases/*/*PLAN*.md")
-    check("plan file written in sandbox", plans, [p.replace(hostroot, "<ws>") for p in plans])
+if not ABORT_ONLY:
+    sid, done, st = run_stage("plan", "gsd-plan-phase", PLAN_TASK, None, on_question=on_q)
+    R["plan"] = {"stageId": sid, "done": done, "status": st}
+    check("plan stage completed", st["status"] == "completed", {"status": st["status"], "error": st.get("error")})
+    check("plan stage model = openai-codex/gpt-6.1-sol", "openai-codex/gpt-6.1-sol" in st["modelsSeen"], st["modelsSeen"])
+    check("real ask-dialog question answered", qa.get("answer", {}).get("ok"), {k: qa.get(k) for k in ("method", "question", "options", "picked")})
+    check("stale answer rejected", qa.get("stale", {}).get("ok") is False and qa["stale"].get("code") == "stale_answer", qa.get("stale"))
+    check("unknown request id rejected", qa.get("bogus", {}).get("ok") is False and qa["bogus"].get("code") == "stale_answer", qa.get("bogus"))
+    if hostroot:
+        plans = glob.glob(f"{hostroot}/work/.planning/phases/*/*PLAN*.md")
+        check("plan file written in sandbox", plans, [p.replace(hostroot, "<ws>") for p in plans])
+    elif osbox:
+        plans = [l for l in sbx("ls .planning/phases/*/*PLAN*.md 2>/dev/null").splitlines() if l]
+        check("plan file written in sandbox", plans, plans)
 
 if not FAST:
     EXEC_TASK = """1
 
 Disposable e2e fixture. Execute phase 1's plan exactly. Inline execution is fine. No questions of any kind.
 Commit locally. Never push, never open a PR, no network installs."""
-    sid, done, st = run_stage("execute", "gsd-execute-phase", EXEC_TASK, 2400)
+    sid, done, st = run_stage("execute", "gsd-execute-phase", EXEC_TASK, None)
     R["execute"] = {"stageId": sid, "done": done, "status": st}
     check("execute stage completed", st["status"] == "completed", {"status": st["status"], "error": st.get("error")})
     check("execute stage model = openai-codex/gpt-6-luna", "openai-codex/gpt-6-luna" in st["modelsSeen"], st["modelsSeen"])
@@ -125,10 +146,13 @@ Commit locally. Never push, never open a PR, no network installs."""
         w = f"{hostroot}/work"
         out = subprocess.run(["sh", "-c", "sh ./greet.sh Ada; echo rc=$?; sh ./greet.sh >/dev/null 2>&1; echo rc_noarg=$?; git log --oneline | head -8"], cwd=w, capture_output=True, text=True)
         check("greet.sh works (executed by Luna in sandbox)", "Ada" in out.stdout and "rc=0" in out.stdout, out.stdout.strip().splitlines())
+    elif osbox:
+        out = sbx("sh ./greet.sh Ada; echo rc=$?; sh ./greet.sh >/dev/null 2>&1; echo rc_noarg=$?; git log --oneline | head -8")
+        check("greet.sh works (executed by Luna in sandbox)", "Ada" in out and "rc=0" in out, out.strip().splitlines())
 
 # --- abort / controlled failure
 ABORT_TASK = "Disposable. Run `sleep 240` with the bash tool, then reply DONE. No questions."
-sid, done, st = run_stage("execute", "gsd-fast", ABORT_TASK, 600, abort_after=25)
+sid, done, st = run_stage("execute", "gsd-fast", ABORT_TASK, None, abort_after=25)
 R["abort"] = {"stageId": sid, "done": done, "status": st}
 check("abort mid-run -> status aborted", st["status"] == "aborted", {"status": st["status"], "abortCall": R.get("abort_call")})
 
@@ -138,9 +162,19 @@ check("down: no leftovers", down.get("ok") and down["result"].get("leftovers") =
 try: p.wait(30)
 except Exception: p.kill()
 check("wrapper exited", p.poll() is not None, p.returncode)
-ps = subprocess.run(["sh", "-c", "ps -eo pid,args | grep -E 'sandbox-agent server|bwrap|omp --mode rpc|auth-broker serve' | grep -v grep || true"], capture_output=True, text=True).stdout.strip()
-check("no sandbox/omp/broker processes left", ps == "", ps.splitlines())
+# Only processes this run owns: the tier's recorded pids, plus anything naming this run's sandbox.
+# (Other agents' host omp sessions on the shared box are not ours and are ignored.)
+ob = (down.get("result") or {}).get("ownedBefore") or {}
+ownpids = [x for x in [ob.get("gatewayPid"), ob.get("podmanServicePid"), ob.get("relayPid"), ob.get("forwardPid"), *(ob.get("children") or []), ready.get("core_pid"), ready.get("wrapper_pid")] if x]
+alive = [str(x) for x in ownpids if os.path.exists(f"/proc/{x}")]
+pat = (osbox or "") + "|" + (hostroot or "__none__")
+named = subprocess.run(["sh", "-c", f"ps -eo pid,args | grep -E '{pat}' | grep -v grep | awk '{{print $1}}' || true"], capture_output=True, text=True).stdout.split()
+ps = " ".join(alive + [f"pid {x} (names this sandbox)" for x in named])  # pids only, never argv (it can carry tokens)
+check("no sandbox/omp/broker processes left", ps == "", {"checkedPids": ownpids, "alive": ps})
 check("workspace dir removed", not hostroot or not os.path.exists(hostroot), hostroot)
+if osbox:
+    ctr = subprocess.run(["sh", "-c", f"podman ps -a --format '{{{{.Names}}}}' | grep -E 'openshell' || true; podman volume ls --format '{{{{.Name}}}}' | grep -F '{osbox}' || true"], capture_output=True, text=True).stdout.strip()
+    check("no OpenShell podman containers/volumes left", ctr == "", ctr.splitlines())
 recs = sorted(glob.glob(f"{ROOT}/.state/receipts/*.json"), key=os.path.getmtime)[-6:]
 bad = [r for r in recs if json.load(open(r)).get("attestation") != "mock"]
 check("every receipt attestation=mock", recs and not bad, [os.path.basename(r) for r in recs])

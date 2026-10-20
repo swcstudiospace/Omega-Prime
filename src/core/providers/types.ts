@@ -1,6 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
-export type TierName = "openshell" | "bwrap" | "agentos-local";
+export type TierName = "openshell-podman" | "openshell" | "bwrap" | "agentos-local";
 
 /** One isolated place where omp + GSD run. Paths passed to exec/spawn are sandbox-side paths. */
 export interface SandboxTier {
