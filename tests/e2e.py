@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Real end-to-end run: Rust wrapper -> TS core -> agentOS VM -> sandbox tier -> omp RPC + GSD-Core.
+"""Real end-to-end run: stdio client -> signed Anda tool_call -> anda_engine_server (Rust) -> TS core -> agentOS VM -> sandbox tier -> omp RPC + GSD-Core.
 Drives the wrapper over stdin/stdout JSON lines. Every line in/out is logged to .state/e2e/<ts>.jsonl.
 Real inference (Sol plan, Luna execute) through omp's auth-broker; no secrets are printed."""
 import json, os, subprocess, sys, threading, time, queue, glob, re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TS = time.strftime("%Y%m%d-%H%M%S")
+TS = time.strftime("%Y%m%d-%H%M%S"); T0 = time.time()
 os.makedirs(f"{ROOT}/.state/e2e", exist_ok=True)
 LOG = open(f"{ROOT}/.state/e2e/{TS}.jsonl", "w")
 BIN = f"{ROOT}/target/release/omp-sandbox-anda"
@@ -56,6 +56,9 @@ def check(name, cond, detail=None):
 
 ready = next_event(lambda e: e.get("event") == "wrapper_ready", 30)
 check("rust wrapper launched TS child", ready.get("core_pid"), {"wrapper_pid": ready.get("wrapper_pid"), "core_pid": ready.get("core_pid")})
+anda = ready.get("anda") or {}
+check("Anda engine server up on loopback (real anda_engine)", ready.get("server_pid") and str(anda.get("addr", "")).startswith("http://127.0.0.1:") and anda.get("engine"),
+      {"server_pid": ready.get("server_pid"), "addr": anda.get("addr"), "engine": anda.get("engine"), "controller": anda.get("controller"), "auth": anda.get("auth")})
 
 up = call("up", {"seed": "tests/fixtures/demo"}, 900)
 u = up.get("result", {})
@@ -65,6 +68,15 @@ check("sandbox tier", u.get("tier"), {"tier": u.get("tier"), "skipped": u.get("s
 check("omp RPC lists GSD-Core 1.18.0 commands", (u.get("omp") or {}).get("gsdCommands", 0) >= 60, u.get("omp"))
 check("fixture seeded via VM mount + git in sandbox", (u.get("seeded") or {}).get("gitExit") == 0, u.get("seeded"))
 check("up attestation=mock", up.get("attestation") == "mock" and u.get("attestation") == "mock")
+acc = up.get("access") or {}
+check("up reached the sandbox through Anda (signed, controller principal)", acc.get("auth") == "ICP signed envelope (Ed25519)" and acc.get("caller") == anda.get("controller") and acc.get("engine") == anda.get("engine") and str(up.get("tee", "")).startswith("none"), acc)
+# Negative auth against the live engine, with the real sandbox behind it.
+probe = call("anda_auth_probe", {}, 120)
+R["auth_probe"] = probe
+cases = (probe.get("result") or {}).get("cases") or []
+check("unauthenticated request through Anda refused", any(c["case"].startswith("unsigned") and c["refused"] for c in cases), [c for c in cases if c["case"].startswith("unsigned")])
+check("Anda auth probe: every bad request refused, controller allowed", (probe.get("result") or {}).get("all_pass") and len(cases) >= 8,
+      [{"case": c["case"], "http": c["http"], "refused": c["refused"], "pass": c["pass"]} for c in cases])
 owned0 = call("sandbox_status").get("result", {}).get("owned") or {}
 hostroot = owned0.get("hostRoot")
 osbox = owned0.get("sandbox") if u.get("tier") == "openshell-podman" else None  # OpenShell sandbox name
@@ -165,7 +177,7 @@ check("wrapper exited", p.poll() is not None, p.returncode)
 # Only processes this run owns: the tier's recorded pids, plus anything naming this run's sandbox.
 # (Other agents' host omp sessions on the shared box are not ours and are ignored.)
 ob = (down.get("result") or {}).get("ownedBefore") or {}
-ownpids = [x for x in [ob.get("gatewayPid"), ob.get("podmanServicePid"), ob.get("relayPid"), ob.get("forwardPid"), *(ob.get("children") or []), ready.get("core_pid"), ready.get("wrapper_pid")] if x]
+ownpids = [x for x in [ob.get("gatewayPid"), ob.get("podmanServicePid"), ob.get("relayPid"), ob.get("forwardPid"), *(ob.get("children") or []), ready.get("core_pid"), ready.get("wrapper_pid"), ready.get("server_pid")] if x]
 alive = [str(x) for x in ownpids if os.path.exists(f"/proc/{x}")]
 pat = (osbox or "") + "|" + (hostroot or "__none__")
 named = subprocess.run(["sh", "-c", f"ps -eo pid,args | grep -E '{pat}' | grep -v grep | awk '{{print $1}}' || true"], capture_output=True, text=True).stdout.split()
@@ -175,9 +187,11 @@ check("workspace dir removed", not hostroot or not os.path.exists(hostroot), hos
 if osbox:
     ctr = subprocess.run(["sh", "-c", f"podman ps -a --format '{{{{.Names}}}}' | grep -E 'openshell' || true; podman volume ls --format '{{{{.Name}}}}' | grep -F '{osbox}' || true"], capture_output=True, text=True).stdout.strip()
     check("no OpenShell podman containers/volumes left", ctr == "", ctr.splitlines())
-recs = sorted(glob.glob(f"{ROOT}/.state/receipts/*.json"), key=os.path.getmtime)[-6:]
+recs = sorted([r for r in glob.glob(f"{ROOT}/.state/receipts/*.json") if os.path.getmtime(r) >= T0 - 1], key=os.path.getmtime)  # this run only
 bad = [r for r in recs if json.load(open(r)).get("attestation") != "mock"]
 check("every receipt attestation=mock", recs and not bad, [os.path.basename(r) for r in recs])
+noacc = [os.path.basename(r) for r in recs if (json.load(open(r)).get("access") or {}).get("caller") != anda.get("controller")]
+check("receipts record Anda access (via anda, caller = controller principal)", recs and not noacc, noacc)
 lines = open(LOG.name).read()
 check("no broker token in transcript", not re.search(r"OMP_AUTH_BROKER_TOKEN\"?\s*[:=]\s*\"?[A-Za-z0-9_\-]{20,}", lines))
 json.dump(R, open(f"{ROOT}/.state/e2e/{TS}.summary.json", "w"), indent=2, default=str)

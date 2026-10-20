@@ -59,9 +59,25 @@ agentOS 0.4.3 findings (worth raising in Rivet Discord or as an issue):
 - Answering an unknown, already-answered or cancelled request, or a request on a closed or terminal session, throws `StaleAnswerError` (`code:"stale_answer"`).
 - The models seen are taken from assistant `message_start` and `message_end` frames.
 
-## Rust wrapper (crates/omp-sandbox-anda)
+## Rust access layer (crates/omp-sandbox-anda, real Anda)
 
-- Plain Rust: std plus serde_json, rustc 1.85.
-- Spawns the TS core, allowlists tool names, forwards requests and stamps `attestation:"mock"` on every line.
-- When its stdin hits EOF, it sends `down` and waits for the core to exit.
-- The `anda` and `tee` features are **seams only**. anda_engine 0.17.4 and anda_core 0.17.1 need rustc 1.95 or later, and a toolchain upgrade was not approved here.
+- Rust 1.99.1 via user-local rustup (`rust-toolchain.toml`); the system rustc 1.85.1 is untouched. Edition 2024, rust-version 1.95.
+- Crates (pinned exact): anda_engine 0.17.4, anda_core 0.17.1, anda_engine_server 0.17.0, anda_web3_client 0.17.0 (feature `client`, the non-TEE SDK).
+- `serve`: spawns the TS core (`core_child.rs`, async, responses by id, other lines queued as events) and builds an Anda `Engine`:
+  - Its identity is the engine key. Management is `BaseManagement{controller: client principal, visibility: Private}`.
+  - The seven sandbox tools (`up`, `run_gsd_stage`, `answer_question`, `sandbox_status`, `abort`, `down`, `poll_events`) are `Tool<BaseCtx>` impls, registered but not exported.
+  - It is served by `anda_engine_server` on loopback only (non-loopback binds are refused), and the server stops after the core exits.
+- Auth path for one request:
+  1. The client builds `RPCRequest{method:"tool_call", params:(ToolInput{name, args, meta{engine, extra{nonce, ts_ms}}},)}`.
+  2. It signs SHA3-256(body) with its Ed25519 key into an ICP `SignedEnvelope` sent in the `Authorization` header, then POSTs to `/default`.
+  3. anda_engine_server verifies the envelope against the body, giving 401 on a mismatch.
+  4. The Engine checks the caller: anonymous or non-controller callers are refused, and so is a `meta.engine` that isn't this engine.
+  5. `ReplayGuard` refuses requests with no nonce or timestamp, a timestamp off by more than 120 s, or a reused nonce.
+  6. The tool forwards to the TS core with `access{via:"anda", caller}`. The core records that in every receipt.
+- `client`: speaks the stdio JSON-lines protocol used by `tests/e2e.py`, signs every request, long-polls events and runs `anda_auth_probe`. On stdin EOF it sends `down`; it exits once the core and server are gone.
+- Attestation: `attestation.rs` always reports `mock`, and replies carry `tee:"none: ..."`. The `tee` feature is a seam (see DTEE.md).
+- Tests (`cargo test --release`):
+  - keys: 0600 and stable; group/world-readable files and the wrong length are refused.
+  - ReplayGuard: missing, short, stale or future timestamps and replays are refused.
+  - The tool allowlist.
+  - An in-process engine plus server in front of a stub core: a signed controller call is allowed and every probe case is refused.

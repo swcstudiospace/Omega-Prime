@@ -15,6 +15,8 @@ console.info = console.log; console.debug = console.log; console.warn = console.
 
 async function handle(req: any) {
   const a = req.args ?? {};
+  // Set by the Rust Anda layer after it verified the signed envelope (via/caller principal).
+  if (req.access) core.access = { via: String(req.access.via ?? ""), caller: String(req.access.caller ?? "") };
   switch (req.op) {
     case "up": return core.up(a);
     case "run_gsd_stage": return core.runStage({ stage: a.stage, gsdCommand: a.gsd_command, task: a.task, thinking: a.thinking, model: a.model });

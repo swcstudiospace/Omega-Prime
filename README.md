@@ -2,7 +2,7 @@
 
 A local sandbox for running omp + GSD-Core 1.18.0. The layers are:
 
-- a Rust wrapper with an Anda-shaped tool surface
+- a Rust access layer built on the real Anda engine (anda_engine 0.17.4 + anda_engine_server 0.17.0): every request into the sandbox is a signed Anda `tool_call`
 - a TypeScript core
 - an agentOS VM
 - a sandbox tier
@@ -11,8 +11,11 @@ A local sandbox for running omp + GSD-Core 1.18.0. The layers are:
 Attestation is **always `mock`** locally.
 
 ```
-omp-sandbox-anda (Rust, stdin/stdout JSON lines; tools: up, run_gsd_stage, answer_question, sandbox_status, abort, down)
-  └─ node src/core/server.ts (TS core)
+omp-sandbox-anda client (stdin/stdout JSON lines; tools: up, run_gsd_stage, answer_question, sandbox_status, abort, down)
+  │   signs each request: ICP envelope (Ed25519, SHA3-256 of the body) + meta {engine id, nonce, ts_ms}
+  └─ omp-sandbox-anda serve: anda_engine_server on 127.0.0.1 (HTTP POST /default, method tool_call)
+     │   Anda Engine "omp_sandbox": Private, controller = client principal, nothing exported; replay guard
+     └─ node src/core/server.ts (TS core; receipts record access {via:"anda", caller principal})
        ├─ omp auth-broker (host, loopback; the sandbox only ever gets an access-token client URL + bearer)
        ├─ sandbox tier: openshell-podman → openshell (MicroVM, opt-in) → bwrap → agentos-local   [first that works; skips recorded]
        │    ├─ openshell-podman: OpenShell 0.1.4 gateway (loopback mTLS) + rootless Podman driver,
@@ -25,7 +28,7 @@ omp-sandbox-anda (Rust, stdin/stdout JSON lines; tools: up, run_gsd_stage, answe
 
 ## Run
 
-The commands below expect Node 24 in `~/tools/node24`, omp in `~/.bun/bin`, a prior `omp` device-code login on the host, and rustc 1.85 or later.
+The commands below expect Node 24 in `~/tools/node24`, omp in `~/.bun/bin`, a prior `omp` device-code login on the host, and rustc 1.95 or later (pinned by `rust-toolchain.toml` to 1.99.1; install user-locally with rustup, no sudo).
 
 For the preferred **openshell-podman** tier you also need:
 
@@ -38,13 +41,24 @@ The tier starts the Podman API socket, the gateway (podman driver) and builds `l
 ```sh
 npm ci
 cargo build --release
+cargo test --release                              # unit tests + in-process Anda auth test
+./target/release/omp-sandbox-anda keygen          # once: identities (0600) in ~/.local/state/omp-sandbox-anda; prints principals only
 ./target/release/omp-sandbox-anda --list-tools
 python3 tests/e2e.py          # full real run: Sol plan, Luna execute, ask/stale, abort, down
 node --experimental-transform-types src/cli.ts up    # up + down smoke
 ```
 
 Wrapper protocol: in `{"id":"1","tool":"run_gsd_stage","args":{"stage":"plan","gsd_command":"gsd-plan-phase","task":"1 ..."}}`.
-Out: `{"id":"1","ok":true,"result":{...},"attestation":"mock"}`, plus unsolicited events: `question`, `stage_done`, `fallback`.
+Out: `{"id":"1","ok":true,"result":{...},"access":{"via":"anda_engine_server 0.17.0","auth":"ICP signed envelope (Ed25519)","caller":"<principal>","engine":"<principal>"},"attestation":"mock","tee":"none: ..."}`, plus unsolicited events: `wrapper_ready`, `question`, `stage_done`, `fallback`, `core_exit`.
+The extra stdio tool `anda_auth_probe` runs the negative auth tests against the live engine (unsigned, unknown key, tampered body, wrong engine id, missing nonce, stale timestamp, replay; plus a signed control).
+
+### Access layer (Anda)
+
+- `omp-sandbox-anda` (no args) = `client --spawn`: starts `serve` on a random loopback port, then turns each stdio request into a signed Anda `tool_call`. Events come through signed `poll_events` long-polls.
+- `serve` runs a real Anda `Engine` behind `anda_engine_server`. It is `Visibility::Private` with the local client principal as controller and exports no tools, so anonymous or unknown callers are refused by Anda itself. Bad signatures get HTTP 401.
+- Anda's direct-key envelopes have no freshness, so every call also carries meta `{nonce, ts_ms}`. The engine refuses missing or stale (>120 s) timestamps and reused nonces.
+- Keys: `~/.local/state/omp-sandbox-anda/{client,engine}.ed25519` (raw 32 bytes, 0600, dir 0700; refused if group/world-readable). The server only reads `client.principal`. Override the dir with `OMP_SANDBOX_ANDA_STATE`.
+- Attestation is **mock** (no TEE on this host); every reply and receipt says so. See `docs/DTEE.md`.
 
 Stage routing:
 

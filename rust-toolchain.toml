@@ -1,0 +1,5 @@
+# User-local rustup toolchain (~/.rustup). Anda Engine 0.17.x needs rustc >= 1.95; the system
+# rustc (/usr/bin, 1.85.1) is untouched. Use ~/.cargo/bin/cargo so this file takes effect.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"

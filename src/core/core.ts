@@ -26,6 +26,8 @@ export class Core extends EventEmitter {
   skipped: Array<{ tier: string; reason: string }> = [];
   vm: any = null;
   attestation: AttestationDoc | null = null;
+  /** Who reached the core: set per request by the Anda access layer ({via:"anda", caller:<principal>}). */
+  access: { via: string; caller: string } | null = null;
   up_: Record<string, unknown> = {};
   stages = new Map<string, StageRec>();
   #receipts = join(STATE, "receipts");
@@ -155,7 +157,7 @@ export class Core extends EventEmitter {
   }
   #receipt(name: string, body: Record<string, unknown>) {
     const p = join(this.#receipts, `${name}.json`);
-    writeFileSync(p, JSON.stringify({ ...body, attestation: "mock", writtenAt: aedt() }, null, 2));
+    writeFileSync(p, JSON.stringify({ ...body, access: this.access, attestation: "mock", tee: "none: mock attestation, no TEE hardware on this host", writtenAt: aedt() }, null, 2));
     return p;
   }
 
