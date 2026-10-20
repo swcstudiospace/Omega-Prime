@@ -215,3 +215,11 @@ def test_numbered_task_ids_stay_distinct_and_embedded_keys_redact() -> None:
     assert embedded[1:] not in str(redact_value(f"note {embedded}", env={}))
     long_lower = "a" + "sk" + "-" + "q" * 24
     assert long_lower[1:] not in str(redact_value(long_lower, env={}))
+
+
+def test_quiet_minutes_never_below_engine_timeout(tmp_path) -> None:
+    from omega_prime.dashboard.config import load_dashboard_config
+
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"dashboard": {"quiet_minutes": 0.5}}')
+    assert load_dashboard_config(settings).quiet_minutes == 2.0

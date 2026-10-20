@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+MIN_QUIET_MINUTES = 2.0
+
 
 @dataclass(frozen=True)
 class DashboardConfig:
@@ -34,7 +36,9 @@ def load_dashboard_config(path: Path | None = None) -> DashboardConfig:
         hours
         if isinstance(hours, (int, float)) and not isinstance(hours, bool) and hours > 0
         else 24.0,
-        quiet
+        # Never below the engine's 120-second call timeout, so a job that is
+        # still inside one call cannot be judged stopped by the quiet window.
+        max(float(quiet), MIN_QUIET_MINUTES)
         if isinstance(quiet, (int, float)) and not isinstance(quiet, bool) and quiet > 0
         else 15.0,
         values.get("fleet_enabled")
