@@ -1,22 +1,22 @@
 ---
 gsd_state_version: "1.0"
-milestone: v20
-milestone_name: Wiring (Phases 97–103) — in progress 2026-10-21
+milestone: v21
+milestone_name: Task Dashboard (Phases 104–105) — in progress
 current_phase: 105
 current_phase_name: Omega Prime Command Center
-status: Phase 97 local implementation executed; verification deferred pending authoritative upstream MCP contract evidence.
-stopped_at: Phase 97 local verification finished; current upstream MCP mount/schema evidence is still needed before phase verification can pass.
-last_updated: "2026-10-20T21:57:49.607Z"
-state_head: 231495d01446cd94fc28ea95a400406b37777be1
+status: Phase 105 implementation and offline verification complete with recorded limitations; live GitHub parity, browser review, signed sandbox evidence, and real-data screenshots remain outer-driver obligations.
+stopped_at: Phase 105 local implementation complete; no milestone audit, completion, cleanup, export, push, or merge was run.
+last_updated: "2026-10-20"
+state_head: 3d1fadf1ed67b8e9b805e5e2da5444dd7b03f37d
 progress:
   total_phases: 2
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 12
-  completed_plans: 1
-  percent: 0
+  completed_plans: 12
+  percent: 100
 last_activity: 2026-10-20
-current_plan: 02
-last_activity_desc: Phase 97 local changes and tests executed; static/catalog gates pass, full test suite has only the 27 recorded baseline failures
+current_plan: 05
+last_activity_desc: Phase 105 W1–W5 implementation plans completed; frontend/doc/dashboard-specific checks pass; broad dashboard collection fails on missing mcp/apscheduler and setuptools package collection remains unavailable
 ---
 
 # Project State
@@ -26,13 +26,13 @@ last_activity_desc: Phase 97 local changes and tests executed; static/catalog ga
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** v20 Wiring (Phases 97–103) is in progress. Phase 97 has local transport, settings, diagnostics, argument, and no-cap implementation with offline tests; current upstream MCP mount/schema compatibility remains unverified, so Phase 97 verification is deferred and no v20 phase is complete. v19 Installer bindings (phase 96) and v1–v19 history remain unchanged. Phase 77.1 live import UAT remains user-owned and `human_needed`.
+**Current focus:** v21 Task Dashboard (Phases 104–105). Phase 104 is complete. Phase 105 W1–W5 implementation plans and local product changes are complete on `feat/command-center`; the broad `-k dashboard` pytest selector is blocked during collection by absent `mcp` and `apscheduler`, W4's real setuptools archive collection was skipped because setuptools is absent, and live GitHub/browser/signed-sandbox evidence remains with the outer driver. v20 Phase 97 remains separately deferred pending upstream MCP contract evidence; Phase 77.1 UAT remains user-owned.
 
 ## Current Position
 
-Phase: 105 (Omega Prime Command Center) — READY TO EXECUTE
-Plan: 02 (5 total; 1 complete; local transport and argument changes are present, but server-contract preflight tasks remain open).
-Status: Local tests and static/catalog gates ran; full pytest has the same 27 baseline failures and zero new failures. Resume with authoritative MCP path/schema preflight in plans 97-02/97-03. Do not audit, complete, or clean up v20. Phase 77.1 remains `verification_deferred_human`; do not re-execute phases 85–96 or mark 77.1 passed.
+Phase: 105 (Omega Prime Command Center) — implementation complete; external acceptance pending.
+Plan: 05 (5/5 plans complete; 105-05-SUMMARY.md records evidence and limitations).
+Status: Frontend install/tests/build and build-asset inspection passed; dashboard-specific tests passed after a deterministic timeout-fixture correction; docs/public-repo tests passed. The required broad dashboard selector exited 2 during collection because `mcp` and `apscheduler` are absent. The real package-data expansion check was skipped because setuptools is absent. Do not install Python packages or conceal these limits. No milestone audit/complete/cleanup, export, push, PR, restart of 7421, or merge was run.
 
 ## Closeout
 
@@ -145,9 +145,10 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ## Session
 
 **Last session:** 2026-10-20
-**Stopped at:** Phase 97 local implementation and offline gates; authoritative upstream MCP mount/schema evidence remains an open verification gap.
-**Resume file:** `.planning/phases/97-substrate-direct-connect/97-02-PLAN.md`
+**Stopped at:** Phase 105 local implementation and offline verification. No milestone lifecycle or remote publication was run.
+**Resume file:** `.planning/phases/105-command-center/105-05-SUMMARY.md`
 
 ## Operator Next Steps
 
-- Phase 97 is locally implemented but not verified against the current upstream server. Obtain authoritative MCP path/schema evidence, then resume the preflight/gap work; live endpoint verification and live settings/connector changes remain operator-owned. Phase 77.1 live UAT stays user-owned (`/gsd:verify-work 77.1`).
+- Phase 105 outer-driver work remains: compare live GitHub PR/check/Greptile evidence and organization inventory (a2/a3); inspect fonts, contrast, motion and reduced motion in a browser (a4); produce the signed openshell-podman/Anda receipt (a6); capture all four views with real data (a7); then perform the separately authorized export/publication flow. No local fixtures prove these outcomes.
+- Phase 97 remains deferred pending authoritative upstream MCP path/schema evidence; phase 77.1 live UAT remains user-owned (`/gsd:verify-work 77.1`).

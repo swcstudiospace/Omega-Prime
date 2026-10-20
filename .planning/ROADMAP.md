@@ -176,20 +176,20 @@ Greptile 5/5 and the merge yes remain operator steps.
 **Depends on:** Phase 104 (unmerged PR #47; branch `feat/command-center` stays stacked).
 **Requirements:** a1, a2, a3, a4, a5, a6, a7
 **Contract:** `.planning/phases/105-command-center/105-UPLIFT.xml`
-**Plans:** 5 file-disjoint plans; planning only in this session.
+**Plans:** 5 execution waves; implementation is complete on `feat/command-center`. Offline tests/build passed with recorded limits; live a2/a3 parity, visual review, signed sandbox receipt and screenshots remain outer-driver evidence.
 **Wave 1**
-- [ ] 105-01-PLAN.md — W1: stable task sequence allocation, CLI and snapshot fields.
+- [x] 105-01-PLAN.md — W1: stable task sequence allocation, CLI and snapshot fields — completed and committed.
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 105-02-PLAN.md — W2 (after W1): cached read-only GitHub organisation repositories, PR checks and reviewed-commit scores.
+- [x] 105-02-PLAN.md — W2 (after W1): cached read-only GitHub organisation repositories, PR checks and reviewed-commit scores — completed and committed.
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 105-03-PLAN.md — W3 (after W2): React/TypeScript/Vite/Tailwind shell, four views, local fonts, adapted motion, tests and committed build.
+- [x] 105-03-PLAN.md — W3 (after W2): React/TypeScript/Vite/Tailwind shell, four views, local fonts, adapted motion, tests and committed build — completed; final frontend payload path uses the published `sources.github.command_center`.
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 105-04-PLAN.md — W4 (after W3): default static app, legacy fallback, MIME/cache/CSP and security regression coverage.
+- [x] 105-04-PLAN.md — W4 (after W3): default static app, legacy fallback, MIME/cache/CSP and security regression coverage — completed; setuptools package collection test skipped because setuptools is unavailable.
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 105-05-PLAN.md — W5 (after W4): Command Center documentation, attributions and final offline verification.
+- [x] 105-05-PLAN.md — W5 (after W4): Command Center documentation, attributions and final offline verification — completed; broad dashboard selection remains blocked by missing `mcp` and `apscheduler` dependencies.
 
 Cross-cutting constraints: no product implementation during planning; no runtime Node or external-origin CSP; no network in Python tests; no write actions in the server/UI. Outer driver owns signed sandbox evidence (a6), live GitHub parity (a2/a3), screenshots (a7), export/push/draft PR and Greptile loop. No merge.
