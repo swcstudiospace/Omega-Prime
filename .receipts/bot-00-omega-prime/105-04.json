@@ -1,0 +1,89 @@
+{
+  "task_id": "105-04",
+  "bot": "bot-00-omega-prime",
+  "started_at": null,
+  "completed_at": "2026-10-20T23:03:47Z",
+  "commands": [
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_command_center_static.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_live_fixes.py",
+      "exit_code": 1,
+      "output_tail": "Initial run exposed incorrect test assumptions for /legacy recovery link handling and an IPv6 test configured with the default IPv4 host."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_command_center_static.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_live_fixes.py",
+      "exit_code": 0,
+      "output_tail": "21 passed, 1 Starlette/httpx deprecation warning."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_app_fixes.py omega_prime/tests/test_dashboard_command_center_static.py",
+      "exit_code": 0,
+      "output_tail": "12 passed, 1 skipped, 1 deprecation warning; package build_py test skipped because setuptools is not installed."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_integration.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_app_fixes.py omega_prime/tests/test_dashboard_live_fixes.py omega_prime/tests/test_dashboard_command_center_static.py",
+      "exit_code": 1,
+      "output_tail": "Initial run failed because the synthetic github_pr row omitted required repo and number fields."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_integration.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_app_fixes.py omega_prime/tests/test_dashboard_live_fixes.py omega_prime/tests/test_dashboard_command_center_static.py",
+      "exit_code": 0,
+      "output_tail": "34 passed, 1 skipped, 1 Starlette/httpx deprecation warning."
+    },
+    {
+      "cmd": "python3 -c 'import setuptools; from setuptools.command.build_py import build_py; print(setuptools.__version__, hasattr(build_py, \"find_data_files\"))'",
+      "exit_code": 1,
+      "output_tail": "ModuleNotFoundError: No module named 'setuptools'."
+    },
+    {
+      "cmd": "Isolated Python runtime smoke: separate python3 -m omega_prime.dashboard next-id processes; assign-id; python3 -m omega_prime.dashboard --host 127.0.0.1 --port 51103; GET /, /legacy, /api/snapshot, /api/stream; stop and restart against the same temporary HOME.",
+      "exit_code": 0,
+      "output_tail": "next-id printed 00002 twice without changing bridge bytes or mtime; assignment persisted 00001 - W4 Smoke Task; API, named SSE, and post-restart API all exposed that display_id. Root and legacy pages responded."
+    },
+    {
+      "cmd": "browser.open local Command Center URL with managed Chromium",
+      "exit_code": 1,
+      "output_tail": "Browser service could not install Chromium because it could not connect to the download endpoint; no UI interaction or screenshot was performed."
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Built, legacy, asset, error, method, Host, traversal, MIME, cache, and security-header route behaviors passed their final task-specific HTTP regression command.",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "The JSON endpoint and named snapshot SSE carried the same redacted nested GitHub payload in the integration test.",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "A real isolated CLI/API/SSE process smoke persisted and retained a task display ID through restart without contacting GitHub.",
+      "evidence_command_index": 6
+    },
+    {
+      "claim": "The current environment lacks setuptools, preventing the real package-data builder test.",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "Browser UI selection and visual verification were unavailable because managed Chromium could not be installed.",
+      "evidence_command_index": 7
+    }
+  ],
+  "unverified": [
+    "Real setuptools package-data collection and serving from collected package output; setuptools is not installed and no package was installed.",
+    "Browser task selection without reload, screenshots, reduced-motion rendering, no-JavaScript visual rendering, and SSE-outage polling recovery; Chromium startup failed before page navigation.",
+    "Live GitHub parity, signed sandbox/attestation, and real-data screenshots were not run.",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    "omega_prime/dashboard/app.py",
+    "pyproject.toml",
+    "omega_prime/tests/test_dashboard_app.py",
+    "omega_prime/tests/test_dashboard_app_fixes.py",
+    "omega_prime/tests/test_dashboard_live_fixes.py",
+    "omega_prime/tests/test_dashboard_integration.py",
+    "omega_prime/tests/test_dashboard_command_center_static.py",
+    ".planning/phases/105-command-center/105-04-SUMMARY.md",
+    ".receipts/bot-00-omega-prime/105-04.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": null
+}
