@@ -7,7 +7,7 @@ Local work stays on the box only when every gate holds:
 - no cloud-only marker (Rust, Go, Docker, mobile)
 - declared languages are JS, TS, Python, or docs
 - ``max_files`` is at most 25
-- ``max_minutes`` is at most 30
+- ``max_minutes`` is at most 60
 - fewer than 2 running local jobs
 - at least 3 GiB of free memory
 - at most one running local ``xai-oauth`` job
@@ -116,7 +116,7 @@ class StubLocalExecutor:
 class LaneLimits:
     """Caps Ove approved for the local lane."""
 
-    max_minutes: int = 30
+    max_minutes: int = 60
     max_files: int = 25
     max_parallel: int = 2
     min_free_bytes: int = 3 * _GIB

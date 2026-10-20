@@ -419,7 +419,7 @@ is accepted only for a loopback host. Those values are not written into job
 files. A local job that omits `max_files` or `max_minutes` is stored with
 the caps below. The local lane stays on the box for
 JS, TS, Python, and docs when the job has no Rust, Go, Docker, or mobile
-marker, at most 25 files, at most 30 minutes, at most 2 running local jobs,
+marker, at most 25 files, at most 60 minutes, at most 2 running local jobs,
 at least 3 GiB free, and at most one running `xai-oauth` job. A full box
 spills to the fleet, or queues locally when `overflow` is `queue`. A local
 job that hits a limit is re-queued to the fleet with its partial branch.

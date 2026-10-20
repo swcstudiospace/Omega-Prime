@@ -60,7 +60,7 @@ All notable changes to this project are documented here. Format follows
   `FLEET_COORDINATOR_URL` and `FLEET_COORDINATOR_TOKEN` (or the matching
   `*_FILE` names). Values are not logged.
 - `omega_prime.engine.lanes`: the same `JobSpec` chooses the local lane or
-  the fleet. Local caps are 30 minutes, 25 files, 2 concurrent jobs, 3 GiB
+  the fleet. Local caps are 60 minutes, 25 files, 2 concurrent jobs, 3 GiB
   free, and one `xai-oauth` job. Rust, Go, Docker, and mobile markers force
   the fleet. A full box spills or queues. A local job that hits a limit is
   re-posted with its partial branch, and the receipt records the lane change.

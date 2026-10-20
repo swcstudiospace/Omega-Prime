@@ -2,13 +2,25 @@
   "task_id": "SPE-17041",
   "bot": "bot-00-omega-prime",
   "started_at": "2026-10-20T10:03:00Z",
-  "completed_at": "2026-10-20T11:40:00Z",
+  "completed_at": "2026-10-20T11:45:00Z",
   "commands": [
     {
       "cmd": "/tmp/omega-venv/bin/python -m mypy omega_prime/ && /tmp/omega-venv/bin/python -m ruff check omega_prime/ && /tmp/omega-venv/bin/python -m ruff format --check omega_prime/ && /tmp/omega-venv/bin/python -m omega_prime.tooling.catalog --check && /tmp/omega-venv/bin/python -m omega_prime.tooling.plugin --check && /tmp/omega-venv/bin/python -m omega_prime.tooling.prompt_format --check && VIRTUAL_ENV=/tmp/omega-venv bash omega_prime/scripts/assemble-prompts.sh --check && /tmp/omega-venv/bin/python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q --tb=line && /tmp/omega-venv/bin/python -m omega_prime.setup_check --root . && /tmp/omega-venv/bin/python -m omega_prime.evals.runner omega_prime/evals/cases && /tmp/omega-venv/bin/python -m pytest omega_prime/tests -q --tb=line",
       "exit_code": 0,
       "duration_s": 205,
       "output_tail": "4784 passed, 20 skipped, 16 warnings in 190.27s"
+    },
+    {
+      "cmd": "/tmp/omega-venv/bin/python -m ruff check omega_prime/engine/lanes.py omega_prime/tests/test_lanes.py && /tmp/omega-venv/bin/python -m ruff format --check omega_prime/engine/lanes.py omega_prime/tests/test_lanes.py docs/setup.md CHANGELOG.md && /tmp/omega-venv/bin/python -m mypy omega_prime/engine/lanes.py omega_prime/tests/test_lanes.py && /tmp/omega-venv/bin/python -m pytest omega_prime/tests/test_lanes.py omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q --tb=short",
+      "exit_code": 0,
+      "duration_s": 2,
+      "output_tail": "50 passed in 1.01s"
+    },
+    {
+      "cmd": "/tmp/omega-venv/bin/python -m pytest omega_prime/tests -q --tb=line",
+      "exit_code": 0,
+      "duration_s": 189,
+      "output_tail": "4784 passed, 20 skipped, 16 warnings in 188.98s"
     }
   ],
   "claims": [
@@ -35,6 +47,10 @@
     {
       "claim": "The suite passes: 4784 passed, 20 skipped. Fleet tests use a fake transport. The bearer is the CredentialBroker key, and an unlisted host raises host_not_allowed before the token is read. Ordinary 'to go' stays on the local lane.",
       "evidence_command_index": 0
+    },
+    {
+      "claim": "LaneLimits.max_minutes defaults to 60. A 60-minute job stays local, a 61-minute job goes to the fleet, and a missing minute bound is stored as 60. The 25-file cap is unchanged. The suite after that edit is 4784 passed, 20 skipped.",
+      "evidence_command_index": 2
     }
   ],
   "unverified": [

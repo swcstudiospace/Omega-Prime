@@ -177,10 +177,10 @@ def test_ordinary_words_are_not_cloud_markers() -> None:
 
 
 def test_file_and_minute_caps() -> None:
-    assert choose_lane(_spec(max_files=25, max_minutes=30), ROOMY).lane == "local"
+    assert choose_lane(_spec(max_files=25, max_minutes=60), ROOMY).lane == "local"
     files = choose_lane(_spec(max_files=26), ROOMY)
     assert files.lane == "fleet" and "max_files" in files.reasons
-    minutes = choose_lane(_spec(max_minutes=31), ROOMY)
+    minutes = choose_lane(_spec(max_minutes=61), ROOMY)
     assert minutes.lane == "fleet" and "max_minutes" in minutes.reasons
 
 
@@ -298,7 +298,7 @@ def test_missing_bounds_are_filled_with_the_local_caps(tmp_path) -> None:
     record = router.dispatch(spec, languages=("python",))
     assert record["lane"] == "local"
     stored = json.loads((job_dir(env, record["id"]) / "spec.json").read_text())
-    assert stored["max_minutes"] == 30
+    assert stored["max_minutes"] == 60
     assert stored["max_files"] == 25
 
 
