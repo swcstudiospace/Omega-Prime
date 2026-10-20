@@ -21,7 +21,7 @@
 - ✅ **v17 XML Prompt Standard** — Phases 85–88 (shipped 2026-10-14; every first-party prompt wrapped in XML tags like Programming Desk, enforced by a gate)
 - ✅ **v18 Operator posture** - Phases 89-95 (shipped 2026-10-14). Seven upgrades accepted when the operator said to continue.
 - ✅ **v19 Installer bindings** - Phase 96 (shipped 2026-10-15). A fresh install binds its own Linear and Notion, treats the existing gateways as optional, and fails setup when `prime-agent` is empty.
-
+- v20 Wiring — Phases 97–103 (in progress; phase 102 planning)
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
 `milestones/v16-phases/`.
@@ -89,5 +89,36 @@ Accepted set from STATE.md after the operator said to continue. Requirements: mi
 Requirements: milestones/v19-REQUIREMENTS.md. Phase 77.1 live UAT stays user-owned.
 
 - [x] Phase 96: Per-install Linear, Notion, and optional gateways (1/1 plan) - completed 2026-10-15
+
+</details>
+
+<details>
+<summary>v20 Wiring (Phases 97–103) — IN PROGRESS</summary>
+
+Goal: establish verified wiring of the substrate, memory, solo/desk modes, Omp engine, real U2 LocalExecutor, schedulers/dead-module cleanup/environment documentation, and Ultrathink integration/cleanup. Phase 102 is planned from the uplift-derived G9–G11 gaps; it depends on Phase 101, whose completion is not established in this worktree.
+
+### Phase 102: Schedulers, dead modules, and environment documentation
+
+Goal: close uplift gaps G9–G11 by wiring existing watchdog and pin-bump schedules, removing unreachable/dead modules, documenting supported environment variables, and reporting wiring status without executing scheduled work. Phase 102 depends on Phase 101; its completion is not established in this worktree.
+
+Requirements: G9-SCHED, G10-EXEC, G10-PLUGINS, G10-X, G10-REACH, G11-ENV, and G9-DOCTOR.
+
+Acceptance criteria:
+1. Tests show that the driver ticks watchdog and pin-bump schedules; due prompt work uses a fake delegate parent, or records an explicit blocked receipt when no executable delegate is available.
+2. No tools module is unreachable except documented, explicitly flag-gated modules.
+3. The committed environment-name/purpose table is AST-derived, and CI fails when a supported environment name is missing from the table.
+4. Doctor reports disabled families and scheduled work whose runner was not observed without executing schedules; the exact requested gates are green, or each baseline failure is explicitly named.
+
+Additional safety constraints: exec-job operations remain approval-gated; plugins require exact `OMEGA_PRIME_PLUGINS=1` opt-in and remain off otherwise; `x_tweepy` is removed while urllib X behavior is retained. Preserve approval gates for sends, posts, merges, deploys, and pin-bump mutation. Do not activate live providers or integrations.
+
+- [ ] Phase 97: Substrate direct connect + settings loader + no time caps
+- [ ] Phase 98: Shared memory via substrate, Hindsight fallback
+- [ ] Phase 99: Solo mode, Desk optional
+- [ ] Phase 100: omp engine wiring
+- [ ] Phase 101: Real U2 LocalExecutor
+- [ ] Phase 102: Schedulers, dead modules, env docs
+- [ ] Phase 103: Ultrathink integration and cleanup
+
+Phase 102 depends on Phase 101. Draft plans: [102-01](phases/102-schedulers-dead-modules-env-docs/102-01-PLAN.md), [102-02](phases/102-schedulers-dead-modules-env-docs/102-02-PLAN.md), [102-03](phases/102-schedulers-dead-modules-env-docs/102-03-PLAN.md), [102-04](phases/102-schedulers-dead-modules-env-docs/102-04-PLAN.md), [102-05](phases/102-schedulers-dead-modules-env-docs/102-05-PLAN.md).
 
 </details>
