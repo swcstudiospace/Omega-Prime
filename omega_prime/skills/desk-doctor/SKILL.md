@@ -13,11 +13,11 @@ Use only tools available in the Omega Prime registry. The external Desk Gateway 
 
 ## Omega Prime adaptation
 
-Omega Prime runs `lead_doctor` through its local tool registry. It checks the local bot configuration available to that tool; it is not a probe of external network services. Desk-specific checks below apply only to an explicitly configured Desk.
+Omega Prime runs `lead_doctor` through its local tool registry. It checks the local bot configuration available to that tool, and its memory rows run a read-only recall probe against local memory and every configured Substrate and Hindsight source, in Solo mode too. A remote memory outage or auth failure can therefore turn the memory rows red; read each source's state (`answered`, `empty`, `not_configured`, `unreachable`, `unauthorized`) before troubleshooting locally. Doctor does not probe other external services (Desk bus, notify, docs index). Desk-specific checks below apply only to an explicitly configured Desk.
 
 ## When this applies (L1)
 
-`/desk doctor` is `lead_doctor` with `action: check`. It reports the configured integrity checks for the current bot. Run it after local setup or a relevant prompt/roster change. Do not infer network health or external service availability from a local integrity report.
+`/desk doctor` is `lead_doctor` with `action: check`. It reports the configured integrity checks for the current bot. Run it after local setup or a relevant prompt/roster change. Apart from the configured memory sources above, do not infer network health or external service availability from this report.
 Detailed Desk rows later in this skill apply only when Desk is explicitly configured; they are not
 required for Solo integrity.
 

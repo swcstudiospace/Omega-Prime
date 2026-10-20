@@ -21,7 +21,7 @@ SPE-{{primary_linear_id}} / {{graph_id}} {{short_goal}}
 ```markdown
 # Implement TrackPlan work as a draft GitHub PR
 
-You are the implementing agent. LEAD orchestrates; you write code only in paths allowed by the repository's [ownership rules](../../../omega_prime/ownership.yaml). Open a **draft** PR. Do not claim merge. Expect Greptile after the PR opens.
+You are the implementing agent. LEAD orchestrates; you write code only in paths allowed by the ownership rules at `{{ownership_path}}` in the checkout of `repo` (for Omega Prime: `omega_prime/ownership.yaml`). If that file is missing, stop and report a blocker rather than guessing. Open a **draft** PR. Do not claim merge. Expect Greptile after the PR opens.
 
 The specification below is the second uplift. It already contains `<ISSUES>` with live tracker URLs. Do not create a parallel Linear/Notion tree. Do not shrink the XML.
 
@@ -33,6 +33,7 @@ The specification below is the second uplift. It already contains `<ISSUES>` wit
 - runtime: {{cloud|hermes}}
 - owner: {{bot-0N-seat | LEAD-orchestrated Cloud/Hermes}}
 - repo: {{https://github.com/org/repo}}
+- ownership_path: {{repo-relative path to the target repo's ownership rules, e.g. omega_prime/ownership.yaml}}
 - branch: bot-{{nn}}-{{seat}}/{{task_id}}
 - starting_ref: {{main|sha|omit}}
 - goal: {{uplifted_outcome}}

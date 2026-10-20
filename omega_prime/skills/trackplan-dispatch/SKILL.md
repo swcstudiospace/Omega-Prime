@@ -103,6 +103,7 @@ The agent prompt **must** contain the fields below **and** the full second-uplif
 | `goal` | From the uplift, not a new goal |
 | `paths_in_scope` / `out_of_scope` | From the ticket or ownership inference — **do not invent ownership** |
 | `acceptance` / `success_criteria` | From `ACCEPTANCE_CRITERIA` |
+| `ownership_path` | Repo-relative path to the target checkout's ownership rules (Omega Prime: `omega_prime/ownership.yaml`); never a link relative to this skill folder |
 | `ownership.yaml` constraint | Only owned paths; cross-seat → contract-first; LEAD does not write product code |
 | `receipt_path` | `.receipts/<bot-id>/<task_id>.json` |
 | `report_back` | PR URL, receipt, `unverified`, blockers |
