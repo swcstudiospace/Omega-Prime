@@ -21,12 +21,35 @@ export const OPENSHELL_GATEWAY_PORT = Number(process.env.OMP_SANDBOX_OPENSHELL_P
 export const PODMAN_IMAGE = process.env.OMP_SANDBOX_PODMAN_IMAGE ?? "localhost/omp-sandbox:0.1";
 export const PODMAN_BIN = process.env.OMP_SANDBOX_PODMAN ?? "/usr/bin/podman";
 
-/** Stage -> model routing (Ove's plan logins via omp). Fallback is used when the primary errors before any work. */
+/** Each plan login has its own plan/build pair: ChatGPT plans on Sol and builds on Luna; Z.ai plans on GLM-5.3 and builds on GLM-5.3-flash. */
+export const PLAN_MODELS = {
+  chatgpt: { plan: "openai-codex/gpt-6.1-sol", execute: "openai-codex/gpt-6-luna" },
+  zai: { plan: "zai/glm-5.3", execute: "zai/glm-5.3-flash" },
+} as const;
+export type Plan = keyof typeof PLAN_MODELS;
+export const PLANS = Object.keys(PLAN_MODELS) as Plan[];
+/** Plans tried in order when a job does not pick one (matches omega_prime plan_router's stage preference). */
+export const PLAN_PREFERENCE: readonly Plan[] = ["chatgpt", "zai"];
+
+/** Default stage -> model routing (Ove's plan logins via omp). Fallback is used when the primary errors before any work. */
 export const STAGE_MODELS = {
-  plan: { primary: "openai-codex/gpt-6.1-sol", fallback: "zai/glm-5.3" },
-  execute: { primary: "openai-codex/gpt-6-luna", fallback: "zai/glm-5.3" },
+  plan: { primary: PLAN_MODELS.chatgpt.plan, fallback: PLAN_MODELS.zai.plan },
+  execute: { primary: PLAN_MODELS.chatgpt.execute, fallback: PLAN_MODELS.zai.execute },
 } as const;
 export type Stage = keyof typeof STAGE_MODELS;
+
+/**
+ * Primary and fallback model for one job. `plan` picks the primary plan login for this job (Z.ai can be the primary,
+ * not only the fallback); later plans in PLAN_PREFERENCE are the fallback, so a Z.ai-primary job has none.
+ */
+export function stageRoute(stage: Stage, plan?: string | null): { plan: Plan; primary: string; fallback: string | null; fallbackPlan: Plan | null } {
+  if (!(stage in STAGE_MODELS)) throw new Error(`unknown stage ${JSON.stringify(stage)}; expected plan|execute`);
+  const first = (plan ?? PLAN_PREFERENCE[0]) as Plan;
+  if (!PLANS.includes(first)) throw new Error(`unknown plan ${JSON.stringify(plan)}; expected one of ${PLANS.join("|")}`);
+  const rest = PLAN_PREFERENCE.slice(PLAN_PREFERENCE.indexOf(first) + 1);
+  const next = rest[0] ?? null;
+  return { plan: first, primary: PLAN_MODELS[first][stage], fallback: next ? PLAN_MODELS[next][stage] : null, fallbackPlan: next };
+}
 export const MAGIC = "orchestrate workflowz ultrathink";
 
 export const aedt = (d = new Date()) =>

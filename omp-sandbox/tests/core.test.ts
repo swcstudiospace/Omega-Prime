@@ -27,3 +27,15 @@ test("attestation is always mock", () => {
   const a = mockAttestation("bwrap");
   assert.equal(a.attestation, "mock"); assert.equal(a.hardware, false);
 });
+
+test("each plan has its own plan/build pair; zai can be primary", async () => {
+  const { stageRoute, STAGE_MODELS } = await import("../src/core/config.ts");
+  assert.deepEqual(stageRoute("plan"), { plan: "chatgpt", primary: "openai-codex/gpt-6.1-sol", fallback: "zai/glm-5.3", fallbackPlan: "zai" });
+  assert.deepEqual(stageRoute("execute"), { plan: "chatgpt", primary: "openai-codex/gpt-6-luna", fallback: "zai/glm-5.3-flash", fallbackPlan: "zai" });
+  assert.deepEqual(stageRoute("plan", "zai"), { plan: "zai", primary: "zai/glm-5.3", fallback: null, fallbackPlan: null });
+  assert.deepEqual(stageRoute("execute", "zai"), { plan: "zai", primary: "zai/glm-5.3-flash", fallback: null, fallbackPlan: null });
+  assert.equal(STAGE_MODELS.execute.fallback, "zai/glm-5.3-flash");
+  assert.equal(STAGE_MODELS.plan.fallback, "zai/glm-5.3");
+  assert.throws(() => stageRoute("plan", "anthropic"), /unknown plan/);
+  assert.throws(() => stageRoute("ship" as any), /unknown stage/);
+});

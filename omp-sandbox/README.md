@@ -62,10 +62,19 @@ The extra stdio tool `anda_auth_probe` runs the negative auth tests against the 
 
 Stage routing:
 
-| Stage | Model | Fallback |
+Each plan login has its own plan/build pair:
+
+| Plan (`args.plan`) | plan stage | execute stage |
+|---|---|---|
+| `chatgpt` (default) | `openai-codex/gpt-6.1-sol` (Sol) | `openai-codex/gpt-6-luna` (Luna) |
+| `zai` | `zai/glm-5.3` | `zai/glm-5.3-flash` |
+
+| Stage | Default model | Fallback |
 |---|---|---|
 | plan | `openai-codex/gpt-6.1-sol` | `zai/glm-5.3`, only if no model ever answered |
-| execute | `openai-codex/gpt-6-luna` | `zai/glm-5.3`, only if no model ever answered |
+| execute | `openai-codex/gpt-6-luna` | `zai/glm-5.3-flash`, only if no model ever answered |
+
+`run_gsd_stage` takes an optional `plan` (`chatgpt` or `zai`) so Z.ai can be the primary for a job, not only the fallback. A Z.ai-primary job has no fallback. An explicit `model` still overrides the primary.
 
 Every stage prompt is `/<gsd-command> orchestrate workflowz ultrathink\n\n<task>`.
 

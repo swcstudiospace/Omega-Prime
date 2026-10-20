@@ -19,7 +19,7 @@ async function handle(req: any) {
   if (req.access) core.access = { via: String(req.access.via ?? ""), caller: String(req.access.caller ?? "") };
   switch (req.op) {
     case "up": return core.up(a);
-    case "run_gsd_stage": return core.runStage({ stage: a.stage, gsdCommand: a.gsd_command, task: a.task, thinking: a.thinking, model: a.model });
+    case "run_gsd_stage": return core.runStage({ stage: a.stage, gsdCommand: a.gsd_command, task: a.task, thinking: a.thinking, model: a.model, plan: a.plan });
     case "answer_question": return core.answer(a.stage_id, a.request_id, { selected: a.selected, text: a.text, perQuestion: a.per_question });
     case "sandbox_status": return core.status(a.stage_id);
     case "abort": return core.abort(a.stage_id);

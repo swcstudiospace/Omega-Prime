@@ -2,7 +2,7 @@
 import { mkdirSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
-import { ROOT, STATE, STAGE_MODELS, MAGIC, OMP_BIN, VERSIONS, aedt, type Stage } from "./config.ts";
+import { ROOT, STATE, STAGE_MODELS, MAGIC, OMP_BIN, VERSIONS, aedt, stageRoute, type Stage } from "./config.ts";
 import { AuthBroker } from "./auth.ts";
 import { startTier } from "./providers/tiers.ts";
 import type { SandboxTier } from "./providers/types.ts";
@@ -14,7 +14,7 @@ import { rid } from "./providers/util.ts";
 
 export type StageStatus = "starting" | "running" | "waiting" | "completed" | "failed" | "aborted";
 type StageRec = {
-  id: string; stage: Stage; command: string; modelRequested: string; status: StageStatus;
+  id: string; stage: Stage; plan: string; fallbackModel: string | null; command: string; modelRequested: string; status: StageStatus;
   client: OmpRpcClient | null; startedAt: string; endedAt?: string; error?: string; fallbackFrom?: string;
   questions: Array<{ requestId: string; asked: string; answered?: AnswerInput; answeredAt?: string; method: string }>;
   lastText: string; done: Promise<void>;
@@ -84,15 +84,16 @@ export class Core extends EventEmitter {
   }
 
   /** Start a GSD stage. Returns immediately; follow with status()/events. */
-  runStage(a: { stage: Stage; gsdCommand: string; task: string; thinking?: string; model?: string }) {
+  runStage(a: { stage: Stage; gsdCommand: string; task: string; thinking?: string; model?: string; plan?: string }) {
     if (!this.tier) throw new Error("not up");
+    const route = stageRoute(a.stage, a.plan);
     const id = rid(`st-${a.stage}`);
-    const model = a.model ?? STAGE_MODELS[a.stage].primary;
+    const model = a.model ?? route.primary;
     const message = `/${a.gsdCommand} ${MAGIC}\n\n${a.task}`;
-    const rec: StageRec = { id, stage: a.stage, command: a.gsdCommand, modelRequested: model, status: "starting", client: null, startedAt: aedt(), questions: [], lastText: "", done: Promise.resolve() };
+    const rec: StageRec = { id, stage: a.stage, plan: route.plan, fallbackModel: route.fallback, command: a.gsdCommand, modelRequested: model, status: "starting", client: null, startedAt: aedt(), questions: [], lastText: "", done: Promise.resolve() };
     this.stages.set(id, rec);
     rec.done = this.#drive(rec, message, model, a.thinking ?? "max").catch((e: any) => { rec.status = rec.status === "aborted" ? "aborted" : "failed"; rec.error = String(e?.message ?? e); }).finally(() => { rec.endedAt = aedt(); this.#stageReceipt(rec); this.emit("event", { event: "stage_done", stageId: id, status: rec.status, error: rec.error }); });
-    return { stageId: id, model, command: a.gsdCommand };
+    return { stageId: id, plan: route.plan, model, fallback: route.fallback, command: a.gsdCommand };
   }
 
   async #drive(rec: StageRec, message: string, model: string, thinking: string): Promise<void> {
@@ -113,8 +114,8 @@ export class Core extends EventEmitter {
     const r = await c.prompt(message);
     const st = (): StageStatus => rec.status;
     const failedEarly = r.status !== "completed" && c.models.size === 0;
-    if (failedEarly && !rec.fallbackFrom && st() !== "aborted") {
-      const fb = STAGE_MODELS[rec.stage].fallback;
+    if (failedEarly && !rec.fallbackFrom && rec.fallbackModel && st() !== "aborted") {
+      const fb = rec.fallbackModel;
       rec.fallbackFrom = model; rec.modelRequested = fb; await c.close();
       this.emit("event", { event: "fallback", stageId: rec.id, from: model, to: fb, reason: r.error?.message ?? r.status });
       return this.#drive(rec, message, fb, thinking);
@@ -147,13 +148,13 @@ export class Core extends EventEmitter {
   }
 
   status(stageId?: string) {
-    const view = (r: StageRec) => ({ stageId: r.id, stage: r.stage, command: r.command, status: r.status, modelRequested: r.modelRequested, fallbackFrom: r.fallbackFrom ?? null, modelsSeen: r.client ? [...r.client.models] : [], pendingQuestions: r.client?.pendingQuestions.map((q) => q.requestId) ?? [], questions: r.questions.length, startedAt: r.startedAt, endedAt: r.endedAt ?? null, error: r.error ?? null, lastText: r.lastText.slice(-600) });
+    const view = (r: StageRec) => ({ stageId: r.id, stage: r.stage, plan: r.plan, command: r.command, status: r.status, modelRequested: r.modelRequested, fallbackFrom: r.fallbackFrom ?? null, modelsSeen: r.client ? [...r.client.models] : [], pendingQuestions: r.client?.pendingQuestions.map((q) => q.requestId) ?? [], questions: r.questions.length, startedAt: r.startedAt, endedAt: r.endedAt ?? null, error: r.error ?? null, lastText: r.lastText.slice(-600) });
     if (stageId) { const r = this.stages.get(stageId); if (!r) throw new Error(`unknown stage ${stageId}`); return view(r); }
     return { tier: this.tier?.name ?? null, isolation: this.tier?.isolation ?? null, owned: this.tier?.owned() ?? null, attestation: "mock", stages: [...this.stages.values()].map(view) };
   }
 
   #stageReceipt(r: StageRec) {
-    this.#receipt(r.id, { stageId: r.id, stage: r.stage, gsdCommand: r.command, magicKeywords: MAGIC, modelRequested: r.modelRequested, fallbackFrom: r.fallbackFrom ?? null, modelsSeen: r.client ? [...r.client.models] : [], status: r.status, error: r.error ?? null, questions: r.questions, startedAt: r.startedAt, endedAt: r.endedAt, tier: this.tier?.name, isolation: this.tier?.isolation, skippedTiers: this.skipped, attestation: "mock", attestationDoc: this.attestation, ompBin: OMP_BIN, lastText: r.lastText.slice(-1500) });
+    this.#receipt(r.id, { stageId: r.id, stage: r.stage, plan: r.plan, gsdCommand: r.command, magicKeywords: MAGIC, modelRequested: r.modelRequested, fallbackFrom: r.fallbackFrom ?? null, modelsSeen: r.client ? [...r.client.models] : [], status: r.status, error: r.error ?? null, questions: r.questions, startedAt: r.startedAt, endedAt: r.endedAt, tier: this.tier?.name, isolation: this.tier?.isolation, skippedTiers: this.skipped, attestation: "mock", attestationDoc: this.attestation, ompBin: OMP_BIN, lastText: r.lastText.slice(-1500) });
   }
   #receipt(name: string, body: Record<string, unknown>) {
     const p = join(this.#receipts, `${name}.json`);
