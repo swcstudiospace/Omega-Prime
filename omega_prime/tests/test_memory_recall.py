@@ -253,6 +253,7 @@ def test_remote_hits_merge_with_stable_source_order_and_full_provenance(tmp_path
                     "scope": "team",
                     "repo": "repo-a",
                     "score": 0.8,
+                    "source": "substrate-index",
                     "evidence": {"path": "docs/a"},
                 },
                 {
@@ -262,6 +263,7 @@ def test_remote_hits_merge_with_stable_source_order_and_full_provenance(tmp_path
                     "scope": "team",
                     "repo": "repo-a",
                     "score": 0.9,
+                    "source": "hindsight-observation",
                 },
             ],
         }
@@ -468,6 +470,58 @@ def test_remote_marker_metadata_is_preserved_as_trusted_provenance(tmp_path):
             "repo": "repo-a",
             "source": "trusted-source",
         },
+    }
+
+
+def test_remote_source_falls_back_to_native_value_when_marker_omits_it(tmp_path):
+    store = MemoryStore(tmp_path / "memory")
+    marker = _remote_metadata(None)
+    substrate = Substrate(
+        [
+            {
+                "text": "marked substrate fact",
+                "scope": "team",
+                "source": "substrate-native",
+                "source_event": marker,
+            },
+            {
+                "text": "unmarked substrate fact",
+                "scope": "team",
+                "source": "substrate-unmarked",
+            },
+        ]
+    )
+    hindsight = Hindsight(
+        [
+            {
+                "text": "marked hindsight fact",
+                "scope": "team",
+                "source": "hindsight-native",
+                "context": marker,
+            },
+            {
+                "text": "unmarked hindsight fact",
+                "scope": "team",
+                "source": "hindsight-unmarked",
+            },
+        ]
+    )
+    backends = resolve_memory_backends(
+        local_store=store,
+        substrate=substrate,
+        hindsight=hindsight,
+        scope="team",
+        environ={},
+    )
+
+    result = recall_memory(backends, "fact", scope="team", repo=None, limit=10)
+
+    sources = {hit["content"]: hit["sources"][0] for hit in result["results"]}
+    assert {content: source["source"] for content, source in sources.items()} == {
+        "marked substrate fact": "substrate-native",
+        "unmarked substrate fact": "substrate-unmarked",
+        "marked hindsight fact": "hindsight-native",
+        "unmarked hindsight fact": "hindsight-unmarked",
     }
 
 

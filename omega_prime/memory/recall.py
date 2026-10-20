@@ -149,10 +149,6 @@ def recall_memory(
                     key in {"scope", "repo"}
                     and (trusted_metadata is None or key not in trusted_metadata)
                 )
-                and not (
-                    key == "source"
-                    and (trusted_metadata is None or key not in trusted_metadata)
-                )
             ):
                 row[key] = value
         if trusted_metadata is not None:
