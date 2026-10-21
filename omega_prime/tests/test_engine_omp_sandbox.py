@@ -660,3 +660,137 @@ def test_ultrathink_engine_passes_engine_plan_to_the_wrapper(
     assert args["gsd_command"] == "gsd-plan-phase"
     assert "Carry out this ultrathink spec." in args["task"]
     assert "Build the export button." in args["task"]
+
+
+# --- W112-05: the guards ------------------------------------------------------
+
+
+def test_allowlist_refusal_precedes_any_wrapper_spawn(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")  # canary: logs on spawn
+    roots = tmp_path / "roots"
+    outside = tmp_path / "outside"
+    work = _git_worktree(outside)  # a real git worktree OUTSIDE the roots
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-refused",
+        stage="plan",
+        plan="zai",
+    )
+    assert result.ok is False
+    assert result.reason == "sandbox_unavailable"
+    assert "path_refused" in result.detail
+    # The refusal happened before any spawn: the canary left no log.
+    assert not log.exists()
+    assert _wrapper_log(log) == []
+
+
+def test_bwrap_default_untouched_when_backend_unset(
+    tmp_path: Path, monkeypatch
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")  # canary: backend untaken
+    bwrap = tmp_path / "bin" / "bwrap"
+    bwrap.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$@\" > \"$OMEGA_FAKE_OMP_BWRAP_LOG\"\n"
+        "while [ \"$1\" != \"--\" ]; do shift; done\n"
+        "shift\n"
+        "exec \"$@\"\n",
+        encoding="utf-8",
+    )
+    bwrap.chmod(bwrap.stat().st_mode | stat.S_IEXEC)
+    env = _env(
+        tmp_path,
+        omp,
+        OMEGA_PRIME_ENGINE_UNSANDBOXED="0",
+        OMEGA_FAKE_OMP_BWRAP_LOG=str(tmp_path / "bwrap.txt"),
+        # The Anda override is present but must never be used: the backend
+        # is only selected by the explicit OMEGA_PRIME_OMP_BACKEND knob.
+        **{ANDA_BIN_ENV: str(script), WORKSPACE_ROOTS_ENV: str(tmp_path)},
+    )
+    assert BACKEND_ENV not in env  # unset: the bwrap default stands
+    result = run("PONG", cwd=tmp_path, env=env, job_id="job-bwrap")
+    assert result.ok is True
+    assert result.sandbox == "bwrap"
+    logged = (tmp_path / "bwrap.txt").read_text(encoding="utf-8")
+    assert "--ro-bind" in logged
+    assert "--unshare-pid" in logged
+    assert not log.exists()
+    assert _wrapper_log(log) == []
+
+
+def test_no_secret_shaped_value_lands_in_any_durable_artifact(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    token = _shaped_zai_key()  # built at runtime, never a literal
+    env = _backend_env(
+        tmp_path,
+        omp,
+        script,
+        roots,
+        OMEGA_PRIME_OMP_ALLOW_ZAI="1",
+        ZAI_API_KEY=token,
+    )
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:secret")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-secret",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:secret",
+    )
+    assert result.ok is True, result.detail
+    # The truthy env routed the run (behaviour only, never values).
+    assert result.plan == "zai"
+    assert result.stats["omp_sandbox"]["tier"] == "fake-tier"
+    # Byte-scan every artifact the run produced: the job state dir (events,
+    # session.json), the operator-visible tasks store, and the wrapper's
+    # receipts. On failure this prints paths only — never contents, never
+    # the value.
+    candidates = [p for p in tmp_path.rglob("*") if p.is_file()]
+    hits = [
+        str(p)
+        for p in candidates
+        if token.encode("utf-8") in p.read_bytes()
+    ]
+    assert hits == [], "secret-shaped value leaked into durable artifacts"
+
+
+def test_question_surfaces_as_event_only(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "question")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:q")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-q",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:q",
+    )
+    assert result.ok is True, result.detail
+    # The question is visible in events.jsonl as an event — and only there.
+    events = _jsonl(Path(result.events_path))
+    questions = [row for row in events if row.get("event") == "question"]
+    assert len(questions) == 1
+    assert questions[0]["attestation"] == "mock"
+    # No waiting_on_ove item, no answer_question round-trip (node n4).
+    data = _read_tasks(store)
+    assert data["waiting_on_ove"] == []
+    assert data["tasks"][0] == {"id": "gb:q", "state": "working"}
+    assert "answer_question" not in _wrapper_tools(log)
+
