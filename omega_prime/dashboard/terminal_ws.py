@@ -47,6 +47,7 @@ from omega_prime.dashboard.terminal import (
 
 TERMINAL_WS_LIMIT = 4
 TERMINAL_INPUT_MAX_BYTES = 4096
+TERMINAL_INPUT_MAX_COMMANDS = 8
 TERMINAL_WS_POLL_S = 1.0
 
 _UNSET = object()
@@ -246,15 +247,41 @@ class HerdrBridge:
         # event loop that serves HTTP, terminal input and live events.
         return await asyncio.to_thread(redact_ansi_frame, raw)
 
-    async def send_text(self, pane: str, text: str) -> None:
-        # NUL (xterm's Ctrl+Space, or pasted) cannot travel in an argv
-        # string, so each NUL goes through send-keys as ctrl+space instead.
-        segments = text.split("\x00")
-        for index, segment in enumerate(segments):
-            if index:
-                await self.send_keys(pane, ["ctrl+space"])
-            if segment:
-                await self.runner(["herdr", "pane", "send-text", pane, segment])
+    async def send_text(
+        self,
+        pane: str,
+        text: str,
+        still_current: Callable[[], bool] | None = None,
+    ) -> None:
+        """Type ``text`` into the pane; NULs travel as ``ctrl+space`` keys.
+
+        NUL (xterm's Ctrl+Space, or pasted) cannot travel in an argv string,
+        so each run of NULs becomes one send-keys call. An input that would
+        need more than TERMINAL_INPUT_MAX_COMMANDS Herdr calls drops its NULs
+        and is sent as one send-text, so a single message never queues
+        thousands of launches. ``still_current`` is checked before every
+        follow-up call; the rest of the input is abandoned once the task's
+        pane mapping changes.
+        """
+        commands: list[list[str]] = []
+        for index, segment in enumerate(re.split(r"(\x00+)", text)):
+            if not segment:
+                continue
+            if index % 2:
+                commands.append(
+                    ["herdr", "pane", "send-keys", pane, *["ctrl+space"] * len(segment)]
+                )
+            else:
+                commands.append(["herdr", "pane", "send-text", pane, segment])
+        if len(commands) > TERMINAL_INPUT_MAX_COMMANDS:
+            stripped = text.replace("\x00", "")
+            commands = (
+                [["herdr", "pane", "send-text", pane, stripped]] if stripped else []
+            )
+        for index, argv in enumerate(commands):
+            if index and still_current is not None and not still_current():
+                return
+            await self.runner(argv)
 
     async def send_keys(self, pane: str, keys: list[str]) -> None:
         await self.runner(["herdr", "pane", "send-keys", pane, *keys])
@@ -472,8 +499,12 @@ def make_terminal_ws_endpoint(
                     pane = pane_provider()
                     if pane is None:
                         continue
+
+                    def still_current(target: str = pane) -> bool:
+                        return pane_provider() == target
+
                     try:
-                        await bridge.send_text(pane, text)
+                        await bridge.send_text(pane, text, still_current=still_current)
                     except asyncio.CancelledError:
                         raise
                     except Exception:

@@ -1026,14 +1026,40 @@ def test_read_frame_redacts_off_the_event_loop():
 
 
 def test_send_text_routes_nul_bytes_through_ctrl_space():
-    # xterm sends Ctrl+Space as NUL, which cannot travel inside an argv string.
+    # xterm sends Ctrl+Space as NUL, which cannot travel inside an argv string;
+    # a run of NULs is one send-keys call.
     runner = _fake_runner()
     bridge = HerdrBridge(runner=runner)
-    asyncio.run(bridge.send_text("w2:p4", "a\x00b\x00"))
+    asyncio.run(bridge.send_text("w2:p4", "a\x00b\x00\x00"))
     assert runner.calls == [
         ["herdr", "pane", "send-text", "w2:p4", "a"],
         ["herdr", "pane", "send-keys", "w2:p4", "ctrl+space"],
         ["herdr", "pane", "send-text", "w2:p4", "b"],
-        ["herdr", "pane", "send-keys", "w2:p4", "ctrl+space"],
+        ["herdr", "pane", "send-keys", "w2:p4", "ctrl+space", "ctrl+space"],
     ]
     assert all("\x00" not in part for call in runner.calls for part in call)
+
+
+def test_send_text_bounds_herdr_calls_per_input():
+    runner = _fake_runner()
+    bridge = HerdrBridge(runner=runner)
+    asyncio.run(bridge.send_text("w2:p4", "x\x00" * 2000))
+    assert runner.calls == [["herdr", "pane", "send-text", "w2:p4", "x" * 2000]]
+    runner.calls.clear()
+    asyncio.run(bridge.send_text("w2:p4", "\x00" * 4096))
+    assert runner.calls == [
+        ["herdr", "pane", "send-keys", "w2:p4", *["ctrl+space"] * 4096]
+    ]
+
+
+def test_send_text_stops_when_the_pane_mapping_changes():
+    runner = _fake_runner()
+    bridge = HerdrBridge(runner=runner)
+    checks = iter([True, False])
+    asyncio.run(
+        bridge.send_text("w2:p4", "a\x00b\x00c", still_current=lambda: next(checks))
+    )
+    assert runner.calls == [
+        ["herdr", "pane", "send-text", "w2:p4", "a"],
+        ["herdr", "pane", "send-keys", "w2:p4", "ctrl+space"],
+    ]
