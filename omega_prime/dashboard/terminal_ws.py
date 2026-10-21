@@ -15,9 +15,16 @@ token stay out of logs, errors and stdout.
 from __future__ import annotations
 
 import asyncio
+import json
+import secrets
+import time
 import unicodedata
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
+from typing import Any
+
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from omega_prime.dashboard import terminal
 from omega_prime.dashboard.redact import redact_value
@@ -33,6 +40,7 @@ from omega_prime.dashboard.terminal import (
     TERMINAL_READ_TIMEOUT_S,
     PaneClosedError,
     _read_pane,
+    resolve_task_pane,
 )
 
 TERMINAL_WS_LIMIT = 4
@@ -158,3 +166,161 @@ class HerdrBridge:
                 last_text = text
             last_status = None
             await self.sleep(self.poll_s)
+
+
+def make_terminal_ws_endpoint(
+    poller: Any,
+    bridge: HerdrBridge,
+    *,
+    token: str,
+    readonly: bool = False,
+    auth_timeout_s: float = 5.0,
+    input_per_s: int = 32,
+    mono: Callable[[], float] = time.monotonic,
+) -> Callable[[WebSocket], Awaitable[None]]:
+    """Build the /ws/tasks/{task_id}/terminal endpoint (protocol default 5).
+
+    Auth happens in the first message within auth_timeout_s; failures close
+    4401. Unknown or invalid task ids close 4404, an exhausted connection cap
+    closes 4429. The pane is resolved only from the task row via
+    terminal.resolve_task_pane and re-resolved every cycle, so pane changes
+    are followed live; client frames never carry or influence pane ids.
+    Read-only connections (server flag or client mode) drop input silently.
+    """
+
+    def _task_row(snapshot: dict[str, Any], task_id: str) -> dict[str, Any] | None:
+        return next(
+            (
+                item
+                for group in ("active", "idle_sessions", "finished")
+                for item in snapshot.get(group, [])
+                if isinstance(item, dict) and item.get("id") == task_id
+            ),
+            None,
+        )
+
+    async def endpoint(websocket: WebSocket) -> None:
+        await websocket.accept()
+        try:
+            message = await asyncio.wait_for(websocket.receive_json(), auth_timeout_s)
+        except (asyncio.TimeoutError, TimeoutError):
+            await websocket.close(code=4401)
+            return
+        if (
+            not isinstance(message, dict)
+            or message.get("type") != "auth"
+            or not isinstance(message.get("token"), str)
+            or not secrets.compare_digest(message["token"], token)
+            or message.get("mode") not in ("rw", "ro")
+        ):
+            await websocket.close(code=4401)
+            return
+        force_readonly = readonly or message["mode"] == "ro"
+
+        task_id = websocket.path_params["task_id"]
+        if (
+            websocket.scope.get("query_string")
+            or len(task_id.encode("utf-8")) > 256
+            or any(ord(c) < 32 or ord(c) == 127 for c in task_id)
+        ):
+            await websocket.close(code=4404)
+            return
+        snapshot = poller.snapshot() or {"active": [], "idle_sessions": [], "finished": []}
+        if _task_row(snapshot, task_id) is None:
+            await websocket.close(code=4404)
+            return
+        if not await bridge.reserve():
+            await websocket.close(code=4429)
+            return
+
+        last_pane: list[str | None] = [None]
+
+        def pane_provider() -> str | None:
+            current = poller.snapshot() or {"active": [], "idle_sessions": [], "finished": []}
+            row = _task_row(current, task_id)
+            pane = resolve_task_pane(row) if row is not None else None
+            if pane is not None:
+                last_pane[0] = pane
+            return pane
+
+        async def writer() -> None:
+            async for event in bridge.poll_events(pane_provider):
+                await websocket.send_json(event)
+
+        async def _allowed(window: deque[float], now: float) -> bool:
+            while window and now - window[0] >= 1.0:
+                window.popleft()
+            if len(window) >= input_per_s:
+                return False
+            window.append(now)
+            return True
+
+        async def reader() -> None:
+            window: deque[float] = deque()
+            while True:
+                try:
+                    frame = await websocket.receive_json()
+                except WebSocketDisconnect:
+                    return
+                if force_readonly or not isinstance(frame, dict):
+                    continue
+                kind = frame.get("type")
+                if kind == "input":
+                    text = frame.get("text")
+                    if (
+                        not isinstance(text, str)
+                        or len(text.encode("utf-8")) > TERMINAL_INPUT_MAX_BYTES
+                        or not await _allowed(window, mono())
+                    ):
+                        continue
+                    pane = last_pane[0]
+                    if pane is None:
+                        continue
+                    try:
+                        await bridge.send_text(pane, text)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        continue
+                elif kind == "keys":
+                    keys = frame.get("keys")
+                    if (
+                        not isinstance(keys, list)
+                        or not all(isinstance(key, str) for key in keys)
+                        or len(json.dumps(keys, separators=(",", ":")).encode("utf-8"))
+                        > TERMINAL_INPUT_MAX_BYTES
+                        or not await _allowed(window, mono())
+                    ):
+                        continue
+                    pane = last_pane[0]
+                    if pane is None:
+                        continue
+                    try:
+                        await bridge.send_keys(pane, keys)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        continue
+
+        writer_task = asyncio.create_task(writer())
+        reader_task = asyncio.create_task(reader())
+        try:
+            # First completion wins; the sibling is cancelled so a returning
+            # reader (disconnect) or writer (pane_closed) ends the session.
+            await asyncio.wait(
+                {writer_task, reader_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            writer_task.cancel()
+            reader_task.cancel()
+            await asyncio.gather(writer_task, reader_task, return_exceptions=True)
+            bridge.release()
+        # The session must always end with an explicit close frame: a bare
+        # return completes the ASGI app without one, and the peer would wait
+        # forever (uvicorn tolerates a close after peer disconnect).
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+    return endpoint
