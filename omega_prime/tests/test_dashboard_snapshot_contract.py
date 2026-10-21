@@ -24,9 +24,8 @@ def test_persisted_task_numbering_reaches_snapshot(tmp_path):
         },
     )
     poller._results["herdr"] = SourceResult(
-        "herdr", "ok", items=[
-            {"pane_id": "idle", "agent_status": "unknown", "terminal_title": "Idle session"}
-        ]
+        "herdr", "ok",
+        items=[{"kind": "herdr_pane", "pane_id": "idle", "agent_status": "unknown", "terminal_title": "Idle session"}],
     )
     poller._build_snapshot()
     first = poller.snapshot()

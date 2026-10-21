@@ -70,6 +70,7 @@ def test_idle_changes_snapshot_hash_and_keeps_number_across_restart(tmp_path):
         poller = DashboardPoller([], task_ids_path=path, clock=lambda: at)
         poller._results["herdr"] = _source(
             "herdr", [{
+                "kind": "herdr_pane",
                 "pane_id": "durable", "agent_status": status,
                 "terminal_title": title, "has_live_agent": True,
             }]

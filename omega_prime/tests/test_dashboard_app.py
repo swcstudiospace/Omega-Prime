@@ -84,7 +84,7 @@ def test_populated_snapshot_api_includes_idle_sessions(tmp_path: Path) -> None:
     poller = DashboardPoller([], task_ids_path=tmp_path / "tasks.json", clock=lambda: NOW)
     poller._results["herdr"] = SourceResult(
         "herdr", "ok",
-        items=[{"pane_id": "idle", "agent_status": "unknown", "terminal_title": "Idle"}],
+        items=[{"kind": "herdr_pane", "pane_id": "idle", "agent_status": "unknown", "terminal_title": "Idle"}],
     )
     poller._build_snapshot()
     app = create_app(poller, port=0)
