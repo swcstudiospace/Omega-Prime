@@ -23,6 +23,13 @@ type StageRec = {
   lastText: string; done: Promise<void>;
 };
 
+const PASS_ENV_NAME = /^(ZAI|ZHIPU|OPENROUTER)_API_KEY$/;
+/** Opt-in env passthrough: OMP_SANDBOX_PASS_ENV names allowlisted host *_API_KEY vars whose values go into the sandbox's
+ *  0600 env file over exec stdin. Only names are ever recorded; values never reach argv, logs or receipts. */
+export function passEnv(src: Record<string, string | undefined> = process.env) {
+  const names = (src.OMP_SANDBOX_PASS_ENV ?? "").split(",").map((n) => n.trim()).filter((n) => PASS_ENV_NAME.test(n) && !!src[n]);
+  return { names, env: Object.fromEntries(names.map((n) => [n, String(src[n])])) as Record<string, string> };
+}
 
 type UpOpts = { tiers?: string[]; seed?: string; workspace_host_path?: string; seed_repo?: SeedRepo; py_deps?: string; stage?: Array<{ from: string; to: string }> };
 export class Core extends EventEmitter {
@@ -69,7 +76,8 @@ export class Core extends EventEmitter {
     mkdirSync(this.#receipts, { recursive: true, mode: 0o700 });
     try {
       await this.broker.start();
-      const { tier, skipped } = await startTier(this.broker.env, opts.tiers as any, { workspaceHostPath: workspace });
+      const passed = passEnv();
+      const { tier, skipped } = await startTier({ ...this.broker.env, ...passed.env }, opts.tiers as any, { workspaceHostPath: workspace });
       this.tier = tier as any; this.skipped = skipped;
       const { vm, bootMs } = await bootVm(tier); this.vm = vm;
       const roundTrip = await vmRoundTrip(vm, tier);
@@ -81,7 +89,7 @@ export class Core extends EventEmitter {
       const staged = [] as unknown[]; for (const st of opts.stage ?? []) staged.push(await this.#stageDir(st));
       const probe = await this.#probeOmp();
       this.attestation = mockAttestation(tier.name, { isolation: tier.isolation });
-      this.up_ = { tier: tier.name, isolation: tier.isolation, skippedTiers: skipped, agentosBootMs: bootMs, roundTrip, gsd, seeded, pyDeps, staged, workspace: workspace ? { hostPath: workspace, sandboxPath: tier.workdir, mode: "bind-rw" } : null, omp: probe, attestation: "mock", attestationDoc: this.attestation };
+      this.up_ = { tier: tier.name, isolation: tier.isolation, skippedTiers: skipped, passedEnv: passed.names, agentosBootMs: bootMs, roundTrip, gsd, seeded, pyDeps, staged, workspace: workspace ? { hostPath: workspace, sandboxPath: tier.workdir, mode: "bind-rw" } : null, omp: probe, attestation: "mock", attestationDoc: this.attestation };
       this.#ready = true;
       this.#receipt(`up-${tier.id}`, this.up_);
       return this.up_;

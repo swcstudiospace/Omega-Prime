@@ -142,3 +142,12 @@ test("ensureGsd and gsdCommandsOnHost target the mounted workspace, never the hi
   assert.equal(gsdCommandsOnHost({ hostRoot }), 1, "without a mount the hostRoot/work location still counts");
   assert.equal(gsdCommandsOnHost({}), null);
 });
+
+test("passEnv forwards only allowlisted *_API_KEY names that are set, and only when opted in", async () => {
+  const { passEnv } = await import("../src/core/core.ts");
+  assert.deepEqual(passEnv({}), { names: [], env: {} });
+  assert.deepEqual(passEnv({ ZAI_API_KEY: "v" }).names, [], "no opt-in, nothing passes");
+  const r = passEnv({ OMP_SANDBOX_PASS_ENV: "ZAI_API_KEY, HOME ,OPENROUTER_API_KEY,GITHUB_TOKEN,ZHIPU_API_KEY", ZAI_API_KEY: "v", HOME: "/h", GITHUB_TOKEN: "t", ZHIPU_API_KEY: "" });
+  assert.deepEqual(r.names, ["ZAI_API_KEY"]);
+  assert.deepEqual(Object.keys(r.env), ["ZAI_API_KEY"]);
+});
