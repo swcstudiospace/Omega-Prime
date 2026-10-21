@@ -275,10 +275,14 @@ def delegate_via_engine(
     cwd: str | None = None,
     interrupt: Any | None = None,
     stage: str | None = None,
+    engine_plan: str | None = None,
 ) -> str | None:
     """JSON summary from omp, or None when the Python child path should run.
 
     ``stage`` falls back to ``OMEGA_PRIME_ENGINE_STAGE``; see ``engine_stage``.
+    ``engine_plan`` requests one coding plan (``run(plan=...)``): the router
+    still decides, so an unknown or off-allowlist plan refuses the run
+    instead of silently changing providers.
     """
     mapping = _mapping(env)
     mode = engine_mode(mapping)
@@ -290,7 +294,9 @@ def delegate_via_engine(
         return None
     if not ready and mode == "required":
         return json.dumps({"error": reason}, ensure_ascii=False)
-    result = run(goal, env=mapping, cwd=cwd, interrupt=interrupt, stage=staged)
+    result = run(
+        goal, env=mapping, cwd=cwd, interrupt=interrupt, stage=staged, plan=engine_plan
+    )
     if not result.ok:
         if mode == "required" or result.started:
             return json.dumps(
@@ -375,11 +381,16 @@ def ultrathink_engine(
     env: Mapping[str, str],
     *,
     stage: str | None = None,
+    engine_plan: str | None = None,
 ) -> dict[str, Any]:
     """Run a resolved ultrathink spec on omp when the engine is ready.
 
     ``stage`` wins, then the plan's ``stage`` field, then
-    ``OMEGA_PRIME_ENGINE_STAGE``.
+    ``OMEGA_PRIME_ENGINE_STAGE``. ``engine_plan`` (deliberately not
+    ``plan``: the first positional already is the spec mapping, and
+    ``engine_plan`` is the established name for the requested coding plan,
+    as in ``route_turn``) is threaded into ``run(plan=...)`` unchanged —
+    the router still decides.
     """
     mode = engine_mode(env)
     if mode == "off":
@@ -406,6 +417,7 @@ def ultrathink_engine(
         env=env,
         system_prompt="Ultrathink turn. Stay inside the spec.",
         stage=staged,
+        plan=engine_plan,
     )
     if not result.ok:
         body = {
