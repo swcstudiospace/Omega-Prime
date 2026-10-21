@@ -12,6 +12,8 @@ MAX_MERGES = 100
 MAX_ERRORS = 20
 MAX_PAGES = 3
 PAGE_SIZE = 100
+CLOSED_PAGE_SIZE = 30
+MAX_CLOSED_PAGES = 10
 
 
 def ci_state(runs: list[dict[str, Any]]) -> str:

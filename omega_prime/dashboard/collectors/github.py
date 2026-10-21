@@ -21,8 +21,9 @@ from urllib.parse import urlencode
 
 from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.dashboard.github_data import (
-    MAX_ERRORS, MAX_MERGES, MAX_PAGES, MAX_REPOSITORIES,
-    MAX_ROWS, PAGE_SIZE, check_rows, ci_state, merge_row, repository_row,
+    CLOSED_PAGE_SIZE, MAX_CLOSED_PAGES, MAX_ERRORS, MAX_MERGES, MAX_PAGES,
+    MAX_REPOSITORIES, MAX_ROWS, PAGE_SIZE, check_rows, ci_state, merge_row,
+    repository_row,
 )
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.redact import redact_value
@@ -35,6 +36,13 @@ TARGETS = (f"{ORG}/Omega-Prime", f"{ORG}/coding-fleet")  # omes-bot was renamed;
 
 _SAFE_REPO = re.compile(r"^swcstudiospace/[A-Za-z0-9_.-]{1,100}$")
 _SAFE_REF = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+
+MAX_RESPONSE_BYTES = 1_000_000
+
+
+class _ResponseTooLarge(ValueError):
+    """GitHub response exceeded the bounded body size."""
+
 
 class _GitHubEndpointPolicy:
     def allows_host(self, host: str) -> bool:
@@ -56,9 +64,14 @@ def _request(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
         raise ValueError("untrusted GitHub API URL")
     try:
         with _OPENER.open(request, timeout=2.5) as response:
-            return response.status, response.read(1_000_000)
+            body = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise _ResponseTooLarge("payload")
+        return response.status, body
     except urllib.error.HTTPError as exc:
         return exc.code, b""
+
+
 
 
 def _stamp(value: datetime) -> str:
@@ -129,9 +142,13 @@ def make_github_collector(
                 exc = RuntimeError("http_" + str(status))
                 setattr(exc, "status", status)
                 raise exc
-            if not isinstance(body, bytes) or len(body) > 1_000_000:
+            if not isinstance(body, bytes):
                 raise ValueError("payload")
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise _ResponseTooLarge("payload")
             return json.loads(body)
+
+
 
         def pages(path: str, params: Mapping[str, Any] | None = None) -> tuple[list[Any], bool]:
             rows: list[Any] = []
@@ -174,7 +191,10 @@ def make_github_collector(
         def fail(section: str, exc: Exception) -> None:
             partial[section] = True
             status = getattr(exc, "status", None)
-            why = "rate_limited" if status == 429 else "forbidden" if status == 403 else "error" if isinstance(exc, (ValueError, json.JSONDecodeError)) else "partial" if str(exc) == "budget" else "offline"
+            if isinstance(exc, _ResponseTooLarge):
+                why = "too_large"
+            else:
+                why = "rate_limited" if status == 429 else "forbidden" if status == 403 else "error" if isinstance(exc, (ValueError, json.JSONDecodeError)) else "partial" if str(exc) == "budget" else "offline"
             reason[section] = why
             with errors_lock:
                 if len(errors) < MAX_ERRORS:
@@ -207,6 +227,28 @@ def make_github_collector(
         legacy_items: list[dict[str, Any]] = []
         repos_out: list[dict[str, Any]] = []
         merges: list[dict[str, Any]] = []
+        def closed_pages(full_name: str, path: str) -> tuple[list[dict[str, Any]], bool]:
+            found: list[dict[str, Any]] = []
+            capped = False
+            for page in range(1, MAX_CLOSED_PAGES + 1):
+                query = urlencode({"state": "closed", "sort": "updated", "direction": "desc", "per_page": CLOSED_PAGE_SIZE, "page": page})
+                url = path if path.startswith(API + "/") else API + path
+                data = get(url + "?" + query)
+                if not isinstance(data, list):
+                    raise ValueError("payload")
+                for item in data[:CLOSED_PAGE_SIZE]:
+                    if isinstance(item, dict):
+                        merge = merge_row(full_name, item)
+                        if merge:
+                            found.append(merge)
+                            if len(found) == MAX_MERGES:
+                                return found, False
+                if len(data) < CLOSED_PAGE_SIZE:
+                    break
+                if page == MAX_CLOSED_PAGES:
+                    capped = True
+            return found, capped
+
         for full_name in selected:
             base = API + f"/repos/{full_name}"
             open_prs: list[Any] = []
@@ -271,19 +313,16 @@ def make_github_collector(
                 repos_out.append(repository_row(repo_data, complete_count, latest))
             if repo is None:
                 try:
-                    closed, cap = pages(base + "/pulls", {"state": "closed", "sort": "updated", "direction": "desc"})
+                    closed, cap = closed_pages(full_name, base + "/pulls")
+                    merges.extend(closed)
                     truncated["recent_merges"] |= cap
                     if cap:
                         partial["recent_merges"], reason["recent_merges"] = True, "partial"
                         failed_merge_repos.add(full_name)
-                    for pr in closed:
-                        if isinstance(pr, dict):
-                            merge = merge_row(full_name, pr)
-                            if merge:
-                                merges.append(merge)
                 except Exception as exc:
                     fail("recent_merges", exc)
                     failed_merge_repos.add(full_name)
+
         if repo is None:
             selected_names = set(selected)
             count_by_name = {item["full_name"]: item["open_pr_count"] for item in repos_out}
