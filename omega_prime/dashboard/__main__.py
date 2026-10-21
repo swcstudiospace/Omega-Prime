@@ -196,7 +196,12 @@ def main(
             assign_parser.add_argument("--id", required=True)
             assign_parser.add_argument("--title", required=True)
             parsed = assign_parser.parse_args(raw_argv[1:])
-            result = allocate_task_id(path=tasks_path, identity=parsed.id, title=parsed.title, now=datetime.now(UTC))
+            result = allocate_task_id(
+                path=tasks_path,
+                identity=parsed.id,
+                title=parsed.title,
+                now=datetime.now(UTC),
+            )
             print(result["display_id"], file=stdout or sys.stdout)
             return 0
         argparse.ArgumentParser(prog="assign-ids").parse_args(raw_argv[1:])
@@ -206,7 +211,11 @@ def main(
         description="Local loopback task dashboard (see --terminal-readonly)"
     )
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("OMEGA_PRIME_DASHBOARD_PORT", "7421")))
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("OMEGA_PRIME_DASHBOARD_PORT", "7421")),
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--stop", action="store_true")
     parser.add_argument(
@@ -284,6 +293,7 @@ def main(
             window_hours=config.window_hours,
             task_ids_path=tasks_path,
         )
+
     factory = poller_factory if poller_factory is not None else build_poller
     if args.once:
         poller = factory()

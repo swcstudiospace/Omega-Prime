@@ -24,7 +24,6 @@ _RESULTS = {"ok", "failed", "stopped"}
 _PANE_ID = re.compile(r"^w[0-9A-Za-z]+:p[0-9A-Za-z]+$")
 
 
-
 @dataclass
 class TasksFileResult:
     status: str
@@ -56,7 +55,9 @@ def _optional_iso(obj: dict[str, Any], field: str, prefix: str) -> str | None:
     try:
         datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise ValueError(f"{prefix}.{field} must be an ISO-8601 string or null") from exc
+        raise ValueError(
+            f"{prefix}.{field} must be an ISO-8601 string or null"
+        ) from exc
     return value
 
 
@@ -83,7 +84,9 @@ def _optional_stale(value: Any, prefix: str) -> dict[str, str] | None:
     try:
         datetime.fromisoformat(since.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise ValueError(f"{prefix}.stale.since must be an ISO-8601 string or null") from exc
+        raise ValueError(
+            f"{prefix}.stale.since must be an ISO-8601 string or null"
+        ) from exc
     return {"reason": reason, "since": since}
 
 
@@ -130,16 +133,19 @@ def _pane(value: Any, prefix: str) -> dict[str, str] | None:
     workspace = value.get("workspace")
     result = {"pane_id": pane_id}
     if workspace is not None:
-        if not isinstance(workspace, str) or len(workspace.encode("utf-8")) > 200 or any(ord(c) < 32 or ord(c) == 127 for c in workspace):
+        if (
+            not isinstance(workspace, str)
+            or len(workspace.encode("utf-8")) > 200
+            or any(ord(c) < 32 or ord(c) == 127 for c in workspace)
+        ):
             raise ValueError(f"{prefix}.herdr_pane.workspace is invalid")
         safe_workspace = redact_value(workspace)
         result["workspace"] = safe_workspace
     return result
+
+
 def _canonical_identity(identity: str) -> str:
     return identity if ":" in identity else f"tasks:{identity}"
-
-
-
 
 
 def _validated(data: dict[str, Any]) -> dict[str, Any]:
@@ -176,12 +182,16 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"{prefix}.state is invalid")
                 item["state"] = state
                 item["started_at"] = _optional_string(row, "started_at", prefix)
-                item["last_activity_at"] = _optional_string(row, "last_activity_at", prefix)
+                item["last_activity_at"] = _optional_string(
+                    row, "last_activity_at", prefix
+                )
                 item["progress"] = _progress(row.get("progress"), prefix)
                 item["note"] = _optional_string(row, "note", prefix)
                 item["links"] = _links(row.get("links", []), prefix)
                 item["herdr_pane"] = _pane(row.get("herdr_pane"), prefix)
-                item["last_heartbeat_at"] = _optional_iso(row, "last_heartbeat_at", prefix)
+                item["last_heartbeat_at"] = _optional_iso(
+                    row, "last_heartbeat_at", prefix
+                )
                 item["pid"] = _optional_pid(row, "pid", prefix)
                 item["stale"] = _optional_stale(row.get("stale"), prefix)
             elif category == "waiting_on_ove":
@@ -212,7 +222,11 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
     clean_registry: dict[str, Any] = {}
     seq_owner: dict[int, str] = {}
     for key, record in registry.items():
-        if not isinstance(key, str) or len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
+        if (
+            not isinstance(key, str)
+            or len(key) != 64
+            or any(c not in "0123456789abcdef" for c in key)
+        ):
             raise ValueError("identity_registry key invalid")
         if not isinstance(record, dict):
             raise ValueError("identity_registry record invalid")
@@ -253,7 +267,9 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
             seq = row.get("seq")
             if seq is None:
                 continue
-            key = hashlib.sha256(_canonical_identity(row["id"]).encode("utf-8")).hexdigest()
+            key = hashlib.sha256(
+                _canonical_identity(row["id"]).encode("utf-8")
+            ).hexdigest()
             if seq in row_owner and row_owner[seq] != key:
                 raise ValueError("duplicate sequence ownership")
             row_owner[seq] = key
@@ -261,7 +277,9 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("row sequence conflicts with identity registry")
             if seq in seq_owner and seq_owner[seq] != key:
                 raise ValueError("row sequence conflicts with identity registry")
-    out["next_seq"] = max(next_seq, max(seq_owner, default=0) + 1, max(row_owner, default=0) + 1)
+    out["next_seq"] = max(
+        next_seq, max(seq_owner, default=0) + 1, max(row_owner, default=0) + 1
+    )
     out["identity_registry"] = clean_registry
     return out
 
@@ -281,15 +299,17 @@ def locked_tasks(path: Path, *, write: bool):
                 raise ValueError("tasks document must be an object")
             data = _validated(data)
         else:
-            data = _validated({
-                "version": 1,
-                "updated_at": datetime.now().isoformat(),
-                "tasks": [],
-                "waiting_on_ove": [],
-                "finished": [],
-                "next_seq": 1,
-                "identity_registry": {},
-            })
+            data = _validated(
+                {
+                    "version": 1,
+                    "updated_at": datetime.now().isoformat(),
+                    "tasks": [],
+                    "waiting_on_ove": [],
+                    "finished": [],
+                    "next_seq": 1,
+                    "identity_registry": {},
+                }
+            )
         yield data
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -327,7 +347,9 @@ def _write_locked(data: dict[str, Any], path: Path) -> Path:
 def write_tasks(data: dict[str, Any], *, path: Path) -> Path:
     with locked_tasks(path, write=True) as current:
         candidate = _validated(data)
-        registry = {key: dict(record) for key, record in current["identity_registry"].items()}
+        registry = {
+            key: dict(record) for key, record in current["identity_registry"].items()
+        }
         for key, incoming in candidate["identity_registry"].items():
             existing = registry.get(key)
             if existing is None:
@@ -351,11 +373,15 @@ def write_tasks(data: dict[str, Any], *, path: Path) -> Path:
         )
         for category in ("tasks", "waiting_on_ove", "finished"):
             for row in candidate[category]:
-                key = hashlib.sha256(_canonical_identity(row["id"]).encode("utf-8")).hexdigest()
+                key = hashlib.sha256(
+                    _canonical_identity(row["id"]).encode("utf-8")
+                ).hexdigest()
                 record = registry.get(key)
                 if record is not None:
                     if "seq" in row and row["seq"] != record["seq"]:
-                        raise ValueError("row sequence conflicts with identity registry")
+                        raise ValueError(
+                            "row sequence conflicts with identity registry"
+                        )
                     row["seq"] = record["seq"]
         return _write_locked(candidate, path)
 

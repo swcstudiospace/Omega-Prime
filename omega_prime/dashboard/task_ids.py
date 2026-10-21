@@ -8,8 +8,13 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
 from omega_prime.dashboard.redact import redact_value
-from omega_prime.dashboard.status_file import _canonical_identity, _write_locked, locked_tasks
+from omega_prime.dashboard.status_file import (
+    _canonical_identity,
+    _write_locked,
+    locked_tasks,
+)
 
 
 def format_display_id(seq: int, title: str) -> str:
@@ -26,10 +31,17 @@ def _key(identity: str) -> str:
 
 def _next(data: dict[str, Any]) -> int:
     row_max = max(
-        (row["seq"] for name in ("tasks", "waiting_on_ove", "finished") for row in data[name] if "seq" in row),
+        (
+            row["seq"]
+            for name in ("tasks", "waiting_on_ove", "finished")
+            for row in data[name]
+            if "seq" in row
+        ),
         default=0,
     )
-    registry_max = max((record["seq"] for record in data["identity_registry"].values()), default=0)
+    registry_max = max(
+        (record["seq"] for record in data["identity_registry"].values()), default=0
+    )
     return max(data["next_seq"], row_max + 1, registry_max + 1)
 
 
@@ -70,6 +82,8 @@ def _pending_backfill_count(data: dict[str, Any]) -> int:
             if key not in data["identity_registry"] and "seq" not in row:
                 pending.add(key)
     return len(pending)
+
+
 def _backfill(data: dict[str, Any]) -> None:
     for category in ("tasks", "waiting_on_ove", "finished"):
         for row in data[category]:
@@ -81,7 +95,6 @@ def _backfill(data: dict[str, Any]) -> None:
                 row.get("seq"),
             )
             row["seq"] = record["seq"]
-
 
 
 def _observe(record: dict[str, Any], state: str, now: datetime) -> None:
@@ -96,12 +109,17 @@ def next_task_id(*, path: Path) -> int:
         return _next(data) + _pending_backfill_count(data)
 
 
-def allocate_task_id(*, path: Path, identity: str, title: str, now: datetime) -> dict[str, Any]:
+def allocate_task_id(
+    *, path: Path, identity: str, title: str, now: datetime
+) -> dict[str, Any]:
     with locked_tasks(path, write=True) as data:
         _backfill(data)
         record = _record(data, identity, title)
         _write_locked(data, path)
-        return {"seq": record["seq"], "display_id": format_display_id(record["seq"], title)}
+        return {
+            "seq": record["seq"],
+            "display_id": format_display_id(record["seq"], title),
+        }
 
 
 def assign_task_ids(*, path: Path, now: datetime) -> dict[str, Any]:
@@ -114,7 +132,7 @@ def assign_task_ids(*, path: Path, now: datetime) -> dict[str, Any]:
 def _observed_state(row: Any) -> str:
     """Finished rows record their result; FinishedItem.state may be None and must never become the string 'None'."""
     if hasattr(row, "result"):
-        return str(getattr(row, "result") or "finished")
+        return str(row.result or "finished")
     if hasattr(row, "ask"):
         return "waiting"
     state = getattr(row, "state", None)
@@ -125,7 +143,12 @@ def number_snapshot(snapshot: Any, *, path: Path, now: datetime) -> Any:
     """Allocate bridge identities first, then collector-only identities deterministically."""
     with locked_tasks(path, write=True) as data:
         _backfill(data)
-        rows = [*snapshot.active, *snapshot.idle_sessions, *snapshot.waiting_on_ove, *snapshot.finished]
+        rows = [
+            *snapshot.active,
+            *snapshot.idle_sessions,
+            *snapshot.waiting_on_ove,
+            *snapshot.finished,
+        ]
         unique: dict[str, Any] = {}
         for row in rows:
             unique.setdefault(row.id, row)
@@ -139,6 +162,8 @@ def number_snapshot(snapshot: Any, *, path: Path, now: datetime) -> Any:
         for row in rows:
             record = data["identity_registry"][_key(row.id)]
             row.seq = record["seq"]
-            row.display_id = format_display_id(record["seq"], getattr(row, "title", getattr(row, "ask", "")))
+            row.display_id = format_display_id(
+                record["seq"], getattr(row, "title", getattr(row, "ask", ""))
+            )
             row.timeline = list(record["timeline"])
         return snapshot

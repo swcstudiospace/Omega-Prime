@@ -58,11 +58,16 @@ def _wiring(item: Mapping[str, Any]) -> dict[str, str | None]:
     return {
         "phase": item.get("phase") if isinstance(item.get("phase"), str) else None,
         "branch": item.get("branch") if isinstance(item.get("branch"), str) else None,
-        "head_sha": item.get("head_sha") if isinstance(item.get("head_sha"), str) else None,
+        "head_sha": item.get("head_sha")
+        if isinstance(item.get("head_sha"), str)
+        else None,
         "stage": item.get("stage") if isinstance(item.get("stage"), str) else None,
         "repo": item.get("repo") if isinstance(item.get("repo"), str) else None,
-        "worktree": item.get("worktree") if isinstance(item.get("worktree"), str) else None,
+        "worktree": item.get("worktree")
+        if isinstance(item.get("worktree"), str)
+        else None,
     }
+
 
 @dataclass
 class Owner:
@@ -187,19 +192,32 @@ class FinishedItem:
     herdr_pane: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return _safe({
-            "id": self.id, "title": self.title, "finished_at": self.finished_at,
-            "result": self.result, "receipt": self.receipt, "summary": self.summary,
-            "seq": self.seq, "display_id": self.display_id, "timeline": self.timeline,
-            "wiring": self.wiring, "source": self.source,
-            "owner": self.owner.to_dict() if self.owner else None, "state": self.state,
-            "started_at": self.started_at, "last_activity_at": self.last_activity_at,
-            "progress": None if self.progress is None else {"done": self.progress[0], "total": self.progress[1]},
-            "herdr_pane": self.herdr_pane,
-            "model": self.model, "detail": self.detail, "links": list(self.links),
-        })
-
-
+        return _safe(
+            {
+                "id": self.id,
+                "title": self.title,
+                "finished_at": self.finished_at,
+                "result": self.result,
+                "receipt": self.receipt,
+                "summary": self.summary,
+                "seq": self.seq,
+                "display_id": self.display_id,
+                "timeline": self.timeline,
+                "wiring": self.wiring,
+                "source": self.source,
+                "owner": self.owner.to_dict() if self.owner else None,
+                "state": self.state,
+                "started_at": self.started_at,
+                "last_activity_at": self.last_activity_at,
+                "progress": None
+                if self.progress is None
+                else {"done": self.progress[0], "total": self.progress[1]},
+                "herdr_pane": self.herdr_pane,
+                "model": self.model,
+                "detail": self.detail,
+                "links": list(self.links),
+            }
+        )
 
 
 @dataclass
@@ -332,7 +350,11 @@ def normalize_tasks(
             "; ".join(detail) or None,
         )
         live_agent = pane.get("has_live_agent")
-        if state in {"unknown", "quiet"} or bool(s.get("stop_reason")) or live_agent is False:
+        if (
+            state in {"unknown", "quiet"}
+            or bool(s.get("stop_reason"))
+            or live_agent is False
+        ):
             idle_sessions.append(task)
         else:
             active.append(task)
@@ -467,10 +489,13 @@ def normalize_tasks(
         if not isinstance(rid, str) or age is None or age > window_hours:
             continue
         task = Task(
-            f"sandbox:e2e:{rid}", f"Sandbox E2E {rid}", "sandbox_e2e",
+            f"sandbox:e2e:{rid}",
+            f"Sandbox E2E {rid}",
+            "sandbox_e2e",
             Owner("sandbox", rid, "Sandbox"),
             "working" if age * 60 < quiet_minutes else "quiet",
-            None, item.get("last_ts"),
+            None,
+            item.get("last_ts"),
         )
         (active if task.state == "working" else idle_sessions).append(task)
     for item in _items(sources, "sandbox_container"):
@@ -667,29 +692,62 @@ def normalize_tasks(
             activity = t.get("last_activity_at")
             progress = _progress(t.get("progress"))
             if state in {"done", "failed"}:
-                finished.append(FinishedItem(
-                    identity, title, activity, "ok" if state == "done" else "failed",
-                    summary=t.get("summary") if isinstance(t.get("summary"), str) else None,
-                    source="tasks_json", owner=owner, state=state,
-                    started_at=t.get("started_at") if isinstance(t.get("started_at"), str) else None,
-                    last_activity_at=activity if isinstance(activity, str) else None,
-                    progress=progress,
-                    model=t.get("model") if isinstance(t.get("model"), str) else None,
-                    detail=t.get("note") if isinstance(t.get("note"), str) else None,
-                    links=links,
-                    wiring=_wiring(t.get("wiring", {})) if isinstance(t.get("wiring"), dict) else None,
-                    herdr_pane=t.get("herdr_pane") if isinstance(t.get("herdr_pane"), dict) else None,
-                ))
+                finished.append(
+                    FinishedItem(
+                        identity,
+                        title,
+                        activity,
+                        "ok" if state == "done" else "failed",
+                        summary=t.get("summary")
+                        if isinstance(t.get("summary"), str)
+                        else None,
+                        source="tasks_json",
+                        owner=owner,
+                        state=state,
+                        started_at=t.get("started_at")
+                        if isinstance(t.get("started_at"), str)
+                        else None,
+                        last_activity_at=activity
+                        if isinstance(activity, str)
+                        else None,
+                        progress=progress,
+                        model=t.get("model")
+                        if isinstance(t.get("model"), str)
+                        else None,
+                        detail=t.get("note")
+                        if isinstance(t.get("note"), str)
+                        else None,
+                        links=links,
+                        wiring=_wiring(t.get("wiring", {}))
+                        if isinstance(t.get("wiring"), dict)
+                        else None,
+                        herdr_pane=t.get("herdr_pane")
+                        if isinstance(t.get("herdr_pane"), dict)
+                        else None,
+                    )
+                )
                 continue
-            active.append(Task(
-                identity, title, "tasks_json", owner, state,
-                t.get("started_at"), activity, progress,
-                t.get("model") if isinstance(t.get("model"), str) else None,
-                t.get("note") if isinstance(t.get("note"), str) else None,
-                links,
-                wiring=_wiring(t.get("wiring", {})) if isinstance(t.get("wiring"), dict) else None,
-                herdr_pane=t.get("herdr_pane") if isinstance(t.get("herdr_pane"), dict) else None,
-            ))
+            active.append(
+                Task(
+                    identity,
+                    title,
+                    "tasks_json",
+                    owner,
+                    state,
+                    t.get("started_at"),
+                    activity,
+                    progress,
+                    t.get("model") if isinstance(t.get("model"), str) else None,
+                    t.get("note") if isinstance(t.get("note"), str) else None,
+                    links,
+                    wiring=_wiring(t.get("wiring", {}))
+                    if isinstance(t.get("wiring"), dict)
+                    else None,
+                    herdr_pane=t.get("herdr_pane")
+                    if isinstance(t.get("herdr_pane"), dict)
+                    else None,
+                )
+            )
         for raw in task_source.extra.get("waiting_on_ove", []):
             if isinstance(raw, dict) and isinstance(raw.get("id"), str):
                 ident = raw["id"] if ":" in raw["id"] else f"tasks:{raw['id']}"
@@ -709,7 +767,9 @@ def normalize_tasks(
                         raw.get("finished_at"),
                         str(raw.get("result", "ok")),
                         raw.get("receipt"),
-                        herdr_pane=raw.get("herdr_pane") if isinstance(raw.get("herdr_pane"), dict) else None,
+                        herdr_pane=raw.get("herdr_pane")
+                        if isinstance(raw.get("herdr_pane"), dict)
+                        else None,
                     )
                 )
     fleet = sources.get("fleet")
@@ -749,7 +809,13 @@ def normalize_tasks(
     finished.reverse()
     finished = finished[:50]
     idle_sessions.sort(key=lambda t: t.id)
-    return Snapshot(active=active, pr_gate=prs, waiting_on_ove=waiting_list, finished=finished, idle_sessions=idle_sessions)
+    return Snapshot(
+        active=active,
+        pr_gate=prs,
+        waiting_on_ove=waiting_list,
+        finished=finished,
+        idle_sessions=idle_sessions,
+    )
 
 
 def _progress(value: Any) -> tuple[int, int] | None:

@@ -14,6 +14,7 @@ from secrets import token_hex
 from typing import Any
 
 from starlette.testclient import TestClient
+from starlette.types import Message, Scope
 
 from omega_prime.dashboard.app import create_app
 from omega_prime.dashboard.collectors.agentos import make_agentos_collector
@@ -246,7 +247,14 @@ def test_composite_snapshot_guards_redaction_and_sse(tmp_path: Path) -> None:
             assert secret not in response.text
             assert secret not in html
         for method in ("POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
-            for path in ("/", "/cc/", "/legacy", "/cc/assets/index-DIGTqjrX.css", "/api/snapshot", "/healthz"):
+            for path in (
+                "/",
+                "/cc/",
+                "/legacy",
+                "/cc/assets/index-DIGTqjrX.css",
+                "/api/snapshot",
+                "/healthz",
+            ):
                 assert (
                     client.request(
                         method, path, headers={"host": "127.0.0.1:7421"}
@@ -414,16 +422,16 @@ def test_snapshot_api_and_named_sse_share_redacted_nested_github_data() -> None:
     async def read_one_event() -> str:
         chunks: asyncio.Queue[str] = asyncio.Queue()
 
-        async def receive() -> dict[str, object]:
+        async def receive() -> Message:
             await asyncio.Event().wait()
             return {"type": "http.disconnect"}
 
-        async def send(message: dict[str, object]) -> None:
+        async def send(message: Message) -> None:
             body = message.get("body", b"")
             if isinstance(body, bytes) and body:
                 chunks.put_nowait(body.decode("utf-8"))
 
-        scope: dict[str, object] = {
+        scope: Scope = {
             "type": "http",
             "method": "GET",
             "path": "/api/stream",
@@ -446,7 +454,11 @@ def test_snapshot_api_and_named_sse_share_redacted_nested_github_data() -> None:
     event = asyncio.run(read_one_event())
     assert "retry: 3000" in event
     assert "event: snapshot" in event
-    frame = next(line.removeprefix("data: ") for line in event.splitlines() if line.startswith("data: "))
+    frame = next(
+        line.removeprefix("data: ")
+        for line in event.splitlines()
+        if line.startswith("data: ")
+    )
     streamed = json.loads(frame)
     assert streamed == snapshot
     assert streamed["sources"]["github"]["command_center"] == nested
