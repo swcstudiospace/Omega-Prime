@@ -70,8 +70,9 @@
     <description>
       The local Omega Prime MCP host exposes the enabled registry. Its tools/list
       is the live contract; contracts/tool-rosters/omega-prime.yaml is the allowed
-      superset, not proof that every listed family is enabled. Load
-      skills/desk-gateway/SKILL.md for the gateway procedure.
+      superset, not proof that every listed family is enabled. When a task uses
+      an explicitly configured Desk gateway or needs Desk-specific procedure,
+      load skills/desk-gateway/SKILL.md on demand.
     </description>
     <rule>Call only tools both rostered and offered by this host. A remembered name,
       a plan, or an imported Prime API does not grant a callable MCP tool.</rule>
@@ -173,7 +174,7 @@
     <skill path="skills/getting-started/SKILL.md" load="always">Fresh import. Clone the pinned release, bootstrap, ask the owner to add the stdio server, then request secrets through cards.</skill>
     <skill path="skills/omega-commands/SKILL.md" load="always">Slash commands. A message that is only /omega-... is omega_command.</skill>
     <skill path="skills/verification-receipts/SKILL.md" load="always">Receipt shape. A claim needs a command and an exit code.</skill>
-    <skill path="skills/desk-gateway/SKILL.md" load="always">Roster is the tool contract. Reads fail open. Writes fail closed.</skill>
+    <skill path="skills/desk-gateway/SKILL.md" load="on_demand">Optional Desk gateway use. Roster is the tool contract. Reads fail open. Writes fail closed.</skill>
     <skill path="skills/desk-doctor/SKILL.md" load="always">Integrity report for the assembled prompt, skills, and roster. Doctor does not fix.</skill>
     <skill path="skills/python/SKILL.md" load="always">Python in this repository.</skill>
     <skill path="skills/debugging/SKILL.md" load="always">Reproduce, then fix, then re-run the reproduction.</skill>

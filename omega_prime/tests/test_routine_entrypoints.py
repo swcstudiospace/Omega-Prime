@@ -414,15 +414,20 @@ def test_read_only_install_writes_skills_on_the_state_volume(
             directory=state,
         )
         assert result["total_created"] == 1
+        # Learned skills live in the agent data folder (where the migration
+        # moves them), not directly under the state root.
         assert writable_skills_root(install, {"OMEGA_PRIME_STATE_DIR": str(state)}) == (
-            state / "skills"
+            state / "agent" / "skills"
         )
-        viewed = json.loads(skill_view("deploy", skills_root=state / "skills"))
+        assert not (state / "skills").exists()
+        viewed = json.loads(
+            skill_view("deploy", skills_root=state / "agent" / "skills")
+        )
         assert "run ./deploy.sh --prod" in viewed["content"]
         registry = ToolRegistry()
         register_growth_tools(
             registry,
-            skills_root=state / "skills",
+            skills_root=state / "agent" / "skills",
             skills_fallback=install,
             memory_dir=tmp_path / "memory",
             session_db=tmp_path / "sessions.db",

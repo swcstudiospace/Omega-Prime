@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -18,7 +21,9 @@ from omega_prime.learning.autolearn import Autolearn
 from omega_prime.learning.goals import GoalStore
 from omega_prime.session.persist import load_session, load_task, save_session, save_task
 from omega_prime.skills_runtime.manager import skill_view
-from omega_prime.tools.exec_jobs import JobControl
+from omega_prime.tools.approvals import ApprovalLog
+from omega_prime.tools.exec_jobs import JobControl, register_exec_job_tools
+from omega_prime.tools.registry import ToolRegistry
 
 
 def _tool_call(name: str, arguments: str = "{}", call_id: str = "call-1") -> dict:
@@ -242,6 +247,330 @@ def test_job_control_runs_polls_and_kills(tmp_path: Path):
 
     with pytest.raises(KeyError):
         jobs.poll("job-999")
+
+
+def test_exec_job_tools_use_approval_gated_registry_dispatch(tmp_path: Path):
+    approval_log = ApprovalLog()
+    registry = ToolRegistry(approval_log=approval_log)
+    register_exec_job_tools(registry, tmp_path)
+    names = ("exec_job_start", "exec_job_poll", "exec_job_wait", "exec_job_kill")
+    assert all(registry.approval_required(name) for name in names)
+
+    marker = tmp_path / "should-not-exist"
+    argv = [
+        sys.executable,
+        "-c",
+        f"from pathlib import Path; Path({str(marker)!r}).touch()",
+    ]
+    denied = json.loads(registry.dispatch("exec_job_start", {"argv": argv}))
+    assert denied == {"error": "approval required", "tool": "exec_job_start"}
+    assert marker.exists() is False
+
+    for name in names:
+        assert approval_log.approve(name, "operator")["approved"] is True
+    started = json.loads(
+        registry.dispatch(
+            "exec_job_start",
+            {"argv": [sys.executable, "-c", "print('job-output')"]},
+        )
+    )
+    job_id = started["id"]
+    assert (
+        json.loads(registry.dispatch("exec_job_poll", {"job_id": job_id}))["id"]
+        == job_id
+    )
+    completed = json.loads(
+        registry.dispatch("exec_job_wait", {"job_id": job_id, "timeout": 5})
+    )
+    assert completed["stdout"] == "job-output\n"
+    assert (
+        json.loads(registry.dispatch("exec_job_wait", {"job_id": job_id})) == completed
+    )
+
+    another = ToolRegistry(approval_log=approval_log)
+
+    class DenyExecStart:
+        def allows_tool(self, name: str) -> bool:
+            return name != "exec_job_start"
+
+    policy = DenyExecStart()
+    policy_registry = ToolRegistry(approval_log=approval_log, policy=policy)
+    register_exec_job_tools(policy_registry, tmp_path)
+    policy_marker = tmp_path / "policy-should-not-exist"
+    policy_denied = json.loads(
+        policy_registry.dispatch(
+            "exec_job_start",
+            {
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(policy_marker)!r}).touch()",
+                ]
+            },
+        )
+    )
+    assert policy_denied == {
+        "error": "policy forbids exec_job_start",
+        "tool": "exec_job_start",
+    }
+    assert policy_marker.exists() is False
+
+    policy_denied_job_id = "job-1"
+    denied_kill = json.loads(
+        policy_registry.dispatch("exec_job_kill", {"job_id": policy_denied_job_id})
+    )
+    assert denied_kill == {"error": f"KeyError: 'unknown job: {policy_denied_job_id}'"}
+    register_exec_job_tools(another, tmp_path)
+    assert json.loads(another.dispatch("exec_job_poll", {"job_id": job_id})) == {
+        "error": f"KeyError: 'unknown job: {job_id}'"
+    }
+
+
+def test_exec_job_wait_timeout_preserves_running_process_and_bounds_timeout(
+    tmp_path: Path,
+):
+    jobs = JobControl(tmp_path)
+    job_id = jobs.start([sys.executable, "-c", "import time; time.sleep(2)"])
+    assert jobs.wait(job_id, timeout=0.01) == {"id": job_id, "running": True}
+    assert jobs.poll(job_id) == {"id": job_id, "running": True}
+    with pytest.raises(ValueError):
+        jobs.wait(job_id, timeout=31)
+    try:
+        assert jobs.kill(job_id)["running"] is False
+    finally:
+        if jobs.poll(job_id)["running"]:
+            jobs.kill(job_id)
+
+
+def test_exec_job_kill_escalates_when_terminate_does_not_finish(tmp_path: Path):
+    import signal
+    import time
+
+    jobs = JobControl(tmp_path)
+    ready_file = tmp_path / "child-ready"
+    job_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import pathlib, signal, sys, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "pathlib.Path(sys.argv[1]).write_text('ready'); "
+                "time.sleep(30)"
+            ),
+            str(ready_file),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_file.exists(), "child did not finish starting"
+
+        result = jobs.kill(job_id)
+        assert result == {
+            "id": job_id,
+            "running": False,
+            "exit_code": -signal.SIGKILL,
+            "stdout": "",
+            "stderr": "",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        }
+        assert jobs.poll(job_id) == result
+    finally:
+        jobs.shutdown()
+
+
+def test_exec_job_does_not_inherit_host_stdin(tmp_path: Path):
+    """A job that reads stdin sees EOF instead of eating the host's input."""
+    jobs = JobControl(tmp_path)
+    reader = "import sys; data = sys.stdin.read(); print(len(data))"
+    read_fd, write_fd = os.pipe()
+    saved = os.dup(0)
+    try:
+        os.dup2(read_fd, 0)
+        os.write(write_fd, b"host request\n")
+        job_id = jobs.start([sys.executable, "-c", reader])
+        result = jobs.wait(job_id, 30)
+        assert result["running"] is False
+        assert result["stdout"].strip() == "0"
+        os.close(write_fd)
+        write_fd = -1
+        assert os.read(0, 64) == b"host request\n"
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+        os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
+        jobs.shutdown()
+
+
+def _process_still_running(pid: int) -> bool:
+    """True while ``pid`` is running; an exited, unreaped zombie counts as dead.
+
+    The worker is a grandchild that gets reparented once its leader dies. If
+    nothing reaps it (a container without an init), it stays a zombie and
+    ``os.kill(pid, 0)`` keeps succeeding even though it has exited, so read
+    its state from ``/proc`` where that is available.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return True
+    # The state field follows the parenthesised command name.
+    state = stat.rsplit(")", 1)[-1].split()[0]
+    return state not in {"Z", "X"}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
+def test_exec_job_kill_stops_group_worker_that_ignores_terminate(tmp_path: Path):
+    """A worker that ignores SIGTERM and dropped the pipes still dies on kill."""
+    import signal
+    import time
+
+    jobs = JobControl(tmp_path)
+    pid_file = tmp_path / "worker-pid"
+    worker = (
+        "import os, pathlib, signal, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "null = os.open(os.devnull, os.O_RDWR); "
+        "[os.dup2(null, fd) for fd in (0, 1, 2)]; "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    leader = (
+        "import subprocess, sys, time; "
+        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL); "
+        "time.sleep(60)"
+    )
+    job_id = jobs.start([sys.executable, "-c", leader, worker, str(pid_file)])
+    worker_pid = 0
+    try:
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert pid_file.exists(), "worker did not start"
+        worker_pid = int(pid_file.read_text())
+
+        result = jobs.kill(job_id)
+        assert result["running"] is False
+        assert result["exit_code"] == -signal.SIGTERM
+
+        deadline = time.monotonic() + 5
+        alive = True
+        while alive and time.monotonic() < deadline:
+            alive = _process_still_running(worker_pid)
+            if alive:
+                time.sleep(0.02)
+        assert alive is False, "SIGTERM-ignoring worker survived kill()"
+    finally:
+        if worker_pid:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(worker_pid, signal.SIGKILL)
+        jobs.shutdown()
+
+
+def test_exec_job_drains_large_stdout_stderr_and_caches_concurrent_reaps(
+    tmp_path: Path,
+):
+    jobs = JobControl(tmp_path)
+    job_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('o' * 300000); "
+            "sys.stderr.write('e' * 300000)",
+        ]
+    )
+    barrier = threading.Barrier(5)
+    results = []
+
+    def wait_for_result():
+        barrier.wait()
+        results.append(jobs.wait(job_id, timeout=10))
+
+    workers = [threading.Thread(target=wait_for_result) for _ in range(5)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert len(results) == 5
+    assert all(result == results[0] for result in results)
+    assert len(results[0]["stdout"]) == 300000
+    assert len(results[0]["stderr"]) == 300000
+    assert jobs.poll(job_id) == results[0]
+
+
+@pytest.mark.parametrize("collection", ["poll", "wait", "kill"])
+def test_exec_job_reports_per_stream_truncation_in_every_result(
+    tmp_path: Path, collection: str
+):
+    import time
+
+    jobs = JobControl(tmp_path)
+    ready_file = tmp_path / "output-ready"
+    script = (
+        "import os, pathlib, sys, time; "
+        "os.write(1, b'o' * (1024 * 1024 + 1)); "
+        "os.write(2, b'e' * (1024 * 1024)); "
+        "pathlib.Path(sys.argv[1]).write_text('ready'); "
+        "time.sleep(30)"
+        if collection == "kill"
+        else (
+            "import os, pathlib, sys; "
+            "os.write(1, b'o' * (1024 * 1024 + 1)); "
+            "os.write(2, b'e' * (1024 * 1024)); "
+            "pathlib.Path(sys.argv[1]).write_text('ready')"
+        )
+    )
+    job_id = jobs.start([sys.executable, "-c", script, str(ready_file)])
+    if collection == "kill":
+        deadline = time.monotonic() + 5
+        while not ready_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_file.exists(), "child did not finish writing output"
+        result = jobs.kill(job_id)
+    elif collection == "wait":
+        result = jobs.wait(job_id, timeout=10)
+    else:
+        deadline = time.monotonic() + 10
+        result = jobs.poll(job_id)
+        while result.get("running") and time.monotonic() < deadline:
+            time.sleep(0.01)
+            result = jobs.poll(job_id)
+
+    assert result["running"] is False
+    assert result["stdout"] == "o" * (1024 * 1024)
+    assert result["stderr"] == "e" * (1024 * 1024)
+    assert result["stdout_truncated"] is True
+    assert result["stderr_truncated"] is False
+    assert jobs.poll(job_id) == result
+    assert jobs.wait(job_id, timeout=1) == result
+    assert jobs.kill(job_id) == result
+
+
+def test_plan_mode_blocks_exec_job_start_and_kill():
+    called = []
+    tools = {
+        "exec_job_start": lambda **_kwargs: called.append("start"),
+        "exec_job_kill": lambda **_kwargs: called.append("kill"),
+        "exec_job_poll": lambda **_kwargs: called.append("poll"),
+    }
+    wrapped = apply_plan_mode(tools)
+    assert wrapped["exec_job_start"]() == "error: plan mode forbids exec_job_start"
+    assert wrapped["exec_job_kill"]() == "error: plan mode forbids exec_job_kill"
+    assert "exec_job_start" in PLAN_MODE_BLOCKED
+    assert "exec_job_kill" in PLAN_MODE_BLOCKED
+    assert "exec_job_poll" not in PLAN_MODE_BLOCKED
+    assert called == []
 
 
 def test_screen_argv_refuses_danger_and_accepts_plain():

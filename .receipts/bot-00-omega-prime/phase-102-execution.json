@@ -1,0 +1,184 @@
+{
+  "task_id": "phase-102-execution",
+  "bot": "bot-00-omega-prime",
+  "started_at": null,
+  "completed_at": "2026-10-20T18:04:31Z",
+  "commands": [
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_cron_store_atomic.py omega_prime/tests/test_desk_lead.py omega_prime/tests/test_durable.py -q",
+      "exit_code": 0,
+      "output_tail": "27 passed in 2.13s"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "output_tail": "27 documented baseline failures, 4859 passed, 11 skipped; no new failure nodeids"
+    },
+    {
+      "cmd": "/workspace/omes-bot/.venv/bin/python -c 'import json, tempfile\nfrom pathlib import Path\nfrom omega_prime.grokbot.doctor import GrokBotDoctor\nwith tempfile.TemporaryDirectory() as temp_root:\n    path = Path(temp_root) / \"cron\" / \"jobs.json\"\n    path.parent.mkdir(parents=True)\n    path.write_text(json.dumps({\"jobs\": [{\"id\": \"synthetic\", \"kind\": \"prompt\", \"due_at\": 100, \"completed\": False, \"prompt\": \"synthetic-only\"}]}), encoding=\"utf-8\")\n    before = path.read_bytes()\n    unbound = GrokBotDoctor(root=Path(temp_root), env={}, runtime_bindings={})._check_scheduled_jobs({}, now=101)\n    bound = GrokBotDoctor(root=Path(temp_root), env={}, runtime_bindings={\"desk_driver\": object(), \"delegate_parent\": object()})._check_scheduled_jobs({}, now=101)\n    assert unbound.status == \"WARN\" and \"Delivery runner not observed\" in unbound.message\n    assert bound.status == \"WARN\" and \"In-process binding metadata was supplied\" in bound.message\n    assert \"synthetic-only\" not in unbound.message + bound.message\n    assert path.read_bytes() == before\n    print(json.dumps({\"unbound\": unbound.status, \"supplied_bindings\": bound.status, \"store_unchanged\": True, \"prompt_redacted\": True}))'",
+      "exit_code": 0,
+      "output_tail": "unbound WARN; supplied bindings WARN; store unchanged; prompt omitted"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/ruff check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "All checks passed!"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/ruff format --check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "589 files already formatted"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/mypy omega_prime/",
+      "exit_code": 0,
+      "output_tail": "Success: no issues found in 462 source files"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_grokbot_doctor.py omega_prime/tests/test_prime_config.py omega_prime/tests/test_prime_family_serving.py omega_prime/tests/test_env_inventory.py omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q",
+      "exit_code": 0,
+      "output_tail": "113 passed in 14.32s"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/python -m omega_prime.tooling.env_inventory --root . --out docs/configuration.md --check",
+      "exit_code": 0,
+      "output_tail": "Environment inventory table is current"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/python -m omega_prime.tooling.catalog --check",
+      "exit_code": 0,
+      "output_tail": "docs/tool-catalog.md up to date"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/python -m omega_prime.tooling.plugin --check",
+      "exit_code": 0,
+      "output_tail": "66 generated files up to date"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/python -m omega_prime.tooling.prompt_format --check",
+      "exit_code": 0,
+      "output_tail": "all prompts conform to the XML standard"
+    },
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_apscheduler_backend.py -q",
+      "exit_code": 0,
+      "output_tail": "9 passed in 2.20s"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Desk schedule settlement and legacy JobStore history compatibility regressions pass",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "The full suite has only the 27 documented baseline failures; 4859 tests pass and 11 are skipped",
+      "evidence_command_index": 1,
+      "expects_failure": true
+    },
+    {
+      "claim": "Schedule diagnostics distinguish unbound from supplied binding metadata without executing jobs or mutating the schedule store",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Ruff lint and formatting gates pass",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "Mypy passes for omega_prime",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "Doctor, config, family, environment inventory, documentation, and public-repo focused tests pass",
+      "evidence_command_index": 6
+    },
+    {
+      "claim": "The environment inventory, tool catalog, plugin manifest, and prompt-format generated checks are current",
+      "evidence_command_index": 7
+    },
+    {
+      "claim": "APScheduler service regression tests pass",
+      "evidence_command_index": 12
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Live scheduler startup, real delegate delivery, external process liveness, and provider behavior were not exercised.",
+    "No connector restart or live activation occurred; Ove must decide whether stale persisted cron rows should be dropped before any future restart.",
+    "Phase 102 is not integrated; ordered rebase/merge remains pending and no Phase 101 completion is claimed.",
+    "Prompt assembly check was not run because no prompt source changed."
+  ],
+  "files_changed": [
+    ".github/dependabot.yml",
+    ".github/workflows/ci.yml",
+    ".github/workflows/supply-chain.yml",
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/phases/102-schedulers-dead-modules-env-docs/102-SUMMARY.md",
+    ".receipts/bot-00-omega-prime/FixSchedulerServiceTests.json",
+    ".receipts/bot-00-omega-prime/phase-102-execution.json",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "docs/README.md",
+    "docs/SUMMARY.md",
+    "docs/agent-loop.md",
+    "docs/configuration.md",
+    "docs/setup.md",
+    "docs/tool-catalog.md",
+    "docs/tool-host.md",
+    "kb/docs/tool-execution-platform.md",
+    "kb/docs/tool-registry-and-capabilities.md",
+    "omega_prime/agent/modes.py",
+    "omega_prime/config.py",
+    "omega_prime/contracts/policies/omega-prime.json",
+    "omega_prime/contracts/tool-rosters/omega-prime.yaml",
+    "omega_prime/cron/apscheduler_backend.py",
+    "omega_prime/cron/desk_driver.py",
+    "omega_prime/cron/scheduler.py",
+    "omega_prime/grokbot/approvals_api.py",
+    "omega_prime/grokbot/doctor.py",
+    "omega_prime/grokbot/local_validation.py",
+    "omega_prime/grokbot/remote.py",
+    "omega_prime/integrations/desk_clients.py",
+    "omega_prime/mcp_server.py",
+    "omega_prime/tests/test_apscheduler_backend.py",
+    "omega_prime/tests/test_cron_admin.py",
+    "omega_prime/tests/test_cron_store_atomic.py",
+    "omega_prime/tests/test_delegate.py",
+    "omega_prime/tests/test_desk_lead.py",
+    "omega_prime/tests/test_desk_wiring.py",
+    "omega_prime/tests/test_durable.py",
+    "omega_prime/tests/test_durable_surface.py",
+    "omega_prime/tests/test_env_inventory.py",
+    "omega_prime/tests/test_grokbot_approvals_api.py",
+    "omega_prime/tests/test_grokbot_doctor.py",
+    "omega_prime/tests/test_grokbot_remote.py",
+    "omega_prime/tests/test_growth.py",
+    "omega_prime/tests/test_mcp_server.py",
+    "omega_prime/tests/test_modes.py",
+    "omega_prime/tests/test_pin_bump.py",
+    "omega_prime/tests/test_platform.py",
+    "omega_prime/tests/test_prime_config.py",
+    "omega_prime/tests/test_prime_family_serving.py",
+    "omega_prime/tests/test_purple_cycle_schedule.py",
+    "omega_prime/tests/test_roe_lifecycle.py",
+    "omega_prime/tests/test_tool_catalog.py",
+    "omega_prime/tests/test_tools.py",
+    "omega_prime/tests/test_x.py",
+    "omega_prime/tests/test_x_tweepy.py",
+    "omega_prime/tooling/catalog.py",
+    "omega_prime/tooling/env_inventory.py",
+    "omega_prime/tooling/env_inventory_policy.json",
+    "omega_prime/tools/cron_admin.py",
+    "omega_prime/tools/exec_jobs.py",
+    "omega_prime/tools/plugins.py",
+    "omega_prime/tools/x_tweepy.py",
+    "pyproject.toml",
+    "requirements-lock.txt"
+  ],
+  "contract_changes": [
+    "Approval-gated exec_job tools are reachable through the host; plugins require exact OMEGA_PRIME_PLUGINS=1 opt-in; x_tweepy was removed in favor of the existing urllib transport.",
+    "Schedule diagnostics report persisted metadata separately from supplied binding observations and do not execute schedules."
+  ],
+  "rollback_plan": null,
+  "approvals": []
+}

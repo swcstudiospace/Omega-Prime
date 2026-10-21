@@ -25,16 +25,20 @@ explicitly. This module is stdlib-only and never imports from
 
 Result contract (the frozen EngineResult, no field changes): ``ok`` comes
 from the terminal ``stage_done`` status being ``completed``; ``final_text``
-from the stage record's ``lastText``; ``plan``/``provider``/``model``/
-``stage``/``fallback_from`` mirror the router Choice; ``sandbox`` is
-``"omp-sandbox"``; ``usage`` is empty and ``cost`` None (the wrapper
-surfaces no usage); ``commands`` lists the wrapper tools called in order.
-Exported commits ride the free-form stats dict under documented keys:
+from the stage record's full ``finalText`` (``lastText`` is only a status
+preview); ``plan``/``provider``/``model``/``fallback_from`` name what
+actually ran — the router Choice, or the approved fallback plan when the
+stage record shows the sandbox fell back; ``stage`` mirrors the Choice;
+``sandbox`` is ``"omp-sandbox"``; ``usage`` is empty and ``cost`` None (the
+wrapper surfaces no usage); ``commands`` lists the wrapper tools called in
+order. Exported commits are fast-forwarded onto the host branch and ride
+the free-form stats dict under documented keys:
 ``stats["omp_sandbox"] = {"stage_id": <stageId>, "tier": <up result tier
-or None>, "status": <final stage_done status>, "model_requested":
-<run_gsd_stage result model>, "export": <export_commits result dict or
-None>}``. Nothing else is stored there, and no env value is ever printed
-or logged (presence/truthiness only).
+or None>, "status": <final stage_done status>, "model_requested": <the
+model the stage ended on>, "export": <export_commits result dict or None>,
+"applied": <{"applied", "head"} after the host fast-forward, or None>}``.
+Nothing else is stored there, and no env value is ever printed or logged
+(presence/truthiness only).
 """
 
 from __future__ import annotations
@@ -57,12 +61,18 @@ from omega_prime.dashboard.blocks import clear_block, raise_block
 from omega_prime.dashboard.status_file import locked_tasks
 from omega_prime.engine.jobs import append_event, child_env, state_dir, write_json
 from omega_prime.engine.omp_driver import EngineError, EngineResult, _system
-from omega_prime.engine.plan_router import read_usage, select
+from omega_prime.engine.plan_router import read_usage, select, stage_fallback
 from omega_prime.engine.sandbox import SandboxUnavailable
 
 BACKEND_ENV = "OMEGA_PRIME_OMP_BACKEND"
 BACKEND_NAME = "omp-sandbox"
 ANDA_BIN_ENV = "OMEGA_PRIME_OMP_SANDBOX_ANDA"
+# The omp-sandbox package root (holds src/core/server.ts). The wrapper starts
+# the TS core relative to it, and falls back to its own cwd when unset.
+ROOT_ENV = "OMP_SANDBOX_ROOT"
+# Stage a stageless call runs as: run_gsd_stage has no stageless form, and a
+# plain engine turn (route_turn, delegate, ultrathink) is execution work.
+DEFAULT_STAGE = "execute"
 WORKSPACE_ROOTS_ENV = "OMP_SANDBOX_WORKSPACE_ROOTS"
 # Same default as omp-sandbox/src/core/paths.ts WORKSPACE_ROOTS.
 DEFAULT_WORKSPACE_ROOTS = "/workspace/omes-bot-wt"
@@ -99,6 +109,34 @@ def anda_binary(env: Mapping[str, str]) -> str | None:
             return None
         return None
     return shutil.which("omp-sandbox-anda", path=env.get("PATH") or None)
+
+
+def sandbox_root(env: Mapping[str, str]) -> Path | None:
+    """The omp-sandbox package root the wrapper must start from.
+
+    ``OMP_SANDBOX_ROOT`` when set, otherwise the ``omp-sandbox`` directory
+    shipped beside this package. Either one must hold
+    ``src/core/server.ts``; ``None`` when neither does, so readiness and
+    the run refuse instead of starting a wrapper that would look for the
+    core under the caller's directory.
+    """
+    explicit = str(env.get(ROOT_ENV, "")).strip()
+    candidate = (
+        Path(explicit)
+        if explicit
+        else Path(__file__).resolve().parents[2] / "omp-sandbox"
+    )
+    try:
+        if candidate.is_absolute() and (candidate / "src/core/server.ts").is_file():
+            return candidate.resolve()
+    except OSError:
+        return None
+    return None
+
+
+def backend_stage(stage: str | None) -> str:
+    """The stage this backend runs: the requested one, else ``execute``."""
+    return DEFAULT_STAGE if stage is None else stage
 
 
 def selected(env: Mapping[str, str]) -> bool:
@@ -233,6 +271,10 @@ class AndaClient:
         self.env = dict(env)
         self.proc: subprocess.Popen[str] | None = None
         self.events: list[dict[str, Any]] = []
+        # Every stage_done seen on any path (a tool reply wait, an event
+        # wait), keyed by stageId, so a terminal event that lands while a
+        # call is in flight is never lost to the stage waiter.
+        self.terminal: dict[str, dict[str, Any]] = {}
         self._queue: queue.Queue[Any] = queue.Queue()
         self._reader_error: BaseException | None = None
         self._stderr_parts: list[str] = []
@@ -240,8 +282,8 @@ class AndaClient:
         self._stderr_thread: threading.Thread | None = None
         self._next_id = 0
 
-    def start(self) -> None:
-        """Spawn ``<binary> client`` and start the reader threads."""
+    def start(self, cwd: Path | None = None) -> None:
+        """Spawn ``<binary> client`` in ``cwd`` and start the reader threads."""
         self.proc = subprocess.Popen(
             [self.binary, "client"],
             stdin=subprocess.PIPE,
@@ -250,6 +292,7 @@ class AndaClient:
             text=True,
             bufsize=1,
             env=self.env,
+            cwd=str(cwd) if cwd is not None else None,
         )
         self._stdout_thread = threading.Thread(target=self._pump_stdout, daemon=True)
         self._stderr_thread = threading.Thread(target=self._pump_stderr, daemon=True)
@@ -307,7 +350,7 @@ class AndaClient:
         while True:
             message = self._take(deadline, f"the {tool} reply")
             if "event" in message and "id" not in message:
-                self.events.append(message)
+                self._buffer(message)
                 continue
             if str(message.get("id") or "") == request_id:
                 if message.get("ok") is not True:
@@ -342,11 +385,16 @@ class AndaClient:
             if message is _EOF:
                 self._raise_stream_failure()
             if "event" in message and "id" not in message:
-                self.events.append(message)
+                self._buffer(message)
                 return message
             # Stray non-event lines (a reply outside any in-flight call) are
             # ignored rather than guessed at.
             continue
+
+    def _buffer(self, message: dict[str, Any]) -> None:
+        self.events.append(message)
+        if message.get("event") == "stage_done":
+            self.terminal[str(message.get("stageId") or "")] = message
 
     def drain_events(self) -> list[dict[str, Any]]:
         """Hand over the buffered event dicts and empty the buffer."""
@@ -481,30 +529,36 @@ def run_backend(
     interrupt: Any | None,
     tasks_path: str | Path | None = None,
     task_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> EngineResult:
     """One engine stage run through the omp-sandbox wrapper.
 
     Admission order before any wrapper spawn: the worktree is allowlist-
-    checked, the seed ref is derived from it, ``read_usage``/``select`` run
-    exactly as on the bwrap path (so ``PlanNotAllowed`` raises pre-spawn),
-    and a stageless run refuses with ``invalid_stage`` — ``run_gsd_stage``
-    has no stageless form. The wrapper then seeds the worktree (``up`` with
-    ``seed_repo`` so ``export_commits`` has a repo), runs the stage
-    (``run_gsd_stage`` returns immediately), waits for the matching
+    checked and must be clean (the sandbox receives the committed branch,
+    so uncommitted edits would be silently left out), the seed ref is
+    derived from it, ``read_usage``/``select`` run exactly as on the bwrap
+    path (so ``PlanNotAllowed`` raises pre-spawn), and the wrapper's package
+    root must resolve. A stageless call runs as ``execute``
+    (``backend_stage``). The wrapper then seeds the worktree (``up`` with
+    ``seed_repo``), runs the stage (``run_gsd_stage`` returns immediately,
+    with the only fallback plan Python approved), waits for the matching
     ``stage_done`` event with no deadline (a set interrupt aborts the stage
     explicitly and raises ``cancelled``), reads the stage record from
-    ``sandbox_status``, and exports commits after a completed stage.
-    ``down`` always runs in the finally, followed by the down-summary
-    job event. Every wrapper failure — ``ok:false`` including
-    ``path_refused`` and tier errors, protocol garbage, EOF, non-zero
-    exit — raises ``SandboxUnavailable``; there is no bwrap fallback. A
-    stage that ends ``failed``/``aborted`` returns ``ok=False`` with reason
-    ``engine`` instead of raising. ``tasks_path``/``task_id`` are optional
-    dashboard context (keyword-only, default ``None``): both set switches
-    on the visibility wiring (Herdr pane, tasks.json row, question
-    round-trip); with either absent the run is unchanged. See the module
-    docstring for the stats keys and session.json/events parity.
+    ``sandbox_status``, exports commits after a completed stage and
+    fast-forwards the host branch onto them. ``down`` always runs in the
+    finally, followed by the down-summary job event. Every wrapper failure
+    raises ``SandboxUnavailable``; there is no bwrap fallback. Once the
+    stage was submitted, every failure keeps ``started=True`` (through
+    ``metadata``) so callers never re-run the same task elsewhere. A stage
+    that ends ``failed``/``aborted`` returns ``ok=False`` with reason
+    ``engine`` instead of raising.
+    ``tasks_path``/``task_id`` are optional dashboard context (keyword-only,
+    default ``None``): both set switches on the visibility wiring (Herdr
+    pane, tasks.json row, question round-trip); with either absent the run
+    is unchanged. See the module docstring for the stats keys and
+    session.json/events parity.
     """
+    run_metadata = metadata if metadata is not None else {}
     tracked = tasks_path is not None and task_id is not None
     # The receipt in the finally must be buildable on every path, and only a
     # row that run_rows.start actually created (after the up reply) is ever
@@ -512,21 +566,22 @@ def run_backend(
     # after run_gsd_stage returns and would strand a started row.
     stage_id: str | None = None
     row_started = False
-    work = allowed_worktree(
-        Path(cwd).resolve() if cwd is not None else Path.cwd(), env
-    )
+    work = allowed_worktree(Path(cwd).resolve() if cwd is not None else Path.cwd(), env)
     seed_ref = _seed_ref(work)
+    _refuse_dirty(work)
+    stage = backend_stage(stage)
     usage = read_usage(binary, env)
     choice = select(env, usage, requested=plan, stage=stage)
-    if stage is None:
-        raise EngineError(
-            "invalid_stage",
-            "the omp-sandbox backend requires stage 'plan' or 'execute'",
-        )
+    fallback_plan = stage_fallback(env, usage, choice)
     anda = anda_binary(env)
     if anda is None:
         raise SandboxUnavailable(
             f"{ANDA_BIN_ENV} is not set and omp-sandbox-anda is not on PATH"
+        )
+    root = sandbox_root(env)
+    if root is None:
+        raise SandboxUnavailable(
+            f"{ROOT_ENV} does not name an omp-sandbox package (src/core/server.ts)"
         )
     events_path = directory / "events.jsonl"
     events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -552,12 +607,14 @@ def run_backend(
             "mode": mode,
         },
     )
-    client = AndaClient(anda, wrapper_env(env))
+    child = wrapper_env(env)
+    child[ROOT_ENV] = str(root)
+    client = AndaClient(anda, child)
     commands: list[str] = []
     started = False
     outcome: dict[str, Any] | None = None
     try:
-        client.start()
+        client.start(cwd=root)
         client.wait_ready()
         up_result = _tool(
             client,
@@ -569,7 +626,7 @@ def run_backend(
             task_id=task_id,
             row_started=row_started,
         )
-        if tracked:
+        if tracked and tasks_path is not None and task_id is not None:
             # Visibility wiring (W113-01/W113-02), only once the stage is
             # actually launching: a run that fails at or before the up reply
             # starts no row — pre-stage visibility stays run()'s raise_block.
@@ -607,6 +664,7 @@ def run_backend(
                 "stage": stage,
                 "plan": choice.decision.plan,
                 "model": f"{choice.decision.provider}/{choice.decision.model_id}",
+                "fallback_plan": fallback_plan,
                 "gsd_command": gsd_command,
                 "task": task_text,
                 "thinking": thinking,
@@ -618,6 +676,7 @@ def run_backend(
             row_started=row_started,
         )
         started = True
+        run_metadata["started"] = True
         stage_id = str(stage_result.get("stageId") or "")
         if not stage_id:
             raise SandboxUnavailable("run_gsd_stage returned no stageId")
@@ -643,6 +702,7 @@ def run_backend(
             row_started=row_started,
         )
         export: dict[str, Any] | None = None
+        applied: dict[str, Any] | None = None
         if done_status == "completed":
             export = _tool(
                 client,
@@ -654,16 +714,25 @@ def run_backend(
                 task_id=task_id,
                 row_started=row_started,
             )
+            applied = _apply_export(work, seed_ref, export)
         tier = up_result.get("tier")
+        final_text = status_record.get("finalText")
+        if not isinstance(final_text, str):
+            raise SandboxUnavailable(
+                "sandbox_status returned no finalText for the stage"
+            )
         outcome = {
             "ok": done_status == "completed",
             "status": done_status,
             "error": status_record.get("error"),
-            "last_text": str(status_record.get("lastText") or ""),
+            "final_text": final_text,
             "stage_id": stage_id,
             "tier": tier if isinstance(tier, str) else None,
-            "model_requested": stage_result.get("model"),
+            "model_requested": status_record.get("modelRequested")
+            or stage_result.get("model"),
+            "fallback_used": bool(status_record.get("fallbackFrom")),
             "export": export,
+            "applied": applied,
         }
     finally:
         # Terminal row before the shutdown: it lands even if `down` is slow.
@@ -671,7 +740,7 @@ def run_backend(
         # row (tier error at the up reply, pre-spawn plan-gate refusal)
         # writes nothing; that visibility is run()'s raise_block.
         run_ok = bool(outcome["ok"]) if outcome is not None else False
-        if row_started:
+        if row_started and tasks_path is not None and task_id is not None:
             with contextlib.suppress(Exception):
                 run_rows.finish(
                     tasks_path,
@@ -682,9 +751,7 @@ def run_backend(
                         "stage_id": stage_id,
                         "ok": run_ok,
                         "status": (
-                            str(outcome["status"])
-                            if outcome is not None
-                            else "failed"
+                            str(outcome["status"]) if outcome is not None else "failed"
                         ),
                         "export": (
                             outcome.get("export") if outcome is not None else None
@@ -698,20 +765,31 @@ def run_backend(
     if outcome is None:
         raise SandboxUnavailable("the omp-sandbox stage ended without a terminal event")
     ok = bool(outcome["ok"])
+    ran_plan = choice.decision.plan
+    provider = choice.decision.provider
+    model = choice.decision.model_id
+    fallback_from = choice.fallback_from
+    if outcome["fallback_used"]:
+        # The sandbox retried on the approved fallback plan: report what ran.
+        ran_plan = fallback_plan or ran_plan
+        provider, _, model = str(outcome["model_requested"]).partition("/")
+        fallback_from = choice.decision.plan
     result = EngineResult(
         ok=ok,
         job_id=job_id,
-        final_text=str(outcome["last_text"]),
+        final_text=str(outcome["final_text"]),
         usage={},
         cost=None,
-        plan=choice.decision.plan,
-        provider=choice.decision.provider,
-        model=choice.decision.model_id,
+        plan=ran_plan,
+        provider=provider,
+        model=model,
         stage=choice.stage,
-        fallback_from=choice.fallback_from,
+        fallback_from=fallback_from,
         events_path=str(events_path),
         reason=None if ok else "engine",
-        detail="" if ok else str(outcome["error"] or outcome["status"] or "stage did not complete"),
+        detail=""
+        if ok
+        else str(outcome["error"] or outcome["status"] or "stage did not complete"),
         stats={
             "omp_sandbox": {
                 "stage_id": outcome["stage_id"],
@@ -719,6 +797,7 @@ def run_backend(
                 "status": outcome["status"],
                 "model_requested": outcome["model_requested"],
                 "export": outcome["export"],
+                "applied": outcome["applied"],
             }
         },
         sandbox=BACKEND_NAME,
@@ -763,6 +842,81 @@ def _touch_row(
         return
     with contextlib.suppress(Exception):
         run_rows.touch(tasks_path, task_id, event)
+
+
+def _git(work: Path, *argv: str) -> subprocess.CompletedProcess[str]:
+    """One git command in the job worktree; no shell, bounded."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(work), *argv],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SandboxUnavailable(f"git {argv[0]} failed: {type(exc).__name__}") from exc
+
+
+def _refuse_dirty(work: Path) -> None:
+    """Refuse a worktree with uncommitted or untracked changes.
+
+    The sandbox is seeded from the committed branch, so local edits would be
+    silently missing from the run (and the fast-forward afterwards could
+    clobber them).
+    """
+    proc = _git(work, "status", "--porcelain", "--untracked-files=normal")
+    if proc.returncode != 0:
+        raise SandboxUnavailable("git status failed in the job worktree")
+    if proc.stdout.strip():
+        raise EngineError(
+            "dirty_worktree",
+            "the job worktree has uncommitted or untracked changes; the "
+            "omp-sandbox backend runs the committed branch, so commit or "
+            "stash them first",
+        )
+
+
+def _apply_export(work: Path, ref: str, export: Mapping[str, Any]) -> dict[str, Any]:
+    """Fast-forward the host branch onto the sandbox's exported commits.
+
+    The export bundle carries ``base..head`` of ``ref``. The host branch must
+    still be checked out and sit at ``base`` (nothing else moved it during
+    the run), the fetched tip must equal the reported ``head``, and the
+    update is ``merge --ff-only`` so no host commit or edit is overwritten.
+    A refused application is ``export_conflict`` with ``started=True``; the
+    bundle stays on disk for a manual merge.
+    """
+    bundle = export.get("bundle")
+    head = str(export.get("head") or "")
+    base = str(export.get("base") or "")
+    if not bundle:
+        return {"applied": False, "head": head, "note": "no new commits"}
+
+    def conflict(detail: str) -> EngineError:
+        return EngineError(
+            "export_conflict",
+            f"exported commits were not applied to {ref}: {detail} "
+            f"(bundle kept at {bundle})",
+            started=True,
+        )
+
+    branch = _git(work, "symbolic-ref", "--short", "HEAD")
+    if branch.returncode != 0 or branch.stdout.strip() != ref:
+        raise conflict("the worktree is no longer on that branch")
+    host = _git(work, "rev-parse", "HEAD")
+    if host.returncode != 0 or host.stdout.strip() != base:
+        raise conflict("the host branch moved since the sandbox was seeded")
+    fetched = _git(work, "fetch", "-q", str(bundle), ref)
+    if fetched.returncode != 0:
+        raise conflict("git fetch from the bundle failed")
+    tip = _git(work, "rev-parse", "FETCH_HEAD")
+    if tip.returncode != 0 or tip.stdout.strip() != head:
+        raise conflict("the bundle tip does not match the reported head")
+    merged = _git(work, "merge", "--ff-only", "-q", head)
+    if merged.returncode != 0:
+        raise conflict("the fast-forward was refused")
+    return {"applied": True, "head": head}
 
 
 def _tool(
@@ -825,13 +979,11 @@ def _answer_from_store(
     One shared-lock snapshot of the store: an answer is a text string or a
     mapping carrying ``selected`` — anything else is not an answer yet.
     """
+    if tasks_path is None:
+        return None
     with locked_tasks(tasks_path) as data:
         item = next(
-            (
-                row
-                for row in data.get("waiting_on_ove", [])
-                if row.get("id") == item_id
-            ),
+            (row for row in data.get("waiting_on_ove", []) if row.get("id") == item_id),
             None,
         )
         answer = item.get("answer") if item is not None else None
@@ -872,8 +1024,15 @@ def _wait_stage_done(
 
     No deadline: the wrapper's event stream is the liveness signal, and
     EOF or a dead wrapper raises SandboxUnavailable instead of hanging.
-    Every event is appended through the redacting ``append_event`` and
-    touches the run's tasks.json row when one was started (best-effort).
+    The terminal event is taken from ``client.terminal``, which every read
+    path fills, so a ``stage_done`` that arrived during a tool call (the
+    stage-start reply, the abort reply) is never lost. Every event is
+    appended through the redacting ``append_event``. A set
+    interrupt sends the ``abort`` tool once and keeps consuming until the
+    terminal event, then raises ``cancelled`` with ``started=True`` so
+    ``run()`` maps it exactly like the bwrap path.
+    Every event also touches the run's tasks.json row when one was started
+    (best-effort).
 
     A ``question`` event with a non-empty requestId (and a started row)
     raises exactly one waiting_on_ove item and the loop polls the store
@@ -882,10 +1041,7 @@ def _wait_stage_done(
     into the same live session; a stale answer clears the dead item and
     keeps waiting (a re-ask arrives as a new question event), any other
     answer_question failure propagates as SandboxUnavailable. A set
-    interrupt is honoured while an answer is pending, sends the ``abort``
-    tool once and keeps consuming until the terminal event, then raises
-    ``cancelled`` with ``started=True`` so ``run()`` maps it exactly like
-    the bwrap path.
+    interrupt is honoured while an answer is pending.
     """
     aborted = False
     # The open question, if any: (wrapper requestId, waiting_on_ove item
@@ -894,35 +1050,36 @@ def _wait_stage_done(
     answer: str | Mapping[str, Any] | None = None
     last_answer_check = 0.0
     while True:
-        event = client.next_event(_POLL_TICK)
+        done = client.terminal.pop(stage_id, None)
+        if done is None:
+            client.next_event(_POLL_TICK)
+            done = client.terminal.pop(stage_id, None)
         for buffered in client.drain_events():
             append_event(events_path, buffered)
             _touch_row(tasks_path, task_id, row_started, buffered)
-        if event is not None:
-            _touch_row(tasks_path, task_id, row_started, event)
+            if (
+                buffered.get("event") == "question"
+                and row_started
+                and str(buffered.get("requestId") or "")
+            ):
+                # A GSD follow-up question: supersede any open item (exactly
+                # one open at a time) and raise the new one under its stable
+                # id. A requestId-less question is informational only —
+                # append/touch already happened above.
+                rid = str(buffered.get("requestId"))
+                with contextlib.suppress(Exception):
+                    if pending is not None:
+                        _clear_question(tasks_path, task_id, pending[1])
+                    pending = (
+                        rid,
+                        _raise_question(
+                            tasks_path, task_id, stage, rid, buffered.get("question")
+                        ),
+                    )
+                    last_answer_check = time.monotonic()
         if (
-            event is not None
-            and event.get("event") == "question"
-            and row_started
-            and str(event.get("requestId") or "")
-        ):
-            # A GSD follow-up question: supersede any open item (exactly
-            # one open at a time) and raise the new one under its stable
-            # id. A requestId-less question is informational only —
-            # append/touch already happened above.
-            rid = str(event.get("requestId"))
-            with contextlib.suppress(Exception):
-                if pending is not None:
-                    _clear_question(tasks_path, task_id, pending[1])
-                pending = (
-                    rid,
-                    _raise_question(
-                        tasks_path, task_id, stage, rid, event.get("question")
-                    ),
-                )
-                last_answer_check = time.monotonic()
-        if (
-            pending is not None
+            done is None
+            and pending is not None
             and time.monotonic() - last_answer_check >= _ANSWER_POLL
         ):
             last_answer_check = time.monotonic()
@@ -950,26 +1107,20 @@ def _wait_stage_done(
                 with contextlib.suppress(Exception):
                     _clear_question(tasks_path, task_id, pending[1])
                 pending = None
-        if (
-            event is not None
-            and event.get("event") == "stage_done"
-            and str(event.get("stageId") or "") == stage_id
-        ):
-            if aborted and event.get("status") == "aborted":
+        if done is not None:
+            if aborted and done.get("status") == "aborted":
                 # Our own abort landed (an externally aborted stage returns
                 # as ok False instead). run() maps this to reason
                 # "cancelled" exactly like the bwrap path.
                 raise EngineError(
                     "cancelled", "stage aborted by interrupt", started=True
                 )
-            return event
+            return done
         if interrupt is not None and interrupt.is_set() and not aborted:
-            # Explicit abort; the reply is consumed here, interleaved events
-            # are flushed. A dead wrapper surfaces as SandboxUnavailable.
+            # Explicit abort. Core.abort waits for the stage to settle, so
+            # its stage_done can arrive before this reply; the client keeps
+            # it in ``terminal`` and the next loop returns it.
             client.call("abort", {"stage_id": stage_id})
-            for buffered in client.drain_events():
-                append_event(events_path, buffered)
-                _touch_row(tasks_path, task_id, row_started, buffered)
             aborted = True
 
 

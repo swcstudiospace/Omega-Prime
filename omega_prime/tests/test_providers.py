@@ -12,6 +12,7 @@ from omega_prime.providers.base import ProviderError, ProviderModel
 from omega_prime.providers.fake import FakeTransport
 from omega_prime.providers.gemini import GeminiProvider
 from omega_prime.providers.grok import XAI_DEFAULT_BASE_URL, GrokProvider
+from omega_prime.providers.http import HttpTransport
 from omega_prime.providers.ollama import OllamaProvider
 from omega_prime.providers.openai import OpenAIProvider
 
@@ -674,3 +675,28 @@ def test_streaming_without_transport_support_raises():
     )
     with pytest.raises(ProviderError, match="does not stream"):
         model.complete([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.parametrize(
+    "method,status",
+    [("get", 401), ("get", 403), ("post", 401), ("post", 403)],
+)
+def test_http_transport_exposes_numeric_status_without_response_body(
+    monkeypatch, method, status
+):
+    transport = HttpTransport(max_retries=0)
+    response_body = b'{"secret":"must not appear in diagnostics"}'
+    monkeypatch.setattr(
+        transport,
+        "_request",
+        lambda *_args: (status, {}, response_body),
+    )
+
+    with pytest.raises(ProviderError) as exc:
+        if method == "get":
+            transport.get("https://provider.local/path", {}, {})
+        else:
+            transport.post("https://provider.local/path", {}, {})
+
+    assert getattr(exc.value, "status_code", None) == status
+    assert response_body.decode() not in str(exc.value)

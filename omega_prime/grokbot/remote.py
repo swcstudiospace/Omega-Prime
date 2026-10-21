@@ -449,6 +449,13 @@ def create_sse_app(
     # not `OMEGA_PRIME_STATE_DIR` or the current directory.
     command_env = dict(os.environ if env is None else env)
     command_env["OMEGA_PRIME_AUDIT_LOG"] = str(tracer.log_path)
+    # Launched without `mcp_server.main` (the one-click SSE path): resolve
+    # the same default agent folder, so host and engine child share it.
+    from omega_prime.agent_state import AGENT_STATE_ENV, live_host_env
+
+    command_env = live_host_env(command_env, home=home)
+    if env is None and command_env.get(AGENT_STATE_ENV):
+        os.environ.setdefault(AGENT_STATE_ENV, command_env[AGENT_STATE_ENV])
     runtime: Runtime = load_runtime(
         root,
         home,
@@ -813,6 +820,7 @@ def create_sse_app(
                 audit=tracer,
                 default_ttl_seconds=default_ttl,
                 max_ttl_seconds=float(approval_max_ttl),
+                separate_approval_name="pin_bump_apply",
             )
         )
     app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
@@ -1112,17 +1120,26 @@ def serve_sse(
         if hasattr(runtime.registry, "runtime_bindings")
         else None
     )
-    if driver is not None:
-        driver.start()
+    bindings = getattr(runtime.registry, "runtime_bindings", {})
+    job_control = (
+        bindings.get("exec_job_control") if isinstance(bindings, dict) else None
+    )
     try:
+        if driver is not None:
+            driver.start()
         try:
             server.run()
         except SystemExit as exc:
             return exc.code if isinstance(exc.code, int) else 1
         return 0
     finally:
-        if driver is not None:
-            driver.stop()
+        try:
+            if driver is not None:
+                driver.stop()
+        finally:
+            shutdown = getattr(job_control, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
 
 
 create_mcp_sse_app = create_sse_app

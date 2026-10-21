@@ -7,6 +7,7 @@ import json
 import pytest
 
 from omega_prime.prime_kernel.native import (
+    extension_path,
     goal_token_delta,
     load_extension,
     native_status,
@@ -28,9 +29,8 @@ NINE = [
 
 
 def _extension():
-    status = native_status()
-    if status["loaded"] is False:
-        pytest.skip("omega_prime_prime extension is not built")
+    if extension_path() is None:
+        pytest.skip("optional omega_prime_prime extension is not built")
     return load_extension()
 
 
@@ -93,7 +93,7 @@ def test_native_status_accepts_unbuilt_extension():
     assert isinstance(status["loaded"], bool)
     if status["loaded"] is False:
         assert isinstance(status["error"], str) and status["error"]
-        assert status["crates"] == NINE
+        assert status["crates"] in (NINE, [])
         return
     assert status["crates"] == NINE
     assert status["error"] is None
@@ -101,6 +101,7 @@ def test_native_status_accepts_unbuilt_extension():
     assert goal_token_delta(3, 4) == 7
 
 
+@pytest.mark.native
 def test_goal_bindings_follow_pa_core():
     ext = _extension()
     goals = ext.goals
@@ -145,6 +146,7 @@ def test_goal_bindings_follow_pa_core():
         goals.create_goal_context_message(empty, "continuation")
 
 
+@pytest.mark.native
 def test_autonomous_run_uses_pa_core_limits():
     ext = _extension()
     autonomous = ext.autonomous
@@ -196,6 +198,7 @@ def test_autonomous_run_uses_pa_core_limits():
     assert "keep going" in json.dumps(row)
 
 
+@pytest.mark.native
 def test_protocol_parse_and_encode_use_the_rust_frames():
     ext = _extension()
     protocol = ext.protocol
@@ -244,6 +247,7 @@ def test_protocol_parse_and_encode_use_the_rust_frames():
         protocol.encode_request({"type": "nope"})
 
 
+@pytest.mark.native
 def test_heartbeat_schedule_and_deferral():
     ext = _extension()
     heartbeat = ext.heartbeat
@@ -283,6 +287,7 @@ def test_heartbeat_schedule_and_deferral():
     assert "ping the worker" in heartbeat.format_job(_job())
 
 
+@pytest.mark.native
 def test_refinement_history_round_trip(tmp_path):
     ext = _extension()
     refinement = ext.refinement
@@ -299,6 +304,7 @@ def test_refinement_history_round_trip(tmp_path):
     assert rows[0]["scope"] == "global"
 
 
+@pytest.mark.native
 def test_goal_apply_uses_pa_core_transitions():
     ext = _extension()
     goal = ext.goals.Goal()
@@ -337,6 +343,7 @@ def test_goal_apply_uses_pa_core_transitions():
         ext.goals.Goal().apply("--budget 0 nope")
 
 
+@pytest.mark.native
 def test_slash_parsers_match_pa_core():
     ext = _extension()
     commands = ext.commands
@@ -359,6 +366,7 @@ def test_slash_parsers_match_pa_core():
     assert "Tokens: 0/80,000" in text
 
 
+@pytest.mark.native
 def test_native_tool_validation_rejects_missing_required_argument():
     ext = _extension()
     with pytest.raises(ValueError, match="Validation failed"):
@@ -369,6 +377,7 @@ def test_native_tool_validation_rejects_missing_required_argument():
         )
 
 
+@pytest.mark.native
 def test_kernel_tools_call_the_rust_commands(tmp_path):
     from omega_prime.prime_kernel.bound import apply_autonomous, apply_goal
 

@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from omega_prime.engine.omp_driver import EngineResult, probe, run
+from omega_prime.engine.jobs import agent_data_dir, job_dir
+from omega_prime.engine.omp_driver import EngineResult, omp_home, probe, run
+from omega_prime.engine.ui_control import UIControlStore
 
 _OFF = frozenset({"0", "off", "python", "false", "no"})
 _TRANSCRIPT_CHARS = 4_000
@@ -127,6 +130,19 @@ def engine_stage(env: Mapping[str, str], explicit: str | None = None) -> str | N
     return text or None
 
 
+def _unknown_stage(staged: str | None) -> str | None:
+    """Refusal detail for a stage the router does not know, else None.
+
+    Checked before the readiness fallback: a typo such as ``ship`` must be
+    reported, not quietly run on the Python loop without a stage.
+    """
+    from omega_prime.engine.plan_router import STAGES
+
+    if staged is None or staged in STAGES:
+        return None
+    return f"unknown stage {staged!r}; expected one of {STAGES}"
+
+
 def route_turn(
     agent: Any,
     user_message: Any,
@@ -163,23 +179,74 @@ def route_turn(
         return None
     if not forced and not _live_model(getattr(agent, "model", None)):
         return None
+    bad_stage = _unknown_stage(staged)
+    if bad_stage is not None:
+        refused = EngineResult(
+            False,
+            getattr(agent, "engine_job_id", None) or "job-" + uuid.uuid4().hex[:8],
+            reason="plan_not_allowed",
+            detail=bad_stage,
+        )
+        return _refused(
+            agent, user_message, conversation_history, refused, task_id=task_id
+        )
     if mode == "auto" and not forced:
-        ready, _reason = probe(mapping, stage=staged)
+        ready, _reason = probe(
+            mapping, stage=staged, plan=getattr(agent, "engine_plan", None)
+        )
         if not ready:
             return None
-    result = run(
-        _with_history(user_message, conversation_history),
-        cwd=getattr(agent, "engine_cwd", None),
-        system_prompt=system_message,
-        thinking=getattr(agent, "engine_thinking", None),
-        plan=getattr(agent, "engine_plan", None),
-        env=mapping,
-        job_id=getattr(agent, "engine_job_id", None),
-        interrupt=interrupt,
-        stage=staged,
+    job_id = getattr(agent, "engine_job_id", None) or "job-" + uuid.uuid4().hex[:8]
+    engine_cwd = getattr(agent, "engine_cwd", None)
+    work_root = (
+        Path(os.path.abspath(engine_cwd)) if engine_cwd is not None else Path.cwd()
     )
+    try:
+        binds: list[Path | str] = [
+            job_dir(mapping, job_id),
+            work_root,
+            agent_data_dir(mapping),
+        ]
+        omp_store = omp_home(mapping)
+        if omp_store.is_dir() and omp_store not in binds:
+            binds.append(omp_store)
+        ui_control = UIControlStore.from_env(mapping, writable_binds=binds)
+    except (OSError, ValueError):
+        result = EngineResult(
+            False,
+            job_id,
+            reason="ui_control_unavailable",
+            detail="rpc-ui requires a safe operator control store",
+            mode="rpc-ui",
+        )
+        return _refused(
+            agent, user_message, conversation_history, result, task_id=task_id
+        )
+    with ui_control:
+        result = run(
+            _with_history(user_message, conversation_history),
+            cwd=work_root,
+            system_prompt=system_message,
+            thinking=getattr(agent, "engine_thinking", None),
+            plan=getattr(agent, "engine_plan", None),
+            env=mapping,
+            job_id=job_id,
+            mode="rpc-ui",
+            ui_control=ui_control,
+            stage=staged,
+            cancel_event=(
+                interrupt
+                if interrupt is not None
+                else getattr(agent, "interrupt", None)
+            ),
+        )
     if not result.ok:
-        if mode == "required" or forced or result.started:
+        if (
+            mode == "required"
+            or forced
+            or result.started
+            or result.reason == "ui_control_unavailable"
+        ):
             return _refused(
                 agent, user_message, conversation_history, result, task_id=task_id
             )
@@ -203,9 +270,11 @@ def _engine_body(result: EngineResult) -> dict[str, Any]:
         "stage": result.stage,
         "fallback_from": result.fallback_from,
         "events": result.events_path,
-        "cost": result.cost,
         "usage": result.usage,
+        "cost": result.cost,
         "sandbox": result.sandbox,
+        "mcp_status": result.mcp_status,
+        "mcp_cleanup_conflicts": result.cleanup_conflicts,
         "started": result.started,
     }
 
@@ -276,38 +345,52 @@ def delegate_via_engine(
     cwd: str | None = None,
     interrupt: Any | None = None,
     stage: str | None = None,
-    engine_plan: str | None = None,
+    delegate_depth: int | None = None,
+    plan: str | None = None,
     tasks_path: str | Path | None = None,
     task_id: str | None = None,
 ) -> str | None:
     """JSON summary from omp, or None when the Python child path should run.
 
     ``stage`` falls back to ``OMEGA_PRIME_ENGINE_STAGE``; see ``engine_stage``.
-    ``engine_plan`` requests one coding plan (``run(plan=...)``): the router
-    still decides, so an unknown or off-allowlist plan refuses the run
-    instead of silently changing providers. ``tasks_path``/``task_id`` are
-    optional dashboard context threaded into ``run(...)`` unchanged — they
-    switch on the run's visibility wiring when both are set.
+    An unknown stage is an error, never a quiet fall back to the Python child.
+    ``plan`` is the requested primary plan (for example ``zai``), checked by
+    ``probe`` and used by ``run`` the same way ``route_turn`` uses
+    ``agent.engine_plan``.
+    ``delegate_depth`` is the child's depth, handed to omp's MCP server so
+    the child's own delegates still stop at the parent's ``max_depth``.
+    ``tasks_path``/``task_id`` are optional dashboard context threaded into
+    ``run(...)`` unchanged; they switch on the run's visibility wiring when
+    both are set.
     """
     mapping = _mapping(env)
     mode = engine_mode(mapping)
     if mode == "off":
         return None
     staged = engine_stage(mapping, stage)
-    ready, reason = probe(mapping, stage=staged)
+    bad_stage = _unknown_stage(staged)
+    if bad_stage is not None:
+        return json.dumps(
+            {"error": "plan_not_allowed", "detail": bad_stage}, ensure_ascii=False
+        )
+    ready, reason = probe(mapping, stage=staged, plan=plan)
     if not ready and mode != "required":
         return None
     if not ready and mode == "required":
         return json.dumps({"error": reason}, ensure_ascii=False)
+    extra: dict[str, Any] = {}
+    if delegate_depth is not None:
+        extra["delegate_depth"] = delegate_depth
     result = run(
         goal,
         env=mapping,
         cwd=cwd,
         interrupt=interrupt,
         stage=staged,
-        plan=engine_plan,
+        plan=plan,
         tasks_path=tasks_path,
         task_id=task_id,
+        **extra,
     )
     if not result.ok:
         if mode == "required" or result.started:
@@ -333,9 +416,10 @@ def desk_engine_dispatch(
     *,
     cwd: str | None = None,
     stage: str | None = None,
+    plan: str | None = None,
 ) -> dict[str, Any] | None:
     """One desk ticket on omp. None means keep the existing blocked path."""
-    raw = delegate_via_engine(goal, env=env, cwd=cwd, stage=stage)
+    raw = delegate_via_engine(goal, env=env, cwd=cwd, stage=stage, plan=plan)
     if raw is None:
         return None
     try:
@@ -393,27 +477,35 @@ def ultrathink_engine(
     env: Mapping[str, str],
     *,
     stage: str | None = None,
-    engine_plan: str | None = None,
+    requested_plan: str | None = None,
     tasks_path: str | Path | None = None,
     task_id: str | None = None,
 ) -> dict[str, Any]:
     """Run a resolved ultrathink spec on omp when the engine is ready.
 
     ``stage`` wins, then the plan's ``stage`` field, then
-    ``OMEGA_PRIME_ENGINE_STAGE``. ``engine_plan`` (deliberately not
-    ``plan``: the first positional already is the spec mapping, and
-    ``engine_plan`` is the established name for the requested coding plan,
-    as in ``route_turn``) is threaded into ``run(plan=...)`` unchanged —
-    the router still decides. ``tasks_path``/``task_id`` are optional
-    dashboard context threaded into ``run(...)`` unchanged — they switch
-    on the run's visibility wiring when both are set.
+    ``OMEGA_PRIME_ENGINE_STAGE``. An unknown stage fails instead of being
+    skipped. ``requested_plan`` is the primary plan to ask the router for
+    (for example ``zai``); ``plan`` here is the ultrathink spec record.
+    ``tasks_path``/``task_id`` are optional dashboard context threaded into
+    ``run(...)`` unchanged; they switch on the run's visibility wiring when
+    both are set.
     """
     mode = engine_mode(env)
     if mode == "off":
         return {"used": False, "reason": "off"}
     requested = stage if stage is not None else plan.get("stage")
     staged = engine_stage(env, requested if isinstance(requested, str) else None)
-    ready, reason = probe(env, stage=staged)
+    bad_stage = _unknown_stage(staged)
+    if bad_stage is not None:
+        return {
+            "used": False,
+            "failed": True,
+            "reason": "plan_not_allowed",
+            "error": "plan_not_allowed",
+            "detail": bad_stage,
+        }
+    ready, reason = probe(env, stage=staged, plan=requested_plan)
     if not ready:
         return _required_miss(env, reason)
     if not plan.get("found"):
@@ -433,7 +525,7 @@ def ultrathink_engine(
         env=env,
         system_prompt="Ultrathink turn. Stay inside the spec.",
         stage=staged,
-        plan=engine_plan,
+        plan=requested_plan,
         tasks_path=tasks_path,
         task_id=task_id,
     )

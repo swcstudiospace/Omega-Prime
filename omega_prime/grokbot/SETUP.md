@@ -207,7 +207,8 @@ anonymous and diagnostics warn. URLs with userinfo are rejected.
 Non-secret settings may be stored in `~/.omega-prime/settings.json`, with
 `OMEGA_PRIME_SETTINGS_FILE` as the sole path override. The only accepted
 string keys are `SUBSTRATE_URL`, `HINDSIGHT_URL`, `ULTRATHINK_ROOT`,
-`ULTRATHINK_SHIP`, and `OMEGA_PRIME_STATE_DIR`. For example, the non-secret
+`ULTRATHINK_SHIP`, `OMEGA_PRIME_STATE_DIR`, and
+`OMEGA_PRIME_AGENT_STATE_DIR`. For example, the non-secret
 Ultrathink inputs are `ULTRATHINK_ROOT=/workspace/claude-ultrathink` and
 `ULTRATHINK_SHIP=0`. Keep the file outside git worktrees and tracked paths,
 with no group/world write permission. Do not put credentials or `*_FILE`
@@ -222,11 +223,57 @@ unverified. Local fake-server checks are not live Grok Bot or endpoint
 verification. Do not write the live settings file or restart the connector
 without the operator.
 
+Hindsight has no default URL: set `HINDSIGHT_URL` explicitly only for a
+service you operate, and use HTTPS. Hindsight URLs must not include user
+information, a query, or a fragment. The Hindsight key is resolved via the
+credential broker from the environment or a mode-checked 0600 secret file,
+and is not a setting. To let the broker supply that key, add the hostname
+from `HINDSIGHT_URL` (hostname only, not the full URL) to the
+`network.hosts` allowlist in
+`omega_prime/contracts/policies/omega-prime.json`; the broker rejects hosts
+that are not listed. Regenerate the sandbox policy after changing the
+allowlist. Do not put a URL or key in Omega Prime settings, a Bot template,
+or chat. If `HINDSIGHT_URL` is unset, no Hindsight credential lookup or
+network request occurs.
+
+### Memory backend behavior
+
+`OMEGA_PRIME_MEMORY_BACKEND` accepts `local`, `substrate`, or `hindsight`.
+It selects the preferred write backend only; recall searches local memory
+and every configured remote independently for every selector value. If not
+set, the default is `substrate` only when the authoritative resolver has an
+explicitly configured Substrate URL; otherwise it is `local`. An explicitly
+selected but unconfigured remote is reported as `not_configured`, not
+silently replaced.
+
+Recall and doctor report local, Substrate, and Hindsight with exactly these
+states: `answered`, `empty`, `not_configured`, `unreachable`, or
+`unauthorized`. Diagnostics are sanitized; a failed source is not presented
+as empty, and its failure does not suppress healthy-source results. Results
+retain provenance and enforce repo isolation across backends. Substrate
+transport failures follow phase 97's source-aware contract and are reported
+as unreachable or unauthorized, not empty.
+
+Retention is local-first. Configured Substrate receives the write regardless
+of selector; Hindsight receives writes only when selected as `hindsight`,
+although configured Hindsight remains a recall source. A required remote
+write failure is visible and does not roll back the local save. There is no
+service-first bridge or silent fallback, and the documentation makes no
+server idempotency or Hindsight document-ID guarantee.
+
+Use the conservative command form
+`/omega-retain --source <source> -- <content>` or
+`/omega-retain --receipt-path <path> -- <content>`. Retain requires approval
+through the lead path and source or receipt evidence; secret-shaped content
+is refused. A local save by itself is not success if a required configured
+remote publication fails. The growth memory `target=user` operation and
+memory replace/remove remain local-only and do not publish to shared backends.
+
 Configure only the integrations you intend to use. Failure behavior is
-operation-specific: some tools return `not_configured`, some refuse or return
-gateway errors, and some clients raise or degrade reads. Readiness's
-`feature_disabled` or prerequisite-blocked rows are separate classifications;
-see [connectors](../../docs/connectors.md) and [Red Team](../../docs/red-team.md).
+operation-specific: other tools may return `not_configured`, refuse, or
+return gateway errors. Readiness's `feature_disabled` or
+prerequisite-blocked rows are separate classifications; see
+[connectors](../../docs/connectors.md) and [Red Team](../../docs/red-team.md).
 
 ## 3. Attach the tool host (1-Click Native Integration)
 

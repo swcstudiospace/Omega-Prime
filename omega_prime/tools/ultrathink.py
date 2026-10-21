@@ -4,18 +4,20 @@ Shells to the ultrathink checkout's CLIs (`bin/ultrathink`,
 `bin/ultrathink-mcp`, `bin/ultrathink-ship`) behind an injected
 runner. No ultrathink source is vendored: this module only execs
 the host-installed checkout, which keeps the AGPL boundary at the
-process edge. Tests use fakes only.
+process edge. Tests use fakes only. Ship writes are default-off and require
+explicit ULTRATHINK_SHIP='1' or 'true'.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from omega_prime.integrations.ultrathink import ship_enabled
 from omega_prime.tools.registry import ToolRegistry
 
 ULT_TOOL_NAMES = (
@@ -55,11 +57,15 @@ def _default_run(argv: list[str], timeout: int = 120) -> dict[str, Any]:
 
 @dataclass
 class UltrathinkContext:
-    """Checkout root + command runner. Empty root means unconfigured."""
+    """Checkout root, runner, timeout, and explicit environment mapping.
+
+    Ship writes are default-off unless ``env`` explicitly enables them.
+    """
 
     root: str | Path = ""
     run: Any = None
     timeout: int = 120
+    env: Mapping[str, str] = field(default_factory=dict)
 
 
 class UltrathinkClient:
@@ -75,6 +81,17 @@ class UltrathinkClient:
         return str(Path(root) / "bin" / name)
 
     def _call(self, binary: str, args: list[str]) -> dict[str, Any]:
+        """Call a CLI verb, enforcing the explicit default-off ship opt-in."""
+        if (
+            binary == "ultrathink-ship"
+            and args
+            and args[0] in ("pr", "review", "merge")
+            and not ship_enabled(self.ctx.env)
+        ):
+            return _error(
+                "ship_disabled",
+                "set ULTRATHINK_SHIP=1 or true to enable ship writes",
+            )
         exe = self._bin(binary)
         if exe is None:
             return _error(

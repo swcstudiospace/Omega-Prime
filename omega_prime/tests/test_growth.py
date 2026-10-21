@@ -7,10 +7,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from omega_prime.agent.conversation_loop import Agent, run_conversation
 from omega_prime.agent.curator import review_turn
 from omega_prime.agent.model import ScriptedModel
 from omega_prime.agent.runtime import OmegaPrimeAgent
+from omega_prime.memory.backends import (
+    LocalRecord,
+    decode_local_record,
+    encode_local_record,
+)
 from omega_prime.memory.manager import MemoryManager
 from omega_prime.memory.provider import (
     BuiltinMemoryProvider,
@@ -22,6 +29,7 @@ from omega_prime.providers.fake import FakeTransport
 from omega_prime.session.search import SessionStore, session_search
 from omega_prime.skills_runtime.manager import skill_manage, skill_view
 from omega_prime.substrate.client import SubstrateClient
+from omega_prime.tooling.catalog import EXEC_JOB_TOOL_NAMES
 from omega_prime.tooling.roster import roster_names
 from omega_prime.tools.agent_message import (
     MESSAGING_TOOL_NAMES,
@@ -48,6 +56,7 @@ from omega_prime.tools.durable_surface import (
     DURABLE_TOOL_NAMES,
     register_durable_surface_tools,
 )
+from omega_prime.tools.exec_jobs import register_exec_job_tools
 from omega_prime.tools.goals import GOAL_TOOL_NAMES, register_goal_tools
 from omega_prime.tools.growth import GROWTH_TOOL_NAMES, register_growth_tools
 from omega_prime.tools.harness import HARNESS_TOOL_NAMES, register_harness_tools
@@ -618,6 +627,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
     register_omega_command_tools(registry, {})
     register_platform_tools(registry, home=tmp_path)
     register_ide_tools(registry, tmp_path)
+    register_exec_job_tools(registry, tmp_path)
     register_x_tools(registry, XClient(FakeTransport(), token="fake"))
     register_telegram_tools(
         registry, TelegramClient(make_bot=lambda token: None, token="fake")
@@ -669,6 +679,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
         + OMEGA_COMMAND_TOOL_NAMES
         + PLATFORM_TOOL_NAMES
         + IDE_TOOL_NAMES
+        + EXEC_JOB_TOOL_NAMES
         + X_TOOL_NAMES
         + TELEGRAM_TOOL_NAMES
         + DISCORD_TOOL_NAMES
@@ -778,3 +789,318 @@ def test_create_refuses_a_name_that_exists_only_in_the_shipped_root(
     assert (writable / "deploy" / "SKILL.md").is_file()
     still = _load(registry.dispatch("skill_view", {"name": "desk-gateway"}))
     assert still["content"] == "shipped body\n"
+
+
+def test_growth_uses_retain_only_for_shared_memory_add(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    retained: list[str] = []
+    store = MemoryStore(tmp_path / "memory")
+
+    def retain(content: str) -> dict:
+        retained.append(content)
+        record = LocalRecord(
+            bank="ultrathink",
+            scope="user",
+            repo=None,
+            kind="memory",
+            content=content,
+            source="growth",
+            tags=("test",),
+        )
+        saved = store.add("memory", encode_local_record(record))
+        assert saved["success"]
+        return {"ok": False, "local_saved": True, "error": "remote unavailable"}
+
+    register_growth_tools(
+        registry,
+        skills_root=tmp_path / "skills",
+        memory_dir=tmp_path / "memory",
+        session_db=tmp_path / "sessions.db",
+        memory_store=store,
+        retain_memory=retain,
+    )
+
+    shared = _load(
+        registry.dispatch(
+            "memory", {"action": "add", "target": "memory", "content": "shared fact"}
+        )
+    )
+    assert shared == {"ok": False, "local_saved": True, "error": "remote unavailable"}
+    assert retained == ["shared fact"]
+    original_record = decode_local_record(store.memory_entries[0], "ultrathink")
+    assert isinstance(original_record, LocalRecord)
+    assert original_record.content == "shared fact"
+
+    user = _load(
+        registry.dispatch(
+            "memory", {"action": "add", "target": "user", "content": "profile note"}
+        )
+    )
+    replaced = _load(
+        registry.dispatch(
+            "memory",
+            {
+                "action": "replace",
+                "target": "memory",
+                "old_text": "shared fact",
+                "content": "revised fact",
+            },
+        )
+    )
+    replacement_record = decode_local_record(store.memory_entries[0], "ultrathink")
+    assert isinstance(replacement_record, LocalRecord)
+    assert replacement_record.content == "revised fact"
+    assert replacement_record.source == original_record.source
+    assert replacement_record.tags == original_record.tags
+
+    removed = _load(
+        registry.dispatch(
+            "memory",
+            {"action": "remove", "target": "memory", "old_text": "revised fact"},
+        )
+    )
+    assert user["success"] and replaced["success"] and removed["success"]
+    assert retained == ["shared fact"]
+    assert not store.memory_entries
+    assert store.user_entries == ["profile note"]
+
+
+def test_provider_edit_exact_match_precedes_substring_across_record_types(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "memory")
+    record = LocalRecord(
+        bank="ultrathink",
+        scope="user",
+        repo=None,
+        kind="memory",
+        content="exact fact",
+        source="test",
+    )
+    assert store.add("memory", "exact fact with more text")["success"]
+    assert store.add("memory", encode_local_record(record))["success"]
+    provider = BuiltinMemoryProvider(store)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "memory",
+            {
+                "action": "replace",
+                "target": "memory",
+                "old_text": "exact fact",
+                "content": "updated exact fact",
+            },
+        )
+    )
+
+    assert result["success"]
+    assert store.memory_entries[0] == "exact fact with more text"
+    updated = decode_local_record(store.memory_entries[1], "ultrathink")
+    assert isinstance(updated, LocalRecord)
+    assert updated.content == "updated exact fact"
+    assert updated.source == "test"
+
+
+@pytest.mark.parametrize("action", ["replace", "remove"])
+def test_provider_rejects_non_string_old_text_without_editing(
+    tmp_path: Path, action: str
+) -> None:
+    store = MemoryStore(tmp_path / "memory")
+    assert store.add("memory", "keep this entry")["success"]
+    before = list(store.memory_entries)
+
+    result = json.loads(
+        BuiltinMemoryProvider(store).handle_tool_call(
+            "memory",
+            {
+                "action": action,
+                "target": "memory",
+                "old_text": 42,
+                "content": "replacement",
+            },
+        )
+    )
+
+    assert result == {"success": False, "error": "old_text must be a string."}
+    assert store.memory_entries == before
+
+
+def test_provider_rejects_ambiguous_plain_and_versioned_exact_matches(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "memory")
+    record = LocalRecord(
+        bank="ultrathink",
+        scope="user",
+        repo=None,
+        kind="memory",
+        content="same fact",
+        source="test",
+    )
+    assert store.add("memory", "same fact")["success"]
+    assert store.add("memory", encode_local_record(record))["success"]
+    before = list(store.memory_entries)
+
+    result = json.loads(
+        BuiltinMemoryProvider(store).handle_tool_call(
+            "memory",
+            {
+                "action": "remove",
+                "target": "memory",
+                "old_text": "same fact",
+            },
+        )
+    )
+
+    assert result == {
+        "success": False,
+        "error": "Multiple entries matched 'same fact'.",
+    }
+    assert store.memory_entries == before
+
+
+def test_provider_reloads_before_editing_record_from_second_store(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "memory"
+    provider_store = MemoryStore(directory)
+    provider = BuiltinMemoryProvider(provider_store)
+    second_store = MemoryStore(directory)
+    record = LocalRecord(
+        bank="ultrathink",
+        scope="user",
+        repo="repo",
+        kind="memory",
+        content="stale edit fact",
+        source="second store",
+        receipt_path="receipts/stale.json",
+        tags=("preserve", "edit"),
+        graph_id="graph-edit",
+        task_id="task-edit",
+    )
+    assert second_store.add("memory", encode_local_record(record))["success"]
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "memory",
+            {
+                "action": "replace",
+                "target": "memory",
+                "old_text": "stale edit fact",
+                "content": "fresh edit fact",
+            },
+        )
+    )
+
+    assert result["success"]
+    edited = decode_local_record(provider_store.memory_entries[0], "ultrathink")
+    assert isinstance(edited, LocalRecord)
+    assert edited.content == "fresh edit fact"
+    assert edited.bank == record.bank
+    assert edited.scope == record.scope
+    assert edited.repo == record.repo
+    assert edited.kind == record.kind
+    assert edited.source == record.source
+    assert edited.receipt_path == record.receipt_path
+    assert edited.tags == record.tags
+    assert edited.graph_id == record.graph_id
+    assert edited.task_id == record.task_id
+
+
+def test_stale_plain_lookup_cannot_raw_replace_a_versioned_record(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "memory"
+    provider_store = MemoryStore(directory)
+    assert provider_store.add("memory", "stale lookup fact")["success"]
+    provider = BuiltinMemoryProvider(provider_store)
+    second_store = MemoryStore(directory)
+    record = LocalRecord(
+        bank="ultrathink",
+        scope="user",
+        repo="repo",
+        kind="memory",
+        content="stale lookup fact",
+        source="second store",
+        receipt_path="receipts/stale-lookup.json",
+        tags=("preserve", "stale-lookup"),
+        graph_id="graph-stale-lookup",
+        task_id="task-stale-lookup",
+    )
+    assert second_store.replace(
+        "memory", "stale lookup fact", encode_local_record(record)
+    )["success"]
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "memory",
+            {
+                "action": "replace",
+                "target": "memory",
+                "old_text": "stale lookup fact",
+                "content": "fresh lookup fact",
+            },
+        )
+    )
+
+    assert result["success"]
+    updated = decode_local_record(provider_store.memory_entries[0], "ultrathink")
+    assert isinstance(updated, LocalRecord)
+    assert updated.content == "fresh lookup fact"
+    assert updated.bank == record.bank
+    assert updated.scope == record.scope
+    assert updated.repo == record.repo
+    assert updated.kind == record.kind
+    assert updated.source == record.source
+    assert updated.receipt_path == record.receipt_path
+    assert updated.tags == record.tags
+    assert updated.graph_id == record.graph_id
+    assert updated.task_id == record.task_id
+
+
+def test_provider_reloads_before_removing_record_from_second_store(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "memory"
+    provider_store = MemoryStore(directory)
+    provider = BuiltinMemoryProvider(provider_store)
+    second_store = MemoryStore(directory)
+    record = LocalRecord(
+        bank="ultrathink",
+        scope="user",
+        repo=None,
+        kind="memory",
+        content="stale remove fact",
+        source="second store",
+        tags=("preserve", "remove"),
+        graph_id="graph-remove",
+        task_id="task-remove",
+    )
+    untouched = LocalRecord(
+        bank="ultrathink",
+        scope="repo",
+        repo="repo",
+        kind="memory",
+        content="untouched fact",
+        source="second store",
+        tags=("untouched",),
+    )
+    assert second_store.add("memory", encode_local_record(record))["success"]
+    assert second_store.add("memory", encode_local_record(untouched))["success"]
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "memory",
+            {
+                "action": "remove",
+                "target": "memory",
+                "old_text": "stale remove fact",
+            },
+        )
+    )
+
+    assert result["success"]
+    assert len(provider_store.memory_entries) == 1
+    remaining = decode_local_record(provider_store.memory_entries[0], "ultrathink")
+    assert isinstance(remaining, LocalRecord)
+    assert remaining == untouched

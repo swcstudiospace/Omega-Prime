@@ -509,3 +509,35 @@ def read_usage(binary: str, env: Mapping[str, str]) -> dict[str, Quota]:
     except json.JSONDecodeError:
         return {}
     return parse_usage(payload)
+
+
+def stage_fallback(
+    env: Mapping[str, str],
+    usage: Mapping[str, Quota] | None,
+    choice: Choice,
+) -> str | None:
+    """The plan a staged run may still fall back to after ``choice`` starts.
+
+    A runner that retries on another plan by itself (the omp-sandbox core
+    falls back from ChatGPT to Z.ai when the first model fails early) may
+    only do so with this answer: the next plan in the stage preference
+    order after the chosen one, and only while it is allowlisted and its
+    quota window is not exhausted. ``None`` means no fallback is approved —
+    a stageless choice, a last-in-order plan, or a next plan that this env
+    has not allowed.
+    """
+    if choice.stage is None:
+        return None
+    order = list(_STAGE_PREFERENCE)
+    current = choice.decision.plan
+    if current not in order or order.index(current) + 1 >= len(order):
+        return None
+    name = order[order.index(current) + 1]
+    match = next(
+        (item for item in evaluate_all(env, choice.stage) if item.plan == name), None
+    )
+    if match is None or not match.allowlisted:
+        return None
+    if _exhausted(dict(usage or {}).get(name)):
+        return None
+    return name

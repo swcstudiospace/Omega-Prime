@@ -1,0 +1,102 @@
+{
+  "task_id": "phase-99-solo-mode-desk-optional",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T17:04:44Z",
+  "completed_at": "2026-10-20T17:04:44Z",
+  "commands": [
+    {
+      "cmd": "PATH=\"/workspace/omes-bot/.venv/bin:$PATH\" PYTHONPATH=/workspace/omes-bot-wt/p3 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_lead.py omega_prime/tests/test_desk_wiring.py omega_prime/tests/test_desk_lead.py omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_shell.py omega_prime/tests/test_prompt_format.py omega_prime/tests/test_command_generation.py -q",
+      "exit_code": 0,
+      "output_tail": "176 passed in 8.18s"
+    },
+    {
+      "cmd": "PATH=\"/workspace/omes-bot/.venv/bin:$PATH\" PYTHONPATH=/workspace/omes-bot-wt/p3 ruff check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "All checks passed!"
+    },
+    {
+      "cmd": "PATH=\"/workspace/omes-bot/.venv/bin:$PATH\" PYTHONPATH=/workspace/omes-bot-wt/p3 ruff format --check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "589 files already formatted"
+    },
+    {
+      "cmd": "PATH=\"/workspace/omes-bot/.venv/bin:$PATH\" PYTHONPATH=/workspace/omes-bot-wt/p3 mypy omega_prime/",
+      "exit_code": 0,
+      "output_tail": "Success: no issues found in 462 source files"
+    },
+    {
+      "cmd": "PATH=\"/workspace/omes-bot/.venv/bin:$PATH\" PYTHONPATH=/workspace/omes-bot-wt/p3 pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "output_tail": "27 failed, 4782 passed, 11 skipped, 15 warnings in 195.48s. All 27 failing node IDs and causes match the baseline documented in .planning/phases/99-solo-mode-desk-optional/99-VALIDATION.md; no new failure node ID appeared."
+    },
+    {
+      "cmd": "PATH=\"/workspace/omes-bot/.venv/bin:$PATH\" PYTHONPATH=/workspace/omes-bot-wt/p3 VIRTUAL_ENV=/workspace/omes-bot/.venv bash omega_prime/scripts/assemble-prompts.sh --check",
+      "exit_code": 0,
+      "output_tail": "assemble-prompts --check: OMEGA_PRIME up to date"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Focused solo routing, Desk compatibility, prompt, and link regressions pass",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "Ruff lint passes",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "Ruff format check passes",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Mypy passes",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "The complete test suite was run; its 27 failures match the documented baseline failure set",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "Assembled prompt output is current",
+      "evidence_command_index": 5
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Phase 97 docs-search question wire mapping and SSE integration; integrate after rebase without changing the Python API call in this phase",
+    "Phase 98 integration, live substrate/Desk endpoints, connector restart, and deployment were not exercised or authorized",
+    "Pyright reports unresolved anyio/mcp imports in the available LSP environment and an existing lead.py typing diagnostic; mandated mypy gate passes"
+  ],
+  "files_changed": [
+    "CHANGELOG.md",
+    "docs/setup.md",
+    "docs/substrate.md",
+    "omega_prime/mcp_server.py",
+    "omega_prime/prompts-assembled/OMEGA_PRIME.xml",
+    "omega_prime/prompts/_shared/core-directives.xml",
+    "omega_prime/prompts/bot-00-omega-prime.xml",
+    "omega_prime/skills/desk-bootstrap/SKILL.md",
+    "omega_prime/skills/desk-doctor/SKILL.md",
+    "omega_prime/skills/desk-gateway/SKILL.md",
+    "omega_prime/skills/gotxcot-uplift/SKILL.md",
+    "omega_prime/skills/greptile-merge-gate/SKILL.md",
+    "omega_prime/skills/hindsight-memory/SKILL.md",
+    "omega_prime/skills/ragflow-docs/SKILL.md",
+    "omega_prime/skills/railway-tailscale/SKILL.md",
+    "omega_prime/skills/tool-packs/SKILL.md",
+    "omega_prime/skills/trackplan-dispatch/SKILL.md",
+    "omega_prime/skills/trackplan-dispatch/prompt-template.md",
+    "omega_prime/tests/test_desk_wiring.py",
+    "omega_prime/tests/test_docs.py",
+    "omega_prime/tools/lead.py",
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/state.json",
+    ".planning/phases/99-solo-mode-desk-optional/99-SUMMARY.md",
+    ".planning/phases/99-solo-mode-desk-optional/99-VERIFICATION.md",
+    ".receipts/bot-00-omega-prime/phase-99.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": null,
+  "approvals": []
+}

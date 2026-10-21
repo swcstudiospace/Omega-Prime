@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 import json
+import threading
 
+from omega_prime.agent.conversation_loop import Agent
+from omega_prime.agent.model import ScriptedModel
 from omega_prime.cron.heartbeat import HEARTBEAT_KIND, list_heartbeats
-from omega_prime.cron.scheduler import DESK_LEAD_KIND, JobStore, list_desk_lead_passes
+from omega_prime.cron.scheduler import (
+    DESK_LEAD_KIND,
+    JobStore,
+    list_desk_lead_passes,
+    run_due_jobs,
+    schedule_desk_lead_pass,
+    schedule_purple_cycle,
+    tick_desk_lead_passes,
+    tick_purple_cycles,
+)
 from omega_prime.tools.cron_admin import (
     _WRITE_TOOLS,
     CRON_ADMIN_TOOL_NAMES,
@@ -168,6 +180,35 @@ def test_remove_then_gone(tmp_path):
     assert "error" in missing
 
 
+def test_admin_remove_reloads_fresh_store_and_preserves_concurrent_rows(tmp_path):
+    registry = _registry(tmp_path)
+    path = tmp_path.joinpath(*STORE_PATH_COMPONENTS)
+    seed_store = JobStore(path)
+    removed_id = seed_store.schedule("remove me", 1000)
+    unrelated_id = seed_store.schedule("keep me", 2000)
+    concurrent_store = JobStore(path)
+    concurrent_store.schedule("added elsewhere", 3000)
+
+    # The handler opens a fresh store and removes transactionally, retaining
+    # rows written by another store after the original rows were created.
+    result = _dispatch(registry, "cron_job_remove", {"job_id": removed_id})
+
+    assert result == {"removed": removed_id, "kind": "prompt"}
+    persisted = {job["id"]: job for job in JobStore(path).jobs}
+    assert removed_id not in persisted
+    assert persisted[unrelated_id]["prompt"] == "keep me"
+    assert any(job["prompt"] == "added elsewhere" for job in persisted.values())
+
+    # A cached view of the row is not evidence that it is still present.
+    assert not concurrent_store.remove(removed_id)
+    assert _dispatch(registry, "cron_job_remove", {"job_id": removed_id}) == {
+        "error": f"no cron job: {removed_id!r}"
+    }
+    persisted = {job["id"]: job for job in JobStore(path).jobs}
+    assert unrelated_id in persisted
+    assert any(job["prompt"] == "added elsewhere" for job in persisted.values())
+
+
 def test_bad_kind_rejected_as_dict(tmp_path):
     registry = _registry(tmp_path)
     result = _dispatch(
@@ -235,3 +276,98 @@ def test_unreadable_store_is_an_explicit_error(tmp_path):
     listed = _dispatch(registry, "cron_jobs_list", {})
     assert "error" in listed
     assert "cron_jobs_list" not in listed
+
+
+def test_admin_create_and_remove_during_dispatch_survive_settlement(tmp_path):
+    registry = _registry(tmp_path)
+    path = tmp_path.joinpath(*STORE_PATH_COMPONENTS)
+    store = JobStore(path)
+    now = 1_700_000_000
+    running_id = store.schedule("dispatching", now)
+    started = threading.Event()
+    release = threading.Event()
+
+    class WaitingModel:
+        def complete(self, messages, tools=None):
+            started.set()
+            assert release.wait(timeout=5)
+            return {"role": "assistant", "content": "done"}
+
+    parent = Agent(model=ScriptedModel([]), tools={})
+    parent.child_model = WaitingModel()
+    result = []
+    worker = threading.Thread(
+        target=lambda: result.extend(run_due_jobs(store, now, parent))
+    )
+    worker.start()
+    assert started.wait(timeout=5)
+
+    created = _dispatch(
+        registry,
+        "cron_job_create",
+        {"prompt": "future created during dispatch", "due_at": now + 600},
+    )["created"]
+    removed = _dispatch(registry, "cron_job_remove", {"job_id": running_id})
+    assert removed["removed"] == running_id
+
+    release.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    persisted = {job["id"]: job for job in _store(tmp_path).jobs}
+    assert result == []
+    assert running_id not in persisted
+    assert persisted[created]["prompt"] == "future created during dispatch"
+    assert persisted[created]["due_at"] == now + 600
+
+
+def test_stale_prompt_and_desk_actions_are_missed_without_dispatch(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS", "300")
+    now = 1_700_000_000
+    store = JobStore(tmp_path / "jobs.json")
+    expired = store.schedule("expired one shot", now - 301)
+    recurring = store.schedule("stale recurring", now - 301, interval_seconds=20)
+    model = ScriptedModel([])
+    parent = Agent(model=ScriptedModel([]), tools={})
+    parent.child_model = model
+
+    prompt_results = run_due_jobs(store, now, parent)
+    prompt_rows = {job["id"]: job for job in JobStore(store.path).jobs}
+    assert {job["id"] for job in prompt_results} == {expired, recurring}
+    assert prompt_rows[expired]["last_result"]["state"] == "missed"
+    assert prompt_rows[expired]["completed"] is True
+    assert prompt_rows[recurring]["due_at"] == now + 20
+    assert model.call_count == 0
+
+    desk_store = JobStore(tmp_path / "desk-jobs.json")
+    desk_id = schedule_desk_lead_pass(desk_store, due_at=now - 301, interval_seconds=60)
+    calls = []
+    desk_results = tick_desk_lead_passes(
+        desk_store, now, lambda job: calls.append(job["id"])
+    )
+    assert calls == []
+    assert desk_results[0]["id"] == desk_id
+    assert desk_results[0]["last_result"]["state"] == "missed"
+    assert desk_results[0]["due_at"] == now + 60
+
+
+def test_stale_purple_cycle_is_missed_and_coalesced(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS", "300")
+    now = 1_700_000_000
+    store = JobStore(tmp_path / "jobs.json")
+    job_id = schedule_purple_cycle(store, due_at=now - 301, interval_seconds=90)
+    calls = []
+
+    def runner(job: dict) -> dict:
+        calls.append(job["id"])
+        return {"ok": True}
+
+    ran = tick_purple_cycles(store, now, runner=runner)
+
+    row = JobStore(store.path).jobs[0]
+    assert calls == []
+    assert ran[0]["id"] == job_id
+    assert row["last_result"]["state"] == "missed"
+    assert row["history"][-1]["status"] == "missed"
+    assert row["due_at"] == now + 90
