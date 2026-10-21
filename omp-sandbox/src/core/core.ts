@@ -97,13 +97,16 @@ export class Core extends EventEmitter {
     const t = this.tier!;
     const rel = t.workdir.slice(t.sandboxRoot.length).replace(/^\/+/, "");
     const { files, skipped } = seedFiles(src);
+    let bytes = 0;
     for (const f of files) {
       const dir = f.rel.includes("/") ? f.rel.slice(0, f.rel.lastIndexOf("/")) : "";
       if (dir) await this.vm.filesystem.mkdir(`${SANDBOX_MOUNT}/${rel}/${dir}`, { recursive: true }).catch(() => {});
-      await this.vm.filesystem.writeFile(`${SANDBOX_MOUNT}/${rel}/${f.rel}`, new Uint8Array(f.data));
+      const data = readFileSync(f.path);
+      bytes += data.length;
+      await this.vm.filesystem.writeFile(`${SANDBOX_MOUNT}/${rel}/${f.rel}`, new Uint8Array(data));
     }
     const g = await t.exec(["sh", "-c", "git init -q && git add -A && git -c user.name=omp-sandbox -c user.email=omp-sandbox@local commit -qm 'seed: disposable e2e fixture' && git log --oneline | head -1"], { timeoutMs: 60_000 });
-    return { fixture: src, files: files.map((f) => f.rel), bytes: files.reduce((n, f) => n + f.data.length, 0), skipped, viaVm: true, git: g.stdout.trim(), gitExit: g.code };
+    return { fixture: src, files: files.map((f) => f.rel), bytes, skipped, viaVm: true, git: g.stdout.trim(), gitExit: g.code };
   }
 
 

@@ -1,15 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { allowedDir, seedFiles, PathRefused } from "../src/core/paths.ts";
-import { gatewayToml, mountDriverConfig } from "../src/core/providers/openshell-podman.ts";
+import { ROOT } from "../src/core/config.ts";
+import { SANDBOX_MOUNT, vmRoundTrip } from "../src/core/vm.ts";
+import { gatewayToml, mountDriverConfig, podmanPolicyYaml } from "../src/core/providers/openshell-podman.ts";
 import { startTier, MOUNT_TIERS } from "../src/core/providers/tiers.ts";
+import type { SandboxTier } from "../src/core/providers/types.ts";
 
 const box = realpathSync(mkdtempSync(join(tmpdir(), "omp-sbx-paths-")));
 const root = join(box, "wt"); const job = join(root, "job-1"); const outside = join(box, "outside");
 for (const d of [root, job, outside]) mkdirSync(d, { recursive: true });
+mkdirSync(join(root, "..job", "inner"), { recursive: true });   // strictly-inside names starting with '..'
 symlinkSync(outside, join(root, "escape"));
 writeFileSync(join(root, "file.txt"), "x");
 
@@ -35,8 +39,33 @@ test("seed is binary-safe and skips .git, .venv, node_modules and symlinks", () 
   symlinkSync("/etc/passwd", join(src, "link"));
   const { files, skipped } = seedFiles(src);
   assert.deepEqual(files.map((f) => f.rel), ["README.md", "a/b/blob.bin"]);
-  assert.ok(files[1].data.equals(bin));
+  assert.equal(files[1].path, join(src, "a", "b", "blob.bin"));
+  assert.equal(readFileSync(files[1].path).equals(bin), true, "bytes the copier reads are intact on disk");
   assert.deepEqual(skipped.sort(), [".git", ".venv", "a/.git", "link", "node_modules"].sort());
+});
+
+test("seedFiles carries rel + absolute source path only (no bytes buffered during the walk)", () => {
+  const src = join(root, "walkseed"); mkdirSync(join(src, "d"), { recursive: true });
+  writeFileSync(join(src, "d", "f.bin"), Buffer.from([1, 2, 3]));
+  writeFileSync(join(src, "top.txt"), "t\n");
+  symlinkSync("/etc/passwd", join(src, "link"));
+  const { files, skipped } = seedFiles(src);
+  assert.deepEqual(files.map((f) => f.rel), ["d/f.bin", "top.txt"]);
+  for (const f of files) {
+    assert.equal("data" in f, false, "the walk must not buffer file bytes");
+    assert.equal(f.path, join(src, f.rel), "entry carries the absolute source path");
+    assert.equal(statSync(f.path).isFile(), true);
+  }
+  assert.deepEqual(skipped, ["link"], "symlink skip semantics unchanged");
+});
+
+test("allowedDir accepts strictly-inside dotdot names; every real traversal stays refused", () => {
+  assert.equal(allowedDir(join(root, "..job"), [root], "ws"), join(root, "..job"));
+  assert.equal(allowedDir(join(root, "..job", "inner"), [root], "ws"), join(root, "..job", "inner"));
+  assert.throws(() => allowedDir(join(root, ".."), [root], "ws"), (e: unknown) => e instanceof PathRefused && /allowlisted/.test(e.message), "the root's parent is refused");
+  assert.throws(() => allowedDir(`${root}/../outside`, [root], "ws"), (e: unknown) => e instanceof PathRefused && /'\.\.'/.test(e.message), "real '..' component refused");
+  assert.throws(() => allowedDir(`${root}/a/../b`, [root], "ws"), (e: unknown) => e instanceof PathRefused && /'\.\.'/.test(e.message));
+  assert.throws(() => allowedDir(join(root, "escape"), [root], "ws"), (e: unknown) => e instanceof PathRefused && /allowlisted/.test(e.message), "symlink escape refused");
 });
 
 test("mount gateway config only on the mount variant; driver config is a single rw bind at the workdir", () => {
@@ -50,4 +79,64 @@ test("mount gateway config only on the mount variant; driver config is a single 
 test("a workspace mount skips tiers that cannot bind-mount it", async () => {
   assert.deepEqual([...MOUNT_TIERS].sort(), ["bwrap", "openshell-podman"]);
   await assert.rejects(startTier({}, ["agentos-local", "openshell"], { workspaceHostPath: job }), /cannot bind-mount workspace_host_path/);
+});
+
+test("podmanPolicyYaml substitutes only the run-as values; the checked-in policy stays 1000/1000", () => {
+  const gen = podmanPolicyYaml("1001", "1002");
+  assert.ok(gen.includes('run_as_user: "1001"'), "generated run_as_user");
+  assert.ok(gen.includes('run_as_group: "1002"'), "generated run_as_group");
+  for (const k of ["chatgpt.com", "auth.openai.com", "api.z.ai", "registry.npmjs.org", "read_write: [/sandbox, /tmp]"]) {
+    assert.ok(gen.includes(k), `default-deny policy survives: ${k}`);
+  }
+  const stat = readFileSync(join(ROOT, "sandbox", "policy-podman.yaml"), "utf8");
+  const genWithoutRunAs = gen.split("\n").filter((l) => !l.includes("run_as_")).join("\n");
+  const statWithoutRunAs = stat.split("\n").filter((l) => !l.includes("run_as_")).join("\n");
+  assert.equal(genWithoutRunAs, statWithoutRunAs, "the generated policy differs from the static one in exactly the two run-as values");
+  assert.ok(stat.includes('run_as_user: "1000"'), "checked-in policy keeps run_as_user 1000");
+  assert.ok(stat.includes('run_as_group: "1000"'), "checked-in policy keeps run_as_group 1000");
+});
+
+test("vmRoundTrip probes only the tier's private home, never the mounted workdir", async () => {
+  for (const sandboxRoot of ["/sbx", "/sandbox"]) {
+    const writes: Array<{ path: string; data: string }> = [];
+    const vmCmds: string[] = [];
+    const tierArgv: string[][] = [];
+    let marker = "";
+    const vm = {
+      filesystem: {
+        writeFile: async (path: string, data: string) => { writes.push({ path, data }); marker = data; },
+        readdir: async () => [".agentos-probe.txt"],
+      },
+      process: {
+        exec: async (command: string) => {
+          vmCmds.push(command);
+          return command.includes("uname") ? { exitCode: 0, stdout: "probe-host" } : { exitCode: 0, stdout: ".agentos-probe.txt\n" };
+        },
+      },
+    };
+    const tier: SandboxTier = {
+      name: "bwrap", id: `fake-rt-${sandboxRoot}`, workdir: `${sandboxRoot}/work`, sandboxRoot, isolation: "none (test)",
+      workspaceHostPath: "/host/job-ws",
+      start: async () => {},
+      sandboxAgent: () => ({ baseUrl: "", token: "" }),
+      spawnStdio: () => { throw new Error("round-trip tests must not spawn"); },
+      exec: async (argv) => { tierArgv.push(argv); return { code: 0, stdout: argv[0] === "cat" ? marker : "", stderr: "" }; },
+      owned: () => ({}),
+      dispose: async () => ({ leftovers: [] }),
+    };
+    const r = await vmRoundTrip(vm, tier);
+    assert.equal(r.match, true, `round trip still proven on ${sandboxRoot}`);
+    assert.equal(r.hostFnExit, 0);
+    assert.deepEqual(writes.map((w) => w.path), [`${SANDBOX_MOUNT}/home/.agentos-probe.txt`], `write target on ${sandboxRoot}`);
+    assert.deepEqual(tierArgv[0], ["cat", `${sandboxRoot}/home/.agentos-probe.txt`], `cat target on ${sandboxRoot}`);
+    assert.deepEqual(vmCmds, ["agentos-sandbox run-command --command uname --args -n", `ls ${SANDBOX_MOUNT}/home`], `vm commands on ${sandboxRoot}`);
+    for (const s of [...writes.map((w) => w.path), ...vmCmds, ...tierArgv.flat()]) {
+      assert.equal(s.includes("work") || s.includes("/host/job-ws"), false, `probe must avoid the mounted workdir: ${s}`);
+    }
+    // Actual probe accesses (write, cat, ls) go through the private home; the uname host-fn writes nothing.
+    // The cat argv is pinned exactly by the deepEqual above.
+    for (const s of [...writes.map((w) => w.path), `ls ${SANDBOX_MOUNT}/home`]) {
+      assert.ok(s.includes("/home"), `every probe access stays under the private home: ${s}`);
+    }
+  }
 });

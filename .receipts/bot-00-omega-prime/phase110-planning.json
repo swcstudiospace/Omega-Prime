@@ -1,0 +1,91 @@
+{
+  "task_id": "phase110-planning",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T14:20:00Z",
+  "completed_at": "2026-10-21T15:45:00Z",
+  "scope": "Planning only (task 00030 node n2 follow-ups): register Phase 110 in .planning/ROADMAP.md, write 110-CONTEXT.md and one execution plan 110-01-PLAN.md. No product code, no omp-sandbox/ source changes, no push/PR/remote.",
+  "commands": [
+    {
+      "cmd": "git log -1 --format='%H %P' 3e7be33",
+      "exit_code": 0,
+      "duration_s": 0.01,
+      "output_tail": "3e7be33b107a7380eb5fa2dff0a5772905712bde 40338ec9f3a32704b93276889048f146fc9bbdca 3ada70bb780ed65bed226d832860f694f4accc13",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "git diff 40338ec -- omp-sandbox/package.json omp-sandbox/src/core/core.ts omp-sandbox/src/core/providers/tiers.ts && git diff 3ada70b -- (same three paths)",
+      "exit_code": 0,
+      "duration_s": 0.1,
+      "output_tail": "HEAD carries the union: test script runs core+paths+guards suites; core.ts has sbx-0 single-flight/#ready/TERMINAL/teardown AND sbx-2 workspace_host_path/allowedDir/mount-aware startTier; tiers.ts has sbx-0 validateTiers/TIER_NAMES AND sbx-2 MOUNT_TIERS/TierOptions skip-with-reason",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "git diff 40338ec..HEAD --stat -- omp-sandbox/src/core/providers/bwrap.ts omp-sandbox/src/core/gsd.ts omp-sandbox/src/core/paths.ts omp-sandbox/src/core/server.ts omp-sandbox/src/core/vm.ts omp-sandbox/sandbox/policy-podman.yaml",
+      "exit_code": 0,
+      "duration_s": 0.02,
+      "output_tail": "(empty diff — none of the six Greptile-comment files changed since 40338ec, so all six comments still apply at HEAD)",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "cd omp-sandbox && npm ci --no-audit --no-fund",
+      "exit_code": 1,
+      "duration_s": 4.1,
+      "output_tail": "gyp ERR! connect EACCES (node-gyp cannot fetch node headers; no compiler on box) building transitive better-sqlite3@12.11.1",
+      "phase": "environment-probe"
+    },
+    {
+      "cmd": "cd omp-sandbox && npm ci --ignore-scripts --no-audit --no-fund",
+      "exit_code": 0,
+      "duration_s": 4.7,
+      "output_tail": "added packages from lockfile without lifecycle scripts",
+      "phase": "environment-probe"
+    },
+    {
+      "cmd": "cd omp-sandbox && npx tsc --noEmit",
+      "exit_code": 2,
+      "duration_s": 4.7,
+      "output_tail": "openshell-podman.ts(215,21): TS2304 Cannot find name 'os'; (217,38): TS7006 x implicitly any; (217,84): TS7006 n implicitly any",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "cd omp-sandbox && npm test",
+      "exit_code": 0,
+      "duration_s": 1.8,
+      "output_tail": "tests 12, pass 12, fail 0 (core 3, paths 4, guards 5)",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "node --version",
+      "exit_code": 0,
+      "duration_s": 0.01,
+      "output_tail": "v24.21.0",
+      "phase": "environment-probe"
+    }
+  ],
+  "claims": [
+    { "claim": "Merge commit 3e7be33 has exactly the parents 40338ec (sbx-2) and 3ada70b (sbx-0 round-1 fixes)", "evidence_command_index": 0 },
+    { "claim": "Both parents' behavior is present at HEAD in the three merge-resolved paths (guards and mount variant both survive)", "evidence_command_index": 1 },
+    { "claim": "All six Greptile PR #55 comments still apply at HEAD (the merge touched none of their files)", "evidence_command_index": 2 },
+    { "claim": "tsc baseline at HEAD is exactly the three W110-01 errors named in the plan (bare os at 215, two implicit-any at 217)", "evidence_command_index": 5, "expects_failure": true },
+    { "claim": "npm test baseline at HEAD is 12/12 green", "evidence_command_index": 6 },
+    { "claim": "Plain npm ci fails in this sandbox; npm ci --ignore-scripts is the working install (unit tests never load better-sqlite3's native module)", "evidence_command_index": 3 },
+    { "claim": "npm ci --ignore-scripts installs successfully and Node on PATH satisfies engines >=24", "evidence_command_index": 4 }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Execution-stage acceptance (tsc 0 errors and npm test green AFTER the fixes) is not verified here — this stage is planning only; baselines were recorded, fixes were not made",
+    "gsd-plan-checker verdict (pass, 3 minor findings, all fixed in the plan file) is subagent-reported and was spot-checked by reading the cited code, not re-run as a shell command",
+    "omega_prime tooling checks (catalog/plugin/prompt_format/assemble-prompts/test_docs) not run — no file in their scope (omega_prime/, docs/, root *.md) was changed by this task",
+    "Mount-variant podman behavior (uid-mapped policy, generated policy accepted by openshell sandbox create) untestable here — no podman/openshell in this sandbox; covered by fake-based unit tests in the execution plan only"
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/phases/110-sbx2-merge-finish/110-CONTEXT.md",
+    ".planning/phases/110-sbx2-merge-finish/110-01-PLAN.md",
+    ".receipts/bot-00-omega-prime/phase110-planning.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "git revert of the single planning commit restores ROADMAP.md and removes the phase 110 directory and receipt; no product code to roll back",
+  "approvals": [],
+  "approved_by": null
+}

@@ -9,7 +9,9 @@ import type { SandboxTier } from "./providers/types.ts";
 const CACHE = join(STATE, "cache", `gsd-core-${VERSIONS.gsdCore}`);
 
 export async function ensureGsd(tier: SandboxTier & { hostRoot?: string }) {
-  const hostWork = tier.hostRoot ? join(tier.hostRoot, "work") : null;
+  // On a mounted tier the workdir IS the mounted host tree (the workspace bind hides hostRoot/work inside
+  // the sandbox), so every host-side GSD path keys off the workspace when the tier has one.
+  const hostWork = tier.workspaceHostPath ?? (tier.hostRoot ? join(tier.hostRoot, "work") : null);
   if (hostWork && existsSync(join(CACHE, ".claude", "commands", "gsd-plan-phase.md"))) {
     cpSync(join(CACHE, ".claude"), join(hostWork, ".claude"), { recursive: true });
     return { source: "cache", cache: CACHE, ompAgents: writeOmpAgents(hostWork) };
@@ -37,9 +39,10 @@ export async function ensureGsd(tier: SandboxTier & { hostRoot?: string }) {
   return { source: "installed-in-sandbox", cache: hostWork ? CACHE : null, ompAgents };
 }
 
-export function gsdCommandsOnHost(tier: { hostRoot?: string }) {
-  if (!tier.hostRoot) return null;
-  const d = join(tier.hostRoot, "work", ".claude", "commands");
+export function gsdCommandsOnHost(tier: { hostRoot?: string; workspaceHostPath?: string | null }) {
+  const work = tier.workspaceHostPath ?? (tier.hostRoot ? join(tier.hostRoot, "work") : null);
+  if (!work) return null;
+  const d = join(work, ".claude", "commands");
   return existsSync(d) ? readdirSync(d).filter((f) => f.startsWith("gsd-")).length : 0;
 }
 
