@@ -304,23 +304,34 @@ def make_terminal_ws_endpoint(
 
         writer_task = asyncio.create_task(writer())
         reader_task = asyncio.create_task(reader())
+        cancelled: asyncio.CancelledError | None = None
         try:
             # First completion wins; the sibling is cancelled so a returning
             # reader (disconnect) or writer (pane_closed) ends the session.
             await asyncio.wait(
                 {writer_task, reader_task}, return_when=asyncio.FIRST_COMPLETED
             )
+        except asyncio.CancelledError as exc:
+            # Session torn down by the server; remember the marked exception
+            # so it can be re-raised after cleanup (unmarked re-deliveries
+            # below must not replace it).
+            cancelled = exc
         finally:
             writer_task.cancel()
             reader_task.cancel()
-            await asyncio.gather(writer_task, reader_task, return_exceptions=True)
+            try:
+                await asyncio.gather(writer_task, reader_task, return_exceptions=True)
+            except asyncio.CancelledError:
+                pass
             bridge.release()
-        # The session must always end with an explicit close frame: a bare
-        # return completes the ASGI app without one, and the peer would wait
-        # forever (uvicorn tolerates a close after peer disconnect).
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+            # The session must always end with an explicit close frame: a bare
+            # return completes the ASGI app without one, and the peer would wait
+            # forever (uvicorn tolerates a close after peer disconnect).
+            try:
+                await websocket.close()
+            except (Exception, asyncio.CancelledError):
+                pass
+        if cancelled is not None:
+            raise cancelled
 
     return endpoint
