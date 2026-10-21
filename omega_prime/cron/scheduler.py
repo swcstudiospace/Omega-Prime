@@ -8,22 +8,155 @@ is due again at ``now + interval_seconds``.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
+import io
 import json
+import math
 import os
 import stat
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from omega_prime.agent.conversation_loop import Agent, run_conversation
-from omega_prime.agent.model import Model
+
+def _process_start(pid: int) -> str | None:
+    """Return a start identity for ``pid`` that changes when the pid is reused.
+
+    Linux reports the process start time in clock ticks since boot (field 22
+    of ``/proc/<pid>/stat``); combined with the boot id it tells a restarted
+    worker that happens to get the same pid (common in containers) apart
+    from the worker that saved the claim. Other platforms return ``None``.
+    """
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        fields = stat_text[stat_text.rindex(")") + 2 :].split()
+        start = fields[19]
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except (OSError, ValueError, IndexError):
+        return None
+    return f"{boot.replace(':', '')}-{start}" if start.isdigit() else None
+
+
+def _new_claim_token() -> str:
+    pid = os.getpid()
+    start = _process_start(pid) or "-"
+    return f"{pid}:{start}:{threading.get_ident()}:{uuid.uuid4().hex}"
+
+
+def _claim_is_stale(token: Any) -> bool:
+    """Return whether a persisted claim belongs to an exited worker."""
+    if not isinstance(token, str):
+        return token is not None
+    parts = token.split(":", 3)
+    try:
+        if len(parts) == 4:
+            pid_text, start, worker_text, _nonce = parts
+        elif len(parts) == 3:
+            # Tokens saved before the start identity was recorded.
+            pid_text, worker_text, _nonce = parts
+            start = "-"
+        else:
+            return True
+        pid = int(pid_text)
+        worker_id = int(worker_text)
+    except (TypeError, ValueError):
+        return True
+    if pid <= 0 or worker_id <= 0:
+        return True
+    if start != "-":
+        current = _process_start(pid)
+        if current is not None and current != start:
+            # The pid now belongs to a different process: the worker that
+            # saved this claim exited (for example across a restart).
+            return True
+    if pid == os.getpid():
+        if start == "-" and _process_start(pid) is not None:
+            # A legacy token naming our own pid cannot have been saved by
+            # this process, which always records its start identity.
+            return True
+        return worker_id not in {
+            thread.ident
+            for thread in threading.enumerate()
+            if thread.is_alive() and thread.ident is not None
+        }
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
 
 HISTORY_LIMIT = 20
+
+# Only untyped legacy prompt rows and explicitly typed prompt rows are generic.
+GENERIC_PROMPT_KIND = "prompt"
+SPECIALIZED_KINDS = frozenset(
+    {
+        "desk_lead_pass",
+        "roe_watchdog",
+        "pin_bump_schedule",
+        "purple_cycle",
+        "session_heartbeat",
+    }
+)
+
+
+PIN_BUMP_APPLY_APPROVAL = "pin_bump_apply"
+CRON_LATENESS_GRACE_ENV = "OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS"
+DEFAULT_CRON_LATENESS_GRACE_SECONDS = 300.0
+
+
+def cron_lateness_grace_seconds() -> float:
+    """Read the configured positive finite action lateness grace."""
+    raw = os.environ.get(CRON_LATENESS_GRACE_ENV)
+    try:
+        value = DEFAULT_CRON_LATENESS_GRACE_SECONDS if raw is None else float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{CRON_LATENESS_GRACE_ENV} must be positive and finite"
+        ) from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{CRON_LATENESS_GRACE_ENV} must be positive and finite")
+    return value
+
+
+def _monotonic() -> float:
+    """Monotonic clock seam for :class:`_TickClock` (patched in tests)."""
+    return time.monotonic()
+
+
+class _TickClock:
+    """Fresh per-job clock readings for one tick.
+
+    A tick selects due jobs at the ``now`` it was given, then runs them one
+    after another. A slow earlier job (an audit, a model call) moves the real
+    clock on, so a later queued job must judge its lateness, and stamp its
+    run, against a fresh reading rather than the tick-start value. ``read``
+    returns ``now`` plus the whole seconds elapsed on the monotonic clock
+    since the tick began: the injected ``now`` stays authoritative (hermetic
+    callers keep exact stamps) and wall-clock jumps cannot move it backwards.
+    Sub-second drift is dropped; lateness grace is configured in seconds.
+    """
+
+    def __init__(self, now: int | float) -> None:
+        self._base = now
+        self._start = _monotonic()
+
+    def elapsed(self) -> int:
+        return math.floor(max(_monotonic() - self._start, 0.0))
+
+    def read(self, elapsed: int | None = None) -> int | float:
+        if elapsed is None:
+            elapsed = self.elapsed()
+        return self._base if elapsed == 0 else self._base + elapsed
 
 
 class JobStore:
@@ -43,21 +176,231 @@ class JobStore:
     ) -> str:
         """Store one job and return its id. ``due_at`` is a unix timestamp in seconds."""
         job_id = uuid.uuid4().hex
-        self.jobs.append(
-            {
-                "id": job_id,
-                "prompt": prompt,
-                "due_at": due_at,
-                "interval_seconds": interval_seconds,
-                "completed": False,
-                "last_result": None,
-                "last_ran_at": None,
-                "history": [],
-                "claimed_at": None,
-            }
-        )
-        self._save()
+        with self._store_transaction():
+            self.jobs.append(
+                {
+                    "id": job_id,
+                    "prompt": prompt,
+                    "due_at": due_at,
+                    "interval_seconds": interval_seconds,
+                    "completed": False,
+                    "last_result": None,
+                    "last_ran_at": None,
+                    "history": [],
+                    "claimed_at": None,
+                    "claim_token": None,
+                }
+            )
+            self._save()
         return job_id
+
+    def _schedule_typed(
+        self,
+        prompt: str,
+        due_at: int | float,
+        *,
+        interval_seconds: int | float | None = None,
+        kind: str,
+        **metadata: Any,
+    ) -> str:
+        """Create a typed job atomically with its kind-specific metadata."""
+        job_id = uuid.uuid4().hex
+        with self._store_transaction():
+            self.jobs.append(
+                {
+                    "id": job_id,
+                    "prompt": prompt,
+                    "due_at": due_at,
+                    "interval_seconds": interval_seconds,
+                    "completed": False,
+                    "last_result": None,
+                    "last_ran_at": None,
+                    "history": [],
+                    "claimed_at": None,
+                    "claim_token": None,
+                    "kind": kind,
+                    **metadata,
+                }
+            )
+            self._save()
+        return job_id
+
+    def _claim_typed(self, job_id: str, kind: str, now: int | float) -> dict | None:
+        """Claim one typed occurrence in a short transaction."""
+        with self._store_transaction():
+            job = next(
+                (
+                    item
+                    for item in self.jobs
+                    if isinstance(item, dict) and item.get("id") == job_id
+                ),
+                None,
+            )
+            if job is None:
+                return None
+            history = job.get("history")
+            already_run = isinstance(history, list) and any(
+                isinstance(entry, dict) and entry.get("ran_at") == now
+                for entry in history
+            )
+            due_at = job.get("due_at")
+            token = job.get("claim_token")
+            if token is not None:
+                if not _claim_is_stale(token):
+                    return None
+                job["claim_token"] = None
+                job["claimed_at"] = None
+            if (
+                job.get("kind") != kind
+                or job.get("completed")
+                or due_at is None
+                or due_at > now
+                or already_run
+            ):
+                return None
+            token = _new_claim_token()
+            scheduled_for = job["due_at"]
+            job["claim_token"] = token
+            job["claimed_at"] = now
+            self._save()
+            return {
+                "job": json.loads(json.dumps(job)),
+                "token": token,
+                "scheduled_for": scheduled_for,
+            }
+
+    def _settle_typed_claim(
+        self, claim: dict, update: Callable[[dict], None]
+    ) -> dict | None:
+        """Apply kind-specific state only while the claim is still owned."""
+        with self._store_transaction():
+            job = next(
+                (
+                    item
+                    for item in self.jobs
+                    if isinstance(item, dict) and item.get("id") == claim["job"]["id"]
+                ),
+                None,
+            )
+            if job is None or job.get("claim_token") != claim["token"]:
+                return None
+            update(job)
+            job["claimed_at"] = None
+            job["claim_token"] = None
+            self._save()
+            return json.loads(json.dumps(job))
+
+    def remove(self, job_id: str, *, kind: str | None = None) -> bool:
+        """Remove one job under the same short transaction as claims and writes."""
+        with self._store_transaction():
+            for index, job in enumerate(self.jobs):
+                if (
+                    isinstance(job, dict)
+                    and job.get("id") == job_id
+                    and (kind is None or job.get("kind") == kind)
+                ):
+                    self.jobs.pop(index)
+                    self._save()
+                    return True
+        return False
+
+    @contextlib.contextmanager
+    def _store_transaction(self):
+        """Serialize short store mutations across processes and reload first."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            self._load()
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _claim(self, job_id: str, now: int | float) -> dict | None:
+        with self._store_transaction():
+            job = next(
+                (
+                    item
+                    for item in self.jobs
+                    if isinstance(item, dict) and item.get("id") == job_id
+                ),
+                None,
+            )
+            if job is None:
+                return None
+            token = job.get("claim_token")
+            if token is not None:
+                if not _claim_is_stale(token):
+                    return None
+                job["claim_token"] = None
+                job["claimed_at"] = None
+            due_at = job.get("due_at")
+            if job.get("completed") or due_at is None or due_at > now:
+                return None
+            history = job.get("history")
+            if isinstance(history, list) and any(
+                isinstance(entry, dict)
+                and entry.get("scheduled_for") == job.get("due_at")
+                and entry.get("ran_at") == now
+                for entry in history
+            ):
+                return None
+            due_at = job["due_at"]
+            token = _new_claim_token()
+            job["claim_token"] = token
+            job["claimed_at"] = now
+            self._save()
+            return {
+                "job": json.loads(json.dumps(job)),
+                "token": token,
+                "scheduled_for": due_at,
+            }
+
+    def _settle_claim(
+        self,
+        claim: dict,
+        now: int | float,
+        outcome: Any,
+        disposition: str,
+        *,
+        write_receipt: bool = False,
+    ) -> dict | None:
+        with self._store_transaction():
+            job = next(
+                (
+                    item
+                    for item in self.jobs
+                    if isinstance(item, dict) and item.get("id") == claim["job"]["id"]
+                ),
+                None,
+            )
+            if job is None or job.get("claim_token") != claim["token"]:
+                return None
+            history = job.get("history")
+            if not isinstance(history, list):
+                history = []
+            entry = {"ran_at": now, "result": outcome}
+            if write_receipt:
+                entry = {
+                    "scheduled_for": claim["scheduled_for"],
+                    "ran_at": now,
+                    "disposition": disposition,
+                    "result": outcome,
+                }
+            history.append(entry)
+            job["history"] = history[-HISTORY_LIMIT:]
+            job["last_result"] = outcome
+            job["last_ran_at"] = now
+            job["claimed_at"] = None
+            job["claim_token"] = None
+            interval = job.get("interval_seconds")
+            if interval is None:
+                job["completed"] = True
+            else:
+                job["due_at"] = now + interval
+            self._save()
+            return json.loads(json.dumps(job))
 
     def tick(
         self,
@@ -66,54 +409,99 @@ class JobStore:
         *,
         skip_kind: str | None = None,
         skip_kinds: tuple[str, ...] | list[str] | None = None,
+        write_receipts: bool = False,
     ) -> list[dict]:
-        """Run each due job that is not complete. Leave a later job unchanged.
-
-        ``runner(prompt)`` is called once per due job. ``last_result`` becomes
-        that value and ``last_ran_at`` becomes ``now``. An interval moves
-        ``due_at`` to ``now + interval_seconds``. A one-shot job completes.
-        Each execution is recorded in the job's bounded history, and a job
-        already claimed or completed for ``now`` is not re-run. Jobs of
-        ``skip_kind`` (or in ``skip_kinds``) are left untouched (another
-        driver owns them).
-        """
-        skipped: set[str] = set(skip_kinds) if skip_kinds else set()
+        """Run due prompts; opt-in receipts are reserved for delegate dispatch."""
+        skipped = set(SPECIALIZED_KINDS)
+        if skip_kinds:
+            skipped.update(skip_kinds)
         if skip_kind is not None:
             skipped.add(skip_kind)
+        grace = cron_lateness_grace_seconds()
+        tick_start = now
+        with self._store_transaction():
+            job_ids = [
+                job["id"]
+                for job in self.jobs
+                if isinstance(job, dict)
+                and not job.get("completed")
+                and job.get("kind") in (None, GENERIC_PROMPT_KIND)
+                and job.get("kind") not in skipped
+                and job.get("due_at") is not None
+                and job["due_at"] <= now
+            ]
         ran: list[dict] = []
-        for job in self.jobs:
-            if job.get("completed"):
+        clock = _TickClock(tick_start)
+        for job_id in job_ids:
+            # A fresh reading per queued job: an earlier slow runner must not
+            # let this one pass the lateness check on the tick-start time.
+            now = clock.read()
+            claim = self._claim(job_id, now)
+            if claim is None:
                 continue
-            if job.get("kind") in skipped:
+            if now - float(claim["scheduled_for"]) > grace:
+                missed = {
+                    "state": "missed",
+                    "scheduled_for": claim["scheduled_for"],
+                    "evaluated_at": now,
+                    "lateness": now - float(claim["scheduled_for"]),
+                }
+                settled = self._settle_claim(
+                    claim, now, missed, "missed", write_receipt=write_receipts
+                )
+                if settled is not None:
+                    ran.append(settled)
                 continue
-            if job["due_at"] > now:
-                continue
-            history = job.get("history")
-            if not isinstance(history, list):
-                history = []
-                job["history"] = history
-            if job.get("claimed_at") == now:
-                continue
-            if any(
-                isinstance(entry, dict) and entry.get("ran_at") == now
-                for entry in history
-            ):
-                continue
-            job["claimed_at"] = now
-            self._save()
-            job["last_result"] = runner(job["prompt"])
-            job["last_ran_at"] = now
-            history.append({"ran_at": now, "result": job["last_result"]})
-            del history[:-HISTORY_LIMIT]
-            job["claimed_at"] = None
-            interval = job.get("interval_seconds")
-            if interval is not None:
-                job["due_at"] = now + interval
+            try:
+                result = runner(claim["job"].get("prompt", ""))
+            except Exception as exc:
+                outcome = {
+                    "state": "failed",
+                    "error": f"{type(exc).__name__}: scheduler runner failed",
+                }
+                disposition = "failed"
             else:
-                job["completed"] = True
-            ran.append(job)
-        if ran:
-            self._save()
+                if not write_receipts:
+                    outcome = result
+                    disposition = "succeeded"
+                else:
+                    context = "delegate returned invalid output"
+                    try:
+                        if not isinstance(result, str) or not result.strip():
+                            context = "generic prompt runner returned empty output"
+                            raise ValueError
+                        response = json.loads(result)
+                        if not isinstance(response, dict):
+                            context = "delegate returned malformed output"
+                            raise ValueError
+                        if response.get("error") or response.get("pending"):
+                            context = "delegate returned error or pending output"
+                            raise ValueError
+                        summary = response.get("summary")
+                        if not isinstance(summary, str) or not summary.strip():
+                            context = "delegate returned empty final output"
+                            raise ValueError
+                        outcome = {"state": "succeeded", "summary": summary}
+                        disposition = "succeeded"
+                    except (
+                        TypeError,
+                        json.JSONDecodeError,
+                        ValueError,
+                    ) as exc:
+                        if isinstance(exc, json.JSONDecodeError):
+                            context = "delegate returned malformed output"
+                        elif isinstance(exc, TypeError):
+                            context = "delegate returned invalid output"
+                        outcome = {
+                            "state": "blocked",
+                            "error": f"{type(exc).__name__}: {context}",
+                        }
+                        disposition = "blocked"
+            settled = self._settle_claim(
+                claim, now, outcome, disposition, write_receipt=write_receipts
+            )
+            if settled is not None:
+                ran.append(settled)
         return ran
 
     def _load(self) -> None:
@@ -128,6 +516,7 @@ class JobStore:
             if isinstance(job, dict):
                 job.setdefault("history", [])
                 job.setdefault("claimed_at", None)
+                job.setdefault("claim_token", None)
         self.jobs = jobs
 
     def _save(self) -> None:
@@ -190,15 +579,14 @@ def schedule_desk_lead_pass(
         raise ValueError("a desk lead pass needs a positive interval_seconds")
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("limit must be a positive integer")
-    job_id = store.schedule(prompt, due_at, interval_seconds=interval_seconds)
-    for job in store.jobs:
-        if isinstance(job, dict) and job.get("id") == job_id:
-            job["kind"] = DESK_LEAD_KIND
-            job["intake_path"] = None if intake_path is None else str(intake_path)
-            job["limit"] = limit
-            break
-    store._save()
-    return job_id
+    return store._schedule_typed(
+        prompt,
+        due_at,
+        interval_seconds=interval_seconds,
+        kind=DESK_LEAD_KIND,
+        intake_path=None if intake_path is None else str(intake_path),
+        limit=limit,
+    )
 
 
 def list_desk_lead_passes(store: JobStore) -> list[dict]:
@@ -215,14 +603,17 @@ def desk_lead_runner(
     work_root: str | Path | None = None,
     *,
     bot: str = "bot-00-omega-prime",
+    intake_path: str | Path | None = None,
 ) -> Callable[[dict], Any]:
     """Build the production runner for ``desk_lead_pass`` jobs.
 
     Each pass resolves the same ``IntakeStore`` the lead tools use (the
     shared state dir via :func:`desk_intake_path`) and dispatches tickets
     through the parent shim, so the routine and ``lead_intake_next`` /
-    ``lead_intake_ack`` see the same records. The lead stack is imported
-    inside the runner, so plain cron ticks never load it.
+    ``lead_intake_ack`` see the same records. ``intake_path`` is the file the
+    host's lead tools opened (from its effective settings env); a job's own
+    ``intake_path`` still wins. The lead stack is imported inside the
+    runner, so plain cron ticks never load it.
     """
 
     def runner(job: dict) -> Any:
@@ -233,8 +624,8 @@ def desk_lead_runner(
         )
         from omega_prime.tools.lead import IntakeStore
 
-        intake_path = job.get("intake_path") or desk_intake_path(work_root)
-        intake = IntakeStore(intake_path)
+        path = job.get("intake_path") or intake_path or desk_intake_path(work_root)
+        intake = IntakeStore(path)
         limit = job.get("limit")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             limit = 5
@@ -256,37 +647,70 @@ def tick_desk_lead_passes(
     process) sees ``claimed_at`` and nothing holds a store lock across the
     pass's model calls.
     """
+    with store._store_transaction():
+        job_ids = [
+            job["id"]
+            for job in store.jobs
+            if isinstance(job, dict)
+            and job.get("kind") == DESK_LEAD_KIND
+            and not job.get("completed")
+            and job.get("due_at") is not None
+            and job["due_at"] <= now
+        ]
+    # Read settings before any claim is saved: an invalid value must not
+    # leave a claimed occurrence behind.
+    grace = cron_lateness_grace_seconds()
     ran: list[dict] = []
-    for job in store.jobs:
-        if job.get("kind") != DESK_LEAD_KIND or job.get("completed"):
+    clock = _TickClock(now)
+    for job_id in job_ids:
+        # Fresh reading per queued pass (see JobStore.tick).
+        current = clock.read()
+        claim = store._claim(job_id, current)
+        if claim is None:
             continue
-        if job["due_at"] > now:
+        lateness = current - float(claim["scheduled_for"])
+        if lateness > grace:
+            missed = {
+                "state": "missed",
+                "scheduled_for": claim["scheduled_for"],
+                "evaluated_at": current,
+                "lateness": lateness,
+            }
+            settled = store._settle_claim(
+                claim, current, missed, "missed", write_receipt=True
+            )
+            if settled is not None:
+                ran.append(settled)
             continue
-        history = job.get("history")
-        if not isinstance(history, list):
-            history = []
-            job["history"] = history
-        if job.get("claimed_at") == now:
-            continue
-        if any(
-            isinstance(entry, dict) and entry.get("ran_at") == now for entry in history
-        ):
-            continue
-        job["claimed_at"] = now
-        store._save()
-        job["last_result"] = lead_runner(job)
-        job["last_ran_at"] = now
-        history.append({"ran_at": now, "result": job["last_result"]})
-        del history[:-HISTORY_LIMIT]
-        job["claimed_at"] = None
-        interval = job.get("interval_seconds")
-        if interval is not None:
-            job["due_at"] = now + interval
-        else:
-            job["completed"] = True
-        ran.append(job)
-    if ran:
-        store._save()
+        try:
+            result = lead_runner(claim["job"])
+            if result is None:
+                outcome = {
+                    "state": "blocked",
+                    "error": "desk lead runner returned no outcome",
+                }
+                disposition = "blocked"
+            elif not isinstance(result, dict):
+                outcome = {
+                    "state": "blocked",
+                    "error": "desk lead runner returned invalid outcome",
+                }
+                disposition = "blocked"
+            else:
+                outcome = dict(result)
+                outcome.setdefault("state", "succeeded")
+                disposition = "succeeded"
+        except Exception as exc:
+            outcome = {
+                "state": "failed",
+                "error": f"{type(exc).__name__}: desk lead runner failed",
+            }
+            disposition = "failed"
+        settled = store._settle_claim(
+            claim, current, outcome, disposition, write_receipt=True
+        )
+        if settled is not None:
+            ran.append(settled)
     return ran
 
 
@@ -297,6 +721,7 @@ def run_desk_lead_passes(
     work_root: str | Path | None = None,
     *,
     bot: str = "bot-00-omega-prime",
+    intake_path: str | Path | None = None,
 ) -> list[dict]:
     """Production entry point: tick due desk passes with real dispatch.
 
@@ -306,50 +731,23 @@ def run_desk_lead_passes(
     comes back explicitly blocked with a failure receipt.
     """
     return tick_desk_lead_passes(
-        store, now, desk_lead_runner(parent, work_root, bot=bot)
+        store,
+        now,
+        desk_lead_runner(parent, work_root, bot=bot, intake_path=intake_path),
     )
 
 
-def run_due_jobs(
-    store: JobStore,
-    now: int | float,
-    model: Model,
-    tools: dict[str, Any] | None,
-) -> list[dict]:
-    """Run each due job through a new ``Agent`` and store ``final_response``.
-
-    ``desk_lead_pass`` jobs are skipped: they are driven by
-    :func:`run_desk_lead_passes` and must never burn a model call here.
-    ``pin_bump_schedule`` jobs are skipped for the same reason: they
-    are driven by :func:`tick_pin_bump_schedules`. ``purple_cycle``
-    jobs are skipped too: they are driven by :func:`tick_purple_cycles`.
-    """
+def run_due_jobs(store: JobStore, now: int | float, parent: Any = None) -> list[dict]:
+    """Dispatch due generic prompt jobs through the supplied delegate parent."""
 
     def runner(prompt: str) -> str:
-        from omega_prime.agent.harness import emit
-        from omega_prime.durable.journal import TurnJournal, attach_journal
+        if parent is None:
+            return json.dumps({"error": "delegate parent unavailable"})
+        from omega_prime.agent.delegate import delegate_task
 
-        agent = Agent(model=model, tools=tools)
-        try:
-            journal = TurnJournal(store.path.parent / "turns.sqlite")
-        except Exception as exc:
-            emit(
-                agent,
-                "prime_degraded",
-                family="durable",
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            journal = None
-        attach_journal(agent, journal)
-        result = run_conversation(agent, prompt)
-        response = result.get("final_response") if isinstance(result, dict) else ""
-        return response if isinstance(response, str) else ""
+        return delegate_task(parent, prompt)
 
-    return store.tick(
-        now,
-        runner,
-        skip_kinds=(DESK_LEAD_KIND, PIN_BUMP_SCHEDULE_KIND, PURPLE_CYCLE_KIND),
-    )
+    return store.tick(now, runner, write_receipts=True)
 
 
 #: Job kind marker stored on RoE watchdog jobs (K11). An independent
@@ -384,18 +782,13 @@ def schedule_roe_watchdog(
         raise ValueError("artifact_path must be a non-empty string")
     if isinstance(interval_seconds, bool) or interval_seconds <= 0:
         raise ValueError("a roe watchdog needs a positive interval_seconds")
-    job_id = store.schedule(
+    return store._schedule_typed(
         f"roe-watchdog {artifact_path.strip()}",
         due_at,
         interval_seconds=interval_seconds,
+        kind=ROE_WATCHDOG_KIND,
+        artifact_path=artifact_path.strip(),
     )
-    for job in store.jobs:
-        if isinstance(job, dict) and job.get("id") == job_id:
-            job["kind"] = ROE_WATCHDOG_KIND
-            job["artifact_path"] = artifact_path.strip()
-            break
-    store._save()
-    return job_id
 
 
 def list_roe_watchdogs(store: JobStore) -> list[dict]:
@@ -409,15 +802,8 @@ def list_roe_watchdogs(store: JobStore) -> list[dict]:
 
 def clear_roe_watchdog(store: JobStore, job_id: str) -> dict:
     """Remove one RoE watchdog by id. Unknown id is a structured result."""
-    for index, job in enumerate(store.jobs):
-        if (
-            isinstance(job, dict)
-            and job.get("id") == job_id
-            and job.get("kind") == ROE_WATCHDOG_KIND
-        ):
-            store.jobs.pop(index)
-            store._save()
-            return {"cleared": job_id}
+    if store.remove(job_id, kind=ROE_WATCHDOG_KIND):
+        return {"cleared": job_id}
     return {"error": f"no roe-watchdog job: {job_id!r}"}
 
 
@@ -453,43 +839,55 @@ def tick_roe_watchdog(store: JobStore, now: Any, checker: Any = None) -> list[di
     ``due_at = stamp + interval``. State transitions persist to
     ``job["roe_watchdog_digest"]`` (``{"from", "to", "at",
     "artifact_id", "effective_until", "action"}``) and update
-    ``job["roe_watchdog_state"]``, so a DOWN heartbeat cannot silence
-    an expiring grant — the digest keeps the valid → expiring →
-    expired trail. Never raises: a checker failure records a
-    fail-closed ``missing`` result instead. Pass
-    ``skip_kind=ROE_WATCHDOG_KIND`` to the generic ``JobStore.tick``
-    driver so it leaves these jobs to this tick.
+    ``job["roe_watchdog_state"]``, so a DOWN heartbeat cannot silence an
+    expiring grant — the digest keeps the valid → expiring → expired trail.
+    The check is read-only, so an occurrence older than the configured
+    lateness grace still reads the grant now (its history entry carries
+    ``late``) and the next due time is set from that fresh check. Never raises:
+    a checker failure records a fail-closed ``missing`` result instead. Pass
     """
     if checker is None:
         from omega_prime.grokbot.roe_lifecycle import watchdog_check
 
         checker = watchdog_check
+
     checker_now, stamp = _roe_watchdog_now(now)
+    # Read settings before any claim is saved (see tick_desk_lead_passes).
+    grace = cron_lateness_grace_seconds()
     ran: list[dict] = []
-    for job in store.jobs:
-        if not isinstance(job, dict):
+    with store._store_transaction():
+        job_ids = [
+            job["id"]
+            for job in store.jobs
+            if isinstance(job, dict)
+            and job.get("kind") == ROE_WATCHDOG_KIND
+            and not job.get("completed")
+            and job.get("due_at") is not None
+            and job["due_at"] <= stamp
+        ]
+    clock = _TickClock(stamp)
+    for job_id in job_ids:
+        # Fresh reading per queued watchdog (see JobStore.tick).
+        elapsed = clock.elapsed()
+        stamp = clock.read(elapsed)
+        job_now = checker_now + timedelta(seconds=elapsed)
+        claim = store._claim_typed(job_id, ROE_WATCHDOG_KIND, stamp)
+        if claim is None:
             continue
-        if job.get("kind") != ROE_WATCHDOG_KIND or job.get("completed"):
-            continue
-        due_at = job.get("due_at")
-        if due_at is None or due_at > stamp:
-            continue
-        history = job.get("history")
-        if not isinstance(history, list):
-            history = []
-            job["history"] = history
-        if job.get("claimed_at") == stamp:
-            continue
-        if any(
-            isinstance(entry, dict) and entry.get("ran_at") == stamp
-            for entry in history
-        ):
-            continue
-        job["claimed_at"] = stamp
-        store._save()
-        artifact = job.get("artifact_path", "")
+        claimed_job = claim["job"]
+        lateness = stamp - float(claim["scheduled_for"])
+        # The watchdog only reads the grant, so a late occurrence is still
+        # checked now: skipping it would leave ``roe_watchdog_state`` stale
+        # (say ``valid`` past expiry) for a whole interval. Lateness beyond
+        # the grace is recorded on the history entry instead.
+        late = (
+            {"scheduled_for": claim["scheduled_for"], "lateness": lateness}
+            if lateness > grace
+            else None
+        )
+        artifact = claimed_job.get("artifact_path", "")
         try:
-            result = checker(artifact, now=checker_now)
+            result = checker(artifact, now=job_now)
         except Exception:
             result = {
                 "state": "missing",
@@ -520,40 +918,53 @@ def tick_roe_watchdog(store: JobStore, now: Any, checker: Any = None) -> list[di
                 "effective_until": result.get("effective_until"),
                 "action": "fix artifact",
             }
-        job["last_result"] = result
-        job["last_ran_at"] = stamp
-        history.append({"ran_at": stamp, "result": job["last_result"]})
-        del history[:-ROE_WATCHDOG_HISTORY_LIMIT]
-        job["claimed_at"] = None
-        interval = job.get("interval_seconds")
-        if interval is not None:
+
+        def settle(
+            job: dict,
+            *,
+            stamp: float = stamp,
+            result: dict = result,
+            late: dict | None = late,
+        ) -> None:
+            history = job.get("history")
+            if not isinstance(history, list):
+                history = []
+            job["last_result"] = result
+            job["last_ran_at"] = stamp
+            entry: dict[str, Any] = {"ran_at": stamp, "result": result}
+            if late is not None:
+                entry["late"] = late
+            history.append(entry)
+            job["history"] = history[-ROE_WATCHDOG_HISTORY_LIMIT:]
+            interval = job.get("interval_seconds")
             try:
-                job["due_at"] = stamp + interval
+                job["due_at"] = stamp + (
+                    interval if interval is not None else ROE_WATCHDOG_INTERVAL_SECONDS
+                )
             except TypeError:
                 job["due_at"] = stamp + ROE_WATCHDOG_INTERVAL_SECONDS
-        else:
-            job["due_at"] = stamp + ROE_WATCHDOG_INTERVAL_SECONDS
-        previous = job.get("roe_watchdog_state")
-        current_state = result.get("state")
-        if previous != current_state:
-            job["roe_watchdog_state"] = current_state
-            digest = job.setdefault("roe_watchdog_digest", [])
-            if not isinstance(digest, list):
-                digest = []
+            previous = job.get("roe_watchdog_state")
+            current_state = result.get("state")
+            if previous != current_state:
+                job["roe_watchdog_state"] = current_state
+                digest = job.get("roe_watchdog_digest")
+                if not isinstance(digest, list):
+                    digest = []
+                digest.append(
+                    {
+                        "from": previous,
+                        "to": current_state,
+                        "at": stamp,
+                        "artifact_id": result.get("artifact_id"),
+                        "effective_until": result.get("effective_until"),
+                        "action": result.get("action"),
+                    }
+                )
                 job["roe_watchdog_digest"] = digest
-            digest.append(
-                {
-                    "from": previous,
-                    "to": current_state,
-                    "at": stamp,
-                    "artifact_id": result.get("artifact_id"),
-                    "effective_until": result.get("effective_until"),
-                    "action": result.get("action"),
-                }
-            )
-        ran.append(job)
-    if ran:
-        store._save()
+
+        settled = store._settle_typed_claim(claim, settle)
+        if settled is not None:
+            ran.append(settled)
     return ran
 
 
@@ -709,28 +1120,39 @@ def schedule_pin_bump(
         raise ValueError("schedule name must be a non-empty string")
     label = name.strip()
     stamp = time.time() if now is None else float(now)
-    for index, job in enumerate(store.jobs):
-        if (
-            isinstance(job, dict)
-            and job.get("kind") == PIN_BUMP_SCHEDULE_KIND
-            and job.get("schedule_name") == label
-        ):
-            store.jobs.pop(index)
-            break
-    job_id = store.schedule(
-        f"pin-bump-schedule {label} {expr}",
-        pin_bump_next_due(expr, stamp),
-    )
-    for job in store.jobs:
-        if isinstance(job, dict) and job.get("id") == job_id:
-            job["kind"] = PIN_BUMP_SCHEDULE_KIND
-            job["schedule_name"] = label
-            job["cron_expr"] = expr
-            job["pin_bump_config"] = dict(config) if config else {}
-            job["last_verdict"] = None
-            job["last_run"] = None
-            break
-    store._save()
+    next_due = pin_bump_next_due(expr, stamp)
+    job_id = uuid.uuid4().hex
+    with store._store_transaction():
+        store.jobs = [
+            job
+            for job in store.jobs
+            if not (
+                isinstance(job, dict)
+                and job.get("kind") == PIN_BUMP_SCHEDULE_KIND
+                and job.get("schedule_name") == label
+            )
+        ]
+        store.jobs.append(
+            {
+                "id": job_id,
+                "prompt": f"pin-bump-schedule {label} {expr}",
+                "due_at": next_due,
+                "interval_seconds": None,
+                "completed": False,
+                "last_result": None,
+                "last_ran_at": None,
+                "history": [],
+                "claimed_at": None,
+                "claim_token": None,
+                "kind": PIN_BUMP_SCHEDULE_KIND,
+                "schedule_name": label,
+                "cron_expr": expr,
+                "pin_bump_config": dict(config) if config else {},
+                "last_verdict": None,
+                "last_run": None,
+            }
+        )
+        store._save()
     return job_id
 
 
@@ -768,6 +1190,8 @@ def tick_pin_bump_schedules(
     audit: Callable[[dict], Any] | None = None,
     bump: Callable[[dict], Any] | None = None,
     root: str | Path | None = None,
+    approval_log: Any = None,
+    can_apply_pin_bump: Callable[[], bool] | None = None,
 ) -> list[dict]:
     """Run each due pin-bump schedule once, in order.
 
@@ -787,27 +1211,57 @@ def tick_pin_bump_schedules(
     if root is None:
         root = store.path.parent.parent
     ran: list[dict] = []
-    for job in store.jobs:
-        if not isinstance(job, dict):
+    with store._store_transaction():
+        job_ids = [
+            job["id"]
+            for job in store.jobs
+            if isinstance(job, dict)
+            and job.get("kind") == PIN_BUMP_SCHEDULE_KIND
+            and not job.get("completed")
+            and job.get("due_at") is not None
+            and job["due_at"] <= stamp
+        ]
+    grace = cron_lateness_grace_seconds()
+    clock = _TickClock(stamp)
+    for job_id in job_ids:
+        # A fresh reading per queued job: a slow earlier job must not let
+        # this one pass the lateness check on the tick-start stamp.
+        stamp = clock.read()
+        claim = store._claim_typed(job_id, PIN_BUMP_SCHEDULE_KIND, stamp)
+        if claim is None:
             continue
-        if job.get("kind") != PIN_BUMP_SCHEDULE_KIND or job.get("completed"):
+        job = claim["job"]
+        due_at = claim["scheduled_for"]
+        lateness = stamp - float(due_at)
+        if lateness > grace:
+            outcome = {
+                "scheduled_for": due_at,
+                "evaluated_at": stamp,
+                "lateness": lateness,
+                "disposition": "missed",
+            }
+
+            def settle_missed(
+                current: dict, *, outcome: dict = outcome, stamp: float = stamp
+            ) -> None:
+                current["last_result"] = outcome
+                current["last_ran_at"] = stamp
+                history = current.get("history")
+                if not isinstance(history, list):
+                    history = []
+                history.append({"ran_at": stamp, **outcome})
+                current["history"] = history[-PIN_BUMP_SCHEDULE_HISTORY_LIMIT:]
+                try:
+                    current["due_at"] = pin_bump_next_due(
+                        current.get("cron_expr", "* * * * *"), stamp
+                    )
+                except ValueError:
+                    current["completed"] = True
+
+            settled = store._settle_typed_claim(claim, settle_missed)
+            if settled is not None:
+                ran.append(settled)
             continue
-        due_at = job.get("due_at")
-        if due_at is None or due_at > stamp:
-            continue
-        history = job.get("history")
-        if not isinstance(history, list):
-            history = []
-            job["history"] = history
-        if job.get("claimed_at") == stamp:
-            continue
-        if any(
-            isinstance(entry, dict) and entry.get("ran_at") == stamp
-            for entry in history
-        ):
-            continue
-        job["claimed_at"] = stamp
-        store._save()
         config = job.get("pin_bump_config")
         if not isinstance(config, dict):
             config = {}
@@ -816,52 +1270,77 @@ def tick_pin_bump_schedules(
             audit_seam = audit or (lambda j: _default_pin_bump_audit(j, root))
             result = audit_seam(job)
         except Exception as exc:
-            result = {"verdict": "error", "error": f"{type(exc).__name__}: {exc}"}
+            result = {"verdict": "error", "error": type(exc).__name__}
         if not isinstance(result, dict):
             result = {"verdict": "error", "error": "audit seam misbehaved"}
         verdict = result.get("verdict")
-        semver_ok = bool(result.get("semver_compatible", True))
+        semver_ok = result.get("semver_compatible") is True
         action = "none"
         bump_result: Any = None
         if verdict == "improved" and (not semver_on or semver_ok):
             try:
-                bump_seam = bump or (lambda j: _default_pin_bump_apply(j, root))
-                bump_result = bump_seam(job)
-                action = "bump-pr"
+                approved = (
+                    approval_log is not None
+                    and callable(getattr(approval_log, "is_approved", None))
+                    and approval_log.is_approved(PIN_BUMP_APPLY_APPROVAL)
+                    and can_apply_pin_bump is not None
+                    and can_apply_pin_bump()
+                )
+                if not approved or not approval_log.is_approved(
+                    PIN_BUMP_APPLY_APPROVAL
+                ):
+                    action = "blocked-approval-required"
+                else:
+                    bump_seam = bump or (lambda j: _default_pin_bump_apply(j, root))
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        bump_result = bump_seam(job)
+                    action = "bump-pr" if bump_result == 0 else "bump-pr-failed"
             except Exception as exc:
-                bump_result = f"{type(exc).__name__}: {exc}"
+                bump_result = type(exc).__name__
                 action = "bump-pr-failed"
-        job["last_result"] = {
-            "verdict": verdict,
-            "action": action,
-            "detail": bump_result,
-        }
-        job["last_verdict"] = verdict
-        job["last_run"] = stamp
-        history.append({"ran_at": stamp, "result": job["last_result"]})
-        del history[:-PIN_BUMP_SCHEDULE_HISTORY_LIMIT]
-        digest = job.get("pin_bump_digest")
-        if not isinstance(digest, list):
-            digest = []
-            job["pin_bump_digest"] = digest
-        digest.append(
-            {
-                "at": stamp,
-                "verdict": verdict,
-                "action": action,
-                "semver_compatible": semver_ok,
-                "detail": bump_result,
-            }
-        )
-        del digest[:-PIN_BUMP_SCHEDULE_HISTORY_LIMIT]
-        job["claimed_at"] = None
-        try:
-            job["due_at"] = pin_bump_next_due(job.get("cron_expr", "* * * * *"), stamp)
-        except ValueError:
-            job["completed"] = True
-        ran.append(job)
-    if ran:
-        store._save()
+        outcome = {"verdict": verdict, "action": action, "detail": bump_result}
+
+        def settle_result(
+            current: dict,
+            *,
+            outcome: dict = outcome,
+            verdict: Any = verdict,
+            stamp: float = stamp,
+            semver_ok: bool = semver_ok,
+            action: str = action,
+            bump_result: Any = bump_result,
+        ) -> None:
+            current["last_result"] = outcome
+            current["last_verdict"] = verdict
+            current["last_run"] = stamp
+            history = current.get("history")
+            if not isinstance(history, list):
+                history = []
+            history.append({"ran_at": stamp, "result": outcome})
+            current["history"] = history[-PIN_BUMP_SCHEDULE_HISTORY_LIMIT:]
+            digest = current.get("pin_bump_digest")
+            if not isinstance(digest, list):
+                digest = []
+            digest.append(
+                {
+                    "at": stamp,
+                    "verdict": verdict,
+                    "action": action,
+                    "semver_compatible": semver_ok,
+                    "detail": bump_result,
+                }
+            )
+            current["pin_bump_digest"] = digest[-PIN_BUMP_SCHEDULE_HISTORY_LIMIT:]
+            try:
+                current["due_at"] = pin_bump_next_due(
+                    current.get("cron_expr", "* * * * *"), stamp
+                )
+            except ValueError:
+                current["completed"] = True
+
+        settled = store._settle_typed_claim(claim, settle_result)
+        if settled is not None:
+            ran.append(settled)
     return ran
 
 
@@ -927,19 +1406,14 @@ def schedule_purple_cycle(
                 f"unknown step {unknown[0]!r}; expected {PURPLE_CYCLE_STEPS}"
             )
         stored_steps = tuple(name for name in PURPLE_CYCLE_STEPS if name in steps)
-    job_id = store.schedule(
+    return store._schedule_typed(
         f"purple-cycle {mode}",
         due_at,
         interval_seconds=interval_seconds,
+        kind=PURPLE_CYCLE_KIND,
+        mode=mode,
+        steps=stored_steps,
     )
-    for job in store.jobs:
-        if isinstance(job, dict) and job.get("id") == job_id:
-            job["kind"] = PURPLE_CYCLE_KIND
-            job["mode"] = mode
-            job["steps"] = stored_steps
-            break
-    store._save()
-    return job_id
 
 
 def list_purple_cycles(store: JobStore) -> list[dict]:
@@ -953,15 +1427,8 @@ def list_purple_cycles(store: JobStore) -> list[dict]:
 
 def clear_purple_cycle(store: JobStore, job_id: str) -> dict:
     """Remove one purple cycle by id. Unknown id is a structured result."""
-    for index, job in enumerate(store.jobs):
-        if (
-            isinstance(job, dict)
-            and job.get("id") == job_id
-            and job.get("kind") == PURPLE_CYCLE_KIND
-        ):
-            store.jobs.pop(index)
-            store._save()
-            return {"cleared": job_id}
+    if store.remove(job_id, kind=PURPLE_CYCLE_KIND):
+        return {"cleared": job_id}
     return {"error": f"no purple-cycle job: {job_id!r}"}
 
 
@@ -1070,64 +1537,114 @@ def tick_purple_cycles(
     """
     stamp = float(now)
     ran: list[dict] = []
-    changed = False
-    for job in store.jobs:
-        if not isinstance(job, dict):
+    with store._store_transaction():
+        job_ids = [
+            job["id"]
+            for job in store.jobs
+            if isinstance(job, dict)
+            and job.get("kind") == PURPLE_CYCLE_KIND
+            and not job.get("completed")
+            and job.get("due_at") is not None
+            and job["due_at"] <= stamp
+        ]
+    grace = cron_lateness_grace_seconds()
+    clock = _TickClock(stamp)
+    for job_id in job_ids:
+        # A fresh reading per queued job: a slow earlier job must not let
+        # this one pass the lateness check on the tick-start stamp.
+        stamp = clock.read()
+        claim = store._claim_typed(job_id, PURPLE_CYCLE_KIND, stamp)
+        if claim is None:
             continue
-        if job.get("kind") != PURPLE_CYCLE_KIND or job.get("completed"):
+        job = claim["job"]
+        due_at = claim["scheduled_for"]
+        lateness = stamp - float(due_at)
+        if lateness > grace:
+            outcome = {
+                "state": "missed",
+                "scheduled_for": due_at,
+                "evaluated_at": stamp,
+                "lateness": lateness,
+            }
+
+            def settle_missed(
+                current: dict, *, outcome: dict = outcome, stamp: float = stamp
+            ) -> None:
+                current["last_result"] = outcome
+                current["last_ran_at"] = stamp
+                history = current.get("history")
+                if not isinstance(history, list):
+                    history = []
+                history.append({"ran_at": stamp, "result": outcome, "status": "missed"})
+                current["history"] = history[-PURPLE_CYCLE_HISTORY_LIMIT:]
+                interval = current.get("interval_seconds")
+                if (
+                    isinstance(interval, bool)
+                    or not isinstance(interval, (int, float))
+                    or interval <= 0
+                ):
+                    current["completed"] = True
+                else:
+                    current["due_at"] = stamp + interval
+
+            settled = store._settle_typed_claim(claim, settle_missed)
+            if settled is not None:
+                ran.append(settled)
             continue
-        due_at = job.get("due_at")
-        if due_at is None or due_at > stamp:
-            continue
-        history = job.get("history")
-        if not isinstance(history, list):
-            history = []
-            job["history"] = history
-        if job.get("claimed_at") == stamp:
-            continue
-        if any(
-            isinstance(entry, dict) and entry.get("ran_at") == stamp
-            for entry in history
-        ):
-            continue
-        job["claimed_at"] = stamp
-        store._save()
-        try:
-            if runner is None:
-                result = _default_purple_cycle_runner(job, root=root)
-            else:
-                result = runner(job)
-        except Exception as exc:
+        if job.get("mode") not in _PURPLE_CYCLE_MODES:
             result = {
                 "ok": False,
                 "exit": 1,
                 "state": "failed",
-                "error": f"{type(exc).__name__}",
+                "error": "invalid scheduled mode",
             }
-        failed = _purple_cycle_failed(result)
-        job["last_result"] = result
-        job["last_ran_at"] = stamp
-        history.append(
-            {
-                "ran_at": stamp,
-                "result": result,
-                "status": "failed" if failed else "ok",
-            }
-        )
-        del history[:-PURPLE_CYCLE_HISTORY_LIMIT]
-        job["claimed_at"] = None
-        interval = job.get("interval_seconds")
-        if isinstance(interval, bool) or not isinstance(interval, (int, float)):
-            job["completed"] = True
-        elif interval > 0:
-            job["due_at"] = stamp + interval
         else:
-            job["completed"] = True
-        changed = True
-        if not failed:
-            ran.append(job)
-    if changed:
-        store._save()
+            try:
+                result = (
+                    _default_purple_cycle_runner(job, root=root)
+                    if runner is None
+                    else runner(job)
+                )
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "exit": 1,
+                    "state": "failed",
+                    "error": type(exc).__name__,
+                }
+        failed = _purple_cycle_failed(result)
+
+        def settle_result(
+            current: dict,
+            *,
+            result: Any = result,
+            stamp: float = stamp,
+            failed: bool = failed,
+        ) -> None:
+            current["last_result"] = result
+            current["last_ran_at"] = stamp
+            history = current.get("history")
+            if not isinstance(history, list):
+                history = []
+            history.append(
+                {
+                    "ran_at": stamp,
+                    "result": result,
+                    "status": "failed" if failed else "ok",
+                }
+            )
+            current["history"] = history[-PURPLE_CYCLE_HISTORY_LIMIT:]
+            interval = current.get("interval_seconds")
+            if isinstance(interval, bool) or not isinstance(interval, (int, float)):
+                current["completed"] = True
+            elif interval > 0:
+                current["due_at"] = stamp + interval
+            else:
+                current["completed"] = True
+
+        settled = store._settle_typed_claim(claim, settle_result)
+        if settled is not None and not failed:
+            ran.append(settled)
     return ran
 
 

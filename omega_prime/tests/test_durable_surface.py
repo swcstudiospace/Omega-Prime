@@ -19,11 +19,15 @@ def test_cron_job_writes_a_journal(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "cron" / "jobs.json")
     now = 1_700_000_000
     store.schedule("say hi", now)
-    model = ScriptedModel([{"role": "assistant", "content": "hello"}])
-    ran = run_due_jobs(store, now, model, {})
-    assert ran[0]["last_result"] == "hello"
     journal = TurnJournal(tmp_path / "cron" / "turns.sqlite")
-    assert journal.status()["entry_count"] >= 1
+    parent = Agent(model=ScriptedModel([]), tools={})
+    parent.child_model = ScriptedModel([{"role": "assistant", "content": "hello"}])
+    parent.journal = journal
+    ran = run_due_jobs(store, now, parent)
+    assert ran[0]["last_result"] == {"state": "succeeded", "summary": "hello"}
+    status = journal.status()
+    assert status["entry_count"] >= 1
+    assert status["last_run_id"]
 
 
 def test_delegate_child_writes_the_parent_journal(tmp_path: Path) -> None:
@@ -77,17 +81,19 @@ def test_durable_status_reports_a_journal(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "cron" / "jobs.json")
     now = 1_700_000_000
     store.schedule("say hi", now)
-    run_due_jobs(
-        store,
-        now,
-        ScriptedModel([{"role": "assistant", "content": "noted"}]),
-        {},
-    )
+    journal = TurnJournal(tmp_path / "cron" / "turns.sqlite")
+    parent = Agent(model=ScriptedModel([]), tools={})
+    parent.child_model = ScriptedModel([{"role": "assistant", "content": "noted"}])
+    parent.journal = journal
+    run_due_jobs(store, now, parent)
+    journal_status = journal.status()
     registry = ToolRegistry()
     register_durable_surface_tools(registry, tmp_path)
     body = json.loads(registry.dispatch("durable_status", {}))
     assert body["journal"] == "present"
+    assert body["entry_count"] == journal_status["entry_count"]
     assert body["entry_count"] >= 1
+    assert body["last_run_id"] == journal_status["last_run_id"]
     assert body["last_run_id"]
 
 

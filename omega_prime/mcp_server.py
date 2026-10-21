@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import threading
@@ -40,6 +41,7 @@ from omega_prime.commands.context import (
 )
 from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.cron.desk_driver import DeskDriver
+from omega_prime.engine.clarify_ipc import ClarifySocketClient
 from omega_prime.grokbot.approvals_file import (
     load_approvals_file,
     resolve_approvals_digest,
@@ -83,6 +85,7 @@ from omega_prime.tools.approvals import ApprovalLog
 from omega_prime.tools.coding import register_coding_tools
 from omega_prime.tools.delegate import register_delegate_tools
 from omega_prime.tools.discord import DiscordClient, register_discord_tools
+from omega_prime.tools.exec_jobs import register_exec_job_tools
 from omega_prime.tools.growth import register_growth_tools
 from omega_prime.tools.ide import register_ide_tools
 from omega_prime.tools.infra import InfraClient, InfraContext, register_infra_tools
@@ -206,10 +209,21 @@ def resolve_work_root(
     return Path(root)
 
 
-def _desk_store_path(work_root: Path, state_dir: str | None, name: str) -> Path:
-    """One desk store file: under the state dir when set, else the work root."""
+def _desk_store_path(
+    work_root: Path,
+    state_dir: str | None,
+    name: str,
+    legacy: Mapping[str, Sequence[Path]] | None = None,
+) -> Path:
+    """One desk store file: under the agent data folder when set, else the work root.
+
+    ``state_dir`` is the agent folder (``<state>/agent``). ``legacy`` names
+    older copies that are still read while the agent copy is missing.
+    """
     if state_dir:
-        return Path(state_dir) / name
+        from omega_prime.agent_state import agent_path
+
+        return agent_path(Path(state_dir), name, (legacy or {}).get(name, ()))
     return work_root / "omega_prime" / "state" / name
 
 
@@ -224,7 +238,17 @@ class _DeskParent:
     each access, so the parent can exist before the last families register.
     """
 
-    def __init__(self, registry: ToolRegistry, model: Any) -> None:
+    # `tools` is the whole live registry, which is exactly the roster the
+    # engine's omp reaches through this MCP server, so routing a staged
+    # delegate to the engine narrows nothing (see attach._restricted).
+    engine_full_tools = True
+
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        model: Any,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         self._registry = registry
         self.child_model = model
         self.delegate_depth = 0
@@ -235,7 +259,7 @@ class _DeskParent:
         # server; a staged parent delegates to the execute stage.
         from omega_prime.engine.attach import engine_stage
 
-        self.engine_stage = engine_stage(os.environ)
+        self.engine_stage = engine_stage(os.environ if env is None else env)
 
     @property
     def tools(self) -> dict[str, Any]:
@@ -265,6 +289,10 @@ class _RlmParent(_DeskParent):
     (the desk store convention), and `session_name` is the owning bot
     identity a restarted host recovers its own children by.
     """
+
+    # RLM children keep the desk child model: RlmHost owns their model
+    # selection, so they never take the engine's staged route.
+    engine_full_tools = False
 
     def __init__(self, registry: ToolRegistry, model: Any, session_dir: Path) -> None:
         super().__init__(registry, model)
@@ -389,7 +417,10 @@ class _DeskSubstrate:
             for key, value in (event.items() if isinstance(event, dict) else ())
             if key != "kind" and value is not None
         }
-        result = self._client.emit("note", summary, **fields)
+        try:
+            result = self._client.emit("note", summary, **fields)
+        except Exception as exc:
+            return {"error": "upstream_error", "reason": str(exc)}
         if isinstance(result, dict) and result.get("stored") is False:
             message = str(result.get("error") or "event not accepted")
             error = (
@@ -433,7 +464,7 @@ class _DeskDocsIndex:
     def __init__(self, client: SubstrateClient) -> None:
         self._client = client
 
-    def __call__(self, query: str, limit: int, repo: str | None) -> list:
+    def __call__(self, query: str, limit: int, repo: str | None) -> list | dict:
         _ = repo
         result = _shape_substrate_docs(self._client, query)
         chunks = result.get("chunks") if isinstance(result, dict) else None
@@ -443,7 +474,7 @@ class _DeskDocsIndex:
                 if isinstance(result, dict) and result.get("error")
                 else "docs index returned a malformed response"
             )
-            raise RuntimeError(f"docs index failed: {reason}")
+            return {"error": reason}
         return chunks[:limit]
 
 
@@ -581,6 +612,18 @@ class _DeskBusClient:
                         "gateway": "desk_bus",
                     }
             return saved.rstrip("/"), None
+        if self._policy is not None:
+            try:
+                host = urlsplit(self._base_url).hostname or ""
+            except ValueError:
+                host = ""
+            if not host or not self._policy.allows_host(host):
+                shown = host or "that host"
+                return "", {
+                    "ok": False,
+                    "error": f"The seat policy does not allow {shown}.",
+                    "gateway": "desk_bus",
+                }
         return self._base_url, None
 
 
@@ -793,6 +836,8 @@ def default_registry(
     approval_log: Any = None,
     env: dict | None = None,
     work_root: str | Path | None = None,
+    prime_config: Any = None,
+    bot_id: str = "bot-00-omega-prime",
     settings_status: SettingsResult | None = None,
 ) -> ToolRegistry:
     """Wire every family, including `delegate_task` on an in-process parent.
@@ -827,6 +872,11 @@ def default_registry(
     served but returns `not_configured: provider`.
     """
     env = dict(env or {})
+    from omega_prime.tools.plugins import load_plugins, plugins_enabled
+
+    plugins_on = plugins_enabled(env)
+    solo_value = env.get("OMEGA_PRIME_SOLO")
+    solo = (bot_id == "bot-00-omega-prime") if solo_value is None else solo_value != "0"
     registry = ToolRegistry(approval_log=approval_log, policy=policy)
     registry.runtime_bindings["settings_status"] = settings_status
     root = Path(root)
@@ -849,27 +899,147 @@ def default_registry(
     # DESK-02: a distinct work root is itself the coding workspace; the
     # default keeps the shipped `root/omega_prime` jail.
     coding_root = work if work != root else root / "omega_prime"
-    register_coding_tools(registry, coding_root, policy=policy)
+    register_coding_tools(
+        registry,
+        coding_root,
+        policy=policy,
+        interaction=ClarifySocketClient.from_env(env),
+    )
     # `OMEGA_PRIME_STATE_DIR` moves the growth stores and the desk stores out
     # of the (possibly read-only) source tree. New skills follow that volume
     # when the install skills directory cannot be written. The state skills
     # directory is created before the tools are registered so a read can fall
     # through to the shipped copy, and creating a shipped name is refused.
-    state_dir = env.get("OMEGA_PRIME_STATE_DIR")
-    state_value = state_dir if isinstance(state_dir, str) and state_dir else ""
-    if state_value:
-        memory_dir = Path(state_value) / "memory"
-        session_db = Path(state_value) / "sessions.db"
+    # The agent's data (memory, history, desk stores) lives in one folder,
+    # `<state>/agent` (see `omega_prime.agent_state`). The sandboxed engine
+    # child is pointed at the same folder, so both see one memory. Data from
+    # older layouts is moved in once; anything that could not move is still
+    # read in place.
+    from omega_prime.agent_state import (
+        agent_memory_dir,
+        agent_path,
+        agent_state_dir,
+        ensure_agent_dir,
+        legacy_layout,
+        legacy_sources,
+        migrate_agent_state,
+    )
+
+    agent_dir = agent_state_dir(env)
+    if agent_dir is not None and not ensure_agent_dir(agent_dir):
+        agent_dir = None
+    if agent_dir is None and str(env.get("OMEGA_PRIME_STATE_DIR") or "").strip():
+        # The agent folder cannot be created (read-only state volume): keep
+        # the earlier layout directly under the state root.
+        legacy_state = Path(str(env["OMEGA_PRIME_STATE_DIR"]).strip())
+        if ensure_agent_dir(legacy_state):
+            agent_dir = legacy_state
+    state_value = str(agent_dir) if agent_dir is not None else ""
+    if agent_dir is not None:
+        layout = legacy_layout(env, home=home, install_root=root, work_root=work)
+        migrate_agent_state(agent_dir, **layout)
+        legacy = legacy_sources(**layout)
+        memory_dir = agent_memory_dir(agent_dir, legacy)
+        session_db = agent_path(agent_dir, "sessions.db", legacy.get("sessions.db", ()))
+        desk_legacy = legacy
     else:
         memory_dir = root / "omega_prime" / "memory"
         session_db = root / "omega_prime" / "sessions.db"
+        desk_legacy = {}
     # DESK-01: one MemoryStore instance shared by the growth tools and the
     # lead pack, so `lead_memory_recall` sees what the growth tools retain.
     memory_store = MemoryStore(memory_dir)
+    from omega_prime.integrations.gateways import (
+        gateway_block,
+        ready_gateway_url,
+    )
+    from omega_prime.memory.backends import resolve_memory_backends
+    from omega_prime.memory.hindsight_service import HindsightService
+    from omega_prime.memory.retain import retain_memory
+
+    substrate_token = secret_value(env, "SUBSTRATE_TOKEN") or secret_value(
+        env, "SUBSTRATE_TOKEN_GROK_BOT"
+    )
+    # SubstrateClient is the authoritative phase-97 endpoint resolver. Keep
+    # the same raw client for desk operations and memory; never infer a default.
+    substrate_client = SubstrateClient(
+        env.get("SUBSTRATE_URL") or None,
+        token=substrate_token or None,
+        honor_binding=True,
+        binding_env=env,
+        policy=policy,
+    )
+    substrate_url, substrate_error = substrate_client._resolve_base()
+    hindsight = None
+    hindsight_construction_error = None
+    hindsight_url = str(env.get("HINDSIGHT_URL") or "").strip()
+    if hindsight_url:
+        try:
+            hindsight = HindsightService(
+                hindsight_url,
+                broker=CredentialBroker(policy, env),
+                transport=HttpTransport(policy=policy, max_retries=0),
+                policy=policy,
+            )
+        except Exception:
+            hindsight_construction_error = "configured Hindsight service is invalid"
+    memory_backends = resolve_memory_backends(
+        local_store=memory_store,
+        # Do not expose an unresolved binding-aware client as a configured
+        # backend. It is attached immediately before memory operations when a
+        # live binding resolves to a usable endpoint.
+        substrate=substrate_client if substrate_url and not substrate_error else None,
+        hindsight=hindsight,
+        substrate_url=substrate_url,
+        hindsight_url=hindsight_url or None,
+        environ=env,
+    )
+    if substrate_error:
+        memory_backends.errors["substrate"] = substrate_error
+        memory_backends.states["substrate"] = (
+            "not_configured" if "not configured" in substrate_error else "unreachable"
+        )
+    if hindsight_construction_error:
+        memory_backends.errors["hindsight"] = hindsight_construction_error
+        memory_backends.states["hindsight"] = "unreachable"
+
+    def refresh_memory_substrate() -> None:
+        """Resolve live connector settings immediately before a memory call."""
+        base, error = substrate_client._resolve_base()
+        if base and error is None:
+            memory_backends.substrate = substrate_client
+            memory_backends.errors.pop("substrate", None)
+            memory_backends.states["substrate"] = "empty"
+        else:
+            memory_backends.substrate = None
+            if error is not None:
+                message = str(error)
+                memory_backends.errors["substrate"] = message
+                memory_backends.states["substrate"] = (
+                    "not_configured" if "not configured" in message else "unreachable"
+                )
+            else:
+                memory_backends.errors["substrate"] = (
+                    "substrate gateway is not configured"
+                )
+                memory_backends.states["substrate"] = "not_configured"
+
+    def growth_retain(content: str) -> dict[str, Any]:
+        refresh_memory_substrate()
+        return retain_memory(
+            memory_backends,
+            content,
+            scope=memory_backends.trusted_scope,
+            repo=memory_backends.trusted_repo,
+            kind="fact",
+        )
+
     from omega_prime.routines.nightly import writable_skills_root
 
     install_skills = root / "omega_prime" / "skills"
-    skills_root = writable_skills_root(install_skills, env)
+    # A read-only install writes learned skills into the agent folder, where
+    # the migration moves them; an unmigrated `<state>/skills` is still used.
+    skills_root = writable_skills_root(install_skills, env, agent_dir=agent_dir)
     if skills_root != install_skills:
         ensure_private_dir(skills_root)
     register_growth_tools(
@@ -879,6 +1049,7 @@ def default_registry(
         memory_dir=memory_dir,
         session_db=session_db,
         memory_store=memory_store,
+        retain_memory=growth_retain,
     )
     # DESK-03: delegate_task is served here (roster order: after growth), on
     # an in-process parent shim. Without a provider env the parent stays None
@@ -887,13 +1058,17 @@ def default_registry(
     # see every family registered below.
     parent = None
     child_model = _desk_child_model(env, policy)
-    if child_model is not None:
-        parent = _DeskParent(registry, child_model)
+    from omega_prime.engine.attach import engine_stage
+
+    # A staged engine turn delegates to the engine's execute stage, so it
+    # gets a parent even with no Python child provider configured.
+    if child_model is not None or engine_stage(env) is not None:
+        parent = _DeskParent(registry, child_model, env)
         try:
             from omega_prime.durable.journal import TurnJournal
 
             parent.journal = TurnJournal(
-                _desk_store_path(work, state_value, "turns.sqlite")
+                _desk_store_path(work, state_value, "turns.sqlite", desk_legacy)
             )
         except Exception:
             parent.journal = None
@@ -901,6 +1076,8 @@ def default_registry(
     register_omega_command_tools(registry, env)
     register_platform_tools(registry, home=home)
     register_ide_tools(registry, root, jail=None if work == root else work)
+    job_control = register_exec_job_tools(registry, cwd=work)
+    registry.runtime_bindings["exec_job_control"] = job_control
     x_token = secret_value(env, "X_API_TOKEN")
     register_x_tools(
         registry,
@@ -914,58 +1091,104 @@ def default_registry(
         registry,
         DiscordClient(make_client=None, token=secret_value(env, "DISCORD_BOT_TOKEN")),
     )
-    substrate_token = secret_value(env, "SUBSTRATE_TOKEN") or secret_value(
-        env, "SUBSTRATE_TOKEN_GROK_BOT"
-    )
-    substrate_client = SubstrateClient(
-        env.get("SUBSTRATE_URL") or None,
-        token=substrate_token or None,
-        honor_binding=True,
-        binding_env=env,
-        policy=policy,
-    )
-    substrate_base, substrate_error = substrate_client._resolve_base()
+    substrate_base = substrate_url
     docs_url = (env.get(DESK_DOCS_INDEX_ENV) or "").strip()
+    # Explicit env URL only (phase 97: never infer a default endpoint); a saved
+    # or blocked connector binding is resolved by the binding-aware client.
+    substrate_env_url = (env.get("SUBSTRATE_URL") or "").strip()
     notify_url = (env.get(DESK_NOTIFY_URL_ENV) or "").strip()
     bus_url = (env.get(DESK_BUS_URL_ENV) or "").strip()
-    from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
 
     bus_saved = ready_gateway_url("desk_bus", env)
     bus_blocked = gateway_block("desk_bus", env)
+    substrate_saved = ready_gateway_url("substrate", env)
+    substrate_blocked = gateway_block("substrate", env)
+    desk_docs = (
+        _DeskDocsIndex(substrate_client)
+        if solo
+        else (
+            _DeskDocsIndex(
+                SubstrateClient(
+                    docs_url or substrate_env_url or None,
+                    token=substrate_token or None,
+                    honor_binding=True,
+                    binding_env=env,
+                    policy=policy,
+                )
+            )
+            if docs_url or substrate_env_url or substrate_saved or substrate_blocked
+            else None
+        )
+    )
+    desk_planes = {
+        "docs": (
+            "substrate"
+            if solo
+            else (
+                "blocked"
+                if substrate_blocked is not None
+                else (
+                    "configured"
+                    if docs_url or substrate_env_url or substrate_saved
+                    else "not_configured"
+                )
+            )
+        ),
+        "notify": (
+            "disabled_solo"
+            if solo
+            else ("configured" if notify_url else "not_configured")
+        ),
+        "bus": (
+            "disabled_solo"
+            if solo
+            else (
+                "blocked"
+                if bus_blocked is not None
+                else ("configured" if bus_saved or bus_url else "not_configured")
+            )
+        ),
+    }
+    # One intake file for the lead tools and the scheduled desk pass.
+    desk_intake = (
+        _desk_store_path(work, state_value, "intake.json", desk_legacy)
+        if state_value
+        else desk_intake_path(work, state_dir=None)
+    )
     register_lead_tools(
         registry,
         LeadClient(
             LeadContext(
+                bot_id=bot_id,
                 root=root,
                 registry=registry,
                 memory=memory_store,
-                intake=IntakeStore(
-                    desk_intake_path(work, state_dir=state_value or None)
+                memory_backends=memory_backends,
+                memory_refresh=refresh_memory_substrate,
+                intake=IntakeStore(desk_intake),
+                roster=RosterStore(
+                    _desk_store_path(work, state_value, "packs.json", desk_legacy)
                 ),
-                roster=RosterStore(_desk_store_path(work, state_value, "packs.json")),
-                events=EventStore(_desk_store_path(work, state_value, "events.ndjson")),
+                events=EventStore(
+                    _desk_store_path(work, state_value, "events.ndjson", desk_legacy)
+                ),
                 substrate=_DeskSubstrate(substrate_client),
                 substrate_configured=substrate_base is not None,
                 substrate_error=substrate_error,
                 substrate_auth_configured=bool(substrate_token),
                 settings_status=settings_status,
-                docs_index=_DeskDocsIndex(
-                    SubstrateClient(
-                        docs_url,
-                        token=substrate_token or None,
-                    )
-                )
-                if docs_url
-                else None,
-                notify=_DeskNotifier(notify_url) if notify_url else None,
+                solo=solo,
+                desk_planes=desk_planes,
+                docs_index=desk_docs,
+                notify=_DeskNotifier(notify_url) if not solo and notify_url else None,
                 bus=(
                     _DeskBusClient(
-                        bus_saved or bus_url or "http://127.0.0.1",
+                        bus_saved or bus_url or "",
                         honor_binding=True,
                         binding_env=env,
                         policy=policy,
                     )
-                    if bus_blocked is not None or bus_saved or bus_url
+                    if not solo and (bus_blocked is not None or bus_saved or bus_url)
                     else None
                 ),
             )
@@ -1047,7 +1270,7 @@ def default_registry(
     from omega_prime.tools.harness import register_harness_tools
     from omega_prime.tools.heartbeat import register_heartbeat_tools
 
-    config = load_config(root)
+    config = prime_config if prime_config is not None else load_config(root)
     if prime_enabled(config, "harness"):
         register_harness_tools(registry, root)
     if prime_enabled(config, "goals"):
@@ -1065,7 +1288,7 @@ def default_registry(
     if prime_enabled(config, "rlm"):
         from omega_prime.tools.rlm import register_rlm_tools
 
-        session_dir = _desk_store_path(work, state_value, "rlm")
+        session_dir = _desk_store_path(work, state_value, "rlm", desk_legacy)
         session_dir.mkdir(parents=True, exist_ok=True)
         rlm_parent = _RlmParent(registry, child_model, session_dir)
         rlm_parent.rlm_unconfigured = child_model is None
@@ -1085,8 +1308,9 @@ def default_registry(
     # configured bearer_token_file) — but only after the Phase 79 sidecar
     # guard authorizes the run. Kill switch first, then default-off, then
     # signed-RoE resolution; BLOCKED always means zero registrations.
-    sidecar_state, _sidecar_cause = _evaluate_redteam_guard(config, env)
+    sidecar_state, sidecar_cause = _evaluate_redteam_guard(config, env)
     registry.runtime_bindings["sidecar_state"] = sidecar_state
+    registry.runtime_bindings["sidecar_cause"] = sidecar_cause
     if sidecar_state == "IDLE":
         from omega_prime.redteam.roe import grant_tool_allowlist
         from omega_prime.tools.redteam import (
@@ -1135,11 +1359,34 @@ def default_registry(
     # convention (`root/cron/jobs.json`) so the desk pass and the plain cron
     # tick see one schedule file. Built last so a catch-up tick meets the
     # fully registered tool surface.
-    driver = DeskDriver(root, parent=parent, work_root=work)
+    driver = DeskDriver(
+        root,
+        parent=parent,
+        work_root=work,
+        intake_path=desk_intake,
+        approval_log=approval_log,
+        can_apply_pin_bump=(
+            lambda: bool(
+                approval_log is not None
+                and callable(getattr(approval_log, "is_approved", None))
+                and approval_log.is_approved("pin_bump_apply")
+            )
+        ),
+    )
     registry.runtime_bindings["desk_driver"] = driver
     # Started by the live server (stdio main / serve_sse), not here: building
     # a registry is also how doctor, setup_check, the catalog and tests
     # inspect the tool surface, and those must not spawn a ticking thread.
+    if plugins_on:
+        load_plugins(home, registry)
+    dispatch = registry.dispatch
+
+    def dispatch_with_memory_refresh(name: str, arguments: Any = None) -> str:
+        if name in {"lead_memory_recall", "lead_doctor"}:
+            refresh_memory_substrate()
+        return dispatch(name, arguments)
+
+    registry.dispatch = dispatch_with_memory_refresh  # type: ignore[method-assign]
     return registry
 
 
@@ -1443,12 +1690,24 @@ def load_runtime(
     root = Path(root)
     home = Path(home) if home is not None else Path.home()
     roster: list[str] | None = None
-    if not no_roster:
-        roster_path = (
-            root / "omega_prime" / "contracts" / "tool-rosters" / "omega-prime.yaml"
-        )
+    bot_id = "bot-00-omega-prime"
+    roster_path = (
+        root / "omega_prime" / "contracts" / "tool-rosters" / "omega-prime.yaml"
+    )
+    if no_roster:
         try:
-            roster = roster_names(roster_path.read_text(encoding="utf-8"))
+            roster_text = roster_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+        else:
+            seat = re.search(r"(?m)^seat:\s*([^\s#]+)", roster_text)
+            bot_id = seat.group(1) if seat else bot_id
+    else:
+        try:
+            roster_text = roster_path.read_text(encoding="utf-8")
+            roster = roster_names(roster_text)
+            seat = re.search(r"(?m)^seat:\s*([^\s#]+)", roster_text)
+            bot_id = seat.group(1) if seat else "bot-00-omega-prime"
         except (OSError, ValueError) as exc:
             raise RuntimeConfigError(
                 f"cannot read roster {roster_path}: {exc}"
@@ -1480,6 +1739,7 @@ def load_runtime(
         approval_log=log,
         env=settings_env,
         work_root=work_root,
+        bot_id=bot_id,
         settings_status=settings_status,
     )
     tool_names = [tool.name for tool in _mcp_tools(registry, roster)]
@@ -1740,6 +2000,23 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings(process_env)
     host_env = dict(settings.effective_env)
     host_env["OMEGA_PRIME_AUDIT_LOG"] = str(resolved_audit)
+    # A live host keeps the agent's data in ~/.omega-prime/agent, the same
+    # folder the engine binds into its sandbox, unless a state dir is named.
+    from omega_prime.agent_state import (
+        AGENT_STATE_ENV,
+        STATE_DIR_ENV,
+        agent_state_dir,
+        ensure_agent_dir,
+    )
+
+    if (
+        not str(host_env.get(AGENT_STATE_ENV, "")).strip()
+        and not str(host_env.get(STATE_DIR_ENV, "")).strip()
+    ):
+        default_agent = agent_state_dir({}, home=args.home)
+        if default_agent is not None and ensure_agent_dir(default_agent):
+            host_env[AGENT_STATE_ENV] = str(default_agent)
+            os.environ.setdefault(AGENT_STATE_ENV, str(default_agent))
 
     def _fail(reason: object) -> int:
         print(f"omega-prime-mcp-server: {reason}", file=sys.stderr)
@@ -1845,13 +2122,22 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         return _fail(exc)
     driver = _desk_driver_of(runtime)
-    if driver is not None:
-        driver.start()
+    bindings = getattr(runtime.registry, "runtime_bindings", {})
+    job_control = (
+        bindings.get("exec_job_control") if isinstance(bindings, dict) else None
+    )
     try:
+        if driver is not None:
+            driver.start()
         asyncio.run(_serve(build_server(runtime.registry, runtime.roster)))
     finally:
-        if driver is not None:
-            driver.stop()
+        try:
+            if driver is not None:
+                driver.stop()
+        finally:
+            shutdown = getattr(job_control, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
     return 0
 
 

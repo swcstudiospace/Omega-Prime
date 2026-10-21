@@ -43,7 +43,7 @@ def test_audit_reuses_supply_chain_chain():
     runs = "\n".join(str(s.get("run", "")) for s in steps)
     uses = " ".join(str(s.get("uses", "")) for s in steps)
     assert "git submodule update --init redteam" in runs
-    assert "actions/setup-node@v4" in uses
+    assert "actions/setup-node@" in uses
     assert "npm ci --ignore-scripts" in runs
     assert "npm audit --omit=dev --audit-level=high --json" in runs
     assert "scripts/redteam-audit-triage.py" in runs

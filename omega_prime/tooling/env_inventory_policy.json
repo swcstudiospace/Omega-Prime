@@ -1,0 +1,729 @@
+{
+  "purposes": {
+    "AI_GATEWAY_API_KEY": "Authenticates provider requests routed through AI Gateway.",
+    "ANTHROPIC_API_KEY": "Authenticates Anthropic API requests.",
+    "ANTHROPIC_API_KEY_FILE": "Names a protected file containing the Anthropic API credential.",
+    "ANTHROPIC_OAUTH_TOKEN": "Authenticates Anthropic requests using OAuth.",
+    "ASC_ISSUER_ID": "Identifies the App Store Connect API issuer.",
+    "ASC_ISSUER_ID_FILE": "Names a protected file containing the App Store Connect issuer identifier.",
+    "ASC_KEY_ID": "Identifies the App Store Connect API key.",
+    "ASC_KEY_ID_FILE": "Names a protected file containing the App Store Connect key identifier.",
+    "ASC_PRIVATE_KEY": "Provides the App Store Connect signing private key.",
+    "ASC_PRIVATE_KEY_FILE": "Names a protected file containing the App Store Connect signing key.",
+    "AZURE_OPENAI_API_KEY": "Authenticates Azure OpenAI API requests.",
+    "CEREBRAS_API_KEY": "Authenticates Cerebras API requests.",
+    "CLOUDFLARE_API_KEY": "Authenticates Cloudflare AI provider requests.",
+    "COPILOT_GITHUB_TOKEN": "Authenticates GitHub Copilot provider requests.",
+    "CURSOR_API_KEY": "Authenticates Cursor provider requests.",
+    "CURSOR_API_KEY_FILE": "Names a protected file containing the Cursor provider credential.",
+    "DEEPSEEK_API_KEY": "Authenticates DeepSeek API requests.",
+    "DISCORD_BOT_TOKEN": "Authenticates the Discord connector.",
+    "DISCORD_BOT_TOKEN_FILE": "Names a protected file containing the Discord connector credential.",
+    "FIREWORKS_API_KEY": "Authenticates Fireworks API requests.",
+    "FLEET_COORDINATOR_TOKEN": "Authenticates requests to the Fleet coordinator.",
+    "FLEET_COORDINATOR_TOKEN_FILE": "Names a protected file containing the Fleet coordinator credential.",
+    "GEMINI_API_KEY": "Authenticates Gemini API requests.",
+    "GEMINI_API_KEY_FILE": "Names a protected file containing the Gemini API credential.",
+    "GH_TOKEN": "Authenticates GitHub CLI and GitHub integrations.",
+    "GITHUB_TOKEN": "Authenticates GitHub API requests.",
+    "GOOGLE_API_KEY": "Authenticates Google provider requests.",
+    "GOOGLE_API_KEY_FILE": "Names a protected file containing the Google API credential.",
+    "GOOGLE_CLOUD_API_KEY": "Authenticates Google Cloud provider requests.",
+    "GREPTILE_API_KEY": "Authenticates Greptile API requests.",
+    "GREPTILE_API_KEY_FILE": "Names a protected file containing the Greptile credential.",
+    "GREPTILE_GITHUB_TOKEN": "Authenticates Greptile access to GitHub.",
+    "GREPTILE_GITHUB_TOKEN_FILE": "Names a protected file containing the Greptile GitHub credential.",
+    "GREPTILE_MCP_URL": "Selects the explicitly trusted Greptile MCP endpoint.",
+    "GROK_HOME": "Selects the Grok integration home directory.",
+    "GROK_PLUGIN_DATA": "Selects the Grok plugin data directory.",
+    "GROQ_API_KEY": "Authenticates Groq API requests.",
+    "HERMES_HOME": "Selects the Hermes integration home directory.",
+    "HF_TOKEN": "Authenticates Hugging Face provider requests.",
+    "HINDSIGHT_API_KEY": "Authenticates Hindsight API requests.",
+    "HINDSIGHT_API_KEY_FILE": "Names a protected file containing the Hindsight API credential.",
+    "HINDSIGHT_API_TOKEN": "Authenticates Hindsight API requests using a token.",
+    "HINDSIGHT_API_TOKEN_FILE": "Names a protected file containing the Hindsight token.",
+    "HINDSIGHT_URL": "Selects the Hindsight service endpoint.",
+    "HINDSIGHT_URL_FILE": "Names a protected file containing the Hindsight endpoint value.",
+    "HOME": "Provides the host home directory used by child processes.",
+    "HOME_FILE": "Forwarded file-name counterpart for the child-process HOME setting.",
+    "KIMI_API_KEY": "Authenticates Kimi provider requests.",
+    "LANG": "Selects the locale inherited by child processes.",
+    "LANG_FILE": "Forwarded file-name counterpart for the child-process locale setting.",
+    "LC_ALL": "Selects the all-categories locale inherited by child processes.",
+    "LC_ALL_FILE": "Forwarded file-name counterpart for the child-process locale setting.",
+    "LC_CTYPE": "Selects the character locale inherited by child processes.",
+    "LC_CTYPE_FILE": "Forwarded file-name counterpart for the child-process character locale.",
+    "LINEAR_API_KEY": "Authenticates Linear API requests for connector setup and issue operations.",
+    "LINEAR_API_KEY_FILE": "Names a protected file containing the Linear API credential.",
+    "LOGNAME": "Identifies the host user in child processes.",
+    "LOGNAME_FILE": "Forwarded file-name counterpart for the child-process login name.",
+    "META_API_KEY": "Authenticates Meta provider requests.",
+    "META_API_KEY_FILE": "Names a protected file containing the Meta provider credential.",
+    "MCP_AUTH_TOKEN": "Authenticates bearer requests to the MCP tool server.",
+    "MINIMAX_API_KEY": "Authenticates MiniMax API requests.",
+    "MINIMAX_CN_API_KEY": "Authenticates MiniMax China API requests.",
+    "MISTRAL_API_KEY": "Authenticates Mistral API requests.",
+    "MOONSHOT_API_KEY": "Authenticates Moonshot API requests.",
+    "MUSE_API_KEY": "Authenticates Muse provider requests.",
+    "MUSE_API_KEY_FILE": "Names a protected file containing the Muse provider credential.",
+    "NOTION_TOKEN": "Authenticates Notion connector API requests.",
+    "NOTION_TOKEN_FILE": "Names a protected file containing the Notion integration credential.",
+    "OMEGA_PRIME_AUDIT_LOG": "Selects the destination for Omega Prime audit events.",
+    "OMEGA_PRIME_BWRAP_BIN": "Selects the bubblewrap executable used for sandboxing.",
+    "OMEGA_PRIME_DESK_BUS_URL": "Selects the desk message-bus endpoint.",
+    "OMEGA_PRIME_DESK_BUS_URL_FILE": "Names a protected file containing the desk message-bus endpoint.",
+    "OMEGA_PRIME_DESK_CHILD_MODEL": "Selects the model used for the managed desk child process.",
+    "OMEGA_PRIME_DESK_CHILD_MODEL_FILE": "Names a protected file containing the desk child model setting.",
+    "OMEGA_PRIME_DESK_CHILD_PROVIDER": "Selects the provider used for the managed desk child process.",
+    "OMEGA_PRIME_DESK_CHILD_PROVIDER_FILE": "Names a protected file containing the desk child provider setting.",
+    "OMEGA_PRIME_DESK_DOCS_INDEX": "Selects the desk documentation index endpoint.",
+    "OMEGA_PRIME_DESK_DOCS_INDEX_FILE": "Names a protected file containing the desk documentation endpoint.",
+    "OMEGA_PRIME_DESK_NOTIFY_URL": "Selects the desk notification endpoint.",
+    "OMEGA_PRIME_DESK_NOTIFY_URL_FILE": "Names a protected file containing the desk notification endpoint.",
+    "OMEGA_PRIME_DISPATCH_CONFIRM": "Confirms dispatch operations requiring the Fleet credential helper.",
+    "OMEGA_PRIME_DISPATCH_CONFIRM_FILE": "Names a protected file containing the dispatch confirmation token.",
+    "OMEGA_PRIME_ENGINE": "Controls whether engine execution is enabled or required.",
+    "OMEGA_PRIME_ENGINE_STAGE": "Names the GSD stage (plan or execute) an engine run is on, so staged turns and their delegates pick the stage model.",
+    "OMEGA_PRIME_ENGINE_TMUX": "Controls tmux session attachment for engine jobs.",
+    "OMEGA_PRIME_ENGINE_UNSANDBOXED": "Opts engine execution out of the sandbox.",
+    "OMEGA_PRIME_IMAGE_ROLLOUT": "Selects the staged or direct image rollout mode for deployments.",
+    "OMEGA_PRIME_OMP_ALLOW_CHATGPT": "Enables the ChatGPT plan in engine model routing.",
+    "OMEGA_PRIME_OMP_ALLOW_CURSOR": "Enables the Cursor plan in engine model routing.",
+    "OMEGA_PRIME_OMP_ALLOW_XAI": "Enables the xAI plan in engine model routing.",
+    "OMEGA_PRIME_OMP_ALLOW_ZAI": "Enables the Z.ai plan in engine model routing.",
+    "OMEGA_PRIME_OMP_BIN": "Selects the omp executable used by the engine.",
+    "OMEGA_PRIME_OMP_HOME": "Selects the omp configuration home directory.",
+    "OMEGA_PRIME_PACKS_JSON": "Selects the configured tool-pack description file.",
+    "OMEGA_PRIME_PACKS_JSON_FILE": "Names a protected file containing the tool-pack description setting.",
+    "OMEGA_PRIME_PACK_API_BASES_JSON": "Selects the tool-pack API base configuration.",
+    "OMEGA_PRIME_PACK_API_BASES_JSON_FILE": "Names a protected file containing the tool-pack API base configuration.",
+    "OMEGA_PRIME_PLUGINS": "Opts in to loading trusted local Omega Prime plugins when set exactly to 1.",
+    "OMEGA_PRIME_RAILWAY_PROJECTS": "Restricts Railway status and log operations to named projects.",
+    "OMEGA_PRIME_RAILWAY_PROJECTS_FILE": "Names a protected file containing the Railway project restriction setting.",
+    "OMEGA_PRIME_REDTEAM_ROE_FILE": "Selects the signed red-team Rules of Engagement artifact.",
+    "OMEGA_PRIME_REDTEAM_ROE_FILES": "Selects comma-separated red-team Rules of Engagement artifacts.",
+    "OMEGA_PRIME_SIDECAR_REPORTS_DIR": "Selects the red-team sidecar reports directory.",
+    "OMEGA_PRIME_AGENT_STATE_DIR": "Selects the agent data folder for sessions, memory, skills and intake; defaults to the state directory's agent folder.",
+    "OMEGA_PRIME_CLARIFY_SOCKET": "Names the per-run clarify broker socket an engine child uses to ask the operator a question.",
+    "OMEGA_PRIME_MEMORY_BACKEND": "Selects which memory backend serves recall and writes.",
+    "OMEGA_PRIME_MEMORY_DIR": "Selects the local memory store directory.",
+    "OMEGA_PRIME_SOLO": "Turns solo mode on or off for the MCP tool registry; defaults on for the Omega Prime bot.",
+    "OMEGA_PRIME_STATE_DIR": "Selects persistent state for Omega Prime integrations and engine jobs.",
+    "OMEGA_PRIME_STATE_DIR_FILE": "Names a protected file containing the Omega Prime state directory setting.",
+    "OMEGA_PRIME_SWEEP_MENTIONS": "Controls mention processing during scheduled sweeps.",
+    "OMEGA_PRIME_WORK_ROOT": "Selects the workspace root used by Omega Prime operations.",
+    "OMEGA_PRIME_WORK_ROOT_FILE": "Names a protected file containing the Omega Prime workspace root.",
+    "OPENAI_API_KEY": "Authenticates OpenAI API requests.",
+    "OPENAI_API_KEY_FILE": "Names a protected file containing the OpenAI API credential.",
+    "OPENCODE_API_KEY": "Authenticates OpenCode provider requests.",
+    "OPENROUTER_API_KEY": "Authenticates OpenRouter API requests.",
+    "P46_TEST_DATA": "Selects a temporary directory for the browser egress resolver-profile verification.",
+    "PATH": "Provides executable search paths to child processes.",
+    "PATH_FILE": "Forwarded file-name counterpart for the child-process executable search path.",
+    "PI_CODING_AGENT_DIR": "Sets the pi coding agent data directory in the managed child environment.",
+    "PLAY_CONSOLE_TOKEN": "Authenticates Google Play Console operations.",
+    "PLAY_CONSOLE_TOKEN_FILE": "Names a protected file containing the Play Console credential.",
+    "PRIME_API_KEY": "Authenticates Prime provider requests.",
+    "PYTHONHOME": "Selects the Python runtime prefix inherited by child processes.",
+    "PYTHONHOME_FILE": "Forwarded file-name counterpart for the child-process Python home.",
+    "PYTHONPATH": "Sets import search paths inherited by child processes.",
+    "PYTHONPATH_FILE": "Forwarded file-name counterpart for the child-process Python import path.",
+    "RAILWAY_TOKEN": "Authenticates Railway project status and log operations.",
+    "RAILWAY_TOKEN_FILE": "Names a protected file containing the Railway credential.",
+    "SUBSTRATE_TOKEN": "Authenticates requests to the Substrate service.",
+    "SUBSTRATE_TOKEN_FILE": "Names a protected file containing the Substrate credential.",
+    "SUBSTRATE_TOKEN_GROK_BOT": "Authenticates Grokbot requests to the Substrate service.",
+    "SUBSTRATE_TOKEN_GROK_BOT_FILE": "Names a protected file containing the Grokbot Substrate credential.",
+    "SUBSTRATE_URL": "Selects the Substrate service endpoint.",
+    "SUBSTRATE_URL_FILE": "Names a protected file containing the Substrate endpoint setting.",
+    "T3MP3ST_BEARER_TOKEN": "Authenticates requests to the T3MP3ST gateway.",
+    "T3MP3ST_BEARER_TOKEN_FILE": "Names a protected file containing the T3MP3ST gateway credential.",
+    "TELEGRAM_BOT_TOKEN": "Authenticates the Telegram connector.",
+    "TELEGRAM_BOT_TOKEN_FILE": "Names a protected file containing the Telegram credential.",
+    "TERM": "Selects the terminal type inherited by child processes.",
+    "TERM_FILE": "Forwarded file-name counterpart for the child-process terminal type.",
+    "TMPDIR": "Selects the temporary directory inherited by child processes.",
+    "TMPDIR_FILE": "Forwarded file-name counterpart for the child-process temporary directory.",
+    "ULTRATHINK_ROOT": "Selects the ultrathink integration root directory.",
+    "ULTRATHINK_ROOT_FILE": "Names a protected file containing the ultrathink integration root.",
+    "ULTRATHINK_STATE_DIR": "Selects persistent state for the ultrathink integration.",
+    "USER": "Identifies the host user inherited by child processes.",
+    "USER_FILE": "Forwarded file-name counterpart for the child-process user name.",
+    "VERCEL_TOKEN": "Authenticates Vercel operations.",
+    "VERCEL_TOKEN_FILE": "Names a protected file containing the Vercel credential.",
+    "VIRTUAL_ENV": "Selects the Python virtual environment inherited by child processes.",
+    "VIRTUAL_ENV_FILE": "Forwarded file-name counterpart for the child-process virtual environment.",
+    "XAI_API_KEY": "Authenticates xAI API requests.",
+    "XAI_API_KEY_FILE": "Names a protected file containing the xAI provider credential.",
+    "XDG_CONFIG_HOME": "Selects the XDG configuration directory.",
+    "XDG_RUNTIME_DIR": "Selects the XDG runtime directory used by host processes.",
+    "XDG_RUNTIME_DIR_FILE": "Forwarded file-name counterpart for the XDG runtime directory.",
+    "XDG_STATE_HOME": "Selects the XDG state directory.",
+    "XIAOMI_API_KEY": "Authenticates Xiaomi API requests.",
+    "XIAOMI_TOKEN_PLAN_AMS_API_KEY": "Authenticates Xiaomi Amsterdam token-plan requests.",
+    "XIAOMI_TOKEN_PLAN_CN_API_KEY": "Authenticates Xiaomi China token-plan requests.",
+    "XIAOMI_TOKEN_PLAN_SGP_API_KEY": "Authenticates Xiaomi Singapore token-plan requests.",
+    "X_API_TOKEN": "Authenticates the X connector.",
+    "X_API_TOKEN_FILE": "Names a protected file containing the X connector credential.",
+    "ZAI_API_KEY": "Authenticates Z.ai provider requests.",
+    "ZAI_API_KEY_FILE": "Names a protected file containing the Z.ai provider credential.",
+    "OMEGA_PRIME_EVALS_JUDGE_API_KEY": "Authenticates requests to the live evaluation judge.",
+    "OMEGA_PRIME_EVALS_JUDGE_ENDPOINT": "Selects the live evaluation judge endpoint.",
+    "OMEGA_PRIME_EVALS_REGRESS_THRESHOLD": "Sets the minimum per-case score drop counted as an evaluation regression.",
+    "OMEGA_PRIME_EVALS_JUDGE_ENABLED": "Enables the live-model evaluation judge.",
+    "OMEGA_PRIME_EVALS_JUDGE_MODEL": "Selects the model used by the live evaluation judge.",
+    "OMEGA_PRIME_OMP_MODEL_ZAI": "Overrides the default model for the Z.ai engine plan.",
+    "OMEGA_PRIME_OMP_MODEL_XAI": "Overrides the default model for the xAI engine plan.",
+    "OMEGA_PRIME_OMP_MODEL_ANTHROPIC": "Overrides the default model for the Anthropic engine plan.",
+    "OMEGA_PRIME_OMP_MODEL_MUSE": "Overrides the default model for the Muse engine plan.",
+    "OMEGA_PRIME_OMP_MODEL_CURSOR": "Overrides the default model for the Cursor engine plan.",
+    "OMEGA_PRIME_OMP_MODEL_CHATGPT": "Overrides the default model for the ChatGPT engine plan.",
+    "OMEGA_PRIME_OMP_MODEL_ZAI_PLAN": "Overrides the planning-stage Z.ai model.",
+    "OMEGA_PRIME_OMP_MODEL_ZAI_EXECUTE": "Overrides the execution-stage Z.ai model.",
+    "OMEGA_PRIME_OMP_MODEL_XAI_PLAN": "Overrides the planning-stage xAI model.",
+    "OMEGA_PRIME_OMP_MODEL_XAI_EXECUTE": "Overrides the execution-stage xAI model.",
+    "OMEGA_PRIME_OMP_MODEL_ANTHROPIC_PLAN": "Overrides the planning-stage Anthropic model.",
+    "OMEGA_PRIME_OMP_MODEL_ANTHROPIC_EXECUTE": "Overrides the execution-stage Anthropic model.",
+    "OMEGA_PRIME_OMP_MODEL_MUSE_PLAN": "Overrides the planning-stage Muse model.",
+    "OMEGA_PRIME_OMP_MODEL_MUSE_EXECUTE": "Overrides the execution-stage Muse model.",
+    "OMEGA_PRIME_OMP_MODEL_CURSOR_PLAN": "Overrides the planning-stage Cursor model.",
+    "OMEGA_PRIME_OMP_MODEL_CURSOR_EXECUTE": "Overrides the execution-stage Cursor model.",
+    "OMEGA_PRIME_OMP_MODEL_CHATGPT_PLAN": "Overrides the planning-stage ChatGPT model.",
+    "OMEGA_PRIME_OMP_MODEL_CHATGPT_EXECUTE": "Overrides the execution-stage ChatGPT model.",
+    "GITHUB_SHA": "Records the source commit identifier as evaluation-history provenance.",
+    "OMEGA_PRIME_PRIME_RLM_ENABLED": "Enables the RLM Prime capability family.",
+    "OMEGA_PRIME_PRIME_HARNESS_ENABLED": "Enables the harness Prime capability family.",
+    "OMEGA_PRIME_PRIME_GOALS_ENABLED": "Enables the goals Prime capability family.",
+    "OMEGA_PRIME_PRIME_HEARTBEAT_ENABLED": "Enables the heartbeat Prime capability family.",
+    "OMEGA_PRIME_PRIME_AUTONOMOUS_ENABLED": "Enables the autonomous Prime capability family.",
+    "OMEGA_PRIME_PRIME_MESSAGING_ENABLED": "Enables the messaging Prime capability family.",
+    "OMEGA_PRIME_PRIME_KERNEL_ENABLED": "Enables the kernel Prime capability family.",
+    "OMEGA_PRIME_REDTEAM_ENABLED": "Enables the red-team capability.",
+    "OMEGA_PRIME_REDTEAM_GATEWAY_URL": "Selects the red-team gateway endpoint.",
+    "OMEGA_PRIME_REDTEAM_KILL": "Activates the red-team kill switch.",
+    "OMEGA_PRIME_REDTEAM_ROE_REQUIRED": "Requires Rules of Engagement authorization for red-team operations.",
+    "OMEGA_PRIME_REDTEAM_ROE_KEY": "Provides the detached HMAC key for Rules of Engagement verification.",
+    "OMEGA_PRIME_REDTEAM_ROE_KEY_FILE": "Selects a file containing the Rules of Engagement verification key.",
+    "OMEGA_PRIME_REDTEAM_REPORTS_DIR": "Selects the red-team engagement report output directory.",
+    "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_ENABLED": "Enables red-team findings synchronization to a tracker.",
+    "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_REPO": "Selects the repository receiving synchronized red-team findings.",
+    "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_TRACKER": "Selects the tracker backend for red-team findings synchronization.",
+    "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_LINEAR_TEAM_ID": "Selects the Linear team receiving red-team findings.",
+    "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_SLACK_WEBHOOK_URL": "Selects the Slack webhook for findings synchronization.",
+    "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_TEAMS_WEBHOOK_URL": "Selects the Teams webhook for findings synchronization.",
+    "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_WEBHOOK_SIGNING_SECRET": "Provides the active HMAC key for generic red-team webhook signatures.",
+    "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_WEBHOOK_SIGNING_SECRET_PREVIOUS": "Provides the prior HMAC key during webhook signing-key rotation.",
+    "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_WEBHOOK_URL": "Selects the generic webhook endpoint for findings synchronization.",
+    "OMEGA_PRIME_REDTEAM_AUTO_PIN_BUMP": "Enables release-watch initiated pin-bump processing.",
+    "OMEGA_PRIME_REDTEAM_COVERAGE_ALERT_THRESHOLD": "Sets the red-team pass-rate threshold that triggers a coverage alert.",
+    "OMEGA_PRIME_TELEMETRY_OTLP_ENABLED": "Enables OpenTelemetry OTLP export.",
+    "OMEGA_PRIME_TELEMETRY_OTLP_ENDPOINT": "Selects the OTLP telemetry push endpoint.",
+    "OMEGA_PRIME_TELEMETRY_OTLP_INTERVAL_SECONDS": "Sets the OTLP telemetry export interval.",
+    "OMEGA_PRIME_ROTATION_ENABLED": "Enables scheduled credential rotation.",
+    "OMEGA_PRIME_ROTATION_OVERLAP_HOURS": "Sets the overlap period for scheduled credential rotation.",
+    "OMEGA_PRIME_QUOTAS_MODE": "Selects report, soft, or hard quota enforcement behavior.",
+    "OMEGA_PRIME_QUOTAS_DOCUMENT": "Selects the quota configuration document.",
+    "OMEGA_PRIME_SANDBOX_ENABLED": "Enables sandboxed execution.",
+    "OMEGA_PRIME_SANDBOX_POLICY": "Selects the generated sandbox policy file.",
+    "OMEGA_PRIME_SANDBOX_SCOPE": "Selects which execution phases the sandbox governs.",
+    "OMEGA_PRIME_APPROVALS_FILE": "Selects the external approval grants file.",
+    "OMEGA_PRIME_APPROVALS_SHA256": "Pins the expected digest of the approval grants file.",
+    "OMEGA_PRIME_COMMAND_LOG": "Selects the command history log destination.",
+    "OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS": "Sets the maximum accepted lateness for scheduled actions.",
+    "FLEET_COORDINATOR_URL": "Selects the approved Fleet coordinator endpoint."
+  },
+  "helpers": {
+    "omega_prime/commands/redteam_readiness.py:_first": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "c62bfac722fffbd877935fa985c49140616f5fd853505077f1b7a3299998efa5",
+      "suffixes": []
+    },
+    "omega_prime/commands/redteam_readiness.py:_listed": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "98e6fb4f1ed563c45ca8787b32d5c63e8ebd37a4f2f5edbd7ef5a4f98465fae0",
+      "suffixes": []
+    },
+    "omega_prime/commands/redteam_roe_check.py:_first": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "c62bfac722fffbd877935fa985c49140616f5fd853505077f1b7a3299998efa5",
+      "suffixes": []
+    },
+    "omega_prime/engine/fleet_client.py:read_named_secret": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "fc01ae0b0dee1827c21a26cbd1b02646918357eb1101ea4040b922a071baec17",
+      "suffixes": ["_FILE"]
+    },
+    "omega_prime/engine/jobs.py:flag": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "2d632e1ff4081ce29e4c6052dca1f80fe1e47e922f93761892f83f2738d496e1",
+      "suffixes": []
+    },
+    "omega_prime/engine/jobs.py:falsy": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "ba2888a4b45e4f5447adcac8cdd686e2f4ebdeeee996b81f0e4a56c4b7bc4fbe",
+      "suffixes": []
+    },
+    "omega_prime/engine/plan_router.py:_present": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "2d119c28efd891ca2a9dfebf9bec129a695f7997dcfbd934fc36e6a5eb368b46",
+      "suffixes": []
+    },
+    "omega_prime/integrations/binding.py:resolve_secret": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "08a87f64c81fb99954227d83b3ae0b81996db3d58b1af87ffa7fd1c2badeff70",
+      "suffixes": ["_FILE"]
+    },
+    "omega_prime/integrations/binding.py:secret_value": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "94d503b3a2fd21f7b0720ae5edadf73eeb474365245831d81cb1257c16463c60",
+      "suffixes": ["_FILE"]
+    },
+    "omega_prime/integrations/desk_clients.py:_env_token": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "f2a7c53b501e7d3d2981b54446eba6a27a5ae23b19df7176c965dce58ef916e4",
+      "suffixes": ["_FILE"]
+    },
+    "omega_prime/integrations/binding.py:secret_configured": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "8990ce7c866521501a55398b95451a45ac824b852ee6dd1afa0d6f87bd85021d",
+      "suffixes": ["_FILE"]
+    },
+    "omega_prime/commands/workflows.py:_present": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "643313aa432f09d0ee03a4594b11ef0a83793fa32f7e9f1c50a55759c627e797",
+      "suffixes": []
+    },
+    "omega_prime/commands/workflows.py:_filled": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "6b754310600a7548e1b324fb9bb5b6d1413145074ef1f5d1bef1de8c6aeed00d",
+      "suffixes": ["_FILE"]
+    },
+    "omega_prime/integrations/setup.py:_checked_secret": {
+      "name_arg": 2,
+      "env_arg": 1,
+      "source_sha256": "4384725446ca12c88307a86226293cce2ecd8a26f801af73059da5523f55d77f",
+      "suffixes": ["_FILE"]
+    },
+    "omega_prime/mcp_server.py:_json_env": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "1d7b42959391b12c791eeee39621da6785bfb7fb8d87465362afc367b3cc7e88",
+      "suffixes": []
+    },
+    "omega_prime/mcp_server.py:_secret_present": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "2048d543a98d7e03d1684665d756ac0bc05bebbe61330a89417d0a44966e832f",
+      "suffixes": ["_FILE"]
+    }
+  },
+  "dynamic": [
+    {
+      "site": "omega_prime/config.py:275:environment.items",
+      "symbol": "_env_overrides",
+      "source_sha256": "af58ce1a14bdd12b51ea2a30734f445fb6f62415c78d9f86f33f3a689888bb07",
+      "names": [
+        "OMEGA_PRIME_PRIME_RLM_ENABLED", "OMEGA_PRIME_PRIME_HARNESS_ENABLED",
+        "OMEGA_PRIME_PRIME_GOALS_ENABLED", "OMEGA_PRIME_PRIME_HEARTBEAT_ENABLED",
+        "OMEGA_PRIME_PRIME_AUTONOMOUS_ENABLED", "OMEGA_PRIME_PRIME_MESSAGING_ENABLED",
+        "OMEGA_PRIME_PRIME_KERNEL_ENABLED", "OMEGA_PRIME_REDTEAM_ENABLED",
+        "OMEGA_PRIME_REDTEAM_GATEWAY_URL", "OMEGA_PRIME_REDTEAM_KILL",
+        "OMEGA_PRIME_REDTEAM_ROE_REQUIRED", "OMEGA_PRIME_REDTEAM_ROE_FILE",
+        "OMEGA_PRIME_REDTEAM_ROE_FILES", "OMEGA_PRIME_REDTEAM_ROE_KEY",
+        "OMEGA_PRIME_REDTEAM_ROE_KEY_FILE", "OMEGA_PRIME_REDTEAM_REPORTS_DIR",
+        "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_ENABLED", "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_REPO",
+        "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_TRACKER", "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_LINEAR_TEAM_ID",
+        "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_SLACK_WEBHOOK_URL", "OMEGA_PRIME_REDTEAM_FINDINGS_SYNC_TEAMS_WEBHOOK_URL",
+        "OMEGA_PRIME_REDTEAM_AUTO_PIN_BUMP", "OMEGA_PRIME_REDTEAM_COVERAGE_ALERT_THRESHOLD",
+        "OMEGA_PRIME_TELEMETRY_OTLP_ENABLED", "OMEGA_PRIME_TELEMETRY_OTLP_ENDPOINT",
+        "OMEGA_PRIME_TELEMETRY_OTLP_INTERVAL_SECONDS", "OMEGA_PRIME_ROTATION_ENABLED",
+        "OMEGA_PRIME_ROTATION_OVERLAP_HOURS", "OMEGA_PRIME_QUOTAS_MODE",
+        "OMEGA_PRIME_QUOTAS_DOCUMENT", "OMEGA_PRIME_SANDBOX_ENABLED",
+        "OMEGA_PRIME_SANDBOX_POLICY", "OMEGA_PRIME_SANDBOX_SCOPE",
+        "OMEGA_PRIME_EVALS_REGRESS_THRESHOLD", "OMEGA_PRIME_EVALS_JUDGE_ENABLED",
+        "OMEGA_PRIME_EVALS_JUDGE_MODEL"
+      ],
+      "reason": "Decodes only explicit Prime family, redteam, telemetry, rotation, quota, sandbox, and evals configuration branches."
+    },
+    {
+      "site": "omega_prime/engine/plan_router.py:111:mapping.get",
+      "symbol": "model_id",
+      "source_sha256": "8e752ab8c2102d4f24c6e0b10a29fa4c9064eb630c8454f0511415972cb5059e",
+      "names": [
+        "OMEGA_PRIME_OMP_MODEL_ZAI", "OMEGA_PRIME_OMP_MODEL_XAI",
+        "OMEGA_PRIME_OMP_MODEL_ANTHROPIC", "OMEGA_PRIME_OMP_MODEL_MUSE",
+        "OMEGA_PRIME_OMP_MODEL_CURSOR", "OMEGA_PRIME_OMP_MODEL_CHATGPT",
+        "OMEGA_PRIME_OMP_MODEL_ZAI_PLAN", "OMEGA_PRIME_OMP_MODEL_ZAI_EXECUTE",
+        "OMEGA_PRIME_OMP_MODEL_XAI_PLAN", "OMEGA_PRIME_OMP_MODEL_XAI_EXECUTE",
+        "OMEGA_PRIME_OMP_MODEL_ANTHROPIC_PLAN", "OMEGA_PRIME_OMP_MODEL_ANTHROPIC_EXECUTE",
+        "OMEGA_PRIME_OMP_MODEL_MUSE_PLAN", "OMEGA_PRIME_OMP_MODEL_MUSE_EXECUTE",
+        "OMEGA_PRIME_OMP_MODEL_CURSOR_PLAN", "OMEGA_PRIME_OMP_MODEL_CURSOR_EXECUTE",
+        "OMEGA_PRIME_OMP_MODEL_CHATGPT_PLAN", "OMEGA_PRIME_OMP_MODEL_CHATGPT_EXECUTE"
+      ],
+      "reason": "Reads plan-only and plan-stage model override names from the exact finite plans and stages."
+    },
+    {
+      "site": "omega_prime/engine/plan_router.py:114:mapping.get",
+      "symbol": "model_id",
+      "source_sha256": "8e752ab8c2102d4f24c6e0b10a29fa4c9064eb630c8454f0511415972cb5059e",
+      "names": [
+        "OMEGA_PRIME_OMP_MODEL_ZAI", "OMEGA_PRIME_OMP_MODEL_XAI",
+        "OMEGA_PRIME_OMP_MODEL_ANTHROPIC", "OMEGA_PRIME_OMP_MODEL_MUSE",
+        "OMEGA_PRIME_OMP_MODEL_CURSOR", "OMEGA_PRIME_OMP_MODEL_CHATGPT"
+      ],
+      "reason": "Reads base model override names from the exact finite plan set."
+    },
+    {
+      "site": "omega_prime/grokbot/manifest.py:243:mapping.get",
+      "symbol": "prime_family_flags",
+      "source_sha256": "dc6e4c09d6dcab4e34ca6f410a0f236204476e849bd8bedead5c133c08289cd0",
+      "names": [
+        "OMEGA_PRIME_PRIME_RLM_ENABLED",
+        "OMEGA_PRIME_PRIME_HARNESS_ENABLED",
+        "OMEGA_PRIME_PRIME_GOALS_ENABLED",
+        "OMEGA_PRIME_PRIME_HEARTBEAT_ENABLED",
+        "OMEGA_PRIME_PRIME_AUTONOMOUS_ENABLED",
+        "OMEGA_PRIME_PRIME_MESSAGING_ENABLED",
+        "OMEGA_PRIME_PRIME_KERNEL_ENABLED"
+      ],
+      "reason": "Enumerates the exact finite Prime family override names from PRIME_FAMILIES."
+    },
+    {
+      "site": "omega_prime/commands/workflows.py:152:helper:omega_prime/commands/workflows.py:_present",
+      "symbol": "connector_requests",
+      "source_sha256": "5e3c73619bbb1d2f5f4bd7944b4ca1fe69e43f669bf0b974174e1d05cf47ef88",
+      "names": [
+        "X_API_TOKEN", "X_API_TOKEN_FILE",
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN_FILE",
+        "DISCORD_BOT_TOKEN", "DISCORD_BOT_TOKEN_FILE",
+        "XAI_API_KEY", "XAI_API_KEY_FILE",
+        "OPENAI_API_KEY", "OPENAI_API_KEY_FILE",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_FILE",
+        "SUBSTRATE_TOKEN", "SUBSTRATE_TOKEN_FILE",
+        "SUBSTRATE_TOKEN_GROK_BOT", "SUBSTRATE_TOKEN_GROK_BOT_FILE",
+        "HINDSIGHT_API_KEY", "HINDSIGHT_API_KEY_FILE",
+        "HINDSIGHT_API_TOKEN", "HINDSIGHT_API_TOKEN_FILE",
+        "RAILWAY_TOKEN", "RAILWAY_TOKEN_FILE",
+        "GREPTILE_API_KEY", "GREPTILE_API_KEY_FILE",
+        "VERCEL_TOKEN", "VERCEL_TOKEN_FILE",
+        "PLAY_CONSOLE_TOKEN", "PLAY_CONSOLE_TOKEN_FILE",
+        "ASC_KEY_ID", "ASC_KEY_ID_FILE",
+        "ASC_ISSUER_ID", "ASC_ISSUER_ID_FILE",
+        "ASC_PRIVATE_KEY", "ASC_PRIVATE_KEY_FILE"
+      ],
+      "reason": "Resolves the finite connector credential names declared in _CONNECTORS, including file selectors."
+    },
+    {
+      "site": "omega_prime/mcp_server.py:373:helper:omega_prime/mcp_server.py:_secret_present",
+      "symbol": "_desk_child_model",
+      "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
+      "names": [
+        "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_FILE",
+        "XAI_API_KEY", "XAI_API_KEY_FILE",
+        "OPENAI_API_KEY", "OPENAI_API_KEY_FILE",
+        "GEMINI_API_KEY", "GEMINI_API_KEY_FILE",
+        "GOOGLE_API_KEY", "GOOGLE_API_KEY_FILE"
+      ],
+      "reason": "Resolves only the finite provider credential names from the desk child provider declarations."
+    },
+    {
+      "site": "omega_prime/mcp_server.py:386:helper:omega_prime/integrations/binding.py:secret_value",
+      "symbol": "_desk_child_model",
+      "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
+      "names": [
+        "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_FILE",
+        "XAI_API_KEY", "XAI_API_KEY_FILE",
+        "OPENAI_API_KEY", "OPENAI_API_KEY_FILE",
+        "GEMINI_API_KEY", "GEMINI_API_KEY_FILE",
+        "GOOGLE_API_KEY", "GOOGLE_API_KEY_FILE"
+      ],
+      "reason": "Resolves only the finite provider credential names from the desk child provider declarations."
+    },
+    {
+      "site": "omega_prime/credentials/broker.py:42:helper:omega_prime/integrations/binding.py:secret_value",
+      "symbol": "key_for",
+      "source_sha256": "b7d89e2cb040723a073ee5e5618063c341c0af6cce334b8aba3c15ef010b7024",
+      "names": [
+        "AI_GATEWAY_API_KEY", "AI_GATEWAY_API_KEY_FILE",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_FILE",
+        "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN_FILE",
+        "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_API_KEY_FILE",
+        "CEREBRAS_API_KEY", "CEREBRAS_API_KEY_FILE",
+        "CLOUDFLARE_API_KEY", "CLOUDFLARE_API_KEY_FILE",
+        "COPILOT_GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN_FILE",
+        "DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY_FILE",
+        "FIREWORKS_API_KEY", "FIREWORKS_API_KEY_FILE",
+        "GEMINI_API_KEY", "GEMINI_API_KEY_FILE",
+        "GH_TOKEN", "GH_TOKEN_FILE",
+        "GITHUB_TOKEN", "GITHUB_TOKEN_FILE",
+        "GOOGLE_API_KEY", "GOOGLE_API_KEY_FILE",
+        "GOOGLE_CLOUD_API_KEY", "GOOGLE_CLOUD_API_KEY_FILE",
+        "GROQ_API_KEY", "GROQ_API_KEY_FILE",
+        "HF_TOKEN", "HF_TOKEN_FILE",
+        "KIMI_API_KEY", "KIMI_API_KEY_FILE",
+        "MINIMAX_API_KEY", "MINIMAX_API_KEY_FILE",
+        "MINIMAX_CN_API_KEY", "MINIMAX_CN_API_KEY_FILE",
+        "MISTRAL_API_KEY", "MISTRAL_API_KEY_FILE",
+        "MOONSHOT_API_KEY", "MOONSHOT_API_KEY_FILE",
+        "OPENAI_API_KEY", "OPENAI_API_KEY_FILE",
+        "OPENCODE_API_KEY", "OPENCODE_API_KEY_FILE",
+        "OPENROUTER_API_KEY", "OPENROUTER_API_KEY_FILE",
+        "PRIME_API_KEY", "PRIME_API_KEY_FILE",
+        "XAI_API_KEY", "XAI_API_KEY_FILE",
+        "XIAOMI_API_KEY", "XIAOMI_API_KEY_FILE",
+        "XIAOMI_TOKEN_PLAN_AMS_API_KEY", "XIAOMI_TOKEN_PLAN_AMS_API_KEY_FILE",
+        "XIAOMI_TOKEN_PLAN_CN_API_KEY", "XIAOMI_TOKEN_PLAN_CN_API_KEY_FILE",
+        "XIAOMI_TOKEN_PLAN_SGP_API_KEY", "XIAOMI_TOKEN_PLAN_SGP_API_KEY_FILE",
+        "ZAI_API_KEY", "ZAI_API_KEY_FILE"
+      ],
+      "reason": "Enumerates finite provider.env_vars credentials consumed by the approved credential broker, including protected-file selectors."
+    },
+    {
+      "site": "omega_prime/grokbot/doctor.py:1116:mapping.get",
+      "symbol": "_check_connector_secrets",
+      "source_sha256": "da9adca5c1daa73671631474854e3d6ba5d0f29547adfe97bc64e7c398dea84e",
+      "names": [
+        "XAI_API_KEY",
+        "X_API_TOKEN",
+        "TELEGRAM_BOT_TOKEN",
+        "DISCORD_BOT_TOKEN",
+        "SUBSTRATE_TOKEN",
+        "HINDSIGHT_API_KEY"
+      ],
+      "reason": "Enumerates the reviewed connector credential names checked by the doctor."
+    }
+  ],
+  "supplements": [
+    {
+      "site": "omega_prime/engine/jobs.py:274:environment.items",
+      "symbol": "child_env",
+      "source_sha256": "66bbaa94289708bd30b8c66db94ad357667826ac001dbec82321331819d5ca59",
+      "classification": "excluded",
+      "reason": "Forwards arbitrary OMEGA_FAKE_OMP_ values exclusively to isolated fake-engine child processes; not operator configuration."
+    }
+  ],
+  "exclusions": [
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:45:os.environ.subscription",
+      "symbol": "record_exit",
+      "source_sha256": "82633e6f1b276fd7cc5ecaaf1198ff04244d2f1b5997ba60ba4d18ffb871f2a0",
+      "names": ["GITHUB_OUTPUT"],
+      "reason": "Reads GITHUB_OUTPUT only to append the CI action exit-code output receipt."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:52:os.environ.subscription",
+      "symbol": "cmd_identity",
+      "source_sha256": "a73ab3bb9c81f038ab74a418422c5156fddbf8b82ae7a380e9b2b45f6a755dce",
+      "names": ["REQUESTED_PYTHON"],
+      "reason": "Reads REQUESTED_PYTHON only as CI interpreter identity receipt metadata."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:61:os.environ.get",
+      "symbol": "cmd_identity",
+      "source_sha256": "a73ab3bb9c81f038ab74a418422c5156fddbf8b82ae7a380e9b2b45f6a755dce",
+      "names": ["SETUP_PYTHON_VERSION"],
+      "reason": "Reads SETUP_PYTHON_VERSION only as optional CI interpreter identity receipt metadata."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:62:os.environ.get",
+      "symbol": "cmd_identity",
+      "source_sha256": "a73ab3bb9c81f038ab74a418422c5156fddbf8b82ae7a380e9b2b45f6a755dce",
+      "names": ["SETUP_PYTHON_PATH"],
+      "reason": "Reads SETUP_PYTHON_PATH only as optional CI interpreter identity receipt metadata."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:73:os.environ.get",
+      "symbol": "cmd_identity",
+      "source_sha256": "a73ab3bb9c81f038ab74a418422c5156fddbf8b82ae7a380e9b2b45f6a755dce",
+      "names": [
+        "GITHUB_REPOSITORY", "GITHUB_WORKFLOW", "GITHUB_RUN_ID", "GITHUB_RUN_NUMBER",
+        "GITHUB_RUN_ATTEMPT", "GITHUB_JOB", "GITHUB_EVENT_NAME", "GITHUB_REF",
+        "GITHUB_SHA", "RUNNER_OS", "RUNNER_ARCH"
+      ],
+      "reason": "Reads the finite workflow and runner identity keys in the source tuple for CI receipt metadata."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:482:os.environ.get",
+      "symbol": "cmd_retention",
+      "source_sha256": "417be890963faaf197165aee3713fd46eb4d866c3fa5b1c25c6e6e457683567b",
+      "names": ["RUNNER_TEMP"],
+      "reason": "Reads RUNNER_TEMP only to constrain CI retained-evidence paths."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:543:os.environ.subscription",
+      "symbol": "cmd_summary",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
+      "names": ["STEPS_JSON"],
+      "reason": "Reads STEPS_JSON only as serialized CI step outcomes for the summary receipt."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:544:os.environ.subscription",
+      "symbol": "cmd_summary",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
+      "names": ["JOB_STATUS"],
+      "reason": "Reads JOB_STATUS only as the GitHub Actions job outcome protocol."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:547:os.environ.subscription",
+      "symbol": "cmd_summary",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
+      "names": ["STAGES"],
+      "reason": "Reads STAGES only as CI step names used to build the summary receipt."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:581:os.environ.get",
+      "symbol": "cmd_summary",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
+      "names": ["GITHUB_JOB"],
+      "reason": "Reads GITHUB_JOB only as job identity metadata in the CI receipt."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:582:os.environ.subscription",
+      "symbol": "cmd_summary",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
+      "names": ["REQUESTED_PYTHON"],
+      "reason": "Reads REQUESTED_PYTHON only as interpreter identity metadata in the CI receipt."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:586:os.environ.get",
+      "symbol": "cmd_summary",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
+      "names": ["GUARD_TESTCASE"],
+      "reason": "Reads GUARD_TESTCASE only to select an optional CI JUnit guard."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:593:os.environ.subscription",
+      "symbol": "cmd_summary",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
+      "names": ["RUNNER_TEMP"],
+      "reason": "Reads RUNNER_TEMP only to locate the CI suite JUnit report."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:610:os.environ.subscription",
+      "symbol": "cmd_summary",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
+      "names": ["GUARD_CLASSNAME"],
+      "reason": "Reads GUARD_CLASSNAME only to select the named CI JUnit testcase."
+    },
+    {
+      "site": "omega_prime/scripts/ci_receipt.py:611:os.environ.subscription",
+      "symbol": "cmd_summary",
+      "source_sha256": "b0752a40ac5e81b310a2035a193c5d1e6d60c187c1a9ef384013f88a6bb77444",
+      "names": ["GUARD_NAME"],
+      "reason": "Reads GUARD_NAME only to select the named CI JUnit testcase."
+    },
+    {
+      "site": "omega_prime/grokbot/local_validation.py:1515:os.environ.subscription",
+      "symbol": "_run_profile",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
+      "names": ["READINESS_INSTALL"],
+      "reason": "Fixture-only path input for isolated local readiness validation."
+    },
+    {
+      "site": "omega_prime/grokbot/local_validation.py:1516:os.environ.get",
+      "symbol": "_run_profile",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
+      "names": ["READINESS_INCLUDE_PRIME"],
+      "reason": "Fixture-only toggle for isolated local readiness validation."
+    },
+    {
+      "site": "omega_prime/grokbot/local_validation.py:1517:os.environ.get",
+      "symbol": "_run_profile",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
+      "names": ["READINESS_PRIME_MISSING"],
+      "reason": "Fixture-only input for isolated local readiness validation."
+    },
+    {
+      "site": "omega_prime/grokbot/local_validation.py:1519:os.environ.get",
+      "symbol": "_run_profile",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
+      "names": ["READINESS_SOURCE"],
+      "reason": "Fixture-only checkout path for isolated local readiness validation."
+    },
+    {
+      "site": "omega_prime/grokbot/local_validation.py:1520:os.environ.subscription",
+      "symbol": "_run_profile",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
+      "names": ["READINESS_BASE"],
+      "reason": "Fixture-only path input for isolated local readiness validation."
+    },
+    {
+      "site": "omega_prime/grokbot/local_validation.py:1522:os.environ.subscription",
+      "symbol": "_run_profile",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
+      "names": ["READINESS_HOME"],
+      "reason": "Fixture-only path input for isolated local readiness validation."
+    },
+    {
+      "site": "omega_prime/grokbot/local_validation.py:1523:os.environ.subscription",
+      "symbol": "_run_profile",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
+      "names": ["READINESS_WORK"],
+      "reason": "Fixture-only path input for isolated local readiness validation."
+    },
+    {
+      "site": "omega_prime/grokbot/local_validation.py:1524:os.environ.subscription",
+      "symbol": "_run_profile",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
+      "names": ["READINESS_STATE"],
+      "reason": "Fixture-only path input for isolated local readiness validation."
+    },
+    {
+      "site": "omega_prime/grokbot/local_validation.py:1525:os.environ.subscription",
+      "symbol": "_run_profile",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
+      "names": ["READINESS_AUDIT"],
+      "reason": "Fixture-only path input for isolated local readiness validation."
+    },
+    {
+      "site": "omega_prime/grokbot/local_validation.py:1526:os.environ.subscription",
+      "symbol": "_run_profile",
+      "source_sha256": "648b8c20015ed965ab8c4dee62554fe85b8a1c428042630a381d4b9c1b0d4ee0",
+      "names": ["READINESS_COMMAND_LOG"],
+      "reason": "Fixture-only path input for isolated local readiness validation."
+    }
+  ],
+  "metadata": {
+    "token_selectors": [
+      {
+        "site": "omega_prime/mcp_server.py:2155:args.token_env",
+        "symbol": "_resolve_token",
+        "source_sha256": "e04ec502c56de9c37869762a3519cac3470f599f455c9ec1b3343026091652d7",
+        "reason": "The caller-selected environment key is an arbitrary MCP bearer-token selector, not a concrete setting name."
+      },
+      {
+        "site": "omega_prime/grokbot/oneclick.py:257:token_env",
+        "symbol": "_resolve_token",
+        "source_sha256": "71330b28e111b323141f85f64c37224eb239f42b8cf738da190a4c8aaab5b5fe",
+        "reason": "The token_env argument selects an arbitrary bearer credential after file and argv token sources."
+      }
+      ,
+      {
+        "site": "omega_prime/grokbot/manifest.py:445:args.token_env",
+        "symbol": "main",
+        "source_sha256": "f9944acb43fc785c8770c5d1eaadcce23e4dc75f2355528bf4b17e01f2942e83",
+        "reason": "The CLI-selected token_env is checked only for bearer authentication presence; its name is arbitrary."
+      },
+      {
+        "site": "omega_prime/grokbot/verify.py:938:env_name",
+        "symbol": "_load_secret",
+        "source_sha256": "7b6742601de88c3336a8dea70e81fb9d018bd35bb8685ed5b7c800fdbcfcd6d1",
+        "reason": "The CLI-selected env_name identifies an arbitrary verification secret and is not an inventory name."
+      }
+    ]
+  }
+}

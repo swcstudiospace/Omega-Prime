@@ -235,23 +235,29 @@ def test_e2e_listed_tools_match_health_and_state(tmp_path: Path) -> None:
     assert len(names) > 100
 
 
-def test_e2e_tool_call_is_audited_without_argument_values(tmp_path: Path) -> None:
+def test_e2e_clarify_reports_undeliverable_without_live_operator(
+    tmp_path: Path,
+) -> None:
     with _serve(_app(tmp_path)) as host:
 
         async def go() -> tuple[Any, Any]:
             async with _client(host) as client:
                 plain = await client.call_tool("todo_read", {})
-                echoed = await client.call_tool("clarify", {"question": QUESTION})
-            return plain, echoed
+                undeliverable = await client.call_tool(
+                    "clarify", {"question": QUESTION}
+                )
+            return plain, undeliverable
 
-        plain, echoed = _run(go())
+        plain, undeliverable = _run(go())
         records = host.records()
         verified, count, _ = host.audit.verify_integrity()
         text = host.audit.log_path.read_text(encoding="utf-8")
 
     assert not plain.is_error
-    assert not echoed.is_error
-    assert QUESTION in echoed.content[0].text  # the caller sees the value ...
+    assert undeliverable.is_error
+    assert json.loads(undeliverable.content[0].text) == {
+        "error": "undeliverable: no clarify interaction is configured"
+    }
     assert [r["tool_name"] for r in records] == ["todo_read", "clarify"]
     first, second = records
     assert first["caller"] == "env-token"
@@ -261,7 +267,9 @@ def test_e2e_tool_call_is_audited_without_argument_values(tmp_path: Path) -> Non
     assert first["details"]["transport"] == "sse"
     assert second["details"]["arg_keys"] == ["question"]
     assert len(second["details"]["args_sha256"]) == 64
-    assert QUESTION not in text  # ... the audit log never does
+    assert second["status"] == "error"
+    assert second["is_error"] is True
+    assert QUESTION not in text
     assert verified is True
     assert count == len(records)
 

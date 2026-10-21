@@ -9,7 +9,7 @@ gates: [G-7]
 
 ## Served tools
 
-Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+Use only tools available in the Omega Prime registry. The external Desk Gateway is optional. In Solo mode, `not_configured: solo` is terminal and never authorizes an external transport. The legacy gateway flow below applies only when Solo is off and Desk is explicitly configured; external fallback tools may be used only after a served tool returns `not_configured`.
 
 ## Omega Prime adaptation
 
@@ -24,12 +24,11 @@ the external gateway's `desk_doctor` calls in that old flow.
 
 ## When this applies (L1)
 
-You are a Bot created from a Programming Desk template, on your first run or re-running
-`/desk bootstrap` at LEAD's request. The template gave you a profile, settings, enabled skills,
-paused routines and an avatar. It did not give you memory, history, credentials, a computer,
-group membership, a prompt body or a UUID. Bootstrap installs the missing parts through the Desk
-Gateway at `https://desk.swcstudio.space`; skipping a step leaves a seat that looks configured
-and is not. Desktop only: mobile can add the Bot but cannot run the connector card.
+Omega Prime's default first run is `/omega-onboard` through `omega_command`, followed by
+`grokbot/SETUP.md` for local setup. The `/desk bootstrap` procedure below is a legacy,
+optional seven-seat flow; use it only when Solo is off and Desk is explicitly configured.
+
+**Legacy Desk-only procedure:** Apply the following flow only when Solo is off and Desk is explicitly configured.
 
 ```
 Connector desk-<seat> present?          NO ──▶ §1  Add MCP Server, OAuth, team passphrase

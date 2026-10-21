@@ -35,9 +35,18 @@ References: `omes/tools/registry.py#L45-L74`, `omes/tools/coding.py#L21-L46`, `o
 
 ### Plugin registration
 
-Plugins extend the registry from a workspace-local `plugins/<name>/plugin.py` location. A plugin exposes a `register(registry)` entry point and can add tools to the same registry as built-in groups.
+Plugins extend the registry from a workspace-local `plugins/<name>/plugin.py`
+location. A plugin exposes a `register(registry)` entry point and can add
+tools to the same registry as built-in groups.
 
-The loader uses only valid plugin directory names and skips a plugin file that resolves outside the workspace. It reports the names newly added by each plugin, but plugin tools are not automatically offered to the model unless the active roster includes them.
+Plugin modules load only when `OMEGA_PRIME_PLUGINS=1` exactly. When disabled,
+the host does not scan or import plugin files. Enabled modules are trusted
+local Python and run unsandboxed; a plugin can add tools or replace existing
+handlers and approval metadata. Plugin registration therefore does not itself
+establish a safe or approved capability.
+
+The `pin_bump_apply` action requires an exact human grant through the existing
+admin grant/revoke route. Served-tool metadata is not itself an approval.
 
 References: `omes/tools/plugins.py#L1-L54`, `omes/tools/plugins.py#L57-L97`
 
@@ -87,9 +96,12 @@ References: `omes/tools/rpc.py#L1-L10`, `omes/tools/rpc.py#L31-L109`, `omes/tool
 
 ## Execution jobs
 
-Execution jobs provide a job handle for child processes that may need polling or later control. `JobControl` screens every argv before it starts, then lets the caller poll, wait, or kill the job and receive the same cached final result after the process exits.
-
-This model separates capability selection from process lifetime. A capability can start work and return an id, while a later action checks whether the work is running or obtains its captured output. Every started child is reaped once, and a refused command starts no process.
+Execution jobs provide a job handle for child processes that may need polling
+or later control. The four `exec_job_start`, `exec_job_poll`, `exec_job_wait`,
+and `exec_job_kill` tools are retained, approval-gated, and local to the
+registry that owns them. Plan mode blocks start and kill; argv cwd is fixed to
+the approved work root. Jobs can be polled, waited on, or killed and return
+their cached final result after reaping.
 
 References: `omes/tools/exec_jobs.py#L1-L9`, `omes/tools/exec_jobs.py#L21-L59`, `omes/tools/exec_jobs.py#L61-L111`, `omes/agent/security.py#L1-L48`
 

@@ -37,6 +37,7 @@ def register_growth_tools(
     session_db: str | Path,
     memory_store: MemoryStore | None = None,
     skills_fallback: str | Path | None = None,
+    retain_memory: Callable[[str], dict[str, Any]] | None = None,
 ) -> list[str]:
     """Register the four growth tools. Handlers close over the three paths.
 
@@ -46,7 +47,7 @@ def register_growth_tools(
     ``memory_dir``.
     """
     store = memory_store if memory_store is not None else MemoryStore(memory_dir)
-    provider = BuiltinMemoryProvider(store)
+    provider = BuiltinMemoryProvider(store, retain=retain_memory)
     manager = MemoryManager()
     manager.add_provider(provider)
     sessions = SessionStore(session_db)

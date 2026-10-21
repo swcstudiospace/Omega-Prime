@@ -6,10 +6,14 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from omega_prime.engine.omp_driver import EngineResult, probe, run
+from omega_prime.engine.jobs import agent_data_dir, job_dir
+from omega_prime.engine.omp_driver import EngineResult, omp_home, probe, run
+from omega_prime.engine.ui_control import UIControlStore
 
 _OFF = frozenset({"0", "off", "python", "false", "no"})
 _TRANSCRIPT_CHARS = 4_000
@@ -166,19 +170,57 @@ def route_turn(
         ready, _reason = probe(mapping, stage=staged)
         if not ready:
             return None
-    result = run(
-        _with_history(user_message, conversation_history),
-        cwd=getattr(agent, "engine_cwd", None),
-        system_prompt=system_message,
-        thinking=getattr(agent, "engine_thinking", None),
-        plan=getattr(agent, "engine_plan", None),
-        env=mapping,
-        job_id=getattr(agent, "engine_job_id", None),
-        interrupt=interrupt,
-        stage=staged,
+    job_id = getattr(agent, "engine_job_id", None) or "job-" + uuid.uuid4().hex[:8]
+    engine_cwd = getattr(agent, "engine_cwd", None)
+    work_root = (
+        Path(os.path.abspath(engine_cwd)) if engine_cwd is not None else Path.cwd()
     )
+    try:
+        binds: list[Path | str] = [
+            job_dir(mapping, job_id),
+            work_root,
+            agent_data_dir(mapping),
+        ]
+        omp_store = omp_home(mapping)
+        if omp_store.is_dir() and omp_store not in binds:
+            binds.append(omp_store)
+        ui_control = UIControlStore.from_env(mapping, writable_binds=binds)
+    except (OSError, ValueError):
+        result = EngineResult(
+            False,
+            job_id,
+            reason="ui_control_unavailable",
+            detail="rpc-ui requires a safe operator control store",
+            mode="rpc-ui",
+        )
+        return _refused(
+            agent, user_message, conversation_history, result, task_id=task_id
+        )
+    with ui_control:
+        result = run(
+            _with_history(user_message, conversation_history),
+            cwd=work_root,
+            system_prompt=system_message,
+            thinking=getattr(agent, "engine_thinking", None),
+            plan=getattr(agent, "engine_plan", None),
+            env=mapping,
+            job_id=job_id,
+            mode="rpc-ui",
+            ui_control=ui_control,
+            stage=staged,
+            cancel_event=(
+                interrupt
+                if interrupt is not None
+                else getattr(agent, "interrupt", None)
+            ),
+        )
     if not result.ok:
-        if mode == "required" or forced or result.started:
+        if (
+            mode == "required"
+            or forced
+            or result.started
+            or result.reason == "ui_control_unavailable"
+        ):
             return _refused(
                 agent, user_message, conversation_history, result, task_id=task_id
             )
@@ -202,9 +244,11 @@ def _engine_body(result: EngineResult) -> dict[str, Any]:
         "stage": result.stage,
         "fallback_from": result.fallback_from,
         "events": result.events_path,
-        "cost": result.cost,
         "usage": result.usage,
+        "cost": result.cost,
         "sandbox": result.sandbox,
+        "mcp_status": result.mcp_status,
+        "mcp_cleanup_conflicts": result.cleanup_conflicts,
         "started": result.started,
     }
 

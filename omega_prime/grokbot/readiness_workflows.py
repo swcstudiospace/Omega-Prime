@@ -92,9 +92,11 @@ def _coding_root(probe: ReadinessProbe) -> Path:
 
 def _memory_dir(probe: ReadinessProbe) -> Path:
     """Disposable memory directory, mirroring the runtime wiring."""
-    state = _state_value(probe)
-    if state:
-        return Path(state) / "memory"
+    from omega_prime.agent_state import agent_state_dir
+
+    agent = agent_state_dir(_layout_env(probe))
+    if agent is not None:
+        return agent / "memory"
     return _runtime_root(probe) / "omega_prime" / "memory"
 
 
@@ -111,9 +113,13 @@ def _durable_journal_path(probe: ReadinessProbe) -> Path:
 
 
 def _desk_turns_path(probe: ReadinessProbe) -> Path:
+    from omega_prime.agent_state import agent_state_dir
     from omega_prime.mcp_server import _desk_store_path
 
-    return _desk_store_path(_work_root(probe), _state_value(probe), "turns.sqlite")
+    agent = agent_state_dir(_layout_env(probe))
+    return _desk_store_path(
+        _work_root(probe), str(agent) if agent is not None else "", "turns.sqlite"
+    )
 
 
 def _unique(prefix: str) -> str:
@@ -537,30 +543,30 @@ def _python_clean_slice(probe: ReadinessProbe, context: dict[str, Any]) -> None:
 
 
 def _retain_recall_slice(probe: ReadinessProbe, context: dict[str, Any]) -> None:
-    marker = f"readiness workflows retain proof {uuid.uuid4().hex}"
-    retained = _result(probe, "omega_command", {"command": f"/omega-retain {marker}"})
+    marker = f"readiness-workflow-{uuid.uuid4().hex}"
+    retained = _result(
+        probe,
+        "omega_command",
+        {"command": f"/omega-retain --source readiness -- {marker}"},
+    )
     probe.check(retained.get("ok") is True, "retain reports ok")
 
     recalled = _result(
         probe, "omega_command", {"command": f"/omega-recall {marker.split()[-1]}"}
     )
     probe.check(recalled.get("ok") is True, "recall reports ok")
-    banks = (recalled.get("result") or {}).get("results") or []
-    entries = [
-        entry
-        for bank in banks
-        if isinstance(bank, dict)
-        for entry in (bank.get("entries") or [])
-    ]
-    probe.check(len(entries) > 0, "recall returns entries for the retained marker")
+    entries = (recalled.get("result") or {}).get("results") or []
     probe.check(
-        any(marker in str(entry) for entry in entries),
+        any(
+            isinstance(entry, dict) and marker in entry.get("content", "")
+            for entry in entries
+        ),
         "retained text roundtrips through recall",
     )
     probe.record(
         "slash-retain-recall",
         ("omega_command", "memory", "lead_memory_recall"),
-        "retain stores one entry and recall returns it from the shared banks",
+        "retain stores one entry and unified recall returns its content envelope",
     )
 
 
@@ -1003,18 +1009,16 @@ def _cron_slice(probe: ReadinessProbe) -> None:
     )
     probe.check(banked.get("ok") is True, "banked retain reports ok")
     probe.check(
-        banked.get("bank") == "omega-prime-lead", "retain lands in the lead bank"
+        banked.get("local_saved") is True, "retain saves the unified local record"
     )
     banked_recall = _result(probe, "lead_memory_recall", {"query": banked_marker})
-    banked_entries = [
-        entry
-        for bank in (banked_recall.get("results") or [])
-        if isinstance(bank, dict)
-        for entry in (bank.get("entries") or [])
-    ]
+    banked_entries = banked_recall.get("results") or []
     probe.check(
-        any(banked_marker in str(entry) for entry in banked_entries),
-        "banked memo roundtrips through lead recall",
+        any(
+            isinstance(entry, dict) and banked_marker in entry.get("content", "")
+            for entry in banked_entries
+        ),
+        "banked memo roundtrips through unified lead recall",
     )
     settled = IntakeStore(intake_path).get(model_order["intake_id"])
     probe.check(

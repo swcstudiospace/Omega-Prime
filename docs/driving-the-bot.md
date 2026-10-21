@@ -106,6 +106,11 @@ cargo build --locked --manifest-path native/omega-prime-prime/Cargo.toml \
 
 ## Start the tool host
 
+This command starts the desk MCP host registered with a Grok Bot seat. It is
+separate from the omp coding engine; it does not configure omp's project-local
+MCP attachment, skills view, or RPC-UI operator queue. See
+[omp engine setup](setup.md#9-omp-engine) for that separate path.
+
 ```bash
 .venv/bin/python -m omega_prime.mcp_server --root . \
   --approve goal_set:alice --approve goal_clear:alice
@@ -152,6 +157,14 @@ The Prime families write under `--root`, and the repository ignores these paths:
 
 An autonomous run is held in the host process and is not written to disk.
 
+The omp engine uses a separate, temporary `<work-root>/.omp/mcp.json` and
+`.omp/skills` view while it owns that work tree. They are not Prime state under
+`--root`. The next run for that work tree attempts recovery only for matching
+journal entries whose owner and artifact identities prove they are stale;
+changed or uncertain files are
+preserved and reported. The shared omp login store remains under `~/.omp` and
+is never copied. See [omp engine setup](setup.md#9-omp-engine).
+
 ### Intake queue
 
 The intake queue (`intake.json`, resolved from the state directory) is the
@@ -197,6 +210,11 @@ The template tells the bot to read `omega_prime/prompts-assembled/OMEGA_PRIME.xm
 run. Give your bot the effective file instead. This repository builds the file;
 how Grok takes it is a Grok Bot setting this repository neither controls nor
 tests, so confirm it with the checks below.
+
+The effective prompt and this Grok Bot roster do not prove that a separate omp
+session discovered its MCP tools or loaded its skills. Verify those against
+the omp session's discovery and skill-loader results; see
+[omp engine setup](setup.md#9-omp-engine).
 
 ## Check it
 
@@ -302,6 +320,11 @@ a Bot is section 1 of
 | `the factory is disabled; run /factory on to enable it` | The factory is off until `prime_factory_run` enables it. | Approve and call `prime_factory_run` with a valid spec id. |
 | A heartbeat job never fires | The host has no loop bound to a named session. | Expected here. Jobs fire only under an embedded `OmegaPrimeAgent(..., session_name=...)`; see [Agent loop](agent-loop.md). |
 | The host serves Prime tools but the bot never calls them | Its prompt does not list them. | Build and load the effective prompt. |
+| An omp session reports `mcp_status: attach_failed` | The work tree's `.omp` path was pre-existing, busy, unsafe, or its server did not appear in session discovery. | Read `mcp_status` and `cleanup_conflicts` in the job's `session.json`. Preserve existing `.omp` data; use a clean work tree for an isolated run, and correct the installation/import path before retrying. |
+| An OMP tool is missing after `mcp_status: attached` | The session discovered `omega_command`, but the requested tool may not be registered in the installed roster or may be excluded by the caller. | Check the requested name against the installed Omega Prime tool roster and the caller's restrictions; this is not a Grok Bot seat roster issue. |
+| Two omp runs target the same work tree | The project-local `.omp` attachment has one owner; the other run backs off instead of replacing it. | Serialize runs for that work tree or use separate work trees. Do not remove `.omp` while a run may own it. |
+| An omp job reports an MCP cleanup conflict | A run-owned path changed identity while the engine was using it, so cleanup preserved it. | Inspect `cleanup_conflicts` in `session.json`; do not delete or overwrite the changed path until its owner is known. |
+| An omp RPC-UI ask is pending | A live operator answer is required; there is no policy-file auto-answer. | Run `omega ui list`, then `omega ui answer --job JOB --session SESSION --turn TURN --request REQUEST --text "answer"` using the exact identity. Cancel with `omega ui abort --job JOB --session SESSION`. |
 
 More on the typed errors and handler rules: [Migration to v10](migration.md).
 Per-tool approval and parameters: [Tool catalog](tool-catalog.md).

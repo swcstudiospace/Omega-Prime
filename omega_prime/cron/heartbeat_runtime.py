@@ -33,8 +33,8 @@ import json
 import math
 import threading
 import time
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, TypeGuard
@@ -335,10 +335,25 @@ class HeartbeatRuntime:
                 ]
             )
 
+    @contextmanager
+    def _locked_store(self) -> Iterator[JobStore]:
+        """The job file, reloaded under the store's cross-process lock.
+
+        Every heartbeat read-modify-save runs inside this, the same flock the
+        scheduler's claim/settle path takes, so a heartbeat save can never
+        write back a stale copy over a prompt job another tick just settled.
+        Never nest it: the lock is not re-entrant across file descriptors.
+        """
+        store = JobStore(self._path)
+        with store._store_transaction():
+            yield store
+
     def clear(self, job_id: str) -> dict:
         """Remove one heartbeat; unknown ids (or foreign rows) are errors."""
         with self._lock:
             store = JobStore(self._path)
+            # clear_heartbeat removes the row in the store's own locked
+            # reload-and-save transaction, so it never writes a stale copy.
             result = clear_heartbeat(store, job_id)
             self._sync_entry_locked(store, job_id)
         return result
@@ -606,70 +621,76 @@ class HeartbeatRuntime:
         with self._lock:
             if self._drain_depth > 0:
                 return None
-            store = JobStore(self._path)
-            job = _find(store.jobs, job_id)
-            if job is None or job.get("kind") != HEARTBEAT_KIND or job.get("completed"):
-                return None
-            session = job.get("session")
-            prompt = job.get("prompt")
-            interval = job.get("interval_seconds")
-            claim_due = job.get("due_at")
-            history = job.get("history")
-            if isinstance(history, list) and any(
-                isinstance(entry, dict) and entry.get("ran_at") == now
-                for entry in history
-            ):
-                return None
-            if _job_fire_at(job, now) is None:
-                outcome = {
-                    "error": "heartbeat job has invalid session, prompt, "
-                    "interval_seconds, due_at, or scheduler calendar"
-                }
-                finished = self._finish_locked(store, job, now, None, outcome)
-                self._sync_entry_locked(store, job_id)
-                # A diagnostic sink may re-enter this runtime (list/clear),
-                # so capture the event under the lock and emit after release.
-                deferred = (
-                    self._service_sink,
-                    {
-                        "type": "prime_degraded",
-                        "family": "heartbeat",
-                        "error": outcome["error"],
-                        "job_id": job_id,
-                    },
-                )
-            else:
-                assert isinstance(session, str)
-                if job["due_at"] > now:
+            with self._locked_store() as store:
+                job = _find(store.jobs, job_id)
+                if (
+                    job is None
+                    or job.get("kind") != HEARTBEAT_KIND
+                    or job.get("completed")
+                ):
                     return None
+                session = job.get("session")
+                prompt = job.get("prompt")
+                interval = job.get("interval_seconds")
+                claim_due = job.get("due_at")
                 history = job.get("history")
-                if not isinstance(history, list):
-                    history = []
-                    job["history"] = history
-                if job.get("claimed_at") == now or any(
+                if isinstance(history, list) and any(
                     isinstance(entry, dict) and entry.get("ran_at") == now
                     for entry in history
                 ):
                     return None
-                job["claimed_at"] = now
-                store._save()
-                pair = self._bindings.get(session)
-                if pair is None:
-                    outcome = {"error": f"unknown heartbeat session: {session!r}"}
-                    finished = self._finish_locked(store, job, now, interval, outcome)
+                if _job_fire_at(job, now) is None:
+                    outcome = {
+                        "error": "heartbeat job has invalid session, prompt, "
+                        "interval_seconds, due_at, or scheduler calendar"
+                    }
+                    finished = self._finish_locked(store, job, now, None, outcome)
                     self._sync_entry_locked(store, job_id)
+                    # A diagnostic sink may re-enter this runtime (list/clear),
+                    # so capture the event under the lock and emit after release.
                     deferred = (
                         self._service_sink,
                         {
                             "type": "prime_degraded",
                             "family": "heartbeat",
                             "error": outcome["error"],
-                            "session": session,
                             "job_id": job_id,
                         },
                     )
                 else:
-                    runner, sink = pair
+                    assert isinstance(session, str)
+                    if job["due_at"] > now:
+                        return None
+                    history = job.get("history")
+                    if not isinstance(history, list):
+                        history = []
+                        job["history"] = history
+                    if job.get("claimed_at") == now or any(
+                        isinstance(entry, dict) and entry.get("ran_at") == now
+                        for entry in history
+                    ):
+                        return None
+                    job["claimed_at"] = now
+                    store._save()
+                    pair = self._bindings.get(session)
+                    if pair is None:
+                        outcome = {"error": f"unknown heartbeat session: {session!r}"}
+                        finished = self._finish_locked(
+                            store, job, now, interval, outcome
+                        )
+                        self._sync_entry_locked(store, job_id)
+                        deferred = (
+                            self._service_sink,
+                            {
+                                "type": "prime_degraded",
+                                "family": "heartbeat",
+                                "error": outcome["error"],
+                                "session": session,
+                                "job_id": job_id,
+                            },
+                        )
+                    else:
+                        runner, sink = pair
         if deferred is not None:
             emit_sink, event = deferred
             self._emit_guarded(emit_sink, event)
@@ -733,8 +754,7 @@ class HeartbeatRuntime:
         current due/interval values stand, so finish never overwrites an
         external update.
         """
-        with self._lock:
-            store = JobStore(self._path)
+        with self._lock, self._locked_store() as store:
             job = _find(store.jobs, job_id)
             if (
                 job is None
@@ -777,8 +797,7 @@ class HeartbeatRuntime:
 
     def _release_claim(self, job_id: str) -> None:
         """Clear a claim after a ``BaseException`` so future beats can fire."""
-        with self._lock:
-            store = JobStore(self._path)
+        with self._lock, self._locked_store() as store:
             job = _find(store.jobs, job_id)
             if job is None or job.get("kind") != HEARTBEAT_KIND:
                 return

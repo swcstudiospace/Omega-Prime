@@ -4,9 +4,9 @@ milestone: v20
 milestone_name: Wiring
 status: Phase 97 local implementation executed; verification deferred pending authoritative upstream MCP contract evidence.
 stopped_at: Phase 97 local verification finished; current upstream MCP mount/schema evidence is still needed before phase verification can pass.
-last_updated: "2026-10-20"
-last_activity: 2026-10-20
-last_activity_desc: Phase 97 local changes and tests executed; static/catalog gates pass, full test suite has only the 27 recorded baseline failures
+last_updated: "2026-10-21"
+last_activity: 2026-10-21
+last_activity_desc: Phase 98 shared memory merged (PR #51); Phase 99 solo mode integrated onto main (PR #48); Phase 100 omp engine wiring integrated after it (PR #50); phase 97 verification remains deferred on authoritative upstream contract evidence; Phase 102 integrated (PR #52).
 state_head: 0b1fad3
 progress:
   total_phases: 7
@@ -25,15 +25,23 @@ current_plan: "02"
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** v20 Wiring (Phases 97–103) is in progress. Phase 97 has local transport, settings, diagnostics, argument, and no-cap implementation with offline tests; current upstream MCP mount/schema compatibility remains unverified, so Phase 97 verification is deferred and no v20 phase is complete. v19 Installer bindings (phase 96) and v1–v19 history remain unchanged. Phase 77.1 live import UAT remains user-owned and `human_needed`.
+**Historical current focus (v19 closeout):** v19 Installer bindings is complete (phase 96). v18 stays shipped. v17 stays shipped. Historical v17 note: every first-party prompt is wrapped in XML and `python -m omega_prime.tooling.prompt_format --check` enforces it. v1–v16 stay shipped. Phase 77.1 is a separate unchecked ROADMAP phase whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–18 are on main (`.planning/BATCH-01-REPORT.md` … `BATCH-18-REPORT.md`); batch 19 was not the accepted seven. The accepted seven are implemented as v18 phases 89-95. `ci / lint` on main was RED from batch 05 to 17 (21 ruff errors the batch reports had called clean) and was repaired in PR #31: every batch gate MUST run the exact CI commands (`ruff check omega_prime/`, `ruff format --check omega_prime/`, `mypy omega_prime/`, `pytest omega_prime/tests -q`) against current source; never trust old green prose.
+
+**Current focus:** v20 Wiring (Phases 97–103) is in progress. Phase 97 has local transport, settings, diagnostics, argument, and no-cap implementation with offline tests; current upstream MCP mount/schema compatibility remains unverified, so Phase 97 verification is deferred and no v20 phase is complete. Phase 98's branch implementation is being integrated after phase 97; preserve phase 97's authoritative endpoint resolver and source-aware `memory_search` errors. v19 Installer bindings and v1–v19 history remain unchanged. Phase 77.1 live import UAT remains user-owned and `human_needed`.
 
 ## Current Position
 
 Phase: v20 Phase 97 — substrate direct connect + settings loader + no time caps (local implementation executed; verification deferred on authoritative upstream MCP mount/schema evidence).
 Plan: 02 (5 total; 1 complete; local transport and argument changes are present, but server-contract preflight tasks remain open).
-Status: Local tests and static/catalog gates ran; full pytest has the same 27 baseline failures and zero new failures. Resume with authoritative MCP path/schema preflight in plans 97-02/97-03. Do not audit, complete, or clean up v20. Phase 77.1 remains `verification_deferred_human`; do not re-execute phases 85–96 or mark 77.1 passed.
+Status: Phase 97 local implementation is not verified against current upstream transport/schema. Phase 98 runtime work is present on the parallel branch and is being rebased after phase 97; phase 97 contracts take precedence at integration. Resume with authoritative MCP path/schema preflight in plans 97-02/97-03. Do not audit, complete, or clean up v20. Phase 77.1 remains `verification_deferred_human`; do not re-execute phases 85–96 or mark 77.1 passed.
 
-## Closeout
+Phase 100 (omp engine wiring) is complete and integrated after Phase 99 (PR #50). Evidence: .planning/phases/100-omp-engine-wiring/100-SUMMARY.md.
+
+Phase 99 (solo mode, Desk optional) is implemented and integrated onto main after Phase 98; see `.planning/phases/99-solo-mode-desk-optional/99-SUMMARY.md`.
+
+## Closeout — Historical v19
+
+Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.
 
 Audit: milestones/v19-MILESTONE-AUDIT.md. Requirements INST-01 through INST-07 are checked. v18 audit remains at milestones/v18-MILESTONE-AUDIT.md. Requirements OPS-01 through OPS-07 stay checked. Pytest after the command-file commit: the three stdio overlay tests passed. The earlier full suite was 4639 passed, 3 skipped, and those three failures only. Ruff, ruff format, and mypy were clean on this branch. Cleanup leaves phase directories in place, matching v17, which is still under .planning/phases.
 
@@ -102,6 +110,7 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ### Roadmap Evolution
 
 - v14 Boundary alignment shipped 2026-10-10: phases 71–74, audit passed 10/10.
+- v20 Wiring opened for phases 97–103. Phase 99 has been implemented in its isolated worktree; integration remains in operator-controlled merge order.
 - Count text in BND-05 and BND-06 moved from 110/147 to 117/154 with the phase 73 tools.
 - v14 application updates were merged through PR #17; v15 continues on `v15-integrated-readiness`.
 - v15 has phases 75–78 and 21 approved requirements, with no unrelated seeds or upstream changes.
@@ -144,9 +153,13 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ## Session
 
 **Last session:** 2026-10-20
-**Stopped at:** Phase 97 local implementation and offline gates; authoritative upstream MCP mount/schema evidence remains an open verification gap.
+**Stopped at:** Phase 97 local implementation and offline gates; authoritative upstream MCP mount/schema evidence remains an open verification gap. Phase 98 implementation is being integrated in order after phase 97.
 **Resume file:** `.planning/phases/97-substrate-direct-connect/97-02-PLAN.md`
 
 ## Operator Next Steps
 
-- Phase 97 is locally implemented but not verified against the current upstream server. Obtain authoritative MCP path/schema evidence, then resume the preflight/gap work; live endpoint verification and live settings/connector changes remain operator-owned. Phase 77.1 live UAT stays user-owned (`/gsd:verify-work 77.1`).
+- Phase 97 is locally implemented but not verified against the current upstream server. Obtain authoritative MCP path/schema evidence, then resume the preflight/gap work; live endpoint verification and live settings/connector changes remain operator-owned. Phase 98's endpoint and source-aware search behavior must retain this phase 97 authority. Phase 77.1 live UAT stays user-owned (`/gsd:verify-work 77.1`).
+- Phase 99 is integrated onto main after Phases 97 and 98; it does not mark the milestone complete.
+- Phase 100 (omp engine wiring) is integrated after Phase 99 (PR #50); see `.planning/phases/100-omp-engine-wiring/100-SUMMARY.md`.
+
+Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.
