@@ -54,10 +54,15 @@ def delegate_task(
         # A plan-mode parent, a child_tool_hook, or a narrowed tool map
         # must not receive the full MCP registry.
         if not _restricted(parent):
+            # The engine child counts as one level deeper, like _run_child,
+            # and works in the parent's checkout rather than the process cwd.
+            engine_cwd = getattr(parent, "engine_cwd", None)
             routed = delegate_via_engine(
                 goals[0],
                 interrupt=getattr(parent, "interrupt", None),
                 stage=child_stage,
+                cwd=None if engine_cwd is None else str(engine_cwd),
+                delegate_depth=depth + 1,
             )
             if routed is not None:
                 return routed

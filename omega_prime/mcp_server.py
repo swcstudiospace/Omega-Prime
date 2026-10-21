@@ -248,10 +248,17 @@ class _DeskParent:
         registry: ToolRegistry,
         model: Any,
         env: Mapping[str, str] | None = None,
+        work: Path | None = None,
     ) -> None:
         self._registry = registry
         self.child_model = model
-        self.delegate_depth = 0
+        mapping = os.environ if env is None else env
+        # A server started for an engine child (omp -> this MCP server) runs
+        # at that child's delegate depth, so the depth limit carries over.
+        self.delegate_depth = _delegate_depth(mapping)
+        # Staged delegates run in the server's resolved work root, the same
+        # checkout the IDE and exec tools are jailed to, not the process cwd.
+        self.engine_cwd = None if work is None else str(work)
         self.max_depth = 2
         self.max_children = 1
         self.journal: Any = None
@@ -259,7 +266,7 @@ class _DeskParent:
         # server; a staged parent delegates to the execute stage.
         from omega_prime.engine.attach import engine_stage
 
-        self.engine_stage = engine_stage(os.environ if env is None else env)
+        self.engine_stage = engine_stage(mapping)
 
     @property
     def tools(self) -> dict[str, Any]:
@@ -269,6 +276,15 @@ class _DeskParent:
             )
             for item in self._registry.schemas()
         }
+
+
+def _delegate_depth(env: Mapping[str, str]) -> int:
+    raw = str(env.get("OMEGA_PRIME_DELEGATE_DEPTH", "") or "").strip()
+    try:
+        return max(0, int(raw)) if raw else 0
+    except ValueError:
+        # An unreadable depth fails closed: no further delegates.
+        return 1 << 16
 
 
 def _desk_dispatch(registry: ToolRegistry, name: str) -> Any:
@@ -1063,7 +1079,7 @@ def default_registry(
     # A staged engine turn delegates to the engine's execute stage, so it
     # gets a parent even with no Python child provider configured.
     if child_model is not None or engine_stage(env) is not None:
-        parent = _DeskParent(registry, child_model, env)
+        parent = _DeskParent(registry, child_model, env, work=work)
         try:
             from omega_prime.durable.journal import TurnJournal
 

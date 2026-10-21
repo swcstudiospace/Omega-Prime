@@ -167,7 +167,9 @@ def route_turn(
     if not forced and not _live_model(getattr(agent, "model", None)):
         return None
     if mode == "auto" and not forced:
-        ready, _reason = probe(mapping, stage=staged)
+        ready, _reason = probe(
+            mapping, stage=staged, plan=getattr(agent, "engine_plan", None)
+        )
         if not ready:
             return None
     job_id = getattr(agent, "engine_job_id", None) or "job-" + uuid.uuid4().hex[:8]
@@ -319,10 +321,13 @@ def delegate_via_engine(
     cwd: str | None = None,
     interrupt: Any | None = None,
     stage: str | None = None,
+    delegate_depth: int | None = None,
 ) -> str | None:
     """JSON summary from omp, or None when the Python child path should run.
 
     ``stage`` falls back to ``OMEGA_PRIME_ENGINE_STAGE``; see ``engine_stage``.
+    ``delegate_depth`` is the child's depth, handed to omp's MCP server so
+    the child's own delegates still stop at the parent's ``max_depth``.
     """
     mapping = _mapping(env)
     mode = engine_mode(mapping)
@@ -334,7 +339,10 @@ def delegate_via_engine(
         return None
     if not ready and mode == "required":
         return json.dumps({"error": reason}, ensure_ascii=False)
-    result = run(goal, env=mapping, cwd=cwd, interrupt=interrupt, stage=staged)
+    extra: dict[str, Any] = {}
+    if delegate_depth is not None:
+        extra["delegate_depth"] = delegate_depth
+    result = run(goal, env=mapping, cwd=cwd, interrupt=interrupt, stage=staged, **extra)
     if not result.ok:
         if mode == "required" or result.started:
             return json.dumps(

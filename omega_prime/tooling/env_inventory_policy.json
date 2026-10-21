@@ -71,6 +71,7 @@
     "NOTION_TOKEN_FILE": "Names a protected file containing the Notion integration credential.",
     "OMEGA_PRIME_AUDIT_LOG": "Selects the destination for Omega Prime audit events.",
     "OMEGA_PRIME_BWRAP_BIN": "Selects the bubblewrap executable used for sandboxing.",
+    "OMEGA_PRIME_DELEGATE_DEPTH": "Sets the delegate depth an engine child's MCP server starts at, so nested delegates keep the parent's depth limit; set by the engine, not by operators.",
     "OMEGA_PRIME_DESK_BUS_URL": "Selects the desk message-bus endpoint.",
     "OMEGA_PRIME_DESK_BUS_URL_FILE": "Names a protected file containing the desk message-bus endpoint.",
     "OMEGA_PRIME_DESK_CHILD_MODEL": "Selects the model used for the managed desk child process.",
@@ -428,7 +429,7 @@
       "reason": "Resolves the finite connector credential names declared in _CONNECTORS, including file selectors."
     },
     {
-      "site": "omega_prime/mcp_server.py:373:helper:omega_prime/mcp_server.py:_secret_present",
+      "site": "omega_prime/mcp_server.py:389:helper:omega_prime/mcp_server.py:_secret_present",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -441,7 +442,7 @@
       "reason": "Resolves only the finite provider credential names from the desk child provider declarations."
     },
     {
-      "site": "omega_prime/mcp_server.py:386:helper:omega_prime/integrations/binding.py:secret_value",
+      "site": "omega_prime/mcp_server.py:402:helper:omega_prime/integrations/binding.py:secret_value",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -700,7 +701,7 @@
   "metadata": {
     "token_selectors": [
       {
-        "site": "omega_prime/mcp_server.py:2155:args.token_env",
+        "site": "omega_prime/mcp_server.py:2171:args.token_env",
         "symbol": "_resolve_token",
         "source_sha256": "e04ec502c56de9c37869762a3519cac3470f599f455c9ec1b3343026091652d7",
         "reason": "The caller-selected environment key is an arbitrary MCP bearer-token selector, not a concrete setting name."

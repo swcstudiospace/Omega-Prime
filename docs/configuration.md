@@ -105,6 +105,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_CLARIFY_SOCKET` | Names the per-run clarify broker socket an engine child uses to ask the operator a question. |
 | `OMEGA_PRIME_COMMAND_LOG` | Selects the command history log destination. |
 | `OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS` | Sets the maximum accepted lateness for scheduled actions. |
+| `OMEGA_PRIME_DELEGATE_DEPTH` | Sets the delegate depth an engine child's MCP server starts at, so nested delegates keep the parent's depth limit; set by the engine, not by operators. |
 | `OMEGA_PRIME_DESK_BUS_URL` | Selects the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_BUS_URL_FILE` | Names a protected file containing the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_CHILD_MODEL` | Selects the model used for the managed desk child process. |
