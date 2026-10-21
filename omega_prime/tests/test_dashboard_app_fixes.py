@@ -5,9 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator, MutableMapping
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -81,7 +81,9 @@ def test_package_data_build_py_collects_nested_dashboard_assets(
             host = {"host": "127.0.0.1:7421"}
             page = client.get("/", headers=host)
             assert page.status_code == 200
-            assert client.get("/cc/assets/index-DIGTqjrX.css", headers=host).status_code == 200
+            css_path = re.search(r'href="([^"]+\.css)"', page.text)
+            assert css_path is not None
+            assert client.get(css_path.group(1), headers=host).status_code == 200
     finally:
         monkeypatch.undo()
 
