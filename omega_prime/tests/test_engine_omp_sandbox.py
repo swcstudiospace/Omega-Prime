@@ -26,10 +26,13 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from omega_prime.agent.interrupt import InterruptFlag
+from omega_prime.dashboard.status_file import _write_locked, locked_tasks
 from omega_prime.engine.attach import delegate_via_engine, ultrathink_engine
 from omega_prime.engine.omp_driver import run
 from omega_prime.engine.sandbox_omp import (
@@ -1105,32 +1108,274 @@ def test_untracked_backend_run_writes_nothing(tmp_path: Path) -> None:
     assert "answer_question" not in _wrapper_tools(log)
 
 
-def test_question_surfaces_as_event_only(tmp_path: Path) -> None:
+def _shaped_answer_token() -> str:
+    """A credential-shaped value built at runtime, never a literal."""
+    return "".join(("sk-", "ans", "wer-", "not", "-for-", "disk"))
+
+
+def _answer_when_raised(
+    store: Path, item_id: str, answer: str, timeout: float = 10.0
+) -> None:
+    """Responder side of the round-trip: poll, then write the answer.
+
+    The poll bound is TEST-side only — the engine wait has no deadline
+    (phase-112 lock). The write is the exact production responder
+    convention: one ``locked_tasks(write=True)`` block plus
+    ``_write_locked``, so it serializes against the engine's polls.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with locked_tasks(store) as data:
+            raised = any(
+                item.get("id") == item_id for item in data["waiting_on_ove"]
+            )
+        if raised:
+            with locked_tasks(store, write=True) as data:
+                target = next(
+                    item
+                    for item in data["waiting_on_ove"]
+                    if item["id"] == item_id
+                )
+                target["answer"] = answer
+                _write_locked(data, store)
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{item_id} never appeared within {timeout:.0f}s")
+
+
+def _question_fixture(
+    tmp_path: Path, behavior: str
+) -> tuple[dict[str, str], Path, Path, Path]:
+    """Fixture shape shared by the question round-trip tests.
+
+    Built in the MAIN thread before the run thread starts, so the
+    responder can hold the store path while the run is still waiting.
+    """
     omp = _install_fake(tmp_path)
-    script, log = _install_fake_anda(tmp_path, "question")
+    script, log = _install_fake_anda(tmp_path, behavior)
+    _install_fake_herdr(tmp_path, "ok")
     roots = tmp_path / "roots"
     work = _git_worktree(roots)
     env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
     store = _seed(tmp_path / "tasks.json", rows=[_row("gb:q")])
-    result = run(
+    return env, store, log, work
+
+
+def _run_tracked(
+    env: dict[str, str], work: Path, store: Path, job_id: str
+) -> Any:
+    """One tracked question-stage run through the real engine."""
+    return run(
         "plan the thing",
         cwd=work,
         env=env,
-        job_id="job-q",
+        job_id=job_id,
         stage="plan",
         plan="zai",
         tasks_path=store,
         task_id="gb:q",
     )
+
+
+def test_question_round_trip_resumes_the_run(tmp_path: Path) -> None:
+    """The n4 contract: a GSD question is answerable mid-run.
+
+    Cutover (documented): this replaces the phase-112 pin
+    ``test_question_surfaces_as_event_only``, which asserted the n4
+    BOUNDARY — a requestId-less question stayed an event only, no item
+    was raised, no answer_question call, row exactly
+    ``{"id": "gb:q", "state": "working"}``. n4 ships the round-trip, so
+    the pin flips to the strictly stronger contract: every old axis is
+    re-asserted on the new shape (one question event, attestation mock)
+    and MORE is asserted — the item raised under the stable id, the
+    answer piped through answer_question with matching ids, the item
+    cleared, the row done, the run ok.
+    """
+    env, store, log, work = _question_fixture(tmp_path, "question")
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-q")
+        except BaseException as exc:  # surfaced in the main thread
+            failures.append(exc)
+
+    def responder() -> None:
+        try:
+            deadline = time.monotonic() + 10.0
+            item = None
+            while time.monotonic() < deadline:
+                with locked_tasks(store) as data:
+                    raised = [
+                        row
+                        for row in data["waiting_on_ove"]
+                        if row.get("id") == "gb:q:question:req-1"
+                    ]
+                if raised:
+                    item = raised[0]
+                    break
+                time.sleep(0.05)
+            if item is None:
+                raise AssertionError("the question item never appeared")
+            # Mid-run: exactly one live item, and the row is blocked.
+            assert item["ask"] == "Which shape do you want?"
+            assert item["blocks"] == "sandbox GSD question (stage plan)"
+            with locked_tasks(store) as data:
+                assert [row["id"] for row in data["waiting_on_ove"]] == [
+                    "gb:q:question:req-1"
+                ]
+                row = next(r for r in data["tasks"] if r["id"] == "gb:q")
+                assert row["state"] == "blocked"
+            _answer_when_raised(store, "gb:q:question:req-1", "the square one")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    responder()
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "the answer")
+    result = box["run"]
     assert result.ok is True, result.detail
-    # The question is visible in events.jsonl as an event — and only there.
+    # The question event survived — exactly one, requestId stamped.
     events = _jsonl(Path(result.events_path))
     questions = [row for row in events if row.get("event") == "question"]
     assert len(questions) == 1
+    assert questions[0]["requestId"] == "req-1"
     assert questions[0]["attestation"] == "mock"
-    # No waiting_on_ove item, no answer_question round-trip (node n4).
+    # The answer travelled through answer_question with the matching ids.
+    assert [
+        (row["tool"], row["args"])
+        for row in _wrapper_log(log)
+        if row.get("tool") == "answer_question"
+    ] == [
+        (
+            "answer_question",
+            {
+                "stage_id": "stage-1",
+                "request_id": "req-1",
+                "text": "the square one",
+            },
+        )
+    ]
+    # The item cleared and the run finished.
     data = _read_tasks(store)
     assert data["waiting_on_ove"] == []
-    assert data["tasks"][0] == {"id": "gb:q", "state": "working"}
-    assert "answer_question" not in _wrapper_tools(log)
+    row = next(r for r in data["tasks"] if r["id"] == "gb:q")
+    assert row["state"] == "done"
+
+
+def _check_round_trip(
+    box: dict[str, Any],
+    failures: list[BaseException],
+    thread: threading.Thread,
+    what: str,
+) -> None:
+    """Shared round-trip epilogue: surface responder/run errors, join bound."""
+    if failures:
+        raise failures[0]
+    assert not thread.is_alive(), f"the run never resumed after {what}"
+
+
+def test_stale_answer_reasks_under_a_new_item(tmp_path: Path) -> None:
+    """A stale answer clears the dead item; the re-ask arrives under a new id."""
+    env, store, log, work = _question_fixture(tmp_path, "question_reask")
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-reask")
+        except BaseException as exc:
+            failures.append(exc)
+
+    def responder() -> None:
+        try:
+            _answer_when_raised(store, "gb:q:question:req-1", "first instinct")
+            # The stale reply killed req-1: exactly the re-asked item remains.
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                with locked_tasks(store) as data:
+                    ids = [row["id"] for row in data["waiting_on_ove"]]
+                if ids == ["gb:q:question:req-2"]:
+                    break
+                time.sleep(0.05)
+            else:
+                raise AssertionError(f"req-2 never replaced req-1; last ids {ids}")
+            _answer_when_raised(store, "gb:q:question:req-2", "the square one")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    responder()
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "the re-ask")
+    result = box["run"]
+    assert result.ok is True, result.detail
+    # Both asks are in the event feed, each under its own requestId.
+    events = _jsonl(Path(result.events_path))
+    assert [
+        row["requestId"] for row in events if row.get("event") == "question"
+    ] == ["req-1", "req-2"]
+    # Exactly two answer_question calls: the stale one and the good one.
+    answers = [
+        row["args"]
+        for row in _wrapper_log(log)
+        if row.get("tool") == "answer_question"
+    ]
+    assert [args["request_id"] for args in answers] == ["req-1", "req-2"]
+    assert [args["text"] for args in answers] == ["first instinct", "the square one"]
+    data = _read_tasks(store)
+    assert data["waiting_on_ove"] == []
+    row = next(r for r in data["tasks"] if r["id"] == "gb:q")
+    assert row["state"] == "done"
+
+
+def test_answer_text_never_lands_in_durable_dashboard_artifacts(
+    tmp_path: Path,
+) -> None:
+    """The answer travels only into the answer_question call.
+
+    Byte-scan of every product artifact the run writes: tasks.json,
+    events.jsonl, the herdr receipts. The fake wrapper's own
+    wrapper-log.jsonl is excluded — it receipts the call the test itself
+    made (that call IS the product behavior under test), and no
+    production surface logs answers.
+    """
+    token = _shaped_answer_token()
+    answer = f"paste {token} to unblock"
+    env, store, log, work = _question_fixture(tmp_path, "question")
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-secret-answer")
+        except BaseException as exc:
+            failures.append(exc)
+
+    def responder() -> None:
+        try:
+            _answer_when_raised(store, "gb:q:question:req-1", answer)
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    responder()
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "the answer")
+    result = box["run"]
+    assert result.ok is True, result.detail
+    # The call itself carried the answer (the product behavior).
+    assert any(
+        row.get("tool") == "answer_question" and row["args"].get("text") == answer
+        for row in _wrapper_log(log)
+    )
+    # The durable product surfaces never saw it — byte-scan, paths only.
+    assert token.encode("utf-8") not in store.read_bytes()
+    assert token.encode("utf-8") not in Path(result.events_path).read_bytes()
+    assert token.encode("utf-8") not in (tmp_path / "bin" / "herdr-log.jsonl").read_bytes()
 
