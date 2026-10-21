@@ -1,0 +1,87 @@
+{
+  "task_id": "phase111-execution",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T15:53:32Z",
+  "completed_at": "2026-10-21T16:12:00Z",
+  "scope": "Execution of .planning/phases/111-block-surfacing/111-01-PLAN.md (task 00030 node n5): W111-01..W111-05, five plan-owned files only (omega_prime/dashboard/__init__.py, status_file.py, blocks.py, omega_prime/engine/omp_driver.py, omega_prime/tests/test_dashboard_blocks.py). Four atomic commits with 00013 titles; no push, no PR, no remote.",
+  "commands": [
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_blocks.py",
+      "exit_code": 0,
+      "output_tail": "16 passed in 0.58s",
+      "phase": "verify"
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_blocks.py omega_prime/tests/test_engine.py omega_prime/tests/test_engine_stage.py omega_prime/tests/test_credentials.py",
+      "exit_code": 1,
+      "output_tail": "1 failed, 73 passed in 4.22s — the one failure is test_engine_stage.py::test_mcp_desk_parent_reads_the_stage_from_its_env, ModuleNotFoundError: No module named 'mcp' (pre-existing, see command 2)",
+      "phase": "verify"
+    },
+    {
+      "cmd": "git stash -q && python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_engine_stage.py::test_mcp_desk_parent_reads_the_stage_from_its_env; git stash pop -q",
+      "exit_code": 1,
+      "output_tail": "FAILED ... - ModuleNotFoundError: No module named 'mcp' — identical failure with the plan's changes stashed, proving the failure predates this plan; test_engine_stage.py is outside the plan's owned files and was not touched",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k 'dashboard or engine or status' --co",
+      "exit_code": 2,
+      "output_tail": "49 collection errors, all ModuleNotFoundError in unrelated files (mcp x35, apscheduler x8, httpx2 x3, tweepy, pyrit, aiogram — this sandbox lacks those optional deps); the filter itself matches exactly test_dashboard_blocks.py, test_engine.py, test_engine_stage.py, all executed in commands 0-1",
+      "phase": "verify"
+    },
+    {
+      "cmd": "python3 -m py_compile omega_prime/dashboard/__init__.py omega_prime/dashboard/status_file.py omega_prime/dashboard/blocks.py omega_prime/engine/omp_driver.py",
+      "exit_code": 0,
+      "output_tail": "ok",
+      "phase": "verify"
+    },
+    {
+      "cmd": "git diff cf5897c..HEAD --stat",
+      "exit_code": 0,
+      "output_tail": "omega_prime/dashboard/__init__.py | 27 +; omega_prime/dashboard/blocks.py | 111 +; omega_prime/dashboard/status_file.py | 98 +; omega_prime/engine/omp_driver.py | 49 +; omega_prime/tests/test_dashboard_blocks.py | 378 +; 5 files changed, 663 insertions(+), 0 deletions — additions only, no existing test weakened, skipped or deleted",
+      "phase": "verify"
+    },
+    {
+      "cmd": "python3 -c \"import pathlib; from omega_prime.credentials.redact import redact_text; p=[pathlib.Path('.receipts/bot-00-omega-prime/phase111-execution.json'), pathlib.Path('.planning/phases/111-block-surfacing/111-01-SUMMARY.md')]; assert all(redact_text(f.read_text()) == f.read_text() for f in p), 'secret-shaped text in receipt or summary'; print('redaction clean')\"",
+      "exit_code": 0,
+      "output_tail": "redaction clean",
+      "phase": "verify"
+    },
+    {
+      "cmd": "git status --porcelain",
+      "exit_code": 0,
+      "output_tail": "(empty — working tree clean after the final docs commit)",
+      "phase": "verify"
+    }
+  ],
+  "claims": [
+    { "claim": "All 16 phase-111 tests pass: store seeding without file creation, roundtrip without residue, exclusive sidecar flock vs a second non-blocking writer, unknown-field survival, raise upsert stability (seq once, since pinned), blocked->working lifecycle with terminal rows safe from foreign clears, push hook one-item-per-push with idempotent repeats and ValueError on unknown reasons without writes, secret-shaped inputs never in raw file bytes", "evidence_command_index": 0 },
+    { "claim": "The touched engine suites plus credentials are green: 73 passed (test_engine.py, test_engine_stage.py, test_credentials.py unmodified and passing alongside the new module)", "evidence_command_index": 1 },
+    { "claim": "The single suite failure (test_mcp_desk_parent_reads_the_stage_from_its_env) is pre-existing and environmental: it fails identically with this plan's changes stashed, and the plan's owned-file list excludes test_engine_stage.py", "evidence_command_index": 2 },
+    { "claim": "The outer-driver -k filter's 49 collection errors are missing optional modules in unrelated test files (no dashboard/engine/status file among them); the three matching modules were executed", "evidence_command_index": 3 },
+    { "claim": "The three new/edited modules compile cleanly", "evidence_command_index": 4 },
+    { "claim": "Execution commits touched exactly the five plan-owned files, insertions only (663+, 0 deletions): no existing test weakened, skipped or deleted; run()'s except block otherwise byte-identical", "evidence_command_index": 5 },
+    { "claim": "Receipt and SUMMARY pass the dashboard redaction check: redact_text applied to both files is a no-op (no token-shaped, Bearer, or secret-assignment text)", "evidence_command_index": 6 },
+    { "claim": "Working tree is clean at the end (git status --porcelain empty)", "evidence_command_index": 7 }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Box-side integration: the box executor's push step calling push_block and the hourly digest routine writing the same tasks.json concurrently — the box deployment is unreachable here; writer serialization is proven only by in-process flock tests",
+    "Real engine runs against a live omp binary with bwrap or omp-sandbox (none in this sandbox, and no model calls allowed); gated failures were proven through the established fake-omp PATH fixtures",
+    "Bundle export of these commits by the outer driver — happens after this session; not verifiable here"
+  ],
+  "files_changed": [
+    "omega_prime/dashboard/__init__.py",
+    "omega_prime/dashboard/status_file.py",
+    "omega_prime/dashboard/blocks.py",
+    "omega_prime/engine/omp_driver.py",
+    "omega_prime/tests/test_dashboard_blocks.py",
+    ".planning/phases/111-block-surfacing/111-01-SUMMARY.md",
+    ".planning/ROADMAP.md",
+    ".receipts/bot-00-omega-prime/phase111-execution.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "git revert 0828b30 ebacace 6f09c9a (the three execution commits) and the final docs commit restores the cf5897c planning-only state; the new omega_prime/dashboard package disappears with the revert; no data migration, no external state.",
+  "approvals": [],
+  "approved_by": null
+}

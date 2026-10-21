@@ -167,4 +167,4 @@ Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's roun
 4. A secret-looking string passed into `ask`/`blocks`/`detail` never appears verbatim in tasks.json (dashboard redaction check).
 5. No existing test weakened, skipped or deleted; tests use a temp tasks.json and fakes only (no gh, herdr, podman, network, or model calls).
 
-- [ ] Phase 111: Immediate block surfacing in waiting_on_ove
+- [x] Phase 111: Immediate block surfacing in waiting_on_ove
