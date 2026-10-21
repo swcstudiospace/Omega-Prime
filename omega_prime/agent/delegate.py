@@ -63,6 +63,7 @@ def delegate_task(
                 stage=child_stage,
                 cwd=None if engine_cwd is None else str(engine_cwd),
                 delegate_depth=depth + 1,
+                delegate_max_depth=max_depth,
             )
             if routed is not None:
                 return routed

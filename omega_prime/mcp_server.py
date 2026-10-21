@@ -259,7 +259,8 @@ class _DeskParent:
         # Staged delegates run in the server's resolved work root, the same
         # checkout the IDE and exec tools are jailed to, not the process cwd.
         self.engine_cwd = None if work is None else str(work)
-        self.max_depth = 2
+        # ...and stops at that parent's own max_depth, not a fresh default.
+        self.max_depth = _delegate_max_depth(mapping)
         self.max_children = 1
         self.journal: Any = None
         # The engine passes a staged run's stage to omp, and omp to this
@@ -285,6 +286,15 @@ def _delegate_depth(env: Mapping[str, str]) -> int:
     except ValueError:
         # An unreadable depth fails closed: no further delegates.
         return 1 << 16
+
+
+def _delegate_max_depth(env: Mapping[str, str]) -> int:
+    raw = str(env.get("OMEGA_PRIME_DELEGATE_MAX_DEPTH", "") or "").strip()
+    try:
+        return max(0, int(raw)) if raw else 2
+    except ValueError:
+        # An unreadable limit fails closed: no further delegates.
+        return 0
 
 
 def _desk_dispatch(registry: ToolRegistry, name: str) -> Any:

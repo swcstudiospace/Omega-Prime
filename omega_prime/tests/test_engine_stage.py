@@ -477,10 +477,14 @@ def test_engine_delegate_carries_depth_and_work_root(
 
     assert json.loads(delegate_task(Parent(1), "build it"))["summary"] == "ok"
     assert calls[0]["delegate_depth"] == 2
+    assert calls[0]["delegate_max_depth"] == 2
     assert calls[0]["cwd"] == str(tmp_path)
     assert calls[0]["stage"] == "execute"
     refused = json.loads(delegate_task(Parent(2), "build it"))
     assert "max_depth" in refused["error"] and len(calls) == 1
+    # A custom limit travels with the engine child instead of the default.
+    json.loads(delegate_task(Parent(2), "build it", max_depth=4))
+    assert (calls[1]["delegate_depth"], calls[1]["delegate_max_depth"]) == (3, 4)
 
 
 def test_desk_parent_starts_at_the_engine_childs_depth_in_its_work_root(
@@ -501,6 +505,28 @@ def test_desk_parent_starts_at_the_engine_childs_depth_in_its_work_root(
     # An unreadable depth fails closed instead of resetting to zero.
     bad = _DeskParent(ToolRegistry(), None, {"OMEGA_PRIME_DELEGATE_DEPTH": "x"})
     assert bad.delegate_depth >= bad.max_depth
+    # The parent's custom max_depth carries over; without it the default stays.
+    assert top.max_depth == 2
+    deep = _DeskParent(
+        ToolRegistry(),
+        None,
+        {"OMEGA_PRIME_DELEGATE_DEPTH": "3", "OMEGA_PRIME_DELEGATE_MAX_DEPTH": "4"},
+    )
+    assert (deep.delegate_depth, deep.max_depth) == (3, 4)
+    capped = _DeskParent(
+        ToolRegistry(),
+        None,
+        {"OMEGA_PRIME_DELEGATE_DEPTH": "4", "OMEGA_PRIME_DELEGATE_MAX_DEPTH": "4"},
+    )
+    raw = json.loads(delegate_task(capped, "too deep", max_depth=capped.max_depth))
+    assert "max_depth" in raw["error"]
+    # An unreadable limit fails closed.
+    assert (
+        _DeskParent(
+            ToolRegistry(), None, {"OMEGA_PRIME_DELEGATE_MAX_DEPTH": "x"}
+        ).max_depth
+        == 0
+    )
 
 
 def test_mcp_server_desk_parent_uses_the_resolved_work_root(tmp_path: Path) -> None:
@@ -528,6 +554,7 @@ def test_omp_process_env_names_the_delegate_depth(tmp_path: Path) -> None:
     wrapper.write_text(
         "#!/bin/sh\n"
         f'printf "%s\\n" "${{OMEGA_PRIME_DELEGATE_DEPTH:-none}}" >> {tmp_path}/depth.log\n'
+        f'printf "%s\\n" "${{OMEGA_PRIME_DELEGATE_MAX_DEPTH:-none}}" >> {tmp_path}/max.log\n'
         f'exec {fake} "$@"\n',
         encoding="utf-8",
     )
@@ -535,8 +562,9 @@ def test_omp_process_env_names_the_delegate_depth(tmp_path: Path) -> None:
     env["OMEGA_PRIME_OMP_BIN"] = str(wrapper)
     from omega_prime.engine.omp_driver import run
 
-    assert run("PONG", cwd=tmp_path, env=env, delegate_depth=2).ok
+    assert run("PONG", cwd=tmp_path, env=env, delegate_depth=2, delegate_max_depth=5).ok
     assert "2" in (tmp_path / "depth.log").read_text("utf-8").split()
+    assert "5" in (tmp_path / "max.log").read_text("utf-8").split()
 
 
 def test_auto_mode_refuses_an_unknown_stage_instead_of_running_unstaged(
