@@ -69,8 +69,9 @@ def test_terminal_route_resolves_only_task_owned_pane_and_uses_read_argv():
     status, wire = asyncio.run(_wire(app, "/api/tasks/task:one/terminal"))
     assert status == 200 and '"text":"safe output"' in wire
     assert calls == [["herdr", "pane", "read", "w2:p4", "--source", "recent", "--lines", "200", "--format", "text"]]
+    unmapped_status, unmapped_wire = asyncio.run(_wire(create_app(_poller(), terminal_service=service), "/api/tasks/task:one/terminal"))
+    assert unmapped_status == 200 and '"status":"no_session"' in unmapped_wire and len(calls) == 1
     assert asyncio.run(_wire(create_app(_poller(task_id=None), terminal_service=service), "/api/tasks/unknown/terminal"))[0] == 404
-    assert len(calls) == 1
 
 
 def test_terminal_sanitizes_redacts_caps_and_sends_only_changed_frames():
