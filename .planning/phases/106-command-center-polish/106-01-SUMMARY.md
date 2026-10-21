@@ -12,7 +12,7 @@ affects: [106-03, 106-04, 106-05]
 actuals:
   tokens: not-measured
   tasks: 3
-  commits: 6
+  commits: 9
 tech-stack:
   added: []
   patterns: [bounded page-specific collector policy, additive snapshot bucket, shared canonical identity registry]
@@ -35,30 +35,30 @@ coverage:
     verification:
       - kind: unit
         ref: omega_prime/tests/test_dashboard_github_merges_polish.py
-        status: unknown
+        status: pass
     human_judgment: true
-    rationale: Tests were authored but not run by this assignment; live host validation is explicitly prohibited.
+    rationale: Focused offline tests passed as reported by the integration owner; live host validation remains unverified.
   - id: D2
     description: Finished and idle bucket projection retains task detail, waiting relations and worktree wiring.
     requirement: AC6
     verification:
       - kind: unit
         ref: omega_prime/tests/test_dashboard_model_buckets.py
-        status: unknown
+        status: pass
     human_judgment: true
-    rationale: Tests were authored but not run by this assignment.
+    rationale: Focused offline tests passed as reported by the integration owner.
   - id: D3
     description: Idle task identities survive bucket transitions, restart, snapshot hashing and API publication.
     requirement: AC8
     verification:
       - kind: integration
         ref: omega_prime/tests/test_dashboard_snapshot_contract.py
-        status: unknown
+        status: pass
       - kind: integration
         ref: omega_prime/tests/test_dashboard_app.py
-        status: unknown
+        status: pass
     human_judgment: true
-    rationale: Tests were authored but not run by this assignment.
+    rationale: Focused offline tests passed as reported by the integration owner; broader dashboard gate remains pending.
 duration: not-measured
 completed: 2026-10-21
 status: complete
@@ -96,8 +96,8 @@ status: complete
 2. **Task 2: Separate finished tasks and idle sessions** — `45e3ad9`.
 3. **Task 3: Carry Idle through numbering, hashing and APIs** — `febadb4`.
 
-**Regression corrections:** `36c3d41`, `a7c622e`.  
-**Summary:** `608fa0b`.
+**Regression corrections:** `36c3d41`, `a7c622e`, `7225337`.  
+**Summary commits:** `608fa0b`, `cb4c61c`; this verification update follows.
 ## Files Created/Modified
 
 - `omega_prime/dashboard/collectors/github.py`
@@ -127,16 +127,16 @@ None intended. No poller changes, generated asset changes, external dependency c
 
 ## Verification and Evidence
 
-No tests, builds, lint, formatters, baseline transplant, live network, real HOME/task store, Herdr command or 7421 access were run; this was explicitly prohibited. Implemented tests and required commands are:
+The implementation agent did not run tests, builds, lint or formatters. The integration owner subsequently reported these focused results:
 
-- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_github_merges_polish.py` — not run (assignment instruction).
-- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_model_buckets.py omega_prime/tests/test_dashboard_model.py omega_prime/tests/test_dashboard_process_collectors.py` — not run (assignment instruction).
-- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_model_buckets.py omega_prime/tests/test_dashboard_task_ids.py omega_prime/tests/test_dashboard_snapshot_contract.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_integration.py` — not run (assignment instruction).
-- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k dashboard` — not run (outer integration owner only).
+- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_github_merges_polish.py` — PASS, 4/4.
+- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_model_buckets.py omega_prime/tests/test_dashboard_model.py omega_prime/tests/test_dashboard_process_collectors.py` — PASS, 19/19 after restoring the test fixture assignment.
+- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_model_buckets.py omega_prime/tests/test_dashboard_task_ids.py omega_prime/tests/test_dashboard_snapshot_contract.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_integration.py` — PASS, 35 tests.
+- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k dashboard` — not run; outer integration owner only.
 
-**Baseline regression failures:** No ad3942b fixture transplant was executed, so no baseline assertion failure is claimed. The new regression nodes are test coverage authored, not execution evidence. The supplied baseline files report existing broad collection blockers (`mcp`, `apscheduler`, and setuptools availability); none were rechecked or changed.
+No baseline fixture transplant was executed, so no baseline assertion failure is claimed. The new regression nodes have focused passing results, but no red-on-base evidence. Supplied baseline files report existing broad collection blockers (`mcp`, `apscheduler`, and setuptools availability); none were rechecked or changed.
 
-**Host-unverified:** Live GitHub parity and all 7421/live-data behavior remain unverified by design. The explicit assignment prohibited network, Herdr, real task-store/HOME and 7421 access. Outer integration owner must execute the offline checks after writers stop and report those outcomes independently.
+**Host-unverified:** Live GitHub parity and all 7421/live-data behavior remain unverified by design. The assignment prohibited network, Herdr, real task-store/HOME and 7421 access. No claim is made about these live acceptance conditions.
 
 ## User Setup Required
 
@@ -144,7 +144,7 @@ None.
 
 ## Next Phase Readiness
 
-Plan 03 can extend GitHub collector behavior after 01/02. Plan 04 can add the frontend Idle group/count; plan 05 can extend model/task-pane projection. Offline checks remain pending with the outer integration owner.
+Plan 03 can extend GitHub collector behavior after 01/02. Plan 04 can add the frontend Idle group/count; plan 05 can extend model/task-pane projection. The focused offline suites reported by the integration owner pass; the broad dashboard gate and live host evidence remain pending.
 
 ---
 *Phase: 106-command-center-polish*
