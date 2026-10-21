@@ -16,17 +16,57 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# Fields Python 3.12 added to existing node types. Python 3.11 does not have
+# them, so its dump gets them back as the empty value 3.12 prints.
+_PY312_ADDED_FIELDS: dict[str, tuple[str, ...]] = {
+    "FunctionDef": ("type_params",),
+    "AsyncFunctionDef": ("type_params",),
+    "ClassDef": ("type_params",),
+}
+
+
+def _dump_312_shape(node: object) -> str:
+    """``ast.dump(node)`` as Python 3.12 prints it, on any older interpreter.
+
+    Same rules as the 3.11/3.12 ``ast.dump`` (fields in order, an unset field or
+    a ``None`` that equals the class default is left out; every field is
+    printed with its name), plus the 3.12 fields from ``_PY312_ADDED_FIELDS`` as ``[]``.
+    """
+    if isinstance(node, ast.AST):
+        cls = type(node)
+        args: list[str] = []
+        added = _PY312_ADDED_FIELDS.get(cls.__name__, ())
+        fields = [*node._fields, *(name for name in added if name not in node._fields)]
+        for name in fields:
+            try:
+                value = getattr(node, name)
+            except AttributeError:
+                if name not in added:
+                    continue
+                value = []
+            if value is None and getattr(cls, name, ...) is None:
+                continue
+            args.append(f"{name}={_dump_312_shape(value)}")
+        return f"{cls.__name__}({', '.join(args)})"
+    if isinstance(node, list):
+        return "[" + ", ".join(_dump_312_shape(item) for item in node) + "]"
+    return repr(node)
+
 
 def ast_source_digest(node: ast.AST) -> str:
-    """SHA-256 of a node's AST dump, identical across Python 3.12, 3.13 and 3.14.
+    """SHA-256 of a node's AST dump, identical on Python 3.11 through 3.14.
 
-    Python 3.13 started omitting empty fields from ``ast.dump``; ``show_empty``
-    restores the 3.12 shape so committed policy digests match on every CI version.
+    Committed policy digests use the Python 3.12 dump. Python 3.13 started
+    omitting empty fields from ``ast.dump``; ``show_empty`` restores the 3.12
+    shape there. Python 3.11 lacks fields 3.12 added (``type_params``), so it
+    uses ``_dump_312_shape``, which prints them empty the way 3.12 does.
     """
     if sys.version_info >= (3, 13):
         dumped = ast.dump(node, include_attributes=False, show_empty=True)
-    else:
+    elif sys.version_info >= (3, 12):
         dumped = ast.dump(node, include_attributes=False)
+    else:
+        dumped = _dump_312_shape(node)
     return hashlib.sha256(dumped.encode()).hexdigest()
 
 

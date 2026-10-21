@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -377,6 +379,59 @@ def test_exec_job_kill_escalates_when_terminate_does_not_finish(tmp_path: Path):
         }
         assert jobs.poll(job_id) == result
     finally:
+        jobs.shutdown()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
+def test_exec_job_kill_stops_group_worker_that_ignores_terminate(tmp_path: Path):
+    """A worker that ignores SIGTERM and dropped the pipes still dies on kill."""
+    import signal
+    import time
+
+    jobs = JobControl(tmp_path)
+    pid_file = tmp_path / "worker-pid"
+    worker = (
+        "import os, pathlib, signal, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "null = os.open(os.devnull, os.O_RDWR); "
+        "[os.dup2(null, fd) for fd in (0, 1, 2)]; "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    leader = (
+        "import subprocess, sys, time; "
+        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL); "
+        "time.sleep(60)"
+    )
+    job_id = jobs.start([sys.executable, "-c", leader, worker, str(pid_file)])
+    worker_pid = 0
+    try:
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert pid_file.exists(), "worker did not start"
+        worker_pid = int(pid_file.read_text())
+
+        result = jobs.kill(job_id)
+        assert result["running"] is False
+        assert result["exit_code"] == -signal.SIGTERM
+
+        deadline = time.monotonic() + 5
+        alive = True
+        while alive and time.monotonic() < deadline:
+            try:
+                os.kill(worker_pid, 0)
+            except ProcessLookupError:
+                alive = False
+            else:
+                time.sleep(0.02)
+        assert alive is False, "SIGTERM-ignoring worker survived kill()"
+    finally:
+        if worker_pid:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(worker_pid, signal.SIGKILL)
         jobs.shutdown()
 
 

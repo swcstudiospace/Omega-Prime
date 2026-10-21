@@ -109,6 +109,16 @@ class JobControl:
                 return {"id": job_id, **job["result"]}
             child = job["child"]
             _signal_job(child, signal.SIGTERM)
+            if child.returncode is None and _can_wait_unreaped():
+                # Give the leader its grace period without reaping it. A worker
+                # in its group may ignore SIGTERM and no longer hold the pipes,
+                # so a finished collection does not mean the group is gone.
+                # While the leader is unreaped (alive or a zombie) its pid, and
+                # so the group id, cannot be recycled, which makes this SIGKILL
+                # safe to send whether or not the leader already exited.
+                _wait_exit_unreaped(child, timeout=5)
+                _signal_job(child, signal.SIGKILL)
+                return self._collect(job_id, job, timeout=5)
             try:
                 return self._collect(job_id, job, timeout=5)
             except subprocess.TimeoutExpired:
@@ -189,6 +199,29 @@ def _drain(
 
 
 _MAX_OUTPUT_BYTES = 1024 * 1024
+
+
+def _can_wait_unreaped() -> bool:
+    return os.name == "posix" and hasattr(os, "waitid")
+
+
+def _wait_exit_unreaped(child: subprocess.Popen, timeout: float) -> bool:
+    """Wait up to ``timeout`` for ``child`` to exit, leaving it unreaped.
+
+    ``WNOWAIT`` keeps the exited leader as a zombie, so ``child.wait`` still
+    collects its status afterwards. Returns whether the child exited.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            info = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return True
+        if info is not None:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
 
 
 def _signal_job(child: subprocess.Popen, signum: int) -> None:

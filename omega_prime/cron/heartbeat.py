@@ -64,16 +64,14 @@ def list_heartbeats(store: JobStore) -> list[dict]:
 
 
 def clear_heartbeat(store: JobStore, job_id: str) -> dict:
-    """Remove one heartbeat by id. Unknown id is a structured result."""
-    for index, job in enumerate(store.jobs):
-        if (
-            isinstance(job, dict)
-            and job.get("id") == job_id
-            and job.get("kind") == HEARTBEAT_KIND
-        ):
-            store.jobs.pop(index)
-            store._save()
-            return {"cleared": job_id}
+    """Remove one heartbeat by id. Unknown id is a structured result.
+
+    The removal reloads and saves under the store's cross-process lock
+    (:meth:`JobStore.remove`), so a concurrent scheduler settle is never
+    overwritten by this process's older copy of the file.
+    """
+    if store.remove(job_id, kind=HEARTBEAT_KIND):
+        return {"cleared": job_id}
     return {"error": f"no heartbeat job: {job_id!r}"}
 
 

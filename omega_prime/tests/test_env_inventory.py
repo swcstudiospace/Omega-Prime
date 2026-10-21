@@ -671,3 +671,34 @@ def test_provider_env_vars_mapping_is_collected(tmp_path: Path) -> None:
         }
     }
     assert [item.name for item in collect(root, policy)] == ["OMEGA_PROVIDER_TOKEN"]
+
+
+def test_source_digest_matches_the_312_shape_on_python_311() -> None:
+    """Python 3.11 has no ``type_params``; its dump must still match 3.12's."""
+    import hashlib
+
+    from omega_prime.tooling import env_inventory
+
+    source = (
+        "class Holder:\n"
+        "    def read(self, env):\n"
+        "        return env.get('NAME')\n"
+        "\n"
+        "async def fetch(env):\n"
+        "    return env.get('OTHER')\n"
+    )
+    expected = [
+        env_inventory.ast_source_digest(node) for node in ast.parse(source).body
+    ]
+    # Build the 3.11 tree shape: the same nodes without the 3.12 field.
+    older = ast.parse(source).body
+    for node in older:
+        for child in ast.walk(node):
+            if isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ) and hasattr(child, "type_params"):
+                delattr(child, "type_params")
+    assert [
+        hashlib.sha256(env_inventory._dump_312_shape(node).encode()).hexdigest()
+        for node in older
+    ] == expected
