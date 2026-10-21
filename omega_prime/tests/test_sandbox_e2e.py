@@ -1,0 +1,313 @@
+"""End-to-end proof of the omp-sandbox wiring from Omega Prime's own loop.
+
+Hermetic contract: everything here runs against the fake omp binary, the
+fake herdr runner and a self-contained two-stage fake omp-sandbox-anda
+wrapper doing real GSD-shaped git work in a throwaway temp worktree under
+a temp allowlisted root, with a temp tasks store and a temp state dir.
+No herdr, tmux, podman, gh, openshell, network or model call ever happens.
+The one opt-in test drives the REAL wrapper on the host only, behind the
+OMEGA_PRIME_SANDBOX_E2E_REAL marker; it reads consent/API envs
+presence/truthiness-only and never prints any env value — effects only.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import stat
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+from omega_prime.engine import sandbox_omp
+from omega_prime.engine.omp_driver import run
+from omega_prime.routines.ultrathink_turn import execute_ultrathink
+from omega_prime.tests.test_engine import _env, _install_fake
+from omega_prime.tests.test_engine_omp_sandbox import (
+    _backend_env,
+    _git,
+    _git_worktree,
+    _install_fake_anda,
+    _install_fake_herdr,
+    _jsonl,
+    _read_tasks,
+    _row,
+    _seed,
+    _shaped_zai_key,
+    _wrapper_log,
+    _wrapper_tools,
+)
+
+_REAL_MARKER = "OMEGA_PRIME_SANDBOX_E2E_REAL"
+
+_SPEC_TEXT = "Wire the demo greeting for the throwaway project."
+
+
+_E2E_ANDA_FAKE = r'''#!/usr/bin/env python3
+"""Self-contained two-stage fake omp-sandbox-anda: client.rs stdio protocol.
+
+One receipt line per request ({"id", "tool", "args"}) is appended to
+wrapper-log.jsonl beside this script before the reply is written; the
+startup receipt carries the observed OMP_SANDBOX_WORKSPACE_ROOTS. Every
+emitted line carries "attestation": "mock". ``down`` is answered and the
+wrapper then exits. ``run_gsd_stage`` performs REAL GSD-shaped stage work
+in the seeded worktree: the plan stage writes
+.planning/phases/999-demo/PLAN.md and commits "gsd(plan): demo plan";
+the execute stage writes src/demo/greeting.txt and commits
+"gsd(execute): demo greeting". ``export_commits`` makes a real git
+bundle of the branch. Stdlib only.
+"""
+import json
+import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+LOG_PATH = os.path.join(HERE, "wrapper-log.jsonl")
+EXPORTS = [0]
+
+
+def emit(obj):
+    obj["attestation"] = "mock"
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def receipt(row):
+    with open(LOG_PATH, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+def git(work, *argv):
+    proc = subprocess.run(
+        ["git", "-C", work] + list(argv),
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", "/tmp"),
+        },
+    )
+    return proc.stdout.strip()
+
+
+def run_gsd_stage(work, args):
+    """Real GSD-shaped stage work: write the stage's file, commit it."""
+    stage = args.get("stage")
+    first_line = str(args.get("task") or "").splitlines()[0]
+    if stage == "plan":
+        path = os.path.join(work, ".planning", "phases", "999-demo", "PLAN.md")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        body = "# Demo plan\n" + first_line + "\n"
+        subject = "gsd(plan): demo plan"
+    elif stage == "execute":
+        path = os.path.join(work, "src", "demo", "greeting.txt")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        body = "hello from the e2e fake\n" + first_line + "\n"
+        subject = "gsd(execute): demo greeting"
+    else:
+        raise SystemExit("unknown stage %r" % stage)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(body)
+    git(work, "add", "--", os.path.relpath(path, work))
+    git(
+        work,
+        "-c", "user.name=E2E Anda",
+        "-c", "user.email=e2e-anda@example.invalid",
+        "commit", "-q", "-m", subject,
+    )
+    EXPORTS[0] = 0
+    return "stage-e2e"
+
+
+def export_commits(work):
+    """Bundle the branch after the stage's commit."""
+    EXPORTS[0] += 1
+    head = git(work, "rev-parse", "HEAD")
+    base = git(work, "rev-parse", "HEAD~1")
+    ref = git(work, "symbolic-ref", "--short", "HEAD")
+    dirty = git(work, "status", "--porcelain") != ""
+    bundle = os.path.join(HERE, "export-%d.bundle" % EXPORTS[0])
+    if os.path.exists(bundle):
+        os.unlink(bundle)
+    git(work, "bundle", "create", bundle, ref)
+    return {
+        "head": head,
+        "base": base,
+        "ref": ref,
+        "commits": 1,
+        "dirty": dirty,
+        "bundle": bundle,
+        "bytes": os.path.getsize(bundle),
+        "via": "fake",
+    }
+
+
+receipt({
+    "ready": True,
+    "pid": os.getpid(),
+    "argv": sys.argv[1:],
+    "workspace_roots": os.environ.get("OMP_SANDBOX_WORKSPACE_ROOTS"),
+})
+emit({"event": "wrapper_ready", "wrapper_pid": os.getpid()})
+
+work = None
+stage_id = None
+
+for line in sys.stdin:
+    text = line.strip()
+    if not text:
+        continue
+    req = json.loads(text)
+    rid = req.get("id")
+    tool = req.get("tool")
+    args = req.get("args") or {}
+    receipt({"id": rid, "tool": tool, "args": args})
+    if tool == "down":
+        emit({
+            "id": rid,
+            "ok": True,
+            "result": {"leftovers": [], "ownership": "released"},
+        })
+        break
+    if tool == "up":
+        work = (args.get("seed_repo") or {}).get("path")
+        emit({
+            "id": rid,
+            "ok": True,
+            "result": {"tier": "fake-tier", "workspace": work},
+        })
+        continue
+    if tool == "run_gsd_stage":
+        stage_id = run_gsd_stage(work, args)
+        emit({
+            "id": rid,
+            "ok": True,
+            "result": {
+                "stageId": stage_id,
+                "plan": args.get("plan"),
+                "model": args.get("model"),
+                "fallback": None,
+                "command": args.get("gsd_command"),
+            },
+        })
+        emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
+        continue
+    if tool == "sandbox_status":
+        emit({
+            "id": rid,
+            "ok": True,
+            "result": {
+                "stageId": stage_id,
+                "status": "completed",
+                "lastText": "e2e fake final text",
+                "error": None,
+            },
+        })
+        continue
+    if tool == "export_commits":
+        emit({
+            "id": rid,
+            "ok": True,
+            "result": export_commits(work),
+        })
+        continue
+    emit({
+        "id": rid,
+        "ok": False,
+        "error": "unknown tool %s" % tool,
+        "code": "unknown_tool",
+    })
+'''
+
+
+def _install_e2e_anda(tmp_path: Path) -> tuple[Path, Path]:
+    """Write the two-stage fake wrapper into its own dir; return (script, log)."""
+    home = tmp_path / "anda-e2e"
+    home.mkdir(exist_ok=True)
+    script = home / "fake-anda-e2e"
+    script.write_text(_E2E_ANDA_FAKE, encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script, home / "wrapper-log.jsonl"
+
+
+def _seed_turn(state: Path, stage: str, spec_text: str) -> None:
+    """Seed <state>/ultrathink with the spec and a fresh stage-named plan."""
+    home = state / "ultrathink"
+    home.mkdir(parents=True, exist_ok=True)
+    spec = home / "spec.md"
+    spec.write_text(spec_text + "\n", encoding="utf-8")
+    (home / "last-plan.json").write_text(
+        json.dumps({"specPath": str(spec), "stage": stage}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_opt_in_real_run_drives_the_real_wrapper_on_the_host(
+    tmp_path: Path, monkeypatch
+) -> None:
+    if os.environ.get(_REAL_MARKER) != "1":
+        pytest.skip(
+            "host-only: set OMEGA_PRIME_SANDBOX_E2E_REAL=1 to run the real "
+            "omp-sandbox-anda binary"
+        )
+    resolver: dict[str, str] = {"PATH": os.environ.get("PATH", "")}
+    override = os.environ.get("OMEGA_PRIME_OMP_SANDBOX_ANDA")
+    if override:
+        resolver["OMEGA_PRIME_OMP_SANDBOX_ANDA"] = override
+    if sandbox_omp.anda_binary(resolver) is None:
+        pytest.skip(
+            "host-only: no real wrapper found via OMEGA_PRIME_OMP_SANDBOX_ANDA "
+            "or PATH"
+        )
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    store = _seed(
+        tmp_path / "tasks.json",
+        rows=[_row("gb:sbx5-plan"), _row("gb:sbx5-exec")],
+    )
+    state = tmp_path / "state"
+    base = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path / "home"),
+        "OMEGA_PRIME_STATE_DIR": str(state),
+        "OMEGA_PRIME_OMP_BACKEND": "omp-sandbox",
+        "OMP_SANDBOX_WORKSPACE_ROOTS": str(roots),
+        "OMEGA_PRIME_OMP_ALLOW_ZAI": "1",
+        "OMEGA_PRIME_TASKS_PATH": str(store),
+    }
+    monkeypatch.chdir(work)
+    for stage, task_id, model in (
+        ("plan", "gb:sbx5-plan", "glm-5.3"),
+        ("execute", "gb:sbx5-exec", "glm-5.3-flash"),
+    ):
+        _seed_turn(state, stage, _SPEC_TEXT)
+        env = dict(base, OMEGA_PRIME_TASK_ID=task_id)
+        plan = execute_ultrathink(env)
+        assert plan["found"] is True
+        engine = plan["engine"]
+        assert engine["used"] is True, engine
+        assert engine["plan"] == "zai"
+        assert engine["stage"] == stage
+        assert engine["model"] == model
+        assert "failed" not in plan
+        session = json.loads(
+            (state / "jobs" / engine["job_id"] / "session.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert session["sandbox"] == "omp-sandbox"
+        assert session["model"] == model
+        assert session["stage"] == stage
+        assert session["ok"] is True
+        subjects = _git("log", "--format=%s", cwd=work).splitlines()
+        assert len(subjects) > 1
+    data = _read_tasks(store)
+    for task_id in ("gb:sbx5-plan", "gb:sbx5-exec"):
+        row = next(r for r in data["tasks"] if r["id"] == task_id)
+        assert row["state"] == "done"
+        export = row["receipt"]["export"]
+        assert export["commits"] >= 1
+        assert Path(export["bundle"]).is_file()
