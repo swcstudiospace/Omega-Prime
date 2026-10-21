@@ -14,8 +14,8 @@ Branch rows are deduplicated by repository+branch, retaining the first backend r
 
 Added the named tests `prefers backend branch rows even when fallback SHA is stale` and `adds fallback only when repository branch has no backend row`. They cover stale fallback suppression, both target repositories, PR preservation, duplicate backend rows, a missing-backend fallback, a different branch, same-number PRs across repositories, and rerender key-warning observation.
 
-The requested behavioral baseline transplant and polished test run were not executed: the task explicitly prohibits checks and test commands. No pass/fail result is claimed; the outer integration owner must perform the prescribed baseline and post-change verification.
+`npm test -- --run` passed after the final source/test integration: 17 files passed, 1 skipped; 35 tests passed, 1 skipped. The two named tests were included in that full run. No baseline transplant was run, so no FAIL-on-base result is claimed.
 
-## Integration readiness
+## Integration result
 
-Source-only integration is ready for Plan 04's wave-1 static build. No generated assets or shared types/selectors/fixtures were changed.
+The deduplication source is included in both ordered static builds. The final wave-2 build and asset checks passed; generated files were written only by the plan-05 integration owner.

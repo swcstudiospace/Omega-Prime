@@ -202,12 +202,12 @@ Cross-cutting constraints: no product implementation during planning; no runtime
 **Plans:** Exactly five plans in two waves. Files are disjoint within each wave; cross-wave extensions are explicitly ordered.
 
 **Wave 1**
-- [ ] 106-01-PLAN.md — bounded recent-merges fetch and honest oversize degradation; terminal task/idle session model fixes and regression tests.
-- [ ] 106-02-PLAN.md — backend-first CI/CD branch de-duplication with live-shaped Vitest fixtures; no generated assets.
-- [ ] 106-04-PLAN.md — hash routes, bucket/task detail views, density and Idle sessions UI; sole wave-1 `static/cc` rebuild after 106-02.
+- [x] 106-01-PLAN.md — bounded recent-merges fetch and honest oversize degradation; terminal task/idle session model fixes and regression tests.
+- [x] 106-02-PLAN.md — backend-first CI/CD branch de-duplication with live-shaped Vitest fixtures; no generated assets.
+- [x] 106-04-PLAN.md — hash routes, bucket/task detail views, density and Idle sessions UI; sole wave-1 `static/cc` rebuild after 106-02.
 
 **Wave 2**
-- [ ] 106-03-PLAN.md — after 106-01/02: merged-PR Greptile enrichment and explicit card wording.
-- [ ] 106-05-PLAN.md — after 106-04: validated task/pane mapping and bounded read-only terminal SSE; sole wave-2 `static/cc` rebuild after 106-03.
+- [x] 106-03-PLAN.md — after 106-01/02: merged-PR Greptile enrichment and explicit card wording.
+- [x] 106-05-PLAN.md — after 106-04: validated task/pane mapping and bounded read-only terminal SSE; sole wave-2 `static/cc` rebuild after 106-03.
 
-Planning only in this stage. Execution uses offline fake transports/runners and named fail-on-`ad3942b` regressions. The outer driver owns live GitHub/Herdr and five screenshots on isolated `127.0.0.1:7441` with a throwaway HOME. No access to the live 7421 service or real task store; local commits only, no push/merge/deploy. Draft PR remains deferred until a remote and working authentication exist.
+Local implementation and offline verification are recorded in `106-SUMMARY.md`. Live GitHub/Herdr checks, five screenshots on isolated `127.0.0.1:7441`, signed sandbox evidence, and the real-terminal check remain outer-driver work. Local commits only; no push, merge, or deploy. AC9 remains pending.

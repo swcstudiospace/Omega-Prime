@@ -28,13 +28,8 @@ Added the named frontend regressions:
 - `renders merged PR score, no PR, unavailable and unreported reviewed SHA`
 - `shows recent_merges failure with original successful section freshness`
 
-Implementation-agent test/build/lint/formatter commands were not run, as required. No baseline transplant was run, so no FAIL-on-base or PASS-after result is claimed. Paired command results remain **not run / exit not collected**:
+`python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_github_greptile_polish.py omega_prime/tests/test_dashboard_github_command_center.py omega_prime/tests/test_dashboard_github_cache.py omega_prime/tests/test_dashboard_github_merges_polish.py` — PASS, 15 tests.
 
-| Side | Command | Exit/result |
-|---|---|---|
-| Baseline and polish | `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_github_greptile_polish.py` | Not run; exit not collected |
-| Baseline and polish | `npm test -- --run src/views/CiCd.greptile.test.tsx` (frontend cwd) | Not run; exit not collected |
-| Baseline and polish | `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_github_greptile_polish.py omega_prime/tests/test_dashboard_github_command_center.py omega_prime/tests/test_dashboard_github_cache.py omega_prime/tests/test_dashboard_github_merges_polish.py` | Not run; exit not collected |
-| Baseline and polish | `npm test -- --run src/views/CiCd.test.tsx src/views/CiCd.dedup.test.tsx src/views/CiCd.greptile.test.tsx` (frontend cwd) | Not run; exit not collected |
+`npm test -- --run src/views/CiCd.test.tsx src/views/CiCd.dedup.test.tsx src/views/CiCd.greptile.test.tsx` — PASS, 3 files / 5 tests. These include the named tests above.
 
-The outer owner should run the prescribed baseline/polish pairs and settled full gates. Plan 05 is the sole wave-2 frontend builder after source integration. Live GitHub, Herdr, and screenshots were not exercised.
+No baseline transplant was run, so no FAIL-on-base result is claimed. The broad required `-k dashboard` suite was attempted by the integration owner and failed during collection (exit 2) because `mcp` and `apscheduler` are unavailable in the environment. Live GitHub and host screenshots were not exercised.

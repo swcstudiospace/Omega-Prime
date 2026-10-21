@@ -4,19 +4,19 @@ milestone: v21
 milestone_name: Task Dashboard
 current_phase: 106
 current_phase_name: Command Center polish
-status: Phase 105 implementation and offline verification complete with recorded limitations; live GitHub parity, browser review, signed sandbox evidence, and real-data screenshots remain outer-driver obligations.
-stopped_at: Phase 105 local implementation complete; no milestone audit, completion, cleanup, export, push, or merge was run.
-last_updated: "2026-10-21T08:43:12.765Z"
+status: Phase 106 local implementation and offline verification complete with environment and outer-driver gates pending; no milestone audit, completion, or cleanup was run.
+stopped_at: Phase 106 local implementation and offline verification; broad Python collection and host-only evidence remain pending.
+last_updated: "2026-10-21T10:16:57Z"
 state_head: ad3942b0c18db0c0f845746642323e075dada117
 progress:
   total_phases: 3
   completed_phases: 1
-  total_plans: 17
-  completed_plans: 12
+  total_plans: 22
+  completed_plans: 17
   percent: 0
-last_activity: 2026-10-20
+last_activity: 2026-10-21
 current_plan: 05
-last_activity_desc: Phase 105 W1–W5 implementation plans completed; frontend/doc/dashboard-specific checks pass; broad dashboard collection fails on missing mcp/apscheduler and setuptools package collection remains unavailable
+last_activity_desc: Phase 106 plans 01–05 implemented; frontend install/full tests/build, focused dashboard tests and docs/public-repo tests passed. Broad dashboard collection is blocked by missing mcp/apscheduler; host GitHub/Herdr/browser/signed-sandbox evidence remains outer-driver work.
 ---
 
 # Project State
@@ -26,13 +26,13 @@ last_activity_desc: Phase 105 W1–W5 implementation plans completed; frontend/d
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** v21 Task Dashboard (Phases 104–105). Phase 104 is complete. Phase 105 W1–W5 implementation plans and local product changes are complete on `feat/command-center`; the broad `-k dashboard` pytest selector is blocked during collection by absent `mcp` and `apscheduler`, W4's real setuptools archive collection was skipped because setuptools is absent, and live GitHub/browser/signed-sandbox evidence remains with the outer driver. v20 Phase 97 remains separately deferred pending upstream MCP contract evidence; Phase 77.1 UAT remains user-owned.
+**Current focus:** v21 Task Dashboard (Phases 104–106). Phase 104 is complete. Phase 105 local implementation is recorded on `feat/command-center`; Phase 106 local implementation and offline verification are recorded on `feat/command-center-polish`, with broad Python collection and host evidence pending. v20 Phase 97 remains separately deferred pending upstream MCP contract evidence; Phase 77.1 UAT remains user-owned.
 
 ## Current Position
 
-Phase: 106 (Command Center polish) — READY TO EXECUTE
-Plan: 05 (5/5 plans complete; 105-05-SUMMARY.md records evidence and limitations).
-Status: Frontend install/tests/build and build-asset inspection passed; dashboard-specific tests passed after a deterministic timeout-fixture correction; docs/public-repo tests passed. The required broad dashboard selector exited 2 during collection because `mcp` and `apscheduler` are absent. The real package-data expansion check was skipped because setuptools is absent. Do not install Python packages or conceal these limits. No milestone audit/complete/cleanup, export, push, PR, restart of 7421, or merge was run.
+Phase: 106 (Command Center polish) — LOCAL IMPLEMENTATION COMPLETE; ACCEPTANCE GATES PENDING
+Plan: 05 (5/5 phase plans executed; `106-SUMMARY.md` records tests and limitations).
+Status: Frontend npm install, full Vitest suite, production build and build-asset inspection passed; dashboard-file family passed 158 with 1 skipped; dashboard app/static serving passed 13 with 1 skipped; docs/public-repo tests passed 31. The required broad dashboard selector exited 2 during collection because `mcp` and `apscheduler` are absent. Ruff, mypy and polyglot-check are unavailable in this environment. Live GitHub/Herdr, browser screenshots, signed sandbox evidence and real-terminal verification remain pending. No milestone audit/complete/cleanup, export, push, PR, restart of 7421, or merge was run.
 
 ## Closeout
 
@@ -144,9 +144,9 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Session
 
-**Last session:** 2026-10-20
-**Stopped at:** Phase 105 local implementation and offline verification. No milestone lifecycle or remote publication was run.
-**Resume file:** `.planning/phases/105-command-center/105-05-SUMMARY.md`
+**Last session:** 2026-10-21
+**Stopped at:** Phase 106 local implementation and offline verification. Host-only verification and missing Python tooling/dependencies remain pending; no milestone lifecycle or remote publication was run.
+**Resume file:** `.planning/phases/106-command-center-polish/106-SUMMARY.md`
 
 ## Operator Next Steps
 
