@@ -111,6 +111,7 @@ class _SSEResponse(Response):
                 await send(
                     {"type": "http.response.body", "body": body, "more_body": True}
                 )
+                await asyncio.sleep(0)
                 if disconnected.is_set():
                     await send({"type": "http.response.body", "body": b"", "more_body": False})
                     return
