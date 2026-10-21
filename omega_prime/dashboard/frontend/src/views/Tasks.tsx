@@ -9,14 +9,17 @@ import { safeHref } from '../lib/links'
 import { reviewLabel } from '../lib/review'
 import type { BucketRow } from '../lib/selectors'
 type Props = DashboardState & { snapshot: Snapshot; bucket: TaskBucket; notice: string | null; onTask: (id: string) => void }
-function rowTitle(item: BucketRow['item']): string { return isWaiting(item) ? item.ask : item.title }
+function rowTitle(item: BucketRow['item']): string {
+  if ('number' in item) return item.title
+  return isWaiting(item) ? item.ask : item.title
+}
 const labels: Record<TaskBucket, string> = { all: 'All', waiting: 'Waiting on Ove', working: 'Working', 'pr-gate': 'PR gate', finished: 'Finished' }
 const emptyCopy: Record<TaskBucket, [string, string]> = { all: ['No task records available', 'Task records will appear here when reported by a source.'], waiting: ['Nothing waiting on you', 'Choose All to view the rest of the work queue.'], working: ['No work in progress', 'Choose All to view waiting and finished work.'], 'pr-gate': ['No PRs at the gate', 'Choose All to view the rest of the work queue.'], finished: ['No finished tasks yet', 'Choose All to view current work.'] }
 function bucketCountLabel(bucket: TaskBucket, count: number): string { return bucket === 'pr-gate' ? `${count} ${count === 1 ? 'PR' : 'PRs'}` : `${count} ${count === 1 ? 'task' : 'tasks'}` }
 export function Tasks({ snapshot, loading, error, receivedAt, refresh, bucket, notice, onTask }: Props) {
   const [search, setSearch] = useState(''), [density, setDensity] = useState<'compact' | 'comfortable'>('compact'), [idleOpen, setIdleOpen] = useState(false)
   const rows = useMemo(() => bucketRows(snapshot, bucket), [snapshot, bucket])
-  const filtered = rows.filter(({ item }) => `${rowTitle(item)} ${item.display_id ?? ''}`.toLocaleLowerCase().includes(search.toLocaleLowerCase()))
+  const filtered = rows.filter(({ item }) => `${rowTitle(item)} ${'display_id' in item ? item.display_id ?? '' : ''}`.toLocaleLowerCase().includes(search.toLocaleLowerCase()))
   const idle = idleTasks(snapshot)
   const [emptyHeading, emptyBody] = search ? ['No task matches the current filters', 'Clear the search or choose All.'] : emptyCopy[bucket]
   const navBuckets: TaskBucket[] = ['working', 'waiting', 'pr-gate', 'finished']
