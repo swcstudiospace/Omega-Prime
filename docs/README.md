@@ -9,8 +9,8 @@ still require their actual prerequisites and authorization.
 
 ## Start by audience
 
-- **Install and check locally:** [Setup](setup.md) and [local validation](local-validation.md).
-  These distinguish exercised local effects from disabled features and missing prerequisites.
+- **Install and check locally:** [Setup](setup.md), [local validation](local-validation.md),
+  and the [configuration inventory](configuration.md) for environment names and purposes.
 - **Use the agent and workflows:** [User guide](user-guide.md), [driving the bot](driving-the-bot.md)
   and [FAQ](faq.md), with configuration, work/state roots and approval boundaries.
 - **Run or integrate tools:** [Tool host](tool-host.md), [remote MCP host](grok-bot-native.md),

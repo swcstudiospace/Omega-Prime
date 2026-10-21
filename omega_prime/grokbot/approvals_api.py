@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 MAX_BODY_BYTES = 4096
 _ALLOWED_KEYS = frozenset({"tool", "ttl_seconds"})
 _REALM_HEADER = 'Bearer realm="omega-prime"'
+_SEPARATE_APPROVAL_NAME = "pin_bump_apply"
 
 
 def _reject_constant(name: str) -> Any:
@@ -104,12 +105,20 @@ def approval_routes(
     audit: Any = None,
     default_ttl_seconds: float = 3600.0,
     max_ttl_seconds: float = 86400.0,
+    separate_approval_name: str | None = None,
 ) -> list[Route]:
     """Build the admin approval routes over ``approval_log``.
 
-    ``gated_tools`` returns the names currently requiring approval; it is called
-    per request. ``audit`` is an optional ``GrokBotAuditTracer``-like object.
+    ``gated_tools`` returns names currently requiring approval; it is called
+    per request and is the only list exposed as gated-tool metadata.
+    ``separate_approval_name`` permits one non-tool action to be managed here
+    without publishing it as a served or gated MCP tool.
     """
+    if separate_approval_name not in (None, _SEPARATE_APPROVAL_NAME):
+        raise ValueError("unsupported separate approval name")
+
+    def is_approvable(tool: str) -> bool:
+        return tool in gated_tools() or tool == separate_approval_name
 
     async def _audit(
         event: str, tool: str, principal: Principal, ttl: float | None, approver: str
@@ -163,7 +172,7 @@ def approval_routes(
             or not math.isfinite(ttl_raw)
         ):
             return _error(400, "ttl_seconds must be a finite number")
-        if tool not in gated_tools():
+        if not is_approvable(tool):
             return _error(404, "unknown or non-gated tool")
         if ttl_raw <= 0:
             return _error(422, "ttl_seconds must be greater than 0")
@@ -189,7 +198,7 @@ def approval_routes(
         if denied is not None or principal is None:
             return denied or _error(401, "authentication required")
         tool = request.path_params["tool"]
-        if tool not in gated_tools() or not approval_log.revoke(tool):
+        if not is_approvable(tool) or not approval_log.revoke(tool):
             return _error(404, "no active approval for tool")
         await _audit(
             "approval_revoked", tool, principal, None, principal.label or principal.id

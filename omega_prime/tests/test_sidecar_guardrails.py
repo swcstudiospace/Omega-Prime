@@ -330,7 +330,15 @@ def test_file_key_value_rejected_fail_closed(monkeypatch, sidecar_env, tmp_path)
     registry = default_registry(
         install, tmp_path / "home", approval_log=ApprovalLog(), env={}
     )
-    assert registry.runtime_bindings["sidecar_state"] == "BLOCKED"
+    assert registry.runtime_bindings["sidecar_cause"] == "roe-key-in-file"
+    assert registry.runtime_bindings["sidecar_cause"] in {
+        "kill-switch",
+        "disabled",
+        "roe-missing",
+        "roe-invalid",
+        "roe-key-in-file",
+        "roe-key-unavailable",
+    }
     assert not (_registered_names(registry) & set(REDTEAM_TOOL_NAMES))
 
 
