@@ -74,7 +74,7 @@ def test_terminal_route_resolves_only_task_owned_pane_and_uses_read_argv():
 
 
 def test_terminal_sanitizes_redacts_caps_and_sends_only_changed_frames():
-    content = "\x1b[31m" + "é" * 40000 + "\n" + "\n".join(f"line-{i}" for i in range(205)) + "\nBearer abcdefghijkl ghp_abcdefgh123456 api_key='topsecret'\x1b[0m"
+    content = "\x1b[31m" + "é" * 40000 + "\n" + "\n".join(f"line-{i}" for i in range(205)) + "\nBearer abcdefghijkl ghp_abcdefgh123456 github_pat_\x1b[32mABCDEFGHIJKLMNOPQRSTUVWXYZ012345 sk-abcdefgh123456 aaaaaaaa.bbbbbbbb.cccccccc api_key='topsecret'\x1b[0m"
     calls = 0
     async def runner(_argv):
         nonlocal calls
@@ -86,7 +86,7 @@ def test_terminal_sanitizes_redacts_caps_and_sends_only_changed_frames():
     assert status == 200
     events = [json.loads(line[6:]) for line in wire.splitlines() if line.startswith("data: ")]
     assert len(events) == 2
-    assert "abcdefghijkl" not in wire and "ghp_abcdefgh123456" not in wire and "topsecret" not in wire and "\x1b" not in wire
+    assert all(secret not in wire for secret in ("abcdefghijkl", "ghp_abcdefgh123456", "github_pat_", "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", "sk-abcdefgh123456", "aaaaaaaa.bbbbbbbb.cccccccc", "topsecret", "\x1b"))
     assert len(events[-1]["text"].encode()) <= 65536 and len(events[-1]["text"].splitlines()) <= 200
     assert events[0]["updated_at"] != events[1]["updated_at"]
     assert calls == 2 and service._slots._value == 4
