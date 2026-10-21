@@ -18,7 +18,6 @@ from typing import Any
 from omega_prime.dashboard.model import SourceResult, normalize_tasks
 from omega_prime.dashboard.redact import redact_value
 from omega_prime.dashboard.stale import StaleChecker
-from omega_prime.dashboard.task_ids import number_snapshot
 
 LOCAL_SOURCES = 3.0
 HERDR_PODMAN = 5.0
@@ -71,6 +70,7 @@ class DashboardPoller:
         self._next_due: dict[str, float] = {}
         self._in_flight: set[asyncio.Task[None]] = set()
         self._running: set[str] = set()
+        self._build_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Start the background polling loop once."""
@@ -109,24 +109,41 @@ class DashboardPoller:
         self._running.add(spec.source)
         try:
             await self._collect(spec)
-            self._maybe_build()
+            await self._maybe_build()
         finally:
             self._running.discard(spec.source)
 
     async def _run_specs(self, specs: list[CollectorSpec]) -> None:
         await asyncio.gather(*(self._run_one(spec) for spec in specs))
 
-    def _maybe_build(self) -> None:
+    async def _maybe_build(self) -> None:
         if not all(spec.source in self._results for spec in self.specs):
             return
-        try:
-            self._status.pop("normalization", None)
-            self._build_snapshot()
-        except Exception as exc:
-            self._status["normalization"] = {
-                "status": "error",
-                "error": f"normalize failed: {type(exc).__name__}",
-            }
+        # Builds are serialized so a slow stale probe can never let an older
+        # build overwrite a newer one; the stale evidence (Herdr pane list
+        # subprocess and /proc probes) is gathered in a worker thread so a
+        # slow or hung Herdr never blocks the event loop that serves HTTP,
+        # terminal input and every stream.
+        async with self._build_lock:
+            try:
+                self._status.pop("normalization", None)
+                now = self.clock()
+                rows = self._stale_rows()
+                stale_values = await asyncio.to_thread(
+                    self.stale_checker.stale_map, rows, now=now
+                )
+                self._build_snapshot(now=now, stale_values=stale_values)
+            except Exception as exc:
+                self._status["normalization"] = {
+                    "status": "error",
+                    "error": f"normalize failed: {type(exc).__name__}",
+                }
+
+    def _stale_rows(self) -> list[dict[str, Any]]:
+        result = self._results.get("tasks_json")
+        if result is None:
+            return []
+        return [row for row in result.extra.get("tasks", []) if isinstance(row, dict)]
 
     async def _collect(self, spec: CollectorSpec) -> None:
         started = time.perf_counter()
@@ -178,8 +195,20 @@ class DashboardPoller:
             status[key] = redact_value(extra)
         self._status[spec.source] = status
 
-    def _build_snapshot(self) -> None:
-        now = self.clock()
+    def _build_snapshot(
+        self,
+        *,
+        now: datetime | None = None,
+        stale_values: dict[str, dict[str, str | None] | None] | None = None,
+    ) -> None:
+        """Build and cache the snapshot.
+
+        ``stale_values`` is the pre-collected (off-loop) stale evidence; when
+        omitted (direct synchronous callers such as tests) it is computed
+        inline.
+        """
+        if now is None:
+            now = self.clock()
         normalized_results = {
             name: SourceResult(
                 result.source,
@@ -208,12 +237,13 @@ class DashboardPoller:
         )
         tasks_result = normalized_results.get("tasks_json")
         if tasks_result is not None:
-            rows = [
-                row
-                for row in tasks_result.extra.get("tasks", [])
-                if isinstance(row, dict)
-            ]
-            stale_values = self.stale_checker.stale_map(rows, now=now)
+            if stale_values is None:
+                rows = [
+                    row
+                    for row in tasks_result.extra.get("tasks", [])
+                    if isinstance(row, dict)
+                ]
+                stale_values = self.stale_checker.stale_map(rows, now=now)
             for task in snapshot.active:
                 if task.source == "tasks_json" and task.id in stale_values:
                     task.stale = stale_values[task.id]

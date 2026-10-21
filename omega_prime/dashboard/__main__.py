@@ -17,12 +17,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from omega_prime.dashboard.task_ids import (
-    allocate_task_id,
-    assign_task_ids,
-    next_task_id,
-)
-
 from omega_prime.dashboard.config import DashboardConfig, load_dashboard_config
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.poller import (
@@ -32,6 +26,11 @@ from omega_prime.dashboard.poller import (
     LOCAL_SOURCES,
     CollectorSpec,
     DashboardPoller,
+)
+from omega_prime.dashboard.task_ids import (
+    allocate_task_id,
+    assign_task_ids,
+    next_task_id,
 )
 
 
@@ -203,7 +202,9 @@ def main(
         argparse.ArgumentParser(prog="assign-ids").parse_args(raw_argv[1:])
         assign_task_ids(path=tasks_path, now=datetime.now(UTC))
         return 0
-    parser = argparse.ArgumentParser(description="Local read-only task dashboard")
+    parser = argparse.ArgumentParser(
+        description="Local loopback task dashboard (see --terminal-readonly)"
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=int(os.environ.get("OMEGA_PRIME_DASHBOARD_PORT", "7421")))
     parser.add_argument("--once", action="store_true")

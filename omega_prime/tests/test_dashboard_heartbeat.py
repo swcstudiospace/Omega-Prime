@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Protocol defaults 2 and 3: tolerant-but-strict validation and the heartbeat writer."""
+
 from datetime import UTC, datetime
 
 import pytest
@@ -84,7 +85,10 @@ def test_heartbeat_clears_a_written_stale_marker(tmp_path):
         stale={"reason": "pid_dead", "since": "2026-10-21T10:00:00+00:00"},
     )
     rows, _ = _rows(path)
-    assert rows[0]["stale"] == {"reason": "pid_dead", "since": "2026-10-21T10:00:00+00:00"}
+    assert rows[0]["stale"] == {
+        "reason": "pid_dead",
+        "since": "2026-10-21T10:00:00+00:00",
+    }
     heartbeat(path, "gb:1", now=NOW)
     rows, _ = _rows(path)
     assert rows[0]["stale"] is None
@@ -119,7 +123,10 @@ def test_new_fields_round_trip_through_write_and_read(tmp_path):
         ("last_heartbeat_at", "not-a-date"),
         ("stale", {"reason": 5, "since": "2026-10-21T10:00:00+00:00"}),
         ("stale", {"reason": "pid_dead", "since": "nope"}),
-        ("stale", {"reason": "pid_dead", "since": "2026-10-21T10:00:00+00:00", "pid": 1}),
+        (
+            "stale",
+            {"reason": "pid_dead", "since": "2026-10-21T10:00:00+00:00", "pid": 1},
+        ),
         ("stale", {"reason": "pid_dead"}),
         ("stale", "pid_dead"),
     ],

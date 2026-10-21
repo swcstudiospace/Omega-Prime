@@ -15,7 +15,10 @@ token stay out of logs, errors and stdout.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import difflib
 import json
+import re
 import secrets
 import time
 import unicodedata
@@ -26,7 +29,6 @@ from typing import Any
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from omega_prime.dashboard import terminal
 from omega_prime.dashboard.redact import redact_value
 from omega_prime.dashboard.terminal import (
     _ANSI,
@@ -61,15 +63,100 @@ def _redact_visible_run(text: str) -> str:
     return text
 
 
-def redact_ansi_frame(value: str) -> str:
-    """Redact visible text of an ANSI frame while keeping escape runs verbatim."""
-    parts: list[str] = []
+# Text-bearing escape strings: OSC (hyperlinks, window titles, clipboard) and
+# DCS/SOS/PM/APC. Their payloads are text the browser terminal may surface
+# (link targets, titles), so they are removed outright rather than preserved.
+_STRING_SEQ = re.compile(r"\x1b(?:\]|[PX^_])[^\x07\x1b]*(?:\x07|\x1b\\)")
+# Introducers of the above that never terminate are dropped too, so the bytes
+# that follow are treated (and redacted) as ordinary visible text.
+_STRING_INTRO = frozenset("]PX^_")
+
+
+def _split_frame(value: str) -> tuple[str, list[tuple[int, str]]]:
+    """Split a frame into its visible text and positioned styling escapes.
+
+    Each escape is paired with the visible-text index it precedes. Only
+    styling/cursor escapes (CSI and two-byte ESC sequences) are kept.
+    """
+    value = _STRING_SEQ.sub("", value)
+    visible: list[str] = []
+    escapes: list[tuple[int, str]] = []
+    count = 0
     cursor = 0
     for match in _ANSI.finditer(value):
-        parts.append(_redact_visible_run(value[cursor : match.start()]))
-        parts.append(match.group(0))
+        run = value[cursor : match.start()]
+        visible.append(run)
+        count += len(run)
+        sequence = match.group(0)
+        if not (len(sequence) >= 2 and sequence[1] in _STRING_INTRO):
+            escapes.append((count, sequence))
         cursor = match.end()
-    parts.append(_redact_visible_run(value[cursor:]))
+    visible.append(value[cursor:])
+    return "".join(visible), escapes
+
+
+def _map_redaction(visible: str, redacted: str) -> list[tuple[int, int, str]]:
+    """Edits turning ``visible`` into ``redacted`` as (start, end, text).
+
+    Lines are aligned one-to-one when the line count is unchanged (the usual
+    case, so the diff stays small); otherwise the whole text is diffed.
+    """
+    edits: list[tuple[int, int, str]] = []
+    old_lines = visible.split("\n")
+    new_lines = redacted.split("\n")
+    if len(old_lines) != len(new_lines):
+        pairs = [(0, visible, redacted)]
+    else:
+        pairs = []
+        offset = 0
+        for old_line, new_line in zip(old_lines, new_lines, strict=True):
+            if old_line != new_line:
+                pairs.append((offset, old_line, new_line))
+            offset += len(old_line) + 1
+    for offset, old_text, new_text in pairs:
+        matcher = difflib.SequenceMatcher(None, old_text, new_text, autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag != "equal":
+                edits.append((offset + i1, offset + i2, new_text[j1:j2]))
+    return edits
+
+
+def redact_ansi_frame(value: str) -> str:
+    """Redact an ANSI frame across its complete visible text.
+
+    Secrets are matched on the visible text with every escape removed (the
+    same view sanitize_terminal_text redacts), so styling between an
+    assignment and its value cannot split a match. The replacements are then
+    mapped back onto the styled frame: styling escapes keep their positions,
+    and the frame's visible text is exactly the redacted visible text.
+    Text-bearing OSC/DCS strings are dropped entirely.
+    """
+    visible, escapes = _split_frame(value)
+    redacted = _redact_visible_run(visible)
+    edits = _map_redaction(visible, redacted) if redacted != visible else []
+    parts: list[str] = []
+    escape_index = 0
+    edit_index = 0
+    position = 0
+    length = len(visible)
+    while position <= length:
+        while escape_index < len(escapes) and escapes[escape_index][0] <= position:
+            parts.append(escapes[escape_index][1])
+            escape_index += 1
+        if edit_index < len(edits) and edits[edit_index][0] == position:
+            start, end, text = edits[edit_index]
+            edit_index += 1
+            # Styling inside the replaced span stays, ahead of the replacement.
+            while escape_index < len(escapes) and escapes[escape_index][0] < end:
+                parts.append(escapes[escape_index][1])
+                escape_index += 1
+            parts.append(text)
+            if end > start:
+                position = end
+                continue
+        if position < length:
+            parts.append(visible[position])
+        position += 1
     text = "".join(parts)
     text = "\n".join(text.splitlines()[-TERMINAL_MAX_LINES:])
     encoded = text.encode("utf-8")
@@ -109,9 +196,21 @@ class HerdrBridge:
 
     async def read_frame(self, pane: str) -> str:
         """Read the pane's visible screen as ANSI and return it redacted."""
-        argv = ["herdr", "pane", "read", pane, "--source", "visible", "--format", "ansi"]
+        argv = [
+            "herdr",
+            "pane",
+            "read",
+            pane,
+            "--source",
+            "visible",
+            "--format",
+            "ansi",
+        ]
         raw = await asyncio.wait_for(self.runner(argv), TERMINAL_READ_TIMEOUT_S)
-        if not isinstance(raw, str) or len(raw.encode("utf-8")) > TERMINAL_MAX_CAPTURE_BYTES:
+        if (
+            not isinstance(raw, str)
+            or len(raw.encode("utf-8")) > TERMINAL_MAX_CAPTURE_BYTES
+        ):
             raise OSError("terminal capture unavailable")
         return redact_ansi_frame(raw)
 
@@ -127,12 +226,14 @@ class HerdrBridge:
         """Yield frame/status events for the pane the provider resolves.
 
         Frames are sent only when the redacted visible content changes; a pane
-        change always produces a first frame. Statuses are deduplicated. The
-        generator returns on pane_closed and propagates CancelledError.
+        change always produces a first frame. Statuses are deduplicated, and
+        recovery from an error status yields a ``live`` status followed by a
+        fresh frame. The generator returns on pane_closed and propagates
+        CancelledError.
         """
         last_status: str | None = None
         last_text: str | None = None
-        current_pane: str | None | object = _UNSET
+        current_pane: str | object | None = _UNSET
         while True:
             pane = pane_provider()
             if pane is None:
@@ -157,6 +258,12 @@ class HerdrBridge:
                     last_status = "unavailable"
                 await self.sleep(self.poll_s)
                 continue
+            if last_status is not None:
+                # Recovered from no_session/unavailable: tell the client so it
+                # clears the error state, and resend the screen even if it
+                # did not change while the pane was unreadable.
+                yield {"type": "status", "status": "live"}
+                last_text = None
             if last_text is None or text != last_text:
                 yield {
                     "type": "frame",
@@ -166,6 +273,42 @@ class HerdrBridge:
                 last_text = text
             last_status = None
             await self.sleep(self.poll_s)
+
+
+def _parse_auth(raw: Any) -> dict[str, Any] | None:
+    """Validate the first-frame auth shape; None for anything malformed."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        message = json.loads(raw)
+    except ValueError:
+        return None
+    if (
+        not isinstance(message, dict)
+        or message.get("type") != "auth"
+        or not isinstance(message.get("token"), str)
+        or message.get("mode") not in ("rw", "ro")
+    ):
+        return None
+    return message
+
+
+def _token_matches(candidate: str, token: str) -> bool:
+    """Constant-time token check that never raises on unsupported text.
+
+    secrets.compare_digest raises TypeError for non-ASCII str input, so the
+    comparison runs on UTF-8 bytes (a non-ASCII candidate simply mismatches).
+    """
+    try:
+        encoded = candidate.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return secrets.compare_digest(encoded, token.encode("utf-8"))
+
+
+async def _close_quietly(websocket: WebSocket, code: int) -> None:
+    with contextlib.suppress(Exception):
+        await websocket.close(code=code)
 
 
 def make_terminal_ws_endpoint(
@@ -202,18 +345,20 @@ def make_terminal_ws_endpoint(
     async def endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
         try:
-            message = await asyncio.wait_for(websocket.receive_json(), auth_timeout_s)
-        except (asyncio.TimeoutError, TimeoutError):
+            raw = await asyncio.wait_for(websocket.receive_text(), auth_timeout_s)
+        except TimeoutError:
             await websocket.close(code=4401)
             return
-        if (
-            not isinstance(message, dict)
-            or message.get("type") != "auth"
-            or not isinstance(message.get("token"), str)
-            or not secrets.compare_digest(message["token"], token)
-            or message.get("mode") not in ("rw", "ro")
-        ):
-            await websocket.close(code=4401)
+        except WebSocketDisconnect:
+            return
+        except (KeyError, RuntimeError, TypeError):
+            # A binary (non-text) first frame, or a receive the socket state
+            # cannot serve, is a rejected auth attempt, not a server error.
+            await _close_quietly(websocket, 4401)
+            return
+        message = _parse_auth(raw)
+        if message is None or not _token_matches(message["token"], token):
+            await _close_quietly(websocket, 4401)
             return
         force_readonly = readonly or message["mode"] == "ro"
 
@@ -225,7 +370,11 @@ def make_terminal_ws_endpoint(
         ):
             await websocket.close(code=4404)
             return
-        snapshot = poller.snapshot() or {"active": [], "idle_sessions": [], "finished": []}
+        snapshot = poller.snapshot() or {
+            "active": [],
+            "idle_sessions": [],
+            "finished": [],
+        }
         if _task_row(snapshot, task_id) is None:
             await websocket.close(code=4404)
             return
@@ -233,15 +382,17 @@ def make_terminal_ws_endpoint(
             await websocket.close(code=4429)
             return
 
-        last_pane: list[str | None] = [None]
-
         def pane_provider() -> str | None:
-            current = poller.snapshot() or {"active": [], "idle_sessions": [], "finished": []}
+            # Resolved from the current snapshot on every call: the writer
+            # follows pane changes live, and input is never sent to a pane
+            # the task no longer maps (or to any pane once the task is gone).
+            current = poller.snapshot() or {
+                "active": [],
+                "idle_sessions": [],
+                "finished": [],
+            }
             row = _task_row(current, task_id)
-            pane = resolve_task_pane(row) if row is not None else None
-            if pane is not None:
-                last_pane[0] = pane
-            return pane
+            return resolve_task_pane(row) if row is not None else None
 
         async def writer() -> None:
             async for event in bridge.poll_events(pane_provider):
@@ -259,9 +410,15 @@ def make_terminal_ws_endpoint(
             window: deque[float] = deque()
             while True:
                 try:
-                    frame = await websocket.receive_json()
+                    raw_frame = await websocket.receive_text()
                 except WebSocketDisconnect:
                     return
+                except KeyError:
+                    continue  # binary frame: not part of the protocol
+                try:
+                    frame = json.loads(raw_frame)
+                except ValueError:
+                    continue
                 if force_readonly or not isinstance(frame, dict):
                     continue
                 kind = frame.get("type")
@@ -273,7 +430,7 @@ def make_terminal_ws_endpoint(
                         or not await _allowed(window, mono())
                     ):
                         continue
-                    pane = last_pane[0]
+                    pane = pane_provider()
                     if pane is None:
                         continue
                     try:
@@ -292,7 +449,7 @@ def make_terminal_ws_endpoint(
                         or not await _allowed(window, mono())
                     ):
                         continue
-                    pane = last_pane[0]
+                    pane = pane_provider()
                     if pane is None:
                         continue
                     try:
@@ -319,18 +476,14 @@ def make_terminal_ws_endpoint(
         finally:
             writer_task.cancel()
             reader_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.gather(writer_task, reader_task, return_exceptions=True)
-            except asyncio.CancelledError:
-                pass
             bridge.release()
             # The session must always end with an explicit close frame: a bare
             # return completes the ASGI app without one, and the peer would wait
             # forever (uvicorn tolerates a close after peer disconnect).
-            try:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 await websocket.close()
-            except (Exception, asyncio.CancelledError):
-                pass
         if cancelled is not None:
             raise cancelled
 

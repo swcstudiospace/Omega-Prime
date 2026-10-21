@@ -26,8 +26,8 @@ from typing import Any
 from omega_prime.dashboard import stale
 from omega_prime.dashboard.herdr_launch import _run, workspace_label
 from omega_prime.dashboard.redact import redact_value
-from omega_prime.dashboard.status_file import _PANE_ID, _write_locked, locked_tasks
 from omega_prime.dashboard.stale import normalize_pane_list
+from omega_prime.dashboard.status_file import _PANE_ID, _write_locked, locked_tasks
 
 Runner = Any  # Callable[[list[str]], str]
 PidAlive = Any  # Callable[[int], bool]
@@ -81,18 +81,26 @@ def _row_verdict(
     now: datetime,
     stale_minutes: float,
 ) -> str | None:
-    """One verdict per working/blocked row; first match wins."""
+    """One verdict per working/blocked row; first match wins.
+
+    Mirrors StaleChecker's evidence order: the row's own recorded pid is
+    checked against /proc regardless of pane availability, then pane absence,
+    the pane's exited flag/status, the pane process pid, and finally
+    heartbeat age.
+    """
+    row_pid = _positive_pid(row.get("pid"))
+    if row_pid is not None and not pid_alive(row_pid):
+        return "pid_dead"
     pane = row.get("herdr_pane")
     pane_id = pane.get("pane_id") if isinstance(pane, dict) else None
     if panes is not None and isinstance(pane_id, str) and pane_id:
-        if pane_id not in panes:
+        info = panes.get(pane_id)
+        if info is None:
             return "pane_gone"
+        if stale.pane_exited(info):
+            return "pane_exited"
         evidence_pid = _pane_pid(runner, pane_id)
         if evidence_pid is not None and not pid_alive(evidence_pid):
-            return "pid_dead"
-    elif pane_id is None:
-        row_pid = _positive_pid(row.get("pid"))
-        if row_pid is not None and not pid_alive(row_pid):
             return "pid_dead"
     if stale.no_heartbeat(row, now=now, stale_minutes=stale_minutes):
         return "no_heartbeat"
@@ -131,7 +139,9 @@ def _orphan_attaches(
         )
         if matches:
             claimed.add(matches[0])
-            attaches.append({"id": row["id"], "pane_id": matches[0], "workspace": label})
+            attaches.append(
+                {"id": row["id"], "pane_id": matches[0], "workspace": label}
+            )
     return attaches
 
 
@@ -190,9 +200,7 @@ def _reconcile(
     now: datetime,
 ) -> int:
     age = _updated_age_minutes(data.get("updated_at"), now)
-    protected = (
-        age is not None and age < _PROTECTION_MINUTES and not args.force
-    )
+    protected = age is not None and age < _PROTECTION_MINUTES and not args.force
 
     panes = _pane_map(run)
     dead: list[dict[str, Any]] = []
@@ -218,7 +226,10 @@ def _reconcile(
         elif verdict == "no_heartbeat":
             reference = stale.last_signal(row)
             heartbeatless.append(
-                {"id": row.get("id"), "since": reference.isoformat() if reference else None}
+                {
+                    "id": row.get("id"),
+                    "since": reference.isoformat() if reference else None,
+                }
             )
             marked.append((row, verdict))
 

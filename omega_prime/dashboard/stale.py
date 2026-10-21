@@ -54,7 +54,9 @@ def last_signal(row: dict[str, Any]) -> datetime | None:
     return best
 
 
-def no_heartbeat(row: dict[str, Any], *, now: datetime, stale_minutes: float = DEFAULT_STALE_MINUTES) -> bool:
+def no_heartbeat(
+    row: dict[str, Any], *, now: datetime, stale_minutes: float = DEFAULT_STALE_MINUTES
+) -> bool:
     """True when the row's newest reference is at least stale_minutes old.
 
     A row carrying no parseable reference never qualifies: there is no
@@ -68,7 +70,13 @@ def no_heartbeat(row: dict[str, Any], *, now: datetime, stale_minutes: float = D
 
 
 def normalize_pane_list(payload: Any) -> dict[str, dict[str, Any]] | None:
-    """Defensively normalize a `herdr pane list` payload; None when unusable."""
+    """Defensively normalize a `herdr pane list` payload; None when unusable.
+
+    A genuinely empty listing is ``{}`` (Herdr is up, no panes). A response
+    whose shape is unrecognized, or whose entries carry no usable pane id,
+    is ``None`` so callers never mistake a bad response for "every pane is
+    gone". Envelopes such as ``{"result": {"panes": [...]}}`` are unwrapped.
+    """
     entries: Any = None
     if isinstance(payload, list):
         entries = payload
@@ -79,10 +87,10 @@ def normalize_pane_list(payload: Any) -> dict[str, dict[str, Any]] | None:
                 entries = value
                 break
             if isinstance(value, dict):
+                if any(name in value for name in _PANE_LIST_KEYS):
+                    return normalize_pane_list(value)
                 entries = [
-                    {"pane_id": pane_id, **info}
-                    if isinstance(info, dict)
-                    else info
+                    {"pane_id": pane_id, **info} if isinstance(info, dict) else info
                     for pane_id, info in value.items()
                     if isinstance(pane_id, str)
                 ]
@@ -99,6 +107,8 @@ def normalize_pane_list(payload: Any) -> dict[str, dict[str, Any]] | None:
         if not isinstance(pane_id, str) or not pane_id:
             continue
         panes[pane_id] = entry
+    if entries and not panes:
+        return None
     return panes
 
 
@@ -127,7 +137,8 @@ def _default_pid_alive(pid: int) -> bool:
     return (Path("/proc") / str(pid)).exists()
 
 
-def _pane_exited(info: dict[str, Any]) -> bool:
+def pane_exited(info: dict[str, Any]) -> bool:
+    """True when a pane-list entry reports an exited flag or exit status."""
     if info.get("exited"):
         return True
     status = info.get("status")
@@ -227,7 +238,7 @@ class StaleChecker:
                 info = panes.get(pane_id)
                 if info is None:
                     return {"reason": "pane_gone", "since": anchor}
-                if _pane_exited(info):
+                if pane_exited(info):
                     return {"reason": "pane_exited", "since": anchor}
 
         if no_heartbeat(row, now=current, stale_minutes=self.stale_minutes):

@@ -5,12 +5,12 @@
 from __future__ import annotations
 
 import contextlib
-import json
-import os
-import tempfile
 import fcntl
 import hashlib
+import json
+import os
 import re
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -308,13 +308,18 @@ def _write_locked(data: dict[str, Any], path: Path) -> Path:
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as stream:
-            stream.write(payload); stream.flush(); os.fsync(stream.fileno())
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(tmp_name, path)
         dir_fd = os.open(path.parent, os.O_RDONLY)
-        try: os.fsync(dir_fd)
-        finally: os.close(dir_fd)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except BaseException:
-        with contextlib.suppress(FileNotFoundError): os.unlink(tmp_name)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_name)
         raise
     return path
 

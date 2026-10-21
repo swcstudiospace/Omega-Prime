@@ -11,17 +11,16 @@ import secrets
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, MutableMapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any, TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from starlette.applications import Starlette
 from starlette.responses import FileResponse, JSONResponse, Response
-from starlette.routing import Mount, Route, WebSocketRoute
-from starlette.staticfiles import StaticFiles
+from starlette.routing import Route, WebSocketRoute
 
-from omega_prime.dashboard.terminal import TerminalService, resolve_task_pane
-from omega_prime.dashboard.terminal_ws import HerdrBridge, make_terminal_ws_endpoint
 from omega_prime.dashboard import __version__
 from omega_prime.dashboard.poller import DashboardPoller
+from omega_prime.dashboard.terminal import TerminalService, resolve_task_pane
+from omega_prime.dashboard.terminal_ws import HerdrBridge, make_terminal_ws_endpoint
 
 if TYPE_CHECKING:
     from omega_prime.dashboard.events import TasksFileWatcher
@@ -169,17 +168,19 @@ class _DashboardGuards:
             selected_host = f"{host}:{port}".lower()
             if selected_host not in self.allowed_hosts:
                 self.allowed_hosts.add(selected_host)
+        # Origins and websocket CSP sources are derived from every supported
+        # Host (including a bracketed IPv6 loopback such as [::1]), so a page
+        # served on any accepted address can open its own websockets.
+        hosts = sorted(self.allowed_hosts)
+        ws_sources = " ".join(f"ws://{value}" for value in hosts)
         self.security_headers = dict(_SECURITY_HEADERS)
         self.security_headers["content-security-policy"] = (
             _SECURITY_HEADERS["content-security-policy"].replace(
                 "connect-src 'self'",
-                f"connect-src 'self' ws://127.0.0.1:{port} ws://localhost:{port}",
+                f"connect-src 'self' {ws_sources}",
             )
         )
-        self.allowed_origins = {
-            f"http://127.0.0.1:{port}".lower(),
-            f"http://localhost:{port}".lower(),
-        }
+        self.allowed_origins = {f"http://{value}".lower() for value in hosts}
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] == "websocket":

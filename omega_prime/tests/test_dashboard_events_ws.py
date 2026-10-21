@@ -10,6 +10,7 @@ import json
 import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -42,7 +43,9 @@ SNAPSHOT_KEYS = {
 }
 
 
-def _snapshot(active=(), waiting=(), finished=(), *, generated_at="2026-10-21T12:00:00+00:00"):
+def _snapshot(
+    active=(), waiting=(), finished=(), *, generated_at="2026-10-21T12:00:00+00:00"
+):
     return {
         "generated_at": generated_at,
         "sources": {},
@@ -93,13 +96,17 @@ def test_stale_transitions_emit_exactly_one_stale_changed():
         _snapshot(active=[_task("tasks:one", stale=stale)]),
         _snapshot(active=[_task("tasks:one")]),
     )
-    assert object_to_null == [{"type": "stale_changed", "id": "tasks:one", "stale": None}]
+    assert object_to_null == [
+        {"type": "stale_changed", "id": "tasks:one", "stale": None}
+    ]
 
     reason_change = compute_deltas(
         _snapshot(active=[_task("tasks:one", stale=stale)]),
         _snapshot(active=[_task("tasks:one", stale=other)]),
     )
-    assert reason_change == [{"type": "stale_changed", "id": "tasks:one", "stale": other}]
+    assert reason_change == [
+        {"type": "stale_changed", "id": "tasks:one", "stale": other}
+    ]
 
 
 def test_note_and_stale_change_emit_task_changed_then_stale_changed():
@@ -139,7 +146,11 @@ def test_finished_id_appearing_without_ever_being_active_emits_task_finished():
 
 
 def test_waiting_rows_emit_added_and_cleared():
-    item = {"id": "tasks:w1", "ask": "approve deploy", "since": "2026-10-21T12:00:00+00:00"}
+    item = {
+        "id": "tasks:w1",
+        "ask": "approve deploy",
+        "since": "2026-10-21T12:00:00+00:00",
+    }
 
     added = compute_deltas(_snapshot(), _snapshot(waiting=[item]))
     assert added == [{"type": "waiting_added", "item": item}]
@@ -149,7 +160,11 @@ def test_waiting_rows_emit_added_and_cleared():
 
 
 def test_waiting_to_finished_emits_finished_before_cleared():
-    item = {"id": "tasks:w1", "ask": "approve deploy", "since": "2026-10-21T12:00:00+00:00"}
+    item = {
+        "id": "tasks:w1",
+        "ask": "approve deploy",
+        "since": "2026-10-21T12:00:00+00:00",
+    }
     finished_row = {"id": "tasks:w1", "result": "ok"}
     before = _snapshot(waiting=[item])
     after = _snapshot(finished=[finished_row])
@@ -164,9 +179,15 @@ def test_multi_change_fixture_has_the_exact_ordered_message_list():
     new_row = _task("tasks:new")
     done_row = {"id": "tasks:old", "result": "ok"}
     stale_row = _task("tasks:stale", stale=stale)
-    waiting_item = {"id": "tasks:w2", "ask": "ok the spend", "since": "2026-10-21T12:01:00+00:00"}
+    waiting_item = {
+        "id": "tasks:w2",
+        "ask": "ok the spend",
+        "since": "2026-10-21T12:01:00+00:00",
+    }
 
-    before = _snapshot(active=[_task("tasks:old", note="running"), _task("tasks:stale")])
+    before = _snapshot(
+        active=[_task("tasks:old", note="running"), _task("tasks:stale")]
+    )
     after = _snapshot(
         active=[new_row, stale_row],
         waiting=[waiting_item],
@@ -184,7 +205,9 @@ def test_none_previous_treats_every_row_as_new_in_group_order():
     active_rows = [_task("tasks:a"), _task("tasks:b")]
     waiting_item = {"id": "tasks:w", "ask": "hi", "since": None}
     finished_row = {"id": "tasks:f", "result": "ok"}
-    current = _snapshot(active=active_rows, waiting=[waiting_item], finished=[finished_row])
+    current = _snapshot(
+        active=active_rows, waiting=[waiting_item], finished=[finished_row]
+    )
     assert compute_deltas(None, current) == [
         {"type": "task_finished", "task": finished_row},
         {"type": "task_changed", "task": active_rows[0]},
@@ -196,13 +219,19 @@ def test_none_previous_treats_every_row_as_new_in_group_order():
 def test_malformed_rows_are_skipped_and_last_row_per_id_wins():
     before = _snapshot()
     after = _snapshot(
-        active=["nope", {"title": "no id"}, _task("tasks:dup", note="first"), _task("tasks:dup", note="last")]
+        active=[
+            "nope",
+            {"title": "no id"},
+            _task("tasks:dup", note="first"),
+            _task("tasks:dup", note="last"),
+        ]
     )
     deltas = compute_deltas(before, after)
     assert deltas == [{"type": "task_changed", "task": _task("tasks:dup", note="last")}]
 
 
 # --- route tests (TestClient websockets, injected intervals, port 7441 only) ---
+
 
 def _tasks_row(row_id="tasks:one", state="working", **overrides):
     row = {
@@ -246,7 +275,9 @@ def _bare_snapshot():
     return {
         "generated_at": "2026-10-21T12:00:00+00:00",
         "sources": {},
-        "active": [{"id": "tasks:one", "title": "task one", "note": None, "stale": None}],
+        "active": [
+            {"id": "tasks:one", "title": "task one", "note": None, "stale": None}
+        ],
         "pr_gate": [],
         "waiting_on_ove": [],
         "finished": [],
@@ -260,16 +291,18 @@ def test_snapshot_first_then_task_finished_within_two_seconds(tmp_path):
     poller = _tasks_poller(tasks_path)
     asyncio.run(poller.refresh_now())
     app = create_app(poller, port=PORT, heartbeat_s=0.5)
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
-            first = ws.receive_json()
-            assert first["type"] == "snapshot"
-            assert set(first["snapshot"]) == SNAPSHOT_KEYS
-            assert [row["id"] for row in first["snapshot"]["active"]] == ["tasks:one"]
-            _write(tasks_path, tasks=[_tasks_row(state="done", note="wrapped up")])
-            started = time.monotonic()
-            delta = ws.receive_json()
-            elapsed = time.monotonic() - started
+    with (
+        TestClient(app) as client,
+        client.websocket_connect("/ws/events", headers=HEADERS) as ws,
+    ):
+        first = ws.receive_json()
+        assert first["type"] == "snapshot"
+        assert set(first["snapshot"]) == SNAPSHOT_KEYS
+        assert [row["id"] for row in first["snapshot"]["active"]] == ["tasks:one"]
+        _write(tasks_path, tasks=[_tasks_row(state="done", note="wrapped up")])
+        started = time.monotonic()
+        delta = ws.receive_json()
+        elapsed = time.monotonic() - started
     assert delta["type"] == "task_finished"
     assert delta["task"]["id"] == "tasks:one"
     assert delta["task"]["state"] == "done"
@@ -282,22 +315,24 @@ def test_waiting_added_delta_arrives_after_rewrite(tmp_path):
     poller = _tasks_poller(tasks_path)
     asyncio.run(poller.refresh_now())
     app = create_app(poller, port=PORT, heartbeat_s=0.5)
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
-            assert ws.receive_json()["type"] == "snapshot"
-            _write(
-                tasks_path,
-                tasks=[_tasks_row()],
-                waiting=[
-                    {
-                        "id": "tasks:wait1",
-                        "ask": "approve the deploy",
-                        "since": "2026-10-21T12:01:00+00:00",
-                        "blocks": "tasks:one",
-                    }
-                ],
-            )
-            delta = ws.receive_json()
+    with (
+        TestClient(app) as client,
+        client.websocket_connect("/ws/events", headers=HEADERS) as ws,
+    ):
+        assert ws.receive_json()["type"] == "snapshot"
+        _write(
+            tasks_path,
+            tasks=[_tasks_row()],
+            waiting=[
+                {
+                    "id": "tasks:wait1",
+                    "ask": "approve the deploy",
+                    "since": "2026-10-21T12:01:00+00:00",
+                    "blocks": "tasks:one",
+                }
+            ],
+        )
+        delta = ws.receive_json()
     assert delta["type"] == "waiting_added"
     assert delta["item"]["id"] == "tasks:wait1"
     assert delta["item"]["ask"] == "approve the deploy"
@@ -307,32 +342,34 @@ def test_heartbeat_stale_changed_and_no_churn_without_collectors():
     poller = DashboardPoller([])
     poller._snapshot = _bare_snapshot()
     app = create_app(poller, port=PORT, heartbeat_s=0.2)
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
-            assert ws.receive_json()["type"] == "snapshot"
-            assert ws.receive_json() == {"type": "heartbeat"}
+    with (
+        TestClient(app) as client,
+        client.websocket_connect("/ws/events", headers=HEADERS) as ws,
+    ):
+        assert ws.receive_json()["type"] == "snapshot"
+        assert ws.receive_json() == {"type": "heartbeat"}
 
-            stale_copy = json.loads(json.dumps(poller._snapshot))
-            stale_copy["active"][0]["stale"] = {
+        stale_copy = json.loads(json.dumps(poller._snapshot))
+        stale_copy["active"][0]["stale"] = {
+            "reason": "no_heartbeat",
+            "since": "2026-10-21T11:40:00+00:00",
+        }
+        stale_copy["generated_at"] = "2026-10-21T12:30:00+00:00"
+        poller._snapshot = stale_copy
+        assert ws.receive_json() == {
+            "type": "stale_changed",
+            "id": "tasks:one",
+            "stale": {
                 "reason": "no_heartbeat",
                 "since": "2026-10-21T11:40:00+00:00",
-            }
-            stale_copy["generated_at"] = "2026-10-21T12:30:00+00:00"
-            poller._snapshot = stale_copy
-            assert ws.receive_json() == {
-                "type": "stale_changed",
-                "id": "tasks:one",
-                "stale": {
-                    "reason": "no_heartbeat",
-                    "since": "2026-10-21T11:40:00+00:00",
-                },
-            }
+            },
+        }
 
-            churned = json.loads(json.dumps(poller._snapshot))
-            churned["generated_at"] = "2026-10-21T13:00:00+00:00"
-            poller._snapshot = churned
-            assert ws.receive_json() == {"type": "heartbeat"}
-            assert ws.receive_json() == {"type": "heartbeat"}
+        churned = json.loads(json.dumps(poller._snapshot))
+        churned["generated_at"] = "2026-10-21T13:00:00+00:00"
+        poller._snapshot = churned
+        assert ws.receive_json() == {"type": "heartbeat"}
+        assert ws.receive_json() == {"type": "heartbeat"}
 
 
 def test_events_ws_guard_rejects_foreign_missing_origin_and_bad_host():
@@ -345,9 +382,11 @@ def test_events_ws_guard_rejects_foreign_missing_origin_and_bad_host():
             {"host": f"127.0.0.1:{PORT}"},
             {"host": "evil.example:7441", "origin": f"http://127.0.0.1:{PORT}"},
         ):
-            with pytest.raises(WebSocketDisconnect) as exc:
-                with client.websocket_connect("/ws/events", headers=headers):
-                    pass
+            with (
+                pytest.raises(WebSocketDisconnect) as exc,
+                client.websocket_connect("/ws/events", headers=headers),
+            ):
+                pass
             assert exc.value.code == 4403
         with client.websocket_connect(
             "/ws/events",
@@ -367,9 +406,11 @@ def test_events_ws_cap_refuses_17th_and_releases_slots_on_close():
                     client.websocket_connect("/ws/events", headers=HEADERS)
                 )
                 assert ws.receive_json()["type"] == "snapshot"
-            with pytest.raises(WebSocketDisconnect) as exc:
-                with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
-                    ws.receive_json()
+            with (
+                pytest.raises(WebSocketDisconnect) as exc,
+                client.websocket_connect("/ws/events", headers=HEADERS) as ws,
+            ):
+                ws.receive_json()
             assert exc.value.code == 4429
         with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
             assert ws.receive_json()["type"] == "snapshot"
@@ -380,7 +421,7 @@ def test_events_ws_cap_refuses_17th_and_releases_slots_on_close():
 
 def test_nudge_schedules_named_collector_and_ignores_unknown_source():
     async def run():
-        calls = []
+        calls: list[int] = []
 
         def collect():
             calls.append(len(calls))
@@ -418,7 +459,13 @@ def test_tasks_file_watcher_fires_once_per_signature_change(tmp_path):
     class _Stop(Exception):
         pass
 
-    sequence = [(1000, 10), (1000, 10), (1001, 12), FileNotFoundError, (1002, 20)]
+    sequence: list[Any] = [
+        (1000, 10),
+        (1000, 10),
+        (1001, 12),
+        FileNotFoundError,
+        (1002, 20),
+    ]
     fired = []
 
     def stat():
@@ -462,7 +509,10 @@ def test_tasks_json_wake_reaches_events_ws_within_two_seconds(tmp_path):
             raise
 
     watcher = TasksFileWatcher(
-        tasks_path, on_change=lambda: poller.nudge("tasks_json"), interval_s=0.05, sleep=_sleep
+        tasks_path,
+        on_change=lambda: poller.nudge("tasks_json"),
+        interval_s=0.05,
+        sleep=_sleep,
     )
     app = create_app(poller, port=PORT, heartbeat_s=0.3, tasks_watcher=watcher)
     with TestClient(app) as client:
@@ -489,7 +539,7 @@ def test_tasks_json_wake_reaches_events_ws_within_two_seconds(tmp_path):
 
 
 def test_main_threads_tasks_path_into_create_app(tmp_path):
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
     poller = DashboardPoller([])
 
     def serving(app: object, host: str, port: int) -> None:
@@ -515,8 +565,106 @@ def test_create_app_without_tasks_path_has_no_watcher_but_runs_lifespan():
     app = create_app(poller, port=PORT)
     assert app.state.tasks_watcher is None
     with TestClient(app) as client:
-        assert client.get(
-            "/api/snapshot", headers={"host": f"127.0.0.1:{PORT}"}
-        ).status_code == 200
+        assert (
+            client.get(
+                "/api/snapshot", headers={"host": f"127.0.0.1:{PORT}"}
+            ).status_code
+            == 200
+        )
         with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
             assert ws.receive_json()["type"] == "snapshot"
+
+
+# --- Greptile round 1 regressions -------------------------------------------
+
+from omega_prime.dashboard.events import needs_full_snapshot  # noqa: E402
+
+
+def test_delta_representable_changes_do_not_need_a_full_snapshot():
+    before = _snapshot([_task("tasks:one")], waiting=[{"id": "w1", "ask": "a"}])
+    after = json.loads(json.dumps(before))
+    after["active"][0]["note"] = "changed"
+    after["active"].append(_task("tasks:two"))
+    after["waiting_on_ove"].append({"id": "w2", "ask": "b"})
+    after["generated_at"] = "2026-10-21T13:00:00+00:00"
+    assert needs_full_snapshot(before, after) is False
+    moved = _snapshot([], finished=[_task("tasks:one")])
+    assert needs_full_snapshot(_snapshot([_task("tasks:one")]), moved) is False
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda s: s["sources"].update({"github": {"status": "ok", "ci_cd": [1]}}),
+        lambda s: s["pr_gate"].append({"id": "pr:1", "number": 1}),
+        lambda s: s["idle_sessions"].append(_task("tasks:idle")),
+        lambda s: s["active"].clear(),
+        lambda s: s["finished"][0].update({"title": "edited"}),
+        lambda s: s["finished"].clear(),
+        lambda s: s["waiting_on_ove"][0].update({"ask": "edited"}),
+        lambda s: s.update({"extra_bucket": [1]}),
+    ],
+)
+def test_changes_outside_the_delta_types_need_a_full_snapshot(mutate):
+    before = _snapshot(
+        [_task("tasks:one")],
+        waiting=[{"id": "w1", "ask": "a"}],
+        finished=[_task("tasks:done")],
+    )
+    after = json.loads(json.dumps(before))
+    mutate(after)
+    assert needs_full_snapshot(before, after) is True
+
+
+def test_source_timing_noise_alone_is_not_a_change():
+    before = _snapshot()
+    before["sources"] = {"github": {"status": "ok", "took_ms": 1.0}}
+    after = json.loads(json.dumps(before))
+    after["sources"]["github"]["took_ms"] = 99.0
+    assert needs_full_snapshot(before, after) is False
+
+
+def test_active_to_idle_move_sends_a_full_snapshot_frame():
+    poller = DashboardPoller([])
+    poller._snapshot = _bare_snapshot()
+    app = create_app(poller, port=PORT, heartbeat_s=0.2)
+    with (
+        TestClient(app) as client,
+        client.websocket_connect("/ws/events", headers=HEADERS) as ws,
+    ):
+        assert ws.receive_json()["type"] == "snapshot"
+        moved = json.loads(json.dumps(poller._snapshot))
+        moved["idle_sessions"] = moved.pop("active")
+        moved["active"] = []
+        poller._snapshot = moved
+        message = ws.receive_json()
+        while message["type"] == "heartbeat":
+            message = ws.receive_json()
+    assert message["type"] == "snapshot"
+    assert message["snapshot"]["active"] == []
+    assert [row["id"] for row in message["snapshot"]["idle_sessions"]] == ["tasks:one"]
+
+
+def test_unchanged_rebuilds_do_not_starve_heartbeats():
+    poller = DashboardPoller([])
+    poller._snapshot = _bare_snapshot()
+    stop = {"done": False}
+
+    async def churn():
+        # A rebuild every 50 ms yields a new, content-identical snapshot
+        # object and wakes the writer, like a normally polling dashboard.
+        while not stop["done"]:
+            await asyncio.sleep(0.05)
+            poller._snapshot = json.loads(json.dumps(poller._snapshot))
+            poller._changed.set()
+
+    app = create_app(poller, port=PORT, heartbeat_s=0.3)
+    with TestClient(app) as client:
+        assert client.portal is not None
+        client.portal.start_task_soon(churn)
+        try:
+            with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
+                assert ws.receive_json()["type"] == "snapshot"
+                assert ws.receive_json() == {"type": "heartbeat"}
+        finally:
+            stop["done"] = True

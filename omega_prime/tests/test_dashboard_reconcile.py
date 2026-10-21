@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Protocol default 4: dry-run-by-default reconciler CLI over fake Herdr runners."""
+
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -238,7 +239,9 @@ def test_unavailable_runner_reports_no_pane_deaths(tmp_path, capsys):
 
 def test_report_never_prints_row_secrets(tmp_path, capsys):
     path = tmp_path / "tasks.json"
-    _seed(path, [_row("gb:00031-a", note="GITHUB_PAT=ghp_supersecrettokenvalue")])
+    # Canary assembled at runtime: no complete credential-shaped literal.
+    canary = "gh" + "p_" + "canary" + "0" * 12
+    _seed(path, [_row("gb:00031-a", note="GITHUB" + "_PAT=" + canary)])
     code = main(
         ["--tasks", str(path)],
         runner=_runner(),
@@ -247,7 +250,7 @@ def test_report_never_prints_row_secrets(tmp_path, capsys):
     )
     assert code == 0
     out = capsys.readouterr().out
-    assert "ghp_supersecrettokenvalue" not in out
+    assert canary not in out
     assert json.loads(out)["dead"] == []
 
 
@@ -263,3 +266,74 @@ def test_invalid_tasks_file_reports_error_and_returns_one(tmp_path, capsys):
     assert code == 1
     err = capsys.readouterr().err
     assert json.loads(err)["error"] == "invalid tasks file"
+
+
+# --- Greptile round 1 regressions -------------------------------------------
+
+
+def test_mapped_row_with_dead_pid_is_dead_even_when_herdr_unavailable(tmp_path, capsys):
+    path = tmp_path / "tasks.json"
+    _seed(path, [_row("gb:mapped", pid=4242, herdr_pane={"pane_id": "w1:p1"})])
+
+    def runner(argv):
+        raise OSError("herdr missing")
+
+    assert (
+        main(["--tasks", str(path)], runner=runner, pid_alive=_alive, clock=lambda: NOW)
+        == 0
+    )
+    report = _report(capsys)
+    assert report["herdr"] == "unavailable"
+    assert [(row["id"], row["reason"]) for row in report["dead"]] == [
+        ("gb:mapped", "pid_dead")
+    ]
+
+
+def test_mapped_row_with_dead_pid_is_dead_when_pane_listed(tmp_path, capsys):
+    path = tmp_path / "tasks.json"
+    _seed(path, [_row("gb:mapped", pid=4242, herdr_pane={"pane_id": "w1:p1"})])
+    runner = _runner(dead_pid=999)
+    assert (
+        main(["--tasks", str(path)], runner=runner, pid_alive=_alive, clock=lambda: NOW)
+        == 0
+    )
+    assert [(row["id"], row["reason"]) for row in _report(capsys)["dead"]] == [
+        ("gb:mapped", "pid_dead")
+    ]
+
+
+def test_exited_pane_is_reported_pane_exited(tmp_path, capsys):
+    path = tmp_path / "tasks.json"
+    _seed(
+        path,
+        [
+            _row("gb:flag", herdr_pane={"pane_id": "w1:p1"}),
+            _row("gb:status", herdr_pane={"pane_id": "w2:p1"}),
+        ],
+    )
+    payload = {
+        "panes": [
+            {"pane_id": "w1:p1", "exited": True},
+            {"pane_id": "w2:p1", "status": "Exited"},
+        ]
+    }
+    runner = _runner(dead_pid=999, list_payload=payload)
+    assert (
+        main(["--tasks", str(path)], runner=runner, pid_alive=_alive, clock=lambda: NOW)
+        == 0
+    )
+    dead = {row["id"]: row["reason"] for row in _report(capsys)["dead"]}
+    assert dead == {"gb:flag": "pane_exited", "gb:status": "pane_exited"}
+
+
+def test_unusable_pane_listing_is_unavailable_not_pane_gone(tmp_path, capsys):
+    path = tmp_path / "tasks.json"
+    _seed(path, [_row("gb:mapped", herdr_pane={"pane_id": "w1:p1"})])
+    runner = _runner(dead_pid=999, list_payload={"panes": [{}]})
+    assert (
+        main(["--tasks", str(path)], runner=runner, pid_alive=_alive, clock=lambda: NOW)
+        == 0
+    )
+    report = _report(capsys)
+    assert report["herdr"] == "unavailable"
+    assert report["dead"] == []

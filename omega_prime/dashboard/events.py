@@ -11,6 +11,7 @@ Nothing here logs, and no function performs I/O in the delta computation.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from pathlib import Path
@@ -36,6 +37,7 @@ _EMPTY_SNAPSHOT: dict[str, Any] = {
     "idle_sessions": [],
 }
 
+
 def _row_map(bucket: Any) -> dict[str, dict[str, Any]]:
     """Index one snapshot bucket by row id, keeping the last row per id."""
     rows: dict[str, dict[str, Any]] = {}
@@ -53,6 +55,67 @@ def _row_map(bucket: Any) -> dict[str, dict[str, Any]]:
 
 def _without_stale(row: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in row.items() if key != "stale"}
+
+
+_DELTA_BUCKETS = ("active", "waiting_on_ove", "finished")
+
+
+def _canonical_sources(value: Any) -> Any:
+    """Sources without per-build timing noise (mirrors the poller hash)."""
+    if not isinstance(value, dict):
+        return value
+    return {
+        name: (
+            {key: item for key, item in state.items() if key != "took_ms"}
+            if isinstance(state, dict)
+            else state
+        )
+        for name, state in value.items()
+    }
+
+
+def needs_full_snapshot(
+    previous: dict[str, Any] | None, current: dict[str, Any]
+) -> bool:
+    """True when the change cannot be expressed by the locked delta types.
+
+    The delta messages only add/replace active rows, move rows into
+    ``finished``, add/clear waiting items and patch active-row staleness.
+    Anything else — source status (CI/CD, GitHub checks), ``pr_gate``,
+    ``idle_sessions``, active rows that disappear without finishing, edits
+    or removals of existing waiting/finished rows, or any other top-level
+    key — needs a full snapshot so live clients never keep old data.
+    ``generated_at`` and per-source ``took_ms`` are ignored as build noise.
+    """
+    if not isinstance(previous, dict):
+        return True
+    keys = (set(previous) | set(current)) - {"generated_at", *_DELTA_BUCKETS}
+    for key in keys:
+        before, after = previous.get(key), current.get(key)
+        if key == "sources":
+            before, after = _canonical_sources(before), _canonical_sources(after)
+        if before != after:
+            return True
+    prev_active = _row_map(previous.get("active"))
+    prev_waiting = _row_map(previous.get("waiting_on_ove"))
+    prev_finished = _row_map(previous.get("finished"))
+    now_active = _row_map(current.get("active"))
+    now_waiting = _row_map(current.get("waiting_on_ove"))
+    now_finished = _row_map(current.get("finished"))
+    for row_id in prev_active:
+        if row_id in now_active:
+            continue
+        # task_finished removes the active row client-side, but it is only
+        # emitted for rows that are new to the finished bucket.
+        if row_id not in now_finished or row_id in prev_finished:
+            return True
+    for row_id, row in prev_finished.items():
+        if now_finished.get(row_id) != row:
+            return True
+    for row_id, item in prev_waiting.items():
+        if row_id in now_waiting and now_waiting[row_id] != item:
+            return True
+    return False
 
 
 def compute_deltas(
@@ -80,9 +143,7 @@ def compute_deltas(
             messages.append({"type": "task_finished", "task": row})
     for row_id, row in now_active.items():
         before = prev_active.get(row_id)
-        if before is None:
-            messages.append({"type": "task_changed", "task": row})
-        elif _without_stale(before) != _without_stale(row):
+        if before is None or _without_stale(before) != _without_stale(row):
             messages.append({"type": "task_changed", "task": row})
     for row_id, item in now_waiting.items():
         if row_id not in prev_waiting:
@@ -170,7 +231,8 @@ def make_events_ws_endpoint(
     The first message is always the full snapshot (or the empty-snapshot
     literal before the first build); afterwards the connection receives only
     the five locked delta types plus heartbeats, computed by re-diffing
-    ``poller.snapshot()`` on every wake — including heartbeat timeouts, which
+    ``poller.snapshot()`` on every wake (a full snapshot frame is re-sent
+    when the change is outside what the deltas can express) — including heartbeat timeouts, which
     is the missed-wake recovery. No token exists on this route; admission is
     the guard's Host plus required-Origin check. A full limiter closes 4429
     before accept.
@@ -210,10 +272,18 @@ def make_events_ws_endpoint(
                     await poller.wait_for_update(heartbeat_s)
                     current = poller.snapshot()
                     if current is not None and current is not previous:
-                        for message in compute_deltas(previous, current):
+                        if needs_full_snapshot(previous, current):
+                            messages = [{"type": "snapshot", "snapshot": current}]
+                        else:
+                            messages = compute_deltas(previous, current)
+                        for message in messages:
                             await websocket.send_text(_frame(message))
                         previous = current
-                        last_sent = mono()
+                        # Only a frame actually sent resets the heartbeat
+                        # timer; unchanged rebuilds still yield a new
+                        # snapshot object and must not starve heartbeats.
+                        if messages:
+                            last_sent = mono()
                     if mono() - last_sent >= heartbeat_s:
                         await websocket.send_text(_frame({"type": "heartbeat"}))
                         last_sent = mono()
@@ -230,20 +300,16 @@ def make_events_ws_endpoint(
             finally:
                 writer_task.cancel()
                 reader_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.gather(
                         writer_task, reader_task, return_exceptions=True
                     )
-                except asyncio.CancelledError:
-                    pass
                 # The session must always end with an explicit close frame: a
                 # bare return completes the ASGI app without one, and the peer
                 # would wait forever (uvicorn tolerates a close after peer
                 # disconnect).
-                try:
+                with contextlib.suppress(Exception, asyncio.CancelledError):
                     await websocket.close()
-                except (Exception, asyncio.CancelledError):
-                    pass
             if cancelled is not None:
                 raise cancelled
         finally:

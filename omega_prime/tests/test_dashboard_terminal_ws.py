@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Terminal websocket bridge, protocol and app-wiring tests (fakes only)."""
+
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from starlette.applications import Starlette
@@ -12,6 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from omega_prime.dashboard.__main__ import main
 from omega_prime.dashboard.app import create_app
+from omega_prime.dashboard.poller import DashboardPoller
 from omega_prime.dashboard.terminal import PaneClosedError
 from omega_prime.dashboard.terminal_ws import (
     TERMINAL_INPUT_MAX_BYTES,
@@ -20,9 +23,18 @@ from omega_prime.dashboard.terminal_ws import (
     make_terminal_ws_endpoint,
     redact_ansi_frame,
 )
-from omega_prime.dashboard.poller import DashboardPoller
 
 NOW = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
+
+# Synthetic redaction canaries, assembled at runtime so no complete
+# credential-shaped literal is stored in the repository (no-secrets rule).
+_CANARY = "canary" + "0" * 6
+GH_CANARY = "gh" + "p_" + _CANARY
+OPENAI_CANARY = "s" + "k-" + _CANARY
+JWT_CANARY = ".".join(c * 8 for c in "abc")
+BEARER_CANARY = "bearer" + "canary"
+ASSIGN_NAME = "GITHUB" + "_" + "TOKEN"
+ASSIGN_VALUE = "canary" + "value" + "42"
 
 
 def _fake_runner(reads=None):
@@ -41,17 +53,17 @@ def _fake_runner(reads=None):
 
 def test_redact_ansi_frame_preserves_escapes_and_redacts_visible():
     frame = (
-        "\x1b[31mBearer abcdefghijkl\x1b[0m ghp_abcdefgh123456 "
-        "sk-abcdefgh123456 aaaaaaaa.bbbbbbbb.cccccccc api_key='topsecret'\n"
+        f"\x1b[31mBearer {BEARER_CANARY}\x1b[0m {GH_CANARY} "
+        f"{OPENAI_CANARY} {JWT_CANARY} api_key='{ASSIGN_VALUE}'\n"
         "ok\x1b[2Jline"
     )
     out = redact_ansi_frame(frame)
     assert "\x1b[31m" in out and "\x1b[0m" in out and "\x1b[2J" in out
-    assert "abcdefghijkl" not in out
-    assert "ghp_abcdefgh123456" not in out
-    assert "sk-abcdefgh123456" not in out
-    assert "aaaaaaaa.bbbbbbbb.cccccccc" not in out
-    assert "topsecret" not in out
+    assert BEARER_CANARY not in out
+    assert GH_CANARY not in out
+    assert OPENAI_CANARY not in out
+    assert JWT_CANARY not in out
+    assert ASSIGN_VALUE not in out
     assert "[REDACTED]" in out
     assert "\n" in out
 
@@ -63,13 +75,55 @@ def test_redact_ansi_frame_drops_control_chars_keeps_newline_tab():
     assert "\n" in out and "\t" in out
 
 
+def _visible(text):
+    import re
+
+    return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]", "", text)
+
+
+def test_redact_ansi_frame_matches_across_styling_splits():
+    frame = f"\x1b[32m{ASSIGN_NAME}=\x1b[0m{ASSIGN_VALUE}\x1b[0m done\nBearer \x1b[1m{BEARER_CANARY}\x1b[0m"
+    out = redact_ansi_frame(frame)
+    assert ASSIGN_VALUE not in out and BEARER_CANARY not in out
+    assert ASSIGN_VALUE not in _visible(out) and BEARER_CANARY not in _visible(out)
+    assert _visible(out) == f"{ASSIGN_NAME}=[REDACTED] done\nBearer [REDACTED]"
+    assert out.startswith("\x1b[32m") and "\x1b[0m" in out
+
+
+def test_redact_ansi_frame_visible_text_equals_sanitized_text():
+    from omega_prime.dashboard.terminal import sanitize_terminal_text
+
+    frame = f"a\x1b[31m{GH_CANARY[:4]}\x1b[0m{GH_CANARY[4:]} b\n\x1b[1m{ASSIGN_NAME}\x1b[0m={ASSIGN_VALUE}"
+    out = redact_ansi_frame(frame)
+    assert _visible(out) == sanitize_terminal_text(frame)
+    assert GH_CANARY[4:] not in out and ASSIGN_VALUE not in out
+
+
+def test_redact_ansi_frame_strips_osc_hyperlinks_and_titles():
+    link = f"\x1b]8;;file:///canary?{ASSIGN_NAME}={ASSIGN_VALUE}\x07click\x1b]8;;\x07"
+    title = f"\x1b]0;{GH_CANARY}\x1b\\"
+    dcs = f"\x1bP{OPENAI_CANARY}\x1b\\"
+    out = redact_ansi_frame(f"{title}see {link} ok{dcs}\x1b[1m!\x1b[0m")
+    assert ASSIGN_VALUE not in out and GH_CANARY not in out and OPENAI_CANARY not in out
+    assert "\x1b]" not in out and "\x1bP" not in out
+    assert out == "see click ok\x1b[1m!\x1b[0m"
+
+
+def test_redact_ansi_frame_unterminated_osc_is_redacted_as_text():
+    out = redact_ansi_frame(f"x \x1b]8;;{ASSIGN_NAME}={ASSIGN_VALUE}")
+    assert ASSIGN_VALUE not in out
+    assert "\x1b]" not in out
+
+
 def test_read_frame_uses_visible_ansi_argv_and_redacts():
-    runner = _fake_runner(reads=["\x1b[31mGITHUB_TOKEN=abc123def\x1b[0m"])
+    runner = _fake_runner(reads=[f"\x1b[31m{ASSIGN_NAME}={ASSIGN_VALUE}\x1b[0m"])
     bridge = HerdrBridge(runner=runner)
     frame = asyncio.run(bridge.read_frame("w2:p4"))
-    assert runner.calls == [["herdr", "pane", "read", "w2:p4", "--source", "visible", "--format", "ansi"]]
+    assert runner.calls == [
+        ["herdr", "pane", "read", "w2:p4", "--source", "visible", "--format", "ansi"]
+    ]
     assert "\x1b[31m" in frame and "\x1b[0m" in frame
-    assert "abc123def" not in frame
+    assert ASSIGN_VALUE not in frame
 
 
 def test_send_text_and_send_keys_argv_are_exact():
@@ -96,7 +150,10 @@ def _collect(generator, limit):
 def test_poll_events_emits_only_changed_frames():
     runner = _fake_runner(reads=["A", "A", "B"])
     seconds = iter(range(50))
-    clock = lambda: NOW + timedelta(seconds=next(seconds))
+
+    def clock():
+        return NOW + timedelta(seconds=next(seconds))
+
     bridge = HerdrBridge(runner=runner, clock=clock, sleep=lambda _s: asyncio.sleep(0))
     events = _collect(bridge.poll_events(lambda: "w2:p4"), 2)
     assert [e["type"] for e in events] == ["frame", "frame"]
@@ -106,8 +163,10 @@ def test_poll_events_emits_only_changed_frames():
 
 def test_poll_events_no_session_then_frame_on_return():
     runner = _fake_runner(reads=["A"])
-    bridge = HerdrBridge(runner=runner, clock=lambda: NOW, sleep=lambda _s: asyncio.sleep(0))
-    provider = {"pane": None}
+    bridge = HerdrBridge(
+        runner=runner, clock=lambda: NOW, sleep=lambda _s: asyncio.sleep(0)
+    )
+    provider: dict[str, str | None] = {"pane": None}
 
     def provide():
         return provider["pane"]
@@ -117,16 +176,45 @@ def test_poll_events_no_session_then_frame_on_return():
         first = await gen.__anext__()
         provider["pane"] = "w2:p4"
         second = await gen.__anext__()
-        return [first, second]
+        third = await gen.__anext__()
+        return [first, second, third]
 
     events = asyncio.run(run())
     assert events[0] == {"type": "status", "status": "no_session"}
-    assert events[1]["type"] == "frame" and events[1]["text"] == "A"
+    # Recovery is announced so the client clears its error state.
+    assert events[1] == {"type": "status", "status": "live"}
+    assert events[2]["type"] == "frame" and events[2]["text"] == "A"
+
+
+def test_poll_events_recovery_resends_unchanged_frame():
+    calls = {"n": 0}
+
+    async def runner(argv):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("transient")
+        return "same"
+
+    bridge = HerdrBridge(
+        runner=runner, clock=lambda: NOW, sleep=lambda _s: asyncio.sleep(0)
+    )
+
+    async def run():
+        gen = bridge.poll_events(lambda: "w2:p4")
+        return [await gen.__anext__() for _ in range(4)]
+
+    events = asyncio.run(run())
+    assert events[0]["type"] == "frame" and events[0]["text"] == "same"
+    assert events[1] == {"type": "status", "status": "unavailable"}
+    assert events[2] == {"type": "status", "status": "live"}
+    assert events[3]["type"] == "frame" and events[3]["text"] == "same"
 
 
 def test_poll_events_pane_switch_reyields_first_frame():
     runner = _fake_runner(reads=["A", "A"])
-    bridge = HerdrBridge(runner=runner, clock=lambda: NOW, sleep=lambda _s: asyncio.sleep(0))
+    bridge = HerdrBridge(
+        runner=runner, clock=lambda: NOW, sleep=lambda _s: asyncio.sleep(0)
+    )
     panes = ["w2:p4", "w2:p9"]
 
     def provide():
@@ -147,7 +235,9 @@ def test_poll_events_pane_closed_ends_generator():
     async def runner(argv):
         raise PaneClosedError()
 
-    bridge = HerdrBridge(runner=runner, clock=lambda: NOW, sleep=lambda _s: asyncio.sleep(0))
+    bridge = HerdrBridge(
+        runner=runner, clock=lambda: NOW, sleep=lambda _s: asyncio.sleep(0)
+    )
 
     async def run():
         return [event async for event in bridge.poll_events(lambda: "w2:p4")]
@@ -165,20 +255,23 @@ def test_poll_events_transient_error_yields_unavailable_once():
             raise OSError("boom")
         return "A"
 
-    bridge = HerdrBridge(runner=runner, clock=lambda: NOW, sleep=lambda _s: asyncio.sleep(0))
+    bridge = HerdrBridge(
+        runner=runner, clock=lambda: NOW, sleep=lambda _s: asyncio.sleep(0)
+    )
 
     async def run():
         out = []
         gen = bridge.poll_events(lambda: "w2:p4")
         async for event in gen:
             out.append(event)
-            if len(out) >= 2:
+            if len(out) >= 3:
                 break
         return out
 
     events = asyncio.run(run())
     assert events[0] == {"type": "status", "status": "unavailable"}
-    assert events[1]["type"] == "frame" and events[1]["text"] == "A"
+    assert events[1] == {"type": "status", "status": "live"}
+    assert events[2]["type"] == "frame" and events[2]["text"] == "A"
 
 
 def test_reserve_caps_at_four_and_release_restores():
@@ -209,7 +302,9 @@ def _poller(rows):
 
 
 def _endpoint_app(endpoint):
-    app = Starlette(routes=[WebSocketRoute("/ws/tasks/{task_id:path}/terminal", endpoint)])
+    app = Starlette(
+        routes=[WebSocketRoute("/ws/tasks/{task_id:path}/terminal", endpoint)]
+    )
     return TestClient(app)
 
 
@@ -245,14 +340,26 @@ def test_rw_session_forwards_input_and_keys_byte_exactly():
             return "{}"
         return "phase-two" if sent["n"] else "phase-one"
 
-    poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}, "owner": {"kind": "worker", "ref": "x"}}])
+    poller = _poller(
+        [
+            {
+                "id": "task:one",
+                "herdr_pane": {"pane_id": "w2:p4"},
+                "owner": {"kind": "worker", "ref": "x"},
+            }
+        ]
+    )
     bridge = HerdrBridge(runner=runner, poll_s=0.01)
     endpoint = make_terminal_ws_endpoint(poller, bridge, token=FIXED_TOKEN)
     client = _endpoint_app(endpoint)
     with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
         _auth(ws)
         first = ws.receive_json()
-        assert first == {"type": "frame", "text": "phase-one", "updated_at": first["updated_at"]}
+        assert first == {
+            "type": "frame",
+            "text": "phase-one",
+            "updated_at": first["updated_at"],
+        }
         ws.send_json({"type": "input", "text": "make check\n"})
         second = ws.receive_json()
         assert second["text"] == "phase-two"
@@ -263,65 +370,96 @@ def test_rw_session_forwards_input_and_keys_byte_exactly():
 
 def test_wrong_token_closes_4401():
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
-    endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=_fake_runner(), poll_s=0.01), token=FIXED_TOKEN)
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=_fake_runner(), poll_s=0.01), token=FIXED_TOKEN
+    )
     client = _endpoint_app(endpoint)
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
-            _auth(ws, token="wrong-token")
-            ws.receive_json()
+    with (
+        pytest.raises(WebSocketDisconnect) as exc,
+        client.websocket_connect("/ws/tasks/task:one/terminal") as ws,
+    ):
+        _auth(ws, token="wrong-token")
+        ws.receive_json()
     assert exc.value.code == 4401
 
 
 def test_non_string_token_closes_4401():
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
-    endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=_fake_runner(), poll_s=0.01), token=FIXED_TOKEN)
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=_fake_runner(), poll_s=0.01), token=FIXED_TOKEN
+    )
     client = _endpoint_app(endpoint)
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
-            ws.send_json({"type": "auth", "token": 12345, "mode": "rw"})
-            ws.receive_json()
+    with (
+        pytest.raises(WebSocketDisconnect) as exc,
+        client.websocket_connect("/ws/tasks/task:one/terminal") as ws,
+    ):
+        ws.send_json({"type": "auth", "token": 12345, "mode": "rw"})
+        ws.receive_json()
     assert exc.value.code == 4401
 
 
 def test_auth_silence_times_out_4401():
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
     endpoint = make_terminal_ws_endpoint(
-        poller, HerdrBridge(runner=_fake_runner(), poll_s=0.01), token=FIXED_TOKEN, auth_timeout_s=0.05
+        poller,
+        HerdrBridge(runner=_fake_runner(), poll_s=0.01),
+        token=FIXED_TOKEN,
+        auth_timeout_s=0.05,
     )
     client = _endpoint_app(endpoint)
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
-            ws.receive_json()
+    with (
+        pytest.raises(WebSocketDisconnect) as exc,
+        client.websocket_connect("/ws/tasks/task:one/terminal") as ws,
+    ):
+        ws.receive_json()
     assert exc.value.code == 4401
 
 
 def test_bad_mode_closes_4401():
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
-    endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=_fake_runner(), poll_s=0.01), token=FIXED_TOKEN)
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=_fake_runner(), poll_s=0.01), token=FIXED_TOKEN
+    )
     client = _endpoint_app(endpoint)
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
-            _auth(ws, mode="admin")
-            ws.receive_json()
+    with (
+        pytest.raises(WebSocketDisconnect) as exc,
+        client.websocket_connect("/ws/tasks/task:one/terminal") as ws,
+    ):
+        _auth(ws, mode="admin")
+        ws.receive_json()
     assert exc.value.code == 4401
 
 
 @pytest.mark.parametrize("task_id", ["unknown-task", "bad%01id"])
 def test_unknown_or_invalid_task_closes_4404(task_id):
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
-    endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=_fake_runner(), poll_s=0.01), token=FIXED_TOKEN)
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=_fake_runner(), poll_s=0.01), token=FIXED_TOKEN
+    )
     client = _endpoint_app(endpoint)
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect(f"/ws/tasks/{task_id}/terminal") as ws:
-            _auth(ws)
-            ws.receive_json()
+    with (
+        pytest.raises(WebSocketDisconnect) as exc,
+        client.websocket_connect(f"/ws/tasks/{task_id}/terminal") as ws,
+    ):
+        _auth(ws)
+        ws.receive_json()
     assert exc.value.code == 4404
 
 
 def test_slash_task_id_reaches_end_to_end():
     runner = _counter_runner()
-    poller = _poller([{"id": "worker/1", "herdr_pane": {"pane_id": "w2:p4"}, "owner": {"kind": "worker", "ref": "x"}}])
-    endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN)
+    poller = _poller(
+        [
+            {
+                "id": "worker/1",
+                "herdr_pane": {"pane_id": "w2:p4"},
+                "owner": {"kind": "worker", "ref": "x"},
+            }
+        ]
+    )
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN
+    )
     client = _endpoint_app(endpoint)
     with client.websocket_connect("/ws/tasks/worker%2F1/terminal") as ws:
         _auth(ws)
@@ -332,7 +470,9 @@ def test_slash_task_id_reaches_end_to_end():
 def test_client_readonly_receives_frames_drops_input():
     runner = _counter_runner()
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
-    endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN)
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN
+    )
     client = _endpoint_app(endpoint)
     with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
         _auth(ws, mode="ro")
@@ -340,13 +480,17 @@ def test_client_readonly_receives_frames_drops_input():
         ws.send_json({"type": "input", "text": "should not land\n"})
         assert ws.receive_json()["text"] == "frame-2"
         assert ws.receive_json()["text"] == "frame-3"
-    assert not any(c[1:3] in (["pane", "send-text"], ["pane", "send-keys"]) for c in runner.calls)
+    assert not any(
+        c[1:3] in (["pane", "send-text"], ["pane", "send-keys"]) for c in runner.calls
+    )
 
 
 def test_oversized_input_is_dropped_silently():
     runner = _counter_runner()
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
-    endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN)
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN
+    )
     client = _endpoint_app(endpoint)
     with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
         _auth(ws)
@@ -355,15 +499,19 @@ def test_oversized_input_is_dropped_silently():
         ws.send_json({"type": "input", "text": "small\n"})
         while not any(c[1:3] == ["pane", "send-text"] for c in runner.calls):
             ws.receive_json()
-    assert runner.calls[-1] == ["herdr", "pane", "send-text", "w2:p4", "small\n"]
-    assert sum(1 for c in runner.calls if c[1:3] == ["pane", "send-text"]) == 1
+    # Reads keep running concurrently, so compare the send calls themselves.
+    sends = [c for c in runner.calls if c[1:3] == ["pane", "send-text"]]
+    assert sends == [["herdr", "pane", "send-text", "w2:p4", "small\n"]]
 
 
 def test_rate_limited_third_rapid_input_is_dropped():
     runner = _counter_runner()
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
     endpoint = make_terminal_ws_endpoint(
-        poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN, input_per_s=2
+        poller,
+        HerdrBridge(runner=runner, poll_s=0.01),
+        token=FIXED_TOKEN,
+        input_per_s=2,
     )
     client = _endpoint_app(endpoint)
     with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
@@ -379,8 +527,12 @@ def test_rate_limited_third_rapid_input_is_dropped():
 
 def test_row_without_pane_yields_no_session_status():
     runner = _counter_runner()
-    poller = _poller([{"id": "task:one", "owner": {"kind": "worker", "ref": "not-a-pane"}}])
-    endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN)
+    poller = _poller(
+        [{"id": "task:one", "owner": {"kind": "worker", "ref": "not-a-pane"}}]
+    )
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN
+    )
     client = _endpoint_app(endpoint)
     with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
         _auth(ws)
@@ -392,13 +544,17 @@ def test_pane_closed_status_ends_session():
         raise PaneClosedError()
 
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
-    endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN)
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN
+    )
     client = _endpoint_app(endpoint)
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
-            _auth(ws)
-            assert ws.receive_json() == {"type": "status", "status": "pane_closed"}
-            ws.receive_json()
+    with (
+        pytest.raises(WebSocketDisconnect),
+        client.websocket_connect("/ws/tasks/task:one/terminal") as ws,
+    ):
+        _auth(ws)
+        assert ws.receive_json() == {"type": "status", "status": "pane_closed"}
+        ws.receive_json()
 
 
 def test_fifth_concurrent_session_closes_4429():
@@ -416,10 +572,12 @@ def test_fifth_concurrent_session_closes_4429():
             _auth(ws)
             assert ws.receive_json()["type"] == "frame"
             sessions.append(ctx)
-        with pytest.raises(WebSocketDisconnect) as exc:
-            with client.websocket_connect("/ws/tasks/task:one/terminal") as ws5:
-                _auth(ws5)
-                ws5.receive_json()
+        with (
+            pytest.raises(WebSocketDisconnect) as exc,
+            client.websocket_connect("/ws/tasks/task:one/terminal") as ws5,
+        ):
+            _auth(ws5)
+            ws5.receive_json()
         assert exc.value.code == 4429
     finally:
         for ctx in sessions:
@@ -436,7 +594,9 @@ def test_only_changed_frames_cross_the_socket():
         return text
 
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
-    endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN)
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN
+    )
     client = _endpoint_app(endpoint)
     with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
         _auth(ws)
@@ -448,16 +608,18 @@ def test_only_changed_frames_cross_the_socket():
 
 def test_frame_secrets_arrive_redacted_with_escapes_intact():
     async def runner(argv):
-        return "\x1b[31mtoken: ghp_abcdefgh123456\x1b[0m ready"
+        return f"\x1b[31mtoken: {GH_CANARY}\x1b[0m ready"
 
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
-    endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN)
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN
+    )
     client = _endpoint_app(endpoint)
     with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
         _auth(ws)
         frame = ws.receive_json()
     assert frame["text"].startswith("\x1b[31mtoken: [REDACTED]\x1b[0m")
-    assert "ghp_abcdefgh123456" not in frame["text"]
+    assert GH_CANARY not in frame["text"]
 
 
 def _wired_app(**kwargs):
@@ -485,18 +647,32 @@ def test_api_session_releases_token_to_same_origin_only():
     assert response.status_code == 200
     assert response.json() == {"token": FIXED_TOKEN, "readonly": False}
     assert response.headers["cache-control"] == "no-store"
-    assert client.get(
-        "/api/session", headers={"host": "127.0.0.1:7441", "sec-fetch-site": "cross-site"}
-    ).status_code == 403
+    assert (
+        client.get(
+            "/api/session",
+            headers={"host": "127.0.0.1:7441", "sec-fetch-site": "cross-site"},
+        ).status_code
+        == 403
+    )
     for site in ("same-origin", "none"):
-        assert client.get(
-            "/api/session", headers={"host": "127.0.0.1:7441", "sec-fetch-site": site}
-        ).status_code == 200
-    assert client.get("/api/session", headers={"host": "127.0.0.1:7441"}).status_code == 200
-    assert client.post(
-        "/api/session", headers={"host": "127.0.0.1:7441"}
-    ).status_code == 405
-    assert client.get("/api/session", headers={"host": "10.0.0.9:7441"}).status_code == 403
+        assert (
+            client.get(
+                "/api/session",
+                headers={"host": "127.0.0.1:7441", "sec-fetch-site": site},
+            ).status_code
+            == 200
+        )
+    assert (
+        client.get("/api/session", headers={"host": "127.0.0.1:7441"}).status_code
+        == 200
+    )
+    assert (
+        client.post("/api/session", headers={"host": "127.0.0.1:7441"}).status_code
+        == 405
+    )
+    assert (
+        client.get("/api/session", headers={"host": "10.0.0.9:7441"}).status_code == 403
+    )
 
 
 def test_guard_admits_authorized_ws_end_to_end():
@@ -529,15 +705,17 @@ def test_guard_accepts_localhost_origin_variant_case_insensitive():
 )
 def test_guard_closes_foreign_ws_4403(headers):
     client, _app, _runner = _wired_app()
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect("/ws/tasks/task:one/terminal", headers=headers) as ws:
-            _auth(ws)
-            ws.receive_json()
+    with (
+        pytest.raises(WebSocketDisconnect) as exc,
+        client.websocket_connect("/ws/tasks/task:one/terminal", headers=headers) as ws,
+    ):
+        _auth(ws)
+        ws.receive_json()
     assert exc.value.code == 4403
 
 
 def test_minted_tokens_differ_per_app_and_are_strings():
-    runner = _counter_runner()
+    _counter_runner()
     poller = _poller([{"id": "task:one"}])
     first = create_app(poller, port=7441)
     second = create_app(poller, port=7441)
@@ -550,7 +728,7 @@ def test_minted_tokens_differ_per_app_and_are_strings():
 
 
 def test_csp_gains_ws_sources_and_keeps_substrings():
-    client, app, _runner = _wired_app()
+    client, _app, _runner = _wired_app()
     response = client.get("/api/snapshot", headers={"host": "127.0.0.1:7441"})
     csp = response.headers["content-security-policy"]
     assert "ws://127.0.0.1:7441" in csp and "ws://localhost:7441" in csp
@@ -596,14 +774,18 @@ def test_server_readonly_flag_forces_rw_connections_readonly():
 
 
 def _serve_fake(findings):
-    def serve(app: object, host: str, port: int) -> None:
+    def serve(app: Any, host: str, port: int) -> None:
         client = TestClient(app)
         response = client.get("/api/session", headers={"host": "127.0.0.1:7441"})
         payload = response.json()
         findings["readonly"] = payload["readonly"]
-        findings["token_is_str"] = isinstance(payload["token"], str) and bool(payload["token"])
+        findings["token_is_str"] = isinstance(payload["token"], str) and bool(
+            payload["token"]
+        )
         headers = {"host": "127.0.0.1:7441", "origin": "http://127.0.0.1:7441"}
-        with client.websocket_connect("/ws/tasks/task:one/terminal", headers=headers) as ws:
+        with client.websocket_connect(
+            "/ws/tasks/task:one/terminal", headers=headers
+        ) as ws:
             ws.send_json({"type": "auth", "token": payload["token"], "mode": "rw"})
             findings["first"] = ws.receive_json()
             ws.send_json({"type": "input", "text": "dropped anyway\n"})
@@ -652,3 +834,132 @@ def test_cli_without_flag_reports_readonly_false(tmp_path):
     assert code == 0
     assert findings["readonly"] is False
     assert findings["first"] == {"type": "status", "status": "no_session"}
+
+
+# --- Greptile round 1 regressions -------------------------------------------
+
+
+def test_input_is_not_sent_to_a_pane_the_task_no_longer_maps():
+    runner = _counter_runner()
+    poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN
+    )
+    client = _endpoint_app(endpoint)
+    with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
+        _auth(ws)
+        assert ws.receive_json()["type"] == "frame"
+        # The task loses its pane mapping: the writer reports no_session and
+        # input must not reach the previously mapped pane.
+        poller._snapshot = {
+            "active": [{"id": "task:one"}],
+            "idle_sessions": [],
+            "finished": [],
+        }
+        while ws.receive_json() != {"type": "status", "status": "no_session"}:
+            pass
+        ws.send_json({"type": "input", "text": "late\n"})
+        ws.send_json({"type": "keys", "keys": ["enter"]})
+        # Remap to a new pane: input now goes to the new pane only.
+        poller._snapshot = {
+            "active": [{"id": "task:one", "herdr_pane": {"pane_id": "w2:p9"}}],
+            "idle_sessions": [],
+            "finished": [],
+        }
+        while ws.receive_json().get("type") != "frame":
+            pass
+        ws.send_json({"type": "input", "text": "fresh\n"})
+        while not any(c[1:3] == ["pane", "send-text"] for c in runner.calls):
+            ws.receive_json()
+    sends = [
+        c
+        for c in runner.calls
+        if c[1:3] in (["pane", "send-text"], ["pane", "send-keys"])
+    ]
+    assert sends == [["herdr", "pane", "send-text", "w2:p9", "fresh\n"]]
+
+
+@pytest.mark.parametrize(
+    "first_frame",
+    [
+        "not json at all",
+        "[1, 2, 3]",
+        json.dumps({"type": "auth", "token": "t\u00f6ken-\u2603", "mode": "rw"}),
+    ],
+)
+def test_malformed_auth_frames_close_4401_cleanly(first_frame):
+    poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=_fake_runner(), poll_s=0.01), token=FIXED_TOKEN
+    )
+    client = _endpoint_app(endpoint)
+    with (
+        pytest.raises(WebSocketDisconnect) as exc,
+        client.websocket_connect("/ws/tasks/task:one/terminal") as ws,
+    ):
+        ws.send_text(first_frame)
+        ws.receive_json()
+    assert exc.value.code == 4401
+
+
+def test_binary_auth_frame_closes_4401_cleanly():
+    poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=_fake_runner(), poll_s=0.01), token=FIXED_TOKEN
+    )
+    client = _endpoint_app(endpoint)
+    with (
+        pytest.raises(WebSocketDisconnect) as exc,
+        client.websocket_connect("/ws/tasks/task:one/terminal") as ws,
+    ):
+        ws.send_bytes(b"\x00\x01")
+        ws.receive_json()
+    assert exc.value.code == 4401
+
+
+def test_malformed_input_frames_are_ignored_not_fatal():
+    runner = _counter_runner()
+    poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
+    endpoint = make_terminal_ws_endpoint(
+        poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN
+    )
+    client = _endpoint_app(endpoint)
+    with client.websocket_connect("/ws/tasks/task:one/terminal") as ws:
+        _auth(ws)
+        ws.receive_json()
+        ws.send_text("{broken")
+        ws.send_bytes(b"\xff")
+        ws.send_json({"type": "input", "text": "ok\n"})
+        while not any(c[1:3] == ["pane", "send-text"] for c in runner.calls):
+            ws.receive_json()
+    sends = [c for c in runner.calls if c[1:3] == ["pane", "send-text"]]
+    assert sends == [["herdr", "pane", "send-text", "w2:p4", "ok\n"]]
+
+
+def test_ipv6_loopback_host_admits_its_own_origin_and_csp():
+    from omega_prime.dashboard.app import _DashboardGuards
+
+    guards = _DashboardGuards(app=None, port=7441, host="::1")
+    assert "http://[::1]:7441" in guards.allowed_origins
+    assert "http://127.0.0.1:7441" in guards.allowed_origins
+    assert "http://localhost:7441" in guards.allowed_origins
+    assert "ws://[::1]:7441" in guards.security_headers["content-security-policy"]
+
+
+def test_ipv6_loopback_ws_end_to_end():
+    runner = _counter_runner()
+    poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
+    app = create_app(
+        poller,
+        port=7441,
+        host="::1",
+        attach_token=FIXED_TOKEN,
+        terminal_bridge=HerdrBridge(runner=runner, poll_s=0.01),
+    )
+    client = TestClient(app)
+    with client.websocket_connect(
+        "/ws/tasks/task:one/terminal",
+        headers={"host": "[::1]:7441", "origin": "http://[::1]:7441"},
+    ) as ws:
+        _auth(ws)
+        assert ws.receive_json()["type"] == "frame"
