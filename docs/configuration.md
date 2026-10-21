@@ -105,6 +105,8 @@ The table records names and purposes only.
 | `OMEGA_PRIME_CLARIFY_SOCKET` | Names the per-run clarify broker socket an engine child uses to ask the operator a question. |
 | `OMEGA_PRIME_COMMAND_LOG` | Selects the command history log destination. |
 | `OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS` | Sets the maximum accepted lateness for scheduled actions. |
+| `OMEGA_PRIME_DELEGATE_DEPTH` | Sets the delegate depth an engine child's MCP server starts at, so nested delegates keep the parent's depth limit; set by the engine, not by operators. |
+| `OMEGA_PRIME_DELEGATE_MAX_DEPTH` | Sets the delegate depth limit of an engine child's MCP server to the parent's own max_depth, so a custom limit is not reset to the default; set by the engine, not by operators. |
 | `OMEGA_PRIME_DESK_BUS_URL` | Selects the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_BUS_URL_FILE` | Names a protected file containing the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_CHILD_MODEL` | Selects the model used for the managed desk child process. |
@@ -118,6 +120,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_DISPATCH_CONFIRM` | Confirms dispatch operations requiring the Fleet credential helper. |
 | `OMEGA_PRIME_DISPATCH_CONFIRM_FILE` | Names a protected file containing the dispatch confirmation token. |
 | `OMEGA_PRIME_ENGINE` | Controls whether engine execution is enabled or required. |
+| `OMEGA_PRIME_ENGINE_STAGE` | Names the GSD stage (plan or execute) an engine run is on, so staged turns and their delegates pick the stage model. |
 | `OMEGA_PRIME_ENGINE_TMUX` | Controls tmux session attachment for engine jobs. |
 | `OMEGA_PRIME_ENGINE_UNSANDBOXED` | Opts engine execution out of the sandbox. |
 | `OMEGA_PRIME_EVALS_JUDGE_API_KEY` | Authenticates requests to the live evaluation judge. |

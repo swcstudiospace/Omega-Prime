@@ -91,7 +91,9 @@ class Agent:
 
     Engine: ``force_engine`` sends a scripted or fake model through the omp
     RPC driver when the binary and allowlist are ready. Auto mode otherwise
-    leaves those models on the Python loop.
+    leaves those models on the Python loop. ``engine_stage`` (``plan`` or
+    ``execute``) picks that stage's model for engine turns; None defers to
+    ``OMEGA_PRIME_ENGINE_STAGE``.
     """
 
     model: Model
@@ -114,6 +116,7 @@ class Agent:
     substrate: Any | None = None
     prime_hooks: Any | None = None
     force_engine: bool = False
+    engine_stage: str | None = None
     delegate_depth: int = 0
     max_depth: int = 2
     max_children: int = 1

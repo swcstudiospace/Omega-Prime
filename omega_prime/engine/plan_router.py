@@ -37,10 +37,13 @@ _PROVIDERS = {
 }
 
 # Stage defaults. Planning runs on the stronger model, execution on the
-# faster one. Operators override them with OMEGA_PRIME_OMP_MODEL_<PLAN>_<STAGE>.
+# faster one: ChatGPT plans on Sol and builds on Luna; Z.ai plans on GLM-5.3
+# and builds on GLM-5.3-flash. Operators override them with
+# OMEGA_PRIME_OMP_MODEL_<PLAN>_<STAGE>.
 STAGES = ("plan", "execute")
 _STAGE_MODELS: dict[str, dict[str, str]] = {
     "chatgpt": {"plan": "gpt-6.1-sol", "execute": "gpt-6-luna"},
+    "zai": {"plan": "glm-5.3", "execute": "glm-5.3-flash"},
 }
 # Stage routing tries these plans in order. Z.ai GLM covers ChatGPT when the
 # ChatGPT plan is gated off or its quota window is exhausted.

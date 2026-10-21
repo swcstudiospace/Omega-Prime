@@ -238,13 +238,36 @@ class _DeskParent:
     each access, so the parent can exist before the last families register.
     """
 
-    def __init__(self, registry: ToolRegistry, model: Any) -> None:
+    # `tools` is the whole live registry, which is exactly the roster the
+    # engine's omp reaches through this MCP server, so routing a staged
+    # delegate to the engine narrows nothing (see attach._restricted).
+    engine_full_tools = True
+
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        model: Any,
+        env: Mapping[str, str] | None = None,
+        work: Path | None = None,
+    ) -> None:
         self._registry = registry
         self.child_model = model
-        self.delegate_depth = 0
-        self.max_depth = 2
+        mapping = os.environ if env is None else env
+        # A server started for an engine child (omp -> this MCP server) runs
+        # at that child's delegate depth, so the depth limit carries over.
+        self.delegate_depth = _delegate_depth(mapping)
+        # Staged delegates run in the server's resolved work root, the same
+        # checkout the IDE and exec tools are jailed to, not the process cwd.
+        self.engine_cwd = None if work is None else str(work)
+        # ...and stops at that parent's own max_depth, not a fresh default.
+        self.max_depth = _delegate_max_depth(mapping)
         self.max_children = 1
         self.journal: Any = None
+        # The engine passes a staged run's stage to omp, and omp to this
+        # server; a staged parent delegates to the execute stage.
+        from omega_prime.engine.attach import engine_stage
+
+        self.engine_stage = engine_stage(mapping)
 
     @property
     def tools(self) -> dict[str, Any]:
@@ -254,6 +277,24 @@ class _DeskParent:
             )
             for item in self._registry.schemas()
         }
+
+
+def _delegate_depth(env: Mapping[str, str]) -> int:
+    raw = str(env.get("OMEGA_PRIME_DELEGATE_DEPTH", "") or "").strip()
+    try:
+        return max(0, int(raw)) if raw else 0
+    except ValueError:
+        # An unreadable depth fails closed: no further delegates.
+        return 1 << 16
+
+
+def _delegate_max_depth(env: Mapping[str, str]) -> int:
+    raw = str(env.get("OMEGA_PRIME_DELEGATE_MAX_DEPTH", "") or "").strip()
+    try:
+        return max(0, int(raw)) if raw else 2
+    except ValueError:
+        # An unreadable limit fails closed: no further delegates.
+        return 0
 
 
 def _desk_dispatch(registry: ToolRegistry, name: str) -> Any:
@@ -274,6 +315,10 @@ class _RlmParent(_DeskParent):
     (the desk store convention), and `session_name` is the owning bot
     identity a restarted host recovers its own children by.
     """
+
+    # RLM children keep the desk child model: RlmHost owns their model
+    # selection, so they never take the engine's staged route.
+    engine_full_tools = False
 
     def __init__(self, registry: ToolRegistry, model: Any, session_dir: Path) -> None:
         super().__init__(registry, model)
@@ -1040,8 +1085,12 @@ def default_registry(
     # see every family registered below.
     parent = None
     child_model = _desk_child_model(env, policy)
-    if child_model is not None:
-        parent = _DeskParent(registry, child_model)
+    from omega_prime.engine.attach import engine_stage
+
+    # A staged engine turn delegates to the engine's execute stage, so it
+    # gets a parent even with no Python child provider configured.
+    if child_model is not None or engine_stage(env) is not None:
+        parent = _DeskParent(registry, child_model, env, work=work)
         try:
             from omega_prime.durable.journal import TurnJournal
 
