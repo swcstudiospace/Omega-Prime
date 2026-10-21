@@ -24,7 +24,9 @@ from __future__ import annotations
 import json
 import stat
 import subprocess
+import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from omega_prime.agent.interrupt import InterruptFlag
@@ -334,6 +336,37 @@ def _install_fake_herdr(tmp_path: Path, mode: str = "ok") -> tuple[Path, Path]:
     binary.write_text(_HERDR_FAKE.replace("__MODE__", mode), encoding="utf-8")
     binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
     return binary, binary.parent / "herdr-log.jsonl"
+
+
+_TMUX_FAKE = r'''#!/usr/bin/env python3
+"""Fake tmux: argv receipts beside itself; has-session misses, new-session wins."""
+import json
+import os
+import sys
+
+LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmux-log.jsonl")
+argv = sys.argv[1:]
+with open(LOG, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({"argv": argv}) + "\n")
+if argv[:1] == ["has-session"]:
+    sys.exit(1)
+if argv[:1] == ["new-session"]:
+    sys.exit(0)
+sys.exit(1)
+'''
+
+
+def _install_fake_tmux(tmp_path: Path) -> Path:
+    """Write an executable fake ``tmux`` into the tmp bin dir (first on PATH).
+
+    The receipts pin the fallback session-spawn argv; ``has-session``
+    always misses so every test exercises the ``new-session`` path.
+    """
+    binary = tmp_path / "bin" / "tmux"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text(_TMUX_FAKE, encoding="utf-8")
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+    return binary
 
 
 def _jsonl(path: Path) -> list[dict]:
@@ -862,6 +895,214 @@ def test_no_secret_shaped_value_lands_in_any_durable_artifact(tmp_path: Path) ->
         if token.encode("utf-8") in p.read_bytes()
     ]
     assert hits == [], "secret-shaped value leaked into durable artifacts"
+
+
+# --- W113-05: the run is visible (row, pane argv, fallback, absence) --------
+
+
+def test_tracked_run_lands_a_row_working_to_done(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    _install_fake_herdr(tmp_path, "ok")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    other = _row("gb:other", "queued", owner="sol", nested={"keep": [1, 2, 3]})
+    store = _seed(tmp_path / "tasks.json", rows=[other])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-vis",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:vis",
+    )
+    assert result.ok is True, result.detail
+    data = _read_tasks(store)
+    row = next(r for r in data["tasks"] if r["id"] == "gb:vis")
+    assert row["state"] == "done"
+    receipts = _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
+    create = next(e for e in receipts if e["argv"][:2] == ["workspace", "create"])
+    assert row["herdr_pane"] == create["pane"]
+    started = datetime.fromisoformat(row["started_at"])
+    activity = datetime.fromisoformat(row["last_activity_at"])
+    assert started <= activity
+    assert row["last_event"] == "stage_done completed"
+    assert set(row["receipt"]) == {"job_id", "stage_id", "ok", "status", "export"}
+    assert row["receipt"]["job_id"] == "job-vis"
+    assert row["receipt"]["stage_id"] == "stage-1"
+    assert row["receipt"]["ok"] is True
+    assert row["receipt"]["status"] == "completed"
+    assert set(row["receipt"]["export"]) == {
+        "head",
+        "base",
+        "ref",
+        "commits",
+        "dirty",
+        "bundle",
+        "bytes",
+        "via",
+    }
+    assert row["receipt"]["export"]["via"] == "fake"
+    # An unrelated row's unknown fields survive the run byte-for-byte.
+    assert next(r for r in data["tasks"] if r["id"] == "gb:other") == other
+
+
+def test_pane_label_and_watch_argv_are_pinned(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    _install_fake_herdr(tmp_path, "ok")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:argv")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-argv",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:argv",
+    )
+    assert result.ok is True, result.detail
+    receipts = _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
+    create = next(e for e in receipts if e["argv"][:2] == ["workspace", "create"])
+    pane_run = next(e for e in receipts if e["argv"][:2] == ["pane", "run"])
+    assert create["argv"] == [
+        "workspace",
+        "create",
+        "--cwd",
+        str(work),
+        "--label",
+        "gb:argv plan",
+        "--no-focus",
+    ]
+    assert pane_run["argv"] == [
+        "pane",
+        "run",
+        create["pane"],
+        sys.executable,
+        "-m",
+        "omega_prime.engine.watch",
+        "job-argv",
+        "--follow",
+        "--state-dir",
+        str(tmp_path / "state"),
+    ]
+
+
+def test_tmux_fallback_records_the_session(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    _, herdr_log = _install_fake_herdr(tmp_path, "fail")
+    _install_fake_tmux(tmp_path)
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(
+        tmp_path,
+        omp,
+        script,
+        roots,
+        OMEGA_PRIME_OMP_ALLOW_ZAI="1",
+        OMEGA_PRIME_ENGINE_TMUX="1",
+    )
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:tmux")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-tmux",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:tmux",
+    )
+    assert result.ok is True, result.detail
+    data = _read_tasks(store)
+    row = next(r for r in data["tasks"] if r["id"] == "gb:tmux")
+    assert row["state"] == "done"
+    assert row["herdr_pane"] == "tmux:omega-job-tmux"
+    receipts = _jsonl(tmp_path / "bin" / "tmux-log.jsonl")
+    assert receipts[0]["argv"] == ["has-session", "-t", "omega-job-tmux"]
+    assert receipts[1]["argv"] == [
+        "new-session",
+        "-d",
+        "-s",
+        "omega-job-tmux",
+        "--",
+        sys.executable,
+        "-m",
+        "omega_prime.engine.watch",
+        "job-tmux",
+        "--follow",
+        "--state-dir",
+        str(tmp_path / "state"),
+    ]
+    # The failed herdr create was receipted; pane run never happened.
+    assert [
+        e["argv"][:2] for e in _jsonl(herdr_log)
+    ] == [["workspace", "create"]]
+
+
+def test_no_pane_leaves_the_key_absent_and_the_run_healthy(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    # No explicit stub: _backend_env installs the fail-mode herdr itself,
+    # and OMEGA_PRIME_ENGINE_TMUX stays "0" — the deterministic no-pane path.
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:nopane")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-nopane",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:nopane",
+    )
+    assert result.ok is True, result.detail
+    data = _read_tasks(store)
+    row = next(r for r in data["tasks"] if r["id"] == "gb:nopane")
+    assert row["state"] == "done"
+    assert "herdr_pane" not in row
+    # The failing create was attempted exactly once — never fatal.
+    assert [
+        e["argv"][:2]
+        for e in _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
+    ] == [["workspace", "create"]]
+
+
+def test_untracked_backend_run_writes_nothing(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    _install_fake_herdr(tmp_path, "fail")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = tmp_path / "tasks.json"
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-untracked",
+        stage="plan",
+        plan="zai",
+    )
+    assert result.ok is True, result.detail
+    # Exactly the phase-112 shape: the backend ran, nothing was tracked.
+    assert result.sandbox == "omp-sandbox"
+    assert result.stage == "plan"
+    assert result.final_text == "fake final text"
+    assert not store.exists()
+    assert _jsonl(tmp_path / "bin" / "herdr-log.jsonl") == []
+    assert "answer_question" not in _wrapper_tools(log)
 
 
 def test_question_surfaces_as_event_only(tmp_path: Path) -> None:

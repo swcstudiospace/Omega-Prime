@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import fcntl
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from omega_prime.credentials.redact import REDACTED
 from omega_prime.dashboard.blocks import clear_block, push_block, raise_block
+from omega_prime.dashboard.run_rows import finish, start, touch
 from omega_prime.dashboard.status_file import (
     ITEM_FIELDS,
     TASK_STATES,
@@ -376,3 +378,151 @@ def test_engine_ungated_failure_writes_no_item(tmp_path: Path) -> None:
     data = json.loads(store.read_text(encoding="utf-8"))
     assert data["waiting_on_ove"] == []
     assert data["tasks"][0]["state"] == "working"
+
+
+# --- W113-02: run_rows lifecycle (start/touch/finish) -----------------------
+
+
+def _row_by_id(store: Path, task_id: str) -> dict:
+    data = json.loads(store.read_text(encoding="utf-8"))
+    return next(row for row in data["tasks"] if row["id"] == task_id)
+
+
+def test_run_rows_start_creates_the_working_row_and_pins_started_at(
+    tmp_path: Path,
+) -> None:
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:t1")])
+    start(store, "gb:new", job_id="job-1", stage="plan", pane="pane-7")
+    row = _row_by_id(store, "gb:new")
+    assert row["state"] == "working"
+    assert row["job_id"] == "job-1"
+    assert row["stage"] == "plan"
+    assert row["herdr_pane"] == "pane-7"
+    started = datetime.fromisoformat(row["started_at"])
+    activity = datetime.fromisoformat(row["last_activity_at"])
+    assert started <= activity
+    # A re-start moves the row back to working with started_at untouched;
+    # a later pane=None leaves the recorded pane alone.
+    start(store, "gb:new", job_id="job-2", stage="execute", pane=None)
+    again = _row_by_id(store, "gb:new")
+    assert again["state"] == "working"
+    assert again["started_at"] == row["started_at"]
+    assert again["stage"] == "execute"
+    assert again["herdr_pane"] == "pane-7"
+
+
+def test_run_rows_start_never_resurrects_terminal_rows(tmp_path: Path) -> None:
+    store = _seed(
+        tmp_path / "tasks.json",
+        rows=[_row("gb:done", "done", receipt={"job_id": "job-0"})],
+    )
+    before = store.read_bytes()
+    start(store, "gb:done", job_id="job-1", stage="plan", pane="pane-7")
+    assert store.read_bytes() == before
+
+
+def test_run_rows_start_returns_a_blocked_row_to_working(tmp_path: Path) -> None:
+    store = _seed(
+        tmp_path / "tasks.json",
+        rows=[
+            _row(
+                "gb:blocked",
+                "blocked",
+                started_at="2026-01-01T00:00:00+00:00",
+            )
+        ],
+    )
+    start(store, "gb:blocked", job_id="job-1", stage="plan", pane=None)
+    row = _row_by_id(store, "gb:blocked")
+    assert row["state"] == "working"
+    assert row["started_at"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_run_rows_touch_labels_question_and_stage_done_events(
+    tmp_path: Path,
+) -> None:
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:t1")])
+    touch(store, "gb:t1", {"event": "question"})
+    assert _row_by_id(store, "gb:t1")["last_event"] == "question"
+    assert datetime.fromisoformat(_row_by_id(store, "gb:t1")["last_activity_at"])
+    touch(store, "gb:t1", {"event": "stage_done", "status": "completed"})
+    assert _row_by_id(store, "gb:t1")["last_event"] == "stage_done completed"
+    touch(store, "gb:t1", {"event": "stage_done", "status": ""})
+    assert _row_by_id(store, "gb:t1")["last_event"] == "stage_done"
+    # A plain string event is used verbatim.
+    touch(store, "gb:t1", "seeded the worktree")
+    assert _row_by_id(store, "gb:t1")["last_event"] == "seeded the worktree"
+    # Any other event shape leaves the label alone.
+    touch(store, "gb:t1", {"event": "up"})
+    assert _row_by_id(store, "gb:t1")["last_event"] == "seeded the worktree"
+
+
+def test_run_rows_touch_is_a_noop_for_missing_and_terminal_rows(
+    tmp_path: Path,
+) -> None:
+    store = _seed(
+        tmp_path / "tasks.json",
+        rows=[_row("gb:done", "done", last_event="stage_done completed")],
+    )
+    before = store.read_bytes()
+    touch(store, "gb:done", {"event": "question"})
+    touch(store, "gb:absent", {"event": "question"})
+    assert store.read_bytes() == before
+
+
+def test_run_rows_writes_leave_other_rows_byte_identical(tmp_path: Path) -> None:
+    other = _row(
+        "gb:other",
+        "working",
+        owner="sol",
+        nested={"keep": [1, 2]},
+        herdr_pane="pane-9",
+        last_activity_at="2026-01-01T00:00:00+00:00",
+    )
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:t1"), other])
+    touch(store, "gb:t1", {"event": "question"})
+    start(store, "gb:t1", job_id="job-1", stage="plan", pane="pane-1")
+    finish(store, "gb:t1", ok=True, receipt={"job_id": "job-1"})
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert data["tasks"][1] == other
+
+
+def test_run_rows_finish_upserts_terminal_states(tmp_path: Path) -> None:
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:t1")])
+    finish(
+        store,
+        "gb:t1",
+        ok=True,
+        receipt={"job_id": "job-1", "stage_id": "stage-1", "ok": True},
+    )
+    row = _row_by_id(store, "gb:t1")
+    assert row["state"] == "done"
+    assert row["receipt"] == {"job_id": "job-1", "stage_id": "stage-1", "ok": True}
+    # A missing row is created terminal so a suppressed start still records.
+    finish(
+        store,
+        "gb:missing",
+        ok=False,
+        receipt={"job_id": "job-2", "stage_id": None, "ok": False, "status": "failed"},
+    )
+    failed = _row_by_id(store, "gb:missing")
+    assert failed["state"] == "failed"
+    assert failed["receipt"]["status"] == "failed"
+    assert datetime.fromisoformat(failed["started_at"])
+
+
+def test_run_rows_finish_redacts_secret_shaped_receipt_strings(
+    tmp_path: Path,
+) -> None:
+    token, _ = _shaped_inputs()
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:t1")])
+    finish(
+        store,
+        "gb:t1",
+        ok=True,
+        receipt={"job_id": "job-1", "detail": f"handler saw {token}"},
+    )
+    raw = store.read_text(encoding="utf-8")
+    assert token not in raw
+    row = _row_by_id(store, "gb:t1")
+    assert row["receipt"]["detail"] == f"handler saw {REDACTED}"
