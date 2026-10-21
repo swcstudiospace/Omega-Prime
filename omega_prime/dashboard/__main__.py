@@ -208,6 +208,11 @@ def main(
     parser.add_argument("--port", type=int, default=int(os.environ.get("OMEGA_PRIME_DASHBOARD_PORT", "7421")))
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--stop", action="store_true")
+    parser.add_argument(
+        "--terminal-readonly",
+        action="store_true",
+        help="force every task terminal websocket read-only",
+    )
     args = parser.parse_args(raw_argv)
     stderr = sys.stderr
     output = stdout if stdout is not None else sys.stdout
@@ -290,7 +295,7 @@ def main(
     poller = factory()
     from omega_prime.dashboard.app import create_app
 
-    app = create_app(poller, port=args.port, host=args.host)
+    app = create_app(poller, port=args.port, host=args.host, terminal_readonly=args.terminal_readonly)
     pid = os.getpid()
     start = _process_start_time(pid)
     if start is None:

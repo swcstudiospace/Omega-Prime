@@ -10,6 +10,7 @@ from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from omega_prime.dashboard.__main__ import main
 from omega_prime.dashboard.app import create_app
 from omega_prime.dashboard.terminal import PaneClosedError
 from omega_prime.dashboard.terminal_ws import (
@@ -426,10 +427,13 @@ def test_fifth_concurrent_session_closes_4429():
 
 
 def test_only_changed_frames_cross_the_socket():
-    reads = iter(["A", "A", "B"])
+    pattern = ["A", "A", "B"]
+    state = {"n": 0}
 
     async def runner(argv):
-        return next(reads)
+        text = pattern[state["n"] % len(pattern)]
+        state["n"] += 1
+        return text
 
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
     endpoint = make_terminal_ws_endpoint(poller, HerdrBridge(runner=runner, poll_s=0.01), token=FIXED_TOKEN)
@@ -568,3 +572,83 @@ def test_route_paths_stay_free_of_send_and_input():
     assert "/api/tasks/{task_id:path}/terminal" in paths
     assert "/ws/tasks/{task_id:path}/terminal" in paths
     assert not any("send" in path or "input" in path for path in paths)
+
+
+def test_server_readonly_flag_forces_rw_connections_readonly():
+    runner = _counter_runner()
+    poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
+    app = create_app(
+        poller,
+        port=7441,
+        attach_token=FIXED_TOKEN,
+        terminal_readonly=True,
+        terminal_bridge=HerdrBridge(runner=runner, poll_s=0.01),
+    )
+    client = TestClient(app)
+    with _ws(client, "/ws/tasks/task:one/terminal") as ws:
+        _auth(ws)
+        assert ws.receive_json()["type"] == "frame"
+        ws.send_json({"type": "input", "text": "nope\n"})
+        assert ws.receive_json()["type"] == "frame"
+    assert not any(
+        c[1:3] in (["pane", "send-text"], ["pane", "send-keys"]) for c in runner.calls
+    )
+
+
+def _serve_fake(findings):
+    def serve(app: object, host: str, port: int) -> None:
+        client = TestClient(app)
+        response = client.get("/api/session", headers={"host": "127.0.0.1:7441"})
+        payload = response.json()
+        findings["readonly"] = payload["readonly"]
+        findings["token_is_str"] = isinstance(payload["token"], str) and bool(payload["token"])
+        headers = {"host": "127.0.0.1:7441", "origin": "http://127.0.0.1:7441"}
+        with client.websocket_connect("/ws/tasks/task:one/terminal", headers=headers) as ws:
+            ws.send_json({"type": "auth", "token": payload["token"], "mode": "rw"})
+            findings["first"] = ws.receive_json()
+            ws.send_json({"type": "input", "text": "dropped anyway\n"})
+            findings["no_crash"] = True
+
+    return serve
+
+
+def _readonly_poller_factory():
+    def factory():
+        poller = DashboardPoller([])
+        poller._snapshot = {
+            "active": [{"id": "task:one", "owner": {"kind": "worker", "ref": "x"}}],
+            "idle_sessions": [],
+            "finished": [],
+        }
+        return poller
+
+    return factory
+
+
+def test_cli_terminal_readonly_flag_forces_readonly(tmp_path):
+    findings: dict[object, object] = {}
+    code = main(
+        ["--host", "127.0.0.1", "--port", "7441", "--terminal-readonly"],
+        home=tmp_path,
+        serve=_serve_fake(findings),
+        poller_factory=_readonly_poller_factory(),
+    )
+    assert code == 0
+    assert findings["readonly"] is True
+    assert findings["token_is_str"] is True
+    assert findings["first"] == {"type": "status", "status": "no_session"}
+    assert findings["no_crash"] is True
+    assert not (tmp_path / ".omega-prime" / "dashboard" / "dashboard.pid").exists()
+
+
+def test_cli_without_flag_reports_readonly_false(tmp_path):
+    findings: dict[object, object] = {}
+    code = main(
+        ["--host", "127.0.0.1", "--port", "7441"],
+        home=tmp_path,
+        serve=_serve_fake(findings),
+        poller_factory=_readonly_poller_factory(),
+    )
+    assert code == 0
+    assert findings["readonly"] is False
+    assert findings["first"] == {"type": "status", "status": "no_session"}
