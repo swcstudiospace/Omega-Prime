@@ -181,11 +181,14 @@ def test_desk_intake_path_prefers_the_state_dir(monkeypatch, tmp_path):
         desk_intake_path(tmp_path) == tmp_path / "omega_prime" / "state" / "intake.json"
     )
     monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path / "state"))
-    assert desk_intake_path(tmp_path) == tmp_path / "state" / "intake.json"
+    assert desk_intake_path(tmp_path) == tmp_path / "state" / "agent" / "intake.json"
     assert (
         desk_intake_path(tmp_path, state_dir=tmp_path / "other")
-        == tmp_path / "other" / "intake.json"
+        == tmp_path / "other" / "agent" / "intake.json"
     )
+    # An explicit agent folder wins over the state root.
+    monkeypatch.setenv("OMEGA_PRIME_AGENT_STATE_DIR", str(tmp_path / "data"))
+    assert desk_intake_path(tmp_path) == tmp_path / "data" / "intake.json"
 
 
 # -- Phase 64 DESK-04: the desk_lead_pass cron job kind ---------------------
@@ -431,3 +434,29 @@ def test_interleaved_producer_and_claim_survive_dispatch(tmp_path):
     assert len(lines) == 2
     assert lines[0].endswith(":first ticket")
     assert lines[1].endswith(":third ticket")
+
+
+def test_scheduled_pass_uses_the_hosts_effective_intake_file(tmp_path, monkeypatch):
+    """Greptile PR 50: a settings-only agent folder is not in os.environ."""
+    from omega_prime.cron.desk_driver import DeskDriver
+
+    monkeypatch.delenv("OMEGA_PRIME_AGENT_STATE_DIR", raising=False)
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path / "exported"))
+    root = tmp_path / "root"
+    store = JobStore(root / "cron" / "jobs.json")
+    host_intake = tmp_path / "settings-agent" / "intake.json"
+    record = IntakeStore(host_intake).submit("fix login")
+    schedule_desk_lead_pass(store, due_at=1000, interval_seconds=60)
+    driver = DeskDriver(
+        root,
+        parent=None,
+        work_root=tmp_path,
+        clock=lambda: 1000.0,
+        intake_path=host_intake,
+    )
+    driver.tick_once()
+    job = JobStore(root / "cron" / "jobs.json").jobs[0]
+    tickets = job["last_result"]["tickets"]
+    # The pass read the host's queue: its one record became a ticket.
+    assert [t.get("intake_id") for t in tickets] == [record["intake_id"]]
+    assert not (tmp_path / "exported" / "agent" / "intake.json").exists()

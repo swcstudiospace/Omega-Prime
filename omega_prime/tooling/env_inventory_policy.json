@@ -103,6 +103,11 @@
     "OMEGA_PRIME_REDTEAM_ROE_FILE": "Selects the signed red-team Rules of Engagement artifact.",
     "OMEGA_PRIME_REDTEAM_ROE_FILES": "Selects comma-separated red-team Rules of Engagement artifacts.",
     "OMEGA_PRIME_SIDECAR_REPORTS_DIR": "Selects the red-team sidecar reports directory.",
+    "OMEGA_PRIME_AGENT_STATE_DIR": "Selects the agent data folder for sessions, memory, skills and intake; defaults to the state directory's agent folder.",
+    "OMEGA_PRIME_CLARIFY_SOCKET": "Names the per-run clarify broker socket an engine child uses to ask the operator a question.",
+    "OMEGA_PRIME_MEMORY_BACKEND": "Selects which memory backend serves recall and writes.",
+    "OMEGA_PRIME_MEMORY_DIR": "Selects the local memory store directory.",
+    "OMEGA_PRIME_SOLO": "Turns solo mode on or off for the MCP tool registry; defaults on for the Omega Prime bot.",
     "OMEGA_PRIME_STATE_DIR": "Selects persistent state for Omega Prime integrations and engine jobs.",
     "OMEGA_PRIME_STATE_DIR_FILE": "Names a protected file containing the Omega Prime state directory setting.",
     "OMEGA_PRIME_SWEEP_MENTIONS": "Controls mention processing during scheduled sweeps.",
@@ -422,7 +427,7 @@
       "reason": "Resolves the finite connector credential names declared in _CONNECTORS, including file selectors."
     },
     {
-      "site": "omega_prime/mcp_server.py:338:helper:omega_prime/mcp_server.py:_secret_present",
+      "site": "omega_prime/mcp_server.py:354:helper:omega_prime/mcp_server.py:_secret_present",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -435,7 +440,7 @@
       "reason": "Resolves only the finite provider credential names from the desk child provider declarations."
     },
     {
-      "site": "omega_prime/mcp_server.py:351:helper:omega_prime/integrations/binding.py:secret_value",
+      "site": "omega_prime/mcp_server.py:367:helper:omega_prime/integrations/binding.py:secret_value",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -487,7 +492,7 @@
       "reason": "Enumerates finite provider.env_vars credentials consumed by the approved credential broker, including protected-file selectors."
     },
     {
-      "site": "omega_prime/grokbot/doctor.py:937:mapping.get",
+      "site": "omega_prime/grokbot/doctor.py:1116:mapping.get",
       "symbol": "_check_connector_secrets",
       "source_sha256": "da9adca5c1daa73671631474854e3d6ba5d0f29547adfe97bc64e7c398dea84e",
       "names": [
@@ -503,7 +508,7 @@
   ],
   "supplements": [
     {
-      "site": "omega_prime/engine/jobs.py:207:environment.items",
+      "site": "omega_prime/engine/jobs.py:274:environment.items",
       "symbol": "child_env",
       "source_sha256": "66bbaa94289708bd30b8c66db94ad357667826ac001dbec82321331819d5ca59",
       "classification": "excluded",
@@ -694,13 +699,13 @@
   "metadata": {
     "token_selectors": [
       {
-        "site": "omega_prime/mcp_server.py:1852:args.token_env",
+        "site": "omega_prime/mcp_server.py:2132:args.token_env",
         "symbol": "_resolve_token",
         "source_sha256": "e04ec502c56de9c37869762a3519cac3470f599f455c9ec1b3343026091652d7",
         "reason": "The caller-selected environment key is an arbitrary MCP bearer-token selector, not a concrete setting name."
       },
       {
-        "site": "omega_prime/grokbot/oneclick.py:256:token_env",
+        "site": "omega_prime/grokbot/oneclick.py:257:token_env",
         "symbol": "_resolve_token",
         "source_sha256": "71330b28e111b323141f85f64c37224eb239f42b8cf738da190a4c8aaab5b5fe",
         "reason": "The token_env argument selects an arbitrary bearer credential after file and argv token sources."

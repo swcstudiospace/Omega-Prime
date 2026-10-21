@@ -1,0 +1,81 @@
+{
+  "task_id": "pr50-greptile-round2",
+  "bot": "bot-00-omega-prime",
+  "completed_at": "2026-10-20T19:25:35Z",
+  "commands": [
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m ruff format --check omega_prime/",
+      "exit_code": 1,
+      "output_tail": "One formatting issue in omega_prime/tests/test_ui_control.py:200; corrected before the final gate run."
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "output_tail": "5 failed, 4897 passed, 20 skipped; nested prompt assembler used system python without APScheduler because VIRTUAL_ENV was not propagated."
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 VIRTUAL_ENV=/workspace/omes-bot/.venv /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_desk_wiring.py::test_warm_registry_consumes_independent_intake_and_acks omega_prime/tests/test_omega_commands.py::test_registered_omega_command_forwards_doctor_context omega_prime/tests/test_omega_commands.py::test_real_doctor_contextual_health_and_repeat omega_prime/tests/test_omega_commands.py::test_real_doctor_missing_context_stays_unhealthy_and_preserves_sha omega_prime/tests/test_omega_commands.py::test_real_doctor_extra_context_runs_a_missing_check -q",
+      "exit_code": 0,
+      "output_tail": "5 passed in 4.64s; confirms the nested assembler uses the selected venv when VIRTUAL_ENV is set."
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 VIRTUAL_ENV=/workspace/omes-bot/.venv /workspace/omes-bot/.venv/bin/python -m ruff check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "All checks passed!"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 VIRTUAL_ENV=/workspace/omes-bot/.venv /workspace/omes-bot/.venv/bin/python -m ruff format --check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "599 files already formatted"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 VIRTUAL_ENV=/workspace/omes-bot/.venv /workspace/omes-bot/.venv/bin/python -m mypy omega_prime/",
+      "exit_code": 0,
+      "output_tail": "Success: no issues found in 472 source files"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 VIRTUAL_ENV=/workspace/omes-bot/.venv /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_ui_control.py -q",
+      "exit_code": 0,
+      "output_tail": "17 passed in 0.83s"
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 VIRTUAL_ENV=/workspace/omes-bot/.venv /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests -q",
+      "exit_code": 0,
+      "output_tail": "4902 passed, 20 skipped, 15 warnings in 271.90s"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Terminal duplicate answer records are removed safely when another scanner has already unlinked one.",
+      "evidence_command_index": 6
+    },
+    {
+      "claim": "Ruff lint passes.",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "Ruff formatting check passes.",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "Mypy passes.",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "The changed UI-control tests and the full omega_prime test suite pass with the requested venv propagated to nested commands.",
+      "evidence_command_index": 7
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    "omega_prime/engine/ui_control.py",
+    "omega_prime/tests/test_ui_control.py",
+    ".receipts/bot-00-omega-prime/pr50-greptile-round2.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "Revert the focused queue-cleanup change and its regression test.",
+  "approvals": [],
+  "approved_by": null
+}

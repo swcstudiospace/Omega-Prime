@@ -97,10 +97,12 @@ The table records names and purposes only.
 | `MUSE_API_KEY_FILE` | Names a protected file containing the Muse provider credential. |
 | `NOTION_TOKEN` | Authenticates Notion connector API requests. |
 | `NOTION_TOKEN_FILE` | Names a protected file containing the Notion integration credential. |
+| `OMEGA_PRIME_AGENT_STATE_DIR` | Selects the agent data folder for sessions, memory, skills and intake; defaults to the state directory's agent folder. |
 | `OMEGA_PRIME_APPROVALS_FILE` | Selects the external approval grants file. |
 | `OMEGA_PRIME_APPROVALS_SHA256` | Pins the expected digest of the approval grants file. |
 | `OMEGA_PRIME_AUDIT_LOG` | Selects the destination for Omega Prime audit events. |
 | `OMEGA_PRIME_BWRAP_BIN` | Selects the bubblewrap executable used for sandboxing. |
+| `OMEGA_PRIME_CLARIFY_SOCKET` | Names the per-run clarify broker socket an engine child uses to ask the operator a question. |
 | `OMEGA_PRIME_COMMAND_LOG` | Selects the command history log destination. |
 | `OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS` | Sets the maximum accepted lateness for scheduled actions. |
 | `OMEGA_PRIME_DESK_BUS_URL` | Selects the desk message-bus endpoint. |
@@ -124,6 +126,8 @@ The table records names and purposes only.
 | `OMEGA_PRIME_EVALS_JUDGE_MODEL` | Selects the model used by the live evaluation judge. |
 | `OMEGA_PRIME_EVALS_REGRESS_THRESHOLD` | Sets the minimum per-case score drop counted as an evaluation regression. |
 | `OMEGA_PRIME_IMAGE_ROLLOUT` | Selects the staged or direct image rollout mode for deployments. |
+| `OMEGA_PRIME_MEMORY_BACKEND` | Selects which memory backend serves recall and writes. |
+| `OMEGA_PRIME_MEMORY_DIR` | Selects the local memory store directory. |
 | `OMEGA_PRIME_OMP_ALLOW_CHATGPT` | Enables the ChatGPT plan in engine model routing. |
 | `OMEGA_PRIME_OMP_ALLOW_CURSOR` | Enables the Cursor plan in engine model routing. |
 | `OMEGA_PRIME_OMP_ALLOW_XAI` | Enables the xAI plan in engine model routing. |
@@ -190,6 +194,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_SANDBOX_POLICY` | Selects the generated sandbox policy file. |
 | `OMEGA_PRIME_SANDBOX_SCOPE` | Selects which execution phases the sandbox governs. |
 | `OMEGA_PRIME_SIDECAR_REPORTS_DIR` | Selects the red-team sidecar reports directory. |
+| `OMEGA_PRIME_SOLO` | Turns solo mode on or off for the MCP tool registry; defaults on for the Omega Prime bot. |
 | `OMEGA_PRIME_STATE_DIR` | Selects persistent state for Omega Prime integrations and engine jobs. |
 | `OMEGA_PRIME_STATE_DIR_FILE` | Names a protected file containing the Omega Prime state directory setting. |
 | `OMEGA_PRIME_SWEEP_MENTIONS` | Controls mention processing during scheduled sweeps. |

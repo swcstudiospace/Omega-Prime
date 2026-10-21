@@ -16,6 +16,7 @@ import importlib
 import json
 import os
 import socket
+import stat
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from omega_prime.engine.jobs import agent_data_dir, omp_home_override, state_dir
 from omega_prime.grokbot.audit import GrokBotAuditTracer, default_audit_path
 from omega_prime.grokbot.manifest import (
     find_repo_root,
@@ -120,6 +122,169 @@ def _port_probe(host: str, port: int) -> OSError | None:
     return None
 
 
+def _validate_no_symlink(path: Path) -> Path:
+    absolute = _control_path(path)
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError("unsafe symlink in state or bind path")
+    return absolute
+
+
+def _control_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    if ".." in expanded.parts:
+        raise ValueError("unsafe parent traversal in state or bind path")
+    return Path(os.path.abspath(os.fspath(expanded)))
+
+
+def _paths_overlap(path: Path, bind: Path) -> bool:
+    return path == bind or path in bind.parents or bind in path.parents
+
+
+def _open_readonly_directory(path: Path) -> int:
+    """Open existing path components without following symlinks or creating paths."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path.anchor, flags)
+    try:
+        for component in path.parts[1:]:
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _inspect_control_children(control_fd: int) -> None:
+    """Validate existing request and queue entries without following links."""
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    record_flags = (
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
+    for directory_name in ("requests", "queue"):
+        try:
+            directory_fd = os.open(directory_name, directory_flags, dir_fd=control_fd)
+        except FileNotFoundError:
+            continue
+        try:
+            directory_info = os.fstat(directory_fd)
+            if (
+                not stat.S_ISDIR(directory_info.st_mode)
+                or directory_info.st_uid != os.getuid()
+                or stat.S_IMODE(directory_info.st_mode) != 0o700
+            ):
+                raise ValueError(
+                    f"{directory_name} directory has unsafe type, owner or mode"
+                )
+            for name in os.listdir(directory_fd):
+                try:
+                    record_fd = os.open(name, record_flags, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    continue
+                try:
+                    record_info = os.fstat(record_fd)
+                    if (
+                        not stat.S_ISREG(record_info.st_mode)
+                        or record_info.st_uid != os.getuid()
+                        or stat.S_IMODE(record_info.st_mode) != 0o600
+                    ):
+                        raise ValueError(
+                            "control record has unsafe type, owner or mode"
+                        )
+                finally:
+                    os.close(record_fd)
+        finally:
+            os.close(directory_fd)
+
+
+def _ui_control_check(
+    env: Mapping[str, str], writable_binds: Sequence[Path]
+) -> DiagnosticCheck:
+    raw_state_root = state_dir(env)
+    control_path = (
+        Path(os.path.abspath(os.fspath(raw_state_root.expanduser()))) / "ui-control"
+    )
+    try:
+        state_root = _control_path(raw_state_root)
+        control_path = state_root / "ui-control"
+        for bind in writable_binds:
+            if _paths_overlap(control_path, _validate_no_symlink(bind)):
+                raise ValueError(
+                    "control directory overlaps an effective writable child bind"
+                )
+        state_fd = _open_readonly_directory(state_root)
+        try:
+            state_info = os.fstat(state_fd)
+            if not stat.S_ISDIR(state_info.st_mode) or state_info.st_uid != os.getuid():
+                raise ValueError("state directory has an unexpected type or owner")
+            if stat.S_IMODE(state_info.st_mode) & 0o022:
+                raise ValueError("state directory is group- or world-writable")
+            control_fd = os.open(
+                "ui-control",
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=state_fd,
+            )
+        finally:
+            os.close(state_fd)
+        try:
+            control_info = os.fstat(control_fd)
+            if not stat.S_ISDIR(control_info.st_mode):
+                raise ValueError("control path is not a directory")
+            if control_info.st_uid != os.getuid():
+                raise ValueError("control directory has an unexpected owner")
+            if stat.S_IMODE(control_info.st_mode) != 0o700:
+                raise ValueError("control directory must have mode 0700")
+            _inspect_control_children(control_fd)
+        finally:
+            os.close(control_fd)
+    except (OSError, ValueError) as exc:
+        reason = str(exc)
+        if isinstance(exc, OSError):
+            reason = {
+                errno.ENOENT: "state or control directory is missing",
+                errno.ELOOP: "unsafe symlink in state or control path",
+                errno.EACCES: "state or control directory is not readable",
+                errno.ENOTDIR: "unsafe symlink or non-directory in state/control path",
+            }.get(
+                exc.errno if exc.errno is not None else -1,
+                "state or control directory cannot be inspected safely",
+            )
+        missing = isinstance(exc, OSError) and exc.errno == errno.ENOENT
+        return DiagnosticCheck(
+            id="ui_control_health",
+            category="Security",
+            title="UI Control Health",
+            status="WARN" if missing else "FAIL",
+            message=(
+                "state or control directory is not initialized; RPC-UI asks are "
+                f"unavailable until configured; path={control_path}"
+                if missing
+                else f"{reason}; path={control_path}"
+            ),
+        )
+    return DiagnosticCheck(
+        id="ui_control_health",
+        category="Security",
+        title="UI Control Health",
+        status="PASS",
+        message=f"private control directory is safe; state_path={state_root}, "
+        f"state_owner={state_info.st_uid}, state_mode={stat.S_IMODE(state_info.st_mode):04o}, "
+        f"control_path={control_path}, control_owner={control_info.st_uid}, "
+        f"control_mode={stat.S_IMODE(control_info.st_mode):04o}",
+    )
+
+
 class GrokBotDoctor:
     """Preflight diagnostic engine for Grok Bot integration."""
 
@@ -171,10 +336,24 @@ class GrokBotDoctor:
         checks.append(self._check_scheduled_jobs(config))
         checks.append(self._check_template())
         checks.append(self._check_audit_chain())
+        checks.append(self._check_ui_control())
         checks.append(self._check_bind_exposure(host, auth_enabled))
         checks.append(self._check_token_strength())
         checks.append(self._check_connector_secrets())
         return checks
+
+    def _check_ui_control(self) -> DiagnosticCheck:
+        binds = [Path.cwd()]
+        work_root = str(self.env.get("OMEGA_PRIME_WORK_ROOT", "")).strip()
+        if work_root:
+            binds.append(Path(work_root).expanduser())
+        omp_home = omp_home_override(self.env) or (Path.home() / ".omp")
+        if omp_home.exists():
+            binds.append(omp_home)
+        # route_turn binds the agent data folder writable too, so a folder
+        # that overlaps ui-control (or is the state root) fails here first.
+        binds.append(agent_data_dir(self.env))
+        return _ui_control_check(self.env, binds)
 
     # -- runtime ----------------------------------------------------------
 

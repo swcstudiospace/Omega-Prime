@@ -449,6 +449,13 @@ def create_sse_app(
     # not `OMEGA_PRIME_STATE_DIR` or the current directory.
     command_env = dict(os.environ if env is None else env)
     command_env["OMEGA_PRIME_AUDIT_LOG"] = str(tracer.log_path)
+    # Launched without `mcp_server.main` (the one-click SSE path): resolve
+    # the same default agent folder, so host and engine child share it.
+    from omega_prime.agent_state import AGENT_STATE_ENV, live_host_env
+
+    command_env = live_host_env(command_env, home=home)
+    if env is None and command_env.get(AGENT_STATE_ENV):
+        os.environ.setdefault(AGENT_STATE_ENV, command_env[AGENT_STATE_ENV])
     runtime: Runtime = load_runtime(
         root,
         home,

@@ -6,7 +6,7 @@ status: Phase 97 local implementation executed; verification deferred pending au
 stopped_at: Phase 97 local verification finished; current upstream MCP mount/schema evidence is still needed before phase verification can pass.
 last_updated: "2026-10-21"
 last_activity: 2026-10-21
-last_activity_desc: Phase 98 shared memory merged (PR #51); Phase 99 solo mode integrated onto main (PR #48); phase 97 verification remains deferred on authoritative upstream contract evidence; Phase 102 integrated (PR #52).
+last_activity_desc: Phase 98 shared memory merged (PR #51); Phase 99 solo mode integrated onto main (PR #48); Phase 100 omp engine wiring integrated after it (PR #50); phase 97 verification remains deferred on authoritative upstream contract evidence; Phase 102 integrated (PR #52).
 state_head: 0b1fad3
 progress:
   total_phases: 7
@@ -34,6 +34,8 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 Phase: v20 Phase 97 — substrate direct connect + settings loader + no time caps (local implementation executed; verification deferred on authoritative upstream MCP mount/schema evidence).
 Plan: 02 (5 total; 1 complete; local transport and argument changes are present, but server-contract preflight tasks remain open).
 Status: Phase 97 local implementation is not verified against current upstream transport/schema. Phase 98 runtime work is present on the parallel branch and is being rebased after phase 97; phase 97 contracts take precedence at integration. Resume with authoritative MCP path/schema preflight in plans 97-02/97-03. Do not audit, complete, or clean up v20. Phase 77.1 remains `verification_deferred_human`; do not re-execute phases 85–96 or mark 77.1 passed.
+
+Phase 100 (omp engine wiring) is complete and integrated after Phase 99 (PR #50). Evidence: .planning/phases/100-omp-engine-wiring/100-SUMMARY.md.
 
 Phase 99 (solo mode, Desk optional) is implemented and integrated onto main after Phase 98; see `.planning/phases/99-solo-mode-desk-optional/99-SUMMARY.md`.
 
@@ -158,5 +160,6 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 - Phase 97 is locally implemented but not verified against the current upstream server. Obtain authoritative MCP path/schema evidence, then resume the preflight/gap work; live endpoint verification and live settings/connector changes remain operator-owned. Phase 98's endpoint and source-aware search behavior must retain this phase 97 authority. Phase 77.1 live UAT stays user-owned (`/gsd:verify-work 77.1`).
 - Phase 99 is integrated onto main after Phases 97 and 98; it does not mark the milestone complete.
+- Phase 100 (omp engine wiring) is integrated after Phase 99 (PR #50); see `.planning/phases/100-omp-engine-wiring/100-SUMMARY.md`.
 
 Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.

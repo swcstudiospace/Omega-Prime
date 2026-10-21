@@ -231,10 +231,14 @@ def test_desk_stores_live_under_state_dir(tmp_path):
         )
     )
     assert registered.get("ok") is True, registered
-    assert (state / "events.ndjson").is_file()
-    assert (state / "packs.json").is_file()
+    # Desk stores are agent data: they live in the `agent` subfolder.
+    assert (state / "agent" / "events.ndjson").is_file()
+    assert (state / "agent" / "packs.json").is_file()
+    assert not (state / "events.ndjson").exists()
     # The cron desk pass shares this exact intake file (DESK-04 contract).
-    assert desk_intake_path(ROOT, state_dir=str(state)) == state / "intake.json"
+    assert (
+        desk_intake_path(ROOT, state_dir=str(state)) == state / "agent" / "intake.json"
+    )
 
 
 def test_delegate_without_provider_env_is_not_configured(tmp_path):
@@ -418,7 +422,7 @@ def test_warm_registry_consumes_independent_intake_and_acks(tmp_path):
         env=env,
     )
     registry = runtime.registry
-    intake_path = state / "intake.json"
+    intake_path = state / "agent" / "intake.json"
     assert desk_intake_path(ROOT, state_dir=str(state)) == intake_path
     # Prepare the real disposable seat: registration plus installed
     # prompt bytes and their digest, through the public handlers.
@@ -752,7 +756,9 @@ def test_production_registry_solo_routes_lead_planes_and_reports_outage(
     assert docs_error["error"].startswith("upstream_error: unreachable:")
     assert "substrate offline" in docs_error["error"]
     assert event_error["local_mirror"] is True
-    assert (state / "events.ndjson").read_text(encoding="utf-8").count("\n") == 2
+    assert (state / "agent" / "events.ndjson").read_text(encoding="utf-8").count(
+        "\n"
+    ) == 2
 
     doctor = json.loads(registry.dispatch("lead_doctor", {"action": "check"}))
     assert doctor["solo"] is True
@@ -903,7 +909,7 @@ def test_production_registry_notifies_only_when_solo_is_disabled(monkeypatch, tm
         registry = default_registry(
             ROOT, tmp_path / f"{state_name}-home", approval_log=log, env=env
         )
-        submitted = IntakeStore(state / "intake.json").submit(
+        submitted = IntakeStore(state / "agent" / "intake.json").submit(
             "review this issue",
             origin="github",
             links=["https://github.com/example/project/issues/42"],

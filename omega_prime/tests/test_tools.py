@@ -8,13 +8,14 @@ import socket
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 
 from omega_prime.tooling.catalog import EXEC_JOB_TOOL_NAMES
 from omega_prime.tooling.roster import roster_names
 from omega_prime.tools.agent_message import MESSAGING_TOOL_NAMES
 from omega_prime.tools.autonomous import AUTONOMOUS_TOOL_NAMES
 from omega_prime.tools.capacity import CAPACITY_TOOL_NAMES
-from omega_prime.tools.clarify import ClarifyLog, clarify
+from omega_prime.tools.clarify import clarify
 from omega_prime.tools.coding import CODING_TOOL_NAMES, register_coding_tools
 from omega_prime.tools.cron_admin import CRON_ADMIN_TOOL_NAMES
 from omega_prime.tools.delegate import DELEG_TOOL_NAMES
@@ -51,9 +52,11 @@ OMEGA_PRIME = Path(__file__).resolve().parents[1]
 ROSTER = OMEGA_PRIME / "contracts" / "tool-rosters" / "omega-prime.yaml"
 
 
-def _registry(root: Path, web=None, vision=None) -> ToolRegistry:
+def _registry(root: Path, web=None, vision=None, interaction=None) -> ToolRegistry:
     registry = ToolRegistry()
-    register_coding_tools(registry, root, web=web, vision=vision)
+    register_coding_tools(
+        registry, root, web=web, vision=vision, interaction=interaction
+    )
     return registry
 
 
@@ -290,8 +293,17 @@ def test_run_terminal_reports_exit_code_and_refuses_a_path_outside_the_root(
     assert "exit_code" not in shell
 
 
-def test_todo_round_trip_and_clarify_returns_the_question(tmp_path: Path):
-    registry = _registry(tmp_path)
+def test_todo_round_trip_and_clarify_uses_live_operator_answer(tmp_path: Path):
+    class FakeClarifyInteraction:
+        def __init__(self):
+            self.questions = []
+
+        def ask(self, question: str) -> str:
+            self.questions.append(question)
+            return "Apply the patch to the engine package."
+
+    interaction = FakeClarifyInteraction()
+    registry = _registry(tmp_path, interaction=interaction)
     items = [
         {"id": "1", "content": "ship the tool", "status": "pending"},
         {"id": "2", "content": "read it back", "status": "in_progress"},
@@ -313,10 +325,30 @@ def test_todo_round_trip_and_clarify_returns_the_question(tmp_path: Path):
 
     question = "which root should the patch touch?"
     answered = _load(registry.dispatch("clarify", {"question": question}))
-    assert answered["question"] == question
-    log = ClarifyLog()
-    assert clarify(log, question) == {"question": question}
-    assert log.questions == [question]
+    assert interaction.questions == [question]
+    assert answered == {"answer": "Apply the patch to the engine package."}
+
+
+def test_clarify_without_interaction_is_undeliverable_not_an_echo(tmp_path: Path):
+    question = "which root should the patch touch?"
+    result = _load(_registry(tmp_path).dispatch("clarify", {"question": question}))
+
+    assert result == {"error": "undeliverable: no clarify interaction is configured"}
+    assert result.get("answer") != question
+
+
+def test_clarify_rejects_non_string_question():
+    assert clarify(None, cast(Any, 42)) == {"error": "question must be a string"}
+
+
+def test_clarify_interaction_failure_is_undeliverable_without_exception_text():
+    class BrokenInteraction:
+        def ask(self, _question: str) -> str:
+            raise RuntimeError("private operator response")
+
+    result = clarify(BrokenInteraction(), "question")
+
+    assert result == {"error": "undeliverable: live operator interaction failed"}
 
 
 def test_web_and_vision_return_the_transport_payload_without_opening_a_socket(

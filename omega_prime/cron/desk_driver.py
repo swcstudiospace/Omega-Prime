@@ -64,6 +64,7 @@ class DeskDriver:
         clock: Callable[[], float] | None = None,
         approval_log: Any = None,
         can_apply_pin_bump: Callable[[], bool] | None = None,
+        intake_path: str | Path | None = None,
     ) -> None:
         if (
             isinstance(interval_seconds, bool)
@@ -77,6 +78,10 @@ class DeskDriver:
         self.work_root = work_root
         self.approval_log = approval_log
         self.can_apply_pin_bump = can_apply_pin_bump
+        # The intake file the host's lead tools opened, so a scheduled pass
+        # reads the same queue even when the agent folder comes from
+        # settings.json rather than the process env.
+        self.intake_path = intake_path
         self.interval_seconds = interval_seconds
         self._clock = clock or time.time
         self._stop = threading.Event()
@@ -126,7 +131,11 @@ class DeskDriver:
             (
                 "desk-pass",
                 lambda store: run_desk_lead_passes(
-                    store, self._clock(), self.parent, self.work_root
+                    store,
+                    self._clock(),
+                    self.parent,
+                    self.work_root,
+                    intake_path=self.intake_path,
                 ),
             ),
             (
