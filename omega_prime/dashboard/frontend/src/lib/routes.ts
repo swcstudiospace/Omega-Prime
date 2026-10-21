@@ -21,16 +21,8 @@ export function parseHash(hash: string): RouteState {
 }
 export function taskHref(id: string): string { return `#/tasks/${encodeURIComponent(id)}` }
 export function bucketHref(bucket: TaskBucket): string { return bucket === 'all' ? '#/tasks' : `#/tasks?bucket=${bucket}` }
-const originKey = (id: string) => `cc-task-origin:${id}`
-export function rememberTaskOrigin(id: string, bucket: TaskBucket): void {
-  try { sessionStorage.setItem(originKey(id), bucket) } catch { /* Storage can be unavailable in private contexts. */ }
-}
 export function taskOrigin(id: string, state: RouteState): TaskBucket {
   const historyState = window.history.state as { taskOrigin?: unknown; taskOriginTaskId?: unknown } | null
   if (historyState?.taskOriginTaskId === id && typeof historyState.taskOrigin === 'string' && (historyState.taskOrigin === 'all' || isBucket(historyState.taskOrigin))) return historyState.taskOrigin as TaskBucket
-  try {
-    const stored = historyState?.taskOriginTaskId === id ? sessionStorage.getItem(originKey(id)) : null
-    if (stored === 'all' || (stored && isBucket(stored))) return stored as TaskBucket
-  } catch { /* Storage can be unavailable. */ }
   return state.bucket
 }

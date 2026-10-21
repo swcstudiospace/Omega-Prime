@@ -28,6 +28,7 @@ describe('Command Center hash routes', () => {
     fireEvent.click(within(screen.getByRole('main')).getByRole('link', { name: /00007 - Compile release/ }))
     await waitFor(() => expect(screen.getByRole('heading', { name: /Compile release/, level: 2 })).toBeInTheDocument())
     expect(screen.getByRole('link', { name: '← Back to Working' })).toHaveAttribute('href', '#/tasks?bucket=working')
+    expect(window.history.state).toMatchObject({ taskOrigin: 'working', taskOriginTaskId: 'worker/1' })
     first.unmount()
     render(<App />)
     expect(screen.getByRole('link', { name: '← Back to Working' })).toBeInTheDocument()

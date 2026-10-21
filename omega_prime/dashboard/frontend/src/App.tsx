@@ -6,7 +6,7 @@ import { Tasks } from './views/Tasks'
 import { CiCd } from './views/CiCd'
 import { Repositories } from './views/Repositories'
 import { TaskDetail } from './components/TaskDetail'
-import { parseHash, rememberTaskOrigin, taskHref, taskOrigin, type RouteState, type TaskBucket } from './lib/routes'
+import { parseHash, taskHref, taskOrigin, type RouteState, type TaskBucket } from './lib/routes'
 import { selectedTask } from './lib/selectors'
 import { ViewState } from './components/ViewState'
 import type { Snapshot } from './types'
@@ -20,12 +20,18 @@ export function App() {
   const dashboard = useDashboard()
   const [route, setRoute] = useState(() => parseHash(window.location.hash))
   const previousRoute = useRef(route)
+  const pendingTaskOrigin = useRef<{ id: string; bucket: TaskBucket } | null>(null)
   const snapshot: Snapshot = dashboard.data ?? {}
   useEffect(() => {
     if (previousRoute.current.taskId === null) clearTaskOriginState()
     const onChange = () => {
       if (window.location.hash === '#main-content') return
       const next = parseHash(window.location.hash)
+      const pendingOrigin = pendingTaskOrigin.current
+      if (next.taskId !== null && pendingOrigin?.id === next.taskId) {
+        window.history.replaceState({ ...(window.history.state ?? {}), taskOrigin: pendingOrigin.bucket, taskOriginTaskId: pendingOrigin.id }, '')
+        pendingTaskOrigin.current = null
+      }
       const previous = previousRoute.current
       previousRoute.current = next
       if (previous.taskId !== null && next.taskId === null) clearTaskOriginState()
@@ -40,8 +46,7 @@ export function App() {
     return () => window.removeEventListener('hashchange', onChange)
   }, [])
   const rememberOrigin = (id: string, bucket: TaskBucket) => {
-    rememberTaskOrigin(id, bucket)
-    window.history.replaceState({ ...(window.history.state ?? {}), taskOrigin: bucket, taskOriginTaskId: id }, '')
+    pendingTaskOrigin.current = { id, bucket }
   }
   const resolved = route.taskId === null ? null : selectedTask(snapshot, `task:${route.taskId}`) ?? selectedTask(snapshot, `wait:${route.taskId}`)
   const origin = route.taskId ? taskOrigin(route.taskId, route) : 'all'
