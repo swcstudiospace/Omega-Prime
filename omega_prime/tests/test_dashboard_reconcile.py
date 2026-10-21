@@ -439,3 +439,39 @@ def test_apply_rechecks_rows_reread_after_evidence(tmp_path, capsys):
     rows = _rows(path)
     assert rows["gb:00031-a"]["state"] == "done"
     assert rows["gb:00031-a"].get("stale") is None, rows["gb:00031-a"].get("stale")
+
+
+def test_apply_skips_rows_remapped_during_evidence(tmp_path, capsys):
+    """Greptile r4: a row mapped to a new pane after the pane list was read
+    is not judged against that old list, so no false pane_gone is saved."""
+    path = tmp_path / "tasks.json"
+    _seed(path, _fixture_rows())
+
+    def remapping_runner(argv):
+        if argv[1:3] == ["pane", "list"]:
+            payload = _runner()(argv)
+            from omega_prime.dashboard.status_file import _write_locked
+
+            with locked_tasks(path, write=True) as data:
+                for row in data["tasks"]:
+                    if row["id"] == "gb:00031-b":
+                        row["herdr_pane"] = {"pane_id": "w9:p1", "workspace": "00031-b"}
+                _write_locked(data, path)
+            return payload
+        return _runner()(argv)
+
+    assert (
+        main(
+            ["--tasks", str(path), "--apply", "--force"],
+            runner=remapping_runner,
+            pid_alive=_alive,
+            clock=lambda: NOW,
+        )
+        == 0
+    )
+    report = _report(capsys)
+    rows = _rows(path)
+    assert rows["gb:00031-b"]["herdr_pane"]["pane_id"] == "w9:p1"
+    assert rows["gb:00031-b"].get("stale") is None, rows["gb:00031-b"].get("stale")
+    assert "gb:00031-b" not in {entry["id"] for entry in report["dead"]}
+    assert rows["gb:00031-a"]["stale"]["reason"] == "pane_gone"

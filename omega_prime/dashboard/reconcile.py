@@ -21,6 +21,7 @@ import copy
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -193,12 +194,29 @@ def main(
         panes, pane_pids = _gather_evidence(snapshot, run)
         if not args.apply:
             return _reconcile(args, snapshot, path, panes, pane_pids, alive, now)
+        gathered = {_row_key(row) for row in snapshot.get("tasks", [])}
         with locked_tasks(path, write=True) as data:
-            return _reconcile(args, data, path, panes, pane_pids, alive, now)
+            # A row that changed while Herdr was checked (e.g. record_pane
+            # mapped it to a new pane) was never judged by this evidence:
+            # leave it for the next pass rather than mark it from stale data.
+            return _reconcile(
+                args,
+                data,
+                path,
+                panes,
+                pane_pids,
+                alive,
+                now,
+                judge=lambda row: _row_key(row) in gathered,
+            )
     except ValueError as exc:
         error = redact_value({"error": "invalid tasks file", "detail": str(exc)})
         sys.stderr.write(json.dumps(error, sort_keys=True) + "\n")
         return 1
+
+
+def _row_key(row: Any) -> str:
+    return json.dumps(row, sort_keys=True, default=str)
 
 
 def _gather_evidence(
@@ -231,6 +249,7 @@ def _reconcile(
     pane_pids: dict[str, int | None],
     alive: PidAlive,
     now: datetime,
+    judge: Callable[[dict[str, Any]], bool] | None = None,
 ) -> int:
     age = _updated_age_minutes(data.get("updated_at"), now)
     protected = age is not None and age < _PROTECTION_MINUTES and not args.force
@@ -240,6 +259,8 @@ def _reconcile(
     marked: list[tuple[dict[str, Any], str]] = []
     for row in data["tasks"]:
         if not isinstance(row, dict) or row.get("state") not in ("working", "blocked"):
+            continue
+        if judge is not None and not judge(row):
             continue
         verdict = _row_verdict(
             row, panes, pane_pids, alive, now=now, stale_minutes=args.stale_minutes
@@ -271,6 +292,8 @@ def _reconcile(
         for entry in attaches:
             for row in data["tasks"]:
                 if isinstance(row, dict) and row.get("id") == entry["id"]:
+                    if judge is not None and not judge(row):
+                        break
                     row["herdr_pane"] = {
                         "pane_id": entry["pane_id"],
                         "workspace": entry["workspace"],

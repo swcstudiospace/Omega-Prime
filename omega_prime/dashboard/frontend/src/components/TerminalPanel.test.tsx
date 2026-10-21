@@ -354,4 +354,31 @@ describe('TerminalPanel', () => {
     expect(FakeWebSocket.instances[1]!.sent[0]).toMatchObject({ type: 'auth', token: 'token-after-restart' })
     expect(FakeEventSource.instances).toHaveLength(0)
   })
+  it('keeps retrying when the session refresh fails during reconnect', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    vi.stubGlobal('EventSource', FakeEventSource)
+    let online = true
+    const fetchMock = vi.fn(async (url: unknown) => {
+      if (url !== '/api/session') return { ok: false, status: 404 }
+      if (!online) throw new Error('offline')
+      return { ok: true, json: async () => ({ token: FAKE_TOKEN, readonly: false }) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<TerminalPanel taskId="one" />)
+    await flush()
+    FakeWebSocket.instances[0]!.open()
+    online = false
+    FakeWebSocket.instances[0]!.drop()
+    act(() => { vi.advanceTimersByTime(30_000) })
+    await flush()
+    const sessionCalls = () => fetchMock.mock.calls.filter(([url]) => url === '/api/session').length
+    expect(sessionCalls()).toBe(2)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    online = true
+    act(() => { vi.advanceTimersByTime(30_000) })
+    await flush()
+    expect(sessionCalls()).toBe(3)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+  })
 })

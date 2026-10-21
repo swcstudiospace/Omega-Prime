@@ -71,6 +71,19 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
   const authRetryRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const region = useRef<HTMLDivElement>(null)
+  const attachedRef = useRef(attached)
+  useEffect(() => { attachedRef.current = attached }, [attached])
+
+  const scheduleSessionRetry = useCallback(() => {
+    if (retryTimerRef.current !== undefined) return
+    retryTimerRef.current = setTimeout(() => {
+      retryTimerRef.current = undefined
+      noRetryRef.current = false
+      // wsFailed clears when the fresh session lands, so the retry opens
+      // exactly one socket, with the new token.
+      setSessionEpoch(value => value + 1)
+    }, RECONNECT_MS)
+  }, [])
 
   const interactive = session !== null && typeof WebSocket !== 'undefined' && attached && !wsFailed
   const degraded = sessionFailed || wsFailed || (session !== null && typeof WebSocket === 'undefined')
@@ -97,7 +110,14 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
       // A fresh object on every fetch so the socket reconnects with the
       // new token and readonly flag even when they did not change.
       setSession({ readonly: body.readonly })
-    }).catch(() => { if (!cancelled) setSessionFailed(true) })
+    }).catch(() => {
+      if (cancelled) return
+      setSessionFailed(true)
+      // A failed refresh during reconnect must not end the retries: re-arm
+      // so a temporary outage recovers without a reload. The first fetch
+      // (epoch 0) falls back to the SSE view without polling the session.
+      if (sessionEpoch > 0 && attachedRef.current && !noRetryRef.current) scheduleSessionRetry()
+    })
     return () => { cancelled = true }
     // The server mints a new token on every restart: sessionEpoch bumps
     // refetch it before each reconnect so a stale token cannot loop on 4401.
@@ -143,13 +163,7 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
           return
         }
         setWsFailed(true)
-        if (retryTimerRef.current === undefined) retryTimerRef.current = setTimeout(() => {
-          retryTimerRef.current = undefined
-          noRetryRef.current = false
-          // wsFailed clears when the fresh session lands, so the retry opens
-          // exactly one socket, with the new token.
-          setSessionEpoch(value => value + 1)
-        }, RECONNECT_MS)
+        scheduleSessionRetry()
       }
       next.onerror = () => { /* the close event always follows */ }
     }
