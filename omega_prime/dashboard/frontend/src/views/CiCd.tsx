@@ -8,13 +8,36 @@ import { correlateWiring, githubFreshness } from '../lib/selectors'
 export function CiCd({ snapshot, loading, error, receivedAt, refresh }: DashboardState & { snapshot: Snapshot }) {
   const cc = snapshot.sources?.github?.command_center
   const detailedRows = cc?.ci_cd ?? []
-  const branchRows: CiRow[] = (cc?.repositories ?? []).flatMap(repo => repo.latest_main_ci ? [{
-    id: `repo:${repo.id}:default-ci`, kind: 'branch', repo: repo.full_name,
-    branch: repo.latest_main_ci.branch ?? repo.default_branch ?? 'default branch',
-    head_sha: repo.latest_main_ci.head_sha ?? null, ci: repo.latest_main_ci.ci ?? null,
-    checks: repo.latest_main_ci.checks ?? [],
-  }] : [])
-  const rows = [...branchRows, ...detailedRows]
+  const backendBranches = new Set<string>()
+  const seenBranches = new Set<string>()
+  const seenPullRequests = new Set<string>()
+  const rows: CiRow[] = []
+  for (const row of detailedRows) {
+    if (row.kind === 'branch' && row.repo && row.branch) {
+      const identity = JSON.stringify([row.repo, row.branch])
+      backendBranches.add(identity)
+      if (seenBranches.has(identity)) continue
+      seenBranches.add(identity)
+    } else if (row.kind === 'pull_request' && row.repo) {
+      const pullRequest = row.number != null ? `number:${row.number}` : row.id ? `id:${row.id}` : null
+      if (pullRequest) {
+        const identity = JSON.stringify([row.repo, pullRequest])
+        if (seenPullRequests.has(identity)) continue
+        seenPullRequests.add(identity)
+      }
+    }
+    rows.push(row)
+  }
+  for (const repo of cc?.repositories ?? []) {
+    const latest = repo.latest_main_ci
+    if (!latest) continue
+    const branch = latest.branch ?? repo.default_branch ?? 'default branch'
+    if (backendBranches.has(JSON.stringify([repo.full_name, branch]))) continue
+    rows.push({
+      id: `repo:${repo.id}:default-ci`, kind: 'branch', repo: repo.full_name, branch,
+      head_sha: latest.head_sha ?? null, ci: latest.ci ?? null, checks: latest.checks ?? [],
+    })
+  }
   const localTasks = [...(snapshot.active ?? []), ...(snapshot.finished ?? [])]
   const meta = cc?.meta
   const freshness = githubFreshness(snapshot)
@@ -23,9 +46,14 @@ export function CiCd({ snapshot, loading, error, receivedAt, refresh }: Dashboar
   return <ViewState loading={loading} error={error} receivedAt={receivedAt} sourceUpdatedAt={freshness.updatedAt} stale={freshness.stale} retry={refresh} partial={partial} empty={!rows.length && !summary?.length} emptyLabel={cc ? 'No CI/CD records are available.' : 'GitHub command-center data is not configured or has not been collected.'}>
     <div className="view-stack">
       {summary?.length ? <section className="panel"><h2>Legacy merge gate · detailed records unavailable</h2><ul className="merge-list">{summary.map(pr => <li key={pr.id}><strong>{pr.repo} #{pr.number} · {pr.title}</strong><span>{pr.ci} · {pr.merge_rule}</span></li>)}</ul></section> : null}
-      {rows.map(row => <CiCard key={row.id} row={row} tasks={localTasks} />)}
+      {rows.map(row => <CiCard key={cardKey(row)} row={row} tasks={localTasks} />)}
     </div>
   </ViewState>
+}
+function cardKey(row: CiRow): string {
+  if (row.kind === 'branch' && row.repo && row.branch) return `branch:${JSON.stringify([row.repo, row.branch])}`
+  if (row.kind === 'pull_request') return `pull-request:${JSON.stringify([row.repo ?? '', row.number != null ? `number:${row.number}` : `id:${row.id}`])}`
+  return `${row.kind}:${row.id}`
 }
 
 function CiCard({ row, tasks }: { row: CiRow; tasks: Array<NonNullable<Snapshot['active']>[number] | NonNullable<Snapshot['finished']>[number]> }) {
