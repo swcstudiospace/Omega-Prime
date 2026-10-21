@@ -696,6 +696,7 @@ def normalize_tasks(
                         raw.get("finished_at"),
                         str(raw.get("result", "ok")),
                         raw.get("receipt"),
+                        herdr_pane=raw.get("herdr_pane") if isinstance(raw.get("herdr_pane"), dict) else None,
                     )
                 )
     fleet = sources.get("fleet")

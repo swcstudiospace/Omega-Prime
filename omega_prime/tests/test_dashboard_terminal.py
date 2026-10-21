@@ -5,18 +5,21 @@ from datetime import UTC, datetime
 import pytest
 
 from omega_prime.dashboard.collectors.tasks_json import make_tasks_json_collector
-from omega_prime.dashboard.model import SourceResult, normalize_tasks
+from omega_prime.dashboard.model import normalize_tasks
 from omega_prime.dashboard.status_file import read_tasks, write_tasks
 from omega_prime.dashboard.terminal import resolve_task_pane, sanitize_terminal_text
 
 
 def test_task_mapping_roundtrips_validation_collector_and_snapshot(tmp_path):
     path = tmp_path / "tasks.json"
-    write_tasks({"version": 1, "updated_at": "2026-10-21T00:00:00Z", "tasks": [{"id": "work", "title": "work", "owner": {"kind": "worker", "ref": "x"}, "state": "working", "herdr_pane": {"pane_id": "w2:p4", "workspace": "clean"}}], "waiting_on_ove": [], "finished": []}, path=path)
-    assert read_tasks(path).data["tasks"][0]["herdr_pane"]["pane_id"] == "w2:p4"
+    write_tasks({"version": 1, "updated_at": "2026-10-21T00:00:00Z", "tasks": [{"id": "work", "title": "work", "owner": {"kind": "worker", "ref": "x"}, "state": "working", "herdr_pane": {"pane_id": "w2:p4", "workspace": "clean"}}], "waiting_on_ove": [], "finished": [{"id": "done", "title": "done", "finished_at": "2026-10-21T00:00:00Z", "result": "ok", "herdr_pane": {"pane_id": "w3:p5"}}]}, path=path)
+    loaded = read_tasks(path).data
+    assert loaded["tasks"][0]["herdr_pane"]["pane_id"] == "w2:p4"
+    assert loaded["finished"][0]["herdr_pane"]["pane_id"] == "w3:p5"
     row = make_tasks_json_collector(tasks_path=path, now_fn=lambda: datetime.now(UTC))()
     snapshot = normalize_tasks({"tasks_json": row}, now=datetime.now(UTC)).to_dict()
     assert snapshot["active"][0]["herdr_pane"]["pane_id"] == "w2:p4"
+    assert snapshot["finished"][0]["herdr_pane"]["pane_id"] == "w3:p5"
 
 
 def test_invalid_pane_mapping_is_rejected(tmp_path):

@@ -151,6 +151,7 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"{prefix}.result is invalid")
                 item["result"] = result
                 item["receipt"] = _optional_string(row, "receipt", prefix)
+                item["herdr_pane"] = _pane(row.get("herdr_pane"), prefix)
             if "seq" in row:
                 seq = row["seq"]
                 if isinstance(seq, bool) or not isinstance(seq, int) or seq <= 0:
