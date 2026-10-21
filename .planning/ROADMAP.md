@@ -127,7 +127,7 @@ Source evidence: `/workspace/omes-bot-wiring-audit/AUDIT.md` (read-only audit of
 - [ ] Phase 102: Schedulers, dead modules, env docs
 - [ ] Phase 103: Ultrathink integration and cleanup
 
-### v21 Sandbox wiring (Phases 110-111) — in progress 2026-10-21
+### v21 Sandbox wiring (Phases 110-112) — in progress 2026-10-21
 
 Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's round-1 fixes into `feat/sbx-2-workspace-mount` is committed (3e7be33) but leaves follow-ups, all inside `omp-sandbox/`. Planning only in this stage; execution is one plan (110-01).
 
@@ -168,3 +168,21 @@ Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's roun
 5. No existing test weakened, skipped or deleted; tests use a temp tasks.json and fakes only (no gh, herdr, podman, network, or model calls).
 
 - [x] Phase 111: Immediate block surfacing in waiting_on_ove
+
+**Phase 112 goal:** Add the sbx-3 engine backend (task 00030 node n3; audit C4 + C7): a new `omega_prime/engine/sandbox_omp.py` — a small stdio client for the omp-sandbox Anda wrapper (`omp-sandbox-anda client`: newline JSON `{id, tool, args}` -> `{id, ok, result|error, code}` plus `{event: question|fallback|stage_done, stageId}` events; tools `up`, `run_gsd_stage`, `sandbox_status`, `answer_question`, `abort`, `run_check`, `export_commits`, `down`) — selected only by `OMEGA_PRIME_OMP_BACKEND=omp-sandbox` with bwrap kept as the unchanged default, mounting the job worktree only from the allowlisted workspace roots, mapping every result into the existing `EngineResult` contract (sandbox label `omp-sandbox`, model ids, exported commits), and passing stage plus requested plan through `delegate_via_engine`/`ultrathink_engine`. Execution is three file-disjoint plans: 112-01 (`omp-sandbox/` folded-ops test coverage), 112-02 (the backend under `omega_prime/engine/`), 112-03 (`omega_prime/tests/` with a fake Anda wrapper).
+
+**Requirements:**
+- **W112-01 folded-ops coverage (omp-sandbox/):** `npx tsc --noEmit` stays at 0 errors (verified green at 52ce785) and `npm test` gains coverage of the folded standalone ops against the fake omp/fake tier: `seed_repo` (git-bundle seed), `run_check` (CHECK_BINS allowlist + receipt fields), `export_commits` (bundle out plus the `no seeded repo` refusal), `py_deps` staging, and `runStage` stage/plan/model routing (`stageRoute` with a zai primary; message `/{gsdCommand} {MAGIC}\n\n{task}`).
+- **W112-02 backend selection + Anda client:** `omega_prime/engine/sandbox_omp.py` speaks the wrapper stdio protocol and is selected only when `OMEGA_PRIME_OMP_BACKEND=omp-sandbox`; bwrap remains the default and is byte-unchanged when not selected; the job worktree must resolve under the allowlisted workspace roots (`OMP_SANDBOX_WORKSPACE_ROOTS`) with an engine-side pre-check before anything starts, and the wrapper's `path_refused`/tier failures map to `sandbox_unavailable`.
+- **W112-03 stage + requested plan pass-through:** with the backend selected, `run` still routes through `plan_router.select`, so `stage=plan` with Z.ai requested/selected yields `zai/glm-5.3` and `stage=execute` yields `zai/glm-5.3-flash`; `delegate_via_engine` and `ultrathink_engine` accept a `plan` argument threaded through to `run`, and the chosen plan/model reach `run_gsd_stage`.
+- **W112-04 one result contract:** the backend maps `stage_done`/`sandbox_status`/`export_commits` into the existing `EngineResult` (ok, final text from the stage's `lastText`, `stage`, `sandbox: "omp-sandbox"`, plan/provider/model ids, exported commits recorded without changing the dataclass shape); `PlanNotAllowed` and wrapper/tier unavailability surface as today's `plan_not_allowed`/`sandbox_unavailable` reasons so `run()`'s phase-111 wiring raises the one `waiting_on_ove` block; `probe()` reports the backend's readiness honestly.
+- **W112-05 fake-Anda tests:** `omega_prime/tests/` gains a fake Anda wrapper script (no podman, no Rust build, no model calls) and tests for: plan->execute ordering on one job, abort mid-stage, tier unavailable, plan not allowed, results landing back in the job worktree (export applied), no secret in receipts/events, and bwrap behaviour unchanged when the env is unset.
+
+**Success criteria:**
+1. With `OMEGA_PRIME_OMP_BACKEND=omp-sandbox`, an engine `run` drives a plan stage then an execute stage through the (fake) Anda wrapper on the chosen models, and the returned `EngineResult` reports `sandbox="omp-sandbox"`, the stage, the model ids, and the exported commits (node n3 acceptance).
+2. With the env unset, every existing engine test passes unchanged and `run` still wraps omp in bwrap.
+3. `PlanNotAllowed` and tier/wrapper-unavailable runs return the existing reasons and raise exactly one `waiting_on_ove` item each when task context is present (phase-111 helper, unchanged).
+4. A worktree outside the allowlisted roots is refused before any sandbox starts.
+5. `cd omp-sandbox && npx tsc --noEmit` exits 0 and `npm test` is green including the new folded-ops tests; `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/<new file>` is green; no existing test weakened, skipped or deleted; fakes only (no podman, openshell, herdr, gh, network, or model calls).
+
+- [ ] Phase 112: omp-sandbox engine backend (sbx-3)
