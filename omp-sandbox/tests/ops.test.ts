@@ -162,3 +162,97 @@ test("export_commits returns a size-verified bundle for the seeded repo and refu
   await assert.rejects(bare.exportCommits({}), /no seeded repo/);
   assert.deepEqual(readdirSync(exportsDir), before, "the refusal created no export directory");
 });
+
+/** Receipts dir for run_check/export receipts, and the single receipt a runCheck call added since `before`. */
+const receiptsDir = join(CORE_STATE, "receipts");
+function receiptWrittenSince(before: string[]) {
+  const added = (existsSync(receiptsDir) ? readdirSync(receiptsDir) : []).filter((f) => !before.includes(f));
+  assert.equal(added.length, 1, `exactly one receipt per check run (saw ${added.length})`);
+  return join(receiptsDir, added[0]);
+}
+
+test("run_check gates argv and cwd, runs confined in the workdir, and receipts every run at 0600", async () => {
+  const { tier, hostWork } = mappedTier();
+  const core = new Core();
+  core.attachTierForTests(tier);
+
+  // (1) argv[0] outside CHECK_BINS is refused — with the allowlist named — and refused runs write no receipt.
+  const beforeRefusal = existsSync(receiptsDir) ? readdirSync(receiptsDir) : [];
+  await assert.rejects(
+    core.runCheck({ argv: ["curl", "http://example.invalid"] }),
+    /run_check: curl is not allowlisted \(npm, npx, node, python3, git\)/,
+  );
+  assert.deepEqual(existsSync(receiptsDir) ? readdirSync(receiptsDir) : [], beforeRefusal, "a refused argv writes no receipt");
+
+  // (2) a cwd escaping the workdir is refused before anything runs.
+  await assert.rejects(
+    core.runCheck({ argv: ["node", "-e", "process.stdout.write('hi')"], cwd: "../escape" }),
+    /run_check: cwd must stay inside the workdir/,
+  );
+
+  // (3) allowlisted run: confined to the tier workdir (the exec's real cwd is the mapped one), receipted at 0600.
+  const argv = ["node", "-e", "console.log('ops-ok'); console.log(process.cwd())"];
+  const beforeOk = existsSync(receiptsDir) ? readdirSync(receiptsDir) : [];
+  const ok = await core.runCheck({ argv, label: "node probe", cwd: "." });
+  assert.equal(ok.code, 0);
+  assert.equal(ok.cwd, "/sandbox/work/.");
+  assert.equal(ok.tier, tier.name);
+  assert.match(ok.stdoutTail, /ops-ok/);
+  assert.equal(ok.stdoutTail.trim().split("\n")[1], hostWork, "the exec really ran in the mapped workdir");
+  const receipt = receiptWrittenSince(beforeOk);
+  assert.equal(statSync(receipt).mode & 0o777, 0o600);
+  const body = JSON.parse(readFileSync(receipt, "utf8")) as Record<string, unknown>;
+  assert.equal(body.label, "node probe");
+  assert.deepEqual(body.argv, argv);
+  assert.equal(body.cwd, "/sandbox/work/.");
+  assert.equal(body.code, 0);
+  assert.equal(typeof body.ms, "number");
+  assert.match(body.stdoutTail as string, /ops-ok/);
+  assert.equal(typeof body.stderrTail, "string");
+  assert.equal(typeof body.startedAt, "string");
+  assert.equal(typeof body.endedAt, "string");
+  assert.equal(body.tier, tier.name);
+
+  // python3 variant with the default cwd: exactly the tier workdir, receipted with the default label.
+  const beforePy = existsSync(receiptsDir) ? readdirSync(receiptsDir) : [];
+  const py = await core.runCheck({ argv: ["python3", "-c", "print('py-ok')"] });
+  assert.equal(py.code, 0);
+  assert.equal(py.cwd, "/sandbox/work");
+  assert.match(py.stdoutTail, /py-ok/);
+  const pyBody = JSON.parse(readFileSync(receiptWrittenSince(beforePy), "utf8")) as Record<string, unknown>;
+  assert.equal(pyBody.label, "python3 -c print('py-ok')");
+  assert.equal(pyBody.cwd, "/sandbox/work");
+
+  // (4) non-zero exits are reported in the result (not thrown) and receipted with the exit code.
+  const beforeFail = existsSync(receiptsDir) ? readdirSync(receiptsDir) : [];
+  const fail = await core.runCheck({ argv: ["node", "-e", "process.exit(7)"] });
+  assert.equal(fail.code, 7);
+  const failBody = JSON.parse(readFileSync(receiptWrittenSince(beforeFail), "utf8")) as Record<string, unknown>;
+  assert.equal(failBody.code, 7);
+});
+
+test("py_deps stages importable stubs and wires PYTHONPATH through the sandbox env file", async () => {
+  const repo = makeSeedRepo("pydeps-src");
+  const fixture = mkdtempSync(join(tmpdir(), "omp-sbx-ops-pydeps-"));
+  writeFileSync(join(fixture, "pytest.py"), "__version__ = '8.0.0-fixture'\n");
+  mkdirSync(join(fixture, "starlette"), { recursive: true });
+  writeFileSync(join(fixture, "starlette", "__init__.py"), "starlette = 'fixture'\n");
+  mkdirSync(join(fixture, "httpx"), { recursive: true });
+  writeFileSync(join(fixture, "httpx", "__init__.py"), "httpx = 'fixture'\n");
+
+  const { tier, hostHome, map } = mappedTier();
+  const core = new Core();
+  // One attach runs both seeded parts, mirroring #up: the repo ships as a bundle, the stubs ship as a tarball.
+  const up = (await core.attachTierForTests(tier, { seed_repo: { path: repo, ref: "main" }, py_deps: fixture })) as UpResult;
+
+  assert.equal(up.seeded!.repo, repo, "the seed part still ran in the same attach");
+  assert.equal(up.pyDeps!.dir, "/sandbox/home/pydeps");
+  assert.match(up.pyDeps!.python_pytest, /^\S+ 8\.0\.0-fixture$/, "python version + stub pytest version");
+  assert.equal(existsSync(join(hostHome, "pydeps", "pytest.py")), true);
+  assert.equal(existsSync(join(hostHome, "pydeps", "starlette", "__init__.py")), true);
+  assert.equal(existsSync(join(hostHome, "pydeps", "httpx", "__init__.py")), true);
+  // The in-sandbox import check above only passed because the stubs are importable through the staged PYTHONPATH;
+  // the sandbox env file gains the export line for the (mapped) pydeps dir.
+  const envLines = readFileSync(join(hostHome, ".omp-sandbox.env"), "utf8").split("\n");
+  assert.equal(envLines.includes(`export PYTHONPATH=${map("/sandbox/home/pydeps")}`), true, "PYTHONPATH export lands in .omp-sandbox.env");
+});
