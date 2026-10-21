@@ -1604,25 +1604,31 @@ def apply_scheduled_bump(
     pin_note_specs = config.get("pin_note")
     pin_selectors = config.get("pin")
     stored_report_to = config.get("report_to")
-    return bump(
-        config.get("to", ""),
-        root=Path(root),
-        run=run,
-        old_audit=config.get("old_audit"),
-        semver_check=bool(config.get("semver_check")),
-        bump_commit=bool(config.get("bump_commit")),
-        auto_detect_upstream_fix=bool(config.get("auto_detect_upstream_fix")),
-        open_pr=True,
-        json_mode=False,
-        dry_run=False,
-        audit_only=False,
-        interactive=False,
-        pin=list(pin_selectors) if isinstance(pin_selectors, list) else None,
-        pin_note=(list(pin_note_specs) if isinstance(pin_note_specs, list) else None),
-        # Fail-closed replay: a stored path that is not a string is passed
-        # through as-is so bump() rejects it instead of dropping the flag.
-        report_to=stored_report_to,
-    )
+    # Scheduled ticks run inside the MCP server, where stdout is reserved
+    # for protocol output. Keep CLI progress out of that channel; stderr
+    # diagnostics remain visible to the scheduler/operator.
+    with contextlib.redirect_stdout(io.StringIO()):
+        return bump(
+            config.get("to", ""),
+            root=Path(root),
+            run=run,
+            old_audit=config.get("old_audit"),
+            semver_check=bool(config.get("semver_check")),
+            bump_commit=bool(config.get("bump_commit")),
+            auto_detect_upstream_fix=bool(config.get("auto_detect_upstream_fix")),
+            open_pr=True,
+            json_mode=False,
+            dry_run=False,
+            audit_only=False,
+            interactive=False,
+            pin=list(pin_selectors) if isinstance(pin_selectors, list) else None,
+            pin_note=(
+                list(pin_note_specs) if isinstance(pin_note_specs, list) else None
+            ),
+            # Fail-closed replay: a stored path that is not a string is passed
+            # through as-is so bump() rejects it instead of dropping the flag.
+            report_to=stored_report_to,
+        )
 
 
 _ROLLBACK_REPORT_OLD_RE = re.compile(r"^Old:\s*`([^`]*)`", re.MULTILINE)

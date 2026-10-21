@@ -1625,3 +1625,69 @@ def test_overdue_executor_delivery_catches_up_once(tmp_path):
         assert row["history"] == [{"ran_at": 1061, "result": "caught up"}]
         rt._fire_job(job_id)
         assert calls == ["overdue prompt"]
+
+
+# ------------------------------------------ shared jobs.json transactions ---
+
+
+def test_clear_keeps_a_job_another_writer_saved_after_the_load(tmp_path, monkeypatch):
+    """``clear`` must not write back its older copy of the shared job file."""
+    from omega_prime.cron import heartbeat_runtime
+
+    with _live(tmp_path) as (rt, _clock):
+        job_id = rt.schedule("s", "ping", interval_seconds=60, due_at=5000.0)
+        original = heartbeat_runtime.clear_heartbeat
+        added: list[str] = []
+
+        def clear_after_another_write(store, target):
+            # Another process (the prompt tick) saves after clear loaded.
+            added.append(JobStore(rt.path).schedule("prompt", 9000.0))
+            return original(store, target)
+
+        monkeypatch.setattr(
+            heartbeat_runtime, "clear_heartbeat", clear_after_another_write
+        )
+        assert rt.clear(job_id) == {"cleared": job_id}
+        ids = [job["id"] for job in _fresh(rt)]
+        assert ids == added
+
+
+def test_finish_waits_for_the_store_lock_and_keeps_other_writes(tmp_path, monkeypatch):
+    """A beat's settle reloads under the store lock, so a concurrent write stays."""
+    from omega_prime.cron import heartbeat_runtime
+
+    with _live(tmp_path) as (rt, _clock):
+        armed = threading.Event()
+        writer_done = threading.Event()
+        added: list[str] = []
+
+        def other_writer() -> None:
+            added.append(JobStore(rt.path).schedule("prompt", 9000.0))
+            writer_done.set()
+
+        writer = threading.Thread(target=other_writer)
+        original_find = heartbeat_runtime._find
+
+        def find_then_race(jobs, target):
+            found = original_find(jobs, target)
+            if armed.is_set():
+                armed.clear()
+                # The settle has read the row; another writer saves now. It
+                # must wait for the settle's lock rather than be overwritten.
+                writer.start()
+                writer_done.wait(timeout=0.5)
+            return found
+
+        def runner(prompt: str) -> str:
+            armed.set()
+            return "beat"
+
+        rt.bind("s", runner)
+        job_id = rt.schedule("s", "ping", interval_seconds=60, due_at=1000.0)
+        monkeypatch.setattr(heartbeat_runtime, "_find", find_then_race)
+        rt._fire_job(job_id)
+        writer.join(timeout=10)
+        assert not writer.is_alive()
+        rows = {job["id"]: job for job in _fresh(rt)}
+        assert rows[job_id]["last_result"] == "beat"
+        assert added and added[0] in rows

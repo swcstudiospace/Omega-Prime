@@ -10,10 +10,6 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     ignore:
-      # tweepy 4.17 requires oauthlib<4 (see SECURITY.md). A 4.x bump makes
-      # requirements-lock.txt uninstallable. Drop this when tweepy accepts oauthlib>=4.
-      - dependency-name: oauthlib
-        update-types: ["version-update:semver-major"]
       # tokenizers 0.23 requires huggingface-hub<2. A 2.x bump makes
       # requirements-lock.txt uninstallable. Drop this when tokenizers accepts it.
       - dependency-name: huggingface-hub
