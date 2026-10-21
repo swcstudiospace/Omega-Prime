@@ -41,7 +41,7 @@ describe('Task detail routes', () => {
   it('does not show not-found until the initial snapshot has loaded', () => {
     state.data = null; state.loading = true; window.location.hash = '#/tasks/missing'
     render(<App />)
-    expect(screen.getByText('Loading task details…')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Loading task details…', level: 1 })).toBeInTheDocument()
     expect(screen.queryByText('Task not found')).not.toBeInTheDocument()
   })
 })
