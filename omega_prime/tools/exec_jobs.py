@@ -41,6 +41,7 @@ class JobControl:
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             cwd=self.cwd,
             shell=False,
             start_new_session=os.name == "posix",

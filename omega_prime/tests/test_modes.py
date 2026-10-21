@@ -382,6 +382,31 @@ def test_exec_job_kill_escalates_when_terminate_does_not_finish(tmp_path: Path):
         jobs.shutdown()
 
 
+def test_exec_job_does_not_inherit_host_stdin(tmp_path: Path):
+    """A job that reads stdin sees EOF instead of eating the host's input."""
+    jobs = JobControl(tmp_path)
+    reader = "import sys; data = sys.stdin.read(); print(len(data))"
+    read_fd, write_fd = os.pipe()
+    saved = os.dup(0)
+    try:
+        os.dup2(read_fd, 0)
+        os.write(write_fd, b"host request\n")
+        job_id = jobs.start([sys.executable, "-c", reader])
+        result = jobs.wait(job_id, 30)
+        assert result["running"] is False
+        assert result["stdout"].strip() == "0"
+        os.close(write_fd)
+        write_fd = -1
+        assert os.read(0, 64) == b"host request\n"
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+        os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
+        jobs.shutdown()
+
+
 def _process_still_running(pid: int) -> bool:
     """True while ``pid`` is running; an exited, unreaped zombie counts as dead.
 
