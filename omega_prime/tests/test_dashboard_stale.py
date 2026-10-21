@@ -4,6 +4,7 @@
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.poller import DashboardPoller
@@ -332,3 +333,35 @@ def test_poller_collects_stale_evidence_off_the_event_loop():
     assert snapshot is not None
     stale = {task["id"]: task.get("stale") for task in snapshot["active"]}
     assert stale["gb:mapped"] == {"reason": "pane_gone", "since": NOW.isoformat()}
+
+
+def test_build_applies_stale_evidence_only_to_the_rows_it_was_gathered_for():
+    """A tasks_json replaced mid-probe must not inherit the old verdict."""
+    poller = DashboardPoller([], clock=lambda: NOW)
+    old = _row(id="gb:one", title="old", pid=4242, last_activity_at=_ago(30))
+    new = _row(id="gb:one", title="recovered", pid=4343, last_activity_at=_ago(0))
+
+    class _RacingChecker(StaleChecker):
+        def stale_map(
+            self, rows: list[Any], *, now: datetime | None = None
+        ) -> dict[str, dict[str, str | None] | None]:
+            assert [row["title"] for row in rows] == ["old"]
+            poller._results["tasks_json"] = SourceResult(
+                "tasks_json",
+                "ok",
+                extra={"tasks": [new], "waiting_on_ove": [], "finished": []},
+            )
+            return {"gb:one": {"reason": "pid_dead", "since": _ago(30)}}
+
+    poller.stale_checker = _RacingChecker(clock=lambda: NOW)
+    poller._results["tasks_json"] = SourceResult(
+        "tasks_json", "ok", extra={"tasks": [old], "waiting_on_ove": [], "finished": []}
+    )
+    asyncio.run(poller._maybe_build())
+    snapshot = poller.snapshot()
+    assert snapshot is not None
+    rows = [task for task in snapshot["active"] if task.get("id") == "gb:one"]
+    assert rows and all(task.get("title") == "old" for task in rows)
+    assert not any(
+        task.get("title") == "recovered" and task.get("stale") for task in rows
+    )

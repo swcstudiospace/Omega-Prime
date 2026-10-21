@@ -128,19 +128,28 @@ class DashboardPoller:
             try:
                 self._status.pop("normalization", None)
                 now = self.clock()
-                rows = self._stale_rows()
+                # Freeze the results the stale evidence is gathered for: a
+                # collector may replace tasks_json while the probe runs, and
+                # applying old evidence to a newer row would show a false
+                # stale badge. The newer result triggers its own build.
+                results = dict(self._results)
+                rows = self._stale_rows(results)
                 stale_values = await asyncio.to_thread(
                     self.stale_checker.stale_map, rows, now=now
                 )
-                self._build_snapshot(now=now, stale_values=stale_values)
+                self._build_snapshot(
+                    now=now, stale_values=stale_values, results=results
+                )
             except Exception as exc:
                 self._status["normalization"] = {
                     "status": "error",
                     "error": f"normalize failed: {type(exc).__name__}",
                 }
 
-    def _stale_rows(self) -> list[dict[str, Any]]:
-        result = self._results.get("tasks_json")
+    def _stale_rows(
+        self, results: dict[str, SourceResult] | None = None
+    ) -> list[dict[str, Any]]:
+        result = (self._results if results is None else results).get("tasks_json")
         if result is None:
             return []
         return [row for row in result.extra.get("tasks", []) if isinstance(row, dict)]
@@ -200,6 +209,7 @@ class DashboardPoller:
         *,
         now: datetime | None = None,
         stale_values: dict[str, dict[str, str | None] | None] | None = None,
+        results: dict[str, SourceResult] | None = None,
     ) -> None:
         """Build and cache the snapshot.
 
@@ -209,6 +219,8 @@ class DashboardPoller:
         """
         if now is None:
             now = self.clock()
+        if results is None:
+            results = self._results
         normalized_results = {
             name: SourceResult(
                 result.source,
@@ -218,9 +230,9 @@ class DashboardPoller:
                 dict(result.extra),
                 result.detail,
             )
-            for name, result in self._results.items()
+            for name, result in results.items()
         }
-        for result in self._results.values():
+        for result in results.values():
             for item in result.items:
                 kind = item.get("kind")
                 if isinstance(kind, str):

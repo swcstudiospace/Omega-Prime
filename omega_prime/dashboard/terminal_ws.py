@@ -95,29 +95,59 @@ def _split_frame(value: str) -> tuple[str, list[tuple[int, str]]]:
     return "".join(visible), escapes
 
 
+# Upper bound on len(old) * len(new) for a character-level diff of one changed
+# region. Larger regions are replaced as a single span (still exact visible
+# text; only styling inside that span moves ahead of it), so redaction cost
+# stays linear in the frame size instead of quadratic.
+_DIFF_MAX_CELLS = 200_000
+
+
+def _diff_region(
+    offset: int, old_text: str, new_text: str
+) -> list[tuple[int, int, str]]:
+    """Edits for one changed region, trimmed to its differing middle."""
+    limit = min(len(old_text), len(new_text))
+    prefix = 0
+    while prefix < limit and old_text[prefix] == new_text[prefix]:
+        prefix += 1
+    suffix = 0
+    while (
+        suffix < limit - prefix
+        and old_text[len(old_text) - 1 - suffix] == new_text[len(new_text) - 1 - suffix]
+    ):
+        suffix += 1
+    old_mid = old_text[prefix : len(old_text) - suffix]
+    new_mid = new_text[prefix : len(new_text) - suffix]
+    start = offset + prefix
+    if not old_mid and not new_mid:
+        return []
+    if len(old_mid) * len(new_mid) > _DIFF_MAX_CELLS:
+        return [(start, start + len(old_mid), new_mid)]
+    matcher = difflib.SequenceMatcher(None, old_mid, new_mid, autojunk=False)
+    return [
+        (start + i1, start + i2, new_mid[j1:j2])
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag != "equal"
+    ]
+
+
 def _map_redaction(visible: str, redacted: str) -> list[tuple[int, int, str]]:
     """Edits turning ``visible`` into ``redacted`` as (start, end, text).
 
     Lines are aligned one-to-one when the line count is unchanged (the usual
-    case, so the diff stays small); otherwise the whole text is diffed.
+    case, so the diff stays small); otherwise the differing middle of the
+    whole text is diffed, bounded by ``_DIFF_MAX_CELLS``.
     """
     edits: list[tuple[int, int, str]] = []
     old_lines = visible.split("\n")
     new_lines = redacted.split("\n")
     if len(old_lines) != len(new_lines):
-        pairs = [(0, visible, redacted)]
-    else:
-        pairs = []
-        offset = 0
-        for old_line, new_line in zip(old_lines, new_lines, strict=True):
-            if old_line != new_line:
-                pairs.append((offset, old_line, new_line))
-            offset += len(old_line) + 1
-    for offset, old_text, new_text in pairs:
-        matcher = difflib.SequenceMatcher(None, old_text, new_text, autojunk=False)
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            if tag != "equal":
-                edits.append((offset + i1, offset + i2, new_text[j1:j2]))
+        return _diff_region(0, visible, redacted)
+    offset = 0
+    for old_line, new_line in zip(old_lines, new_lines, strict=True):
+        if old_line != new_line:
+            edits.extend(_diff_region(offset, old_line, new_line))
+        offset += len(old_line) + 1
     return edits
 
 
@@ -212,7 +242,9 @@ class HerdrBridge:
             or len(raw.encode("utf-8")) > TERMINAL_MAX_CAPTURE_BYTES
         ):
             raise OSError("terminal capture unavailable")
-        return redact_ansi_frame(raw)
+        # Redaction is CPU work on up to a full capture; keep it off the
+        # event loop that serves HTTP, terminal input and live events.
+        return await asyncio.to_thread(redact_ansi_frame, raw)
 
     async def send_text(self, pane: str, text: str) -> None:
         await self.runner(["herdr", "pane", "send-text", pane, text])

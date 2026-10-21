@@ -963,3 +963,58 @@ def test_ipv6_loopback_ws_end_to_end():
     ) as ws:
         _auth(ws)
         assert ws.receive_json()["type"] == "frame"
+
+
+def _apply_edits(visible, edits):
+    out, cursor = [], 0
+    for start, end, text in edits:
+        out.append(visible[cursor:start])
+        out.append(text)
+        cursor = end
+    out.append(visible[cursor:])
+    return "".join(out)
+
+
+def test_map_redaction_stays_fast_when_redaction_removes_a_newline():
+    import time
+
+    from omega_prime.dashboard.terminal_ws import _map_redaction
+
+    visible = "line of repeated terminal output\n" * 150
+    redacted = visible.replace("output\nline", "[REDACTED]", 1)
+    started = time.perf_counter()
+    edits = _map_redaction(visible, redacted)
+    assert time.perf_counter() - started < 0.25
+    assert _apply_edits(visible, edits) == redacted
+
+    huge = "x" * 3000 + "\n" + "y" * 3000
+    changed = "z" * 2999 + "y" * 3000
+    started = time.perf_counter()
+    edits = _map_redaction(huge, changed)
+    assert time.perf_counter() - started < 0.25
+    assert _apply_edits(huge, edits) == changed
+
+
+def test_read_frame_redacts_off_the_event_loop():
+    seen = []
+
+    async def runner(argv):
+        return f"\x1b[1mBearer {BEARER_CANARY}\x1b[0m"
+
+    import omega_prime.dashboard.terminal_ws as terminal_ws
+
+    original = terminal_ws.redact_ansi_frame
+
+    def spy(value):
+        import threading
+
+        seen.append(threading.current_thread() is threading.main_thread())
+        return original(value)
+
+    terminal_ws.redact_ansi_frame = spy
+    try:
+        out = asyncio.run(HerdrBridge(runner=runner).read_frame("w1:p1"))
+    finally:
+        terminal_ws.redact_ansi_frame = original
+    assert seen == [False]
+    assert BEARER_CANARY not in out
