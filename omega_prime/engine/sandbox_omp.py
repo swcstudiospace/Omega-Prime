@@ -45,13 +45,15 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from omega_prime.engine.jobs import append_event, child_env, write_json
+from omega_prime.dashboard import herdr_launch, run_rows
+from omega_prime.engine.jobs import append_event, child_env, state_dir, write_json
 from omega_prime.engine.omp_driver import EngineError, EngineResult, _system
 from omega_prime.engine.plan_router import read_usage, select
 from omega_prime.engine.sandbox import SandboxUnavailable
@@ -497,6 +499,13 @@ def run_backend(
     round-trip); with either absent the run is unchanged. See the module
     docstring for the stats keys and session.json/events parity.
     """
+    tracked = tasks_path is not None and task_id is not None
+    # The receipt in the finally must be buildable on every path, and only a
+    # row that run_rows.start actually created (after the up reply) is ever
+    # touched or finished — never the existing `started`, which is set only
+    # after run_gsd_stage returns and would strand a started row.
+    stage_id: str | None = None
+    row_started = False
     work = allowed_worktree(
         Path(cwd).resolve() if cwd is not None else Path.cwd(), env
     )
@@ -550,7 +559,41 @@ def run_backend(
             {"seed_repo": {"path": str(work), "ref": seed_ref}},
             commands,
             events_path,
+            tasks_path=tasks_path,
+            task_id=task_id,
+            row_started=row_started,
         )
+        if tracked:
+            # Visibility wiring (W113-01/W113-02), only once the stage is
+            # actually launching: a run that fails at or before the up reply
+            # starts no row — pre-stage visibility stays run()'s raise_block.
+            # Every write is best-effort (omp_driver.py:385 discipline): a
+            # missing herdr or an unwritable/corrupt store can never fail a
+            # healthy stage.
+            pane: str | None = None
+            with contextlib.suppress(Exception):
+                pane = herdr_launch.open_pane(
+                    env,
+                    cwd=work,
+                    label=f"{task_id} {stage}",
+                    command=[
+                        sys.executable,
+                        "-m",
+                        "omega_prime.engine.watch",
+                        job_id,
+                        "--follow",
+                        "--state-dir",
+                        str(state_dir(env)),
+                    ],
+                    session=f"omega-{job_id}",
+                )
+            with contextlib.suppress(Exception):
+                run_rows.start(
+                    tasks_path, task_id, job_id=job_id, stage=stage, pane=pane
+                )
+                # After start, inside the same suppress: a failed start leaves
+                # the row un-started and the run un-finished.
+                row_started = True
         stage_result = _tool(
             client,
             "run_gsd_stage",
@@ -564,19 +607,46 @@ def run_backend(
             },
             commands,
             events_path,
+            tasks_path=tasks_path,
+            task_id=task_id,
+            row_started=row_started,
         )
         started = True
         stage_id = str(stage_result.get("stageId") or "")
         if not stage_id:
             raise SandboxUnavailable("run_gsd_stage returned no stageId")
-        done_event = _wait_stage_done(client, stage_id, interrupt, events_path)
+        done_event = _wait_stage_done(
+            client,
+            stage_id,
+            interrupt,
+            events_path,
+            tasks_path=tasks_path,
+            task_id=task_id,
+            row_started=row_started,
+        )
         done_status = str(done_event.get("status") or "")
         status_record = _tool(
-            client, "sandbox_status", {"stage_id": stage_id}, commands, events_path
+            client,
+            "sandbox_status",
+            {"stage_id": stage_id},
+            commands,
+            events_path,
+            tasks_path=tasks_path,
+            task_id=task_id,
+            row_started=row_started,
         )
         export: dict[str, Any] | None = None
         if done_status == "completed":
-            export = _tool(client, "export_commits", {}, commands, events_path)
+            export = _tool(
+                client,
+                "export_commits",
+                {},
+                commands,
+                events_path,
+                tasks_path=tasks_path,
+                task_id=task_id,
+                row_started=row_started,
+            )
         tier = up_result.get("tier")
         outcome = {
             "ok": done_status == "completed",
@@ -589,6 +659,31 @@ def run_backend(
             "export": export,
         }
     finally:
+        # Terminal row before the shutdown: it lands even if `down` is slow.
+        # Gated on row_started, not tracked — a run that never started its
+        # row (tier error at the up reply, pre-spawn plan-gate refusal)
+        # writes nothing; that visibility is run()'s raise_block.
+        run_ok = bool(outcome["ok"]) if outcome is not None else False
+        if row_started:
+            with contextlib.suppress(Exception):
+                run_rows.finish(
+                    tasks_path,
+                    task_id,
+                    ok=run_ok,
+                    receipt={
+                        "job_id": job_id,
+                        "stage_id": stage_id,
+                        "ok": run_ok,
+                        "status": (
+                            str(outcome["status"])
+                            if outcome is not None
+                            else "failed"
+                        ),
+                        "export": (
+                            outcome.get("export") if outcome is not None else None
+                        ),
+                    },
+                )
         down_summary = client.down()
         commands.append("down")
         _append_down_event(events_path, outcome, down_summary)
@@ -645,18 +740,42 @@ def run_backend(
     return result
 
 
+def _touch_row(
+    tasks_path: str | Path | None,
+    task_id: str | None,
+    row_started: bool,
+    event: dict[str, Any],
+) -> None:
+    """Best-effort ``run_rows.touch`` for one wrapper event.
+
+    Only a row that ``run_rows.start`` actually created is touched; a
+    missing/unwritable/corrupt store is suppressed — visibility never
+    kills a run.
+    """
+    if not row_started or tasks_path is None or task_id is None:
+        return
+    with contextlib.suppress(Exception):
+        run_rows.touch(tasks_path, task_id, event)
+
+
 def _tool(
     client: AndaClient,
     tool: str,
     args: dict[str, Any],
     commands: list[str],
     events_path: Path,
+    *,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
+    row_started: bool = False,
 ) -> dict[str, Any]:
     """One wrapper tool call; events land in events.jsonl via append_event,
-    the tool name in commands."""
+    the tool name in commands. Each drained event also touches the run's
+    tasks.json row when one was started (best-effort, never fatal)."""
     reply = client.call(tool, args)
     for event in client.drain_events():
         append_event(events_path, event)
+        _touch_row(tasks_path, task_id, row_started, event)
     commands.append(tool)
     return reply
 
@@ -666,21 +785,29 @@ def _wait_stage_done(
     stage_id: str,
     interrupt: Any | None,
     events_path: Path,
+    *,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
+    row_started: bool = False,
 ) -> dict[str, Any]:
     """Consume events until the stage's ``stage_done`` arrives.
 
     No deadline: the wrapper's event stream is the liveness signal, and
     EOF or a dead wrapper raises SandboxUnavailable instead of hanging.
-    Every event is appended through the redacting ``append_event``. A set
-    interrupt sends the ``abort`` tool once and keeps consuming until the
-    terminal event, then raises ``cancelled`` with ``started=True`` so
-    ``run()`` maps it exactly like the bwrap path.
+    Every event is appended through the redacting ``append_event`` and
+    touches the run's tasks.json row when one was started (best-effort).
+    A set interrupt sends the ``abort`` tool once and keeps consuming
+    until the terminal event, then raises ``cancelled`` with
+    ``started=True`` so ``run()`` maps it exactly like the bwrap path.
     """
     aborted = False
     while True:
         event = client.next_event(_POLL_TICK)
         for buffered in client.drain_events():
             append_event(events_path, buffered)
+            _touch_row(tasks_path, task_id, row_started, buffered)
+        if event is not None:
+            _touch_row(tasks_path, task_id, row_started, event)
         if (
             event is not None
             and event.get("event") == "stage_done"
@@ -700,6 +827,7 @@ def _wait_stage_done(
             client.call("abort", {"stage_id": stage_id})
             for buffered in client.drain_events():
                 append_event(events_path, buffered)
+                _touch_row(tasks_path, task_id, row_started, buffered)
             aborted = True
 
 
