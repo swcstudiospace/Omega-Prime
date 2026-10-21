@@ -181,7 +181,11 @@ def writable_skills_root(
 
     mapping: Mapping[str, str] = os.environ if env is None else env
     state = state_dir(mapping)
-    agent = agent_dir if agent_dir is not None else agent_state_dir(mapping)
+    # Same default as the MCP host: with only HOME configured the agent
+    # folder is ``~/.omega-prime/agent``, so a separately launched nightly
+    # pass writes the skills the host reads.
+    home = str(mapping.get("HOME", "") or "").strip() or None
+    agent = agent_dir if agent_dir is not None else agent_state_dir(mapping, home=home)
     if agent is not None:
         legacy = (Path(state) / "skills",) if state is not None else ()
         return agent_path(agent, "skills", legacy)

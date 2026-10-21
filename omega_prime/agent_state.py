@@ -27,7 +27,7 @@ import errno
 import json
 import os
 import shutil
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
@@ -142,22 +142,39 @@ def agent_path(
 def agent_memory_dir(agent_dir: Path, legacy: Mapping[str, Sequence[Path]]) -> Path:
     """``agent_dir/memory``, or a writable legacy memory folder not yet moved."""
     target = agent_dir / "memory"
-    if any((target / name).exists() for name in MEMORY_FILES):
-        return target
     candidates: list[Path] = []
     for old in legacy.get("memory", ()):
         candidates.append(Path(old))
     for name in MEMORY_FILES:
         for old in legacy.get(f"memory/{name}", ()):
             candidates.append(Path(old).parent)
-    for folder in candidates:
-        if folder == target or folder.is_symlink():
-            continue
-        if any((folder / name).is_file() for name in MEMORY_FILES) and os.access(
-            folder, os.W_OK | os.X_OK
-        ):
-            return folder
-    return target
+    usable = [
+        folder
+        for folder in candidates
+        if folder != target
+        and not folder.is_symlink()
+        and any((folder / name).is_file() for name in MEMORY_FILES)
+        and os.access(folder, os.W_OK | os.X_OK)
+    ]
+    here = {name for name in MEMORY_FILES if (target / name).exists()}
+    # The agent folder wins only when it holds every memory file an old
+    # folder still has. After a partial move (one file kept back) the old
+    # folder that still holds the missing file is read instead, so neither
+    # the memory nor the profile drops out of view.
+    missing = {
+        name
+        for name in MEMORY_FILES
+        if name not in here and any((f / name).is_file() for f in usable)
+    }
+    if here and not missing:
+        return target
+    best: Path | None = None
+    best_count = len(here)
+    for folder in usable:
+        count = sum((folder / name).is_file() for name in MEMORY_FILES)
+        if count > best_count:
+            best, best_count = folder, count
+    return best if best is not None else target
 
 
 def legacy_sources(
@@ -277,7 +294,53 @@ def _scratch(dst: Path) -> Path:
     return dst.parent / f".{dst.name}.migrating-{os.getpid()}"
 
 
+class SourceChangedError(OSError):
+    """The source file was replaced by a writer while it was being moved."""
+
+
+def _identity(path: Path) -> tuple[int, int, int, int]:
+    st = os.lstat(path)
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+@contextlib.contextmanager
+def _writer_lock(src: Path) -> Iterator[None]:
+    """Hold the store's own ``<name>.lock`` flock while ``src`` moves.
+
+    ``IntakeStore`` (and the other JSON stores) take an exclusive ``flock``
+    on that stable sidecar for every save, so a pass that is still writing
+    the old file waits until the move is complete instead of replacing the
+    source between the publish and the unlink. A store without a lock file
+    is moved unlocked; the identity check in :func:`_publish_file` still
+    refuses to delete a source that changed.
+    """
+    lock = src.with_name(src.name + ".lock")
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX
+        yield
+        return
+    try:
+        fd = os.open(lock, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def _publish_file(src: Path, dst: Path) -> bool:
+    """Move ``src`` to a missing ``dst`` under the store's writer lock."""
+    with _writer_lock(src):
+        return _publish_file_locked(src, dst)
+
+
+def _publish_file_locked(src: Path, dst: Path) -> bool:
     """Move one file to ``dst`` only if ``dst`` does not exist. Atomic.
 
     ``os.link`` fails with EEXIST instead of replacing, so a record another
@@ -285,8 +348,15 @@ def _publish_file(src: Path, dst: Path) -> bool:
     link (another filesystem), the file is copied to a scratch name beside
     ``dst``, flushed, and published with the same no-replace link; a failed
     copy is removed and the source stays. False when ``dst`` already exists.
+
+    The source is unlinked only while it is still the file that was
+    published. A writer that replaced it meanwhile (atomic save) keeps its
+    newer file: the published copy is withdrawn and
+    :class:`SourceChangedError` is raised, so the source stays the one
+    readable copy and the next start retries.
     """
     dst.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    before = _identity(src)
     try:
         os.link(src, dst, follow_symlinks=False)
     except FileExistsError:
@@ -310,6 +380,19 @@ def _publish_file(src: Path, dst: Path) -> bool:
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(scratch)
+    try:
+        changed = _identity(src) != before
+    except FileNotFoundError:
+        changed = True
+    if changed:
+        published = os.lstat(dst)
+        if published.st_size == before[2] and (
+            (published.st_dev, published.st_ino) == before[:2]
+            or published.st_mtime_ns == before[3]
+        ):
+            with contextlib.suppress(OSError):
+                os.unlink(dst)
+        raise SourceChangedError(errno.EAGAIN, "source changed during move")
     os.unlink(src)
     return True
 
@@ -581,6 +664,10 @@ def migrate_agent_state(
                     _move_one(src, memory_target, report)
                 continue
             if name.endswith((".db", ".sqlite")):
+                if not os.path.lexists(src):
+                    # Sidecars without their database are left alone: a
+                    # stray journal must never land beside another database.
+                    continue
                 _move_group(*_sqlite_group(src, target), report)
                 continue
             _move_one(src, target, report)

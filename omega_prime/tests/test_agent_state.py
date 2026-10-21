@@ -577,3 +577,118 @@ def test_secret_files_in_hidden_folders_are_passed_by_env(tmp_path):
     plain = sandboxed_child_env(env, [])
     assert plain["SUBSTRATE_TOKEN_FILE"] == str(token)
     assert "SUBSTRATE_TOKEN" not in plain
+
+
+def test_a_source_replaced_during_the_move_keeps_the_newer_file(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "intake.json").write_text('{"old": true}', encoding="utf-8")
+    agent = state / "agent"
+    real_link = os.link
+
+    def writer_saves_after_link(src, dst, *args, **kwargs):
+        # A desk pass replaces the source (atomic save) right after the publish.
+        result = real_link(src, dst, *args, **kwargs)
+        if Path(dst) == agent / "intake.json":
+            fresh = state / "intake.json.tmp"
+            fresh.write_text('{"new": true}', encoding="utf-8")
+            os.replace(fresh, state / "intake.json")
+        return result
+
+    monkeypatch.setattr(os, "link", writer_saves_after_link)
+    report = migrate_agent_state(agent, state_root=state)
+    # The newer save survives in place and the stale copy is withdrawn.
+    assert (state / "intake.json").read_text(encoding="utf-8") == '{"new": true}'
+    assert not (agent / "intake.json").exists()
+    assert report.errors and not report.moved
+    assert agent_path(agent, "intake.json", [state / "intake.json"]) == (
+        state / "intake.json"
+    )
+
+
+def test_the_move_waits_for_the_intake_writer_lock(tmp_path):
+    import fcntl
+    import threading
+    import time
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "intake.json").write_text('{"old": true}', encoding="utf-8")
+    lock = state / "intake.json.lock"
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    agent = state / "agent"
+    done = threading.Event()
+
+    def run() -> None:
+        migrate_agent_state(agent, state_root=state)
+        done.set()
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        time.sleep(0.3)
+        # The writer still holds the lock: nothing has moved yet.
+        assert not done.is_set()
+        assert not (agent / "intake.json").exists()
+        fresh = state / "intake.json.tmp"
+        fresh.write_text('{"new": true}', encoding="utf-8")
+        os.replace(fresh, state / "intake.json")
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    worker.join(5)
+    assert done.is_set()
+    assert (agent / "intake.json").read_text(encoding="utf-8") == '{"new": true}'
+    assert not (state / "intake.json").exists()
+
+
+def test_orphan_sidecars_never_move_without_their_database(tmp_path):
+    state = tmp_path / "state"
+    child = state / "mcp-state"
+    child.mkdir(parents=True)
+    (state / "sessions.db-journal").write_bytes(b"stray")
+    db = sqlite3.connect(child / "sessions.db")
+    db.execute("create table t (v text)")
+    db.execute("insert into t values ('child')")
+    db.commit()
+    db.close()
+    agent = state / "agent"
+    migrate_agent_state(agent, state_root=state)
+    assert (state / "sessions.db-journal").read_bytes() == b"stray"
+    assert (agent / "sessions.db").is_file()
+    assert not (agent / "sessions.db-journal").exists()
+    db = sqlite3.connect(agent / "sessions.db")
+    assert db.execute("select v from t").fetchall() == [("child",)]
+    db.close()
+
+
+def test_memory_folder_with_half_a_set_defers_to_the_folder_with_both(tmp_path):
+    agent = tmp_path / "agent"
+    (agent / "memory").mkdir(parents=True)
+    (agent / "memory" / "MEMORY.md").write_text("moved fact\n", encoding="utf-8")
+    old = tmp_path / "old" / "memory"
+    old.mkdir(parents=True)
+    (old / "MEMORY.md").write_text("fact\n", encoding="utf-8")
+    (old / "USER.md").write_text("user\n", encoding="utf-8")
+    assert agent_memory_dir(agent, {"memory": [old]}) == old
+    # Once the agent folder holds every file the old one has, it wins.
+    (agent / "memory" / "USER.md").write_text("user\n", encoding="utf-8")
+    assert agent_memory_dir(agent, {"memory": [old]}) == agent / "memory"
+
+
+def test_nightly_with_only_home_uses_the_hosts_agent_folder(tmp_path):
+    from omega_prime.routines.nightly import writable_skills_root
+
+    install = tmp_path / "omega_prime" / "skills"
+    install.mkdir(parents=True)
+    home = tmp_path / "home"
+    host_agent = agent_state_dir({}, home=home)
+    assert host_agent is not None
+    install.chmod(0o555)
+    try:
+        assert writable_skills_root(install, {"HOME": str(home)}) == (
+            host_agent / "skills"
+        )
+    finally:
+        install.chmod(0o755)
