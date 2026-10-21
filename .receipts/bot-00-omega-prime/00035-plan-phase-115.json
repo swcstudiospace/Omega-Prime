@@ -1,0 +1,48 @@
+{
+  "task_id": "00035-plan-phase-115",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T14:05:00Z",
+  "completed_at": "2026-10-21T15:35:26Z",
+  "commands": [
+    { "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_terminal_api.py", "exit_code": 0, "duration_s": 0.6,
+      "output_tail": "......... [100%] 9 passed in 0.16s" },
+    { "cmd": "diff -q /sandbox/home/refs/uplift.xml .planning/phases/115-herdr-live-terminals/115-UPLIFT.xml", "exit_code": 0, "duration_s": 0.1,
+      "output_tail": "(no output — files identical)" },
+    { "cmd": "python3 (yaml.safe_load frontmatter + section/tag/threat/disjointness validator over 115-01..04-PLAN.md)", "exit_code": 1, "duration_s": 0.4,
+      "output_tail": "yaml.scanner.ScannerError: mapping values are not allowed here — 115-01 truth line 20 ({reason: str, ...} colon-space in plain scalar)" },
+    { "cmd": "python3 (same validator after frontmatter repair)", "exit_code": 0, "duration_s": 0.3,
+      "output_tail": "01..04 OK | threats: 26 unique: 26 | wave1 overlap: none | wave2 overlap: none | all six fix assertions PASS" },
+    { "cmd": "git status --porcelain", "exit_code": 0, "duration_s": 0.1,
+      "output_tail": "5 untracked files only: 115-CONTEXT.md and 115-01..04-PLAN.md under .planning/phases/115-herdr-live-terminals/" },
+    { "cmd": "python3 (final validator after advisory edit: frontmatter parse, sections, task-tag balance, </output> endings, 26 unique threat IDs)", "exit_code": 0, "duration_s": 0.3,
+      "output_tail": "final: all 4 plans parse; threats 26 unique 26" }
+  ],
+  "claims": [
+    { "claim": "Plan-stage verify-command shape is executable from the repo root against the untouched dashboard (prescribed pytest invocation)", "evidence_command_index": 0 },
+    { "claim": "The phase contract committed in 115-UPLIFT.xml is byte-identical to /sandbox/home/refs/uplift.xml", "evidence_command_index": 1 },
+    { "claim": "Plan-frontmatter YAML breakage was real before repair (broken colon-space scalar in 115-01 must_haves)", "evidence_command_index": 2, "expects_failure": true },
+    { "claim": "All four PLAN.md files parse as valid GSD plans: frontmatter YAML, required sections, balanced task tags, 26 unique threat IDs, wave-1 and wave-2 file-disjointness, depends_on [03→01, 04→02+03], requirements partition a1-a7; all six checker findings (F1 route converter, F2 stable since, F3 7421-free CSP assertion, F4 no-session note, F5 citation, F6 no-churn test) verifiably present in the files", "evidence_command_index": 3 },
+    { "claim": "Planning stage changed nothing outside the five phase planning artifacts", "evidence_command_index": 4 },
+    { "claim": "Structural validity still holds after the final advisory wording edit", "evidence_command_index": 5 }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Execution-stage <verify> commands (new test suites, npm ci/vitest/build, full test_dashboard_*.py gate) are parent-owned and were intentionally NOT run at plan stage — no product code exists to test yet",
+    "Line citations inside the four plans were authored by gsd-planner subagents and spot-checked by two gsd-plan-checker passes (iteration 1 full review, iteration 2 fix re-pass returned PASS); not every citation was independently re-read by the orchestrator",
+    "gsd-plan-checker verified the 115-02/115-03 starlette/uvicorn behavior claims against /sandbox/home/pydeps sources; no live websocket server was run (planning stage, ports unbeknownst bound)",
+    "@xterm/xterm exact pin (expected 5.5.x) deferred to execution-time registry.npmjs.org confirmation per the locked plan wording",
+    "No independent bot exists in ownership.yaml to approve; approvals left empty — the checker subagents run under bot-00's session"
+  ],
+  "files_changed": [
+    ".planning/phases/115-herdr-live-terminals/115-CONTEXT.md",
+    ".planning/phases/115-herdr-live-terminals/115-01-PLAN.md",
+    ".planning/phases/115-herdr-live-terminals/115-02-PLAN.md",
+    ".planning/phases/115-herdr-live-terminals/115-03-PLAN.md",
+    ".planning/phases/115-herdr-live-terminals/115-04-PLAN.md",
+    ".receipts/bot-00-omega-prime/00035-plan-phase-115.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "git reset --hard f5cf797 removes the planning commit; the phase dir then holds only 115-UPLIFT.xml/115-GOT.json/115-TRACKING.md again",
+  "approvals": [],
+  "approved_by": null
+}
