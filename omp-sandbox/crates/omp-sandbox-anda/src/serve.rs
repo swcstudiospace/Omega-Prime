@@ -46,7 +46,12 @@ pub async fn run(root: &Path, addr: &str) -> Result<(), String> {
     let c2 = core.clone();
     let shutdown = async move {
         // Serve until the core exits (after `down`), then give clients a moment to read the reply.
-        if !c2.exited.load(Ordering::SeqCst) { c2.exit_notify.notified().await; }
+        // Register for the notification before reading the flag: `notify_waiters` only wakes waiters that already
+        // exist, so an exit landing between the check and the wait would otherwise be missed forever.
+        let notified = c2.exit_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !c2.exited.load(Ordering::SeqCst) { notified.await; }
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     };
     let sig = async {

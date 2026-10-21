@@ -232,3 +232,38 @@ test("a sandbox-agent binary that cannot launch rejects startup instead of crash
   const ok = spawn(process.execPath, ["-e", "setTimeout(() => {}, 200)"], { stdio: "ignore" });
   assert.equal(await launched(ok, "x", Promise.resolve(7)), 7);
 });
+
+// Greptile round 4: the fallback tiers find Bun/omp wherever they are installed and link the configured omp.
+test("pickBin and onPath find a toolchain outside ~/.bun and honour an explicit setting", async () => {
+  const { pickBin, onPath, toolchainRoot } = await import("../src/core/config.ts");
+  const d = mkdtempSync(join(tmpdir(), "omp-sbx-bin-"));
+  const bun = join(d, "bun"); writeFileSync(bun, "#!/bin/sh\n");
+  assert.equal(onPath("bun", `/nonexistent:${d}`), bun);
+  assert.equal(onPath("bun", "/nonexistent"), null);
+  // A relative PATH entry is skipped: the result is used as an absolute symlink target.
+  const prev = process.cwd(); process.chdir(d);
+  try { assert.equal(onPath("bun", "."), null); assert.equal(pickBin("./bun", []), bun); } finally { process.chdir(prev); }
+  assert.equal(pickBin(undefined, [join(d, "missing"), onPath("bun", d)]), bun);
+  assert.equal(pickBin("/explicit/bun", [bun]), "/explicit/bun");
+  assert.equal(pickBin(undefined, [join(d, "missing"), null]), join(d, "missing"));
+  const pkg = join(d, "pkg", "node_modules", "@scope", "cli", "dist"); mkdirSync(pkg, { recursive: true });
+  writeFileSync(join(pkg, "cli.js"), "");
+  // Only the node_modules tree is exposed, not the project that holds it.
+  assert.equal(toolchainRoot(join(pkg, "cli.js")), join(d, "pkg", "node_modules"));
+  assert.equal(toolchainRoot(bun), d);
+});
+
+test("bwrap binds the configured omp and Bun folders read-only, deduplicated and skipping /usr", async () => {
+  const { toolchainBinds } = await import("../src/core/providers/bwrap.ts");
+  const d = mkdtempSync(join(tmpdir(), "omp-sbx-tc-"));
+  const inner = join(d, "inner"); mkdirSync(inner);
+  writeFileSync(join(d, "bun"), ""); writeFileSync(join(inner, "omp"), "");
+  assert.deepEqual(toolchainBinds([join(inner, "omp"), join(d, "bun")]), ["--ro-bind", d, d]);
+  assert.deepEqual(toolchainBinds(["/usr/bin/env"]), []);
+  assert.deepEqual(toolchainBinds([join(d, "gone", "omp")]), []);
+});
+
+test("launched rejects (instead of crashing) when a launcher cannot execute", async () => {
+  const p = spawn(join(STATE, "no-such-gateway"), [], { stdio: ["ignore", "pipe", "pipe"] });
+  await assert.rejects(utilMod.launched(p, "openshell-gateway", new Promise(() => {})), /openshell-gateway could not start/);
+});
