@@ -349,9 +349,15 @@ def normalize_tasks(
         title = s.get("title") or PurePath(path).name
         sid = s.get("session_id") or hashlib.sha1(path.encode()).hexdigest()[:10]
         if stop:
-            idle_sessions.append(
-                Task(f"omp:{sid}", str(title), "omp_session", Owner("omp-session", path, str(title)),
-                     "quiet", s.get("started_at"), s.get("last_ts"))
+            finished.append(
+                FinishedItem(
+                    f"omp:{sid}",
+                    str(title),
+                    s.get("last_ts"),
+                    "stopped"
+                    if str(stop).lower() in {"stopped", "aborted", "cancelled"}
+                    else "ok",
+                )
             )
             continue
         age = _recent(s.get("last_ts"), now, window_hours)
@@ -369,11 +375,9 @@ def normalize_tasks(
             and isinstance(s.get("cwd"), str)
             and not live(s.get("cwd"))
         ):
-            # Uncertain work stays quiet; only a known cwd with a reliable
-            # process check proves the session exited.
-            idle_sessions.append(
-                Task(f"omp:{sid}", str(title), "omp_session", Owner("omp-session", path, str(title)),
-                     "quiet", s.get("started_at"), s.get("last_ts"))
+            # A known cwd without a process check proves this old session ended.
+            finished.append(
+                FinishedItem(f"omp:{sid}", str(title), s.get("last_ts"), "stopped")
             )
             continue
         detail = []
@@ -382,13 +386,20 @@ def normalize_tasks(
             detail.append(
                 f"tokens in/out {usage.get('input', 0)}/{usage.get('output', 0)}"
             )
-        task = Task(
-            f"omp:{sid}", str(title), "omp_session",
-            Owner("omp-session", path, str(title)), state,
-            s.get("started_at"), s.get("last_ts"), _progress(s.get("progress")),
-            s.get("model"), "; ".join(detail) or None,
+        active.append(
+            Task(
+                f"omp:{sid}",
+                str(title),
+                "omp_session",
+                Owner("omp-session", path, str(title)),
+                state,
+                s.get("started_at"),
+                s.get("last_ts"),
+                _progress(s.get("progress")),
+                s.get("model"),
+                "; ".join(detail) or None,
+            )
         )
-        (idle_sessions if state == "quiet" else active).append(task)
 
     for item in _items(sources, "wiring"):
         phase = item.get("phase")

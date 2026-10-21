@@ -97,11 +97,13 @@ def test_session_quiet_stopped_and_exit_paths() -> None:
         )
     }
     snap = normalize_tasks(src, now=NOW)
-    # Quiet and explicitly stopped sessions are Idle; a recent session with an
-    # unknown cwd stays Active as stopped? because exit cannot be established.
-    assert {x.id: x.state for x in snap.active} == {"omp:live": "stopped?"}
-    assert {x.id for x in snap.idle_sessions} == {"omp:old", "omp:exit"}
-    assert snap.finished == []
+    # Unmatched OMP sessions keep their existing Active/Finished classification.
+    assert {x.id: x.state for x in snap.active} == {
+        "omp:old": "quiet",
+        "omp:live": "stopped?",
+    }
+    assert {(x.id, x.result) for x in snap.finished} == {("omp:exit", "stopped")}
+    assert snap.idle_sessions == []
 
 
 def test_wiring_join_done_and_waiting_derivation() -> None:
