@@ -331,6 +331,7 @@ def create_app(
         pane = resolve_task_pane(task)
         if pane is None:
             async def no_session() -> AsyncIterator[str]:
+                yield "retry: 3000\n\n"
                 yield terminal_backend._event("no_session", "", None)
             return _SSEResponse(no_session(), headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
         if not await terminal_backend.reserve():
