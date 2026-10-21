@@ -23,6 +23,8 @@ from omega_prime.dashboard.status_file import (
     _write_locked,
     locked_tasks,
 )
+from omega_prime.engine.omp_driver import run
+from omega_prime.tests.test_engine import _env, _install_fake
 
 
 def _row(task_id: str, state: str = "working", **extra: object) -> dict:
@@ -252,3 +254,125 @@ def test_stored_text_is_redacted_and_never_the_input(tmp_path: Path) -> None:
     assert REDACTED in raw
     data = json.loads(store.read_text(encoding="utf-8"))
     assert [item["id"] for item in data["waiting_on_ove"]] == ["blk-secret", "gb:t2:push"]
+
+
+# --- W111-04: engine failure wiring -----------------------------------------
+
+
+def _task_store(tmp_path: Path, task_id: str) -> Path:
+    return _seed(tmp_path / "tasks.json", rows=[_row(task_id)])
+
+
+def test_engine_gated_failure_raises_one_block_in_the_same_call(tmp_path: Path) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary)
+    env.pop("ANTHROPIC_API_KEY")  # empty allowlist: the plan gate refuses
+    store = _task_store(tmp_path, "gb:t1")
+    result = run(
+        "PONG",
+        cwd=tmp_path,
+        env=env,
+        job_id="job-gate",
+        stage="plan",
+        tasks_path=store,
+        task_id="gb:t1",
+    )
+    assert result.ok is False
+    assert result.reason == "plan_not_allowed"
+    # Immediacy: the item and the blocked row exist the moment run() returned,
+    # with no polling step in between.
+    data = json.loads(store.read_text(encoding="utf-8"))
+    items = data["waiting_on_ove"]
+    assert [item["id"] for item in items] == ["gb:t1:plan_not_allowed"]
+    assert items[0]["blocks"] == "engine plan gate (plan_not_allowed)"
+    assert "OMEGA_PRIME_OMP_ALLOW_ZAI" in items[0]["ask"]
+    assert data["tasks"][0] == {"id": "gb:t1", "state": "blocked"}
+    first = dict(items[0])
+    # A retried run upserts instead of duplicating.
+    run(
+        "PONG",
+        cwd=tmp_path,
+        env=env,
+        job_id="job-gate-2",
+        stage="plan",
+        tasks_path=store,
+        task_id="gb:t1",
+    )
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert [item["id"] for item in data["waiting_on_ove"]] == ["gb:t1:plan_not_allowed"]
+    assert data["waiting_on_ove"][0]["seq"] == first["seq"]
+    assert data["waiting_on_ove"][0]["since"] == first["since"]
+    # Resolution clears the item and returns the task to working.
+    clear_block(store, "gb:t1:plan_not_allowed", "gb:t1")
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert data["waiting_on_ove"] == []
+    assert data["tasks"][0]["state"] == "working"
+
+
+def test_engine_tier_failure_raises_its_own_block(tmp_path: Path) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_PRIME_ENGINE_UNSANDBOXED="0",
+        OMEGA_PRIME_BWRAP_BIN=str(tmp_path / "no-bwrap"),
+    )
+    store = _task_store(tmp_path, "gb:t2")
+    result = run(
+        "PONG",
+        cwd=tmp_path,
+        env=env,
+        job_id="job-tier",
+        tasks_path=store,
+        task_id="gb:t2",
+    )
+    assert result.ok is False
+    assert result.reason == "sandbox_unavailable"
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert [item["id"] for item in data["waiting_on_ove"]] == ["gb:t2:sandbox_unavailable"]
+    assert data["waiting_on_ove"][0]["blocks"] == (
+        "engine sandbox gate (sandbox_unavailable)"
+    )
+    assert data["tasks"][0]["state"] == "blocked"
+
+
+def test_engine_writes_no_tasks_file_without_task_context(tmp_path: Path) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary)
+    env.pop("ANTHROPIC_API_KEY")
+    result = run("PONG", cwd=tmp_path, env=env, job_id="job-noctx", stage="plan")
+    assert result.ok is False
+    assert result.reason == "plan_not_allowed"
+    assert not (tmp_path / "tasks.json").exists()
+    # tasks_path without task_id is equally inert.
+    store = tmp_path / "tasks.json"
+    result = run(
+        "PONG",
+        cwd=tmp_path,
+        env=env,
+        job_id="job-halfctx",
+        stage="plan",
+        tasks_path=store,
+    )
+    assert result.ok is False
+    assert result.reason == "plan_not_allowed"
+    assert not store.exists()
+
+
+def test_engine_ungated_failure_writes_no_item(tmp_path: Path) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary, OMEGA_PRIME_OMP_BIN=str(tmp_path / "bin" / "missing"))
+    store = _task_store(tmp_path, "gb:t3")
+    result = run(
+        "PONG",
+        cwd=tmp_path,
+        env=env,
+        job_id="job-noomp",
+        tasks_path=store,
+        task_id="gb:t3",
+    )
+    assert result.ok is False
+    assert result.reason == "not_configured"
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert data["waiting_on_ove"] == []
+    assert data["tasks"][0]["state"] == "working"

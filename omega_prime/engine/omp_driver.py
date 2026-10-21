@@ -48,6 +48,28 @@ _READY_TIMEOUT = 15.0
 _COMMAND_TIMEOUT = 15.0
 
 
+# Static ask/blocks texts for the waiting_on_ove item raised when a gated
+# stage cannot run. The box item shape has no detail field, so the exception
+# detail stays in EngineResult.detail and is not copied into the item.
+_ENGINE_ASK = {
+    "plan_not_allowed": (
+        "The stage's coding plan is not allowlisted, so the run was refused. "
+        "Allow the plan for this stage (its opt-in flag such as "
+        "OMEGA_PRIME_OMP_ALLOW_ZAI, or an API key on the allowlist) and "
+        "re-run the task."
+    ),
+    "sandbox_unavailable": (
+        "The engine sandbox tier is unavailable, so the run was refused. "
+        "Restore the sandbox binary (bwrap or the configured tier), or set "
+        "OMEGA_PRIME_ENGINE_UNSANDBOXED=1 explicitly, then re-run the task."
+    ),
+}
+_ENGINE_BLOCKS = {
+    "plan_not_allowed": "engine plan gate (plan_not_allowed)",
+    "sandbox_unavailable": "engine sandbox gate (sandbox_unavailable)",
+}
+
+
 _EOF = object()
 
 
@@ -284,6 +306,8 @@ def run(
     env: Mapping[str, str] | None = None,
     unsandboxed: bool | None = None,
     tmux: bool | None = None,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
     stage: str | None = None,
     interrupt: Any | None = None,
 ) -> EngineResult:
@@ -291,6 +315,12 @@ def run(
 
     ``stage`` (``plan`` or ``execute``) picks that stage's model and lets the
     router fall back from ChatGPT to Z.ai; see ``plan_router.select``.
+
+    ``tasks_path`` and ``task_id`` are optional dashboard context: when both
+    are set and the run fails the plan gate (``plan_not_allowed``) or the
+    sandbox gate (``sandbox_unavailable``), the same call raises one
+    ``waiting_on_ove`` item and blocks the task row before the failed
+    ``EngineResult`` returns. Without them, behaviour is unchanged.
     """
     mapping = dict(env if env is not None else {})
     if env is None:
@@ -342,6 +372,25 @@ def run(
                 append_event(
                     events_path,
                     {"type": "job_end", "ok": False, "reason": str(reason or "engine")},
+                )
+        if (
+            tasks_path is not None
+            and task_id is not None
+            and reason in ("plan_not_allowed", "sandbox_unavailable")
+        ):
+            # Best-effort visibility: one waiting_on_ove item per stable id,
+            # raised before the failed result returns. Suppressed so a
+            # visibility failure can never mask or replace the engine
+            # failure below (W111-04).
+            with contextlib.suppress(Exception):
+                from omega_prime.dashboard.blocks import raise_block
+
+                raise_block(
+                    tasks_path,
+                    f"{task_id}:{reason}",
+                    ask=_ENGINE_ASK[str(reason)],
+                    blocks=_ENGINE_BLOCKS[str(reason)],
+                    task_id=task_id,
                 )
         return EngineResult(
             False,
