@@ -149,4 +149,4 @@ Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's roun
 3. W110-02 verified by diffing the three merged paths against 40338ec and 3ada70b: guards and mount variant both present.
 4. No test is weakened, skipped, or deleted to make anything pass; all new tests run under Node's built-in runner with fakes only (no podman, openshell, herdr, or network).
 
-- [ ] Phase 110: omp-sandbox sbx-2 merge finish (tsc clean + Greptile #55 round 2)
+- [x] Phase 110: omp-sandbox sbx-2 merge finish (tsc clean + Greptile #55 round 2)

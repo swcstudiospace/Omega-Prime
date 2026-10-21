@@ -1,0 +1,120 @@
+{
+  "task_id": "phase110-execution",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T14:55:00Z",
+  "completed_at": "2026-10-21T15:20:00Z",
+  "scope": "Execution of .planning/phases/110-sbx2-merge-finish/110-01-PLAN.md (task 00030 node n2): W110-01..W110-08 in omp-sandbox/ only. Four atomic commits with 00012 titles; no push, no PR, no remote.",
+  "commands": [
+    {
+      "cmd": "cd omp-sandbox && npx tsc --noEmit",
+      "exit_code": 2,
+      "duration_s": 3.3,
+      "output_tail": "baseline at 3e7be33: exactly TS2304 openshell-podman.ts(215,21) Cannot find name 'os'; TS7006 (217,38) x; TS7006 (217,84) n",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "cd omp-sandbox && npm test",
+      "exit_code": 0,
+      "duration_s": 1.9,
+      "output_tail": "tests 12, pass 12, fail 0 (baseline)",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "git diff 40338ec..HEAD -- omp-sandbox/package.json omp-sandbox/src/core/core.ts omp-sandbox/src/core/providers/tiers.ts; git diff 3ada70b..HEAD -- (same paths); git grep -c markers at 40338ec/3ada70b/HEAD",
+      "exit_code": 0,
+      "duration_s": 0.3,
+      "output_tail": "vs 40338ec: guards-suite union in test script, sbx-0 additions; workspace_host_path and MOUNT_TIERS present both sides. vs 3ada70b: validateTiers 2->2, TIER_NAMES 3->3, #starting 4->4, TERMINAL 5->5, teardown 3->3",
+      "phase": "w110-02-evidence"
+    },
+    {
+      "cmd": "cd omp-sandbox && npx tsc --noEmit",
+      "exit_code": 0,
+      "duration_s": 1.5,
+      "output_tail": "clean after the this.#os call-target fix (both TS7006 cascades gone; no annotations added)",
+      "phase": "w110-01"
+    },
+    {
+      "cmd": "cd omp-sandbox && npm ci --ignore-scripts --no-audit --no-fund",
+      "exit_code": 0,
+      "duration_s": 4.0,
+      "output_tail": "added 178 packages in 4s (final gate, clean install)",
+      "phase": "final-gate"
+    },
+    {
+      "cmd": "cd omp-sandbox && npx tsc --noEmit && npm test",
+      "exit_code": 0,
+      "duration_s": 7.2,
+      "output_tail": "tsc exit 0; tests 18, pass 18, fail 0 (12 existing + 6 new dedicated blocks: guards 7, paths 8, core 3)",
+      "phase": "final-gate"
+    },
+    {
+      "cmd": "cd omp-sandbox && timeout 30 node --experimental-transform-types --no-warnings src/core/server.ts < /dev/null",
+      "exit_code": 0,
+      "duration_s": 0.4,
+      "output_tail": "{\"event\":\"ready\",\"pid\":2685} then clean exit 0 — main-module boot identical to core_child.rs's launch",
+      "phase": "w110-05-boot-proof"
+    },
+    {
+      "cmd": "cd omp-sandbox && node --experimental-transform-types --no-warnings --input-type=module -e \"await import('file://.../src/core/server.ts'); process.stderr.write('IMPORT-DONE')\" < /dev/null",
+      "exit_code": 0,
+      "duration_s": 0.3,
+      "output_tail": "IMPORT-DONE printed, no ready line, no hang — importing server.ts runs nothing",
+      "phase": "w110-05-import-proof"
+    },
+    {
+      "cmd": "diff <(git show fd784af:omp-sandbox/src/core/providers/openshell-podman.ts | sed -n '/^export function gatewayToml/,/^}/p') <(sed -n '/^export function gatewayToml/,/^}/p' omp-sandbox/src/core/providers/openshell-podman.ts)",
+      "exit_code": 0,
+      "duration_s": 0.05,
+      "output_tail": "IDENTICAL — userns = \"keep-id\" kept, no uidmap keys added",
+      "phase": "prohibitions"
+    },
+    {
+      "cmd": "git diff fd784af..HEAD --name-only; git diff 3e7be33..HEAD -- omp-sandbox/sandbox/policy-podman.yaml | wc -l",
+      "exit_code": 0,
+      "duration_s": 0.05,
+      "output_tail": "exactly the 8 plan-owned files under omp-sandbox/; static policy yaml diff empty (still 1000/1000)",
+      "phase": "prohibitions"
+    },
+    {
+      "cmd": "git status --porcelain",
+      "exit_code": 0,
+      "duration_s": 0.02,
+      "output_tail": "(empty — recorded again after the final docs commit)",
+      "phase": "final-state"
+    }
+  ],
+  "claims": [
+    { "claim": "Baseline tsc had exactly the three W110-01 errors and 12/12 tests passed before any edit", "evidence_command_index": 0 },
+    { "claim": "Both parents' behavior survives in package.json, core.ts and tiers.ts at HEAD (W110-02)", "evidence_command_index": 2 },
+    { "claim": "npx tsc --noEmit exits 0 after the fixes, on a clean npm ci install (W110-01 acceptance)", "evidence_command_index": 5 },
+    { "claim": "npm test is all green with 18 tests: 12 existing (none weakened/skipped/deleted) + 6 new dedicated blocks, one per W110-03..W110-08, all fake-only", "evidence_command_index": 5 },
+    { "claim": "node src/core/server.ts from the package root boots the full server (ready event) and importing the module runs no side effects (W110-05 both directions)", "evidence_command_index": 6 },
+    { "claim": "gatewayToml is byte-identical to the pre-execution base: keep-id kept, no invented uidmap keys (W110-04 prohibition)", "evidence_command_index": 8 },
+    { "claim": "Execution commits touched only the 8 plan-owned files and the static policy yaml is unchanged at 1000/1000", "evidence_command_index": 9 },
+    { "claim": "Working tree is clean at the end (git status --porcelain empty)", "evidence_command_index": 10 }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Real podman/openshell behavior of the generated mount policy (sandbox create accepting the generated policy; workload writing a non-1000-owned workspace) — no podman/openshell in this sandbox; covered by fake-based unit tests only",
+    "Live e2e mount smoke and receipts under /workspace/sbx-runs/pr2 — box-only path, explicitly out of scope here",
+    "PR #55 Greptile review status cannot be refreshed without gh (not available); fixes were made from the recorded PR55-greptile-comments.md contract",
+    "Bundle export by the outer driver — happens after this session; not verifiable here"
+  ],
+  "files_changed": [
+    "omp-sandbox/src/core/providers/openshell-podman.ts",
+    "omp-sandbox/src/core/paths.ts",
+    "omp-sandbox/src/core/core.ts",
+    "omp-sandbox/src/core/gsd.ts",
+    "omp-sandbox/src/core/server.ts",
+    "omp-sandbox/src/core/vm.ts",
+    "omp-sandbox/tests/paths.test.ts",
+    "omp-sandbox/tests/guards.test.ts",
+    ".planning/ROADMAP.md",
+    ".planning/phases/110-sbx2-merge-finish/110-01-SUMMARY.md",
+    ".receipts/bot-00-omega-prime/phase110-execution.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "git revert 1a3cd5e..bec0300 range (the four execution commits) restores the 3e7be33/fd784af state; revert the docs commit for ROADMAP/SUMMARY/receipt. No data migration, no external state.",
+  "approvals": [],
+  "approved_by": null
+}
