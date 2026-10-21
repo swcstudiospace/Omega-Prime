@@ -73,6 +73,8 @@ from omega_prime.engine.sandbox import SandboxUnavailable, sandbox_ready, wrap
 from omega_prime.engine.skills_attach import attach_skills
 from omega_prime.engine.ui_control import UIControlError, UIControlStore
 
+#: Env var naming the delegate depth of a child started through the engine.
+DELEGATE_DEPTH_ENV = "OMEGA_PRIME_DELEGATE_DEPTH"
 _READY_TIMEOUT = 15.0
 _COMMAND_TIMEOUT = 15.0
 
@@ -356,6 +358,7 @@ def run(
     ui_control: UIControlStore | None = None,
     cancel_event: _CancelEvent | None = None,
     interrupt: _CancelEvent | None = None,
+    delegate_depth: int | None = None,
 ) -> EngineResult:
     """Run one prompt on omp and return the assistant text, usage, and cost.
 
@@ -367,6 +370,10 @@ def run(
     sandbox gate (``sandbox_unavailable``), the same call raises one
     ``waiting_on_ove`` item and blocks the task row before the failed
     ``EngineResult`` returns. Without them, behaviour is unchanged.
+
+    ``delegate_depth`` is the delegate depth of a child started by
+    ``delegate_task``; omp's MCP server starts its delegate parent there, so
+    nested delegates keep the parent's ``max_depth``.
     """
     mapping = dict(env if env is not None else {})
     if env is None:
@@ -404,6 +411,7 @@ def run(
             ui_control=ui_control,
             cancel_event=cancel_event if cancel_event is not None else interrupt,
             metadata=metadata,
+            delegate_depth=delegate_depth,
         )
     except (EngineError, PlanNotAllowed, SandboxUnavailable, OSError) as exc:
         if isinstance(exc, OSError):
@@ -503,6 +511,7 @@ def _run(
     ui_control: UIControlStore | None = None,
     cancel_event: _CancelEvent | None = None,
     metadata: dict[str, Any] | None = None,
+    delegate_depth: int | None = None,
 ) -> EngineResult:
     run_metadata = metadata if metadata is not None else {}
     if mode not in MODES:
@@ -707,6 +716,10 @@ def _run(
         # omp hands its env to the omega-prime MCP server it starts, so a
         # delegate_task from a staged turn knows to build on execute.
         process_env["OMEGA_PRIME_ENGINE_STAGE"] = choice.stage
+    if delegate_depth is not None:
+        # The MCP server's delegate parent starts at this depth, so a child
+        # run through the engine cannot reset the delegate depth limit.
+        process_env[DELEGATE_DEPTH_ENV] = str(max(0, int(delegate_depth)))
     gate_read = gate_write = -1
     try:
         launch = wrapped
@@ -1599,10 +1612,12 @@ def probe(
 ) -> tuple[bool, str]:
     """Whether a turn can run on omp. Does not call a model API.
 
-    ``plan`` is the requested coding plan and ``stage`` the GSD stage, both
-    exactly as ``run(plan=..., stage=...)`` will receive them, so readiness
-    accepts what the router will select and refuses what it will refuse.
-    With the omp-sandbox backend selected a stageless turn is checked as the
+    With ``stage``, the stage's plan order (``plan`` first, else ChatGPT,
+    then Z.ai) must have an allowlisted plan. ``plan`` is the caller's
+    requested plan and ``stage`` the GSD stage, both exactly as
+    ``run(plan=..., stage=...)`` will receive them, so readiness accepts what
+    the router will select and refuses what it will refuse. With the
+    omp-sandbox backend selected a stageless turn is checked as the
     ``execute`` stage it will run on.
     """
     from omega_prime.engine import sandbox_omp

@@ -105,6 +105,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_CLARIFY_SOCKET` | Names the per-run clarify broker socket an engine child uses to ask the operator a question. |
 | `OMEGA_PRIME_COMMAND_LOG` | Selects the command history log destination. |
 | `OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS` | Sets the maximum accepted lateness for scheduled actions. |
+| `OMEGA_PRIME_DELEGATE_DEPTH` | Sets the delegate depth an engine child's MCP server starts at, so nested delegates keep the parent's depth limit; set by the engine, not by operators. |
 | `OMEGA_PRIME_DESK_BUS_URL` | Selects the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_BUS_URL_FILE` | Names a protected file containing the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_CHILD_MODEL` | Selects the model used for the managed desk child process. |
@@ -244,6 +245,7 @@ The table records names and purposes only.
 | `TMPDIR_FILE` | Forwarded file-name counterpart for the child-process temporary directory. |
 | `ULTRATHINK_ROOT` | Selects the ultrathink integration root directory. |
 | `ULTRATHINK_ROOT_FILE` | Names a protected file containing the ultrathink integration root. |
+| `ULTRATHINK_SHIP` | Enables ultrathink ship writes only for the exact values 1 and true. |
 | `ULTRATHINK_STATE_DIR` | Selects persistent state for the ultrathink integration. |
 | `USER` | Identifies the host user inherited by child processes. |
 | `USER_FILE` | Forwarded file-name counterpart for the child-process user name. |

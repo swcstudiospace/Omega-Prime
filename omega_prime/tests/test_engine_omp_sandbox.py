@@ -666,7 +666,7 @@ def test_delegate_via_engine_passes_engine_plan_to_the_wrapper(tmp_path: Path) -
     work = _git_worktree(roots)
     env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
     raw = delegate_via_engine(
-        "plan the thing", env=env, cwd=str(work), stage="plan", engine_plan="zai"
+        "plan the thing", env=env, cwd=str(work), stage="plan", plan="zai"
     )
     assert raw is not None
     body = json.loads(raw)
@@ -701,7 +701,7 @@ def test_ultrathink_engine_passes_engine_plan_to_the_wrapper(
         {"found": True, "spec_path": str(spec)},
         env,
         stage="plan",
-        engine_plan="zai",
+        requested_plan="zai",
     )
     assert body["used"] is True
     assert body["stage"] == "plan"
@@ -907,7 +907,7 @@ def test_a_stageless_call_runs_the_execute_stage_and_readiness_agrees(
     work = _git_worktree(roots)
     env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
     assert probe(env, plan="zai") == (True, "ok")
-    raw = delegate_via_engine("build it", env=env, cwd=str(work), engine_plan="zai")
+    raw = delegate_via_engine("build it", env=env, cwd=str(work), plan="zai")
     assert raw is not None
     body = json.loads(raw)
     assert body["stage"] == "execute"
@@ -1061,9 +1061,7 @@ def test_failures_after_the_stage_started_keep_started_true(tmp_path: Path) -> N
     assert result.reason == "sandbox_unavailable"
     assert result.started is True
     # An auto-mode delegate must not re-run a started task on the Python path.
-    raw = delegate_via_engine(
-        "plan", env=env, cwd=str(work), stage="plan", engine_plan="zai"
-    )
+    raw = delegate_via_engine("plan", env=env, cwd=str(work), stage="plan", plan="zai")
     assert raw is not None and json.loads(raw)["error"] == "sandbox_unavailable"
 
 

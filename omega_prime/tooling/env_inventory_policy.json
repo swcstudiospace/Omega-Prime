@@ -71,6 +71,7 @@
     "NOTION_TOKEN_FILE": "Names a protected file containing the Notion integration credential.",
     "OMEGA_PRIME_AUDIT_LOG": "Selects the destination for Omega Prime audit events.",
     "OMEGA_PRIME_BWRAP_BIN": "Selects the bubblewrap executable used for sandboxing.",
+    "OMEGA_PRIME_DELEGATE_DEPTH": "Sets the delegate depth an engine child's MCP server starts at, so nested delegates keep the parent's depth limit; set by the engine, not by operators.",
     "OMEGA_PRIME_DESK_BUS_URL": "Selects the desk message-bus endpoint.",
     "OMEGA_PRIME_DESK_BUS_URL_FILE": "Names a protected file containing the desk message-bus endpoint.",
     "OMEGA_PRIME_DESK_CHILD_MODEL": "Selects the model used for the managed desk child process.",
@@ -151,6 +152,7 @@
     "TMPDIR_FILE": "Forwarded file-name counterpart for the child-process temporary directory.",
     "ULTRATHINK_ROOT": "Selects the ultrathink integration root directory.",
     "ULTRATHINK_ROOT_FILE": "Names a protected file containing the ultrathink integration root.",
+    "ULTRATHINK_SHIP": "Enables ultrathink ship writes only for the exact values 1 and true.",
     "ULTRATHINK_STATE_DIR": "Selects persistent state for the ultrathink integration.",
     "USER": "Identifies the host user inherited by child processes.",
     "USER_FILE": "Forwarded file-name counterpart for the child-process user name.",
@@ -432,7 +434,7 @@
       "reason": "Resolves the finite connector credential names declared in _CONNECTORS, including file selectors."
     },
     {
-      "site": "omega_prime/mcp_server.py:373:helper:omega_prime/mcp_server.py:_secret_present",
+      "site": "omega_prime/mcp_server.py:389:helper:omega_prime/mcp_server.py:_secret_present",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -445,7 +447,7 @@
       "reason": "Resolves only the finite provider credential names from the desk child provider declarations."
     },
     {
-      "site": "omega_prime/mcp_server.py:386:helper:omega_prime/integrations/binding.py:secret_value",
+      "site": "omega_prime/mcp_server.py:402:helper:omega_prime/integrations/binding.py:secret_value",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -497,7 +499,7 @@
       "reason": "Enumerates finite provider.env_vars credentials consumed by the approved credential broker, including protected-file selectors."
     },
     {
-      "site": "omega_prime/grokbot/doctor.py:1116:mapping.get",
+      "site": "omega_prime/grokbot/doctor.py:1151:mapping.get",
       "symbol": "_check_connector_secrets",
       "source_sha256": "da9adca5c1daa73671631474854e3d6ba5d0f29547adfe97bc64e7c398dea84e",
       "names": [
@@ -509,6 +511,17 @@
         "HINDSIGHT_API_KEY"
       ],
       "reason": "Enumerates the reviewed connector credential names checked by the doctor."
+    },
+    {
+      "site": "omega_prime/setup_check.py:159:mapping.subscription",
+      "symbol": "check_ultrathink",
+      "source_sha256": "5312217b06a100ddaedda1ceda4798eb1869d44ed62868fc9d03405424c82c05",
+      "names": [
+        "HOME", "OMEGA_PRIME_STATE_DIR", "ULTRATHINK_STATE_DIR", "GROK_PLUGIN_DATA",
+        "GROK_HOME", "HERMES_HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR",
+        "ULTRATHINK_ROOT", "ULTRATHINK_SHIP"
+      ],
+      "reason": "Copies the reviewed Ultrathink readiness keys (READINESS_ENV_KEYS) from the supplied environment for the setup check."
     }
   ],
   "supplements": [
@@ -711,7 +724,7 @@
   "metadata": {
     "token_selectors": [
       {
-        "site": "omega_prime/mcp_server.py:2155:args.token_env",
+        "site": "omega_prime/mcp_server.py:2174:args.token_env",
         "symbol": "_resolve_token",
         "source_sha256": "e04ec502c56de9c37869762a3519cac3470f599f455c9ec1b3343026091652d7",
         "reason": "The caller-selected environment key is an arbitrary MCP bearer-token selector, not a concrete setting name."

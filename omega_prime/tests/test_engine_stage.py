@@ -399,3 +399,213 @@ def test_execute_ultrathink_keeps_a_saved_plan_stage(tmp_path: Path) -> None:
         "execute",
         "gpt-6-luna",
     )
+
+
+def test_probe_checks_the_requested_plan_for_a_stage(tmp_path: Path) -> None:
+    """``probe`` asks the router the same question ``run(plan=..., stage=...)`` will."""
+    from omega_prime.engine import omp_driver
+
+    asked: list[tuple[str | None, str | None]] = []
+
+    def fake_select(env, usage=None, *, requested=None, stage=None, fallback=None):
+        asked.append((requested, stage))
+        raise omp_driver.PlanNotAllowed("stop here")
+
+    env = _chatgpt_env(tmp_path)
+    original = omp_driver.select
+    omp_driver.select = fake_select
+    try:
+        assert probe(env, stage="execute", plan="anthropic") == (
+            False,
+            "plan_not_allowed",
+        )
+        assert probe(env, plan="zai") == (False, "plan_not_allowed")
+        assert probe(env, stage="plan") == (False, "plan_not_allowed")
+    finally:
+        omp_driver.select = original
+    assert asked == [("anthropic", "execute"), ("zai", None), (None, "plan")]
+
+
+def test_route_turn_probes_with_the_agents_plan(tmp_path: Path, monkeypatch) -> None:
+    from omega_prime.engine import attach
+
+    seen: list[dict] = []
+
+    def fake_probe(env, **kwargs):
+        seen.append(kwargs)
+        return False, "plan_not_allowed"
+
+    monkeypatch.setattr(attach, "probe", fake_probe)
+    monkeypatch.setattr(attach, "_live_model", lambda model: True)
+    agent = Agent(model=ScriptedModel([]))
+    agent.engine_plan = "anthropic"  # type: ignore[attr-defined]
+    env = {**_chatgpt_env(tmp_path), "OMEGA_PRIME_ENGINE": "auto"}
+    assert (
+        route_turn(
+            agent,
+            "hi",
+            system_message=None,
+            conversation_history=None,
+            env=env,
+            stage="execute",
+        )
+        is None
+    )
+    assert seen == [{"stage": "execute", "plan": "anthropic"}]
+
+
+def test_engine_delegate_carries_depth_and_work_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import attach
+
+    calls: list[dict] = []
+
+    def fake_delegate(goal, **kwargs):
+        calls.append(kwargs)
+        return json.dumps({"summary": "ok"})
+
+    monkeypatch.setattr(attach, "delegate_via_engine", fake_delegate)
+
+    class Parent:
+        def __init__(self, depth: int) -> None:
+            self.child_model = None
+            self.tools: dict = {}
+            self.engine_stage = "plan"
+            self.delegate_depth = depth
+            self.engine_cwd = tmp_path
+
+    assert json.loads(delegate_task(Parent(1), "build it"))["summary"] == "ok"
+    assert calls[0]["delegate_depth"] == 2
+    assert calls[0]["cwd"] == str(tmp_path)
+    assert calls[0]["stage"] == "execute"
+    refused = json.loads(delegate_task(Parent(2), "build it"))
+    assert "max_depth" in refused["error"] and len(calls) == 1
+
+
+def test_desk_parent_starts_at_the_engine_childs_depth_in_its_work_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.mcp_server import _DeskParent
+    from omega_prime.tools.registry import ToolRegistry
+
+    monkeypatch.delenv("OMEGA_PRIME_DELEGATE_DEPTH", raising=False)
+    top = _DeskParent(ToolRegistry(), None, {})
+    assert (top.delegate_depth, top.engine_cwd) == (0, None)
+    nested = _DeskParent(
+        ToolRegistry(), None, {"OMEGA_PRIME_DELEGATE_DEPTH": "2"}, work=tmp_path
+    )
+    assert (nested.delegate_depth, nested.engine_cwd) == (2, str(tmp_path))
+    raw = json.loads(delegate_task(nested, "go deeper", max_depth=nested.max_depth))
+    assert "max_depth" in raw["error"]
+    # An unreadable depth fails closed instead of resetting to zero.
+    bad = _DeskParent(ToolRegistry(), None, {"OMEGA_PRIME_DELEGATE_DEPTH": "x"})
+    assert bad.delegate_depth >= bad.max_depth
+
+
+def test_mcp_server_desk_parent_uses_the_resolved_work_root(tmp_path: Path) -> None:
+    from omega_prime.mcp_server import default_registry
+    from omega_prime.tests.test_desk_wiring import ROOT
+    from omega_prime.tools.delegate import DELEGATE_PARENT_BINDING
+
+    work = tmp_path / "work"
+    work.mkdir()
+    env = {
+        "OMEGA_PRIME_STATE_DIR": str(tmp_path / "state"),
+        "OMEGA_PRIME_ENGINE_STAGE": "plan",
+    }
+    staged = default_registry(ROOT, tmp_path / "home", env=env, work_root=work)
+    parent = staged.runtime_bindings[DELEGATE_PARENT_BINDING]
+    assert parent is not None and parent.engine_cwd == str(work)
+
+
+def test_omp_process_env_names_the_delegate_depth(tmp_path: Path) -> None:
+    import stat as _stat
+
+    env = _chatgpt_env(tmp_path)
+    fake = Path(env["OMEGA_PRIME_OMP_BIN"])
+    wrapper = tmp_path / "bin" / "omp-depth"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "${{OMEGA_PRIME_DELEGATE_DEPTH:-none}}" >> {tmp_path}/depth.log\n'
+        f'exec {fake} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | _stat.S_IEXEC)
+    env["OMEGA_PRIME_OMP_BIN"] = str(wrapper)
+    from omega_prime.engine.omp_driver import run
+
+    assert run("PONG", cwd=tmp_path, env=env, delegate_depth=2).ok
+    assert "2" in (tmp_path / "depth.log").read_text("utf-8").split()
+
+
+def test_auto_mode_refuses_an_unknown_stage_instead_of_running_unstaged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A typo in the stage is reported on every staged entry point, not skipped."""
+    from omega_prime.engine import attach
+
+    env = _chatgpt_env(tmp_path, OMEGA_PRIME_ENGINE="auto")
+    monkeypatch.setattr(attach, "_live_model", lambda model: True)
+    agent = Agent(model=ScriptedModel([]))
+    routed = route_turn(
+        agent,
+        "ping",
+        system_message=None,
+        conversation_history=None,
+        env={**env, "OMEGA_PRIME_ENGINE_STAGE": "ship"},
+    )
+    assert routed is not None
+    assert routed["failed"] is True
+    assert routed["engine"]["reason"] == "plan_not_allowed"
+    assert "ship" in routed["engine"]["detail"]
+
+    raw = delegate_via_engine("say PONG", env=env, stage="ship")
+    assert raw is not None
+    assert json.loads(raw)["error"] == "plan_not_allowed"
+
+    spec = tmp_path / "spec.md"
+    spec.write_text("Do the small thing.\n", encoding="utf-8")
+    body = ultrathink_engine({"found": True, "spec_path": str(spec)}, env, stage="ship")
+    assert (body["used"], body["failed"], body["reason"]) == (
+        False,
+        True,
+        "plan_not_allowed",
+    )
+    # Nothing reached omp: the refusals happen before any launch.
+    log = tmp_path / "omp-log.jsonl"
+    launches = (
+        [line for line in log.read_text("utf-8").splitlines() if '"--mode"' in line]
+        if log.exists()
+        else []
+    )
+    assert launches == []
+
+
+def test_staged_entry_points_forward_the_requested_plan(tmp_path: Path) -> None:
+    """With ChatGPT and Z.ai both allowed, a requested ``zai`` wins on every path."""
+    env = _chatgpt_env(tmp_path, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    raw = delegate_via_engine("say PONG", env=env, stage="execute", plan="zai")
+    assert raw is not None
+    assert json.loads(raw)["model"] == "glm-5.3-flash"
+    assert _model_arg(tmp_path) == "zai/glm-5.3-flash"
+    desk = desk_engine_dispatch(
+        "ticket", env, cwd=str(tmp_path), stage="plan", plan="zai"
+    )
+    assert desk is not None and desk["status"] == "done"
+    assert _model_arg(tmp_path) == "zai/glm-5.3"
+    spec = tmp_path / "spec.md"
+    spec.write_text("Do the small thing.\n", encoding="utf-8")
+    body = ultrathink_engine(
+        {"found": True, "spec_path": str(spec)},
+        env,
+        stage="execute",
+        requested_plan="zai",
+    )
+    assert body["used"] is True
+    assert (body["plan"], body["model"]) == ("zai", "glm-5.3-flash")
+    # Unrequested, the router still puts ChatGPT first.
+    body = ultrathink_engine(
+        {"found": True, "spec_path": str(spec)}, env, stage="execute"
+    )
+    assert (body["plan"], body["model"]) == ("chatgpt", "gpt-6-luna")
