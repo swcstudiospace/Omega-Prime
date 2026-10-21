@@ -1,6 +1,6 @@
 ---
 name: hindsight-memory
-description: "Retain and recall discipline for the seat memory banks: what to keep, what never to keep, and the receipt-path rule."
+description: "Evidence-backed retain and recall across local memory and configured shared sources."
 bots: [bot-00-omega-prime]
 gates: [G-2, G-3]
 ---
@@ -9,15 +9,16 @@ gates: [G-2, G-3]
 
 ## Served tools
 
-Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). Do not substitute an external gateway or infer a Hindsight service route.
 
 ## When this applies (L1)
 
-The desk's memory plane is Hindsight, reached only through the gateway: `lead_brief` at turn
-start, `lead_memory_recall` when you need a fact, `lead_memory_retain` when you have one worth
-keeping. Banks: `pd-<seat>` is yours to write; `pd-desk` is shared, written by LEAD and QUALITY,
-read by all; `pd-lead-reports` is LEAD's. A weekly `reflect` prunes banks into mental models
-without your involvement.
+Omega Prime provides a local-first memory plane with optional configured
+Substrate and Hindsight sources. Use `lead_brief` at turn start,
+`lead_memory_recall` when you need a fact, and `lead_memory_retain` only when
+you have a fact worth keeping and its evidence. The selected backend controls
+write preference; it does not disable recall from other configured sources.
+Hindsight is not reached only through an external gateway.
 
 **Retain is refused without `receipt_path` or `source`.** That is the whole discipline in one
 schema rule: memory holds what was verified or where it was read, never what was believed.
@@ -26,7 +27,7 @@ schema rule: memory holds what was verified or where it was read, never what was
 About to retain something?
 │
 ├─ Is it a secret, token, connection string or passphrase?   YES ──▶ Never. §5
-├─ Is it another seat's work or decision?                    YES ──▶ Not your bank. Tell LEAD. §1
+├─ Is it another seat's work or decision?                    YES ──▶ Do not retain it as your own verified fact. §1
 ├─ Is it a transcript, a chat summary or a whole file?       YES ──▶ Not memory. Docs plane or receipt. §2
 ├─ Is it backed by a receipt you wrote?                      YES ──▶ retain with receipt_path. §3
 ├─ Was it read from a URL or a committed file?               YES ──▶ retain with source. §3
@@ -36,28 +37,47 @@ About to act on something recalled?
 └─▶ Recall is a hint about where to look. Re-run the command or open the file before claiming it. §4
 ```
 
-Redaction runs at the gateway, but the seat still does not type tokens: a redacted line is a
-useless line, and the audit event still records that one was sent.
+Do not type tokens, keys, connection strings, or passphrases into a memory
+tool argument. Credentials are resolved through the broker; diagnostics are
+sanitized. Secret-shaped retain content is refused.
 
 ---
 
 ## Method (L2)
 
-### §1 Banks
+### §1 Backends and boundaries
 
-| Bank | Writes | Reads | Holds |
-|---|---|---|---|
-| `pd-<seat>` | The seat | The seat | Own decisions, environment facts, verified commands, review risks |
-| `pd-desk` | LEAD, QUALITY | All seats | Team-wide facts: hosts, conventions, standing decisions, gate outcomes worth remembering |
-| `pd-lead-reports` | LEAD | LEAD | Dispatch and report history |
+`OMEGA_PRIME_MEMORY_BACKEND` accepts `local`, `substrate`, or `hindsight`.
+When unset, the default is `substrate` only if the authoritative resolver
+has an explicitly configured Substrate URL; otherwise it is `local`. This
+setting is a write preference. Recall queries local memory and each
+configured remote independently regardless of the selector.
 
-Your endpoint writes to your own bank only; the gateway derives the bank from the seat token, so
-there is no argument to get wrong. A fact that belongs to the team goes to LEAD or QUALITY with
-its receipt path, and they retain it into `pd-desk`. Writing "the team decided X" into `pd-android`
-makes it invisible to everyone but ANDROID and unreviewable by QUALITY.
+Retain saves locally first. Configured Substrate receives each shared retain
+regardless of selector. Hindsight receives writes only when selected as
+`hindsight`, but remains a recall source whenever configured. A remote
+failure is reported; it does not erase a local save or become a silent local
+fallback. No Hindsight document-ID or server idempotency guarantee is made.
 
-A new team starts with an empty `pd-<seat>` and inherits `pd-desk`'s environment facts through
-`lead_brief`. Nothing else carries over from a template.
+Recall and doctor report `local`, `substrate`, and `hindsight` separately
+using exactly `answered`, `empty`, `not_configured`, `unreachable`, or
+`unauthorized`. Sanitized diagnostics are separate from these states:
+unreachable is not empty, and healthy-source results survive another
+source's failure. Provenance is retained and repo isolation applies across
+sources; do not rely on bank labels or caller input to cross repo boundaries.
+
+Memory `target=user` (the user profile), and memory replace/remove operations
+remain local-only. They do not write to Substrate or Hindsight.
+
+Configure Hindsight only by explicitly setting `HINDSIGHT_URL` to an HTTPS
+service you operate. There is no default URL. Add only the hostname from
+`HINDSIGHT_URL` (not the full URL) to `network.hosts` in
+`omega_prime/contracts/policies/omega-prime.json`; `CredentialBroker.key_for`
+rejects unlisted hosts before resolving the key. Hindsight credentials are
+obtained through the credential broker from environment or a mode-checked
+0600 secret file. Never put the URL or key in settings, a Bot template, or
+chat. With the URL unset, Hindsight credential lookup and network access are
+skipped.
 
 ### §2 What to retain, what never
 
@@ -65,85 +85,95 @@ A new team starts with an empty `pd-<seat>` and inherits `pd-desk`'s environment
 |---|---|---|---|
 | Decisions with their receipt | "Chose staged rollout 10% → 50% → 100% for KanbanOS 2.3; halt on crash-free < 99.5%" + `receipt_path` | Secrets | Redaction is a backstop, not a licence; a retained token is a rotated token |
 | Environment facts | "The dev box has one emulator image; a newer API needs {{ADMIN_DEVICES}}" + `source` or receipt | Unverified claims | Recall would replay the guess as a fact to your future self (PD-1) |
-| Verified commands | "`./gradlew :app:lintDebug` takes 4 min; `lintBaseline` grows silently" + receipt | Other seats' work | Their bank, their receipt; you would be remembering hearsay |
+| Verified commands | "`./gradlew :app:lintDebug` takes 4 min; `lintBaseline` grows silently" + receipt | Unverified or other-seat claims | Recall must not turn hearsay into fact |
 | Review risks and outcomes | "App Review rejected 2.2 for background-location text; fixed by …" + `source` | Transcripts, chat summaries, whole files | Memory is for facts you will need again; documents live in RAGFlow, evidence in receipts |
 
-Ask of each line: if this comes back in a brief six weeks from now, does it still help, and can
-I tell where it came from? A line that fails either question is noise the weekly reflect has to
-prune.
+Ask of each line: if this comes back later, will it help, and can you show where it came from?
+One useful, evidence-backed fact is better than a paragraph of unrelated claims.
 
 ### §3 Retain call shape
 
+The approved command syntax is:
+
+```
+/omega-retain --source <source> -- <content>
+/omega-retain --receipt-path <path> -- <content>
+```
+
+Retain also requires the existing lead approval/grant policy. Supply either
+a source or a receipt path as evidence; a receipt must already exist and be
+within the authorized root. Never use a fake or vague source. Secret-shaped
+content is refused. Keep one concise fact per retain.
+
+The lead tool accepts this evidence-bearing shape:
+
 ```
 lead_memory_retain {
-  content:      "…one fact, plainly stated, with the numbers that matter…",   (8–8000 chars)
-  receipt_path: ".receipts/bot-03-android/kanbanos-2.3-rollout.json",        ← or source
-  source:       "https://github.com/<org>/<repo>/blob/<sha>/docs/<file>.md",
-  graph_id:     "ut-…", task_id: "kanbanos-2.3-rollout",
-  tags:         ["kanbanos", "rollout", "play"]
+  content:      "…one verified fact, plainly stated…",
+  receipt_path: ".receipts/bot-00-omega-prime/task.json",  ← or source
+  source:       "committed file reference or evidence URL",
+  graph_id:     "…", task_id: "…",
+  tags:         ["topic", "decision"]
 }
 ```
 
-- `receipt_path` must match `.receipts/bot-0N-<seat>/<task>.json` and be yours. A receipt path
-  from another seat is refused; a path that does not exist yet is a receipt you have not written.
-- `source` is a URL or a committed file reference. "I read it somewhere" is not a source.
-- `graph_id` and `task_id` let the brief group memories by ticket. Omit them and the fact floats.
-- One fact per call. A paragraph of five facts recalls as one blob and is half useless.
+An operation is saved locally first. A configured Substrate write is required
+regardless of selector; Hindsight is written only when selected. If a required
+remote write fails, the result reports failure even when `local_saved` is
+true.
 
 ### §4 Recall and the brief
 
-`lead_brief` runs at turn start (the gateway caches it five minutes; pass `refresh: true` after
-you retain something you need in the same turn). It returns the substrate brief for the Graph ID,
-recall from your bank and `pd-desk`, and your open tickets. `lead_memory_recall` with a `query`
-answers a specific question; `include_shared: false` narrows to your own bank.
+`lead_brief` runs at turn start. `lead_memory_recall` searches local memory
+and every configured remote independently, retaining source provenance and
+enforcing repo isolation. The selected write backend does not narrow recall.
+Each source reports one of `answered`, `empty`, `not_configured`,
+`unreachable`, or `unauthorized`. A source failure is not an empty result and
+does not suppress valid hits from other sources.
 
-Recall is retrieval, not verification. A recalled command is a command to run again; a recalled
-fact about the environment is a fact to re-check if the receipt is older than the change you are
-making. Recall tells you where the last verified answer was. It cannot tell you that nothing
-changed since.
+Substrate client errors now propagate from `memory_search`; transport and
+protocol failures are reported as source failures, not empty results. An empty
+list means the search succeeded and found no entries.
 
-Recall and the brief fail open (`skills/desk-gateway` §2): an empty brief with a `reason` is not
-"no memories". Note the reason and continue without the cache.
+Recall is retrieval, not verification. Re-run a recalled command or re-check
+an environment fact against current evidence before relying on it.
 
-### §5 Redaction and the weekly reflect
+### §5 Secrets and stale information
 
-The gateway runs the substrate redactor over `content` before it reaches Hindsight, and the audit
-event records only a hash of the arguments. Neither fact changes your behaviour: you do not type
-tokens, passwords, connection strings or the team passphrase into any tool argument (PD-4). A
-redacted retain leaves a hole where the fact was and an event showing a seat sent a secret.
+Never type tokens, passwords, connection strings, or passphrases into a
+memory argument. Hindsight credentials come through the broker; do not put
+the Hindsight URL or key in settings, templates, or memory. Errors and
+provenance are handled without exposing credentials.
 
-`reflect` runs weekly on each bank and folds retained facts into mental models. You do not run
-it, schedule it or wait for it. If a brief surfaces a fact you now know to be stale, retain the
-correction with the new receipt; reflect resolves contradictions towards the newest evidence.
+Re-check recalled facts against current evidence. Do not assume an external
+reflect schedule or Hindsight server behavior.
 
 ---
 
 ## Worked example
 
-**Good — IOS after a TestFlight investigation.**
+**Good — a verified operational fact.**
 
 ```
-receipt written: .receipts/bot-04-ios/kanbanos-2.3-testflight.json (build 412 processed 38 min)
-lead_memory_retain {content: "KanbanOS TestFlight processing takes 30–40 min for builds with
-  the new asset catalog; poll mob_testflight_status no sooner than 30 min after upload",
-  receipt_path: ".receipts/bot-04-ios/kanbanos-2.3-testflight.json",
-  graph_id: "ut-…", task_id: "kanbanos-2.3-testflight", tags: ["kanbanos", "testflight"]}
+receipt written: .receipts/bot-00-omega-prime/task.json
+/omega-retain --receipt-path .receipts/bot-00-omega-prime/task.json -- \
+  "The local fake integration confirmed the selected backend and source state."
 ```
 
-Six weeks later the brief says "expect 30–40 min", the seat does not poll for half an hour, and
-the receipt path tells a reviewer exactly where the number came from.
+The evidence path points to a receipt that already exists. The retained
+statement remains a memory, not a substitute for reopening its evidence.
 
-**Bad — same seat, same afternoon.**
+**Bad — retaining without evidence.**
 
 ```
-lead_memory_retain {content: "ASC key for kanbanos is AKIA… / team id 7X…; TestFlight is slow"}
-→ refused: receipt_path or source required
-lead_memory_retain {content: "TestFlight is slow", source: "https://example.com"}
+/omega-retain -- "Service is slow."
+→ refused: provide `--source` or `--receipt-path`
 ```
 
-The first call would have sent a key through the redactor (and the audit log records the attempt).
-The second satisfies the schema with a fake source and retains nothing useful. In six weeks
-"TestFlight is slow" recalls as a fact with no number, no build, and a source that proves nothing.
+This is a policy-enforced refusal: retain requires either evidence argument.
+When a source is supplied, the caller must judge whether it actually supports
+the claim; a vague source may be accepted by the tool and is not proof of
+verification. Secret-shaped content is refused separately.
 
 ---
 
@@ -151,14 +181,14 @@ The second satisfies the schema with a fake source and retains nothing useful. I
 
 | Mode | Symptom | Fix |
 |---|---|---|
-| Retain without evidence | `refused: receipt_path or source required` | Write the receipt first; memory follows evidence |
-| Fake or vague `source` | Schema passes, nothing verifiable | A URL or committed path someone else can open |
-| Secret in `content` | Redacted hole; audit row | Never type it; the gateway holds secrets |
-| Team fact in a seat bank | Other seats never see it | Send to LEAD/QUALITY with the receipt path for `pd-desk` |
-| Transcript as memory | Brief becomes unreadable | One fact per retain; documents go to RAGFlow |
-| Acting on recall | Claim rests on an old receipt | Re-run or re-open before claiming (PD-1) |
-| Empty brief read as "nothing known" | Fail-open reason ignored | Check `reason`; continue uncached |
-| Stale fact left standing | Brief keeps repeating it | Retain the correction with the new receipt |
+| Retain without evidence | Refused | Write the receipt first or cite a checkable source |
+| Fake or vague `source` | Does not establish evidence | Give a URL or committed file reference that can be checked |
+| Secret in `content` | Refused | Never type secrets; credentials are broker-sourced |
+| Another seat's unverified claim | No attributable evidence | Ask the owner or lead to verify and retain it |
+| Transcript as memory | Poor recall signal | Keep one fact; documents live in the docs plane |
+| Acting on recall | Claim rests on stale evidence | Re-run or reopen before claiming |
+| Source unavailable | Source reports failure, not empty | Record its state and continue only with supported results |
+| Stale fact left standing | Memory may be out of date | Verify and retain a correction with current evidence |
 
 ---
 
@@ -167,7 +197,7 @@ The second satisfies the schema with a fake source and retains nothing useful. I
 | Rule | Gate or directive | Why |
 |---|---|---|
 | `receipt_path` or `source` on every retain | G-2, PD-1 | Memory is downstream of verification, never a substitute for it |
-| No secrets in `content` or any argument | G-3, PD-4 | Redaction is a backstop; the audit event outlives it |
-| Own bank only; team facts via LEAD/QUALITY | PD-2 (ownership, applied to memory) | One writer per bank keeps evidence attributable |
+| No secrets in `content` or any argument | G-3, PD-4 | Secret-shaped content is refused; credentials stay out of memory |
+| Preserve evidence and repo boundaries | PD-2 | Provenance and isolation keep recall attributable |
 | Recall is re-verified before a claim | PD-1 | A recalled exit code is not an observed one |
 </skill>
