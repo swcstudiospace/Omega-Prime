@@ -241,6 +241,7 @@ The table records names and purposes only.
 | `TMPDIR_FILE` | Forwarded file-name counterpart for the child-process temporary directory. |
 | `ULTRATHINK_ROOT` | Selects the ultrathink integration root directory. |
 | `ULTRATHINK_ROOT_FILE` | Names a protected file containing the ultrathink integration root. |
+| `ULTRATHINK_SHIP` | Enables ultrathink ship writes only for the exact values 1 and true. |
 | `ULTRATHINK_STATE_DIR` | Selects persistent state for the ultrathink integration. |
 | `USER` | Identifies the host user inherited by child processes. |
 | `USER_FILE` | Forwarded file-name counterpart for the child-process user name. |
