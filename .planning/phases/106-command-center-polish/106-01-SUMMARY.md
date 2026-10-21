@@ -12,7 +12,7 @@ affects: [106-03, 106-04, 106-05]
 actuals:
   tokens: not-measured
   tasks: 3
-  commits: 9
+  commits: 11
 tech-stack:
   added: []
   patterns: [bounded page-specific collector policy, additive snapshot bucket, shared canonical identity registry]
@@ -96,8 +96,8 @@ status: complete
 2. **Task 2: Separate finished tasks and idle sessions** — `45e3ad9`.
 3. **Task 3: Carry Idle through numbering, hashing and APIs** — `febadb4`.
 
-**Regression corrections:** `36c3d41`, `a7c622e`, `7225337`.  
-**Summary commits:** `608fa0b`, `cb4c61c`; this verification update follows.
+**Regression/compatibility corrections:** `36c3d41`, `a7c622e`, `7225337`, `a21ad25`.  
+**Summary commits:** `608fa0b`, `cb4c61c`, `c27524c`; final evidence update follows.
 ## Files Created/Modified
 
 - `omega_prime/dashboard/collectors/github.py`
@@ -130,11 +130,11 @@ None intended. No poller changes, generated asset changes, external dependency c
 The implementation agent did not run tests, builds, lint or formatters. The integration owner subsequently reported these focused results:
 
 - `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_github_merges_polish.py` — PASS, 4/4.
-- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_model_buckets.py omega_prime/tests/test_dashboard_model.py omega_prime/tests/test_dashboard_process_collectors.py` — PASS, 19/19 after restoring the test fixture assignment.
+- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_model_buckets.py omega_prime/tests/test_dashboard_model.py omega_prime/tests/test_dashboard_process_collectors.py` — PASS, 19/19 after restoring the test fixture assignment and preserving standalone OMP classification.
 - `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_model_buckets.py omega_prime/tests/test_dashboard_task_ids.py omega_prime/tests/test_dashboard_snapshot_contract.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_integration.py` — PASS, 35 tests.
-- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k dashboard` — not run; outer integration owner only.
-
-No baseline fixture transplant was executed, so no baseline assertion failure is claimed. The new regression nodes have focused passing results, but no red-on-base evidence. Supplied baseline files report existing broad collection blockers (`mcp`, `apscheduler`, and setuptools availability); none were rechecked or changed.
+- Focused dashboard family suite — PASS, 158 passed / 1 skipped (integration-owner report; exact invocation was not supplied).
+- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k dashboard` — BLOCKED at collection, exit 2 (integration-owner report); supplied baseline identifies missing `mcp` and `apscheduler` prerequisites.
+No baseline fixture transplant was executed, so no baseline assertion failure is claimed. Regression tests have focused passing results, but no red-on-base evidence. The integration owner reports the broad gate remains blocked during collection; supplied baseline identifies missing `mcp` and `apscheduler` prerequisites. No dependency was changed.
 
 **Host-unverified:** Live GitHub parity and all 7421/live-data behavior remain unverified by design. The assignment prohibited network, Herdr, real task-store/HOME and 7421 access. No claim is made about these live acceptance conditions.
 
