@@ -110,6 +110,31 @@ the explicit `SUBSTRATE_URL=local` loopback opt-in. `HINDSIGHT_URL` defaults
 to unset, which disables the remote bank; set it only to a service you
 operate. `omega_prime/grokbot/SETUP.md` has the full secret table.
 
+The following five `OMEGA_PRIME_DESK_*` variables are optional legacy desk
+settings; none is required for local use:
+
+| Variable | Purpose |
+| --- | --- |
+| `OMEGA_PRIME_DESK_BUS_URL` | Connect the optional desk bus. |
+| `OMEGA_PRIME_DESK_DOCS_INDEX` | Select an optional desk docs index. |
+| `OMEGA_PRIME_DESK_NOTIFY_URL` | Configure an optional notification endpoint. |
+| `OMEGA_PRIME_DESK_CHILD_PROVIDER` | Select a delegate child provider adapter. |
+| `OMEGA_PRIME_DESK_CHILD_MODEL` | Select the delegate child model id. |
+
+The child provider and model settings are distinct: a model id alone needs a
+provider credential available through the configured provider, while naming
+`OMEGA_PRIME_DESK_CHILD_PROVIDER` selects the adapter (including keyless
+`ollama`). Without a configured provider/model combination, `delegate_task`
+remains available but returns `not_configured: provider`; setting a URL for
+one of the other optional planes only enables that plane.
+
+`OMEGA_PRIME_SOLO` defaults to solo mode only for `bot-00-omega-prime`.
+Setting its value to the exact string `0` opts out; every other explicit
+value enables solo mode. In Solo, lead docs search and events use substrate;
+the optional Desk docs, bus, and notify routes are suppressed even if
+configured. Desk bus calls return `not_configured: solo`. If substrate is
+unavailable, Solo does not fall back to Desk or localhost.
+
 Send `/omega-connectors` to walk installer setup: the Notion template in
 [notion-task-dashboard.md](notion-task-dashboard.md), then Notion, then
 Linear, then an optional gateway. Bindings are stored outside the

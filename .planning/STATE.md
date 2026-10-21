@@ -26,6 +26,10 @@ last_activity_desc: Phase 106 plans 01–05 implemented; frontend install/full t
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
+**Historical current focus (v19 closeout):** v19 Installer bindings is complete (phase 96). v18 stays shipped. v17 stays shipped. Historical v17 note: every first-party prompt is wrapped in XML and `python -m omega_prime.tooling.prompt_format --check` enforces it. v1–v16 stay shipped. Phase 77.1 is a separate unchecked ROADMAP phase whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–18 are on main (`.planning/BATCH-01-REPORT.md` … `BATCH-18-REPORT.md`); batch 19 was not the accepted seven. The accepted seven are implemented as v18 phases 89-95. `ci / lint` on main was RED from batch 05 to 17 (21 ruff errors the batch reports had called clean) and was repaired in PR #31: every batch gate MUST run the exact CI commands (`ruff check omega_prime/`, `ruff format --check omega_prime/`, `mypy omega_prime/`, `pytest omega_prime/tests -q`) against current source; never trust old green prose.
+
+**v20 Wiring (on main):** Phase 97 local implementation is executed with verification deferred on authoritative upstream MCP contract evidence; Phase 98 shared memory merged (PR #51); Phase 99 solo mode integrated (PR #48).
+
 **Current focus:** v21 Task Dashboard (Phases 104–106). Phase 104 is complete. Phase 105 local implementation is recorded on `feat/command-center`; Phase 106 local implementation and offline verification are recorded on `feat/command-center-polish`, with broad Python collection and host evidence pending. v20 Phase 97 remains separately deferred pending upstream MCP contract evidence; Phase 77.1 UAT remains user-owned.
 
 ## Current Position
@@ -34,7 +38,9 @@ Phase: 106 (Command Center polish) — LOCAL IMPLEMENTATION COMPLETE; ACCEPTANCE
 Plan: 05 (5/5 phase plans executed; `106-SUMMARY.md` records tests and limitations).
 Status: Frontend npm install, full Vitest suite, production build and build-asset inspection passed; dashboard-file family passed 158 with 1 skipped; dashboard app/static serving passed 13 with 1 skipped; docs/public-repo tests passed 31. The required broad dashboard selector exited 2 during collection because `mcp` and `apscheduler` are absent. Ruff, mypy and polyglot-check are unavailable in this environment. Live GitHub/Herdr, browser screenshots, signed sandbox evidence and real-terminal verification remain pending. No milestone audit/complete/cleanup, export, push, PR, restart of 7421, or merge was run.
 
-## Closeout
+Phase 99 (solo mode, Desk optional) is implemented and integrated onto main after Phase 98; see `.planning/phases/99-solo-mode-desk-optional/99-SUMMARY.md`.
+
+## Closeout — Historical v19
 
 Audit: milestones/v19-MILESTONE-AUDIT.md. Requirements INST-01 through INST-07 are checked. v18 audit remains at milestones/v18-MILESTONE-AUDIT.md. Requirements OPS-01 through OPS-07 stay checked. Pytest after the command-file commit: the three stdio overlay tests passed. The earlier full suite was 4639 passed, 3 skipped, and those three failures only. Ruff, ruff format, and mypy were clean on this branch. Cleanup leaves phase directories in place, matching v17, which is still under .planning/phases.
 
@@ -103,6 +109,7 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ### Roadmap Evolution
 
 - v14 Boundary alignment shipped 2026-10-10: phases 71–74, audit passed 10/10.
+- v20 Wiring opened for phases 97–103. Phase 99 has been implemented in its isolated worktree; integration remains in operator-controlled merge order.
 - Count text in BND-05 and BND-06 moved from 110/147 to 117/154 with the phase 73 tools.
 - v14 application updates were merged through PR #17; v15 continues on `v15-integrated-readiness`.
 - v15 has phases 75–78 and 21 approved requirements, with no unrelated seeds or upstream changes.
@@ -152,3 +159,4 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 - Phase 105 outer-driver work remains: compare live GitHub PR/check/Greptile evidence and organization inventory (a2/a3); inspect fonts, contrast, motion and reduced motion in a browser (a4); produce the signed openshell-podman/Anda receipt (a6); capture all four views with real data (a7); then perform the separately authorized export/publication flow. No local fixtures prove these outcomes.
 - Phase 97 remains deferred pending authoritative upstream MCP path/schema evidence; phase 77.1 live UAT remains user-owned (`/gsd:verify-work 77.1`).
+- Phase 99 is integrated onto main after Phases 97 and 98; it does not mark the milestone complete.
