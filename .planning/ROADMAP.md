@@ -203,4 +203,4 @@ Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's roun
 4. With `OMEGA_PRIME_OMP_BACKEND` unset, every existing engine test passes unchanged (bwrap default untouched); `delegate_task`/`ultrathink_turn` defaults are unchanged without task context.
 5. `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/<files>` green with a temp tasks.json, a fake herdr runner and the fake Anda wrapper only (no herdr, podman, gh, network, or model calls); no existing test weakened, skipped or deleted — the one phase-112 pin that asserted the n4 boundary is updated to assert the n4 contract instead.
 
-- [ ] Phase 113: Sandbox runs visible in Herdr and tasks.json
+- [x] Phase 113: Sandbox runs visible in Herdr and tasks.json
