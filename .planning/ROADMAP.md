@@ -22,6 +22,7 @@
 - ✅ **v18 Operator posture** - Phases 89-95 (shipped 2026-10-14). Seven upgrades accepted when the operator said to continue.
 - ✅ **v19 Installer bindings** - Phase 96 (shipped 2026-10-15). A fresh install binds its own Linear and Notion, treats the existing gateways as optional, and fails setup when `prime-agent` is empty.
 - **v20 Wiring** — Phases 97–103 (in progress 2026-10-21). Staged from the 2026-10-21 read-only wiring audit (`/workspace/omes-bot-wiring-audit/AUDIT.md`): explicit substrate configuration with a safe settings loader, streamable-HTTP/SSE transport and argument/lease/memory contracts, shared memory, solo mode, engine wiring with no time caps, a real local executor, schedulers and dead modules, and Ultrathink integration.
+- **v21 Sandbox wiring (task 00030)** — Phase 110+ (in progress 2026-10-21). Finish the omp-sandbox sbx-2 merge follow-ups (tsc clean, all still-applying Greptile #55 comments fixed with regression tests) before sbx-3 engine-backend work starts. Source contract: `/sandbox/home/refs/uplift2.xml` (node n2) and `/sandbox/home/refs/PR55-greptile-comments.md`.
 
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
@@ -125,3 +126,27 @@ Source evidence: `/workspace/omes-bot-wiring-audit/AUDIT.md` (read-only audit of
 - [ ] Phase 101: Real U2 LocalExecutor
 - [ ] Phase 102: Schedulers, dead modules, env docs
 - [ ] Phase 103: Ultrathink integration and cleanup
+
+### v21 Sandbox wiring (Phase 110) — in progress 2026-10-21
+
+Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's round-1 fixes into `feat/sbx-2-workspace-mount` is committed (3e7be33) but leaves follow-ups, all inside `omp-sandbox/`. Planning only in this stage; execution is one plan (110-01).
+
+**Phase 110 goal:** Make the merged sbx-2 tree typecheck clean and fix every Greptile PR #55 inline comment that still applies at 3e7be33 — each with a regression test — while keeping both parents' behavior (sbx-0 guards and sbx-2 mount variant) intact.
+
+**Requirements:**
+- **W110-01 tsc clean:** `openshell-podman.ts` `#otherSandboxes` calls bare `os(...)` where `this.#os(...)` is meant; two implicit-any lambdas at the same site must be gone. `npx tsc --noEmit` in `omp-sandbox/` exits 0.
+- **W110-02 merge preservation:** `omp-sandbox/package.json`, `src/core/core.ts`, `src/core/providers/tiers.ts` keep sbx-0's guards (single-flight `up`, `validateTiers`, guards suite in `npm test`) and sbx-2's mount variant (`workspace_host_path`, `MOUNT_TIERS`), re-checked against both parents 40338ec and 3ada70b.
+- **W110-03 mounted bwrap sees GSD:** `ensureGsd` (and the same-assumption `gsdCommandsOnHost`) must target `workspaceHostPath` when a workspace is mounted, not the hidden `hostRoot/work` copy.
+- **W110-04 podman uid mapping:** the mount variant must not require host uid 1000; a workspace owned by a non-1000 host user stays writable (map the host user to the policy uid or derive the policy user from the host identity).
+- **W110-05 path_refused reaches callers:** `server.ts` reply mapping carries `PathRefused.code` ("path_refused") instead of collapsing it to "error".
+- **W110-06 probe hygiene:** `vmRoundTrip` must not leave `.agentos-probe.txt` (or any probe artifact) in the mounted host job directory.
+- **W110-07 seed streaming:** `seedFiles` must not hold every seed file's bytes in memory; copy one file at a time.
+- **W110-08 valid dotdot names:** `allowedDir` must accept strictly-inside names like `..job` while still refusing `..` itself, `../` prefixes, and escapes.
+
+**Success criteria:**
+1. `cd omp-sandbox && npx tsc --noEmit` reports 0 errors.
+2. `cd omp-sandbox && npm test` is all green, including one new regression test per W110-03..W110-08.
+3. W110-02 verified by diffing the three merged paths against 40338ec and 3ada70b: guards and mount variant both present.
+4. No test is weakened, skipped, or deleted to make anything pass; all new tests run under Node's built-in runner with fakes only (no podman, openshell, herdr, or network).
+
+- [ ] Phase 110: omp-sandbox sbx-2 merge finish (tsc clean + Greptile #55 round 2)
