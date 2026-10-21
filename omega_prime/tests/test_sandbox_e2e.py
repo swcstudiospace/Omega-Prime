@@ -257,7 +257,8 @@ def test_routine_drives_plan_then_execute_end_to_end(
         tmp_path / "tasks.json",
         rows=[_row("gb:sbx5-plan"), _row("gb:sbx5-exec")],
     )
-    base = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    extra = {"OMEGA_PRIME_OMP_ALLOW_ZAI": "1"}
+    base = _backend_env(tmp_path, omp, script, roots, **extra)
     monkeypatch.chdir(work)  # ultrathink runs on the process cwd
     state = Path(base["OMEGA_PRIME_STATE_DIR"])
 
@@ -382,15 +383,12 @@ def test_forced_plan_gate_blocks_the_row_in_the_same_call(
     work = _git_worktree(roots)
     store = _seed(tmp_path / "tasks.json", rows=[_row("gb:sbx5-gate")])
     token = _shaped_zai_key()  # runtime-built, never a literal
-    env = _backend_env(
-        tmp_path,
-        omp,
-        canary_script,
-        roots,
-        OMEGA_PRIME_TASKS_PATH=str(store),
-        OMEGA_PRIME_TASK_ID="gb:sbx5-gate",
-        ZAI_API_KEY=token,
-    )
+    extra = {
+        "OMEGA_PRIME_TASKS_PATH": str(store),
+        "OMEGA_PRIME_TASK_ID": "gb:sbx5-gate",
+        "ZAI_API_KEY": token,
+    }
+    env = _backend_env(tmp_path, omp, canary_script, roots, **extra)
     env.pop("ANTHROPIC_API_KEY", None)  # no other allowlisted plan
     assert "OMEGA_PRIME_OMP_ALLOW_ZAI" not in env
     state = Path(env["OMEGA_PRIME_STATE_DIR"])
