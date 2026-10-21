@@ -24,6 +24,7 @@ export function execCapture(cmd: string, args: string[], opts: SpawnOptions & { 
     p.stderr!.on("data", (b) => { stderr += b; if (stderr.length > 1_000_000) stderr = stderr.slice(-500_000); });
     const t = opts.timeoutMs ? setTimeout(() => { stderr += `\n[omp-sandbox] timeout after ${opts.timeoutMs}ms`; if (killGroup && p.pid) killTree(p.pid, "SIGKILL"); else p.kill("SIGKILL"); }, opts.timeoutMs) : null;
     p.on("error", (e) => { stderr += String(e); });
+    p.stdin!.on("error", (e) => { stderr += `\n[omp-sandbox] stdin: ${e}`; });
     p.on("close", (code) => { if (t) clearTimeout(t); resolve({ code, stdout, stderr }); });
     if (opts.input !== undefined) p.stdin!.end(opts.input); else p.stdin!.end();
   });

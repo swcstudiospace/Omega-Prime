@@ -23,6 +23,8 @@ async function handle(req: any) {
     case "answer_question": return core.answer(a.stage_id, a.request_id, { selected: a.selected, text: a.text, perQuestion: a.per_question });
     case "sandbox_status": return core.status(a.stage_id);
     case "abort": return core.abort(a.stage_id);
+    case "run_check": return core.runCheck({ argv: a.argv, cwd: a.cwd, timeout_ms: a.timeout_ms, label: a.label });
+    case "export_commits": return core.exportCommits({ out: a.out });
     case "down": return core.down();
     default: throw new Error(`unknown op ${req.op}`);
   }
