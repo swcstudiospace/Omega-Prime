@@ -3,10 +3,17 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import type { Snapshot } from '../types'
 import { App } from '../App'
 import { fixture } from '../test/fixtures'
+class PassiveEventSource {
+  onopen: ((event: Event) => void) | null = null
+  onerror: ((event: Event) => void) | null = null
+  constructor(_url: string) {}
+  addEventListener(_name: string, _listener: EventListenerOrEventListenerObject) {}
+  close() {}
+}
 const state = vi.hoisted(() => ({ data: null as Snapshot | null, loading: false }))
 vi.mock('../hooks/useDashboard', () => ({ useDashboard: () => ({ data: state.data, loading: state.loading, error: null, receivedAt: state.data ? Date.now() : null, live: true, refresh: vi.fn() }) }))
-beforeEach(() => { state.data = fixture; state.loading = false; window.history.replaceState(null, ''); window.location.hash = '#/overview'; sessionStorage.clear() })
-afterEach(() => cleanup())
+beforeEach(() => { vi.stubGlobal('EventSource', PassiveEventSource); state.data = fixture; state.loading = false; window.history.replaceState(null, ''); window.location.hash = '#/overview'; sessionStorage.clear() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 describe('Task detail routes', () => {
   it('opens numbered task detail with recorded links PR evidence wiring and events', async () => {
     window.location.hash = '#/tasks/worker%2F1'
@@ -18,7 +25,7 @@ describe('Task detail routes', () => {
     expect(screen.queryByRole('link', { name: 'Unsafe link' })).not.toBeInTheDocument()
     expect(screen.getByText('CI: success · Greptile 4/5 · from #12')).toBeInTheDocument()
     expect(screen.getByText(/Task resumed/)).toBeInTheDocument()
-    expect(screen.getByText('Terminal streaming not connected')).toBeInTheDocument()
+    expect(screen.getByText('Read only · redacted · last 200 lines')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('link', { name: '← Back to All tasks' }))
     await waitFor(() => expect(window.location.hash).toBe('#/tasks'))
   })
