@@ -17,10 +17,11 @@ export function redactSecrets(text: string): string {
 
 /** `killGroup`: run the command as its own process group and kill the whole group on timeout.
  *  `onSpawn`: called with the child's pid (its group id under killGroup) so an owner can track and reap it. */
-export function execCapture(cmd: string, args: string[], opts: SpawnOptions & { timeoutMs?: number; input?: string; killGroup?: boolean; onSpawn?: (pid: number) => void } = {}) {
+export function execCapture(cmd: string, args: string[], opts: SpawnOptions & { timeoutMs?: number; input?: string; killGroup?: boolean; onSpawn?: (pid: number) => void; extraFds?: number[] } = {}) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-    const { killGroup, onSpawn, ...spawnOpts } = opts;
-    const p = spawn(cmd, args, { ...spawnOpts, detached: !!killGroup, stdio: ["pipe", "pipe", "pipe"] });
+    const { killGroup, onSpawn, extraFds, ...spawnOpts } = opts;
+    // `extraFds` are handed to the child as fds 3, 4, ... (e.g. a pinned directory for `bwrap --bind-fd 3`).
+    const p = spawn(cmd, args, { ...spawnOpts, detached: !!killGroup, stdio: ["pipe", "pipe", "pipe", ...(extraFds ?? [])] });
     if (p.pid && onSpawn) onSpawn(p.pid);
     let stdout = "", stderr = "";
     p.stdout!.on("data", (b) => { stdout += b; if (stdout.length > 4_000_000) stdout = stdout.slice(-2_000_000); });

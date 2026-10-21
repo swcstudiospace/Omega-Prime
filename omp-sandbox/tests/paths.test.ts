@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { allowedDir, copySeed, seedFiles, PathRefused } from "../src/core/paths.ts";
-import { ROOT } from "../src/core/config.ts";
+import { dirname, join } from "node:path";
+import { allowedDir, copySeed, seedFiles, PathRefused, pinDir, pinStillNamed, unpinDir } from "../src/core/paths.ts";
+import { ROOT, NODE24_BIN, SANDBOX_AGENT_BIN } from "../src/core/config.ts";
 import { SANDBOX_MOUNT, vmRoundTrip } from "../src/core/vm.ts";
 import { gatewayToml, mountDriverConfig, podmanPolicyYaml } from "../src/core/providers/openshell-podman.ts";
 import { startTier, MOUNT_TIERS } from "../src/core/providers/tiers.ts";
@@ -179,4 +179,40 @@ test("vmRoundTrip probes only the tier's private home, never the mounted workdir
       assert.ok(s.includes("/home"), `every probe access stays under the private home: ${s}`);
     }
   }
+});
+
+// Greptile round 3 on sbx-2: a checked worktree swapped for a symlink before (or after) the mount cannot redirect it.
+test("pinDir holds the checked directory and refuses a name swapped for a symlink", () => {
+  const parent = join(root, "pin-parent"); const child = join(parent, "child"); mkdirSync(child, { recursive: true });
+  const checked = allowedDir(child, [root], "ws");
+  const pin = pinDir(checked, "ws");
+  try {
+    assert.equal(pinStillNamed(pin), true);
+    const st = statSync(checked); assert.deepEqual([pin.dev, pin.ino], [st.dev, st.ino]);
+    // Another job owning `parent` swaps `child` for a link to a folder outside the allowlisted roots.
+    renameSync(child, join(parent, "child-orig")); symlinkSync(outside, child);
+    assert.equal(pinStillNamed(pin), false, "the name now leads elsewhere");
+    assert.throws(() => pinDir(checked, "ws"), (e: any) => e instanceof PathRefused && /changed since it was checked/.test(e.message));
+    // A swapped parent folder is caught too.
+    rmSync(child); renameSync(join(parent, "child-orig"), child);
+    renameSync(parent, join(root, "pin-parent-orig")); symlinkSync(join(root, "pin-parent-orig"), parent);
+    assert.throws(() => pinDir(checked, "ws"), /changed since it was checked/);
+  } finally { unpinDir(pin); }
+});
+
+const bwrapReady = existsSync("/usr/bin/bwrap") && existsSync(NODE24_BIN) && existsSync(dirname(SANDBOX_AGENT_BIN));
+test("bwrap binds the pinned descriptor, so a later symlink swap does not move the mount", { skip: !bwrapReady }, async () => {
+  const { BwrapTier } = await import("../src/core/providers/bwrap.ts");
+  const parent = join(root, "pin-bwrap"); const ws = join(parent, "job"); mkdirSync(ws, { recursive: true });
+  const hostRoot = join(box, "bw-host"); for (const d of ["work", "home", "bin"]) mkdirSync(join(hostRoot, d), { recursive: true });
+  const t = new BwrapTier(hostRoot, allowedDir(ws, [root], "ws"));
+  assert.throws(() => t.exec(["true"]), /not pinned/, "no pin before start(): refuse rather than bind by name");
+  t.pinWorkspace();
+  try {
+    renameSync(ws, join(parent, "job-orig")); symlinkSync(outside, ws);
+    const r = await t.exec(["sh", "-c", "echo pinned > /sbx/work/proof.txt"], { cwd: "/sbx" });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(join(parent, "job-orig", "proof.txt"), "utf8"), "pinned\n", "write lands in the checked directory");
+    assert.equal(existsSync(join(outside, "proof.txt")), false, "never in the symlink's target");
+  } finally { await t.dispose(); }
 });

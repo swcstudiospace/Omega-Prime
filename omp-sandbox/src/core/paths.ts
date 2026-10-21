@@ -33,6 +33,36 @@ export function allowedDir(p: unknown, roots: readonly string[], what: string): 
   throw new PathRefused(`${what} is not under an allowlisted root (${roots.join(", ")})`);
 }
 
+/** A checked workspace directory held open, so a mount uses the directory that was checked, not whatever its name now points to. */
+export type PinnedDir = { readonly path: string; readonly fd: number; readonly dev: number; readonly ino: number };
+
+/**
+ * Open the allowlist-resolved directory `real` without following a link and confirm the descriptor is that exact
+ * directory (its /proc path, else its real path, still equals `real`). A parent or the folder itself replaced by a
+ * symlink since `allowedDir` is refused. Close it with `unpinDir`.
+ */
+export function pinDir(real: string, what: string): PinnedDir {
+  let fd: number;
+  try { fd = openSync(real, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); }
+  catch (e: any) { throw new PathRefused(`${what} changed since it was checked (${e?.code === "ELOOP" ? "replaced by a symlink" : "cannot be opened"})`); }
+  try {
+    let where: string | null = null;
+    try { where = readlinkSync(`/proc/self/fd/${fd}`); } catch { /* no procfs */ }
+    const st = fstatSync(fd);
+    const same = where !== null ? where === real : (() => { try { const r = statSync(realpathSync(real)); return realpathSync(real) === real && r.ino === st.ino && r.dev === st.dev; } catch { return false; } })();
+    if (!same || !st.isDirectory()) throw new PathRefused(`${what} changed since it was checked (now resolves elsewhere)`);
+    return { path: real, fd, dev: st.dev, ino: st.ino };
+  } catch (e) { closeSync(fd); throw e; }
+}
+
+/** Whether the name of a pinned directory still leads, link-free, to the same directory. */
+export function pinStillNamed(pin: PinnedDir): boolean {
+  try { const st = lstatSync(pin.path); return !st.isSymbolicLink() && realpathSync(pin.path) === pin.path && st.ino === pin.ino && st.dev === pin.dev; }
+  catch { return false; }
+}
+
+export function unpinDir(pin: PinnedDir | null) { if (pin) try { closeSync(pin.fd); } catch { /* already closed */ } }
+
 /** Files to seed from `src`. Path-only entries: bytes are read at copy time (core.ts #seed), never buffered here.
  *  Skips SEED_SKIP names at any depth and every symlink. */
 export function seedFiles(src: string): { files: Array<{ rel: string; path: string }>; skipped: string[] } {
