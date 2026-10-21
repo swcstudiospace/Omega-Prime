@@ -71,6 +71,11 @@ class FakeSubstrate:
             return {"error": self.error[0], "reason": self.error[1]}
         return {"body": {"accepted": True}}
 
+    def memory_search(self, query, scope, limit, *, repo=None):
+        if self.error:
+            raise RuntimeError(self.error[1])
+        return []
+
 
 class FakeBus:
     def __init__(self):
@@ -344,7 +349,8 @@ def test_roster_status_absorbed_seats_from_default_json(tmp_path: Path):
     assert status["packs"] == []
 
 
-def test_doctor_register_install_and_check(tmp_path: Path):
+def test_doctor_register_install_and_check(tmp_path: Path, monkeypatch: Any):
+    monkeypatch.delenv("SUBSTRATE_URL", raising=False)
     registry = ToolRegistry()
     ctx = _ctx(tmp_path, registry=registry)
     client = LeadClient(ctx)
@@ -374,8 +380,10 @@ def test_doctor_register_install_and_check(tmp_path: Path):
     assert check["checks"]["memory"]["green"] is True
     assert check["checks"]["tools"] == {"green": True, "pack": 16, "live": 16}
     assert check["checks"]["roster"]["green"] is True
-    assert check["checks"]["substrate"]["green"] is False
-    assert check["green"] is False
+    assert check["checks"]["substrate"]["green"] is True
+    assert check["checks"]["substrate"]["state"] == "not_configured"
+    assert check["checks"]["substrate"]["attempted"] is False
+    assert check["green"] is True
     bare = client.doctor("check")
     assert bare["checks"]["prompt"]["green"] is False
     assert bare["checks"]["skills"]["missing"] == ["lead-pack", "debugging"]
@@ -419,23 +427,24 @@ def test_doctor_settings_provenance_is_value_free(
         assert "rejected_keys" in settings["reasons"]
 
 
-def test_doctor_reports_configured_only_substrate_and_anonymous_warning(
+def test_doctor_reports_configured_substrate_source_failure_and_anonymous_warning(
     tmp_path: Path,
 ) -> None:
     client = LeadClient(
         _ctx(
             tmp_path,
-            substrate=object(),
+            substrate=FakeSubstrate(error=("unreachable", "offline")),
             substrate_configured=True,
             substrate_auth_configured=False,
         )
     )
     result = client.doctor("check")
+    assert result["green"] is False
     substrate = result["checks"]["substrate"]
-    assert substrate["green"] is True
+    assert substrate["green"] is False
     assert substrate["configured"] is True
-    assert "configured only" in substrate["detail"]
-    assert "reachability not checked" in substrate["detail"]
+    assert substrate["state"] == "unreachable"
+    assert substrate["attempted"] is True
     assert "anonymous mode" in substrate["detail"]
 
 
@@ -487,17 +496,55 @@ def test_memory_retain_and_recall(tmp_path: Path):
         "secret_refused"
         in client.memory_retain(f"key {FAKE_KEY}", source="chat")["error"]
     )
+    client.ctx._brief_cache["stale"] = (0, {"recall": {"results": []}})
     kept = client.memory_retain(
-        "desk uses receipts", source="chat", tags=["core"], graph_id="g-1"
+        "desk uses receipts",
+        receipt_path="receipts/abc.json",
+        source="chat",
+        tags=["core"],
+        graph_id="g-1",
+        task_id="t-1",
     )
-    assert kept == {"ok": True, "bank": "omega-prime-lead"}
+    assert kept["ok"] is True
+    assert kept["local_saved"] is True
+    assert kept["backends"] == {
+        "local": {"state": "answered", "attempted": True, "participation": "required"},
+        "substrate": {
+            "state": "not_configured",
+            "attempted": False,
+            "participation": "not_configured",
+        },
+        "hindsight": {
+            "state": "not_configured",
+            "attempted": False,
+            "participation": "not_configured",
+        },
+    }
+    assert client.ctx._brief_cache == {}
     recalled = client.memory_recall("receipts")
-    assert recalled["banks"] == ["omega-prime-lead", "omega-prime-desk"]
-    assert any(
-        "desk uses receipts" in entry for entry in recalled["results"][0]["entries"]
-    )
-    assert client.memory_recall("nothing-here")["results"][0]["entries"] == []
-    assert "not_configured" in LeadClient(LeadContext()).memory_recall("q")["error"]
+    assert "results" in recalled and "backends" in recalled
+    assert recalled["results"][0]["content"] == "desk uses receipts"
+    provenance = recalled["results"][0]["sources"][0]
+    assert provenance["backend"] == "local"
+    assert provenance["source"] == "chat"
+    assert provenance["tags"] == ["core"]
+    assert provenance["graph_id"] == "g-1"
+    assert provenance["receipt_path"] == "receipts/abc.json"
+    assert provenance["task_id"] == "t-1"
+    assert client.ctx.memory is not None
+    assert "[pack:lead]" not in client.ctx.memory.memory_entries[0]
+    assert client.memory_recall("nothing-here")["results"] == []
+    assert LeadClient(LeadContext()).memory_recall("q") == {
+        "selected_backend": "local",
+        "scope": "default",
+        "repo": None,
+        "backends": {
+            "local": {"state": "not_configured", "attempted": False},
+            "substrate": {"state": "not_configured", "attempted": False},
+            "hindsight": {"state": "not_configured", "attempted": False},
+        },
+        "results": [],
+    }
 
 
 def test_receipt_check_paths(tmp_path: Path, monkeypatch: Any):
@@ -1180,4 +1227,18 @@ def test_memory_retain_refuses_secrets_in_metadata(tmp_path: Path):
     kept = client.memory_retain(
         "clean note", source="chat", tags=["core"], graph_id="g-1"
     )
-    assert kept == {"ok": True, "bank": "omega-prime-lead"}
+    assert kept["ok"] is True
+    assert kept["local_saved"] is True
+    assert kept["backends"] == {
+        "local": {"state": "answered", "attempted": True, "participation": "required"},
+        "substrate": {
+            "state": "not_configured",
+            "attempted": False,
+            "participation": "not_configured",
+        },
+        "hindsight": {
+            "state": "not_configured",
+            "attempted": False,
+            "participation": "not_configured",
+        },
+    }

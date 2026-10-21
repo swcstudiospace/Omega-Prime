@@ -3,13 +3,7 @@
 Omega Prime is a surface on the agent substrate: the shared briefing, event
 trail, memory, and docs plane that every agent on the install uses. When
 the surface is wired, turns open with a brief of what other agents are
-doing, report their own tool trail with graph provenance, share memory
-across agents, recall episodes from Hindsight, and answer docs questions
-from RAGflow.
-When it is not wired, Omega Prime remains usable locally; substrate calls
-degrade visibly instead of silently targeting localhost. No substrate URL
-means `not_configured`; loopback is available only through the explicit
-`SUBSTRATE_URL=local` opt-in.
+doing, report their own tool trail with graph provenance, share memory across agents, recall episodes from Hindsight, and answer docs questions from RAGflow. Memory search queries local notes and each configured Substrate and Hindsight source independently; per-source failures stay visible instead of being hidden by fallback. When it is not wired, Omega Prime remains usable locally; substrate calls degrade visibly instead of silently targeting localhost. No substrate URL means `not_configured`; loopback is available only through the explicit `SUBSTRATE_URL=local` opt-in.
 
 ## What is wired to what
 
@@ -19,7 +13,7 @@ means `not_configured`; loopback is available only through the explicit
 | Turn/tool/file/session events | `POST /events` | GreptimeDB ledger |
 | Shared memory write/search | `memory_write` / `memory_search` | TimescaleDB index |
 | Docs answers | `docs_search` tool | RAGflow |
-| Episodic retain/recall/reflect | Hindsight service, `ultrathink` bank | hindsight-api |
+| Episodic memory | Configured Hindsight recall; writes only when selected | hindsight-api |
 | Task claims + leases | `substrate_graph_*` tools | TimescaleDB index |
 
 Omega Prime never touches GreptimeDB, TimescaleDB, or DragonflyDB directly. Those
@@ -88,19 +82,70 @@ errors so no caller mistakes a lost write for a landed one:
 | --- | --- |
 | Brief (`POST /brief`) | Fail open: empty brief (`""`) |
 | Event emit (`POST /events`) | Fail open: `stored: false` plus a redacted error |
-| Shared memory search | Fail open: empty results (`[]`) |
+| Shared memory recall/retain | Per-source states; local-first retain, visible required-write failures; transport failures are reported as unreachable or unauthorized, never empty results |
 | Shared memory writes, graph claim/release/complete/heartbeat | Fail closed: caller gets a state-labelled error |
 | Docs search (`docs_search`) | Returns an explicit state-labelled error, never an empty success |
-| Hindsight retain/recall | Falls back to the local bank-tagged store |
+| Hindsight retain/recall | Local-first retention; recall reports the Hindsight source state without suppressing other sources |
 | Reflect, page search | Degrade to empty |
 
 Briefs are cached per session and written to `.substrate/BRIEF.md` as the
 offline fallback. Event intake carries kind/summary/surface plus caller
 fields; tool summaries carry names and file paths only — tool
 arguments never leave the process; prompt summaries are truncated and pass
-through broker redaction. Memory-write arguments (`scope`, `kind`, `text`,
-plus optional `trust`/`ttl`/`source_event`) are the write channel; reads
-take a query plus optional `scope`/`limit` and return entries only.
+through broker redaction. Memory coordination validates scope and repo, searches
+all configured sources independently, and preserves source provenance.
+
+### Memory selection, recall, and retention
+
+`OMEGA_PRIME_MEMORY_BACKEND` accepts `local`, `substrate`, or `hindsight`.
+It is a write preference, not a recall filter: recall queries local memory and
+each configured remote independently, regardless of the selected value.
+Without an explicit selector, `substrate` is the default only when the
+authoritative Substrate resolver has an explicitly configured URL; otherwise
+the default is `local`. An explicitly selected but unavailable/unconfigured
+remote is reported as such, not silently replaced by another write
+destination.
+
+Recall and doctor report all three backends with exactly these states:
+`answered`, `empty`, `not_configured`, `unreachable`, or `unauthorized`.
+Sanitized diagnostics are separate from state; per-source failure reports may
+include an `error_type` discriminator (`protocol_error` or `tool_error`) so
+phase 97's typed failures remain distinguishable without adding state values.
+Results preserve source provenance and repo boundaries: an unscoped request
+accepts only records with no repo, and a repo-scoped request requires an exact
+repo match. Source scores are not compared as if they shared a scale.
+
+The Substrate transport/status behavior follows phase 97's authoritative
+source-aware contract. Transport failures are reported as `unreachable` or
+`unauthorized`, never as an empty result; the optional `repo` filter is
+forwarded. Upstream mount/schema compatibility remains subject to phase 97's
+verification work.
+
+Retain saves locally first. If Substrate is configured, it is also published
+there for every selector; a failed required remote write is reported and does
+not undo the local save. Hindsight is written only when selected as
+`hindsight`; configured Hindsight is still searched on recall. No automatic
+Hindsight-to-local fallback hides a failed source, and no server-side
+idempotency or document-ID guarantee is implied.
+
+Configure Hindsight only with an explicitly set `HINDSIGHT_URL` using HTTPS;
+there is no default or hosted URL. The URL must not contain user information,
+query, or fragment. Add only the hostname from `HINDSIGHT_URL` (not the full
+URL) to `network.hosts` in `omega_prime/contracts/policies/omega-prime.json`;
+`CredentialBroker.key_for` rejects unlisted hosts before resolving the key.
+Hindsight keys are resolved through the credential broker from environment or a mode-checked 0600 secret file. Do not put a Hindsight
+URL or key in Omega Prime settings, a Bot template, or chat. If the URL is
+unset, Hindsight credential lookup and network access are skipped.
+
+Shared retention is distinct from personal local memory editing. Growth's
+memory `target=user` (user-profile), and memory replace/remove operations,
+remain local-only; they do not publish to Substrate or Hindsight.
+
+The approved command form is `/omega-retain --source <source> -- <content>`
+or `/omega-retain --receipt-path <path> -- <content>`. Retain requires
+approval through the lead path and explicit evidence (`source` or a receipt
+path); secret-shaped content is refused. Local save alone is not overall
+success when a required configured remote publication fails.
 
 ## Probes
 

@@ -1,14 +1,12 @@
-"""Phase 40: Hindsight service client + local-fallback bridge."""
+"""Hindsight service client contract tests."""
 
 from __future__ import annotations
 
 import pytest
 
-from omega_prime.memory.hindsight import Hindsight
-from omega_prime.memory.hindsight_bridge import HindsightBridge
 from omega_prime.memory.hindsight_service import HindsightError, HindsightService
-from omega_prime.memory.store import MemoryStore
 from omega_prime.providers.base import ProviderError
+from omega_prime.providers.http import HttpTransport
 
 TOKEN = "hs-secret-token"
 BANK_URL = "https://hs.local/v1/default/banks/ultrathink"
@@ -128,10 +126,13 @@ def test_retain_transport_failure_raises() -> None:
         service.retain(["x"])
 
 
-def test_recall_texts_and_limit() -> None:
-    results = [{"id": f"m{i}", "text": f"fact {i}"} for i in range(5)]
+def test_recall_hits_and_limit() -> None:
+    results = [
+        {"id": f"m{i}", "text": f"fact {i}", "score": i, "metadata": {"source": "test"}}
+        for i in range(5)
+    ]
     service, transport = _service([{"results": results}])
-    assert service.recall("sky", limit=2) == ["fact 0", "fact 1"]
+    assert service.recall("sky", limit=2) == results[:2]
     assert transport.requests[0]["body"] == {
         "query": "sky",
         "types": ["observation"],
@@ -173,7 +174,7 @@ def test_reflect_text_passthrough() -> None:
 
 
 def test_search_pages_hits() -> None:
-    hits = [{"page_id": "p1", "title": "t"}, "junk"]
+    hits = [{"page_id": "p1", "title": "t"}]
     service, transport = _service([{"results": hits, "total": 1}])
     assert service.search_pages("sky") == [{"page_id": "p1", "title": "t"}]
     request = transport.requests[0]
@@ -189,26 +190,27 @@ def test_search_pages_hits() -> None:
 
 
 def test_bad_bank_and_base_url() -> None:
-    with pytest.raises(ValueError):
-        HindsightService("https://hs.local", bank="has space")
-    with pytest.raises(ValueError):
-        HindsightService("notaurl")
+    for url in (
+        "http://hs.local",
+        "https://user:pass@hs.local",
+        "https://hs.local/path",
+        "https://hs.local?token=secret",
+        "https://hs.local#fragment",
+    ):
+        with pytest.raises(ValueError):
+            HindsightService(url)
+    for bank in ("has space", "../admin", "bank/other", "%2fadmin"):
+        with pytest.raises(ValueError):
+            HindsightService("https://hs.local", bank=bank)
     assert HindsightService("https://hs.local/").base_url == "https://hs.local"
 
 
 def test_default_base_url_is_unset_and_refuses_to_construct() -> None:
-    from pathlib import Path
-
     from omega_prime.memory.hindsight_service import DEFAULT_BASE_URL
 
     assert DEFAULT_BASE_URL == ""
-    with pytest.raises(ValueError, match="non-empty"):
+    with pytest.raises(ValueError, match="explicitly configured"):
         HindsightService()
-    body = (
-        Path(__file__).resolve().parents[1] / "memory" / "hindsight_service.py"
-    ).read_text(encoding="utf-8")
-    assert "hindsight-api-production" not in body
-    assert "up.railway.app" not in body
 
 
 def test_token_never_leaks() -> None:
@@ -218,52 +220,89 @@ def test_token_never_leaks() -> None:
     assert TOKEN not in str(exc.value)
 
 
-def _bridge(script: list, tmp_path) -> tuple[HindsightBridge, _FakeTransport]:
-    service, transport = _service(script)
-    store = MemoryStore(tmp_path / "mem")
-    local = Hindsight(store, bank="ultrathink")
-    local.retain("local sky fact")
-    return HindsightBridge(service, local), transport
+def test_malformed_responses_raise_typed_error() -> None:
+    service, _ = _service([{"results": ["ignored malformed row"]}])
+    with pytest.raises(HindsightError) as exc:
+        service.recall("sky")
+    assert exc.value.code == "malformed_response"
+    assert exc.value.status == "unreachable"
+
+    service, _ = _service([{}])
+    with pytest.raises(HindsightError) as exc:
+        service.retain(["sky"])
+    assert exc.value.code == "malformed_response"
 
 
-def test_bridge_service_ok_passthrough(tmp_path) -> None:
-    bridge, transport = _bridge(
-        [
-            {"success": True, "bank_id": "u", "items_count": 1},
-            {"results": [{"id": "m1", "text": "shared sky fact"}]},
-        ],
-        tmp_path,
+def test_auth_failure_uses_structured_status_and_redaction_failure_is_safe() -> None:
+    service, _ = _service([ProviderError("HTTP 401 from endpoint")])
+    with pytest.raises(HindsightError) as exc:
+        service.recall("sky")
+    assert exc.value.status == "unreachable"
+    assert exc.value.code == "transport_error"
+
+    class TypedStatusError(Exception):
+        status_code = 401
+
+    service, _ = _service([TypedStatusError("request denied")])
+    with pytest.raises(HindsightError) as exc:
+        service.recall("sky")
+    assert exc.value.status == "unauthorized"
+    assert exc.value.code == "http_401"
+
+    class BrokenRedactor(_FakeBroker):
+        def redact(self, text):
+            raise RuntimeError(TOKEN)
+
+    transport = _FakeTransport([ProviderError(f"private {TOKEN}")])
+    service = HindsightService(
+        "https://hs.local", transport=transport, broker=BrokenRedactor()
     )
-    assert bridge.retain("sky") == {"ok": True, "count": 1}
-    assert bridge.recall("sky") == ["shared sky fact"]
-    assert len(transport.requests) == 2
+    with pytest.raises(HindsightError) as exc:
+        service.recall("sky")
+    assert TOKEN not in str(exc.value)
 
 
-def test_bridge_falls_back_to_local(tmp_path) -> None:
-    bridge, _ = _bridge([ProviderError("down")] * 4, tmp_path)
-    assert bridge.retain("local grass fact") == {"ok": True}
-    assert bridge.recall("local") == ["local sky fact", "local grass fact"]
-    # Intentional misuse: blanks and non-strings are skipped, not sent.
-    assert bridge.retain_batch(["a", "", 42, "b"]) == {"ok": True, "count": 2}  # type: ignore[list-item]
-    assert bridge.reflect("why?") == ""
-    assert bridge.search_pages("sky") == []
-
-
-def test_bridge_batch_service_path_skips_blanks(tmp_path) -> None:
-    bridge, transport = _bridge(
-        [{"success": True, "bank_id": "u", "items_count": 2}], tmp_path
+def test_http_status_error_is_typed_unauthorized_end_to_end(monkeypatch) -> None:
+    transport = HttpTransport(max_retries=0)
+    response_body = b'{"secret":"response body must stay private"}'
+    monkeypatch.setattr(
+        transport,
+        "_request",
+        lambda *_args: (403, {}, response_body),
     )
-    # Intentional misuse: blanks and non-strings are skipped, not sent.
-    assert bridge.retain_batch(["a", "", "b", 7]) == {"ok": True, "count": 2}  # type: ignore[list-item]
-    assert transport.requests[0]["body"] == {
-        "items": [{"content": "a"}, {"content": "b"}]
-    }
-    assert bridge.retain("  ") == {
-        "ok": False,
-        "reason": "content must be a non-empty string",
-    }
-    # Intentional misuse: a bare string is not a list of items.
-    assert bridge.retain_batch("nope") == {  # type: ignore[arg-type]
-        "ok": False,
-        "reason": "items must be a list of strings",
-    }
+    service = HindsightService(
+        "https://hs.local", transport=transport, broker=_FakeBroker()
+    )
+
+    with pytest.raises(HindsightError) as exc:
+        service.recall("sky")
+
+    assert exc.value.status == "unauthorized"
+    assert exc.value.code == "http_403"
+    assert "response body must stay private" not in str(exc.value)
+    assert "hs.local" not in str(exc.value)
+
+
+def test_broker_failure_is_sanitized_unauthorized() -> None:
+    private_detail = "broker response contains private credential details"
+
+    class FailingBroker(_FakeBroker):
+        def key_for(self, provider, url: str) -> str:
+            raise RuntimeError(private_detail)
+
+    service = HindsightService(
+        "https://hs.local", transport=_FakeTransport([]), broker=FailingBroker()
+    )
+
+    with pytest.raises(HindsightError) as exc:
+        service.recall("sky")
+
+    assert exc.value.status == "unauthorized"
+    assert exc.value.code == "credentials_unavailable"
+    assert private_detail not in str(exc.value)
+
+
+def test_default_hindsight_transport_disables_retries() -> None:
+    service = HindsightService("https://hs.local")
+
+    assert service._transport._max_retries == 0
