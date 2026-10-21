@@ -1023,3 +1023,17 @@ def test_read_frame_redacts_off_the_event_loop():
         terminal_ws.redact_ansi_frame = original
     assert seen == [False]
     assert BEARER_CANARY not in out
+
+
+def test_send_text_routes_nul_bytes_through_ctrl_space():
+    # xterm sends Ctrl+Space as NUL, which cannot travel inside an argv string.
+    runner = _fake_runner()
+    bridge = HerdrBridge(runner=runner)
+    asyncio.run(bridge.send_text("w2:p4", "a\x00b\x00"))
+    assert runner.calls == [
+        ["herdr", "pane", "send-text", "w2:p4", "a"],
+        ["herdr", "pane", "send-keys", "w2:p4", "ctrl+space"],
+        ["herdr", "pane", "send-text", "w2:p4", "b"],
+        ["herdr", "pane", "send-keys", "w2:p4", "ctrl+space"],
+    ]
+    assert all("\x00" not in part for call in runner.calls for part in call)

@@ -475,3 +475,79 @@ def test_apply_skips_rows_remapped_during_evidence(tmp_path, capsys):
     assert rows["gb:00031-b"].get("stale") is None, rows["gb:00031-b"].get("stale")
     assert "gb:00031-b" not in {entry["id"] for entry in report["dead"]}
     assert rows["gb:00031-a"]["stale"]["reason"] == "pane_gone"
+
+
+def _seed_with_finished(path, rows, finished):
+    _seed(path, rows)
+    data = json.loads(path.read_text())
+    data["finished"] = finished
+    path.write_text(json.dumps(data) + "\n")
+
+
+def test_owner_mapped_row_is_not_reattached_and_is_judged(tmp_path, capsys):
+    path = tmp_path / "tasks.json"
+    _seed(
+        path,
+        [
+            _row(
+                "gb:00031-c",
+                owner={"kind": "herdr-pane", "ref": "w1:p1"},
+                last_activity_at=_iso(30),
+            )
+        ],
+    )
+    calls: list[list[str]] = []
+    code = main(
+        ["--tasks", str(path), "--apply"],
+        runner=_runner(calls),
+        pid_alive=_alive,
+        clock=lambda: NOW,
+    )
+    assert code == 0
+    report = _report(capsys)
+    assert report["attach"] == []
+    assert report["dead"] == [
+        {"id": "gb:00031-c", "reason": "pid_dead", "pane_id": "w1:p1", "pid": None}
+    ]
+    assert ["herdr", "pane", "process-info", "--pane", "w1:p1"] in calls
+    assert _rows(path)["gb:00031-c"].get("herdr_pane") is None
+
+
+def test_pane_kept_by_a_finished_row_is_not_reassigned(tmp_path, capsys):
+    path = tmp_path / "tasks.json"
+    finished = [
+        {
+            "id": "gb:old",
+            "title": "gb:old",
+            "finished_at": _iso(5),
+            "result": "ok",
+            "herdr_pane": {"pane_id": "w2:p1", "workspace": "00031-c"},
+        }
+    ]
+    _seed_with_finished(path, [_row("gb:00031-c")], finished)
+    code = main(
+        ["--tasks", str(path)], runner=_runner(), pid_alive=_alive, clock=lambda: NOW
+    )
+    assert code == 0
+    assert _report(capsys)["attach"] == []
+
+
+def test_attach_skips_exited_panes_with_the_same_label(tmp_path, capsys):
+    path = tmp_path / "tasks.json"
+    _seed(path, [_row("gb:00031-c")])
+    payload = {
+        "panes": [
+            {"pane_id": "w1:p1", "workspace": "00031-c", "exited": True},
+            {"pane_id": "w2:p1", "workspace": "00031-c"},
+        ]
+    }
+    code = main(
+        ["--tasks", str(path)],
+        runner=_runner(list_payload=payload),
+        pid_alive=_alive,
+        clock=lambda: NOW,
+    )
+    assert code == 0
+    assert _report(capsys)["attach"] == [
+        {"id": "gb:00031-c", "pane_id": "w2:p1", "workspace": "00031-c"}
+    ]

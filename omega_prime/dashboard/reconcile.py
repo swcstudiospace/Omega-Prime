@@ -31,6 +31,7 @@ from omega_prime.dashboard.herdr_launch import _run, workspace_label
 from omega_prime.dashboard.redact import redact_value
 from omega_prime.dashboard.stale import normalize_pane_list
 from omega_prime.dashboard.status_file import _PANE_ID, _write_locked, locked_tasks
+from omega_prime.dashboard.terminal import resolve_task_pane
 
 Runner = Any  # Callable[[list[str]], str]
 PidAlive = Any  # Callable[[int], bool]
@@ -69,6 +70,22 @@ def _pane_pid(runner: Runner, pane_id: str) -> int | None:
     return pid
 
 
+def _mapped_pane(row: Any) -> str | None:
+    """The pane a row already owns: herdr_pane first, else a herdr-pane owner.
+
+    A recorded herdr_pane id is returned as-is (even if malformed) so a bad
+    mapping is still judged instead of being treated as missing.
+    """
+    if not isinstance(row, dict):
+        return None
+    pane = row.get("herdr_pane")
+    if isinstance(pane, dict):
+        pane_id = pane.get("pane_id")
+        if isinstance(pane_id, str) and pane_id:
+            return pane_id
+    return resolve_task_pane(row)
+
+
 def _positive_pid(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
@@ -94,9 +111,8 @@ def _row_verdict(
     row_pid = _positive_pid(row.get("pid"))
     if row_pid is not None and not pid_alive(row_pid):
         return "pid_dead"
-    pane = row.get("herdr_pane")
-    pane_id = pane.get("pane_id") if isinstance(pane, dict) else None
-    if panes is not None and isinstance(pane_id, str) and pane_id:
+    pane_id = _mapped_pane(row)
+    if panes is not None and pane_id is not None:
         info = panes.get(pane_id)
         if info is None:
             return "pane_gone"
@@ -113,23 +129,26 @@ def _row_verdict(
 def _orphan_attaches(
     data: dict[str, Any], panes: dict[str, dict[str, Any]]
 ) -> list[dict[str, str]]:
-    """Attach candidates: unreferenced panes whose workspace labels a pane-less row.
+    """Attach candidates: unreferenced live panes whose workspace labels a pane-less row.
 
+    A pane counts as referenced when any task or finished row owns it, through
+    herdr_pane or a herdr-pane owner; exited panes are never chosen.
     Several panes matching one row pick the lowest pane id; one pane matching
     several rows prefers the first row in file order.
     """
     referenced: set[str] = set()
-    for row in data["tasks"]:
-        pane = row.get("herdr_pane") if isinstance(row, dict) else None
-        if isinstance(pane, dict) and isinstance(pane.get("pane_id"), str):
-            referenced.add(pane["pane_id"])
+    for bucket in ("tasks", "finished"):
+        rows = data.get(bucket)
+        for row in rows if isinstance(rows, list) else []:
+            owned = _mapped_pane(row)
+            if owned is not None:
+                referenced.add(owned)
     attaches: list[dict[str, str]] = []
     claimed: set[str] = set()
     for row in data["tasks"]:
         if not isinstance(row, dict) or not isinstance(row.get("id"), str):
             continue
-        pane = row.get("herdr_pane")
-        if isinstance(pane, dict) and pane.get("pane_id"):
+        if _mapped_pane(row) is not None:
             continue
         label = workspace_label(row["id"])
         matches = sorted(
@@ -139,6 +158,7 @@ def _orphan_attaches(
             and pane_id not in claimed
             and isinstance(info.get("workspace"), str)
             and info["workspace"] == label
+            and not stale.pane_exited(info)
         )
         if matches:
             claimed.add(matches[0])
@@ -230,9 +250,8 @@ def _gather_evidence(
     for row in data["tasks"]:
         if not isinstance(row, dict) or row.get("state") not in ("working", "blocked"):
             continue
-        pane = row.get("herdr_pane")
-        pane_id = pane.get("pane_id") if isinstance(pane, dict) else None
-        if not isinstance(pane_id, str) or pane_id in pane_pids:
+        pane_id = _mapped_pane(row)
+        if pane_id is None or pane_id in pane_pids:
             continue
         info = panes.get(pane_id)
         if info is None or stale.pane_exited(info):
@@ -266,12 +285,11 @@ def _reconcile(
             row, panes, pane_pids, alive, now=now, stale_minutes=args.stale_minutes
         )
         if verdict in ("pid_dead", "pane_gone", "pane_exited"):
-            pane = row.get("herdr_pane")
             dead.append(
                 {
                     "id": row.get("id"),
                     "reason": verdict,
-                    "pane_id": pane.get("pane_id") if isinstance(pane, dict) else None,
+                    "pane_id": _mapped_pane(row),
                     "pid": row.get("pid"),
                 }
             )

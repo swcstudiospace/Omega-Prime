@@ -112,6 +112,12 @@ def needs_full_snapshot(
     for row_id, row in prev_finished.items():
         if now_finished.get(row_id) != row:
             return True
+    for row_id in now_finished:
+        # task_finished drops the active row client-side; a row that newly
+        # finishes while an active row with the same id is still served
+        # (the bridge lets both coexist) would vanish from the live view.
+        if row_id not in prev_finished and row_id in now_active:
+            return True
     for row_id, item in prev_waiting.items():
         if row_id in now_waiting and now_waiting[row_id] != item:
             return True

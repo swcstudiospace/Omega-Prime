@@ -247,7 +247,14 @@ class HerdrBridge:
         return await asyncio.to_thread(redact_ansi_frame, raw)
 
     async def send_text(self, pane: str, text: str) -> None:
-        await self.runner(["herdr", "pane", "send-text", pane, text])
+        # NUL (xterm's Ctrl+Space, or pasted) cannot travel in an argv
+        # string, so each NUL goes through send-keys as ctrl+space instead.
+        segments = text.split("\x00")
+        for index, segment in enumerate(segments):
+            if index:
+                await self.send_keys(pane, ["ctrl+space"])
+            if segment:
+                await self.runner(["herdr", "pane", "send-text", pane, segment])
 
     async def send_keys(self, pane: str, keys: list[str]) -> None:
         await self.runner(["herdr", "pane", "send-keys", pane, *keys])

@@ -668,3 +668,14 @@ def test_unchanged_rebuilds_do_not_starve_heartbeats():
                 assert ws.receive_json() == {"type": "heartbeat"}
         finally:
             stop["done"] = True
+
+
+# --- Greptile round 6 regressions -------------------------------------------
+
+
+def test_new_finished_row_sharing_an_active_id_needs_a_full_snapshot():
+    # task_finished removes the active row client-side, so a finished record
+    # that coexists with a still-served active row must go out as a snapshot.
+    before = _snapshot([_task("tasks:one")])
+    after = _snapshot([_task("tasks:one")], finished=[_task("tasks:one")])
+    assert needs_full_snapshot(before, after) is True
