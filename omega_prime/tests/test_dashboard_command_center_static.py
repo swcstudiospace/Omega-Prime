@@ -6,11 +6,15 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 import pytest
+from starlette.applications import Starlette
 from starlette.testclient import TestClient
+from starlette.types import Message, Scope
 
 import omega_prime.dashboard.app as app_module
 from omega_prime.dashboard.app import create_app
@@ -20,13 +24,18 @@ HOST = {"host": "127.0.0.1:7421"}
 NOW = datetime(2026, 10, 21, tzinfo=UTC)
 
 
-def _app(host: str = "127.0.0.1") -> object:
+def _app(host: str = "127.0.0.1") -> Starlette:
     poller = DashboardPoller([], clock=lambda: NOW)
     asyncio.run(poller.refresh_now())
     return create_app(poller, host=host)
 
 
-def _assert_security(response: object) -> None:
+class _HasHeaders(Protocol):
+    @property
+    def headers(self) -> Mapping[str, str]: ...
+
+
+def _assert_security(response: _HasHeaders) -> None:
     headers = response.headers
     csp = headers["content-security-policy"]
     assert "default-src 'self'" in csp
@@ -84,14 +93,14 @@ def test_default_cc_and_legacy_routes_serve_only_expected_assets() -> None:
                 _assert_security(asset)
 
         asset_root = Path(app_module.__file__).resolve().parent / "static" / "cc"
-        for asset in (asset_root / "assets").iterdir():
-            if asset.suffix in {".js", ".css", ".woff2"}:
-                response = client.get(f"/cc/assets/{asset.name}", headers=HOST)
+        for asset_path in (asset_root / "assets").iterdir():
+            if asset_path.suffix in {".js", ".css", ".woff2"}:
+                response = client.get(f"/cc/assets/{asset_path.name}", headers=HOST)
                 expected = {
                     ".js": "text/javascript",
                     ".css": "text/css",
                     ".woff2": "font/woff2",
-                }[asset.suffix]
+                }[asset_path.suffix]
                 assert response.headers["content-type"].startswith(expected)
                 assert response.status_code == 200
         for notice in (asset_root / "licenses").iterdir():
@@ -182,17 +191,17 @@ def test_method_host_and_ipv6_guards_cover_page_and_asset_routes() -> None:
 
 def test_duplicate_host_headers_are_rejected_with_security_headers() -> None:
     app = _app()
-    starts: list[dict[str, object]] = []
+    starts: list[Message] = []
 
-    async def receive() -> dict[str, object]:
+    async def receive() -> Message:
         await asyncio.Event().wait()
         return {"type": "http.disconnect"}
 
-    async def send(message: dict[str, object]) -> None:
+    async def send(message: Message) -> None:
         if message["type"] == "http.response.start":
             starts.append(message)
 
-    scope: dict[str, object] = {
+    scope: Scope = {
         "type": "http",
         "method": "GET",
         "path": "/",

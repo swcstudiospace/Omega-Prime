@@ -38,6 +38,7 @@ def test_task_mapping_roundtrips_validation_collector_and_snapshot(tmp_path):
         path=path,
     )
     loaded = read_tasks(path).data
+    assert loaded is not None
     assert loaded["tasks"][0]["herdr_pane"]["pane_id"] == "w2:p4"
     assert loaded["finished"][0]["herdr_pane"]["pane_id"] == "w3:p5"
     row = make_tasks_json_collector(tasks_path=path, now_fn=lambda: datetime.now(UTC))()

@@ -85,12 +85,15 @@ async def _read_pane(argv: list[str]) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    stdout_stream, stderr_stream = process.stdout, process.stderr
+    # Both are pipes (PIPE above), so asyncio always provides the readers.
+    assert stdout_stream is not None and stderr_stream is not None
     try:
         chunks: list[bytes] = []
         total = 0
         while True:
             chunk = await asyncio.wait_for(
-                process.stdout.read(min(65536, TERMINAL_MAX_CAPTURE_BYTES + 1 - total)),
+                stdout_stream.read(min(65536, TERMINAL_MAX_CAPTURE_BYTES + 1 - total)),
                 TERMINAL_READ_TIMEOUT_S,
             )
             if not chunk:
@@ -103,7 +106,7 @@ async def _read_pane(argv: list[str]) -> str:
         stderr_total = 0
         while True:
             chunk = await asyncio.wait_for(
-                process.stderr.read(min(1024, 4097 - stderr_total)),
+                stderr_stream.read(min(1024, 4097 - stderr_total)),
                 TERMINAL_READ_TIMEOUT_S,
             )
             if not chunk:

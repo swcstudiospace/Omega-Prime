@@ -4,6 +4,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -121,16 +122,15 @@ def test_number_snapshot_numbers_derived_rows_and_records_observed_changes(tmp_p
     idle = Task("herdr:idle", "Idle", "herdr", Owner("herdr", "idle", "Idle"), "quiet")
     snapshot = Snapshot([task], [], [waiting], [finished], [idle])
     number_snapshot(snapshot, path=path, now=NOW)
-    first = {
-        row.id: row
-        for row in [
-            *snapshot.active,
-            *snapshot.idle_sessions,
-            *snapshot.waiting_on_ove,
-            *snapshot.finished,
-        ]
-    }
+    numbered: list[Task | WaitingItem | FinishedItem] = [
+        *snapshot.active,
+        *snapshot.idle_sessions,
+        *snapshot.waiting_on_ove,
+        *snapshot.finished,
+    ]
+    first = {row.id: row for row in numbered}
     assert {row.seq for row in first.values()} == {1, 2, 3, 4}
+    assert task.wiring is not None and finished.wiring is not None
     assert task.wiring["repo"] is None and finished.wiring["repo"] is None
     assert task.timeline == [{"at": NOW.isoformat(), "state": "running"}]
     number_snapshot(snapshot, path=path, now=NOW + timedelta(minutes=1))
@@ -161,7 +161,9 @@ def test_preview_and_assignment_are_durable(tmp_path):
 def test_display_id_width_is_minimum():
     assert format_display_id(99999, "x") == "99999 - x"
     assert format_display_id(100000, "x") == "100000 - x"
-    for invalid in (True, 0, -1, 1.5, "1"):
+    # Deliberately wrong types: format_display_id must reject them at runtime.
+    invalid_values: tuple[Any, ...] = (True, 0, -1, 1.5, "1")
+    for invalid in invalid_values:
         with pytest.raises(ValueError):
             format_display_id(invalid, "x")
 

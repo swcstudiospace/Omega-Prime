@@ -14,6 +14,7 @@ from secrets import token_hex
 from typing import Any
 
 from starlette.testclient import TestClient
+from starlette.types import Message, Scope
 
 from omega_prime.dashboard.app import create_app
 from omega_prime.dashboard.collectors.agentos import make_agentos_collector
@@ -421,16 +422,16 @@ def test_snapshot_api_and_named_sse_share_redacted_nested_github_data() -> None:
     async def read_one_event() -> str:
         chunks: asyncio.Queue[str] = asyncio.Queue()
 
-        async def receive() -> dict[str, object]:
+        async def receive() -> Message:
             await asyncio.Event().wait()
             return {"type": "http.disconnect"}
 
-        async def send(message: dict[str, object]) -> None:
+        async def send(message: Message) -> None:
             body = message.get("body", b"")
             if isinstance(body, bytes) and body:
                 chunks.put_nowait(body.decode("utf-8"))
 
-        scope: dict[str, object] = {
+        scope: Scope = {
             "type": "http",
             "method": "GET",
             "path": "/api/stream",

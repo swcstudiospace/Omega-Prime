@@ -10,6 +10,7 @@ import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from secrets import token_hex
 
 import pytest
 
@@ -218,10 +219,14 @@ def test_allowlisted_source_extras_are_published() -> None:
 
 
 def test_github_command_center_is_published_with_only_bounded_fields() -> None:
+    # Built at runtime so no credential-shaped literal lives in the source,
+    # while the value the poller sees still looks like a real GitHub PAT.
+    fake_pat = "ghp_" + token_hex(10)
+
     async def run() -> None:
         extra = {
             "command_center": {
-                "repositories": [{"name": "repo", "token": "ghp_12345678901234567890"}],
+                "repositories": [{"name": "repo", "token": fake_pat}],
                 "ci_cd": [],
                 "recent_merges": [],
                 "meta": {"password": "secret_value"},
@@ -240,7 +245,9 @@ def test_github_command_center_is_published_with_only_bounded_fields() -> None:
             ]
         )
         await poller.refresh_now()
-        status = poller.snapshot()["sources"]["github"]
+        snapshot = poller.snapshot()
+        assert snapshot is not None
+        status = snapshot["sources"]["github"]
         assert set(status["command_center"]) == {
             "repositories",
             "ci_cd",
@@ -248,7 +255,7 @@ def test_github_command_center_is_published_with_only_bounded_fields() -> None:
             "meta",
         }
         rendered = str(status)
-        assert "ghp_12345678901234567890" not in rendered
+        assert fake_pat not in rendered
         assert "secret_value" not in rendered
         assert "other" not in status
 

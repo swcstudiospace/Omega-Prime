@@ -5,6 +5,8 @@ import inspect
 import json
 from datetime import UTC, datetime, timedelta
 
+from starlette.routing import Mount, Route, WebSocketRoute
+
 from omega_prime.dashboard.app import create_app
 from omega_prime.dashboard.poller import DashboardPoller
 
@@ -332,6 +334,10 @@ def test_terminal_stream_limit_returns_429_before_sse_starts():
 
 
 def test_terminal_has_no_input_route_or_subcommand():
-    paths = {route.path for route in create_app(_poller()).routes}
+    paths = {
+        route.path
+        for route in create_app(_poller()).routes
+        if isinstance(route, (Route, WebSocketRoute, Mount))
+    }
     assert "/api/tasks/{task_id:path}/terminal" in paths
     assert not any("send" in path or "input" in path for path in paths)

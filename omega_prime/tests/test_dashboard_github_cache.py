@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 from omega_prime.dashboard.collectors.github import make_github_collector
@@ -67,10 +68,13 @@ def test_ttl_403_and_missing_token_preserve_original_successful_section_data():
 
 
 def test_cold_unauthenticated_and_rate_limited_states_are_truthful():
-    calls = []
-    cold = make_github_collector(
-        env={}, transport=lambda u, h: calls.append(u) or (200, b"[]")
-    )()
+    calls: list[str] = []
+
+    def record(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
+        calls.append(url)
+        return 200, b"[]"
+
+    cold = make_github_collector(env={}, transport=record)()
     assert cold.status == "unavailable"
     assert cold.extra["command_center"]["repositories"] == []
     assert calls == []

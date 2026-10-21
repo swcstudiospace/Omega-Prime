@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -57,6 +58,14 @@ MAX_RESPONSE_BYTES = 1_000_000
 
 class _ResponseTooLarge(ValueError):
     """GitHub response exceeded the bounded body size."""
+
+
+class _HTTPStatusError(RuntimeError):
+    """GitHub answered with a non-200 status; ``status`` keeps the code."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__("http_" + str(status))
+        self.status = status
 
 
 class _GitHubEndpointPolicy:
@@ -187,9 +196,7 @@ def make_github_collector(
             if time.monotonic() >= deadline:
                 raise RuntimeError("budget")
             if status != 200:
-                exc = RuntimeError("http_" + str(status))
-                exc.status = status
-                raise exc
+                raise _HTTPStatusError(status)
             if not isinstance(body, bytes):
                 raise ValueError("payload")
             if len(body) > MAX_RESPONSE_BYTES:
@@ -467,11 +474,18 @@ def make_github_collector(
                                 reviewed_sha = head["sha"]
                                 extraction_failed = [False]
 
-                                def review_truncated() -> None:
-                                    extraction_failed[0] = True
+                                # Bind this iteration's flag explicitly so each
+                                # callback can only mark its own repository.
+                                def review_truncated(
+                                    failed: list[bool] = extraction_failed,
+                                ) -> None:
+                                    failed[0] = True
 
-                                def review_failed(exc: Exception) -> None:
-                                    extraction_failed[0] = True
+                                def review_failed(
+                                    exc: Exception,
+                                    failed: list[bool] = extraction_failed,
+                                ) -> None:
+                                    failed[0] = True
 
                                 evidence = _greptile(
                                     merged_pr,
@@ -537,11 +551,15 @@ def make_github_collector(
                     fail("ci_cd", exc)
                     failed_ci_repos.add(full_name)
 
-            def project_pr(pr: Any) -> tuple[dict[str, Any], dict[str, Any]] | None:
+            def project_pr(
+                pr: Any, full_name: str, base: str
+            ) -> tuple[dict[str, Any], dict[str, Any]] | None:
                 if not isinstance(pr, dict):
                     return None
-                head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
-                sha = head.get("sha") if isinstance(head.get("sha"), str) else ""
+                raw_head = pr.get("head")
+                head: dict[str, Any] = raw_head if isinstance(raw_head, dict) else {}
+                raw_sha = head.get("sha")
+                sha: str = raw_sha if isinstance(raw_sha, str) else ""
                 number = pr.get("number")
                 checks: list[dict[str, Any]] = []
                 try:
@@ -583,6 +601,7 @@ def make_github_collector(
                         "pr_number": number if number_ok else None,
                         "evidence_source": review["source"],
                     }
+                base_obj = pr.get("base")
                 rich = {
                     "id": pr.get("id", f"{full_name}:{number}"),
                     "kind": "pull_request",
@@ -592,9 +611,7 @@ def make_github_collector(
                     "url": _safe_url(pr.get("html_url")),
                     "branch": _safe_text(head.get("ref"), 200),
                     "base_branch": _safe_text(
-                        (pr.get("base") or {}).get("ref")
-                        if isinstance(pr.get("base"), dict)
-                        else None,
+                        base_obj.get("ref") if isinstance(base_obj, dict) else None,
                         200,
                     ),
                     "head_sha": sha or None,
@@ -625,7 +642,12 @@ def make_github_collector(
 
             pr_limit = max(0, MAX_ROWS - (1 if latest is not None else 0))
             with ThreadPoolExecutor(max_workers=8) as pool:
-                projected = list(pool.map(project_pr, open_prs[:pr_limit]))
+                projected = list(
+                    pool.map(
+                        functools.partial(project_pr, full_name=full_name, base=base),
+                        open_prs[:pr_limit],
+                    )
+                )
             if len(open_prs) > pr_limit:
                 truncated["ci_cd"] = True
                 partial["ci_cd"], reason["ci_cd"] = True, "partial"

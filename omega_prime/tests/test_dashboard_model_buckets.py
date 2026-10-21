@@ -175,16 +175,22 @@ def test_idle_changes_snapshot_hash_and_keeps_number_across_restart(tmp_path):
         return poller
 
     active = build("working", "Durable", NOW)
-    seq = active.snapshot()["active"][0]["seq"]
+    active_snapshot = active.snapshot()
+    assert active_snapshot is not None
+    seq = active_snapshot["active"][0]["seq"]
     idle = build("unknown", "Durable", NOW + timedelta(minutes=1))
-    idle_row = idle.snapshot()["idle_sessions"][0]
+    idle_snapshot = idle.snapshot()
+    assert idle_snapshot is not None
+    idle_row = idle_snapshot["idle_sessions"][0]
     assert idle_row["seq"] == seq
     idle_hash = idle.snapshot_hash()
     changed_idle = build("unknown", "Idle changed", NOW + timedelta(minutes=1))
     assert changed_idle.snapshot_hash() != idle_hash
 
     restored = build("working", "Durable", NOW + timedelta(minutes=2))
-    restored_row = restored.snapshot()["active"][0]
+    restored_snapshot = restored.snapshot()
+    assert restored_snapshot is not None
+    restored_row = restored_snapshot["active"][0]
     assert restored_row["seq"] == seq
     assert restored_row["timeline"][-1]["state"] == "working"
     assert idle_row["timeline"][-1]["state"] == "unknown"

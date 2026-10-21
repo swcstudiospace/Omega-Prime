@@ -28,6 +28,7 @@ def test_next_id_is_non_consuming_and_assign_id_reuses(tmp_path, capsys):
         == 0
     )
     assert capsys.readouterr().out == "00001 - Example\n"
+    assert path.read_bytes() == before
     assert json.loads(path.read_text())["identity_registry"]
     assert main(["next-id"], home=tmp_path) == 0
     assert capsys.readouterr().out == "00002\n"

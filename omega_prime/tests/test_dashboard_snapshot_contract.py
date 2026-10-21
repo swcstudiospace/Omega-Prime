@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from secrets import token_hex
 
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.poller import CollectorSpec, DashboardPoller
@@ -69,9 +70,11 @@ def test_persisted_task_numbering_reaches_snapshot(tmp_path):
 def test_github_command_center_extra_is_bounded_and_redacted():
     import asyncio
 
+    # Built at runtime so no credential-shaped literal lives in the source.
+    fake_pat = "ghp_" + token_hex(10)
     extra = {
         "command_center": {
-            "repositories": [{"name": "repo", "token": "ghp_12345678901234567890"}],
+            "repositories": [{"name": "repo", "token": fake_pat}],
             "ci_cd": [],
             "recent_merges": [],
             "meta": {"secret": "secret_value"},
@@ -99,6 +102,6 @@ def test_github_command_center_extra_is_bounded_and_redacted():
         "meta",
     }
     rendered = str(status["command_center"])
-    assert "ghp_12345678901234567890" not in rendered
+    assert fake_pat not in rendered
     assert "secret_value" not in rendered
     assert "unrelated" not in status
