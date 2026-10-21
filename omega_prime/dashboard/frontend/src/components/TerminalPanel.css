@@ -6,5 +6,8 @@
 .terminal-actions button { min-height: 44px; padding: 8px 12px; }
 .terminal-output { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fff; white-space: pre; font-family: SpaceMono, monospace; font-size: 12px; line-height: 1.5; }
 .terminal-output pre { margin: 0; font: inherit; }
+.terminal-screen { height: 320px; padding: 6px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: #14121f; }
+.terminal-screen:focus-visible { outline: 3px solid #9278e8; outline-offset: 2px; }
+.terminal-badge { font-weight: 600; color: var(--ink); }
 .terminal-output:focus-visible, .terminal-actions button:focus-visible { outline: 3px solid #9278e8; outline-offset: 2px; }
-@media (max-width: 760px) { .terminal-output { max-height: 240px; } }
+@media (max-width: 760px) { .terminal-output { max-height: 240px; } .terminal-screen { height: 240px; } }

@@ -1,24 +1,77 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { TerminalPanel } from './TerminalPanel'
+const terminalState = vi.hoisted(() => ({ instances: [] as Array<{ options: unknown; ops: string[]; dataHandler: ((data: string) => void) | null; disposed: boolean }> }))
+vi.mock('@xterm/xterm', () => {
+  class FakeTerminal {
+    options: unknown
+    ops: string[] = []
+    dataHandler: ((data: string) => void) | null = null
+    disposed = false
+    constructor(options: unknown) { this.options = options; terminalState.instances.push(this) }
+    open() { this.ops.push('open') }
+    write(text: string) { this.ops.push(`write:${text}`) }
+    reset() { this.ops.push('reset') }
+    onData(handler: (data: string) => void) { this.dataHandler = handler; return { dispose: () => {} } }
+    dispose() { this.disposed = true }
+  }
+  return { default: FakeTerminal, Terminal: FakeTerminal }
+})
+const terminalInstances = () => terminalState.instances
 class FakeEventSource {
   static instances: FakeEventSource[] = []
-  listeners = new Map<string, EventListener>()
+  listeners: Record<string, EventListener> = {}
   closed = false
   onopen: ((event: Event) => void) | null = null
   onerror: ((event: Event) => void) | null = null
   constructor(readonly url: string) { FakeEventSource.instances.push(this) }
-  addEventListener(name: string, fn: EventListener) { this.listeners.set(name, fn) }
+  addEventListener(name: string, fn: EventListener) { this.listeners[name] = fn }
   close() { this.closed = true }
-  emit(frame: object) { act(() => this.listeners.get('terminal')?.({ data: JSON.stringify(frame) } as MessageEvent as Event)) }
+  emit(frame: object) { act(() => this.listeners.terminal?.({ data: JSON.stringify(frame) } as MessageEvent as Event)) }
 }
-afterEach(() => { cleanup(); FakeEventSource.instances = []; vi.unstubAllGlobals() })
+class FakeWebSocket {
+  static instances: FakeWebSocket[] = []
+  onopen: (() => void) | null = null
+  onmessage: ((event: MessageEvent) => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((event: Event) => void) | null = null
+  sent: unknown[] = []
+  closed = false
+  constructor(readonly url: string) { FakeWebSocket.instances.push(this) }
+  send(payload: string) { this.sent.push(JSON.parse(payload)) }
+  close() { this.closed = true }
+  open() { act(() => this.onopen?.()) }
+  emit(message: object) { act(() => this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent)) }
+  drop() { act(() => { this.onclose?.() }) }
+}
+const FAKE_TOKEN = 'fixed-fake-token'
+const stubSession = (session: { token: string; readonly: boolean } | null, rejectAll = false) => {
+  vi.stubGlobal('fetch', rejectAll
+    ? vi.fn().mockRejectedValue(new Error('offline'))
+    : vi.fn(async (url: unknown) => {
+      if (url === '/api/session' && session !== null) return { ok: true, json: async () => session }
+      return { ok: false, status: 404 }
+    }))
+}
+const flush = async () => { await act(async () => {}) }
+const badge = (text: string) => screen.getByText(text, { selector: '.terminal-badge' })
+afterEach(() => {
+  cleanup()
+  FakeEventSource.instances = []
+  FakeWebSocket.instances = []
+  terminalInstances().length = 0
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+})
 describe('TerminalPanel', () => {
-  it('streams plain text and cleans reconnect on task change', () => {
+  it('streams plain text and cleans reconnect on task change', async () => {
+    vi.stubGlobal('WebSocket', undefined)
     vi.stubGlobal('EventSource', FakeEventSource)
+    stubSession(null, true)
     const view = render(<TerminalPanel taskId="one/1" />)
-    expect(FakeEventSource.instances[0].url).toBe('/api/tasks/one%2F1/terminal')
-    const source = FakeEventSource.instances[0]
+    await flush()
+    expect(FakeEventSource.instances[0]!.url).toBe('/api/tasks/one%2F1/terminal')
+    const source = FakeEventSource.instances[0]!
     source.emit({ status: 'live', text: '<img src=x>', updated_at: '2026-10-21T00:00:00Z' })
     expect(screen.getByText('<img src=x>')).toBeInTheDocument()
     act(() => { source.onerror?.(new Event('error')) })
@@ -27,26 +80,33 @@ describe('TerminalPanel', () => {
     source.emit({ status: 'live', text: '<img src=x> next', updated_at: '2026-10-21T00:00:01Z' })
     expect(screen.getByText('<img src=x> next')).toBeInTheDocument()
     expect(screen.queryByRole('img')).not.toBeInTheDocument()
-    const old = FakeEventSource.instances[0]
+    const old = FakeEventSource.instances[0]!
     view.rerender(<TerminalPanel taskId="two" />)
+    await flush()
     expect(old.closed).toBe(true)
     expect(FakeEventSource.instances).toHaveLength(2)
     view.unmount()
-    expect(FakeEventSource.instances[1].closed).toBe(true)
+    expect(FakeEventSource.instances[1]!.closed).toBe(true)
   })
-  it('keeps transport running when pausing auto-scroll and exposes status', () => {
+  it('keeps transport running when pausing auto-scroll and exposes status', async () => {
+    vi.stubGlobal('WebSocket', undefined)
     vi.stubGlobal('EventSource', FakeEventSource)
+    stubSession(null, true)
     render(<TerminalPanel taskId="one" />)
+    await flush()
     fireEvent.click(screen.getByRole('button', { name: 'Pause auto-scroll' }))
     expect(screen.getByRole('button', { name: 'Resume auto-scroll' })).toHaveAttribute('aria-pressed', 'true')
-    expect(FakeEventSource.instances[0].closed).toBe(false)
+    expect(FakeEventSource.instances[0]!.closed).toBe(false)
   })
   it('renders local terminal failure states and copies only the displayed buffer', async () => {
+    vi.stubGlobal('WebSocket', undefined)
     vi.stubGlobal('EventSource', FakeEventSource)
+    stubSession(null, true)
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     const view = render(<TerminalPanel taskId="one" />)
-    FakeEventSource.instances[0].emit({ status: 'live', text: 'safe text', updated_at: '2026-10-21T00:00:00Z' })
+    await flush()
+    FakeEventSource.instances[0]!.emit({ status: 'live', text: 'safe text', updated_at: '2026-10-21T00:00:00Z' })
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Copy output' }))
       await Promise.resolve()
@@ -54,17 +114,144 @@ describe('TerminalPanel', () => {
     expect(await screen.findByText('Output copied')).toBeInTheDocument()
     expect(writeText).toHaveBeenCalledWith('safe text')
     view.rerender(<TerminalPanel taskId="closed" />)
-    FakeEventSource.instances[1].emit({ status: 'pane_closed', text: '', updated_at: '2026-10-21T00:00:01Z' })
+    await flush()
+    FakeEventSource.instances[1]!.emit({ status: 'pane_closed', text: '', updated_at: '2026-10-21T00:00:01Z' })
     expect(screen.getByText('Pane closed')).toBeInTheDocument()
     expect(screen.getByText('This session has ended. Other task details remain available.')).toBeInTheDocument()
     view.rerender(<TerminalPanel taskId="missing" />)
-    FakeEventSource.instances[2].emit({ status: 'no_session', text: '', updated_at: null })
+    await flush()
+    FakeEventSource.instances[2]!.emit({ status: 'no_session', text: '', updated_at: null })
     expect(screen.getByText('No session attached')).toBeInTheDocument()
     expect(screen.getByText('This task has no mapped Herdr pane. Other task details remain available.')).toBeInTheDocument()
     view.rerender(<TerminalPanel taskId="unavailable" />)
-    FakeEventSource.instances[3].emit({ status: 'unavailable', text: '', updated_at: null })
+    await flush()
+    FakeEventSource.instances[3]!.emit({ status: 'unavailable', text: '', updated_at: null })
     expect(screen.getByText('Herdr unavailable')).toBeInTheDocument()
     expect(screen.getByText('Terminal output cannot be read on this host. Other task details remain available.')).toBeInTheDocument()
     view.unmount()
+  })
+  it('derives the socket url, authenticates first, and renders full-screen frames', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    stubSession({ token: FAKE_TOKEN, readonly: false })
+    const view = render(<TerminalPanel taskId="one/1" />)
+    await flush()
+    const socket = FakeWebSocket.instances[0]!
+    expect(socket.url).toBe(`ws://${window.location.host}/ws/tasks/one%2F1/terminal`)
+    socket.open()
+    expect(socket.sent[0]).toEqual({ type: 'auth', token: FAKE_TOKEN, mode: 'rw' })
+    const terminal = terminalInstances()[0]!
+    expect(terminal.options).toMatchObject({ convertEol: true, rows: 24, cols: 80 })
+    socket.emit({ type: 'frame', text: '\x1b[31mready\x1b[0m', updated_at: '2026-10-21T00:00:00Z' })
+    expect(terminal.ops).toEqual(['open', 'reset', 'write:\x1b[31mready\x1b[0m'])
+    expect(screen.getByText(/Last updated 21 Oct 2026/)).toBeInTheDocument()
+    expect(badge('Attached')).toBeInTheDocument()
+    terminal.dataHandler!('ls')
+    expect(socket.sent).toContainEqual({ type: 'input', text: 'ls' })
+    terminal.dataHandler!('\r')
+    expect(socket.sent).toContainEqual({ type: 'keys', keys: ['enter'] })
+    view.unmount()
+    expect(socket.closed).toBe(true)
+    expect(terminal.disposed).toBe(true)
+  })
+  it('stops all input and sends mode ro when the read-only toggle is on', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    stubSession({ token: FAKE_TOKEN, readonly: false })
+    render(<TerminalPanel taskId="one" />)
+    await flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Read-only' }))
+    await flush()
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    expect(socket.sent[0]).toEqual({ type: 'auth', token: FAKE_TOKEN, mode: 'ro' })
+    expect(badge('Read-only')).toBeInTheDocument()
+    terminalInstances()[0]!.dataHandler!('ls')
+    expect(socket.sent).toHaveLength(1)
+  })
+  it('forces mode ro without input when the session is readonly', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    stubSession({ token: FAKE_TOKEN, readonly: true })
+    render(<TerminalPanel taskId="one" />)
+    await flush()
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    expect(socket.sent[0]).toEqual({ type: 'auth', token: FAKE_TOKEN, mode: 'ro' })
+    expect(badge('Read-only')).toBeInTheDocument()
+    terminalInstances()[0]!.dataHandler!('\r')
+    expect(socket.sent).toHaveLength(1)
+  })
+  it('detaches and reattaches with a fresh socket', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    stubSession({ token: FAKE_TOKEN, readonly: false })
+    render(<TerminalPanel taskId="one" />)
+    await flush()
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    fireEvent.click(screen.getByRole('button', { name: 'Detach' }))
+    expect(socket.closed).toBe(true)
+    expect(badge('Detached')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Attach' }))
+    await flush()
+    expect(FakeWebSocket.instances).toHaveLength(2)
+  })
+  it('shows pane closed and never auto-reconnects it', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    stubSession({ token: FAKE_TOKEN, readonly: false })
+    render(<TerminalPanel taskId="one" />)
+    await flush()
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    socket.emit({ type: 'status', status: 'pane_closed' })
+    expect(badge('Pane closed')).toBeInTheDocument()
+    expect(socket.closed).toBe(true)
+    await act(async () => { vi.advanceTimersByTime(90_000) })
+    expect(FakeWebSocket.instances).toHaveLength(1)
+  })
+  it('shows the no-session status with the task note in both views', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    stubSession({ token: FAKE_TOKEN, readonly: false })
+    const interactive = render(<TerminalPanel taskId="one" note="waiting for creds" />)
+    await flush()
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    socket.emit({ type: 'status', status: 'no_session' })
+    expect(badge('No session attached')).toBeInTheDocument()
+    expect(screen.getByText('No session attached — last note: waiting for creds')).toBeInTheDocument()
+    interactive.unmount()
+    vi.stubGlobal('WebSocket', undefined)
+    vi.stubGlobal('EventSource', FakeEventSource)
+    stubSession(null, true)
+    render(<TerminalPanel taskId="one" note="waiting for creds" />)
+    await flush()
+    FakeEventSource.instances[0]!.emit({ status: 'no_session', text: '', updated_at: null })
+    expect(screen.getByText(/This task has no mapped Herdr pane\. Other task details remain available\. Last note: waiting for creds/)).toBeInTheDocument()
+  })
+  it('falls back to the read-only SSE view when no websocket exists', async () => {
+    vi.stubGlobal('WebSocket', undefined)
+    vi.stubGlobal('EventSource', FakeEventSource)
+    stubSession({ token: FAKE_TOKEN, readonly: false })
+    render(<TerminalPanel taskId="one/1" />)
+    await flush()
+    expect(screen.getByText('Read only · redacted · last 200 lines')).toBeInTheDocument()
+    expect(FakeEventSource.instances[0]!.url).toBe('/api/tasks/one%2F1/terminal')
+  })
+  it('serves the sse view on socket failure and retries the websocket on the 30s cadence', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    vi.stubGlobal('EventSource', FakeEventSource)
+    stubSession({ token: FAKE_TOKEN, readonly: false })
+    render(<TerminalPanel taskId="one" />)
+    await flush()
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    socket.drop()
+    expect(screen.getByText('Read only · redacted · last 200 lines')).toBeInTheDocument()
+    expect(FakeEventSource.instances).toHaveLength(1)
+    act(() => { vi.advanceTimersByTime(30_000) })
+    await flush()
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    FakeWebSocket.instances[1]!.open()
+    expect(screen.queryByText('Read only · redacted · last 200 lines')).not.toBeInTheDocument()
+    expect(FakeEventSource.instances[0]!.closed).toBe(true)
   })
 })
