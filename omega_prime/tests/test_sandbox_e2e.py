@@ -245,6 +245,134 @@ def _seed_turn(state: Path, stage: str, spec_text: str) -> None:
     )
 
 
+def test_routine_drives_plan_then_execute_end_to_end(
+    tmp_path: Path, monkeypatch
+) -> None:
+    omp = _install_fake(tmp_path)
+    _install_fake_herdr(tmp_path, "ok")  # BEFORE _backend_env: keep the ok stub
+    script, log = _install_e2e_anda(tmp_path)
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    store = _seed(
+        tmp_path / "tasks.json",
+        rows=[_row("gb:sbx5-plan"), _row("gb:sbx5-exec")],
+    )
+    base = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    monkeypatch.chdir(work)  # ultrathink runs on the process cwd
+    state = Path(base["OMEGA_PRIME_STATE_DIR"])
+
+    for stage, task_id, model in (
+        ("plan", "gb:sbx5-plan", "glm-5.3"),
+        ("execute", "gb:sbx5-exec", "glm-5.3-flash"),
+    ):
+        _seed_turn(state, stage, _SPEC_TEXT)
+        env = dict(
+            base,
+            OMEGA_PRIME_TASKS_PATH=str(store),
+            OMEGA_PRIME_TASK_ID=task_id,
+        )
+        plan = execute_ultrathink(env)
+        assert plan["found"] is True
+        engine = plan["engine"]
+        assert engine["used"] is True, engine
+        assert engine["plan"] == "zai"
+        assert engine["stage"] == stage
+        assert engine["model"] == model
+        assert "failed" not in plan
+        session = json.loads(
+            (state / "jobs" / engine["job_id"] / "session.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert session["sandbox"] == "omp-sandbox"
+        assert session["model"] == model
+        assert session["stage"] == stage
+        assert session["ok"] is True
+
+    # Wrapper receipts: the whole chain, in order, with the contracted args.
+    stages = [
+        row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"
+    ]
+    assert [row["args"]["stage"] for row in stages] == ["plan", "execute"]
+    assert [row["args"]["plan"] for row in stages] == ["zai", "zai"]
+    assert [row["args"]["model"] for row in stages] == [
+        "zai/glm-5.3",
+        "zai/glm-5.3-flash",
+    ]
+    assert [row["args"]["gsd_command"] for row in stages] == [
+        "gsd-plan-phase",
+        "gsd-execute-phase",
+    ]
+    assert all(_SPEC_TEXT in row["args"]["task"] for row in stages)
+    ups = [row for row in _wrapper_log(log) if row.get("tool") == "up"]
+    assert len(ups) == 2
+    for row in ups:
+        assert row["args"]["seed_repo"]["path"] == str(work)
+    ready = [row for row in _wrapper_log(log) if row.get("ready")]
+    assert len(ready) == 2
+    assert {row["workspace_roots"] for row in ready} == {str(roots)}
+    events: list[dict] = []
+    for job_dir_path in sorted((state / "jobs").iterdir()):
+        events_path = job_dir_path / "events.jsonl"
+        if events_path.is_file():
+            events.extend(
+                row for row in _jsonl(events_path) if "event" in row and "id" not in row
+            )
+    assert events
+    assert all(row.get("attestation") == "mock" for row in events)
+
+    # The exported commits really landed in the job worktree.
+    subjects = _git("log", "--format=%s", cwd=work).splitlines()
+    assert "gsd(plan): demo plan" in subjects
+    assert "gsd(execute): demo greeting" in subjects
+    assert len(subjects) >= 3  # seed + both GSD-shaped commits
+    assert (work / ".planning" / "phases" / "999-demo" / "PLAN.md").is_file()
+    assert (work / "src" / "demo" / "greeting.txt").is_file()
+
+    # Rows and panes: one row per stage, each with its own timeline.
+    data = _read_tasks(store)
+    herdr_receipts = _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
+    for task_id, stage in (("gb:sbx5-plan", "plan"), ("gb:sbx5-exec", "execute")):
+        row = next(r for r in data["tasks"] if r["id"] == task_id)
+        assert row["state"] == "done"
+        assert row["stage"] == stage
+        create = next(
+            e
+            for e in herdr_receipts
+            if e["argv"][:2] == ["workspace", "create"]
+            and f"{task_id} {stage}" in e["argv"]
+        )
+        assert row["herdr_pane"] == create["pane"]
+        started = datetime.fromisoformat(
+            row.get("started_at") or row["last_activity_at"]
+        )
+        activity = datetime.fromisoformat(row["last_activity_at"])
+        assert started <= activity
+        assert row["last_event"] == "stage_done completed"
+        assert set(row["receipt"]) == {
+            "job_id",
+            "stage_id",
+            "ok",
+            "status",
+            "export",
+        }
+        assert row["receipt"]["ok"] is True
+        assert row["receipt"]["status"] == "completed"
+        export = row["receipt"]["export"]
+        assert set(export) == {
+            "head",
+            "base",
+            "ref",
+            "commits",
+            "dirty",
+            "bundle",
+            "bytes",
+            "via",
+        }
+        assert export["commits"] >= 1
+        assert Path(export["bundle"]).is_file()
+
+
 def test_opt_in_real_run_drives_the_real_wrapper_on_the_host(
     tmp_path: Path, monkeypatch
 ) -> None:
