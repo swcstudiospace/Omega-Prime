@@ -1,5 +1,5 @@
 // The TS core: auth-broker -> sandbox tier -> agentOS VM -> GSD-Core -> omp RPC stages.
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { STATE, STAGE_MODELS, MAGIC, OMP_BIN, VERSIONS, aedt, stageRoute, type Stage } from "./config.ts";
@@ -11,7 +11,7 @@ import { ensureGsd } from "./gsd.ts";
 import { OmpRpcClient, StaleAnswerError, textOf, type AnswerInput, type PendingQuestion } from "./omp-rpc.ts";
 import { mockAttestation, type AttestationDoc } from "./attest.ts";
 import { redactSecrets, rid } from "./providers/util.ts";
-import { allowedDir, seedFiles, PathRefused, SEED_ROOTS, WORKSPACE_ROOTS } from "./paths.ts";
+import { allowedDir, copySeed, PathRefused, SEED_ROOTS, WORKSPACE_ROOTS } from "./paths.ts";
 
 export type StageStatus = "starting" | "running" | "waiting" | "completed" | "failed" | "aborted";
 const TERMINAL: readonly StageStatus[] = ["completed", "failed", "aborted"];
@@ -89,17 +89,9 @@ export class Core extends EventEmitter {
   async #seed(src: string) {
     const t = this.tier!;
     const rel = t.workdir.slice(t.sandboxRoot.length).replace(/^\/+/, "");
-    const { files, skipped } = seedFiles(src);
-    let bytes = 0;
-    for (const f of files) {
-      const dir = f.rel.includes("/") ? f.rel.slice(0, f.rel.lastIndexOf("/")) : "";
-      if (dir) await this.vm.filesystem.mkdir(`${SANDBOX_MOUNT}/${rel}/${dir}`, { recursive: true }).catch(() => {});
-      const data = readFileSync(f.path);
-      bytes += data.length;
-      await this.vm.filesystem.writeFile(`${SANDBOX_MOUNT}/${rel}/${f.rel}`, new Uint8Array(data));
-    }
+    const { files, skipped, bytes } = await copySeed(src, `${SANDBOX_MOUNT}/${rel}`, this.vm.filesystem);
     const g = await t.exec(["sh", "-c", "git init -q && git add -A && git -c user.name=omp-sandbox -c user.email=omp-sandbox@local commit -qm 'seed: disposable e2e fixture' && git log --oneline | head -1"], { timeoutMs: 60_000 });
-    return { fixture: src, files: files.map((f) => f.rel), bytes, skipped, viaVm: true, git: g.stdout.trim(), gitExit: g.code };
+    return { fixture: src, files, bytes, skipped, viaVm: true, git: g.stdout.trim(), gitExit: g.code };
   }
 
   async #probeOmp() {

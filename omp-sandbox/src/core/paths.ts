@@ -1,6 +1,6 @@
 // Host paths the sandbox may touch. A workspace bind mount and a seed source must be absolute,
 // exist, resolve (after symlinks) strictly inside an allowlisted root, and be directories.
-import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { ROOT } from "./config.ts";
 
@@ -51,4 +51,52 @@ export function seedFiles(src: string): { files: Array<{ rel: string; path: stri
   };
   walk("");
   return { files, skipped };
+}
+
+/**
+ * Read one seed file's bytes at copy time without following a link swapped in since the walk. Every parent folder
+ * below `src` must still be a real folder (not a symlink), the file is opened with O_NOFOLLOW, and the open
+ * descriptor itself must still name `src/rel` (via /proc/self/fd, else by inode against the real path), so a
+ * parent replaced between the checks and the open is caught too. `src` must already be allowlist-resolved.
+ */
+export function readSeedFile(src: string, rel: string): Buffer {
+  const parts = rel.split("/");
+  if (parts.some((p) => p === "" || p === "." || p === "..")) throw new PathRefused(`seed file ${rel}: bad relative path`);
+  for (let i = 1; i < parts.length; i++) {
+    const d = lstatSync(join(src, ...parts.slice(0, i)), { throwIfNoEntry: false });
+    if (!d || d.isSymbolicLink() || !d.isDirectory()) throw new PathRefused(`seed file ${rel}: a parent folder changed since the walk`);
+  }
+  const want = join(src, rel);
+  let fd: number;
+  try { fd = openSync(want, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0)); }
+  catch (e: any) { throw new PathRefused(`seed file ${rel}: ${e?.code === "ELOOP" ? "replaced by a symlink" : "cannot be opened"} since the walk`); }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new PathRefused(`seed file ${rel}: no longer a regular file`);
+    let where: string | null = null;
+    try { where = readlinkSync(`/proc/self/fd/${fd}`); } catch { /* no procfs */ }
+    if (where !== null ? where !== want : (() => { const r = statSync(realpathSync(want)); return realpathSync(want) !== want || r.ino !== st.ino || r.dev !== st.dev; })())
+      throw new PathRefused(`seed file ${rel}: resolves outside the seed source`);
+    const buf = Buffer.alloc(st.size); let off = 0;
+    while (off < st.size) { const n = readSync(fd, buf, off, st.size - off, off); if (n === 0) break; off += n; }
+    return off === st.size ? buf : buf.subarray(0, off);
+  } finally { closeSync(fd); }
+}
+
+/** The VM filesystem calls the seed copy uses (agentOS `vm.filesystem`, or a fake in tests). */
+export type SeedFs = { mkdir(p: string, o: { recursive: boolean }): Promise<unknown>; writeFile(p: string, data: Uint8Array): Promise<unknown> };
+
+/** Copy `src` (allowlist-resolved) into `dest` on `fs` one file at a time as raw bytes; nothing is buffered beyond one file. */
+export async function copySeed(src: string, dest: string, fs: SeedFs) {
+  const { files, skipped } = seedFiles(src);
+  let bytes = 0;
+  for (const f of files) {
+    const dir = f.rel.includes("/") ? f.rel.slice(0, f.rel.lastIndexOf("/")) : "";
+    if (dir) await fs.mkdir(`${dest}/${dir}`, { recursive: true }).catch(() => {});
+    // Read after every await: another job may edit `src` while the copy waits on the VM.
+    const data = readSeedFile(src, f.rel);
+    bytes += data.length;
+    await fs.writeFile(`${dest}/${f.rel}`, new Uint8Array(data.buffer, data.byteOffset, data.length));
+  }
+  return { files: files.map((f) => f.rel), skipped, bytes };
 }

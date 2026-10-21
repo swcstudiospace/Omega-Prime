@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, symlinkSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { allowedDir, seedFiles, PathRefused } from "../src/core/paths.ts";
+import { allowedDir, copySeed, seedFiles, PathRefused } from "../src/core/paths.ts";
 import { ROOT } from "../src/core/config.ts";
 import { SANDBOX_MOUNT, vmRoundTrip } from "../src/core/vm.ts";
 import { gatewayToml, mountDriverConfig, podmanPolicyYaml } from "../src/core/providers/openshell-podman.ts";
@@ -40,8 +40,48 @@ test("seed is binary-safe and skips .git, .venv, node_modules and symlinks", () 
   const { files, skipped } = seedFiles(src);
   assert.deepEqual(files.map((f) => f.rel), ["README.md", "a/b/blob.bin"]);
   assert.equal(files[1].path, join(src, "a", "b", "blob.bin"));
-  assert.equal(readFileSync(files[1].path).equals(bin), true, "bytes the copier reads are intact on disk");
   assert.deepEqual(skipped.sort(), [".git", ".venv", "a/.git", "link", "node_modules"].sort());
+});
+
+/** A fake agentOS VM filesystem that records the exact bytes handed to writeFile. `onMkdir` runs during each await. */
+function fakeVmFs(onMkdir: (p: string) => void = () => {}) {
+  const written = new Map<string, Buffer>(); const dirs: string[] = [];
+  return {
+    written, dirs,
+    fs: {
+      mkdir: async (p: string) => { dirs.push(p); onMkdir(p); },
+      writeFile: async (p: string, data: Uint8Array) => { assert.ok(data instanceof Uint8Array, "raw bytes, never a string"); written.set(p, Buffer.from(data)); },
+    },
+  };
+}
+
+test("the seed copy hands the VM the exact binary bytes", async () => {
+  const src = join(root, "binseed"); mkdirSync(join(src, "a", "b"), { recursive: true });
+  const bin = Buffer.from([0, 255, 254, 0x80, 10, 0xc3, 0x28]);
+  writeFileSync(join(src, "a", "b", "blob.bin"), bin);
+  writeFileSync(join(src, "README.md"), "hi\n");
+  const vm = fakeVmFs();
+  const out = await copySeed(src, "/mnt/work", vm.fs);
+  assert.deepEqual(out.files, ["README.md", "a/b/blob.bin"]);
+  assert.equal(out.bytes, bin.length + 3);
+  assert.deepEqual(vm.dirs, ["/mnt/work/a/b"]);
+  assert.equal(vm.written.get("/mnt/work/a/b/blob.bin")!.equals(bin), true, "bytes passed to writeFile equal the source bytes");
+  assert.equal(vm.written.get("/mnt/work/README.md")!.toString("utf8"), "hi\n");
+});
+
+test("a file or parent folder swapped for a symlink during the copy is refused, never followed", async () => {
+  const secret = join(outside, "secret.txt"); writeFileSync(secret, "outside-bytes");
+  for (const swap of ["file", "parent"] as const) {
+    const src = join(root, `race-${swap}`); mkdirSync(join(src, "d"), { recursive: true });
+    writeFileSync(join(src, "d", "secret.txt"), "inside");
+    const vm = fakeVmFs(() => {
+      // Another job edits the workspace while the copy waits on the VM.
+      if (swap === "file") { rmSync(join(src, "d", "secret.txt")); symlinkSync(secret, join(src, "d", "secret.txt")); }
+      else { renameSync(join(src, "d"), join(src, "d.old")); symlinkSync(outside, join(src, "d")); }
+    });
+    await assert.rejects(copySeed(src, "/mnt/work", vm.fs), (e: unknown) => e instanceof PathRefused, swap);
+    for (const b of vm.written.values()) assert.equal(b.toString("utf8").includes("outside-bytes"), false, `${swap}: no outside bytes reached the VM`);
+  }
 });
 
 test("seedFiles carries rel + absolute source path only (no bytes buffered during the walk)", () => {
