@@ -31,7 +31,7 @@
     <skill path="skills/getting-started/SKILL.md" load="always">Fresh import. Clone the pinned release, bootstrap, ask the owner to add the stdio server, then request secrets through cards.</skill>
     <skill path="skills/omega-commands/SKILL.md" load="always">Slash commands. A message that is only /omega-... is omega_command.</skill>
     <skill path="skills/verification-receipts/SKILL.md" load="always">Receipt shape. A claim needs a command and an exit code.</skill>
-    <skill path="skills/desk-gateway/SKILL.md" load="always">Roster is the tool contract. Reads fail open. Writes fail closed.</skill>
+    <skill path="skills/desk-gateway/SKILL.md" load="on_demand">Optional Desk gateway use. Roster is the tool contract. Reads fail open. Writes fail closed.</skill>
     <skill path="skills/desk-doctor/SKILL.md" load="always">Integrity report for the assembled prompt, skills, and roster. Doctor does not fix.</skill>
     <skill path="skills/python/SKILL.md" load="always">Python in this repository.</skill>
     <skill path="skills/debugging/SKILL.md" load="always">Reproduce, then fix, then re-run the reproduction.</skill>

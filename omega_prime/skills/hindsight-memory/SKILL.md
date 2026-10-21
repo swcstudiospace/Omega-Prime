@@ -9,6 +9,8 @@ gates: [G-2, G-3]
 
 ## Served tools
 
+Use only tools available in the Omega Prime registry. The external Desk Gateway is optional. In Solo mode, `not_configured: solo` is terminal and does not authorize an external transport. Use an external Desk only when Solo is off and Desk is explicitly configured, and only after a served tool returns `not_configured`.
+
 Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). Do not substitute an external gateway or infer a Hindsight service route.
 
 ## When this applies (L1)
@@ -19,6 +21,7 @@ Substrate and Hindsight sources. Use `lead_brief` at turn start,
 you have a fact worth keeping and its evidence. The selected backend controls
 write preference; it does not disable recall from other configured sources.
 Hindsight is not reached only through an external gateway.
+Do not treat an unavailable Solo service as permission to use another transport.
 
 **Retain is refused without `receipt_path` or `source`.** That is the whole discipline in one
 schema rule: memory holds what was verified or where it was read, never what was believed.
@@ -124,7 +127,8 @@ true.
 
 ### §4 Recall and the brief
 
-`lead_brief` runs at turn start. `lead_memory_recall` searches local memory
+In configured Desk mode, `lead_brief` is cached for five minutes; pass `refresh: true` after
+retaining something needed in the same turn. `lead_brief` runs at turn start. `lead_memory_recall` searches local memory
 and every configured remote independently, retaining source provenance and
 enforcing repo isolation. The selected write backend does not narrow recall.
 Each source reports one of `answered`, `empty`, `not_configured`,
