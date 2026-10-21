@@ -327,3 +327,336 @@ def _seed(path: Path, rows: list[dict]) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+# --- W112-05: the run contract through the real engine -----------------------
+
+
+def test_plan_then_execute_orders_two_stages_on_one_worktree(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    plan_result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-plan",
+        stage="plan",
+        plan="zai",
+    )
+    assert plan_result.ok is True, plan_result.detail
+    exec_result = run(
+        "build it",
+        cwd=work,
+        env=env,
+        job_id="job-exec",
+        stage="execute",
+        plan="zai",
+    )
+    assert exec_result.ok is True, exec_result.detail
+    # One result contract for both stages, on the omp-sandbox backend.
+    for result, stage_name, model in (
+        (plan_result, "plan", "glm-5.3"),
+        (exec_result, "execute", "glm-5.3-flash"),
+    ):
+        assert result.sandbox == "omp-sandbox"
+        assert result.plan == "zai"
+        assert result.stage == stage_name
+        assert result.model == model
+        assert result.fallback_from is None
+        assert result.final_text == "fake final text"
+        assert result.started is True
+        assert result.commands == [
+            "up",
+            "run_gsd_stage",
+            "sandbox_status",
+            "export_commits",
+            "down",
+        ]
+    # Exactly two run_gsd_stage calls, in order, with the contracted args.
+    stages = [
+        row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"
+    ]
+    assert [row["args"]["stage"] for row in stages] == ["plan", "execute"]
+    first, second = stages
+    assert first["args"]["plan"] == "zai" and second["args"]["plan"] == "zai"
+    assert first["args"]["model"] == "zai/glm-5.3"
+    assert second["args"]["model"] == "zai/glm-5.3-flash"
+    assert first["args"]["gsd_command"] == "gsd-plan-phase"
+    assert second["args"]["gsd_command"] == "gsd-execute-phase"
+    assert first["args"]["task"] == "plan the thing"
+    assert second["args"]["task"] == "build it"
+    # Both stages seeded the same worktree at the same ref.
+    ups = [row for row in _wrapper_log(log) if row.get("tool") == "up"]
+    assert len(ups) == 2
+    for row in ups:
+        assert row["args"]["seed_repo"]["path"] == str(work)
+        assert row["args"]["seed_repo"]["ref"] == "main"
+    # The fake observed the engine-forwarded workspace roots value.
+    seen_roots = {
+        row.get("workspace_roots")
+        for row in _wrapper_log(log)
+        if "workspace_roots" in row
+    }
+    assert seen_roots == {str(roots)}
+    # Wrapper-originated events all carry the attestation stamp.
+    events = [row for row in _jsonl(Path(plan_result.events_path)) if "event" in row]
+    assert events
+    assert all(row.get("attestation") == "mock" for row in events)
+
+
+def test_export_lands_back_in_the_worktree_and_is_reported(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-export",
+        stage="plan",
+        plan="zai",
+    )
+    assert result.ok is True, result.detail
+    stats = result.stats["omp_sandbox"]
+    assert set(stats) == {
+        "stage_id",
+        "tier",
+        "status",
+        "model_requested",
+        "export",
+    }
+    assert stats["status"] == "completed"
+    assert stats["tier"] == "fake-tier"
+    assert stats["model_requested"] == "zai/glm-5.3"
+    export = stats["export"]
+    assert set(export) == {
+        "head",
+        "base",
+        "ref",
+        "commits",
+        "dirty",
+        "bundle",
+        "bytes",
+        "via",
+    }
+    # The reported head is the worktree's HEAD right now, and the commit is
+    # really in the worktree's log.
+    assert export["head"] == _git("rev-parse", "HEAD", cwd=work)
+    assert export["base"] == _git("rev-parse", "HEAD~1", cwd=work)
+    assert export["ref"] == "main"
+    assert export["commits"] == 1
+    assert export["dirty"] is False
+    subjects = _git("log", "--format=%s", cwd=work).splitlines()
+    assert any("fake export" in line for line in subjects)
+    bundle = Path(export["bundle"])
+    assert bundle.is_file()
+    assert export["bytes"] == bundle.stat().st_size
+    assert export["bytes"] > 0
+
+
+def test_tier_unavailable_raises_exactly_one_sandbox_item(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "tier_error")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:tier")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-tier",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:tier",
+    )
+    assert result.ok is False
+    assert result.reason == "sandbox_unavailable"
+    assert "tier unavailable" in result.detail
+    # The item exists the moment run() returned, through run()'s own wiring.
+    data = _read_tasks(store)
+    items = data["waiting_on_ove"]
+    assert [item["id"] for item in items] == ["gb:tier:sandbox_unavailable"]
+    assert items[0]["blocks"] == "engine sandbox gate (sandbox_unavailable)"
+    assert data["tasks"][0] == {"id": "gb:tier", "state": "blocked"}
+    # The run stopped at the up refusal: only up and the shutdown ran.
+    assert _wrapper_tools(log) == ["up", "down"]
+    # A retried run upserts instead of duplicating (one item, stable id).
+    first = dict(items[0])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-tier-2",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:tier",
+    )
+    assert result.ok is False and result.reason == "sandbox_unavailable"
+    data = _read_tasks(store)
+    assert [item["id"] for item in data["waiting_on_ove"]] == [
+        "gb:tier:sandbox_unavailable"
+    ]
+    assert data["waiting_on_ove"][0]["seq"] == first["seq"]
+    assert data["waiting_on_ove"][0]["since"] == first["since"]
+
+
+def test_plan_not_allowed_raises_one_item_without_spawning(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")  # canary: logs on spawn
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots)
+    env.pop("ANTHROPIC_API_KEY", None)  # no other allowlisted plan
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:gate")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-gate",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:gate",
+    )
+    assert result.ok is False
+    assert result.reason == "plan_not_allowed"
+    data = _read_tasks(store)
+    items = data["waiting_on_ove"]
+    assert [item["id"] for item in items] == ["gb:gate:plan_not_allowed"]
+    assert items[0]["blocks"] == "engine plan gate (plan_not_allowed)"
+    assert data["tasks"][0] == {"id": "gb:gate", "state": "blocked"}
+    # The gate refused before any wrapper spawn: the canary left no log.
+    assert not log.exists()
+    assert _wrapper_log(log) == []
+    # The retried run upserts the same single item.
+    run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-gate-2",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:gate",
+    )
+    data = _read_tasks(store)
+    assert [item["id"] for item in data["waiting_on_ove"]] == [
+        "gb:gate:plan_not_allowed"
+    ]
+
+
+def test_interrupt_aborts_the_stage_and_returns_cancelled(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "hang")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    interrupt = InterruptFlag()
+    timer = threading.Timer(0.8, interrupt.set)
+    timer.start()
+    try:
+        result = run(
+            "build it",
+            cwd=work,
+            env=env,
+            job_id="job-abort",
+            stage="execute",
+            plan="zai",
+            interrupt=interrupt,
+        )
+    finally:
+        timer.join()
+    assert result.ok is False
+    assert result.reason == "cancelled"
+    assert result.started is True
+    # The engine sent the abort tool with the live stage id, and the
+    # aborted stage_done is visible in events.jsonl.
+    events = _jsonl(Path(result.events_path))
+    aborted = [
+        row
+        for row in events
+        if row.get("event") == "stage_done" and row.get("status") == "aborted"
+    ]
+    assert len(aborted) == 1
+    stage_id = aborted[0]["stageId"]
+    aborts = [row for row in _wrapper_log(log) if row.get("tool") == "abort"]
+    assert len(aborts) == 1
+    assert aborts[0]["args"] == {"stage_id": stage_id}
+    assert _wrapper_tools(log) == ["up", "run_gsd_stage", "abort", "down"]
+    assert any(
+        row.get("type") == "job_end" and row.get("ok") is False
+        and row.get("reason") == "cancelled"
+        for row in events
+    )
+
+
+def test_delegate_via_engine_passes_engine_plan_to_the_wrapper(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    raw = delegate_via_engine(
+        "plan the thing", env=env, cwd=str(work), stage="plan", engine_plan="zai"
+    )
+    assert raw is not None
+    body = json.loads(raw)
+    assert body["engine"] == "omp"
+    assert body["stage"] == "plan"
+    assert body["model"] == "glm-5.3"
+    assert body["summary"] == "fake final text"
+    # The requested plan reached run_gsd_stage verbatim; probe's backend
+    # readiness gate passed on the same env (the call got this far).
+    stages = [
+        row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"
+    ]
+    assert len(stages) == 1
+    args = stages[0]["args"]
+    assert args["stage"] == "plan"
+    assert args["plan"] == "zai"
+    assert args["model"] == "zai/glm-5.3"
+    assert args["gsd_command"] == "gsd-plan-phase"
+    assert args["task"] == "plan the thing"
+
+
+def test_ultrathink_engine_passes_engine_plan_to_the_wrapper(
+    tmp_path: Path, monkeypatch
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    spec = tmp_path / "spec.md"
+    spec.write_text("Build the export button.\n", encoding="utf-8")
+    monkeypatch.chdir(work)  # ultrathink runs on the process cwd
+    body = ultrathink_engine(
+        {"found": True, "spec_path": str(spec)},
+        env,
+        stage="plan",
+        engine_plan="zai",
+    )
+    assert body["used"] is True
+    assert body["stage"] == "plan"
+    assert body["plan"] == "zai"
+    assert body["model"] == "glm-5.3"
+    assert body["final_text"] == "fake final text"
+    stages = [
+        row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"
+    ]
+    assert len(stages) == 1
+    args = stages[0]["args"]
+    assert args["stage"] == "plan"
+    assert args["plan"] == "zai"
+    assert args["model"] == "zai/glm-5.3"
+    assert args["gsd_command"] == "gsd-plan-phase"
+    assert "Carry out this ultrathink spec." in args["task"]
+    assert "Build the export button." in args["task"]
