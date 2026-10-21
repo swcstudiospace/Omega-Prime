@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from omega_prime.engine.omp_driver import EngineResult, probe, run
@@ -276,13 +277,17 @@ def delegate_via_engine(
     interrupt: Any | None = None,
     stage: str | None = None,
     engine_plan: str | None = None,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
 ) -> str | None:
     """JSON summary from omp, or None when the Python child path should run.
 
     ``stage`` falls back to ``OMEGA_PRIME_ENGINE_STAGE``; see ``engine_stage``.
     ``engine_plan`` requests one coding plan (``run(plan=...)``): the router
     still decides, so an unknown or off-allowlist plan refuses the run
-    instead of silently changing providers.
+    instead of silently changing providers. ``tasks_path``/``task_id`` are
+    optional dashboard context threaded into ``run(...)`` unchanged — they
+    switch on the run's visibility wiring when both are set.
     """
     mapping = _mapping(env)
     mode = engine_mode(mapping)
@@ -295,7 +300,14 @@ def delegate_via_engine(
     if not ready and mode == "required":
         return json.dumps({"error": reason}, ensure_ascii=False)
     result = run(
-        goal, env=mapping, cwd=cwd, interrupt=interrupt, stage=staged, plan=engine_plan
+        goal,
+        env=mapping,
+        cwd=cwd,
+        interrupt=interrupt,
+        stage=staged,
+        plan=engine_plan,
+        tasks_path=tasks_path,
+        task_id=task_id,
     )
     if not result.ok:
         if mode == "required" or result.started:
@@ -382,6 +394,8 @@ def ultrathink_engine(
     *,
     stage: str | None = None,
     engine_plan: str | None = None,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     """Run a resolved ultrathink spec on omp when the engine is ready.
 
@@ -390,7 +404,9 @@ def ultrathink_engine(
     ``plan``: the first positional already is the spec mapping, and
     ``engine_plan`` is the established name for the requested coding plan,
     as in ``route_turn``) is threaded into ``run(plan=...)`` unchanged —
-    the router still decides.
+    the router still decides. ``tasks_path``/``task_id`` are optional
+    dashboard context threaded into ``run(...)`` unchanged — they switch
+    on the run's visibility wiring when both are set.
     """
     mode = engine_mode(env)
     if mode == "off":
@@ -418,6 +434,8 @@ def ultrathink_engine(
         system_prompt="Ultrathink turn. Stay inside the spec.",
         stage=staged,
         plan=engine_plan,
+        tasks_path=tasks_path,
+        task_id=task_id,
     )
     if not result.ok:
         body = {
