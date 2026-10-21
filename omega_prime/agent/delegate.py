@@ -58,6 +58,10 @@ def delegate_task(
                 goals[0],
                 interrupt=getattr(parent, "interrupt", None),
                 stage=child_stage,
+                cwd=getattr(parent, "engine_cwd", None),
+                engine_plan=getattr(parent, "engine_plan", None),
+                tasks_path=getattr(parent, "engine_tasks_path", None),
+                task_id=getattr(parent, "engine_task_id", None),
             )
             if routed is not None:
                 return routed

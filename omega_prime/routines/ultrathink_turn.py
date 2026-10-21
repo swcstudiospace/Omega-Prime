@@ -119,12 +119,16 @@ def resolve_turn_plan(
 
 
 def _engine_annotation(
-    plan: Mapping[str, Any], env: Mapping[str, str]
+    plan: Mapping[str, Any],
+    env: Mapping[str, str],
+    *,
+    tasks_path: str | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     """omp run for this spec, or a fallback reason when the engine is not ready."""
     from omega_prime.engine.attach import ultrathink_engine
 
-    return ultrathink_engine(plan, env)
+    return ultrathink_engine(plan, env, tasks_path=tasks_path, task_id=task_id)
 
 
 def execute_ultrathink(env: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -145,7 +149,11 @@ def execute_ultrathink(env: Mapping[str, str] | None = None) -> dict[str, Any]:
         mapping = env
         plan = resolve_turn_plan(env=dict(env))
     plan["publishes"] = False
-    plan["engine"] = _engine_annotation(plan, mapping)
+    tasks_path = mapping.get("OMEGA_PRIME_TASKS_PATH") or None
+    task_id = mapping.get("OMEGA_PRIME_TASK_ID") or None
+    plan["engine"] = _engine_annotation(
+        plan, mapping, tasks_path=tasks_path, task_id=task_id
+    )
     engine = plan["engine"]
     if isinstance(engine, dict) and engine.get("failed"):
         plan["failed"] = True
@@ -167,7 +175,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.state_dir:
         plan = resolve_turn_plan(state_dirs=[args.state_dir])
         plan["publishes"] = False
-        plan["engine"] = _engine_annotation(plan, os.environ)
+        plan["engine"] = _engine_annotation(
+            plan,
+            os.environ,
+            tasks_path=os.environ.get("OMEGA_PRIME_TASKS_PATH") or None,
+            task_id=os.environ.get("OMEGA_PRIME_TASK_ID") or None,
+        )
     else:
         plan = execute_ultrathink(os.environ)
     json.dump(plan, sys.stdout)
