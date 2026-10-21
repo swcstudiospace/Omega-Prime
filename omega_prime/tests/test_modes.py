@@ -382,6 +382,27 @@ def test_exec_job_kill_escalates_when_terminate_does_not_finish(tmp_path: Path):
         jobs.shutdown()
 
 
+def _process_still_running(pid: int) -> bool:
+    """True while ``pid`` is running; an exited, unreaped zombie counts as dead.
+
+    The worker is a grandchild that gets reparented once its leader dies. If
+    nothing reaps it (a container without an init), it stays a zombie and
+    ``os.kill(pid, 0)`` keeps succeeding even though it has exited, so read
+    its state from ``/proc`` where that is available.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return True
+    # The state field follows the parenthesised command name.
+    state = stat.rsplit(")", 1)[-1].split()[0]
+    return state not in {"Z", "X"}
+
+
 @pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
 def test_exec_job_kill_stops_group_worker_that_ignores_terminate(tmp_path: Path):
     """A worker that ignores SIGTERM and dropped the pipes still dies on kill."""
@@ -421,11 +442,8 @@ def test_exec_job_kill_stops_group_worker_that_ignores_terminate(tmp_path: Path)
         deadline = time.monotonic() + 5
         alive = True
         while alive and time.monotonic() < deadline:
-            try:
-                os.kill(worker_pid, 0)
-            except ProcessLookupError:
-                alive = False
-            else:
+            alive = _process_still_running(worker_pid)
+            if alive:
                 time.sleep(0.02)
         assert alive is False, "SIGTERM-ignoring worker survived kill()"
     finally:
