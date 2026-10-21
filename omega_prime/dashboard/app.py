@@ -17,6 +17,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from omega_prime.dashboard.terminal import TerminalService, resolve_task_pane
 from omega_prime.dashboard import __version__
 from omega_prime.dashboard.poller import DashboardPoller
 
@@ -208,6 +209,7 @@ def create_app(
     port: int = 7421,
     host: str = "127.0.0.1",
     heartbeat_s: float = 15.0,
+    terminal_service: TerminalService | None = None,
 ) -> Starlette:
     """Build the local dashboard application around a shared poller."""
     static_dir = Path(__file__).resolve().parent / "static"
@@ -305,6 +307,24 @@ def create_app(
 
     async def health(_: Any) -> Response:
         return JSONResponse({"ok": True, "version": __version__})
+    async def terminal(request: Any) -> Response:
+        task_id = request.path_params["task_id"]
+        if request.scope.get("query_string") or len(task_id.encode("utf-8")) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in task_id):
+            return Response("not found", status_code=404)
+        snapshot = poller.snapshot() or _empty_snapshot()
+        task = next((item for group in ("active", "idle_sessions", "finished") for item in snapshot.get(group, []) if isinstance(item, dict) and item.get("id") == task_id), None)
+        if task is None:
+            return Response("not found", status_code=404)
+        pane = resolve_task_pane(task)
+        service = terminal_service or TerminalService()
+        async def events() -> AsyncIterator[str]:
+            if pane is None:
+                yield service._event("no_session", "", None)
+            else:
+                async for event in service.stream(pane):
+                    yield event
+        return _SSEResponse(events(), headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 
     async def stream(_: Any) -> Response:
         async def sse_generator() -> AsyncIterator[str]:
@@ -340,6 +360,7 @@ def create_app(
             Route("/cc/{asset_path:path}", cc_asset, methods=["GET"]),
             Route("/legacy", legacy, methods=["GET"]),
             Route("/static/{asset_name}", legacy_asset, methods=["GET"]),
+            Route("/api/tasks/{task_id:path}/terminal", terminal, methods=["GET"]),
             Route("/api/snapshot", snapshot, methods=["GET"]),
             Route("/api/stream", stream, methods=["GET"]),
             Route("/healthz", health, methods=["GET"]),

@@ -91,6 +91,7 @@ class Task:
     display_id: str | None = None
     timeline: list[dict[str, str]] = field(default_factory=list)
     wiring: dict[str, str | None] | None = None
+    herdr_pane: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _safe(
@@ -112,6 +113,7 @@ class Task:
                 "display_id": self.display_id,
                 "timeline": self.timeline,
                 "wiring": self.wiring,
+                "herdr_pane": self.herdr_pane,
             }
         )
 
@@ -180,6 +182,7 @@ class FinishedItem:
     model: str | None = None
     detail: str | None = None
     links: tuple[dict[str, str], ...] = ()
+    herdr_pane: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _safe({
@@ -190,6 +193,7 @@ class FinishedItem:
             "owner": self.owner.to_dict() if self.owner else None, "state": self.state,
             "started_at": self.started_at, "last_activity_at": self.last_activity_at,
             "progress": None if self.progress is None else {"done": self.progress[0], "total": self.progress[1]},
+            "herdr_pane": self.herdr_pane,
             "model": self.model, "detail": self.detail, "links": list(self.links),
         })
 
@@ -661,6 +665,7 @@ def normalize_tasks(
                     detail=t.get("note") if isinstance(t.get("note"), str) else None,
                     links=links,
                     wiring=_wiring(t.get("wiring", {})) if isinstance(t.get("wiring"), dict) else None,
+                    herdr_pane=t.get("herdr_pane") if isinstance(t.get("herdr_pane"), dict) else None,
                 ))
                 continue
             active.append(Task(
@@ -670,6 +675,7 @@ def normalize_tasks(
                 t.get("note") if isinstance(t.get("note"), str) else None,
                 links,
                 wiring=_wiring(t.get("wiring", {})) if isinstance(t.get("wiring"), dict) else None,
+                herdr_pane=t.get("herdr_pane") if isinstance(t.get("herdr_pane"), dict) else None,
             ))
         for raw in task_source.extra.get("waiting_on_ove", []):
             if isinstance(raw, dict) and isinstance(raw.get("id"), str):

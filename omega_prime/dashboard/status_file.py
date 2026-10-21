@@ -10,6 +10,7 @@ import os
 import tempfile
 import fcntl
 import hashlib
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,6 +21,8 @@ from omega_prime.dashboard.redact import redact_value
 
 _STATES = {"queued", "working", "blocked", "waiting_on_ove", "done", "failed"}
 _RESULTS = {"ok", "failed", "stopped"}
+_PANE_ID = re.compile(r"^w\d+:p\d+$")
+
 
 
 @dataclass
@@ -76,8 +79,25 @@ def _links(value: Any, prefix: str) -> list[dict[str, str]]:
     return result
 
 
-def _canonical_identity(identity: str) -> str:
-    return identity if ":" in identity else f"tasks:{identity}"
+def _pane(value: Any, prefix: str) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {"pane_id", "workspace"}:
+        raise ValueError(f"{prefix}.herdr_pane must be a pane mapping")
+    pane_id = value.get("pane_id")
+    if not isinstance(pane_id, str) or not _PANE_ID.fullmatch(pane_id):
+        raise ValueError(f"{prefix}.herdr_pane.pane_id is invalid")
+    workspace = value.get("workspace")
+    result = {"pane_id": pane_id}
+    if workspace is not None:
+        if not isinstance(workspace, str) or len(workspace.encode("utf-8")) > 200 or any(ord(c) < 32 or ord(c) == 127 for c in workspace):
+            raise ValueError(f"{prefix}.herdr_pane.workspace is invalid")
+        safe_workspace = redact_value(workspace)
+        result["workspace"] = safe_workspace
+    return result
+
+
+
 
 def _validated(data: dict[str, Any]) -> dict[str, Any]:
     if data.get("version") != 1:
@@ -117,6 +137,7 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
                 item["progress"] = _progress(row.get("progress"), prefix)
                 item["note"] = _optional_string(row, "note", prefix)
                 item["links"] = _links(row.get("links", []), prefix)
+                item["herdr_pane"] = _pane(row.get("herdr_pane"), prefix)
             elif category == "waiting_on_ove":
                 item["since"] = _optional_string(row, "since", prefix)
                 item["blocks"] = _string(row, "blocks", prefix)
