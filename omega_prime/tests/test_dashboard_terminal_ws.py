@@ -10,6 +10,7 @@ from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from omega_prime.dashboard.app import create_app
 from omega_prime.dashboard.terminal import PaneClosedError
 from omega_prime.dashboard.terminal_ws import (
     TERMINAL_INPUT_MAX_BYTES,
@@ -453,3 +454,117 @@ def test_frame_secrets_arrive_redacted_with_escapes_intact():
         frame = ws.receive_json()
     assert frame["text"].startswith("\x1b[31mtoken: [REDACTED]\x1b[0m")
     assert "ghp_abcdefgh123456" not in frame["text"]
+
+
+def _wired_app(**kwargs):
+    runner = _counter_runner()
+    poller = _poller(
+        [
+            {"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}},
+            {"id": "worker/1", "herdr_pane": {"pane_id": "w2:p5"}},
+        ]
+    )
+    kwargs.setdefault("attach_token", FIXED_TOKEN)
+    kwargs.setdefault("terminal_bridge", HerdrBridge(runner=runner, poll_s=0.01))
+    app = create_app(poller, port=7441, **kwargs)
+    return TestClient(app), app, runner
+
+
+def _ws(client, path):
+    headers = {"host": "127.0.0.1:7441", "origin": "http://127.0.0.1:7441"}
+    return client.websocket_connect(path, headers=headers)
+
+
+def test_api_session_releases_token_to_same_origin_only():
+    client, _app, _runner = _wired_app()
+    response = client.get("/api/session", headers={"host": "127.0.0.1:7441"})
+    assert response.status_code == 200
+    assert response.json() == {"token": FIXED_TOKEN, "readonly": False}
+    assert response.headers["cache-control"] == "no-store"
+    assert client.get(
+        "/api/session", headers={"host": "127.0.0.1:7441", "sec-fetch-site": "cross-site"}
+    ).status_code == 403
+    for site in ("same-origin", "none"):
+        assert client.get(
+            "/api/session", headers={"host": "127.0.0.1:7441", "sec-fetch-site": site}
+        ).status_code == 200
+    assert client.get("/api/session", headers={"host": "127.0.0.1:7441"}).status_code == 200
+    assert client.post(
+        "/api/session", headers={"host": "127.0.0.1:7441"}
+    ).status_code == 405
+    assert client.get("/api/session", headers={"host": "10.0.0.9:7441"}).status_code == 403
+
+
+def test_guard_admits_authorized_ws_end_to_end():
+    client, _app, _runner = _wired_app()
+    with _ws(client, "/ws/tasks/task:one/terminal") as ws:
+        _auth(ws)
+        assert ws.receive_json()["type"] == "frame"
+    with _ws(client, "/ws/tasks/worker%2F1/terminal") as ws:
+        _auth(ws)
+        assert ws.receive_json()["type"] == "frame"
+
+
+def test_guard_accepts_localhost_origin_variant_case_insensitive():
+    client, _app, _runner = _wired_app()
+    with client.websocket_connect(
+        "/ws/tasks/task:one/terminal",
+        headers={"host": "127.0.0.1:7441", "origin": "HTTP://LocalHost:7441"},
+    ) as ws:
+        _auth(ws)
+        assert ws.receive_json()["type"] == "frame"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"host": "127.0.0.1:7441", "origin": "http://evil.example"},
+        {"host": "127.0.0.1:7441"},
+        {"host": "10.0.0.9:7441", "origin": "http://127.0.0.1:7441"},
+    ],
+)
+def test_guard_closes_foreign_ws_4403(headers):
+    client, _app, _runner = _wired_app()
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect("/ws/tasks/task:one/terminal", headers=headers) as ws:
+            _auth(ws)
+            ws.receive_json()
+    assert exc.value.code == 4403
+
+
+def test_minted_tokens_differ_per_app_and_are_strings():
+    runner = _counter_runner()
+    poller = _poller([{"id": "task:one"}])
+    first = create_app(poller, port=7441)
+    second = create_app(poller, port=7441)
+    client = TestClient(first)
+    one = client.get("/api/session", headers={"host": "127.0.0.1:7441"}).json()
+    client2 = TestClient(second)
+    two = client2.get("/api/session", headers={"host": "127.0.0.1:7441"}).json()
+    assert isinstance(one["token"], str) and one["token"]
+    assert one["token"] != two["token"]
+
+
+def test_csp_gains_ws_sources_and_keeps_substrings():
+    client, app, _runner = _wired_app()
+    response = client.get("/api/snapshot", headers={"host": "127.0.0.1:7441"})
+    csp = response.headers["content-security-policy"]
+    assert "ws://127.0.0.1:7441" in csp and "ws://localhost:7441" in csp
+    assert "default-src 'self'" in csp and "font-src 'self'" in csp
+    assert "connect-src 'self' ws://127.0.0.1:7441 ws://localhost:7441" in csp
+
+
+def test_default_port_csp_unit_level():
+    from omega_prime.dashboard.app import _DashboardGuards
+
+    guards = _DashboardGuards(app=None, port=7421, host="127.0.0.1")
+    csp = guards.security_headers["content-security-policy"]
+    assert "connect-src 'self' ws://127.0.0.1:7421 ws://localhost:7421" in csp
+
+
+def test_route_paths_stay_free_of_send_and_input():
+    _client, app, _runner = _wired_app()
+    paths = [getattr(route, "path", "") for route in app.routes]
+    assert "/api/tasks/{task_id:path}/terminal" in paths
+    assert "/ws/tasks/{task_id:path}/terminal" in paths
+    assert not any("send" in path or "input" in path for path in paths)
