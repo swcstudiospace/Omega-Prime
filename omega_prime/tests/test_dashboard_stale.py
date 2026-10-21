@@ -214,7 +214,8 @@ def test_stale_survives_numbering(tmp_path):
     assert task["seq"] == 1
 
 
-def test_default_checker_degrades_without_herdr_binary():
+def test_default_checker_degrades_without_herdr_binary(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
     poller = DashboardPoller([], clock=lambda: NOW)
     _feed_poller(
         poller,
