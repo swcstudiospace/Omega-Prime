@@ -7,7 +7,6 @@ import pytest
 from omega_prime.dashboard.collectors.tasks_json import make_tasks_json_collector
 from omega_prime.dashboard.model import normalize_tasks
 from omega_prime.dashboard.status_file import read_tasks, write_tasks
-from omega_prime.dashboard.terminal import resolve_task_pane, sanitize_terminal_text
 
 
 def test_task_mapping_roundtrips_validation_collector_and_snapshot(tmp_path):
@@ -29,11 +28,13 @@ def test_invalid_pane_mapping_is_rejected(tmp_path):
 
 
 def test_pane_owner_fallback_is_explicit_and_validated():
+    from omega_prime.dashboard.terminal import resolve_task_pane
     assert resolve_task_pane({"owner": {"kind": "herdr-pane", "ref": "w1:p3"}}) == "w1:p3"
     assert resolve_task_pane({"owner": {"kind": "worker", "ref": "w1:p3"}}) is None
 
 
 def test_sanitizer_redacts_controls_lines_bytes_and_tokens():
+    from omega_prime.dashboard.terminal import sanitize_terminal_text
     text = "\x1b[31mBearer abcdefghijkl\x1b[0m\x85\n\t" + "\n".join(f"line{i}" for i in range(205))
     safe = sanitize_terminal_text(text)
     assert "\x1b" not in safe and "\x85" not in safe and "abcdefghijkl" not in safe and "line0\n" not in safe

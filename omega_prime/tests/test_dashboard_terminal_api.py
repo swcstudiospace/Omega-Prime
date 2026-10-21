@@ -4,10 +4,23 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
+import inspect
+
 from omega_prime.dashboard.app import create_app
 from omega_prime.dashboard.poller import DashboardPoller
-from omega_prime.dashboard.terminal import PaneClosedError, TerminalService
 
+
+def _terminal_service(**kwargs):
+    if "terminal_service" not in inspect.signature(create_app).parameters:
+        return None
+    from omega_prime.dashboard.terminal import TerminalService
+    return TerminalService(**kwargs)
+
+
+def _app(poller, service):
+    if "terminal_service" in inspect.signature(create_app).parameters:
+        return create_app(poller, terminal_service=service)
+    return create_app(poller)
 
 def _poller(*, task_id="task:one", mapping=None):
     poller = DashboardPoller([])
@@ -64,14 +77,14 @@ def test_terminal_route_resolves_only_task_owned_pane_and_uses_read_argv():
     async def runner(argv):
         calls.append(argv)
         return "safe output"
-    service = TerminalService(runner=runner)
-    app = create_app(_poller(mapping={"pane_id": "w2:p4"}), terminal_service=service)
+    service = _terminal_service(runner=runner)
+    app = _app(_poller(mapping={"pane_id": "w2:p4"}), service)
     status, wire = asyncio.run(_wire(app, "/api/tasks/task:one/terminal"))
     assert status == 200 and '"text":"safe output"' in wire
     assert calls == [["herdr", "pane", "read", "w2:p4", "--source", "recent", "--lines", "200", "--format", "text"]]
-    unmapped_status, unmapped_wire = asyncio.run(_wire(create_app(_poller(), terminal_service=service), "/api/tasks/task:one/terminal"))
+    unmapped_status, unmapped_wire = asyncio.run(_wire(_app(_poller(), service), "/api/tasks/task:one/terminal"))
     assert unmapped_status == 200 and '"status":"no_session"' in unmapped_wire and len(calls) == 1
-    assert asyncio.run(_wire(create_app(_poller(task_id=None), terminal_service=service), "/api/tasks/unknown/terminal"))[0] == 404
+    assert asyncio.run(_wire(_app(_poller(task_id=None), service), "/api/tasks/unknown/terminal"))[0] == 404
 
 
 def test_terminal_sanitizes_redacts_caps_and_sends_only_changed_frames():
@@ -82,8 +95,8 @@ def test_terminal_sanitizes_redacts_caps_and_sends_only_changed_frames():
         calls += 1
         return content if calls == 1 else content + "\nnew frame"
     ticks = iter(datetime(2026, 10, 21, tzinfo=UTC) + timedelta(seconds=n) for n in range(10))
-    service = TerminalService(runner=runner, clock=lambda: next(ticks), sleep=lambda _: asyncio.sleep(0))
-    status, wire = asyncio.run(_wire(create_app(_poller(mapping={"pane_id": "w2:p4"}), terminal_service=service), "/api/tasks/task:one/terminal", stop_after_terminal=2))
+    service = _terminal_service(runner=runner, clock=lambda: next(ticks), sleep=lambda _: asyncio.sleep(0))
+    status, wire = asyncio.run(_wire(_app(_poller(mapping={"pane_id": "w2:p4"}), service), "/api/tasks/task:one/terminal", stop_after_terminal=2))
     assert status == 200
     events = [json.loads(line[6:]) for line in wire.splitlines() if line.startswith("data: ")]
     assert len(events) == 2
@@ -98,8 +111,8 @@ def test_terminal_disconnect_releases_capacity_and_stops_reads():
     async def runner(_argv):
         calls.append(1)
         return "constant"
-    service = TerminalService(runner=runner, sleep=lambda _: asyncio.sleep(0))
-    status, wire = asyncio.run(_wire(create_app(_poller(mapping={"pane_id": "w1:p1"}), terminal_service=service), "/api/tasks/task:one/terminal"))
+    service = _terminal_service(runner=runner, sleep=lambda _: asyncio.sleep(0))
+    status, wire = asyncio.run(_wire(_app(_poller(mapping={"pane_id": "w1:p1"}), service), "/api/tasks/task:one/terminal"))
     assert status == 200 and "event: terminal" in wire
     assert len(calls) == 1 and service._slots._value == 4
 
@@ -112,9 +125,9 @@ def test_terminal_cancels_capture_when_raw_asgi_viewer_disconnects():
             await asyncio.Event().wait()
         finally:
             cancelled.set()
-    service = TerminalService(runner=runner)
+    service = _terminal_service(runner=runner)
     async def exercise():
-        status, wire = await _wire(create_app(_poller(mapping={"pane_id": "w1:p1"}), terminal_service=service), "/api/tasks/task:one/terminal", disconnect_when=started)
+        status, wire = await _wire(_app(_poller(mapping={"pane_id": "w1:p1"}), service), "/api/tasks/task:one/terminal", disconnect_when=started)
         assert status == 200 and "retry: 3000" in wire
         assert cancelled.is_set() and service._slots._value == 4
     asyncio.run(exercise())
@@ -125,8 +138,8 @@ def test_terminal_unchanged_capture_heartbeats_without_timestamp_change():
     async def runner(_argv):
         calls.append(1)
         return "same"
-    service = TerminalService(runner=runner, sleep=lambda _: asyncio.sleep(0))
-    status, wire = asyncio.run(_wire(create_app(_poller(mapping={"pane_id": "w1:p1"}), terminal_service=service), "/api/tasks/task:one/terminal", stop_after_terminal=9999, stop_on_heartbeat=True))
+    service = _terminal_service(runner=runner, sleep=lambda _: asyncio.sleep(0))
+    status, wire = asyncio.run(_wire(_app(_poller(mapping={"pane_id": "w1:p1"}), service), "/api/tasks/task:one/terminal", stop_after_terminal=9999, stop_on_heartbeat=True))
     assert status == 200 and ": heartbeat" in wire
     assert wire.count('"updated_at":"') == 1 and len(calls) == 2
     assert service._slots._value == 4
@@ -138,8 +151,8 @@ def test_terminal_state_change_does_not_advance_output_timestamp():
         if calls == 1:
             return "last good frame"
         raise OSError("private stderr is never emitted")
-    service = TerminalService(runner=runner, clock=lambda: datetime(2026, 10, 21, tzinfo=UTC), sleep=lambda _: asyncio.sleep(0))
-    status, wire = asyncio.run(_wire(create_app(_poller(mapping={"pane_id": "w1:p1"}), terminal_service=service), "/api/tasks/task:one/terminal", stop_after_terminal=2))
+    service = _terminal_service(runner=runner, clock=lambda: datetime(2026, 10, 21, tzinfo=UTC), sleep=lambda _: asyncio.sleep(0))
+    status, wire = asyncio.run(_wire(_app(_poller(mapping={"pane_id": "w1:p1"}), service), "/api/tasks/task:one/terminal", stop_after_terminal=2))
     events = [json.loads(line[6:]) for line in wire.splitlines() if line.startswith("data: ")]
     assert status == 200 and [frame["status"] for frame in events] == ["live", "unavailable"]
     assert events[0]["updated_at"] == events[1]["updated_at"]
@@ -148,10 +161,11 @@ def test_terminal_state_change_does_not_advance_output_timestamp():
 
 
 def test_terminal_reports_confirmed_closed_pane_and_releases_capacity():
+    from omega_prime.dashboard.terminal import PaneClosedError
     async def runner(_argv):
         raise PaneClosedError()
-    service = TerminalService(runner=runner)
-    status, wire = asyncio.run(_wire(create_app(_poller(mapping={"pane_id": "w1:p1"}), terminal_service=service), "/api/tasks/task:one/terminal"))
+    service = _terminal_service(runner=runner)
+    status, wire = asyncio.run(_wire(_app(_poller(mapping={"pane_id": "w1:p1"}), service), "/api/tasks/task:one/terminal"))
     assert status == 200 and '"status":"pane_closed"' in wire
     assert service._slots._value == 4
 
@@ -161,11 +175,11 @@ def test_terminal_stream_limit_returns_429_before_sse_starts():
     async def runner(argv):
         calls.append(argv)
         return "should not run"
-    service = TerminalService(runner=runner)
+    service = _terminal_service(runner=runner)
     async def saturate_and_request():
         for _ in range(4):
             assert await service.reserve()
-        status, wire = await _wire(create_app(_poller(mapping={"pane_id": "w1:p1"}), terminal_service=service), "/api/tasks/task:one/terminal")
+        status, wire = await _wire(_app(_poller(mapping={"pane_id": "w1:p1"}), service), "/api/tasks/task:one/terminal")
         for _ in range(4):
             service._slots.release()
         return status, wire
