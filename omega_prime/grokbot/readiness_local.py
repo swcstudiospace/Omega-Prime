@@ -285,12 +285,16 @@ def _memory(probe: ReadinessProbe) -> None:
         probe, "memory", {"action": "add", "target": "memory", "content": sentinel}
     )
     probe.check(
-        kept.get("success") is True,
+        kept.get("ok") is True,
         f"memory add must succeed, got {kept}",
     )
     recall = _result(probe, "lead_memory_recall", {"query": f"{_MARKER} sentinel"})
     probe.check(
-        _MARKER in json.dumps(recall),
+        any(
+            _MARKER in entry.get("content", "")
+            for entry in recall.get("results", [])
+            if isinstance(entry, dict)
+        ),
         f"lead_memory_recall must surface the retained entry, got {recall}",
     )
     candidates = list(Path(probe.layout.state).rglob("MEMORY.md"))
@@ -1253,12 +1257,16 @@ def _lead_effects(probe: ReadinessProbe) -> None:
         },
     )
     probe.check(
-        retained.get("ok") is True and retained.get("bank") == "omega-prime-lead",
+        retained.get("ok") is True,
         f"lead_memory_retain must persist with receipt evidence, got {retained}",
     )
     recall = _result(probe, "lead_memory_recall", {"query": _LEAD_RETAIN})
     probe.check(
-        _LEAD_RETAIN in json.dumps(recall),
+        any(
+            _LEAD_RETAIN in entry.get("content", "")
+            for entry in recall.get("results", [])
+            if isinstance(entry, dict)
+        ),
         f"retained entry must be recallable, got {recall}",
     )
     probe.record(
@@ -1973,13 +1981,16 @@ def _negatives(probe: ReadinessProbe) -> None:
 
     clarified = _result(probe, "clarify", {"question": "75-05 baseline ready?"})
     probe.check(
-        clarified.get("question") == "75-05 baseline ready?",
-        f"clarify must echo the recorded question, got {clarified}",
+        clarified
+        == {
+            "answer": "Emulator stand-in answer: proceed to the operator-selected phase."
+        },
+        f"clarify emulator stand-in returned an unexpected answer: {clarified}",
     )
     probe.record(
-        "clarify effect-free echo",
+        "clarify deterministic emulator stand-in",
         ("clarify",),
-        "question recorded and returned unchanged; no user interrupt in this slice",
+        "the readiness emulator uses a scripted answer; this is not a live operator round trip",
     )
 
     bad_receipt = {

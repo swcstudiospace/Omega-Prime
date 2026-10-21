@@ -8,10 +8,8 @@ bots: [bot-00-omega-prime]
 
 **Owner:** Programming Lead (bot-00). LEAD orchestrates this skill. Specialists execute tickets. This skill never invents product-code ownership and never edits specialist paths.
 
-**Policy:** `https://github.com/swcstudiospace/programming-desk/blob/main/docs/gotxcot-cloud-pipeline.md`.  
-**Constants:** `vendor/ultrathink-policy/constants.ts` (`MIN_NODES=5`, `MAX_NODES=8`, `MIN_STEPS=4`, `MAX_STEPS=8`).  
-**Kickoff concepts:** `vendor/ultrathink-policy/kickoff-checklist.md` (desk override of upstream `ultrathink-kickoff`).  
-**Next skill, only after this one finishes:** `skills/trackplan-dispatch`.
+**Local guidance:** This repository does not contain a verified copy of the Programming Desk pipeline policy or the referenced `vendor/ultrathink-policy` files; they are not operative authorities here. Follow the local uplift procedure below and the existing [XML root and density guidance](xml-roots.md).
+**Next skill, only after this one finishes:** [trackplan-dispatch](../trackplan-dispatch/SKILL.md).
 
 **Status:** Procedure for the desk pack. Live Notion/Linear/Cloud Agent E2E is **not** verified by authoring this skill.
 
@@ -108,7 +106,7 @@ Build a DAG of **major work units**. Count is a function of complexity **inside 
 
 Kinds allowed: `understand`, `decompose`, `generate`, `compare`, `critique`, `aggregate`, `refine`, `synthesize`.
 
-If generation fails, use the five-node fallback in `vendor/ultrathink-policy/constants.ts` commentary (`Understand → Decompose → Approaches → Risks → Plan`) and mark the graph source `fallback`. Fallback is not permission to shrink a successful graph below 5.
+If graph generation fails, use the five-node fallback `Understand → Decompose → Approaches → Risks → Plan`, mark the graph source `fallback`, and keep all required density constraints. No verified local copy of the former vendor constants is available.
 
 ---
 
@@ -148,7 +146,7 @@ HITL: at most **4** blocking clarifications, deduplicated. Non-blocking items ta
 
 ## 4. Kickoff materialization checklist
 
-Follow `vendor/ultrathink-policy/kickoff-checklist.md` in order. Summary:
+Follow the kickoff materialization steps below. No verified local copy of the former vendor checklist is available.
 
 1. Build `graphId` (`ut-<base36>-<uuid8>`) once. Re-entry updates; it does not duplicate.
 2. Notion **Task** on Agent Task Graph. `Agent` = **`cursor-cloud`** if Cursor will execute (Lane A).
@@ -233,11 +231,9 @@ Write a Lead receipt under `.receipts/bot-00-programming-lead/` for the orchestr
 
 | Path | Role |
 |---|---|
-| `https://github.com/swcstudiospace/programming-desk/blob/main/docs/gotxcot-cloud-pipeline.md` | Authoritative flow |
-| `vendor/ultrathink-policy/README.md` | VPS constant and prompt string diffs |
-| `vendor/ultrathink-policy/kickoff-checklist.md` | Tracker materialization |
-| `skills/gotxcot-uplift/xml-roots.md` | Root picker and density checks |
-| `skills/trackplan-dispatch/SKILL.md` | Dispatch after stage 5 |
-| `https://github.com/swcstudiospace/programming-desk/blob/main/docs/desk-operating-model.md` | Specialist ticket shape |
-| `ownership.yaml` | Who may implement |
+| [XML root and density guidance](xml-roots.md) | Local root picker and density checks |
+| [Trackplan dispatch](../trackplan-dispatch/SKILL.md) | Dispatch after stage 5 |
+| [Ownership](../../../omega_prime/ownership.yaml) | Who may implement |
+
+The former Programming Desk pipeline and operating-model documents, and `vendor/ultrathink-policy` materials, are not present as verified local sources and are not required authorities.
 </skill>

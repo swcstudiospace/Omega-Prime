@@ -1,4 +1,5 @@
 ## Unreleased
+- Solo mode is the default for bot-00; Desk docs, bus, and notifications remain opt-in, with skill-link checks covering package documentation. Evidence: `.receipts/bot-00-omega-prime/phase-99.json` — focused solo/Desk/prompt/link tests `pytest omega_prime/tests/test_lead.py omega_prime/tests/test_desk_wiring.py omega_prime/tests/test_desk_lead.py omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_shell.py omega_prime/tests/test_prompt_format.py omega_prime/tests/test_command_generation.py -q` exit 0; `bash omega_prime/scripts/assemble-prompts.sh --check` exit 0.
 
 - omp engine (Phase A1a): the coding loop can run on omp 18.x over RPC. Tools stay on the stdio MCP server, plans go through an allowlist, and `omega_capacity` reports quota.
 - A1b dispatch: `omega_dispatch` (approval plus confirm token), `omega_jobs_status`, and `omega_jobs_cancel`. One JobSpec goes to the local sandbox lane or the coding fleet. The fleet client reads `FLEET_COORDINATOR_URL` by name. `FLEET_COORDINATOR_TOKEN` is resolved by the credential broker after `SeatPolicy.allows_host`.
@@ -9,6 +10,7 @@
 - Stdio gated tools read a mode 0600 approvals file outside the repo and outside `OMEGA_PRIME_STATE_DIR` at startup. A person pins its sha256 with `--approvals-sha256` (or `OMEGA_PRIME_APPROVALS_SHA256`); a mismatch refuses to start. The state-dir file is not loaded. The launcher forwards the path and the digest, never `--approve`. The process does not write the file, and an approver that names the bot is refused. `lead_doctor` action `check` is ungated and does not write the roster; register, install, and repair stay gated.
 - `HINDSIGHT_URL` defaults to unset, which disables the remote bank. There is no hosted default.
 - Runtime files `omega_prime/sessions.db`, `omega_prime/state/`, `omega_prime/memory/MEMORY.md`, and `omega_prime/memory/USER.md` are gitignored. The `omega_prime/memory/` package stays tracked.
+- Engine review fixes preserve paid token usage, discard terminal duplicate UI answers, isolate skill-loader fixtures, reject unsafe control-store child directories, and retain attachment/cleanup events in `omega ui status`.
 - Settings provenance follows the candidate repository, setup diagnostics share the loaded environment with Ultrathink, and malformed non-empty Substrate SSE frames fail as protocol errors.
 
 # Changelog
@@ -18,6 +20,24 @@ All notable changes to this project are documented here. Format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.html).
 
 ## [Unreleased]
+
+### Agent data folder
+
+- The agent's memory, session history and desk stores live in one folder,
+  `<state>/agent` (`OMEGA_PRIME_AGENT_STATE_DIR` overrides it). The host MCP
+  server and the sandboxed engine MCP child share it; the sandbox binds only
+  that folder writable and hides `settings.json`, `secrets/` and
+  `dashboard/`. A one-time, non-overwriting migration moves older data in,
+  and unmoved stores are still read in place
+  (`python -m omega_prime.agent_state --dry-run`).
+- The migration never replaces a file: each move is published with a
+  no-replace link (a copy to a scratch name first across filesystems), a
+  database moves together with its `-wal`/`-shm`/`-journal` sidecars,
+  `MEMORY.md` and `USER.md` move as one unit, and a failed move is undone.
+  Learned skills on a read-only install use `<agent>/skills`. Credential
+  files under the hidden `secrets/` folder are read on the host and passed
+  to the engine by environment, and scheduled desk passes open the same
+  intake file as the host's lead tools.
 
 ### omp engine (Phase A1a)
 
