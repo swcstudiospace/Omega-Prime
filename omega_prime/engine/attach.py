@@ -130,6 +130,19 @@ def engine_stage(env: Mapping[str, str], explicit: str | None = None) -> str | N
     return text or None
 
 
+def _unknown_stage(staged: str | None) -> str | None:
+    """Refusal detail for a stage the router does not know, else None.
+
+    Checked before the readiness fallback: a typo such as ``ship`` must be
+    reported, not quietly run on the Python loop without a stage.
+    """
+    from omega_prime.engine.plan_router import STAGES
+
+    if staged is None or staged in STAGES:
+        return None
+    return f"unknown stage {staged!r}; expected one of {STAGES}"
+
+
 def route_turn(
     agent: Any,
     user_message: Any,
@@ -166,6 +179,17 @@ def route_turn(
         return None
     if not forced and not _live_model(getattr(agent, "model", None)):
         return None
+    bad_stage = _unknown_stage(staged)
+    if bad_stage is not None:
+        refused = EngineResult(
+            False,
+            getattr(agent, "engine_job_id", None) or "job-" + uuid.uuid4().hex[:8],
+            reason="plan_not_allowed",
+            detail=bad_stage,
+        )
+        return _refused(
+            agent, user_message, conversation_history, refused, task_id=task_id
+        )
     if mode == "auto" and not forced:
         ready, _reason = probe(
             mapping, stage=staged, plan=getattr(agent, "engine_plan", None)
@@ -322,10 +346,15 @@ def delegate_via_engine(
     interrupt: Any | None = None,
     stage: str | None = None,
     delegate_depth: int | None = None,
+    plan: str | None = None,
 ) -> str | None:
     """JSON summary from omp, or None when the Python child path should run.
 
     ``stage`` falls back to ``OMEGA_PRIME_ENGINE_STAGE``; see ``engine_stage``.
+    An unknown stage is an error, never a quiet fall back to the Python child.
+    ``plan`` is the requested primary plan (for example ``zai``), checked by
+    ``probe`` and used by ``run`` the same way ``route_turn`` uses
+    ``agent.engine_plan``.
     ``delegate_depth`` is the child's depth, handed to omp's MCP server so
     the child's own delegates still stop at the parent's ``max_depth``.
     """
@@ -334,7 +363,12 @@ def delegate_via_engine(
     if mode == "off":
         return None
     staged = engine_stage(mapping, stage)
-    ready, reason = probe(mapping, stage=staged)
+    bad_stage = _unknown_stage(staged)
+    if bad_stage is not None:
+        return json.dumps(
+            {"error": "plan_not_allowed", "detail": bad_stage}, ensure_ascii=False
+        )
+    ready, reason = probe(mapping, stage=staged, plan=plan)
     if not ready and mode != "required":
         return None
     if not ready and mode == "required":
@@ -342,7 +376,15 @@ def delegate_via_engine(
     extra: dict[str, Any] = {}
     if delegate_depth is not None:
         extra["delegate_depth"] = delegate_depth
-    result = run(goal, env=mapping, cwd=cwd, interrupt=interrupt, stage=staged, **extra)
+    result = run(
+        goal,
+        env=mapping,
+        cwd=cwd,
+        interrupt=interrupt,
+        stage=staged,
+        plan=plan,
+        **extra,
+    )
     if not result.ok:
         if mode == "required" or result.started:
             return json.dumps(
@@ -367,9 +409,10 @@ def desk_engine_dispatch(
     *,
     cwd: str | None = None,
     stage: str | None = None,
+    plan: str | None = None,
 ) -> dict[str, Any] | None:
     """One desk ticket on omp. None means keep the existing blocked path."""
-    raw = delegate_via_engine(goal, env=env, cwd=cwd, stage=stage)
+    raw = delegate_via_engine(goal, env=env, cwd=cwd, stage=stage, plan=plan)
     if raw is None:
         return None
     try:
@@ -427,18 +470,30 @@ def ultrathink_engine(
     env: Mapping[str, str],
     *,
     stage: str | None = None,
+    requested_plan: str | None = None,
 ) -> dict[str, Any]:
     """Run a resolved ultrathink spec on omp when the engine is ready.
 
     ``stage`` wins, then the plan's ``stage`` field, then
-    ``OMEGA_PRIME_ENGINE_STAGE``.
+    ``OMEGA_PRIME_ENGINE_STAGE``. An unknown stage fails instead of being
+    skipped. ``requested_plan`` is the primary plan to ask the router for
+    (for example ``zai``); ``plan`` here is the ultrathink spec record.
     """
     mode = engine_mode(env)
     if mode == "off":
         return {"used": False, "reason": "off"}
     requested = stage if stage is not None else plan.get("stage")
     staged = engine_stage(env, requested if isinstance(requested, str) else None)
-    ready, reason = probe(env, stage=staged)
+    bad_stage = _unknown_stage(staged)
+    if bad_stage is not None:
+        return {
+            "used": False,
+            "failed": True,
+            "reason": "plan_not_allowed",
+            "error": "plan_not_allowed",
+            "detail": bad_stage,
+        }
+    ready, reason = probe(env, stage=staged, plan=requested_plan)
     if not ready:
         return _required_miss(env, reason)
     if not plan.get("found"):
@@ -458,6 +513,7 @@ def ultrathink_engine(
         env=env,
         system_prompt="Ultrathink turn. Stay inside the spec.",
         stage=staged,
+        plan=requested_plan,
     )
     if not result.ok:
         body = {

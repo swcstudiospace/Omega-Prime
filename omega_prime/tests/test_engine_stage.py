@@ -537,3 +537,75 @@ def test_omp_process_env_names_the_delegate_depth(tmp_path: Path) -> None:
 
     assert run("PONG", cwd=tmp_path, env=env, delegate_depth=2).ok
     assert "2" in (tmp_path / "depth.log").read_text("utf-8").split()
+
+
+def test_auto_mode_refuses_an_unknown_stage_instead_of_running_unstaged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A typo in the stage is reported on every staged entry point, not skipped."""
+    from omega_prime.engine import attach
+
+    env = _chatgpt_env(tmp_path, OMEGA_PRIME_ENGINE="auto")
+    monkeypatch.setattr(attach, "_live_model", lambda model: True)
+    agent = Agent(model=ScriptedModel([]))
+    routed = route_turn(
+        agent,
+        "ping",
+        system_message=None,
+        conversation_history=None,
+        env={**env, "OMEGA_PRIME_ENGINE_STAGE": "ship"},
+    )
+    assert routed is not None
+    assert routed["failed"] is True
+    assert routed["engine"]["reason"] == "plan_not_allowed"
+    assert "ship" in routed["engine"]["detail"]
+
+    raw = delegate_via_engine("say PONG", env=env, stage="ship")
+    assert raw is not None
+    assert json.loads(raw)["error"] == "plan_not_allowed"
+
+    spec = tmp_path / "spec.md"
+    spec.write_text("Do the small thing.\n", encoding="utf-8")
+    body = ultrathink_engine({"found": True, "spec_path": str(spec)}, env, stage="ship")
+    assert (body["used"], body["failed"], body["reason"]) == (
+        False,
+        True,
+        "plan_not_allowed",
+    )
+    # Nothing reached omp: the refusals happen before any launch.
+    log = tmp_path / "omp-log.jsonl"
+    launches = (
+        [line for line in log.read_text("utf-8").splitlines() if '"--mode"' in line]
+        if log.exists()
+        else []
+    )
+    assert launches == []
+
+
+def test_staged_entry_points_forward_the_requested_plan(tmp_path: Path) -> None:
+    """With ChatGPT and Z.ai both allowed, a requested ``zai`` wins on every path."""
+    env = _chatgpt_env(tmp_path, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    raw = delegate_via_engine("say PONG", env=env, stage="execute", plan="zai")
+    assert raw is not None
+    assert json.loads(raw)["model"] == "glm-5.3-flash"
+    assert _model_arg(tmp_path) == "zai/glm-5.3-flash"
+    desk = desk_engine_dispatch(
+        "ticket", env, cwd=str(tmp_path), stage="plan", plan="zai"
+    )
+    assert desk is not None and desk["status"] == "done"
+    assert _model_arg(tmp_path) == "zai/glm-5.3"
+    spec = tmp_path / "spec.md"
+    spec.write_text("Do the small thing.\n", encoding="utf-8")
+    body = ultrathink_engine(
+        {"found": True, "spec_path": str(spec)},
+        env,
+        stage="execute",
+        requested_plan="zai",
+    )
+    assert body["used"] is True
+    assert (body["plan"], body["model"]) == ("zai", "glm-5.3-flash")
+    # Unrequested, the router still puts ChatGPT first.
+    body = ultrathink_engine(
+        {"found": True, "spec_path": str(spec)}, env, stage="execute"
+    )
+    assert (body["plan"], body["model"]) == ("chatgpt", "gpt-6-luna")
