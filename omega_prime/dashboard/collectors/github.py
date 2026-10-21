@@ -310,6 +310,8 @@ def make_github_collector(
                 failed_ci_repos.add(full_name)
             complete_count = len(open_prs) if open_complete else None
             repo_data = repository_by_name.get(full_name, {"full_name": full_name, "name": full_name.rsplit("/", 1)[-1]})
+            latest: dict[str, Any] | None = None
+            branch = repo_data.get("default_branch")
             if isinstance(branch, str) and _SAFE_REF.fullmatch(branch):
                 try:
                     ref = get(base + "/commits/" + quote(branch, safe=""))

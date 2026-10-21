@@ -22,7 +22,7 @@ describe('CI/CD', () => {
     const notice = screen.getByText(/Partial source data · recent_merges: too_large\. Showing last successful data · stale\./)
     expect(notice).toHaveTextContent(/18 Oct 2026/)
     expect(notice).not.toHaveTextContent(/21 Oct 2026/)
-    expect(screen.getByRole('heading', { name: 'Fix safe view' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /Fix safe view/ })).toBeInTheDocument()
     snapshot.sources!.github!.status = 'ok'
     snapshot.sources!.github!.command_center!.meta = {
       fetched_at: aggregate, partial: false, stale: false,
@@ -34,6 +34,6 @@ describe('CI/CD', () => {
     }
     view.rerender(<CiCd snapshot={snapshot} data={snapshot} loading={false} error={null} receivedAt={receivedAt} live refresh={vi.fn()} />)
     expect(screen.queryByText(/Partial source data/)).not.toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Fix safe view' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /Fix safe view/ })).toBeInTheDocument()
   })
 })
