@@ -47,21 +47,22 @@ function mappedTier(spawnEnv: Record<string, string> = {}) {
   mkdirSync(hostWork, { recursive: true });
   const map = (s: string) => s.split("/sandbox/").join(`${hostRoot}/sandbox/`);
   const run = (argv: string[], o: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; input?: string } = {}) =>
+    // new Promise executor form: the tsconfig pins lib ES2023, which has no Promise.withResolvers types.
     new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-      // Every /sandbox path — argv items AND the sh -c script bodies — must rewrite onto this tier's tmp mapping;
-      // an unmapped argv would let "sandbox" paths touch the real host /sandbox (T-112-01's mapping-bug leak).
-      const p = spawn(argv[0], argv.slice(1).map(map), { cwd: map(o.cwd ?? "/sandbox/work"), env: { ...process.env, ...o.env } });
-      let stdout = "", stderr = "";
-      p.stdout!.on("data", (b) => (stdout += b));
-      p.stderr!.on("data", (b) => (stderr += b));
-      const t: NodeJS.Timeout | undefined = o.timeoutMs ? setTimeout(() => p.kill("SIGKILL"), o.timeoutMs) : undefined;
-      p.on("error", (e) => (stderr += String(e)));
-      p.on("close", (code) => {
-        clearTimeout(t);
-        resolve({ code, stdout, stderr });
-      });
-      p.stdin!.end(o.input ?? "");
+    // Every /sandbox path — argv items AND the sh -c script bodies — must rewrite onto this tier's tmp mapping;
+    // an unmapped argv would let "sandbox" paths touch the real host /sandbox (T-112-01's mapping-bug leak).
+    const p = spawn(argv[0], argv.slice(1).map(map), { cwd: map(o.cwd ?? "/sandbox/work"), env: { ...process.env, ...o.env } });
+    let stdout = "", stderr = "";
+    p.stdout!.on("data", (b) => (stdout += b));
+    p.stderr!.on("data", (b) => (stderr += b));
+    const t: NodeJS.Timeout | undefined = o.timeoutMs ? setTimeout(() => p.kill("SIGKILL"), o.timeoutMs) : undefined;
+    p.on("error", (e) => (stderr += String(e)));
+    p.on("close", (code) => {
+      clearTimeout(t);
+      resolve({ code, stdout, stderr });
     });
+    p.stdin!.end(o.input ?? "");
+  });
   const tier: FakeTier = {
     name: "bwrap", id: `ops-${++tierSeq}`, isolation: "none (test)",
     workdir: "/sandbox/work", sandboxRoot: "/sandbox",
@@ -255,4 +256,65 @@ test("py_deps stages importable stubs and wires PYTHONPATH through the sandbox e
   // the sandbox env file gains the export line for the (mapped) pydeps dir.
   const envLines = readFileSync(join(hostHome, ".omp-sandbox.env"), "utf8").split("\n");
   assert.equal(envLines.includes(`export PYTHONPATH=${map("/sandbox/home/pydeps")}`), true, "PYTHONPATH export lands in .omp-sandbox.env");
+});
+
+/** Real polling, not fake timers: the question arrives from a separate OS process with no awaitable signal here.
+ *  new Promise executor form: the tsconfig pins lib ES2023, which has no Promise.withResolvers types. */
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Drive one fake-omp stage to completion exactly as guards.test.ts does: wait for the ask, answer it, await done. */
+async function answerAndFinish(core: InstanceType<typeof Core>, stageId: string) {
+  // status(stageId) returns a single-stage | fleet-wide union; narrow with the fleet arm's `stages` key.
+  const statusOf = () => {
+    const view = core.status(stageId);
+    return "stages" in view ? view.stages.find((s) => s.stageId === stageId)?.status : view.status;
+  };
+  let st = statusOf();
+  for (let i = 0; i < 100 && st !== "waiting"; i++) {
+    await delay(50);
+    st = statusOf();
+  }
+  assert.equal(st, "waiting");
+  core.answer(stageId, "q1", { selected: ["French"] });
+  const rec = core.stages.get(stageId);
+  await rec!.done;
+  assert.equal(statusOf(), "completed");
+  assert.equal(rec!.client!.closed, true, "client closed after the stage");
+}
+
+test("runStage routes plan=zai to the zai model with no fallback and sends the exact GSD prompt", async () => {
+  const log = join(STATE, "prompt-zai-plan.log");
+  const { tier } = mappedTier({ FAKE_OMP_PROMPT_LOG: log });
+  const core = new Core();
+  core.attachTierForTests(tier);
+
+  const a = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T1", plan: "zai" });
+  assert.deepEqual({ plan: a.plan, model: a.model, fallback: a.fallback, command: a.command }, { plan: "zai", model: "zai/glm-5.3", fallback: null, command: "gsd-plan-phase" });
+  await answerAndFinish(core, a.stageId);
+  // The prompt reaching omp is byte-for-byte `/${gsdCommand} ${MAGIC}\n\n${task}` — observed at the fake omp boundary.
+  assert.equal(readFileSync(log, "utf8"), "/gsd-plan-phase orchestrate workflowz ultrathink\n\nT1\n");
+});
+
+test("runStage routes execute=zai to glm-5.3-flash with no fallback", async () => {
+  const { tier } = mappedTier();
+  const core = new Core();
+  core.attachTierForTests(tier);
+
+  const a = core.runStage({ stage: "execute", gsdCommand: "gsd-execute-phase", task: "T2", plan: "zai" });
+  assert.deepEqual({ plan: a.plan, model: a.model, fallback: a.fallback, command: a.command }, { plan: "zai", model: "zai/glm-5.3-flash", fallback: null, command: "gsd-execute-phase" });
+  await answerAndFinish(core, a.stageId);
+});
+
+test("runStage keeps the chatgpt default carrying the zai fallback; an explicit model wins", async () => {
+  const { tier } = mappedTier();
+  const core = new Core();
+  core.attachTierForTests(tier);
+
+  const d = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T3" });
+  assert.deepEqual({ plan: d.plan, model: d.model, fallback: d.fallback }, { plan: "chatgpt", model: "openai-codex/gpt-6.1-sol", fallback: "zai/glm-5.3" });
+  await answerAndFinish(core, d.stageId);
+
+  const m = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T4", model: "zai/glm-5.3-flash" });
+  assert.deepEqual({ plan: m.plan, model: m.model, fallback: m.fallback }, { plan: "chatgpt", model: "zai/glm-5.3-flash", fallback: "zai/glm-5.3" });
+  await answerAndFinish(core, m.stageId);
 });
