@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { STATE, BUN_INSTALL, NODE24_BIN, BUN_EXE, SANDBOX_AGENT_BIN, HOME } from "../config.ts";
 import { freePort } from "../auth.ts";
-import { execCapture, pidAlive, rid, waitHttp } from "./util.ts";
+import { execCapture, pidAlive, rid, waitHttp, launched } from "./util.ts";
 import { TierUnavailable, type SandboxTier } from "./types.ts";
 
 const BWRAP = "/usr/bin/bwrap";
@@ -67,7 +67,7 @@ export class BwrapTier implements SandboxTier {
     this.#agentUrl = `http://127.0.0.1:${port}`;
     this.#agent = spawn(BWRAP, this.#argv(["sandbox-agent", "server", "--host", "127.0.0.1", "--port", String(port), "--token", this.#agentToken, "--no-telemetry"], {}, "/sbx"), { stdio: ["pipe", "pipe", "pipe"] });
     this.#agent.stdout.resume(); this.#agent.stderr.resume();
-    await waitHttp(`${this.#agentUrl}/v1/health`, this.#agentToken, 30_000);
+    await launched(this.#agent, "bwrap sandbox-agent", waitHttp(`${this.#agentUrl}/v1/health`, this.#agentToken, 30_000));
   }
 
   sandboxAgent() { return { baseUrl: this.#agentUrl, token: this.#agentToken }; }

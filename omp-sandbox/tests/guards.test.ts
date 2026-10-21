@@ -13,7 +13,9 @@ const FAKE = new URL("./fake-omp.mjs", import.meta.url).pathname;
 const { OmpRpcClient, StaleAnswerError } = await import("../src/core/omp-rpc.ts");
 const { PathRefused } = await import("../src/core/paths.ts");
 const { validateTiers, startTier } = await import("../src/core/providers/tiers.ts");
-const { redactSecrets } = await import("../src/core/providers/util.ts");
+const utilMod = await import("../src/core/providers/util.ts");
+const { redactSecrets } = utilMod;
+const podmanMod = await import("../src/core/providers/openshell-podman.ts");
 // Dynamic imports are required here (not a style choice): config.ts captures OMP_SANDBOX_STATE into
 // STATE at module-evaluation time, and gsd.ts derives its CACHE from it — so they must load only
 // after the env override above, which a hoisted static import would precede.
@@ -21,6 +23,7 @@ const { Core } = await import("../src/core/core.ts");
 const { ensureGsd, gsdCommandsOnHost } = await import("../src/core/gsd.ts");
 const { STATE: CORE_STATE, VERSIONS } = await import("../src/core/config.ts");
 const GSD_CACHE = join(CORE_STATE, "cache", `gsd-core-${VERSIONS.gsdCore}`);
+const { AuthBroker } = await import("../src/core/auth.ts");
 
 const fakeProc = (env: Record<string, string> = {}) => spawn(process.execPath, [FAKE], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
 
@@ -83,9 +86,54 @@ test("an abort during set_ask_dialog wins: the prompt is never sent", async () =
   assert.equal(existsSync(log), false, "prompt was not sent after abort");
 });
 
+test("an aborted stage still blocks a new one until its omp session has settled", async () => {
+  const core: any = fakeCore({ FAKE_OMP_ASK_DELAY_MS: "400" });
+  const a = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" });
+  await new Promise((r) => setTimeout(r, 50));
+  const aborting = core.abort(a.stageId);
+  assert.equal(core.status(a.stageId).status, "aborted", "status flips to aborted before omp has exited");
+  assert.throws(() => core.runStage({ stage: "execute", gsdCommand: "gsd-execute-phase", task: "t2" }), /winding down \(aborted\)/);
+  await aborting; await core.stages.get(a.stageId).done;
+  const b = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t3" });
+  await core.abort(b.stageId);
+});
+
+test("ownsGroup signals only groups that still hold a process carrying our marker", () => {
+  const { ownsGroup } = utilMod;
+  const proc = mkdtempSync(join(tmpdir(), "omp-sbx-proc-"));
+  const fake = (pid: number, pgrp: number, env: string[]) => {
+    mkdirSync(join(proc, String(pid)));
+    // comm may itself contain spaces and parentheses; fields are read after the last ")".
+    writeFileSync(join(proc, String(pid), "stat"), `${pid} (we ird) cmd) S 1 ${pgrp} ${pgrp} 0 -1`);
+    writeFileSync(join(proc, String(pid), "environ"), env.join("\0") + "\0");
+  };
+  fake(101, 101, ["HOME=/x", "OMP_SANDBOX_TIER_ID=lo-mine"]);
+  fake(202, 202, ["HOME=/y", "OMP_SANDBOX_TIER_ID=lo-other"]);   // reused id, someone else's job
+  fake(303, 101, ["HOME=/z"]);
+  assert.equal(ownsGroup(101, "OMP_SANDBOX_TIER_ID=lo-mine", proc), true);
+  assert.equal(ownsGroup(202, "OMP_SANDBOX_TIER_ID=lo-mine", proc), false);
+  assert.equal(ownsGroup(404, "OMP_SANDBOX_TIER_ID=lo-mine", proc), false, "an ended group is not ours");
+});
+
+test("a tier still starting up holds a lease, so shared services are not stopped under it", () => {
+  const { otherLeases } = podmanMod;
+  const dir = mkdtempSync(join(tmpdir(), "omp-sbx-leases-"));
+  writeFileSync(join(dir, "osp-me"), String(process.pid));
+  writeFileSync(join(dir, "osp-starting"), String(process.pid));
+  writeFileSync(join(dir, "osp-crashed"), "2147483646");
+  writeFileSync(join(dir, "osp-garbage"), "not-a-pid");
+  assert.deepEqual(otherLeases("osp-me", dir), ["osp-starting"]);
+  assert.deepEqual(otherLeases("osp-me", join(dir, "missing")), []);
+});
+
 test("redactSecrets hides credential-shaped text", () => {
-  const s = redactSecrets("err: api_key=abcd1234efgh token: sk-proj-AAAAAAAAAAAAAAAAAAAA Bearer abcdefghijklmnop eyJhbGciOiJI.eyJzdWIiOiIx.sig ok");
-  for (const leak of ["abcd1234efgh", "sk-proj-AAAA", "abcdefghijklmnop", "eyJhbGciOiJI"]) assert.equal(s.includes(leak), false, leak);
+  // Built at runtime so no credential-shaped literal sits in the source.
+  const key = ["sk", "proj", "A".repeat(20)].join("-");
+  const kv = ["abcd", "1234", "efgh"].join("");
+  const bearer = "abcdefgh" + "ijklmnop";
+  const jwt = ["eyJ" + "hbGciOiJI", "eyJ" + "zdWIiOiIx", "sig"].join(".");
+  const s = redactSecrets(`err: api_key=${kv} token: ${key} Bearer ${bearer} ${jwt} ok`);
+  for (const leak of [kv, key.slice(0, 12), bearer, jwt.slice(0, 12)]) assert.equal(s.includes(leak), false, leak);
   assert.match(s, /ok$/);
 });
 
@@ -150,4 +198,46 @@ test("passEnv forwards only allowlisted *_API_KEY names that are set, and only w
   const r = passEnv({ OMP_SANDBOX_PASS_ENV: "ZAI_API_KEY, HOME ,OPENROUTER_API_KEY,GITHUB_TOKEN,ZHIPU_API_KEY", ZAI_API_KEY: "v", HOME: "/h", GITHUB_TOKEN: "t", ZHIPU_API_KEY: "" });
   assert.deepEqual(r.names, ["ZAI_API_KEY"]);
   assert.deepEqual(Object.keys(r.env), ["ZAI_API_KEY"]);
+});
+
+test("down() refuses new stages and startups for its whole duration", async () => {
+  const core: any = new Core();
+  let release: () => void = () => {};
+  const slow = new Promise<void>((r) => { release = r; });
+  const tier: any = { name: "fake", id: "fake", isolation: "none (test)", owned: () => ({}), spawnStdio: () => fakeProc(), dispose: async () => { await slow; return { leftovers: [] }; } };
+  core.attachTierForTests(tier);
+  const downing = core.down();
+  await new Promise((r) => setTimeout(r, 20));   // down() is now waiting on tier cleanup
+  assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" }), /shutting down/);
+  await assert.rejects(core.up(), /shutting down/);
+  assert.equal(core.down(), downing, "a second down() joins the same shutdown");
+  release();
+  const out = await downing;
+  assert.deepEqual(out.leftovers, []);
+  assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" }), /not up/);
+});
+
+test("AuthBroker.stop() returns at once for a broker already killed by a signal", async () => {
+  const b: any = new AuthBroker();
+  const p = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  await new Promise((r) => p.once("spawn", r));
+  p.kill("SIGKILL");
+  await new Promise((r) => p.once("exit", r));
+  assert.equal(p.exitCode, null); assert.equal(p.signalCode, "SIGKILL");
+  b.proc = p;
+  let t: NodeJS.Timeout | undefined;
+  const hung = new Promise((_, rej) => { t = setTimeout(() => rej(new Error("stop() hung")), 2000); });
+  await Promise.race([b.stop(), hung]).finally(() => clearTimeout(t));
+  assert.equal(b.proc, null);
+});
+
+test("a sandbox-agent binary that cannot launch rejects startup instead of crashing Node", async () => {
+  const { launched } = utilMod;
+  const p = spawn(join(STATE, "no-such-sandbox-agent"), [], { stdio: "ignore" });
+  const never = new Promise<void>(() => {});
+  await assert.rejects(launched(p, "sandbox-agent", never), /sandbox-agent could not start: .*ENOENT/);
+  const q = spawn(process.execPath, ["-e", "process.exit(4)"], { stdio: "ignore" });
+  await assert.rejects(launched(q, "sandbox-agent", never), /exited during startup \(4\)/);
+  const ok = spawn(process.execPath, ["-e", "setTimeout(() => {}, 200)"], { stdio: "ignore" });
+  assert.equal(await launched(ok, "x", Promise.resolve(7)), 7);
 });
