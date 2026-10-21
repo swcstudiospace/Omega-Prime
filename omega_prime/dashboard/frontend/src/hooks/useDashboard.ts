@@ -6,6 +6,12 @@ const RECONNECT_MS = 30_000
 const WS_BASE_MS = 1_000
 const WS_MAX_MS = 30_000
 const WS_FALLBACK_AFTER = 3
+/** Most deltas held for replay while a repair fetch is outstanding. Past
+ *  this the queue is dropped and the socket is reopened, because the server
+ *  sends a fresh snapshot first on every /ws/events connection. */
+export const MAX_PENDING_DELTAS = 200
+export const REPAIR_BASE_MS = 1_000
+export const REPAIR_MAX_MS = 30_000
 
 type Stale = { reason: string; since: string }
 type WsMessage =
@@ -146,12 +152,22 @@ export function useDashboard(): DashboardState {
     // Deltas that arrive while a repair fetch is in flight: the HTTP snapshot
     // may predate them, so they are replayed in order on top of it.
     let pendingDeltas: WsMessage[] = []
+    // A failed repair fetch is retried with exponential backoff until a
+    // snapshot lands (over HTTP or the socket).
+    let repairTimer: ReturnType<typeof setTimeout> | undefined
+    let repairBackoff = REPAIR_BASE_MS
+    const clearRepairRetry = () => {
+      clearTimeout(repairTimer)
+      repairTimer = undefined
+      repairBackoff = REPAIR_BASE_MS
+    }
 
     /** Stream data is newer than any in-flight HTTP snapshot: drop the
      *  pending request so a late response cannot restore older rows. */
     const invalidateFetch = () => {
       repairing = false
       pendingDeltas = []
+      clearRepairRetry()
       generation++
       controller?.abort()
       controller = null
@@ -179,13 +195,45 @@ export function useDashboard(): DashboardState {
         }
         repairing = false
         pendingDeltas = []
+        clearRepairRetry()
         commit(merged)
       } catch (cause) {
         if (disposed || (cause instanceof DOMException && cause.name === 'AbortError')) return
         setError(cause instanceof Error ? cause.message : 'Snapshot unavailable')
+        if (repairing && request === generation) scheduleRepair()
       } finally {
         if (!disposed && request === generation) setLoading(false)
       }
+    }
+    const scheduleRepair = () => {
+      if (repairTimer !== undefined) return
+      const wait = repairBackoff
+      repairBackoff = Math.min(REPAIR_MAX_MS, repairBackoff * 2)
+      repairTimer = setTimeout(() => { repairTimer = undefined; if (!disposed && repairing) void fetchSnapshot() }, wait)
+    }
+    /** Start a repair unless one is already outstanding (in flight or waiting
+     *  out its backoff); queued deltas replay on whichever snapshot lands. */
+    const requestRepair = () => {
+      if (repairing) return
+      repairing = true
+      void fetchSnapshot()
+    }
+    /** The replay queue is full: drop it and resync from a fresh socket,
+     *  whose first frame is an authoritative snapshot. */
+    const resync = () => {
+      invalidateFetch()
+      const old = socket
+      if (old === undefined || !socketOpen) { requestRepair(); return }
+      socket = undefined
+      socketOpen = false
+      old.close()
+      connectWs()
+    }
+    /** Hold a delta for replay on the repair snapshot; false on overflow. */
+    const queueDelta = (message: WsMessage) => {
+      if (pendingDeltas.length >= MAX_PENDING_DELTAS) { resync(); return false }
+      pendingDeltas.push(message)
+      return true
     }
     const stopPolling = () => { clearInterval(pollTimer); pollTimer = undefined }
     const startPolling = () => {
@@ -240,18 +288,18 @@ export function useDashboard(): DashboardState {
         reconnectTimer = undefined
       }
       next.onmessage = (event: MessageEvent<string>) => {
-        if (disposed) return
+        if (disposed || socket !== next) return
         const message = parseMessage(typeof event.data === 'string' ? event.data : '')
-        if (message === null) { repairing = true; void fetchSnapshot(); return }
+        if (message === null) { requestRepair(); return }
         if (message.type === 'heartbeat') return
         if (message.type === 'snapshot') { invalidateFetch(); commit(message.snapshot); setLoading(false); setLive(true); stopPolling(); return }
         const current = dataRef.current
         const nextData = current === null ? null : applyDelta(current, message)
-        if (nextData === null) { repairing = true; pendingDeltas.push(message); void fetchSnapshot(); return }
+        if (nextData === null) { if (queueDelta(message)) requestRepair(); return }
         // A repair fetch (issued because a delta could not be applied) must
-        // land, so keep this delta for replay on top of it; otherwise this
-        // newer delta supersedes any pending request.
-        if (repairing) pendingDeltas.push(message)
+        // land, so keep this delta for replay on top of it (bounded; overflow
+        // resyncs); otherwise this newer delta supersedes any pending request.
+        if (repairing) queueDelta(message)
         else invalidateFetch()
         setLoading(false)
         dataRef.current = nextData
@@ -291,6 +339,7 @@ export function useDashboard(): DashboardState {
       clearTimeout(reconnectTimer)
       clearTimeout(socketTimer)
       clearTimeout(socketRetryTimer)
+      clearTimeout(repairTimer)
     }
   }, [refreshKey])
   return { data, loading, error, receivedAt, live, refresh }

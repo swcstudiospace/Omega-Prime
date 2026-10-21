@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { useDashboard } from './useDashboard'
+import { MAX_PENDING_DELTAS, REPAIR_BASE_MS, useDashboard } from './useDashboard'
 import { fixture } from '../test/fixtures'
 class FakeEventSource { static latest: FakeEventSource; listeners: Record<string, EventListener> = {}; onopen: (() => void) | null = null; onerror: (() => void) | null = null; closed = false; constructor(_url: string) { FakeEventSource.latest = this } addEventListener(name: string, callback: EventListener) { this.listeners[name] = callback } close() { this.closed = true } emit(data: unknown) { this.listeners.snapshot?.(new MessageEvent('snapshot', { data: JSON.stringify(data) })) } }
 class RecordingEventSource extends FakeEventSource { static made: RecordingEventSource[] = []; constructor(url: string) { super(url); RecordingEventSource.made.push(this) } }
@@ -110,6 +110,61 @@ describe('useDashboard websocket tier', () => {
     expect(result.current.data?.active![0]!.title).toBe('Live during repair')
     socket.emit({ type: 'task_changed', task: { ...fixture.active![0]!, title: 'After repair' } })
     expect(result.current.data?.active![0]!.title).toBe('After repair')
+    unmount()
+  })
+  it('bounds the replay queue when a repair fetch fails and resyncs from a fresh socket snapshot', async () => {
+    vi.stubGlobal('EventSource', RecordingEventSource); vi.stubGlobal('WebSocket', FakeWebSocket)
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
+    const { result, unmount } = renderHook(() => useDashboard())
+    const socket = FakeWebSocket.latest
+    socket.open()
+    socket.emit({ type: 'snapshot', snapshot: fixture })
+    await waitFor(() => expect(result.current.data).toEqual(fixture))
+    socket.emit({ type: 'stale_changed', id: 'no-such-task', stale: null })
+    await waitFor(() => expect(result.current.error).toBe('offline'))
+    // The unapplicable delta above is already queued; fill the queue to the cap.
+    for (let n = 1; n < MAX_PENDING_DELTAS; n++) socket.emit({ type: 'task_changed', task: { ...fixture.active![0]!, title: `Live ${n}` } })
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    socket.emit({ type: 'task_changed', task: { ...fixture.active![0]!, title: 'Overflow' } })
+    expect(socket.closed).toBe(true)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect(result.current.data?.active![0]!.title).toBe('Overflow')
+    socket.emit({ type: 'task_changed', task: { ...fixture.active![0]!, title: 'Old socket' } })
+    expect(result.current.data?.active![0]!.title).toBe('Overflow')
+    const fresh = FakeWebSocket.latest
+    fresh.open()
+    fresh.emit({ type: 'snapshot', snapshot: { ...fixture, generated_at: 'resync' } })
+    expect(result.current.data?.generated_at).toBe('resync')
+    expect(result.current.data?.active![0]!.title).toBe(fixture.active![0]!.title)
+    unmount()
+  })
+  it('retries a failed repair fetch with exponential backoff until it lands', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('EventSource', RecordingEventSource); vi.stubGlobal('WebSocket', FakeWebSocket)
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, json: async () => fixture }).mockRejectedValue(new Error('offline'))
+    vi.stubGlobal('fetch', fetchMock)
+    const { result, unmount } = renderHook(() => useDashboard())
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    const socket = FakeWebSocket.latest
+    socket.open()
+    socket.emit({ type: 'stale_changed', id: 'no-such-task', stale: null })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    // More unapplicable deltas wait for the outstanding repair, not a new fetch each.
+    socket.emit({ type: 'stale_changed', id: 'no-such-task', stale: null })
+    await act(async () => { await vi.advanceTimersByTimeAsync(REPAIR_BASE_MS - 1) })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    await act(async () => { await vi.advanceTimersByTimeAsync(2 * REPAIR_BASE_MS - 1) })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({ ...fixture, generated_at: 'repaired' }) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(result.current.data?.generated_at).toBe('repaired')
+    expect(result.current.error).toBeNull()
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
     unmount()
   })
   it('fetches /api/snapshot for a message it cannot apply', async () => {
