@@ -65,8 +65,23 @@ export class Core extends EventEmitter {
     return this.#starting;
   }
 
-  /** Test seam: treat an already-started tier as up (no broker, VM or probes). Not reachable over the API. */
-  attachTierForTests(tier: SandboxTier & { hostRoot?: string }) { this.tier = tier; this.#ready = true; this.up_ = { tier: tier.name }; }
+  /**
+   * Test seam: treat an already-started tier as up (no broker, VM or probes). Not reachable over the API.
+   * With `seed`, mirrors #up's seeding sequence — the allowedDir(seed_repo.path, WORKSPACE_ROOTS) pre-check, then
+   * #seedRepo / #stagePyDeps / #stageDir — because up() short-circuits once #ready is set, leaving those folded ops
+   * otherwise unreachable with a fake tier. Seeding is async, so the seeded form returns a promise of the same up_
+   * stub shape with seeded/pyDeps/staged folded in. Still boots no broker, tier or VM. Not reachable over the API.
+   */
+  async attachTierForTests(tier: SandboxTier & { hostRoot?: string }, seed?: { seed_repo?: SeedRepo; py_deps?: string; stage?: Array<{ from: string; to: string }> }): Promise<Record<string, unknown>> {
+    this.tier = tier; this.#ready = true; this.up_ = { tier: tier.name };
+    if (seed === undefined) return this.up_;
+    const seedRepo = seed.seed_repo !== undefined ? { ...seed.seed_repo, path: allowedDir(seed.seed_repo.path, WORKSPACE_ROOTS, "seed_repo.path") } : null;
+    const seeded = seedRepo ? await this.#seedRepo(seedRepo) : null;
+    const pyDeps = seed.py_deps ? await this.#stagePyDeps(seed.py_deps) : null;
+    const staged = [] as unknown[]; for (const st of seed.stage ?? []) staged.push(await this.#stageDir(st));
+    this.up_ = { ...this.up_, seeded, pyDeps, staged };
+    return this.up_;
+  }
 
   async #up(opts: UpOpts) {
     if ([opts.seed, opts.workspace_host_path, opts.seed_repo].filter((x) => x !== undefined).length > 1) throw new PathRefused("seed, seed_repo and workspace_host_path are mutually exclusive");
