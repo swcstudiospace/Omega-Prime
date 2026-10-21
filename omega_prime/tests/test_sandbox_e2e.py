@@ -373,6 +373,77 @@ def test_routine_drives_plan_then_execute_end_to_end(
         assert Path(export["bundle"]).is_file()
 
 
+def test_forced_plan_gate_blocks_the_row_in_the_same_call(
+    tmp_path: Path, monkeypatch
+) -> None:
+    omp = _install_fake(tmp_path)
+    canary_script, canary_log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:sbx5-gate")])
+    token = _shaped_zai_key()  # runtime-built, never a literal
+    env = _backend_env(
+        tmp_path,
+        omp,
+        canary_script,
+        roots,
+        OMEGA_PRIME_TASKS_PATH=str(store),
+        OMEGA_PRIME_TASK_ID="gb:sbx5-gate",
+        ZAI_API_KEY=token,
+    )
+    env.pop("ANTHROPIC_API_KEY", None)  # no other allowlisted plan
+    assert "OMEGA_PRIME_OMP_ALLOW_ZAI" not in env
+    state = Path(env["OMEGA_PRIME_STATE_DIR"])
+    _seed_turn(state, "plan", _SPEC_TEXT)
+    monkeypatch.chdir(work)
+
+    # Layer 1: the routine refuses through the probe short-circuit, raising
+    # nothing and writing nothing — the shipped layering (the routine call
+    # itself never reaches run()'s raise_block; see the SUMMARY drift note).
+    plan = execute_ultrathink(env)
+    assert plan["engine"]["used"] is False
+    assert plan["engine"]["reason"] == "plan_not_allowed"
+    data = _read_tasks(store)
+    assert data["waiting_on_ove"] == []
+    assert data["tasks"][0]["state"] == "working"
+
+    # Layer 2: the exact engine call the routine wraps refuses pre-spawn and
+    # raises exactly one waiting_on_ove item in the same returning call.
+    result = run(
+        "Carry out this ultrathink spec.\n\n" + _SPEC_TEXT,
+        env=env,
+        system_prompt="Ultrathink turn. Stay inside the spec.",
+        stage="plan",
+        tasks_path=store,
+        task_id="gb:sbx5-gate",
+    )
+    assert result.ok is False
+    assert result.reason == "plan_not_allowed"
+    assert result.started is False
+    data = _read_tasks(store)
+    items = data["waiting_on_ove"]
+    assert [item["id"] for item in items] == ["gb:sbx5-gate:plan_not_allowed"]
+    assert items[0]["blocks"] == "engine plan gate (plan_not_allowed)"
+    assert "OMEGA_PRIME_OMP_ALLOW_ZAI" in items[0]["ask"]
+    assert data["tasks"][0] == {"id": "gb:sbx5-gate", "state": "blocked"}
+
+    # No wrapper spawn happened: the canary left no log.
+    assert not canary_log.exists()
+    assert _wrapper_log(canary_log) == []
+    assert _wrapper_tools(canary_log) == []
+
+    # The runtime-built token never reached any durable artifact: the store,
+    # every events.jsonl under the state jobs dir, and the herdr log.
+    assert token not in store.read_text(encoding="utf-8")
+    jobs_dir = state / "jobs"
+    scanned: list[Path] = list(jobs_dir.rglob("events.jsonl")) if jobs_dir.is_dir() else []
+    herdr_log = tmp_path / "bin" / "herdr-log.jsonl"
+    if herdr_log.is_file():
+        scanned.append(herdr_log)
+    hits = [str(p) for p in scanned if token in p.read_text(encoding="utf-8")]
+    assert hits == [], "secret-shaped value leaked into durable artifacts"
+
+
 def test_opt_in_real_run_drives_the_real_wrapper_on_the_host(
     tmp_path: Path, monkeypatch
 ) -> None:
