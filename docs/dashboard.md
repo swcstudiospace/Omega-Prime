@@ -1,6 +1,6 @@
 # Omega Prime Command Center
 
-The Omega Prime Command Center is a local, read-only view of observed work. The operator starts it explicitly; it does not daemonize or start automatically. Its default page is the self-hosted React Command Center. The original static page remains at `/legacy` for recovery and compatibility.
+The Omega Prime Command Center is a local view of observed work. It is read-only except for one write path: keyboard input to a task's own mapped Herdr pane through the token-gated terminal websocket (see [Interactive task terminal](#interactive-task-terminal)), which `--terminal-readonly` disables. The operator starts it explicitly; it does not daemonize or start automatically. Its default page is the self-hosted React Command Center. The original static page remains at `/legacy` for recovery and compatibility.
 
 ## Start and stop
 
@@ -10,6 +10,8 @@ From the repository root:
 python3 -m omega_prime.dashboard --host 127.0.0.1 --port 7421
 ```
 
+Add `--terminal-readonly` to force every terminal websocket read-only for the life of the process: panes are still mirrored, but no input reaches Herdr regardless of what the browser requests.
+
 The dashboard refuses `0.0.0.0`, `::`, and other non-loopback bind addresses. `--once` prints one snapshot as JSON; `--stop` stops the process recorded at `~/.omega-prime/dashboard/dashboard.pid`. `scripts/dashboard-start.sh` is an alternative explicit launcher. Open `http://127.0.0.1:7421/` on the same host. The module's default port can be set with `OMEGA_PRIME_DASHBOARD_PORT`.
 
 Routes:
@@ -17,21 +19,27 @@ Routes:
 - `/` and `/cc/` serve the generated Command Center entry. `/cc` redirects to `/cc/` on the same host.
 - `/legacy` serves the retained legacy dashboard. The built entry also has a persistent `/legacy` recovery link and a no-JavaScript message.
 - `/api/snapshot`, `/api/stream`, and `/healthz` retain their existing contracts.
+- `/api/session` releases the per-server-session terminal token to same-origin loopback pages.
+- `/ws/events` is the live typed-delta websocket; `/ws/tasks/{task_id}/terminal` is the interactive per-task terminal websocket.
 - The generated entry returns an explicit unavailable response with a `/legacy` link if the build is absent. Missing paths remain errors; the server does not serve the app entry as a catch-all.
 
 The browser needs JavaScript for the Command Center. If the app fails to start, use `/legacy`. Static assets are generated during the frontend build and served by Python; Node is not a runtime requirement.
 
 ## Security model
 
-The dashboard is loopback-only and read-only. Every non-GET method, including HEAD and OPTIONS, returns 405 before Host validation. Requests require an expected loopback Host and port. This protects against DNS rebinding and does not enable CORS. Static assets are limited to the built public entry, generated JavaScript/CSS/WOFF2 and license text under the Command Center asset namespace; filesystem containment checks reject traversal, hidden files and escaping symlinks. Legacy routes expose only their intended assets.
+The dashboard is loopback-only. Its only write path is terminal input to a task's mapped Herdr pane over the authenticated terminal websocket; it has no HTTP write routes. Every non-GET method, including HEAD and OPTIONS, returns 405 before Host validation. Requests require an expected loopback Host and port. This protects against DNS rebinding and does not enable CORS. Static assets are limited to the built public entry, generated JavaScript/CSS/WOFF2 and license text under the Command Center asset namespace; filesystem containment checks reject traversal, hidden files and escaping symlinks. Legacy routes expose only their intended assets.
+
+Websocket connections are admitted only on `/ws/` paths with an expected loopback Host and an explicit Origin matching one of the accepted loopback hosts for the bound port (`127.0.0.1`, `localhost`, and the bracketed IPv6 address such as `[::1]` when bound to it); anything else closes with 4403 before application code runs. The CSP's `connect-src` lists the matching `ws://` sources.
 
 Responses carry a self-only Content Security Policy, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`. CSP restricts scripts, fonts, connections, images and default sources to `'self'`; `base-uri` is `'none'` and `frame-ancestors` is `'none'`. The only inline exception is `style-src 'unsafe-inline'` for motion styles. There are no external runtime origins, CDN scripts, data-URL fonts or inline executable scripts. Hashed build assets may be cached immutably; HTML revalidates and errors/license notices are not immutable.
 
-Collector text is redacted at collector and publication boundaries and rendered as escaped text. The React app does not use `innerHTML`/`dangerouslySetInnerHTML` for untrusted content. Navigation accepts safe HTTPS or genuine same-origin URLs; unsafe schemes, protocol-relative URLs and local filesystem paths are inert. GitHub credentials are resolved through the credential broker or supported environment variable, remain server-side, and are never sent to the browser. The dashboard does not read `/proc/*/environ`, full process arguments beyond the `--mode` value, `auth-broker.token`, pane history or terminal history. For a connected viewer of a task with a validated pane mapping, the terminal endpoint performs bounded `herdr pane read` captures of recent output only; output is sanitized and redacted server-side before publication. There is no terminal input, command execution, write action, remote write, rerun, merge or comment capability.
+Collector text is redacted at collector and publication boundaries and rendered as escaped text. The React app does not use `innerHTML`/`dangerouslySetInnerHTML` for untrusted content. Navigation accepts safe HTTPS or genuine same-origin URLs; unsafe schemes, protocol-relative URLs and local filesystem paths are inert. GitHub credentials are resolved through the credential broker or supported environment variable, remain server-side, and are never sent to the browser. The dashboard does not read `/proc/*/environ`, full process arguments beyond the `--mode` value, `auth-broker.token`, pane history or terminal history. For a connected viewer of a task with a validated pane mapping, the terminal endpoint performs bounded `herdr pane read` captures of recent output only; output is sanitized and redacted server-side before publication. Apart from terminal input to a task's own mapped pane (below), there is no command execution, write action, remote write, rerun, merge or comment capability.
 
 ## API and live updates
 
-`GET /api/snapshot` publishes `generated_at`, `sources`, `active`, `idle_sessions`, `pr_gate`, `waiting_on_ove` and `finished`. Task rows add nullable server-issued `seq` and `display_id` plus observed `timeline`; applicable rows carry structured `wiring`. Idle identities retain numbering across bucket transitions and do not increase Active. Waiting rows can include `related_task_id`. The frontend consumes the existing named `snapshot` event from `/api/stream`. `GET /api/tasks/{task_id}/terminal` is a separate task-resolved SSE stream; it accepts no pane parameter and exposes no write/input route.
+`GET /api/snapshot` publishes `generated_at`, `sources`, `active`, `idle_sessions`, `pr_gate`, `waiting_on_ove` and `finished`. Task rows add nullable server-issued `seq` and `display_id` plus observed `timeline`; applicable rows carry structured `wiring`. Idle identities retain numbering across bucket transitions and do not increase Active. Waiting rows can include `related_task_id`. The frontend consumes the existing named `snapshot` event from `/api/stream`. `GET /api/tasks/{task_id}/terminal` is a separate task-resolved SSE stream; it accepts no pane parameter and exposes no write/input route. Interactive input exists only on the `/ws/tasks/{task_id}/terminal` websocket described below.
+
+`/ws/events` sends the full snapshot first, then typed deltas (`task_changed`, `task_finished`, `waiting_added`, `waiting_cleared`, `stale_changed`) and a `heartbeat` after 15 seconds without a frame. Changes the deltas cannot express (source status such as CI/CD and GitHub checks, `pr_gate`, `idle_sessions`, active rows removed without finishing, or edits/removals of existing waiting or finished rows) are sent as a fresh full `snapshot` frame. Stream data supersedes any in-flight HTTP snapshot request in the browser. When the websocket fails three times, the browser falls back to the SSE stream below.
 
 The browser fetches an initial snapshot, listens for the named `snapshot` event, and retains the last usable data during stream failure. It falls back to a five-second snapshot poll and retries the stream after 30 seconds. The server sends a `retry: 3000` instruction and a comment heartbeat every 15 seconds when unchanged. Source collection and browser transport health are distinct: a disconnected stream does not make cached source data disappear.
 
@@ -66,11 +74,19 @@ The v1 bridge keeps `tasks`, `waiting_on_ove` and `finished` arrays and adds the
 
 Use the existing task bridge writer for task updates. A preview is not proof of persisted assignment.
 
-### Read-only task terminal
+### Read-only task terminal (SSE fallback)
 
 The optional `herdr_pane` bridge field maps a task to a pane using a validated pane identifier; an explicit `owner.kind: herdr-pane` plus a valid `owner.ref` is the only fallback. The browser supplies a task ID, never a pane ID. The server resolves that exact current task in Active, Idle or Finished and refuses unknown tasks; unmapped known tasks report `no_session` without invoking Herdr.
 
 For a connected viewer, `GET /api/tasks/{task_id}/terminal` streams named `terminal` events with status `live`, `no_session`, `pane_closed` or `unavailable`, sanitized text and the last actual output-change timestamp. The only subprocess operation is `herdr pane read <validated-pane> --source recent --lines 200 --format text`, invoked without a shell or input channel. Capture is bounded to 1,000,000 bytes and a 2-second read timeout; at most four terminal streams are admitted per app instance. Polling occurs only while connected. Output is stripped of terminal controls, redacted before clipping, and capped to the last 200 lines and 65,536 UTF-8 bytes. Unchanged output uses comment heartbeats without advancing the timestamp. The UI renders plain text only; it has no keyboard-to-terminal, send-text, send-keys, command-run or WebSocket capability. Disconnect, task change and unmount close the stream and release capacity.
+
+### Interactive task terminal
+
+Each task page opens `/ws/tasks/{task_id}/terminal` (an xterm.js surface fitted to its container). The page first fetches `GET /api/session`, which returns `{token, readonly}` with `Cache-Control: no-store` only to same-origin loopback requests. The token is minted per server process (`secrets.token_urlsafe(32)`), held only in memory, never logged, stored or put in a cookie, and must be sent as the first websocket message `{"type":"auth","token":…,"mode":"rw"|"ro"}` within 5 seconds; a missing, malformed, binary or mismatched first frame closes 4401. Unknown tasks close 4404 and a fifth concurrent terminal closes 4429.
+
+The server resolves the pane from the task row on every poll and before every input, so input never reaches a pane the task no longer maps. Frames come from `herdr pane read <pane> --source visible --format ansi` and are redacted across the complete visible text (escape sequences cannot split a secret); styling/cursor escapes are kept, and text-bearing OSC/DCS strings such as hyperlinks and window titles are removed. Status frames report `no_session`, `unavailable`, `pane_closed` and `live` (recovery).
+
+Write path: in `rw` mode, `{"type":"input","text":…}` becomes `herdr pane send-text <pane> <text>` and `{"type":"keys","keys":[…]}` becomes `herdr pane send-keys <pane> <keys…>`, without a shell. Each input is capped at 4,096 UTF-8 bytes and 32 inputs per second per connection; oversize, over-rate and malformed frames are dropped silently. Input payloads are never logged. A connection in `ro` mode, or any connection when the server runs with `--terminal-readonly`, drops all input; toggling read-only in the UI reconnects and re-authenticates in the new mode.
 
 ## Build, fonts and component attribution
 
