@@ -195,4 +195,6 @@ check("receipts record Anda access (via anda, caller = controller principal)", r
 lines = open(LOG.name).read()
 check("no broker token in transcript", not re.search(r"OMP_AUTH_BROKER_TOKEN\"?\s*[:=]\s*\"?[A-Za-z0-9_\-]{20,}", lines))
 json.dump(R, open(f"{ROOT}/.state/e2e/{TS}.summary.json", "w"), indent=2, default=str)
-print("summary:", f".state/e2e/{TS}.summary.json", "FAILED" if any(not c["ok"] for c in R["checks"]) else "ALL PASS")
+failed = any(not c["ok"] for c in R["checks"])
+print("summary:", f".state/e2e/{TS}.summary.json", "FAILED" if failed else "ALL PASS")
+sys.exit(1 if failed else 0)

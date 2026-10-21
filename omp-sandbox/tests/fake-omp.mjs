@@ -3,9 +3,16 @@ import { createInterface } from "node:readline";
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
 out({ type: "ready" });
 let promptId = null;
-createInterface({ input: process.stdin }).on("line", (l) => {
+createInterface({ input: process.stdin }).on("line", async (l) => {
   const m = JSON.parse(l);
-  if (m.type === "set_ask_dialog") return out({ type: "response", id: m.id, command: m.type, success: true });
+  if (m.type === "set_ask_dialog") {
+    const ack = () => out({ type: "response", id: m.id, command: m.type, success: true });
+    const delay = Number(process.env.FAKE_OMP_ASK_DELAY_MS ?? 0);
+    return delay ? setTimeout(ack, delay) : ack();
+  }
+  if (m.type === "abort") return out({ type: "response", id: m.id, command: "abort", success: true });
+  if (m.type === "prompt" && process.env.FAKE_OMP_PROMPT_LOG) (await import("node:fs")).appendFileSync(process.env.FAKE_OMP_PROMPT_LOG, "prompt\n");
+  if (m.type === "prompt" && process.env.FAKE_OMP_EXIT_ON_PROMPT) process.exit(3);
   if (m.type === "prompt") {
     promptId = m.id; out({ type: "response", id: m.id, command: "prompt", success: true });
     out({ type: "message_start", message: { role: "assistant", provider: "fake", model: "m1", content: [] } });

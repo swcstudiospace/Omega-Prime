@@ -1,5 +1,5 @@
 // The TS core: auth-broker -> sandbox tier -> agentOS VM -> GSD-Core -> omp RPC stages.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { STATE, STAGE_MODELS, MAGIC, OMP_BIN, VERSIONS, aedt, stageRoute, type Stage } from "./config.ts";
@@ -10,10 +10,11 @@ import { bootVm, vmRoundTrip, SANDBOX_MOUNT } from "./vm.ts";
 import { ensureGsd } from "./gsd.ts";
 import { OmpRpcClient, StaleAnswerError, textOf, type AnswerInput, type PendingQuestion } from "./omp-rpc.ts";
 import { mockAttestation, type AttestationDoc } from "./attest.ts";
-import { rid } from "./providers/util.ts";
+import { redactSecrets, rid } from "./providers/util.ts";
 import { allowedDir, seedFiles, PathRefused, SEED_ROOTS, WORKSPACE_ROOTS } from "./paths.ts";
 
 export type StageStatus = "starting" | "running" | "waiting" | "completed" | "failed" | "aborted";
+const TERMINAL: readonly StageStatus[] = ["completed", "failed", "aborted"];
 type StageRec = {
   id: string; stage: Stage; plan: string; fallbackModel: string | null; command: string; modelRequested: string; status: StageStatus;
   client: OmpRpcClient | null; startedAt: string; endedAt?: string; error?: string; fallbackFrom?: string;
@@ -33,30 +34,53 @@ export class Core extends EventEmitter {
   stages = new Map<string, StageRec>();
   #receipts = join(STATE, "receipts");
 
+  #starting: Promise<Record<string, unknown>> | null = null;
+  #ready = false;
+
   /**
+   * Bring the sandbox up once. Concurrent callers share one startup; a failed startup tears down everything it
+   * acquired (broker, tier, VM) so the next `up` retries from scratch. Ready only after every check passed.
+   *
    * `workspace_host_path`: an absolute host directory under an allowlisted root (WORKSPACE_ROOTS), bind-mounted
    * read-write at the tier's workdir (/sandbox/work on openshell-podman). Changes land directly in that host tree.
    * `seed`: an absolute fixture directory under SEED_ROOTS, copied (binary-safe, no .git/.venv/node_modules, no
    * symlinks) into an empty workdir. The two are mutually exclusive. Paths are checked before anything starts.
    */
-  async up(opts: { tiers?: string[]; seed?: string; workspace_host_path?: string } = {}) {
-    if (this.tier) return this.up_;
+  up(opts: { tiers?: string[]; seed?: string; workspace_host_path?: string } = {}): Promise<Record<string, unknown>> {
+    if (this.#ready) return Promise.resolve(this.up_);
+    if (!this.#starting) this.#starting = this.#up(opts).finally(() => { this.#starting = null; });
+    return this.#starting;
+  }
+
+  /** Test seam: treat an already-started tier as up (no broker, VM or probes). Not reachable over the API. */
+  attachTierForTests(tier: SandboxTier & { hostRoot?: string }) { this.tier = tier; this.#ready = true; this.up_ = { tier: tier.name }; }
+
+  async #up(opts: { tiers?: string[]; seed?: string; workspace_host_path?: string }) {
     if (opts.seed !== undefined && opts.workspace_host_path !== undefined) throw new PathRefused("seed and workspace_host_path are mutually exclusive");
     const workspace = opts.workspace_host_path !== undefined ? allowedDir(opts.workspace_host_path, WORKSPACE_ROOTS, "workspace_host_path") : null;
     const seedSrc = opts.seed !== undefined ? allowedDir(opts.seed, SEED_ROOTS, "seed") : null;
-    mkdirSync(this.#receipts, { recursive: true });
-    await this.broker.start();
-    const { tier, skipped } = await startTier(this.broker.env, opts.tiers as any, { workspaceHostPath: workspace });
-    this.tier = tier as any; this.skipped = skipped;
-    const { vm, bootMs } = await bootVm(tier); this.vm = vm;
-    const roundTrip = await vmRoundTrip(vm, tier);
-    const gsd = await ensureGsd(tier as any);
-    const seeded = seedSrc ? await this.#seed(seedSrc) : null;
-    const probe = await this.#probeOmp();
-    this.attestation = mockAttestation(tier.name, { isolation: tier.isolation });
-    this.up_ = { tier: tier.name, isolation: tier.isolation, skippedTiers: skipped, agentosBootMs: bootMs, roundTrip, gsd, seeded, workspace: workspace ? { hostPath: workspace, sandboxPath: tier.workdir, mode: "bind-rw" } : null, omp: probe, attestation: "mock", attestationDoc: this.attestation };
-    this.#receipt(`up-${tier.id}`, this.up_);
-    return this.up_;
+    mkdirSync(this.#receipts, { recursive: true, mode: 0o700 });
+    try {
+      await this.broker.start();
+      const { tier, skipped } = await startTier(this.broker.env, opts.tiers as any, { workspaceHostPath: workspace });
+      this.tier = tier as any; this.skipped = skipped;
+      const { vm, bootMs } = await bootVm(tier); this.vm = vm;
+      const roundTrip = await vmRoundTrip(vm, tier);
+      if (!roundTrip.match || roundTrip.hostFnExit !== 0) throw new Error(`agentOS VM <-> sandbox round trip failed (match=${roundTrip.match}, hostFnExit=${roundTrip.hostFnExit})`);
+      const gsd = await ensureGsd(tier as any);
+      const seeded = seedSrc ? await this.#seed(seedSrc) : null;
+      if (seeded && seeded.gitExit !== 0) throw new Error(`seeding failed: git exit ${seeded.gitExit}`);
+      const probe = await this.#probeOmp();
+      this.attestation = mockAttestation(tier.name, { isolation: tier.isolation });
+      this.up_ = { tier: tier.name, isolation: tier.isolation, skippedTiers: skipped, agentosBootMs: bootMs, roundTrip, gsd, seeded, workspace: workspace ? { hostPath: workspace, sandboxPath: tier.workdir, mode: "bind-rw" } : null, omp: probe, attestation: "mock", attestationDoc: this.attestation };
+      this.#ready = true;
+      this.#receipt(`up-${tier.id}`, this.up_);
+      return this.up_;
+    } catch (e) {
+      const { leftovers } = await this.#teardown();
+      if (leftovers.length) (e as any).leftovers = leftovers;
+      throw e;
+    }
   }
 
   /** Copy a fixture project (already allowlist-resolved) into the sandbox workdir THROUGH the agentOS VM mount as raw bytes, then git-init it inside the sandbox. */
@@ -93,7 +117,10 @@ export class Core extends EventEmitter {
 
   /** Start a GSD stage. Returns immediately; follow with status()/events. */
   runStage(a: { stage: Stage; gsdCommand: string; task: string; thinking?: string; model?: string; plan?: string }) {
-    if (!this.tier) throw new Error("not up");
+    if (!this.tier || !this.#ready) throw new Error("not up");
+    // Every stage runs in the same workdir, so overlapping stages would edit and commit each other's files.
+    const active = [...this.stages.values()].find((r) => !TERMINAL.includes(r.status));
+    if (active) throw new Error(`stage ${active.id} is still ${active.status}; one stage at a time per workdir (abort it or wait for stage_done)`);
     const route = stageRoute(a.stage, a.plan);
     const id = rid(`st-${a.stage}`);
     const model = a.model ?? route.primary;
@@ -106,8 +133,14 @@ export class Core extends EventEmitter {
 
   async #drive(rec: StageRec, message: string, model: string, thinking: string): Promise<void> {
     const c = this.#spawnOmp(model, thinking); rec.client = c;
+    try { return await this.#driveWith(c, rec, message, model, thinking); }
+    // Close on every path (rejected prompt, setup timeout, fallback) so no failed stage keeps a live session.
+    finally { await c.close().catch(() => {}); }
+  }
+
+  async #driveWith(c: OmpRpcClient, rec: StageRec, message: string, model: string, thinking: string): Promise<void> {
     c.on("question", (q: PendingQuestion) => {
-      rec.status = "waiting";
+      if (rec.status !== "aborted") rec.status = "waiting";
       const asked = q.questions?.map((x) => x.question).join(" | ") ?? q.title ?? q.method;
       rec.questions.push({ requestId: q.requestId, asked, method: q.method });
       this.emit("event", { event: "question", stageId: rec.id, requestId: q.requestId, method: q.method, questions: q.questions, title: q.title, options: q.options });
@@ -118,6 +151,8 @@ export class Core extends EventEmitter {
       if (f.type === "agent_start" || f.type === "turn_start") if (rec.status === "starting" || rec.status === "running") rec.status = "running";
     });
     await c.command("set_ask_dialog", { enabled: true }, 60_000);
+    // An abort that landed during setup wins: never send the prompt after cancellation.
+    if (rec.status === "aborted") return;
     rec.status = "running";
     const r = await c.prompt(message);
     const st = (): StageStatus => rec.status;
@@ -137,7 +172,7 @@ export class Core extends EventEmitter {
   answer(stageId: string, requestId: string, input: AnswerInput) {
     const rec = this.stages.get(stageId);
     if (!rec) throw new StaleAnswerError(requestId, `unknown stage ${stageId}`);
-    if (!rec.client || ["completed", "failed", "aborted"].includes(rec.status)) throw new StaleAnswerError(requestId, `stage ${stageId} is ${rec.status}`);
+    if (!rec.client || TERMINAL.includes(rec.status)) throw new StaleAnswerError(requestId, `stage ${stageId} is ${rec.status}`);
     const r = rec.client.answer(requestId, input);
     const q = rec.questions.find((x) => x.requestId === requestId); if (q) { q.answered = input; q.answeredAt = aedt(); }
     if (rec.client.pendingQuestions.length === 0 && rec.status === "waiting") rec.status = "running";
@@ -147,10 +182,11 @@ export class Core extends EventEmitter {
   async abort(stageId: string) {
     const rec = this.stages.get(stageId);
     if (!rec) throw new Error(`unknown stage ${stageId}`);
-    if (["completed", "failed", "aborted"].includes(rec.status)) return { stageId, status: rec.status, note: "already terminal" };
+    if (TERMINAL.includes(rec.status)) { if (rec.client && !rec.client.closed) await rec.client.close(2000); return { stageId, status: rec.status, note: "already terminal" }; }
     rec.status = "aborted";
     await rec.client?.abort();
-    await Promise.race([rec.done, new Promise((r) => setTimeout(r, 30_000))]);
+    let t: NodeJS.Timeout | undefined;
+    await Promise.race([rec.done, new Promise((r) => { t = setTimeout(r, 30_000); })]).finally(() => clearTimeout(t));
     if (rec.client && !rec.client.closed) await rec.client.close(2000);
     return { stageId, status: rec.status };
   }
@@ -162,23 +198,35 @@ export class Core extends EventEmitter {
   }
 
   #stageReceipt(r: StageRec) {
-    this.#receipt(r.id, { stageId: r.id, stage: r.stage, plan: r.plan, gsdCommand: r.command, magicKeywords: MAGIC, modelRequested: r.modelRequested, fallbackFrom: r.fallbackFrom ?? null, modelsSeen: r.client ? [...r.client.models] : [], status: r.status, error: r.error ?? null, questions: r.questions, startedAt: r.startedAt, endedAt: r.endedAt, tier: this.tier?.name, isolation: this.tier?.isolation, skippedTiers: this.skipped, attestation: "mock", attestationDoc: this.attestation, ompBin: OMP_BIN, lastText: r.lastText.slice(-1500) });
+    // Answers are never persisted (only whether and when a question was answered); free text is redacted.
+    const questions = r.questions.map((q) => ({ requestId: q.requestId, method: q.method, asked: redactSecrets(q.asked), answered: q.answered !== undefined, answeredAt: q.answeredAt ?? null }));
+    this.#receipt(r.id, { stageId: r.id, stage: r.stage, plan: r.plan, gsdCommand: r.command, magicKeywords: MAGIC, modelRequested: r.modelRequested, fallbackFrom: r.fallbackFrom ?? null, modelsSeen: r.client ? [...r.client.models] : [], status: r.status, error: r.error ? redactSecrets(r.error) : null, questions, startedAt: r.startedAt, endedAt: r.endedAt, tier: this.tier?.name, isolation: this.tier?.isolation, skippedTiers: this.skipped, attestation: "mock", attestationDoc: this.attestation, ompBin: OMP_BIN, lastText: redactSecrets(r.lastText.slice(-1500)) });
   }
   #receipt(name: string, body: Record<string, unknown>) {
+    mkdirSync(this.#receipts, { recursive: true, mode: 0o700 });
     const p = join(this.#receipts, `${name}.json`);
-    writeFileSync(p, JSON.stringify({ ...body, access: this.access, attestation: "mock", tee: "none: mock attestation, no TEE hardware on this host", writtenAt: aedt() }, null, 2));
+    writeFileSync(p, JSON.stringify({ ...body, access: this.access, attestation: "mock", tee: "none: mock attestation, no TEE hardware on this host", writtenAt: aedt() }, null, 2), { mode: 0o600 });
+    chmodSync(p, 0o600);
     return p;
   }
 
-  async down() {
-    for (const r of this.stages.values()) if (!["completed", "failed", "aborted"].includes(r.status)) await this.abort(r.id).catch(() => {});
+  /** Release everything `up` acquired, in reverse order. Safe on a half-started core. */
+  async #teardown() {
     const leftovers: string[] = [];
     try { await this.vm?.dispose(); } catch (e) { leftovers.push(`agentOS VM dispose: ${e}`); }
     this.vm = null;
-    if (this.tier) { const d = await this.tier.dispose(); leftovers.push(...d.leftovers); }
     const ownedBefore = this.tier?.owned() ?? null;
-    this.tier = null;
-    await this.broker.stop();
+    if (this.tier) { try { const d = await this.tier.dispose(); leftovers.push(...d.leftovers); } catch (e) { leftovers.push(`tier dispose: ${e}`); } }
+    this.tier = null; this.#ready = false; this.up_ = {};
+    try { await this.broker.stop(); } catch (e) { leftovers.push(`broker stop: ${e}`); }
+    return { leftovers, ownedBefore };
+  }
+
+  async down() {
+    // Let an in-flight startup finish (or roll itself back) before tearing down.
+    if (this.#starting) await this.#starting.catch(() => {});
+    for (const r of this.stages.values()) if (!TERMINAL.includes(r.status)) await this.abort(r.id).catch(() => {});
+    const { leftovers, ownedBefore } = await this.#teardown();
     const out = { leftovers, ownedBefore, brokerStopped: this.broker.proc === null, attestation: "mock" };
     this.#receipt(`down-${Date.now().toString(36)}`, out);
     return out;
