@@ -12,7 +12,7 @@
 // (`podman system service`), the gateway (`openshell-gateway --compute-driver podman`), the
 // workload image (built from sandbox/image/Containerfile if absent), then one sandbox per `up`.
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, openSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, openSync, readdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -25,6 +25,18 @@ const OS_ENV = { ...process.env, OPENSHELL_TELEMETRY_ENABLED: "false" } as Recor
 const os = (args: string[], o: { timeoutMs?: number; input?: string } = {}) => execCapture(OPENSHELL_BIN, args, { env: OS_ENV, ...o });
 const pm = (args: string[], o: { timeoutMs?: number } = {}) => execCapture(PODMAN_BIN, args, { env: process.env as any, ...o });
 const GW_STATE = join(STATE, "openshell-podman");
+// One lease file per live tier (named by tier id, holding its wrapper pid). A tier takes its lease before it adopts
+// or starts the shared gateway and Podman service, so a tier still starting up counts as a user before it has a sandbox.
+const LEASES = join(GW_STATE, "leases");
+/** Tier ids, other than `self`, whose wrapper process is still alive and holds a lease on the shared services. */
+export function otherLeases(self: string, dir = LEASES): string[] {
+  let names: string[] = [];
+  try { names = readdirSync(dir); } catch { return []; }
+  return names.filter((n) => {
+    if (n === self) return false;
+    try { return pidAlive(Number(readFileSync(join(dir, n), "utf8").trim())); } catch { return false; }
+  });
+}
 const ENV_FILE = "/sandbox/home/.omp-sandbox.env";
 const RELAY_PORT = 18990;           // sandbox-local loopback only
 const AGENT_PORT = 2468;            // sandbox-local loopback only, reached via `forward service`
@@ -78,6 +90,8 @@ export class OpenShellPodmanTier implements SandboxTier {
     const pr = await podmanRootless();
     if (!pr.ok) throw new TierUnavailable("openshell-podman", pr.detail);
     this.info.podman = { version: pr.version, rootless: true, pasta: pr.pasta };
+    mkdirSync(LEASES, { recursive: true, mode: 0o700 });
+    writeFileSync(join(LEASES, this.id), String(process.pid), { mode: 0o600 });
     await this.#ensureSocket(pr.socket!);
     await this.#ensureImage();
     await this.#ensureGateway(pr.socket!);
@@ -257,10 +271,13 @@ export class OpenShellPodmanTier implements SandboxTier {
     await sleep(500);
     for (const pid of pids) if (pidAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} }
     // The gateway and Podman service this tier started are shared with any other wrapper that reused them
-    // (`#ensureGateway` adopts a running one). Stop them only when no other sandbox is still registered.
-    const others = this.#gw || this.#svc ? await this.#otherSandboxes() : [];
+    // (`#ensureGateway` adopts a running one). Stop them only when no other tier holds a lease (that covers a
+    // wrapper still starting up, before its sandbox exists) and no other sandbox is still registered.
+    rmSync(join(LEASES, this.id), { force: true });
+    const leased = this.#gw || this.#svc ? otherLeases(this.id) : [];
+    const others = leased.length ? leased : this.#gw || this.#svc ? await this.#otherSandboxes() : [];
     if (others.length) {
-      this.info.sharedServicesLeftRunning = { reason: `${others.length} other sandbox(es) still use the gateway`, gatewayPid: this.#gw?.pid ?? null, podmanServicePid: this.#svc?.pid ?? null };
+      this.info.sharedServicesLeftRunning = { reason: leased.length ? `${leased.length} other tier(s) still hold a lease on the shared services` : `${others.length} other sandbox(es) still use the gateway`, gatewayPid: this.#gw?.pid ?? null, podmanServicePid: this.#svc?.pid ?? null };
     } else {
       await stopProc(this.#gw); await stopProc(this.#svc);
       for (const [what, p] of [["gateway", this.#gw], ["podman service", this.#svc]] as const) if (p?.pid && pidAlive(p.pid)) leftovers.push(`${what} pid ${p.pid}`);

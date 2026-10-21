@@ -19,6 +19,8 @@ type StageRec = {
   client: OmpRpcClient | null; startedAt: string; endedAt?: string; error?: string; fallbackFrom?: string;
   questions: Array<{ requestId: string; asked: string; answered?: AnswerInput; answeredAt?: string; method: string }>;
   lastText: string; done: Promise<void>;
+  /** True once the stage's omp session has fully wound down (status alone flips to aborted before omp exits). */
+  settled: boolean;
 };
 
 export class Core extends EventEmitter {
@@ -112,15 +114,16 @@ export class Core extends EventEmitter {
   runStage(a: { stage: Stage; gsdCommand: string; task: string; thinking?: string; model?: string; plan?: string }) {
     if (!this.tier || !this.#ready) throw new Error("not up");
     // Every stage runs in the same workdir, so overlapping stages would edit and commit each other's files.
-    const active = [...this.stages.values()].find((r) => !TERMINAL.includes(r.status));
-    if (active) throw new Error(`stage ${active.id} is still ${active.status}; one stage at a time per workdir (abort it or wait for stage_done)`);
+    // An aborted stage is terminal at once but its omp session can still be writing until it settles.
+    const active = [...this.stages.values()].find((r) => !r.settled);
+    if (active) throw new Error(`stage ${active.id} is still ${TERMINAL.includes(active.status) ? `winding down (${active.status})` : active.status}; one stage at a time per workdir (abort it and wait for stage_done)`);
     const route = stageRoute(a.stage, a.plan);
     const id = rid(`st-${a.stage}`);
     const model = a.model ?? route.primary;
     const message = `/${a.gsdCommand} ${MAGIC}\n\n${a.task}`;
-    const rec: StageRec = { id, stage: a.stage, plan: route.plan, fallbackModel: route.fallback, command: a.gsdCommand, modelRequested: model, status: "starting", client: null, startedAt: aedt(), questions: [], lastText: "", done: Promise.resolve() };
+    const rec: StageRec = { id, stage: a.stage, plan: route.plan, fallbackModel: route.fallback, command: a.gsdCommand, modelRequested: model, status: "starting", client: null, startedAt: aedt(), questions: [], lastText: "", done: Promise.resolve(), settled: false };
     this.stages.set(id, rec);
-    rec.done = this.#drive(rec, message, model, a.thinking ?? "max").catch((e: any) => { rec.status = rec.status === "aborted" ? "aborted" : "failed"; rec.error = String(e?.message ?? e); }).finally(() => { rec.endedAt = aedt(); this.#stageReceipt(rec); this.emit("event", { event: "stage_done", stageId: id, status: rec.status, error: rec.error }); });
+    rec.done = this.#drive(rec, message, model, a.thinking ?? "max").catch((e: any) => { rec.status = rec.status === "aborted" ? "aborted" : "failed"; rec.error = String(e?.message ?? e); }).finally(() => { rec.endedAt = aedt(); rec.settled = true; this.#stageReceipt(rec); this.emit("event", { event: "stage_done", stageId: id, status: rec.status, error: rec.error }); });
     return { stageId: id, plan: route.plan, model, fallback: route.fallback, command: a.gsdCommand };
   }
 
