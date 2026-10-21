@@ -4,11 +4,38 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
+import time
+from datetime import UTC, datetime
+
+import pytest
+from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+from omega_prime.dashboard.app import create_app
+from omega_prime.dashboard.collectors.tasks_json import make_tasks_json_collector
 from omega_prime.dashboard.events import (
     EVENTS_WATCH_INTERVAL_S,
     EVENTS_WS_LIMIT,
     compute_deltas,
 )
+from omega_prime.dashboard.poller import CollectorSpec, DashboardPoller
+from omega_prime.dashboard.status_file import write_tasks
+
+NOW = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
+PORT = 7441
+HEADERS = {"host": f"127.0.0.1:{PORT}", "origin": f"http://127.0.0.1:{PORT}"}
+SNAPSHOT_KEYS = {
+    "generated_at",
+    "sources",
+    "active",
+    "pr_gate",
+    "waiting_on_ove",
+    "finished",
+    "idle_sessions",
+}
 
 
 def _snapshot(active=(), waiting=(), finished=(), *, generated_at="2026-10-21T12:00:00+00:00"):
@@ -169,3 +196,176 @@ def test_malformed_rows_are_skipped_and_last_row_per_id_wins():
     )
     deltas = compute_deltas(before, after)
     assert deltas == [{"type": "task_changed", "task": _task("tasks:dup", note="last")}]
+
+
+# --- route tests (TestClient websockets, injected intervals, port 7441 only) ---
+
+def _tasks_row(row_id="tasks:one", state="working", **overrides):
+    row = {
+        "id": row_id,
+        "title": "task one",
+        "owner": {"kind": "agent", "ref": row_id},
+        "state": state,
+        "started_at": "2026-10-21T11:00:00+00:00",
+        "last_activity_at": "2026-10-21T12:00:00+00:00",
+        "progress": None,
+        "note": "running",
+        "links": [],
+    }
+    row.update(overrides)
+    return row
+
+
+def _write(path, tasks=(), waiting=(), finished=()):
+    write_tasks(
+        {
+            "version": 1,
+            "updated_at": "2026-10-21T12:00:00+00:00",
+            "tasks": list(tasks),
+            "waiting_on_ove": list(waiting),
+            "finished": list(finished),
+        },
+        path=path,
+    )
+
+
+def _tasks_poller(tasks_path, *, interval_s=0.2, tick_s=0.05):
+    collector = make_tasks_json_collector(tasks_path=tasks_path, now_fn=lambda: NOW)
+    return DashboardPoller(
+        [CollectorSpec("tasks_json", collector, interval_s, 1.0)],
+        tick_s=tick_s,
+        clock=lambda: NOW,
+    )
+
+
+def _bare_snapshot():
+    return {
+        "generated_at": "2026-10-21T12:00:00+00:00",
+        "sources": {},
+        "active": [{"id": "tasks:one", "title": "task one", "note": None, "stale": None}],
+        "pr_gate": [],
+        "waiting_on_ove": [],
+        "finished": [],
+        "idle_sessions": [],
+    }
+
+
+def test_snapshot_first_then_task_finished_within_two_seconds(tmp_path):
+    tasks_path = tmp_path / "tasks.json"
+    _write(tasks_path, tasks=[_tasks_row()])
+    poller = _tasks_poller(tasks_path)
+    asyncio.run(poller.refresh_now())
+    app = create_app(poller, port=PORT, heartbeat_s=0.5)
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
+            first = ws.receive_json()
+            assert first["type"] == "snapshot"
+            assert set(first["snapshot"]) == SNAPSHOT_KEYS
+            assert [row["id"] for row in first["snapshot"]["active"]] == ["tasks:one"]
+            _write(tasks_path, tasks=[_tasks_row(state="done", note="wrapped up")])
+            started = time.monotonic()
+            delta = ws.receive_json()
+            elapsed = time.monotonic() - started
+    assert delta["type"] == "task_finished"
+    assert delta["task"]["id"] == "tasks:one"
+    assert delta["task"]["state"] == "done"
+    assert elapsed < 2.0
+
+
+def test_waiting_added_delta_arrives_after_rewrite(tmp_path):
+    tasks_path = tmp_path / "tasks.json"
+    _write(tasks_path, tasks=[_tasks_row()])
+    poller = _tasks_poller(tasks_path)
+    asyncio.run(poller.refresh_now())
+    app = create_app(poller, port=PORT, heartbeat_s=0.5)
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
+            assert ws.receive_json()["type"] == "snapshot"
+            _write(
+                tasks_path,
+                tasks=[_tasks_row()],
+                waiting=[
+                    {
+                        "id": "tasks:wait1",
+                        "ask": "approve the deploy",
+                        "since": "2026-10-21T12:01:00+00:00",
+                        "blocks": "tasks:one",
+                    }
+                ],
+            )
+            delta = ws.receive_json()
+    assert delta["type"] == "waiting_added"
+    assert delta["item"]["id"] == "tasks:wait1"
+    assert delta["item"]["ask"] == "approve the deploy"
+
+
+def test_heartbeat_stale_changed_and_no_churn_without_collectors():
+    poller = DashboardPoller([])
+    poller._snapshot = _bare_snapshot()
+    app = create_app(poller, port=PORT, heartbeat_s=0.2)
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
+            assert ws.receive_json()["type"] == "snapshot"
+            assert ws.receive_json() == {"type": "heartbeat"}
+
+            stale_copy = json.loads(json.dumps(poller._snapshot))
+            stale_copy["active"][0]["stale"] = {
+                "reason": "no_heartbeat",
+                "since": "2026-10-21T11:40:00+00:00",
+            }
+            stale_copy["generated_at"] = "2026-10-21T12:30:00+00:00"
+            poller._snapshot = stale_copy
+            assert ws.receive_json() == {
+                "type": "stale_changed",
+                "id": "tasks:one",
+                "stale": {
+                    "reason": "no_heartbeat",
+                    "since": "2026-10-21T11:40:00+00:00",
+                },
+            }
+
+            churned = json.loads(json.dumps(poller._snapshot))
+            churned["generated_at"] = "2026-10-21T13:00:00+00:00"
+            poller._snapshot = churned
+            assert ws.receive_json() == {"type": "heartbeat"}
+            assert ws.receive_json() == {"type": "heartbeat"}
+
+
+def test_events_ws_guard_rejects_foreign_missing_origin_and_bad_host():
+    poller = DashboardPoller([])
+    poller._snapshot = _bare_snapshot()
+    app = create_app(poller, port=PORT)
+    with TestClient(app) as client:
+        for headers in (
+            {"host": f"127.0.0.1:{PORT}", "origin": "http://evil.example"},
+            {"host": f"127.0.0.1:{PORT}"},
+            {"host": "evil.example:7441", "origin": f"http://127.0.0.1:{PORT}"},
+        ):
+            with pytest.raises(WebSocketDisconnect) as exc:
+                with client.websocket_connect("/ws/events", headers=headers):
+                    pass
+            assert exc.value.code == 4403
+        with client.websocket_connect(
+            "/ws/events",
+            headers={"host": f"127.0.0.1:{PORT}", "origin": f"http://localhost:{PORT}"},
+        ) as ws:
+            assert ws.receive_json()["type"] == "snapshot"
+
+
+def test_events_ws_cap_refuses_17th_and_releases_slots_on_close():
+    poller = DashboardPoller([])
+    poller._snapshot = _bare_snapshot()
+    app = create_app(poller, port=PORT)
+    with TestClient(app) as client:
+        with contextlib.ExitStack() as stack:
+            for _ in range(16):
+                ws = stack.enter_context(
+                    client.websocket_connect("/ws/events", headers=HEADERS)
+                )
+                assert ws.receive_json()["type"] == "snapshot"
+            with pytest.raises(WebSocketDisconnect) as exc:
+                with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
+                    ws.receive_json()
+            assert exc.value.code == 4429
+        with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
+            assert ws.receive_json()["type"] == "snapshot"

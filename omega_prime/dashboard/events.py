@@ -10,8 +10,14 @@ Nothing here logs, and no function performs I/O in the delta computation.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from typing import Any
+
+from starlette.websockets import WebSocket
+
+from omega_prime.dashboard.poller import DashboardPoller
 
 EVENTS_WS_LIMIT = 16
 EVENTS_WATCH_INTERVAL_S = 0.5
@@ -90,3 +96,114 @@ def compute_deltas(
                 {"type": "stale_changed", "id": row_id, "stale": row.get("stale")}
             )
     return messages
+
+
+class ConnectionLimiter:
+    """Synchronous, loop-atomic connection counter (no semaphore semantics)."""
+
+    def __init__(self, limit: int = EVENTS_WS_LIMIT) -> None:
+        self._limit = limit
+        self._active = 0
+
+    def try_acquire(self) -> bool:
+        if self._active >= self._limit:
+            return False
+        self._active += 1
+        return True
+
+    def release(self) -> None:
+        self._active -= 1
+
+
+def make_events_ws_endpoint(
+    poller: DashboardPoller,
+    *,
+    heartbeat_s: float = 15.0,
+    limit: int = EVENTS_WS_LIMIT,
+    mono: Any = time.monotonic,
+) -> Any:
+    """Build the /ws/events endpoint (protocol default 9).
+
+    The first message is always the full snapshot (or the empty-snapshot
+    literal before the first build); afterwards the connection receives only
+    the five locked delta types plus heartbeats, computed by re-diffing
+    ``poller.snapshot()`` on every wake — including heartbeat timeouts, which
+    is the missed-wake recovery. No token exists on this route; admission is
+    the guard's Host plus required-Origin check. A full limiter closes 4429
+    before accept.
+    """
+
+    limiter = ConnectionLimiter(limit)
+
+    def _frame(message: dict[str, Any]) -> str:
+        return json.dumps(message, separators=(",", ":"), default=str)
+
+    async def endpoint(websocket: WebSocket) -> None:
+        if not limiter.try_acquire():
+            await websocket.close(code=4429)
+            return
+        try:
+            await websocket.accept()
+            first = poller.snapshot()
+            await websocket.send_text(
+                _frame(
+                    {
+                        "type": "snapshot",
+                        "snapshot": first if first is not None else _EMPTY_SNAPSHOT,
+                    }
+                )
+            )
+
+            async def reader() -> None:
+                # Server-to-client only: every client frame is discarded and
+                # no token is ever read on this route.
+                while True:
+                    await websocket.receive()
+
+            async def writer() -> None:
+                previous = first
+                last_sent = mono()
+                while True:
+                    await poller.wait_for_update(heartbeat_s)
+                    current = poller.snapshot()
+                    if current is not None and current is not previous:
+                        for message in compute_deltas(previous, current):
+                            await websocket.send_text(_frame(message))
+                        previous = current
+                        last_sent = mono()
+                    if mono() - last_sent >= heartbeat_s:
+                        await websocket.send_text(_frame({"type": "heartbeat"}))
+                        last_sent = mono()
+
+            writer_task = asyncio.create_task(writer())
+            reader_task = asyncio.create_task(reader())
+            cancelled: asyncio.CancelledError | None = None
+            try:
+                await asyncio.wait(
+                    {writer_task, reader_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+            finally:
+                writer_task.cancel()
+                reader_task.cancel()
+                try:
+                    await asyncio.gather(
+                        writer_task, reader_task, return_exceptions=True
+                    )
+                except asyncio.CancelledError:
+                    pass
+                # The session must always end with an explicit close frame: a
+                # bare return completes the ASGI app without one, and the peer
+                # would wait forever (uvicorn tolerates a close after peer
+                # disconnect).
+                try:
+                    await websocket.close()
+                except (Exception, asyncio.CancelledError):
+                    pass
+            if cancelled is not None:
+                raise cancelled
+        finally:
+            limiter.release()
+
+    return endpoint

@@ -283,6 +283,9 @@ def create_app(
     cc_index = cc_dir / "index.html"
     terminal_backend = terminal_service or TerminalService()
     token = attach_token if attach_token is not None else secrets.token_urlsafe(32)
+    from omega_prime.dashboard import events
+
+    events_endpoint = events.make_events_ws_endpoint(poller, heartbeat_s=heartbeat_s)
 
     @asynccontextmanager
     async def lifespan(_: Starlette) -> AsyncIterator[None]:
@@ -459,6 +462,7 @@ def create_app(
                     input_per_s=terminal_input_per_s,
                 ),
             ),
+            WebSocketRoute("/ws/events", events_endpoint),
             Route("/healthz", health, methods=["GET"]),
         ],
     )
