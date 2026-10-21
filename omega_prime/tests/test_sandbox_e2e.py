@@ -51,12 +51,15 @@ One receipt line per request ({"id", "tool", "args"}) is appended to
 wrapper-log.jsonl beside this script before the reply is written; the
 startup receipt carries the observed OMP_SANDBOX_WORKSPACE_ROOTS. Every
 emitted line carries "attestation": "mock". ``down`` is answered and the
-wrapper then exits. ``run_gsd_stage`` performs REAL GSD-shaped stage work
-in the seeded worktree: the plan stage writes
+wrapper then exits. ``up`` clones the seeded branch into a private sandbox
+checkout beside this script (like the real wrapper, the host worktree is
+never written here), and ``run_gsd_stage`` performs REAL GSD-shaped stage
+work in that checkout: the plan stage writes
 .planning/phases/999-demo/PLAN.md and commits "gsd(plan): demo plan";
 the execute stage writes src/demo/greeting.txt and commits
 "gsd(execute): demo greeting". ``export_commits`` makes a real git
-bundle of the branch. Stdlib only.
+bundle of ``base..ref`` there; the engine applies it to the host branch.
+Stdlib only.
 """
 import json
 import os
@@ -154,6 +157,7 @@ receipt({
 emit({"event": "wrapper_ready", "wrapper_pid": os.getpid()})
 
 work = None
+box = None
 stage_id = None
 
 for line in sys.stdin:
@@ -173,7 +177,14 @@ for line in sys.stdin:
         })
         break
     if tool == "up":
-        work = (args.get("seed_repo") or {}).get("path")
+        seed = args.get("seed_repo") or {}
+        work = seed.get("path")
+        box = os.path.join(HERE, "sandbox-%d" % os.getpid())
+        subprocess.run(
+            ["git", "clone", "-q", "--branch", seed.get("ref"), work, box],
+            check=True,
+            capture_output=True,
+        )
         emit({
             "id": rid,
             "ok": True,
@@ -181,7 +192,7 @@ for line in sys.stdin:
         })
         continue
     if tool == "run_gsd_stage":
-        stage_id = run_gsd_stage(work, args)
+        stage_id = run_gsd_stage(box, args)
         emit({
             "id": rid,
             "ok": True,
@@ -203,6 +214,7 @@ for line in sys.stdin:
                 "stageId": stage_id,
                 "status": "completed",
                 "lastText": "e2e fake final text",
+                "finalText": "e2e fake final text",
                 "error": None,
             },
         })
@@ -211,7 +223,7 @@ for line in sys.stdin:
         emit({
             "id": rid,
             "ok": True,
-            "result": export_commits(work),
+            "result": export_commits(box),
         })
         continue
     emit({
@@ -291,9 +303,7 @@ def test_routine_drives_plan_then_execute_end_to_end(
         assert session["ok"] is True
 
     # Wrapper receipts: the whole chain, in order, with the contracted args.
-    stages = [
-        row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"
-    ]
+    stages = [row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"]
     assert [row["args"]["stage"] for row in stages] == ["plan", "execute"]
     assert [row["args"]["plan"] for row in stages] == ["zai", "zai"]
     assert [row["args"]["model"] for row in stages] == [
@@ -434,7 +444,9 @@ def test_forced_plan_gate_blocks_the_row_in_the_same_call(
     # every events.jsonl under the state jobs dir, and the herdr log.
     assert token not in store.read_text(encoding="utf-8")
     jobs_dir = state / "jobs"
-    scanned: list[Path] = list(jobs_dir.rglob("events.jsonl")) if jobs_dir.is_dir() else []
+    scanned: list[Path] = (
+        list(jobs_dir.rglob("events.jsonl")) if jobs_dir.is_dir() else []
+    )
     herdr_log = tmp_path / "bin" / "herdr-log.jsonl"
     if herdr_log.is_file():
         scanned.append(herdr_log)
@@ -456,8 +468,7 @@ def test_opt_in_real_run_drives_the_real_wrapper_on_the_host(
         resolver["OMEGA_PRIME_OMP_SANDBOX_ANDA"] = override
     if sandbox_omp.anda_binary(resolver) is None:
         pytest.skip(
-            "host-only: no real wrapper found via OMEGA_PRIME_OMP_SANDBOX_ANDA "
-            "or PATH"
+            "host-only: no real wrapper found via OMEGA_PRIME_OMP_SANDBOX_ANDA or PATH"
         )
     roots = tmp_path / "roots"
     work = _git_worktree(roots)
