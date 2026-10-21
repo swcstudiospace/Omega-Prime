@@ -14,12 +14,11 @@ from typing import Any, cast
 
 from starlette.applications import Starlette
 from starlette.responses import FileResponse, JSONResponse, Response
-from starlette.routing import Mount, Route
-from starlette.staticfiles import StaticFiles
+from starlette.routing import Route
 
-from omega_prime.dashboard.terminal import TerminalService, resolve_task_pane
 from omega_prime.dashboard import __version__
 from omega_prime.dashboard.poller import DashboardPoller
+from omega_prime.dashboard.terminal import TerminalService, resolve_task_pane
 
 _SECURITY_HEADERS = {
     "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'",
@@ -36,8 +35,12 @@ class _SSEResponse(Response):
     start/chunks/final-frame by hand keeps SSE testable and keeps cancellation
     honest.
     """
+
     def __init__(
-        self, events: AsyncIterator[str], *, headers: Mapping[str, str] | None = None,
+        self,
+        events: AsyncIterator[str],
+        *,
+        headers: Mapping[str, str] | None = None,
         on_close: Callable[[], None] | None = None,
     ) -> None:
         self.events = events
@@ -113,7 +116,9 @@ class _SSEResponse(Response):
                 )
                 await asyncio.sleep(0)
                 if disconnected.is_set():
-                    await send({"type": "http.response.body", "body": b"", "more_body": False})
+                    await send(
+                        {"type": "http.response.body", "body": b"", "more_body": False}
+                    )
                     return
             await send({"type": "http.response.body", "body": b"", "more_body": False})
         except BaseException:
@@ -233,6 +238,7 @@ def create_app(
     cc_dir = static_dir / "cc"
     cc_index = cc_dir / "index.html"
     terminal_backend = terminal_service or TerminalService()
+
     @asynccontextmanager
     async def lifespan(_: Starlette) -> AsyncIterator[None]:
         await poller.start()
@@ -243,8 +249,8 @@ def create_app(
 
     async def unavailable() -> Response:
         return Response(
-            '<!doctype html><title>Command Center unavailable</title>'
-            '<p>The built Command Center is unavailable. '
+            "<!doctype html><title>Command Center unavailable</title>"
+            "<p>The built Command Center is unavailable. "
             '<a href="/legacy">Open the legacy dashboard</a>.</p>',
             status_code=503,
             media_type="text/html",
@@ -299,9 +305,7 @@ def create_app(
             ".txt": "text/plain",
         }[suffix]
         headers = {}
-        if suffix != ".txt" and any(
-            len(part) >= 8 and "-" in part for part in parts
-        ):
+        if suffix != ".txt" and any(len(part) >= 8 and "-" in part for part in parts):
             headers["Cache-Control"] = "public, max-age=31536000, immutable"
         else:
             headers["Cache-Control"] = "no-cache"
@@ -315,7 +319,9 @@ def create_app(
         if not target.is_relative_to(static_dir.resolve()) or not target.is_file():
             return Response("not found", status_code=404)
         media_type = "text/javascript" if name.endswith(".js") else "text/css"
-        return FileResponse(target, media_type=media_type, headers={"Cache-Control": "no-cache"})
+        return FileResponse(
+            target, media_type=media_type, headers={"Cache-Control": "no-cache"}
+        )
 
     async def snapshot(_: Any) -> Response:
         value = poller.snapshot() or _empty_snapshot()
@@ -324,30 +330,58 @@ def create_app(
 
     async def health(_: Any) -> Response:
         return JSONResponse({"ok": True, "version": __version__})
+
     async def terminal(request: Any) -> Response:
         task_id = request.path_params["task_id"]
-        if request.scope.get("query_string") or len(task_id.encode("utf-8")) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in task_id):
+        if (
+            request.scope.get("query_string")
+            or len(task_id.encode("utf-8")) > 256
+            or any(ord(c) < 32 or ord(c) == 127 for c in task_id)
+        ):
             return Response("not found", status_code=404)
         snapshot = poller.snapshot() or _empty_snapshot()
-        task = next((item for group in ("active", "idle_sessions", "finished") for item in snapshot.get(group, []) if isinstance(item, dict) and item.get("id") == task_id), None)
+        task = next(
+            (
+                item
+                for group in ("active", "idle_sessions", "finished")
+                for item in snapshot.get(group, [])
+                if isinstance(item, dict) and item.get("id") == task_id
+            ),
+            None,
+        )
         if task is None:
             return Response("not found", status_code=404)
         pane = resolve_task_pane(task)
         if pane is None:
+
             async def no_session() -> AsyncIterator[str]:
                 yield "retry: 3000\n\n"
                 yield terminal_backend._event("no_session", "", None)
-            return _SSEResponse(no_session(), headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+            return _SSEResponse(
+                no_session(),
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
         if not await terminal_backend.reserve():
-            return Response("terminal stream limit reached", status_code=429, headers={"Retry-After": "15"})
+            return Response(
+                "terminal stream limit reached",
+                status_code=429,
+                headers={"Retry-After": "15"},
+            )
         started = [False]
+
         async def events() -> AsyncIterator[str]:
             started[0] = True
             async for event in terminal_backend.stream(pane, reserved=True):
                 yield event
-        return _SSEResponse(events(), headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                            on_close=lambda: terminal_backend._slots.release() if not started[0] else None)
 
+        return _SSEResponse(
+            events(),
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            on_close=lambda: (
+                terminal_backend._slots.release() if not started[0] else None
+            ),
+        )
 
     async def stream(_: Any) -> Response:
         async def sse_generator() -> AsyncIterator[str]:

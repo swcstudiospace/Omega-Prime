@@ -81,10 +81,20 @@ def test_cold_snapshot_api_includes_empty_idle_sessions() -> None:
 
 
 def test_populated_snapshot_api_includes_idle_sessions(tmp_path: Path) -> None:
-    poller = DashboardPoller([], task_ids_path=tmp_path / "tasks.json", clock=lambda: NOW)
+    poller = DashboardPoller(
+        [], task_ids_path=tmp_path / "tasks.json", clock=lambda: NOW
+    )
     poller._results["herdr"] = SourceResult(
-        "herdr", "ok",
-        items=[{"kind": "herdr_pane", "pane_id": "idle", "agent_status": "unknown", "terminal_title": "Idle"}],
+        "herdr",
+        "ok",
+        items=[
+            {
+                "kind": "herdr_pane",
+                "pane_id": "idle",
+                "agent_status": "unknown",
+                "terminal_title": "Idle",
+            }
+        ],
     )
     poller._build_snapshot()
     app = create_app(poller, port=0)
@@ -92,6 +102,7 @@ def test_populated_snapshot_api_includes_idle_sessions(tmp_path: Path) -> None:
         response = client.get("/api/snapshot", headers={"host": "127.0.0.1:0"})
     assert response.status_code == 200
     assert response.json()["idle_sessions"][0]["id"] == "herdr:idle"
+
 
 def test_static_snapshot_and_health_headers() -> None:
     poller = _ready_poller()

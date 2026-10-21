@@ -77,14 +77,21 @@ def test_default_cc_and_legacy_routes_serve_only_expected_assets() -> None:
                 assert ref.startswith("/cc/assets/")
                 asset = client.get(ref, headers=HOST)
                 assert asset.status_code == 200
-                assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
+                assert (
+                    asset.headers["cache-control"]
+                    == "public, max-age=31536000, immutable"
+                )
                 _assert_security(asset)
 
         asset_root = Path(app_module.__file__).resolve().parent / "static" / "cc"
         for asset in (asset_root / "assets").iterdir():
             if asset.suffix in {".js", ".css", ".woff2"}:
                 response = client.get(f"/cc/assets/{asset.name}", headers=HOST)
-                expected = {".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2"}[asset.suffix]
+                expected = {
+                    ".js": "text/javascript",
+                    ".css": "text/css",
+                    ".woff2": "font/woff2",
+                }[asset.suffix]
                 assert response.headers["content-type"].startswith(expected)
                 assert response.status_code == 200
         for notice in (asset_root / "licenses").iterdir():
@@ -93,7 +100,13 @@ def test_default_cc_and_legacy_routes_serve_only_expected_assets() -> None:
             assert response.headers["content-type"].startswith("text/plain")
             assert "immutable" not in response.headers.get("cache-control", "")
 
-        for path in ("/cc/assets/missing.js", "/cc/assets/index.js.map", "/cc/.hidden", "/cc/frontend/package.json", "/static/cc/assets/index.js"):
+        for path in (
+            "/cc/assets/missing.js",
+            "/cc/assets/index.js.map",
+            "/cc/.hidden",
+            "/cc/frontend/package.json",
+            "/static/cc/assets/index.js",
+        ):
             response = client.get(path, headers=HOST)
             assert response.status_code == 404, path
             _assert_security(response)
@@ -149,10 +162,17 @@ def test_method_host_and_ipv6_guards_cover_page_and_asset_routes() -> None:
         paths = ("/", "/cc/", "/legacy", "/cc/assets/index.js", "/api/snapshot")
         for method in ("POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
             for path in paths:
-                response = client.request(method, path, headers={**HOST, "host": "evil.invalid"})
+                response = client.request(
+                    method, path, headers={**HOST, "host": "evil.invalid"}
+                )
                 assert response.status_code == 405, (method, path)
                 _assert_security(response)
-        for host in ("evil.invalid:7421", "127.0.0.1:9999", "", "127.0.0.1:7421,127.0.0.1:7421"):
+        for host in (
+            "evil.invalid:7421",
+            "127.0.0.1:9999",
+            "",
+            "127.0.0.1:7421,127.0.0.1:7421",
+        ):
             response = client.get("/", headers={"host": host})
             assert response.status_code == 403
             _assert_security(response)

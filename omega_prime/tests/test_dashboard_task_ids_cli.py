@@ -13,10 +13,20 @@ def test_next_id_is_non_consuming_and_assign_id_reuses(tmp_path, capsys):
     assert main(["next-id"], home=tmp_path) == 0
     assert capsys.readouterr().out == "00001\n"
     assert not path.exists()
-    assert main(["assign-id", "--id", "tasks:example", "--title", "Example"], home=tmp_path) == 0
+    assert (
+        main(
+            ["assign-id", "--id", "tasks:example", "--title", "Example"], home=tmp_path
+        )
+        == 0
+    )
     assert capsys.readouterr().out == "00001 - Example\n"
     before = path.read_bytes()
-    assert main(["assign-id", "--id", "tasks:example", "--title", "Example"], home=tmp_path) == 0
+    assert (
+        main(
+            ["assign-id", "--id", "tasks:example", "--title", "Example"], home=tmp_path
+        )
+        == 0
+    )
     assert capsys.readouterr().out == "00001 - Example\n"
     assert json.loads(path.read_text())["identity_registry"]
     assert main(["next-id"], home=tmp_path) == 0

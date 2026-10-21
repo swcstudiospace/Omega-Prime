@@ -1,12 +1,13 @@
-from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from omega_prime.dashboard.model import FinishedItem, Owner, Snapshot, Task, WaitingItem
 from omega_prime.dashboard.status_file import write_tasks
 from omega_prime.dashboard.task_ids import (
     allocate_task_id,
@@ -15,7 +16,6 @@ from omega_prime.dashboard.task_ids import (
     next_task_id,
     number_snapshot,
 )
-from omega_prime.dashboard.model import FinishedItem, Owner, Snapshot, Task, WaitingItem
 
 NOW = datetime(2026, 10, 21, 12, tzinfo=UTC)
 
@@ -60,7 +60,9 @@ def test_subprocess_allocations_are_unique_and_persisted(tmp_path):
     assert next_task_id(path=path) == 9
 
 
-def test_failed_replace_cleans_temp_and_preserves_previous_document(tmp_path, monkeypatch):
+def test_failed_replace_cleans_temp_and_preserves_previous_document(
+    tmp_path, monkeypatch
+):
     from omega_prime.dashboard import status_file
 
     path = tmp_path / "tasks.json"
@@ -74,7 +76,10 @@ def test_failed_replace_cleans_temp_and_preserves_previous_document(tmp_path, mo
     with pytest.raises(OSError):
         allocate_task_id(path=path, identity="tasks:new", title="New", now=NOW)
     assert path.read_bytes() == original
-    assert {entry.name for entry in tmp_path.iterdir()} == {"tasks.json", "tasks.json.lock"}
+    assert {entry.name for entry in tmp_path.iterdir()} == {
+        "tasks.json",
+        "tasks.json.lock",
+    }
 
 
 def test_lock_file_is_restrictive(tmp_path):
@@ -86,18 +91,45 @@ def test_lock_file_is_restrictive(tmp_path):
 def test_number_snapshot_numbers_derived_rows_and_records_observed_changes(tmp_path):
     path = tmp_path / "tasks.json"
     task = Task(
-        "proc:42", "Process", "proc", Owner("process", "42", "Process"), "running",
-        wiring={"phase": "build", "branch": "feature/x", "head_sha": "abc", "stage": "test", "repo": None},
+        "proc:42",
+        "Process",
+        "proc",
+        Owner("process", "42", "Process"),
+        "running",
+        wiring={
+            "phase": "build",
+            "branch": "feature/x",
+            "head_sha": "abc",
+            "stage": "test",
+            "repo": None,
+        },
     )
     waiting = WaitingItem("ask:question", "Need input", None, "")
     finished = FinishedItem(
-        "wiring:done", "Finished wiring", NOW.isoformat(), "ok",
-        wiring={"phase": "release", "branch": "main", "head_sha": "def", "stage": "done", "repo": None},
+        "wiring:done",
+        "Finished wiring",
+        NOW.isoformat(),
+        "ok",
+        wiring={
+            "phase": "release",
+            "branch": "main",
+            "head_sha": "def",
+            "stage": "done",
+            "repo": None,
+        },
     )
     idle = Task("herdr:idle", "Idle", "herdr", Owner("herdr", "idle", "Idle"), "quiet")
     snapshot = Snapshot([task], [], [waiting], [finished], [idle])
     number_snapshot(snapshot, path=path, now=NOW)
-    first = {row.id: row for row in [*snapshot.active, *snapshot.idle_sessions, *snapshot.waiting_on_ove, *snapshot.finished]}
+    first = {
+        row.id: row
+        for row in [
+            *snapshot.active,
+            *snapshot.idle_sessions,
+            *snapshot.waiting_on_ove,
+            *snapshot.finished,
+        ]
+    }
     assert {row.seq for row in first.values()} == {1, 2, 3, 4}
     assert task.wiring["repo"] is None and finished.wiring["repo"] is None
     assert task.timeline == [{"at": NOW.isoformat(), "state": "running"}]
@@ -120,7 +152,10 @@ def test_preview_and_assignment_are_durable(tmp_path):
         "display_id": "00001 - A",
     }
     assert next_task_id(path=path) == 2
-    assert allocate_task_id(path=path, identity="tasks:a", title="renamed", now=NOW)["seq"] == 1
+    assert (
+        allocate_task_id(path=path, identity="tasks:a", title="renamed", now=NOW)["seq"]
+        == 1
+    )
 
 
 def test_display_id_width_is_minimum():
@@ -148,7 +183,14 @@ def test_bulk_migration_preserves_bridge_order_and_identity(tmp_path):
         _document(
             tasks=[_task("tasks:a", "same"), _task("tasks:b", "same")],
             waiting=[{"id": "ask:a", "ask": "Question", "blocks": ""}],
-            finished=[{"id": "tasks:a", "title": "same", "finished_at": NOW.isoformat(), "result": "ok"}],
+            finished=[
+                {
+                    "id": "tasks:a",
+                    "title": "same",
+                    "finished_at": NOW.isoformat(),
+                    "result": "ok",
+                }
+            ],
         ),
         path=path,
     )
@@ -165,17 +207,30 @@ def test_legacy_writer_does_not_discard_tombstones_and_counter(tmp_path):
     path = tmp_path / "tasks.json"
     allocate_task_id(path=path, identity="tasks:gone", title="Gone", now=NOW)
     write_tasks(_document(tasks=[_task("tasks:new", "New")]), path=path)
-    assert allocate_task_id(path=path, identity="tasks:new", title="New", now=NOW)["seq"] == 2
-    assert allocate_task_id(path=path, identity="tasks:gone", title="Back", now=NOW)["seq"] == 1
+    assert (
+        allocate_task_id(path=path, identity="tasks:new", title="New", now=NOW)["seq"]
+        == 2
+    )
+    assert (
+        allocate_task_id(path=path, identity="tasks:gone", title="Back", now=NOW)["seq"]
+        == 1
+    )
 
 
 def test_reorder_and_title_changes_do_not_change_numbers(tmp_path):
     path = tmp_path / "tasks.json"
-    write_tasks(_document(tasks=[_task("tasks:a", "A"), _task("tasks:b", "B")]), path=path)
+    write_tasks(
+        _document(tasks=[_task("tasks:a", "A"), _task("tasks:b", "B")]), path=path
+    )
     original = assign_task_ids(path=path, now=NOW)
-    write_tasks(_document(tasks=[_task("tasks:b", "B renamed"), _task("tasks:a", "A renamed")]), path=path)
+    write_tasks(
+        _document(tasks=[_task("tasks:b", "B renamed"), _task("tasks:a", "A renamed")]),
+        path=path,
+    )
     updated = assign_task_ids(path=path, now=NOW + timedelta(minutes=1))
-    assert {r["id"]: r["seq"] for r in original["tasks"]} == {r["id"]: r["seq"] for r in updated["tasks"]}
+    assert {r["id"]: r["seq"] for r in original["tasks"]} == {
+        r["id"]: r["seq"] for r in updated["tasks"]
+    }
     assert updated["next_seq"] == 3
 
 
@@ -183,7 +238,14 @@ def test_concurrent_allocations_are_unique_and_monotone(tmp_path):
     path = tmp_path / "tasks.json"
     identities = [f"tasks:{index}" for index in range(24)]
     with ThreadPoolExecutor(max_workers=12) as pool:
-        allocations = list(pool.map(lambda identity: allocate_task_id(path=path, identity=identity, title=identity, now=NOW), identities))
+        allocations = list(
+            pool.map(
+                lambda identity: allocate_task_id(
+                    path=path, identity=identity, title=identity, now=NOW
+                ),
+                identities,
+            )
+        )
     assert sorted(item["seq"] for item in allocations) == list(range(1, 25))
     assert next_task_id(path=path) == 25
 
@@ -193,7 +255,12 @@ def test_invalid_registry_data_fails_without_rewriting(tmp_path, bad_seq):
     path = tmp_path / "tasks.json"
     key = hashlib.sha256(b"tasks:a").hexdigest()
     data = _document()
-    data.update(next_seq=1, identity_registry={key: {"seq": bad_seq, "title": "A", "timeline": [], "last_state": None}})
+    data.update(
+        next_seq=1,
+        identity_registry={
+            key: {"seq": bad_seq, "title": "A", "timeline": [], "last_state": None}
+        },
+    )
     original = json.dumps(data).encode()
     path.write_bytes(original)
     with pytest.raises((ValueError, OSError)):
@@ -219,4 +286,8 @@ def test_finished_rows_record_result_not_none_and_stay_stable(tmp_path):
         number_snapshot(snapshot, path=path, now=NOW + timedelta(minutes=minute))
     assert finished.timeline == [{"at": NOW.isoformat(), "state": "ok"}]
     data = json.loads(path.read_text())
-    assert all(event["state"] != "None" for record in data["identity_registry"].values() for event in record["timeline"])
+    assert all(
+        event["state"] != "None"
+        for record in data["identity_registry"].values()
+        for event in record["timeline"]
+    )

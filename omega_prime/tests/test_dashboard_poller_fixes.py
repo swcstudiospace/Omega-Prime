@@ -230,7 +230,14 @@ def test_github_command_center_is_published_with_only_bounded_fields() -> None:
             "other": "discard",
         }
         poller = DashboardPoller(
-            [CollectorSpec("github", lambda: SourceResult("github", "ok", extra=extra), 1.0, 1.0)]
+            [
+                CollectorSpec(
+                    "github",
+                    lambda: SourceResult("github", "ok", extra=extra),
+                    1.0,
+                    1.0,
+                )
+            ]
         )
         await poller.refresh_now()
         status = poller.snapshot()["sources"]["github"]
@@ -277,12 +284,17 @@ def test_github_timeout_exposes_error_without_mutating_cached_rows() -> None:
         current = poller.snapshot()
         assert current is not None
         assert current["sources"]["github"]["status"] == "error"
-        assert current["sources"]["github"]["command_center"] == previous["sources"]["github"]["command_center"]
+        assert (
+            current["sources"]["github"]["command_center"]
+            == previous["sources"]["github"]["command_center"]
+        )
 
     asyncio.run(run())
 
 
-def test_default_cli_poller_factory_receives_numbering_path(tmp_path, monkeypatch, capsys) -> None:
+def test_default_cli_poller_factory_receives_numbering_path(
+    tmp_path, monkeypatch, capsys
+) -> None:
     from omega_prime.dashboard import __main__ as dashboard_main
 
     observed = {}

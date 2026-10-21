@@ -246,7 +246,14 @@ def test_composite_snapshot_guards_redaction_and_sse(tmp_path: Path) -> None:
             assert secret not in response.text
             assert secret not in html
         for method in ("POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
-            for path in ("/", "/cc/", "/legacy", "/cc/assets/index-DIGTqjrX.css", "/api/snapshot", "/healthz"):
+            for path in (
+                "/",
+                "/cc/",
+                "/legacy",
+                "/cc/assets/index-DIGTqjrX.css",
+                "/api/snapshot",
+                "/healthz",
+            ):
                 assert (
                     client.request(
                         method, path, headers={"host": "127.0.0.1:7421"}
@@ -446,7 +453,11 @@ def test_snapshot_api_and_named_sse_share_redacted_nested_github_data() -> None:
     event = asyncio.run(read_one_event())
     assert "retry: 3000" in event
     assert "event: snapshot" in event
-    frame = next(line.removeprefix("data: ") for line in event.splitlines() if line.startswith("data: "))
+    frame = next(
+        line.removeprefix("data: ")
+        for line in event.splitlines()
+        if line.startswith("data: ")
+    )
     streamed = json.loads(frame)
     assert streamed == snapshot
     assert streamed["sources"]["github"]["command_center"] == nested
