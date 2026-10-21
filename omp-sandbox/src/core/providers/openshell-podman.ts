@@ -12,12 +12,12 @@
 // (`podman system service`), the gateway (`openshell-gateway --compute-driver podman`), the
 // workload image (built from sandbox/image/Containerfile if absent), then one sandbox per `up`.
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, openSync, readdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { OPENSHELL_BIN, OPENSHELL_GATEWAY_BIN, OPENSHELL_TLS, OPENSHELL_GATEWAY_PORT, PODMAN_BIN, PODMAN_IMAGE, ROOT, STATE, SANDBOX_AGENT_BIN } from "../config.ts";
-import { execCapture, pidAlive, rid, waitHttp } from "./util.ts";
+import { execCapture, launched, pidAlive, rid, waitHttp } from "./util.ts";
 import { BrokerRelay, SANDBOX_RELAY_JS } from "./broker-relay.ts";
 import { TierUnavailable, type SandboxTier } from "./types.ts";
 
@@ -117,21 +117,23 @@ export class OpenShellPodmanTier implements SandboxTier {
     if (this.#brokerTarget) {
       const rp = spawn(OPENSHELL_BIN, this.#raw(["node", "-e", SANDBOX_RELAY_JS], "/sandbox", { OMP_SBX_RELAY_PORT: String(RELAY_PORT) }), { env: OS_ENV, stdio: ["pipe", "pipe", "pipe"] });
       this.#relay = new BrokerRelay(rp, this.#brokerTarget);
-      await this.#relay.start(60_000);
+      await launched(rp, "broker relay", this.#relay.start(60_000));
     }
 
     const agentLog = openSync(join(GW_STATE, `${this.id}-sandbox-agent.log`), "w");
     const agent = spawn(OPENSHELL_BIN, this.#raw(["sandbox-agent", "server", "--host", "127.0.0.1", "--port", String(AGENT_PORT), "--token", this.#agentToken, "--no-telemetry"], "/sandbox", process.env.OMP_SANDBOX_AGENT_LOG ? { RUST_LOG: process.env.OMP_SANDBOX_AGENT_LOG } : {}), { env: OS_ENV, stdio: ["pipe", agentLog, agentLog] });
     this.#children.add(agent as any);
     this.#fwd = spawn(OPENSHELL_BIN, ["forward", "service", "--target-port", String(AGENT_PORT), "--local", "127.0.0.1:0", this.id], { env: OS_ENV, stdio: ["pipe", "pipe", "pipe"] });
-    const port = await new Promise<number>((resolve, reject) => {
+    const fwd = this.#fwd;
+    const forwarded = new Promise<number>((resolve, reject) => {
       let buf = ""; const t = setTimeout(() => reject(new TierUnavailable("openshell-podman", `forward service did not start: ${buf.slice(-300)}`)), 60_000);
       const on = (b: Buffer) => { buf += b; const m = buf.match(/Forwarding 127\.0\.0\.1:(\d+)/); if (m) { clearTimeout(t); resolve(Number(m[1])); } };
-      this.#fwd!.stdout.on("data", on); this.#fwd!.stderr.on("data", on);
-      this.#fwd!.once("exit", (code) => { clearTimeout(t); reject(new TierUnavailable("openshell-podman", `forward service exited (${code}): ${buf.slice(-300)}`)); });
+      fwd.stdout.on("data", on); fwd.stderr.on("data", on);
+      fwd.once("exit", (code) => { clearTimeout(t); reject(new TierUnavailable("openshell-podman", `forward service exited (${code}): ${buf.slice(-300)}`)); });
     });
-    this.#agentUrl = `http://127.0.0.1:${port}`;
-    await waitHttp(`${this.#agentUrl}/v1/health`, this.#agentToken, 60_000);
+    // A launcher that cannot execute emits `error`, not `exit`: both the agent and the forward must reject startup instead.
+    const healthy = forwarded.then((port) => { this.#agentUrl = `http://127.0.0.1:${port}`; return waitHttp(`${this.#agentUrl}/v1/health`, this.#agentToken, 60_000); });
+    await launched(agent, "in-sandbox sandbox-agent", launched(fwd, "openshell forward service", healthy));
   }
 
   async #ensureSocket(sock: string) {
@@ -139,16 +141,25 @@ export class OpenShellPodmanTier implements SandboxTier {
     mkdirSync(dirname(sock), { recursive: true, mode: 0o700 }); mkdirSync(GW_STATE, { recursive: true });
     const log = openSync(join(GW_STATE, "podman-service.log"), "a");
     this.#svc = spawn(PODMAN_BIN, ["system", "service", "--time=0", `unix://${sock}`], { stdio: ["ignore", log, log] });
-    for (let i = 0; i < 60; i++) { if (await ping(sock)) { this.info.podmanSocket = { path: sock, startedByTier: true, pid: this.#svc.pid }; return; } await sleep(500); }
-    throw new TierUnavailable("openshell-podman", `podman API socket did not answer at ${sock}`);
+    const svc = this.#svc;
+    await launched(svc, "podman system service", (async () => {
+      for (let i = 0; i < 60; i++) { if (await ping(sock)) { this.info.podmanSocket = { path: sock, startedByTier: true, pid: svc.pid }; return; } await sleep(500); }
+      throw new TierUnavailable("openshell-podman", `podman API socket did not answer at ${sock}`);
+    })());
   }
 
   async #ensureImage() {
     if ((await pm(["image", "exists", PODMAN_IMAGE])).code === 0) { this.info.image = { ref: PODMAN_IMAGE, built: false }; return; }
-    const ctx = join(ROOT, "sandbox", "image");
-    copyFileSync(SANDBOX_AGENT_BIN, join(ctx, "sandbox-agent"));
-    const b = await pm(["build", "-t", PODMAN_IMAGE, ctx], { timeoutMs: 1_800_000 });
-    rmSync(join(ctx, "sandbox-agent"), { force: true });
+    // Each build gets its own context folder, so a parallel cold start cannot delete the binary another build still copies.
+    const src = join(ROOT, "sandbox", "image");
+    mkdirSync(GW_STATE, { recursive: true });
+    const ctx = mkdtempSync(join(GW_STATE, "image-ctx-"));
+    let b: Awaited<ReturnType<typeof pm>>;
+    try {
+      cpSync(src, ctx, { recursive: true });
+      copyFileSync(SANDBOX_AGENT_BIN, join(ctx, "sandbox-agent"));
+      b = await pm(["build", "-t", PODMAN_IMAGE, ctx], { timeoutMs: 1_800_000 });
+    } finally { rmSync(ctx, { recursive: true, force: true }); }
     if (b.code !== 0) throw new TierUnavailable("openshell-podman", `image build failed: ${b.stderr.slice(-500)}`);
     this.info.image = { ref: PODMAN_IMAGE, built: true };
   }
@@ -168,13 +179,18 @@ export class OpenShellPodmanTier implements SandboxTier {
     ].join("\n"));
     const logPath = join(GW_STATE, "gateway.log"); const log = openSync(logPath, "w");
     this.#gw = spawn(OPENSHELL_GATEWAY_BIN, ["--config", cfg, "--compute-driver", "podman", "--tls-cert", `${OPENSHELL_TLS}/server/tls.crt`, "--tls-key", `${OPENSHELL_TLS}/server/tls.key`, "--tls-client-ca", `${OPENSHELL_TLS}/ca.crt`, "--db-url", `sqlite:${join(GW_STATE, "gateway.db")}?mode=rwc`, "--bind-address", "127.0.0.1", "--port", String(OPENSHELL_GATEWAY_PORT), "--health-port", "0", "--metrics-port", "0"], { env: OS_ENV, stdio: ["ignore", log, log] });
+    const gw = this.#gw;
+    await launched(gw, "openshell-gateway", this.#gatewayReady(gw, logPath));
+  }
+
+  async #gatewayReady(gw: ChildProcess, logPath: string) {
     for (let i = 0; i < 120; i++) {
       await sleep(500);
-      if (this.#gw.exitCode !== null) throw new TierUnavailable("openshell-podman", `gateway exited: ${readFileSync(logPath, "utf8").slice(-500)}`);
+      if (gw.exitCode !== null) throw new TierUnavailable("openshell-podman", `gateway exited: ${readFileSync(logPath, "utf8").slice(-500)}`);
       const l = readFileSync(logPath, "utf8");
       if (/Using compute driver driver=podman/.test(l) && /Gateway listener bound/.test(l)) {
         const st = await os(["status"], { timeoutMs: 15_000 });
-        if (/Connected/.test(st.stdout)) { this.info.gateway = { startedByTier: true, pid: this.#gw.pid, driver: "podman", endpoint: `https://127.0.0.1:${OPENSHELL_GATEWAY_PORT}`, mtls: true }; return; }
+        if (/Connected/.test(st.stdout)) { this.info.gateway = { startedByTier: true, pid: gw.pid, driver: "podman", endpoint: `https://127.0.0.1:${OPENSHELL_GATEWAY_PORT}`, mtls: true }; return; }
       }
     }
     throw new TierUnavailable("openshell-podman", "gateway did not become ready with the podman driver");

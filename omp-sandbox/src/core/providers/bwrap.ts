@@ -6,12 +6,19 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { STATE, BUN_INSTALL, NODE24_BIN, BUN_EXE, SANDBOX_AGENT_BIN, HOME } from "../config.ts";
+import { STATE, NODE24_BIN, BUN_EXE, OMP_BIN, SANDBOX_AGENT_BIN, HOME, realBin, toolchainRoot } from "../config.ts";
 import { freePort } from "../auth.ts";
 import { execCapture, pidAlive, rid, waitHttp, launched } from "./util.ts";
 import { TierUnavailable, type SandboxTier } from "./types.ts";
 
 const BWRAP = "/usr/bin/bwrap";
+
+/** Read-only binds for the omp and Bun the host broker uses, wherever they are installed (deduplicated, nested ones dropped). */
+export function toolchainBinds(bins: string[] = [OMP_BIN, BUN_EXE]): string[] {
+  const roots = [...new Set(bins.map(toolchainRoot))].filter((r) => existsSync(r)).sort();
+  const kept = roots.filter((r) => !roots.some((o) => o !== r && r.startsWith(o + "/")) && r !== "/usr" && !r.startsWith("/usr/"));
+  return kept.flatMap((r) => ["--ro-bind", r, r]);
+}
 
 export class BwrapTier implements SandboxTier {
   readonly name = "bwrap" as const;
@@ -32,7 +39,7 @@ export class BwrapTier implements SandboxTier {
       "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc",
       "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64", "--symlink", "usr/sbin", "/sbin",
       "--tmpfs", "/home",
-      "--ro-bind", BUN_INSTALL, BUN_INSTALL,
+      ...toolchainBinds(),
       "--ro-bind", dirname(NODE24_BIN), dirname(NODE24_BIN),
       "--ro-bind", dirname(SANDBOX_AGENT_BIN), "/opt/sandbox-agent",
       "--bind", this.hostRoot, this.sandboxRoot,
@@ -57,7 +64,8 @@ export class BwrapTier implements SandboxTier {
     this.#env = env;
     for (const d of ["work", "home", "bin"]) mkdirSync(join(this.hostRoot, d), { recursive: true });
     const link = (target: string, name: string) => { const p = join(this.hostRoot, "bin", name); if (!existsSync(p)) symlinkSync(target, p); };
-    link(BUN_EXE, "bun"); link(join(BUN_INSTALL, "bin", "omp"), "omp");
+    // Link the real launchers (the configured omp and the Bun that runs it); their folders are bound read-only above.
+    link(realBin(BUN_EXE), "bun"); link(realBin(OMP_BIN), "omp");
     const probe = await execCapture(BWRAP, this.#argv(["sh", "-c", "omp --version && node -v && test ! -e " + join(HOME, ".omp") + " && echo NO_HOST_OMP_STORE"], {}), { timeoutMs: 60_000 });
     if (probe.code !== 0 || !probe.stdout.includes("NO_HOST_OMP_STORE")) throw new TierUnavailable("bwrap", `probe failed: ${probe.stderr.slice(-400)}`);
     const port = await freePort();
