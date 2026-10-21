@@ -2498,3 +2498,16 @@ def test_recovery_conflicts_reach_the_run_result_and_session_record(
         for event in events
     )
     assert config.read_bytes().endswith(b" ")
+
+
+def test_relative_state_dir_gives_an_absolute_mcp_state_bind(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine.jobs import mcp_state_dir
+
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    resolved = mcp_state_dir({"OMEGA_PRIME_STATE_DIR": "state"})
+    assert resolved.is_absolute()
+    assert resolved == caller / "state" / "mcp-state"

@@ -51,7 +51,7 @@ def mcp_state_dir(env: Mapping[str, str]) -> Path:
     create its memory, session and desk stores without a writable bind over
     the operator control queue or the attachment journal.
     """
-    return state_dir(env) / MCP_STATE_DIR
+    return Path(os.path.abspath(state_dir(env) / MCP_STATE_DIR))
 
 
 def check_job_id(job_id: str) -> str:
