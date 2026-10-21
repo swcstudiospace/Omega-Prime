@@ -38,12 +38,12 @@ export function CiCd({ snapshot, loading, error, receivedAt, refresh }: Dashboar
       head_sha: latest.head_sha ?? null, ci: latest.ci ?? null, checks: latest.checks ?? [],
     })
   }
-  const localTasks = [...(snapshot.active ?? []), ...(snapshot.finished ?? [])]
+  const localTasks = [...(snapshot.active ?? []), ...(snapshot.idle_sessions ?? []), ...(snapshot.finished ?? [])]
   const meta = cc?.meta
   const freshness = githubFreshness(snapshot)
   const partial = meta?.partial ? [meta.reason ?? 'Some GitHub data is partial'] : freshness.partial ? ['GitHub source is degraded; local data remains available'] : []
   const summary = detailedRows.length ? null : (snapshot.pr_gate ?? [])
-  return <ViewState loading={loading} error={error} receivedAt={receivedAt} sourceUpdatedAt={freshness.updatedAt} stale={freshness.stale} retry={refresh} partial={partial} empty={!rows.length && !summary?.length} emptyLabel={cc ? 'No CI/CD records are available.' : 'GitHub command-center data is not configured or has not been collected.'}>
+  return <ViewState loading={loading} error={error} receivedAt={receivedAt} sourceUpdatedAt={freshness.updatedAt} stale={freshness.stale} retry={refresh} partial={partial} githubMeta={cc?.meta} empty={!rows.length && !summary?.length} emptyLabel={cc ? 'No CI/CD records are available.' : 'GitHub command-center data is not configured or has not been collected.'}>
     <div className="view-stack">
       {summary?.length ? <section className="panel"><h2>Legacy merge gate · detailed records unavailable</h2><ul className="merge-list">{summary.map(pr => <li key={pr.id}><strong>{pr.repo} #{pr.number} · {pr.title}</strong><span>{pr.ci} · {pr.merge_rule}</span></li>)}</ul></section> : null}
       {rows.map(row => <CiCard key={cardKey(row)} row={row} tasks={localTasks} />)}
@@ -76,6 +76,6 @@ function CiCard({ row, tasks }: { row: CiRow; tasks: Array<NonNullable<Snapshot[
       const href = safeHref(check.details_url)
       return <li key={check.id ?? `${check.name}-${i}`}><span className={`health-dot ${check.conclusion === 'success' ? 'healthy' : check.conclusion === 'failure' ? 'degraded' : ''}`} /><strong>{check.name}</strong><span>{check.conclusion ?? check.status}</span><span>{duration !== null ? `${duration}s` : check.completed_at ? formatSydney(check.completed_at) : 'Duration pending'}</span>{href && <a href={href} target="_blank" rel="noreferrer">Details</a>}</li>
     })}</ul> : <p className="subtle">Detailed checks unavailable.</p>}
-    <div className="evidence-row"><div><h3>Greptile review</h3><p>{review?.score != null ? `Score ${review.score}` : 'Score unknown'} · {review?.source ?? 'Review source unknown'} · reviewed SHA {review?.reviewed_sha?.slice(0, 12) ?? 'unknown'} · {review?.matches_head == null ? 'head match unknown' : review.matches_head ? 'matches current head' : 'does not match current head'}</p>{safeHref(review?.url) && <a href={safeHref(review?.url) ?? undefined} target="_blank" rel="noreferrer">Review evidence ↗</a>}</div><div><h3>Wiring evidence</h3>{correlation.length ? correlation.map(task => <p key={task.id}>{task.display_id ?? 'ID unavailable'} · {task.wiring?.phase ?? 'Phase unknown'} · {task.wiring?.stage ?? 'Stage unknown'} · merge order unavailable in snapshot{!row.repo ? ' · repository provenance unavailable' : ''}</p>) : <p>Unknown · no unique branch/SHA corroboration.</p>}</div></div>
+    <div className="evidence-row"><div><h3>Greptile review</h3><p>{reviewLabel}</p>{safeHref(review?.url) && <a href={safeHref(review?.url) ?? undefined} target="_blank" rel="noreferrer">Review evidence ↗</a>}</div><div><h3>Wiring evidence</h3>{correlation.length ? correlation.map(task => <p key={task.id}>{task.display_id ?? 'ID unavailable'} · {task.wiring?.phase ?? 'Phase unknown'} · {task.wiring?.stage ?? 'Stage unknown'} · merge order unavailable in snapshot{!row.repo ? ' · repository provenance unavailable' : ''}</p>) : <p>Unknown · no unique branch/SHA corroboration.</p>}</div></div>
   </article>
 }
