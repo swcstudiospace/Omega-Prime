@@ -1,0 +1,149 @@
+---
+phase: 106-command-center-polish
+plan: "01"
+subsystem: dashboard
+tags: [python, github, model, snapshot, task-numbering]
+requires: []
+provides:
+  - Bounded GitHub closed-PR pagination and explicit oversize degradation with stale merge retention.
+  - Finished-only terminal task projection and an idle_sessions snapshot/API bucket.
+  - Durable identity numbering and history across active/idle transitions.
+affects: [106-03, 106-04, 106-05]
+actuals:
+  tokens: not-measured
+  tasks: 3
+  commits: 3
+tech-stack:
+  added: []
+  patterns: [bounded page-specific collector policy, additive snapshot bucket, shared canonical identity registry]
+key-files:
+  created:
+    - omega_prime/tests/test_dashboard_github_merges_polish.py
+    - omega_prime/tests/test_dashboard_model_buckets.py
+  modified:
+    - omega_prime/dashboard/collectors/github.py
+    - omega_prime/dashboard/github_data.py
+    - omega_prime/dashboard/collectors/herdr.py
+    - omega_prime/dashboard/model.py
+    - omega_prime/dashboard/task_ids.py
+    - omega_prime/dashboard/app.py
+requirements-completed: [AC1, AC2, AC6, AC8]
+coverage:
+  - id: D1
+    description: Bounded closed-PR scans, limit+1 response detection and stale merge fallback.
+    requirement: AC1
+    verification:
+      - kind: unit
+        ref: omega_prime/tests/test_dashboard_github_merges_polish.py
+        status: unknown
+    human_judgment: true
+    rationale: Tests were authored but not run by this assignment; live host validation is explicitly prohibited.
+  - id: D2
+    description: Finished and idle bucket projection retains task detail, waiting relations and worktree wiring.
+    requirement: AC6
+    verification:
+      - kind: unit
+        ref: omega_prime/tests/test_dashboard_model_buckets.py
+        status: unknown
+    human_judgment: true
+    rationale: Tests were authored but not run by this assignment.
+  - id: D3
+    description: Idle task identities survive bucket transitions, restart, snapshot hashing and API publication.
+    requirement: AC8
+    verification:
+      - kind: integration
+        ref: omega_prime/tests/test_dashboard_snapshot_contract.py
+        status: unknown
+      - kind: integration
+        ref: omega_prime/tests/test_dashboard_app.py
+        status: unknown
+    human_judgment: true
+    rationale: Tests were authored but not run by this assignment.
+duration: not-measured
+completed: 2026-10-21
+status: complete
+---
+
+# Phase 106 Plan 01 Summary
+
+**Bounded GitHub merge collection and backend-only Finished/Idle task projection now flow through durable numbering and the existing snapshot/API pipeline.**
+
+## Performance
+
+- **Duration:** Not measured.
+- **Started:** Not recorded.
+- **Completed:** 2026-10-21.
+- **Tasks:** 3.
+- **Files modified:** 14 (including two new regression test files).
+
+## Accomplishments
+
+- Closed-PR scans use `CLOSED_PAGE_SIZE=30`, at most `MAX_CLOSED_PAGES=10` (300 raw candidates per target), stop at 100 actual merged rows per target, then sort globally and cap at `MAX_MERGES=100`. Existing open-list constants remain `PAGE_SIZE=100`, `MAX_PAGES=3`.
+- GitHub response bodies are bounded at `MAX_RESPONSE_BYTES=1_000_000`; transport reads at most cap+1, injected transports are independently bounded, and oversize failures report `too_large`. Failed merge refreshes keep repository-local cached rows and their original successful timestamps/stale evidence.
+- `tasks_json` done/failed tasks appear only in Finished with `ok`/`failed`, retaining available owner, model, timestamps, progress, links, note/detail and wiring/worktree evidence. Non-live, unknown, stopped and quiet sessions are projected into `idle_sessions`; live working/idle/blocked panes and working sandbox E2E remain Active, with blocked-pane Waiting relations retained.
+- Added serialized `Snapshot.idle_sessions` after the four existing positional fields and included it in content hashing and the cold snapshot shape. Idle tasks share the existing identity registry, sequence allocator and timeline.
+
+## Active-consumer audit
+
+- `poller.py` was intentionally unchanged: `_build_snapshot()` already runs `normalize_tasks()` → `number_snapshot()` → `Snapshot.to_dict()` → redaction → canonical content hash/publication. Adding Idle serialization and numbering automatically carries Idle into current API snapshots and SSE payloads without duplicate assembly.
+- `task_ids.py` now numbers/observes `active`, `idle_sessions`, `waiting_on_ove` and `finished` in its single existing registry; no second counter or stored idle array was added.
+- `app.py` changed only `_empty_snapshot()` to include `idle_sessions: []`. Existing GET/Host/CSP/static guards and original array shapes are otherwise unchanged.
+- Legacy static `app.js` remains intentionally Active-only. Frontend Idle rendering/count behavior belongs to plan 04. `status_file.py`, poller, frontend/generated assets and external services were not changed.
+
+## Task Commits
+
+1. **Task 1: Restore bounded recent merges** — `c495f6e`.
+2. **Task 2: Separate finished tasks and idle sessions** — `45e3ad9`.
+3. **Task 3: Carry Idle through numbering, hashing and APIs** — `febadb4`.
+
+## Files Created/Modified
+
+- `omega_prime/dashboard/collectors/github.py`
+- `omega_prime/dashboard/github_data.py`
+- `omega_prime/dashboard/collectors/herdr.py`
+- `omega_prime/dashboard/model.py`
+- `omega_prime/dashboard/task_ids.py`
+- `omega_prime/dashboard/app.py` (only `_empty_snapshot`)
+- `omega_prime/tests/test_dashboard_github_merges_polish.py` (new)
+- `omega_prime/tests/test_dashboard_model_buckets.py` (new)
+- `omega_prime/tests/test_dashboard_model.py`
+- `omega_prime/tests/test_dashboard_process_collectors.py`
+- `omega_prime/tests/test_dashboard_task_ids.py`
+- `omega_prime/tests/test_dashboard_snapshot_contract.py`
+- `omega_prime/tests/test_dashboard_app.py`
+- `omega_prime/tests/test_dashboard_integration.py`
+
+## Decisions Made
+
+- Kept the shared general GitHub page constants unchanged and introduced a closed-only page policy.
+- Used the existing normalized Herdr pane record to add optional `has_live_agent` evidence; recognized agent status remains compatibility evidence only when explicit agent metadata is absent. No process requirement was added.
+- Followed the approved model-bucket addendum without touching frontend plan-04 files or plan-05 model extensions.
+
+## Deviations from Plan
+
+None intended. No poller changes, generated asset changes, external dependency changes or unrelated security changes.
+
+## Verification and Evidence
+
+No tests, builds, lint, formatters, baseline transplant, live network, real HOME/task store, Herdr command or 7421 access were run; this was explicitly prohibited. Implemented tests and required commands are:
+
+- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_github_merges_polish.py` — not run (assignment instruction).
+- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_model_buckets.py omega_prime/tests/test_dashboard_model.py omega_prime/tests/test_dashboard_process_collectors.py` — not run (assignment instruction).
+- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_model_buckets.py omega_prime/tests/test_dashboard_task_ids.py omega_prime/tests/test_dashboard_snapshot_contract.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_integration.py` — not run (assignment instruction).
+- `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k dashboard` — not run (outer integration owner only).
+
+**Baseline regression failures:** No ad3942b fixture transplant was executed, so no baseline assertion failure is claimed. The new regression nodes are test coverage authored, not execution evidence. The supplied baseline files report existing broad collection blockers (`mcp`, `apscheduler`, and setuptools availability); none were rechecked or changed.
+
+**Host-unverified:** Live GitHub parity and all 7421/live-data behavior remain unverified by design. The explicit assignment prohibited network, Herdr, real task-store/HOME and 7421 access. Outer integration owner must execute the offline checks after writers stop and report those outcomes independently.
+
+## User Setup Required
+
+None.
+
+## Next Phase Readiness
+
+Plan 03 can extend GitHub collector behavior after 01/02. Plan 04 can add the frontend Idle group/count; plan 05 can extend model/task-pane projection. Offline checks remain pending with the outer integration owner.
+
+---
+*Phase: 106-command-center-polish*
+*Plan: 01*
