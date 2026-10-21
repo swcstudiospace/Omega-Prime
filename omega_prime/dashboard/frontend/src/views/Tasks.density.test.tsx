@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { Tasks } from './Tasks'
 import { fixture } from '../test/fixtures'
 describe('Task row density', () => {
@@ -15,7 +15,7 @@ describe('Task row density', () => {
   it('keeps bucket and density controls available for an empty list', () => {
     render(<Tasks snapshot={{}} data={{}} loading={false} error={null} receivedAt={Date.now()} live refresh={vi.fn()} bucket="finished" notice={null} onTask={vi.fn()} />)
     expect(screen.getByRole('heading', { name: 'No finished tasks yet' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'All' })).toHaveAttribute('href', '#/tasks')
+    expect(within(screen.getAllByRole('navigation', { name: 'Task buckets' }).at(-1)!).getByRole('link', { name: 'All' })).toHaveAttribute('href', '#/tasks')
     expect(screen.getByRole('button', { name: 'Comfortable' })).toBeInTheDocument()
   })
 })
