@@ -38,8 +38,8 @@ def skill_manage(
 
     Every save holds the root's ``<root>.lock`` writer lock, the lock the
     agent-data migration holds while it moves the folder. A save that
-    waited out a move finds the root gone and follows the ``<root>.moved``
-    pointer the migration left (one hop), so it lands in the new folder.
+    waited out a move follows the ``<root>.moved`` pointer the migration
+    left beside the root (one hop), so it lands in the folder the host reads.
     """
     if action not in ("create", "edit", "patch"):
         return _error(f"Unknown action '{action}'. Use create, edit, or patch.")
@@ -110,9 +110,12 @@ def _root_lock(root: Path) -> Iterator[None]:
 
 
 def _moved_to(root: Path) -> Path | None:
-    """The folder a migration moved ``root`` to, when ``root`` is gone."""
-    if root.is_dir():
-        return None
+    """The folder a migration moved (or merged) ``root`` into.
+
+    Followed even when ``root`` still exists: a clash can keep the old
+    folder from being removed, and a save there would stay hidden from a
+    host that reads the agent folder.
+    """
     pointer = root.with_name(root.name + _MOVED_SUFFIX)
     try:
         if pointer.is_symlink():
@@ -120,7 +123,12 @@ def _moved_to(root: Path) -> Path | None:
         target = Path(pointer.read_text(encoding="utf-8").strip())
     except (OSError, UnicodeDecodeError):
         return None
-    if target.is_absolute() and target.is_dir() and not target.is_symlink():
+    if (
+        target.is_absolute()
+        and target.is_dir()
+        and not target.is_symlink()
+        and not _same(target, root)
+    ):
         return target
     return None
 

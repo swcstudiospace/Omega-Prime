@@ -410,32 +410,7 @@ MOVED_SUFFIX = ".moved"
 def _publish_dir(src: Path, dst: Path) -> bool:
     """Move a directory to a missing ``dst``. False when ``dst`` holds data.
 
-    The whole move runs under the folder's ``<name>.lock`` writer lock, the
-    lock the skill manager holds for every save, so a nightly pass that
-    still has the old path waits for the move, then follows the
-    ``<name>.moved`` pointer left here to the new folder instead of writing
-    into (or losing a save to) the old one.
-    """
-    with _writer_lock(src, create=_parent_writable(src)):
-        moved = _publish_dir_locked(src, dst)
-        if moved:
-            with contextlib.suppress(OSError):
-                pointer = src.with_name(src.name + MOVED_SUFFIX)
-                fd = os.open(
-                    pointer,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_TRUNC
-                    | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                )
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    handle.write(str(dst))
-        return moved
-
-
-def _publish_dir_locked(src: Path, dst: Path) -> bool:
-    """``rename`` never replaces a non-empty directory or a file. Across
+    ``rename`` never replaces a non-empty directory or a file. Across
     filesystems the tree is copied to a scratch name first and renamed into
     place only once complete; a failed copy is removed and the source stays.
     """
@@ -543,6 +518,35 @@ def _move_one(src: Path, dst: Path, report: MigrationReport) -> None:
             )
         return
     report.moved.append({"from": str(src), "to": str(dst)})
+
+
+def _move_root(src: Path, dst: Path, report: MigrationReport) -> None:
+    """Move one top-level agent folder under its writer lock, then point at it.
+
+    The lock (``<folder>.lock``) and the pointer (``<folder>.moved``) sit
+    beside the folder, never inside a folder being merged, and only the
+    whole root gets them. The skill manager takes the same lock for every
+    save and follows the pointer whenever it names an existing folder, so a
+    nightly pass still holding the old root writes where the host reads,
+    even when a clash kept the old root from being removed.
+    """
+    if report.dry_run or not src.is_dir() or src.is_symlink():
+        _move_one(src, dst, report)
+        return
+    with _writer_lock(src, create=_parent_writable(src)):
+        errors = len(report.errors)
+        _move_one(src, dst, report)
+        if len(report.errors) != errors or not dst.is_dir() or dst.is_symlink():
+            return
+        with contextlib.suppress(OSError):
+            pointer = src.with_name(src.name + MOVED_SUFFIX)
+            fd = os.open(
+                pointer,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(str(dst))
 
 
 def _merge_dir(src: Path, dst: Path, report: MigrationReport) -> None:
@@ -750,7 +754,7 @@ def migrate_agent_state(
                     continue
                 _move_group(*_sqlite_group(src, target), report)
                 continue
-            _move_one(src, target, report)
+            _move_root(src, target, report)
     if not dry_run and report.moved:
         try:
             agent_dir.mkdir(mode=0o700, parents=True, exist_ok=True)

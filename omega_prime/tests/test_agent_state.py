@@ -850,6 +850,41 @@ def test_a_save_that_resolved_the_old_skills_folder_lands_in_the_moved_one(tmp_p
     assert not old.exists()
 
 
+def test_a_merged_skills_folder_keeps_move_records_outside_and_redirects_saves(
+    tmp_path,
+):
+    from omega_prime.skills_runtime.manager import skill_manage
+
+    def skill(name: str, body: str) -> str:
+        return f"---\nname: {name}\ndescription: Skill {name}.\n---\n{body}\n"
+
+    state = tmp_path / "state"
+    old = state / "skills"
+    agent = state / "agent"
+    for folder, name, body in (
+        (old, "deploy", "old"),
+        (old, "review", "old"),
+        (agent / "skills", "deploy", "agent"),
+    ):
+        (folder / name).mkdir(parents=True)
+        (folder / name / "SKILL.md").write_text(skill(name, body), encoding="utf-8")
+    report = migrate_agent_state(agent, state_root=state)
+    assert not report.errors
+    # The clash keeps the old folder; the other skill merged in.
+    assert (old / "deploy" / "SKILL.md").is_file()
+    assert (agent / "skills" / "review" / "SKILL.md").is_file()
+    # No move record lands inside either skills folder.
+    for folder in (old, agent / "skills"):
+        assert not [p.name for p in folder.iterdir() if p.suffix in (".lock", ".moved")]
+    # A nightly pass holding the old root saves where the host reads.
+    result = json.loads(
+        skill_manage("create", "fresh", content=skill("fresh", "new"), skills_root=old)
+    )
+    assert result["success"], result
+    assert (agent / "skills" / "fresh" / "SKILL.md").is_file()
+    assert not (old / "fresh").exists()
+
+
 def test_saves_into_the_shipped_skills_folder_leave_no_lock_file(tmp_path, monkeypatch):
     from omega_prime.skills_runtime import manager
 
