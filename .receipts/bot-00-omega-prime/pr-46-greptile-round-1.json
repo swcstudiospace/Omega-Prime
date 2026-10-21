@@ -89,7 +89,7 @@
     },
     {
       "claim": "Initializing prime-agent did not produce a green full-suite result; the rerun had 6 failures, 4843 passes, and 20 skips.",
-      "evidence_command_index": 12,
+      "evidence_command_index": 11,
       "expects_failure": true
     }
   ],
