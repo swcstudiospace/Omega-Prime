@@ -7,6 +7,10 @@ type Frame = { status: Status; text: string; updated_at: string | null }
 const empty: Frame = { status: 'live', text: '', updated_at: null }
 
 export function TerminalPanel({ taskId }: { taskId: string }) {
+  return <TerminalPanelStream key={taskId} taskId={taskId} />
+}
+
+function TerminalPanelStream({ taskId }: { taskId: string }) {
   const [frame, setFrame] = useState<Frame>(empty)
   const [connected, setConnected] = useState(false)
   const [paused, setPaused] = useState(false)
