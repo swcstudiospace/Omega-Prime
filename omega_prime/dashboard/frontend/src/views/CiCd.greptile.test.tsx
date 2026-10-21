@@ -12,6 +12,7 @@ describe('CI/CD Greptile review wording', () => {
       { id: 'main', kind: 'branch', repo: 'swcstudiospace/console', branch: 'main', head_sha: 'merge-sha', ci: 'pass', checks: [], greptile_review: mergedReview },
       { id: 'direct', kind: 'branch', repo: 'swcstudiospace/console', branch: 'direct', head_sha: 'direct-sha', ci: 'pass', checks: [], greptile_review: { score: null, reviewed_sha: null, source: 'not_applicable' } },
       { id: 'failed', kind: 'branch', repo: 'swcstudiospace/console', branch: 'failed', head_sha: 'failed-sha', ci: 'pass', checks: [], greptile_review: { score: null, reviewed_sha: null, source: 'unavailable' } },
+      { id: 'unreviewed', kind: 'branch', repo: 'swcstudiospace/console', branch: 'release', head_sha: 'dep-sha', ci: 'pass', checks: [], greptile_review: { score: null, reviewed_sha: null, source: 'merged_pr_unreviewed', evidence_source: 'none', pr_number: 29, url: 'https://github.com/swcstudiospace/console/pull/29', matches_head: null } as NonNullable<CiRow['greptile_review']> },
       { id: 'body', kind: 'pull_request', repo: 'swcstudiospace/console', number: 13, title: 'Body-only evidence', branch: 'feature', head_sha: 'body-sha', ci: 'pass', checks: [], greptile_review: bodyReview },
     ]
     const snapshot = structuredClone(fixture) as Snapshot
@@ -21,6 +22,7 @@ describe('CI/CD Greptile review wording', () => {
     expect(screen.getByText('Greptile 0/5 · from #12')).toBeInTheDocument()
     expect(screen.getByText('No PR review for this commit')).toBeInTheDocument()
     expect(screen.getByText('Greptile review unavailable')).toBeInTheDocument()
+    expect(screen.getByText('No Greptile review on #29')).toBeInTheDocument()
     expect(screen.getByText('Greptile 2/5 · reviewed SHA not reported')).toBeInTheDocument()
     expect(screen.getByText(/Idle-13 · 106 · idle/)).toBeInTheDocument()
     expect(screen.queryByText(/Score unknown · Review source unknown/)).not.toBeInTheDocument()

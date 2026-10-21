@@ -62,6 +62,7 @@ function CiCard({ row, tasks }: { row: CiRow; tasks: Array<NonNullable<Snapshot[
   const mergedPrNumber = review && 'pr_number' in review && typeof review.pr_number === 'number' ? review.pr_number : null
   const evidenceSource = review && 'evidence_source' in review && typeof review.evidence_source === 'string' ? review.evidence_source : review?.source ?? 'Review source unavailable'
   const reviewLabel = review?.source === 'not_applicable' ? 'No PR review for this commit'
+    : review?.source === 'merged_pr_unreviewed' && mergedPrNumber !== null ? `No Greptile review on #${mergedPrNumber}`
     : review?.source === 'unavailable' || !review ? 'Greptile review unavailable'
       : review.source === 'merged_pr' && mergedPrNumber !== null && review.score != null ? `Greptile ${review.score}/5 · from #${mergedPrNumber}`
         : review.score != null && !review.reviewed_sha ? `Greptile ${review.score}/5 · reviewed SHA not reported`

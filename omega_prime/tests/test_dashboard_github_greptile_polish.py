@@ -156,3 +156,36 @@ def test_direct_commit_is_not_applicable_and_lookup_failure_is_row_local():
         assert cc["meta"]["sections"]["recent_merges"]["partial"] is False
         assert all("synthetic private" not in call for call in calls)
         assert "synthetic private error" not in json.dumps(result.__dict__)
+
+
+def test_merged_pr_without_greptile_review_names_the_pr_instead_of_unavailable():
+    repo = "swcstudiospace/Omega-Prime"
+    dependabot = _pr(repo, 29, "branch-merge", "branch-head")
+
+    def transport(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        parsed = urlsplit(url)
+        path = parsed.path
+        if path == "/orgs/swcstudiospace/repos":
+            return 200, json.dumps([{"id": 1, "full_name": repo, "name": "Omega-Prime", "default_branch": "main"}]).encode()
+        if path.endswith("/commits/main"):
+            return 200, b'{"sha":"branch-merge"}'
+        if "/check-runs" in path:
+            return 200, b'{"check_runs":[]}'
+        if path.endswith("/commits/branch-merge/pulls"):
+            return 200, json.dumps([dependabot]).encode()
+        if path.endswith("/issues/29/comments"):
+            return 200, json.dumps([{"user": {"login": "someone"}, "body": "@dependabot rebase", "created_at": "2026-10-20T20:48:43Z"}]).encode()
+        if path.endswith("/pulls/29/reviews"):
+            return 200, b"[]"
+        if path.endswith("/pulls") and parse_qs(parsed.query).get("state") in (["open"], ["closed"]):
+            return 200, b"[]"
+        raise AssertionError(path)
+
+    result = make_github_collector(env={"GITHUB_PAT_DESK_LEAD": TOKEN}, transport=transport)()
+    cc = result.extra["command_center"]
+    review = next(row for row in cc["ci_cd"] if row["kind"] == "branch")["greptile_review"]
+    assert review["source"] == "merged_pr_unreviewed"
+    assert review["pr_number"] == 29
+    assert review["score"] is None
+    assert review["url"] == "https://github.com/swcstudiospace/Omega-Prime/pull/29"
+    assert cc["meta"]["errors"] == []

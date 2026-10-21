@@ -334,7 +334,13 @@ def make_github_collector(
                                 def review_failed(exc: Exception) -> None:
                                     extraction_failed[0] = True
                                 evidence = _greptile(merged_pr, full_name, number, reviewed_sha, base, get, review_truncated, review_failed)
-                                if evidence is not None and not extraction_failed[0]:
+                                if evidence is None and not extraction_failed[0]:
+                                    review = {
+                                        "score": None, "reviewed_sha": None, "source": "merged_pr_unreviewed",
+                                        "evidence_source": "none", "pr_number": number, "submitted_at": None,
+                                        "url": _safe_url(merged_pr.get("html_url")), "matches_head": None,
+                                    }
+                                elif evidence is not None and not extraction_failed[0]:
                                     review = {
                                         "score": evidence["score"], "reviewed_sha": evidence["reviewed_sha"],
                                         "source": "merged_pr", "evidence_source": evidence["source"],
