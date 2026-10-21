@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
 import { CiCd } from './CiCd'
 import { fixture } from '../test/fixtures'
 import type { CiRow, Snapshot } from '../types'
+
+afterEach(() => cleanup())
 
 const dashboardProps = { loading: false, error: null, receivedAt: Date.now(), live: true, refresh: vi.fn() }
 
