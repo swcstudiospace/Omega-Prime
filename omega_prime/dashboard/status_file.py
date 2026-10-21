@@ -13,7 +13,7 @@ import re
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,50 @@ def _optional_string(obj: dict[str, Any], field: str, prefix: str) -> str | None
     if value is not None and not isinstance(value, str):
         raise ValueError(f"{prefix}.{field} must be a string or null")
     return value
+
+
+def _optional_iso(obj: dict[str, Any], field: str, prefix: str) -> str | None:
+    value = obj.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{prefix}.{field} must be an ISO-8601 string or null")
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            f"{prefix}.{field} must be an ISO-8601 string or null"
+        ) from exc
+    return value
+
+
+def _optional_pid(obj: dict[str, Any], field: str, prefix: str) -> int | None:
+    value = obj.get(field)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{prefix}.{field} must be a positive integer or null")
+    return value
+
+
+def _optional_stale(value: Any, prefix: str) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"reason", "since"}:
+        raise ValueError(f"{prefix}.stale must be a stale mapping")
+    reason = value.get("reason")
+    since = value.get("since")
+    if not isinstance(reason, str):
+        raise ValueError(f"{prefix}.stale.reason must be a string or null")
+    if not isinstance(since, str):
+        raise ValueError(f"{prefix}.stale.since must be an ISO-8601 string or null")
+    try:
+        datetime.fromisoformat(since.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            f"{prefix}.stale.since must be an ISO-8601 string or null"
+        ) from exc
+    return {"reason": reason, "since": since}
 
 
 def _progress(value: Any, prefix: str) -> dict[str, int] | None:
@@ -145,6 +189,11 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
                 item["note"] = _optional_string(row, "note", prefix)
                 item["links"] = _links(row.get("links", []), prefix)
                 item["herdr_pane"] = _pane(row.get("herdr_pane"), prefix)
+                item["last_heartbeat_at"] = _optional_iso(
+                    row, "last_heartbeat_at", prefix
+                )
+                item["pid"] = _optional_pid(row, "pid", prefix)
+                item["stale"] = _optional_stale(row.get("stale"), prefix)
             elif category == "waiting_on_ove":
                 item["since"] = _optional_string(row, "since", prefix)
                 item["blocks"] = _string(row, "blocks", prefix)
@@ -335,6 +384,39 @@ def write_tasks(data: dict[str, Any], *, path: Path) -> Path:
                         )
                     row["seq"] = record["seq"]
         return _write_locked(candidate, path)
+
+
+def heartbeat(
+    path: Path,
+    task_id: str,
+    *,
+    state: str | None = None,
+    note: str | None = None,
+    pid: int | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Record liveness for one task row through the locked write path.
+
+    Sets last_heartbeat_at (plus any optional state/note/pid), refreshes the root
+    updated_at, drops any persisted stale marker from the row, and returns a copy
+    of the row. Unknown task ids raise ValueError without writing anything.
+    """
+    stamp = (now or datetime.now(UTC)).isoformat()
+    with locked_tasks(path, write=True) as data:
+        row = next((t for t in data["tasks"] if t.get("id") == task_id), None)
+        if row is None:
+            raise ValueError(f"no tasks row with id {task_id}")
+        row["last_heartbeat_at"] = stamp
+        if state is not None:
+            row["state"] = state
+        if note is not None:
+            row["note"] = note
+        if pid is not None:
+            row["pid"] = pid
+        row.pop("stale", None)
+        data["updated_at"] = stamp
+        _write_locked(data, path)
+        return dict(row)
 
 
 def read_tasks(path: Path) -> TasksFileResult:

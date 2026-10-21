@@ -7,18 +7,23 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import secrets
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, MutableMapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from starlette.applications import Starlette
 from starlette.responses import FileResponse, JSONResponse, Response
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
 
 from omega_prime.dashboard import __version__
 from omega_prime.dashboard.poller import DashboardPoller
 from omega_prime.dashboard.terminal import TerminalService, resolve_task_pane
+from omega_prime.dashboard.terminal_ws import HerdrBridge, make_terminal_ws_endpoint
+
+if TYPE_CHECKING:
+    from omega_prime.dashboard.events import TasksFileWatcher
 
 _SECURITY_HEADERS = {
     "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'",
@@ -147,10 +152,17 @@ class _SSEResponse(Response):
 
 
 class _DashboardGuards:
-    """Enforce GET-only, exact loopback Host and response security headers."""
+    """Enforce GET-only, exact loopback Host and response security headers.
+
+    Websocket scopes are admitted only for /ws/ routes with a loopback Host
+    and an explicit same-server Origin; everything else closes 4403 before any
+    application logic (browsers do not apply CORS to websockets, so Origin is
+    checked here). HTTP behavior is unchanged.
+    """
 
     def __init__(self, app: Any, port: int, host: str) -> None:
         self.app = app
+        self.port = port
         self.allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
         try:
             address = ipaddress.ip_address(host)
@@ -162,8 +174,51 @@ class _DashboardGuards:
             selected_host = f"{host}:{port}".lower()
             if selected_host not in self.allowed_hosts:
                 self.allowed_hosts.add(selected_host)
+        # Origins and websocket CSP sources are derived from every supported
+        # Host (including a bracketed IPv6 loopback such as [::1]), so a page
+        # served on any accepted address can open its own websockets.
+        hosts = sorted(self.allowed_hosts)
+        ws_sources = " ".join(f"ws://{value}" for value in hosts)
+        self.security_headers = dict(_SECURITY_HEADERS)
+        self.security_headers["content-security-policy"] = _SECURITY_HEADERS[
+            "content-security-policy"
+        ].replace(
+            "connect-src 'self'",
+            f"connect-src 'self' {ws_sources}",
+        )
+        self.allowed_origins = {f"http://{value}".lower() for value in hosts}
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "websocket":
+            host_values = [
+                value
+                for key, value in scope.get("headers", [])
+                if key.lower() == b"host"
+            ]
+            host = (
+                host_values[0].decode("latin-1").lower()
+                if len(host_values) == 1
+                else ""
+            )
+            origin_values = [
+                value
+                for key, value in scope.get("headers", [])
+                if key.lower() == b"origin"
+            ]
+            origin = (
+                origin_values[0].decode("latin-1").lower()
+                if len(origin_values) == 1
+                else ""
+            )
+            if (
+                host not in self.allowed_hosts
+                or origin not in self.allowed_origins
+                or not str(scope.get("path", "")).startswith("/ws/")
+            ):
+                await send({"type": "websocket.close", "code": 4403})
+                return
+            await self.app(scope, receive, send)
+            return
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -189,11 +244,11 @@ class _DashboardGuards:
                     response_headers = [
                         (key, value)
                         for key, value in message.get("headers", [])
-                        if key.lower() not in _SECURITY_HEADERS
+                        if key.lower() not in self.security_headers
                     ]
                     response_headers.extend(
                         (key.encode("latin-1"), value.encode("latin-1"))
-                        for key, value in _SECURITY_HEADERS.items()
+                        for key, value in self.security_headers.items()
                     )
                     message["headers"] = response_headers
                 await send(message)
@@ -205,7 +260,7 @@ class _DashboardGuards:
             if message["type"] == "http.response.start":
                 message["headers"].extend(
                     (key.encode("latin-1"), value.encode("latin-1"))
-                    for key, value in _SECURITY_HEADERS.items()
+                    for key, value in self.security_headers.items()
                 )
             await send(message)
 
@@ -231,20 +286,49 @@ def create_app(
     host: str = "127.0.0.1",
     heartbeat_s: float = 15.0,
     terminal_service: TerminalService | None = None,
+    attach_token: str | None = None,
+    terminal_readonly: bool = False,
+    terminal_bridge: HerdrBridge | None = None,
+    terminal_auth_timeout_s: float = 5.0,
+    terminal_input_per_s: int = 32,
+    tasks_path: Path | None = None,
+    tasks_watcher: TasksFileWatcher | None = None,
 ) -> Starlette:
-    """Build the local dashboard application around a shared poller."""
+    """Build the local dashboard application around a shared poller.
+
+    The attach token is minted once per app (or supplied for tests), lives
+    only in this call frame, and is released solely through GET /api/session
+    to same-origin loopback requests; websockets must present it in their
+    first message. The value is never logged, stored, or put in a cookie.
+    """
     static_dir = Path(__file__).resolve().parent / "static"
     legacy_index = static_dir / "index.html"
     cc_dir = static_dir / "cc"
     cc_index = cc_dir / "index.html"
     terminal_backend = terminal_service or TerminalService()
+    token = attach_token if attach_token is not None else secrets.token_urlsafe(32)
+    from omega_prime.dashboard import events
+
+    events_endpoint = events.make_events_ws_endpoint(poller, heartbeat_s=heartbeat_s)
+    watcher = tasks_watcher
+    if watcher is None and tasks_path is not None:
+        watcher = events.TasksFileWatcher(
+            tasks_path, on_change=lambda: poller.nudge("tasks_json")
+        )
 
     @asynccontextmanager
-    async def lifespan(_: Starlette) -> AsyncIterator[None]:
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
         await poller.start()
+        watcher_task: asyncio.Task[None] | None = None
+        if app.state.tasks_watcher is not None:
+            watcher_task = asyncio.create_task(app.state.tasks_watcher.run())
         try:
             yield
         finally:
+            if watcher_task is not None:
+                watcher_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await watcher_task
             await poller.stop()
 
     async def unavailable() -> Response:
@@ -330,6 +414,15 @@ def create_app(
 
     async def health(_: Any) -> Response:
         return JSONResponse({"ok": True, "version": __version__})
+
+    async def session(request: Any) -> Response:
+        sec_fetch_site = request.headers.get("sec-fetch-site")
+        if sec_fetch_site is not None and sec_fetch_site not in ("same-origin", "none"):
+            return Response("forbidden", status_code=403, media_type="text/plain")
+        return JSONResponse(
+            {"token": token, "readonly": terminal_readonly},
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def terminal(request: Any) -> Response:
         task_id = request.path_params["task_id"]
@@ -420,8 +513,22 @@ def create_app(
             Route("/api/tasks/{task_id:path}/terminal", terminal, methods=["GET"]),
             Route("/api/snapshot", snapshot, methods=["GET"]),
             Route("/api/stream", stream, methods=["GET"]),
+            Route("/api/session", session, methods=["GET"]),
+            WebSocketRoute(
+                "/ws/tasks/{task_id:path}/terminal",
+                make_terminal_ws_endpoint(
+                    poller,
+                    terminal_bridge or HerdrBridge(),
+                    token=token,
+                    readonly=terminal_readonly,
+                    auth_timeout_s=terminal_auth_timeout_s,
+                    input_per_s=terminal_input_per_s,
+                ),
+            ),
+            WebSocketRoute("/ws/events", events_endpoint),
             Route("/healthz", health, methods=["GET"]),
         ],
     )
     app.add_middleware(_DashboardGuards, port=port, host=host)
+    app.state.tasks_watcher = watcher
     return app

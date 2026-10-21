@@ -207,7 +207,9 @@ def main(
         argparse.ArgumentParser(prog="assign-ids").parse_args(raw_argv[1:])
         assign_task_ids(path=tasks_path, now=datetime.now(UTC))
         return 0
-    parser = argparse.ArgumentParser(description="Local read-only task dashboard")
+    parser = argparse.ArgumentParser(
+        description="Local loopback task dashboard (see --terminal-readonly)"
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument(
         "--port",
@@ -216,6 +218,11 @@ def main(
     )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--stop", action="store_true")
+    parser.add_argument(
+        "--terminal-readonly",
+        action="store_true",
+        help="force every task terminal websocket read-only",
+    )
     args = parser.parse_args(raw_argv)
     stderr = sys.stderr
     output = stdout if stdout is not None else sys.stdout
@@ -299,7 +306,13 @@ def main(
     poller = factory()
     from omega_prime.dashboard.app import create_app
 
-    app = create_app(poller, port=args.port, host=args.host)
+    app = create_app(
+        poller,
+        port=args.port,
+        host=args.host,
+        terminal_readonly=args.terminal_readonly,
+        tasks_path=tasks_path,
+    )
     pid = os.getpid()
     start = _process_start_time(pid)
     if start is None:

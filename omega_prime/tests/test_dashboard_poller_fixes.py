@@ -7,16 +7,18 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_hex
+from typing import Any
 
 import pytest
 
 from omega_prime.dashboard import poller as poller_module
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.poller import CollectorSpec, DashboardPoller
+from omega_prime.dashboard.stale import StaleChecker
 from omega_prime.dashboard.status_file import read_tasks
 
 
@@ -328,3 +330,41 @@ def test_default_cli_poller_factory_receives_numbering_path(
     capsys.readouterr()
     assert observed["path"] == tmp_path / ".omega-prime" / "dashboard" / "tasks.json"
     assert DashboardPoller([]).task_ids_path is None
+
+
+def test_slow_pane_check_is_shared_and_does_not_hold_collectors() -> None:
+    """Greptile r3: collectors finishing during a slow build share one
+    follow-up build (one pane check) and are free to run again meanwhile."""
+
+    class SlowStale(StaleChecker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def stale_map(
+            self, rows: list[Any], *, now: datetime | None = None
+        ) -> dict[str, dict[str, str | None] | None]:
+            self.calls += 1
+            time.sleep(0.3)
+            return {}
+
+    def collector(n: int) -> Callable[[], SourceResult]:
+        return lambda: SourceResult(f"s{n}", "ok")
+
+    async def run() -> None:
+        stale = SlowStale()
+        specs = [CollectorSpec(f"s{n}", collector(n), 0.0, 5.0) for n in range(12)]
+        poller = DashboardPoller(specs, tick_s=0.01, stale_checker=stale)
+        await poller._run_specs(specs)
+        first = stale.calls
+        assert first >= 1
+        # Twelve collectors finishing while a build is in flight coalesce.
+        build = poller._request_build()
+        await asyncio.gather(*(poller._run_one(spec) for spec in specs))
+        assert not poller._running
+        await build
+        if poller._build_task is not None:
+            await poller._build_task
+        assert stale.calls - first <= 2
+
+    asyncio.run(run())

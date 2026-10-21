@@ -29,7 +29,7 @@ describe('built static Command Center assets', () => {
       expect(resolved.startsWith(`${root}${path.sep}`)).toBe(true)
       await expect(stat(resolved)).resolves.toBeDefined()
     }
-    for (const name of ['Anybody-OFL.txt', 'DM-Sans-OFL.txt', 'Space-Mono-OFL.txt', 'Magic-UI-MIT.txt', 'Aceternity-Attribution.txt']) {
+    for (const name of ['Anybody-OFL.txt', 'DM-Sans-OFL.txt', 'Space-Mono-OFL.txt', 'Magic-UI-MIT.txt', 'Aceternity-Attribution.txt', 'xterm-MIT.txt', 'xterm-addon-fit-MIT.txt']) {
       expect(files.some(file => file.endsWith(path.join('licenses', name)))).toBe(true)
     }
     const distributable = assets.filter(file => /\.(js|css|woff2)$/.test(file))

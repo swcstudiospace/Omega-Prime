@@ -17,6 +17,7 @@ from typing import Any
 
 from omega_prime.dashboard.model import SourceResult, normalize_tasks
 from omega_prime.dashboard.redact import redact_value
+from omega_prime.dashboard.stale import StaleChecker
 
 LOCAL_SOURCES = 3.0
 HERDR_PODMAN = 5.0
@@ -51,8 +52,10 @@ class DashboardPoller:
         tick_s: float = 0.25,
         clock: Callable[[], datetime] | None = None,
         task_ids_path: Path | None = None,
+        stale_checker: StaleChecker | None = None,
     ) -> None:
         self.task_ids_path = task_ids_path
+        self.stale_checker = stale_checker or StaleChecker()
         self.specs = list(specs)
         self.quiet_minutes = quiet_minutes
         self.window_hours = window_hours
@@ -67,6 +70,9 @@ class DashboardPoller:
         self._next_due: dict[str, float] = {}
         self._in_flight: set[asyncio.Task[None]] = set()
         self._running: set[str] = set()
+        self._build_lock = asyncio.Lock()
+        self._build_pending = False
+        self._build_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Start the background polling loop once."""
@@ -105,24 +111,72 @@ class DashboardPoller:
         self._running.add(spec.source)
         try:
             await self._collect(spec)
-            self._maybe_build()
         finally:
             self._running.discard(spec.source)
+        # Collection is done; the source may be rescheduled while the build
+        # (and its possibly slow Herdr pane check) runs.
+        self._request_build()
+
+    def _request_build(self) -> asyncio.Task[None]:
+        """Coalesce build requests into one worker sharing each pane check.
+
+        Any number of collectors finishing during a slow build schedule just
+        one follow-up build over the latest results, not one build each.
+        """
+        self._build_pending = True
+        if self._build_task is None or self._build_task.done():
+            self._build_task = asyncio.create_task(self._drain_builds())
+            self._in_flight.add(self._build_task)
+            self._build_task.add_done_callback(self._in_flight.discard)
+        return self._build_task
+
+    async def _drain_builds(self) -> None:
+        while self._build_pending:
+            self._build_pending = False
+            await self._maybe_build()
 
     async def _run_specs(self, specs: list[CollectorSpec]) -> None:
         await asyncio.gather(*(self._run_one(spec) for spec in specs))
+        if self._build_task is not None:
+            await self._build_task
 
-    def _maybe_build(self) -> None:
+    async def _maybe_build(self) -> None:
         if not all(spec.source in self._results for spec in self.specs):
             return
-        try:
-            self._status.pop("normalization", None)
-            self._build_snapshot()
-        except Exception as exc:
-            self._status["normalization"] = {
-                "status": "error",
-                "error": f"normalize failed: {type(exc).__name__}",
-            }
+        # Builds are serialized so a slow stale probe can never let an older
+        # build overwrite a newer one; the stale evidence (Herdr pane list
+        # subprocess and /proc probes) is gathered in a worker thread so a
+        # slow or hung Herdr never blocks the event loop that serves HTTP,
+        # terminal input and every stream.
+        async with self._build_lock:
+            try:
+                self._status.pop("normalization", None)
+                now = self.clock()
+                # Freeze the results the stale evidence is gathered for: a
+                # collector may replace tasks_json while the probe runs, and
+                # applying old evidence to a newer row would show a false
+                # stale badge. The newer result triggers its own build.
+                results = dict(self._results)
+                rows = self._stale_rows(results)
+                stale_values = await asyncio.to_thread(
+                    self.stale_checker.stale_map, rows, now=now
+                )
+                self._build_snapshot(
+                    now=now, stale_values=stale_values, results=results
+                )
+            except Exception as exc:
+                self._status["normalization"] = {
+                    "status": "error",
+                    "error": f"normalize failed: {type(exc).__name__}",
+                }
+
+    def _stale_rows(
+        self, results: dict[str, SourceResult] | None = None
+    ) -> list[dict[str, Any]]:
+        result = (self._results if results is None else results).get("tasks_json")
+        if result is None:
+            return []
+        return [row for row in result.extra.get("tasks", []) if isinstance(row, dict)]
 
     async def _collect(self, spec: CollectorSpec) -> None:
         started = time.perf_counter()
@@ -174,8 +228,23 @@ class DashboardPoller:
             status[key] = redact_value(extra)
         self._status[spec.source] = status
 
-    def _build_snapshot(self) -> None:
-        now = self.clock()
+    def _build_snapshot(
+        self,
+        *,
+        now: datetime | None = None,
+        stale_values: dict[str, dict[str, str | None] | None] | None = None,
+        results: dict[str, SourceResult] | None = None,
+    ) -> None:
+        """Build and cache the snapshot.
+
+        ``stale_values`` is the pre-collected (off-loop) stale evidence; when
+        omitted (direct synchronous callers such as tests) it is computed
+        inline.
+        """
+        if now is None:
+            now = self.clock()
+        if results is None:
+            results = self._results
         normalized_results = {
             name: SourceResult(
                 result.source,
@@ -185,9 +254,9 @@ class DashboardPoller:
                 dict(result.extra),
                 result.detail,
             )
-            for name, result in self._results.items()
+            for name, result in results.items()
         }
-        for result in self._results.values():
+        for result in results.values():
             for item in result.items:
                 kind = item.get("kind")
                 if isinstance(kind, str):
@@ -202,6 +271,18 @@ class DashboardPoller:
             quiet_minutes=self.quiet_minutes,
             window_hours=self.window_hours,
         )
+        tasks_result = normalized_results.get("tasks_json")
+        if tasks_result is not None:
+            if stale_values is None:
+                rows = [
+                    row
+                    for row in tasks_result.extra.get("tasks", [])
+                    if isinstance(row, dict)
+                ]
+                stale_values = self.stale_checker.stale_map(rows, now=now)
+            for task in snapshot.active:
+                if task.source == "tasks_json" and task.id in stale_values:
+                    task.stale = stale_values[task.id]
         if self.task_ids_path is not None:
             from omega_prime.dashboard.task_ids import number_snapshot
 
@@ -261,3 +342,8 @@ class DashboardPoller:
         now = time.monotonic()
         for spec in self.specs:
             self._next_due[spec.source] = now + max(0.0, spec.interval_s)
+
+    def nudge(self, source: str) -> None:
+        """Make one collector due immediately on the next scheduler tick."""
+        if any(spec.source == source for spec in self.specs):
+            self._next_due[source] = 0.0
