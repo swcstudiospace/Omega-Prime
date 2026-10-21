@@ -780,6 +780,94 @@ def test_a_cross_device_folder_move_removes_only_copied_files(tmp_path, monkeypa
     assert not (state / "skills").exists()
 
 
+def test_a_folder_move_holds_the_skill_writer_lock_for_the_whole_copy(
+    tmp_path, monkeypatch
+):
+    import errno
+    import fcntl
+    import shutil as _shutil
+
+    state = tmp_path / "state"
+    (state / "skills" / "deploy").mkdir(parents=True)
+    (state / "skills" / "deploy" / "SKILL.md").write_text("v1\n", encoding="utf-8")
+    agent = state / "agent"
+    real_rename = os.rename
+    real_copytree = _shutil.copytree
+    seen: list[bool] = []
+
+    def cross_device(src, dst, *args, **kwargs):
+        if Path(src) == state / "skills":
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(src, dst, *args, **kwargs)
+
+    def copy_while_probing_the_lock(src, dst, *args, **kwargs):
+        if Path(src) == state / "skills":
+            # A save (which takes the same <folder>.lock) cannot start now.
+            fd = os.open(state / "skills.lock", os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                seen.append(True)
+            else:
+                seen.append(False)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+        return real_copytree(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rename", cross_device)
+    monkeypatch.setattr(_shutil, "copytree", copy_while_probing_the_lock)
+    report = migrate_agent_state(agent, state_root=state)
+    assert not report.errors
+    assert seen == [True]
+    assert (agent / "skills" / "deploy" / "SKILL.md").is_file()
+    assert not (state / "skills").exists()
+
+
+def test_a_save_that_resolved_the_old_skills_folder_lands_in_the_moved_one(tmp_path):
+    from omega_prime.skills_runtime.manager import skill_manage
+
+    state = tmp_path / "state"
+    old = state / "skills"
+    (old / "deploy").mkdir(parents=True)
+    (old / "deploy" / "SKILL.md").write_text(
+        "---\nname: deploy\ndescription: Deploy it.\n---\nv1\n", encoding="utf-8"
+    )
+    agent = state / "agent"
+    report = migrate_agent_state(agent, state_root=state)
+    assert not report.errors and not old.exists()
+    # A nightly pass still holding the pre-move path saves a new skill.
+    result = json.loads(
+        skill_manage(
+            "create",
+            "fresh",
+            content="---\nname: fresh\ndescription: A new skill.\n---\nbody\n",
+            skills_root=old,
+        )
+    )
+    assert result["success"], result
+    assert (agent / "skills" / "fresh" / "SKILL.md").is_file()
+    assert not old.exists()
+
+
+def test_saves_into_the_shipped_skills_folder_leave_no_lock_file(tmp_path, monkeypatch):
+    from omega_prime.skills_runtime import manager
+
+    shipped = tmp_path / "omega_prime" / "skills"
+    shipped.mkdir(parents=True)
+    monkeypatch.setattr(manager, "_SHIPPED_ROOT", shipped)
+    result = json.loads(
+        manager.skill_manage(
+            "create",
+            "fresh",
+            content="---\nname: fresh\ndescription: A new skill.\n---\nbody\n",
+            skills_root=shipped,
+        )
+    )
+    assert result["success"], result
+    assert not (shipped.parent / "skills.lock").exists()
+
+
 def test_live_host_env_fills_the_default_agent_folder_only_for_a_live_host(tmp_path):
     from omega_prime.agent_state import live_host_env
 

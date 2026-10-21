@@ -304,7 +304,7 @@ def _identity(path: Path) -> tuple[int, int, int, int]:
 
 
 @contextlib.contextmanager
-def _writer_lock(src: Path) -> Iterator[None]:
+def _writer_lock(src: Path, *, create: bool = False) -> Iterator[None]:
     """Hold the store's own ``<name>.lock`` flock while ``src`` moves.
 
     ``IntakeStore`` (and the other JSON stores) take an exclusive ``flock``
@@ -312,7 +312,9 @@ def _writer_lock(src: Path) -> Iterator[None]:
     the old file waits until the move is complete instead of replacing the
     source between the publish and the unlink. A store without a lock file
     is moved unlocked; the identity check in :func:`_publish_file` still
-    refuses to delete a source that changed.
+    refuses to delete a source that changed. With ``create`` the sidecar is
+    created when missing (a folder move: the skill manager takes the same
+    ``<folder>.lock`` for every save, so no save lands mid-move).
     """
     lock = src.with_name(src.name + ".lock")
     try:
@@ -321,7 +323,10 @@ def _writer_lock(src: Path) -> Iterator[None]:
         yield
         return
     try:
-        fd = os.open(lock, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        if create:
+            flags |= os.O_CREAT
+        fd = os.open(lock, flags, 0o600)
     except OSError:
         yield
         return
@@ -397,10 +402,40 @@ def _publish_file_locked(src: Path, dst: Path) -> bool:
     return True
 
 
+#: Left beside a moved folder: names where it went, for a writer that
+#: resolved the old path before the move (see ``skills_runtime.manager``).
+MOVED_SUFFIX = ".moved"
+
+
 def _publish_dir(src: Path, dst: Path) -> bool:
     """Move a directory to a missing ``dst``. False when ``dst`` holds data.
 
-    ``rename`` never replaces a non-empty directory or a file. Across
+    The whole move runs under the folder's ``<name>.lock`` writer lock, the
+    lock the skill manager holds for every save, so a nightly pass that
+    still has the old path waits for the move, then follows the
+    ``<name>.moved`` pointer left here to the new folder instead of writing
+    into (or losing a save to) the old one.
+    """
+    with _writer_lock(src, create=_parent_writable(src)):
+        moved = _publish_dir_locked(src, dst)
+        if moved:
+            with contextlib.suppress(OSError):
+                pointer = src.with_name(src.name + MOVED_SUFFIX)
+                fd = os.open(
+                    pointer,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_TRUNC
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(str(dst))
+        return moved
+
+
+def _publish_dir_locked(src: Path, dst: Path) -> bool:
+    """``rename`` never replaces a non-empty directory or a file. Across
     filesystems the tree is copied to a scratch name first and renamed into
     place only once complete; a failed copy is removed and the source stays.
     """
