@@ -15,6 +15,7 @@ const utilMod = await import("../src/core/providers/util.ts");
 const { redactSecrets } = utilMod;
 const podmanMod = await import("../src/core/providers/openshell-podman.ts");
 const { Core } = await import("../src/core/core.ts");
+const { AuthBroker } = await import("../src/core/auth.ts");
 
 const fakeProc = (env: Record<string, string> = {}) => spawn(process.execPath, [FAKE], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
 
@@ -126,4 +127,46 @@ test("redactSecrets hides credential-shaped text", () => {
   const s = redactSecrets(`err: api_key=${kv} token: ${key} Bearer ${bearer} ${jwt} ok`);
   for (const leak of [kv, key.slice(0, 12), bearer, jwt.slice(0, 12)]) assert.equal(s.includes(leak), false, leak);
   assert.match(s, /ok$/);
+});
+
+test("down() refuses new stages and startups for its whole duration", async () => {
+  const core: any = new Core();
+  let release: () => void = () => {};
+  const slow = new Promise<void>((r) => { release = r; });
+  const tier: any = { name: "fake", id: "fake", isolation: "none (test)", owned: () => ({}), spawnStdio: () => fakeProc(), dispose: async () => { await slow; return { leftovers: [] }; } };
+  core.attachTierForTests(tier);
+  const downing = core.down();
+  await new Promise((r) => setTimeout(r, 20));   // down() is now waiting on tier cleanup
+  assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" }), /shutting down/);
+  await assert.rejects(core.up(), /shutting down/);
+  assert.equal(core.down(), downing, "a second down() joins the same shutdown");
+  release();
+  const out = await downing;
+  assert.deepEqual(out.leftovers, []);
+  assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" }), /not up/);
+});
+
+test("AuthBroker.stop() returns at once for a broker already killed by a signal", async () => {
+  const b: any = new AuthBroker();
+  const p = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  await new Promise((r) => p.once("spawn", r));
+  p.kill("SIGKILL");
+  await new Promise((r) => p.once("exit", r));
+  assert.equal(p.exitCode, null); assert.equal(p.signalCode, "SIGKILL");
+  b.proc = p;
+  let t: NodeJS.Timeout | undefined;
+  const hung = new Promise((_, rej) => { t = setTimeout(() => rej(new Error("stop() hung")), 2000); });
+  await Promise.race([b.stop(), hung]).finally(() => clearTimeout(t));
+  assert.equal(b.proc, null);
+});
+
+test("a sandbox-agent binary that cannot launch rejects startup instead of crashing Node", async () => {
+  const { launched } = utilMod;
+  const p = spawn(join(STATE, "no-such-sandbox-agent"), [], { stdio: "ignore" });
+  const never = new Promise<void>(() => {});
+  await assert.rejects(launched(p, "sandbox-agent", never), /sandbox-agent could not start: .*ENOENT/);
+  const q = spawn(process.execPath, ["-e", "process.exit(4)"], { stdio: "ignore" });
+  await assert.rejects(launched(q, "sandbox-agent", never), /exited during startup \(4\)/);
+  const ok = spawn(process.execPath, ["-e", "setTimeout(() => {}, 200)"], { stdio: "ignore" });
+  assert.equal(await launched(ok, "x", Promise.resolve(7)), 7);
 });

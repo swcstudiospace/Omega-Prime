@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { STATE, NODE24_BIN, BUN_EXE, BUN_INSTALL, SANDBOX_AGENT_BIN } from "../config.ts";
 import { freePort } from "../auth.ts";
-import { execCapture, killTree, ownsGroup, rid, waitHttp } from "./util.ts";
+import { execCapture, killTree, launched, ownsGroup, rid, waitHttp } from "./util.ts";
 import type { SandboxTier } from "./types.ts";
 
 export class LocalTier implements SandboxTier {
@@ -38,9 +38,9 @@ export class LocalTier implements SandboxTier {
     for (const [t, n] of [[BUN_EXE, "bun"], [join(BUN_INSTALL, "bin", "omp"), "omp"]]) { const p = join(this.hostRoot, "bin", n); if (!existsSync(p)) symlinkSync(t, p); }
     const port = await freePort(); this.#url = `http://127.0.0.1:${port}`;
     this.#agent = spawn(SANDBOX_AGENT_BIN, ["server", "--host", "127.0.0.1", "--port", String(port), "--token", this.#token, "--no-telemetry"], { cwd: this.hostRoot, env: this.#fullEnv(), stdio: ["pipe", "pipe", "pipe"], detached: true });
-    this.#groups.add(this.#agent.pid!);
+    if (this.#agent.pid) this.#groups.add(this.#agent.pid);
     this.#agent.stdout.resume(); this.#agent.stderr.resume();
-    await waitHttp(`${this.#url}/v1/health`, this.#token, 30_000);
+    await launched(this.#agent, "sandbox-agent", waitHttp(`${this.#url}/v1/health`, this.#token, 30_000));
   }
   sandboxAgent() { return { baseUrl: this.#url, token: this.#token }; }
   spawnStdio(argv: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {

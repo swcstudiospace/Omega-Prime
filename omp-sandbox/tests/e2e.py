@@ -168,6 +168,21 @@ sid, done, st = run_stage("execute", "gsd-fast", ABORT_TASK, None, abort_after=2
 R["abort"] = {"stageId": sid, "done": done, "status": st}
 check("abort mid-run -> status aborted", st["status"] == "aborted", {"status": st["status"], "abortCall": R.get("abort_call")})
 
+def procs_naming(ids):
+    """Pids (never argv) of live processes whose command line contains one of the non-empty literal `ids`.
+    No ids means nothing to match: an empty pattern must not match every process on the host."""
+    ids = [i for i in ids if i]
+    if not ids: return []
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == os.getpid(): continue
+        try: cmd = open(f"/proc/{d}/cmdline", "rb").read().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError: continue
+        if any(i in cmd for i in ids): out.append(d)
+    return out
+
+assert procs_naming([None, ""]) == [], "empty identifiers match nothing"
+
 down = call("down", {}, 300)
 R["down"] = down
 check("down: no leftovers", down.get("ok") and down["result"].get("leftovers") == [], down.get("result"))
@@ -179,8 +194,7 @@ check("wrapper exited", p.poll() is not None, p.returncode)
 ob = (down.get("result") or {}).get("ownedBefore") or {}
 ownpids = [x for x in [ob.get("gatewayPid"), ob.get("podmanServicePid"), ob.get("relayPid"), ob.get("forwardPid"), *(ob.get("children") or []), ready.get("core_pid"), ready.get("wrapper_pid"), ready.get("server_pid")] if x]
 alive = [str(x) for x in ownpids if os.path.exists(f"/proc/{x}")]
-pat = (osbox or "") + "|" + (hostroot or "__none__")
-named = subprocess.run(["sh", "-c", f"ps -eo pid,args | grep -E '{pat}' | grep -v grep | awk '{{print $1}}' || true"], capture_output=True, text=True).stdout.split()
+named = procs_naming([x for x in (osbox, hostroot) if x])
 ps = " ".join(alive + [f"pid {x} (names this sandbox)" for x in named])  # pids only, never argv (it can carry tokens)
 check("no sandbox/omp/broker processes left", ps == "", {"checkedPids": ownpids, "alive": ps})
 check("workspace dir removed", not hostroot or not os.path.exists(hostroot), hostroot)
