@@ -26,6 +26,8 @@ def test_default_scope_projects_org_pr_branch_checks_and_actual_merges():
                 {"id": 2, "full_name": "swcstudiospace/Omega-Prime", "name": "Omega-Prime", "html_url": "https://github.com/swcstudiospace/Omega-Prime", "visibility": "private", "default_branch": "trunk", "pushed_at": None, "language": "Python", "open_issues_count": 3},
                 {"id": 3, "full_name": "swcstudiospace/other", "name": "other", "default_branch": "main"},
             ]).encode()
+        if "/commits/" in path and path.endswith("/pulls"):
+            return 200, b"[]"
         if path.endswith("/pulls"):
             repo = path.split("/")[2]
             if query.get("state") == ["closed"]:
@@ -70,6 +72,8 @@ def test_default_scope_projects_org_pr_branch_checks_and_actual_merges():
 
 def test_comment_score_has_unknown_reviewed_sha_and_old_head_review_is_not_current():
     def transport(url, headers):
+        if "/commits/" in url and "/pulls?" in url:
+            return 200, b"[]"
         if "/pulls?" in url:
             return 200, b'[{"id":1,"number":4,"head":{"sha":"new","ref":"x"},"body":""}]'
         if "/check-runs" in url:

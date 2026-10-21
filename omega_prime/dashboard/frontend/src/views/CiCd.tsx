@@ -56,9 +56,16 @@ function cardKey(row: CiRow): string {
   return `${row.kind}:${row.id}`
 }
 
-function CiCard({ row, tasks }: { row: CiRow; tasks: Array<NonNullable<Snapshot['active']>[number] | NonNullable<Snapshot['finished']>[number]> }) {
+function CiCard({ row, tasks }: { row: CiRow; tasks: Array<NonNullable<Snapshot['active']>[number] | NonNullable<Snapshot['idle_sessions']>[number] | NonNullable<Snapshot['finished']>[number]> }) {
   const correlation = correlateWiring(row, tasks)
   const review = row.greptile_review
+  const mergedPrNumber = review && 'pr_number' in review && typeof review.pr_number === 'number' ? review.pr_number : null
+  const evidenceSource = review && 'evidence_source' in review && typeof review.evidence_source === 'string' ? review.evidence_source : review?.source ?? 'Review source unavailable'
+  const reviewLabel = review?.source === 'not_applicable' ? 'No PR review for this commit'
+    : review?.source === 'unavailable' || !review ? 'Greptile review unavailable'
+      : review.source === 'merged_pr' && mergedPrNumber !== null && review.score != null ? `Greptile ${review.score}/5 · from #${mergedPrNumber}`
+        : review.score != null && !review.reviewed_sha ? `Greptile ${review.score}/5 · reviewed SHA not reported`
+          : `${review.score != null ? `Score ${review.score}` : 'Score unavailable'} · ${evidenceSource} · reviewed SHA ${review.reviewed_sha?.slice(0, 12) ?? 'not reported'} · ${review.matches_head == null ? 'head match unavailable' : review.matches_head ? 'matches current head' : 'does not match current head'}`
   const sourceHref = safeHref(row.url)
   return <article className="panel ci-card">
     <div className="section-heading"><div><p className="eyebrow">{row.kind.replaceAll('_', ' ')} · {row.repo ?? 'Repository unavailable'}</p><h2>{row.number ? `#${row.number} · ` : ''}{row.title ?? row.branch ?? 'CI record'}</h2></div>{sourceHref && <a href={sourceHref} target="_blank" rel="noreferrer">Open source ↗</a>}</div>

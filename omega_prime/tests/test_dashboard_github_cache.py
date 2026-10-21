@@ -16,6 +16,8 @@ def test_ttl_403_and_missing_token_preserve_original_successful_section_data():
             return 403, b"sensitive bearer detail must not escape"
         if "/orgs/" in url:
             return 200, json.dumps([{"id": 1, "full_name": "swcstudiospace/other", "name": "other", "default_branch": "main"}]).encode()
+        if "/commits/" in url and "/pulls?" in url:
+            return 200, b"[]"
         if "/pulls?" in url:
             return 200, b"[]"
         if "/check-runs" in url:
@@ -67,6 +69,8 @@ def test_failed_org_inventory_does_not_discard_healthy_target_pull_data():
     def transport(url, headers):
         if "/orgs/" in url:
             return 500, b"private"
+        if "/commits/" in url and "/pulls?" in url:
+            return 200, b"[]"
         if "/pulls?" in url:
             return 200, b'[{"id":3,"number":2,"title":"visible","head":{"sha":"head"},"body":"<!-- greptile_confidence_score: 0 -->"}]'
         if "/check-runs" in url:
@@ -88,6 +92,8 @@ def test_one_target_failure_retains_only_that_repository_while_other_refreshes()
                 {"id": 1, "full_name": "swcstudiospace/Omega-Prime", "name": "Omega-Prime", "default_branch": "main"},
                 {"id": 2, "full_name": "swcstudiospace/coding-fleet", "name": "coding-fleet", "default_branch": "main"},
             ]).encode()
+        if "/commits/" in url and "/pulls?" in url:
+            return 200, b"[]"
         if "/pulls?" in url:
             if "/coding-fleet/pulls?" in url and mode[0] == "fail":
                 return 403, b"private"
@@ -113,6 +119,8 @@ def test_greptile_request_failure_is_partial_not_missing_review_evidence():
     now = [datetime(2026, 10, 20, tzinfo=UTC)]
     mode = ["ok"]
     def transport(url, headers):
+        if "/commits/" in url and "/pulls?" in url:
+            return 200, b"[]"
         if "/pulls?" in url:
             return 200, b'[{\"id\":5,\"number\":5,\"title\":\"pr\",\"head\":{\"sha\":\"head\"},\"body\":\"\"}]'
         if "/check-runs" in url:

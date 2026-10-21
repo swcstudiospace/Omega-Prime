@@ -22,8 +22,8 @@ from urllib.parse import urlencode
 from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.dashboard.github_data import (
     CLOSED_PAGE_SIZE, MAX_CLOSED_PAGES, MAX_ERRORS, MAX_MERGES, MAX_PAGES,
-    MAX_REPOSITORIES, MAX_ROWS, PAGE_SIZE, check_rows, ci_state, merge_row,
-    repository_row,
+    MAX_REPOSITORIES, MAX_ROWS, PAGE_SIZE, ASSOCIATION_PAGES, ASSOCIATION_PAGE_SIZE,
+    check_rows, ci_state, merge_row, repository_row,
 )
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.redact import redact_value
@@ -182,6 +182,51 @@ def make_github_collector(
                     failed_ci_repos.add(owner)
                     partial["ci_cd"], reason["ci_cd"] = True, "partial"
             return check_rows({"check_runs": runs}, sha)
+
+        def associated_merged_pr(base: str, full_name: str, branch: str, sha: str) -> dict[str, Any] | None:
+            associated: list[Any] = []
+            for page in range(1, ASSOCIATION_PAGES + 1):
+                data = get(base + "/commits/" + quote(sha, safe="") + "/pulls?" + urlencode({"per_page": ASSOCIATION_PAGE_SIZE, "page": page}))
+                if not isinstance(data, list) or len(data) > ASSOCIATION_PAGE_SIZE:
+                    raise ValueError("payload")
+                if any(not isinstance(item, dict) for item in data):
+                    raise ValueError("payload")
+                associated.extend(data)
+                if len(data) < ASSOCIATION_PAGE_SIZE:
+                    break
+                if page == ASSOCIATION_PAGES:
+                    raise RuntimeError("budget")
+            if not associated:
+                return None
+            matches: list[dict[str, Any]] = []
+            for pr in associated:
+                number = pr.get("number")
+                merge_sha = pr.get("merge_commit_sha")
+                merged_at = pr.get("merged_at")
+                base_data = pr.get("base")
+                base_repo = base_data.get("repo") if isinstance(base_data, dict) else None
+                base_name = base_repo.get("full_name") if isinstance(base_repo, dict) else None
+                base_ref = base_data.get("ref") if isinstance(base_data, dict) else None
+                head = pr.get("head")
+                head_sha = head.get("sha") if isinstance(head, dict) else None
+                if not (isinstance(number, int) and not isinstance(number, bool) and 0 < number < 2**31):
+                    raise ValueError("payload")
+                if not isinstance(merge_sha, str) or not _SAFE_REF.fullmatch(merge_sha):
+                    raise ValueError("payload")
+                if not isinstance(base_name, str) or not _SAFE_REPO.fullmatch(base_name):
+                    raise ValueError("payload")
+                if not isinstance(base_ref, str) or not _SAFE_REF.fullmatch(base_ref):
+                    raise ValueError("payload")
+                if not isinstance(head_sha, str) or not _SAFE_REF.fullmatch(head_sha):
+                    raise ValueError("payload")
+                if merged_at is not None and not isinstance(merged_at, str):
+                    raise ValueError("payload")
+                if merged_at and merge_sha == sha and base_name == full_name and base_ref == branch:
+                    matches.append(pr)
+            if len(matches) != 1:
+                raise ValueError("association")
+            return matches[0]
+
         def mark_ci_truncated(owner: str) -> None:
             truncated["ci_cd"] = True
             failed_ci_repos.add(owner)
@@ -265,16 +310,40 @@ def make_github_collector(
                 failed_ci_repos.add(full_name)
             complete_count = len(open_prs) if open_complete else None
             repo_data = repository_by_name.get(full_name, {"full_name": full_name, "name": full_name.rsplit("/", 1)[-1]})
-            latest: dict[str, Any] | None = None
-            branch = repo_data.get("default_branch")
-            if branch:
+            if isinstance(branch, str) and _SAFE_REF.fullmatch(branch):
                 try:
-                    ref = get(base + "/commits/" + quote(str(branch), safe=""))
+                    ref = get(base + "/commits/" + quote(branch, safe=""))
                     sha = ref.get("sha") if isinstance(ref, dict) else None
                     if isinstance(sha, str) and _SAFE_REF.fullmatch(sha):
                         checks = get_checks(base, sha, full_name)
-                        latest = {"branch": branch, "head_sha": sha, "ci": ci_state(checks), "checks": checks}
-                        rows.append({"id": f"{full_name}:{branch}:{sha}", "kind": "branch", "repo": full_name, "number": None, "title": None, "url": None, "branch": branch, "base_branch": None, "head_sha": sha, "draft": None, "mergeable": None, "ci": latest["ci"], "checks": checks, "greptile_review": None})
+                        review = {"score": None, "reviewed_sha": None, "source": "unavailable", "evidence_source": "unavailable", "pr_number": None, "submitted_at": None, "url": None, "matches_head": None}
+                        try:
+                            merged_pr = associated_merged_pr(base, full_name, branch, sha)
+                            if merged_pr is None:
+                                review["source"] = "not_applicable"
+                                review["evidence_source"] = "not_applicable"
+                            else:
+                                number = merged_pr["number"]
+                                head = merged_pr["head"]
+                                reviewed_sha = head["sha"]
+                                extraction_failed = [False]
+                                def review_truncated() -> None:
+                                    extraction_failed[0] = True
+                                def review_failed(exc: Exception) -> None:
+                                    extraction_failed[0] = True
+                                evidence = _greptile(merged_pr, full_name, number, reviewed_sha, base, get, review_truncated, review_failed)
+                                if evidence is not None and not extraction_failed[0]:
+                                    review = {
+                                        "score": evidence["score"], "reviewed_sha": evidence["reviewed_sha"],
+                                        "source": "merged_pr", "evidence_source": evidence["source"],
+                                        "pr_number": number, "submitted_at": evidence["submitted_at"],
+                                        "url": _safe_url(merged_pr.get("html_url")) or evidence["url"],
+                                        "matches_head": evidence["matches_head"],
+                                    }
+                        except Exception:
+                            pass
+                        latest = {"branch": branch, "head_sha": sha, "ci": ci_state(checks), "checks": checks, "greptile_review": review}
+                        rows.append({"id": f"{full_name}:{branch}:{sha}", "kind": "branch", "repo": full_name, "number": None, "title": None, "url": None, "branch": branch, "base_branch": None, "head_sha": sha, "draft": None, "mergeable": None, "ci": latest["ci"], "checks": checks, "greptile_review": review})
                 except Exception as exc:
                     fail("ci_cd", exc)
                     failed_ci_repos.add(full_name)
@@ -295,6 +364,8 @@ def make_github_collector(
                 body = pr.get("body")
                 has_body_score = isinstance(body, str) and _BODY_SCORE.search(body) is not None
                 review = _greptile(pr, full_name, number, sha, base, get, lambda: mark_ci_truncated(full_name), lambda exc: mark_ci_failure(full_name, exc)) if has_body_score or (number_ok and _SAFE_REF.fullmatch(sha)) else None
+                if review is not None:
+                    review = {**review, "pr_number": number if number_ok else None, "evidence_source": review["source"]}
                 rich = {"id": pr.get("id", f"{full_name}:{number}"), "kind": "pull_request", "repo": full_name, "number": number, "title": _safe_text(pr.get("title"), 300), "url": _safe_url(pr.get("html_url")), "branch": _safe_text(head.get("ref"), 200), "base_branch": _safe_text((pr.get("base") or {}).get("ref") if isinstance(pr.get("base"), dict) else None, 200), "head_sha": sha or None, "draft": bool(pr.get("draft")), "mergeable": pr.get("mergeable") if isinstance(pr.get("mergeable"), bool) else None, "ci": state, "checks": checks, "greptile_review": review}
                 legacy = {"kind": "github_pr", "repo": full_name, "number": number, "title": _safe_text(pr.get("title"), 300), "branch": _safe_text(head.get("ref"), 200), "draft": bool(pr.get("draft")), "mergeable": pr.get("mergeable"), "ci": state, "greptile": f"{review['score']}/5" if review and review["score"] is not None else "not reviewed", "updated_at": pr.get("updated_at"), "url": _safe_url(pr.get("html_url"))}
                 return rich, legacy
