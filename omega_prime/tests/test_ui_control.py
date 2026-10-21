@@ -454,3 +454,38 @@ def test_cli_confirm_false_queues_false_without_rewriting_identity(
         queued = store.next_command()
     assert queued is not None
     assert queued["answer"]["confirmed"] is False
+
+
+def test_accepted_abort_is_served_first_and_survives_answered_question(
+    tmp_path: Path,
+) -> None:
+    session = {
+        "job_id": IDENTITY["job_id"],
+        "session_generation": IDENTITY["session_generation"],
+    }
+    with _store(tmp_path) as store:
+        store.register_request(IDENTITY, {"method": "confirm", "message": "Continue?"})
+        store.answer(IDENTITY, "confirm", True)
+        store.abort(IDENTITY["job_id"], IDENTITY["session_generation"])
+        for _ in range(3):
+            first = store.next_command(**session)
+            assert first is not None and first["action"] == "abort"
+        # The driver answers the last pending question; the abort stays valid.
+        store.resolve_request(IDENTITY, "answered")
+        queued = store.next_command(**session)
+        assert queued is not None
+        assert queued["action"] == "abort"
+        assert queued["identity"] == session
+
+
+def test_abort_for_an_unobserved_session_is_not_served(tmp_path: Path) -> None:
+    with _store(tmp_path) as store:
+        store._enqueue(
+            {
+                "action": "abort",
+                "identity": {"job_id": "job-7", "session_generation": "never-seen"},
+            }
+        )
+        assert (
+            store.next_command(job_id="job-7", session_generation="never-seen") is None
+        )

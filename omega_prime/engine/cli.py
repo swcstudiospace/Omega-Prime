@@ -14,6 +14,7 @@ from typing import Any
 from omega_prime.engine.jobs import (
     JobPathError,
     job_dir,
+    mcp_state_dir,
     omp_home_override,
     state_dir,
 )
@@ -38,7 +39,7 @@ def _control_store(
     # Match the engine's writable bind set conservatively. The per-job directory
     # and current working directory cover the default engine invocation;
     # additional work roots must be supplied with --writable-bind.
-    binds: list[Path | str] = [Path.cwd()]
+    binds: list[Path | str] = [Path.cwd(), mcp_state_dir(env)]
     if job is not None:
         binds.append(state / "jobs" / job)
     work = env.get("OMEGA_PRIME_WORK_ROOT", "").strip()

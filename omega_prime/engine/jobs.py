@@ -41,6 +41,19 @@ def state_dir(env: Mapping[str, str]) -> Path:
     return Path.home() / ".omega-prime"
 
 
+MCP_STATE_DIR = "mcp-state"
+
+
+def mcp_state_dir(env: Mapping[str, str]) -> Path:
+    """Writable state root for the sandboxed Omega MCP child.
+
+    It is a sibling of ``ui-control`` and ``mcp-attachments`` so the child can
+    create its memory, session and desk stores without a writable bind over
+    the operator control queue or the attachment journal.
+    """
+    return state_dir(env) / MCP_STATE_DIR
+
+
 def check_job_id(job_id: str) -> str:
     if not isinstance(job_id, str) or _JOB_RE.fullmatch(job_id) is None:
         raise JobPathError("job id must be a short token")

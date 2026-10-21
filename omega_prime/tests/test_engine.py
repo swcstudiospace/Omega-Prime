@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import queue
 import stat
@@ -2326,3 +2327,174 @@ def test_cli_ui_status_renders_attachment_and_cleanup_details(
         == 'mcp_attachment status=attached cleanup_conflicts=["cleanup failed: PermissionError"]'
         for event in payload["events"]
     )
+
+
+def test_rpc_ui_cancel_after_queued_agent_end_returns_the_finished_turn(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.engine.omp_driver import _accept_prompt_ui
+
+    class RaceSession:
+        def __init__(self) -> None:
+            self.agent_ended = False
+            self.events_path = tmp_path / "ui-race.jsonl"
+            self.events: list[dict] = []
+            self._queue: queue.Queue[str] = queue.Queue()
+            self._queue.put(json.dumps({"type": "agent_end"}))
+            self.sent: list[str] = []
+
+        def _next(self, timeout: float):
+            return None
+
+        def send(self, kind: str, **_: Any) -> str:
+            self.sent.append(kind)
+            return "id"
+
+        def _raise_stream_failure(self):
+            raise AssertionError("completion is already queued")
+
+    flag = InterruptFlag()
+    flag.set("stop")
+    session = RaceSession()
+    commands: list[str] = []
+    summary = {
+        "status": "attached",
+        "pending": 0,
+        "answered": 0,
+        "rejected_stale": 0,
+        "aborted": 0,
+    }
+    with _ui_store(tmp_path) as store:
+        _accept_prompt_ui(
+            cast(OmpSession, session),
+            "prompt-id",
+            math.inf,
+            job_id="job-ui-race",
+            session_generation="s" * 32,
+            turn_generation="t" * 32,
+            ui_control=store,
+            clarify_broker=None,
+            cancel_event=flag,
+            events_path=session.events_path,
+            commands=commands,
+            ui_summary=summary,
+        )
+    assert session.agent_ended
+    assert "abort" not in session.sent and "abort" not in commands
+    assert summary["aborted"] == 0
+
+
+def test_ui_pending_event_keeps_each_ask_question_and_its_options() -> None:
+    from omega_prime.engine.omp_driver import _ui_event_summary
+    from omega_prime.engine.protocol import AskOption, AskQuestion, AskRequest
+
+    summary = _ui_event_summary(
+        AskRequest(
+            id="ask-1",
+            questions=(
+                AskQuestion(
+                    "q-a", "Which branch?", (AskOption("main"), AskOption("dev"))
+                ),
+                AskQuestion("q-b", "Ship it?", (AskOption("yes"), AskOption("no"))),
+            ),
+        )
+    )
+    assert summary["method"] == "ask"
+    assert summary["questions"] == [
+        {"id": "q-a", "question": "Which branch?", "options": ["main", "dev"]},
+        {"id": "q-b", "question": "Ship it?", "options": ["yes", "no"]},
+    ]
+    from omega_prime.engine.watch import format_event
+
+    rendered = format_event({"type": "ui_pending", "request": summary})
+    assert "Ship it?" in rendered and '"yes"' in rendered
+
+
+def test_mcp_child_gets_a_writable_state_root_outside_ui_control(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    attachment = mcp_bridge.try_acquire_attachment(work, state, "job-mcp-state")
+    try:
+        config = json.loads((work / ".omp" / "mcp.json").read_text(encoding="utf-8"))
+    finally:
+        attachment.release()
+    entry = config["mcpServers"]["omega-prime"]
+    assert entry["env"]["OMEGA_PRIME_STATE_DIR"] == str(state / "mcp-state")
+
+    binary = _install_fake(tmp_path)
+    bwrap = tmp_path / "bin" / "bwrap"
+    bwrap.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$@" > "$OMEGA_FAKE_OMP_BWRAP_LOG"\n'
+        'while [ "$1" != "--" ]; do shift; done\n'
+        "shift\n"
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    bwrap.chmod(bwrap.stat().st_mode | stat.S_IEXEC)
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_PRIME_ENGINE_UNSANDBOXED="0",
+        OMEGA_FAKE_OMP_BWRAP_LOG=str(tmp_path / "bwrap.txt"),
+        OMEGA_PRIME_OMP_ALLOW_CHATGPT="1",
+    )
+    result = run("PONG", cwd=work, env=env, job_id="job-mcp-bind", stage="plan")
+    assert result.ok is True
+    args = (tmp_path / "bwrap.txt").read_text(encoding="utf-8").splitlines()
+    binds = [args[i + 1] for i, item in enumerate(args) if item == "--bind"]
+    assert str(state / "mcp-state") in binds
+    assert str(state) not in binds
+    assert not any(
+        str(state / "ui-control") == bind
+        or str(state / "ui-control").startswith(bind.rstrip("/") + "/")
+        for bind in binds
+    )
+    # The operator control store still accepts this bind set.
+    UIControlStore(state, writable_binds=[Path(bind) for bind in binds]).close()
+
+
+def test_recovery_conflicts_reach_the_run_result_and_session_record(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    attachment = mcp_bridge.try_acquire_attachment(work, state, "job-old-run")
+    config = work / ".omp" / "mcp.json"
+    config.write_bytes(config.read_bytes() + b" ")
+    boot_id = (
+        Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    )
+    attachment._owner_identity = {
+        "pid": 999999999,
+        "start_time": "1",
+        "boot_id": boot_id,
+    }
+    attachment._write_journal(None)
+    os.close(attachment._omp_fd)
+    os.close(attachment._parent_fd)
+
+    binary = _install_fake(tmp_path)
+    env = _env(tmp_path, binary)
+    result = run("PONG", cwd=work, env=env, job_id="job-new-run")
+
+    assert result.ok is True
+    assert any("mcp.json" in item for item in result.cleanup_conflicts)
+    session = json.loads(
+        (state / "jobs" / "job-new-run" / "session.json").read_text(encoding="utf-8")
+    )
+    assert session["cleanup_conflicts"] == result.cleanup_conflicts
+    events = _events(state / "jobs" / "job-new-run" / "events.jsonl")
+    assert any(
+        event.get("type") == "mcp_attachment" and event.get("cleanup_conflicts")
+        for event in events
+    )
+    assert config.read_bytes().endswith(b" ")

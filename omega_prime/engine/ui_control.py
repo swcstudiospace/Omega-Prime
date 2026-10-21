@@ -550,10 +550,18 @@ class UIControlStore:
             self._discard_terminal_stale_answers(
                 queue_fd, job_id=job_id, session_generation=session_generation
             )
-            for name in sorted(
+            names = sorted(
                 item for item in os.listdir(queue_fd) if item.endswith(".json")
-            ):
-                command = self._read_record(queue_fd, name)
+            )
+            records = [(name, self._read_record(queue_fd, name)) for name in names]
+            # Queue names are random, so order would otherwise be arbitrary:
+            # an accepted abort is always handed out before any answer.
+            records.sort(
+                key=lambda item: (
+                    not (isinstance(item[1], dict) and item[1].get("action") == "abort")
+                )
+            )
+            for name, command in records:
                 if not isinstance(command, dict):
                     continue
                 action, identity = command.get("action"), command.get("identity")
@@ -619,10 +627,12 @@ class UIControlStore:
                         session = _session_key(
                             identity["job_id"], identity["session_generation"]
                         )
-                        if not any(
-                            item["identity"].get("session_generation")
-                            == session["session_generation"]
-                            for item in self.list_pending(job=session["job_id"])
+                        # abort() already required a pending request when it
+                        # accepted the command. Answering that request later
+                        # must not void the abort, so only require that the
+                        # session was observed (a request record in any state).
+                        if not self._session_observed(
+                            session["job_id"], session["session_generation"]
                         ):
                             continue
                     else:
@@ -633,6 +643,24 @@ class UIControlStore:
             return None
         finally:
             os.close(queue_fd)
+
+    def _session_observed(self, job: str, session: str) -> bool:
+        directory_fd = self._request_dir()
+        try:
+            for name in os.listdir(directory_fd):
+                if not name.endswith(".json"):
+                    continue
+                record = self._read_record(directory_fd, name)
+                identity = record.get("identity") if isinstance(record, dict) else None
+                if (
+                    isinstance(identity, dict)
+                    and identity.get("job_id") == job
+                    and identity.get("session_generation") == session
+                ):
+                    return True
+            return False
+        finally:
+            os.close(directory_fd)
 
     def acknowledge_command(
         self,

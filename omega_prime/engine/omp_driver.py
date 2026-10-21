@@ -36,6 +36,7 @@ from omega_prime.engine.jobs import (
     child_env,
     job_dir,
     maybe_tmux,
+    mcp_state_dir,
     omp_home_override,
     state_dir,
     write_json,
@@ -538,6 +539,13 @@ def _run(
     ]
     argv.extend(["--skills", "*"])
     binds = [directory, work] if work != directory else [directory]
+    # The Omega MCP child writes memory, sessions and desk stores. It gets its
+    # own writable state root; the parent state dir (which holds ui-control and
+    # the attachment journal) stays read-only inside the sandbox.
+    mcp_state = mcp_state_dir(env)
+    mcp_state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if mcp_state not in binds:
+        binds.append(mcp_state)
     store = omp_home(env)
     if store.is_dir() and store not in binds:
         # Writable so omp can save a refreshed login in place.
@@ -564,8 +572,20 @@ def _run(
         if clarify_socket_dir is not None
         else None
     )
+    recovery_conflicts: list[str] = []
     try:
-        recover_attachments(state_dir(env), work)
+        recovery_conflicts = list(recover_attachments(state_dir(env), work) or [])
+        if recovery_conflicts:
+            run_metadata["cleanup_conflicts"] = list(recovery_conflicts)
+            append_event(
+                events_path,
+                {
+                    "type": "mcp_attachment",
+                    "status": "recovery_conflicts",
+                    "cleanup_conflicts": list(recovery_conflicts),
+                },
+            )
+            write_json(directory / "session.json", run_metadata)
         attachment = try_acquire_attachment(
             work,
             state_dir(env),
@@ -750,7 +770,10 @@ def _run(
         if clarify_socket_dir is not None:
             clarify_socket_dir.cleanup()
         session.close()
-        conflicts = attachment.release() if attachment is not None else []
+        conflicts = [
+            *recovery_conflicts,
+            *(attachment.release() if attachment is not None else []),
+        ]
         run_metadata["mcp_status"] = mcp_status
         run_metadata["cleanup_conflicts"] = conflicts
         run_metadata["commands"] = commands
@@ -825,6 +848,30 @@ def _roundtrip(session: OmpSession, kind: str, **fields: Any) -> str:
     return kind
 
 
+def _drain_queued_for_end(session: OmpSession) -> bool:
+    """Read only already-queued lines; True when one of them is agent_end.
+
+    Bounded by the queue size at entry so a cancel never waits on omp.
+    """
+    pending_count = session._queue.qsize()
+    for _ in range(pending_count):
+        try:
+            pending = session._queue.get_nowait()
+        except queue.Empty:
+            break
+        if pending is _EOF:
+            session._raise_stream_failure()
+        raced = loads(pending)
+        if raced is None:
+            continue
+        session.events.append(raced)
+        append_event(session.events_path, raced)
+        if raced.get("type") == "agent_end":
+            session.agent_ended = True
+            return True
+    return False
+
+
 def _accept_prompt(session: OmpSession, command_id: str, interrupt: Any | None) -> None:
     while True:
         event = session._next(0.1)
@@ -838,22 +885,8 @@ def _accept_prompt(session: OmpSession, command_id: str, interrupt: Any | None) 
         if session.agent_ended:
             return
         if interrupt is not None and interrupt.is_set():
-            pending_count = session._queue.qsize()
-            for _ in range(pending_count):
-                try:
-                    pending = session._queue.get_nowait()
-                except queue.Empty:
-                    break
-                if pending is _EOF:
-                    session._raise_stream_failure()
-                raced = loads(pending)
-                if raced is None:
-                    continue
-                session.events.append(raced)
-                append_event(session.events_path, raced)
-                if raced.get("type") == "agent_end":
-                    session.agent_ended = True
-                    return
+            if _drain_queued_for_end(session):
+                return
             raise EngineError("cancelled", "prompt cancelled", started=True)
 
 
@@ -876,12 +909,24 @@ def _ui_json_data(value: Any) -> Any:
 
 def _ui_event_summary(request: UiRequest) -> dict[str, Any]:
     if isinstance(request, AskRequest):
-        prompt = request.questions[0].question if request.questions else ""
-        options = [
-            redact_text(option.label)[:128]
-            for question in request.questions
-            for option in question.options
-        ]
+        # Each question keeps its own identity and options, in order; the
+        # answer command needs one value per question.
+        return {
+            "method": request.method,
+            "question": redact_text(
+                request.questions[0].question if request.questions else ""
+            )[:512],
+            "questions": [
+                {
+                    "id": question.id,
+                    "question": redact_text(question.question)[:512],
+                    "options": [
+                        redact_text(option.label)[:128] for option in question.options
+                    ],
+                }
+                for question in request.questions
+            ],
+        }
     elif isinstance(request, SelectRequest):
         prompt = request.title
         options = [redact_text(option)[:128] for option in request.options]
@@ -1354,6 +1399,10 @@ def _accept_prompt_ui(
                 break
             register_clarify_requests()
             if cancel_event is not None and cancel_event.is_set():
+                # A finished turn wins over a late interrupt: read what omp
+                # already queued before deciding to abort.
+                if _drain_queued_for_end(session):
+                    break
                 send_abort()
                 raise EngineError("cancelled", "prompt cancelled", started=True)
             try:

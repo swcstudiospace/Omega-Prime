@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from omega_prime.engine.jobs import MCP_STATE_DIR
+
 _INSTALL = Path(__file__).resolve().parents[2]
 
 ENGINE_SYSTEM_PROMPT = (
@@ -37,8 +39,13 @@ def mcp_server_entry(
     python: str | None = None,
     work_root: Path | None = None,
     clarify_socket_path: str | Path | None = None,
+    state_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Build the secret-free stdio server entry for a single work tree."""
+    """Build the secret-free stdio server entry for a single work tree.
+
+    ``state_dir`` pins the child's ``OMEGA_PRIME_STATE_DIR`` to a directory
+    the sandbox binds writable (see ``jobs.mcp_state_dir``).
+    """
     executable = Path(python or python_executable())
     if not executable.is_absolute() or not executable.is_file():
         raise ValueError("MCP interpreter must be an absolute existing file")
@@ -57,11 +64,19 @@ def mcp_server_entry(
         ],
         "cwd": str(_INSTALL),
     }
+    child_env: dict[str, str] = {}
     if clarify_socket_path is not None:
         socket_path = str(clarify_socket_path)
         if not socket_path:
             raise ValueError("clarify socket path must not be empty")
-        entry["env"] = {"OMEGA_PRIME_CLARIFY_SOCKET": socket_path}
+        child_env["OMEGA_PRIME_CLARIFY_SOCKET"] = socket_path
+    if state_dir is not None:
+        state_text = str(state_dir)
+        if not state_text or not Path(state_text).is_absolute():
+            raise ValueError("MCP state dir must be an absolute path")
+        child_env["OMEGA_PRIME_STATE_DIR"] = state_text
+    if child_env:
+        entry["env"] = child_env
     return entry
 
 
@@ -587,6 +602,7 @@ def try_acquire_attachment(
                         "omega-prime": mcp_server_entry(
                             work_root=work,
                             clarify_socket_path=clarify_socket_path,
+                            state_dir=Path(os.path.abspath(state_root / MCP_STATE_DIR)),
                         )
                     }
                 },
