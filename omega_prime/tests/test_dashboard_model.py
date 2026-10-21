@@ -22,6 +22,7 @@ def test_empty_sources_and_hash_stability() -> None:
         "pr_gate": [],
         "waiting_on_ove": [],
         "finished": [],
+        "idle_sessions": [],
     }
     assert first.content_hash == normalize_tasks({}, now=NOW).content_hash
     assert (
@@ -95,13 +96,11 @@ def test_session_quiet_stopped_and_exit_paths() -> None:
             ],
         )
     }
-    snap = normalize_tasks(src, now=NOW)
-    # Unknown cwd keeps a quiet session active; a known missing cwd is stopped?.
-    assert {x.id: x.state for x in snap.active} == {
-        "omp:old": "quiet",
-        "omp:live": "stopped?",
-    }
-    assert {(x.id, x.result) for x in snap.finished} == {("omp:exit", "stopped")}
+    # Quiet and explicitly stopped sessions are Idle; a recent session with an
+    # unknown cwd stays Active as stopped? because exit cannot be established.
+    assert {x.id: x.state for x in snap.active} == {"omp:live": "stopped?"}
+    assert {x.id for x in snap.idle_sessions} == {"omp:old", "omp:exit"}
+    assert snap.finished == []
 
 
 def test_wiring_join_done_and_waiting_derivation() -> None:

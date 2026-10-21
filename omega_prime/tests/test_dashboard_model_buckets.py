@@ -66,25 +66,28 @@ def test_idle_changes_snapshot_hash_and_keeps_number_across_restart(tmp_path):
 
     path = tmp_path / "tasks.json"
 
-    def build(state: str, title: str, at: datetime) -> DashboardPoller:
+    def build(status: str, title: str, at: datetime) -> DashboardPoller:
         poller = DashboardPoller([], task_ids_path=path, clock=lambda: at)
-        poller._results["tasks_json"] = _source(
-            "tasks_json", [], {"tasks": [{"id": "durable", "title": title, "state": state}]}
+        poller._results["herdr"] = _source(
+            "herdr", [{
+                "pane_id": "durable", "agent_status": status,
+                "terminal_title": title, "has_live_agent": True,
+            }]
         )
         poller._build_snapshot()
         return poller
 
     active = build("working", "Durable", NOW)
     seq = active.snapshot()["active"][0]["seq"]
-    idle = build("queued", "Durable", NOW + timedelta(minutes=1))
+    idle = build("unknown", "Durable", NOW + timedelta(minutes=1))
     idle_row = idle.snapshot()["idle_sessions"][0]
     assert idle_row["seq"] == seq
     idle_hash = idle.snapshot_hash()
-    changed_idle = build("queued", "Idle changed", NOW + timedelta(minutes=1))
+    changed_idle = build("unknown", "Idle changed", NOW + timedelta(minutes=1))
     assert changed_idle.snapshot_hash() != idle_hash
 
     restored = build("working", "Durable", NOW + timedelta(minutes=2))
     restored_row = restored.snapshot()["active"][0]
     assert restored_row["seq"] == seq
     assert restored_row["timeline"][-1]["state"] == "working"
-    assert idle_row["timeline"][-1]["state"] == "idle"
+    assert idle_row["timeline"][-1]["state"] == "unknown"

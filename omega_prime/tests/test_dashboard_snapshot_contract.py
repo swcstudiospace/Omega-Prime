@@ -13,34 +13,32 @@ def test_persisted_task_numbering_reaches_snapshot(tmp_path):
         "tasks_json",
         "ok",
         extra={
-            "tasks": [
-                {
-                    "id": "tasks:stable",
-                    "title": "Stable task",
-                    "state": "working",
-                    "owner": {"kind": "human", "ref": "owner"},
-                },
-                {
-                    "id": "tasks:idle",
-                    "title": "Idle task",
-                    "state": "queued",
-                    "owner": {"kind": "human", "ref": "owner"},
-                },
-            ],
+            "tasks": [{
+                "id": "tasks:stable",
+                "title": "Stable task",
+                "state": "working",
+                "owner": {"kind": "human", "ref": "owner"},
+            }],
             "waiting_on_ove": [],
             "finished": [],
         },
     )
+    poller._results["herdr"] = SourceResult(
+        "herdr", "ok", items=[
+            {"pane_id": "idle", "agent_status": "unknown", "terminal_title": "Idle session"}
+        ]
+    )
     poller._build_snapshot()
     first = poller.snapshot()
     assert first is not None
-    assert first["idle_sessions"][0]["id"] == "tasks:idle"
+    assert first["idle_sessions"][0]["id"] == "herdr:idle"
     assert first["idle_sessions"][0]["seq"] == 1
     assert first["active"][0]["seq"] == 2
     assert first["active"][0]["display_id"] == "00002 - Stable task"
     assert set(first) == {"generated_at", "sources", "active", "pr_gate", "waiting_on_ove", "finished", "idle_sessions"}
 
     restarted = DashboardPoller([], task_ids_path=bridge, clock=lambda: NOW)
+    restarted._results["herdr"] = poller._results["herdr"]
     restarted._results["tasks_json"] = poller._results["tasks_json"]
     restarted._build_snapshot()
     second = restarted.snapshot()

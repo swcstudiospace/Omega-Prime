@@ -32,6 +32,8 @@ def test_closed_pages_avoid_legacy_1_2mb_truncation():
                 for row in rows:
                     row["title"] = "x" * 12_000
                 payload = json.dumps(rows).encode()
+                assert len(payload) > 1_000_000
+                rows = rows[:per_page]
             else:
                 rows = []
             return 200, json.dumps(rows).encode()
