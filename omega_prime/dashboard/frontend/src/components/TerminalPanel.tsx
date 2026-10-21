@@ -16,7 +16,6 @@ export function TerminalPanel({ taskId }: { taskId: string }) {
   const connect = useCallback(() => {
     const source = new EventSource(`/api/tasks/${encodeURIComponent(taskId)}/terminal`)
     sourceRef.current = source
-    source.onopen = () => setConnected(true)
     source.addEventListener('terminal', ((event: MessageEvent<string>) => {
       try {
         const next = JSON.parse(event.data) as Frame
