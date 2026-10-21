@@ -211,3 +211,10 @@ Cross-cutting constraints: no product implementation during planning; no runtime
 - [x] 106-05-PLAN.md — after 106-04: validated task/pane mapping and bounded read-only terminal SSE; sole wave-2 `static/cc` rebuild after 106-03.
 
 Local implementation and offline verification are recorded in `106-SUMMARY.md`. Live GitHub/Herdr checks, five screenshots on isolated `127.0.0.1:7441`, signed sandbox evidence, and the real-terminal check remain outer-driver work. Local commits only; no push, merge, or deploy. AC9 remains pending.
+
+### Phase 115: Herdr live terminals + websocket Command Center (task 00035)
+
+**Goal:** Interactive per-task Herdr terminal (xterm.js over a token-gated loopback websocket, read-only switch), live /ws/events deltas replacing polling with backoff + SSE fallback, and tasks.json kept current through heartbeats, a stale detector and a reconciler.
+**Depends on:** Phase 106 + herdr_launch (#59, 4016ef8). Branch `feat/herdr-ws`.
+**Contract:** `.planning/phases/115-herdr-live-terminals/115-UPLIFT.xml`; tracking in `115-TRACKING.md`.
+**Plans:** TBD by plan stage (wave 1 backend, wave 2 events + frontend).
