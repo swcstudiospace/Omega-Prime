@@ -1,8 +1,8 @@
 // agentos-local tier: last-resort, labelled "no isolation". Runs the Sandbox Agent server and omp as
 // plain host processes in a private work dir with HOME redirected. Use only when bwrap is missing.
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdirSync, rmSync, symlinkSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, mkdirSync, rmSync, symlinkSync, existsSync } from "node:fs";
+import { basename, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { STATE, NODE24_BIN, BUN_EXE, BUN_INSTALL, SANDBOX_AGENT_BIN } from "../config.ts";
 import { freePort } from "../auth.ts";
@@ -51,8 +51,13 @@ export class LocalTier implements SandboxTier {
     this.#children.add(p); p.once("exit", () => { this.#children.delete(p); this.#prune(); }); return p;
   }
   exec(argv: string[], opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; input?: string } = {}) {
-    return execCapture(argv[0], argv.slice(1), { cwd: opts.cwd ?? this.workdir, env: this.#fullEnv(opts.env), timeoutMs: opts.timeoutMs ?? 600_000, input: opts.input, killGroup: true });
+    // Each exec leads its own group; track it like spawnStdio's so dispose reaps checks still running.
+    return execCapture(argv[0], argv.slice(1), { cwd: opts.cwd ?? this.workdir, env: this.#fullEnv(opts.env), timeoutMs: opts.timeoutMs ?? 600_000, input: opts.input, killGroup: true, onSpawn: (pid) => { this.#prune(); this.#groups.add(pid); } });
   }
+  /** Sandbox paths are host paths on this tier: transfers are plain copies inside the private root. */
+  #inside(path: string) { if (!path.startsWith(`${this.hostRoot}/`) || path.includes("..")) throw new Error(`path outside the tier root: ${path}`); return path; }
+  async upload(local: string, dest: string) { copyFileSync(local, this.#inside(dest)); return { code: 0, stdout: "", stderr: "" }; }
+  async download(path: string, destDir: string) { copyFileSync(this.#inside(path), join(destDir, basename(path))); return { code: 0, stdout: "", stderr: "" }; }
   owned() { this.#prune(); return { hostRoot: this.hostRoot, sandboxAgentPid: this.#agent?.pid ?? null, children: [...this.#children].map((c) => c.pid), processGroups: [...this.#groups] }; }
   async dispose() {
     // Confirm ownership right before each signal: a group id whose members have all exited may now be someone else's.

@@ -546,6 +546,7 @@ def _run(
             omp_major=version[0],
             stage=stage,
             interrupt=cancel_event,
+            metadata=run_metadata,
         )
     if not sandbox_ready(env, unsandboxed_override=unsandboxed):
         raise SandboxUnavailable(
@@ -1594,25 +1595,29 @@ def probe(
     *,
     unsandboxed: bool | None = None,
     stage: str | None = None,
+    plan: str | None = None,
 ) -> tuple[bool, str]:
     """Whether a turn can run on omp. Does not call a model API.
 
-    With ``stage``, the stage's plan order (ChatGPT, then Z.ai) must have an
-    allowlisted plan, matching what ``run(stage=...)`` will select.
+    ``plan`` is the requested coding plan and ``stage`` the GSD stage, both
+    exactly as ``run(plan=..., stage=...)`` will receive them, so readiness
+    accepts what the router will select and refuses what it will refuse.
+    With the omp-sandbox backend selected a stageless turn is checked as the
+    ``execute`` stage it will run on.
     """
+    from omega_prime.engine import sandbox_omp
+
     binary = resolve_omp(env)
     if binary is None:
         return False, "not_configured"
+    backend = sandbox_omp.selected(env)
+    if backend:
+        stage = sandbox_omp.backend_stage(stage)
     try:
-        if stage is None:
-            select(env, requested=None)
-        else:
-            select(env, stage=stage)
+        select(env, requested=plan, stage=stage)
     except PlanNotAllowed:
         return False, "plan_not_allowed"
-    from omega_prime.engine import sandbox_omp
-
-    if sandbox_omp.selected(env):
+    if backend:
         # The backend's honest readiness, in its own order: the host omp
         # binary still backs read_usage, so the same version check applies;
         # bwrap readiness never gates the backend.
@@ -1621,6 +1626,8 @@ def probe(
         except EngineError as exc:
             return False, exc.reason
         if sandbox_omp.anda_binary(env) is None:
+            return False, "sandbox_unavailable"
+        if sandbox_omp.sandbox_root(env) is None:
             return False, "sandbox_unavailable"
         return True, "ok"
     if not sandbox_ready(env, unsandboxed_override=unsandboxed):

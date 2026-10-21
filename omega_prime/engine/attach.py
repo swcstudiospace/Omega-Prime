@@ -167,7 +167,9 @@ def route_turn(
     if not forced and not _live_model(getattr(agent, "model", None)):
         return None
     if mode == "auto" and not forced:
-        ready, _reason = probe(mapping, stage=staged)
+        ready, _reason = probe(
+            mapping, stage=staged, plan=getattr(agent, "engine_plan", None)
+        )
         if not ready:
             return None
     job_id = getattr(agent, "engine_job_id", None) or "job-" + uuid.uuid4().hex[:8]
@@ -333,7 +335,7 @@ def delegate_via_engine(
     if mode == "off":
         return None
     staged = engine_stage(mapping, stage)
-    ready, reason = probe(mapping, stage=staged)
+    ready, reason = probe(mapping, stage=staged, plan=engine_plan)
     if not ready and mode != "required":
         return None
     if not ready and mode == "required":
@@ -441,7 +443,7 @@ def ultrathink_engine(
         return {"used": False, "reason": "off"}
     requested = stage if stage is not None else plan.get("stage")
     staged = engine_stage(env, requested if isinstance(requested, str) else None)
-    ready, reason = probe(env, stage=staged)
+    ready, reason = probe(env, stage=staged, plan=engine_plan)
     if not ready:
         return _required_miss(env, reason)
     if not plan.get("found"):

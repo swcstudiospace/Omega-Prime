@@ -74,24 +74,25 @@ def _write_locked(data: dict[str, Any], path: str | os.PathLike[str]) -> None:
     content. No key reordering, no field filtering.
     """
     target = Path(path)
-    handle = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        delete=False,
-        dir=target.parent,
-        prefix=target.name + ".",
-        suffix=".tmp",
-    )
-    temp = Path(handle.name)
+    temp: Path | None = None
     try:
-        with handle:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            delete=False,
+            dir=target.parent,
+            prefix=target.name + ".",
+            suffix=".tmp",
+        ) as handle:
+            temp = Path(handle.name)
             handle.write(json.dumps(data, indent=2) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, target)
     except BaseException:
-        with contextlib.suppress(OSError):
-            temp.unlink()
+        if temp is not None:
+            with contextlib.suppress(OSError):
+                temp.unlink()
         raise
 
 

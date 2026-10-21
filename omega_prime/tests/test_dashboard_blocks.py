@@ -72,7 +72,10 @@ def test_write_roundtrip_persists_and_leaves_no_residue(tmp_path: Path) -> None:
         data["tasks"].append(_row("gb:t1", "queued"))
         _write_locked(data, store)
     with locked_tasks(store) as data:
-        assert data == {"tasks": [{"id": "gb:t1", "state": "queued"}], "waiting_on_ove": []}
+        assert data == {
+            "tasks": [{"id": "gb:t1", "state": "queued"}],
+            "waiting_on_ove": [],
+        }
     raw = store.read_text(encoding="utf-8")
     assert raw.endswith("\n")
     assert sorted(p.name for p in store.parent.iterdir()) == [
@@ -92,7 +95,9 @@ def test_write_lock_is_exclusive_against_a_second_writer(tmp_path: Path) -> None
             second.close()
         data["tasks"][0]["state"] = "blocked"
         _write_locked(data, store)
-    assert json.loads(store.read_text(encoding="utf-8"))["tasks"][0]["state"] == "blocked"
+    assert (
+        json.loads(store.read_text(encoding="utf-8"))["tasks"][0]["state"] == "blocked"
+    )
 
 
 def test_unknown_fields_survive_a_roundtrip_untouched(tmp_path: Path) -> None:
@@ -163,6 +168,45 @@ def test_clear_restores_working_and_is_idempotent(tmp_path: Path) -> None:
     clear_block(store, "blk-1", "gb:t1")
     data = json.loads(store.read_text(encoding="utf-8"))
     assert data["waiting_on_ove"] == []
+    assert data["tasks"][0]["state"] == "working"
+
+
+def test_task_stays_blocked_until_its_last_block_clears(tmp_path: Path) -> None:
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:t1"), _row("gb:t2")])
+    raise_block(store, "gb:t1:plan_not_allowed", "plan gate", "plan", "gb:t1")
+    push_block(store, "gb:t1", "gh_not_logged_in")
+    raise_block(store, "gb:t2:push", "other task", "push", "gb:t2")
+    clear_block(store, "gb:t1:plan_not_allowed", "gb:t1")
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert [item["id"] for item in data["waiting_on_ove"]] == [
+        "gb:t1:push",
+        "gb:t2:push",
+    ]
+    assert {row["id"]: row["state"] for row in data["tasks"]} == {
+        "gb:t1": "blocked",
+        "gb:t2": "blocked",
+    }
+    clear_block(store, "gb:t1:push", "gb:t1")
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert {row["id"]: row["state"] for row in data["tasks"]} == {
+        "gb:t1": "working",
+        "gb:t2": "blocked",
+    }
+
+
+def test_items_written_before_owner_tracking_still_hold_their_task(
+    tmp_path: Path,
+) -> None:
+    legacy = {"id": "gb:t1:push", "seq": 1, "ask": "a", "blocks": "b", "since": "x"}
+    store = _seed(
+        tmp_path / "tasks.json", rows=[_row("gb:t1", "blocked")], items=[legacy]
+    )
+    raise_block(store, "gb:t1:plan_not_allowed", "plan gate", "plan", "gb:t1")
+    clear_block(store, "gb:t1:plan_not_allowed", "gb:t1")
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert data["tasks"][0]["state"] == "blocked"
+    clear_block(store, "gb:t1:push", "gb:t1")
+    data = json.loads(store.read_text(encoding="utf-8"))
     assert data["tasks"][0]["state"] == "working"
 
 
@@ -245,7 +289,13 @@ def _shaped_inputs() -> tuple[str, str]:
 def test_stored_text_is_redacted_and_never_the_input(tmp_path: Path) -> None:
     store = _seed(tmp_path / "tasks.json", rows=[_row("gb:t1"), _row("gb:t2")])
     token, assignment = _shaped_inputs()
-    raise_block(store, "blk-secret", f"paste {token} and {assignment}", f"Bearer {token}", "gb:t1")
+    raise_block(
+        store,
+        "blk-secret",
+        f"paste {token} and {assignment}",
+        f"Bearer {token}",
+        "gb:t1",
+    )
     push_block(store, "gb:t2", "auto_review_blocked", detail=f"argv-ish {assignment}")
     raw = store.read_text(encoding="utf-8")
     assert token not in raw
@@ -253,7 +303,10 @@ def test_stored_text_is_redacted_and_never_the_input(tmp_path: Path) -> None:
     assert "hunter2-value" not in raw
     assert REDACTED in raw
     data = json.loads(store.read_text(encoding="utf-8"))
-    assert [item["id"] for item in data["waiting_on_ove"]] == ["blk-secret", "gb:t2:push"]
+    assert [item["id"] for item in data["waiting_on_ove"]] == [
+        "blk-secret",
+        "gb:t2:push",
+    ]
 
 
 # --- W111-04: engine failure wiring -----------------------------------------
@@ -329,7 +382,9 @@ def test_engine_tier_failure_raises_its_own_block(tmp_path: Path) -> None:
     assert result.ok is False
     assert result.reason == "sandbox_unavailable"
     data = json.loads(store.read_text(encoding="utf-8"))
-    assert [item["id"] for item in data["waiting_on_ove"]] == ["gb:t2:sandbox_unavailable"]
+    assert [item["id"] for item in data["waiting_on_ove"]] == [
+        "gb:t2:sandbox_unavailable"
+    ]
     assert data["waiting_on_ove"][0]["blocks"] == (
         "engine sandbox gate (sandbox_unavailable)"
     )

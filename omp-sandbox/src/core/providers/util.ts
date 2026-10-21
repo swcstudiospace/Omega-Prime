@@ -15,11 +15,13 @@ export function redactSecrets(text: string): string {
     .replace(/\b[A-Za-z0-9+\/_\-]{48,}={0,2}/g, "[redacted]");
 }
 
-/** `killGroup`: run the command as its own process group and kill the whole group on timeout. */
-export function execCapture(cmd: string, args: string[], opts: SpawnOptions & { timeoutMs?: number; input?: string; killGroup?: boolean } = {}) {
+/** `killGroup`: run the command as its own process group and kill the whole group on timeout.
+ *  `onSpawn`: called with the child's pid (its group id under killGroup) so an owner can track and reap it. */
+export function execCapture(cmd: string, args: string[], opts: SpawnOptions & { timeoutMs?: number; input?: string; killGroup?: boolean; onSpawn?: (pid: number) => void } = {}) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-    const { killGroup, ...spawnOpts } = opts;
+    const { killGroup, onSpawn, ...spawnOpts } = opts;
     const p = spawn(cmd, args, { ...spawnOpts, detached: !!killGroup, stdio: ["pipe", "pipe", "pipe"] });
+    if (p.pid && onSpawn) onSpawn(p.pid);
     let stdout = "", stderr = "";
     p.stdout!.on("data", (b) => { stdout += b; if (stdout.length > 4_000_000) stdout = stdout.slice(-2_000_000); });
     p.stderr!.on("data", (b) => { stderr += b; if (stderr.length > 1_000_000) stderr = stderr.slice(-500_000); });

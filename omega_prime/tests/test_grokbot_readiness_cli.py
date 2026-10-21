@@ -260,7 +260,8 @@ def _run_retention_producer(
     # include the repo root, so hand it over explicitly (no-ops where the
     # package is pip-installed and keeps an existing PYTHONPATH working).
     env["PYTHONPATH"] = (
-        str(ROOT) if not env.get("PYTHONPATH")
+        str(ROOT)
+        if not env.get("PYTHONPATH")
         else str(ROOT) + os.pathsep + env["PYTHONPATH"]
     )
     completed = subprocess.run(

@@ -133,6 +133,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_OMP_ALLOW_CURSOR` | Enables the Cursor plan in engine model routing. |
 | `OMEGA_PRIME_OMP_ALLOW_XAI` | Enables the xAI plan in engine model routing. |
 | `OMEGA_PRIME_OMP_ALLOW_ZAI` | Enables the Z.ai plan in engine model routing. |
+| `OMEGA_PRIME_OMP_BACKEND` | Selects the omp engine backend; omp-sandbox routes engine stages through the omp-sandbox wrapper instead of bwrap. |
 | `OMEGA_PRIME_OMP_BIN` | Selects the omp executable used by the engine. |
 | `OMEGA_PRIME_OMP_HOME` | Selects the omp configuration home directory. |
 | `OMEGA_PRIME_OMP_MODEL_ANTHROPIC` | Overrides the default model for the Anthropic engine plan. |
@@ -153,6 +154,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_OMP_MODEL_ZAI` | Overrides the default model for the Z.ai engine plan. |
 | `OMEGA_PRIME_OMP_MODEL_ZAI_EXECUTE` | Overrides the execution-stage Z.ai model. |
 | `OMEGA_PRIME_OMP_MODEL_ZAI_PLAN` | Overrides the planning-stage Z.ai model. |
+| `OMEGA_PRIME_OMP_SANDBOX_ANDA` | Selects the omp-sandbox-anda wrapper executable used by the omp-sandbox engine backend. |
 | `OMEGA_PRIME_PACKS_JSON` | Selects the configured tool-pack description file. |
 | `OMEGA_PRIME_PACKS_JSON_FILE` | Names a protected file containing the tool-pack description setting. |
 | `OMEGA_PRIME_PACK_API_BASES_JSON` | Selects the tool-pack API base configuration. |
@@ -204,6 +206,8 @@ The table records names and purposes only.
 | `OMEGA_PRIME_TELEMETRY_OTLP_INTERVAL_SECONDS` | Sets the OTLP telemetry export interval. |
 | `OMEGA_PRIME_WORK_ROOT` | Selects the workspace root used by Omega Prime operations. |
 | `OMEGA_PRIME_WORK_ROOT_FILE` | Names a protected file containing the Omega Prime workspace root. |
+| `OMP_SANDBOX_ROOT` | Selects the omp-sandbox package root the wrapper starts its TS core from. |
+| `OMP_SANDBOX_WORKSPACE_ROOTS` | Lists the allowlisted roots a job worktree may live under for the omp-sandbox backend. |
 | `OPENAI_API_KEY` | Authenticates OpenAI API requests. |
 | `OPENAI_API_KEY_FILE` | Names a protected file containing the OpenAI API credential. |
 | `OPENCODE_API_KEY` | Authenticates OpenCode provider requests. |

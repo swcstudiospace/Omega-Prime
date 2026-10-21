@@ -50,6 +50,9 @@ export function gsdCommandsOnHost(tier: { hostRoot?: string; workspaceHostPath?:
  *  `gsd-phase-researcher` / `gsd-planner` / `gsd-executor` ... spawns fail with "Unknown agent". Re-emit each
  *  GSD agent as a project-level .omp/agents/<name>.md with only name + description; omitting `tools` gives
  *  omp's default task-agent tool set (Claude tool names like Read/Bash/mcp__* do not map 1:1). */
+/** First body line of every generated agent file: only files carrying it are ever rewritten. */
+export const GENERATED_MARK = "<!-- omp-sandbox: generated from .claude/agents; project edits belong in a file without this line -->";
+
 export function writeOmpAgents(hostWork: string): number {
   const src = join(hostWork, ".claude", "agents"); const dst = join(hostWork, ".omp", "agents");
   if (!existsSync(src)) return 0;
@@ -62,17 +65,21 @@ export function writeOmpAgents(hostWork: string): number {
     const field = (k: string) => (new RegExp(`^${k}:\\s*(.*)$`, "m").exec(m[1])?.[1] ?? "").trim().replace(/^["']|["']$/g, "");
     const name = field("name") || f.replace(/\.md$/, ""); const description = field("description");
     if (!description) continue;
-    writeFileSync(join(dst, f), `---\nname: ${JSON.stringify(name)}\ndescription: ${JSON.stringify(description)}\nspawns: "*"\n---\n${m[2]}`);
+    const out = join(dst, f);
+    // A project's own .omp/agents file (no generated mark) is kept as is and still counts as available.
+    if (existsSync(out) && !readFileSync(out, "utf8").includes(GENERATED_MARK)) { n++; continue; }
+    writeFileSync(out, `---\nname: ${JSON.stringify(name)}\ndescription: ${JSON.stringify(description)}\nspawns: "*"\n---\n${GENERATED_MARK}\n${m[2]}`);
     n++;
   }
   return n;
 }
 
 /** Same conversion as writeOmpAgents, as a self-contained script run with cwd = the sandbox workdir. */
-const IN_SANDBOX_CONVERT = String.raw`const fs=require("fs"),p=require("path");const src=".claude/agents",dst=".omp/agents";let n=0;
+export const IN_SANDBOX_CONVERT = String.raw`const fs=require("fs"),p=require("path");const src=".claude/agents",dst=".omp/agents";let n=0;const MARK=${JSON.stringify(GENERATED_MARK)};
 if(fs.existsSync(src)){fs.mkdirSync(dst,{recursive:true});for(const f of fs.readdirSync(src).filter(x=>/^gsd-[a-z0-9-]+\.md$/.test(x))){
 const t=fs.readFileSync(p.join(src,f),"utf8");const m=/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(t);if(!m)continue;
 const g=k=>((new RegExp("^"+k+":\\s*(.*)$","m").exec(m[1])||[])[1]||"").trim().replace(/^["']|["']$/g,"");
-const name=g("name")||f.replace(/\.md$/,""),d=g("description");if(!d)continue;
-fs.writeFileSync(p.join(dst,f),"---\nname: "+JSON.stringify(name)+"\ndescription: "+JSON.stringify(d)+"\nspawns: \"*\"\n---\n"+m[2]);n++;}}
+const name=g("name")||f.replace(/\.md$/,""),d=g("description");if(!d)continue;const out=p.join(dst,f);
+if(fs.existsSync(out)&&!fs.readFileSync(out,"utf8").includes(MARK)){n++;continue;}
+fs.writeFileSync(out,"---\nname: "+JSON.stringify(name)+"\ndescription: "+JSON.stringify(d)+"\nspawns: \"*\"\n---\n"+MARK+"\n"+m[2]);n++;}}
 console.log(n)`;

@@ -28,8 +28,9 @@ import threading
 from pathlib import Path
 
 from omega_prime.agent.interrupt import InterruptFlag
+from omega_prime.engine import sandbox_omp
 from omega_prime.engine.attach import delegate_via_engine, ultrathink_engine
-from omega_prime.engine.omp_driver import run
+from omega_prime.engine.omp_driver import probe, run
 from omega_prime.engine.sandbox_omp import (
     ANDA_BIN_ENV,
     BACKEND_ENV,
@@ -43,7 +44,11 @@ _ANDA_FAKE = r'''#!/usr/bin/env python3
 """Fake omp-sandbox-anda wrapper: the client.rs stdio protocol, stdlib only.
 
 Behaviour is selected by ``behavior.json`` beside this script -- never
-argv: ``{"behavior": "happy" | "tier_error" | "question" | "hang"}``. One
+argv: ``{"behavior": "happy" | "tier_error" | "question" | "hang" |
+"early_done" | "abort_race" | "fallback" | "long" | "status_fail" |
+"host_moved"}``. ``up`` clones the seeded branch into a private sandbox
+checkout beside this script (the host worktree is never written by the
+fake), and ``export_commits`` commits there and bundles ``base..ref``. One
 receipt line per request ({"id", "tool", "args"}) is appended to
 wrapper-log.jsonl beside this script before the reply is written. Every
 emitted line carries "attestation": "mock". ``down`` is answered and the
@@ -83,26 +88,26 @@ def git(work, *argv):
     return proc.stdout.strip()
 
 
-def export_commit(work, tag):
-    """Make one real commit and bundle in the seeded worktree."""
+def export_commit(box, tag):
+    """Make one real commit in the sandbox checkout and bundle base..ref."""
+    base = git(box, "rev-parse", "HEAD")
     name = ".fake-export-%s.txt" % tag
-    with open(os.path.join(work, name), "w", encoding="utf-8") as handle:
+    with open(os.path.join(box, name), "w", encoding="utf-8") as handle:
         handle.write("exported by the fake anda wrapper\n")
-    git(work, "add", "--", name)
+    git(box, "add", "--", name)
     git(
-        work,
+        box,
         "-c", "user.name=Fake Anda",
         "-c", "user.email=fake-anda@example.invalid",
         "commit", "-q", "-m", "fake export %s" % tag,
     )
-    head = git(work, "rev-parse", "HEAD")
-    base = git(work, "rev-parse", "HEAD~1")
-    ref = git(work, "symbolic-ref", "--short", "HEAD")
-    dirty = git(work, "status", "--porcelain") != ""
+    head = git(box, "rev-parse", "HEAD")
+    ref = git(box, "symbolic-ref", "--short", "HEAD")
+    dirty = git(box, "status", "--porcelain") != ""
     bundle = os.path.join(HERE, "export-%s.bundle" % tag)
     if os.path.exists(bundle):
         os.unlink(bundle)
-    git(work, "bundle", "create", bundle, ref)
+    git(box, "bundle", "create", "-q", bundle, "%s..%s" % (base, ref))
     return {
         "head": head,
         "base": base,
@@ -115,6 +120,9 @@ def export_commit(work, tag):
     }
 
 
+LONG_TEXT = "BEGIN-" + "x" * 5000 + "-END"
+
+
 with open(os.path.join(HERE, "behavior.json"), encoding="utf-8") as handle:
     behavior = json.load(handle).get("behavior", "happy")
 
@@ -123,10 +131,14 @@ receipt({
     "pid": os.getpid(),
     "argv": sys.argv[1:],
     "workspace_roots": os.environ.get("OMP_SANDBOX_WORKSPACE_ROOTS"),
+    "cwd": os.getcwd(),
+    "sandbox_root": os.environ.get("OMP_SANDBOX_ROOT"),
 })
 emit({"event": "wrapper_ready", "wrapper_pid": os.getpid()})
 
 work = None
+box = None
+model = None
 stage_id = None
 hanging = False
 exports = 0
@@ -156,7 +168,14 @@ for line in sys.stdin:
                 "code": "anda_error",
             })
             continue
-        work = (args.get("seed_repo") or {}).get("path")
+        seed = args.get("seed_repo") or {}
+        work = seed.get("path")
+        box = os.path.join(HERE, "sandbox-%d" % os.getpid())
+        subprocess.run(
+            ["git", "clone", "-q", "--branch", seed.get("ref"), work, box],
+            check=True,
+            capture_output=True,
+        )
         emit({
             "id": rid,
             "ok": True,
@@ -166,6 +185,10 @@ for line in sys.stdin:
     if tool == "run_gsd_stage":
         exports = 0
         stage_id = "stage-%d" % (exports + 1)
+        model = args.get("model")
+        if behavior == "early_done":
+            # The terminal event lands before the stage-start reply.
+            emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
         emit({
             "id": rid,
             "ok": True,
@@ -177,9 +200,22 @@ for line in sys.stdin:
                 "command": args.get("gsd_command"),
             },
         })
-        if behavior == "hang":
+        if behavior in ("hang", "abort_race"):
             hanging = True
             continue
+        if behavior == "early_done":
+            continue
+        if behavior == "host_moved":
+            # Something else commits on the host branch while the stage runs.
+            with open(os.path.join(work, "host.txt"), "w", encoding="utf-8") as handle:
+                handle.write("host change\n")
+            git(work, "add", "host.txt")
+            git(
+                work,
+                "-c", "user.name=Host",
+                "-c", "user.email=host@example.invalid",
+                "commit", "-q", "-m", "host moved",
+            )
         if behavior == "question":
             emit({
                 "event": "question",
@@ -189,19 +225,36 @@ for line in sys.stdin:
         emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
         continue
     if tool == "abort":
+        if behavior == "abort_race" and hanging and stage_id is not None:
+            # Core.abort waits for the stage to settle, so stage_done can
+            # precede the abort reply.
+            emit({"event": "stage_done", "stageId": stage_id, "status": "aborted"})
+            hanging = False
         emit({"id": rid, "ok": True, "result": {}})
         if hanging and stage_id is not None:
             emit({"event": "stage_done", "stageId": stage_id, "status": "aborted"})
             hanging = False
         continue
     if tool == "sandbox_status":
+        if behavior == "status_fail":
+            emit({"id": rid, "ok": False, "error": "status broke", "code": "error"})
+            continue
+        final = LONG_TEXT if behavior == "long" else "fake final text"
+        requested = model
+        fallback_from = None
+        if behavior == "fallback":
+            fallback_from = model
+            requested = "zai/" + ("glm-5.3" if "sol" in str(model) else "glm-5.3-flash")
         emit({
             "id": rid,
             "ok": True,
             "result": {
                 "stageId": stage_id,
                 "status": "completed",
-                "lastText": "fake final text",
+                "modelRequested": requested,
+                "fallbackFrom": fallback_from,
+                "lastText": final[-600:],
+                "finalText": final,
                 "error": None,
             },
         })
@@ -211,7 +264,7 @@ for line in sys.stdin:
         emit({
             "id": rid,
             "ok": True,
-            "result": export_commit(work, "%d-%d" % (os.getpid(), exports)),
+            "result": export_commit(box, "%d-%d" % (os.getpid(), exports)),
         })
         continue
     emit({
@@ -286,9 +339,14 @@ def _git_worktree(parent: Path) -> Path:
     (work / "seed.txt").write_text("seed\n", encoding="utf-8")
     _git("add", "seed.txt", cwd=work)
     _git(
-        "-c", "user.name=Seed",
-        "-c", "user.email=seed@example.invalid",
-        "commit", "-q", "-m", "seed",
+        "-c",
+        "user.name=Seed",
+        "-c",
+        "user.email=seed@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "seed",
         cwd=work,
     )
     return work.resolve()
@@ -376,9 +434,7 @@ def test_plan_then_execute_orders_two_stages_on_one_worktree(tmp_path: Path) -> 
             "down",
         ]
     # Exactly two run_gsd_stage calls, in order, with the contracted args.
-    stages = [
-        row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"
-    ]
+    stages = [row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"]
     assert [row["args"]["stage"] for row in stages] == ["plan", "execute"]
     first, second = stages
     assert first["args"]["plan"] == "zai" and second["args"]["plan"] == "zai"
@@ -409,7 +465,7 @@ def test_plan_then_execute_orders_two_stages_on_one_worktree(tmp_path: Path) -> 
 
 def test_export_lands_back_in_the_worktree_and_is_reported(tmp_path: Path) -> None:
     omp = _install_fake(tmp_path)
-    script, log = _install_fake_anda(tmp_path, "happy")
+    script, _log = _install_fake_anda(tmp_path, "happy")
     roots = tmp_path / "roots"
     work = _git_worktree(roots)
     env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
@@ -429,6 +485,7 @@ def test_export_lands_back_in_the_worktree_and_is_reported(tmp_path: Path) -> No
         "status",
         "model_requested",
         "export",
+        "applied",
     }
     assert stats["status"] == "completed"
     assert stats["tier"] == "fake-tier"
@@ -444,8 +501,11 @@ def test_export_lands_back_in_the_worktree_and_is_reported(tmp_path: Path) -> No
         "bytes",
         "via",
     }
-    # The reported head is the worktree's HEAD right now, and the commit is
+    # The fake committed only in its private sandbox checkout; the engine
+    # fast-forwarded the host branch onto the exported bundle, so the
+    # reported head is the worktree's HEAD right now and the commit is
     # really in the worktree's log.
+    assert stats["applied"] == {"applied": True, "head": export["head"]}
     assert export["head"] == _git("rev-parse", "HEAD", cwd=work)
     assert export["base"] == _git("rev-parse", "HEAD~1", cwd=work)
     assert export["ref"] == "main"
@@ -592,7 +652,8 @@ def test_interrupt_aborts_the_stage_and_returns_cancelled(tmp_path: Path) -> Non
     assert aborts[0]["args"] == {"stage_id": stage_id}
     assert _wrapper_tools(log) == ["up", "run_gsd_stage", "abort", "down"]
     assert any(
-        row.get("type") == "job_end" and row.get("ok") is False
+        row.get("type") == "job_end"
+        and row.get("ok") is False
         and row.get("reason") == "cancelled"
         for row in events
     )
@@ -615,9 +676,7 @@ def test_delegate_via_engine_passes_engine_plan_to_the_wrapper(tmp_path: Path) -
     assert body["summary"] == "fake final text"
     # The requested plan reached run_gsd_stage verbatim; probe's backend
     # readiness gate passed on the same env (the call got this far).
-    stages = [
-        row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"
-    ]
+    stages = [row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"]
     assert len(stages) == 1
     args = stages[0]["args"]
     assert args["stage"] == "plan"
@@ -649,9 +708,7 @@ def test_ultrathink_engine_passes_engine_plan_to_the_wrapper(
     assert body["plan"] == "zai"
     assert body["model"] == "glm-5.3"
     assert body["final_text"] == "fake final text"
-    stages = [
-        row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"
-    ]
+    stages = [row for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"]
     assert len(stages) == 1
     args = stages[0]["args"]
     assert args["stage"] == "plan"
@@ -696,10 +753,10 @@ def test_bwrap_default_untouched_when_backend_unset(
     bwrap = tmp_path / "bin" / "bwrap"
     bwrap.write_text(
         "#!/bin/sh\n"
-        "printf '%s\\n' \"$@\" > \"$OMEGA_FAKE_OMP_BWRAP_LOG\"\n"
-        "while [ \"$1\" != \"--\" ]; do shift; done\n"
+        'printf \'%s\\n\' "$@" > "$OMEGA_FAKE_OMP_BWRAP_LOG"\n'
+        'while [ "$1" != "--" ]; do shift; done\n'
         "shift\n"
-        "exec \"$@\"\n",
+        'exec "$@"\n',
         encoding="utf-8",
     )
     bwrap.chmod(bwrap.stat().st_mode | stat.S_IEXEC)
@@ -725,7 +782,7 @@ def test_bwrap_default_untouched_when_backend_unset(
 
 def test_no_secret_shaped_value_lands_in_any_durable_artifact(tmp_path: Path) -> None:
     omp = _install_fake(tmp_path)
-    script, log = _install_fake_anda(tmp_path, "happy")
+    script, _log = _install_fake_anda(tmp_path, "happy")
     roots = tmp_path / "roots"
     work = _git_worktree(roots)
     token = _shaped_zai_key()  # built at runtime, never a literal
@@ -757,11 +814,7 @@ def test_no_secret_shaped_value_lands_in_any_durable_artifact(tmp_path: Path) ->
     # receipts. On failure this prints paths only — never contents, never
     # the value.
     candidates = [p for p in tmp_path.rglob("*") if p.is_file()]
-    hits = [
-        str(p)
-        for p in candidates
-        if token.encode("utf-8") in p.read_bytes()
-    ]
+    hits = [str(p) for p in candidates if token.encode("utf-8") in p.read_bytes()]
     assert hits == [], "secret-shaped value leaked into durable artifacts"
 
 
@@ -794,3 +847,237 @@ def test_question_surfaces_as_event_only(tmp_path: Path) -> None:
     assert data["tasks"][0] == {"id": "gb:q", "state": "working"}
     assert "answer_question" not in _wrapper_tools(log)
 
+
+# --- Greptile #61: backend fixes ------------------------------------------------
+
+
+def _stage_args(log: Path) -> list[dict]:
+    return [
+        row["args"] for row in _wrapper_log(log) if row.get("tool") == "run_gsd_stage"
+    ]
+
+
+def test_wrapper_starts_from_the_package_root_not_the_callers_cwd(
+    tmp_path: Path, monkeypatch
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    monkeypatch.chdir(tmp_path)  # a caller directory with no omp-sandbox in it
+    result = run("plan", cwd=work, env=env, job_id="job-root", stage="plan", plan="zai")
+    assert result.ok is True, result.detail
+    package = Path(sandbox_omp.__file__).resolve().parents[2] / "omp-sandbox"
+    ready = next(row for row in _wrapper_log(log) if row.get("ready"))
+    assert ready["cwd"] == str(package)
+    assert ready["sandbox_root"] == str(package)
+
+
+def test_a_root_without_the_core_refuses_readiness_and_never_spawns(
+    tmp_path: Path,
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(
+        tmp_path,
+        omp,
+        script,
+        roots,
+        OMEGA_PRIME_OMP_ALLOW_ZAI="1",
+        OMP_SANDBOX_ROOT=str(tmp_path / "not-a-package"),
+    )
+    assert probe(env, stage="plan", plan="zai") == (False, "sandbox_unavailable")
+    result = run(
+        "plan", cwd=work, env=env, job_id="job-noroot", stage="plan", plan="zai"
+    )
+    assert result.ok is False and result.reason == "sandbox_unavailable"
+    assert "OMP_SANDBOX_ROOT" in result.detail
+    assert not log.exists()
+
+
+def test_a_stageless_call_runs_the_execute_stage_and_readiness_agrees(
+    tmp_path: Path,
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    assert probe(env, plan="zai") == (True, "ok")
+    raw = delegate_via_engine("build it", env=env, cwd=str(work), engine_plan="zai")
+    assert raw is not None
+    body = json.loads(raw)
+    assert body["stage"] == "execute"
+    assert body["model"] == "glm-5.3-flash"
+    (args,) = _stage_args(log)
+    assert args["stage"] == "execute"
+    assert args["gsd_command"] == "gsd-execute-phase"
+
+
+def test_readiness_checks_the_requested_plan_like_the_router(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    env = _env(tmp_path, omp)  # only the Anthropic key is allowlisted
+    assert probe(env, unsandboxed=True, stage="execute") == (False, "plan_not_allowed")
+    assert probe(env, unsandboxed=True, stage="execute", plan="anthropic") == (
+        True,
+        "ok",
+    )
+
+
+def test_the_sandbox_gets_only_a_fallback_python_approved(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_CHATGPT="1")
+    first = run("plan", cwd=work, env=env, job_id="job-fb-none", stage="plan")
+    assert first.ok is True, first.detail
+    env["OMEGA_PRIME_OMP_ALLOW_ZAI"] = "1"
+    second = run("plan", cwd=work, env=env, job_id="job-fb-zai", stage="plan")
+    assert second.ok is True, second.detail
+    assert [args["plan"] for args in _stage_args(log)] == ["chatgpt", "chatgpt"]
+    assert [args["fallback_plan"] for args in _stage_args(log)] == [None, "zai"]
+
+
+def test_results_name_the_model_the_sandbox_fell_back_to(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "fallback")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(
+        tmp_path,
+        omp,
+        script,
+        roots,
+        OMEGA_PRIME_OMP_ALLOW_CHATGPT="1",
+        OMEGA_PRIME_OMP_ALLOW_ZAI="1",
+    )
+    result = run("plan", cwd=work, env=env, job_id="job-fell", stage="plan")
+    assert result.ok is True, result.detail
+    assert (result.plan, result.provider, result.model) == ("zai", "zai", "glm-5.3")
+    assert result.fallback_from == "chatgpt"
+    assert result.stats["omp_sandbox"]["model_requested"] == "zai/glm-5.3"
+    session = json.loads((Path(result.events_path).parent / "session.json").read_text())
+    assert session["model"] == "glm-5.3" and session["fallback_from"] == "chatgpt"
+
+
+def test_long_answers_keep_their_beginning(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "long")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run("plan", cwd=work, env=env, job_id="job-long", stage="plan", plan="zai")
+    assert result.ok is True, result.detail
+    assert result.final_text.startswith("BEGIN-")
+    assert result.final_text.endswith("-END")
+    assert len(result.final_text) == 5010
+
+
+def test_a_dirty_worktree_is_refused_before_any_spawn(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    (work / "local-edit.txt").write_text("not committed\n", encoding="utf-8")
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run(
+        "plan", cwd=work, env=env, job_id="job-dirty", stage="plan", plan="zai"
+    )
+    assert result.ok is False
+    assert result.reason == "dirty_worktree"
+    assert result.started is False
+    assert not log.exists()
+    assert (work / "local-edit.txt").read_text(encoding="utf-8") == "not committed\n"
+
+
+def test_a_stage_done_before_the_start_reply_is_not_lost(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "early_done")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    outcome: dict = {}
+    worker = threading.Thread(
+        target=lambda: outcome.update(
+            result=run(
+                "plan", cwd=work, env=env, job_id="job-early", stage="plan", plan="zai"
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=60)
+    assert not worker.is_alive(), (
+        "the stage waiter hung on an event it had already read"
+    )
+    assert outcome["result"].ok is True, outcome["result"].detail
+
+
+def test_a_stage_done_before_the_abort_reply_still_cancels(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "abort_race")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    interrupt = InterruptFlag()
+    timer = threading.Timer(0.5, interrupt.set)
+    timer.start()
+    outcome: dict = {}
+    worker = threading.Thread(
+        target=lambda: outcome.update(
+            result=run(
+                "build",
+                cwd=work,
+                env=env,
+                job_id="job-abort-race",
+                stage="execute",
+                plan="zai",
+                interrupt=interrupt,
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=60)
+    timer.join()
+    assert not worker.is_alive(), "cancellation waited forever"
+    result = outcome["result"]
+    assert result.reason == "cancelled" and result.started is True
+    assert _wrapper_tools(log) == ["up", "run_gsd_stage", "abort", "down"]
+
+
+def test_failures_after_the_stage_started_keep_started_true(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "status_fail")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run("plan", cwd=work, env=env, job_id="job-late", stage="plan", plan="zai")
+    assert result.ok is False
+    assert result.reason == "sandbox_unavailable"
+    assert result.started is True
+    # An auto-mode delegate must not re-run a started task on the Python path.
+    raw = delegate_via_engine(
+        "plan", env=env, cwd=str(work), stage="plan", engine_plan="zai"
+    )
+    assert raw is not None and json.loads(raw)["error"] == "sandbox_unavailable"
+
+
+def test_a_host_branch_that_moved_is_never_overwritten(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "host_moved")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run(
+        "plan", cwd=work, env=env, job_id="job-moved", stage="plan", plan="zai"
+    )
+    assert result.ok is False
+    assert result.reason == "export_conflict"
+    assert result.started is True
+    assert _git("log", "-1", "--format=%s", cwd=work) == "host moved"
+    assert "bundle kept at" in result.detail
