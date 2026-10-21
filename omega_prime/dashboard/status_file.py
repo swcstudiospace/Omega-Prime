@@ -95,6 +95,9 @@ def _pane(value: Any, prefix: str) -> dict[str, str] | None:
         safe_workspace = redact_value(workspace)
         result["workspace"] = safe_workspace
     return result
+def _canonical_identity(identity: str) -> str:
+    return identity if ":" in identity else f"tasks:{identity}"
+
 
 
 

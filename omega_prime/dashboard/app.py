@@ -111,6 +111,9 @@ class _SSEResponse(Response):
                 await send(
                     {"type": "http.response.body", "body": body, "more_body": True}
                 )
+                if disconnected.is_set():
+                    await send({"type": "http.response.body", "body": b"", "more_body": False})
+                    return
             await send({"type": "http.response.body", "body": b"", "more_body": False})
         except BaseException:
             with suppress(Exception):

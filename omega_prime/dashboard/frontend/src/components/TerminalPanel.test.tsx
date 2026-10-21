@@ -10,7 +10,7 @@ class FakeEventSource {
   constructor(readonly url: string) { FakeEventSource.instances.push(this) }
   addEventListener(name: string, fn: EventListener) { this.listeners.set(name, fn) }
   close() { this.closed = true }
-  emit(frame: object) { this.listeners.get('terminal')?.({ data: JSON.stringify(frame) } as MessageEvent as Event) }
+  emit(frame: object) { act(() => this.listeners.get('terminal')?.({ data: JSON.stringify(frame) } as MessageEvent as Event)) }
 }
 afterEach(() => { cleanup(); FakeEventSource.instances = []; vi.unstubAllGlobals() })
 describe('TerminalPanel', () => {
@@ -47,7 +47,10 @@ describe('TerminalPanel', () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     const view = render(<TerminalPanel taskId="one" />)
     FakeEventSource.instances[0].emit({ status: 'live', text: 'safe text', updated_at: '2026-10-21T00:00:00Z' })
-    fireEvent.click(screen.getByRole('button', { name: 'Copy output' }))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Copy output' }))
+      await Promise.resolve()
+    })
     expect(await screen.findByText('Output copied')).toBeInTheDocument()
     expect(writeText).toHaveBeenCalledWith('safe text')
     view.rerender(<TerminalPanel taskId="closed" />)

@@ -11,10 +11,13 @@ from omega_prime.dashboard.terminal import PaneClosedError, TerminalService
 
 def _poller(*, task_id="task:one", mapping=None):
     poller = DashboardPoller([])
-    row = {"id": task_id, "owner": {"kind": "worker", "ref": "not-a-pane"}}
-    if mapping is not None:
-        row["herdr_pane"] = mapping
-    poller._snapshot = {"active": [row], "idle_sessions": [], "finished": []}
+    rows = []
+    if task_id is not None:
+        row = {"id": task_id, "owner": {"kind": "worker", "ref": "not-a-pane"}}
+        if mapping is not None:
+            row["herdr_pane"] = mapping
+        rows.append(row)
+    poller._snapshot = {"active": rows, "idle_sessions": [], "finished": []}
     return poller
 
 
@@ -66,7 +69,7 @@ def test_terminal_route_resolves_only_task_owned_pane_and_uses_read_argv():
     status, wire = asyncio.run(_wire(app, "/api/tasks/task:one/terminal"))
     assert status == 200 and '"text":"safe output"' in wire
     assert calls == [["herdr", "pane", "read", "w2:p4", "--source", "recent", "--lines", "200", "--format", "text"]]
-    assert asyncio.run(_wire(create_app(_poller(task_id="unknown"), terminal_service=service), "/api/tasks/unknown/terminal"))[0] == 404
+    assert asyncio.run(_wire(create_app(_poller(task_id=None), terminal_service=service), "/api/tasks/unknown/terminal"))[0] == 404
     assert len(calls) == 1
 
 
@@ -122,7 +125,7 @@ def test_terminal_unchanged_capture_heartbeats_without_timestamp_change():
         calls.append(1)
         return "same"
     service = TerminalService(runner=runner, sleep=lambda _: asyncio.sleep(0))
-    status, wire = asyncio.run(_wire(create_app(_poller(mapping={"pane_id": "w1:p1"}), terminal_service=service), "/api/tasks/task:one/terminal", stop_on_heartbeat=True))
+    status, wire = asyncio.run(_wire(create_app(_poller(mapping={"pane_id": "w1:p1"}), terminal_service=service), "/api/tasks/task:one/terminal", stop_after_terminal=9999, stop_on_heartbeat=True))
     assert status == 200 and ": heartbeat" in wire
     assert wire.count('"updated_at":"') == 1 and len(calls) == 2
     assert service._slots._value == 4
