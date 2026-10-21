@@ -43,6 +43,7 @@ def test_index_assets_resolve_under_static_mount() -> None:
         for ref in ("/static/app.js", "/static/app.css"):
             assert client.get(ref, headers=HOST).status_code == 200, ref
 
+
 def test_sse_response_sends_no_content_length() -> None:
     async def events() -> Any:
         yield "retry: 3000\n\n"

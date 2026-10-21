@@ -8,6 +8,7 @@ import asyncio
 import re
 from collections.abc import AsyncIterator, MutableMapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -29,7 +30,9 @@ def test_package_data_build_py_collects_nested_dashboard_assets(
     import tomllib
 
     if importlib.util.find_spec("setuptools") is None:
-        pytest.skip("setuptools is unavailable; real package-data collection cannot run")
+        pytest.skip(
+            "setuptools is unavailable; real package-data collection cannot run"
+        )
 
     from setuptools import Distribution
     from setuptools.command.build_py import build_py
@@ -86,6 +89,7 @@ def test_package_data_build_py_collects_nested_dashboard_assets(
             assert client.get(css_path.group(1), headers=host).status_code == 200
     finally:
         monkeypatch.undo()
+
 
 def _pidfile(home: Path) -> Path:
     return home / ".omega-prime" / "dashboard" / "dashboard.pid"

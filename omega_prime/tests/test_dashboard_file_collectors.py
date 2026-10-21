@@ -227,7 +227,9 @@ def test_agentos_routing_summary(tmp_path: Path) -> None:
     )
 
 
-def test_tasks_json_collector_preserves_validated_numbering_metadata(tmp_path: Path) -> None:
+def test_tasks_json_collector_preserves_validated_numbering_metadata(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "tasks.json"
     write_tasks(
         {

@@ -17,12 +17,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from omega_prime.dashboard.task_ids import (
-    allocate_task_id,
-    assign_task_ids,
-    next_task_id,
-)
-
 from omega_prime.dashboard.config import DashboardConfig, load_dashboard_config
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.poller import (
@@ -32,6 +26,11 @@ from omega_prime.dashboard.poller import (
     LOCAL_SOURCES,
     CollectorSpec,
     DashboardPoller,
+)
+from omega_prime.dashboard.task_ids import (
+    allocate_task_id,
+    assign_task_ids,
+    next_task_id,
 )
 
 
@@ -197,7 +196,12 @@ def main(
             assign_parser.add_argument("--id", required=True)
             assign_parser.add_argument("--title", required=True)
             parsed = assign_parser.parse_args(raw_argv[1:])
-            result = allocate_task_id(path=tasks_path, identity=parsed.id, title=parsed.title, now=datetime.now(UTC))
+            result = allocate_task_id(
+                path=tasks_path,
+                identity=parsed.id,
+                title=parsed.title,
+                now=datetime.now(UTC),
+            )
             print(result["display_id"], file=stdout or sys.stdout)
             return 0
         argparse.ArgumentParser(prog="assign-ids").parse_args(raw_argv[1:])
@@ -205,7 +209,11 @@ def main(
         return 0
     parser = argparse.ArgumentParser(description="Local read-only task dashboard")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("OMEGA_PRIME_DASHBOARD_PORT", "7421")))
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("OMEGA_PRIME_DASHBOARD_PORT", "7421")),
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--stop", action="store_true")
     args = parser.parse_args(raw_argv)
@@ -278,6 +286,7 @@ def main(
             window_hours=config.window_hours,
             task_ids_path=tasks_path,
         )
+
     factory = poller_factory if poller_factory is not None else build_poller
     if args.once:
         poller = factory()

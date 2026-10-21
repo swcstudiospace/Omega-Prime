@@ -98,7 +98,8 @@ def test_github_body_marker_wins_over_bot_comment() -> None:
         return 200, b"[]"
 
     result = make_github_collector(
-        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport,
+        env={"GITHUB_PAT_DESK_LEAD": "token"},
+        transport=transport,
         repo="swcstudiospace/omes-bot",
     )()
     assert result.items[0]["greptile"] == "3/5"
@@ -115,7 +116,8 @@ def test_github_ignores_human_score_comment() -> None:
         return 200, b"[]"
 
     result = make_github_collector(
-        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport,
+        env={"GITHUB_PAT_DESK_LEAD": "token"},
+        transport=transport,
         repo="swcstudiospace/omes-bot",
     )()
     assert result.items[0]["greptile"] == "not reviewed"
@@ -155,7 +157,8 @@ def test_github_latest_bot_comment_beats_matching_review() -> None:
         ).encode()
 
     result = make_github_collector(
-        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport,
+        env={"GITHUB_PAT_DESK_LEAD": "token"},
+        transport=transport,
         repo="swcstudiospace/omes-bot",
     )()
     assert result.items[0]["greptile"] == "2/5"
@@ -175,7 +178,8 @@ def test_github_review_score_matches_capitalized_score() -> None:
         )
 
     result = make_github_collector(
-        env={"GITHUB_PAT_DESK_LEAD": "token"}, transport=transport,
+        env={"GITHUB_PAT_DESK_LEAD": "token"},
+        transport=transport,
         repo="swcstudiospace/omes-bot",
     )()
     assert result.items[0]["greptile"] == "4/5"
