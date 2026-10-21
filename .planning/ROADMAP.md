@@ -217,4 +217,14 @@ Local implementation and offline verification are recorded in `106-SUMMARY.md`. 
 **Goal:** Interactive per-task Herdr terminal (xterm.js over a token-gated loopback websocket, read-only switch), live /ws/events deltas replacing polling with backoff + SSE fallback, and tasks.json kept current through heartbeats, a stale detector and a reconciler.
 **Depends on:** Phase 106 + herdr_launch (#59, 4016ef8). Branch `feat/herdr-ws`.
 **Contract:** `.planning/phases/115-herdr-live-terminals/115-UPLIFT.xml`; tracking in `115-TRACKING.md`.
-**Plans:** TBD by plan stage (wave 1 backend, wave 2 events + frontend).
+**Plans:** Four plans in two waves. Files are disjoint within each wave; cross-wave extensions to `app.py`/`poller.py`/`__main__.py` are ordered by dependency.
+
+**Wave 1**
+- [x] 115-01-PLAN.md — heartbeats, stale detector, reconciler CLI: status_file liveness fields, `stale.py`, poller-applied `stale` inside task rows, dry-run-by-default `reconcile.py`.
+- [x] 115-02-PLAN.md — token-gated `/ws/tasks/{id}/terminal` websocket: `terminal_ws.py` ANSI-preserving redaction, `/api/session` token, `/ws/` guard admission, `--terminal-readonly`.
+
+**Wave 2**
+- [x] 115-03-PLAN.md — after 115-01: `/ws/events` typed deltas with heartbeat and 16-connection cap (`events.py`), poller `nudge` + tasks.json stat watcher, `__main__` wiring.
+- [x] 115-04-PLAN.md — after 115-02/03: `/ws/events` tier in useDashboard with jittered backoff and SSE fallback, interactive xterm TerminalPanel, STALE badges, sole `static/cc` rebuild.
+
+Local implementation and offline verification are recorded in `115-SUMMARY.md` (ACs a1–a7 mapped to evidence). Live-Herdr checks and the 7421 server swap remain outer-driver work. Local commits only; no push, merge, or deploy.
