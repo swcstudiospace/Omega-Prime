@@ -1,0 +1,52 @@
+{
+  "task_id": "task00025-phase106-plan-check",
+  "bot": "bot-00-omega-prime",
+  "reviewer": "Phase106Checker",
+  "completed_at": "2026-10-21T08:25:09Z",
+  "scope": "Independent pre-execution static review of five phase-106 plans; no product changes or application verification",
+  "ownership": "omega_prime/ownership.yaml last matching rule resolves this receipt and reviewed planning paths to bot-00-omega-prime",
+  "commands": [
+    {"cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query agent-skills gsd-plan-checker --skills-only && node .claude/gsd-core/bin/gsd-tools.cjs query init.phase-op 106 && node .claude/gsd-core/bin/gsd-tools.cjs query phase.list-plans 106 && node .claude/gsd-core/bin/gsd-tools.cjs query roadmap.get-phase 106", "exit_code": 0, "output_tail": "No configured skills; phase found; five plans; roadmap phase goal loaded"},
+    {"cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query verify.plan-structure .planning/phases/106-command-center-polish/106-01-PLAN.md", "exit_code": 0, "output_tail": "valid true; 3 tasks; no structure errors/warnings"},
+    {"cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query verify.plan-structure .planning/phases/106-command-center-polish/106-02-PLAN.md", "exit_code": 0, "output_tail": "valid true; 2 tasks; no structure errors/warnings"},
+    {"cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query verify.plan-structure .planning/phases/106-command-center-polish/106-03-PLAN.md", "exit_code": 0, "output_tail": "valid true; 2 tasks; no structure errors/warnings"},
+    {"cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query verify.plan-structure .planning/phases/106-command-center-polish/106-04-PLAN.md", "exit_code": 0, "output_tail": "valid true; 3 tasks; no structure errors/warnings"},
+    {"cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query verify.plan-structure .planning/phases/106-command-center-polish/106-05-PLAN.md", "exit_code": 0, "output_tail": "valid true; 3 tasks; no structure errors/warnings"},
+    {"cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query estimate-check --tokens 20000 --calibrated", "exit_code": 0, "output_tail": "budget 100000; over_budget false; confidence low; sample_count 0"},
+    {"cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query estimate-check --tokens 38000 --calibrated", "exit_code": 0, "output_tail": "budget 100000; over_budget false; confidence low; sample_count 0"},
+    {"cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query estimate-check --tokens 48000 --calibrated", "exit_code": 0, "output_tail": "budget 100000; over_budget false; confidence low; sample_count 0"},
+    {"cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query estimate-check --tokens 58000 --calibrated", "exit_code": 0, "output_tail": "budget 100000; over_budget false; confidence low; sample_count 0"},
+    {"cmd": "sha256sum /sandbox/home/refs/106-UPLIFT.xml .planning/phases/106-command-center-polish/106-UPLIFT.xml /sandbox/home/refs/ADDENDUM-model-buckets.md .planning/phases/106-command-center-polish/106-ADDENDUM-model-buckets.md", "exit_code": 0, "output_tail": "Uplift copies match 450e0ae3b366adb31f7c837bc37c9e6b39e91c363eb70c76b1e49d4bfdc78ad4; addendum copies match edc03ddf7ec9414bd7f230690bef790bebe732b4e85a3b6d3a88ce2f717dd7f2"}
+  ],
+  "claims": [
+    {"claim": "All five plan structures were accepted by the read-only structure validator", "evidence_command_index": 1, "additional_evidence_command_indices": [2,3,4,5]},
+    {"claim": "All supplied calibrated plan estimates are below the configured budget, but confidence is low with no completed calibration samples", "evidence_command_index": 6, "additional_evidence_command_indices": [7,8,9]},
+    {"claim": "Reviewed uplift and addendum copies are byte-identical to supplied references", "evidence_command_index": 10}
+  ],
+  "static_review": {
+    "status": "issues_found",
+    "blockers": 1,
+    "warnings": 1,
+    "info": 0,
+    "findings": [
+      "106-05 baseline identity-sanitizing wire-emitter tests invented behavior rather than ad3942b product behavior; AC8 evidence must target the real baseline endpoint",
+      "Section-aware source-notice contract has no planned CiCd caller migration; existing CiCd passes only aggregate reason and timestamp to ViewState"
+    ],
+    "manifest_observations": "Task files exactly equal declared manifests; no same-wave overlaps; 01/02/03/04/05 have 14/3/8/28/15 declared file entries; 13 tasks total. Large fixed partitions and narrow05 prerequisite exception explicitly approved.",
+    "provided_probes": "Consumed user-supplied failure-direction result: 37 commands, zero blockers/warnings; path probe not_applicable, all forms unrecognized, no read error. Neither probe rerun and path result not represented as path proof.",
+    "threat_ids": "T-106-01 through T-106-18 occur once each. T-106-SC deliberately denotes the shared supply-chain threat in all five plans, explicitly documented by VALIDATION.md."
+  },
+  "unverified": [
+    "rule adherence by future agents",
+    "Product implementation and every FAIL-ad3942b/PASS-polish regression: tests are future plan content and were not executed",
+    "Full Python/frontend suites, builds, lint, types, formatters, dependency installation and polyglot-check: prohibited in this planning assignment",
+    "Live GitHub/Herdr, process lifecycle behavior, real terminal redaction, host7441 browser observations and five screenshots: outer-driver execution gates",
+    "No secret scanner was run; no no-secrets verification claim is made",
+    "Planning revisions made after the reviewed snapshots require targeted re-review"
+  ],
+  "files_changed": [".receipts/bot-00-omega-prime/task00025-phase106-plan-check.json"],
+  "contract_changes": [],
+  "rollback_plan": null,
+  "approvals": [],
+  "approved_by": null
+}

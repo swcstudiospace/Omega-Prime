@@ -1,0 +1,58 @@
+{
+  "task_id": "task00025-phase106-planner",
+  "bot": "bot-00-omega-prime",
+  "stage": "planning-only",
+  "commands": [
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query agent-skills gsd-planner --skills-only && node .claude/gsd-core/bin/gsd-tools.cjs query estimate-calibration && node .claude/gsd-core/bin/gsd-tools.cjs graphify status && node .claude/gsd-core/bin/gsd-tools.cjs query history-digest",
+      "cwd": "/sandbox/work",
+      "exit_code": 0,
+      "output_tail": "No configured skill block emitted; calibration factor 1, sample_count 0, confidence low; graphify disabled; history digest returned."
+    },
+    {
+      "cmd": "git ls-files -- omega_prime/dashboard omega_prime/tests/test_dashboard_model.py omega_prime/tests/test_dashboard_process_collectors.py omega_prime/tests/test_dashboard_task_ids.py omega_prime/tests/test_dashboard_snapshot_contract.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_integration.py omega_prime/tests/test_dashboard_github_command_center.py omega_prime/tests/test_dashboard_github_cache.py omega_prime/tests/test_dashboard_app_fixes.py omega_prime/tests/test_dashboard_command_center_static.py docs/dashboard.md CHANGELOG.md .claude/gsd-core/bin/gsd-tools.cjs",
+      "cwd": "/sandbox/work",
+      "exit_code": 0,
+      "output_tail": "Tracked dashboard sources, existing regression modules, docs/dashboard.md and CHANGELOG.md were returned. Runtime GSD launcher was used as tooling, not an edit target."
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Estimate blocks use the observed project calibration factor 1 and derived confidence low with zero samples.",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "Existing product edit-target paths were grounded in tracked dashboard/test/documentation paths; proposed new modules and tests are labelled as new plan artifacts.",
+      "evidence_command_index": 1
+    }
+  ],
+  "artifact_write_observations": [
+    "Write tool acknowledged creation of 106-01-PLAN.md through 106-05-PLAN.md and 106-VALIDATION.md; scoped edits integrated JSON serialization and shared review wording instructions.",
+    "Ownership input was read: broad and later Python/TypeScript rules resolve to bot-00-omega-prime, with planning/receipt paths covered by the broad rule."
+  ],
+  "files_changed": [
+    ".planning/phases/106-command-center-polish/106-01-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-02-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-03-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-04-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-05-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-VALIDATION.md",
+    ".receipts/bot-00-omega-prime/task00025-phase106-planner.json"
+  ],
+  "contract_changes": [
+    "Planning artifacts only: exactly five plans, two source waves, explicit05 task1 prerequisite exception and04/05 single-builder barriers.",
+    "No product source, test implementation, generated assets, dependency lock, roadmap, state or tracker row was changed by this planner."
+  ],
+  "unverified": [
+    "Plan frontmatter/structure/source-grounding validation and independent checker review are delegated to Main; no plan checker was run by this planner.",
+    "All implementation behavior, regression tests, fail-on-ad3942b/pass-after evidence, full Python/frontend suites, builds, lint, types and polyglot-check remain execution work.",
+    "Live GitHub/Herdr behavior, host7441 guard/no-input/no-secret observations, responsive visual inspection and five screenshots remain outer-driver evidence.",
+    "Receipt/source secret scans were not run during this planning-only assignment; no no-secrets verification claim is made.",
+    "Parent local planning commit and later authorized local implementation commits are not performed by this planner; no PR or remote operation occurred here.",
+    "rule adherence by future agents"
+  ],
+  "rollback_plan": "No runtime state was changed. Parent can revise the six new planning artifacts using scoped edits before execution.",
+  "approvals": [
+    "All supplied defaults approved; narrow05-owned TerminalPanel prerequisite scheduling exception explicitly approved in assignment."
+  ]
+}

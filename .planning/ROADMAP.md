@@ -193,3 +193,21 @@ Greptile 5/5 and the merge yes remain operator steps.
 - [x] 105-05-PLAN.md — W5 (after W4): Command Center documentation, attributions and final offline verification — completed; broad dashboard selection remains blocked by missing `mcp` and `apscheduler` dependencies.
 
 Cross-cutting constraints: no product implementation during planning; no runtime Node or external-origin CSP; no network in Python tests; no write actions in the server/UI. Outer driver owns signed sandbox evidence (a6), live GitHub parity (a2/a3), screenshots (a7), export/push/draft PR and Greptile loop. No merge.
+
+### Phase 106: Command Center polish
+
+**Goal:** Fix bounded recent-merges fetching, duplicate default-branch cards and branch Greptile states; add deep-linkable bucket/task views, denser rows, correct Active/Finished/Idle session grouping and a redacted, read-only live Herdr terminal.
+**Depends on:** Phase 105 (`feat/command-center` at `ad3942b`); local work stays on `feat/command-center-polish`.
+**Contract:** `.planning/phases/106-command-center-polish/106-UPLIFT.xml`; approved defaults and the model-bucket addendum are locked in `106-CONTEXT.md`.
+**Plans:** Exactly five plans in two waves. Files are disjoint within each wave; cross-wave extensions are explicitly ordered.
+
+**Wave 1**
+- [ ] 106-01-PLAN.md — bounded recent-merges fetch and honest oversize degradation; terminal task/idle session model fixes and regression tests.
+- [ ] 106-02-PLAN.md — backend-first CI/CD branch de-duplication with live-shaped Vitest fixtures; no generated assets.
+- [ ] 106-04-PLAN.md — hash routes, bucket/task detail views, density and Idle sessions UI; sole wave-1 `static/cc` rebuild after 106-02.
+
+**Wave 2**
+- [ ] 106-03-PLAN.md — after 106-01/02: merged-PR Greptile enrichment and explicit card wording.
+- [ ] 106-05-PLAN.md — after 106-04: validated task/pane mapping and bounded read-only terminal SSE; sole wave-2 `static/cc` rebuild after 106-03.
+
+Planning only in this stage. Execution uses offline fake transports/runners and named fail-on-`ad3942b` regressions. The outer driver owns live GitHub/Herdr and five screenshots on isolated `127.0.0.1:7441` with a throwaway HOME. No access to the live 7421 service or real task store; local commits only, no push/merge/deploy. Draft PR remains deferred until a remote and working authentication exist.

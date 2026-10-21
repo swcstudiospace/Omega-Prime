@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v21
-milestone_name: Task Dashboard (Phases 104–105) — in progress
-current_phase: 105
-current_phase_name: Omega Prime Command Center
+milestone_name: Task Dashboard
+current_phase: 106
+current_phase_name: Command Center polish
 status: Phase 105 implementation and offline verification complete with recorded limitations; live GitHub parity, browser review, signed sandbox evidence, and real-data screenshots remain outer-driver obligations.
 stopped_at: Phase 105 local implementation complete; no milestone audit, completion, cleanup, export, push, or merge was run.
-last_updated: "2026-10-20"
-state_head: 3d1fadf1ed67b8e9b805e5e2da5444dd7b03f37d
+last_updated: "2026-10-21T08:43:12.765Z"
+state_head: ad3942b0c18db0c0f845746642323e075dada117
 progress:
-  total_phases: 2
+  total_phases: 3
   completed_phases: 1
-  total_plans: 12
+  total_plans: 17
   completed_plans: 12
-  percent: 100
+  percent: 0
 last_activity: 2026-10-20
 current_plan: 05
 last_activity_desc: Phase 105 W1–W5 implementation plans completed; frontend/doc/dashboard-specific checks pass; broad dashboard collection fails on missing mcp/apscheduler and setuptools package collection remains unavailable
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 
 ## Current Position
 
-Phase: 105 (Omega Prime Command Center) — implementation complete; external acceptance pending.
+Phase: 106 (Command Center polish) — READY TO EXECUTE
 Plan: 05 (5/5 plans complete; 105-05-SUMMARY.md records evidence and limitations).
 Status: Frontend install/tests/build and build-asset inspection passed; dashboard-specific tests passed after a deterministic timeout-fixture correction; docs/public-repo tests passed. The required broad dashboard selector exited 2 during collection because `mcp` and `apscheduler` are absent. The real package-data expansion check was skipped because setuptools is absent. Do not install Python packages or conceal these limits. No milestone audit/complete/cleanup, export, push, PR, restart of 7421, or merge was run.
 
