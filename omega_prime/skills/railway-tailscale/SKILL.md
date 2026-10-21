@@ -9,7 +9,7 @@ gates: [G-5, G-6]
 
 ## Served tools
 
-Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+Use only tools available in the Omega Prime registry. The external Desk Gateway is optional. In Solo mode, `not_configured: solo` is terminal and does not authorize an external transport. Use an external Desk only when Solo is off and Desk is explicitly configured, and only after a served tool returns `not_configured`.
 
 ## When this applies (L1)
 

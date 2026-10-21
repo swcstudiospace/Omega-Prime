@@ -1,0 +1,107 @@
+{
+  "task_id": "bump-pillow-13-pip-audit",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T21:28:00Z",
+  "completed_at": "2026-10-20T21:44:00Z",
+  "commands": [
+    {
+      "cmd": "/tmp/audit-venv/bin/python -m pip_audit --progress-spinner off -r /workspace/requirements-lock.txt --ignore-vuln PYSEC-2026-4114",
+      "exit_code": 0,
+      "duration_s": 10.8,
+      "output_tail": "No known vulnerabilities found, 2 ignored"
+    },
+    {
+      "cmd": "/tmp/lock-venv/bin/pip install -q -r /workspace/requirements-lock.txt && /tmp/lock-venv/bin/pip check && /tmp/lock-venv/bin/python -c \"import PIL, pyrit, reportlab; print('lock pillow', PIL.__version__)\"",
+      "exit_code": 0,
+      "duration_s": 54.4,
+      "output_tail": "No broken requirements found.\nlock pillow 13.0.0"
+    },
+    {
+      "cmd": "/tmp/omega-venv/bin/python -c \"from PIL import Image, ImageFile; import numpy as np; from pyrit.converter.transparency_attack_converter import TransparencyAttackConverter; from reportlab.pdfgen.canvas import Canvas; im = Image.fromarray(np.zeros((2, 2, 3), dtype=np.uint8), mode='RGB'); assert im.mode == 'RGB'; assert not hasattr(Image.Image, 'get_child_images'); assert not hasattr(Image, '_show'); assert not hasattr(Image.ExifTags.IFD, 'Makernote'); assert hasattr(ImageFile.ImageFile, 'get_child_images'); print('pillow', Image.__version__, 'consumers import')\"",
+      "exit_code": 0,
+      "duration_s": 0.5,
+      "output_tail": "pillow 13.0.0 consumers import"
+    },
+    {
+      "cmd": "/tmp/omega-venv/bin/python -m ruff check omega_prime/ && /tmp/omega-venv/bin/python -m ruff format --check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.3,
+      "output_tail": "All checks passed!\n591 files already formatted"
+    },
+    {
+      "cmd": "/tmp/omega-venv/bin/python -m mypy omega_prime/",
+      "exit_code": 0,
+      "duration_s": 40.5,
+      "output_tail": "Success: no issues found in 464 source files"
+    },
+    {
+      "cmd": "/tmp/omega-venv/bin/python -m pytest omega_prime/tests -q --tb=line",
+      "exit_code": 0,
+      "duration_s": 195.4,
+      "output_tail": "4872 passed, 20 skipped, 16 warnings in 195.43s"
+    },
+    {
+      "cmd": "/tmp/omega-venv/bin/python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q --tb=line && /tmp/omega-venv/bin/python -m omega_prime.tooling.catalog --check && /tmp/omega-venv/bin/python -m omega_prime.tooling.plugin --check && /tmp/omega-venv/bin/python -m omega_prime.tooling.prompt_format --check && VIRTUAL_ENV=/tmp/omega-venv bash omega_prime/scripts/assemble-prompts.sh --check",
+      "exit_code": 0,
+      "duration_s": 7.2,
+      "output_tail": "31 passed in 0.65s\ncatalog --check: /workspace/docs/tool-catalog.md up to date\nplugin --check: 66 generated files up to date\nprompt_format --check: all prompts conform to the XML standard\nassemble-prompts --check: OMEGA_PRIME up to date"
+    },
+    {
+      "cmd": "/tmp/omega-venv/bin/python -m omega_prime.evals.runner omega_prime/evals/cases && /tmp/omega-venv/bin/python -m omega_prime.grokbot.readiness --root . --json",
+      "exit_code": 0,
+      "duration_s": 9.9,
+      "output_tail": "26 passed, 0 failed\nTrue local-only"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "pip-audit of requirements-lock.txt, with the existing PYSEC-2026-4114 ignore and no new ignores, exits 0 and reports no known vulnerabilities",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "The updated lock installs on Python 3.12, pip check is clean, and the installed pillow version is 13.0.0",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "pyrit and reportlab import under pillow 13.0.0. Image.Image.get_child_images, Image._show, and ExifTags.IFD.Makernote are absent. Image.fromarray still accepts a uint8 RGB array with mode RGB",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "ruff check and ruff format --check on omega_prime/ exit 0",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "mypy on omega_prime/ exits 0",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "The pytest suite passes: 4872 passed, 20 skipped",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "docs and public-repo tests pass (31), and catalog, plugin, prompt_format, and assemble-prompts --check exit 0",
+      "evidence_command_index": 6
+    },
+    {
+      "claim": "Eval cases pass (26 passed, 0 failed) and readiness reports ok for the local-only profile",
+      "evidence_command_index": 7
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Pull request CI and the Greptile score were not observed; this receipt records local commands only",
+    "The pre-change pip-audit run exited 1 with eight pillow 12.3.0 CVEs (CVE-2026-112895, CVE-2026-112400, CVE-2026-112397, CVE-2026-112896, CVE-2026-112897, CVE-2026-112395, CVE-2026-112404, CVE-2026-112899), all fixed in 13.0.0. That command is not listed because re-running it on this tree audits pillow 13.0.0",
+    "setup_check exited 1 because SUBSTRATE_URL is unset in this environment. Roster, template, assembly, plugin, and registry checks in that run passed. setup_check is not a CI job",
+    "Python 3.13 and 3.14 matrices were not run locally",
+    "redteam submodule was not initialized, so redteam-provenance and the redteam npm audit were not run",
+    "desk_brief and desk_ownership_resolve failed because the desk MCP OAuth provider could not issue a token. Ownership was resolved from omega_prime/ownership.yaml: requirements-lock.txt matches ** and is owned by bot-00-omega-prime",
+    "No first-party image was encoded or decoded. This repository has no PIL imports. Compatibility evidence is the Pillow 13 API check, pyrit and reportlab imports, the lock install, and the test suite"
+  ],
+  "files_changed": [
+    ".receipts/bot-00-omega-prime/bump-pillow-13-pip-audit.json",
+    "requirements-lock.txt"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "Revert the pillow pin in requirements-lock.txt to 12.3.0.",
+  "approvals": []
+}

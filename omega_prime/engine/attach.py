@@ -122,6 +122,7 @@ def route_turn(
     conversation_history: list | None,
     env: Mapping[str, str] | None = None,
     task_id: str | None = None,
+    interrupt: Any | None = None,
 ) -> dict[str, Any] | None:
     """Run one turn on omp, or return None so the caller keeps the Python loop.
 
@@ -153,6 +154,7 @@ def route_turn(
         plan=getattr(agent, "engine_plan", None),
         env=mapping,
         job_id=getattr(agent, "engine_job_id", None),
+        interrupt=interrupt,
     )
     if not result.ok:
         if mode == "required" or forced or result.started:
@@ -230,8 +232,8 @@ def _refused(
             "messages": messages,
             "api_calls": 0,
             "completed": False,
-            "interrupted": False,
-            "failed": True,
+            "interrupted": result.reason == "cancelled",
+            "failed": result.reason != "cancelled",
             "turn_exit_reason": result.reason or "engine",
             "engine": {
                 "reason": result.reason,
@@ -248,6 +250,7 @@ def delegate_via_engine(
     *,
     env: Mapping[str, str] | None = None,
     cwd: str | None = None,
+    interrupt: Any | None = None,
 ) -> str | None:
     """JSON summary from omp, or None when the Python child path should run."""
     mapping = _mapping(env)
@@ -259,7 +262,7 @@ def delegate_via_engine(
         return None
     if not ready and mode == "required":
         return json.dumps({"error": reason}, ensure_ascii=False)
-    result = run(goal, env=mapping, cwd=cwd)
+    result = run(goal, env=mapping, cwd=cwd, interrupt=interrupt)
     if not result.ok:
         if mode == "required" or result.started:
             return json.dumps(

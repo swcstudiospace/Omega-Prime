@@ -172,6 +172,7 @@ def run_conversation(
                 system_message=system_message,
                 conversation_history=history,
                 task_id=task_id,
+                interrupt=agent.interrupt,
             )
         if routed is not None:
             return _seal_engine_turn(agent, routed, since)
@@ -236,6 +237,11 @@ def _token_usage(raw: Any) -> dict[str, int] | None:
 
 def _seal_engine_turn(agent: Agent, routed: dict, since: int) -> dict:
     """Journal the engine turn and charge goal and autonomous accounting."""
+    if routed.get("interrupted"):
+        interrupt = agent.interrupt
+        if interrupt is not None:
+            routed["interrupt_message"] = getattr(interrupt, "message", None)
+            interrupt.clear()
     messages = routed.get("messages")
     rows = messages if isinstance(messages, list) else []
     run_id = _begin_journal(agent)

@@ -252,6 +252,38 @@ def test_git_ref_with_a_token_component_still_rejects():
     assert ref not in message
 
 
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "refs/heads/dependabot/submodules/prime-agent-763094e",
+        "refs/heads/dependabot/github_actions/actions/setup-node-7",
+        "refs/heads/dependabot/uv/tenacity-9.2.1",
+    ],
+)
+def test_dependabot_branch_ref_is_not_a_bare_token(ref: str):
+    """Dependabot refs in image evidence must not trip the gate (PR #21)."""
+    assert_no_secrets(json.dumps({"ref": ref}, sort_keys=True), "image-evidence")
+    assert_no_secrets(ref, "image-evidence")
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "dependabot/submodules/" + _GENERIC_RUN,
+        "dependabot/pip/" + _GENERIC_RUN[:18] + "/" + _GENERIC_RUN[18:],
+        "dependabot/" + _GENERIC_RUN[:18] + "/" + _GENERIC_RUN[18:],
+    ],
+)
+def test_dependabot_prefix_cannot_launder_a_token(branch: str):
+    """Only the fixed ``dependabot/<ecosystem>/`` prefix is provenance."""
+    ref = "refs/heads/" + branch
+    with pytest.raises(SecretLeakError) as excinfo:
+        assert_no_secrets(ref, "image-evidence")
+    message = str(excinfo.value)
+    assert "token-pattern" in message
+    assert ref not in message
+
+
 def test_slash_inside_a_non_ref_token_still_rejects():
     """``/`` stays a token character outside a Git ref, so base64 is unchanged."""
     token = _synthetic_body(24) + "/" + _synthetic_body(24, start=9)

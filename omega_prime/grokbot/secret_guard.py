@@ -63,6 +63,35 @@ _UUID_RE = re.compile(
 #: ``refs/pull/N/merge`` and ``refs/heads/main`` stay under 32 characters.
 _REF_SEGMENT_RE = re.compile(r"\A[A-Za-z0-9._\-]+\Z")
 _GIT_REF_KINDS = frozenset({"heads", "tags", "remotes", "pull"})
+#: ``dependabot/<ecosystem>/`` is Dependabot's fixed branch prefix. Like
+#: ``refs/heads/`` it is provenance, so it is not part of the judged branch.
+#: Only these known ecosystem names count; anything else stays judged.
+_DEPENDABOT_ECOSYSTEMS = frozenset(
+    {
+        "bun",
+        "bundler",
+        "cargo",
+        "composer",
+        "devcontainers",
+        "docker",
+        "docker_compose",
+        "elm",
+        "github_actions",
+        "go_modules",
+        "gradle",
+        "helm",
+        "hex",
+        "maven",
+        "npm_and_yarn",
+        "nuget",
+        "pip",
+        "pub",
+        "submodules",
+        "swift",
+        "terraform",
+        "uv",
+    }
+)
 
 _MIN_CANDIDATE_LEN = 32
 _MIN_ENTROPY_BITS = 4.2
@@ -157,7 +186,16 @@ def _git_ref_branch(candidate: str) -> list[str] | None:
         return None
     if not all(_REF_SEGMENT_RE.fullmatch(part) for part in parts[2:]):
         return None
-    return parts[2:]
+    branch = parts[2:]
+    if (
+        len(branch) > 2
+        and branch[0] == "dependabot"
+        and branch[1] in _DEPENDABOT_ECOSYSTEMS
+    ):
+        # ``dependabot/submodules/prime-agent-763094e`` joined is ordinary
+        # words, yet its letter mix crosses the entropy cutoff (PR #21).
+        return branch[2:]
+    return branch
 
 
 def _token_shape(candidate: str) -> bool:

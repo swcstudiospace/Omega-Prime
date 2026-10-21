@@ -2,13 +2,24 @@
   "contract": "1.0.0",
   "flavor": "core",
   "milestone": "v20 — Wiring",
-  "phases": [97, 98, 99, 100, 101, 102, 103],
-  "current_phase": 103,
-  "status": "in_progress",
+  "phases": [
+    {
+      "number": 99,
+      "name": "Solo mode, Desk optional",
+      "status": "completed",
+      "directory": ".planning/phases/99-solo-mode-desk-optional"
+    },
+    {
+      "number": 103,
+      "name": "Ultrathink integration and cleanup",
+      "status": "completed",
+      "directory": ".planning/phases/103-ultrathink-integration-and-cleanup"
+    }
+  ],
   "next": {
-    "command": "Continue v20 Wiring phases 97–102",
-    "label": "Continue v20 Wiring",
-    "reason": "Phase 103 is implemented on this branch; phases 97–102 remain unverified here. Full-suite verification requires an initialized prime-agent submodule and resolution of the unregistered Tempest tools."
+    "command": "/skill:gsd-autonomous 97",
+    "label": "Execute Phase 97 plan",
+    "reason": "Five Phase 97 execution plans are staged (01–05); planning is complete and independent units may proceed after separate manual invocation. Authoritative upstream schema confirmation is required before server-specific implementation."
   },
   "updated_at": "2026-10-21"
 }

@@ -9,10 +9,18 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import replace as replace_dataclass
 from typing import Any
 
 from omega_prime.credentials.redact import redact_text
+from omega_prime.memory.backends import (
+    LegacyRecord,
+    LocalRecord,
+    decode_local_record,
+    encode_local_record,
+)
 from omega_prime.memory.store import MemoryStore
 
 INDICATOR_GLYPH = "🧠"
@@ -78,8 +86,13 @@ class MemoryProvider(ABC):
 class BuiltinMemoryProvider(MemoryProvider):
     """Recall and writes go through one ``MemoryStore``."""
 
-    def __init__(self, store: MemoryStore) -> None:
+    def __init__(
+        self,
+        store: MemoryStore,
+        retain: Callable[[str], dict[str, Any]] | None = None,
+    ) -> None:
         self.store = store
+        self._retain = retain
         self._session_id = ""
 
     @property
@@ -144,21 +157,109 @@ class BuiltinMemoryProvider(MemoryProvider):
             content = payload.get("new_text")
         old_text = payload.get("old_text")
         if action == "add":
+            if target == "memory" and self._retain is not None:
+                return json.dumps(
+                    self._retain("" if content is None else content), ensure_ascii=False
+                )
             result = self.store.add(target, "" if content is None else content)
         elif action == "replace":
-            result = self.store.replace(
-                target,
-                "" if old_text is None else old_text,
-                "" if content is None else content,
-            )
+            old_value = "" if old_text is None else old_text
+            new_value = "" if content is None else content
+            record_match = self._local_record_match(target, old_value)
+            if isinstance(record_match, dict):
+                result = record_match
+            elif record_match is not None:
+                stored, record = record_match
+                if record is None:
+                    result = self.store.replace(target, stored, new_value)
+                elif not isinstance(new_value, str) or not new_value.strip():
+                    result = {"success": False, "error": "Content cannot be empty."}
+                elif "§" in new_value:
+                    result = {
+                        "success": False,
+                        "error": "Entry contains the delimiter character §.",
+                    }
+                elif isinstance(record, LegacyRecord):
+                    result = self.store.replace(
+                        target,
+                        stored,
+                        f"[hindsight:{record.bank}] {new_value.strip()}",
+                    )
+                else:
+                    updated_record = replace_dataclass(
+                        record, content=new_value.strip()
+                    )
+                    result = self.store.replace(
+                        target, stored, encode_local_record(updated_record)
+                    )
+            elif target == "memory":
+                result = {
+                    "success": False,
+                    "error": (
+                        f"No entry matched '{old_value.strip()}'."
+                        if isinstance(old_value, str)
+                        else "old_text must be a string."
+                    ),
+                }
+            else:
+                result = self.store.replace(target, old_value, new_value)
         elif action == "remove":
-            result = self.store.remove(target, "" if old_text is None else old_text)
+            old_value = "" if old_text is None else old_text
+            record_match = self._local_record_match(target, old_value)
+            if isinstance(record_match, dict):
+                result = record_match
+            elif record_match is not None:
+                result = self.store.remove(target, record_match[0])
+            elif target == "memory":
+                result = {
+                    "success": False,
+                    "error": (
+                        f"No entry matched '{old_value.strip()}'."
+                        if isinstance(old_value, str)
+                        else "old_text must be a string."
+                    ),
+                }
+            else:
+                result = self.store.remove(target, old_value)
         else:
             result = {
                 "success": False,
                 "error": f"Unknown action '{action}'. Use add, replace, or remove.",
             }
         return json.dumps(result, ensure_ascii=False)
+
+    def _local_record_match(
+        self, target: str, old_text: str
+    ) -> tuple[str, LocalRecord | LegacyRecord | None] | dict[str, Any] | None:
+        """Find one logical memory entry by its plain or decoded content."""
+        if target != "memory" or not isinstance(old_text, str) or not old_text.strip():
+            return None
+        self.store.load_from_disk()
+        needle = old_text.strip()
+        candidates: list[tuple[str, str, LocalRecord | LegacyRecord | None]] = []
+        for stored in self.store.memory_entries:
+            bank_envelope = re.match(r"^\[hindsight:([^\[\]\r\n]+)\] ", stored)
+            if bank_envelope is None:
+                candidates.append((stored, stored, None))
+                continue
+            try:
+                record = decode_local_record(stored, bank_envelope.group(1))
+            except (TypeError, ValueError):
+                # Never allow raw matching to reach inside an encoded record.
+                continue
+            if isinstance(record, (LocalRecord, LegacyRecord)):
+                candidates.append((stored, record.content, record))
+        exact = [item for item in candidates if item[1] == needle]
+        matches = exact or [item for item in candidates if needle in item[1]]
+        if len(matches) > 1:
+            return {
+                "success": False,
+                "error": f"Multiple entries matched '{needle}'.",
+            }
+        if not matches:
+            return None
+        stored, _content, record = matches[0]
+        return stored, record
 
 
 __all__ = [

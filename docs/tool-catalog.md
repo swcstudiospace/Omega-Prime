@@ -297,7 +297,7 @@ Keep one memory entry. Needs receipt_path or source. Requires approval.
 - Approval: not required
 - Required params: query
 
-Recall memory banks matching a query. Read-only.
+Recall matching entries across configured memory backends. Read-only.
 
 ## lead_ownership_resolve
 
@@ -863,7 +863,7 @@ Claim a Graph-of-Thought node for this surface. Returns the lease (expiry + toke
 
 - Family: Substrate
 - Approval: required
-- Required params: graph_id, node_id
+- Required params: graph_id, node_id, lease_id
 
 Release this surface's claim on a node without marking it complete. Requires approval.
 
@@ -871,7 +871,7 @@ Release this surface's claim on a node without marking it complete. Requires app
 
 - Family: Substrate
 - Approval: required
-- Required params: graph_id, node_id
+- Required params: graph_id, node_id, lease_id
 
 Mark a node completed and drop its claim. Requires approval.
 
@@ -879,9 +879,9 @@ Mark a node completed and drop its claim. Requires approval.
 
 - Family: Substrate
 - Approval: not required
-- Required params: graph_id, node_id, token
+- Required params: graph_id, node_id, lease_id
 
-Refresh the lease TTL for an active claim using the token from the claim result.
+Refresh the lease TTL for an active claim using its lease_id.
 
 ## cron_jobs_list
 
