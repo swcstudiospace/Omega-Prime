@@ -25,7 +25,7 @@ from typing import Any
 from omega_prime.dashboard.status_file import _write_locked, locked_tasks
 
 Runner = Callable[[list[str]], str]
-_PANE = re.compile(r"^w\d+:p\d+$")
+_PANE = re.compile(r"^w[0-9A-Za-z]+:p[0-9A-Za-z]+$")
 _LABEL = re.compile(r"[^a-z0-9_-]+")
 
 

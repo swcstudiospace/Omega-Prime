@@ -106,5 +106,38 @@ def test_bad_pane_id_is_refused(tmp_path):
         )
 
 
+@pytest.mark.parametrize("pane_id", ["wA:p1", "w1F:pB"])
+def test_hex_numbered_pane_is_recorded(tmp_path, pane_id):
+    """Herdr numbers workspaces past w9 as wA, wB, ...; those panes must record."""
+    path = tmp_path / "tasks.json"
+    _empty(path)
+    record_pane(
+        path=path,
+        identity="gb:a",
+        title="a",
+        pane_id=pane_id,
+        workspace=None,
+        owner_ref="/w",
+        now=NOW,
+    )
+    with locked_tasks(path, write=False) as data:
+        assert data["tasks"][0]["herdr_pane"] == {"pane_id": pane_id}
+
+
+@pytest.mark.parametrize("pane_id", ["wA:p1;rm", "w:p1", "wA:", "../w1:p1"])
+def test_malformed_pane_ids_stay_refused(tmp_path, pane_id):
+    path = tmp_path / "tasks.json"
+    _empty(path)
+    with pytest.raises(ValueError):
+        record_pane(
+            path=path,
+            identity="gb:a",
+            title="a",
+            pane_id=pane_id,
+            workspace=None,
+            owner_ref="/w",
+        )
+
+
 def test_workspace_label_is_safe():
     assert workspace_label("gb:00031-Triage Run!") == "00031-triage-run"

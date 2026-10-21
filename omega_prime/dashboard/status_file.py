@@ -21,7 +21,7 @@ from omega_prime.dashboard.redact import redact_value
 
 _STATES = {"queued", "working", "blocked", "waiting_on_ove", "done", "failed"}
 _RESULTS = {"ok", "failed", "stopped"}
-_PANE_ID = re.compile(r"^w\d+:p\d+$")
+_PANE_ID = re.compile(r"^w[0-9A-Za-z]+:p[0-9A-Za-z]+$")
 
 
 
