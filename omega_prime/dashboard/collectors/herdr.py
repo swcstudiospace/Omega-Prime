@@ -62,6 +62,13 @@ def _collect_agents(value: Any, workspace: str | None = None) -> list[dict[str, 
                     "cwd": _text(node.get("cwd")),
                     "terminal_title": _text(node.get("terminal_title")),
                     "session_path": _text(session),
+                    "has_live_agent": (
+                        bool(_text(node.get("agent")))
+                        if "agent" in node
+                        else (isinstance(session, str) and bool(session))
+                        if "agent_session" in node
+                        else node.get("agent_status") in {"idle", "working", "blocked"}
+                    ),
                 }
             )
         child_scope = inherited_workspace or (

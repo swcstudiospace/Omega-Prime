@@ -137,6 +137,7 @@ def test_herdr_snapshot_allowlist_redaction_and_invocation() -> None:
         "cwd": "/tmp/work",
         "terminal_title": "[REDACTED]",
         "session_path": "/tmp/session.jsonl",
+        "has_live_agent": True,
     }
     assert leak not in json.dumps(result.items)
 

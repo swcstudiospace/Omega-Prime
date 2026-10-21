@@ -172,10 +172,10 @@ def test_tasks_json_state_mapping_and_order() -> None:
         ("tasks:3", "waiting_on_ove"),
         ("tasks:a", "idle"),
         ("tasks:z", "idle"),
-        ("tasks:4", "done"),
-        ("tasks:5", "failed"),
     ]
-    assert any(x.id == "tasks:4" for x in snap.finished)
+    assert {(item.id, item.result) for item in snap.finished} >= {
+        ("tasks:4", "ok"), ("tasks:5", "failed")
+    }
 
 
 def test_omega_job_never_finishes_from_quiet_minutes_alone() -> None:
