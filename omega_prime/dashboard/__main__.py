@@ -295,7 +295,13 @@ def main(
     poller = factory()
     from omega_prime.dashboard.app import create_app
 
-    app = create_app(poller, port=args.port, host=args.host, terminal_readonly=args.terminal_readonly)
+    app = create_app(
+        poller,
+        port=args.port,
+        host=args.host,
+        terminal_readonly=args.terminal_readonly,
+        tasks_path=tasks_path,
+    )
     pid = os.getpid()
     start = _process_start_time(pid)
     if start is None:

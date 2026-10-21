@@ -276,3 +276,8 @@ class DashboardPoller:
         now = time.monotonic()
         for spec in self.specs:
             self._next_due[spec.source] = now + max(0.0, spec.interval_s)
+
+    def nudge(self, source: str) -> None:
+        """Make one collector due immediately on the next scheduler tick."""
+        if any(spec.source == source for spec in self.specs):
+            self._next_due[source] = 0.0

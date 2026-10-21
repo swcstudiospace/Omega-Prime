@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 from starlette.websockets import WebSocket
@@ -113,6 +114,48 @@ class ConnectionLimiter:
 
     def release(self) -> None:
         self._active -= 1
+
+
+class TasksFileWatcher:
+    """Stat-poll the tasks.json path; fire on_change once per signature change.
+
+    The signature is ``(st_mtime_ns, st_size)`` with ``None`` meaning the file
+    is missing (a normal state before the first write). Never fires on the
+    baseline, never on unchanged stats, never twice for one change; stat
+    errors degrade to the missing-file signature instead of raising, and
+    nothing is logged. Cancellation propagates normally.
+    """
+
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        on_change: Any,
+        interval_s: float = EVENTS_WATCH_INTERVAL_S,
+        sleep: Any = asyncio.sleep,
+        stat: Any = None,
+    ) -> None:
+        self.path = Path(path)
+        self._on_change = on_change
+        self._interval_s = interval_s
+        self._sleep = sleep
+        self._stat = stat if stat is not None else (lambda: self.path.stat())
+
+    def _signature(self) -> tuple[int, int] | None:
+        try:
+            info = self._stat()
+        except OSError:
+            return None
+        return (info.st_mtime_ns, info.st_size)
+
+    async def run(self) -> None:
+        signature = self._signature()
+        while True:
+            await self._sleep(self._interval_s)
+            current = self._signature()
+            if current != signature:
+                signature = current
+                self._on_change()
 
 
 def make_events_ws_endpoint(

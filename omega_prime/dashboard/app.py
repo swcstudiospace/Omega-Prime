@@ -11,7 +11,7 @@ import secrets
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, MutableMapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TYPE_CHECKING, cast
 
 from starlette.applications import Starlette
 from starlette.responses import FileResponse, JSONResponse, Response
@@ -22,6 +22,9 @@ from omega_prime.dashboard.terminal import TerminalService, resolve_task_pane
 from omega_prime.dashboard.terminal_ws import HerdrBridge, make_terminal_ws_endpoint
 from omega_prime.dashboard import __version__
 from omega_prime.dashboard.poller import DashboardPoller
+
+if TYPE_CHECKING:
+    from omega_prime.dashboard.events import TasksFileWatcher
 
 _SECURITY_HEADERS = {
     "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'",
@@ -269,6 +272,8 @@ def create_app(
     terminal_bridge: HerdrBridge | None = None,
     terminal_auth_timeout_s: float = 5.0,
     terminal_input_per_s: int = 32,
+    tasks_path: Path | None = None,
+    tasks_watcher: TasksFileWatcher | None = None,
 ) -> Starlette:
     """Build the local dashboard application around a shared poller.
 
@@ -286,13 +291,25 @@ def create_app(
     from omega_prime.dashboard import events
 
     events_endpoint = events.make_events_ws_endpoint(poller, heartbeat_s=heartbeat_s)
+    watcher = tasks_watcher
+    if watcher is None and tasks_path is not None:
+        watcher = events.TasksFileWatcher(
+            tasks_path, on_change=lambda: poller.nudge("tasks_json")
+        )
 
     @asynccontextmanager
-    async def lifespan(_: Starlette) -> AsyncIterator[None]:
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
         await poller.start()
+        watcher_task: asyncio.Task[None] | None = None
+        if app.state.tasks_watcher is not None:
+            watcher_task = asyncio.create_task(app.state.tasks_watcher.run())
         try:
             yield
         finally:
+            if watcher_task is not None:
+                watcher_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await watcher_task
             await poller.stop()
 
     async def unavailable() -> Response:
@@ -467,4 +484,5 @@ def create_app(
         ],
     )
     app.add_middleware(_DashboardGuards, port=port, host=host)
+    app.state.tasks_watcher = watcher
     return app

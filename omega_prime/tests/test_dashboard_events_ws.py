@@ -9,16 +9,20 @@ import contextlib
 import json
 import time
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from omega_prime.dashboard import SourceResult
+from omega_prime.dashboard.__main__ import main
 from omega_prime.dashboard.app import create_app
 from omega_prime.dashboard.collectors.tasks_json import make_tasks_json_collector
 from omega_prime.dashboard.events import (
     EVENTS_WATCH_INTERVAL_S,
     EVENTS_WS_LIMIT,
+    TasksFileWatcher,
     compute_deltas,
 )
 from omega_prime.dashboard.poller import CollectorSpec, DashboardPoller
@@ -367,5 +371,152 @@ def test_events_ws_cap_refuses_17th_and_releases_slots_on_close():
                 with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
                     ws.receive_json()
             assert exc.value.code == 4429
+        with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
+            assert ws.receive_json()["type"] == "snapshot"
+
+
+# --- wake path: nudge, stat watcher, lifespan and CLI wiring ---
+
+
+def test_nudge_schedules_named_collector_and_ignores_unknown_source():
+    async def run():
+        calls = []
+
+        def collect():
+            calls.append(len(calls))
+            return SourceResult("tasks_json", "ok" if len(calls) == 1 else "degraded")
+
+        poller = DashboardPoller(
+            [CollectorSpec("tasks_json", collect, 30.0, 1.0)], tick_s=0.02
+        )
+        await poller.refresh_now()
+        assert calls == [0]
+        assert await poller.wait_for_update(0.0) is True
+        await poller.start()
+        try:
+            poller.nudge("tasks_json")
+            deadline = time.monotonic() + 0.5
+            while len(calls) < 2 and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert len(calls) >= 2
+            assert poller.snapshot_hash() is not None
+            assert await poller.wait_for_update(1.0) is True
+            poller.nudge("missing-source")
+            await asyncio.sleep(0.1)
+            known_calls = len(calls)
+            deadline = time.monotonic() + 0.2
+            while time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert len(calls) == known_calls
+        finally:
+            await poller.stop()
+
+    asyncio.run(run())
+
+
+def test_tasks_file_watcher_fires_once_per_signature_change(tmp_path):
+    class _Stop(Exception):
+        pass
+
+    sequence = [(1000, 10), (1000, 10), (1001, 12), FileNotFoundError, (1002, 20)]
+    fired = []
+
+    def stat():
+        step = sequence.pop(0)
+        if isinstance(step, type) and issubclass(step, BaseException):
+            raise step()
+        return SimpleNamespace(st_mtime_ns=step[0], st_size=step[1])
+
+    async def sleep(_interval_s):
+        if not sequence:
+            raise _Stop()
+        await asyncio.sleep(0)
+
+    watcher = TasksFileWatcher(
+        tmp_path / "tasks.json",
+        on_change=lambda: fired.append(1),
+        interval_s=0.0,
+        sleep=sleep,
+        stat=stat,
+    )
+    with pytest.raises(_Stop):
+        asyncio.run(watcher.run())
+    assert fired == [1, 1, 1]
+    assert watcher.path == tmp_path / "tasks.json"
+
+
+def test_tasks_json_wake_reaches_events_ws_within_two_seconds(tmp_path):
+    tasks_path = tmp_path / "tasks.json"
+    _write(tasks_path, tasks=[_tasks_row()])
+    poller = _tasks_poller(tasks_path, interval_s=30.0, tick_s=0.05)
+    asyncio.run(poller.refresh_now())
+    cancelled: list[bool] = []
+    sleeps = []
+
+    async def _sleep(interval_s):
+        sleeps.append(1)
+        try:
+            await asyncio.sleep(interval_s)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    watcher = TasksFileWatcher(
+        tasks_path, on_change=lambda: poller.nudge("tasks_json"), interval_s=0.05, sleep=_sleep
+    )
+    app = create_app(poller, port=PORT, heartbeat_s=0.3, tasks_watcher=watcher)
+    with TestClient(app) as client:
+        assert app.state.tasks_watcher is watcher
+        with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
+            first = ws.receive_json()
+            assert first["type"] == "snapshot"
+            assert [row["id"] for row in first["snapshot"]["active"]] == ["tasks:one"]
+            _write(tasks_path, tasks=[_tasks_row(state="done", note="shipped")])
+            started = time.monotonic()
+            delta = None
+            for _ in range(10):
+                message = ws.receive_json()
+                if message["type"] != "heartbeat":
+                    delta = message
+                    break
+            elapsed = time.monotonic() - started
+    assert sleeps, "watcher never ran"
+    assert cancelled == [True]
+    assert delta is not None
+    assert delta["type"] == "task_finished"
+    assert delta["task"]["id"] == "tasks:one"
+    assert elapsed < 2.0
+
+
+def test_main_threads_tasks_path_into_create_app(tmp_path):
+    captured: dict[str, object] = {}
+    poller = DashboardPoller([])
+
+    def serving(app: object, host: str, port: int) -> None:
+        captured["app"] = app
+
+    assert (
+        main(
+            ["--host", "localhost", "--port", str(PORT)],
+            home=tmp_path,
+            serve=serving,
+            poller_factory=lambda: poller,
+        )
+        == 0
+    )
+    app = captured["app"]
+    watcher = app.state.tasks_watcher
+    assert watcher is not None
+    assert watcher.path == tmp_path / ".omega-prime" / "dashboard" / "tasks.json"
+
+
+def test_create_app_without_tasks_path_has_no_watcher_but_runs_lifespan():
+    poller = DashboardPoller([])
+    app = create_app(poller, port=PORT)
+    assert app.state.tasks_watcher is None
+    with TestClient(app) as client:
+        assert client.get(
+            "/api/snapshot", headers={"host": f"127.0.0.1:{PORT}"}
+        ).status_code == 200
         with client.websocket_connect("/ws/events", headers=HEADERS) as ws:
             assert ws.receive_json()["type"] == "snapshot"
