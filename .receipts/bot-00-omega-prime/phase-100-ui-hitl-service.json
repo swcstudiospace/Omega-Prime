@@ -1,0 +1,31 @@
+{
+  "task_id": "phase-100-ui-hitl-service",
+  "correlation_id": "p4-wiring-100-03",
+  "bot": "bot-00-omega-prime",
+  "commands": [
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_hitl.py -q",
+      "exit_code": 0,
+      "output_tail": "27 passed in 0.06s"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "The rpc-ui request service behavior tests pass.",
+      "evidence_command_index": 0
+    }
+  ],
+  "unverified": [
+    "No live Ove round trip was performed.",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    "omega_prime/engine/protocol.py",
+    "omega_prime/engine/hitl.py",
+    "omega_prime/tests/test_hitl.py"
+  ],
+  "contract_changes": [],
+  "rollback_plan": null,
+  "approvals": [],
+  "approved_by": null
+}

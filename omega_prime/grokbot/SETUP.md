@@ -207,7 +207,8 @@ anonymous and diagnostics warn. URLs with userinfo are rejected.
 Non-secret settings may be stored in `~/.omega-prime/settings.json`, with
 `OMEGA_PRIME_SETTINGS_FILE` as the sole path override. The only accepted
 string keys are `SUBSTRATE_URL`, `HINDSIGHT_URL`, `ULTRATHINK_ROOT`,
-`ULTRATHINK_SHIP`, and `OMEGA_PRIME_STATE_DIR`. For example, the non-secret
+`ULTRATHINK_SHIP`, `OMEGA_PRIME_STATE_DIR`, and
+`OMEGA_PRIME_AGENT_STATE_DIR`. For example, the non-secret
 Ultrathink inputs are `ULTRATHINK_ROOT=/workspace/claude-ultrathink` and
 `ULTRATHINK_SHIP=0`. Keep the file outside git worktrees and tracked paths,
 with no group/world write permission. Do not put credentials or `*_FILE`

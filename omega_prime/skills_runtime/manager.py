@@ -6,9 +6,11 @@ binds a closure around the directory and that closure is what the registry calls
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 from omega_prime.skills_runtime.guards import (
@@ -32,14 +34,103 @@ def skill_manage(
     *,
     skills_root: str | Path,
 ) -> str:
-    """Return a JSON string. A failed guard does not write."""
-    if action == "create":
-        return _create(name, content, category, skills_root)
-    if action == "edit":
-        return _edit(name, content, skills_root)
-    if action == "patch":
-        return _patch(name, old_string, new_string, skills_root)
-    return _error(f"Unknown action '{action}'. Use create, edit, or patch.")
+    """Return a JSON string. A failed guard does not write.
+
+    Every save holds the root's ``<root>.lock`` writer lock, the lock the
+    agent-data migration holds while it moves the folder. A save that
+    waited out a move follows the ``<root>.moved`` pointer the migration
+    left beside the root (one hop), so it lands in the folder the host reads.
+    """
+    if action not in ("create", "edit", "patch"):
+        return _error(f"Unknown action '{action}'. Use create, edit, or patch.")
+    root = Path(skills_root)
+    with _root_lock(root):
+        moved = _moved_to(root)
+    if moved is not None:
+        root = moved
+    with _root_lock(root):
+        if action == "create":
+            return _create(name, content, category, root)
+        if action == "edit":
+            return _edit(name, content, root)
+        return _patch(name, old_string, new_string, root)
+
+
+_LOCK_SUFFIX = ".lock"
+_SHIPPED_ROOT = Path(__file__).resolve().parents[1] / "skills"
+
+
+def _same(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
+
+
+_MOVED_SUFFIX = ".moved"  # agent_state.MOVED_SUFFIX
+
+
+@contextlib.contextmanager
+def _root_lock(root: Path) -> Iterator[None]:
+    """Exclusive ``flock`` on ``<root>.lock`` for one save.
+
+    The shipped install folder (``omega_prime/skills``) is never moved by
+    the migration, so it gets no sidecar (the checkout stays clean). Also
+    unlocked when the sidecar cannot be created (a read-only parent): the
+    migration cannot move a root whose parent it cannot write either.
+    """
+    if _same(root, _SHIPPED_ROOT):
+        yield
+        return
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX
+        yield
+        return
+    lock = root.with_name(root.name + _LOCK_SUFFIX)
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(lock, flags)
+    except FileNotFoundError:
+        try:
+            fd = os.open(lock, flags | os.O_CREAT, 0o600)
+        except OSError:
+            yield
+            return
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _moved_to(root: Path) -> Path | None:
+    """The folder a migration moved (or merged) ``root`` into.
+
+    Followed even when ``root`` still exists: a clash can keep the old
+    folder from being removed, and a save there would stay hidden from a
+    host that reads the agent folder.
+    """
+    pointer = root.with_name(root.name + _MOVED_SUFFIX)
+    try:
+        if pointer.is_symlink():
+            return None
+        target = Path(pointer.read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeDecodeError):
+        return None
+    if (
+        target.is_absolute()
+        and target.is_dir()
+        and not target.is_symlink()
+        and not _same(target, root)
+    ):
+        return target
+    return None
 
 
 def skill_view(name: str, *, skills_root: str | Path) -> str:

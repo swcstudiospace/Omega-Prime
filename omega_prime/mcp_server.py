@@ -41,6 +41,7 @@ from omega_prime.commands.context import (
 )
 from omega_prime.credentials.broker import CredentialBroker
 from omega_prime.cron.desk_driver import DeskDriver
+from omega_prime.engine.clarify_ipc import ClarifySocketClient
 from omega_prime.grokbot.approvals_file import (
     load_approvals_file,
     resolve_approvals_digest,
@@ -207,10 +208,21 @@ def resolve_work_root(
     return Path(root)
 
 
-def _desk_store_path(work_root: Path, state_dir: str | None, name: str) -> Path:
-    """One desk store file: under the state dir when set, else the work root."""
+def _desk_store_path(
+    work_root: Path,
+    state_dir: str | None,
+    name: str,
+    legacy: Mapping[str, Sequence[Path]] | None = None,
+) -> Path:
+    """One desk store file: under the agent data folder when set, else the work root.
+
+    ``state_dir`` is the agent folder (``<state>/agent``). ``legacy`` names
+    older copies that are still read while the agent copy is missing.
+    """
     if state_dir:
-        return Path(state_dir) / name
+        from omega_prime.agent_state import agent_path
+
+        return agent_path(Path(state_dir), name, (legacy or {}).get(name, ()))
     return work_root / "omega_prime" / "state" / name
 
 
@@ -863,20 +875,53 @@ def default_registry(
     # DESK-02: a distinct work root is itself the coding workspace; the
     # default keeps the shipped `root/omega_prime` jail.
     coding_root = work if work != root else root / "omega_prime"
-    register_coding_tools(registry, coding_root, policy=policy)
+    register_coding_tools(
+        registry,
+        coding_root,
+        policy=policy,
+        interaction=ClarifySocketClient.from_env(env),
+    )
     # `OMEGA_PRIME_STATE_DIR` moves the growth stores and the desk stores out
     # of the (possibly read-only) source tree. New skills follow that volume
     # when the install skills directory cannot be written. The state skills
     # directory is created before the tools are registered so a read can fall
     # through to the shipped copy, and creating a shipped name is refused.
-    state_dir = env.get("OMEGA_PRIME_STATE_DIR")
-    state_value = state_dir if isinstance(state_dir, str) and state_dir else ""
-    if state_value:
-        memory_dir = Path(state_value) / "memory"
-        session_db = Path(state_value) / "sessions.db"
+    # The agent's data (memory, history, desk stores) lives in one folder,
+    # `<state>/agent` (see `omega_prime.agent_state`). The sandboxed engine
+    # child is pointed at the same folder, so both see one memory. Data from
+    # older layouts is moved in once; anything that could not move is still
+    # read in place.
+    from omega_prime.agent_state import (
+        agent_memory_dir,
+        agent_path,
+        agent_state_dir,
+        ensure_agent_dir,
+        legacy_layout,
+        legacy_sources,
+        migrate_agent_state,
+    )
+
+    agent_dir = agent_state_dir(env)
+    if agent_dir is not None and not ensure_agent_dir(agent_dir):
+        agent_dir = None
+    if agent_dir is None and str(env.get("OMEGA_PRIME_STATE_DIR") or "").strip():
+        # The agent folder cannot be created (read-only state volume): keep
+        # the earlier layout directly under the state root.
+        legacy_state = Path(str(env["OMEGA_PRIME_STATE_DIR"]).strip())
+        if ensure_agent_dir(legacy_state):
+            agent_dir = legacy_state
+    state_value = str(agent_dir) if agent_dir is not None else ""
+    if agent_dir is not None:
+        layout = legacy_layout(env, home=home, install_root=root, work_root=work)
+        migrate_agent_state(agent_dir, **layout)
+        legacy = legacy_sources(**layout)
+        memory_dir = agent_memory_dir(agent_dir, legacy)
+        session_db = agent_path(agent_dir, "sessions.db", legacy.get("sessions.db", ()))
+        desk_legacy = legacy
     else:
         memory_dir = root / "omega_prime" / "memory"
         session_db = root / "omega_prime" / "sessions.db"
+        desk_legacy = {}
     # DESK-01: one MemoryStore instance shared by the growth tools and the
     # lead pack, so `lead_memory_recall` sees what the growth tools retain.
     memory_store = MemoryStore(memory_dir)
@@ -968,7 +1013,9 @@ def default_registry(
     from omega_prime.routines.nightly import writable_skills_root
 
     install_skills = root / "omega_prime" / "skills"
-    skills_root = writable_skills_root(install_skills, env)
+    # A read-only install writes learned skills into the agent folder, where
+    # the migration moves them; an unmigrated `<state>/skills` is still used.
+    skills_root = writable_skills_root(install_skills, env, agent_dir=agent_dir)
     if skills_root != install_skills:
         ensure_private_dir(skills_root)
     register_growth_tools(
@@ -993,7 +1040,7 @@ def default_registry(
             from omega_prime.durable.journal import TurnJournal
 
             parent.journal = TurnJournal(
-                _desk_store_path(work, state_value, "turns.sqlite")
+                _desk_store_path(work, state_value, "turns.sqlite", desk_legacy)
             )
         except Exception:
             parent.journal = None
@@ -1072,6 +1119,12 @@ def default_registry(
             )
         ),
     }
+    # One intake file for the lead tools and the scheduled desk pass.
+    desk_intake = (
+        _desk_store_path(work, state_value, "intake.json", desk_legacy)
+        if state_value
+        else desk_intake_path(work, state_dir=None)
+    )
     register_lead_tools(
         registry,
         LeadClient(
@@ -1082,11 +1135,13 @@ def default_registry(
                 memory=memory_store,
                 memory_backends=memory_backends,
                 memory_refresh=refresh_memory_substrate,
-                intake=IntakeStore(
-                    desk_intake_path(work, state_dir=state_value or None)
+                intake=IntakeStore(desk_intake),
+                roster=RosterStore(
+                    _desk_store_path(work, state_value, "packs.json", desk_legacy)
                 ),
-                roster=RosterStore(_desk_store_path(work, state_value, "packs.json")),
-                events=EventStore(_desk_store_path(work, state_value, "events.ndjson")),
+                events=EventStore(
+                    _desk_store_path(work, state_value, "events.ndjson", desk_legacy)
+                ),
                 substrate=_DeskSubstrate(substrate_client),
                 substrate_configured=substrate_base is not None,
                 substrate_error=substrate_error,
@@ -1203,7 +1258,7 @@ def default_registry(
     if prime_enabled(config, "rlm"):
         from omega_prime.tools.rlm import register_rlm_tools
 
-        session_dir = _desk_store_path(work, state_value, "rlm")
+        session_dir = _desk_store_path(work, state_value, "rlm", desk_legacy)
         session_dir.mkdir(parents=True, exist_ok=True)
         rlm_parent = _RlmParent(registry, child_model, session_dir)
         rlm_parent.rlm_unconfigured = child_model is None
@@ -1273,7 +1328,7 @@ def default_registry(
     # convention (`root/cron/jobs.json`) so the desk pass and the plain cron
     # tick see one schedule file. Built last so a catch-up tick meets the
     # fully registered tool surface.
-    driver = DeskDriver(root, parent=parent, work_root=work)
+    driver = DeskDriver(root, parent=parent, work_root=work, intake_path=desk_intake)
     registry.runtime_bindings["desk_driver"] = driver
     # Started by the live server (stdio main / serve_sse), not here: building
     # a registry is also how doctor, setup_check, the catalog and tests
@@ -1899,6 +1954,23 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings(process_env)
     host_env = dict(settings.effective_env)
     host_env["OMEGA_PRIME_AUDIT_LOG"] = str(resolved_audit)
+    # A live host keeps the agent's data in ~/.omega-prime/agent, the same
+    # folder the engine binds into its sandbox, unless a state dir is named.
+    from omega_prime.agent_state import (
+        AGENT_STATE_ENV,
+        STATE_DIR_ENV,
+        agent_state_dir,
+        ensure_agent_dir,
+    )
+
+    if (
+        not str(host_env.get(AGENT_STATE_ENV, "")).strip()
+        and not str(host_env.get(STATE_DIR_ENV, "")).strip()
+    ):
+        default_agent = agent_state_dir({}, home=args.home)
+        if default_agent is not None and ensure_agent_dir(default_agent):
+            host_env[AGENT_STATE_ENV] = str(default_agent)
+            os.environ.setdefault(AGENT_STATE_ENV, str(default_agent))
 
     def _fail(reason: object) -> int:
         print(f"omega-prime-mcp-server: {reason}", file=sys.stderr)

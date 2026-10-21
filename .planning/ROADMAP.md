@@ -27,6 +27,8 @@ Phase 98 requirements MEM-98-01..MEM-98-10 and four executable plans are in `.pl
 
 Phase 99 (solo mode, Desk optional) is implemented on its own branch and integrated onto main after Phases 97 and 98; see `.planning/phases/99-solo-mode-desk-optional/`.
 
+Phase 100 (omp engine wiring) is complete and integrated after Phase 99 (PR #50); see `.planning/phases/100-omp-engine-wiring/`.
+
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
 `milestones/v16-phases/`.
@@ -164,7 +166,7 @@ Backend selection is a write preference, not a recall opt-out.
 Phase 98 implementation was executed on its phase-specific parallel branch under the operator decision. Its selector, merged recall/provenance, local-first retention, Hindsight runtime, doctor/reporting, and docs work is being integrated after phase 97; phase 97's endpoint resolver and source-aware `memory_search` errors remain authoritative. Phase 77.1's human-owned live UAT remains open and unchanged.
 
 - [x] Phase 99: Solo mode, Desk optional — implemented; integrated onto main after Phases 97/98
-- [ ] Phase 100: omp engine wiring
+- [x] Phase 100: omp engine wiring — six reviewed plans (6/6) — completed 2026-10-20; integrated after Phase 99
 - [ ] Phase 101: Real U2 LocalExecutor
 - [ ] Phase 102: Schedulers, dead modules, env docs
 - [ ] Phase 103: Ultrathink integration and cleanup
@@ -232,3 +234,75 @@ caps.
 
 Phase execution summary: [99-SUMMARY.md](phases/99-solo-mode-desk-optional/99-SUMMARY.md).
 Verification: [99-VERIFICATION.md](phases/99-solo-mode-desk-optional/99-VERIFICATION.md).
+
+### Phase 100: omp engine wiring
+
+**Goal:** Resolve uplift gaps G4/G5: attach Omega Prime MCP tools and real
+skills to the omp engine session, and bridge rpc-ui asks to Ove live through
+clarify without stale replies or user-config damage. Preserve the existing
+outer turn timeout and add no new session/turn caps.
+
+**Depends on:** Phase 99 (wiring phase 3) in the original milestone
+structure, but the operator authorizes this Phase 100 run to proceed without
+Phase 97–99 verification or merge gates. Phase 97 owns changes to the existing
+turn timeout; preserve it here and add no new caps.
+
+**Requirements** (local planning labels, not tracker identifiers):
+
+- **ENG-100-01 — MCP discovery:** Place generated MCP configuration where
+  omp actually reads it; resolve the server command without
+  `CURSOR_PLUGIN_ROOT`. Emit `attached` or `attach_failed`; attachment
+  failure is reported while the session continues without Omega tools.
+- **ENG-100-02 — Ownership and cleanup:** Merge safely or back off on existing
+  project configuration. Restore the prior work-tree `.omp/mcp.json` state;
+  remove only run-owned artifacts, including on error/cancellation. Never
+  mutate global `~/.omp/agent/mcp.json` or copy/print the shared login store.
+  Generated configuration contains no secret values.
+- **ENG-100-03 — Skills:** Expose real GSD and Omega skills through omp's
+  discovery paths; `--skills` is a name glob, never a directory path.
+- **ENG-100-04 — Live HITL:** In rpc-ui, receive `extension_ui_request`,
+  route ask/select/confirm to Ove through clarify, validate answers against
+  each request's schema, and emit `extension_ui_response` with its id.
+  Live clarify is the decided default, not policy-file answers.
+- **ENG-100-05 — Request lifecycle:** Track job/session/request identity;
+  answer once, reject stale/duplicate answers, expose `ui_pending`,
+  `ui_answered`, and `ui_rejected_stale`. No separate bridge deadline is
+  added; the existing outer turn timeout may end a pending ask until Phase 97
+  merges. Cancellation/abort remains usable.
+- **ENG-100-06 — Compatibility and safety:** Accept `max`, confirmed by
+  observed installed omp 18.12.3 (`18.x`) `--help`; `--help` lists `max`.
+  No model session is required to establish support. Preserve shared login and
+  model-role behavior. No new packages or caps, live-config changes,
+  deployment, or LocalExecutor work. No policy-file auto-approval of sends,
+  merges, or deploys.
+- **ENG-100-07 — Verification and docs:** Document that `/skill:` needs
+  rpc or rpc-ui and ask needs rpc-ui. Prove discovered tools, loaded skills,
+  request lifecycle, and config restoration; run exact CI gates and name
+  any independently established pre-existing baseline failures.
+
+**Success criteria** (implementation acceptance, not achieved by planning):
+
+1. A session tool-list test (`get_state` or fake omp) contains Omega Prime tools.
+2. A test proves real GSD and Omega skills load, with `--skills` a glob, not a path.
+3. A fake rpc-ui session answers an ask once, rejects a stale answer, and
+   completes without hanging; validation, duplicate, and cancellation cases
+   preserve the request lifecycle.
+4. Work-tree `.omp/mcp.json` returns to its prior state after a run, with
+   existing user configuration and shared login untouched.
+5. Docs state mode requirements. Ruff check, Ruff format check, mypy, and
+   the complete Omega Prime test suite are green or baseline-only, with
+   prompt assembly checked if prompts change.
+
+**Plans:** Six reviewed execution plans; all six executed and verified. Phase 100 is complete. The v20 milestone remains in progress.
+
+- [x] 100-00 — Installed-contract evidence and prerequisite decisions (wave 1)
+- [x] 100-01 — MCP attachment and ownership-aware cleanup (wave 2)
+- [x] 100-03 — UI protocol and clarification lifecycle service (wave 2, parallel with 01)
+- [x] 100-02 — Real skills discovery and name-glob selection (wave 3)
+- [x] 100-04 — Production rpc-ui/HITL routing and operator controls (wave 4)
+- [x] 100-05 — Docs, integrated verification, and execution receipt (wave 5)
+
+**Integration note:** Phase 100 was planned against the old outer turn timeout. After integration with Phase 97 (W97-06) turns are uncapped; a cancel interrupts the turn and an operator abort gives omp one command timeout to reach `agent_end`.
+
+**Out of scope:** Phase 101 LocalExecutor; the external agentOS runner
+(note only); Phase 97 time-cap removal; deployments and connector restarts.
