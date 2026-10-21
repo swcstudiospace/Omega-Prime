@@ -44,7 +44,7 @@ def test_branch_uses_merged_pr_score_and_actual_reviewed_sha():
         if path.endswith("/pulls") and query.get("state") == ["closed"]:
             return 200, b"[]"
         if path.endswith("/commits/main"):
-            repo = path.split("/")[2]
+            repo = path.split("/")[3]
             return 200, json.dumps({"sha": "merge-omega" if repo == "Omega-Prime" else "merge-fleet"}).encode()
         if "/check-runs" in path:
             return 200, b'{"check_runs":[]}'
