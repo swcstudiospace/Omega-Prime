@@ -1,10 +1,98 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Snapshot } from '../types'
+import type { FinishedItem, Snapshot, Task, WaitingItem } from '../types'
 
 const POLL_MS = 5_000
 const RECONNECT_MS = 30_000
+const WS_BASE_MS = 1_000
+const WS_MAX_MS = 30_000
+const WS_FALLBACK_AFTER = 3
+
+type Stale = { reason: string; since: string }
+type WsMessage =
+  | { type: 'snapshot'; snapshot: Snapshot }
+  | { type: 'task_changed'; task: Task }
+  | { type: 'task_finished'; task: Task }
+  | { type: 'waiting_added'; item: WaitingItem }
+  | { type: 'waiting_cleared'; id: string }
+  | { type: 'stale_changed'; id: string; stale: Stale | null }
+  | { type: 'heartbeat' }
 
 export type DashboardState = { data: Snapshot | null; loading: boolean; error: string | null; receivedAt: number | null; live: boolean; refresh: () => void }
+
+/** Validate one /ws/events frame; the protocol shapes are the contract, so
+ *  the discriminant and identity fields are checked and the named type is
+ *  asserted at this boundary. Returns null for anything unparseable. */
+export function parseMessage(raw: string): WsMessage | null {
+  let parsed: unknown
+  try { parsed = JSON.parse(raw) } catch { return null }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const body = parsed as Partial<WsMessage>
+  switch (body.type) {
+    case 'heartbeat': return { type: 'heartbeat' }
+    case 'snapshot':
+      return typeof body.snapshot === 'object' && body.snapshot !== null
+        ? { type: 'snapshot', snapshot: body.snapshot }
+        : null
+    case 'task_changed':
+    case 'task_finished':
+      return typeof body.task === 'object' && body.task !== null && typeof body.task.id === 'string'
+        ? { type: body.type, task: body.task }
+        : null
+    case 'waiting_added':
+      return typeof body.item === 'object' && body.item !== null && typeof body.item.id === 'string'
+        ? { type: 'waiting_added', item: body.item }
+        : null
+    case 'waiting_cleared':
+      return typeof body.id === 'string' ? { type: 'waiting_cleared', id: body.id } : null
+    case 'stale_changed':
+      if (typeof body.id !== 'string' || typeof body.stale === 'undefined') return null
+      if (body.stale !== null && typeof body.stale !== 'object') return null
+      return { type: 'stale_changed', id: body.id, stale: body.stale }
+    default: return null
+  }
+}
+
+/** Apply one delta immutably; null means the delta cannot be applied. */
+export function applyDelta(current: Snapshot, message: WsMessage): Snapshot | null {
+  switch (message.type) {
+    case 'task_changed': {
+      const active = current.active ?? []
+      const exists = active.some(task => task.id === message.task.id)
+      return { ...current, active: exists ? active.map(task => task.id === message.task.id ? message.task : task) : [...active, message.task] }
+    }
+    case 'task_finished': {
+      const finished = current.finished ?? []
+      const exists = finished.some(item => item.id === message.task.id)
+      return {
+        ...current,
+        active: (current.active ?? []).filter(task => task.id !== message.task.id),
+        idle_sessions: (current.idle_sessions ?? []).filter(task => task.id !== message.task.id),
+        finished: exists ? finished.map(item => item.id === message.task.id ? message.task as unknown as FinishedItem : item) : [...finished, message.task as unknown as FinishedItem],
+      }
+    }
+    case 'waiting_added': {
+      const waiting = current.waiting_on_ove ?? []
+      if (waiting.some(item => item.id === message.item.id)) return current
+      return { ...current, waiting_on_ove: [...waiting, message.item] }
+    }
+    case 'waiting_cleared':
+      return { ...current, waiting_on_ove: (current.waiting_on_ove ?? []).filter(item => item.id !== message.id) }
+    case 'stale_changed': {
+      let matched = false
+      const patch = (tasks: Task[]) => tasks.map(task => {
+        if (task.id !== message.id) return task
+        matched = true
+        return { ...task, stale: message.stale }
+      })
+      const active = patch(current.active ?? [])
+      const idle_sessions = patch(current.idle_sessions ?? [])
+      if (!matched) return null
+      return { ...current, active, idle_sessions }
+    }
+    default: return null
+  }
+}
+
 export function useDashboard(): DashboardState {
   const [data, setData] = useState<Snapshot | null>(null)
   const [loading, setLoading] = useState(true)
@@ -12,17 +100,30 @@ export function useDashboard(): DashboardState {
   const [receivedAt, setReceivedAt] = useState<number | null>(null)
   const [live, setLive] = useState(false)
   const hasData = useRef(false)
+  const dataRef = useRef<Snapshot | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const refresh = useCallback(() => setRefreshKey(v => v + 1), [])
   useEffect(() => {
     let disposed = false
-    let eventSource: EventSource | null = null
-    let pollTimer: ReturnType<typeof setInterval> | null = null
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let eventSource: EventSource | undefined
+    let pollTimer: ReturnType<typeof setInterval> | undefined
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+    let socket: WebSocket | undefined
+    let socketTimer: ReturnType<typeof setTimeout> | undefined
+    let socketRetryTimer: ReturnType<typeof setTimeout> | undefined
+    let failures = 0
+    let backoff = WS_BASE_MS
     let controller: AbortController | null = null
     let streamFailed = false
     let generation = 0
 
+    const commit = (next: Snapshot) => {
+      hasData.current = true
+      dataRef.current = next
+      setData(next)
+      setError(null)
+      setReceivedAt(Date.now())
+    }
     const fetchSnapshot = async () => {
       const request = ++generation
       controller?.abort()
@@ -33,10 +134,7 @@ export function useDashboard(): DashboardState {
         if (!response.ok) throw new Error(`Snapshot request failed (${response.status})`)
         const next = await response.json() as Snapshot
         if (disposed || request !== generation) return
-        hasData.current = true
-        setData(next)
-        setError(null)
-        setReceivedAt(Date.now())
+        commit(next)
       } catch (cause) {
         if (disposed || (cause instanceof DOMException && cause.name === 'AbortError')) return
         setError(cause instanceof Error ? cause.message : 'Snapshot unavailable')
@@ -44,9 +142,9 @@ export function useDashboard(): DashboardState {
         if (!disposed && request === generation) setLoading(false)
       }
     }
-    const stopPolling = () => { if (pollTimer !== null) clearInterval(pollTimer); pollTimer = null }
+    const stopPolling = () => { clearInterval(pollTimer); pollTimer = undefined }
     const startPolling = () => {
-      if (pollTimer !== null) return
+      if (pollTimer !== undefined) return
       void fetchSnapshot()
       pollTimer = setInterval(() => void fetchSnapshot(), POLL_MS)
     }
@@ -58,7 +156,7 @@ export function useDashboard(): DashboardState {
       source.addEventListener('snapshot', ((event: MessageEvent<string>) => {
         try {
           const next = JSON.parse(event.data) as Snapshot
-          if (!disposed) { hasData.current = true; setData(next); setError(null); setReceivedAt(Date.now()); setLoading(false); setLive(true); stopPolling() }
+          if (!disposed) { commit(next); setLoading(false); setLive(true); stopPolling() }
         } catch { setError('Received an invalid snapshot event') }
       }) as EventListener)
       source.onopen = () => { if (!disposed && !streamFailed) { setLive(true); setError(null); stopPolling() } }
@@ -67,21 +165,72 @@ export function useDashboard(): DashboardState {
         streamFailed = true
         setLive(false)
         source.close()
-        if (eventSource === source) eventSource = null
+        if (eventSource === source) eventSource = undefined
         startPolling()
-        if (reconnectTimer === null) reconnectTimer = setTimeout(() => { reconnectTimer = null; connect() }, RECONNECT_MS)
+        if (reconnectTimer === undefined) reconnectTimer = setTimeout(() => { reconnectTimer = undefined; connect() }, RECONNECT_MS)
       }
+    }
+    const connectWs = () => {
+      if (disposed || socket) return
+      if (typeof WebSocket === 'undefined') { connect(); return }
+      let counted = false
+      const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const next = new WebSocket(`${protocol}://${window.location.host}/ws/events`)
+      socket = next
+      next.onopen = () => {
+        if (disposed) { next.close(); return }
+        failures = 0
+        backoff = WS_BASE_MS
+        setLive(true)
+        setError(null)
+        stopPolling()
+        if (eventSource) { eventSource.close(); eventSource = undefined }
+      }
+      next.onmessage = (event: MessageEvent<string>) => {
+        if (disposed) return
+        const message = parseMessage(typeof event.data === 'string' ? event.data : '')
+        if (message === null) { void fetchSnapshot(); return }
+        if (message.type === 'heartbeat') return
+        if (message.type === 'snapshot') { commit(message.snapshot); setLoading(false); setLive(true); stopPolling(); return }
+        const current = dataRef.current
+        const nextData = current === null ? null : applyDelta(current, message)
+        if (nextData === null) { void fetchSnapshot(); return }
+        dataRef.current = nextData
+        setData(nextData)
+        setReceivedAt(Date.now())
+      }
+      const fail = () => {
+        if (counted || disposed || socket !== next) return
+        counted = true
+        socket = undefined
+        setLive(false)
+        failures += 1
+        if (failures >= WS_FALLBACK_AFTER) {
+          connect()
+          if (socketRetryTimer === undefined) socketRetryTimer = setTimeout(() => { socketRetryTimer = undefined; connectWs() }, RECONNECT_MS)
+        } else {
+          backoff = Math.min(WS_MAX_MS, WS_BASE_MS * 2 ** (failures - 1))
+          const wait = Math.random() * backoff
+          if (socketTimer === undefined) socketTimer = setTimeout(() => { socketTimer = undefined; connectWs() }, wait)
+        }
+      }
+      next.onclose = fail
+      next.onerror = fail
     }
 
     void fetchSnapshot()
-    connect()
+    connectWs()
     return () => {
       disposed = true
       generation++
       controller?.abort()
+      socket?.close()
+      socket = undefined
       eventSource?.close()
       stopPolling()
-      clearTimeout(reconnectTimer ?? undefined)
+      clearTimeout(reconnectTimer)
+      clearTimeout(socketTimer)
+      clearTimeout(socketRetryTimer)
     }
   }, [refreshKey])
   return { data, loading, error, receivedAt, live, refresh }
