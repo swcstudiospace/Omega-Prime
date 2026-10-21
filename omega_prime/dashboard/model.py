@@ -92,6 +92,7 @@ class Task:
     timeline: list[dict[str, str]] = field(default_factory=list)
     wiring: dict[str, str | None] | None = None
     herdr_pane: dict[str, str] | None = None
+    stale: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _safe(
@@ -114,6 +115,7 @@ class Task:
                 "timeline": self.timeline,
                 "wiring": self.wiring,
                 "herdr_pane": self.herdr_pane,
+                "stale": self.stale,
             }
         )
 
