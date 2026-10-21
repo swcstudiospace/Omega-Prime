@@ -52,6 +52,7 @@ export function TerminalPanel({ taskId }: { taskId: string }) {
     <div className="terminal-output" role="region" aria-label="Read-only terminal output" tabIndex={0} ref={region} onScroll={onScroll}><pre>{frame.text}</pre></div>
     {frame.status === 'no_session' && <p>This task has no mapped Herdr pane. Other task details remain available.</p>}
     {frame.status === 'pane_closed' && <p>This session has ended. Other task details remain available.</p>}
+    {!connected && frame.text && frame.status === 'live' && <p>Showing the last received output while the connection is restored.</p>}
     {frame.status === 'unavailable' && <p>Terminal output cannot be read on this host. Other task details remain available.</p>}
     <p role="status">{copyStatus}</p>
   </section>

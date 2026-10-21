@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, render, screen, fireEvent } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { TerminalPanel } from './TerminalPanel'
 class FakeEventSource {
   static instances: FakeEventSource[] = []
@@ -40,5 +40,28 @@ describe('TerminalPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Pause auto-scroll' }))
     expect(screen.getByRole('button', { name: 'Resume auto-scroll' })).toHaveAttribute('aria-pressed', 'true')
     expect(FakeEventSource.instances[0].closed).toBe(false)
+  })
+  it('renders local terminal failure states and copies only the displayed buffer', async () => {
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const view = render(<TerminalPanel taskId="one" />)
+    FakeEventSource.instances[0].emit({ status: 'live', text: 'safe text', updated_at: '2026-10-21T00:00:00Z' })
+    fireEvent.click(screen.getByRole('button', { name: 'Copy output' }))
+    expect(await screen.findByText('Output copied')).toBeInTheDocument()
+    expect(writeText).toHaveBeenCalledWith('safe text')
+    view.rerender(<TerminalPanel taskId="closed" />)
+    FakeEventSource.instances[1].emit({ status: 'pane_closed', text: '', updated_at: '2026-10-21T00:00:01Z' })
+    expect(screen.getByText('Pane closed')).toBeInTheDocument()
+    expect(screen.getByText('This session has ended. Other task details remain available.')).toBeInTheDocument()
+    view.rerender(<TerminalPanel taskId="missing" />)
+    FakeEventSource.instances[2].emit({ status: 'no_session', text: '', updated_at: null })
+    expect(screen.getByText('No session attached')).toBeInTheDocument()
+    expect(screen.getByText('This task has no mapped Herdr pane. Other task details remain available.')).toBeInTheDocument()
+    view.rerender(<TerminalPanel taskId="unavailable" />)
+    FakeEventSource.instances[3].emit({ status: 'unavailable', text: '', updated_at: null })
+    expect(screen.getByText('Herdr unavailable')).toBeInTheDocument()
+    expect(screen.getByText('Terminal output cannot be read on this host. Other task details remain available.')).toBeInTheDocument()
+    view.unmount()
   })
 })
