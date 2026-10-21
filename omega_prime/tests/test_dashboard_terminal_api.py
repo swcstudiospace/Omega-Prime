@@ -130,6 +130,21 @@ def test_terminal_unchanged_capture_heartbeats_without_timestamp_change():
     assert status == 200 and ": heartbeat" in wire
     assert wire.count('"updated_at":"') == 1 and len(calls) == 2
     assert service._slots._value == 4
+def test_terminal_state_change_does_not_advance_output_timestamp():
+    calls = 0
+    async def runner(_argv):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return "last good frame"
+        raise OSError("private stderr is never emitted")
+    service = TerminalService(runner=runner, clock=lambda: datetime(2026, 10, 21, tzinfo=UTC), sleep=lambda _: asyncio.sleep(0))
+    status, wire = asyncio.run(_wire(create_app(_poller(mapping={"pane_id": "w1:p1"}), terminal_service=service), "/api/tasks/task:one/terminal", stop_after_terminal=2))
+    events = [json.loads(line[6:]) for line in wire.splitlines() if line.startswith("data: ")]
+    assert status == 200 and [frame["status"] for frame in events] == ["live", "unavailable"]
+    assert events[0]["updated_at"] == events[1]["updated_at"]
+    assert "private stderr" not in wire and service._slots._value == 4
+
 
 
 def test_terminal_reports_confirmed_closed_pane_and_releases_capacity():

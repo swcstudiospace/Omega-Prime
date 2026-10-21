@@ -139,7 +139,7 @@ class TerminalService:
                 except Exception:
                     text, state = "", "unavailable"
                 if (state, text) != previous:
-                    if text or state != "live":
+                    if text and (previous is None or text != previous[1]):
                         updated = self.clock().astimezone(UTC).isoformat()
                     yield self._event(state, text, updated)
                     if state == "pane_closed":
