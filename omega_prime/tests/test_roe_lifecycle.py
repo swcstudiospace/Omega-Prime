@@ -1176,26 +1176,35 @@ def test_watchdog_tick_skips_not_due_and_generic_tick_respects_skip(tmp_path):
     assert skipped == []
 
 
-def test_watchdog_stale_occurrence_is_missed_without_checker(tmp_path):
+def test_watchdog_stale_occurrence_still_reads_grant(tmp_path):
+    """A late watchdog is read-only, so it still checks the grant now."""
     store = JobStore(tmp_path / "cron" / "jobs.json")
     job_id = schedule_roe_watchdog(
         store, "artifact.json", due_at=END.timestamp() - 301, interval_seconds=60
     )
     calls = []
 
-    ran = tick_roe_watchdog(
-        store,
-        END,
-        checker=lambda artifact, *, now: calls.append(artifact),
-    )
+    def checker(artifact, *, now):
+        calls.append((artifact, now))
+        return {
+            "state": "expired",
+            "artifact_id": artifact,
+            "effective_until": None,
+            "action": "archive",
+        }
 
-    assert calls == []
+    ran = tick_roe_watchdog(store, END, checker=checker)
+
+    assert calls == [("artifact.json", END)]
     assert [job["id"] for job in ran] == [job_id]
     job = ran[0]
-    assert job["last_result"]["state"] == "missed"
-    assert job["history"][-1]["status"] == "missed"
+    assert job["last_result"]["state"] == "expired"
+    assert job["roe_watchdog_state"] == "expired"
+    assert job["history"][-1]["late"] == {
+        "scheduled_for": END.timestamp() - 301,
+        "lateness": 301.0,
+    }
     assert job["due_at"] == END.timestamp() + 60
-    assert "roe_watchdog_state" not in job
 
 
 def test_watchdog_check_all_returns_per_artifact_states():

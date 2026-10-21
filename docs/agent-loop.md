@@ -112,7 +112,9 @@ and can replace handlers and approval metadata.
 
 The `DeskDriver` owns desk, watchdog, pin, and purple schedules. Prompt jobs
 dispatch through an available delegate parent; without one, they write blocked
-receipts. Cron jobs that are stale when observed are receipted as missed.
+receipts. Cron jobs that are stale when observed are receipted as missed;
+each queued job is judged on a fresh clock reading, not the tick start. The
+read-only RoE watchdog still reads its grant when late and records `late`.
 
 `exec_job_start`, `exec_job_poll`, `exec_job_wait`, and `exec_job_kill` are
 retained approval-gated registry tools. Plan mode blocks start and kill; argv
@@ -132,7 +134,8 @@ served-tool metadata.
 - **Heartbeats and desk schedules**: `DeskDriver` owns desk, watchdog, pin, and
   purple ticks. Prompt jobs dispatch through an available delegate parent; if
   no parent is available, the job writes a blocked receipt. Stale cron jobs
-  are receipted as missed rather than run late.
+  are receipted as missed rather than run late, judged per queued job on a
+  fresh clock; a late RoE watchdog still reads its grant.
 - **Autonomous mode** (`prime.autonomous.enabled`): after `autonomous_start`,
   the live driver counts logical turns and known tokens and enforces turn,
   token, and elapsed-time limits plus real argv quality gates. Gates run only

@@ -27,7 +27,8 @@ Python, unsandboxed, and can replace handlers and approval metadata.
 `DeskDriver` is passive at registry construction and owns desk, watchdog, pin,
 and purple ticks. Prompt jobs dispatch through an available delegate parent;
 when no parent is available, they write blocked receipts. Stale cron jobs are
-receipted missed. The four `exec_job_start`, `exec_job_poll`, `exec_job_wait`,
+receipted missed, each queued job judged on a fresh clock; a late RoE watchdog
+still reads its grant. The four `exec_job_start`, `exec_job_poll`, `exec_job_wait`,
 and `exec_job_kill` tools are retained, approval-gated, and registry-local.
 Start and kill are blocked in plan mode; argv cwd is fixed to the approved work
 root.

@@ -20,7 +20,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +126,37 @@ def cron_lateness_grace_seconds() -> float:
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{CRON_LATENESS_GRACE_ENV} must be positive and finite")
     return value
+
+
+def _monotonic() -> float:
+    """Monotonic clock seam for :class:`_TickClock` (patched in tests)."""
+    return time.monotonic()
+
+
+class _TickClock:
+    """Fresh per-job clock readings for one tick.
+
+    A tick selects due jobs at the ``now`` it was given, then runs them one
+    after another. A slow earlier job (an audit, a model call) moves the real
+    clock on, so a later queued job must judge its lateness, and stamp its
+    run, against a fresh reading rather than the tick-start value. ``read``
+    returns ``now`` plus the whole seconds elapsed on the monotonic clock
+    since the tick began: the injected ``now`` stays authoritative (hermetic
+    callers keep exact stamps) and wall-clock jumps cannot move it backwards.
+    Sub-second drift is dropped; lateness grace is configured in seconds.
+    """
+
+    def __init__(self, now: int | float) -> None:
+        self._base = now
+        self._start = _monotonic()
+
+    def elapsed(self) -> int:
+        return math.floor(max(_monotonic() - self._start, 0.0))
+
+    def read(self, elapsed: int | None = None) -> int | float:
+        if elapsed is None:
+            elapsed = self.elapsed()
+        return self._base if elapsed == 0 else self._base + elapsed
 
 
 class JobStore:
@@ -387,6 +418,7 @@ class JobStore:
         if skip_kind is not None:
             skipped.add(skip_kind)
         grace = cron_lateness_grace_seconds()
+        tick_start = now
         with self._store_transaction():
             job_ids = [
                 job["id"]
@@ -399,7 +431,11 @@ class JobStore:
                 and job["due_at"] <= now
             ]
         ran: list[dict] = []
+        clock = _TickClock(tick_start)
         for job_id in job_ids:
+            # A fresh reading per queued job: an earlier slow runner must not
+            # let this one pass the lateness check on the tick-start time.
+            now = clock.read()
             claim = self._claim(job_id, now)
             if claim is None:
                 continue
@@ -625,20 +661,23 @@ def tick_desk_lead_passes(
     # leave a claimed occurrence behind.
     grace = cron_lateness_grace_seconds()
     ran: list[dict] = []
+    clock = _TickClock(now)
     for job_id in job_ids:
-        claim = store._claim(job_id, now)
+        # Fresh reading per queued pass (see JobStore.tick).
+        current = clock.read()
+        claim = store._claim(job_id, current)
         if claim is None:
             continue
-        lateness = now - float(claim["scheduled_for"])
+        lateness = current - float(claim["scheduled_for"])
         if lateness > grace:
             missed = {
                 "state": "missed",
                 "scheduled_for": claim["scheduled_for"],
-                "evaluated_at": now,
+                "evaluated_at": current,
                 "lateness": lateness,
             }
             settled = store._settle_claim(
-                claim, now, missed, "missed", write_receipt=True
+                claim, current, missed, "missed", write_receipt=True
             )
             if settled is not None:
                 ran.append(settled)
@@ -668,7 +707,7 @@ def tick_desk_lead_passes(
             }
             disposition = "failed"
         settled = store._settle_claim(
-            claim, now, outcome, disposition, write_receipt=True
+            claim, current, outcome, disposition, write_receipt=True
         )
         if settled is not None:
             ran.append(settled)
@@ -802,9 +841,9 @@ def tick_roe_watchdog(store: JobStore, now: Any, checker: Any = None) -> list[di
     "artifact_id", "effective_until", "action"}``) and update
     ``job["roe_watchdog_state"]``, so a DOWN heartbeat cannot silence an
     expiring grant — the digest keeps the valid → expiring → expired trail.
-    An occurrence older than the configured lateness grace
-    is durably marked ``missed`` without reading the artifact, and its
-    next due time is coalesced forward from the current stamp. Never raises:
+    The check is read-only, so an occurrence older than the configured
+    lateness grace still reads the grant now (its history entry carries
+    ``late``) and the next due time is set from that fresh check. Never raises:
     a checker failure records a fail-closed ``missing`` result instead. Pass
     """
     if checker is None:
@@ -826,46 +865,29 @@ def tick_roe_watchdog(store: JobStore, now: Any, checker: Any = None) -> list[di
             and job.get("due_at") is not None
             and job["due_at"] <= stamp
         ]
+    clock = _TickClock(stamp)
     for job_id in job_ids:
+        # Fresh reading per queued watchdog (see JobStore.tick).
+        elapsed = clock.elapsed()
+        stamp = clock.read(elapsed)
+        job_now = checker_now + timedelta(seconds=elapsed)
         claim = store._claim_typed(job_id, ROE_WATCHDOG_KIND, stamp)
         if claim is None:
             continue
         claimed_job = claim["job"]
         lateness = stamp - float(claim["scheduled_for"])
-        if lateness > grace:
-            missed = {
-                "state": "missed",
-                "scheduled_for": claim["scheduled_for"],
-                "evaluated_at": stamp,
-                "lateness": lateness,
-            }
-
-            def settle_missed(
-                job: dict, *, stamp: float = stamp, missed: dict = missed
-            ) -> None:
-                history = job.get("history")
-                if not isinstance(history, list):
-                    history = []
-                history.append({"ran_at": stamp, "result": missed, "status": "missed"})
-                job["history"] = history[-ROE_WATCHDOG_HISTORY_LIMIT:]
-                job["last_result"] = missed
-                job["last_ran_at"] = stamp
-                interval = job.get("interval_seconds")
-                if (
-                    isinstance(interval, bool)
-                    or not isinstance(interval, (int, float))
-                    or interval <= 0
-                ):
-                    interval = ROE_WATCHDOG_INTERVAL_SECONDS
-                job["due_at"] = stamp + interval
-
-            settled = store._settle_typed_claim(claim, settle_missed)
-            if settled is not None:
-                ran.append(settled)
-            continue
+        # The watchdog only reads the grant, so a late occurrence is still
+        # checked now: skipping it would leave ``roe_watchdog_state`` stale
+        # (say ``valid`` past expiry) for a whole interval. Lateness beyond
+        # the grace is recorded on the history entry instead.
+        late = (
+            {"scheduled_for": claim["scheduled_for"], "lateness": lateness}
+            if lateness > grace
+            else None
+        )
         artifact = claimed_job.get("artifact_path", "")
         try:
-            result = checker(artifact, now=checker_now)
+            result = checker(artifact, now=job_now)
         except Exception:
             result = {
                 "state": "missing",
@@ -897,13 +919,22 @@ def tick_roe_watchdog(store: JobStore, now: Any, checker: Any = None) -> list[di
                 "action": "fix artifact",
             }
 
-        def settle(job: dict, *, stamp: float = stamp, result: dict = result) -> None:
+        def settle(
+            job: dict,
+            *,
+            stamp: float = stamp,
+            result: dict = result,
+            late: dict | None = late,
+        ) -> None:
             history = job.get("history")
             if not isinstance(history, list):
                 history = []
             job["last_result"] = result
             job["last_ran_at"] = stamp
-            history.append({"ran_at": stamp, "result": result})
+            entry: dict[str, Any] = {"ran_at": stamp, "result": result}
+            if late is not None:
+                entry["late"] = late
+            history.append(entry)
             job["history"] = history[-ROE_WATCHDOG_HISTORY_LIMIT:]
             interval = job.get("interval_seconds")
             try:
@@ -1191,7 +1222,11 @@ def tick_pin_bump_schedules(
             and job["due_at"] <= stamp
         ]
     grace = cron_lateness_grace_seconds()
+    clock = _TickClock(stamp)
     for job_id in job_ids:
+        # A fresh reading per queued job: a slow earlier job must not let
+        # this one pass the lateness check on the tick-start stamp.
+        stamp = clock.read()
         claim = store._claim_typed(job_id, PIN_BUMP_SCHEDULE_KIND, stamp)
         if claim is None:
             continue
@@ -1513,7 +1548,11 @@ def tick_purple_cycles(
             and job["due_at"] <= stamp
         ]
     grace = cron_lateness_grace_seconds()
+    clock = _TickClock(stamp)
     for job_id in job_ids:
+        # A fresh reading per queued job: a slow earlier job must not let
+        # this one pass the lateness check on the tick-start stamp.
+        stamp = clock.read()
         claim = store._claim_typed(job_id, PURPLE_CYCLE_KIND, stamp)
         if claim is None:
             continue
