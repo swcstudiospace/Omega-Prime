@@ -575,6 +575,8 @@ class LeadContext:
     notify: Any = None
     seat_prompt: str = "omega_prime/prompts/bot-00-omega-prime.xml"
     assembled_prompt: str = "omega_prime/prompts-assembled/OMEGA_PRIME.xml"
+    solo: bool = False
+    desk_planes: dict[str, str] = field(default_factory=dict)
     _brief_cache: dict = field(default_factory=dict, repr=False)
 
 
@@ -631,8 +633,12 @@ class LeadClient:
                 "error": "not_configured: docs index is not configured",
             }
         raw = self.ctx.docs_index(query, limit, repo)
+        if isinstance(raw, dict) and raw.get("error"):
+            return _error("upstream_error", str(raw["error"]))
+        if not isinstance(raw, list):
+            return _error("upstream_error", "docs index returned a malformed response")
         results = []
-        for chunk in raw if isinstance(raw, list) else []:
+        for chunk in raw:
             if not isinstance(chunk, dict):
                 continue
             results.append(
@@ -829,6 +835,8 @@ class LeadClient:
         """Wait for one bus job. Passthrough to the injected bus."""
         if not isinstance(job_id, str) or job_id == "":
             raise ValueError("job_id must be a non-empty string")
+        if self.ctx.solo:
+            return _error("not_configured", "solo")
         if self.ctx.bus is None:
             return _error("not_configured", "agent bus is not configured")
         result = self.ctx.bus.wait_job(job_id, int(timeout_sec), int(poll_sec))
@@ -851,12 +859,7 @@ class LeadClient:
         }
 
     def roster_status(self) -> dict[str, Any]:
-        """Registered packs, tool counts, intake queue, completeness.
-
-        Absorbed desk seats come from ``grokbot/rosters/default.json`` when
-        that file is under the install root. They are packs folded into
-        ``bot-00-omega-prime``, not separately registered gateway seats.
-        """
+        """Registered packs, intake queue, and absorbed desk seats."""
         packs = []
         records = self.ctx.roster.packs if self.ctx.roster else {}
         doctor = self.ctx.roster.doctor_results() if self.ctx.roster else {}
@@ -1142,9 +1145,15 @@ class LeadClient:
             ),
         }
         green = all(c["green"] for c in checks.values())
-        # check is ungated and must not write the roster. install_prompt and
-        # repair are the actions that record expected_prompt_sha256.
-        return {"green": green, "seat": "Omega Prime", "checks": checks}
+        # Optional Desk planes are informational; their absence never makes
+        # the read-only doctor unhealthy.
+        return {
+            "green": green,
+            "seat": "Omega Prime",
+            "solo": self.ctx.solo,
+            "desk_planes": dict(self.ctx.desk_planes),
+            "checks": checks,
+        }
 
     def intake_next(self, origin: str | None = None) -> dict[str, Any]:
         """Claim the oldest open work order. None + counts when empty."""
@@ -1328,6 +1337,8 @@ class LeadClient:
             or goal == ""
         ):
             raise ValueError("runtime and goal must be non-empty strings")
+        if self.ctx.solo:
+            return _error("not_configured", "solo")
         if self.ctx.bus is None:
             return _error("not_configured", "agent bus is not configured")
         result = self.ctx.bus.start_job(runtime, goal, provider, idempotency_key)

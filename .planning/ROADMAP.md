@@ -25,6 +25,8 @@
 
 Phase 98 requirements MEM-98-01..MEM-98-10 and four executable plans are in `.planning/phases/98-shared-memory-substrate-hindsight/`. Branch execution and verification are recorded in that phase directory's `SUMMARY.md`.
 
+Phase 99 (solo mode, Desk optional) is implemented on its own branch and integrated onto main after Phases 97 and 98; see `.planning/phases/99-solo-mode-desk-optional/`.
+
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
 `milestones/v16-phases/`.
@@ -161,7 +163,7 @@ Backend selection is a write preference, not a recall opt-out.
 
 Phase 98 implementation was executed on its phase-specific parallel branch under the operator decision. Its selector, merged recall/provenance, local-first retention, Hindsight runtime, doctor/reporting, and docs work is being integrated after phase 97; phase 97's endpoint resolver and source-aware `memory_search` errors remain authoritative. Phase 77.1's human-owned live UAT remains open and unchanged.
 
-- [ ] Phase 99: Solo mode, Desk optional
+- [x] Phase 99: Solo mode, Desk optional — implemented; integrated onto main after Phases 97/98
 - [ ] Phase 100: omp engine wiring
 - [ ] Phase 101: Real U2 LocalExecutor
 - [ ] Phase 102: Schedulers, dead modules, env docs
@@ -172,3 +174,61 @@ executable plans [98-01](phases/98-shared-memory-substrate-hindsight/98-01-PLAN.
 [98-02](phases/98-shared-memory-substrate-hindsight/98-02-PLAN.md),
 [98-03](phases/98-shared-memory-substrate-hindsight/98-03-PLAN.md),
 [98-04](phases/98-shared-memory-substrate-hindsight/98-04-PLAN.md).
+
+### Phase 99: Solo mode, Desk optional
+
+**Goal:** Omega Prime runs as a solo bot without requiring the Desk. Preserve
+explicitly configured Desk planes as opt-in compatibility paths; do not delete them.
+
+**Planned dependency:** Phase 98 and Phase 97's substrate docs-search wire contract
+(`question`). The operator authorized parallel phase implementation on the
+current checkout; this phase deliberately leaves `SubstrateClient.docs_search`
+unchanged. Rebase and integrate with Phase 97 before merging this phase.
+**Requirements:** G3 and G11-desk-vars from the supplied uplift (audit gap labels,
+not tracker identifiers).
+
+1. Resolve `OMEGA_PRIME_SOLO` once during runtime construction: default on for
+   bot-00; `=0` restores configured Desk planes. Do not change other seats' defaults.
+2. Route solo `lead_docs_search` through the shared substrate client and
+   `docs_search(question=...)`; route events through substrate emit. Unsupported
+   bus operations report `not_configured: solo` with an actionable hint.
+3. Use Desk bus operations only with solo off and explicit, permitted Desk
+   configuration. Remove the literal `127.0.0.1` bus fallback, including blocked
+   binding construction. Doctor reports solo state and disabled Desk planes.
+4. Make desk-gateway skill loading on-demand in source prompts/core directives;
+   regenerate assembled prompts with the existing assembly tooling.
+5. Replace programming-desk skill-document dependencies with verified
+   substrate-hosted or existing in-repo references. If neither exists, remove
+   the link with a note; fix the dead `docs/quality-gates.md` reference.
+6. Document all five Desk environment variables as optional/legacy, plus solo
+   flag semantics. Preserve the separate child/delegation behavior unless a
+   Desk-plane dependency requires a scoped change.
+
+**Success criteria:**
+
+1. No code path connects to a literal `127.0.0.1` bus URL.
+2. Deterministic tests prove solo docs search and events use a fake substrate,
+   and solo off with Desk configuration uses the Desk planes. A substrate
+   outage reports unreachable clearly without a localhost fallback.
+3. The assembled bot-00 prompt no longer loads desk-gateway always.
+4. Skill link validation finds no dead in-repo references; Desk environment
+   variables are documented as optional.
+5. Exact repository gates are green or only named, evidenced baseline failures:
+   `ruff check omega_prime/`; `ruff format --check omega_prime/`;
+   `mypy omega_prime/`; `pytest omega_prime/tests -q`; and, when prompts change,
+   `bash omega_prime/scripts/assemble-prompts.sh --check`.
+
+**Out of scope:** Deleting Desk code; the separate user-desk-lead connector; the
+full environment table generator (Phase 102); connector restarts, deployment,
+live configuration, pushes, PRs, or merges. No new packages or session/turn time
+caps.
+
+**Plans and execution:**
+
+- [x] [99-01 — Solo routing and regression proof](phases/99-solo-mode-desk-optional/99-01-PLAN.md)
+- [x] [99-02 — On-demand gateway prompt](phases/99-solo-mode-desk-optional/99-02-PLAN.md)
+- [x] [99-03 — Repository-grounded skill links](phases/99-solo-mode-desk-optional/99-03-PLAN.md)
+- [x] [99-04 — Optional Desk docs and link validation](phases/99-solo-mode-desk-optional/99-04-PLAN.md)
+
+Phase execution summary: [99-SUMMARY.md](phases/99-solo-mode-desk-optional/99-SUMMARY.md).
+Verification: [99-VERIFICATION.md](phases/99-solo-mode-desk-optional/99-VERIFICATION.md).

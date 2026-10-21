@@ -2,7 +2,14 @@
   "contract": "1.0.0",
   "flavor": "core",
   "milestone": "v20 — Wiring",
-  "phases": [],
+  "phases": [
+    {
+      "number": 99,
+      "name": "Solo mode, Desk optional",
+      "status": "completed",
+      "directory": ".planning/phases/99-solo-mode-desk-optional"
+    }
+  ],
   "next": {
     "command": "/skill:gsd-autonomous 97",
     "label": "Execute Phase 97 plan",
