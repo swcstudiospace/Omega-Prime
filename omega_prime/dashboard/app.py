@@ -123,6 +123,10 @@ class _SSEResponse(Response):
             disconnect_waiter.cancel()
             with suppress(asyncio.CancelledError):
                 await disconnect_waiter
+            close = getattr(self.events, "aclose", None)
+            if close is not None:
+                with suppress(Exception):
+                    await close()
 
 
 class _DashboardGuards:
@@ -216,6 +220,7 @@ def create_app(
     legacy_index = static_dir / "index.html"
     cc_dir = static_dir / "cc"
     cc_index = cc_dir / "index.html"
+    terminal_backend = terminal_service or TerminalService()
     @asynccontextmanager
     async def lifespan(_: Starlette) -> AsyncIterator[None]:
         await poller.start()
@@ -316,13 +321,15 @@ def create_app(
         if task is None:
             return Response("not found", status_code=404)
         pane = resolve_task_pane(task)
-        service = terminal_service or TerminalService()
+        if pane is None:
+            async def no_session() -> AsyncIterator[str]:
+                yield terminal_backend._event("no_session", "", None)
+            return _SSEResponse(no_session(), headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        if not await terminal_backend.reserve():
+            return Response("terminal stream limit reached", status_code=429, headers={"Retry-After": "15"})
         async def events() -> AsyncIterator[str]:
-            if pane is None:
-                yield service._event("no_session", "", None)
-            else:
-                async for event in service.stream(pane):
-                    yield event
+            async for event in terminal_backend.stream(pane, reserved=True):
+                yield event
         return _SSEResponse(events(), headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 

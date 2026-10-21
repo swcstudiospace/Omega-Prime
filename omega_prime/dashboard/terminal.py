@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
@@ -28,15 +28,11 @@ _ASSIGN = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PAT)[A-Z0-9
 
 
 def resolve_task_pane(task: Any) -> str | None:
-    mapping = getattr(task, "herdr_pane", None)
-    if mapping is None and isinstance(task, dict):
-        mapping = task.get("herdr_pane")
+    mapping = task.get("herdr_pane") if isinstance(task, dict) else getattr(task, "herdr_pane", None)
     if isinstance(mapping, dict):
         pane = mapping.get("pane_id")
         return pane if isinstance(pane, str) and _PANE.fullmatch(pane) else None
-    owner = getattr(task, "owner", None)
-    if isinstance(task, dict):
-        owner = task.get("owner")
+    owner = task.get("owner") if isinstance(task, dict) else getattr(task, "owner", None)
     kind = owner.get("kind") if isinstance(owner, dict) else getattr(owner, "kind", None)
     ref = owner.get("ref") if isinstance(owner, dict) else getattr(owner, "ref", None)
     return ref if kind == "herdr-pane" and isinstance(ref, str) and _PANE.fullmatch(ref) else None
@@ -50,8 +46,7 @@ def sanitize_terminal_text(value: str) -> str:
     text = _TOKEN.sub("[REDACTED]", text)
     text = _JWT.sub("[REDACTED]", text)
     text = _ASSIGN.sub(r"\1=[REDACTED]", text)
-    lines = text.splitlines()
-    text = "\n".join(lines[-TERMINAL_MAX_LINES:])
+    text = "\n".join(text.splitlines()[-TERMINAL_MAX_LINES:])
     encoded = text.encode("utf-8")
     if len(encoded) > TERMINAL_MAX_BYTES:
         encoded = encoded[-TERMINAL_MAX_BYTES:]
@@ -63,13 +58,13 @@ def sanitize_terminal_text(value: str) -> str:
 
 async def _read_pane(pane: str) -> str:
     argv = ["herdr", "pane", "read", pane, "--source", "recent", "--lines", "200", "--format", "text"]
-    process = await asyncio.create_subprocess_exec(
-        *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
+    process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), TERMINAL_READ_TIMEOUT_S)
-        if len(stdout) > TERMINAL_MAX_CAPTURE_BYTES or process.returncode != 0:
+        stdout = await asyncio.wait_for(process.stdout.read(TERMINAL_MAX_CAPTURE_BYTES + 1), TERMINAL_READ_TIMEOUT_S)
+        if len(stdout) > TERMINAL_MAX_CAPTURE_BYTES:
+            raise OSError("Terminal capture unavailable")
+        if await asyncio.wait_for(process.wait(), TERMINAL_READ_TIMEOUT_S) != 0:
             raise OSError("Terminal capture unavailable")
         return stdout.decode("utf-8", errors="replace")
     except BaseException:
@@ -88,14 +83,19 @@ class TerminalService:
         self.sleep = sleep
         self._slots = asyncio.Semaphore(TERMINAL_STREAM_LIMIT)
 
-    async def stream(self, pane: str) -> AsyncIterator[str]:
+    async def reserve(self) -> bool:
+        if self._slots.locked() and getattr(self._slots, "_value", 0) <= 0:
+            return False
+        await self._slots.acquire()
+        return True
+
+    async def stream(self, pane: str, *, reserved: bool = False) -> AsyncIterator[str]:
         if not _PANE.fullmatch(pane):
             yield self._event("no_session", "", None)
             return
-        if self._slots.locked() and getattr(self._slots, "_value", 0) <= 0:
+        if not reserved and not await self.reserve():
             yield self._event("unavailable", "", None)
             return
-        await self._slots.acquire()
         previous: tuple[str, str] | None = None
         updated: str | None = None
         try:
@@ -103,11 +103,12 @@ class TerminalService:
             while True:
                 try:
                     raw = await asyncio.wait_for(self.runner(pane), TERMINAL_READ_TIMEOUT_S)
-                    text = sanitize_terminal_text(raw)
-                    state = "live"
+                    if not isinstance(raw, str) or len(raw.encode("utf-8")) > TERMINAL_MAX_CAPTURE_BYTES:
+                        raise OSError("Terminal capture unavailable")
+                    text, state = sanitize_terminal_text(raw), "live"
                 except asyncio.CancelledError:
                     raise
-                except (TimeoutError, OSError, Exception):
+                except Exception:
                     text, state = "", "unavailable"
                 if (state, text) != previous:
                     if text or state != "live":
@@ -123,5 +124,4 @@ class TerminalService:
 
     @staticmethod
     def _event(status: str, text: str, updated_at: str | None) -> str:
-        import json
         return "event: terminal\ndata: " + json.dumps({"status": status, "text": text, "updated_at": updated_at}, separators=(",", ":")) + "\n\n"
