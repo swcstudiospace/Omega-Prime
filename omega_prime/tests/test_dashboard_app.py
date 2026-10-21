@@ -72,6 +72,27 @@ def _ready_poller() -> DashboardPoller:
     return poller
 
 
+def test_cold_snapshot_api_includes_empty_idle_sessions() -> None:
+    app = create_app(DashboardPoller([]), port=0)
+    with TestClient(app) as client:
+        response = client.get("/api/snapshot", headers={"host": "127.0.0.1:0"})
+    assert response.status_code == 200
+    assert response.json()["idle_sessions"] == []
+
+
+
+def test_populated_snapshot_api_includes_idle_sessions(tmp_path: Path) -> None:
+    poller = DashboardPoller([], task_ids_path=tmp_path / "tasks.json", clock=lambda: NOW)
+    poller._results["tasks_json"] = SourceResult(
+        "tasks_json", "ok", extra={"tasks": [{"id": "idle", "title": "Idle", "state": "queued"}]}
+    )
+    poller._build_snapshot()
+    app = create_app(poller, port=0)
+    with TestClient(app) as client:
+        response = client.get("/api/snapshot", headers={"host": "127.0.0.1:0"})
+    assert response.status_code == 200
+    assert response.json()["idle_sessions"][0]["id"] == "tasks:idle"
+
 def test_static_snapshot_and_health_headers() -> None:
     poller = _ready_poller()
     app = create_app(poller)
@@ -91,6 +112,7 @@ def test_static_snapshot_and_health_headers() -> None:
             "pr_gate",
             "waiting_on_ove",
             "finished",
+            "idle_sessions",
         }
         assert payload["sources"]["herdr"]["status"] == "ok"
         assert "took_ms" in payload["sources"]["herdr"]

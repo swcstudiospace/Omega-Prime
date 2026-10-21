@@ -405,6 +405,7 @@ def test_snapshot_api_and_named_sse_share_redacted_nested_github_data() -> None:
             "pr_gate",
             "waiting_on_ove",
             "finished",
+            "idle_sessions",
         }
         nested = snapshot["sources"]["github"]["command_center"]
         assert set(nested) == {"repositories", "ci_cd", "recent_merges", "meta"}

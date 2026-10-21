@@ -19,7 +19,13 @@ def test_persisted_task_numbering_reaches_snapshot(tmp_path):
                     "title": "Stable task",
                     "state": "working",
                     "owner": {"kind": "human", "ref": "owner"},
-                }
+                },
+                {
+                    "id": "tasks:idle",
+                    "title": "Idle task",
+                    "state": "queued",
+                    "owner": {"kind": "human", "ref": "owner"},
+                },
             ],
             "waiting_on_ove": [],
             "finished": [],
@@ -28,17 +34,20 @@ def test_persisted_task_numbering_reaches_snapshot(tmp_path):
     poller._build_snapshot()
     first = poller.snapshot()
     assert first is not None
-    assert first["active"][0]["seq"] == 1
-    assert first["active"][0]["display_id"] == "00001 - Stable task"
-    assert set(first) == {"generated_at", "sources", "active", "pr_gate", "waiting_on_ove", "finished"}
+    assert first["idle_sessions"][0]["id"] == "tasks:idle"
+    assert first["idle_sessions"][0]["seq"] == 1
+    assert first["active"][0]["seq"] == 2
+    assert first["active"][0]["display_id"] == "00002 - Stable task"
+    assert set(first) == {"generated_at", "sources", "active", "pr_gate", "waiting_on_ove", "finished", "idle_sessions"}
 
     restarted = DashboardPoller([], task_ids_path=bridge, clock=lambda: NOW)
     restarted._results["tasks_json"] = poller._results["tasks_json"]
     restarted._build_snapshot()
     second = restarted.snapshot()
     assert second is not None
-    assert second["active"][0]["seq"] == 1
-    assert second["active"][0]["display_id"] == "00001 - Stable task"
+    assert second["active"][0]["seq"] == 2
+    assert second["active"][0]["display_id"] == "00002 - Stable task"
+    assert second["idle_sessions"][0]["seq"] == first["idle_sessions"][0]["seq"]
     assert second["active"][0]["timeline"] == first["active"][0]["timeline"]
 
 

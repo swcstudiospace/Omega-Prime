@@ -115,7 +115,7 @@ def number_snapshot(snapshot: Any, *, path: Path, now: datetime) -> Any:
     """Allocate bridge identities first, then collector-only identities deterministically."""
     with locked_tasks(path, write=True) as data:
         _backfill(data)
-        rows = [*snapshot.active, *snapshot.waiting_on_ove, *snapshot.finished]
+        rows = [*snapshot.active, *snapshot.idle_sessions, *snapshot.waiting_on_ove, *snapshot.finished]
         unique: dict[str, Any] = {}
         for row in rows:
             unique.setdefault(row.id, row)

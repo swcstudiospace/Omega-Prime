@@ -94,10 +94,11 @@ def test_number_snapshot_numbers_derived_rows_and_records_observed_changes(tmp_p
         "wiring:done", "Finished wiring", NOW.isoformat(), "ok",
         wiring={"phase": "release", "branch": "main", "head_sha": "def", "stage": "done", "repo": None},
     )
-    snapshot = Snapshot([task], [], [waiting], [finished])
+    idle = Task("herdr:idle", "Idle", "herdr", Owner("herdr", "idle", "Idle"), "quiet")
+    snapshot = Snapshot([task], [], [waiting], [finished], [idle])
     number_snapshot(snapshot, path=path, now=NOW)
-    first = {row.id: row for row in [*snapshot.active, *snapshot.waiting_on_ove, *snapshot.finished]}
-    assert {row.seq for row in first.values()} == {1, 2, 3}
+    first = {row.id: row for row in [*snapshot.active, *snapshot.idle_sessions, *snapshot.waiting_on_ove, *snapshot.finished]}
+    assert {row.seq for row in first.values()} == {1, 2, 3, 4}
     assert task.wiring["repo"] is None and finished.wiring["repo"] is None
     assert task.timeline == [{"at": NOW.isoformat(), "state": "running"}]
     number_snapshot(snapshot, path=path, now=NOW + timedelta(minutes=1))

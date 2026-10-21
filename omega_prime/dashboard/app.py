@@ -198,6 +198,7 @@ def _empty_snapshot() -> dict[str, Any]:
         "pr_gate": [],
         "waiting_on_ove": [],
         "finished": [],
+        "idle_sessions": [],
     }
 
 
