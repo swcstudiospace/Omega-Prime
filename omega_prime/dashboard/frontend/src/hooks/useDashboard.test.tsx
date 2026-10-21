@@ -121,7 +121,9 @@ describe('useDashboard websocket tier', () => {
     socket.emit({ type: 'snapshot', snapshot: fixture })
     await waitFor(() => expect(result.current.data).toEqual(fixture))
     socket.emit({ type: 'stale_changed', id: 'no-such-task', stale: null })
-    await waitFor(() => expect(result.current.error).toBe('offline'))
+    // The repair fetch is issued and fails; let its rejection settle.
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2))
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
     // The unapplicable delta above is already queued; fill the queue to the cap.
     for (let n = 1; n < MAX_PENDING_DELTAS; n++) socket.emit({ type: 'task_changed', task: { ...fixture.active![0]!, title: `Live ${n}` } })
     expect(FakeWebSocket.instances).toHaveLength(1)
