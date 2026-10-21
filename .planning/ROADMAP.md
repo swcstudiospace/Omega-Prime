@@ -127,7 +127,7 @@ Source evidence: `/workspace/omes-bot-wiring-audit/AUDIT.md` (read-only audit of
 - [ ] Phase 102: Schedulers, dead modules, env docs
 - [ ] Phase 103: Ultrathink integration and cleanup
 
-### v21 Sandbox wiring (Phase 110) — in progress 2026-10-21
+### v21 Sandbox wiring (Phases 110-111) — in progress 2026-10-21
 
 Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's round-1 fixes into `feat/sbx-2-workspace-mount` is committed (3e7be33) but leaves follow-ups, all inside `omp-sandbox/`. Planning only in this stage; execution is one plan (110-01).
 
@@ -150,3 +150,21 @@ Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's roun
 4. No test is weakened, skipped, or deleted to make anything pass; all new tests run under Node's built-in runner with fakes only (no podman, openshell, herdr, or network).
 
 - [x] Phase 110: omp-sandbox sbx-2 merge finish (tsc clean + Greptile #55 round 2)
+
+**Phase 111 goal:** Surface every blocked push, approval or plan gate in `waiting_on_ove` the moment it happens (task 00030 node n5; audit C10: a blocked push sat ~10 h with no item). One helper in `omega_prime/dashboard` writes the item through `locked_tasks(path, write=True)` + `_write_locked` with a stable id (repeats update, never duplicate), sets the owning task to `blocked` on raise and back to `working` on clear, and passes `ask`/`blocks` text through the secret redaction. The engine's plan/tier gates (`PlanNotAllowed`, sandbox/tier unavailable) and a push-step hook (blocked push, gh not logged in, unanswered approval) call it; execution is one plan (111-01). This is U2 in node n7's build order (U1 was Phase 110).
+
+**Requirements:**
+- **W111-01 store primitives:** `omega_prime/dashboard/status_file.py` with `locked_tasks(path, write=False)` (exclusive sidecar lock while `write=True`, yields the parsed tasks.json) and `_write_locked(data, path)` (atomic write-back) implementing the box contract: task states `queued, working, blocked, waiting_on_ove, done, failed`; `waiting_on_ove` items `{id, seq, ask, blocks, since}`; a missing file starts as `{"tasks": [], "waiting_on_ove": []}`.
+- **W111-02 raise/clear helper:** `omega_prime/dashboard/blocks.py` with `raise_block(path, item_id, ask, blocks, task_id)` and `clear_block(path, item_id, task_id)`: upsert by stable `item_id` (one item per id, `seq` allocated once, `since` pinned at first raise), owning task `blocked` on raise / back to `working` on clear (a `done`/`failed` row is not resurrected).
+- **W111-03 redaction:** `ask` and `blocks` pass through `redact_text` (`omega_prime/credentials/redact.py`) before writing; no token-shaped or credentialed-argv text lands in a row.
+- **W111-04 engine failure wiring:** `omp_driver.run`'s failure path (reason `plan_not_allowed` or `sandbox_unavailable` — the Python face of `PlanNotAllowed` and of the sandbox tier's TS `TierUnavailable` gate) raises one block item in the same call that returns the failed `EngineResult` when the caller passed task context; no item for other reasons; without task context, behaviour is byte-identical to today.
+- **W111-05 push-step hook + tests:** a push-step hook (`push_block(path, task_id, reason, detail="")` with reasons `auto_review_blocked`, `gh_not_logged_in`, `approval_unanswered`, cleared via `clear_block`) any caller can call; tests with a temp tasks.json cover: blocked push -> exactly one item in one call, repeat idempotent, `PlanNotAllowed` -> item + task blocked immediately, clear -> item gone and task working, a secret-looking string never lands in the row.
+
+**Success criteria:**
+1. A simulated blocked push creates exactly one `waiting_on_ove` item within one call; a repeat updates it (same id, same `seq`, same `since`) instead of duplicating.
+2. An engine run failing with `PlanNotAllowed` writes its item and sets the owning task `blocked` in the same call (no poll delay); the `EngineResult` shape is unchanged.
+3. `clear_block` removes the item and returns the task to `working`.
+4. A secret-looking string passed into `ask`/`blocks`/`detail` never appears verbatim in tasks.json (dashboard redaction check).
+5. No existing test weakened, skipped or deleted; tests use a temp tasks.json and fakes only (no gh, herdr, podman, network, or model calls).
+
+- [ ] Phase 111: Immediate block surfacing in waiting_on_ove

@@ -1,0 +1,93 @@
+{
+  "task_id": "phase111-planning",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T22:05:00Z",
+  "completed_at": "2026-10-21T23:10:00Z",
+  "scope": "Planning only (task 00030 node n5): register Phase 111 in .planning/ROADMAP.md, write 111-CONTEXT.md and one execution plan 111-01-PLAN.md (dashboard block-surfacing store + helper + engine wiring). No product code, no omega_prime/ or omp-sandbox/ source changes, no push/PR/remote.",
+  "plan": {
+    "note": "Fallback lightweight plan (no XML uplift root in the dispatch; no PR per task rules — recorded here instead of a PR body).",
+    "nodes": [
+      { "id": "n1", "kind": "understand", "steps": ["Read uplift2.xml node n5, got.json, AUDIT.md C10/C13, README-REFS.md", "Map engine failure paths (omp_driver 323-353, plan_router, sandbox.py, attach.py) and redaction (credentials/redact.py)", "Confirm no locked_tasks/_write_locked/waiting_on_ove/tasks.json code exists in this tree; TierUnavailable is TS-only", "Capture Phase 110 planning conventions (ROADMAP/CONTEXT/PLAN formats, commit + receipt precedents)"], "status": "done" },
+      { "id": "n2", "kind": "register", "steps": ["Add Phase 111 (goal, W111-01..W111-05, success criteria) to the ROADMAP v21 section", "Retitle the v21 header to Phases 110-111; leave all Phase 110 content untouched", "Re-read the diff for accidental edits elsewhere"], "status": "done" },
+      { "id": "n3", "kind": "context", "steps": ["Write 111-CONTEXT.md (goal, block sources, requirements, source map with verified line anchors, environment facts, decisions, pitfalls, out-of-scope, tracker)", "Ground every path/line claim in reads from this session", "Record the pytest-absent environment fact"], "status": "done" },
+      { "id": "n4", "kind": "plan", "steps": ["Write 111-01-PLAN.md: T1 store primitives, T2 raise/clear + push hook + redaction, T3 engine failure wiring, five contract tests", "Lock assumption-delta decisions (store ships here, opt-in run() kwargs, deterministic item ids, static ask/blocks, clear flips blocked only, reuse redact_text)", "Keep ownership to exactly five files; nothing under omp-sandbox/"], "status": "done" },
+      { "id": "n5", "kind": "critique", "steps": ["Spawn gsd-plan-checker against the live tree", "Fix every finding in PLAN/CONTEXT", "Re-verify corrected citations against the cited code"], "status": "done" },
+      { "id": "n6", "kind": "synthesize", "steps": ["Commit '00013 - plan phase 111 block surfacing' (ROADMAP + CONTEXT + PLAN + this receipt) with SPE-18305 trailer", "Leave git status --porcelain clean", "Report the plan checklist, evidence and unverified list"], "status": "done" }
+    ]
+  },
+  "commands": [
+    {
+      "cmd": "ls /sandbox/work && git branch --show-current && git log --oneline -6 && git status --porcelain",
+      "exit_code": 0,
+      "duration_s": 0.33,
+      "output_tail": "branch feat/sbx-3-engine-backend; HEAD cbf1dd2 '00013 - omp-sandbox: port opt-in OMP_SANDBOX_PASS_ENV from standalone 81c3a53'; working tree clean",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "git log --all --oneline -S locked_tasks -- .",
+      "exit_code": 0,
+      "duration_s": 0.1,
+      "output_tail": "(empty — no commit in this repo's history ever touched locked_tasks)",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "git ls-tree -r HEAD --name-only | grep -iE 'dashboard|tasks_json|status_file'",
+      "exit_code": 0,
+      "duration_s": 0.05,
+      "output_tail": "docs/notion-task-dashboard.md (only match; no omega_prime/dashboard package at HEAD)",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "PYTHONPATH=/sandbox/work python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_engine_stage.py omega_prime/tests/test_engine.py omega_prime/tests/test_credentials.py",
+      "exit_code": 1,
+      "duration_s": 0.07,
+      "output_tail": "/usr/bin/python3: No module named pytest",
+      "phase": "environment-probe"
+    },
+    {
+      "cmd": "find / -maxdepth 5 -name pytest -type f 2>/dev/null; python3 -m py_compile --help",
+      "exit_code": 0,
+      "duration_s": 0.4,
+      "output_tail": "(no pytest binary anywhere; py_compile works)",
+      "phase": "environment-probe"
+    },
+    {
+      "cmd": "grep-tool surveys: 'waiting_on_ove' over /sandbox/work (0 code hits); 'locked_tasks|def _write_locked' over omega_prime (0 hits); 'TierUnavailable' over /sandbox/work (only omp-sandbox/src/core/providers/{types,bwrap,openshell-podman,openshell,tiers}.ts); 'tasks\\.json' over /sandbox/work (0 hits)",
+      "exit_code": 0,
+      "duration_s": 2.5,
+      "output_tail": "store absent in this tree; TierUnavailable is TypeScript-only; no tasks.json writer exists",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "read omega_prime/engine/omp_driver.py:275-360,364-473,607-679; plan_router.py (grep hits at 53-56, 98, 421-432); sandbox.py:20-23; attach.py:271-343; credentials/redact.py:13-58; engine/jobs.py state_dir (grep 36-41)",
+      "exit_code": 0,
+      "duration_s": 1.2,
+      "output_tail": "anchors verified: except (EngineError, PlanNotAllowed, SandboxUnavailable, OSError) at 323-353 with reason 'plan_not_allowed' at 333 and 'sandbox_unavailable' at 335; _run gate order resolve_omp -> omp_version -> sandbox_ready -> select at 376-386; redact_text patterns sk-/xai-/ghp_/Bearer/assignment",
+      "phase": "evidence"
+    }
+  ],
+  "claims": [
+    { "claim": "Planning ran on feat/sbx-3-engine-backend @ cbf1dd2 with a clean tree, and only .planning/ROADMAP.md, 111-CONTEXT.md, 111-01-PLAN.md and this receipt were written", "evidence_command_index": 0 },
+    { "claim": "No locked_tasks/_write_locked/waiting_on_ove/tasks.json code exists anywhere in this repo (history and HEAD); the store must be created here, API-compatible with the box contract in README-REFS.md", "evidence_command_index": [1, 2, 5] },
+    { "claim": "TierUnavailable is a TypeScript class only (omp-sandbox/src/core/providers/types.ts); the Python engine face of the tier gate is SandboxUnavailable / reason 'sandbox_unavailable', so the plan wires on reason strings and forbids inventing a Python TierUnavailable", "evidence_command_index": 5 },
+    { "claim": "The engine failure wiring anchor is omp_driver.py run()'s except at 323-353 (plan_not_allowed at 333, sandbox_unavailable at 335), with select() reached only after resolve_omp/omp_version/sandbox_ready — hence the fake omp + fake bwrap fixture requirement in the plan's wiring test", "evidence_command_index": 6 },
+    { "claim": "Python tests cannot run in this sandbox (no pytest module, no pip, none on disk); the execution stage runs them in its own environment per the task rules", "evidence_command_index": [3, 4] }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Execution-stage acceptance (test_dashboard_blocks.py green, engine suites unchanged-green) is not verified here — this stage is planning only and this sandbox has no pytest; baselines were recorded, code was not written",
+    "gsd-plan-checker verdict (pass_with_findings, 3 minor findings, all fixed in the plan/context files) is subagent-reported and was spot-checked by re-reading the cited omp_driver.py/jobs.py lines, not re-run as a shell command",
+    "omega_prime tooling checks (catalog/plugin/prompt_format/assemble-prompts/test_docs/test_public_repo) not run — no file in their scope (omega_prime/, docs/, root *.md) was changed by this task",
+    "Box-tree interoperability (the live /workspace/omes-bot dashboard reading a tasks.json written by the new helper) is untestable from this sandbox; the plan pins the documented contract (README-REFS.md) instead"
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/phases/111-block-surfacing/111-CONTEXT.md",
+    ".planning/phases/111-block-surfacing/111-01-PLAN.md",
+    ".receipts/bot-00-omega-prime/phase111-planning.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "git revert of the single planning commit restores ROADMAP.md and removes the phase 111 directory and receipt; no product code to roll back",
+  "approvals": [],
+  "approved_by": null
+}
