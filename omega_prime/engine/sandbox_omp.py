@@ -22,6 +22,19 @@ individual tool replies; the stage wait itself has no deadline — liveness
 is the wrapper's event stream, and a set interrupt aborts the stage
 explicitly. This module is stdlib-only and never imports from
 ``omp-sandbox``.
+
+Result contract (the frozen EngineResult, no field changes): ``ok`` comes
+from the terminal ``stage_done`` status being ``completed``; ``final_text``
+from the stage record's ``lastText``; ``plan``/``provider``/``model``/
+``stage``/``fallback_from`` mirror the router Choice; ``sandbox`` is
+``"omp-sandbox"``; ``usage`` is empty and ``cost`` None (the wrapper
+surfaces no usage); ``commands`` lists the wrapper tools called in order.
+Exported commits ride the free-form stats dict under documented keys:
+``stats["omp_sandbox"] = {"stage_id": <stageId>, "tier": <up result tier
+or None>, "status": <final stage_done status>, "model_requested":
+<run_gsd_stage result model>, "export": <export_commits result dict or
+None>}``. Nothing else is stored there, and no env value is ever printed
+or logged (presence/truthiness only).
 """
 
 from __future__ import annotations
@@ -38,7 +51,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from omega_prime.engine.jobs import append_event, child_env
+from omega_prime.engine.jobs import append_event, child_env, write_json
 from omega_prime.engine.omp_driver import EngineError, EngineResult, _system
 from omega_prime.engine.plan_router import read_usage, select
 from omega_prime.engine.sandbox import SandboxUnavailable
@@ -468,10 +481,16 @@ def run_backend(
     has no stageless form. The wrapper then seeds the worktree (``up`` with
     ``seed_repo`` so ``export_commits`` has a repo), runs the stage
     (``run_gsd_stage`` returns immediately), waits for the matching
-    ``stage_done`` event with no deadline, reads the stage record from
+    ``stage_done`` event with no deadline (a set interrupt aborts the stage
+    explicitly and raises ``cancelled``), reads the stage record from
     ``sandbox_status``, and exports commits after a completed stage.
-    ``down`` always runs in the finally. Every wrapper failure raises
-    ``SandboxUnavailable``; there is no bwrap fallback.
+    ``down`` always runs in the finally, followed by the down-summary
+    job event. Every wrapper failure — ``ok:false`` including
+    ``path_refused`` and tier errors, protocol garbage, EOF, non-zero
+    exit — raises ``SandboxUnavailable``; there is no bwrap fallback. A
+    stage that ends ``failed``/``aborted`` returns ``ok=False`` with reason
+    ``engine`` instead of raising. See the module docstring for the stats
+    keys and session.json/events parity.
     """
     work = allowed_worktree(
         Path(cwd).resolve() if cwd is not None else Path.cwd(), env
@@ -495,19 +514,36 @@ def run_backend(
     gsd_command = "gsd-plan-phase" if stage == "plan" else "gsd-execute-phase"
     # system_prompt cannot ride an omp flag inside the sandbox, so it opens
     # the task text (same _system helper as the bwrap path).
-    if system_prompt:
-        task_text = _system(system_prompt) + "\n\n" + prompt
-    else:
-        task_text = prompt
+    task_text = _system(system_prompt) + "\n\n" + prompt if system_prompt else prompt
+    # Pre-spawn session.json with the bwrap key set (no task text, no env).
+    write_json(
+        directory / "session.json",
+        {
+            "job_id": job_id,
+            "plan": choice.decision.plan,
+            "provider": choice.decision.provider,
+            "model": choice.decision.model_id,
+            "stage": choice.stage,
+            "fallback_from": choice.fallback_from,
+            "sandbox": BACKEND_NAME,
+            "mcp_json": "",
+            "skills": "",
+            "omp_major": omp_major,
+            "mode": mode,
+        },
+    )
     client = AndaClient(anda, wrapper_env(env))
+    commands: list[str] = []
     started = False
+    outcome: dict[str, Any] | None = None
     try:
         client.start()
         client.wait_ready()
-        _tool(
+        up_result = _tool(
             client,
             "up",
             {"seed_repo": {"path": str(work), "ref": seed_ref}},
+            commands,
             events_path,
         )
         stage_result = _tool(
@@ -521,61 +557,121 @@ def run_backend(
                 "task": task_text,
                 "thinking": thinking,
             },
+            commands,
             events_path,
         )
         started = True
         stage_id = str(stage_result.get("stageId") or "")
         if not stage_id:
             raise SandboxUnavailable("run_gsd_stage returned no stageId")
-        done_event = _wait_stage_done(client, stage_id, events_path)
+        done_event = _wait_stage_done(client, stage_id, interrupt, events_path)
         done_status = str(done_event.get("status") or "")
         status_record = _tool(
-            client, "sandbox_status", {"stage_id": stage_id}, events_path
+            client, "sandbox_status", {"stage_id": stage_id}, commands, events_path
         )
+        export: dict[str, Any] | None = None
         if done_status == "completed":
-            _tool(client, "export_commits", {}, events_path)
+            export = _tool(client, "export_commits", {}, commands, events_path)
+        tier = up_result.get("tier")
+        outcome = {
+            "ok": done_status == "completed",
+            "status": done_status,
+            "error": status_record.get("error"),
+            "last_text": str(status_record.get("lastText") or ""),
+            "stage_id": stage_id,
+            "tier": tier if isinstance(tier, str) else None,
+            "model_requested": stage_result.get("model"),
+            "export": export,
+        }
     finally:
-        client.down()
+        down_summary = client.down()
+        commands.append("down")
+        _append_down_event(events_path, outcome, down_summary)
         client.close()
-    return EngineResult(
-        ok=done_status == "completed",
+    if outcome is None:
+        raise SandboxUnavailable("the omp-sandbox stage ended without a terminal event")
+    ok = bool(outcome["ok"])
+    result = EngineResult(
+        ok=ok,
         job_id=job_id,
-        final_text=str(status_record.get("lastText") or ""),
+        final_text=str(outcome["last_text"]),
+        usage={},
+        cost=None,
         plan=choice.decision.plan,
         provider=choice.decision.provider,
         model=choice.decision.model_id,
         stage=choice.stage,
         fallback_from=choice.fallback_from,
         events_path=str(events_path),
+        reason=None if ok else "engine",
+        detail="" if ok else str(outcome["error"] or outcome["status"] or "stage did not complete"),
+        stats={
+            "omp_sandbox": {
+                "stage_id": outcome["stage_id"],
+                "tier": outcome["tier"],
+                "status": outcome["status"],
+                "model_requested": outcome["model_requested"],
+                "export": outcome["export"],
+            }
+        },
         sandbox=BACKEND_NAME,
+        commands=commands,
         started=started,
     )
+    # Post-run session.json: the bwrap success key set with this run's truth.
+    write_json(
+        directory / "session.json",
+        {
+            "job_id": job_id,
+            "ok": ok,
+            "plan": result.plan,
+            "provider": result.provider,
+            "model": result.model,
+            "stage": result.stage,
+            "fallback_from": result.fallback_from,
+            "sandbox": BACKEND_NAME,
+            "mcp_json": "",
+            "skills": "",
+            "commands": commands,
+            "cost": None,
+            "final_text": result.final_text[:2000],
+        },
+    )
+    return result
 
 
 def _tool(
     client: AndaClient,
     tool: str,
     args: dict[str, Any],
+    commands: list[str],
     events_path: Path,
 ) -> dict[str, Any]:
-    """One wrapper tool call; interleaved events land in events.jsonl."""
+    """One wrapper tool call; events land in events.jsonl via append_event,
+    the tool name in commands."""
     reply = client.call(tool, args)
     for event in client.drain_events():
         append_event(events_path, event)
+    commands.append(tool)
     return reply
 
 
 def _wait_stage_done(
     client: AndaClient,
     stage_id: str,
+    interrupt: Any | None,
     events_path: Path,
 ) -> dict[str, Any]:
     """Consume events until the stage's ``stage_done`` arrives.
 
     No deadline: the wrapper's event stream is the liveness signal, and
     EOF or a dead wrapper raises SandboxUnavailable instead of hanging.
-    Every event is appended through the redacting ``append_event``.
+    Every event is appended through the redacting ``append_event``. A set
+    interrupt sends the ``abort`` tool once and keeps consuming until the
+    terminal event, then raises ``cancelled`` with ``started=True`` so
+    ``run()`` maps it exactly like the bwrap path.
     """
+    aborted = False
     while True:
         event = client.next_event(_POLL_TICK)
         for buffered in client.drain_events():
@@ -585,4 +681,34 @@ def _wait_stage_done(
             and event.get("event") == "stage_done"
             and str(event.get("stageId") or "") == stage_id
         ):
+            if aborted and event.get("status") == "aborted":
+                # Our own abort landed (an externally aborted stage returns
+                # as ok False instead). run() maps this to reason
+                # "cancelled" exactly like the bwrap path.
+                raise EngineError(
+                    "cancelled", "stage aborted by interrupt", started=True
+                )
             return event
+        if interrupt is not None and interrupt.is_set() and not aborted:
+            # Explicit abort; the reply is consumed here, interleaved events
+            # are flushed. A dead wrapper surfaces as SandboxUnavailable.
+            client.call("abort", {"stage_id": stage_id})
+            for buffered in client.drain_events():
+                append_event(events_path, buffered)
+            aborted = True
+
+
+def _append_down_event(
+    events_path: Path,
+    outcome: dict[str, Any] | None,
+    down_summary: dict[str, Any] | None,
+) -> None:
+    """Final job-shaped event so the down result (leftovers, ownership) is
+    visible in events.jsonl. Redaction rides ``append_event``."""
+    body: dict[str, Any] = {"type": "job_end", "down": down_summary or {}}
+    if outcome is not None:
+        body["ok"] = bool(outcome["ok"])
+        if not outcome["ok"]:
+            body["reason"] = "engine"
+    with contextlib.suppress(OSError):
+        append_event(events_path, body)
