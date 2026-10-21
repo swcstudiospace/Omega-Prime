@@ -212,7 +212,7 @@ export class OpenShellPodmanTier implements SandboxTier {
 
   /** Sandboxes on this gateway other than ours. Unknown (gateway unreachable) counts as "none" only if the gateway is gone. */
   async #otherSandboxes(): Promise<string[]> {
-    const l = await os(["sandbox", "list"], { timeoutMs: 30_000 });
+    const l = await this.#os(["sandbox", "list"], { timeoutMs: 30_000 });
     if (l.code !== 0) return this.#gw && this.#gw.exitCode === null ? ["<unknown: sandbox list failed>"] : [];
     return l.stdout.split("\n").map((x) => x.trim().split(/\s+/)[0] ?? "").filter((n) => n && n !== this.id && !/^(NAME|No)$/i.test(n));
   }
