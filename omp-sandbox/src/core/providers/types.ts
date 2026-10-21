@@ -13,6 +13,8 @@ export interface SandboxTier {
   /** Human-readable isolation summary for receipts. */
   readonly isolation: string;
   start(env: Record<string, string>): Promise<void>;
+  /** Host directory bind-mounted read-write at `workdir`, when the job brought its own worktree. */
+  readonly workspaceHostPath?: string | null;
   /** Base URL + token of the Sandbox Agent server inside the sandbox (agentOS external-sandbox contract). */
   sandboxAgent(): { baseUrl: string; token: string };
   /** Long-lived process with piped stdio (omp --mode rpc). */
@@ -26,3 +28,5 @@ export interface SandboxTier {
 export class TierUnavailable extends Error {
   constructor(public tier: TierName, public detail: string) { super(`${tier} unavailable: ${detail}`); }
 }
+
+export type TierOptions = { workspaceHostPath?: string | null };

@@ -12,17 +12,71 @@
 // (`podman system service`), the gateway (`openshell-gateway --compute-driver podman`), the
 // workload image (built from sandbox/image/Containerfile if absent), then one sandbox per `up`.
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, writeFileSync, readFileSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import { request } from "node:http";
+import { connect } from "node:net";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { OPENSHELL_BIN, OPENSHELL_GATEWAY_BIN, OPENSHELL_TLS, OPENSHELL_GATEWAY_PORT, PODMAN_BIN, PODMAN_IMAGE, ROOT, STATE, SANDBOX_AGENT_BIN } from "../config.ts";
+import { OPENSHELL_BIN, OPENSHELL_GATEWAY_BIN, OPENSHELL_TLS, OPENSHELL_GATEWAY_PORT, OPENSHELL_MOUNT_GATEWAY_PORT, PODMAN_BIN, PODMAN_IMAGE, ROOT, STATE, SANDBOX_AGENT_BIN } from "../config.ts";
 import { execCapture, launched, pidAlive, rid, waitHttp } from "./util.ts";
 import { BrokerRelay, SANDBOX_RELAY_JS } from "./broker-relay.ts";
 import { TierUnavailable, type SandboxTier } from "./types.ts";
+import { pinDir, pinStillNamed, unpinDir, PathRefused, type PinnedDir } from "../paths.ts";
 
 const OS_ENV = { ...process.env, OPENSHELL_TELEMETRY_ENABLED: "false" } as Record<string, string>;
-const os = (args: string[], o: { timeoutMs?: number; input?: string } = {}) => execCapture(OPENSHELL_BIN, args, { env: OS_ENV, ...o });
+/** Default-gateway CLI env, or the mount gateway's (selected by endpoint, never by changing the active gateway). */
+const osEnv = (port: number | null): Record<string, string> => port === null ? OS_ENV : { ...OS_ENV, OPENSHELL_GATEWAY_ENDPOINT: `https://127.0.0.1:${port}` };
+
+/** Podman driver config that bind-mounts a validated host worktree read-write at /sandbox/work. */
+export function mountDriverConfig(hostPath: string, target = "/sandbox/work") {
+  return { podman: { mounts: [{ type: "bind", source: hostPath, target, read_only: false }] } };
+}
+
+/**
+ * The checked-in sandbox/policy-podman.yaml with exactly the run-as values substituted — single source of
+ * truth, so filesystem_policy, landlock and the default-deny network_policies stay byte-identical. The mount
+ * variant generates a copy with the host identity (userns = "keep-id" makes the container uid the host uid);
+ * the default variant uses the checked-in file as-is (uid/gid 1000).
+ */
+export function podmanPolicyYaml(runAsUser: string, runAsGroup: string): string {
+  return readFileSync(join(ROOT, "sandbox", "policy-podman.yaml"), "utf8")
+    .replace(/^(\s*run_as_user:).*/m, `$1 "${runAsUser}"`)
+    .replace(/^(\s*run_as_group:).*/m, `$1 "${runAsGroup}"`);
+}
+
+/** Gateway TOML. The mount variant adds exactly the settings bind mounts need; the default gateway keeps them off. */
+export function gatewayToml(sock: string, port: number, mount: boolean) {
+  return [
+    "[openshell]", "version = 2", "",
+    "[openshell.gateway]", 'compute_driver = "podman"', "disable_tls = false", `guest_tls_ca = "${OPENSHELL_TLS}/ca.crt"`, "",
+    "[openshell.drivers.podman]", `socket_path = "${sock}"`, 'network_name = "openshell"', `default_image = "${PODMAN_IMAGE}"`,
+    'image_pull_policy = "if_not_present"', `grpc_endpoint = "https://127.0.0.1:${port}"`, "stop_timeout_secs = 10",
+    ...(mount ? ["allow_driver_config = true", "enable_bind_mounts = true", 'userns = "keep-id"', "", "[openshell.drivers.podman.resource_admission]", "enabled = false"] : []), "",
+    "[openshell.gateway.gateway_jwt]", `signing_key_path = "${OPENSHELL_TLS}/jwt/signing.pem"`, `public_key_path = "${OPENSHELL_TLS}/jwt/public.pem"`,
+    `kid_path = "${OPENSHELL_TLS}/jwt/kid"`, `gateway_id = "omp-sandbox-podman${mount ? "-mnt" : ""}"`, "",
+  ].join("\n");
+}
+
+/**
+ * The CLI reads mTLS client material for an endpoint from <config>/openshell/gateways/https___127.0.0.1_<port>/mtls.
+ * Point that at the active gateway's mtls dir (same loopback PKI) with a symlink; key bytes are never copied or read.
+ */
+export function ensureEndpointRegistration(port: number) {
+  const base = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "openshell");
+  const dir = join(base, "gateways", `https___127.0.0.1_${port}`);
+  if (existsSync(join(dir, "mtls"))) return;
+  const active = existsSync(join(base, "active_gateway")) ? readFileSync(join(base, "active_gateway"), "utf8").trim() : "";
+  if (!active || active.includes("/") || !existsSync(join(base, "gateways", active, "mtls"))) throw new TierUnavailable("openshell-podman", "no active OpenShell gateway registration to borrow loopback mTLS from");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const target = join("..", active, "mtls");
+  try { symlinkSync(target, join(dir, "mtls")); }
+  catch (e) {
+    // Another wrapper starting its first mounted job may have created the same link first: accept it when it matches.
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST" || !sameLink(join(dir, "mtls"), target)) throw e;
+  }
+}
+function sameLink(path: string, target: string) { try { return readlinkSync(path) === target; } catch { return false; } }
 const pm = (args: string[], o: { timeoutMs?: number } = {}) => execCapture(PODMAN_BIN, args, { env: process.env as any, ...o });
 const GW_STATE = join(STATE, "openshell-podman");
 // One lease file per live tier (named by tier id, holding its wrapper pid). A tier takes its lease before it adopts
@@ -42,6 +96,30 @@ const RELAY_PORT = 18990;           // sandbox-local loopback only
 const AGENT_PORT = 2468;            // sandbox-local loopback only, reached via `forward service`
 const SECRET = /TOKEN|KEY|SECRET|PASSWORD/i;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Sandbox names in `openshell sandbox list` output, other than `self`. */
+export function listedSandboxes(stdout: string, self: string): string[] {
+  return stdout.split("\n").map((x) => x.trim().split(/\s+/)[0] ?? "").filter((n) => n && n !== self && !/^(NAME|No)$/i.test(n));
+}
+
+/**
+ * Users of one gateway, as seen when deciding whether the shared Podman service may stop. A listed sandbox is a
+ * user; a failed list counts as an unknown user while something still answers on the gateway's port (it may be
+ * a gateway this tier never saw start, with sandboxes made by a plain CLI client and no tier lease).
+ */
+export function gatewaySandboxUsers(list: { code: number | null; stdout: string }, self: string, listening: boolean, port: number): string[] {
+  if (list.code === 0) return listedSandboxes(list.stdout, self);
+  return listening ? [`<unknown: sandbox list failed on gateway port ${port}>`] : [];
+}
+
+/** True when something accepts a TCP connection on 127.0.0.1:port. */
+function listening(port: number, timeoutMs = 2_000): Promise<boolean> {
+  return new Promise((res) => {
+    const s = connect({ host: "127.0.0.1", port });
+    const done = (v: boolean) => { s.destroy(); res(v); };
+    s.setTimeout(timeoutMs, () => done(false)); s.once("connect", () => done(true)); s.once("error", () => done(false));
+  });
+}
 
 function ping(socketPath: string) {
   return new Promise<boolean>((res) => {
@@ -84,14 +162,40 @@ export class OpenShellPodmanTier implements SandboxTier {
   #children = new Set<ChildProcessWithoutNullStreams>();
   #created = false;
   info: Record<string, unknown> = {};
+  readonly workspaceHostPath: string | null;
+  readonly #port: number;
+  readonly #gwLeases: string;
+  readonly #osEnv: Record<string, string>;
+  readonly #gwState: string;
+
+  /** `workspaceHostPath` must already be allowlist-resolved (core.ts allowedDir); it selects the mount gateway. */
+  constructor(workspaceHostPath?: string | null) {
+    this.workspaceHostPath = workspaceHostPath ?? null;
+    this.#port = this.workspaceHostPath ? OPENSHELL_MOUNT_GATEWAY_PORT : OPENSHELL_GATEWAY_PORT;
+    this.#osEnv = osEnv(this.workspaceHostPath ? this.#port : null);
+    this.#gwState = this.workspaceHostPath ? `${GW_STATE}-mnt` : GW_STATE;
+    this.#gwLeases = join(this.#gwState, "gateway-leases");
+  }
+  #os(args: string[], o: { timeoutMs?: number; input?: string } = {}) { return execCapture(OPENSHELL_BIN, args, { env: this.#osEnv, ...o }); }
+
+  /** The checked worktree, held open from start to dispose; the mounted directory must be this one. */
+  #pin: PinnedDir | null = null;
 
   async start(env: Record<string, string>) {
     if (!existsSync(OPENSHELL_BIN) || !existsSync(OPENSHELL_GATEWAY_BIN)) throw new TierUnavailable("openshell-podman", `OpenShell binaries missing next to ${OPENSHELL_BIN}`);
+    if (this.workspaceHostPath) {
+      try { this.#pin = pinDir(this.workspaceHostPath, "workspace_host_path"); }
+      catch (e) { throw e instanceof PathRefused ? new TierUnavailable("openshell-podman", e.message) : e; }
+    }
     const pr = await podmanRootless();
     if (!pr.ok) throw new TierUnavailable("openshell-podman", pr.detail);
     this.info.podman = { version: pr.version, rootless: true, pasta: pr.pasta };
-    mkdirSync(LEASES, { recursive: true, mode: 0o700 });
-    writeFileSync(join(LEASES, this.id), String(process.pid), { mode: 0o600 });
+    // Leases: the Podman service is shared by every tier (default and mount gateways alike); each gateway only
+    // by the tiers of its own variant, so each gets its own lease directory.
+    for (const dir of [LEASES, this.#gwLeases]) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      writeFileSync(join(dir, this.id), String(process.pid), { mode: 0o600 });
+    }
     await this.#ensureSocket(pr.socket!);
     await this.#ensureImage();
     await this.#ensureGateway(pr.socket!);
@@ -101,29 +205,48 @@ export class OpenShellPodmanTier implements SandboxTier {
     this.#brokerTarget = u ? { host: u.hostname, port: Number(u.port) } : null;
     this.#env = { ...env, ...(u ? { OMP_AUTH_BROKER_URL: `http://127.0.0.1:${RELAY_PORT}` } : {}) };
 
-    const c = await os(["sandbox", "create", "--name", this.id, "--from", PODMAN_IMAGE, "--policy", join(ROOT, "sandbox", "policy-podman.yaml"), "--detach", "--no-tty", "--no-auto-providers"], { timeoutMs: 600_000 });
+    const mount = this.workspaceHostPath ? ["--driver-config-json", JSON.stringify(mountDriverConfig(this.workspaceHostPath, this.workdir))] : [];
+    // The mount gateway runs userns = "keep-id" (container uid = host uid); generate its policy with the host
+    // run-as identity into the variant's gateway state dir (like gateway.toml) so the workload can write its
+    // own bind mount. The default variant keeps the checked-in policy's uid/gid 1000.
+    let policyPath = join(ROOT, "sandbox", "policy-podman.yaml");
+    // Non-null assertions: this tier is Linux-only (rootless Podman); @types/node marks getuid/getgid optional.
+    const runAsUser = String(process.getuid!());
+    const runAsGroup = String(process.getgid!());
+    if (this.workspaceHostPath) {
+      mkdirSync(this.#gwState, { recursive: true });
+      policyPath = join(this.#gwState, "policy-podman.yaml");
+      writeFileSync(policyPath, podmanPolicyYaml(runAsUser, runAsGroup));
+    }
+    // Podman resolves the mount source by name, so re-check the name right before create and the mounted
+    // directory itself after Ready (below): a worktree swapped for a symlink in between is refused.
+    if (this.#pin && !pinStillNamed(this.#pin)) throw new TierUnavailable("openshell-podman", "workspace_host_path changed since it was checked");
+    const c = await this.#os(["sandbox", "create", "--name", this.id, "--from", PODMAN_IMAGE, "--policy", policyPath, "--detach", "--no-tty", "--no-auto-providers", ...mount], { timeoutMs: 600_000 });
     if (c.code !== 0) throw new TierUnavailable("openshell-podman", `sandbox create failed: ${(c.stderr || c.stdout).slice(-500)}`);
     this.#created = true;
+    if (this.workspaceHostPath) this.info.workspace = { hostPath: this.workspaceHostPath, sandboxPath: this.workdir, mode: "bind-rw", userns: "keep-id", gatewayPort: this.#port, policy: policyPath, runAsUser, runAsGroup };
     await this.#waitReady();
+    if (this.#pin) await this.#verifyMount(this.#pin);
     const ctrs = await this.containers();
     if (!ctrs.some((n) => n.startsWith("openshell-supervisor-")) || !ctrs.some((n) => n.startsWith("openshell-"))) throw new TierUnavailable("openshell-podman", `gateway did not create Podman containers for ${this.id} (is it using another driver?)`);
     this.info.containers = ctrs;
 
     // Stage env (secrets only via stdin into a 0600 file inside the sandbox; never argv, never logs).
     const envLines = Object.entries(this.#env).map(([k, v]) => `export ${k}='${String(v).replace(/'/g, "'\\''")}'`).join("\n") + "\n";
-    const w = await execCapture(OPENSHELL_BIN, this.#raw(["sh", "-c", `umask 077; mkdir -p /sandbox/home /sandbox/work; cat > ${ENV_FILE}`], "/sandbox"), { env: OS_ENV, input: envLines, timeoutMs: 120_000 });
+    const w = await execCapture(OPENSHELL_BIN, this.#raw(["sh", "-c", `umask 077; mkdir -p /sandbox/home /sandbox/work; cat > ${ENV_FILE}`], "/sandbox"), { env: this.#osEnv, input: envLines, timeoutMs: 120_000 });
     if (w.code !== 0) throw new TierUnavailable("openshell-podman", `could not stage sandbox env file via exec stdin: ${w.stderr.slice(-300)}`);
 
     if (this.#brokerTarget) {
-      const rp = spawn(OPENSHELL_BIN, this.#raw(["node", "-e", SANDBOX_RELAY_JS], "/sandbox", { OMP_SBX_RELAY_PORT: String(RELAY_PORT) }), { env: OS_ENV, stdio: ["pipe", "pipe", "pipe"] });
+      const rp = spawn(OPENSHELL_BIN, this.#raw(["node", "-e", SANDBOX_RELAY_JS], "/sandbox", { OMP_SBX_RELAY_PORT: String(RELAY_PORT) }), { env: this.#osEnv, stdio: ["pipe", "pipe", "pipe"] });
       this.#relay = new BrokerRelay(rp, this.#brokerTarget);
       await launched(rp, "broker relay", this.#relay.start(60_000));
     }
 
-    const agentLog = openSync(join(GW_STATE, `${this.id}-sandbox-agent.log`), "w");
-    const agent = spawn(OPENSHELL_BIN, this.#raw(["sandbox-agent", "server", "--host", "127.0.0.1", "--port", String(AGENT_PORT), "--token", this.#agentToken, "--no-telemetry"], "/sandbox", process.env.OMP_SANDBOX_AGENT_LOG ? { RUST_LOG: process.env.OMP_SANDBOX_AGENT_LOG } : {}), { env: OS_ENV, stdio: ["pipe", agentLog, agentLog] });
+    mkdirSync(this.#gwState, { recursive: true });
+    const agentLog = openSync(join(this.#gwState, `${this.id}-sandbox-agent.log`), "w");
+    const agent = spawn(OPENSHELL_BIN, this.#raw(["sandbox-agent", "server", "--host", "127.0.0.1", "--port", String(AGENT_PORT), "--token", this.#agentToken, "--no-telemetry"], "/sandbox", process.env.OMP_SANDBOX_AGENT_LOG ? { RUST_LOG: process.env.OMP_SANDBOX_AGENT_LOG } : {}), { env: this.#osEnv, stdio: ["pipe", agentLog, agentLog] });
     this.#children.add(agent as any);
-    this.#fwd = spawn(OPENSHELL_BIN, ["forward", "service", "--target-port", String(AGENT_PORT), "--local", "127.0.0.1:0", this.id], { env: OS_ENV, stdio: ["pipe", "pipe", "pipe"] });
+    this.#fwd = spawn(OPENSHELL_BIN, ["forward", "service", "--target-port", String(AGENT_PORT), "--local", "127.0.0.1:0", this.id], { env: this.#osEnv, stdio: ["pipe", "pipe", "pipe"] });
     const fwd = this.#fwd;
     const forwarded = new Promise<number>((resolve, reject) => {
       let buf = ""; const t = setTimeout(() => reject(new TierUnavailable("openshell-podman", `forward service did not start: ${buf.slice(-300)}`)), 60_000);
@@ -134,6 +257,14 @@ export class OpenShellPodmanTier implements SandboxTier {
     // A launcher that cannot execute emits `error`, not `exit`: both the agent and the forward must reject startup instead.
     const healthy = forwarded.then((port) => { this.#agentUrl = `http://127.0.0.1:${port}`; return waitHttp(`${this.#agentUrl}/v1/health`, this.#agentToken, 60_000); });
     await launched(agent, "in-sandbox sandbox-agent", launched(fwd, "openshell forward service", healthy));
+  }
+
+  /** The directory mounted at `workdir` must be the pinned one (same device and inode), not what the name later pointed to. */
+  async #verifyMount(pin: PinnedDir) {
+    const r = await execCapture(OPENSHELL_BIN, this.#raw(["stat", "-c", "%d:%i", this.workdir], "/sandbox"), { env: this.#osEnv, timeoutMs: 60_000 });
+    const want = `${pin.dev}:${pin.ino}`;
+    if (r.code !== 0 || r.stdout.trim() !== want) throw new TierUnavailable("openshell-podman", `mounted workspace is not the checked directory (want ${want}, got ${r.stdout.trim() || r.stderr.slice(-200)})`);
+    this.info.workspaceVerified = { devIno: want };
   }
 
   async #ensureSocket(sock: string) {
@@ -165,20 +296,14 @@ export class OpenShellPodmanTier implements SandboxTier {
   }
 
   async #ensureGateway(sock: string) {
-    const s = await os(["status"], { timeoutMs: 15_000 });
-    if (s.code === 0 && /Connected/.test(s.stdout)) { this.info.gateway = { startedByTier: false, endpoint: `https://127.0.0.1:${OPENSHELL_GATEWAY_PORT}` }; return; }
-    mkdirSync(GW_STATE, { recursive: true });
-    const cfg = join(GW_STATE, "gateway.toml");
-    writeFileSync(cfg, [
-      "[openshell]", "version = 2", "",
-      "[openshell.gateway]", 'compute_driver = "podman"', "disable_tls = false", `guest_tls_ca = "${OPENSHELL_TLS}/ca.crt"`, "",
-      "[openshell.drivers.podman]", `socket_path = "${sock}"`, 'network_name = "openshell"', `default_image = "${PODMAN_IMAGE}"`,
-      'image_pull_policy = "if_not_present"', `grpc_endpoint = "https://127.0.0.1:${OPENSHELL_GATEWAY_PORT}"`, "stop_timeout_secs = 10", "",
-      "[openshell.gateway.gateway_jwt]", `signing_key_path = "${OPENSHELL_TLS}/jwt/signing.pem"`, `public_key_path = "${OPENSHELL_TLS}/jwt/public.pem"`,
-      `kid_path = "${OPENSHELL_TLS}/jwt/kid"`, 'gateway_id = "omp-sandbox-podman"', "",
-    ].join("\n"));
-    const logPath = join(GW_STATE, "gateway.log"); const log = openSync(logPath, "w");
-    this.#gw = spawn(OPENSHELL_GATEWAY_BIN, ["--config", cfg, "--compute-driver", "podman", "--tls-cert", `${OPENSHELL_TLS}/server/tls.crt`, "--tls-key", `${OPENSHELL_TLS}/server/tls.key`, "--tls-client-ca", `${OPENSHELL_TLS}/ca.crt`, "--db-url", `sqlite:${join(GW_STATE, "gateway.db")}?mode=rwc`, "--bind-address", "127.0.0.1", "--port", String(OPENSHELL_GATEWAY_PORT), "--health-port", "0", "--metrics-port", "0"], { env: OS_ENV, stdio: ["ignore", log, log] });
+    if (this.workspaceHostPath) ensureEndpointRegistration(this.#port);
+    const s = await this.#os(["status"], { timeoutMs: 15_000 });
+    if (s.code === 0 && /Connected/.test(s.stdout)) { this.info.gateway = { startedByTier: false, endpoint: `https://127.0.0.1:${this.#port}`, mountGateway: !!this.workspaceHostPath }; return; }
+    mkdirSync(this.#gwState, { recursive: true });
+    const cfg = join(this.#gwState, "gateway.toml");
+    writeFileSync(cfg, gatewayToml(sock, this.#port, !!this.workspaceHostPath));
+    const logPath = join(this.#gwState, "gateway.log"); const log = openSync(logPath, "w");
+    this.#gw = spawn(OPENSHELL_GATEWAY_BIN, ["--config", cfg, "--compute-driver", "podman", "--tls-cert", `${OPENSHELL_TLS}/server/tls.crt`, "--tls-key", `${OPENSHELL_TLS}/server/tls.key`, "--tls-client-ca", `${OPENSHELL_TLS}/ca.crt`, "--db-url", `sqlite:${join(this.#gwState, "gateway.db")}?mode=rwc`, "--bind-address", "127.0.0.1", "--port", String(this.#port), "--health-port", "0", "--metrics-port", "0"], { env: this.#osEnv, stdio: ["ignore", log, log] });
     const gw = this.#gw;
     await launched(gw, "openshell-gateway", this.#gatewayReady(gw, logPath));
   }
@@ -189,8 +314,8 @@ export class OpenShellPodmanTier implements SandboxTier {
       if (gw.exitCode !== null) throw new TierUnavailable("openshell-podman", `gateway exited: ${readFileSync(logPath, "utf8").slice(-500)}`);
       const l = readFileSync(logPath, "utf8");
       if (/Using compute driver driver=podman/.test(l) && /Gateway listener bound/.test(l)) {
-        const st = await os(["status"], { timeoutMs: 15_000 });
-        if (/Connected/.test(st.stdout)) { this.info.gateway = { startedByTier: true, pid: gw.pid, driver: "podman", endpoint: `https://127.0.0.1:${OPENSHELL_GATEWAY_PORT}`, mtls: true }; return; }
+        const st = await this.#os(["status"], { timeoutMs: 15_000 });
+        if (/Connected/.test(st.stdout)) { this.info.gateway = { startedByTier: true, pid: gw.pid, driver: "podman", endpoint: `https://127.0.0.1:${this.#port}`, mtls: true, mountGateway: !!this.workspaceHostPath }; return; }
       }
     }
     throw new TierUnavailable("openshell-podman", "gateway did not become ready with the podman driver");
@@ -198,14 +323,28 @@ export class OpenShellPodmanTier implements SandboxTier {
 
   /** Sandboxes on this gateway other than ours. Unknown (gateway unreachable) counts as "none" only if the gateway is gone. */
   async #otherSandboxes(): Promise<string[]> {
-    const l = await os(["sandbox", "list"], { timeoutMs: 30_000 });
+    const l = await this.#os(["sandbox", "list"], { timeoutMs: 30_000 });
     if (l.code !== 0) return this.#gw && this.#gw.exitCode === null ? ["<unknown: sandbox list failed>"] : [];
-    return l.stdout.split("\n").map((x) => x.trim().split(/\s+/)[0] ?? "").filter((n) => n && n !== this.id && !/^(NAME|No)$/i.test(n));
+    return listedSandboxes(l.stdout, this.id);
+  }
+
+  /**
+   * Sandboxes registered on either gateway (default and mount) other than ours. Both share the one Podman
+   * service, and a sandbox made by a local CLI client holds no tier lease, so the registries are the only record.
+   */
+  async #sandboxesOnBothGateways(): Promise<string[]> {
+    const users: string[] = [];
+    for (const port of [OPENSHELL_GATEWAY_PORT, OPENSHELL_MOUNT_GATEWAY_PORT]) {
+      const env = osEnv(port === OPENSHELL_GATEWAY_PORT ? null : port);
+      const l = await execCapture(OPENSHELL_BIN, ["sandbox", "list"], { env, timeoutMs: 30_000 });
+      users.push(...gatewaySandboxUsers(l, this.id, l.code === 0 ? true : await listening(port), port));
+    }
+    return users;
   }
 
   async #waitReady() {
     for (let i = 0; i < 240; i++) {
-      const l = await os(["sandbox", "list"], { timeoutMs: 30_000 });
+      const l = await this.#os(["sandbox", "list"], { timeoutMs: 30_000 });
       const row = l.stdout.split("\n").find((x) => x.startsWith(this.id + " "));
       if (row && /\bReady\b/.test(row)) return;
       if (row && /Error|Failed/i.test(row)) throw new TierUnavailable("openshell-podman", `sandbox ${this.id}: ${row.trim()}`);
@@ -242,7 +381,7 @@ export class OpenShellPodmanTier implements SandboxTier {
 
   spawnStdio(argv: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
     const tag = randomBytes(6).toString("hex");
-    const p = spawn(OPENSHELL_BIN, this.#execArgs(argv, opts, tag), { env: OS_ENV, stdio: ["pipe", "pipe", "pipe"] });
+    const p = spawn(OPENSHELL_BIN, this.#execArgs(argv, opts, tag), { env: this.#osEnv, stdio: ["pipe", "pipe", "pipe"] });
     this.#children.add(p);
     // Killing the local exec client does not kill the remote process tree, so on exit we kill the
     // whole remote session (omp + anything its tools started).
@@ -251,11 +390,11 @@ export class OpenShellPodmanTier implements SandboxTier {
   }
   #killSession(tag: string) {
     const f = `/tmp/.ompsbx-${tag}.sid`;
-    return execCapture(OPENSHELL_BIN, this.#raw(["sh", "-c", `[ -f ${f} ] && pkill -KILL -s "$(cat ${f})"; rm -f ${f}; true`], "/sandbox"), { env: OS_ENV, timeoutMs: 60_000 });
+    return execCapture(OPENSHELL_BIN, this.#raw(["sh", "-c", `[ -f ${f} ] && pkill -KILL -s "$(cat ${f})"; rm -f ${f}; true`], "/sandbox"), { env: this.#osEnv, timeoutMs: 60_000 });
   }
 
   exec(argv: string[], opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; input?: string } = {}) {
-    return execCapture(OPENSHELL_BIN, this.#execArgs(argv, opts), { env: OS_ENV, timeoutMs: opts.timeoutMs, input: opts.input });
+    return execCapture(OPENSHELL_BIN, this.#execArgs(argv, opts), { env: this.#osEnv, timeoutMs: opts.timeoutMs, input: opts.input });
   }
 
   owned() {
@@ -269,16 +408,17 @@ export class OpenShellPodmanTier implements SandboxTier {
 
   async dispose() {
     const leftovers: string[] = [];
+    unpinDir(this.#pin); this.#pin = null;
     const pids = [this.#relay?.proc.pid, this.#fwd?.pid, ...[...this.#children].map((c) => c.pid)].filter(Boolean) as number[];
     for (const c of [...this.#children]) c.kill("SIGTERM");
     this.#relay?.stop(); this.#fwd?.kill("SIGTERM");
     if (this.#created) {
-      const d = await os(["sandbox", "delete", this.id], { timeoutMs: 180_000 });
+      const d = await this.#os(["sandbox", "delete", this.id], { timeoutMs: 180_000 });
       if (d.code !== 0) leftovers.push(`openshell sandbox delete failed: ${(d.stderr || d.stdout).slice(-200)}`);
       let ctrs: string[] = [];
-      for (let i = 0; i < 90; i++) { ctrs = await this.containers(); const l = await os(["sandbox", "list"], { timeoutMs: 30_000 }); if (!ctrs.length && !l.stdout.split("\n").some((x) => x.startsWith(this.id + " "))) break; await sleep(1000); }
+      for (let i = 0; i < 90; i++) { ctrs = await this.containers(); const l = await this.#os(["sandbox", "list"], { timeoutMs: 30_000 }); if (!ctrs.length && !l.stdout.split("\n").some((x) => x.startsWith(this.id + " "))) break; await sleep(1000); }
       if (ctrs.length) leftovers.push(...ctrs.map((n) => `podman container ${n}`));
-      const l = await os(["sandbox", "list"], { timeoutMs: 30_000 });
+      const l = await this.#os(["sandbox", "list"], { timeoutMs: 30_000 });
       if (l.stdout.split("\n").some((x) => x.startsWith(this.id + " "))) leftovers.push(`openshell sandbox ${this.id}`);
       const vols = await pm(["volume", "ls", "--format", "{{.Name}}"]);
       leftovers.push(...vols.stdout.split("\n").filter((v) => v.includes(this.id)).map((v) => `podman volume ${v}`));
@@ -287,17 +427,22 @@ export class OpenShellPodmanTier implements SandboxTier {
     await sleep(500);
     for (const pid of pids) if (pidAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} }
     // The gateway and Podman service this tier started are shared with any other wrapper that reused them
-    // (`#ensureGateway` adopts a running one). Stop them only when no other tier holds a lease (that covers a
-    // wrapper still starting up, before its sandbox exists) and no other sandbox is still registered.
-    rmSync(join(LEASES, this.id), { force: true });
-    const leased = this.#gw || this.#svc ? otherLeases(this.id) : [];
-    const others = leased.length ? leased : this.#gw || this.#svc ? await this.#otherSandboxes() : [];
-    if (others.length) {
-      this.info.sharedServicesLeftRunning = { reason: leased.length ? `${leased.length} other tier(s) still hold a lease on the shared services` : `${others.length} other sandbox(es) still use the gateway`, gatewayPid: this.#gw?.pid ?? null, podmanServicePid: this.#svc?.pid ?? null };
-    } else {
-      await stopProc(this.#gw); await stopProc(this.#svc);
-      for (const [what, p] of [["gateway", this.#gw], ["podman service", this.#svc]] as const) if (p?.pid && pidAlive(p.pid)) leftovers.push(`${what} pid ${p.pid}`);
-    }
+    // (`#ensureGateway` adopts a running one). A tier holds its leases from before it adopts or starts them, so a
+    // wrapper still starting up (no sandbox yet) counts as a user. Stop the gateway only when no other tier of
+    // this variant holds its lease and no other sandbox is registered on it; stop the Podman service only when
+    // no other tier of either variant holds a lease and no sandbox is registered on either gateway (a sandbox a
+    // plain CLI client made holds no lease).
+    rmSync(join(LEASES, this.id), { force: true }); rmSync(join(this.#gwLeases, this.id), { force: true });
+    const gwLeased = this.#gw ? otherLeases(this.id, this.#gwLeases) : [];
+    const gwUsers = gwLeased.length ? gwLeased : this.#gw ? await this.#otherSandboxes() : [];
+    const svcLeased = this.#svc ? otherLeases(this.id, LEASES) : [];
+    const svcUsers = svcLeased.length || !this.#svc || gwUsers.length ? svcLeased : await this.#sandboxesOnBothGateways();
+    const kept: Record<string, unknown> = {};
+    if (gwUsers.length) kept.gateway = { pid: this.#gw?.pid ?? null, reason: gwLeased.length ? `${gwLeased.length} other tier(s) hold a gateway lease` : `${gwUsers.length} other sandbox(es) still use the gateway` };
+    else if (this.#gw) { await stopProc(this.#gw); if (this.#gw.pid && pidAlive(this.#gw.pid)) leftovers.push(`gateway pid ${this.#gw.pid}`); }
+    if (this.#svc && (svcUsers.length || gwUsers.length)) kept.podmanService = { pid: this.#svc?.pid ?? null, reason: svcLeased.length ? `${svcLeased.length} other tier(s) hold a Podman service lease` : svcUsers.length ? `${svcUsers.length} sandbox(es) on the default or mount gateway still use it` : "the gateway left running still needs it" };
+    else if (this.#svc) { await stopProc(this.#svc); if (this.#svc.pid && pidAlive(this.#svc.pid)) leftovers.push(`podman service pid ${this.#svc.pid}`); }
+    if (Object.keys(kept).length) this.info.sharedServicesLeftRunning = kept;
     leftovers.push(...pids.filter(pidAlive).map((p) => `pid ${p}`));
     return { leftovers };
   }

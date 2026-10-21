@@ -16,10 +16,11 @@ export function redactSecrets(text: string): string {
 }
 
 /** `killGroup`: run the command as its own process group and kill the whole group on timeout. */
-export function execCapture(cmd: string, args: string[], opts: SpawnOptions & { timeoutMs?: number; input?: string; killGroup?: boolean } = {}) {
+export function execCapture(cmd: string, args: string[], opts: SpawnOptions & { timeoutMs?: number; input?: string; killGroup?: boolean; extraFds?: number[] } = {}) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-    const { killGroup, ...spawnOpts } = opts;
-    const p = spawn(cmd, args, { ...spawnOpts, detached: !!killGroup, stdio: ["pipe", "pipe", "pipe"] });
+    const { killGroup, extraFds, ...spawnOpts } = opts;
+    // `extraFds` are handed to the child as fds 3, 4, ... (e.g. a pinned directory for `bwrap --bind-fd 3`).
+    const p = spawn(cmd, args, { ...spawnOpts, detached: !!killGroup, stdio: ["pipe", "pipe", "pipe", ...(extraFds ?? [])] });
     let stdout = "", stderr = "";
     p.stdout!.on("data", (b) => { stdout += b; if (stdout.length > 4_000_000) stdout = stdout.slice(-2_000_000); });
     p.stderr!.on("data", (b) => { stderr += b; if (stderr.length > 1_000_000) stderr = stderr.slice(-500_000); });

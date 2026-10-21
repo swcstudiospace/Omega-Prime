@@ -2,19 +2,27 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, statSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, statSync, existsSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SandboxTier } from "../src/core/providers/types.ts";
 
 const STATE = mkdtempSync(join(tmpdir(), "omp-sbx-guards-"));
 process.env.OMP_SANDBOX_STATE = STATE;
 const FAKE = new URL("./fake-omp.mjs", import.meta.url).pathname;
-const { OmpRpcClient } = await import("../src/core/omp-rpc.ts");
+const { OmpRpcClient, StaleAnswerError } = await import("../src/core/omp-rpc.ts");
+const { PathRefused } = await import("../src/core/paths.ts");
 const { validateTiers, startTier } = await import("../src/core/providers/tiers.ts");
 const utilMod = await import("../src/core/providers/util.ts");
 const { redactSecrets } = utilMod;
 const podmanMod = await import("../src/core/providers/openshell-podman.ts");
+// Dynamic imports are required here (not a style choice): config.ts captures OMP_SANDBOX_STATE into
+// STATE at module-evaluation time, and gsd.ts derives its CACHE from it — so they must load only
+// after the env override above, which a hoisted static import would precede.
 const { Core } = await import("../src/core/core.ts");
+const { ensureGsd, gsdCommandsOnHost } = await import("../src/core/gsd.ts");
+const { STATE: CORE_STATE, VERSIONS } = await import("../src/core/config.ts");
+const GSD_CACHE = join(CORE_STATE, "cache", `gsd-core-${VERSIONS.gsdCore}`);
 const { AuthBroker } = await import("../src/core/auth.ts");
 
 const fakeProc = (env: Record<string, string> = {}) => spawn(process.execPath, [FAKE], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
@@ -118,6 +126,19 @@ test("a tier still starting up holds a lease, so shared services are not stopped
   assert.deepEqual(otherLeases("osp-me", join(dir, "missing")), []);
 });
 
+test("a lease-less CLI sandbox on either gateway keeps the shared Podman service up", () => {
+  const { listedSandboxes, gatewaySandboxUsers } = podmanMod;
+  const table = "NAME        PHASE\nosp-me      Ready\ncli-made    Ready\n";
+  assert.deepEqual(listedSandboxes(table, "osp-me"), ["cli-made"]);
+  assert.deepEqual(listedSandboxes("No sandboxes found\n", "osp-me"), []);
+  // The mount gateway's registry counts even though no tier holds a lease for its sandbox.
+  assert.deepEqual(gatewaySandboxUsers({ code: 0, stdout: table }, "osp-me", true, 18080), ["cli-made"]);
+  // A list that fails while the gateway still answers is an unknown user, never "none".
+  assert.equal(gatewaySandboxUsers({ code: 1, stdout: "" }, "osp-me", true, 18080).length, 1);
+  // Nothing listening: that gateway is gone and holds no one.
+  assert.deepEqual(gatewaySandboxUsers({ code: 1, stdout: "" }, "osp-me", false, 18080), []);
+});
+
 test("redactSecrets hides credential-shaped text", () => {
   // Built at runtime so no credential-shaped literal sits in the source.
   const key = ["sk", "proj", "A".repeat(20)].join("-");
@@ -127,6 +148,87 @@ test("redactSecrets hides credential-shaped text", () => {
   const s = redactSecrets(`err: api_key=${kv} token: ${key} Bearer ${bearer} ${jwt} ok`);
   for (const leak of [kv, key.slice(0, 12), bearer, jwt.slice(0, 12)]) assert.equal(s.includes(leak), false, leak);
   assert.match(s, /ok$/);
+});
+
+test("errorReply maps path_refused distinctly from stale_answer and generic errors", async () => {
+  // Importing server.ts must run nothing: no readline on the test's stdin, no Core, no ready line on stdout.
+  // A regression boots the server inside this suite and hangs the runner instead of passing silently.
+  const { errorReply } = await import("../src/core/server.ts");
+  assert.deepEqual(errorReply(new PathRefused("nope")), { ok: false, error: "nope", code: "path_refused" });
+  assert.equal(errorReply(new StaleAnswerError("q9", "test")).code, "stale_answer");
+  assert.deepEqual(errorReply(new Error("boom")), { ok: false, error: "boom", code: "error" });
+});
+
+/** Minimal SandboxTier for gsd.ts: only exec and the two host-path fields are read. No spawn. */
+function gsdTier(workspaceHostPath: string | null, hostRoot: string, exec: SandboxTier["exec"]): SandboxTier & { hostRoot: string } {
+  return {
+    name: "bwrap", id: "fake-gsd", workdir: "/sbx/work", sandboxRoot: "/sbx", isolation: "none (test)",
+    workspaceHostPath, hostRoot, exec,
+    start: async () => {},
+    sandboxAgent: () => ({ baseUrl: "", token: "" }),
+    spawnStdio: () => { throw new Error("gsd tests must not spawn"); },
+    owned: () => ({}),
+    dispose: async () => ({ leftovers: [] }),
+  };
+}
+
+test("ensureGsd and gsdCommandsOnHost target the mounted workspace, never the hidden hostRoot/work", async () => {
+  const noExec: SandboxTier["exec"] = async () => { throw new Error("cached/warm path must not exec"); };
+
+  // Cold: the in-sandbox install lands in the workspace through the bind; the host cache fills from it.
+  const coldWs = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-cws-"));
+  const coldHr = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-chr-"));
+  // Cold on a mounted worktree: the install serves this job only. The worktree is shared with the host and
+  // other jobs, so neither its own .claude files nor anything written into it while npx runs (even inside
+  // the staging folder) may reach the shared cache.
+  mkdirSync(join(coldWs, ".claude", "commands"), { recursive: true });
+  writeFileSync(join(coldWs, ".claude", "settings.json"), "{\"private\":true}");
+  let installCwd = "";
+  const install = (hostOf: (cwd: string) => string) => async (_argv: string[], opts?: { cwd?: string }) => {
+    installCwd = opts?.cwd ?? "";
+    assert.match(installCwd, /^\/sbx\/work\/\.omp-gsd-install-/, "installs in a fresh staging folder under the workdir");
+    const staged = hostOf(installCwd.slice("/sbx/work/".length));
+    assert.deepEqual(readdirSync(staged), [], "staging folder starts empty");
+    mkdirSync(join(staged, ".claude", "commands"), { recursive: true });   // npx writes through the bind
+    writeFileSync(join(staged, ".claude", "commands", "gsd-plan-phase.md"), "plan");
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const mountedInstall = install((rel) => join(coldWs, rel));
+  const cold = await ensureGsd(gsdTier(coldWs, coldHr, async (argv, opts) => {
+    const r = await mountedInstall(argv, opts);
+    // Another writer on the shared worktree drops a file into the staging folder mid-install.
+    writeFileSync(join(coldWs, installCwd.slice("/sbx/work/".length), ".claude", "commands", "gsd-injected.md"), "evil");
+    return r;
+  }));
+  assert.equal(cold.source, "installed-in-sandbox");
+  assert.equal(cold.cache, null, "a mounted install never fills the shared cache");
+  assert.equal(existsSync(join(GSD_CACHE, ".claude")), false, "shared cache untouched by the mounted job");
+  assert.equal(existsSync(join(coldWs, ".claude", "commands", "gsd-plan-phase.md")), true, "the job still gets the install");
+  assert.equal(existsSync(join(coldWs, installCwd.slice("/sbx/work/".length))), false, "staging folder removed");
+  assert.equal(existsSync(join(coldHr, "work")), false, "cold path never creates hostRoot/work");
+
+  // Cold on a private work folder (no mount): only the installer's output fills the shared cache.
+  const privHr = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-phr-"));
+  const priv = await ensureGsd(gsdTier(null, privHr, install((rel) => join(privHr, "work", rel))));
+  assert.equal(priv.cache, GSD_CACHE);
+  assert.deepEqual(readdirSync(join(GSD_CACHE, ".claude")), ["commands"], "no private settings in the cache");
+  assert.deepEqual(readdirSync(join(GSD_CACHE, ".claude", "commands")), ["gsd-plan-phase.md"], "only installer output is cached");
+
+  // Warm: the cache fills the workspace copy; exec never runs; hostRoot/work stays absent.
+  const ws = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-ws-"));
+  const hostRoot = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-hr-"));
+  const warm = await ensureGsd(gsdTier(ws, hostRoot, noExec));
+  assert.equal(warm.source, "cache");
+  assert.equal(existsSync(join(ws, ".claude", "commands", "gsd-plan-phase.md")), true, "warm copy landed in the mounted workspace");
+  assert.equal(existsSync(join(hostRoot, "work")), false, "mounted run never touches hostRoot/work");
+
+  // gsdCommandsOnHost counts the mounted workspace and ignores the stale hostRoot/work location.
+  writeFileSync(join(ws, ".claude", "commands", "gsd-execute-phase.md"), "x");
+  mkdirSync(join(hostRoot, "work", ".claude", "commands"), { recursive: true });
+  writeFileSync(join(hostRoot, "work", ".claude", "commands", "gsd-stale.md"), "stale");
+  assert.equal(gsdCommandsOnHost({ workspaceHostPath: ws, hostRoot }), 2, "counts gsd-*.md in the mounted workspace");
+  assert.equal(gsdCommandsOnHost({ hostRoot }), 1, "without a mount the hostRoot/work location still counts");
+  assert.equal(gsdCommandsOnHost({}), null);
 });
 
 test("down() refuses new stages and startups for its whole duration", async () => {
