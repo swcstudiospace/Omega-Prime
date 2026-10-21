@@ -12,7 +12,7 @@ affects: [106-03, 106-04, 106-05]
 actuals:
   tokens: not-measured
   tasks: 3
-  commits: 3
+  commits: 6
 tech-stack:
   added: []
   patterns: [bounded page-specific collector policy, additive snapshot bucket, shared canonical identity registry]
@@ -96,6 +96,8 @@ status: complete
 2. **Task 2: Separate finished tasks and idle sessions** — `45e3ad9`.
 3. **Task 3: Carry Idle through numbering, hashing and APIs** — `febadb4`.
 
+**Regression corrections:** `36c3d41`, `a7c622e`.  
+**Summary:** `608fa0b`.
 ## Files Created/Modified
 
 - `omega_prime/dashboard/collectors/github.py`
