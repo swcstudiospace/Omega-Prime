@@ -98,9 +98,9 @@ def test_cron_history_is_bounded_and_ticks_do_not_repeat(tmp_path: Path):
 
         store.tick(tick, _run)
 
-    assert len(job["history"]) == HISTORY_LIMIT
-    assert job["history"][-1] == {"ran_at": 350, "result": "ran@350"}
-    assert job["history"][0]["ran_at"] == 350 - (HISTORY_LIMIT - 1) * 10
+    assert len(store.jobs[0]["history"]) == HISTORY_LIMIT
+    assert store.jobs[0]["history"][-1] == {"ran_at": 350, "result": "ran@350"}
+    assert store.jobs[0]["history"][0]["ran_at"] == (350 - (HISTORY_LIMIT - 1) * 10)
 
     reloaded = JobStore(tmp_path / "jobs.json")
     assert len(reloaded.jobs[0]["history"]) == HISTORY_LIMIT

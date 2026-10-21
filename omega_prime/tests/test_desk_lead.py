@@ -248,6 +248,23 @@ def test_desk_pass_tick_serializes_and_holds_no_lock_during_run(tmp_path):
     assert len(observed) == 2
 
 
+def test_desk_pass_exception_receipt_omits_exception_message(tmp_path):
+    store = _store(tmp_path)
+    job_id = schedule_desk_lead_pass(store, due_at=1000, interval_seconds=60)
+    sentinel = "credential-shaped-desk-pass-sentinel"
+
+    def runner(job):
+        raise RuntimeError(sentinel)
+
+    ran = tick_desk_lead_passes(store, 1000, runner)
+    receipt = _store(tmp_path).jobs[0]["last_result"]
+
+    assert ran[0]["id"] == job_id
+    assert receipt["state"] == "failed"
+    assert receipt["error"] == "RuntimeError: desk lead runner failed"
+    assert sentinel not in json.dumps(receipt)
+
+
 def test_scheduler_runs_the_desk_pass_end_to_end(tmp_path):
     store = _store(tmp_path)
     intake_path = tmp_path / "state" / "intake.json"
@@ -259,6 +276,9 @@ def test_scheduler_runs_the_desk_pass_end_to_end(tmp_path):
     ran = run_desk_lead_passes(store, 1000, _fake_parent(), tmp_path)
     assert [job["id"] for job in ran] == [job_id]
     result = ran[0]["last_result"]
+    assert result["state"] == "succeeded"
+    assert ran[0]["history"][-1]["disposition"] == "succeeded"
+    assert ran[0]["history"][-1]["result"]["tickets"][0]["status"] == "done"
     assert result["tickets"][0]["status"] == "done"
     validate_receipt(result["receipts"][0]["receipt"])
     # The runner built its own IntakeStore from the same file (a separate
@@ -293,7 +313,11 @@ def test_no_parent_scheduler_pass_blocks_explicitly_not_no_dispatcher(tmp_path):
 
 def test_run_due_jobs_leaves_desk_jobs_to_the_desk_tick(tmp_path):
     store = _store(tmp_path)
-    model = ScriptedModel([{"role": "assistant", "content": "should-not-run"}])
+    parent = Agent(model=ScriptedModel([]), tools={})
+    child_model = ScriptedModel(
+        [{"role": "assistant", "content": "plain job completed"}]
+    )
+    parent.child_model = child_model
     desk_id = schedule_desk_lead_pass(
         store,
         due_at=1000,
@@ -301,14 +325,32 @@ def test_run_due_jobs_leaves_desk_jobs_to_the_desk_tick(tmp_path):
         intake_path=tmp_path / "intake.json",
     )
     plain_id = store.schedule("plain", 1000)
-    ran = run_due_jobs(store, 1000, model, {})
+    ran = run_due_jobs(store, 1000, parent)
     assert [job["id"] for job in ran] == [plain_id]
-    assert model.call_count == 1
+    assert ran[0]["last_result"] == {
+        "state": "succeeded",
+        "summary": "plain job completed",
+    }
+    assert child_model.call_count == 1
     desk_job = next(job for job in store.jobs if job["id"] == desk_id)
     assert desk_job.get("last_ran_at") is None  # untouched by the model tick
     # The desk driver still owns it.
     desk_ran = tick_desk_lead_passes(store, 1000, lambda job: {})
     assert [job["id"] for job in desk_ran] == [desk_id]
+
+
+def test_stale_desk_pass_is_missed_without_running_lead(tmp_path):
+    store = _store(tmp_path)
+    job_id = schedule_desk_lead_pass(store, due_at=1000, interval_seconds=60)
+    calls = []
+
+    ran = tick_desk_lead_passes(store, 1301, lambda job: calls.append(job))
+
+    assert calls == []
+    assert [job["id"] for job in ran] == [job_id]
+    assert ran[0]["last_result"]["state"] == "missed"
+    assert ran[0]["history"][-1]["disposition"] == "missed"
+    assert ran[0]["due_at"] == 1361
 
 
 def test_interleaved_producer_and_claim_survive_dispatch(tmp_path):

@@ -1,10 +1,10 @@
 """APScheduler backend: JobStore jobs as real scheduled entries.
 
 One-shots become date triggers, intervals become interval triggers, and each
-fire runs `store.tick` — so claim, bounded history, completion, and resume
-are exactly the `JobStore` semantics. The JSON store is the source of truth;
-the scheduler keeps entries in memory only. `start()` first ticks once for
-overdue jobs, then registers future entries keyed by job id.
+fire dispatches generic prompt jobs through the supplied delegate parent.
+Specialized schedule kinds belong to their designated owners and are never
+registered as generic APScheduler callbacks. The JSON store is the source of
+truth; `start()` first ticks overdue generic jobs, then registers future ones.
 """
 
 from __future__ import annotations
@@ -13,19 +13,11 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from omega_prime.cron.scheduler import (
-    DESK_LEAD_KIND,
-    PIN_BUMP_SCHEDULE_KIND,
-    PURPLE_CYCLE_KIND,
-    JobStore,
-    tick_purple_cycles,
-)
-
-#: Kinds this service must not send to the model runner. Each has its own tick.
-_SKIP_KINDS = (DESK_LEAD_KIND, PIN_BUMP_SCHEDULE_KIND, PURPLE_CYCLE_KIND)
+from omega_prime.cron.scheduler import GENERIC_PROMPT_KIND, JobStore, run_due_jobs
 
 
 class SchedulerService:
@@ -34,13 +26,13 @@ class SchedulerService:
     def __init__(
         self,
         store: JobStore,
-        runner: Callable[[str], str],
+        parent: Any = None,
         *,
         scheduler: BackgroundScheduler | None = None,
         clock: Callable[[], float] | None = None,
     ) -> None:
         self.store = store
-        self.runner = runner
+        self.parent = parent
         self.scheduler = scheduler or BackgroundScheduler()
         self._clock = clock or time.time
         self._started = False
@@ -49,15 +41,13 @@ class SchedulerService:
     def start(self) -> list[dict]:
         """Tick overdue jobs now, register future entries, start firing."""
         now = self._clock()
-        # Desk lead passes are another driver's jobs (DeskDriver); ticking
-        # them here would burn a model call per pass. Pin-bump schedules
-        # are owned by tick_pin_bump_schedules. Purple cycles are owned by
-        # tick_purple_cycles: the model runner must not consume them, and
-        # this process is a running scheduler so the ticker has to fire here.
-        ran = self.store.tick(now, self.runner, skip_kinds=_SKIP_KINDS)
-        tick_purple_cycles(self.store, now)
+        # DeskDriver owns all specialized cron kinds; heartbeat has its own
+        # runtime. APScheduler handles only generic prompt jobs.
+        ran = run_due_jobs(self.store, now, self.parent)
         for job in self.store.jobs:
-            if job.get("completed"):
+            if job.get("kind") not in (None, GENERIC_PROMPT_KIND) or job.get(
+                "completed"
+            ):
                 continue
             if job["due_at"] <= now:
                 continue
@@ -96,12 +86,8 @@ class SchedulerService:
         return [job.id for job in self.scheduler.get_jobs()]
 
     def _fire(self) -> None:
-        # `tick` is single-threaded (claim by exact `now`); concurrent fires
-        # must not interleave inside it.
         with self._lock:
-            now = self._clock()
-            self.store.tick(now, self.runner, skip_kinds=_SKIP_KINDS)
-            tick_purple_cycles(self.store, now)
+            run_due_jobs(self.store, self._clock(), self.parent)
 
 
 def _at(timestamp: float) -> datetime:

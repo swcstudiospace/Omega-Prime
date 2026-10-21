@@ -19,7 +19,6 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "tweepy>=4.17",
   "mcp>=2.3,<3",
   "pyrit>=1.1",
   "apscheduler>=3.11",

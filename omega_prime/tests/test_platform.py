@@ -20,7 +20,7 @@ from omega_prime.tools.growth import GROWTH_TOOL_NAMES
 from omega_prime.tools.offer import offered_schemas
 from omega_prime.tools.omega_command import OMEGA_COMMAND_TOOL_NAMES
 from omega_prime.tools.platform import PLATFORM_TOOL_NAMES, register_platform_tools
-from omega_prime.tools.plugins import load_plugins
+from omega_prime.tools.plugins import load_plugins, plugins_enabled
 from omega_prime.tools.registry import ToolRegistry
 
 OMEGA_PRIME = Path(__file__).resolve().parents[1]
@@ -426,7 +426,21 @@ def test_approval_gate_blocks_until_a_person_approves():
     assert bare_calls == []
 
 
+@pytest.mark.parametrize(
+    "value",
+    [None, "", " ", "0", "true", "01", " 1 ", "yes"],
+)
+def test_plugins_require_exact_opt_in_value(value):
+    env = {} if value is None else {"OMEGA_PRIME_PLUGINS": value}
+    assert plugins_enabled(env) is False
+
+
+def test_plugins_exact_opt_in_is_read_from_supplied_snapshot():
+    assert plugins_enabled({"OMEGA_PRIME_PLUGINS": "1"}) is True
+
+
 def test_load_plugins_registers_echo_and_skips_a_symlink_outside_home(tmp_path: Path):
+
     home = tmp_path / "home"
     echo = home / "plugins" / "echo"
     echo.mkdir(parents=True)
@@ -504,3 +518,135 @@ def test_offered_schemas_include_platform_names_and_omit_an_extra_tool(tmp_path:
         assert platform_name in names
     assert "not_on_roster" not in names
     assert _load(registry.dispatch("not_on_roster", {})) == {"ok": True}
+
+
+def test_exec_job_tools_are_reachable_through_roster_and_require_approval(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.mcp_server import default_registry
+
+    names = (
+        "exec_job_start",
+        "exec_job_poll",
+        "exec_job_wait",
+        "exec_job_kill",
+    )
+    approval_log = ApprovalLog()
+    registry = default_registry(
+        OMEGA_PRIME.parent,
+        tmp_path,
+        approval_log=approval_log,
+        env={
+            "OMEGA_PRIME_STATE_DIR": str(tmp_path / "state"),
+            "OMEGA_PRIME_PLUGINS": "0",
+        },
+        work_root=tmp_path,
+    )
+    roster = roster_names(ROSTER.read_text(encoding="utf-8"))
+    offered = offered_schemas(registry, roster)
+    offered_names = [item["function"]["name"] for item in offered]
+    assert [name for name in offered_names if name in names] == list(names)
+    assert all(registry.approval_required(name) for name in names)
+
+    marker = tmp_path / "exec-job-started"
+    start_args = {
+        "argv": [
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        ]
+    }
+    denied_start = _load(registry.dispatch("exec_job_start", start_args))
+    assert denied_start == {"error": "approval required", "tool": "exec_job_start"}
+    assert marker.exists() is False
+    for name in names[1:]:
+        denied = _load(registry.dispatch(name, {"job_id": "job-1"}))
+        assert denied == {"error": "approval required", "tool": name}
+
+    for name in names:
+        assert approval_log.approve(name, "operator")["approved"] is True
+
+    started = _load(registry.dispatch("exec_job_start", start_args))
+    job_id = started["id"]
+    completed = _load(
+        registry.dispatch("exec_job_wait", {"job_id": job_id, "timeout": 5})
+    )
+    assert completed["running"] is False
+    assert marker.exists() is True
+    assert _load(registry.dispatch("exec_job_poll", {"job_id": job_id})) == completed
+    assert _load(registry.dispatch("exec_job_kill", {"job_id": job_id})) == completed
+
+
+def test_plan_mode_refuses_exec_job_start_and_kill() -> None:
+    from omega_prime.agent.modes import apply_plan_mode
+
+    calls = []
+    tools = apply_plan_mode(
+        {
+            "exec_job_start": lambda argv: calls.append(("start", argv)),
+            "exec_job_kill": lambda job_id: calls.append(("kill", job_id)),
+        }
+    )
+    assert tools["exec_job_start"](argv=[]) == (
+        "error: plan mode forbids exec_job_start"
+    )
+    assert tools["exec_job_kill"](job_id="job-1") == (
+        "error: plan mode forbids exec_job_kill"
+    )
+    assert calls == []
+
+
+def test_prime_and_redteam_families_remain_default_off(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.mcp_server import default_registry
+    from omega_prime.tools.prime_runtime import KERNEL_TOOL_NAMES
+    from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
+
+    expected_kernel = (
+        "prime_cell",
+        "prime_factory_run",
+        "prime_factory_status",
+        "prime_factory_stop",
+        "prime_factory_resume",
+        "prime_factory_graph",
+        "prime_bash",
+        "prime_skill_list",
+        "prime_crates",
+        "prime_goal",
+        "prime_autonomous",
+    )
+    expected_redteam = (
+        "tempest_status",
+        "tempest_mission_start",
+        "tempest_mission_stop",
+        "tempest_report",
+        "tempest_operators_list",
+        "tempest_operator_task",
+        "tempest_findings",
+        "tempest_providers",
+        "tempest_purple_synthesize",
+        "tempest_blue_gaps",
+        "tempest_black_cover",
+        "tempest_white_roe",
+        "tempest_hats_list",
+        "tempest_hat_dispatch",
+    )
+    assert tuple(KERNEL_TOOL_NAMES) == expected_kernel
+    assert tuple(REDTEAM_TOOL_NAMES) == expected_redteam
+    families = (*expected_kernel, *expected_redteam)
+    family_names = set(families)
+    roster = roster_names(ROSTER.read_text(encoding="utf-8"))
+    assert [name for name in roster if name in family_names] == list(families)
+
+    registry = default_registry(
+        OMEGA_PRIME.parent,
+        tmp_path,
+        env={
+            "OMEGA_PRIME_STATE_DIR": str(tmp_path / "state"),
+            "OMEGA_PRIME_PLUGINS": "0",
+        },
+        work_root=tmp_path,
+    )
+    registered = {item["function"]["name"] for item in registry.schemas()}
+    assert family_names.isdisjoint(registered)

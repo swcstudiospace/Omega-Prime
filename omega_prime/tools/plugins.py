@@ -1,9 +1,11 @@
 """Load ``{home}/plugins/<name>/plugin.py`` and register its tools.
 
-Adapted from a Hermes plugin ``register`` that calls ``register_tool``. The
-module is loaded with ``importlib`` from that path. It is not installed. A
-resolved ``plugin.py`` outside ``home`` is skipped, including a symlink that
-leaves ``home``.
+The exact ``OMEGA_PRIME_PLUGINS=1`` predicate is exposed for the host to check
+against its supplied environment snapshot before scanning this directory.
+Loaded plugins are trusted local Python, not sandboxed or approval-gated;
+registration can replace handlers and approval metadata in the registry.
+Resolved ``plugin.py`` paths outside ``home`` are skipped, including symlinks
+that leave ``home``.
 """
 
 from __future__ import annotations
@@ -12,10 +14,16 @@ import importlib.util
 import re
 import sys
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 _NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+
+def plugins_enabled(env: Mapping[str, str]) -> bool:
+    """Return whether the supplied environment snapshot opts plugins in."""
+    return env.get("OMEGA_PRIME_PLUGINS") == "1"
 
 
 def load_plugins(home: str | Path, registry: Any) -> list[str]:
@@ -97,4 +105,4 @@ def _added(before: list[str], after: list[str]) -> list[str]:
     return added
 
 
-__all__ = ["load_plugins"]
+__all__ = ["load_plugins", "plugins_enabled"]
