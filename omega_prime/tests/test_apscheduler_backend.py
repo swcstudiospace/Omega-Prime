@@ -123,7 +123,9 @@ def test_restart_resumes_without_duplicates(tmp_path: Path):
         second.start()
         count_at_restart = len(seen)
         assert _wait_until(lambda: len(seen) > count_at_restart)
-        assert len(reopened.jobs[0]["history"]) == len(seen)
+        # The run is recorded after the model call returns, so wait for that write
+        # to land rather than reading history the moment the call is seen.
+        assert _wait_until(lambda: len(reopened.jobs[0]["history"]) == len(seen))
     finally:
         second.stop()
 

@@ -1,0 +1,77 @@
+name: omp-sandbox
+
+# The engine's execution tier (omp-sandbox/): Node 24 TypeScript core and the
+# Rust Anda wrapper. Separate from ci.yml so the Python jobs stay unchanged.
+# Hermetic: no Podman, no OpenShell gateway, no model logins. The live e2e
+# (tests/e2e.py) needs those and runs locally only.
+
+on:
+  push:
+    paths:
+      - omp-sandbox/**
+      - .github/workflows/omp-sandbox.yml
+  pull_request:
+    paths:
+      - omp-sandbox/**
+      - .github/workflows/omp-sandbox.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omp-sandbox-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  node:
+    name: omp-sandbox node (tsc + node --test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: omp-sandbox
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: omp-sandbox/package-lock.json
+      - name: npm ci (no scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: typecheck
+        run: npm run check
+      - name: unit tests
+        run: npm test
+  rust:
+    name: omp-sandbox rust (cargo build + test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: omp-sandbox
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # The signed-access test drives the real Node core, so the rust job needs Node and the npm deps too.
+      # OMP_SANDBOX_REQUIRE_NODE=1 makes that test fail (not skip) if Node is missing.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: omp-sandbox/package-lock.json
+      - name: npm ci (no scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: point the Anda test at Node
+        run: echo "OMP_SANDBOX_NODE=$(command -v node)" >> "$GITHUB_ENV"
+      - name: toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: omp-sandbox
+      - name: build (locked)
+        run: cargo build --locked
+      - name: test (locked)
+        env:
+          OMP_SANDBOX_REQUIRE_NODE: "1"
+        run: cargo test --locked

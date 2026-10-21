@@ -1,0 +1,19 @@
+# omp-sandbox workload image for the OpenShell Podman driver (rootless). Pinned toolchain baked in so
+# sandbox boot needs no network: Node 24.21.0, Bun 1.4.2, omp 18.8.4, sandbox-agent 0.4.2, git, python3
+# (python3 is required by the agentOS sandbox_agent mount: its realpath runs a remote python3).
+# GSD-Core 1.18.0 is NOT baked in: it installs project-local inside the sandbox workdir at `up`.
+FROM nvcr.io/nvidia/base/ubuntu:24.04
+ARG NODE_V=24.21.0
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git xz-utils unzip python3 \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL "https://nodejs.org/dist/v${NODE_V}/node-v${NODE_V}-linux-x64.tar.xz" | tar -xJ -C /opt \
+ && mv /opt/node-v${NODE_V}-linux-x64 /opt/node
+ENV PATH=/opt/bun/bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin BUN_INSTALL=/opt/bun
+RUN npm i -g --prefix /opt/bunpkg bun@1.4.2 && mkdir -p /opt/bun/bin \
+ && ln -sf "$(readlink -f /opt/bunpkg/bin/bun)" /opt/bun/bin/bun && bun --version
+RUN bun install -g @oh-my-pi/pi-coding-agent@18.8.4 && omp --version
+COPY sandbox-agent /usr/local/bin/sandbox-agent
+RUN chmod 0755 /usr/local/bin/sandbox-agent
+# OpenShell uses the image WORKDIR as the workspace; /sandbox is the default.
+WORKDIR /sandbox
+USER ubuntu
