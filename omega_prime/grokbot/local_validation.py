@@ -1528,10 +1528,6 @@ def _run_profile() -> str:
     )
     canonical = roster_names((install / ROSTER_REL).read_text(encoding="utf-8"))
     env = dict(_os.environ)
-    # The disposable profile deliberately opts into loopback so the no-secret
-    # local substrate checks exercise the configured path without inheriting
-    # caller environment or relying on a production default.
-    env["SUBSTRATE_URL"] = "local"
     home = layout.home
 
     off_fixture = {

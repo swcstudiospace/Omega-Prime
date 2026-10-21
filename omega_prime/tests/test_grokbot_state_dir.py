@@ -25,7 +25,7 @@ def _remember(registry, content: str) -> None:
             "memory", {"action": "add", "target": "memory", "content": content}
         )
     )
-    assert result.get("success") is True, result
+    assert result.get("ok") is True, result
 
 
 def test_state_dir_redirects_memory_and_sessions(tmp_path: Path) -> None:

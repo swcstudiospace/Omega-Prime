@@ -8,7 +8,7 @@ bots: [bot-00-omega-prime]
 
 **Owner:** QUALITY (bot-06). LEAD may trigger the review after a draft PR opens. Only QUALITY records the merge-claim verdict. This skill does not weaken G-1…G-6 or PD-1…PD-6.
 
-**Status:** Policy encoded from `https://github.com/swcstudiospace/programming-desk/blob/main/docs/github-sot-orchestration.md` §4. **E2E not verified** — no live Greptile trigger was run while authoring this pack. If MCP `get_me` returns needsAuth, say so and stop. Do not mark the gate passed.
+**Status:** Local review and receipt constraints are defined in this skill and the [verification-receipts guidance](../verification-receipts/SKILL.md). The former Programming Desk `github-sot-orchestration.md` is not available as a verified local source and is not required policy. **E2E not verified** — no live Greptile trigger was run while authoring this pack. If MCP `get_me` returns needsAuth, say so and stop. Do not mark the gate passed.
 
 ---
 

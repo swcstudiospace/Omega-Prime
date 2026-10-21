@@ -16,9 +16,13 @@ DOCS = ROOT / "docs"
 
 _LINK = re.compile(r"\[[^\]]*\]\(([^)#]+\.md)\)")
 
-# Pages a reader opens from GitHub or GitBook: every docs page plus the
-# repository-root Markdown files that link into them.
-_PAGES = sorted(DOCS.rglob("*.md")) + sorted(ROOT.glob("*.md"))
+# Pages a reader opens from GitHub or GitBook: docs, repository-root Markdown,
+# and the Omega Prime package documentation (including nested skills).
+_PAGES = (
+    sorted(DOCS.rglob("*.md"))
+    + sorted(ROOT.glob("*.md"))
+    + sorted(OMEGA_PRIME.rglob("*.md"))
+)
 _FENCE = re.compile(
     r"^[ \t]*(`{3,}|~{3,})([^\n]*)\n(.*?)^[ \t]*\1[ \t]*$", re.MULTILINE | re.DOTALL
 )
@@ -87,7 +91,7 @@ def _broken_links(page: Path, text: str) -> list[str]:
                 continue
             path_part, _, anchor = target.partition("#")
             path_part = path_part.split("?", 1)[0]
-            resolved = (page.parent / unquote(path_part)) if path_part else page
+            resolved = page.parent / unquote(path_part) if path_part else page
             if not resolved.exists():
                 broken.append(f"{target} (no file {resolved})")
                 continue
@@ -161,6 +165,33 @@ def test_relative_links_images_and_anchors_resolve():
         if (found := _broken_links(page, page.read_text(encoding="utf-8")))
     }
     assert not broken, broken
+
+
+def test_reader_relative_links_resolve_and_reject_missing_targets_and_anchors():
+    """Package links resolve from the page, never an implicit package root."""
+    page = OMEGA_PRIME / "tests" / "test_docs.py"
+    text = (
+        "[skill](../skills/getting-started/SKILL.md#1-clone-a-pinned-release)\n"
+        "[contract](../contracts/tool-rosters/omega-prime.yaml)\n"
+        "[ownership](../ownership.yaml)\n"
+    )
+    assert _broken_links(page, text) == []
+    assert _broken_links(
+        page, "[skill](skills/getting-started/SKILL.md#1-clone-a-pinned-release)"
+    )
+
+    for invalid in (
+        "[missing](../skills/no-such-skill/SKILL.md)",
+        "[bad anchor](../skills/getting-started/SKILL.md#no-such-section)",
+        "[missing routine](../routines/no-such-routine.md)",
+        "[missing contract](../contracts/no-such-contract.yaml)",
+        "[missing ownership](../ownership-missing.yaml)",
+    ):
+        assert _broken_links(page, invalid), invalid
+
+
+def test_package_markdown_is_in_link_inventory():
+    assert OMEGA_PRIME / "skills" / "getting-started" / "SKILL.md" in _PAGES
 
 
 def test_link_check_flags_missing_targets_and_accepts_valid_forms():

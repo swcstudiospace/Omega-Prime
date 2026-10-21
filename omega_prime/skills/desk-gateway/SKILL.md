@@ -9,19 +9,18 @@ gates: [G-5, G-6, G-7]
 
 ## Served tools
 
-Use the Omega Prime tools named below (`lead_*`, `app_*`, `web_*`, `mob_*`, `infra_*`, `sys_*`, `qua_*`). An external Desk Gateway is optional and is not part of a default install. Its `desk_*` and `agent_bus_*` tools are a fallback only when that gateway is connected and a served tool returns `not_configured`. If neither answers, stop and record the blocker. Do not invent a tool name.
+Use the Omega Prime in-process registry by default. In Solo mode, `not_configured: solo` is a terminal local result; do not try an external transport. Desk-specific instructions below apply only when Desk is explicitly configured and Solo is off. External fallbacks require a served tool to return `not_configured`.
 
 ## Omega Prime adaptation
 
-Omega Prime has no Desk Gateway: tools come from the in-process registry
-(or the Omega Prime MCP tool host at `python -m omega_prime.mcp_server`), and
-the roster is `contracts/tool-rosters/omega-prime.yaml`. Read "gateway"
-below as that registry, "seat" as the single Omega Prime bot, and
-refusals as blockers for the operator, not retry loops.
+Omega Prime uses the in-process tool registry (or the Omega Prime MCP tool host at
+`python -m omega_prime.mcp_server`), and the roster is
+[`contracts/tool-rosters/omega-prime.yaml`](../../contracts/tool-rosters/omega-prime.yaml).
+Desk-gateway instructions below describe optional configured Desk behavior, not the default.
 
 ## When this applies (L1)
 
-Every `desk_*` tool you hold comes from the Desk Gateway at `https://desk.swcstudio.space/mcp/<seat>`.
+When Desk is explicitly configured, every `desk_*` tool you hold comes from its Gateway at `https://desk.swcstudio.space/mcp/<seat>`.
 The gateway serves your roster and nothing else: **a tool the gateway did not list does not
 exist**, and a call it refused is a blocker for LEAD, not a retry loop. Rosters are contracts
 under `contracts/tool-rosters/` (QUALITY); the eight core tools are in `_core.yaml` and your seat
@@ -37,7 +36,7 @@ Calling a gateway tool?
 ├─ gates: [g6]? ──▶ External gateway: approval_id on the call. Served tool: receipt only. §3
 ├─ Took > 20 s? ──▶ The call was cut. Bound the inputs and split the work. §4
 ├─ 403? ──▶ Wrong seat endpoint. Stop. Tell LEAD. §5
-├─ not_configured? ──▶ Upstream credential not provided. `unverified`, no browser workaround. §5
+├─ `not_configured`? ──▶ Record the reason. `not_configured: solo` is a terminal local result; only an explicitly configured Desk with Solo off may use an external fallback. §5
 └─ Argument contains a token, password or key? ──▶ Remove it. Every call is audited. §6
 ```
 
@@ -109,7 +108,7 @@ error rather than a hang. Consequences:
 | Error | Meaning | Response |
 |---|---|---|
 | `403` | Your token is for a different seat than the endpoint you called, or the connector was added with the wrong URL | Stop. Tell LEAD with the endpoint and tool name. Do not retry, do not try another endpoint. `/desk doctor` shows the Connector row |
-| `not_configured` | The operator has not provided the upstream credential for that tool (Play, App Store Connect, Vercel, Railway, Greptile) | Record it in `unverified` with the tool name. Do not perform the action through the browser or a personal login; the gateway path exists so that the action is audited and the credential is not yours to hold |
+| `not_configured` | The configured tool lacks its upstream credential | Record it in `unverified` with the tool name; do not use a browser or personal login. `not_configured: solo` is instead the local runtime's terminal outcome and never authorizes an external transport |
 | Refusal naming gate fields | A g5/g6 call without its approval or rollback inputs | Blocker for LEAD. Obtain the approval; do not invent it |
 | Unknown tool | The tool is not on your roster (or a pack was unloaded) | §1. Check `tools/list`; do not guess a name |
 
