@@ -43,7 +43,8 @@ _ANDA_FAKE = r'''#!/usr/bin/env python3
 """Fake omp-sandbox-anda wrapper: the client.rs stdio protocol, stdlib only.
 
 Behaviour is selected by ``behavior.json`` beside this script -- never
-argv: ``{"behavior": "happy" | "tier_error" | "question" | "hang"}``. One
+argv: ``{"behavior": "happy" | "tier_error" | "question" |
+"question_reask" | "hang"}``. One
 receipt line per request ({"id", "tool", "args"}) is appended to
 wrapper-log.jsonl beside this script before the reply is written. Every
 emitted line carries "attestation": "mock". ``down`` is answered and the
@@ -130,6 +131,8 @@ work = None
 stage_id = None
 hanging = False
 exports = 0
+pending = None
+reasked = False
 
 for line in sys.stdin:
     text = line.strip()
@@ -180,13 +183,53 @@ for line in sys.stdin:
         if behavior == "hang":
             hanging = True
             continue
-        if behavior == "question":
+        if behavior in ("question", "question_reask"):
+            # The real wrapper holds stage_done until answer_question:
+            # one question at a time, a requestId per ask (e2e.py).
+            pending = {"stage": stage_id, "request": "req-1", "answered": False}
             emit({
                 "event": "question",
                 "stageId": stage_id,
+                "requestId": pending["request"],
                 "question": "Which shape do you want?",
             })
+            continue
         emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
+        continue
+    if tool == "answer_question":
+        stale = {
+            "id": rid,
+            "ok": False,
+            "error": "stale answer (fake)",
+            "code": "stale_answer",
+        }
+        matching = (
+            pending is not None
+            and not pending["answered"]
+            and args.get("stage_id") == pending["stage"]
+            and args.get("request_id") == pending["request"]
+        )
+        if behavior == "question_reask" and pending is not None and not reasked:
+            # The first answer ALWAYS arrives stale: the ask was already
+            # superseded server-side. Re-ask under a fresh requestId; the
+            # engine is expected to drop the dead item and raise the new
+            # one. Any later answer goes stale again once req-2 is done.
+            reasked = True
+            emit(stale)
+            pending = {"stage": stage_id, "request": "req-2", "answered": False}
+            emit({
+                "event": "question",
+                "stageId": stage_id,
+                "requestId": "req-2",
+                "question": "Which shape do you want?",
+            })
+            continue
+        if matching:
+            pending["answered"] = True
+            emit({"id": rid, "ok": True, "result": {"answered": True}})
+            emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
+            continue
+        emit(stale)
         continue
     if tool == "abort":
         emit({"id": rid, "ok": True, "result": {}})
@@ -245,6 +288,54 @@ def _install_fake_anda(tmp_path: Path, behavior: str) -> tuple[Path, Path]:
     return script, home / "wrapper-log.jsonl"
 
 
+_HERDR_FAKE = r'''#!/usr/bin/env python3
+"""Fake herdr runner: argv receipts beside itself, mode-baked output.
+
+``ok`` mode prints a workspace line whose last whitespace token is the
+pane id (the pinned parse contract) and exits 0 for create/run;
+``fail`` mode exits 1 on every call, receipts still written. The create
+receipt carries the exact pane id it printed so tests can compare the
+row's ``herdr_pane`` against what the launcher parsed. Stdlib only, no
+env knobs: the same two-key child env the launcher passes is enough.
+"""
+import json
+import os
+import sys
+
+MODE = "__MODE__"
+LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "herdr-log.jsonl")
+
+argv = sys.argv[1:]
+row = {"argv": argv}
+created = MODE == "ok" and argv[:2] == ["workspace", "create"]
+if created:
+    row["pane"] = "pane-%d" % os.getpid()
+with open(LOG, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(row) + "\n")
+if created:
+    sys.stdout.write("workspace created %s\n" % row["pane"])
+    sys.exit(0)
+if MODE == "ok" and argv[:2] == ["pane", "run"]:
+    sys.exit(0)
+sys.exit(1)
+'''
+
+
+def _install_fake_herdr(tmp_path: Path, mode: str = "ok") -> tuple[Path, Path]:
+    """Write an executable fake ``herdr`` into the tmp bin dir (first on PATH).
+
+    Returns the script and its receipt log. ``ok`` mode prints a pane id
+    that parses under the pinned contract; ``fail`` mode fails every call
+    so the no-pane path is deterministic on any box. Receipts let the
+    tests pin the exact argv the engine passed (label, watch command).
+    """
+    binary = tmp_path / "bin" / "herdr"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text(_HERDR_FAKE.replace("__MODE__", mode), encoding="utf-8")
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+    return binary, binary.parent / "herdr-log.jsonl"
+
+
 def _jsonl(path: Path) -> list[dict]:
     rows: list[dict] = []
     if not path.exists():
@@ -301,7 +392,15 @@ def _backend_env(
     roots: Path,
     **extra: str,
 ) -> dict[str, str]:
-    """The engine env for the omp-sandbox backend against the fake wrapper."""
+    """The engine env for the omp-sandbox backend against the fake wrapper.
+
+    Hermetic by default: without an explicitly installed stub the run gets
+    a fail-mode fake herdr (deterministic no-pane path) — a herdr on the
+    executor box can never be reached, because the tmp bin dir is FIRST
+    on PATH and always carries the fake.
+    """
+    if not (tmp_path / "bin" / "herdr").exists():
+        _install_fake_herdr(tmp_path, "fail")
     return _env(
         tmp_path,
         omp,
