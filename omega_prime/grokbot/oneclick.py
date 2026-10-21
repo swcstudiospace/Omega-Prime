@@ -46,6 +46,7 @@ from omega_prime.grokbot.security import (
     check_bind_safety,
     generate_token,
 )
+from omega_prime.settings import load_settings
 from omega_prime.tooling.fs import (
     PRIVATE_FILE_MODE,
     atomic_write_text,
@@ -306,6 +307,8 @@ def run_oneclick(
 ) -> int:
     """Execute the 1-click workflow."""
     sse = transport == "sse"
+    settings = load_settings(dict(os.environ)) if sse else None
+    effective_env = dict(settings.effective_env) if settings is not None else None
     strict = sse if strict is None else strict
     protocol_stdio = not sse and not dry_run
     # A served stdio process reserves stdout for the child's JSON-RPC frames.
@@ -548,7 +551,10 @@ def run_oneclick(
     if approvals_path is not None:
         try:
             file_grants = load_approvals_file(
-                approvals_path, repo_root=root, digest=approvals_digest
+                approvals_path,
+                repo_root=root,
+                digest=approvals_digest,
+                env=effective_env,
             )
         except ValueError as exc:
             return _fail(str(exc))
@@ -597,6 +603,8 @@ def run_oneclick(
             token_store_path=token_store_path,
             log_format=log_format,
             work_root=work_root,
+            env=effective_env,
+            settings_status=settings,
         )
     except (KeyboardInterrupt, Exception):
         _finish("interrupted", 130)

@@ -2,11 +2,24 @@
   "contract": "1.0.0",
   "flavor": "core",
   "milestone": "v20 — Wiring",
-  "phases": [97, 98, 99, 100, 101, 102, 103],
+  "phases": [
+    {
+      "number": 99,
+      "name": "Solo mode, Desk optional",
+      "status": "completed",
+      "directory": ".planning/phases/99-solo-mode-desk-optional"
+    },
+    {
+      "number": 100,
+      "name": "omp engine wiring",
+      "status": "completed",
+      "directory": ".planning/phases/100-omp-engine-wiring"
+    }
+  ],
   "next": {
-    "command": "/gsd-autonomous",
-    "label": "Execute Phase 100 in a separate authorized session",
-    "reason": "Six reviewed plans; begin with 100-00 prerequisite checks. No implementation has started."
+    "command": "/skill:gsd-autonomous 97",
+    "label": "Execute Phase 97 plan",
+    "reason": "Five Phase 97 execution plans are staged (01–05); planning is complete and independent units may proceed after separate manual invocation. Authoritative upstream schema confirmation is required before server-specific implementation."
   },
   "updated_at": "2026-10-21"
 }

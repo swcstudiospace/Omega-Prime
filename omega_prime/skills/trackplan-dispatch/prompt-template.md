@@ -21,7 +21,7 @@ SPE-{{primary_linear_id}} / {{graph_id}} {{short_goal}}
 ```markdown
 # Implement TrackPlan work as a draft GitHub PR
 
-You are the implementing agent for Programming Desk. LEAD orchestrates; you write code only in paths allowed by ownership.yaml. Open a **draft** PR. Do not claim merge. Expect Greptile after the PR opens.
+You are the implementing agent. LEAD orchestrates; you write code only in paths allowed by the ownership rules at `{{ownership_path}}` in the checkout of `repo` (for Omega Prime: `omega_prime/ownership.yaml`). If that file is missing, stop and report a blocker rather than guessing. Open a **draft** PR. Do not claim merge. Expect Greptile after the PR opens.
 
 The specification below is the second uplift. It already contains `<ISSUES>` with live tracker URLs. Do not create a parallel Linear/Notion tree. Do not shrink the XML.
 
@@ -33,6 +33,7 @@ The specification below is the second uplift. It already contains `<ISSUES>` wit
 - runtime: {{cloud|hermes}}
 - owner: {{bot-0N-seat | LEAD-orchestrated Cloud/Hermes}}
 - repo: {{https://github.com/org/repo}}
+- ownership_path: {{repo-relative path to the target repo's ownership rules, e.g. omega_prime/ownership.yaml}}
 - branch: bot-{{nn}}-{{seat}}/{{task_id}}
 - starting_ref: {{main|sha|omit}}
 - goal: {{uplifted_outcome}}
@@ -70,4 +71,4 @@ When `runtime=hermes`, prepend:
 You are Hermes on the VPS lane. Durable output is still a GitHub branch + draft PR + `.receipts/`. Do not leave results only on the VPS. The second-uplift XML is the spec, same as Lane A.
 ```
 
-Pass this markdown as the `goal` of `lead_bus_start` (`runtime` set for the job), then poll with `lead_bus_wait`. The external tool `agent_bus_start_job` on a connected Hermes gateway is the same step only when `lead_bus_start` returns `not_configured`. `handoff_to_hermes` is the Hermes-only fallback (`goal` and `messages`). Do not reinstall stdio `user-hermes` and do not recreate `hermes-mcp-bridge.mjs`. If both the served tools and `agent_bus_*` error, do not send this prompt through SSH as a substitute, and do not publish.
+Pass this markdown as the `goal` of `lead_bus_start` (`runtime` set for the job), then poll with `lead_bus_wait`. Only when Solo is off, Desk is explicitly configured, and the served bus tool returns `not_configured` may a connected Desk gateway `agent_bus_start_job` be used. `not_configured: solo` is a terminal local blocker: do not route the prompt through agent_bus, Hermes, or SSH. `handoff_to_hermes` is available only as an explicitly configured Hermes fallback. Do not reinstall stdio `user-hermes` or recreate `hermes-mcp-bridge.mjs`.

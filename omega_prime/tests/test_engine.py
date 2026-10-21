@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import queue
 import stat
 import subprocess
 import sys
@@ -14,7 +15,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -25,11 +26,18 @@ from omega_prime.agent.conversation_loop import (
     run_conversation,
 )
 from omega_prime.agent.delegate import delegate_task
+from omega_prime.agent.interrupt import InterruptFlag
 from omega_prime.agent.model import ScriptedModel
 from omega_prime.agent.runtime import OmegaPrimeAgent
 from omega_prime.engine.attach import _PROMPT_LIMIT, _TRANSCRIPT_CHARS, _with_history
 from omega_prime.engine.jobs import append_event, maybe_tmux
-from omega_prime.engine.omp_driver import OmpSession, run, session_abort, session_steer
+from omega_prime.engine.omp_driver import (
+    EngineError,
+    OmpSession,
+    run,
+    session_abort,
+    session_steer,
+)
 from omega_prime.engine.plan_router import (
     PlanNotAllowed,
     evaluate_all,
@@ -147,6 +155,19 @@ for line in sys.stdin:
         subscribed_events = cmd.get("events", [])
         emit({"id": cid, "type": "response", "command": kind, "success": True})
     elif kind == "prompt":
+        if os.environ.get("OMEGA_FAKE_OMP_BLOCK_PROMPT") == "1":
+            for abort_line in sys.stdin:
+                abort_cmd = json.loads(abort_line)
+                log({"cmd": abort_cmd.get("type")})
+                if abort_cmd.get("type") == "abort":
+                    emit({
+                        "id": abort_cmd.get("id"),
+                        "type": "response",
+                        "command": "abort",
+                        "success": True,
+                    })
+                    break
+            continue
         if (
             mode == "rpc-ui"
             and os.environ.get("OMEGA_FAKE_OMP_UI_ENABLED") == "1"
@@ -643,7 +664,6 @@ def test_rpc_ui_dispatches_one_original_id_response_through_control_store(
             mode="rpc-ui",
             thinking="max",
             ui_control=store,
-            timeout=5,
         )
         operator.join(5)
         assert not operator.is_alive()
@@ -774,7 +794,6 @@ def test_rpc_ui_dispatches_confirm_and_ask_answers(
             job_id=job_id,
             mode="rpc-ui",
             ui_control=store,
-            timeout=5,
         )
         operator.join(5)
         assert not operator.is_alive()
@@ -822,7 +841,6 @@ def test_rpc_ui_queued_abort_invalidates_pending_request_and_aborts_once(
             job_id=job_id,
             mode="rpc-ui",
             ui_control=store,
-            timeout=5,
         )
         operator.join(5)
         assert not operator.is_alive()
@@ -877,13 +895,12 @@ def test_rpc_ui_cancel_sends_one_abort_and_marks_request_aborted(
             mode="rpc-ui",
             ui_control=store,
             cancel_event=cancel_event,
-            timeout=5,
         )
         operator.join(5)
         assert not operator.is_alive()
         assert not failures
         assert result.ok is False
-        assert result.reason == "aborted"
+        assert result.reason == "cancelled"
         assert result.ui_summary["aborted"] == 1
         commands = [
             row["cmd"]
@@ -918,7 +935,6 @@ def test_rpc_ui_eof_resolves_pending_request_instead_of_waiting_for_timeout(
             job_id=job_id,
             mode="rpc-ui",
             ui_control=store,
-            timeout=5,
         )
         assert result.ok is False
         assert result.reason == "process"
@@ -964,7 +980,6 @@ def test_rpc_ui_writer_failure_does_not_retry_response(
             job_id=job_id,
             mode="rpc-ui",
             ui_control=store,
-            timeout=5,
         )
         operator.join(5)
         assert not operator.is_alive()
@@ -1309,6 +1324,333 @@ def test_steer_and_abort_round_trip(tmp_path: Path) -> None:
     assert "ready" in kinds
 
 
+def test_prompt_wait_has_no_elapsed_lifetime_limit(monkeypatch, tmp_path: Path) -> None:
+    from omega_prime.engine import omp_driver
+
+    class LongSession:
+        agent_ended = False
+        events_path = tmp_path / "long-events.jsonl"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def _next(self, timeout: float):
+            self.calls += 1
+            monkeypatch.setattr(omp_driver.time, "monotonic", lambda: self.calls * 0.11)
+            if self.calls == 1:
+                return {"id": "prompt-id", "type": "response", "success": True}
+            if self.calls <= 1201:
+                return None
+            self.agent_ended = True
+            return {"type": "agent_end"}
+
+    session = LongSession()
+    _accept = omp_driver._accept_prompt
+    _accept(cast(OmpSession, session), "prompt-id", None)
+    assert session.calls > 1200
+    assert session.agent_ended
+
+
+def test_session_distinguishes_idle_eof_reader_fault_and_dead_child(
+    tmp_path: Path,
+) -> None:
+    class Alive:
+        returncode: int | None = None
+
+        def poll(self):
+            return None
+
+    class BlockingReader:
+        def __init__(self, error: BaseException | None = None) -> None:
+            self.release = threading.Event()
+            self.error = error
+
+        def __iter__(self):
+            self.release.wait(1)
+            if self.error:
+                raise self.error
+            return
+            yield ""
+
+    idle = BlockingReader()
+    session = OmpSession(
+        type("Proc", (Alive,), {"stdout": idle, "stderr": io.StringIO()})(),
+        tmp_path / "idle.jsonl",
+    )
+    assert session._next(0.02) is None
+    idle.release.set()
+    try:
+        session._next(0.2)
+    except EngineError as exc:
+        assert exc.reason == "process"
+    else:
+        raise AssertionError("clean EOF must fail")
+
+    faulty = BlockingReader(OSError("reader broke"))
+    failed = OmpSession(
+        type("Proc", (Alive,), {"stdout": faulty, "stderr": io.StringIO()})(),
+        tmp_path / "fault.jsonl",
+    )
+    faulty.release.set()
+    try:
+        failed._next(0.2)
+    except EngineError as exc:
+        assert "reader failed" in exc.detail
+    else:
+        raise AssertionError("reader fault must fail")
+
+    inherited_pipe = BlockingReader()
+
+    class Dead(Alive):
+        returncode: int | None = 17
+
+        def poll(self):
+            return self.returncode
+
+    dead = OmpSession(
+        type("Proc", (Dead,), {"stdout": inherited_pipe, "stderr": io.StringIO()})(),
+        tmp_path / "dead.jsonl",
+    )
+    try:
+        dead._next(0.02)
+    except EngineError as exc:
+        assert "exited" in exc.detail
+    else:
+        raise AssertionError("dead child must fail even with inherited stdout open")
+    inherited_pipe.release.set()
+
+
+def test_close_kills_and_reaps_an_uncooperative_child(tmp_path: Path) -> None:
+    class Uncooperative:
+        stdin = None
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def __init__(self) -> None:
+            self.waits = 0
+            self.killed = False
+
+        def wait(self, timeout: float):
+            self.waits += 1
+            if not self.killed:
+                raise subprocess.TimeoutExpired("omp", timeout)
+            return -9
+
+        def kill(self) -> None:
+            self.killed = True
+
+    proc = Uncooperative()
+    session = OmpSession(cast(subprocess.Popen[str], proc), tmp_path / "cleanup.jsonl")
+    assert session.close() == -9
+    assert proc.killed and proc.waits == 2
+
+
+def test_interrupt_reaches_attach_and_delegate_engine_paths_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_PRIME_ENGINE="required",
+        OMEGA_FAKE_OMP_BLOCK_PROMPT="1",
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    def run_cancelled(call, interrupt: InterruptFlag):
+        result: list = []
+        worker = threading.Thread(target=lambda: result.append(call()), daemon=True)
+        worker.start()
+        log = Path(env["OMEGA_FAKE_OMP_LOG"])
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and "prompt" not in _omp_commands(log):
+            time.sleep(0.01)
+        assert "prompt" in _omp_commands(log)
+        interrupt.set("stop")
+        worker.join(7)
+        assert not worker.is_alive()
+        return result[0]
+
+    flag = InterruptFlag()
+    budget = IterationBudget(1)
+    model = ScriptedModel([{"role": "assistant", "content": "python"}])
+    agent = Agent(model=model, budget=budget, interrupt=flag, force_engine=True)
+    attached = run_cancelled(lambda: run_conversation(agent, "wait"), flag)
+    assert attached["engine"]["started"] is True
+    assert attached["turn_exit_reason"] == "cancelled"
+    assert attached["interrupted"] is True
+    assert attached["failed"] is False
+    assert budget.remaining == 0 and model.call_count == 0
+    assert _omp_commands(Path(env["OMEGA_FAKE_OMP_LOG"])).count("abort") == 1
+
+    log = Path(env["OMEGA_FAKE_OMP_LOG"])
+    log.unlink()
+    delegate_flag = InterruptFlag()
+
+    class Parent:
+        child_model = None
+        delegate_depth = 0
+
+        def __init__(self) -> None:
+            self.interrupt = delegate_flag
+            self.tools: dict = {}
+
+    delegated = run_cancelled(
+        lambda: json.loads(delegate_task(Parent(), "wait")), delegate_flag
+    )
+    assert delegated["error"] == "cancelled"
+    assert delegated["detail"] == "prompt cancelled"
+    assert _omp_commands(log).count("abort") == 1
+
+
+def test_cancelled_engine_turn_consumes_interrupt_before_next_message(
+    tmp_path: Path, monkeypatch
+) -> None:
+    binary = _install_fake(tmp_path)
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_PRIME_ENGINE="required",
+        OMEGA_FAKE_OMP_BLOCK_PROMPT="1",
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    flag = InterruptFlag()
+    model = ScriptedModel([{"role": "assistant", "content": "worked"}])
+    agent = Agent(model=model, interrupt=flag, force_engine=True)
+    result: list = []
+    worker = threading.Thread(
+        target=lambda: result.append(run_conversation(agent, "cancel me")),
+        daemon=True,
+    )
+    worker.start()
+    log = Path(env["OMEGA_FAKE_OMP_LOG"])
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and "prompt" not in _omp_commands(log):
+        time.sleep(0.01)
+    assert "prompt" in _omp_commands(log)
+    flag.set("stop this turn")
+    worker.join(7)
+
+    assert not worker.is_alive()
+    cancelled = result[0]
+    assert cancelled["turn_exit_reason"] == "cancelled"
+    assert cancelled["interrupted"] is True
+    assert cancelled["interrupt_message"] == "stop this turn"
+    assert flag.is_set() is False
+    assert flag.message is None
+
+    agent.force_engine = False
+    next_turn = run_conversation(agent, "next message")
+    assert next_turn["final_response"] == "worked"
+    assert next_turn["completed"] is True
+    assert next_turn["interrupted"] is False
+    assert model.call_count == 1
+
+
+def test_agent_end_already_queued_wins_cancellation_race(tmp_path: Path) -> None:
+    from omega_prime.engine.omp_driver import _accept_prompt
+
+    class RaceSession:
+        def __init__(self) -> None:
+            self.agent_ended = False
+            self.events_path = tmp_path / "race.jsonl"
+            self.events: list[dict] = []
+            self._queue: queue.Queue[str] = queue.Queue()
+            self._queue.put(json.dumps({"type": "agent_end"}))
+
+        def _next(self, timeout: float):
+            return None
+
+        def _raise_stream_failure(self):
+            raise AssertionError("completion is already queued")
+
+    flag = InterruptFlag()
+    flag.set("stop")
+    session = RaceSession()
+    _accept_prompt(cast(OmpSession, session), "prompt-id", flag)
+    assert session.agent_ended
+
+
+def test_cancel_drain_is_bounded_while_producer_keeps_enqueuing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import omp_driver
+    from omega_prime.engine.omp_driver import _accept_prompt
+
+    snapshot = [
+        {"type": "message_update", "delta": {"text": "queued-one"}},
+        {"type": "message_update", "delta": {"text": "queued-two"}},
+    ]
+
+    class NoisyQueue(queue.Queue[str]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.produced = 0
+            self.remaining = 100
+            for event in snapshot:
+                self.put(json.dumps(event))
+
+        def get_nowait(self) -> str:
+            item = super().get_nowait()
+            if self.remaining:
+                self.produced += 1
+                self.remaining -= 1
+                self.put(
+                    json.dumps(
+                        {
+                            "type": "message_update",
+                            "delta": {"text": f"later-{self.produced}"},
+                        }
+                    )
+                )
+            return item
+
+    class NoisySession:
+        def __init__(self) -> None:
+            self.agent_ended = False
+            self.events_path = tmp_path / "noisy-cancel.jsonl"
+            self.events: list[dict] = []
+            self._queue = NoisyQueue()
+            self._abort_sent = False
+
+        def _next(self, timeout: float):
+            return None
+
+        def _raise_stream_failure(self) -> None:
+            raise AssertionError("no stream failure was queued")
+
+        def abort_once(self) -> None:
+            OmpSession.abort_once(cast(OmpSession, self))
+
+    session = NoisySession()
+    aborts: list[tuple[int, int]] = []
+
+    def record_abort(actual: OmpSession) -> None:
+        aborts.append((len(actual.events), actual._queue.qsize()))
+
+    monkeypatch.setattr(omp_driver, "session_abort", record_abort)
+    interrupt = InterruptFlag()
+    interrupt.set("stop")
+
+    try:
+        _accept_prompt(cast(OmpSession, session), "prompt-id", interrupt)
+    except EngineError as exc:
+        assert exc.reason == "cancelled"
+    else:
+        raise AssertionError("prompt cancellation was not reported")
+
+    session.abort_once()
+
+    assert aborts == [(2, 2)]
+    assert session._queue.produced == 2
+    assert session._queue.remaining == 98
+    assert session.events == snapshot
+    assert _events(session.events_path) == snapshot
+
+
 def test_loops_prefer_the_fake_engine(tmp_path, monkeypatch) -> None:
     binary = _install_fake(tmp_path)
     env = _env(tmp_path, binary, OMEGA_PRIME_ENGINE="auto")
@@ -1561,7 +1903,7 @@ def test_current_request_survives_a_long_transcript() -> None:
 def test_failed_launch_records_job_end_and_follow_stops(tmp_path: Path) -> None:
     binary = _install_fake(tmp_path)
     env = _env(tmp_path, binary, OMEGA_FAKE_OMP_EXIT_AFTER_READY="1")
-    result = run("ping", env=env, job_id="job-died", timeout=5)
+    result = run("ping", env=env, job_id="job-died")
     assert result.ok is False
     assert result.started is False
     events = _events(Path(result.events_path))
@@ -1590,7 +1932,7 @@ def test_job_end_write_failure_still_returns_the_original_result(
         real(path, event)
 
     monkeypatch.setattr("omega_prime.engine.omp_driver.append_event", fail_job_end)
-    result = run("ping", env=env, job_id="job-full", timeout=5)
+    result = run("ping", env=env, job_id="job-full")
     assert result.ok is False
     assert result.reason != ""
     assert result.started is False

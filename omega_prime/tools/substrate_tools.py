@@ -13,11 +13,35 @@ import math
 from typing import Any
 
 from omega_prime.credentials.redact import redact_text, redact_value
-from omega_prime.substrate.client import SubstrateError
+from omega_prime.substrate.client import (
+    SubstrateError,
+    SubstrateNotConfiguredError,
+    SubstrateProtocolError,
+    SubstrateToolError,
+    SubstrateUnauthorizedError,
+    SubstrateUnreachableError,
+)
 
 _CONTENT_CAP = 1500
 _LABEL_CAP = 500
 _ERROR_CAP = 500
+
+
+def _substrate_failure(exc: Exception) -> str:
+    if isinstance(exc, SubstrateNotConfiguredError):
+        state = "not_configured"
+    elif isinstance(exc, SubstrateUnauthorizedError):
+        state = "unauthorized"
+    elif isinstance(exc, SubstrateProtocolError):
+        state = "protocol_error"
+    elif isinstance(exc, SubstrateToolError):
+        state = "tool_error"
+    elif isinstance(exc, SubstrateUnreachableError):
+        state = "unreachable"
+    else:
+        state = "unreachable"
+    return redact_text(f"{state}: {exc}")[:_ERROR_CAP]
+
 
 SUBSTRATE_TOOL_NAMES = (
     "substrate_docs_search",
@@ -45,14 +69,20 @@ def register_substrate_tools(registry: Any, client: Any) -> list[str]:
     ) -> dict:
         return graph_claim(client, graph_id, node_id, session_id, ttl_seconds)
 
-    def substrate_graph_release_tool(graph_id: str, node_id: str) -> dict:
-        return graph_release(client, graph_id, node_id)
+    def substrate_graph_release_tool(
+        graph_id: str, node_id: str, lease_id: str | None = None
+    ) -> dict:
+        return graph_release(client, graph_id, node_id, lease_id)
 
-    def substrate_graph_complete_tool(graph_id: str, node_id: str) -> dict:
-        return graph_complete(client, graph_id, node_id)
+    def substrate_graph_complete_tool(
+        graph_id: str, node_id: str, lease_id: str | None = None
+    ) -> dict:
+        return graph_complete(client, graph_id, node_id, lease_id)
 
-    def substrate_graph_heartbeat_tool(graph_id: str, node_id: str, token: str) -> dict:
-        return graph_heartbeat(client, graph_id, node_id, token)
+    def substrate_graph_heartbeat_tool(
+        graph_id: str, node_id: str, lease_id: str | None = None
+    ) -> dict:
+        return graph_heartbeat(client, graph_id, node_id, lease_id)
 
     handlers = {
         "substrate_docs_search": substrate_docs_search_tool,
@@ -86,9 +116,7 @@ def docs_search(client: Any, query: str) -> dict:
     try:
         result = client.docs_search(query)
     except Exception as exc:
-        return redact_value(
-            {"error": redact_text(f"substrate unreachable: {exc}")[:_ERROR_CAP]}
-        )
+        return {"error": _substrate_failure(exc)}
     if not isinstance(result, dict) or not result.get("ok"):
         reason = result.get("error") if isinstance(result, dict) else None
         if not isinstance(reason, str) or reason == "":
@@ -208,44 +236,60 @@ def graph_claim(
     try:
         return client.graph_claim(graph_id, node_id, session_id, ttl_seconds)
     except SubstrateError as exc:
-        return {"error": f"substrate unreachable: {exc}"}
+        return {"error": _substrate_failure(exc)}
     except ValueError as exc:
         return {"error": str(exc)}
 
 
-def graph_release(client: Any, graph_id: str, node_id: str) -> dict:
+def graph_release(
+    client: Any, graph_id: str, node_id: str, lease_id: str | None = None
+) -> dict:
     """Release this surface's claim on a node."""
     error = _graph_error(graph_id, node_id)
     if error is not None:
         return error
+    if not isinstance(lease_id, str) or lease_id == "":
+        return {"error": "lease_id must be a non-empty string"}
     try:
-        return {"result": client.graph_release(graph_id, node_id)}
+        return {"result": client.graph_release(graph_id, node_id, lease_id)}
     except SubstrateError as exc:
-        return {"error": f"substrate unreachable: {exc}"}
+        return {"error": _substrate_failure(exc)}
+    except ValueError as exc:
+        return {"error": str(exc)}
 
 
-def graph_complete(client: Any, graph_id: str, node_id: str) -> dict:
+def graph_complete(
+    client: Any, graph_id: str, node_id: str, lease_id: str | None = None
+) -> dict:
     """Mark a node completed and drop its claim."""
     error = _graph_error(graph_id, node_id)
     if error is not None:
         return error
+    if not isinstance(lease_id, str) or lease_id == "":
+        return {"error": "lease_id must be a non-empty string"}
     try:
-        return {"result": client.graph_complete(graph_id, node_id)}
+        return {"result": client.graph_complete(graph_id, node_id, lease_id)}
     except SubstrateError as exc:
-        return {"error": f"substrate unreachable: {exc}"}
+        return {"error": _substrate_failure(exc)}
+    except ValueError as exc:
+        return {"error": str(exc)}
 
 
-def graph_heartbeat(client: Any, graph_id: str, node_id: str, token: str) -> dict:
+def graph_heartbeat(
+    client: Any, graph_id: str, node_id: str, lease_id: str | None = None
+) -> dict:
     """Refresh the lease TTL for an active claim."""
     error = _graph_error(graph_id, node_id)
     if error is not None:
         return error
-    if not isinstance(token, str) or token == "":
-        return {"error": "token must be a non-empty lease token"}
+    if not isinstance(lease_id, str) or lease_id == "":
+        return {"error": "lease_id must be a non-empty string"}
     try:
-        return client.graph_heartbeat(graph_id, node_id, token)
+        return client.graph_heartbeat(graph_id, node_id, lease_id)
     except SubstrateError as exc:
-        return {"error": f"substrate unreachable: {exc}"}
+        return {"error": _substrate_failure(exc)}
+    except ValueError as exc:
+        return {"error": str(exc)}
 
 
 def _graph_error(graph_id: str, node_id: str) -> dict | None:
@@ -305,18 +349,23 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
     "substrate_graph_release": (
         "Release this surface's claim on a node without marking it complete. "
         "Requires approval.",
-        _graph_ref(["graph_id", "node_id"]),
+        _graph_ref(
+            ["graph_id", "node_id", "lease_id"],
+            {"lease_id": _string("Lease ID from the claim result.")},
+        ),
     ),
     "substrate_graph_complete": (
         "Mark a node completed and drop its claim. Requires approval.",
-        _graph_ref(["graph_id", "node_id"]),
+        _graph_ref(
+            ["graph_id", "node_id", "lease_id"],
+            {"lease_id": _string("Lease ID from the claim result.")},
+        ),
     ),
     "substrate_graph_heartbeat": (
-        "Refresh the lease TTL for an active claim using the token from the "
-        "claim result.",
+        "Refresh the lease TTL for an active claim using its lease_id.",
         _graph_ref(
-            ["graph_id", "node_id", "token"],
-            {"token": _string("Lease token from the claim result.")},
+            ["graph_id", "node_id", "lease_id"],
+            {"lease_id": _string("Lease ID from the claim result.")},
         ),
     ),
 }
