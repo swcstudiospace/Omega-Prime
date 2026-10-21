@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { allowedDir, seedFiles, PathRefused } from "../src/core/paths.ts";
 import { ROOT } from "../src/core/config.ts";
+import { SANDBOX_MOUNT, vmRoundTrip } from "../src/core/vm.ts";
 import { gatewayToml, mountDriverConfig, podmanPolicyYaml } from "../src/core/providers/openshell-podman.ts";
 import { startTier, MOUNT_TIERS } from "../src/core/providers/tiers.ts";
+import type { SandboxTier } from "../src/core/providers/types.ts";
 
 const box = realpathSync(mkdtempSync(join(tmpdir(), "omp-sbx-paths-")));
 const root = join(box, "wt"); const job = join(root, "job-1"); const outside = join(box, "outside");
@@ -92,4 +94,49 @@ test("podmanPolicyYaml substitutes only the run-as values; the checked-in policy
   assert.equal(genWithoutRunAs, statWithoutRunAs, "the generated policy differs from the static one in exactly the two run-as values");
   assert.ok(stat.includes('run_as_user: "1000"'), "checked-in policy keeps run_as_user 1000");
   assert.ok(stat.includes('run_as_group: "1000"'), "checked-in policy keeps run_as_group 1000");
+});
+
+test("vmRoundTrip probes only the tier's private home, never the mounted workdir", async () => {
+  for (const sandboxRoot of ["/sbx", "/sandbox"]) {
+    const writes: Array<{ path: string; data: string }> = [];
+    const vmCmds: string[] = [];
+    const tierArgv: string[][] = [];
+    let marker = "";
+    const vm = {
+      filesystem: {
+        writeFile: async (path: string, data: string) => { writes.push({ path, data }); marker = data; },
+        readdir: async () => [".agentos-probe.txt"],
+      },
+      process: {
+        exec: async (command: string) => {
+          vmCmds.push(command);
+          return command.includes("uname") ? { exitCode: 0, stdout: "probe-host" } : { exitCode: 0, stdout: ".agentos-probe.txt\n" };
+        },
+      },
+    };
+    const tier: SandboxTier = {
+      name: "bwrap", id: `fake-rt-${sandboxRoot}`, workdir: `${sandboxRoot}/work`, sandboxRoot, isolation: "none (test)",
+      workspaceHostPath: "/host/job-ws",
+      start: async () => {},
+      sandboxAgent: () => ({ baseUrl: "", token: "" }),
+      spawnStdio: () => { throw new Error("round-trip tests must not spawn"); },
+      exec: async (argv) => { tierArgv.push(argv); return { code: 0, stdout: argv[0] === "cat" ? marker : "", stderr: "" }; },
+      owned: () => ({}),
+      dispose: async () => ({ leftovers: [] }),
+    };
+    const r = await vmRoundTrip(vm, tier);
+    assert.equal(r.match, true, `round trip still proven on ${sandboxRoot}`);
+    assert.equal(r.hostFnExit, 0);
+    assert.deepEqual(writes.map((w) => w.path), [`${SANDBOX_MOUNT}/home/.agentos-probe.txt`], `write target on ${sandboxRoot}`);
+    assert.deepEqual(tierArgv[0], ["cat", `${sandboxRoot}/home/.agentos-probe.txt`], `cat target on ${sandboxRoot}`);
+    assert.deepEqual(vmCmds, ["agentos-sandbox run-command --command uname --args -n", `ls ${SANDBOX_MOUNT}/home`], `vm commands on ${sandboxRoot}`);
+    for (const s of [...writes.map((w) => w.path), ...vmCmds, ...tierArgv.flat()]) {
+      assert.equal(s.includes("work") || s.includes("/host/job-ws"), false, `probe must avoid the mounted workdir: ${s}`);
+    }
+    // Actual probe accesses (write, cat, ls) go through the private home; the uname host-fn writes nothing.
+    // The cat argv is pinned exactly by the deepEqual above.
+    for (const s of [...writes.map((w) => w.path), `ls ${SANDBOX_MOUNT}/home`]) {
+      assert.ok(s.includes("/home"), `every probe access stays under the private home: ${s}`);
+    }
+  }
 });

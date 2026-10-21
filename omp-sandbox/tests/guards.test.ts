@@ -10,7 +10,8 @@ import type { SandboxTier } from "../src/core/providers/types.ts";
 const STATE = mkdtempSync(join(tmpdir(), "omp-sbx-guards-"));
 process.env.OMP_SANDBOX_STATE = STATE;
 const FAKE = new URL("./fake-omp.mjs", import.meta.url).pathname;
-const { OmpRpcClient } = await import("../src/core/omp-rpc.ts");
+const { OmpRpcClient, StaleAnswerError } = await import("../src/core/omp-rpc.ts");
+const { PathRefused } = await import("../src/core/paths.ts");
 const { validateTiers, startTier } = await import("../src/core/providers/tiers.ts");
 const { redactSecrets } = await import("../src/core/providers/util.ts");
 // Dynamic imports are required here (not a style choice): config.ts captures OMP_SANDBOX_STATE into
@@ -86,6 +87,15 @@ test("redactSecrets hides credential-shaped text", () => {
   const s = redactSecrets("err: api_key=abcd1234efgh token: sk-proj-AAAAAAAAAAAAAAAAAAAA Bearer abcdefghijklmnop eyJhbGciOiJI.eyJzdWIiOiIx.sig ok");
   for (const leak of ["abcd1234efgh", "sk-proj-AAAA", "abcdefghijklmnop", "eyJhbGciOiJI"]) assert.equal(s.includes(leak), false, leak);
   assert.match(s, /ok$/);
+});
+
+test("errorReply maps path_refused distinctly from stale_answer and generic errors", async () => {
+  // Importing server.ts must run nothing: no readline on the test's stdin, no Core, no ready line on stdout.
+  // A regression boots the server inside this suite and hangs the runner instead of passing silently.
+  const { errorReply } = await import("../src/core/server.ts");
+  assert.deepEqual(errorReply(new PathRefused("nope")), { ok: false, error: "nope", code: "path_refused" });
+  assert.equal(errorReply(new StaleAnswerError("q9", "test")).code, "stale_answer");
+  assert.deepEqual(errorReply(new Error("boom")), { ok: false, error: "boom", code: "error" });
 });
 
 /** Minimal SandboxTier for gsd.ts: only exec and the two host-path fields are read. No spawn. */
