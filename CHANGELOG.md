@@ -21,6 +21,16 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Agent data folder
+
+- The agent's memory, session history and desk stores live in one folder,
+  `<state>/agent` (`OMEGA_PRIME_AGENT_STATE_DIR` overrides it). The host MCP
+  server and the sandboxed engine MCP child share it; the sandbox binds only
+  that folder writable and hides `settings.json`, `secrets/` and
+  `dashboard/`. A one-time, non-overwriting migration moves older data in,
+  and unmoved stores are still read in place
+  (`python -m omega_prime.agent_state --dry-run`).
+
 ### omp engine (Phase A1a)
 
 #### Added

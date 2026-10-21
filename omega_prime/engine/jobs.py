@@ -41,17 +41,22 @@ def state_dir(env: Mapping[str, str]) -> Path:
     return Path.home() / ".omega-prime"
 
 
-MCP_STATE_DIR = "mcp-state"
+def agent_data_dir(env: Mapping[str, str]) -> Path:
+    """The agent's writable data folder, shared by the host and the engine child.
 
-
-def mcp_state_dir(env: Mapping[str, str]) -> Path:
-    """Writable state root for the sandboxed Omega MCP child.
-
-    It is a sibling of ``ui-control`` and ``mcp-attachments`` so the child can
-    create its memory, session and desk stores without a writable bind over
-    the operator control queue or the attachment journal.
+    ``OMEGA_PRIME_AGENT_STATE_DIR`` wins, then ``<state>/agent``. It holds
+    only the agent's memory, history and desk stores; ``settings.json``,
+    ``secrets/``, ``dashboard/``, ``ui-control`` and the attachment journal
+    stay outside it. The host MCP server opens the same folder (see
+    ``omega_prime.agent_state``). Always absolute, so the bwrap bind and
+    the child's env name the same directory from any working directory.
     """
-    return Path(os.path.abspath(state_dir(env) / MCP_STATE_DIR))
+    from omega_prime.agent_state import AGENT_STATE_ENV, AGENT_SUBDIR
+
+    explicit = str(env.get(AGENT_STATE_ENV, "")).strip()
+    if explicit:
+        return Path(os.path.abspath(Path(explicit).expanduser()))
+    return Path(os.path.abspath(state_dir(env) / AGENT_SUBDIR))
 
 
 def check_job_id(job_id: str) -> str:

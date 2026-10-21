@@ -2410,7 +2410,7 @@ def test_ui_pending_event_keeps_each_ask_question_and_its_options() -> None:
     assert "Ship it?" in rendered and '"yes"' in rendered
 
 
-def test_mcp_child_gets_a_writable_state_root_outside_ui_control(
+def test_mcp_child_gets_the_shared_agent_folder_outside_ui_control(
     tmp_path: Path,
 ) -> None:
     from omega_prime.engine import mcp_bridge
@@ -2424,7 +2424,8 @@ def test_mcp_child_gets_a_writable_state_root_outside_ui_control(
     finally:
         attachment.release()
     entry = config["mcpServers"]["omega-prime"]
-    assert entry["env"]["OMEGA_PRIME_STATE_DIR"] == str(state / "mcp-state")
+    assert entry["env"]["OMEGA_PRIME_AGENT_STATE_DIR"] == str(state / "agent")
+    assert entry["env"]["OMEGA_PRIME_STATE_DIR"] == str(state / "agent")
 
     binary = _install_fake(tmp_path)
     bwrap = tmp_path / "bin" / "bwrap"
@@ -2448,7 +2449,7 @@ def test_mcp_child_gets_a_writable_state_root_outside_ui_control(
     assert result.ok is True
     args = (tmp_path / "bwrap.txt").read_text(encoding="utf-8").splitlines()
     binds = [args[i + 1] for i, item in enumerate(args) if item == "--bind"]
-    assert str(state / "mcp-state") in binds
+    assert str(state / "agent") in binds
     assert str(state) not in binds
     assert not any(
         str(state / "ui-control") == bind
@@ -2500,14 +2501,96 @@ def test_recovery_conflicts_reach_the_run_result_and_session_record(
     assert config.read_bytes().endswith(b" ")
 
 
-def test_relative_state_dir_gives_an_absolute_mcp_state_bind(
+def test_relative_state_dir_gives_an_absolute_agent_bind(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from omega_prime.engine.jobs import mcp_state_dir
+    from omega_prime.engine.jobs import agent_data_dir
 
     caller = tmp_path / "caller"
     caller.mkdir()
     monkeypatch.chdir(caller)
-    resolved = mcp_state_dir({"OMEGA_PRIME_STATE_DIR": "state"})
+    resolved = agent_data_dir({"OMEGA_PRIME_STATE_DIR": "state"})
     assert resolved.is_absolute()
-    assert resolved == caller / "state" / "mcp-state"
+    assert resolved == caller / "state" / "agent"
+    explicit = agent_data_dir(
+        {"OMEGA_PRIME_STATE_DIR": "state", "OMEGA_PRIME_AGENT_STATE_DIR": "data"}
+    )
+    assert explicit == caller / "data"
+
+
+def test_sandbox_never_mounts_settings_secrets_or_dashboard_writable(
+    tmp_path: Path,
+) -> None:
+    """Only the agent folder is writable; operator files are hidden."""
+    state = tmp_path / "state"
+    (state / "secrets").mkdir(parents=True)
+    (state / "secrets" / "TOKEN").write_text("x", encoding="utf-8")
+    (state / "dashboard").mkdir()
+    (state / "settings.json").write_text("{}", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    binary = _install_fake(tmp_path)
+    bwrap = tmp_path / "bin" / "bwrap"
+    bwrap.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$@" > "$OMEGA_FAKE_OMP_BWRAP_LOG"\n'
+        'while [ "$1" != "--" ]; do shift; done\n'
+        "shift\n"
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    bwrap.chmod(bwrap.stat().st_mode | stat.S_IEXEC)
+    env = _env(
+        tmp_path,
+        binary,
+        OMEGA_PRIME_ENGINE_UNSANDBOXED="0",
+        OMEGA_FAKE_OMP_BWRAP_LOG=str(tmp_path / "bwrap.txt"),
+        OMEGA_PRIME_OMP_ALLOW_CHATGPT="1",
+    )
+    result = run("PONG", cwd=work, env=env, job_id="job-private", stage="plan")
+    assert result.ok is True
+    args = (tmp_path / "bwrap.txt").read_text(encoding="utf-8").splitlines()
+    args = args[: args.index("--")]
+    binds = [args[i + 1] for i, item in enumerate(args) if item == "--bind"]
+    assert str(state / "agent") in binds
+    for name in ("secrets", "dashboard", "settings.json"):
+        private = str(state / name)
+        assert not any(
+            private == bind or private.startswith(bind.rstrip("/") + "/")
+            for bind in binds
+        ), (name, binds)
+    tmpfs = [args[i + 1] for i, item in enumerate(args) if item == "--tmpfs"]
+    remount = [args[i + 1] for i, item in enumerate(args) if item == "--remount-ro"]
+    assert str(state / "secrets") in tmpfs and str(state / "secrets") in remount
+    assert str(state / "dashboard") in tmpfs and str(state / "dashboard") in remount
+    masked = [
+        args[i + 2]
+        for i, item in enumerate(args)
+        if item == "--ro-bind" and args[i + 1] == "/dev/null"
+    ]
+    assert str(state / "settings.json") in masked
+    # Masks come after every writable bind, so a later bind cannot reopen them.
+    last_bind = max(i for i, item in enumerate(args) if item == "--bind")
+    first_mask = min(
+        i
+        for i, item in enumerate(args)
+        if item == "--tmpfs" or (item == "--ro-bind" and args[i + 1] == "/dev/null")
+    )
+    assert first_mask > last_bind
+
+
+def test_sandbox_refuses_a_writable_bind_inside_a_private_path(tmp_path: Path) -> None:
+    from omega_prime.engine.sandbox import SandboxUnavailable, wrap
+
+    secrets = tmp_path / "state" / "secrets"
+    secrets.mkdir(parents=True)
+    bwrap = tmp_path / "bwrap"
+    bwrap.write_text("#!/bin/sh\n", encoding="utf-8")
+    bwrap.chmod(0o755)
+    with pytest.raises(SandboxUnavailable):
+        wrap(
+            ["omp"],
+            env={"OMEGA_PRIME_BWRAP_BIN": str(bwrap)},
+            binds=[secrets / "inner"],
+            hidden=[secrets],
+        )

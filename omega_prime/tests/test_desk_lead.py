@@ -181,11 +181,14 @@ def test_desk_intake_path_prefers_the_state_dir(monkeypatch, tmp_path):
         desk_intake_path(tmp_path) == tmp_path / "omega_prime" / "state" / "intake.json"
     )
     monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path / "state"))
-    assert desk_intake_path(tmp_path) == tmp_path / "state" / "intake.json"
+    assert desk_intake_path(tmp_path) == tmp_path / "state" / "agent" / "intake.json"
     assert (
         desk_intake_path(tmp_path, state_dir=tmp_path / "other")
-        == tmp_path / "other" / "intake.json"
+        == tmp_path / "other" / "agent" / "intake.json"
     )
+    # An explicit agent folder wins over the state root.
+    monkeypatch.setenv("OMEGA_PRIME_AGENT_STATE_DIR", str(tmp_path / "data"))
+    assert desk_intake_path(tmp_path) == tmp_path / "data" / "intake.json"
 
 
 # -- Phase 64 DESK-04: the desk_lead_pass cron job kind ---------------------

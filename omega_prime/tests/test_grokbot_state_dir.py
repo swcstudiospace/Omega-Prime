@@ -39,10 +39,10 @@ def test_state_dir_redirects_memory_and_sessions(tmp_path: Path) -> None:
     registry = default_registry(root, home, env={STATE_ENV: str(state)})
     _remember(registry, "state-dir sentinel")
 
-    assert "state-dir sentinel" in (state / "memory" / "MEMORY.md").read_text(
+    assert "state-dir sentinel" in (state / "agent" / "memory" / "MEMORY.md").read_text(
         encoding="utf-8"
     )
-    assert (state / "sessions.db").is_file()
+    assert (state / "agent" / "sessions.db").is_file()
     assert _snapshot(root) == before
 
 
@@ -86,7 +86,7 @@ def test_state_dir_through_load_runtime_on_a_copied_tree(tmp_path: Path) -> None
     runtime = load_runtime(root, home, no_roster=True, env={STATE_ENV: str(state)})
     _remember(runtime.registry, "runtime sentinel")
 
-    assert (state / "memory" / "MEMORY.md").is_file()
+    assert (state / "agent" / "memory" / "MEMORY.md").is_file()
     assert _snapshot(root) == before
 
 

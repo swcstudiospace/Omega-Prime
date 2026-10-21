@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from omega_prime.engine.jobs import MCP_STATE_DIR
+from omega_prime.agent_state import AGENT_STATE_ENV, AGENT_SUBDIR
 
 _INSTALL = Path(__file__).resolve().parents[2]
 
@@ -43,8 +43,11 @@ def mcp_server_entry(
 ) -> dict[str, Any]:
     """Build the secret-free stdio server entry for a single work tree.
 
-    ``state_dir`` pins the child's ``OMEGA_PRIME_STATE_DIR`` to a directory
-    the sandbox binds writable (see ``jobs.mcp_state_dir``).
+    ``state_dir`` is the agent data folder (``jobs.agent_data_dir``), the one
+    directory the sandbox binds writable. The child gets it as both
+    ``OMEGA_PRIME_AGENT_STATE_DIR`` (where its stores live, the same folder
+    the host server opens) and ``OMEGA_PRIME_STATE_DIR`` (so nothing in the
+    child resolves the operator's state root, which holds secrets).
     """
     executable = Path(python or python_executable())
     if not executable.is_absolute() or not executable.is_file():
@@ -73,7 +76,8 @@ def mcp_server_entry(
     if state_dir is not None:
         state_text = str(state_dir)
         if not state_text or not Path(state_text).is_absolute():
-            raise ValueError("MCP state dir must be an absolute path")
+            raise ValueError("MCP agent data dir must be an absolute path")
+        child_env[AGENT_STATE_ENV] = state_text
         child_env["OMEGA_PRIME_STATE_DIR"] = state_text
     if child_env:
         entry["env"] = child_env
@@ -563,8 +567,13 @@ def try_acquire_attachment(
     job_id: str,
     *,
     clarify_socket_path: str | Path | None = None,
+    agent_dir: str | Path | None = None,
 ) -> AcquiredAttachment:
-    """Acquire .omp/mcp.json exclusively and persist its run ownership."""
+    """Acquire .omp/mcp.json exclusively and persist its run ownership.
+
+    ``agent_dir`` is the agent data folder the child's stores live in;
+    it defaults to ``<state_root>/agent``.
+    """
     parent_fd, work = _open_dir_chain(work_root)
     owner_identity = _process_identity(os.getpid())
     state_root = Path(state_root)
@@ -602,7 +611,13 @@ def try_acquire_attachment(
                         "omega-prime": mcp_server_entry(
                             work_root=work,
                             clarify_socket_path=clarify_socket_path,
-                            state_dir=Path(os.path.abspath(state_root / MCP_STATE_DIR)),
+                            state_dir=Path(
+                                os.path.abspath(
+                                    agent_dir
+                                    if agent_dir is not None
+                                    else state_root / AGENT_SUBDIR
+                                )
+                            ),
                         )
                     }
                 },

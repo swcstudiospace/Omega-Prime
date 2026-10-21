@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from omega_prime.agent_state import private_state_paths
 from omega_prime.credentials.redact import redact_text
 from omega_prime.engine.clarify_ipc import ClarifyRequest, ClarifySocketBroker
 from omega_prime.engine.hitl import (
@@ -32,11 +33,11 @@ from omega_prime.engine.hitl import (
     new_generation,
 )
 from omega_prime.engine.jobs import (
+    agent_data_dir,
     append_event,
     child_env,
     job_dir,
     maybe_tmux,
-    mcp_state_dir,
     omp_home_override,
     state_dir,
     write_json,
@@ -539,13 +540,15 @@ def _run(
     ]
     argv.extend(["--skills", "*"])
     binds = [directory, work] if work != directory else [directory]
-    # The Omega MCP child writes memory, sessions and desk stores. It gets its
-    # own writable state root; the parent state dir (which holds ui-control and
-    # the attachment journal) stays read-only inside the sandbox.
-    mcp_state = mcp_state_dir(env)
-    mcp_state.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if mcp_state not in binds:
-        binds.append(mcp_state)
+    # The Omega MCP child writes memory, sessions and desk stores into the
+    # agent data folder the host server uses too, so both see one memory.
+    # Only that folder is writable; the rest of the state root (ui-control,
+    # the attachment journal) stays read-only, and settings.json, secrets/
+    # and dashboard/ are hidden inside the sandbox.
+    agent_dir = agent_data_dir(env)
+    agent_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if agent_dir not in binds:
+        binds.append(agent_dir)
     store = omp_home(env)
     if store.is_dir() and store not in binds:
         # Writable so omp can save a refreshed login in place.
@@ -554,6 +557,7 @@ def _run(
         argv,
         env=env,
         binds=binds,
+        hidden=private_state_paths([state_dir(env)]),
         unsandboxed_override=unsandboxed,
     )
     run_metadata["sandbox"] = sandbox
@@ -590,6 +594,7 @@ def _run(
             work,
             state_dir(env),
             job_id,
+            agent_dir=agent_dir,
             clarify_socket_path=(
                 candidate_broker.socket_path if candidate_broker is not None else None
             ),

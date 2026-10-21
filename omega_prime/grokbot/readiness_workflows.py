@@ -92,9 +92,11 @@ def _coding_root(probe: ReadinessProbe) -> Path:
 
 def _memory_dir(probe: ReadinessProbe) -> Path:
     """Disposable memory directory, mirroring the runtime wiring."""
-    state = _state_value(probe)
-    if state:
-        return Path(state) / "memory"
+    from omega_prime.agent_state import agent_state_dir
+
+    agent = agent_state_dir(_layout_env(probe))
+    if agent is not None:
+        return agent / "memory"
     return _runtime_root(probe) / "omega_prime" / "memory"
 
 
@@ -111,9 +113,13 @@ def _durable_journal_path(probe: ReadinessProbe) -> Path:
 
 
 def _desk_turns_path(probe: ReadinessProbe) -> Path:
+    from omega_prime.agent_state import agent_state_dir
     from omega_prime.mcp_server import _desk_store_path
 
-    return _desk_store_path(_work_root(probe), _state_value(probe), "turns.sqlite")
+    agent = agent_state_dir(_layout_env(probe))
+    return _desk_store_path(
+        _work_root(probe), str(agent) if agent is not None else "", "turns.sqlite"
+    )
 
 
 def _unique(prefix: str) -> str:

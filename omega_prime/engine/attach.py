@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from omega_prime.engine.jobs import job_dir, mcp_state_dir
+from omega_prime.engine.jobs import agent_data_dir, job_dir
 from omega_prime.engine.omp_driver import EngineResult, omp_home, probe, run
 from omega_prime.engine.ui_control import UIControlStore
 
@@ -159,7 +159,7 @@ def route_turn(
         binds: list[Path | str] = [
             job_dir(mapping, job_id),
             work_root,
-            mcp_state_dir(mapping),
+            agent_data_dir(mapping),
         ]
         omp_store = omp_home(mapping)
         if omp_store.is_dir() and omp_store not in binds:

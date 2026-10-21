@@ -439,6 +439,38 @@ The `omega watch JOB` console script is the same command. When `tmux` is on
 The engine uses bubblewrap when `bwrap` is on `PATH`. Without bubblewrap it
 refuses to start unless `OMEGA_PRIME_ENGINE_UNSANDBOXED=1` is set.
 
+### Agent data folder
+
+The agent's own data lives in one folder, `<state>/agent`
+(`$OMEGA_PRIME_STATE_DIR/agent`, or `~/.omega-prime/agent` on a host with no
+state dir; `OMEGA_PRIME_AGENT_STATE_DIR` overrides it). It holds memory
+(`memory/MEMORY.md`, `memory/USER.md`), session history (`sessions.db`), the
+desk stores (`intake.json`, `packs.json`, `events.ndjson`, `turns.sqlite`,
+`rlm/`) and state-side `skills/`. The host MCP server and the sandboxed MCP
+child that omp starts both open this folder, so they share one memory.
+
+Inside the sandbox only the agent folder, the job folder, the work tree and
+the omp login store are writable. The rest of the state root stays read-only
+(`ui-control/`, `mcp-attachments/`, `jobs/`), and `settings.json`,
+`secrets/` and `dashboard/` are hidden: an empty read-only tmpfs covers each
+folder and `/dev/null` covers the file. The engine refuses a writable bind
+inside one of those paths.
+
+On start the host server moves data written by older releases into the
+folder once: from directly under `$OMEGA_PRIME_STATE_DIR`, from the earlier
+`mcp-state/` child folder, or, on a host with no state dir, from the install
+tree (`omega_prime/sessions.db`, `omega_prime/memory/MEMORY.md` and
+`USER.md`, `omega_prime/state/`). It never overwrites a file: on a clash the
+agent copy wins and the old copy stays where it was. A store that could not
+move is still read in place. Each move is listed in
+`<state>/agent/MIGRATION.json`. Preview or run it by hand (paths and counts
+only, never file contents):
+
+```bash
+python -m omega_prime.agent_state --root /workspace/omes-bot --dry-run
+python -m omega_prime.agent_state --root /workspace/omes-bot
+```
+
 For each run, the engine acquires an exclusive project-local
 `<work-root>/.omp/mcp.json` attachment and an additive `.omp/skills` view.
 The attachment is removed after the child exits; only files created by that
