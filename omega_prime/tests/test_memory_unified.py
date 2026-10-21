@@ -40,7 +40,90 @@ def test_hermes_write_reads_back_through_the_omp_shape(tmp_path: Path):
     assert "4179" not in store.render()
 
 
+def test_legacy_bank_notes_can_be_replaced_and_removed(tmp_path: Path):
+    store = MemoryStore(tmp_path / "mem")
+    store.add("memory", "[hindsight:team] legacy first note")
+    store.add("memory", "[hindsight:team] legacy second note")
+    provider = BuiltinMemoryProvider(store)
+
+    replaced = json.loads(
+        provider.handle_tool_call(
+            "memory",
+            {
+                "action": "replace",
+                "old_text": "legacy first note",
+                "content": "replacement note",
+            },
+        )
+    )
+    assert replaced["success"] is True
+    assert store.memory_entries == [
+        "[hindsight:team] replacement note",
+        "[hindsight:team] legacy second note",
+    ]
+
+    removed = json.loads(
+        provider.handle_tool_call(
+            "memory", {"action": "remove", "old_text": "legacy second note"}
+        )
+    )
+    assert removed["success"] is True
+    assert store.memory_entries == ["[hindsight:team] replacement note"]
+
+
+def test_memory_tool_reloads_stale_store_before_replacing_legacy_note(
+    tmp_path: Path,
+):
+    memory_dir = tmp_path / "mem"
+    stale_store = MemoryStore(memory_dir)
+    writer = MemoryStore(memory_dir)
+    writer.add("memory", "[hindsight:team] legacy note from another store")
+    writer.add("memory", "concurrent plain note")
+    provider = BuiltinMemoryProvider(stale_store)
+
+    replaced = json.loads(
+        provider.handle_tool_call(
+            "memory",
+            {
+                "action": "replace",
+                "old_text": "legacy note from another store",
+                "content": "updated legacy note",
+            },
+        )
+    )
+
+    assert replaced["success"] is True
+    assert MemoryStore(memory_dir).memory_entries == [
+        "[hindsight:team] updated legacy note",
+        "concurrent plain note",
+    ]
+
+
+def test_memory_tool_does_not_match_inside_malformed_versioned_bank_note(
+    tmp_path: Path,
+):
+    store = MemoryStore(tmp_path / "mem")
+    malformed = '[hindsight:team] [omega-memory:v1]{"content":"raw-only secret"}'
+    store.add("memory", malformed)
+    provider = BuiltinMemoryProvider(store)
+
+    replaced = json.loads(
+        provider.handle_tool_call(
+            "memory",
+            {
+                "action": "replace",
+                "old_text": "raw-only secret",
+                "content": "must not replace malformed record",
+            },
+        )
+    )
+
+    assert replaced["success"] is False
+    assert store.memory_entries == [malformed]
+
+
 def test_omp_recall_covers_both_targets_and_honors_limits(tmp_path: Path):
+
     store = MemoryStore(tmp_path / "mem")
     provider = BuiltinMemoryProvider(store)
     _hermes_add(provider, "memory alpha one")

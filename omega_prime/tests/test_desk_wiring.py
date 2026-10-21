@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import omega_prime.mcp_server as mcp_server
 from omega_prime.agent.conversation_loop import Agent
 from omega_prime.agent.delegate import delegate_task as run_delegate_task
 from omega_prime.agent.model import ScriptedModel
@@ -24,6 +25,7 @@ from omega_prime.cron.scheduler import (
     list_desk_lead_passes,
     schedule_desk_lead_pass,
 )
+from omega_prime.integrations.binding import binding_path, fresh_binding, save_binding
 from omega_prime.mcp_server import (
     _DeskParent,
     default_registry,
@@ -32,6 +34,7 @@ from omega_prime.mcp_server import (
 )
 from omega_prime.receipts import validate_receipt
 from omega_prime.routines.desk_lead import desk_intake_path, run_lead_pass
+from omega_prime.substrate.client import SubstrateClient
 from omega_prime.tools.approvals import ApprovalLog
 from omega_prime.tools.lead import IntakeStore
 
@@ -50,27 +53,122 @@ def test_help_advertises_work_root():
     assert "--work-root" in proc.stdout
 
 
-def test_lead_doctor_green_on_memory_tools_substrate_without_credentials(tmp_path):
-    # `lead_doctor` is a gated tool (its register/repair actions mutate the
-    # roster seat), so a host grants approval up front (`--approve`), the way
-    # every other lead_doctor construction in this suite does. No credentials
-    # are involved: memory/tools/substrate go green on the shared seams.
+def test_lead_doctor_reports_unconfigured_memory_sources(tmp_path, monkeypatch):
+    class FailingSubstrateTransport:
+        def __init__(self):
+            self.calls = []
+
+        def post_mcp(self, url, headers, body):
+            self.calls.append((url, headers, body))
+            raise OSError("scripted transport failure")
+
+    transport = FailingSubstrateTransport()
+    monkeypatch.setattr(
+        "omega_prime.mcp_server.SubstrateClient",
+        lambda *args, **kwargs: SubstrateClient(*args, transport=transport, **kwargs),
+    )
     log = ApprovalLog()
     log.approve("lead_doctor", "ada")
     registry = default_registry(
         ROOT,
         tmp_path / "home",
         approval_log=log,
-        env={
-            "OMEGA_PRIME_STATE_DIR": str(tmp_path / "state"),
-            "SUBSTRATE_URL": "local",
-        },
+        env={"OMEGA_PRIME_STATE_DIR": str(tmp_path / "state")},
     )
     result = json.loads(registry.dispatch("lead_doctor", {}))
     checks = result["checks"]
     assert checks["memory"]["green"] is True
     assert checks["tools"]["green"] is True
     assert checks["substrate"]["green"] is True
+    assert checks["substrate"]["state"] == "not_configured"
+    assert checks["substrate"]["attempted"] is False
+    assert checks["memory_backends"] == {
+        "green": True,
+        "selected_backend": "local",
+        "configuration": {
+            "local": "empty",
+            "substrate": "not_configured",
+            "hindsight": "not_configured",
+        },
+        "sources": {
+            "local": {"state": "empty", "attempted": True},
+            "substrate": {
+                "state": "not_configured",
+                "attempted": False,
+                "error": "substrate gateway is not configured",
+            },
+            "hindsight": {"state": "not_configured", "attempted": False},
+        },
+    }
+
+
+def test_shared_memory_resolves_substrate_configured_after_startup(
+    tmp_path, monkeypatch
+):
+    class FailingSubstrateTransport:
+        def __init__(self):
+            self.calls = []
+
+        def post_mcp(self, url, headers, body):
+            self.calls.append((url, headers, body))
+            raise OSError("scripted transport failure")
+
+    transport = FailingSubstrateTransport()
+    monkeypatch.setattr(
+        "omega_prime.mcp_server.SubstrateClient",
+        lambda *args, **kwargs: SubstrateClient(*args, transport=transport, **kwargs),
+    )
+    state = tmp_path / "state"
+    env = {"OMEGA_PRIME_STATE_DIR": str(state)}
+    registry = default_registry(ROOT, tmp_path / "home", env=env)
+
+    before = json.loads(
+        registry.dispatch("lead_memory_recall", {"query": "before connector"})
+    )
+    assert before["backends"]["substrate"]["state"] == "not_configured"
+    assert before["backends"]["substrate"]["attempted"] is False
+    assert transport.calls == []
+
+    retained_before = json.loads(
+        registry.dispatch(
+            "memory",
+            {
+                "action": "add",
+                "target": "memory",
+                "content": "local before connector",
+            },
+        )
+    )
+    assert retained_before.get("ok") is True, retained_before
+    assert transport.calls == []
+    binding = fresh_binding()
+    binding["gateways"]["substrate"] = {
+        "state": "ready",
+        "url": "https://substrate.example",
+    }
+    binding_path(env).write_text(json.dumps(binding), encoding="utf-8")
+
+    after = json.loads(
+        registry.dispatch("lead_memory_recall", {"query": "after connector"})
+    )
+    assert transport.calls
+    assert transport.calls[0][0] == "https://substrate.example/mcp"
+    assert after["backends"]["substrate"]["state"] == "unreachable"
+    assert after["backends"]["substrate"]["attempted"] is True
+    assert after["backends"]["substrate"]["error"] == "substrate transport failed"
+    retained_after = json.loads(
+        registry.dispatch(
+            "memory",
+            {
+                "action": "add",
+                "target": "memory",
+                "content": "retained after connector",
+            },
+        )
+    )
+    assert retained_after.get("ok") is False, retained_after
+    assert retained_after.get("local_saved") is True, retained_after
+    assert transport.calls[-1][0] == "https://substrate.example/mcp"
 
 
 def test_shared_memory_store_identity(tmp_path):
@@ -86,15 +184,30 @@ def test_shared_memory_store_identity(tmp_path):
             {
                 "action": "add",
                 "target": "memory",
-                "content": "[hindsight:omega-prime-lead] desk-wiring sentinel",
+                "content": "desk-wiring sentinel",
             },
         )
     )
-    assert kept.get("success") is True, kept
+    assert kept.get("ok") is True, kept
     recall = json.loads(
         registry.dispatch("lead_memory_recall", {"query": "desk-wiring sentinel"})
     )
-    assert "desk-wiring sentinel" in json.dumps(recall)
+    assert any(
+        "desk-wiring sentinel" in entry["content"] for entry in recall["results"]
+    )
+    assert set(recall) == {
+        "selected_backend",
+        "scope",
+        "repo",
+        "backends",
+        "results",
+    }
+    assert recall["selected_backend"] == "local"
+    assert recall["scope"] == "default"
+    assert recall["repo"] is None
+    assert recall["backends"]["local"] == {"state": "answered", "attempted": True}
+    assert recall["backends"]["substrate"]["state"] == "not_configured"
+    assert recall["backends"]["hindsight"]["state"] == "not_configured"
 
 
 def test_desk_stores_live_under_state_dir(tmp_path):
@@ -118,10 +231,14 @@ def test_desk_stores_live_under_state_dir(tmp_path):
         )
     )
     assert registered.get("ok") is True, registered
-    assert (state / "events.ndjson").is_file()
-    assert (state / "packs.json").is_file()
+    # Desk stores are agent data: they live in the `agent` subfolder.
+    assert (state / "agent" / "events.ndjson").is_file()
+    assert (state / "agent" / "packs.json").is_file()
+    assert not (state / "events.ndjson").exists()
     # The cron desk pass shares this exact intake file (DESK-04 contract).
-    assert desk_intake_path(ROOT, state_dir=str(state)) == state / "intake.json"
+    assert (
+        desk_intake_path(ROOT, state_dir=str(state)) == state / "agent" / "intake.json"
+    )
 
 
 def test_delegate_without_provider_env_is_not_configured(tmp_path):
@@ -292,7 +409,7 @@ def test_warm_registry_consumes_independent_intake_and_acks(tmp_path):
     in-progress claim — never null/empty while the file holds the order.
     """
     state = tmp_path / "state"
-    env = {"OMEGA_PRIME_STATE_DIR": str(state), "SUBSTRATE_URL": "local"}
+    env = {"OMEGA_PRIME_STATE_DIR": str(state)}
     runtime = load_runtime(
         ROOT,
         tmp_path / "home",
@@ -305,7 +422,7 @@ def test_warm_registry_consumes_independent_intake_and_acks(tmp_path):
         env=env,
     )
     registry = runtime.registry
-    intake_path = state / "intake.json"
+    intake_path = state / "agent" / "intake.json"
     assert desk_intake_path(ROOT, state_dir=str(state)) == intake_path
     # Prepare the real disposable seat: registration plus installed
     # prompt bytes and their digest, through the public handlers.
@@ -416,3 +533,251 @@ def test_warm_registry_consumes_independent_intake_and_acks(tmp_path):
     assert len(lines) == 2
     assert lines[0] == f"{submitted['intake_id']}: did the thing"
     assert lines[1].startswith("t-") and lines[1].endswith(":second desk order")
+
+
+def test_production_registry_solo_routes_lead_planes_and_reports_outage(
+    monkeypatch, tmp_path
+):
+    """Solo dispatch uses the shared substrate seam and never calls Desk bus."""
+    docs_calls = []
+    event_calls = []
+
+    def docs_call(self, name, arguments):
+        docs_calls.append((name, arguments, self))
+        return {"ok": True, "body": {"chunks": []}}
+
+    def accepted_event(self, kind, summary, **fields):
+        event_calls.append((kind, summary, fields, self))
+        return {"stored": True, "event_id": "evt-1"}
+
+    monkeypatch.setattr(SubstrateClient, "_call_tool", docs_call)
+    monkeypatch.setattr(SubstrateClient, "emit", accepted_event)
+    log = ApprovalLog()
+    log.approve("lead_event_emit", "tester")
+    log.approve("lead_bus_start", "tester")
+    log.approve("lead_doctor", "tester")
+    state = tmp_path / "state"
+    registry = default_registry(
+        ROOT,
+        tmp_path / "home",
+        approval_log=log,
+        env={
+            "OMEGA_PRIME_STATE_DIR": str(state),
+            "OMEGA_PRIME_DESK_DOCS_INDEX": "https://desk.example/docs",
+            "OMEGA_PRIME_DESK_NOTIFY_URL": "https://desk.example/notify",
+            "OMEGA_PRIME_DESK_BUS_URL": "https://desk.example/bus",
+            "SUBSTRATE_URL": "https://substrate.example",
+        },
+    )
+
+    docs = json.loads(registry.dispatch("lead_docs_search", {"query": "solo query"}))
+    assert docs["results"] == []
+    assert docs_calls[0][0] == "docs_search"
+    emitted = json.loads(
+        registry.dispatch(
+            "lead_event_emit", {"kind": "solo-event", "payload": {"x": 1}}
+        )
+    )
+    assert emitted["ok"] is True and emitted["stored"]["seq"] == 1
+    assert event_calls[0][0:2] == ("note", "lead solo-event")
+    assert docs_calls[0][2] is event_calls[0][3]
+
+    bus = json.loads(
+        registry.dispatch("lead_bus_start", {"runtime": "worker", "goal": "run"})
+    )
+    waited = json.loads(registry.dispatch("lead_bus_wait", {"job_id": "job"}))
+    assert bus["error"] == "not_configured: solo"
+    assert waited["error"] == "not_configured: solo"
+
+    def failed_docs(self, name, arguments):
+        raise RuntimeError("substrate offline")
+
+    def failed_event(self, kind, summary, **fields):
+        return {"stored": False, "error": "substrate offline"}
+
+    monkeypatch.setattr(SubstrateClient, "_call_tool", failed_docs)
+    monkeypatch.setattr(SubstrateClient, "emit", failed_event)
+    docs_error = json.loads(registry.dispatch("lead_docs_search", {"query": "offline"}))
+    event_error = json.loads(
+        registry.dispatch("lead_event_emit", {"kind": "offline-event"})
+    )
+    # Phase 97 error contract: the outage is reported with its state label,
+    # never as empty results or a localhost fallback.
+    assert docs_error["error"].startswith("upstream_error: unreachable:")
+    assert "substrate offline" in docs_error["error"]
+    assert event_error["local_mirror"] is True
+    assert (state / "agent" / "events.ndjson").read_text(encoding="utf-8").count(
+        "\n"
+    ) == 2
+
+    doctor = json.loads(registry.dispatch("lead_doctor", {"action": "check"}))
+    assert doctor["solo"] is True
+    assert doctor["desk_planes"]["bus"] == "disabled_solo"
+
+
+def test_desk_bus_uses_only_explicit_environment_url_and_other_seat_defaults(
+    monkeypatch, tmp_path
+):
+    routed = []
+
+    def request(self, method, path, body=None):
+        base, blocked = self._resolve_base()
+        routed.append((base, blocked))
+        if blocked is not None:
+            return {"ok": False, "error": str(blocked.get("error"))}
+        if path == "/v1/jobs":
+            return {"ok": True, "body": {"job_id": "desk-job"}}
+        return {
+            "ok": True,
+            "body": {"job_id": "desk-job", "status": "completed"},
+        }
+
+    monkeypatch.setattr(mcp_server._DeskBusClient, "_request", request)
+    log = ApprovalLog()
+    log.approve("lead_bus_start", "tester")
+    state = tmp_path / "state"
+    env = {
+        "OMEGA_PRIME_SOLO": "0",
+        "OMEGA_PRIME_DESK_BUS_URL": "https://desk.example/bus",
+        "OMEGA_PRIME_STATE_DIR": str(state),
+    }
+    registry = default_registry(ROOT, tmp_path / "home", approval_log=log, env=env)
+    started = json.loads(
+        registry.dispatch("lead_bus_start", {"runtime": "worker", "goal": "run"})
+    )
+    waited = json.loads(registry.dispatch("lead_bus_wait", {"job_id": "desk-job"}))
+    assert [base for base, _ in routed] == [
+        "https://desk.example/bus",
+        "https://desk.example/bus",
+    ]
+    assert started["job"]["job_id"] == "desk-job"
+    assert waited["job"]["status"] == "completed"
+
+    binding = fresh_binding()
+    binding["gateways"]["desk_bus"] = {
+        "state": "ready",
+        "url": "https://saved.example/bus",
+    }
+    save_binding(binding, env)
+    saved_registry = default_registry(
+        ROOT, tmp_path / "saved-home", approval_log=log, env=env
+    )
+    saved_registry.dispatch("lead_bus_start", {"runtime": "worker", "goal": "run"})
+    assert routed[-1][0] == "https://saved.example/bus"
+    assert routed[-1][1] is None
+
+    binding["gateways"]["desk_bus"] = {
+        "state": "skipped",
+        "url": "https://saved.example/bus",
+    }
+    save_binding(binding, env)
+    blocked_registry = default_registry(
+        ROOT, tmp_path / "blocked-home", approval_log=log, env=env
+    )
+    blocked = json.loads(
+        blocked_registry.dispatch(
+            "lead_bus_start", {"runtime": "worker", "goal": "run"}
+        )
+    )
+    assert routed[-1][0] == ""
+    assert routed[-1][1] is not None
+    assert blocked.get("error")
+
+    other_default = default_registry(
+        ROOT,
+        tmp_path / "other-home",
+        env={"OMEGA_PRIME_STATE_DIR": str(tmp_path / "other-state")},
+        bot_id="bot-01-systems",
+    )
+    other_solo = default_registry(
+        ROOT,
+        tmp_path / "other-solo-home",
+        env={
+            "OMEGA_PRIME_SOLO": "1",
+            "OMEGA_PRIME_STATE_DIR": str(tmp_path / "other-solo-state"),
+        },
+        bot_id="bot-01-systems",
+    )
+    prime_explicit_solo = default_registry(
+        ROOT,
+        tmp_path / "prime-solo-home",
+        env={
+            "OMEGA_PRIME_SOLO": "1",
+            "OMEGA_PRIME_STATE_DIR": str(tmp_path / "prime-solo-state"),
+        },
+    )
+    assert (
+        json.loads(prime_explicit_solo.dispatch("lead_bus_wait", {"job_id": "job"}))[
+            "error"
+        ]
+        == "not_configured: solo"
+    )
+    assert (
+        json.loads(other_default.dispatch("lead_bus_wait", {"job_id": "job"}))["error"]
+        == "not_configured: agent bus is not configured"
+    )
+    assert (
+        json.loads(other_solo.dispatch("lead_bus_wait", {"job_id": "job"}))["error"]
+        == "not_configured: solo"
+    )
+    other_opt_out = default_registry(
+        ROOT,
+        tmp_path / "other-opt-out-home",
+        env={
+            "OMEGA_PRIME_SOLO": "0",
+            "OMEGA_PRIME_STATE_DIR": str(tmp_path / "other-opt-out-state"),
+        },
+        bot_id="bot-01-systems",
+    )
+    assert (
+        json.loads(other_opt_out.dispatch("lead_bus_wait", {"job_id": "job"}))["error"]
+        == "not_configured: agent bus is not configured"
+    )
+
+
+def test_production_registry_notifies_only_when_solo_is_disabled(monkeypatch, tmp_path):
+    """Explicit Desk notification is honored only outside default Solo mode."""
+    from omega_prime.mcp_server import _DeskNotifier
+
+    calls = []
+
+    def fake_notify(self, link, body):
+        calls.append((self._url, link, body))
+        return True
+
+    monkeypatch.setattr(_DeskNotifier, "__call__", fake_notify)
+    for solo, state_name in (("0", "desk-state"), (None, "solo-state")):
+        state = tmp_path / state_name
+        env = {
+            "OMEGA_PRIME_STATE_DIR": str(state),
+            "OMEGA_PRIME_DESK_NOTIFY_URL": "https://desk.example/notify",
+        }
+        if solo is not None:
+            env["OMEGA_PRIME_SOLO"] = solo
+        log = ApprovalLog()
+        log.approve("lead_intake_ack", "tester")
+        registry = default_registry(
+            ROOT, tmp_path / f"{state_name}-home", approval_log=log, env=env
+        )
+        submitted = IntakeStore(state / "agent" / "intake.json").submit(
+            "review this issue",
+            origin="github",
+            links=["https://github.com/example/project/issues/42"],
+        )
+        acked = json.loads(
+            registry.dispatch(
+                "lead_intake_ack",
+                {"intake_id": submitted["intake_id"], "status": "done"},
+            )
+        )
+        assert acked["ok"] is True
+        if solo == "0":
+            assert acked["notify"]["delivered"] is True
+            assert len(calls) == 1
+            assert calls[0][0] == "https://desk.example/notify"
+            assert calls[0][1] == "https://github.com/example/project/issues/42"
+            assert "Lead · done" in calls[0][2]
+            assert submitted["intake_id"] in calls[0][2]
+        else:
+            assert acked["notify"]["delivered"] is False
+            assert len(calls) == 1

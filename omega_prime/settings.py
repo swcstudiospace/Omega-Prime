@@ -19,6 +19,7 @@ _ALLOWED = frozenset(
         "ULTRATHINK_ROOT",
         "ULTRATHINK_SHIP",
         "OMEGA_PRIME_STATE_DIR",
+        "OMEGA_PRIME_AGENT_STATE_DIR",
     }
 )
 _SECRET_PARTS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "PAT", "AUTH")

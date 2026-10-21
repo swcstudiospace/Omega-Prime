@@ -16,7 +16,7 @@ import json
 import uuid
 from collections.abc import Mapping
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal, overload
 from urllib.parse import urlsplit
 
 from omega_prime.providers.http import HttpTransport
@@ -58,9 +58,13 @@ class SubstrateNotConfiguredError(SubstrateError):
 class SubstrateUnauthorizedError(SubstrateError):
     """The MCP endpoint rejected authentication."""
 
+    status = "unauthorized"
+
 
 class SubstrateUnreachableError(SubstrateError):
     """The MCP endpoint could not be reached."""
+
+    status = "unreachable"
 
 
 class SubstrateProtocolError(SubstrateError):
@@ -175,6 +179,7 @@ class SubstrateClient:
             return {"stored": False, "error": "substrate returned no event body"}
         return result
 
+    # Phase-98 argument seam; phase 97 retains transport and response ownership.
     def memory_write(
         self,
         scope: str,
@@ -208,14 +213,16 @@ class SubstrateClient:
         )
         return self._call_tool("memory_write", arguments)
 
+    # Phase-98 repository filter; phase 97 retains transport and response ownership.
     def memory_search(
         self,
         query: str,
         scope: str | None = None,
         limit: int | None = None,
+        *,
         repo: str | None = None,
     ) -> list:
-        """Call ``memory_search``. Fail-open: failures return ``[]``."""
+        """Call ``memory_search``. Failures raise ``SubstrateError``."""
         if not isinstance(query, str) or query == "":
             raise ValueError("query must be a non-empty string")
         arguments: dict[str, Any] = {"query": query}
@@ -225,12 +232,15 @@ class SubstrateClient:
             arguments["limit"] = limit
         if repo is not None:
             arguments["repo"] = repo
-        try:
-            result = self._call_tool("memory_search", arguments)
-        except SubstrateError:
-            return []
-        entries = result.get("entries", result)
-        return entries if isinstance(entries, list) else []
+        result = self._call_tool("memory_search", arguments, allow_list=True)
+        if isinstance(result, list):
+            return result
+        entries = result.get("entries")
+        if not isinstance(entries, list):
+            raise SubstrateProtocolError(
+                "substrate memory_search returned malformed entries"
+            )
+        return entries
 
     def docs_search(self, query: str) -> dict:
         """Call ``docs_search``. Failures raise ``SubstrateError``."""
@@ -292,7 +302,19 @@ class SubstrateClient:
             raise SubstrateProtocolError("substrate tool returned a malformed result")
         return text
 
-    def _call_tool(self, name: str, arguments: dict) -> dict:
+    @overload
+    def _call_tool(
+        self, name: str, arguments: dict, *, allow_list: Literal[False] = False
+    ) -> dict: ...
+
+    @overload
+    def _call_tool(
+        self, name: str, arguments: dict, *, allow_list: Literal[True]
+    ) -> dict | list: ...
+
+    def _call_tool(
+        self, name: str, arguments: dict, *, allow_list: bool = False
+    ) -> dict | list:
         """One MCP ``tools/call`` round trip. Failures raise ``SubstrateError``."""
         text = _tool_text(self._mcp_post(name, arguments))
         if text is None:
@@ -303,9 +325,9 @@ class SubstrateClient:
             raise SubstrateProtocolError(
                 "substrate tool returned invalid JSON"
             ) from None
-        if not isinstance(decoded, dict):
-            raise SubstrateProtocolError("substrate tool returned no result object")
-        return decoded
+        if isinstance(decoded, dict) or (allow_list and isinstance(decoded, list)):
+            return decoded
+        raise SubstrateProtocolError("substrate tool returned no result object")
 
     def _mcp_post(self, name: str, arguments: dict) -> Any:
         """POST and validate one MCP response, using only scoped session state."""

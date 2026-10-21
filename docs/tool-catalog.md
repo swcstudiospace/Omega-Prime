@@ -73,7 +73,7 @@ Return the task list last stored by todo_write.
 - Approval: not required
 - Required params: question
 
-Record a question for the user and return that same question.
+Send a question to a live human operator and return their answer. If no operator interaction is configured, return an undeliverable error; never echo the question.
 
 ## web_search
 
@@ -297,7 +297,7 @@ Keep one memory entry. Needs receipt_path or source. Requires approval.
 - Approval: not required
 - Required params: query
 
-Recall memory banks matching a query. Read-only.
+Recall matching entries across configured memory backends. Read-only.
 
 ## lead_ownership_resolve
 
