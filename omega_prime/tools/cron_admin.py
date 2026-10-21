@@ -33,12 +33,12 @@ CRON_ADMIN_TOOL_NAMES = (
 )
 
 PROMPT_KIND = "prompt"
-"""Kind label for plain jobs the model-driven tick runs.
+"""Kind label for plain prompt jobs dispatched by ``run_due_jobs``.
 
 The store itself leaves these with no ``kind`` key (``JobStore.schedule``
 never sets one); ``cron_jobs_list`` reports them as ``"prompt"`` and
 ``cron_job_create`` stores them the same way, because that is the
-representation the scheduler's own tick reads.
+representation the production cron tick reads.
 """
 
 _KNOWN_KINDS = (PROMPT_KIND, DESK_LEAD_KIND, HEARTBEAT_KIND)
@@ -160,13 +160,17 @@ def register_cron_admin_tools(registry: ToolRegistry, root: Any) -> list[str]:
         store, failure = _open(path)
         if failure is not None or store is None:
             return failure or {"error": "cron store unreadable"}
-        for index, job in enumerate(store.jobs):
-            if isinstance(job, dict) and job.get("id") == job_id:
-                kind = job.get("kind") or PROMPT_KIND
-                store.jobs.pop(index)
-                store._save()
-                return {"removed": job_id, "kind": kind}
-        return {"error": f"no cron job: {job_id!r}"}
+        kind = next(
+            (
+                job.get("kind") or PROMPT_KIND
+                for job in store.jobs
+                if isinstance(job, dict) and job.get("id") == job_id
+            ),
+            PROMPT_KIND,
+        )
+        if not store.remove(job_id):
+            return {"error": f"no cron job: {job_id!r}"}
+        return {"removed": job_id, "kind": kind}
 
     handlers: dict[str, Callable[..., Any]] = {
         "cron_jobs_list": cron_jobs_list,

@@ -29,6 +29,7 @@ from omega_prime.providers.fake import FakeTransport
 from omega_prime.session.search import SessionStore, session_search
 from omega_prime.skills_runtime.manager import skill_manage, skill_view
 from omega_prime.substrate.client import SubstrateClient
+from omega_prime.tooling.catalog import EXEC_JOB_TOOL_NAMES
 from omega_prime.tooling.roster import roster_names
 from omega_prime.tools.agent_message import (
     MESSAGING_TOOL_NAMES,
@@ -55,6 +56,7 @@ from omega_prime.tools.durable_surface import (
     DURABLE_TOOL_NAMES,
     register_durable_surface_tools,
 )
+from omega_prime.tools.exec_jobs import register_exec_job_tools
 from omega_prime.tools.goals import GOAL_TOOL_NAMES, register_goal_tools
 from omega_prime.tools.growth import GROWTH_TOOL_NAMES, register_growth_tools
 from omega_prime.tools.harness import HARNESS_TOOL_NAMES, register_harness_tools
@@ -625,6 +627,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
     register_omega_command_tools(registry, {})
     register_platform_tools(registry, home=tmp_path)
     register_ide_tools(registry, tmp_path)
+    register_exec_job_tools(registry, tmp_path)
     register_x_tools(registry, XClient(FakeTransport(), token="fake"))
     register_telegram_tools(
         registry, TelegramClient(make_bot=lambda token: None, token="fake")
@@ -676,6 +679,7 @@ def test_offered_schemas_include_growth_names_and_omit_an_extra_tool(tmp_path: P
         + OMEGA_COMMAND_TOOL_NAMES
         + PLATFORM_TOOL_NAMES
         + IDE_TOOL_NAMES
+        + EXEC_JOB_TOOL_NAMES
         + X_TOOL_NAMES
         + TELEGRAM_TOOL_NAMES
         + DISCORD_TOOL_NAMES

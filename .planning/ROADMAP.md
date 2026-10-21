@@ -29,6 +29,7 @@ Phase 99 (solo mode, Desk optional) is implemented on its own branch and integra
 
 Phase 100 (omp engine wiring) is complete and integrated after Phase 99 (PR #50); see `.planning/phases/100-omp-engine-wiring/`.
 
+Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
 `milestones/v16-phases/`.
@@ -168,7 +169,7 @@ Phase 98 implementation was executed on its phase-specific parallel branch under
 - [x] Phase 99: Solo mode, Desk optional — implemented; integrated onto main after Phases 97/98
 - [x] Phase 100: omp engine wiring — six reviewed plans (6/6) — completed 2026-10-20; integrated after Phase 99
 - [ ] Phase 101: Real U2 LocalExecutor
-- [ ] Phase 102: Schedulers, dead modules, env docs
+- [x] Phase 102: Schedulers, dead modules, env docs — executed and verified; integrated in wiring order (PR #52)
 - [x] Phase 103: Ultrathink integration and cleanup — executed and verified; integrated in wiring order (PR #46)
 Phase 98 plan: [CONTEXT](phases/98-shared-memory-substrate-hindsight/CONTEXT.md),
 [research](phases/98-shared-memory-substrate-hindsight/RESEARCH.md), and
@@ -306,3 +307,17 @@ turn timeout; preserve it here and add no new caps.
 
 **Out of scope:** Phase 101 LocalExecutor; the external agentOS runner
 (note only); Phase 97 time-cap removal; deployments and connector restarts.
+
+### Phase 102: Schedulers, dead modules, and environment documentation
+
+Goal: close uplift gaps G9–G11 by wiring existing watchdog and pin-bump schedules, routing due prompt jobs through a delegate or blocked receipt, removing unreachable/dead modules, documenting supported environment variables, and reporting wiring status without executing scheduled work. Phase 102 was executed and verified locally and is integrated in wiring order (PR #52).
+
+Requirements: G9-SCHED, G10-EXEC, G10-PLUGINS, G10-X, G10-REACH, G11-ENV, and G9-DOCTOR.
+
+Acceptance criteria:
+1. Tests show that the driver ticks watchdog and pin-bump schedules; due prompt work uses a fake delegate parent, or records an explicit blocked receipt when no executable delegate is available.
+2. No tools module is unreachable except documented, explicitly flag-gated modules.
+3. The committed environment-name/purpose table is AST-derived, and CI fails when a supported environment name is missing from the table.
+4. Doctor reports disabled families and scheduled work whose runner was not observed without executing schedules; the exact requested gates are green, or each baseline failure is explicitly named.
+
+Additional safety constraints: exec-job operations remain approval-gated; plugins require exact `OMEGA_PRIME_PLUGINS=1` opt-in and remain off otherwise; `x_tweepy` is removed while urllib X behavior is retained. Preserve approval gates for sends, posts, merges, deploys, and pin-bump mutation. Do not activate live providers or integrations.

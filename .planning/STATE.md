@@ -6,7 +6,7 @@ status: Phase 97 local implementation executed; verification deferred pending au
 stopped_at: Phase 97 local verification finished; current upstream MCP mount/schema evidence is still needed before phase verification can pass.
 last_updated: "2026-10-21"
 last_activity: 2026-10-21
-last_activity_desc: Phase 98 shared memory merged (PR #51); Phase 99 solo mode integrated onto main (PR #48); Phase 100 omp engine wiring integrated after it (PR #50); phase 97 verification remains deferred on authoritative upstream contract evidence; Phase 103 integrated (PR #46).
+last_activity_desc: Phase 98 shared memory merged (PR #51); Phase 99 solo mode integrated onto main (PR #48); Phase 100 omp engine wiring integrated after it (PR #50); phase 97 verification remains deferred on authoritative upstream contract evidence; Phase 102 integrated (PR #52); Phase 103 integrated (PR #46).
 state_head: 0b1fad3
 progress:
   total_phases: 7
@@ -42,6 +42,8 @@ Phase 103 (Ultrathink integration and cleanup) is integrated in wiring order (PR
 Phase 99 (solo mode, Desk optional) is implemented and integrated onto main after Phase 98; see `.planning/phases/99-solo-mode-desk-optional/99-SUMMARY.md`.
 
 ## Closeout — Historical v19
+
+Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.
 
 Audit: milestones/v19-MILESTONE-AUDIT.md. Requirements INST-01 through INST-07 are checked. v18 audit remains at milestones/v18-MILESTONE-AUDIT.md. Requirements OPS-01 through OPS-07 stay checked. Pytest after the command-file commit: the three stdio overlay tests passed. The earlier full suite was 4639 passed, 3 skipped, and those three failures only. Ruff, ruff format, and mypy were clean on this branch. Cleanup leaves phase directories in place, matching v17, which is still under .planning/phases.
 
@@ -161,5 +163,7 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 - Phase 97 is locally implemented but not verified against the current upstream server. Obtain authoritative MCP path/schema evidence, then resume the preflight/gap work; live endpoint verification and live settings/connector changes remain operator-owned. Phase 98's endpoint and source-aware search behavior must retain this phase 97 authority. Phase 77.1 live UAT stays user-owned (`/gsd:verify-work 77.1`).
 - Phase 99 is integrated onto main after Phases 97 and 98; it does not mark the milestone complete.
 - Phase 100 (omp engine wiring) is integrated after Phase 99 (PR #50); see `.planning/phases/100-omp-engine-wiring/100-SUMMARY.md`.
+
+Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.
 
 Phase 103 (Ultrathink integration and cleanup) is integrated in wiring order (PR #46); see `.planning/phases/` for its summary.

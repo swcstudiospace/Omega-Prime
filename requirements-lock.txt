@@ -96,7 +96,7 @@ pyee==13.0.1
 Pygments==2.21.0
 PyJWT==2.15.1
 pyodbc==5.3.0
-pypdf==6.20.1
+pypdf==6.21.2
 pyrit==1.1.0
 PySocks==1.7.1
 pytest==9.1.1
@@ -134,7 +134,6 @@ treelib==1.8.0
 trio-websocket==0.12.2
 trio==0.34.0
 truststore==0.10.4
-tweepy==4.17.0
 typer==0.27.2
 typing-inspection==0.4.4
 typing_extensions==4.16.0

@@ -1,0 +1,30 @@
+{
+  "task_id": "FixSchedulerServiceTests",
+  "bot": "bot-00-omega-prime",
+  "started_at": null,
+  "completed_at": "2026-10-20T18:04:10Z",
+  "commands": [
+    {
+      "cmd": "PATH=/workspace/omes-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin PYTHONPATH=/workspace/omes-bot-wt/p6 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_apscheduler_backend.py -q",
+      "exit_code": 0,
+      "output_tail": "9 passed in 2.20s"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "APScheduler service regression tests pass",
+      "evidence_command_index": 0
+    }
+  ],
+  "unverified": [
+    "Full live APScheduler startup and external job delivery were not exercised",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    "omega_prime/cron/apscheduler_backend.py",
+    "omega_prime/tests/test_apscheduler_backend.py"
+  ],
+  "contract_changes": [],
+  "rollback_plan": null,
+  "approvals": []
+}

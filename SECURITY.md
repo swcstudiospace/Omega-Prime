@@ -85,13 +85,13 @@ One process, one seat. Tools run one at a time. Operator detail is
 
 ## Dependency exceptions
 
-`requirements-lock.txt` pins `oauthlib==3.3.1` because `tweepy==4.17.0`
-requires `oauthlib>=3.2.0,<4`. [PYSEC-2026-4114](https://osv.dev/vulnerability/PYSEC-2026-4114)
+The lockfile currently includes `oauthlib==3.3.1`; [PYSEC-2026-4114](https://osv.dev/vulnerability/PYSEC-2026-4114)
 is a PKCE timing oracle in oauthlib's authorization-server grant
 (`code_challenge_method_plain` / `code_challenge_method_s256`). Omega Prime
-does not host that grant. The supply-chain workflow ignores only that
-advisory, against the lockfile, until a tweepy release accepts `oauthlib>=4`.
-The runner's own `pip` is not part of the audit.
+does not host that grant, so the supply-chain workflow ignores this advisory
+against the committed lockfile. The prior Tweepy version constraint no longer
+applies; Dependabot may update oauthlib when compatible with the rest of the
+locked dependency graph. The runner's own `pip` is not part of the audit.
 
 The weekly `redteam-remediation` workflow proposes upstream purple-team dependency bumps while the redteam pin audits red; its optional `REMEDIATION_TOKEN` secret carries only `repo` scope on `swcstudiospace/purple-team` (fix branches + bump PRs, never approve/merge), and without it the workflow degrades to artifact + tracking issue. See `docs/red-team.md`.
 

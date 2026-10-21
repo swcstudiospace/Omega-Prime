@@ -45,14 +45,13 @@ def schedule_heartbeat(
         raise ValueError("session must be a non-empty string")
     if isinstance(interval_seconds, bool) or interval_seconds <= 0:
         raise ValueError("a heartbeat needs a positive interval_seconds")
-    job_id = store.schedule(prompt, due_at, interval_seconds=interval_seconds)
-    for job in store.jobs:
-        if isinstance(job, dict) and job.get("id") == job_id:
-            job["kind"] = HEARTBEAT_KIND
-            job["session"] = session
-            break
-    store._save()
-    return job_id
+    return store._schedule_typed(
+        prompt,
+        due_at,
+        interval_seconds=interval_seconds,
+        kind=HEARTBEAT_KIND,
+        session=session,
+    )
 
 
 def list_heartbeats(store: JobStore) -> list[dict]:
@@ -65,16 +64,14 @@ def list_heartbeats(store: JobStore) -> list[dict]:
 
 
 def clear_heartbeat(store: JobStore, job_id: str) -> dict:
-    """Remove one heartbeat by id. Unknown id is a structured result."""
-    for index, job in enumerate(store.jobs):
-        if (
-            isinstance(job, dict)
-            and job.get("id") == job_id
-            and job.get("kind") == HEARTBEAT_KIND
-        ):
-            store.jobs.pop(index)
-            store._save()
-            return {"cleared": job_id}
+    """Remove one heartbeat by id. Unknown id is a structured result.
+
+    The removal reloads and saves under the store's cross-process lock
+    (:meth:`JobStore.remove`), so a concurrent scheduler settle is never
+    overwritten by this process's older copy of the file.
+    """
+    if store.remove(job_id, kind=HEARTBEAT_KIND):
+        return {"cleared": job_id}
     return {"error": f"no heartbeat job: {job_id!r}"}
 
 
@@ -353,15 +350,13 @@ def schedule_roe_expiry(
         raise ValueError("artifact_path must be a non-empty string")
     if isinstance(interval_seconds, bool) or interval_seconds <= 0:
         raise ValueError("a roe-expiry watcher needs a positive interval_seconds")
-    prompt = f"roe-expiry-watch {artifact_path.strip()}"
-    job_id = store.schedule(prompt, due_at, interval_seconds=interval_seconds)
-    for job in store.jobs:
-        if isinstance(job, dict) and job.get("id") == job_id:
-            job["kind"] = ROE_EXPIRY_KIND
-            job["artifact_path"] = artifact_path.strip()
-            break
-    store._save()
-    return job_id
+    return store._schedule_typed(
+        f"roe-expiry-watch {artifact_path.strip()}",
+        due_at,
+        interval_seconds=interval_seconds,
+        kind=ROE_EXPIRY_KIND,
+        artifact_path=artifact_path.strip(),
+    )
 
 
 def list_roe_expiries(store: JobStore) -> list[dict]:
@@ -484,15 +479,12 @@ def schedule_engagement_digest(
     """
     if isinstance(interval_seconds, bool) or interval_seconds <= 0:
         raise ValueError("an engagement digest needs a positive interval_seconds")
-    job_id = store.schedule(
-        "engagement-digest", due_at, interval_seconds=interval_seconds
+    return store._schedule_typed(
+        "engagement-digest",
+        due_at,
+        interval_seconds=interval_seconds,
+        kind=ENGAGEMENT_DIGEST_KIND,
     )
-    for job in store.jobs:
-        if isinstance(job, dict) and job.get("id") == job_id:
-            job["kind"] = ENGAGEMENT_DIGEST_KIND
-            break
-    store._save()
-    return job_id
 
 
 def list_engagement_digests(store: JobStore) -> list[dict]:
@@ -585,13 +577,12 @@ def schedule_release_watch(
 ) -> Any:
     if isinstance(interval_seconds, bool) or interval_seconds <= 0:
         raise ValueError("a release-watch watcher needs a positive interval_seconds")
-    job_id = store.schedule("release-watch", due_at, interval_seconds=interval_seconds)
-    for job in store.jobs:
-        if isinstance(job, dict) and job.get("id") == job_id:
-            job["kind"] = RELEASE_WATCH_KIND
-            break
-    store._save()
-    return job_id
+    return store._schedule_typed(
+        "release-watch",
+        due_at,
+        interval_seconds=interval_seconds,
+        kind=RELEASE_WATCH_KIND,
+    )
 
 
 def list_release_watches(store: Any) -> list[Any]:
@@ -880,13 +871,12 @@ def schedule_coverage_alert(
     """
     if isinstance(interval_seconds, bool) or interval_seconds <= 0:
         raise ValueError("a coverage-alert watcher needs a positive interval_seconds")
-    job_id = store.schedule("coverage-alert", due_at, interval_seconds=interval_seconds)
-    for job in store.jobs:
-        if isinstance(job, dict) and job.get("id") == job_id:
-            job["kind"] = COVERAGE_ALERT_KIND
-            break
-    store._save()
-    return job_id
+    return store._schedule_typed(
+        "coverage-alert",
+        due_at,
+        interval_seconds=interval_seconds,
+        kind=COVERAGE_ALERT_KIND,
+    )
 
 
 def list_coverage_alerts(store: JobStore) -> list[dict]:
