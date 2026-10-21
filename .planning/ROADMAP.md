@@ -221,4 +221,4 @@ Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's roun
 4. `docs/omp-sandbox-engine.md` passes the docs suites and documents backend selection, env names without values, and the visibility contract; `docs/SUMMARY.md` links it exactly once.
 5. `114-AUDIT-RERUN.md` covers C1..C13 with runnable commands and expected results (all PASS except C13); `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py` stays green; no existing test weakened, skipped or deleted.
 
-- [ ] Phase 114: Sandbox steering end-to-end (sbx-5)
+- [x] Phase 114: Sandbox steering end-to-end (sbx-5) — completed 2026-10-21 (audit re-run PASS at every proof site except C13 push, blocked on Ove; hermetic e2e: the ultrathink routine drives plan zai/glm-5.3 then execute zai/glm-5.3-flash through the backend, exports land, rows/panes done, forced plan gate raises one immediate waiting_on_ove item; omp-sandbox tsc 0 errors, npm test 27/27)
