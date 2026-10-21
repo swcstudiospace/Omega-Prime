@@ -4,7 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, symlinkS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { allowedDir, seedFiles, PathRefused } from "../src/core/paths.ts";
-import { gatewayToml, mountDriverConfig } from "../src/core/providers/openshell-podman.ts";
+import { ROOT } from "../src/core/config.ts";
+import { gatewayToml, mountDriverConfig, podmanPolicyYaml } from "../src/core/providers/openshell-podman.ts";
 import { startTier, MOUNT_TIERS } from "../src/core/providers/tiers.ts";
 
 const box = realpathSync(mkdtempSync(join(tmpdir(), "omp-sbx-paths-")));
@@ -76,4 +77,19 @@ test("mount gateway config only on the mount variant; driver config is a single 
 test("a workspace mount skips tiers that cannot bind-mount it", async () => {
   assert.deepEqual([...MOUNT_TIERS].sort(), ["bwrap", "openshell-podman"]);
   await assert.rejects(startTier({}, ["agentos-local", "openshell"], { workspaceHostPath: job }), /cannot bind-mount workspace_host_path/);
+});
+
+test("podmanPolicyYaml substitutes only the run-as values; the checked-in policy stays 1000/1000", () => {
+  const gen = podmanPolicyYaml("1001", "1002");
+  assert.ok(gen.includes('run_as_user: "1001"'), "generated run_as_user");
+  assert.ok(gen.includes('run_as_group: "1002"'), "generated run_as_group");
+  for (const k of ["chatgpt.com", "auth.openai.com", "api.z.ai", "registry.npmjs.org", "read_write: [/sandbox, /tmp]"]) {
+    assert.ok(gen.includes(k), `default-deny policy survives: ${k}`);
+  }
+  const stat = readFileSync(join(ROOT, "sandbox", "policy-podman.yaml"), "utf8");
+  const genWithoutRunAs = gen.split("\n").filter((l) => !l.includes("run_as_")).join("\n");
+  const statWithoutRunAs = stat.split("\n").filter((l) => !l.includes("run_as_")).join("\n");
+  assert.equal(genWithoutRunAs, statWithoutRunAs, "the generated policy differs from the static one in exactly the two run-as values");
+  assert.ok(stat.includes('run_as_user: "1000"'), "checked-in policy keeps run_as_user 1000");
+  assert.ok(stat.includes('run_as_group: "1000"'), "checked-in policy keeps run_as_group 1000");
 });

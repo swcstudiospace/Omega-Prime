@@ -31,6 +31,18 @@ export function mountDriverConfig(hostPath: string, target = "/sandbox/work") {
   return { podman: { mounts: [{ type: "bind", source: hostPath, target, read_only: false }] } };
 }
 
+/**
+ * The checked-in sandbox/policy-podman.yaml with exactly the run-as values substituted — single source of
+ * truth, so filesystem_policy, landlock and the default-deny network_policies stay byte-identical. The mount
+ * variant generates a copy with the host identity (userns = "keep-id" makes the container uid the host uid);
+ * the default variant uses the checked-in file as-is (uid/gid 1000).
+ */
+export function podmanPolicyYaml(runAsUser: string, runAsGroup: string): string {
+  return readFileSync(join(ROOT, "sandbox", "policy-podman.yaml"), "utf8")
+    .replace(/^(\s*run_as_user:).*/m, `$1 "${runAsUser}"`)
+    .replace(/^(\s*run_as_group:).*/m, `$1 "${runAsGroup}"`);
+}
+
 /** Gateway TOML. The mount variant adds exactly the settings bind mounts need; the default gateway keeps them off. */
 export function gatewayToml(sock: string, port: number, mount: boolean) {
   return [
@@ -135,10 +147,22 @@ export class OpenShellPodmanTier implements SandboxTier {
     this.#env = { ...env, ...(u ? { OMP_AUTH_BROKER_URL: `http://127.0.0.1:${RELAY_PORT}` } : {}) };
 
     const mount = this.workspaceHostPath ? ["--driver-config-json", JSON.stringify(mountDriverConfig(this.workspaceHostPath, this.workdir))] : [];
-    const c = await this.#os(["sandbox", "create", "--name", this.id, "--from", PODMAN_IMAGE, "--policy", join(ROOT, "sandbox", "policy-podman.yaml"), "--detach", "--no-tty", "--no-auto-providers", ...mount], { timeoutMs: 600_000 });
+    // The mount gateway runs userns = "keep-id" (container uid = host uid); generate its policy with the host
+    // run-as identity into the variant's gateway state dir (like gateway.toml) so the workload can write its
+    // own bind mount. The default variant keeps the checked-in policy's uid/gid 1000.
+    let policyPath = join(ROOT, "sandbox", "policy-podman.yaml");
+    // Non-null assertions: this tier is Linux-only (rootless Podman); @types/node marks getuid/getgid optional.
+    const runAsUser = String(process.getuid!());
+    const runAsGroup = String(process.getgid!());
+    if (this.workspaceHostPath) {
+      mkdirSync(this.#gwState, { recursive: true });
+      policyPath = join(this.#gwState, "policy-podman.yaml");
+      writeFileSync(policyPath, podmanPolicyYaml(runAsUser, runAsGroup));
+    }
+    const c = await this.#os(["sandbox", "create", "--name", this.id, "--from", PODMAN_IMAGE, "--policy", policyPath, "--detach", "--no-tty", "--no-auto-providers", ...mount], { timeoutMs: 600_000 });
     if (c.code !== 0) throw new TierUnavailable("openshell-podman", `sandbox create failed: ${(c.stderr || c.stdout).slice(-500)}`);
     this.#created = true;
-    if (this.workspaceHostPath) this.info.workspace = { hostPath: this.workspaceHostPath, sandboxPath: this.workdir, mode: "bind-rw", userns: "keep-id", gatewayPort: this.#port };
+    if (this.workspaceHostPath) this.info.workspace = { hostPath: this.workspaceHostPath, sandboxPath: this.workdir, mode: "bind-rw", userns: "keep-id", gatewayPort: this.#port, policy: policyPath, runAsUser, runAsGroup };
     await this.#waitReady();
     const ctrs = await this.containers();
     if (!ctrs.some((n) => n.startsWith("openshell-supervisor-")) || !ctrs.some((n) => n.startsWith("openshell-"))) throw new TierUnavailable("openshell-podman", `gateway did not create Podman containers for ${this.id} (is it using another driver?)`);
