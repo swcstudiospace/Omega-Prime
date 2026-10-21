@@ -111,6 +111,16 @@ def assign_task_ids(*, path: Path, now: datetime) -> dict[str, Any]:
         return data
 
 
+def _observed_state(row: Any) -> str:
+    """Finished rows record their result; FinishedItem.state may be None and must never become the string 'None'."""
+    if hasattr(row, "result"):
+        return str(getattr(row, "result") or "finished")
+    if hasattr(row, "ask"):
+        return "waiting"
+    state = getattr(row, "state", None)
+    return "unknown" if state is None else str(state)
+
+
 def number_snapshot(snapshot: Any, *, path: Path, now: datetime) -> Any:
     """Allocate bridge identities first, then collector-only identities deterministically."""
     with locked_tasks(path, write=True) as data:
@@ -123,7 +133,7 @@ def number_snapshot(snapshot: Any, *, path: Path, now: datetime) -> Any:
             row = unique[identity]
             title = getattr(row, "title", getattr(row, "ask", ""))
             record = _record(data, identity, title)
-            state = getattr(row, "state", "waiting" if hasattr(row, "ask") else getattr(row, "result", "finished"))
+            state = _observed_state(row)
             _observe(record, str(state), now)
         _write_locked(data, path)
         for row in rows:

@@ -208,3 +208,15 @@ def test_corrupt_json_fails_closed_and_is_preserved(tmp_path):
     with pytest.raises((ValueError, OSError)):
         allocate_task_id(path=path, identity="tasks:a", title="A", now=NOW)
     assert path.read_bytes() == original
+
+
+def test_finished_rows_record_result_not_none_and_stay_stable(tmp_path):
+    path = tmp_path / "tasks.json"
+    finished = FinishedItem("tasks:done-task", "Done task", NOW.isoformat(), "ok")
+    assert finished.state is None
+    snapshot = Snapshot([], [], [], [finished], [])
+    for minute in range(5):
+        number_snapshot(snapshot, path=path, now=NOW + timedelta(minutes=minute))
+    assert finished.timeline == [{"at": NOW.isoformat(), "state": "ok"}]
+    data = json.loads(path.read_text())
+    assert all(event["state"] != "None" for record in data["identity_registry"].values() for event in record["timeline"])
