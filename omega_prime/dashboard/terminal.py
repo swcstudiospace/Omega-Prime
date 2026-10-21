@@ -74,9 +74,20 @@ async def _read_pane(argv: list[str]) -> str:
             if total > TERMINAL_MAX_CAPTURE_BYTES:
                 raise OSError("Terminal capture unavailable")
             chunks.append(chunk)
-        stderr = await asyncio.wait_for(process.stderr.read(4097), TERMINAL_READ_TIMEOUT_S)
-        if await asyncio.wait_for(process.wait(), TERMINAL_READ_TIMEOUT_S) != 0:
-            if re.search(rb"(?i)(pane|session).{0,40}(closed|not found|does not exist)", stderr[:4096]):
+        stderr_chunks: list[bytes] = []
+        stderr_total = 0
+        while True:
+            chunk = await asyncio.wait_for(process.stderr.read(min(1024, 4097 - stderr_total)), TERMINAL_READ_TIMEOUT_S)
+            if not chunk:
+                break
+            stderr_total += len(chunk)
+            if stderr_total > 4096:
+                raise OSError("Terminal capture unavailable")
+            stderr_chunks.append(chunk)
+        stderr = b"".join(stderr_chunks)
+        returncode = await asyncio.wait_for(process.wait(), TERMINAL_READ_TIMEOUT_S)
+        if returncode != 0:
+            if re.search(rb"(?i)(pane|session).{0,40}(closed|not found|does not exist)", stderr):
                 raise PaneClosedError()
             raise OSError("Terminal capture unavailable")
         return b"".join(chunks).decode("utf-8", errors="replace")
