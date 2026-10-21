@@ -431,6 +431,8 @@ def test_engine_body_reads_result_fields() -> None:
         started=True,
         mcp_status="attached",
         cleanup_conflicts=["preserved config"],
+        stage="execute",
+        fallback_from="chatgpt",
     )
 
     assert _engine_body(result) == {
@@ -438,6 +440,8 @@ def test_engine_body_reads_result_fields() -> None:
         "plan": "anthropic",
         "provider": "anthropic",
         "model": "claude",
+        "stage": "execute",
+        "fallback_from": "chatgpt",
         "events": "/tmp/events.jsonl",
         "usage": {"input_tokens": 17, "output_tokens": 9},
         "cost": None,
