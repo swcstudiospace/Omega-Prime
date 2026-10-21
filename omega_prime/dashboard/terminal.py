@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Spectrum Web Co
 """Bounded, read-only terminal capture for task-owned Herdr panes."""
+
 from __future__ import annotations
 
 import asyncio
@@ -20,23 +21,39 @@ TERMINAL_HEARTBEAT_S = 15.0
 TERMINAL_MAX_LINES = 200
 TERMINAL_MAX_BYTES = 65536
 TERMINAL_MAX_CAPTURE_BYTES = 1_000_000
-_PANE = re.compile(r"^w\d+:p\d+$")
+_PANE = re.compile(r"^w[0-9A-Za-z]+:p[0-9A-Za-z]+$")
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])")
 _BEARER = re.compile(r"(?i)\bBearer\s+[^\s\"']+")
-_TOKEN = re.compile(r"\b(?:ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|sk-[A-Za-z0-9_-]{8,})\b")
+_TOKEN = re.compile(
+    r"\b(?:ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|sk-[A-Za-z0-9_-]{8,})\b"
+)
 _JWT = re.compile(r"\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
-_ASSIGN = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PAT)[A-Z0-9_]*)\s*=\s*([^\s,;]+)")
+_ASSIGN = re.compile(
+    r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PAT)[A-Z0-9_]*)\s*=\s*([^\s,;]+)"
+)
 
 
 def resolve_task_pane(task: Any) -> str | None:
-    mapping = task.get("herdr_pane") if isinstance(task, dict) else getattr(task, "herdr_pane", None)
+    mapping = (
+        task.get("herdr_pane")
+        if isinstance(task, dict)
+        else getattr(task, "herdr_pane", None)
+    )
     if isinstance(mapping, dict):
         pane = mapping.get("pane_id")
         return pane if isinstance(pane, str) and _PANE.fullmatch(pane) else None
-    owner = task.get("owner") if isinstance(task, dict) else getattr(task, "owner", None)
-    kind = owner.get("kind") if isinstance(owner, dict) else getattr(owner, "kind", None)
+    owner = (
+        task.get("owner") if isinstance(task, dict) else getattr(task, "owner", None)
+    )
+    kind = (
+        owner.get("kind") if isinstance(owner, dict) else getattr(owner, "kind", None)
+    )
     ref = owner.get("ref") if isinstance(owner, dict) else getattr(owner, "ref", None)
-    return ref if kind == "herdr-pane" and isinstance(ref, str) and _PANE.fullmatch(ref) else None
+    return (
+        ref
+        if kind == "herdr-pane" and isinstance(ref, str) and _PANE.fullmatch(ref)
+        else None
+    )
 
 
 def sanitize_terminal_text(value: str) -> str:
@@ -62,13 +79,23 @@ class PaneClosedError(Exception):
 
 
 async def _read_pane(argv: list[str]) -> str:
-    process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    process = await asyncio.create_subprocess_exec(
+        *argv,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_stream, stderr_stream = process.stdout, process.stderr
+    # Both are pipes (PIPE above), so asyncio always provides the readers.
+    assert stdout_stream is not None and stderr_stream is not None
     try:
         chunks: list[bytes] = []
         total = 0
         while True:
-            chunk = await asyncio.wait_for(process.stdout.read(min(65536, TERMINAL_MAX_CAPTURE_BYTES + 1 - total)), TERMINAL_READ_TIMEOUT_S)
+            chunk = await asyncio.wait_for(
+                stdout_stream.read(min(65536, TERMINAL_MAX_CAPTURE_BYTES + 1 - total)),
+                TERMINAL_READ_TIMEOUT_S,
+            )
             if not chunk:
                 break
             total += len(chunk)
@@ -78,7 +105,10 @@ async def _read_pane(argv: list[str]) -> str:
         stderr_chunks: list[bytes] = []
         stderr_total = 0
         while True:
-            chunk = await asyncio.wait_for(process.stderr.read(min(1024, 4097 - stderr_total)), TERMINAL_READ_TIMEOUT_S)
+            chunk = await asyncio.wait_for(
+                stderr_stream.read(min(1024, 4097 - stderr_total)),
+                TERMINAL_READ_TIMEOUT_S,
+            )
             if not chunk:
                 break
             stderr_total += len(chunk)
@@ -88,7 +118,9 @@ async def _read_pane(argv: list[str]) -> str:
         stderr = b"".join(stderr_chunks)
         returncode = await asyncio.wait_for(process.wait(), TERMINAL_READ_TIMEOUT_S)
         if returncode != 0:
-            if re.search(rb"(?i)(pane|session).{0,40}(closed|not found|does not exist)", stderr):
+            if re.search(
+                rb"(?i)(pane|session).{0,40}(closed|not found|does not exist)", stderr
+            ):
                 raise PaneClosedError()
             raise OSError("Terminal capture unavailable")
         return b"".join(chunks).decode("utf-8", errors="replace")
@@ -100,9 +132,13 @@ async def _read_pane(argv: list[str]) -> str:
 
 
 class TerminalService:
-    def __init__(self, *, runner: Callable[[list[str]], Awaitable[str]] | None = None,
-                 clock: Callable[[], datetime] | None = None,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+    def __init__(
+        self,
+        *,
+        runner: Callable[[list[str]], Awaitable[str]] | None = None,
+        clock: Callable[[], datetime] | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self.runner = runner or _read_pane
         self.clock = clock or (lambda: datetime.now(UTC))
         self.sleep = sleep
@@ -121,15 +157,31 @@ class TerminalService:
         if not reserved and not await self.reserve():
             yield self._event("unavailable", "", None)
             return
-        argv = ["herdr", "pane", "read", pane, "--source", "recent", "--lines", "200", "--format", "text"]
+        argv = [
+            "herdr",
+            "pane",
+            "read",
+            pane,
+            "--source",
+            "recent",
+            "--lines",
+            "200",
+            "--format",
+            "text",
+        ]
         previous: tuple[str, str] | None = None
         updated: str | None = None
         try:
             yield "retry: 3000\n\n"
             while True:
                 try:
-                    raw = await asyncio.wait_for(self.runner(argv), TERMINAL_READ_TIMEOUT_S)
-                    if not isinstance(raw, str) or len(raw.encode("utf-8")) > TERMINAL_MAX_CAPTURE_BYTES:
+                    raw = await asyncio.wait_for(
+                        self.runner(argv), TERMINAL_READ_TIMEOUT_S
+                    )
+                    if (
+                        not isinstance(raw, str)
+                        or len(raw.encode("utf-8")) > TERMINAL_MAX_CAPTURE_BYTES
+                    ):
                         raise OSError("Terminal capture unavailable")
                     text, state = sanitize_terminal_text(raw), "live"
                 except asyncio.CancelledError:
@@ -154,4 +206,11 @@ class TerminalService:
 
     @staticmethod
     def _event(status: str, text: str, updated_at: str | None) -> str:
-        return "event: terminal\ndata: " + json.dumps({"status": status, "text": text, "updated_at": updated_at}, separators=(",", ":")) + "\n\n"
+        return (
+            "event: terminal\ndata: "
+            + json.dumps(
+                {"status": status, "text": text, "updated_at": updated_at},
+                separators=(",", ":"),
+            )
+            + "\n\n"
+        )

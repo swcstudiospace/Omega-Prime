@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import threading
@@ -384,7 +385,10 @@ class _DeskSubstrate:
             for key, value in (event.items() if isinstance(event, dict) else ())
             if key != "kind" and value is not None
         }
-        result = self._client.emit("note", summary, **fields)
+        try:
+            result = self._client.emit("note", summary, **fields)
+        except Exception as exc:
+            return {"error": "upstream_error", "reason": str(exc)}
         if isinstance(result, dict) and result.get("stored") is False:
             message = str(result.get("error") or "event not accepted")
             error = (
@@ -428,7 +432,7 @@ class _DeskDocsIndex:
     def __init__(self, client: SubstrateClient) -> None:
         self._client = client
 
-    def __call__(self, query: str, limit: int, repo: str | None) -> list:
+    def __call__(self, query: str, limit: int, repo: str | None) -> list | dict:
         _ = repo
         result = _shape_substrate_docs(self._client, query)
         chunks = result.get("chunks") if isinstance(result, dict) else None
@@ -438,7 +442,7 @@ class _DeskDocsIndex:
                 if isinstance(result, dict) and result.get("error")
                 else "docs index returned a malformed response"
             )
-            raise RuntimeError(f"docs index failed: {reason}")
+            return {"error": reason}
         return chunks[:limit]
 
 
@@ -576,6 +580,18 @@ class _DeskBusClient:
                         "gateway": "desk_bus",
                     }
             return saved.rstrip("/"), None
+        if self._policy is not None:
+            try:
+                host = urlsplit(self._base_url).hostname or ""
+            except ValueError:
+                host = ""
+            if not host or not self._policy.allows_host(host):
+                shown = host or "that host"
+                return "", {
+                    "ok": False,
+                    "error": f"The seat policy does not allow {shown}.",
+                    "gateway": "desk_bus",
+                }
         return self._base_url, None
 
 
@@ -788,6 +804,7 @@ def default_registry(
     approval_log: Any = None,
     env: dict | None = None,
     work_root: str | Path | None = None,
+    bot_id: str = "bot-00-omega-prime",
     settings_status: SettingsResult | None = None,
 ) -> ToolRegistry:
     """Wire every family, including `delegate_task` on an in-process parent.
@@ -822,6 +839,8 @@ def default_registry(
     served but returns `not_configured: provider`.
     """
     env = dict(env or {})
+    solo_value = env.get("OMEGA_PRIME_SOLO")
+    solo = (bot_id == "bot-00-omega-prime") if solo_value is None else solo_value != "0"
     registry = ToolRegistry(approval_log=approval_log, policy=policy)
     registry.runtime_bindings["settings_status"] = settings_status
     root = Path(root)
@@ -861,6 +880,91 @@ def default_registry(
     # DESK-01: one MemoryStore instance shared by the growth tools and the
     # lead pack, so `lead_memory_recall` sees what the growth tools retain.
     memory_store = MemoryStore(memory_dir)
+    from omega_prime.integrations.gateways import (
+        gateway_block,
+        ready_gateway_url,
+    )
+    from omega_prime.memory.backends import resolve_memory_backends
+    from omega_prime.memory.hindsight_service import HindsightService
+    from omega_prime.memory.retain import retain_memory
+
+    substrate_token = secret_value(env, "SUBSTRATE_TOKEN") or secret_value(
+        env, "SUBSTRATE_TOKEN_GROK_BOT"
+    )
+    # SubstrateClient is the authoritative phase-97 endpoint resolver. Keep
+    # the same raw client for desk operations and memory; never infer a default.
+    substrate_client = SubstrateClient(
+        env.get("SUBSTRATE_URL") or None,
+        token=substrate_token or None,
+        honor_binding=True,
+        binding_env=env,
+        policy=policy,
+    )
+    substrate_url, substrate_error = substrate_client._resolve_base()
+    hindsight = None
+    hindsight_construction_error = None
+    hindsight_url = str(env.get("HINDSIGHT_URL") or "").strip()
+    if hindsight_url:
+        try:
+            hindsight = HindsightService(
+                hindsight_url,
+                broker=CredentialBroker(policy, env),
+                transport=HttpTransport(policy=policy, max_retries=0),
+                policy=policy,
+            )
+        except Exception:
+            hindsight_construction_error = "configured Hindsight service is invalid"
+    memory_backends = resolve_memory_backends(
+        local_store=memory_store,
+        # Do not expose an unresolved binding-aware client as a configured
+        # backend. It is attached immediately before memory operations when a
+        # live binding resolves to a usable endpoint.
+        substrate=substrate_client if substrate_url and not substrate_error else None,
+        hindsight=hindsight,
+        substrate_url=substrate_url,
+        hindsight_url=hindsight_url or None,
+        environ=env,
+    )
+    if substrate_error:
+        memory_backends.errors["substrate"] = substrate_error
+        memory_backends.states["substrate"] = (
+            "not_configured" if "not configured" in substrate_error else "unreachable"
+        )
+    if hindsight_construction_error:
+        memory_backends.errors["hindsight"] = hindsight_construction_error
+        memory_backends.states["hindsight"] = "unreachable"
+
+    def refresh_memory_substrate() -> None:
+        """Resolve live connector settings immediately before a memory call."""
+        base, error = substrate_client._resolve_base()
+        if base and error is None:
+            memory_backends.substrate = substrate_client
+            memory_backends.errors.pop("substrate", None)
+            memory_backends.states["substrate"] = "empty"
+        else:
+            memory_backends.substrate = None
+            if error is not None:
+                message = str(error)
+                memory_backends.errors["substrate"] = message
+                memory_backends.states["substrate"] = (
+                    "not_configured" if "not configured" in message else "unreachable"
+                )
+            else:
+                memory_backends.errors["substrate"] = (
+                    "substrate gateway is not configured"
+                )
+                memory_backends.states["substrate"] = "not_configured"
+
+    def growth_retain(content: str) -> dict[str, Any]:
+        refresh_memory_substrate()
+        return retain_memory(
+            memory_backends,
+            content,
+            scope=memory_backends.trusted_scope,
+            repo=memory_backends.trusted_repo,
+            kind="fact",
+        )
+
     from omega_prime.routines.nightly import writable_skills_root
 
     install_skills = root / "omega_prime" / "skills"
@@ -874,6 +978,7 @@ def default_registry(
         memory_dir=memory_dir,
         session_db=session_db,
         memory_store=memory_store,
+        retain_memory=growth_retain,
     )
     # DESK-03: delegate_task is served here (roster order: after growth), on
     # an in-process parent shim. Without a provider env the parent stays None
@@ -909,31 +1014,76 @@ def default_registry(
         registry,
         DiscordClient(make_client=None, token=secret_value(env, "DISCORD_BOT_TOKEN")),
     )
-    substrate_token = secret_value(env, "SUBSTRATE_TOKEN") or secret_value(
-        env, "SUBSTRATE_TOKEN_GROK_BOT"
-    )
-    substrate_client = SubstrateClient(
-        env.get("SUBSTRATE_URL") or None,
-        token=substrate_token or None,
-        honor_binding=True,
-        binding_env=env,
-        policy=policy,
-    )
-    substrate_base, substrate_error = substrate_client._resolve_base()
+    substrate_base = substrate_url
     docs_url = (env.get(DESK_DOCS_INDEX_ENV) or "").strip()
+    # Explicit env URL only (phase 97: never infer a default endpoint); a saved
+    # or blocked connector binding is resolved by the binding-aware client.
+    substrate_env_url = (env.get("SUBSTRATE_URL") or "").strip()
     notify_url = (env.get(DESK_NOTIFY_URL_ENV) or "").strip()
     bus_url = (env.get(DESK_BUS_URL_ENV) or "").strip()
-    from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
 
     bus_saved = ready_gateway_url("desk_bus", env)
     bus_blocked = gateway_block("desk_bus", env)
+    substrate_saved = ready_gateway_url("substrate", env)
+    substrate_blocked = gateway_block("substrate", env)
+    desk_docs = (
+        _DeskDocsIndex(substrate_client)
+        if solo
+        else (
+            _DeskDocsIndex(
+                SubstrateClient(
+                    docs_url or substrate_env_url or None,
+                    token=substrate_token or None,
+                    # An explicit Desk docs endpoint stands on its own; a saved
+                    # (or blocked) Substrate binding only steers the fallback.
+                    honor_binding=not docs_url,
+                    binding_env=env,
+                    policy=policy,
+                )
+            )
+            if docs_url or substrate_env_url or substrate_saved or substrate_blocked
+            else None
+        )
+    )
+    desk_planes = {
+        "docs": (
+            "substrate"
+            if solo
+            else (
+                "blocked"
+                if substrate_blocked is not None
+                else (
+                    "configured"
+                    if docs_url or substrate_env_url or substrate_saved
+                    else "not_configured"
+                )
+            )
+        ),
+        "notify": (
+            "disabled_solo"
+            if solo
+            else ("configured" if notify_url else "not_configured")
+        ),
+        "bus": (
+            "disabled_solo"
+            if solo
+            else (
+                "blocked"
+                if bus_blocked is not None
+                else ("configured" if bus_saved or bus_url else "not_configured")
+            )
+        ),
+    }
     register_lead_tools(
         registry,
         LeadClient(
             LeadContext(
+                bot_id=bot_id,
                 root=root,
                 registry=registry,
                 memory=memory_store,
+                memory_backends=memory_backends,
+                memory_refresh=refresh_memory_substrate,
                 intake=IntakeStore(
                     desk_intake_path(work, state_dir=state_value or None)
                 ),
@@ -944,23 +1094,18 @@ def default_registry(
                 substrate_error=substrate_error,
                 substrate_auth_configured=bool(substrate_token),
                 settings_status=settings_status,
-                docs_index=_DeskDocsIndex(
-                    SubstrateClient(
-                        docs_url,
-                        token=substrate_token or None,
-                    )
-                )
-                if docs_url
-                else None,
-                notify=_DeskNotifier(notify_url) if notify_url else None,
+                solo=solo,
+                desk_planes=desk_planes,
+                docs_index=desk_docs,
+                notify=_DeskNotifier(notify_url) if not solo and notify_url else None,
                 bus=(
                     _DeskBusClient(
-                        bus_saved or bus_url or "http://127.0.0.1",
+                        bus_saved or bus_url or "",
                         honor_binding=True,
                         binding_env=env,
                         policy=policy,
                     )
-                    if bus_blocked is not None or bus_saved or bus_url
+                    if not solo and (bus_blocked is not None or bus_saved or bus_url)
                     else None
                 ),
             )
@@ -1135,6 +1280,14 @@ def default_registry(
     # Started by the live server (stdio main / serve_sse), not here: building
     # a registry is also how doctor, setup_check, the catalog and tests
     # inspect the tool surface, and those must not spawn a ticking thread.
+    dispatch = registry.dispatch
+
+    def dispatch_with_memory_refresh(name: str, arguments: Any = None) -> str:
+        if name in {"lead_memory_recall", "lead_doctor"}:
+            refresh_memory_substrate()
+        return dispatch(name, arguments)
+
+    registry.dispatch = dispatch_with_memory_refresh  # type: ignore[method-assign]
     return registry
 
 
@@ -1438,12 +1591,24 @@ def load_runtime(
     root = Path(root)
     home = Path(home) if home is not None else Path.home()
     roster: list[str] | None = None
-    if not no_roster:
-        roster_path = (
-            root / "omega_prime" / "contracts" / "tool-rosters" / "omega-prime.yaml"
-        )
+    bot_id = "bot-00-omega-prime"
+    roster_path = (
+        root / "omega_prime" / "contracts" / "tool-rosters" / "omega-prime.yaml"
+    )
+    if no_roster:
         try:
-            roster = roster_names(roster_path.read_text(encoding="utf-8"))
+            roster_text = roster_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+        else:
+            seat = re.search(r"(?m)^seat:\s*([^\s#]+)", roster_text)
+            bot_id = seat.group(1) if seat else bot_id
+    else:
+        try:
+            roster_text = roster_path.read_text(encoding="utf-8")
+            roster = roster_names(roster_text)
+            seat = re.search(r"(?m)^seat:\s*([^\s#]+)", roster_text)
+            bot_id = seat.group(1) if seat else "bot-00-omega-prime"
         except (OSError, ValueError) as exc:
             raise RuntimeConfigError(
                 f"cannot read roster {roster_path}: {exc}"
@@ -1475,6 +1640,7 @@ def load_runtime(
         approval_log=log,
         env=settings_env,
         work_root=work_root,
+        bot_id=bot_id,
         settings_status=settings_status,
     )
     tool_names = [tool.name for tool in _mcp_tools(registry, roster)]

@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from secrets import token_hex
 
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.poller import CollectorSpec, DashboardPoller
@@ -13,19 +14,29 @@ def test_persisted_task_numbering_reaches_snapshot(tmp_path):
         "tasks_json",
         "ok",
         extra={
-            "tasks": [{
-                "id": "tasks:stable",
-                "title": "Stable task",
-                "state": "working",
-                "owner": {"kind": "human", "ref": "owner"},
-            }],
+            "tasks": [
+                {
+                    "id": "tasks:stable",
+                    "title": "Stable task",
+                    "state": "working",
+                    "owner": {"kind": "human", "ref": "owner"},
+                }
+            ],
             "waiting_on_ove": [],
             "finished": [],
         },
     )
     poller._results["herdr"] = SourceResult(
-        "herdr", "ok",
-        items=[{"kind": "herdr_pane", "pane_id": "idle", "agent_status": "unknown", "terminal_title": "Idle session"}],
+        "herdr",
+        "ok",
+        items=[
+            {
+                "kind": "herdr_pane",
+                "pane_id": "idle",
+                "agent_status": "unknown",
+                "terminal_title": "Idle session",
+            }
+        ],
     )
     poller._build_snapshot()
     first = poller.snapshot()
@@ -34,7 +45,15 @@ def test_persisted_task_numbering_reaches_snapshot(tmp_path):
     assert first["idle_sessions"][0]["seq"] == 1
     assert first["active"][0]["seq"] == 2
     assert first["active"][0]["display_id"] == "00002 - Stable task"
-    assert set(first) == {"generated_at", "sources", "active", "pr_gate", "waiting_on_ove", "finished", "idle_sessions"}
+    assert set(first) == {
+        "generated_at",
+        "sources",
+        "active",
+        "pr_gate",
+        "waiting_on_ove",
+        "finished",
+        "idle_sessions",
+    }
 
     restarted = DashboardPoller([], task_ids_path=bridge, clock=lambda: NOW)
     restarted._results["herdr"] = poller._results["herdr"]
@@ -51,9 +70,11 @@ def test_persisted_task_numbering_reaches_snapshot(tmp_path):
 def test_github_command_center_extra_is_bounded_and_redacted():
     import asyncio
 
+    # Built at runtime so no credential-shaped literal lives in the source.
+    fake_pat = "ghp_" + token_hex(10)
     extra = {
         "command_center": {
-            "repositories": [{"name": "repo", "token": "ghp_12345678901234567890"}],
+            "repositories": [{"name": "repo", "token": fake_pat}],
             "ci_cd": [],
             "recent_merges": [],
             "meta": {"secret": "secret_value"},
@@ -62,7 +83,11 @@ def test_github_command_center_extra_is_bounded_and_redacted():
         "unrelated": "drop me too",
     }
     poller = DashboardPoller(
-        [CollectorSpec("github", lambda: SourceResult("github", "ok", extra=extra), 1.0, 1.0)],
+        [
+            CollectorSpec(
+                "github", lambda: SourceResult("github", "ok", extra=extra), 1.0, 1.0
+            )
+        ],
         clock=lambda: NOW,
     )
     asyncio.run(poller._collect(poller.specs[0]))
@@ -70,8 +95,13 @@ def test_github_command_center_extra_is_bounded_and_redacted():
     snapshot = poller.snapshot()
     assert snapshot is not None
     status = snapshot["sources"]["github"]
-    assert set(status["command_center"]) == {"repositories", "ci_cd", "recent_merges", "meta"}
+    assert set(status["command_center"]) == {
+        "repositories",
+        "ci_cd",
+        "recent_merges",
+        "meta",
+    }
     rendered = str(status["command_center"])
-    assert "ghp_12345678901234567890" not in rendered
+    assert fake_pat not in rendered
     assert "secret_value" not in rendered
     assert "unrelated" not in status

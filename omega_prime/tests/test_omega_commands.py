@@ -63,22 +63,99 @@ def test_unknown_command_does_not_dispatch() -> None:
 def test_retain_refuses_a_secret_before_dispatch() -> None:
     registry = RecordingRegistry()
     secret = "X_API_TOKEN=abc"
-    body = execute_command(f"/omega-retain {secret}", registry, {})
+    body = execute_command(
+        f"/omega-retain --source https://example.test/evidence -- {secret}",
+        registry,
+        {},
+    )
     encoded = json.dumps(body)
     assert body["error"] == "secret_refused"
     assert registry.calls == []
     assert secret not in encoded
     assert "abc" not in encoded
 
+    evidence_secret = "https://example.test/?token=abc"
+    evidence_body = execute_command(
+        f"/omega-retain --source {evidence_secret} -- ordinary fact",
+        registry,
+        {},
+    )
+    evidence_encoded = json.dumps(evidence_body)
+    assert evidence_body["error"] == "secret_refused"
+    assert registry.calls == []
+    assert evidence_secret not in evidence_encoded
+    assert "abc" not in evidence_encoded
 
-def test_retain_tags_ordinary_text() -> None:
-    registry = RecordingRegistry([{"success": True}])
-    body = execute_command("/omega-retain the desk ships on Friday", registry, {})
-    assert body["ok"] is True
-    name, arguments = registry.calls[0]
-    assert name == "memory"
-    assert arguments["content"].startswith("[hindsight:omega-prime-lead] ")
-    assert "Friday" in arguments["content"]
+
+def test_retain_requires_explicit_source_or_receipt_without_dispatch() -> None:
+    registry = RecordingRegistry()
+    for command in (
+        "/omega-retain a fact",
+        "/omega-retain --source",
+        "/omega-retain --source https://example.test/evidence",
+        "/omega-retain --receipt-path .receipts/item.json -- ",
+        "/omega-retain --unknown value -- fact",
+    ):
+        body = execute_command(command, registry, {})
+        assert body["ok"] is False, command
+        assert body["error"] == "invalid_retain_args", command
+    assert registry.calls == []
+
+
+def test_retain_local_save_does_not_hide_remote_failure() -> None:
+    failure = {
+        "ok": False,
+        "local_saved": True,
+        "error": "substrate memory write failed",
+        "backends": {"substrate": {"state": "unreachable"}},
+    }
+    registry = RecordingRegistry([failure])
+    body = execute_command(
+        "/omega-retain --source https://example.test/evidence -- a fact",
+        registry,
+        {},
+    )
+    assert body["ok"] is False
+    assert body["error"] == failure["error"]
+    assert body["result"] == failure
+    assert [name for name, _ in registry.calls] == ["lead_memory_retain"]
+
+
+def test_real_retain_requires_approval_and_valid_source(tmp_path: Path) -> None:
+    registry, env = _real_registry(tmp_path)
+    denied = execute_command(
+        "/omega-retain --source https://example.test/evidence -- remember this",
+        registry,
+        env,
+    )
+    assert denied["ok"] is False, denied
+    assert denied["error"] == "approval required", denied
+    assert denied["result"]["tool"] == "lead_memory_retain", denied
+
+    approved_registry, approved_env = _real_registry(
+        tmp_path / "approved", "lead_memory_retain"
+    )
+    content = "phase-98 command retained memory proof"
+    source = "https://example.test/phase-98-evidence"
+    saved = execute_command(
+        f"/omega-retain --source {source} -- {content}",
+        approved_registry,
+        approved_env,
+    )
+    assert saved["ok"] is True, saved
+    assert saved["result"]["local_saved"] is True, saved
+
+    recalled = execute_command(
+        "/omega-recall phase-98 command retained", approved_registry, approved_env
+    )
+    assert recalled["ok"] is True, recalled
+    entry = next(
+        row for row in recalled["result"]["results"] if content in row["content"]
+    )
+    assert any(
+        row.get("backend") == "local" and row.get("source") == source
+        for row in entry["sources"]
+    ), recalled
 
 
 def test_connectors_never_echo_a_token() -> None:
@@ -191,7 +268,7 @@ def test_registered_omega_command_forwards_doctor_context(tmp_path: Path) -> Non
 def _real_registry(
     tmp_path: Path,
     *approvals: str,
-    substrate_url: str | None = "https://substrate.example",
+    substrate_url: str | None = None,
 ) -> tuple[ToolRegistry, dict]:
     log = ApprovalLog()
     for tool in approvals:
@@ -249,16 +326,36 @@ def test_real_doctor_contextual_health_and_repeat(tmp_path: Path) -> None:
     assert repeat["result"]["green"] is True, repeat
 
 
-def test_real_doctor_configured_https_is_configuration_only_without_network(
+def test_real_doctor_configured_https_source_failure_is_unhealthy_without_network(
     tmp_path: Path, monkeypatch
 ) -> None:
     from omega_prime.substrate.client import SubstrateClient
 
     def no_network(*args, **kwargs):
-        raise AssertionError("doctor must not contact substrate")
+        raise AssertionError("synthetic substrate source failure")
 
     monkeypatch.setattr(SubstrateClient, "_mcp_post", no_network)
-    registry, env = _real_registry(tmp_path, "lead_doctor")
+    registry, env = _real_registry(
+        tmp_path, "lead_doctor", substrate_url="https://substrate.example"
+    )
+    sha, declared = _prepared_seat(registry)
+    result = execute_command(
+        "/omega-doctor",
+        registry,
+        env,
+        doctor_context={"prompt_sha256": sha, "installed_skills": declared},
+    )
+    assert result["ok"] is False, result
+    substrate = result["result"]["checks"]["substrate"]
+    assert substrate["configured"] is True
+    assert substrate["state"] == "unreachable"
+    assert substrate["attempted"] is True
+
+
+def test_real_doctor_missing_url_is_not_configured_nonselected_source(
+    tmp_path: Path,
+) -> None:
+    registry, env = _real_registry(tmp_path, "lead_doctor", substrate_url=None)
     sha, declared = _prepared_seat(registry)
     result = execute_command(
         "/omega-doctor",
@@ -268,25 +365,11 @@ def test_real_doctor_configured_https_is_configuration_only_without_network(
     )
     assert result["ok"] is True, result
     substrate = result["result"]["checks"]["substrate"]
-    assert substrate["configured"] is True
-    assert "configured only" in substrate["detail"]
-    assert "reachability not checked" in substrate["detail"]
-
-
-def test_real_doctor_missing_url_fails_separately(tmp_path: Path) -> None:
-    registry, env = _real_registry(tmp_path, "lead_doctor", substrate_url=None)
-    sha, declared = _prepared_seat(registry)
-    result = execute_command(
-        "/omega-doctor",
-        registry,
-        env,
-        doctor_context={"prompt_sha256": sha, "installed_skills": declared},
-    )
-    assert result["ok"] is False
-    substrate = result["result"]["checks"]["substrate"]
-    assert substrate["green"] is False
-    assert "SUBSTRATE_URL" in substrate["detail"]
-    assert "settings file" in substrate["detail"]
+    assert substrate["green"] is True
+    assert substrate["configured"] is False
+    assert substrate["state"] == "not_configured"
+    assert substrate["attempted"] is False
+    assert result["result"]["checks"]["memory_backends"]["selected_backend"] == "local"
 
 
 def test_real_doctor_missing_context_stays_unhealthy_and_preserves_sha(
