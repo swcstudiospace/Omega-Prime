@@ -133,7 +133,7 @@ transformers==5.18.0
 treelib==1.8.0
 trio-websocket==0.12.2
 trio==0.34.0
-truststore==0.10.4
+truststore==0.10.5
 typer==0.27.2
 typing-inspection==0.4.4
 typing_extensions==4.16.0
