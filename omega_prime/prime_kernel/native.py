@@ -108,7 +108,11 @@ def native_status() -> dict:
     try:
         module = load_extension()
     except ImportError as exc:
-        return {"loaded": False, "crates": _workspace_members(), "error": str(exc)}
+        try:
+            crates = _workspace_members()
+        except OSError:
+            crates = []
+        return {"loaded": False, "crates": crates, "error": str(exc)}
     probed = module.crates.probe()
     return {
         "loaded": True,

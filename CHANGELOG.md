@@ -10,6 +10,13 @@
 - Stdio gated tools read a mode 0600 approvals file outside the repo and outside `OMEGA_PRIME_STATE_DIR` at startup. A person pins its sha256 with `--approvals-sha256` (or `OMEGA_PRIME_APPROVALS_SHA256`); a mismatch refuses to start. The state-dir file is not loaded. The launcher forwards the path and the digest, never `--approve`. The process does not write the file, and an approver that names the bot is refused. `lead_doctor` action `check` is ungated and does not write the roster; register, install, and repair stay gated.
 - `HINDSIGHT_URL` defaults to unset, which disables the remote bank. There is no hosted default.
 - Runtime files `omega_prime/sessions.db`, `omega_prime/state/`, `omega_prime/memory/MEMORY.md`, and `omega_prime/memory/USER.md` are gitignored. The `omega_prime/memory/` package stays tracked.
+- Ultrathink integration documents the strict default-off `ULTRATHINK_SHIP`
+  opt-in, read-only readiness and assessment boundaries, plan-discovery
+  precedence and stale-plan stop behavior, and independent approvals.
+  Optional native test lanes and test-only `OPENSHELL_BIN` are bounded
+  without claiming production override or binary availability. The related
+  code, test, setup, and skill changes do not make provider, live-config, or
+  live-host changes.
 - Engine review fixes preserve paid token usage, discard terminal duplicate UI answers, isolate skill-loader fixtures, reject unsafe control-store child directories, and retain attachment/cleanup events in `omega ui status`.
 - Settings provenance follows the candidate repository, setup diagnostics share the loaded environment with Ultrathink, and malformed non-empty Substrate SSE frames fail as protocol errors.
 

@@ -146,6 +146,7 @@
     "TMPDIR_FILE": "Forwarded file-name counterpart for the child-process temporary directory.",
     "ULTRATHINK_ROOT": "Selects the ultrathink integration root directory.",
     "ULTRATHINK_ROOT_FILE": "Names a protected file containing the ultrathink integration root.",
+    "ULTRATHINK_SHIP": "Enables ultrathink ship writes only for the exact values 1 and true.",
     "ULTRATHINK_STATE_DIR": "Selects persistent state for the ultrathink integration.",
     "USER": "Identifies the host user inherited by child processes.",
     "USER_FILE": "Forwarded file-name counterpart for the child-process user name.",
@@ -492,7 +493,7 @@
       "reason": "Enumerates finite provider.env_vars credentials consumed by the approved credential broker, including protected-file selectors."
     },
     {
-      "site": "omega_prime/grokbot/doctor.py:1116:mapping.get",
+      "site": "omega_prime/grokbot/doctor.py:1151:mapping.get",
       "symbol": "_check_connector_secrets",
       "source_sha256": "da9adca5c1daa73671631474854e3d6ba5d0f29547adfe97bc64e7c398dea84e",
       "names": [
@@ -504,6 +505,17 @@
         "HINDSIGHT_API_KEY"
       ],
       "reason": "Enumerates the reviewed connector credential names checked by the doctor."
+    },
+    {
+      "site": "omega_prime/setup_check.py:159:mapping.subscription",
+      "symbol": "check_ultrathink",
+      "source_sha256": "5312217b06a100ddaedda1ceda4798eb1869d44ed62868fc9d03405424c82c05",
+      "names": [
+        "HOME", "OMEGA_PRIME_STATE_DIR", "ULTRATHINK_STATE_DIR", "GROK_PLUGIN_DATA",
+        "GROK_HOME", "HERMES_HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR",
+        "ULTRATHINK_ROOT", "ULTRATHINK_SHIP"
+      ],
+      "reason": "Copies the reviewed Ultrathink readiness keys (READINESS_ENV_KEYS) from the supplied environment for the setup check."
     }
   ],
   "supplements": [
@@ -699,7 +711,7 @@
   "metadata": {
     "token_selectors": [
       {
-        "site": "omega_prime/mcp_server.py:2132:args.token_env",
+        "site": "omega_prime/mcp_server.py:2135:args.token_env",
         "symbol": "_resolve_token",
         "source_sha256": "e04ec502c56de9c37869762a3519cac3470f599f455c9ec1b3343026091652d7",
         "reason": "The caller-selected environment key is an arbitrary MCP bearer-token selector, not a concrete setting name."
