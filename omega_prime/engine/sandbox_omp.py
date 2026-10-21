@@ -53,6 +53,8 @@ from pathlib import Path
 from typing import Any
 
 from omega_prime.dashboard import herdr_launch, run_rows
+from omega_prime.dashboard.blocks import clear_block, raise_block
+from omega_prime.dashboard.status_file import locked_tasks
 from omega_prime.engine.jobs import append_event, child_env, state_dir, write_json
 from omega_prime.engine.omp_driver import EngineError, EngineResult, _system
 from omega_prime.engine.plan_router import read_usage, select
@@ -75,6 +77,10 @@ _TOOL_TIMEOUT = 300.0
 _EXIT_GRACE = 10.0
 # Wake-up tick for waits that must also notice an interrupt.
 _POLL_TICK = 0.2
+# Answer store-read cadence for a raised GSD question: one shared-lock
+# snapshot per second at most, riding these same event-loop ticks. The
+# question/stage wait itself has NO deadline (phase-112 lock).
+_ANSWER_POLL = 1.0
 
 _EOF = object()
 
@@ -623,6 +629,7 @@ def run_backend(
             tasks_path=tasks_path,
             task_id=task_id,
             row_started=row_started,
+            stage=stage,
         )
         done_status = str(done_event.get("status") or "")
         status_record = _tool(
@@ -780,6 +787,76 @@ def _tool(
     return reply
 
 
+def _question_item_id(task_id: str, request_id: str) -> str:
+    """The stable waiting_on_ove item id for one GSD question."""
+    return f"{task_id}:question:{request_id}"
+
+
+def _raise_question(
+    tasks_path: str | Path | None,
+    task_id: str | None,
+    stage: str | None,
+    request_id: str,
+    question_text: Any,
+) -> str:
+    """Raise exactly one question item through the only block writer.
+
+    The id embeds the wrapper's requestId, so a re-ask after a stale
+    answer raises under a new id instead of duplicating; ask/blocks pass
+    redact_text inside raise_block (the owning row goes ``blocked``).
+    Returns the item id.
+    """
+    item_id = _question_item_id(str(task_id), request_id)
+    raise_block(
+        tasks_path,
+        item_id,
+        ask=str(question_text or ""),
+        blocks=f"sandbox GSD question (stage {stage})",
+        task_id=str(task_id),
+    )
+    return item_id
+
+
+def _answer_from_store(
+    tasks_path: str | Path | None, item_id: str
+) -> str | Mapping[str, Any] | None:
+    """The item's additive ``answer`` field, or ``None`` when not answered.
+
+    One shared-lock snapshot of the store: an answer is a text string or a
+    mapping carrying ``selected`` — anything else is not an answer yet.
+    """
+    with locked_tasks(tasks_path) as data:
+        item = next(
+            (
+                row
+                for row in data.get("waiting_on_ove", [])
+                if row.get("id") == item_id
+            ),
+            None,
+        )
+        answer = item.get("answer") if item is not None else None
+    if isinstance(answer, str):
+        return answer
+    if isinstance(answer, Mapping) and "selected" in answer:
+        return answer
+    return None
+
+
+def _answer_args(answer: str | Mapping[str, Any]) -> dict[str, Any]:
+    """``answer_question`` args for one polled answer (server.ts:44)."""
+    if isinstance(answer, str):
+        return {"text": answer}
+    return {"selected": list(answer["selected"])}
+
+
+def _clear_question(
+    tasks_path: str | Path | None, task_id: str | None, item_id: str
+) -> None:
+    """Clear the question item (idempotent; the blocked row returns to
+    ``working`` through clear_block's own semantics)."""
+    clear_block(tasks_path, item_id, task_id=str(task_id))
+
+
 def _wait_stage_done(
     client: AndaClient,
     stage_id: str,
@@ -789,6 +866,7 @@ def _wait_stage_done(
     tasks_path: str | Path | None = None,
     task_id: str | None = None,
     row_started: bool = False,
+    stage: str | None = None,
 ) -> dict[str, Any]:
     """Consume events until the stage's ``stage_done`` arrives.
 
@@ -796,11 +874,25 @@ def _wait_stage_done(
     EOF or a dead wrapper raises SandboxUnavailable instead of hanging.
     Every event is appended through the redacting ``append_event`` and
     touches the run's tasks.json row when one was started (best-effort).
-    A set interrupt sends the ``abort`` tool once and keeps consuming
-    until the terminal event, then raises ``cancelled`` with
-    ``started=True`` so ``run()`` maps it exactly like the bwrap path.
+
+    A ``question`` event with a non-empty requestId (and a started row)
+    raises exactly one waiting_on_ove item and the loop polls the store
+    for its additive ``answer`` at most once per _ANSWER_POLL seconds —
+    no wall-clock deadline — piping it back through ``answer_question``
+    into the same live session; a stale answer clears the dead item and
+    keeps waiting (a re-ask arrives as a new question event), any other
+    answer_question failure propagates as SandboxUnavailable. A set
+    interrupt is honoured while an answer is pending, sends the ``abort``
+    tool once and keeps consuming until the terminal event, then raises
+    ``cancelled`` with ``started=True`` so ``run()`` maps it exactly like
+    the bwrap path.
     """
     aborted = False
+    # The open question, if any: (wrapper requestId, waiting_on_ove item
+    # id). One question at a time per stage is the wrapper's contract.
+    pending: tuple[str, str] | None = None
+    answer: str | Mapping[str, Any] | None = None
+    last_answer_check = 0.0
     while True:
         event = client.next_event(_POLL_TICK)
         for buffered in client.drain_events():
@@ -808,6 +900,56 @@ def _wait_stage_done(
             _touch_row(tasks_path, task_id, row_started, buffered)
         if event is not None:
             _touch_row(tasks_path, task_id, row_started, event)
+        if (
+            event is not None
+            and event.get("event") == "question"
+            and row_started
+            and str(event.get("requestId") or "")
+        ):
+            # A GSD follow-up question: supersede any open item (exactly
+            # one open at a time) and raise the new one under its stable
+            # id. A requestId-less question is informational only —
+            # append/touch already happened above.
+            rid = str(event.get("requestId"))
+            with contextlib.suppress(Exception):
+                if pending is not None:
+                    _clear_question(tasks_path, task_id, pending[1])
+                pending = (
+                    rid,
+                    _raise_question(
+                        tasks_path, task_id, stage, rid, event.get("question")
+                    ),
+                )
+                last_answer_check = time.monotonic()
+        if (
+            pending is not None
+            and time.monotonic() - last_answer_check >= _ANSWER_POLL
+        ):
+            last_answer_check = time.monotonic()
+            answer = None
+            with contextlib.suppress(Exception):
+                answer = _answer_from_store(tasks_path, pending[1])
+            if answer is not None:
+                try:
+                    client.call(
+                        "answer_question",
+                        {
+                            "stage_id": stage_id,
+                            "request_id": pending[0],
+                            **_answer_args(answer),
+                        },
+                    )
+                except SandboxUnavailable as exc:
+                    if "stale_answer" not in str(exc):
+                        # Wrapper-level failure: propagate per the
+                        # no-silent-fallback rule.
+                        raise
+                    # The request died (answered/cancelled elsewhere): the
+                    # item is dead too — clear it and keep waiting; a fresh
+                    # ask arrives as a new question event with a new id.
+                with contextlib.suppress(Exception):
+                    _clear_question(tasks_path, task_id, pending[1])
+                pending = None
         if (
             event is not None
             and event.get("event") == "stage_done"
