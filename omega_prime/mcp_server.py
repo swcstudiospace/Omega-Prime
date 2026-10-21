@@ -1013,7 +1013,9 @@ def default_registry(
     from omega_prime.routines.nightly import writable_skills_root
 
     install_skills = root / "omega_prime" / "skills"
-    skills_root = writable_skills_root(install_skills, env)
+    # A read-only install writes learned skills into the agent folder, where
+    # the migration moves them; an unmigrated `<state>/skills` is still used.
+    skills_root = writable_skills_root(install_skills, env, agent_dir=agent_dir)
     if skills_root != install_skills:
         ensure_private_dir(skills_root)
     register_growth_tools(
@@ -1117,6 +1119,12 @@ def default_registry(
             )
         ),
     }
+    # One intake file for the lead tools and the scheduled desk pass.
+    desk_intake = (
+        _desk_store_path(work, state_value, "intake.json", desk_legacy)
+        if state_value
+        else desk_intake_path(work, state_dir=None)
+    )
     register_lead_tools(
         registry,
         LeadClient(
@@ -1127,11 +1135,7 @@ def default_registry(
                 memory=memory_store,
                 memory_backends=memory_backends,
                 memory_refresh=refresh_memory_substrate,
-                intake=IntakeStore(
-                    _desk_store_path(work, state_value, "intake.json", desk_legacy)
-                    if state_value
-                    else desk_intake_path(work, state_dir=None)
-                ),
+                intake=IntakeStore(desk_intake),
                 roster=RosterStore(
                     _desk_store_path(work, state_value, "packs.json", desk_legacy)
                 ),
@@ -1324,7 +1328,7 @@ def default_registry(
     # convention (`root/cron/jobs.json`) so the desk pass and the plain cron
     # tick see one schedule file. Built last so a catch-up tick meets the
     # fully registered tool surface.
-    driver = DeskDriver(root, parent=parent, work_root=work)
+    driver = DeskDriver(root, parent=parent, work_root=work, intake_path=desk_intake)
     registry.runtime_bindings["desk_driver"] = driver
     # Started by the live server (stdio main / serve_sse), not here: building
     # a registry is also how doctor, setup_check, the catalog and tests

@@ -343,3 +343,237 @@ def test_private_state_paths_lists_only_existing_operator_files(tmp_path):
         state / "dashboard",
     }
     assert state / "agent" not in paths
+
+
+# -- Greptile PR 50 round 4: safe moves ---------------------------------------
+
+
+def _db(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path)
+    db.execute("create table t (v text)")
+    db.execute("insert into t values (?)", (value,))
+    db.commit()
+    db.close()
+
+
+def test_a_database_and_its_journal_move_together(tmp_path):
+    state = tmp_path / "state"
+    _db(state / "sessions.db", "host")
+    _db(state / "mcp-state" / "sessions.db", "child")
+    (state / "mcp-state" / "sessions.db-journal").write_bytes(b"child journal")
+    agent = state / "agent"
+    report = migrate_agent_state(agent, state_root=state)
+    assert not report.errors
+    # The first (host) database moved; the child's database keeps its own
+    # journal beside it instead of meeting the host database.
+    assert (agent / "sessions.db").is_file()
+    assert not (agent / "sessions.db-journal").exists()
+    assert (state / "mcp-state" / "sessions.db").is_file()
+    assert (state / "mcp-state" / "sessions.db-journal").read_bytes() == (
+        b"child journal"
+    )
+    db = sqlite3.connect(agent / "sessions.db")
+    assert db.execute("select v from t").fetchall() == [("host",)]
+    db.close()
+
+
+def test_a_stray_destination_journal_blocks_the_database_move(tmp_path):
+    state = tmp_path / "state"
+    _db(state / "sessions.db", "host")
+    agent = state / "agent"
+    agent.mkdir(parents=True)
+    (agent / "sessions.db-wal").write_bytes(b"stray")
+    report = migrate_agent_state(agent, state_root=state)
+    assert (state / "sessions.db").is_file()
+    assert not (agent / "sessions.db").exists()
+    assert any(Path(k["from"]).name == "sessions.db" for k in report.kept)
+
+
+def test_a_record_created_during_the_move_is_never_replaced(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "intake.json").write_text('{"old": true}', encoding="utf-8")
+    agent = state / "agent"
+    real_link = os.link
+
+    def racing_link(src, dst, *args, **kwargs):
+        # Another process writes the destination after the existence check.
+        if Path(dst) == agent / "intake.json" and not Path(dst).exists():
+            Path(dst).write_text('{"new": true}', encoding="utf-8")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", racing_link)
+    report = migrate_agent_state(agent, state_root=state)
+    assert (agent / "intake.json").read_text(encoding="utf-8") == '{"new": true}'
+    assert (state / "intake.json").read_text(encoding="utf-8") == '{"old": true}'
+    assert any(k.get("reason") == "already_exists" for k in report.kept)
+
+
+def test_a_failed_cross_device_copy_leaves_no_partial_file(tmp_path, monkeypatch):
+    import errno
+    import shutil
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "intake.json").write_text('{"orders": [1]}', encoding="utf-8")
+    agent = state / "agent"
+
+    def cross_device(src, dst, *args, **kwargs):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    def disk_full(reader, writer, *args, **kwargs):
+        writer.write(b'{"ord')
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(os, "link", cross_device)
+    monkeypatch.setattr(shutil, "copyfileobj", disk_full)
+    report = migrate_agent_state(agent, state_root=state)
+    assert report.errors and not report.moved
+    assert not (agent / "intake.json").exists()
+    assert list(agent.glob(".*migrating*")) == []
+    assert (state / "intake.json").read_text(encoding="utf-8") == '{"orders": [1]}'
+    # The compatibility read keeps using the intact original.
+    assert agent_path(agent, "intake.json", (state / "intake.json",)) == (
+        state / "intake.json"
+    )
+
+
+def test_a_cross_device_copy_publishes_without_replacing(tmp_path, monkeypatch):
+    import errno
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "intake.json").write_text('{"orders": [2]}', encoding="utf-8")
+    agent = state / "agent"
+    real_link = os.link
+
+    def no_link_from_source(src, dst, *args, **kwargs):
+        if Path(src) == state / "intake.json":
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", no_link_from_source)
+    report = migrate_agent_state(agent, state_root=state)
+    assert not report.errors
+    assert (agent / "intake.json").read_text(encoding="utf-8") == '{"orders": [2]}'
+    assert not (state / "intake.json").exists()
+    assert list(agent.glob(".*migrating*")) == []
+
+
+def test_memory_files_stay_together_when_one_cannot_move(tmp_path):
+    install = tmp_path / "install"
+    package = install / "omega_prime" / "memory"
+    package.mkdir(parents=True)
+    (package / "MEMORY.md").write_text("tree fact\n", encoding="utf-8")
+    profile = tmp_path / "profile.md"
+    profile.write_text("tree user\n", encoding="utf-8")
+    (package / "USER.md").symlink_to(profile)
+    home = tmp_path / "home"
+    agent = agent_state_dir({}, home=home)
+    assert agent is not None
+    layout = legacy_layout({}, home=home, install_root=install, work_root=install)
+    migrate_agent_state(agent, **layout)
+    # Neither file moved, so the memory folder still shows both.
+    assert (package / "MEMORY.md").is_file()
+    assert not (agent / "memory" / "MEMORY.md").exists()
+    chosen = agent_memory_dir(agent, legacy_sources(**layout))
+    assert chosen == package
+    assert (chosen / "USER.md").read_text(encoding="utf-8") == "tree user\n"
+
+
+def test_a_failed_memory_move_puts_the_moved_file_back(tmp_path, monkeypatch):
+    import errno
+
+    state = tmp_path / "state"
+    install = tmp_path / "install"
+    package = install / "omega_prime" / "memory"
+    package.mkdir(parents=True)
+    (package / "MEMORY.md").write_text("fact\n", encoding="utf-8")
+    (package / "USER.md").write_text("user\n", encoding="utf-8")
+    agent = state / "agent"
+    real_link = os.link
+
+    def fail_user(src, dst, *args, **kwargs):
+        if Path(dst).name == "USER.md" and Path(dst).parent == agent / "memory":
+            raise OSError(errno.EIO, "Input/output error")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", fail_user)
+    report = migrate_agent_state(
+        agent, state_root=None, install_root=install, work_root=install
+    )
+    assert report.errors
+    assert (package / "MEMORY.md").read_text(encoding="utf-8") == "fact\n"
+    assert (package / "USER.md").read_text(encoding="utf-8") == "user\n"
+    assert not (agent / "memory" / "MEMORY.md").exists()
+
+
+def test_read_only_install_reads_migrated_skills_from_the_agent_folder(tmp_path):
+    from omega_prime.routines.nightly import writable_skills_root
+
+    install = tmp_path / "omega_prime" / "skills"
+    install.mkdir(parents=True)
+    state = tmp_path / "state"
+    (state / "skills" / "deploy").mkdir(parents=True)
+    (state / "skills" / "deploy" / "SKILL.md").write_text("steps\n", encoding="utf-8")
+    env = {"OMEGA_PRIME_STATE_DIR": str(state)}
+    install.chmod(0o555)
+    try:
+        # Before the move the old folder is still used in place.
+        assert writable_skills_root(install, env) == state / "skills"
+        migrate_agent_state(state / "agent", state_root=state)
+        assert writable_skills_root(install, env) == state / "agent" / "skills"
+        assert (state / "agent" / "skills" / "deploy" / "SKILL.md").is_file()
+        registry = default_registry(ROOT, tmp_path / "home", env=env)
+        del registry
+        assert not (state / "skills").exists()
+    finally:
+        install.chmod(0o755)
+
+
+def test_secret_files_in_hidden_folders_are_passed_by_env(tmp_path):
+    from omega_prime.engine.jobs import sandboxed_child_env
+
+    state = tmp_path / "state"
+    secrets = state / "secrets"
+    secrets.mkdir(parents=True)
+    token = secrets / "SUBSTRATE_TOKEN"
+    token.write_text("s3cret-value\n", encoding="utf-8")
+    token.chmod(0o600)
+    loose = secrets / "X_API_TOKEN"
+    loose.write_text("loose\n", encoding="utf-8")
+    loose.chmod(0o644)
+    implicit = secrets / "TELEGRAM_BOT_TOKEN"
+    implicit.write_text("tg\n", encoding="utf-8")
+    implicit.chmod(0o600)
+    outside = tmp_path / "elsewhere" / "DISCORD_BOT_TOKEN"
+    outside.parent.mkdir()
+    outside.write_text("d\n", encoding="utf-8")
+    outside.chmod(0o600)
+    env = {
+        "OMEGA_PRIME_STATE_DIR": str(state),
+        "SUBSTRATE_TOKEN_FILE": str(token),
+        "X_API_TOKEN_FILE": str(loose),
+        "DISCORD_BOT_TOKEN_FILE": str(outside),
+        "HINDSIGHT_API_KEY": "direct",
+        "HINDSIGHT_API_KEY_FILE": str(secrets / "HINDSIGHT_API_KEY"),
+    }
+    hidden = private_state_paths([state])
+    child = sandboxed_child_env(env, hidden)
+    # Resolved on the host, handed over by env (never argv or mcp.json).
+    assert child["SUBSTRATE_TOKEN"] == "s3cret-value"
+    assert "SUBSTRATE_TOKEN_FILE" not in child
+    assert child["TELEGRAM_BOT_TOKEN"] == "tg"
+    # An unreadable (group-readable) file is dropped, not a startup failure.
+    assert "X_API_TOKEN" not in child and "X_API_TOKEN_FILE" not in child
+    # A file the sandbox can still read keeps its path.
+    assert child["DISCORD_BOT_TOKEN_FILE"] == str(outside)
+    assert "DISCORD_BOT_TOKEN" not in child
+    # A direct value still wins.
+    assert child["HINDSIGHT_API_KEY"] == "direct"
+    assert "HINDSIGHT_API_KEY_FILE" not in child
+    # Without hidden paths nothing changes.
+    plain = sandboxed_child_env(env, [])
+    assert plain["SUBSTRATE_TOKEN_FILE"] == str(token)
+    assert "SUBSTRATE_TOKEN" not in plain

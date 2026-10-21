@@ -30,6 +30,14 @@ All notable changes to this project are documented here. Format follows
   `dashboard/`. A one-time, non-overwriting migration moves older data in,
   and unmoved stores are still read in place
   (`python -m omega_prime.agent_state --dry-run`).
+- The migration never replaces a file: each move is published with a
+  no-replace link (a copy to a scratch name first across filesystems), a
+  database moves together with its `-wal`/`-shm`/`-journal` sidecars,
+  `MEMORY.md` and `USER.md` move as one unit, and a failed move is undone.
+  Learned skills on a read-only install use `<agent>/skills`. Credential
+  files under the hidden `secrets/` folder are read on the host and passed
+  to the engine by environment, and scheduled desk passes open the same
+  intake file as the host's lead tools.
 
 ### omp engine (Phase A1a)
 

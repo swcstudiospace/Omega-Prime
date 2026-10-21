@@ -58,6 +58,7 @@ class DeskDriver:
         *,
         interval_seconds: int | float = DEFAULT_INTERVAL_SECONDS,
         clock: Callable[[], float] | None = None,
+        intake_path: str | Path | None = None,
     ) -> None:
         if (
             isinstance(interval_seconds, bool)
@@ -68,6 +69,10 @@ class DeskDriver:
         self.path = Path(root, "cron", "jobs.json").expanduser().resolve()
         self.parent = parent
         self.work_root = work_root
+        # The intake file the host's lead tools opened, so a scheduled pass
+        # reads the same queue even when the agent folder comes from
+        # settings.json rather than the process env.
+        self.intake_path = intake_path
         self.interval_seconds = interval_seconds
         self._clock = clock or time.time
         self._stop = threading.Event()
@@ -119,7 +124,13 @@ class DeskDriver:
         store: JobStore | None = None
         try:
             store = JobStore(self.path)
-            run_desk_lead_passes(store, self._clock(), self.parent, self.work_root)
+            run_desk_lead_passes(
+                store,
+                self._clock(),
+                self.parent,
+                self.work_root,
+                intake_path=self.intake_path,
+            )
         except Exception as exc:  # loud, non-fatal: the next tick retries
             print(
                 f"desk-pass driver: tick failed: {type(exc).__name__}: {exc}",

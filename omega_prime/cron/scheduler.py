@@ -215,14 +215,17 @@ def desk_lead_runner(
     work_root: str | Path | None = None,
     *,
     bot: str = "bot-00-omega-prime",
+    intake_path: str | Path | None = None,
 ) -> Callable[[dict], Any]:
     """Build the production runner for ``desk_lead_pass`` jobs.
 
     Each pass resolves the same ``IntakeStore`` the lead tools use (the
     shared state dir via :func:`desk_intake_path`) and dispatches tickets
     through the parent shim, so the routine and ``lead_intake_next`` /
-    ``lead_intake_ack`` see the same records. The lead stack is imported
-    inside the runner, so plain cron ticks never load it.
+    ``lead_intake_ack`` see the same records. ``intake_path`` is the file the
+    host's lead tools opened (from its effective settings env); a job's own
+    ``intake_path`` still wins. The lead stack is imported inside the
+    runner, so plain cron ticks never load it.
     """
 
     def runner(job: dict) -> Any:
@@ -233,8 +236,8 @@ def desk_lead_runner(
         )
         from omega_prime.tools.lead import IntakeStore
 
-        intake_path = job.get("intake_path") or desk_intake_path(work_root)
-        intake = IntakeStore(intake_path)
+        path = job.get("intake_path") or intake_path or desk_intake_path(work_root)
+        intake = IntakeStore(path)
         limit = job.get("limit")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             limit = 5
@@ -297,6 +300,7 @@ def run_desk_lead_passes(
     work_root: str | Path | None = None,
     *,
     bot: str = "bot-00-omega-prime",
+    intake_path: str | Path | None = None,
 ) -> list[dict]:
     """Production entry point: tick due desk passes with real dispatch.
 
@@ -306,7 +310,9 @@ def run_desk_lead_passes(
     comes back explicitly blocked with a failure receipt.
     """
     return tick_desk_lead_passes(
-        store, now, desk_lead_runner(parent, work_root, bot=bot)
+        store,
+        now,
+        desk_lead_runner(parent, work_root, bot=bot, intake_path=intake_path),
     )
 
 

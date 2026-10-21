@@ -106,7 +106,9 @@ def test_read_only_install_creates_state_skills_and_keeps_shipped_names(
     before = _snapshot(root)
     try:
         registry = default_registry(root, home, env={STATE_ENV: str(state)})
-        assert (state / "skills").is_dir()
+        # Learned skills live in the agent data folder, not the state root.
+        assert not (state / "skills").exists()
+        assert (state / "agent" / "skills").is_dir()
         viewed = json.loads(registry.dispatch("skill_view", {"name": "desk-gateway"}))
         assert viewed["success"] is True
         assert viewed["content"] == "shipped body\n"
@@ -127,7 +129,7 @@ def test_read_only_install_creates_state_skills_and_keeps_shipped_names(
             "success": False,
             "error": "A skill named 'desk-gateway' already exists.",
         }
-        assert not (state / "skills" / "desk-gateway").exists()
+        assert not (state / "agent" / "skills" / "desk-gateway").exists()
         created = json.loads(
             registry.dispatch(
                 "skill_manage",
@@ -139,7 +141,7 @@ def test_read_only_install_creates_state_skills_and_keeps_shipped_names(
             )
         )
         assert created["success"] is True
-        assert (state / "skills" / "deploy" / "SKILL.md").is_file()
+        assert (state / "agent" / "skills" / "deploy" / "SKILL.md").is_file()
         assert _snapshot(root) == before
     finally:
         install.chmod(0o755)

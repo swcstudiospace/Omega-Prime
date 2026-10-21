@@ -261,6 +261,91 @@ class MigrationReport:
         }
 
 
+#: ``os.link`` errors that mean "no hard link here": copy and publish instead.
+_NO_LINK = {
+    errno.EXDEV,
+    errno.EPERM,
+    errno.EMLINK,
+    getattr(errno, "ENOTSUP", errno.EPERM),
+    getattr(errno, "EOPNOTSUPP", errno.EPERM),
+}
+#: ``os.rename`` errors that mean the directory destination already holds data.
+_DIR_TAKEN = {errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR, errno.EISDIR}
+
+
+def _scratch(dst: Path) -> Path:
+    return dst.parent / f".{dst.name}.migrating-{os.getpid()}"
+
+
+def _publish_file(src: Path, dst: Path) -> bool:
+    """Move one file to ``dst`` only if ``dst`` does not exist. Atomic.
+
+    ``os.link`` fails with EEXIST instead of replacing, so a record another
+    process creates at ``dst`` meanwhile is never overwritten. Without a hard
+    link (another filesystem), the file is copied to a scratch name beside
+    ``dst``, flushed, and published with the same no-replace link; a failed
+    copy is removed and the source stays. False when ``dst`` already exists.
+    """
+    dst.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.link(src, dst, follow_symlinks=False)
+    except FileExistsError:
+        return False
+    except OSError as exc:
+        if exc.errno not in _NO_LINK:
+            raise
+        scratch = _scratch(dst)
+        try:
+            with open(src, "rb") as reader, open(scratch, "xb") as writer:
+                shutil.copyfileobj(reader, writer)
+                writer.flush()
+                os.fsync(writer.fileno())
+            shutil.copystat(src, scratch)
+            if os.path.getsize(scratch) != os.path.getsize(src):
+                raise OSError(errno.EIO, "copy size mismatch") from exc
+            try:
+                os.link(scratch, dst)
+            except FileExistsError:
+                return False
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(scratch)
+    os.unlink(src)
+    return True
+
+
+def _publish_dir(src: Path, dst: Path) -> bool:
+    """Move a directory to a missing ``dst``. False when ``dst`` holds data.
+
+    ``rename`` never replaces a non-empty directory or a file. Across
+    filesystems the tree is copied to a scratch name first and renamed into
+    place only once complete; a failed copy is removed and the source stays.
+    """
+    dst.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.rename(src, dst)
+        return True
+    except OSError as exc:
+        if exc.errno in _DIR_TAKEN:
+            return False
+        if exc.errno != errno.EXDEV:
+            raise
+    scratch = _scratch(dst)
+    try:
+        shutil.copytree(src, scratch, symlinks=True)
+        try:
+            os.rename(scratch, dst)
+        except OSError as exc:
+            if exc.errno in _DIR_TAKEN:
+                return False
+            raise
+    finally:
+        if os.path.lexists(scratch):
+            shutil.rmtree(scratch, ignore_errors=True)
+    shutil.rmtree(src)
+    return True
+
+
 def _move_one(src: Path, dst: Path, report: MigrationReport) -> None:
     """Move ``src`` to ``dst`` without overwriting anything."""
     if src == dst or not os.path.lexists(src):
@@ -270,11 +355,7 @@ def _move_one(src: Path, dst: Path, report: MigrationReport) -> None:
         return
     if os.path.lexists(dst):
         if src.is_dir() and dst.is_dir() and not dst.is_symlink():
-            for child in sorted(src.iterdir()):
-                _move_one(child, dst / child.name, report)
-            if not report.dry_run:
-                with contextlib.suppress(OSError):
-                    src.rmdir()
+            _merge_dir(src, dst, report)
             return
         report.kept.append(
             {"from": str(src), "to": str(dst), "reason": "already_exists"}
@@ -284,32 +365,139 @@ def _move_one(src: Path, dst: Path, report: MigrationReport) -> None:
         report.moved.append({"from": str(src), "to": str(dst)})
         return
     try:
-        dst.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        try:
-            os.rename(src, dst)
-        except OSError as exc:
-            if exc.errno != errno.EXDEV:
-                raise
-            # Another filesystem: copy, check, then remove the original.
-            if src.is_dir():
-                shutil.copytree(src, dst, symlinks=True)
-                shutil.rmtree(src)
-            else:
-                shutil.copy2(src, dst)
-                if os.path.getsize(dst) != os.path.getsize(src):
-                    os.unlink(dst)
-                    raise OSError(errno.EIO, "copy size mismatch") from exc
-                os.unlink(src)
+        publish = _publish_dir if src.is_dir() else _publish_file
+        published = publish(src, dst)
     except OSError as exc:
-        report.errors.append(
-            {
-                "from": str(src),
-                "to": str(dst),
-                "error": exc.strerror or type(exc).__name__,
-            }
-        )
+        _error(report, src, dst, exc)
+        return
+    if not published:
+        # Created by someone else since the check: merge or keep both.
+        if src.is_dir() and dst.is_dir() and not dst.is_symlink():
+            _merge_dir(src, dst, report)
+        else:
+            report.kept.append(
+                {"from": str(src), "to": str(dst), "reason": "already_exists"}
+            )
         return
     report.moved.append({"from": str(src), "to": str(dst)})
+
+
+def _merge_dir(src: Path, dst: Path, report: MigrationReport) -> None:
+    for child in sorted(src.iterdir()):
+        _move_one(child, dst / child.name, report)
+    if not report.dry_run:
+        with contextlib.suppress(OSError):
+            src.rmdir()
+
+
+def _error(report: MigrationReport, src: Path, dst: Path, exc: OSError) -> None:
+    report.errors.append(
+        {"from": str(src), "to": str(dst), "error": exc.strerror or type(exc).__name__}
+    )
+
+
+def _move_group(
+    pairs: Sequence[tuple[Path, Path]],
+    guard: Sequence[Path],
+    report: MigrationReport,
+    *,
+    keep_clashes: bool = False,
+) -> None:
+    """Move files that only make sense together, all or none.
+
+    Used for a SQLite database with its ``-wal``/``-shm``/``-journal``
+    sidecars and for the two memory files. When any name in ``guard``
+    already exists at the destination, or any source is a symlink, every
+    source stays where it is, so a database never meets another database's
+    journal and a profile never splits from its memory. A failure part way
+    moves the published files back. With ``keep_clashes`` a file whose own
+    destination exists stays put on its own and the rest still move as one
+    unit (the memory files: the agent folder then holds a complete set).
+    """
+    pairs = [(src, dst) for src, dst in pairs if os.path.lexists(src)]
+    if not pairs:
+        return
+    if any(src.is_symlink() for src, _ in pairs):
+        for src, _ in pairs:
+            report.kept.append({"from": str(src), "reason": "symlink"})
+        return
+    if keep_clashes:
+        for src, dst in pairs:
+            if os.path.lexists(dst):
+                report.kept.append(
+                    {"from": str(src), "to": str(dst), "reason": "already_exists"}
+                )
+        pairs = [(src, dst) for src, dst in pairs if not os.path.lexists(dst)]
+        guard = [dst for _, dst in pairs]
+        if not pairs:
+            return
+    if any(os.path.lexists(path) for path in guard):
+        for src, dst in pairs:
+            report.kept.append(
+                {"from": str(src), "to": str(dst), "reason": "already_exists"}
+            )
+        return
+    if report.dry_run:
+        for src, dst in pairs:
+            report.moved.append({"from": str(src), "to": str(dst)})
+        return
+    done: list[tuple[Path, Path]] = []
+    failure: tuple[Path, Path, OSError] | None = None
+    for src, dst in pairs:
+        try:
+            if _publish_file(src, dst):
+                done.append((src, dst))
+                continue
+            failure = (src, dst, FileExistsError(errno.EEXIST, "already exists"))
+        except OSError as exc:
+            failure = (src, dst, exc)
+        break
+    if failure is None:
+        for src, dst in done:
+            report.moved.append({"from": str(src), "to": str(dst)})
+        return
+    for src, dst in reversed(done):
+        try:
+            _publish_file(dst, src)
+        except OSError as back:
+            _error(report, dst, src, back)
+    failed_src, failed_dst, cause = failure
+    if isinstance(cause, FileExistsError):
+        for item_src, item_dst in pairs:
+            report.kept.append(
+                {"from": str(item_src), "to": str(item_dst), "reason": "already_exists"}
+            )
+    else:
+        _error(report, failed_src, failed_dst, cause)
+
+
+def _sqlite_group(src: Path, dst: Path) -> tuple[list[tuple[Path, Path]], list[Path]]:
+    """A database and its sidecars. Every destination name guards.
+
+    A stray ``-journal`` or ``-wal`` already at the destination would be
+    replayed into the moved database, so it blocks the move too.
+    """
+    pairs = [
+        (src.parent / (src.name + suffix), dst.parent / (dst.name + suffix))
+        for suffix in ("", *SQLITE_SIDECARS)
+    ]
+    return pairs, [pair[1] for pair in pairs]
+
+
+def _memory_group(
+    folder: Path, target: Path
+) -> tuple[list[tuple[Path, Path]], list[Path]]:
+    """The memory files present in ``folder``; only their own names guard.
+
+    Complementary halves from two old folders still combine (one held
+    ``MEMORY.md``, the other ``USER.md``). Moved with ``keep_clashes``.
+    """
+    pairs = [
+        (folder / name, target / name)
+        for name in MEMORY_FILES
+        if os.path.lexists(folder / name)
+    ]
+    return pairs, [dst for _, dst in pairs]
 
 
 def migrate_agent_state(
@@ -345,11 +533,55 @@ def migrate_agent_state(
         if root is not None
         for name in PRIVATE_STATE_NAMES
     }
+
+    def allowed(src: Path) -> bool:
+        return not (src in private or src == agent_dir or agent_dir in src.parents)
+
+    sidecar_names = {
+        item + suffix for item in AGENT_ITEMS for suffix in SQLITE_SIDECARS
+    }
+    memory_target = agent_dir / "memory"
+    memory_folders: set[Path] = set()
     for name, candidates in sources.items():
+        if name in sidecar_names:
+            continue  # moved with their database
         target = agent_dir / name
-        for src in candidates:
-            src = _absolute(src)
-            if src in private or src == agent_dir or agent_dir in src.parents:
+        for src in map(_absolute, candidates):
+            if not allowed(src):
+                continue
+            if name.startswith("memory/"):
+                # The install tree's two memory files move as one unit.
+                if src.parent not in memory_folders:
+                    memory_folders.add(src.parent)
+                    _move_group(
+                        *_memory_group(src.parent, memory_target),
+                        report,
+                        keep_clashes=True,
+                    )
+                continue
+            if name == "memory":
+                if (
+                    src.is_dir()
+                    and not src.is_symlink()
+                    and os.path.lexists(memory_target)
+                ):
+                    # Keep MEMORY.md and USER.md together; merge the rest.
+                    _move_group(
+                        *_memory_group(src, memory_target),
+                        report,
+                        keep_clashes=True,
+                    )
+                    for child in sorted(src.iterdir()):
+                        if child.name not in MEMORY_FILES:
+                            _move_one(child, memory_target / child.name, report)
+                    if not dry_run:
+                        with contextlib.suppress(OSError):
+                            src.rmdir()
+                else:
+                    _move_one(src, memory_target, report)
+                continue
+            if name.endswith((".db", ".sqlite")):
+                _move_group(*_sqlite_group(src, target), report)
                 continue
             _move_one(src, target, report)
     if not dry_run and report.moved:

@@ -39,6 +39,7 @@ from omega_prime.engine.jobs import (
     job_dir,
     maybe_tmux,
     omp_home_override,
+    sandboxed_child_env,
     state_dir,
     write_json,
 )
@@ -553,11 +554,12 @@ def _run(
     if store.is_dir() and store not in binds:
         # Writable so omp can save a refreshed login in place.
         binds.append(store)
+    hidden = private_state_paths([state_dir(env)])
     wrapped, sandbox = wrap(
         argv,
         env=env,
         binds=binds,
-        hidden=private_state_paths([state_dir(env)]),
+        hidden=hidden,
         unsandboxed_override=unsandboxed,
     )
     run_metadata["sandbox"] = sandbox
@@ -648,7 +650,9 @@ def _run(
             stderr=subprocess.PIPE,
             text=True,
             cwd=str(work),
-            env=child_env(env),
+            # Credential files under the hidden secrets/ folder are read on
+            # the host and passed by env, so the MCP child can still start.
+            env=sandboxed_child_env(env, hidden),
             bufsize=1,
             pass_fds=pass_fds,
         )

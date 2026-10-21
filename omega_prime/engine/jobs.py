@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -199,6 +199,55 @@ _CONNECTOR_ENV = (
     "OMEGA_PRIME_DESK_CHILD_MODEL",
     "OMEGA_PRIME_DESK_CHILD_PROVIDER",
 )
+
+
+def _inside(path: str | os.PathLike[str], roots: Sequence[Path]) -> bool:
+    real = Path(os.path.realpath(os.path.expanduser(str(path))))
+    for root in roots:
+        top = Path(os.path.realpath(str(root)))
+        if real == top or top in real.parents:
+            return True
+    return False
+
+
+def sandboxed_child_env(
+    env: Mapping[str, str], hidden: Sequence[Path]
+) -> dict[str, str]:
+    """:func:`child_env` for a run whose sandbox hides ``hidden`` paths.
+
+    A credential file inside a hidden path (``secrets/`` under the state
+    root) is not readable inside the sandbox, so the MCP child would fail
+    to start when it resolves ``NAME_FILE``. Those files are read here, on
+    the host, and handed to omp as ``NAME`` in the process environment,
+    the same channel a directly set credential already uses. Values never
+    reach argv or the generated MCP config. The same holds for a
+    credential the host would read from ``$OMEGA_PRIME_STATE_DIR/secrets``.
+    A file that cannot be read is dropped, so the child reports the
+    connector as not configured instead of failing to start.
+    """
+    from omega_prime.tooling.fs import read_secret_file
+
+    child = child_env(env)
+    if not hidden:
+        return child
+    state = str(env.get("OMEGA_PRIME_STATE_DIR", "") or "").strip()
+    for name in (*_PASS_ENV, *_CONNECTOR_ENV):
+        file_name = f"{name}_FILE"
+        path = child.get(file_name)
+        if path is None and state and name.isidentifier() and name not in child:
+            implicit = Path(state).expanduser() / "secrets" / name
+            if os.path.lexists(implicit):
+                path = str(implicit)
+        if path is None or not _inside(path, hidden):
+            continue
+        child.pop(file_name, None)
+        if name in child:
+            continue  # a direct value wins over the file, as on the host
+        try:
+            child[name] = read_secret_file(path)
+        except ValueError:
+            continue
+    return child
 
 
 def omp_home_override(env: Mapping[str, str]) -> Path | None:
