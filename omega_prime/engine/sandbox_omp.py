@@ -471,6 +471,8 @@ def run_backend(
     omp_major: int,
     stage: str | None,
     interrupt: Any | None,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
 ) -> EngineResult:
     """One engine stage run through the omp-sandbox wrapper.
 
@@ -489,8 +491,11 @@ def run_backend(
     ``path_refused`` and tier errors, protocol garbage, EOF, non-zero
     exit — raises ``SandboxUnavailable``; there is no bwrap fallback. A
     stage that ends ``failed``/``aborted`` returns ``ok=False`` with reason
-    ``engine`` instead of raising. See the module docstring for the stats
-    keys and session.json/events parity.
+    ``engine`` instead of raising. ``tasks_path``/``task_id`` are optional
+    dashboard context (keyword-only, default ``None``): both set switches
+    on the visibility wiring (Herdr pane, tasks.json row, question
+    round-trip); with either absent the run is unchanged. See the module
+    docstring for the stats keys and session.json/events parity.
     """
     work = allowed_worktree(
         Path(cwd).resolve() if cwd is not None else Path.cwd(), env

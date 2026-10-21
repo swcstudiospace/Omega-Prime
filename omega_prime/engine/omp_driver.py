@@ -349,6 +349,8 @@ def run(
             tmux=tmux,
             stage=stage,
             interrupt=interrupt,
+            tasks_path=tasks_path,
+            task_id=task_id,
         )
     except (EngineError, PlanNotAllowed, SandboxUnavailable, OSError) as exc:
         reason: str | None
@@ -417,6 +419,8 @@ def _run(
     tmux: bool | None,
     stage: str | None = None,
     interrupt: Any | None = None,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
 ) -> EngineResult:
     if mode not in MODES:
         raise EngineError("invalid_mode", "mode must be rpc or rpc-ui")
@@ -447,6 +451,8 @@ def _run(
             omp_major=version[0],
             stage=stage,
             interrupt=interrupt,
+            tasks_path=tasks_path,
+            task_id=task_id,
         )
     if not sandbox_ready(env, unsandboxed_override=unsandboxed):
         raise SandboxUnavailable(
