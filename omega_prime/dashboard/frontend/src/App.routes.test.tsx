@@ -2,9 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { App } from './App'
 import { fixture } from './test/fixtures'
+class PassiveEventSource {
+  onopen: ((event: Event) => void) | null = null
+  onerror: ((event: Event) => void) | null = null
+  constructor(_url: string) {}
+  addEventListener(_name: string, _listener: EventListenerOrEventListenerObject) {}
+  close() {}
+}
 vi.mock('./hooks/useDashboard', () => ({ useDashboard: () => ({ data: fixture, loading: false, error: null, receivedAt: Date.now(), live: true, refresh: vi.fn() }) }))
-beforeEach(() => { window.history.replaceState(null, ''); window.location.hash = '#/overview'; sessionStorage.clear() })
-afterEach(() => cleanup())
+beforeEach(() => { vi.stubGlobal('EventSource', PassiveEventSource); window.history.replaceState(null, ''); window.location.hash = '#/overview'; sessionStorage.clear() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 describe('Command Center hash routes', () => {
   it('opens and clears each bucket and restores initial hash', async () => {
     window.location.hash = '#/tasks?bucket=working'
