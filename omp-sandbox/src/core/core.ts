@@ -24,6 +24,8 @@ type StageRec = {
   settled: boolean;
 };
 
+type DownReport = { leftovers: string[]; ownedBefore: Record<string, unknown> | null; brokerStopped: boolean; attestation: string };
+
 export class Core extends EventEmitter {
   broker = new AuthBroker();
   tier: (SandboxTier & { hostRoot?: string }) | null = null;
@@ -38,6 +40,8 @@ export class Core extends EventEmitter {
 
   #starting: Promise<Record<string, unknown>> | null = null;
   #ready = false;
+  /** Set for the whole of `down()`: no new startup or stage is accepted while shutdown is tearing things down. */
+  #stopping: Promise<DownReport> | null = null;
 
   /**
    * Bring the sandbox up once. Concurrent callers share one startup; a failed startup tears down everything it
@@ -49,6 +53,7 @@ export class Core extends EventEmitter {
    * symlinks) into an empty workdir. The two are mutually exclusive. Paths are checked before anything starts.
    */
   up(opts: { tiers?: string[]; seed?: string; workspace_host_path?: string } = {}): Promise<Record<string, unknown>> {
+    if (this.#stopping) return Promise.reject(new Error("shutting down; call up again after down finishes"));
     if (this.#ready) return Promise.resolve(this.up_);
     if (!this.#starting) this.#starting = this.#up(opts).finally(() => { this.#starting = null; });
     return this.#starting;
@@ -114,6 +119,7 @@ export class Core extends EventEmitter {
 
   /** Start a GSD stage. Returns immediately; follow with status()/events. */
   runStage(a: { stage: Stage; gsdCommand: string; task: string; thinking?: string; model?: string; plan?: string }) {
+    if (this.#stopping) throw new Error("shutting down; no new stages");
     if (!this.tier || !this.#ready) throw new Error("not up");
     // Every stage runs in the same workdir, so overlapping stages would edit and commit each other's files.
     // An aborted stage is terminal at once but its omp session can still be writing until it settles.
@@ -220,10 +226,19 @@ export class Core extends EventEmitter {
     return { leftovers, ownedBefore };
   }
 
-  async down() {
+  down(): Promise<DownReport> {
+    // One shutdown at a time; a second caller waits for the same one.
+    if (!this.#stopping) this.#stopping = this.#down().finally(() => { this.#stopping = null; });
+    return this.#stopping;
+  }
+
+  async #down(): Promise<DownReport> {
+    // Refuse new work before the first wait: `#stopping` is already set, and the core is no longer ready.
+    this.#ready = false;
     // Let an in-flight startup finish (or roll itself back) before tearing down.
     if (this.#starting) await this.#starting.catch(() => {});
-    for (const r of this.stages.values()) if (!TERMINAL.includes(r.status)) await this.abort(r.id).catch(() => {});
+    this.#ready = false;
+    for (const r of this.stages.values()) if (!r.settled) await this.abort(r.id).catch(() => {});
     const { leftovers, ownedBefore } = await this.#teardown();
     const out = { leftovers, ownedBefore, brokerStopped: this.broker.proc === null, attestation: "mock" };
     this.#receipt(`down-${Date.now().toString(36)}`, out);

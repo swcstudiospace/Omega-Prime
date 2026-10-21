@@ -32,13 +32,17 @@ export class AuthBroker {
       const onData = (b: Buffer) => { if (b.toString().includes("auth-broker listening")) { clearTimeout(t); resolve(); } };
       this.proc!.stdout!.on("data", onData); this.proc!.stderr!.on("data", onData);
       this.proc!.once("exit", (c) => { clearTimeout(t); reject(new Error(`auth-broker exited early (${c})`)); });
+      // A missing or non-executable omp emits `error` (not `exit`); reject so `up` rolls back instead of crashing.
+      this.proc!.once("error", (e) => { clearTimeout(t); reject(new Error(`auth-broker could not start: ${e.message}`)); });
     });
+    this.proc?.on("error", () => {});
     return this;
   }
 
   async stop() {
     const p = this.proc; this.proc = null; this.#token = "";
-    if (!p || p.exitCode !== null) return;
+    // A broker killed by a signal has exitCode null and signalCode set; its exit event has already fired.
+    if (!p || p.exitCode !== null || p.signalCode !== null) return;
     const gone = new Promise((r) => p.once("exit", r));
     p.kill("SIGTERM"); const t = setTimeout(() => p.kill("SIGKILL"), 5000);
     await gone; clearTimeout(t);

@@ -13,6 +13,9 @@ try {
     core.on("event", (e) => { console.error(JSON.stringify(e)); if (e.event === "question") core.answer(e.stageId, e.requestId, {}); });
     const { stageId } = core.runStage({ stage: stage as any, gsdCommand, task: readFileSync(file, "utf8") });
     await new Promise<void>((r) => core.on("event", (e) => e.event === "stage_done" && e.stageId === stageId && r()));
-    console.log(JSON.stringify(core.status(stageId), null, 2));
+    const result = core.status(stageId) as { status: string };
+    console.log(JSON.stringify(result, null, 2));
+    // A failed or aborted stage does not throw; scripts must still see a nonzero exit.
+    if (result.status !== "completed") process.exitCode = 1;
   }
 } finally { console.error(JSON.stringify(await core.down())); }

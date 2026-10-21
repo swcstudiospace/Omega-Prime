@@ -101,6 +101,9 @@ saved output — `--token` exists only as a deprecated flag that warns because
 | `NOTION_TOKEN` or `NOTION_TOKEN_FILE` | Notion Task dashboard (read, update, and insert content) | host env, or a mode 0600 file path |
 | `LINEAR_API_KEY` or `LINEAR_API_KEY_FILE` | Linear team selection and issue create | host env, or a mode 0600 file path |
 
+The [configuration inventory](configuration.md) lists environment names and purposes,
+with the scope of its production-Python scan stated on that page.
+
 Configure only the integrations you intend to use. Availability and failure
 behavior are tool-specific: some tools return `not_configured`, readiness
 accounts for named prerequisites, and some clients raise or degrade reads.

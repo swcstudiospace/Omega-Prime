@@ -1,4 +1,4 @@
-import { spawn, type SpawnOptions } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 
@@ -75,4 +75,19 @@ export function ownsGroup(pgid: number, marker: string, proc = "/proc"): boolean
     } catch { /* exited or not readable: not ours */ }
   }
   return false;
+}
+
+/**
+ * Wait for `ready`, but reject as soon as `p` fails to launch (ENOENT, EACCES) or exits first, so a broken binary
+ * goes through the caller's normal failed-startup cleanup instead of an unhandled child `error` killing Node.
+ * A later `error` on the long-lived child is absorbed for the same reason (its exit is observed elsewhere).
+ */
+export async function launched<T>(p: ChildProcess, what: string, ready: Promise<T>): Promise<T> {
+  let fail: (e: Error) => void = () => {};
+  const died = new Promise<never>((_, rej) => { fail = rej; });
+  const onError = (e: Error) => fail(new Error(`${what} could not start: ${e.message}`));
+  const onExit = (code: number | null, sig: string | null) => fail(new Error(`${what} exited during startup (${code ?? sig})`));
+  p.on("error", onError); p.once("exit", onExit);
+  try { return await Promise.race([ready, died]); }
+  finally { p.off("error", onError); p.off("exit", onExit); p.on("error", () => {}); }
 }

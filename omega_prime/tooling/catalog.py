@@ -47,6 +47,14 @@ from omega_prime.tools.ultrathink import ULT_TOOL_NAMES
 from omega_prime.tools.webpack import WEB_TOOL_NAMES
 from omega_prime.tools.x import X_TOOL_NAMES
 
+EXEC_JOB_TOOL_NAMES = (
+    "exec_job_start",
+    "exec_job_poll",
+    "exec_job_wait",
+    "exec_job_kill",
+)
+
+
 FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Coding", CODING_TOOL_NAMES),
     ("Growth", GROWTH_TOOL_NAMES),
@@ -54,6 +62,7 @@ FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Omega command", OMEGA_COMMAND_TOOL_NAMES),
     ("Platform", PLATFORM_TOOL_NAMES),
     ("IDE", IDE_TOOL_NAMES),
+    ("Exec jobs", EXEC_JOB_TOOL_NAMES),
     ("X", X_TOOL_NAMES),
     ("Telegram", TELEGRAM_TOOL_NAMES),
     ("Discord", DISCORD_TOOL_NAMES),
