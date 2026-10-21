@@ -12,6 +12,13 @@ describe('Tasks', () => {
     expect(badge).toHaveClass('stale-pill')
     expect(badge).toHaveAttribute('title')
     expect(badge.getAttribute('title')).toContain('2026')
+    // The badge lives inside the state cell, so stale rows keep the same
+    // seven grid cells as fresh rows.
+    const row = badge.closest('li')!
+    expect(badge.parentElement).toHaveClass('task-state')
+    const freshRender = render(<Tasks snapshot={fixture} data={fixture} loading={false} error={null} receivedAt={Date.now()} live refresh={vi.fn()} bucket="all" notice={null} onTask={vi.fn()} />)
+    const freshRow = freshRender.container.querySelector('li.task-row')!
+    expect(row.children).toHaveLength(freshRow.children.length)
   })
   it('renders no stale badge for fresh tasks', () => {
     render(<Tasks snapshot={fixture} data={fixture} loading={false} error={null} receivedAt={Date.now()} live refresh={vi.fn()} bucket="all" notice={null} onTask={vi.fn()} />)

@@ -116,7 +116,16 @@ export function useDashboard(): DashboardState {
     let controller: AbortController | null = null
     let streamFailed = false
     let generation = 0
+    let repairing = false
 
+    /** Stream data is newer than any in-flight HTTP snapshot: drop the
+     *  pending request so a late response cannot restore older rows. */
+    const invalidateFetch = () => {
+      repairing = false
+      generation++
+      controller?.abort()
+      controller = null
+    }
     const commit = (next: Snapshot) => {
       hasData.current = true
       dataRef.current = next
@@ -134,6 +143,7 @@ export function useDashboard(): DashboardState {
         if (!response.ok) throw new Error(`Snapshot request failed (${response.status})`)
         const next = await response.json() as Snapshot
         if (disposed || request !== generation) return
+        repairing = false
         commit(next)
       } catch (cause) {
         if (disposed || (cause instanceof DOMException && cause.name === 'AbortError')) return
@@ -156,7 +166,7 @@ export function useDashboard(): DashboardState {
       source.addEventListener('snapshot', ((event: MessageEvent<string>) => {
         try {
           const next = JSON.parse(event.data) as Snapshot
-          if (!disposed) { commit(next); setLoading(false); setLive(true); stopPolling() }
+          if (!disposed) { invalidateFetch(); commit(next); setLoading(false); setLive(true); stopPolling() }
         } catch { setError('Received an invalid snapshot event') }
       }) as EventListener)
       source.onopen = () => { if (!disposed && !streamFailed) { setLive(true); setError(null); stopPolling() } }
@@ -189,12 +199,16 @@ export function useDashboard(): DashboardState {
       next.onmessage = (event: MessageEvent<string>) => {
         if (disposed) return
         const message = parseMessage(typeof event.data === 'string' ? event.data : '')
-        if (message === null) { void fetchSnapshot(); return }
+        if (message === null) { repairing = true; void fetchSnapshot(); return }
         if (message.type === 'heartbeat') return
-        if (message.type === 'snapshot') { commit(message.snapshot); setLoading(false); setLive(true); stopPolling(); return }
+        if (message.type === 'snapshot') { invalidateFetch(); commit(message.snapshot); setLoading(false); setLive(true); stopPolling(); return }
         const current = dataRef.current
         const nextData = current === null ? null : applyDelta(current, message)
-        if (nextData === null) { void fetchSnapshot(); return }
+        if (nextData === null) { repairing = true; void fetchSnapshot(); return }
+        // A repair fetch (issued because a delta could not be applied) must
+        // land; otherwise this newer delta supersedes any pending request.
+        if (!repairing) invalidateFetch()
+        setLoading(false)
         dataRef.current = nextData
         setData(nextData)
         setReceivedAt(Date.now())

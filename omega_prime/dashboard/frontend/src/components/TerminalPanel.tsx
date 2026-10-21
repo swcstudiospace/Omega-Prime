@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { formatSydney } from '../lib/time'
 import './TerminalPanel.css'
@@ -21,10 +22,24 @@ function TerminalSurface({ onData, terminalRef }: { onData: (payload: string) =>
   const surface = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     const terminal = new Terminal({ convertEol: true, rows: 24, cols: 80 })
+    const fit = new FitAddon()
+    terminal.loadAddon(fit)
     terminalRef.current = terminal
-    if (surface.current) terminal.open(surface.current)
+    const element = surface.current
+    // Fit the local terminal to its container on mount and whenever the panel
+    // resizes, so narrow task panels and mobile layouts never clip output.
+    const refit = () => { try { fit.fit() } catch { /* not laid out yet */ } }
+    let observer: ResizeObserver | undefined
+    if (element) {
+      terminal.open(element)
+      refit()
+      if (typeof ResizeObserver !== 'undefined') { observer = new ResizeObserver(refit); observer.observe(element) }
+    }
+    window.addEventListener('resize', refit)
     const subscription = terminal.onData(onData)
     return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', refit)
       subscription.dispose()
       terminal.dispose()
       if (terminalRef.current === terminal) terminalRef.current = null
@@ -51,7 +66,6 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
   const sourceRef = useRef<EventSource | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const writableRef = useRef(false)
-  const readOnlyRef = useRef(false)
   const noRetryRef = useRef(false)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const region = useRef<HTMLDivElement>(null)
@@ -82,17 +96,13 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
   }, [])
 
   useEffect(() => {
-    readOnlyRef.current = effectiveReadOnly
-  }, [effectiveReadOnly])
-
-  useEffect(() => {
     if (!interactive || session === null) return
     const connect = () => {
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
       const next = new WebSocket(`${protocol}://${window.location.host}/ws/tasks/${encodeURIComponent(taskId)}/terminal`)
       socketRef.current = next
       next.onopen = () => {
-        next.send(JSON.stringify({ type: 'auth', token: tokenRef.current ?? '', mode: readOnlyRef.current ? 'ro' : 'rw' }))
+        next.send(JSON.stringify({ type: 'auth', token: tokenRef.current ?? '', mode: effectiveReadOnly ? 'ro' : 'rw' }))
         setWsOpen(true)
       }
       next.onmessage = (event: MessageEvent<string>) => {
@@ -102,11 +112,13 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
             const text = typeof message.text === 'string' ? message.text : ''
             terminalRef.current?.reset()
             terminalRef.current?.write(text)
+            setPaneStatus(null)
             setFrame(previous => ({ status: 'live', text, updated_at: typeof message.updated_at === 'string' ? message.updated_at : previous.updated_at }))
           } else if (message.type === 'status') {
             if (message.status === 'pane_closed') { noRetryRef.current = true; setPaneStatus('pane_closed'); next.close() }
             else if (message.status === 'no_session') setPaneStatus('no_session')
             else if (message.status === 'unavailable') setPaneStatus('unavailable')
+            else if (message.status === 'live') setPaneStatus(null)
           }
         } catch { /* malformed server frame: ignore */ }
       }
@@ -130,7 +142,9 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
       if (socket !== null) { socketRef.current = null; socket.onclose = null; socket.close() }
       setWsOpen(false)
     }
-  }, [interactive, session, taskId, attached, epoch])
+    // effectiveReadOnly is a dependency on purpose: the server fixes the mode
+    // at authentication, so a toggle must reconnect and authenticate again.
+  }, [interactive, session, taskId, attached, epoch, effectiveReadOnly])
 
   useEffect(() => () => { clearTimeout(retryTimerRef.current) }, [])
 
@@ -155,6 +169,10 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
     const source = connectSse()
     return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
   }, [degraded, connectSse])
+
+  useEffect(() => {
+    if (!paused && region.current) region.current.scrollTop = region.current.scrollHeight
+  }, [frame.text, paused])
 
   const copy = async () => {
     try { await navigator.clipboard.writeText(frame.text); setCopyStatus('Output copied') }

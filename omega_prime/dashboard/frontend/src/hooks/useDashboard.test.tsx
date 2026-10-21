@@ -70,6 +70,28 @@ describe('useDashboard websocket tier', () => {
     expect(result.current.data?.idle_sessions![0]!.stale).toBeNull()
     unmount()
   })
+  it('a late HTTP snapshot cannot overwrite newer stream data', async () => {
+    vi.stubGlobal('EventSource', RecordingEventSource); vi.stubGlobal('WebSocket', FakeWebSocket)
+    let resolveFetch: (value: unknown) => void = () => {}
+    const signals: AbortSignal[] = []
+    vi.stubGlobal('fetch', vi.fn((_url: unknown, init?: { signal?: AbortSignal }) => {
+      if (init?.signal) signals.push(init.signal)
+      return new Promise(resolve => { resolveFetch = resolve })
+    }))
+    const { result, unmount } = renderHook(() => useDashboard())
+    const socket = FakeWebSocket.latest
+    socket.open()
+    const newer = { ...fixture, generated_at: 'stream-newer' }
+    socket.emit({ type: 'snapshot', snapshot: newer })
+    await waitFor(() => expect(result.current.data?.generated_at).toBe('stream-newer'))
+    socket.emit({ type: 'task_changed', task: { ...fixture.active![0]!, title: 'Live title' } })
+    expect(signals[0]?.aborted).toBe(true)
+    await act(async () => { resolveFetch({ ok: true, json: async () => ({ ...fixture, generated_at: 'http-older' }) }) })
+    expect(result.current.data?.generated_at).toBe('stream-newer')
+    expect(result.current.data?.active![0]!.title).toBe('Live title')
+    expect(result.current.loading).toBe(false)
+    unmount()
+  })
   it('fetches /api/snapshot for a message it cannot apply', async () => {
     vi.stubGlobal('EventSource', RecordingEventSource); vi.stubGlobal('WebSocket', FakeWebSocket); stubFetchSnapshot()
     const { unmount } = renderHook(() => useDashboard())

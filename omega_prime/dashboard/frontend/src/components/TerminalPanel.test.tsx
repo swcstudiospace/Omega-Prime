@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { TerminalPanel } from './TerminalPanel'
-const terminalState = vi.hoisted(() => ({ instances: [] as Array<{ options: unknown; ops: string[]; dataHandler: ((data: string) => void) | null; disposed: boolean }> }))
+const terminalState = vi.hoisted(() => ({ instances: [] as Array<{ options: unknown; ops: string[]; dataHandler: ((data: string) => void) | null; disposed: boolean; addons: unknown[] }> }))
 vi.mock('@xterm/xterm', () => {
   class FakeTerminal {
     options: unknown
@@ -9,6 +9,8 @@ vi.mock('@xterm/xterm', () => {
     dataHandler: ((data: string) => void) | null = null
     disposed = false
     constructor(options: unknown) { this.options = options; terminalState.instances.push(this) }
+    addons: unknown[] = []
+    loadAddon(addon: unknown) { this.addons.push(addon) }
     open() { this.ops.push('open') }
     write(text: string) { this.ops.push(`write:${text}`) }
     reset() { this.ops.push('reset') }
@@ -16,6 +18,15 @@ vi.mock('@xterm/xterm', () => {
     dispose() { this.disposed = true }
   }
   return { default: FakeTerminal, Terminal: FakeTerminal }
+})
+const fitState = vi.hoisted(() => ({ fits: 0 }))
+vi.mock('@xterm/addon-fit', () => {
+  class FakeFitAddon {
+    activate() {}
+    dispose() {}
+    fit() { fitState.fits += 1 }
+  }
+  return { FitAddon: FakeFitAddon }
 })
 const terminalInstances = () => terminalState.instances
 class FakeEventSource {
@@ -160,12 +171,81 @@ describe('TerminalPanel', () => {
     await flush()
     fireEvent.click(screen.getByRole('button', { name: 'Read-only' }))
     await flush()
-    const socket = FakeWebSocket.instances[0]!
+    const socket = FakeWebSocket.instances.at(-1)!
     socket.open()
     expect(socket.sent[0]).toEqual({ type: 'auth', token: FAKE_TOKEN, mode: 'ro' })
     expect(badge('Read-only')).toBeInTheDocument()
     terminalInstances()[0]!.dataHandler!('ls')
     expect(socket.sent).toHaveLength(1)
+  })
+  it('reconnects and re-authenticates when the read-only toggle changes after auth', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    stubSession({ token: FAKE_TOKEN, readonly: false })
+    render(<TerminalPanel taskId="one" />)
+    await flush()
+    const first = FakeWebSocket.instances[0]!
+    first.open()
+    expect(first.sent[0]).toEqual({ type: 'auth', token: FAKE_TOKEN, mode: 'rw' })
+    fireEvent.click(screen.getByRole('button', { name: 'Read-only' }))
+    await flush()
+    expect(first.closed).toBe(true)
+    const readonly = FakeWebSocket.instances.at(-1)!
+    expect(readonly).not.toBe(first)
+    readonly.open()
+    expect(readonly.sent[0]).toEqual({ type: 'auth', token: FAKE_TOKEN, mode: 'ro' })
+    fireEvent.click(screen.getByRole('button', { name: 'Read-only' }))
+    await flush()
+    expect(readonly.closed).toBe(true)
+    const writable = FakeWebSocket.instances.at(-1)!
+    expect(writable).not.toBe(readonly)
+    writable.open()
+    expect(writable.sent[0]).toEqual({ type: 'auth', token: FAKE_TOKEN, mode: 'rw' })
+    expect(badge('Attached')).toBeInTheDocument()
+    terminalInstances().at(-1)!.dataHandler!('ls')
+    expect(writable.sent).toContainEqual({ type: 'input', text: 'ls' })
+  })
+  it('clears an error badge when the pane recovers', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    stubSession({ token: FAKE_TOKEN, readonly: false })
+    render(<TerminalPanel taskId="one" />)
+    await flush()
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    socket.emit({ type: 'status', status: 'unavailable' })
+    expect(badge('Herdr unavailable')).toBeInTheDocument()
+    socket.emit({ type: 'status', status: 'live' })
+    expect(badge('Attached')).toBeInTheDocument()
+    socket.emit({ type: 'status', status: 'no_session' })
+    expect(badge('No session attached')).toBeInTheDocument()
+    socket.emit({ type: 'frame', text: 'back', updated_at: '2026-10-21T00:00:00Z' })
+    expect(badge('Attached')).toBeInTheDocument()
+  })
+  it('fits the terminal to its container on mount', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    stubSession({ token: FAKE_TOKEN, readonly: false })
+    const before = fitState.fits
+    render(<TerminalPanel taskId="one" />)
+    await flush()
+    expect(terminalInstances().at(-1)!.addons).toHaveLength(1)
+    expect(fitState.fits).toBeGreaterThan(before)
+  })
+  it('keeps the fallback view following new output until paused', async () => {
+    vi.stubGlobal('WebSocket', undefined)
+    vi.stubGlobal('EventSource', FakeEventSource)
+    stubSession(null, true)
+    render(<TerminalPanel taskId="one" />)
+    await flush()
+    const region = screen.getByRole('region', { name: 'Read-only terminal output' })
+    Object.defineProperty(region, 'scrollHeight', { configurable: true, value: 500 })
+    Object.defineProperty(region, 'clientHeight', { configurable: true, value: 100 })
+    FakeEventSource.instances[0]!.emit({ status: 'live', text: 'one', updated_at: '2026-10-21T00:00:00Z' })
+    expect(region.scrollTop).toBe(500)
+    fireEvent.click(screen.getByRole('button', { name: 'Pause auto-scroll' }))
+    region.scrollTop = 10
+    FakeEventSource.instances[0]!.emit({ status: 'live', text: 'one\ntwo', updated_at: '2026-10-21T00:00:01Z' })
+    expect(region.scrollTop).toBe(10)
+    fireEvent.click(screen.getByRole('button', { name: 'Resume auto-scroll' }))
+    expect(region.scrollTop).toBe(500)
   })
   it('forces mode ro without input when the session is readonly', async () => {
     vi.stubGlobal('WebSocket', FakeWebSocket)
