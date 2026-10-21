@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { allowedDir, seedFiles, PathRefused } from "../src/core/paths.ts";
@@ -10,6 +10,7 @@ import { startTier, MOUNT_TIERS } from "../src/core/providers/tiers.ts";
 const box = realpathSync(mkdtempSync(join(tmpdir(), "omp-sbx-paths-")));
 const root = join(box, "wt"); const job = join(root, "job-1"); const outside = join(box, "outside");
 for (const d of [root, job, outside]) mkdirSync(d, { recursive: true });
+mkdirSync(join(root, "..job", "inner"), { recursive: true });   // strictly-inside names starting with '..'
 symlinkSync(outside, join(root, "escape"));
 writeFileSync(join(root, "file.txt"), "x");
 
@@ -35,8 +36,33 @@ test("seed is binary-safe and skips .git, .venv, node_modules and symlinks", () 
   symlinkSync("/etc/passwd", join(src, "link"));
   const { files, skipped } = seedFiles(src);
   assert.deepEqual(files.map((f) => f.rel), ["README.md", "a/b/blob.bin"]);
-  assert.ok(files[1].data.equals(bin));
+  assert.equal(files[1].path, join(src, "a", "b", "blob.bin"));
+  assert.equal(readFileSync(files[1].path).equals(bin), true, "bytes the copier reads are intact on disk");
   assert.deepEqual(skipped.sort(), [".git", ".venv", "a/.git", "link", "node_modules"].sort());
+});
+
+test("seedFiles carries rel + absolute source path only (no bytes buffered during the walk)", () => {
+  const src = join(root, "walkseed"); mkdirSync(join(src, "d"), { recursive: true });
+  writeFileSync(join(src, "d", "f.bin"), Buffer.from([1, 2, 3]));
+  writeFileSync(join(src, "top.txt"), "t\n");
+  symlinkSync("/etc/passwd", join(src, "link"));
+  const { files, skipped } = seedFiles(src);
+  assert.deepEqual(files.map((f) => f.rel), ["d/f.bin", "top.txt"]);
+  for (const f of files) {
+    assert.equal("data" in f, false, "the walk must not buffer file bytes");
+    assert.equal(f.path, join(src, f.rel), "entry carries the absolute source path");
+    assert.equal(statSync(f.path).isFile(), true);
+  }
+  assert.deepEqual(skipped, ["link"], "symlink skip semantics unchanged");
+});
+
+test("allowedDir accepts strictly-inside dotdot names; every real traversal stays refused", () => {
+  assert.equal(allowedDir(join(root, "..job"), [root], "ws"), join(root, "..job"));
+  assert.equal(allowedDir(join(root, "..job", "inner"), [root], "ws"), join(root, "..job", "inner"));
+  assert.throws(() => allowedDir(join(root, ".."), [root], "ws"), (e: unknown) => e instanceof PathRefused && /allowlisted/.test(e.message), "the root's parent is refused");
+  assert.throws(() => allowedDir(`${root}/../outside`, [root], "ws"), (e: unknown) => e instanceof PathRefused && /'\.\.'/.test(e.message), "real '..' component refused");
+  assert.throws(() => allowedDir(`${root}/a/../b`, [root], "ws"), (e: unknown) => e instanceof PathRefused && /'\.\.'/.test(e.message));
+  assert.throws(() => allowedDir(join(root, "escape"), [root], "ws"), (e: unknown) => e instanceof PathRefused && /allowlisted/.test(e.message), "symlink escape refused");
 });
 
 test("mount gateway config only on the mount variant; driver config is a single rw bind at the workdir", () => {

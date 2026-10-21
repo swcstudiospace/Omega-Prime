@@ -1,6 +1,6 @@
 // Host paths the sandbox may touch. A workspace bind mount and a seed source must be absolute,
 // exist, resolve (after symlinks) strictly inside an allowlisted root, and be directories.
-import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { ROOT } from "./config.ts";
 
@@ -28,14 +28,15 @@ export function allowedDir(p: unknown, roots: readonly string[], what: string): 
     let rr: string;
     try { rr = realpathSync(root); } catch { continue; }
     const rel = relative(rr, real);
-    if (rel !== "" && !rel.startsWith("..") && !isAbsolute(rel)) return real;
+    if (rel !== "" && rel !== ".." && !rel.startsWith("../") && !isAbsolute(rel)) return real;
   }
   throw new PathRefused(`${what} is not under an allowlisted root (${roots.join(", ")})`);
 }
 
-/** Files to seed from `src` as raw bytes (binary-safe). Skips SEED_SKIP names at any depth and every symlink. */
-export function seedFiles(src: string): { files: Array<{ rel: string; data: Buffer }>; skipped: string[] } {
-  const files: Array<{ rel: string; data: Buffer }> = [];
+/** Files to seed from `src`. Path-only entries: bytes are read at copy time (core.ts #seed), never buffered here.
+ *  Skips SEED_SKIP names at any depth and every symlink. */
+export function seedFiles(src: string): { files: Array<{ rel: string; path: string }>; skipped: string[] } {
+  const files: Array<{ rel: string; path: string }> = [];
   const skipped: string[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(join(src, dir)).sort()) {
@@ -44,7 +45,7 @@ export function seedFiles(src: string): { files: Array<{ rel: string; data: Buff
       const st = lstatSync(join(src, rel));
       if (st.isSymbolicLink()) { skipped.push(rel); continue; }
       if (st.isDirectory()) walk(rel);
-      else if (st.isFile()) files.push({ rel, data: readFileSync(join(src, rel)) });
+      else if (st.isFile()) files.push({ rel, path: join(src, rel) });
       else skipped.push(rel);
     }
   };
