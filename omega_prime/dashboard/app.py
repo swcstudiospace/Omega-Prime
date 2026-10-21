@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
-from collections.abc import AsyncIterator, Coroutine, Mapping, MutableMapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, MutableMapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, cast
@@ -36,11 +36,12 @@ class _SSEResponse(Response):
     start/chunks/final-frame by hand keeps SSE testable and keeps cancellation
     honest.
     """
-
     def __init__(
-        self, events: AsyncIterator[str], *, headers: Mapping[str, str] | None = None
+        self, events: AsyncIterator[str], *, headers: Mapping[str, str] | None = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         self.events = events
+        self.on_close = on_close
         super().__init__(
             status_code=200, headers=headers, media_type="text/event-stream"
         )
@@ -127,6 +128,8 @@ class _SSEResponse(Response):
             if close is not None:
                 with suppress(Exception):
                     await close()
+            if self.on_close is not None:
+                self.on_close()
 
 
 class _DashboardGuards:
@@ -327,10 +330,13 @@ def create_app(
             return _SSEResponse(no_session(), headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
         if not await terminal_backend.reserve():
             return Response("terminal stream limit reached", status_code=429, headers={"Retry-After": "15"})
+        started = [False]
         async def events() -> AsyncIterator[str]:
+            started[0] = True
             async for event in terminal_backend.stream(pane, reserved=True):
                 yield event
-        return _SSEResponse(events(), headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return _SSEResponse(events(), headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                            on_close=lambda: terminal_backend._slots.release() if not started[0] else None)
 
 
     async def stream(_: Any) -> Response:

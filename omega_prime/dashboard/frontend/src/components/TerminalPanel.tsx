@@ -20,7 +20,7 @@ export function TerminalPanel({ taskId }: { taskId: string }) {
     source.addEventListener('terminal', ((event: MessageEvent<string>) => {
       try {
         const next = JSON.parse(event.data) as Frame
-        setFrame(next)
+        setFrame(previous => ({ ...next, text: next.text || (next.status === 'unavailable' || next.status === 'pane_closed' ? previous.text : '') }))
         setConnected(next.status === 'live')
       } catch { setConnected(false) }
     }) as EventListener)
@@ -28,7 +28,7 @@ export function TerminalPanel({ taskId }: { taskId: string }) {
     return source
   }, [taskId])
   useEffect(() => {
-    setFrame(empty); setConnected(false)
+    setFrame(empty); setConnected(false); setPaused(false); setCopyStatus('')
     const source = connect()
     return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
   }, [connect])
