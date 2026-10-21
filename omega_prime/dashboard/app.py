@@ -59,7 +59,12 @@ class _SSEResponse(Response):
             "status": self.status_code,
             "headers": headers,
         }
-        await send(start)
+        try:
+            await send(start)
+        except BaseException:
+            if self.on_close is not None:
+                self.on_close()
+            raise
 
         disconnected = asyncio.Event()
 

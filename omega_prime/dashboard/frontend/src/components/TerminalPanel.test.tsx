@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, fireEvent } from '@testing-library/react'
+import { act, cleanup, render, screen, fireEvent } from '@testing-library/react'
 import { TerminalPanel } from './TerminalPanel'
 class FakeEventSource {
   static instances: FakeEventSource[] = []
@@ -18,8 +18,14 @@ describe('TerminalPanel', () => {
     vi.stubGlobal('EventSource', FakeEventSource)
     const view = render(<TerminalPanel taskId="one/1" />)
     expect(FakeEventSource.instances[0].url).toBe('/api/tasks/one%2F1/terminal')
-    FakeEventSource.instances[0].emit({ status: 'live', text: '<img src=x>', updated_at: '2026-10-21T00:00:00Z' })
+    const source = FakeEventSource.instances[0]
+    source.emit({ status: 'live', text: '<img src=x>', updated_at: '2026-10-21T00:00:00Z' })
     expect(screen.getByText('<img src=x>')).toBeInTheDocument()
+    act(() => { source.onerror?.(new Event('error')) })
+    expect(screen.getByText('Reconnecting…')).toBeInTheDocument()
+    expect(screen.getByText(/Last updated 21 Oct 2026/)).toBeInTheDocument()
+    source.emit({ status: 'live', text: '<img src=x> next', updated_at: '2026-10-21T00:00:01Z' })
+    expect(screen.getByText('<img src=x> next')).toBeInTheDocument()
     expect(screen.queryByRole('img')).not.toBeInTheDocument()
     const old = FakeEventSource.instances[0]
     view.rerender(<TerminalPanel taskId="two" />)

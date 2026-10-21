@@ -56,17 +56,30 @@ def sanitize_terminal_text(value: str) -> str:
     return text
 
 
-async def _read_pane(pane: str) -> str:
-    argv = ["herdr", "pane", "read", pane, "--source", "recent", "--lines", "200", "--format", "text"]
+class PaneClosedError(Exception):
+    """Herdr confirmed the requested pane no longer exists."""
+
+
+async def _read_pane(argv: list[str]) -> str:
     process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        stdout = await asyncio.wait_for(process.stdout.read(TERMINAL_MAX_CAPTURE_BYTES + 1), TERMINAL_READ_TIMEOUT_S)
-        if len(stdout) > TERMINAL_MAX_CAPTURE_BYTES:
-            raise OSError("Terminal capture unavailable")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = await asyncio.wait_for(process.stdout.read(min(65536, TERMINAL_MAX_CAPTURE_BYTES + 1 - total)), TERMINAL_READ_TIMEOUT_S)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > TERMINAL_MAX_CAPTURE_BYTES:
+                raise OSError("Terminal capture unavailable")
+            chunks.append(chunk)
+        stderr = await asyncio.wait_for(process.stderr.read(4097), TERMINAL_READ_TIMEOUT_S)
         if await asyncio.wait_for(process.wait(), TERMINAL_READ_TIMEOUT_S) != 0:
+            if re.search(rb"(?i)(pane|session).{0,40}(closed|not found|does not exist)", stderr[:4096]):
+                raise PaneClosedError()
             raise OSError("Terminal capture unavailable")
-        return stdout.decode("utf-8", errors="replace")
+        return b"".join(chunks).decode("utf-8", errors="replace")
     except BaseException:
         if process.returncode is None:
             process.kill()
@@ -75,7 +88,7 @@ async def _read_pane(pane: str) -> str:
 
 
 class TerminalService:
-    def __init__(self, *, runner: Callable[[str], Awaitable[str]] | None = None,
+    def __init__(self, *, runner: Callable[[list[str]], Awaitable[str]] | None = None,
                  clock: Callable[[], datetime] | None = None,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         self.runner = runner or _read_pane
@@ -96,24 +109,29 @@ class TerminalService:
         if not reserved and not await self.reserve():
             yield self._event("unavailable", "", None)
             return
+        argv = ["herdr", "pane", "read", pane, "--source", "recent", "--lines", "200", "--format", "text"]
         previous: tuple[str, str] | None = None
         updated: str | None = None
         try:
             yield "retry: 3000\n\n"
             while True:
                 try:
-                    raw = await asyncio.wait_for(self.runner(pane), TERMINAL_READ_TIMEOUT_S)
+                    raw = await asyncio.wait_for(self.runner(argv), TERMINAL_READ_TIMEOUT_S)
                     if not isinstance(raw, str) or len(raw.encode("utf-8")) > TERMINAL_MAX_CAPTURE_BYTES:
                         raise OSError("Terminal capture unavailable")
                     text, state = sanitize_terminal_text(raw), "live"
                 except asyncio.CancelledError:
                     raise
+                except PaneClosedError:
+                    text, state = "", "pane_closed"
                 except Exception:
                     text, state = "", "unavailable"
                 if (state, text) != previous:
                     if text or state != "live":
                         updated = self.clock().astimezone(UTC).isoformat()
                     yield self._event(state, text, updated)
+                    if state == "pane_closed":
+                        return
                     previous = (state, text)
                 else:
                     await self.sleep(TERMINAL_HEARTBEAT_S)

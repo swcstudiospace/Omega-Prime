@@ -22,6 +22,7 @@ export function TerminalPanel({ taskId }: { taskId: string }) {
         const next = JSON.parse(event.data) as Frame
         setFrame(previous => ({ ...next, text: next.text || (next.status === 'unavailable' || next.status === 'pane_closed' ? previous.text : '') }))
         setConnected(next.status === 'live')
+        if (next.status === 'no_session' || next.status === 'pane_closed' || next.status === 'unavailable') source.close()
       } catch { setConnected(false) }
     }) as EventListener)
     source.onerror = () => setConnected(false)
