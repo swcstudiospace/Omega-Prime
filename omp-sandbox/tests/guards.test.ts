@@ -178,12 +178,16 @@ test("pickBin and onPath find a toolchain outside ~/.bun and honour an explicit 
   const bun = join(d, "bun"); writeFileSync(bun, "#!/bin/sh\n");
   assert.equal(onPath("bun", `/nonexistent:${d}`), bun);
   assert.equal(onPath("bun", "/nonexistent"), null);
+  // A relative PATH entry is skipped: the result is used as an absolute symlink target.
+  const prev = process.cwd(); process.chdir(d);
+  try { assert.equal(onPath("bun", "."), null); assert.equal(pickBin("./bun", []), bun); } finally { process.chdir(prev); }
   assert.equal(pickBin(undefined, [join(d, "missing"), onPath("bun", d)]), bun);
   assert.equal(pickBin("/explicit/bun", [bun]), "/explicit/bun");
   assert.equal(pickBin(undefined, [join(d, "missing"), null]), join(d, "missing"));
   const pkg = join(d, "pkg", "node_modules", "@scope", "cli", "dist"); mkdirSync(pkg, { recursive: true });
   writeFileSync(join(pkg, "cli.js"), "");
-  assert.equal(toolchainRoot(join(pkg, "cli.js")), join(d, "pkg"));
+  // Only the node_modules tree is exposed, not the project that holds it.
+  assert.equal(toolchainRoot(join(pkg, "cli.js")), join(d, "pkg", "node_modules"));
   assert.equal(toolchainRoot(bun), d);
 });
 

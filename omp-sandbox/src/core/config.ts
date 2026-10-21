@@ -1,5 +1,5 @@
 // Paths and pinned versions. Everything lives under the repo's .state/ (gitignored).
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { existsSync, realpathSync } from "node:fs";
@@ -10,14 +10,17 @@ export const HOME = homedir();
 export const VERSIONS = { omp: "18.8.4", gsdCore: "1.18.0", agentosCore: "0.4.3", openshell: "0.1.4" } as const;
 export const NODE24_BIN = process.env.OMP_SANDBOX_NODE24 ?? join(HOME, "tools", "node24", "bin");
 export const BUN_INSTALL = process.env.BUN_INSTALL ?? join(HOME, ".bun");
-/** First of `name` on PATH, so a toolchain installed outside ~/.bun is still found. */
+/**
+ * First of `name` on PATH, so a toolchain installed outside ~/.bun is still found. Relative PATH entries are
+ * skipped: the result becomes a symlink target inside a tier's private bin, where a relative path points elsewhere.
+ */
 export function onPath(name: string, path = process.env.PATH ?? ""): string | null {
-  for (const d of path.split(":")) if (d && existsSync(join(d, name))) return join(d, name);
+  for (const d of path.split(":")) if (d && isAbsolute(d) && existsSync(join(d, name))) return join(d, name);
   return null;
 }
 /** An explicit setting wins; otherwise the first candidate that exists, else the first one (so errors name a real default). */
 export function pickBin(explicit: string | undefined, candidates: (string | null)[]): string {
-  if (explicit) return explicit;
+  if (explicit) return resolve(explicit);
   const real = candidates.filter((c): c is string => !!c);
   return real.find((c) => existsSync(c)) ?? real[0];
 }
@@ -26,12 +29,12 @@ export const BUN_EXE = pickBin(process.env.OMP_SANDBOX_BUN, [join(BUN_INSTALL, "
 /** Where a launcher really lives (links resolved), so the fallback tiers link and mount the file itself, not a host-only link. */
 export function realBin(p: string): string { try { return realpathSync(p); } catch { return p; } }
 /**
- * The folder a sandbox must see read-only for `bin` to run: the package root above its outermost node_modules
- * (a JS entry such as omp's cli.js needs its siblings), else the file's own folder.
+ * The folder a sandbox must see read-only for `bin` to run: its outermost node_modules tree (a JS entry such as
+ * omp's cli.js needs its dependencies), never the project above it, else the file's own folder.
  */
 export function toolchainRoot(bin: string): string {
   const real = realBin(bin); const i = real.indexOf("/node_modules/");
-  return i > 0 ? real.slice(0, i) : dirname(real);
+  return i >= 0 ? real.slice(0, i + "/node_modules".length) : dirname(real);
 }
 export const SANDBOX_AGENT_BIN = join(ROOT, "node_modules", "@sandbox-agent", "cli-linux-x64", "bin", "sandbox-agent");
 export const OPENSHELL_BIN = process.env.OMP_SANDBOX_OPENSHELL ?? join(HOME, ".local", "opt", "openshell", VERSIONS.openshell, "bin", "openshell");
