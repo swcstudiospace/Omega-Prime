@@ -2,19 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v20
 milestone_name: Wiring
-status: in_progress
-stopped_at: Phase 102 locally executed, verified, and committed; ordered rebase/merge remains pending.
-last_updated: "2026-10-20"
-last_activity: 2026-10-20
-last_activity_desc: Executed and verified Phase 102 locally on its isolated branch; the branch remains unmerged pending the operator's ordered integration sequence.
+status: Phase 97 local implementation executed; verification deferred pending authoritative upstream MCP contract evidence.
+stopped_at: Phase 97 local verification finished; current upstream MCP mount/schema evidence is still needed before phase verification can pass.
+last_updated: "2026-10-21"
+last_activity: 2026-10-21
+last_activity_desc: Phase 98 shared memory merged (PR #51); Phase 99 solo mode integrated onto main (PR #48); phase 97 verification remains deferred on authoritative upstream contract evidence; Phase 102 integrated (PR #52).
+state_head: 0b1fad3
 progress:
   total_phases: 7
-  completed_phases: 1
+  completed_phases: 0
   total_plans: 5
-  completed_plans: 5
-  percent: 14
-current_phase: 102
-current_plan: null
+  completed_plans: 1
+  percent: 0
+current_phase: 97
+current_plan: "02"
 ---
 
 # Project State
@@ -24,15 +25,21 @@ current_plan: null
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
-**Current focus:** v20 Wiring remains in progress. Phase 102 locally executes G9-SCHED, G10-EXEC, G10-PLUGINS, G10-X, G10-REACH, G11-ENV, and G9-DOCTOR. The operator directed parallel implementation of the seven wiring phases; Phase 102 did not wait for Phase 101. Phases 97–101 and 103 remain unchecked, and Phase 102 is not yet integrated.
+**Historical current focus (v19 closeout):** v19 Installer bindings is complete (phase 96). v18 stays shipped. v17 stays shipped. Historical v17 note: every first-party prompt is wrapped in XML and `python -m omega_prime.tooling.prompt_format --check` enforces it. v1–v16 stay shipped. Phase 77.1 is a separate unchecked ROADMAP phase whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–18 are on main (`.planning/BATCH-01-REPORT.md` … `BATCH-18-REPORT.md`); batch 19 was not the accepted seven. The accepted seven are implemented as v18 phases 89-95. `ci / lint` on main was RED from batch 05 to 17 (21 ruff errors the batch reports had called clean) and was repaired in PR #31: every batch gate MUST run the exact CI commands (`ruff check omega_prime/`, `ruff format --check omega_prime/`, `mypy omega_prime/`, `pytest omega_prime/tests -q`) against current source; never trust old green prose.
+
+**Current focus:** v20 Wiring (Phases 97–103) is in progress. Phase 97 has local transport, settings, diagnostics, argument, and no-cap implementation with offline tests; current upstream MCP mount/schema compatibility remains unverified, so Phase 97 verification is deferred and no v20 phase is complete. Phase 98's branch implementation is being integrated after phase 97; preserve phase 97's authoritative endpoint resolver and source-aware `memory_search` errors. v19 Installer bindings and v1–v19 history remain unchanged. Phase 77.1 live import UAT remains user-owned and `human_needed`.
 
 ## Current Position
 
-Phase: 102 (local execution complete; branch awaiting ordered rebase/merge).
-Plan: all five Phase 102 plans executed.
-Status: Implemented and locally verified; no live activation or milestone completion claimed.
-Last activity: 2026-10-20 - Phase 102 implementation, tests, and gates completed on the isolated branch.
-## Historical v19 Closeout
+Phase: v20 Phase 97 — substrate direct connect + settings loader + no time caps (local implementation executed; verification deferred on authoritative upstream MCP mount/schema evidence).
+Plan: 02 (5 total; 1 complete; local transport and argument changes are present, but server-contract preflight tasks remain open).
+Status: Phase 97 local implementation is not verified against current upstream transport/schema. Phase 98 runtime work is present on the parallel branch and is being rebased after phase 97; phase 97 contracts take precedence at integration. Resume with authoritative MCP path/schema preflight in plans 97-02/97-03. Do not audit, complete, or clean up v20. Phase 77.1 remains `verification_deferred_human`; do not re-execute phases 85–96 or mark 77.1 passed.
+
+Phase 99 (solo mode, Desk optional) is implemented and integrated onto main after Phase 98; see `.planning/phases/99-solo-mode-desk-optional/99-SUMMARY.md`.
+
+## Closeout — Historical v19
+
+Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.
 
 Audit: milestones/v19-MILESTONE-AUDIT.md. Requirements INST-01 through INST-07 are checked. v18 audit remains at milestones/v18-MILESTONE-AUDIT.md. Requirements OPS-01 through OPS-07 stay checked. Pytest after the command-file commit: the three stdio overlay tests passed. The earlier full suite was 4639 passed, 3 skipped, and those three failures only. Ruff, ruff format, and mypy were clean on this branch. Cleanup leaves phase directories in place, matching v17, which is still under .planning/phases.
 
@@ -57,6 +64,7 @@ Absorbing purple-team v1.5, a live gateway engagement, failing closed on an unre
 | Phase | State | Resume |
 |-------|-------|--------|
 | 77.1 | verification_deferred_human | /gsd:verify-work 77.1 |
+| 97 | verification_deferred_gaps | /gsd-plan-phase 97 --gaps |
 
 ## Deferred Items
 
@@ -100,6 +108,7 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 ### Roadmap Evolution
 
 - v14 Boundary alignment shipped 2026-10-10: phases 71–74, audit passed 10/10.
+- v20 Wiring opened for phases 97–103. Phase 99 has been implemented in its isolated worktree; integration remains in operator-controlled merge order.
 - Count text in BND-05 and BND-06 moved from 110/147 to 117/154 with the phase 73 tools.
 - v14 application updates were merged through PR #17; v15 continues on `v15-integrated-readiness`.
 - v15 has phases 75–78 and 21 approved requirements, with no unrelated seeds or upstream changes.
@@ -139,11 +148,15 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 - Phase 77.1 final-source LOCAL-PROOF: a fresh `file://` recursive clone of fcd5edb passed a cold bootstrap (93 s, 0 stdout bytes), a warm no-op, and the declared mcp.json stdio command (initialize, /omega-help 46 commands, /omega-code-review skill, all stdout JSON-RPC). Exit classes 10/11 (operator_venv, sentinel kept)/12/13 were each observed with 0 stdout bytes. `plugin --verify` passed both entries (HTTPS loopback bearer 22/0) from the clone root and through the launcher from a polluted /tmp. The real repo .venv was untouched. Receipts: `/tmp/v15-771-localproof-1791815817/`. A foreign `/tmp/mcp.py` from an unrelated process shadowed `mcp` only for a direct `python -m` run from /tmp; this is an environment observation, not a product defect.
 - Real GitHub delivery path: branch `v15-integrated-readiness` was pushed to origin at a128000 (no PR, no merge). `git clone --recurse-submodules --branch v15-integrated-readiness https://github.com/swcstudiospace/omes-bot.git` succeeded with prime-agent 967eb13 and redteam 831a6b0 pinned. `--bootstrap-only` exited 0 in 90 s with 0 stdout bytes, and the declared stdio command served /omega-help (46 commands) and /omega-code-review with all stdout JSON-RPC (`/tmp/v15-771-ghclone-1791816624/`). This proves the clone step from this machine, not on the user's Bot computer; live Bot rows stay UNPROVEN until the user reports them.
 
+## Session
+
 **Last session:** 2026-10-20
-**Stopped at:** Phase 102 local execution complete; branch awaits ordered rebase/merge.
-**Resume file:** .planning/phases/102-schedulers-dead-modules-env-docs/102-SUMMARY.md
+**Stopped at:** Phase 97 local implementation and offline gates; authoritative upstream MCP mount/schema evidence remains an open verification gap. Phase 98 implementation is being integrated in order after phase 97.
+**Resume file:** `.planning/phases/97-substrate-direct-connect/97-02-PLAN.md`
+
 ## Operator Next Steps
 
-- Rebase and integrate the Phase 102 branch only in the operator's required wiring-phase order; no merge or live restart was performed here.
-- Before any future connector restart, the operator must decide whether stale persisted cron rows should be dropped.
-- Keep Phase 77.1 live import UAT user-owned and `human_needed`.
+- Phase 97 is locally implemented but not verified against the current upstream server. Obtain authoritative MCP path/schema evidence, then resume the preflight/gap work; live endpoint verification and live settings/connector changes remain operator-owned. Phase 98's endpoint and source-aware search behavior must retain this phase 97 authority. Phase 77.1 live UAT stays user-owned (`/gsd:verify-work 77.1`).
+- Phase 99 is integrated onto main after Phases 97 and 98; it does not mark the milestone complete.
+
+Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.

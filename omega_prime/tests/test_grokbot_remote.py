@@ -765,3 +765,44 @@ def test_serve_sse_desk_driver_stops_once_after_normal_or_error(
     assert driver.started == 1
     assert driver.stopped == 1
     assert shutdowns == ["shutdown"]
+
+
+def test_serve_sse_forwards_interceptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omega_prime.grokbot import remote
+
+    hooks: tuple[Any, Any] = (object(), object())
+    captured: dict[str, Any] = {}
+
+    class RuntimeCaptured(Exception):
+        pass
+
+    def capture_runtime(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        raise RuntimeCaptured
+
+    monkeypatch.setattr(remote, "create_sse_app", capture_runtime)
+
+    with pytest.raises(RuntimeCaptured):
+        serve_sse(
+            ROOT,
+            port=_free_port(),
+            home=tmp_path / "home",
+            audit=GrokBotAuditTracer(tmp_path / "audit.jsonl"),
+            env={},
+            interceptors=hooks,
+        )
+
+    assert captured["interceptors"] is hooks
+
+
+def test_sse_runtime_keeps_settings_status_at_constructor_boundary(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.settings import load_settings
+
+    status = load_settings({}, path=tmp_path / "absent-settings.json")
+    app = _app(tmp_path, env={}, settings_status=status)
+    assert app.state.runtime.settings_status is status
+    assert app.state.runtime.registry.runtime_bindings["settings_status"] is status

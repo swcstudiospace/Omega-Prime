@@ -1,4 +1,5 @@
 ## Unreleased
+- Solo mode is the default for bot-00; Desk docs, bus, and notifications remain opt-in, with skill-link checks covering package documentation. Evidence: `.receipts/bot-00-omega-prime/phase-99.json` — focused solo/Desk/prompt/link tests `pytest omega_prime/tests/test_lead.py omega_prime/tests/test_desk_wiring.py omega_prime/tests/test_desk_lead.py omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_shell.py omega_prime/tests/test_prompt_format.py omega_prime/tests/test_command_generation.py -q` exit 0; `bash omega_prime/scripts/assemble-prompts.sh --check` exit 0.
 
 - omp engine (Phase A1a): the coding loop can run on omp 18.x over RPC. Tools stay on the stdio MCP server, plans go through an allowlist, and `omega_capacity` reports quota.
 - A1b dispatch: `omega_dispatch` (approval plus confirm token), `omega_jobs_status`, and `omega_jobs_cancel`. One JobSpec goes to the local sandbox lane or the coding fleet. The fleet client reads `FLEET_COORDINATOR_URL` by name. `FLEET_COORDINATOR_TOKEN` is resolved by the credential broker after `SeatPolicy.allows_host`.
@@ -9,6 +10,7 @@
 - Stdio gated tools read a mode 0600 approvals file outside the repo and outside `OMEGA_PRIME_STATE_DIR` at startup. A person pins its sha256 with `--approvals-sha256` (or `OMEGA_PRIME_APPROVALS_SHA256`); a mismatch refuses to start. The state-dir file is not loaded. The launcher forwards the path and the digest, never `--approve`. The process does not write the file, and an approver that names the bot is refused. `lead_doctor` action `check` is ungated and does not write the roster; register, install, and repair stay gated.
 - `HINDSIGHT_URL` defaults to unset, which disables the remote bank. There is no hosted default.
 - Runtime files `omega_prime/sessions.db`, `omega_prime/state/`, `omega_prime/memory/MEMORY.md`, and `omega_prime/memory/USER.md` are gitignored. The `omega_prime/memory/` package stays tracked.
+- Settings provenance follows the candidate repository, setup diagnostics share the loaded environment with Ultrathink, and malformed non-empty Substrate SSE frames fail as protocol errors.
 
 # Changelog
 
@@ -78,6 +80,30 @@ All notable changes to this project are documented here. Format follows
   in the state directory. A local job with no file or
   minute bound is stored at the local caps. Escalation posts the original
   task text; receipts stay redacted.
+
+### Substrate connection and uncapped local execution
+
+#### Added
+
+- A guarded non-secret settings file at `~/.omega-prime/settings.json`,
+  overridden only by `OMEGA_PRIME_SETTINGS_FILE`. Process environment
+  precedence, allowlisting, file safety checks, and value-free diagnostics
+  keep credentials on their existing secret paths.
+- MCP Streamable HTTP POST support with JSON/SSE response parsing, request-id
+  correlation, and session-id reuse. Argument mappings follow supplied audit
+  expectations; current upstream mount/schema compatibility remains
+  unverified.
+
+#### Changed
+
+- Substrate configuration has no silent localhost default; `local` is an
+  explicit opt-in. Missing configuration and transport/protocol/tool failures
+  are reported distinctly. Doctor/setup checks report configuration without
+  claiming reachability.
+- Engine turns and default local lanes have no duration deadline. Process and
+  pipe liveness detect failure; they do not limit inference. Other resource
+  and capacity limits remain.
+
 
 ### Purple-team operator tooling (batch 18)
 
