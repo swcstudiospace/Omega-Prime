@@ -1,0 +1,144 @@
+{
+  "task_id": "gsd-plan-phase-100",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T14:53:28.161884+00:00",
+  "completed_at": "2026-10-20T14:55:44.060147+00:00",
+  "scope": "Planning only: v20 Wiring registration and Phase 100 execution plans; no application implementation.",
+  "commands": [
+    {
+      "cmd": "omp --help",
+      "exit_code": 0,
+      "duration_s": 0.73,
+      "output_tail": "omp v18.8.4; --skills comma-separated glob filter; --thinking includes max."
+    },
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p4 ruff check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.26,
+      "output_tail": "All checks passed!"
+    },
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p4 ruff format --check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.27,
+      "output_tail": "589 files already formatted"
+    },
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p4 mypy omega_prime/",
+      "exit_code": 0,
+      "duration_s": 44.31,
+      "output_tail": "Success: no issues found in 462 source files"
+    },
+    {
+      "cmd": "env PATH=/workspace/omes-bot/.venv/bin:$PATH PYTHONPATH=/workspace/omes-bot-wt/p4 pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "duration_s": 236.58,
+      "output_tail": "27 failed, 4777 passed, 11 skipped, 15 warnings in 232.67s. Exact 27 node IDs recorded in 100-VALIDATION.md; empty/uninitialized prime-agent checkout. Not repaired or rerun to confirm."
+    },
+    {
+      "cmd": "env PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -c 'from pathlib import Path\nimport yaml\nroot=Path('\"'\"'.planning/phases/100-omp-engine-wiring'\"'\"')\nids={f'\"'\"'100-{i:02}'\"'\"' for i in range(6)}\nerrors=[]\nfor i in range(6):\n p=root/f'\"'\"'100-{i:02}-PLAN.md'\"'\"'\n if not p.exists(): errors.append(f'\"'\"'{p.name}: missing'\"'\"'); continue\n text=p.read_text(); h=yaml.safe_load(text.split('\"'\"'---'\"'\"',2)[1])\n if h.get('\"'\"'phase'\"'\"')!='\"'\"'100-omp-engine-wiring'\"'\"' or h.get('\"'\"'plan'\"'\"')!=f'\"'\"'{i:02}'\"'\"': errors.append(f'\"'\"'{p.name}: phase/plan mismatch'\"'\"')\n for dep in h.get('\"'\"'depends_on'\"'\"',[]):\n  if dep not in ids: errors.append(f'\"'\"'{p.name}: noncanonical dependency {dep!r}; expected 100-NN'\"'\"')\n if not isinstance(h.get('\"'\"'requirements'\"'\"'),list): errors.append(f'\"'\"'{p.name}: requirements must be a flat list'\"'\"')\n if not all(h.get('\"'\"'must_haves'\"'\"',{}).get(k) for k in ['\"'\"'truths'\"'\"','\"'\"'artifacts'\"'\"','\"'\"'key_links'\"'\"']): errors.append(f'\"'\"'{p.name}: missing must_haves'\"'\"')\nprint('\"'\"'\\n'\"'\"'.join(errors) if errors else '\"'\"'PASS: six plan frontmatters and canonical dependencies'\"'\"')\nraise SystemExit(bool(errors))'",
+      "exit_code": 1,
+      "duration_s": 0.043,
+      "output_tail": "Before correction: YAML ScannerError in 100-00 frontmatter; graph metadata defects also identified by independent reviewers."
+    },
+    {
+      "cmd": "env PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -c 'from pathlib import Path\nfrom itertools import combinations\nimport re,yaml,json\nroot=Path('\"'\"'.planning/phases/100-omp-engine-wiring'\"'\"')\nexpected={0:(1,[]),1:(2,['\"'\"'100-00'\"'\"']),2:(3,['\"'\"'100-01'\"'\"']),3:(2,['\"'\"'100-00'\"'\"']),4:(4,['\"'\"'100-02'\"'\"','\"'\"'100-03'\"'\"']),5:(5,['\"'\"'100-04'\"'\"'])}\nheaders={}; errors=[]; coverage=set()\nfor n,(wave,deps) in expected.items():\n p=root/f'\"'\"'100-{n:02}-PLAN.md'\"'\"'\n try:\n  text=p.read_text(); assert text.startswith('\"'\"'---\\n'\"'\"'); h=yaml.safe_load(text.split('\"'\"'---'\"'\"',2)[1])\n  assert h['\"'\"'phase'\"'\"']=='\"'\"'100-omp-engine-wiring'\"'\"' and h['\"'\"'plan'\"'\"']==f'\"'\"'{n:02}'\"'\"' and h['\"'\"'type'\"'\"']=='\"'\"'execute'\"'\"'\n  assert h['\"'\"'wave'\"'\"']==wave and h['\"'\"'depends_on'\"'\"']==deps, '\"'\"'dependency/wave mismatch'\"'\"'\n  assert isinstance(h['\"'\"'autonomous'\"'\"'],bool)\n  assert isinstance(h['\"'\"'requirements'\"'\"'],list) and all(isinstance(x,str) and re.fullmatch(r'\"'\"'ENG-100-0[1-7]'\"'\"',x) for x in h['\"'\"'requirements'\"'\"']), '\"'\"'requirements shape'\"'\"'\n  coverage.update(h['\"'\"'requirements'\"'\"'])\n  assert isinstance(h['\"'\"'files_modified'\"'\"'],list) and h['\"'\"'files_modified'\"'\"'] and all(isinstance(x,str) and not any(c in x for c in '\"'\"'*<>'\"'\"') and not Path(x).is_absolute() for x in h['\"'\"'files_modified'\"'\"']), '\"'\"'files_modified must be exact relative paths'\"'\"'\n  for key in ['\"'\"'truths'\"'\"','\"'\"'artifacts'\"'\"','\"'\"'key_links'\"'\"']:\n   assert isinstance(h['\"'\"'must_haves'\"'\"'][key],list) and h['\"'\"'must_haves'\"'\"'][key] and all(isinstance(x,str) for x in h['\"'\"'must_haves'\"'\"'][key]), f'\"'\"'must_haves.{key} strings'\"'\"'\n  assert re.search(r'\"'\"'(?i)\\b(tasks|task 1|t1)\\b'\"'\"',text), '\"'\"'missing tasks'\"'\"'\n  assert not re.search(r'\"'\"'100-omp-engine-wiring[/.](?:100-)?[0-9]{2}(?![-0-9])'\"'\"',text), '\"'\"'noncanonical plan identifier'\"'\"'\n  headers[n]=h\n except Exception as exc: errors.append(f'\"'\"'{p.name}: {type(exc).__name__}: {exc}'\"'\"')\nfor (a,ha),(b,hb) in combinations(headers.items(),2):\n if ha['\"'\"'wave'\"'\"']==hb['\"'\"'wave'\"'\"']:\n  overlap=set(ha['\"'\"'files_modified'\"'\"']) & set(hb['\"'\"'files_modified'\"'\"'])\n  if overlap: errors.append(f'\"'\"'same-wave conflict {a:02}/{b:02}: {sorted(overlap)}'\"'\"')\nassert coverage=={f'\"'\"'ENG-100-{i:02}'\"'\"' for i in range(1,8)}, f'\"'\"'requirement coverage: {coverage}'\"'\"'\nroad=Path('\"'\"'.planning/ROADMAP.md'\"'\"').read_text(); st=Path('\"'\"'.planning/STATE.md'\"'\"').read_text(); sh=yaml.safe_load(st.split('\"'\"'---'\"'\"',2)[1]); sj=json.loads(Path('\"'\"'.planning/state.json'\"'\"').read_text()); index=(root/'\"'\"'100-OVERVIEW.md'\"'\"').read_text(); validation=(root/'\"'\"'100-VALIDATION.md'\"'\"').read_text()\nassert '\"'\"'v20 Wiring'\"'\"' in road and all(f'\"'\"'Phase {i}:'\"'\"' in road for i in range(97,104))\nassert all(f'\"'\"'ENG-100-{i:02}'\"'\"' in road for i in range(1,8))\nassert sh['\"'\"'milestone'\"'\"']=='\"'\"'v20'\"'\"' and sh['\"'\"'current_phase'\"'\"']==100 and sh['\"'\"'progress'\"'\"']['\"'\"'total_plans'\"'\"']==6 and sh['\"'\"'progress'\"'\"']['\"'\"'completed_plans'\"'\"']==0\nassert '\"'\"'verification_deferred_human'\"'\"' in st and sj['\"'\"'phases'\"'\"']==list(range(97,104))\nassert all(f'\"'\"'100-{i:02}-PLAN.md'\"'\"' in index for i in range(6))\nassert not re.search(r'\"'\"'100-omp-engine-wiring[/.](?:100-)?[0-9]{2}(?![-0-9])'\"'\"',index)\nassert len(re.findall(r'\"'\"'^omega_prime/tests/[^\\n]+::[^\\n]+$'\"'\"',validation,re.M))==27, '\"'\"'27 exact baseline node IDs required'\"'\"'\nfor name in ['\"'\"'100-CONTEXT.md'\"'\"','\"'\"'100-RESEARCH.md'\"'\"','\"'\"'100-VALIDATION.md'\"'\"','\"'\"'100-OVERVIEW.md'\"'\"']:\n assert (root/name).read_text().startswith('\"'\"'# '\"'\"'), f'\"'\"'{name}: missing title'\"'\"'\nif errors:\n print('\"'\"'\\n'\"'\"'.join(errors)); raise SystemExit(1)\nprint('\"'\"'PASS: six YAML plans; canonical DAG/waves; flat requirement coverage; exact target paths; no same-wave edit collisions; index/state/roadmap synchronized; 27 exact baseline nodes; no execution marked complete'\"'\"')\n'",
+      "exit_code": 1,
+      "duration_s": 0.048,
+      "output_tail": "100-02-PLAN.md: AssertionError: must_haves.key_links strings\n100-03-PLAN.md: AssertionError: dependency/wave mismatch"
+    },
+    {
+      "cmd": "env PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -c 'from pathlib import Path\nfrom itertools import combinations\nimport re,yaml,json\nroot=Path('\"'\"'.planning/phases/100-omp-engine-wiring'\"'\"')\nexpected={0:(1,[]),1:(2,['\"'\"'100-00'\"'\"']),2:(3,['\"'\"'100-01'\"'\"']),3:(2,['\"'\"'100-00'\"'\"']),4:(4,['\"'\"'100-02'\"'\"','\"'\"'100-03'\"'\"']),5:(5,['\"'\"'100-04'\"'\"'])}\nheaders={}; errors=[]; coverage=set()\nfor n,(wave,deps) in expected.items():\n p=root/f'\"'\"'100-{n:02}-PLAN.md'\"'\"'\n try:\n  text=p.read_text(); assert text.startswith('\"'\"'---\\n'\"'\"'); h=yaml.safe_load(text.split('\"'\"'---'\"'\"',2)[1])\n  assert h['\"'\"'phase'\"'\"']=='\"'\"'100-omp-engine-wiring'\"'\"' and h['\"'\"'plan'\"'\"']==f'\"'\"'{n:02}'\"'\"' and h['\"'\"'type'\"'\"']=='\"'\"'execute'\"'\"'\n  assert h['\"'\"'wave'\"'\"']==wave and h['\"'\"'depends_on'\"'\"']==deps, '\"'\"'dependency/wave mismatch'\"'\"'\n  assert isinstance(h['\"'\"'autonomous'\"'\"'],bool)\n  assert isinstance(h['\"'\"'requirements'\"'\"'],list) and all(isinstance(x,str) and re.fullmatch(r'\"'\"'ENG-100-0[1-7]'\"'\"',x) for x in h['\"'\"'requirements'\"'\"']), '\"'\"'requirements shape'\"'\"'\n  coverage.update(h['\"'\"'requirements'\"'\"'])\n  assert isinstance(h['\"'\"'files_modified'\"'\"'],list) and h['\"'\"'files_modified'\"'\"'] and all(isinstance(x,str) and not any(c in x for c in '\"'\"'*<>'\"'\"') and not Path(x).is_absolute() for x in h['\"'\"'files_modified'\"'\"']), '\"'\"'files_modified must be exact relative paths'\"'\"'\n  for key in ['\"'\"'truths'\"'\"','\"'\"'artifacts'\"'\"','\"'\"'key_links'\"'\"']:\n   assert isinstance(h['\"'\"'must_haves'\"'\"'][key],list) and h['\"'\"'must_haves'\"'\"'][key] and all(isinstance(x,str) for x in h['\"'\"'must_haves'\"'\"'][key]), f'\"'\"'must_haves.{key} strings'\"'\"'\n  assert re.search(r'\"'\"'(?i)\\b(tasks|task 1|t1)\\b'\"'\"',text), '\"'\"'missing tasks'\"'\"'\n  assert not re.search(r'\"'\"'100-omp-engine-wiring[/.](?:100-)?[0-9]{2}(?![-0-9])'\"'\"',text), '\"'\"'noncanonical plan identifier'\"'\"'\n  headers[n]=h\n except Exception as exc: errors.append(f'\"'\"'{p.name}: {type(exc).__name__}: {exc}'\"'\"')\nfor (a,ha),(b,hb) in combinations(headers.items(),2):\n if ha['\"'\"'wave'\"'\"']==hb['\"'\"'wave'\"'\"']:\n  overlap=set(ha['\"'\"'files_modified'\"'\"']) & set(hb['\"'\"'files_modified'\"'\"'])\n  if overlap: errors.append(f'\"'\"'same-wave conflict {a:02}/{b:02}: {sorted(overlap)}'\"'\"')\nassert coverage=={f'\"'\"'ENG-100-{i:02}'\"'\"' for i in range(1,8)}, f'\"'\"'requirement coverage: {coverage}'\"'\"'\nroad=Path('\"'\"'.planning/ROADMAP.md'\"'\"').read_text(); st=Path('\"'\"'.planning/STATE.md'\"'\"').read_text(); sh=yaml.safe_load(st.split('\"'\"'---'\"'\"',2)[1]); sj=json.loads(Path('\"'\"'.planning/state.json'\"'\"').read_text()); index=(root/'\"'\"'100-OVERVIEW.md'\"'\"').read_text(); validation=(root/'\"'\"'100-VALIDATION.md'\"'\"').read_text()\nassert '\"'\"'v20 Wiring'\"'\"' in road and all(f'\"'\"'Phase {i}:'\"'\"' in road for i in range(97,104))\nassert all(f'\"'\"'ENG-100-{i:02}'\"'\"' in road for i in range(1,8))\nassert sh['\"'\"'milestone'\"'\"']=='\"'\"'v20'\"'\"' and sh['\"'\"'current_phase'\"'\"']==100 and sh['\"'\"'progress'\"'\"']['\"'\"'total_plans'\"'\"']==6 and sh['\"'\"'progress'\"'\"']['\"'\"'completed_plans'\"'\"']==0\nassert '\"'\"'verification_deferred_human'\"'\"' in st and sj['\"'\"'phases'\"'\"']==list(range(97,104))\nassert all(f'\"'\"'100-{i:02}-PLAN.md'\"'\"' in index for i in range(6))\nassert not re.search(r'\"'\"'100-omp-engine-wiring[/.](?:100-)?[0-9]{2}(?![-0-9])'\"'\"',index)\nassert len(re.findall(r'\"'\"'^omega_prime/tests/[^\\n]+::[^\\n]+$'\"'\"',validation,re.M))==27, '\"'\"'27 exact baseline node IDs required'\"'\"'\nfor name in ['\"'\"'100-CONTEXT.md'\"'\"','\"'\"'100-RESEARCH.md'\"'\"','\"'\"'100-VALIDATION.md'\"'\"','\"'\"'100-OVERVIEW.md'\"'\"']:\n assert (root/name).read_text().startswith('\"'\"'# '\"'\"'), f'\"'\"'{name}: missing title'\"'\"'\nif errors:\n print('\"'\"'\\n'\"'\"'.join(errors)); raise SystemExit(1)\nprint('\"'\"'PASS: six YAML plans; canonical DAG/waves; flat requirement coverage; exact target paths; no same-wave edit collisions; index/state/roadmap synchronized; 27 exact baseline nodes; no execution marked complete'\"'\"')\n'",
+      "exit_code": 0,
+      "duration_s": 0.052,
+      "output_tail": "PASS: six YAML plans; canonical DAG/waves; flat requirement coverage; exact target paths; no same-wave edit collisions; index/state/roadmap synchronized; 27 exact baseline nodes; no execution marked complete"
+    },
+    {
+      "cmd": "env PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -c 'from pathlib import Path\nimport subprocess\nexpected={'\"'\"'.planning/ROADMAP.md'\"'\"','\"'\"'.planning/STATE.md'\"'\"','\"'\"'.planning/state.json'\"'\"'}\nchanged=set(subprocess.check_output(['\"'\"'git'\"'\"','\"'\"'diff'\"'\"','\"'\"'--name-only'\"'\"','\"'\"'HEAD'\"'\"'],text=True).splitlines())\nassert changed <= expected, f'\"'\"'unexpected tracked edits: {sorted(changed-expected)}'\"'\"'\nbranch=subprocess.check_output(['\"'\"'git'\"'\"','\"'\"'branch'\"'\"','\"'\"'--show-current'\"'\"'],text=True).strip()\nassert branch=='\"'\"'fix/wiring-p4-omp-engine'\"'\"', branch\nroot=Path('\"'\"'.planning/phases/100-omp-engine-wiring'\"'\"')\nfiles=sorted(p.name for p in root.iterdir() if p.is_file())\nwant={f'\"'\"'100-{i:02}-PLAN.md'\"'\"' for i in range(6)}|{'\"'\"'100-CONTEXT.md'\"'\"','\"'\"'100-OVERVIEW.md'\"'\"','\"'\"'100-RESEARCH.md'\"'\"','\"'\"'100-VALIDATION.md'\"'\"'}\nassert set(files)==want, files\nassert len(list(root.glob('\"'\"'*-PLAN.md'\"'\"')))==6\nprint('\"'\"'PASS: current feature branch; only three tracked planning metadata edits; ten phase-planning files; exactly six discoverable *-PLAN.md execution files; no tracked application/test/prompt changes'\"'\"')\n'",
+      "exit_code": 0,
+      "duration_s": 0.035,
+      "output_tail": "PASS: current feature branch; only three tracked planning metadata edits; ten phase-planning files; exactly six discoverable *-PLAN.md execution files; no tracked application/test/prompt changes"
+    },
+    {
+      "cmd": "env PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -c 'from pathlib import Path\nfrom itertools import combinations\nimport re,yaml,json\nroot=Path('\"'\"'.planning/phases/100-omp-engine-wiring'\"'\"')\nexpected={0:(1,[]),1:(2,['\"'\"'100-00'\"'\"']),2:(3,['\"'\"'100-01'\"'\"']),3:(2,['\"'\"'100-00'\"'\"']),4:(4,['\"'\"'100-02'\"'\"','\"'\"'100-03'\"'\"']),5:(5,['\"'\"'100-04'\"'\"'])}\nheaders={}; errors=[]; coverage=set()\nfor n,(wave,deps) in expected.items():\n p=root/f'\"'\"'100-{n:02}-PLAN.md'\"'\"'\n try:\n  text=p.read_text(); assert text.startswith('\"'\"'---\\n'\"'\"'); h=yaml.safe_load(text.split('\"'\"'---'\"'\"',2)[1])\n  assert h['\"'\"'phase'\"'\"']=='\"'\"'100-omp-engine-wiring'\"'\"' and h['\"'\"'plan'\"'\"']==f'\"'\"'{n:02}'\"'\"' and h['\"'\"'type'\"'\"']=='\"'\"'execute'\"'\"'\n  assert h['\"'\"'wave'\"'\"']==wave and h['\"'\"'depends_on'\"'\"']==deps, '\"'\"'dependency/wave mismatch'\"'\"'\n  assert isinstance(h['\"'\"'autonomous'\"'\"'],bool)\n  assert isinstance(h['\"'\"'requirements'\"'\"'],list) and all(isinstance(x,str) and re.fullmatch(r'\"'\"'ENG-100-0[1-7]'\"'\"',x) for x in h['\"'\"'requirements'\"'\"']), '\"'\"'requirements shape'\"'\"'\n  coverage.update(h['\"'\"'requirements'\"'\"'])\n  assert isinstance(h['\"'\"'files_modified'\"'\"'],list) and h['\"'\"'files_modified'\"'\"'] and all(isinstance(x,str) and not any(c in x for c in '\"'\"'*<>'\"'\"') and not Path(x).is_absolute() for x in h['\"'\"'files_modified'\"'\"']), '\"'\"'files_modified must be exact relative paths'\"'\"'\n  for key in ['\"'\"'truths'\"'\"','\"'\"'artifacts'\"'\"','\"'\"'key_links'\"'\"']:\n   assert isinstance(h['\"'\"'must_haves'\"'\"'][key],list) and h['\"'\"'must_haves'\"'\"'][key] and all(isinstance(x,str) for x in h['\"'\"'must_haves'\"'\"'][key]), f'\"'\"'must_haves.{key} strings'\"'\"'\n  assert re.search(r'\"'\"'(?i)\\b(tasks|task 1|t1)\\b'\"'\"',text), '\"'\"'missing tasks'\"'\"'\n  assert not re.search(r'\"'\"'100-omp-engine-wiring[/.](?:100-)?[0-9]{2}(?![-0-9])'\"'\"',text), '\"'\"'noncanonical plan identifier'\"'\"'\n  headers[n]=h\n except Exception as exc: errors.append(f'\"'\"'{p.name}: {type(exc).__name__}: {exc}'\"'\"')\nfor (a,ha),(b,hb) in combinations(headers.items(),2):\n if ha['\"'\"'wave'\"'\"']==hb['\"'\"'wave'\"'\"']:\n  overlap=set(ha['\"'\"'files_modified'\"'\"']) & set(hb['\"'\"'files_modified'\"'\"'])\n  if overlap: errors.append(f'\"'\"'same-wave conflict {a:02}/{b:02}: {sorted(overlap)}'\"'\"')\nassert coverage=={f'\"'\"'ENG-100-{i:02}'\"'\"' for i in range(1,8)}, f'\"'\"'requirement coverage: {coverage}'\"'\"'\nroad=Path('\"'\"'.planning/ROADMAP.md'\"'\"').read_text(); st=Path('\"'\"'.planning/STATE.md'\"'\"').read_text(); sh=yaml.safe_load(st.split('\"'\"'---'\"'\"',2)[1]); sj=json.loads(Path('\"'\"'.planning/state.json'\"'\"').read_text()); index=(root/'\"'\"'100-OVERVIEW.md'\"'\"').read_text(); validation=(root/'\"'\"'100-VALIDATION.md'\"'\"').read_text()\nassert '\"'\"'v20 Wiring'\"'\"' in road and all(f'\"'\"'Phase {i}:'\"'\"' in road for i in range(97,104))\nassert all(f'\"'\"'ENG-100-{i:02}'\"'\"' in road for i in range(1,8))\nassert sh['\"'\"'milestone'\"'\"']=='\"'\"'v20'\"'\"' and sh['\"'\"'current_phase'\"'\"']==100 and sh['\"'\"'progress'\"'\"']['\"'\"'total_plans'\"'\"']==6 and sh['\"'\"'progress'\"'\"']['\"'\"'completed_plans'\"'\"']==0\nassert '\"'\"'verification_deferred_human'\"'\"' in st and sj['\"'\"'phases'\"'\"']==list(range(97,104))\nassert all(f'\"'\"'100-{i:02}-PLAN.md'\"'\"' in index for i in range(6))\nassert not re.search(r'\"'\"'100-omp-engine-wiring[/.](?:100-)?[0-9]{2}(?![-0-9])'\"'\"',index)\nassert len(re.findall(r'\"'\"'^omega_prime/tests/[^\\n]+::[^\\n]+$'\"'\"',validation,re.M))==27, '\"'\"'27 exact baseline node IDs required'\"'\"'\nfor name in ['\"'\"'100-CONTEXT.md'\"'\"','\"'\"'100-RESEARCH.md'\"'\"','\"'\"'100-VALIDATION.md'\"'\"','\"'\"'100-OVERVIEW.md'\"'\"']:\n assert (root/name).read_text().startswith('\"'\"'# '\"'\"'), f'\"'\"'{name}: missing title'\"'\"'\nif errors:\n print('\"'\"'\\n'\"'\"'.join(errors)); raise SystemExit(1)\nprint('\"'\"'PASS: six YAML plans; canonical DAG/waves; flat requirement coverage; exact target paths; no same-wave edit collisions; index/state/roadmap synchronized; 27 exact baseline nodes; no execution marked complete'\"'\"')\n\nfrom pathlib import Path\nimport subprocess\nexpected={'\"'\"'.planning/ROADMAP.md'\"'\"','\"'\"'.planning/STATE.md'\"'\"','\"'\"'.planning/state.json'\"'\"'}\nchanged=set(subprocess.check_output(['\"'\"'git'\"'\"','\"'\"'diff'\"'\"','\"'\"'--name-only'\"'\"','\"'\"'HEAD'\"'\"'],text=True).splitlines())\nassert changed <= expected, f'\"'\"'unexpected tracked edits: {sorted(changed-expected)}'\"'\"'\nbranch=subprocess.check_output(['\"'\"'git'\"'\"','\"'\"'branch'\"'\"','\"'\"'--show-current'\"'\"'],text=True).strip()\nassert branch=='\"'\"'fix/wiring-p4-omp-engine'\"'\"', branch\nroot=Path('\"'\"'.planning/phases/100-omp-engine-wiring'\"'\"')\nfiles=sorted(p.name for p in root.iterdir() if p.is_file())\nwant={f'\"'\"'100-{i:02}-PLAN.md'\"'\"' for i in range(6)}|{'\"'\"'100-CONTEXT.md'\"'\"','\"'\"'100-OVERVIEW.md'\"'\"','\"'\"'100-RESEARCH.md'\"'\"','\"'\"'100-VALIDATION.md'\"'\"'}\nassert set(files)==want, files\nassert len(list(root.glob('\"'\"'*-PLAN.md'\"'\"')))==6\nprint('\"'\"'PASS: current feature branch; only three tracked planning metadata edits; ten phase-planning files; exactly six discoverable *-PLAN.md execution files; no tracked application/test/prompt changes'\"'\"')\n\nimport json,fnmatch,yaml\nfrom pathlib import Path\nr=json.loads(Path('\"'\"'.receipts/bot-00-omega-prime/gsd-plan-phase-100.json'\"'\"').read_text())\nassert r['\"'\"'task_id'\"'\"']=='\"'\"'gsd-plan-phase-100'\"'\"' and r['\"'\"'bot'\"'\"']=='\"'\"'bot-00-omega-prime'\"'\"'\nassert '\"'\"'rule adherence by future agents'\"'\"' in r['\"'\"'unverified'\"'\"'] and r['\"'\"'approved_by'\"'\"'] is None\nassert len(r['\"'\"'files_changed'\"'\"'])==14 and all(Path(p).is_file() for p in r['\"'\"'files_changed'\"'\"'])\nown=yaml.safe_load(Path('\"'\"'omega_prime/ownership.yaml'\"'\"').read_text())\nfor p in r['\"'\"'files_changed'\"'\"']:\n matches=[x['\"'\"'owner'\"'\"'] for x in own['\"'\"'paths'\"'\"'] if fnmatch.fnmatchcase(p,x['\"'\"'pattern'\"'\"'])]\n assert matches and matches[-1]=='\"'\"'bot-00-omega-prime'\"'\"',p\nfor c in r['\"'\"'claims'\"'\"']:\n command=r['\"'\"'commands'\"'\"'][c['\"'\"'evidence_command_index'\"'\"']]\n assert (command['\"'\"'exit_code'\"'\"']!=0) if c.get('\"'\"'expects_failure'\"'\"') else (command['\"'\"'exit_code'\"'\"']==0)\nassert not r['\"'\"'contract_changes'\"'\"']\nprint('\"'\"'PASS: receipt JSON, 14 owned existing delivery paths, evidence indices/exit codes, required unverified limit, no self-approval, no runtime contract changes'\"'\"')\n'",
+      "exit_code": 0,
+      "duration_s": 0.074,
+      "output_tail": "PASS: six YAML plans; canonical DAG/waves; flat requirement coverage; exact target paths; no same-wave edit collisions; index/state/roadmap synchronized; 27 exact baseline nodes; no execution marked complete\nPASS: current feature branch; only three tracked planning metadata edits; ten phase-planning files; exactly six discoverable *-PLAN.md execution files; no tracked application/test/prompt changes\nPASS: receipt JSON, 14 owned existing delivery paths, evidence indices/exit codes, required unverified limit, no self-approval, no runtime contract changes"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Installed omp help lists max as accepted and --skills as name-glob filtering. MCP loader precedence and rpc-ui wire shapes are not established by help.",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "Planning-session Ruff lint baseline passes.",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "Planning-session Ruff formatting baseline passes.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Planning-session mypy baseline passes.",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "Full-suite planning baseline is non-green: 27 failures, 4777 passes, 11 skips, with failures named in the validation artifact.",
+      "evidence_command_index": 4,
+      "expects_failure": true
+    },
+    {
+      "claim": "Draft planning frontmatter failed validation before corrective edits.",
+      "evidence_command_index": 5,
+      "expects_failure": true
+    },
+    {
+      "claim": "The first corrective wave still had two frontmatter defects before the final targeted corrections.",
+      "evidence_command_index": 6,
+      "expects_failure": true
+    },
+    {
+      "claim": "All six final numbered plans parse, use the expected dependency DAG/waves, cover seven local requirements, and have no same-wave file conflicts; roadmap/state pointers and exact baseline IDs are consistent.",
+      "evidence_command_index": 7
+    },
+    {
+      "claim": "Delivery stays on the current feature branch with only planning metadata edits and ten phase-planning documents; exactly six filenames match *-PLAN.md, with no tracked application/test/prompt changes.",
+      "evidence_command_index": 8
+    },
+    {
+      "claim": "Final post-status-update smoke validates plan DAG and pointers, planning-only branch/scope, receipt JSON and evidence indices, all14 delivery path owners, and required unverified limitations.",
+      "evidence_command_index": 9
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Phase 100 implementation and runtime acceptance: this session produced plans only, not MCP/skills/HITL code or feature tests.",
+    "Installed omp MCP discovery/merge precedence, exact rpc-ui request/response envelopes and provider-free skill resolver: prerequisite evidence plan 100-00 must establish them.",
+    "Actual installed GSD manifests/source roots and real GSD plus Omega skill resolution; absent evidence blocks future execution acceptance, not waived by this receipt.",
+    "Phase 97 uncapped execution and Phase 99 prerequisite behavior were not verified; current engine timeout discrepancy is explicitly an execution prerequisite.",
+    "Live human delivery/replies to Ove and real sandbox isolation/control denial were not exercised; required production-path and isolation proof belongs to future execution.",
+    "The 27 observed prime-agent/environment baseline failures remain unresolved; no submodule initialization, package installation or unrelated repair was performed.",
+    "Prompt assembly not run because no prompts changed; no runtime model/provider, connector, deployment or global-config checks were performed."
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/state.json",
+    ".planning/phases/100-omp-engine-wiring/100-00-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-01-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-02-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-03-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-04-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-05-PLAN.md",
+    ".planning/phases/100-omp-engine-wiring/100-CONTEXT.md",
+    ".planning/phases/100-omp-engine-wiring/100-OVERVIEW.md",
+    ".planning/phases/100-omp-engine-wiring/100-RESEARCH.md",
+    ".planning/phases/100-omp-engine-wiring/100-VALIDATION.md",
+    ".receipts/bot-00-omega-prime/gsd-plan-phase-100.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "Revert the local planning commit; no application runtime migration or live-config change is part of this task.",
+  "approvals": [],
+  "approved_by": null
+}

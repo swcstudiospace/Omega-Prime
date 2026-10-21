@@ -110,6 +110,31 @@ the explicit `SUBSTRATE_URL=local` loopback opt-in. `HINDSIGHT_URL` defaults
 to unset, which disables the remote bank; set it only to a service you
 operate. `omega_prime/grokbot/SETUP.md` has the full secret table.
 
+The following five `OMEGA_PRIME_DESK_*` variables are optional legacy desk
+settings; none is required for local use:
+
+| Variable | Purpose |
+| --- | --- |
+| `OMEGA_PRIME_DESK_BUS_URL` | Connect the optional desk bus. |
+| `OMEGA_PRIME_DESK_DOCS_INDEX` | Select an optional desk docs index. |
+| `OMEGA_PRIME_DESK_NOTIFY_URL` | Configure an optional notification endpoint. |
+| `OMEGA_PRIME_DESK_CHILD_PROVIDER` | Select a delegate child provider adapter. |
+| `OMEGA_PRIME_DESK_CHILD_MODEL` | Select the delegate child model id. |
+
+The child provider and model settings are distinct: a model id alone needs a
+provider credential available through the configured provider, while naming
+`OMEGA_PRIME_DESK_CHILD_PROVIDER` selects the adapter (including keyless
+`ollama`). Without a configured provider/model combination, `delegate_task`
+remains available but returns `not_configured: provider`; setting a URL for
+one of the other optional planes only enables that plane.
+
+`OMEGA_PRIME_SOLO` defaults to solo mode only for `bot-00-omega-prime`.
+Setting its value to the exact string `0` opts out; every other explicit
+value enables solo mode. In Solo, lead docs search and events use substrate;
+the optional Desk docs, bus, and notify routes are suppressed even if
+configured. Desk bus calls return `not_configured: solo`. If substrate is
+unavailable, Solo does not fall back to Desk or localhost.
+
 Send `/omega-connectors` to walk installer setup: the Notion template in
 [notion-task-dashboard.md](notion-task-dashboard.md), then Notion, then
 Linear, then an optional gateway. Bindings are stored outside the
@@ -351,9 +376,11 @@ is `token_rotated` with no token material in the file.
 ## 9. omp engine
 
 The coding loop can run on [omp](https://omp.sh) (`oh-my-pi`, major 18) over
-its RPC mode. Omega Prime supplies the tools, skills, prompts, and loop
-policy. omp performs the inference through its own provider logins or API
-keys. The Python process does not call model HTTP APIs for that path.
+RPC or RPC-UI. Omega Prime supplies its tools and skills through the
+project-local attachment. omp performs inference through its own provider
+logins or API keys; the Python process does not call model HTTP APIs for this
+path. Interactive conversation turns use RPC-UI; direct non-interactive engine
+calls use RPC unless their caller requests RPC-UI.
 
 Install omp 18.x and sign in with `omp login` for the plans you intend to
 use, or export the API key for that provider in the host environment. The
@@ -415,23 +442,78 @@ The `omega watch JOB` console script is the same command. When `tmux` is on
 The engine uses bubblewrap when `bwrap` is on `PATH`. Without bubblewrap it
 refuses to start unless `OMEGA_PRIME_ENGINE_UNSANDBOXED=1` is set.
 
-The session `mcp.json` starts `python -m omega_prime.mcp_server` with
-`--root` set to this installation and `--work-root` set to the checkout.
-Connector settings already in the environment (`X_API_TOKEN`,
-`TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, `SUBSTRATE_TOKEN`, and the other
-desk client variables) are passed through to that process. They are not
-written into `mcp.json`. Plan mode, a narrowed tool roster, and a
-`child_tool_hook` stay on the Python loop so those turns do not receive
-tools the caller removed.
+### Agent data folder
 
-`omega watch JOB --follow` waits for the event file to appear, then until the
-job ends (`agent_end`, or `job_end` when a launch fails after the event file
-exists). Pass `--timeout` only to bound this observer's wait; it does not stop
-the engine turn. A started turn has no duration deadline: the driver polls
-process and pipe liveness until `agent_end` or the existing explicit
-interrupt, and reports a clear failure if the process or stream dies. This
-polling detects state; it is not a timeout. Bounded readiness, RPC command,
-transport, and cleanup waits remain separate and do not limit active inference.
+The agent's own data lives in one folder, `<state>/agent`
+(`$OMEGA_PRIME_STATE_DIR/agent`, or `~/.omega-prime/agent` on a host with no
+state dir; `OMEGA_PRIME_AGENT_STATE_DIR` overrides it). It holds memory
+(`memory/MEMORY.md`, `memory/USER.md`), session history (`sessions.db`), the
+desk stores (`intake.json`, `packs.json`, `events.ndjson`, `turns.sqlite`,
+`rlm/`) and state-side `skills/`. The host MCP server and the sandboxed MCP
+child that omp starts both open this folder, so they share one memory.
+
+Inside the sandbox only the agent folder, the job folder, the work tree and
+the omp login store are writable. The rest of the state root stays read-only
+(`ui-control/`, `mcp-attachments/`, `jobs/`), and `settings.json`,
+`secrets/` and `dashboard/` are hidden: an empty read-only tmpfs covers each
+folder and `/dev/null` covers the file. The engine refuses a writable bind
+inside one of those paths.
+
+On start the host server moves data written by older releases into the
+folder once: from directly under `$OMEGA_PRIME_STATE_DIR`, from the earlier
+`mcp-state/` child folder, or, on a host with no state dir, from the install
+tree (`omega_prime/sessions.db`, `omega_prime/memory/MEMORY.md` and
+`USER.md`, `omega_prime/state/`). It never overwrites a file: on a clash the
+agent copy wins and the old copy stays where it was. A store that could not
+move is still read in place. Each move is listed in
+`<state>/agent/MIGRATION.json`. Preview or run it by hand (paths and counts
+only, never file contents):
+
+```bash
+python -m omega_prime.agent_state --root /workspace/omes-bot --dry-run
+python -m omega_prime.agent_state --root /workspace/omes-bot
+```
+
+For each run, the engine acquires an exclusive project-local
+`<work-root>/.omp/mcp.json` attachment and an additive `.omp/skills` view.
+The attachment is removed after the child exits; only files created by that
+run are eligible for cleanup. If `.omp` already exists or cannot be safely
+owned, the engine preserves it and continues with MCP tools reported as
+`attach_failed`. The MCP entry starts `python -m omega_prime.mcp_server` with
+`--root` set to this installation and `--work-root` set to the checkout.
+Connector settings already in the environment are passed to that process;
+their values are not written into `mcp.json`. Skills are exposed as links and
+omp receives `--skills "*"` as a name glob, so native custom skill directories
+remain discoverable.
+
+If the generated `mcp.json` changes before cleanup, the engine preserves it and reports a cleanup conflict. `omega ui status --job JOB` shows attachment status and cleanup details; `omega watch JOB` renders the same attachment events.
+
+`/skill:` requires RPC or RPC-UI; the OMP `ask` tool requires RPC-UI. Interactive
+RPC-UI requests are routed to the local operator control queue, never answered
+from a policy file. Inspect pending requests with `omega ui list`; answer one
+with the exact `job_id`, `session_generation`, `turn_generation`, and
+`request_id` shown in that output, for example:
+
+```bash
+omega ui answer --job JOB --session SESSION --turn TURN --request REQUEST --text "operator answer"
+```
+
+For multi-question asks, repeat `--text` once per question in displayed order; `omega ui list` shows each question id and its own choices. For a single `select` request, pass the stable `choice-N` key displayed by `omega ui list` with `--choice`, not the redacted or shortened label.
+
+The bridge adds no separate deadline for human input, and cancellation
+rejects pending requests. Plan mode, a narrowed
+tool roster, and a `child_tool_hook` stay on the Python loop so those turns do
+not receive tools the caller removed. `omega watch JOB --follow` waits for the
+event file to appear, then until the job ends (`agent_end`, or `job_end` when a
+launch fails after the event file exists). Pass `--timeout` only to bound this
+observer's wait; it does not stop the engine turn. A started turn has no
+duration deadline: the driver polls process and pipe liveness until
+`agent_end`, the explicit interrupt, or an operator abort (which gives omp one
+command timeout to reach `agent_end`), and reports a clear failure if the
+process or stream dies. Bounded readiness, RPC command, transport, and cleanup
+waits remain separate and do not limit active inference.
+A refusal before the prompt is sent does not spend a caller-supplied iteration
+budget.
 
 `OMEGA_PRIME_ENGINE=omp` makes the conversation loop, delegate, desk-lead
 pass, and ultrathink turn require the engine. Unset, or `auto`, uses the

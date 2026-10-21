@@ -69,8 +69,9 @@
     <description>
       The local Omega Prime MCP host exposes the enabled registry. Its tools/list
       is the live contract; contracts/tool-rosters/omega-prime.yaml is the allowed
-      superset, not proof that every listed family is enabled. Load
-      skills/desk-gateway/SKILL.md for the gateway procedure.
+      superset, not proof that every listed family is enabled. When a task uses
+      an explicitly configured Desk gateway or needs Desk-specific procedure,
+      load skills/desk-gateway/SKILL.md on demand.
     </description>
     <rule>Call only tools both rostered and offered by this host. A remembered name,
       a plan, or an imported Prime API does not grant a callable MCP tool.</rule>
