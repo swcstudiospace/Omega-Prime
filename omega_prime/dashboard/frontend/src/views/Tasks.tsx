@@ -7,13 +7,16 @@ import { bucketHref, taskHref, type TaskBucket } from '../lib/routes'
 import { ageLabel } from '../lib/time'
 import { safeHref } from '../lib/links'
 import { reviewLabel } from '../lib/review'
+import type { BucketRow } from '../lib/selectors'
+type Props = DashboardState & { snapshot: Snapshot; bucket: TaskBucket; notice: string | null; onTask: (id: string) => void }
+function rowTitle(item: BucketRow['item']): string { return isWaiting(item) ? item.ask : item.title }
 const labels: Record<TaskBucket, string> = { all: 'All', waiting: 'Waiting on Ove', working: 'Working', 'pr-gate': 'PR gate', finished: 'Finished' }
 const emptyCopy: Record<TaskBucket, [string, string]> = { all: ['No task records available', 'Task records will appear here when reported by a source.'], waiting: ['Nothing waiting on you', 'Choose All to view the rest of the work queue.'], working: ['No work in progress', 'Choose All to view waiting and finished work.'], 'pr-gate': ['No PRs at the gate', 'Choose All to view the rest of the work queue.'], finished: ['No finished tasks yet', 'Choose All to view current work.'] }
 function bucketCountLabel(bucket: TaskBucket, count: number): string { return bucket === 'pr-gate' ? `${count} ${count === 1 ? 'PR' : 'PRs'}` : `${count} ${count === 1 ? 'task' : 'tasks'}` }
 export function Tasks({ snapshot, loading, error, receivedAt, refresh, bucket, notice, onTask }: Props) {
   const [search, setSearch] = useState(''), [density, setDensity] = useState<'compact' | 'comfortable'>('compact'), [idleOpen, setIdleOpen] = useState(false)
   const rows = useMemo(() => bucketRows(snapshot, bucket), [snapshot, bucket])
-  const filtered = rows.filter(({ item }) => `${'title' in item ? item.title : 'ask' in item ? item.ask : item.title} ${item.display_id ?? ''}`.toLocaleLowerCase().includes(search.toLocaleLowerCase()))
+  const filtered = rows.filter(({ item }) => `${rowTitle(item)} ${item.display_id ?? ''}`.toLocaleLowerCase().includes(search.toLocaleLowerCase()))
   const idle = idleTasks(snapshot)
   const [emptyHeading, emptyBody] = search ? ['No task matches the current filters', 'Clear the search or choose All.'] : emptyCopy[bucket]
   const navBuckets: TaskBucket[] = ['working', 'waiting', 'pr-gate', 'finished']
@@ -26,12 +29,12 @@ export function Tasks({ snapshot, loading, error, receivedAt, refresh, bucket, n
           const associatedTask = matches.length === 1 ? matches[0]?.item : null
           return <li key={key} className="task-row pr-gate-row"><span className="task-number">PR #{item.number}</span><strong>{item.title}</strong><span className="state-pill">{item.ci}</span>{href && <a href={href} target="_blank" rel="noreferrer">Open PR</a>}{associatedTask && <a href={taskHref(associatedTask.id)} onClick={() => onTask(associatedTask.id)}>{associatedTask.display_id ?? 'Open associated task'}</a>}<span className="task-evidence">{source ? reviewLabel(source) : 'Greptile review unavailable'}</span></li>
         }
-        const title = isWaiting(item) ? item.ask : item.title
+        const title = rowTitle(item)
         const status = isWaiting(item) ? 'Waiting on Ove' : 'state' in item ? item.state : 'Finished'
-        const task = isTask(item)
-        const prs = task ? taskPrRows(snapshot, item) : []
+        const task = isTask(item) ? item : null
+        const prs = task ? taskPrRows(snapshot, task) : []
         const pr = prs.length === 1 ? prs[0] : undefined
-        const age = task ? ageLabel(task.last_activity_at ?? task.started_at) : isWaiting(item) ? ageLabel(item.since) : ageLabel(item.finished_at)
+        const age = isWaiting(item) ? ageLabel(item.since) : isTask(item) ? ageLabel(item.last_activity_at ?? item.started_at) : ageLabel(item.finished_at)
         return <li key={key} className={`task-row task-row-${density}`}><span className="task-number">{item.display_id ?? 'ID unavailable'}</span><a className="task-title-link" href={taskHref(item.id)} onClick={() => onTask(item.id)} aria-label={`${item.display_id ?? 'ID unavailable'} ${title}`}>{title}</a><span className="state-pill">{status}</span><span className="task-age">{age}</span><span>{task ? task.owner?.label ?? task.owner?.ref ?? task.owner?.kind ?? 'Unavailable' : 'Unavailable'}</span><span className="task-pr">{pr?.url && safeHref(pr.url) ? <a href={safeHref(pr.url) ?? undefined} target="_blank" rel="noreferrer">PR #{pr.number}</a> : 'PR unavailable'} · {pr?.ci ?? 'CI unavailable'}</span><span className="task-evidence">{pr ? reviewLabel(pr) : 'Greptile review unavailable'}</span></li>
       })}</ul></section>{bucket === 'all' && <section className="panel idle-group"><button className="idle-disclosure" aria-expanded={idleOpen} onClick={() => setIdleOpen(open => !open)}>Idle sessions ({idle.length})</button>{idleOpen && (idle.length ? <ul className="task-list task-list-compact">{idle.map(item => <li key={item.id} className="task-row task-row-compact"><span className="task-number">{item.display_id ?? 'ID unavailable'}</span><a className="task-title-link" href={taskHref(item.id)} onClick={() => onTask(item.id)}>{item.title}</a><span className="state-pill">Idle</span><span>{ageLabel(item.last_activity_at ?? item.started_at)}</span><span>{item.owner?.label ?? item.owner?.ref ?? item.owner?.kind ?? 'Unavailable'}</span></li>)}</ul> : <p>No idle sessions.</p>)}</section>}</div></ViewState>
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { fixture } from '../test/fixtures'
-import { bucketRows, correlateWiring, idleTasks, observedActivity, selectedTask, sortRepositories, taskSelection, tasksForPr, workingTasks } from './selectors'
+import { bucketRows, correlateWiring, idleTasks, selectedTask, sortRepositories, taskSelection, tasksForPr, workingTasks } from './selectors'
 describe('dashboard selectors', () => {
   it('deduplicates active and finished identities and preserves server numbering', () => { const rows = taskSelection(fixture); expect(rows.filter(row => row.key === 'task:worker/1')).toHaveLength(1); expect(rows[0]?.item.display_id).toBe('00007 - Compile release'); expect(selectedTask(fixture, 'task:worker/1')?.id).toBe('worker/1') })
   it('excludes idle sessions from Working and the main All queue while retaining detail identity', () => { expect(idleTasks(fixture)).toHaveLength(1); expect(workingTasks(fixture).map(task => task.id)).toEqual(['worker/1']); expect(bucketRows(fixture, 'all').some(row => row.key === 'task:idle/2')).toBe(false); expect(selectedTask(fixture, 'task:idle/2')?.id).toBe('idle/2') })
