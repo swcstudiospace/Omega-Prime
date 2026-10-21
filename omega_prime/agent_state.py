@@ -414,8 +414,13 @@ def _publish_dir(src: Path, dst: Path) -> bool:
         if exc.errno != errno.EXDEV:
             raise
     scratch = _scratch(dst)
+    before = _tree_identity(src)
     try:
         shutil.copytree(src, scratch, symlinks=True)
+        if _tree_identity(src) != before:
+            # A writer (a nightly pass saving a skill) changed the folder
+            # while it was copied: keep the source whole and retry later.
+            raise SourceChangedError(errno.EAGAIN, "source changed during move")
         try:
             os.rename(scratch, dst)
         except OSError as exc:
@@ -425,8 +430,48 @@ def _publish_dir(src: Path, dst: Path) -> bool:
     finally:
         if os.path.lexists(scratch):
             shutil.rmtree(scratch, ignore_errors=True)
-    shutil.rmtree(src)
+    _remove_copied(src, before)
     return True
+
+
+def _tree_identity(root: Path) -> dict[str, tuple[int, int, int, int]]:
+    """Relative path -> identity for every entry under ``root`` (no follow)."""
+    out: dict[str, tuple[int, int, int, int]] = {}
+    for base, dirs, files in os.walk(root, followlinks=False):
+        for name in (*dirs, *files):
+            path = Path(base) / name
+            st = os.lstat(path)
+            ident = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+            if os.path.isdir(path) and not os.path.islink(path):
+                ident = (st.st_dev, st.st_ino, 0, 0)
+            out[str(path.relative_to(root))] = ident
+    return out
+
+
+def _remove_copied(root: Path, copied: Mapping[str, tuple[int, int, int, int]]) -> None:
+    """Delete only the source entries that are unchanged since the copy.
+
+    A file a writer created or replaced after the copy stays, with its
+    folders, so the next start merges it into the agent folder instead of
+    losing it.
+    """
+    for base, dirs, files in os.walk(root, topdown=False, followlinks=False):
+        for name in files:
+            path = Path(base) / name
+            rel = str(path.relative_to(root))
+            with contextlib.suppress(OSError):
+                if _identity(path) == copied.get(rel):
+                    os.unlink(path)
+        for name in dirs:
+            path = Path(base) / name
+            with contextlib.suppress(OSError):
+                if path.is_symlink():
+                    if _identity(path) == copied.get(str(path.relative_to(root))):
+                        os.unlink(path)
+                else:
+                    path.rmdir()
+    with contextlib.suppress(OSError):
+        root.rmdir()
 
 
 def _move_one(src: Path, dst: Path, report: MigrationReport) -> None:
@@ -687,6 +732,33 @@ def migrate_agent_state(
         except OSError:
             pass
     return report
+
+
+def live_host_env(
+    env: Mapping[str, str],
+    *,
+    home: str | os.PathLike[str] | None = None,
+) -> dict[str, str]:
+    """``env`` with the live host's default agent folder filled in.
+
+    Every live entry point (stdio ``main``, the SSE / one-click launcher)
+    calls this, so the host opens ``<home>/.omega-prime/agent`` exactly as
+    the engine child does. Only a mapping that carries ``HOME`` is a live
+    host; an empty test mapping stays isolated. A configured
+    ``OMEGA_PRIME_AGENT_STATE_DIR`` or ``OMEGA_PRIME_STATE_DIR`` wins.
+    """
+    out = dict(env)
+    if str(out.get(AGENT_STATE_ENV, "") or "").strip():
+        return out
+    if str(out.get(STATE_DIR_ENV, "") or "").strip():
+        return out
+    env_home = str(out.get("HOME", "") or "").strip()
+    if not env_home:
+        return out
+    agent = agent_state_dir({}, home=home if home is not None else env_home)
+    if agent is not None and ensure_agent_dir(agent):
+        out[AGENT_STATE_ENV] = str(agent)
+    return out
 
 
 def ensure_agent_dir(agent_dir: Path) -> bool:

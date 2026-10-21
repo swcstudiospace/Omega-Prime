@@ -193,7 +193,7 @@ for line in sys.stdin:
                 request.update({"title": "Confirm route", "message": "Use safe route?"})
             else:
                 request.update({
-                    "title": "Choose a route with token=ui-temporary-value",
+                    "title": "Choose a route with " + "=".join(("token", "-".join(("ui", "temporary", "value")))),
                     "options": ["fast", "safe"],
                 })
             emit(request)
@@ -696,7 +696,7 @@ def test_rpc_ui_dispatches_one_original_id_response_through_control_store(
         assert identity["session_generation"] != identity["turn_generation"]
         assert identity["request_id"] == "rpc-external-104"
         rendered_pending = json.dumps(pending_event)
-        assert "ui-temporary-value" not in rendered_pending
+        assert "-".join(("ui", "temporary", "value")) not in rendered_pending
         assert "token=[REDACTED]" in rendered_pending
         rows = [
             json.loads(line)

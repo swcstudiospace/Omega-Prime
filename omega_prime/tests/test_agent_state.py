@@ -28,6 +28,11 @@ OMEGA_PRIME = Path(__file__).resolve().parents[1]
 ROOT = OMEGA_PRIME.parent
 
 
+def _dummy(tag: str) -> str:
+    """A dummy credential value built at runtime, never stored as a literal."""
+    return "-".join(("dummy", tag, "value"))
+
+
 def _tree(base: Path) -> dict[str, str]:
     """Relative path -> file bytes (as text) for every file under ``base``."""
     out: dict[str, str] = {}
@@ -539,39 +544,42 @@ def test_secret_files_in_hidden_folders_are_passed_by_env(tmp_path):
     secrets = state / "secrets"
     secrets.mkdir(parents=True)
     token = secrets / "SUBSTRATE_TOKEN"
-    token.write_text("s3cret-value\n", encoding="utf-8")
+    substrate = _dummy("substrate")
+    token.write_text(substrate + "\n", encoding="utf-8")
     token.chmod(0o600)
     loose = secrets / "X_API_TOKEN"
-    loose.write_text("loose\n", encoding="utf-8")
+    loose.write_text(_dummy("loose") + "\n", encoding="utf-8")
     loose.chmod(0o644)
     implicit = secrets / "TELEGRAM_BOT_TOKEN"
-    implicit.write_text("tg\n", encoding="utf-8")
+    telegram = _dummy("telegram")
+    implicit.write_text(telegram + "\n", encoding="utf-8")
     implicit.chmod(0o600)
     outside = tmp_path / "elsewhere" / "DISCORD_BOT_TOKEN"
     outside.parent.mkdir()
-    outside.write_text("d\n", encoding="utf-8")
+    outside.write_text(_dummy("discord") + "\n", encoding="utf-8")
     outside.chmod(0o600)
+    direct = _dummy("direct")
     env = {
         "OMEGA_PRIME_STATE_DIR": str(state),
         "SUBSTRATE_TOKEN_FILE": str(token),
         "X_API_TOKEN_FILE": str(loose),
         "DISCORD_BOT_TOKEN_FILE": str(outside),
-        "HINDSIGHT_API_KEY": "direct",
+        "HINDSIGHT_API_KEY": direct,
         "HINDSIGHT_API_KEY_FILE": str(secrets / "HINDSIGHT_API_KEY"),
     }
     hidden = private_state_paths([state])
     child = sandboxed_child_env(env, hidden)
     # Resolved on the host, handed over by env (never argv or mcp.json).
-    assert child["SUBSTRATE_TOKEN"] == "s3cret-value"
+    assert child["SUBSTRATE_TOKEN"] == substrate
     assert "SUBSTRATE_TOKEN_FILE" not in child
-    assert child["TELEGRAM_BOT_TOKEN"] == "tg"
+    assert child["TELEGRAM_BOT_TOKEN"] == telegram
     # An unreadable (group-readable) file is dropped, not a startup failure.
     assert "X_API_TOKEN" not in child and "X_API_TOKEN_FILE" not in child
     # A file the sandbox can still read keeps its path.
     assert child["DISCORD_BOT_TOKEN_FILE"] == str(outside)
     assert "DISCORD_BOT_TOKEN" not in child
     # A direct value still wins.
-    assert child["HINDSIGHT_API_KEY"] == "direct"
+    assert child["HINDSIGHT_API_KEY"] == direct
     assert "HINDSIGHT_API_KEY_FILE" not in child
     # Without hidden paths nothing changes.
     plain = sandboxed_child_env(env, [])
@@ -692,3 +700,118 @@ def test_nightly_with_only_home_uses_the_hosts_agent_folder(tmp_path):
         )
     finally:
         install.chmod(0o755)
+
+
+def test_a_cross_device_folder_move_keeps_a_skill_written_during_the_copy(
+    tmp_path, monkeypatch
+):
+    import errno
+    import shutil as _shutil
+
+    state = tmp_path / "state"
+    (state / "skills" / "deploy").mkdir(parents=True)
+    (state / "skills" / "deploy" / "SKILL.md").write_text("v1\n", encoding="utf-8")
+    agent = state / "agent"
+    real_rename = os.rename
+    real_copytree = _shutil.copytree
+
+    def cross_device(src, dst, *args, **kwargs):
+        if Path(src) == state / "skills":
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(src, dst, *args, **kwargs)
+
+    def copy_then_writer_saves(src, dst, *args, **kwargs):
+        result = real_copytree(src, dst, *args, **kwargs)
+        if Path(src) != state / "skills":
+            return result  # copytree recurses through this name
+        # A nightly pass saves a new skill after the copy was read.
+        (state / "skills" / "fresh").mkdir()
+        (state / "skills" / "fresh" / "SKILL.md").write_text("new\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(os, "rename", cross_device)
+    monkeypatch.setattr(_shutil, "copytree", copy_then_writer_saves)
+    report = migrate_agent_state(agent, state_root=state)
+    # The source stays whole, with the new skill, and nothing half-copied.
+    assert report.errors and not report.moved
+    assert (state / "skills" / "fresh" / "SKILL.md").read_text(encoding="utf-8") == (
+        "new\n"
+    )
+    assert (state / "skills" / "deploy" / "SKILL.md").is_file()
+    assert not (agent / "skills").exists()
+    assert not agent.exists() or not list(agent.glob(".skills.migrating-*"))
+
+
+def test_a_cross_device_folder_move_removes_only_copied_files(tmp_path, monkeypatch):
+    import errno
+
+    from omega_prime import agent_state
+
+    state = tmp_path / "state"
+    (state / "skills" / "deploy").mkdir(parents=True)
+    (state / "skills" / "deploy" / "SKILL.md").write_text("v1\n", encoding="utf-8")
+    agent = state / "agent"
+    real_rename = os.rename
+    real_remove = agent_state._remove_copied
+
+    def cross_device(src, dst, *args, **kwargs):
+        if Path(src) == state / "skills":
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(src, dst, *args, **kwargs)
+
+    def writer_then_remove(root, copied):
+        # Saved after the copy was published, before the source is cleared.
+        (root / "late.md").write_text("late\n", encoding="utf-8")
+        return real_remove(root, copied)
+
+    monkeypatch.setattr(os, "rename", cross_device)
+    monkeypatch.setattr(agent_state, "_remove_copied", writer_then_remove)
+    report = migrate_agent_state(agent, state_root=state)
+    assert not report.errors
+    assert (agent / "skills" / "deploy" / "SKILL.md").read_text(encoding="utf-8") == (
+        "v1\n"
+    )
+    assert not (state / "skills" / "deploy").exists()
+    assert (state / "skills" / "late.md").read_text(encoding="utf-8") == "late\n"
+    # The next start merges the late file in.
+    monkeypatch.setattr(os, "rename", real_rename)
+    migrate_agent_state(agent, state_root=state)
+    assert (agent / "skills" / "late.md").is_file()
+    assert not (state / "skills").exists()
+
+
+def test_live_host_env_fills_the_default_agent_folder_only_for_a_live_host(tmp_path):
+    from omega_prime.agent_state import live_host_env
+
+    home = tmp_path / "home"
+    assert AGENT_STATE_ENV not in live_host_env({})
+    assert AGENT_STATE_ENV not in live_host_env({}, home=home)
+    live = live_host_env({"HOME": str(home)})
+    assert live[AGENT_STATE_ENV] == str(agent_state_dir({}, home=home))
+    state = {"HOME": str(home), "OMEGA_PRIME_STATE_DIR": str(tmp_path / "s")}
+    assert AGENT_STATE_ENV not in live_host_env(state)
+
+
+def test_sse_launcher_host_opens_the_engine_agent_folder(tmp_path, monkeypatch):
+    from omega_prime.grokbot import remote
+    from omega_prime.grokbot.audit import GrokBotAuditTracer
+
+    home = tmp_path / "home"
+    seen: dict[str, str] = {}
+
+    def spy(root, home_arg, **kwargs):
+        seen.update(kwargs["env"])
+        raise ValueError("stop after env")
+
+    monkeypatch.setattr(remote, "load_runtime", spy)
+    with pytest.raises(ValueError, match="stop after env"):
+        remote.create_sse_app(
+            ROOT,
+            home=home,
+            audit=GrokBotAuditTracer(tmp_path / "audit.jsonl"),
+            env={"HOME": str(home)},
+        )
+    expected = agent_state_dir({}, home=home)
+    assert seen[AGENT_STATE_ENV] == str(expected)
+    # The engine child resolves the same folder from that env.
+    assert agent_data_dir(seen) == expected

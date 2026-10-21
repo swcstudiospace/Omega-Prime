@@ -433,3 +433,22 @@ def test_ui_control_health_fails_for_unsafe_child_directory(
 
     assert check.status == "FAIL"
     assert "unsafe" in check.message or "symlink" in check.message
+
+
+@pytest.mark.parametrize("agent", ["state", "ui-control"])
+def test_ui_control_health_fails_when_agent_folder_overlaps_control(
+    tmp_path: Path, agent: str
+):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    (state / "ui-control").mkdir(mode=0o700)
+    folder = state if agent == "state" else state / "ui-control" / "agent"
+    env = {
+        "OMEGA_PRIME_STATE_DIR": str(state),
+        "OMEGA_PRIME_AGENT_STATE_DIR": str(folder),
+    }
+
+    check = GrokBotDoctor(env=env)._check_ui_control()
+
+    assert check.status == "FAIL"
+    assert "overlaps" in check.message

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from omega_prime.engine.jobs import omp_home_override, state_dir
+from omega_prime.engine.jobs import agent_data_dir, omp_home_override, state_dir
 from omega_prime.grokbot.audit import GrokBotAuditTracer, default_audit_path
 from omega_prime.grokbot.manifest import (
     find_repo_root,
@@ -295,6 +295,9 @@ class GrokBotDoctor:
         omp_home = omp_home_override(self.env) or (Path.home() / ".omp")
         if omp_home.exists():
             binds.append(omp_home)
+        # route_turn binds the agent data folder writable too, so a folder
+        # that overlaps ui-control (or is the state root) fails here first.
+        binds.append(agent_data_dir(self.env))
         return _ui_control_check(self.env, binds)
 
     # -- runtime ----------------------------------------------------------

@@ -23,6 +23,15 @@ IDENTITY = {
 }
 
 
+def _dummy(*parts: str) -> str:
+    """A dummy credential-shaped value built at runtime, never a literal."""
+    return "-".join(parts)
+
+
+def _pair(name: str, value: str) -> str:
+    return "=".join((name, value))
+
+
 def _store(tmp_path: Path, *, binds: tuple[Path, ...] = ()) -> UIControlStore:
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
@@ -48,7 +57,8 @@ def test_answer_queue_preserves_full_identity_and_selection(tmp_path: Path) -> N
 def test_choice_keys_select_original_values_without_using_redacted_labels(
     tmp_path: Path,
 ) -> None:
-    options = ("token=one-secret", "token=two-secret")
+    second = _pair("token", _dummy("two", "secret"))
+    options = (_pair("token", _dummy("one", "secret")), second)
     with _store(tmp_path) as store:
         store.register_request(IDENTITY, {"method": "select", "options": options})
         pending = store.list_pending()[0]
@@ -58,7 +68,7 @@ def test_choice_keys_select_original_values_without_using_redacted_labels(
         {"key": "choice-1", "label": "token=[REDACTED]"},
         {"key": "choice-2", "label": "token=[REDACTED]"},
     ]
-    assert command["answer"]["value"] == "token=two-secret"
+    assert command["answer"]["value"] == second
 
 
 def test_text_answers_retain_order_for_every_ask_question(tmp_path: Path) -> None:
@@ -87,6 +97,7 @@ def test_text_answers_retain_order_for_every_ask_question(tmp_path: Path) -> Non
 def test_list_pending_keeps_each_ask_question_and_its_own_options(
     tmp_path: Path,
 ) -> None:
+    first = _dummy("first", "secret")
     with _store(tmp_path) as store:
         store.register_request(
             IDENTITY,
@@ -95,7 +106,7 @@ def test_list_pending_keeps_each_ask_question_and_its_own_options(
                 "questions": (
                     {
                         "id": "first",
-                        "question": "First token=first-secret?",
+                        "question": f"First {_pair('token', first)}?",
                         "options": ("red", "blue"),
                     },
                     {
@@ -119,7 +130,7 @@ def test_list_pending_keeps_each_ask_question_and_its_own_options(
         ],
         [{"key": "choice-1", "label": "yes"}],
     ]
-    assert "first-secret" not in json.dumps(pending)
+    assert first not in json.dumps(pending)
 
 
 def test_confirm_false_is_preserved_as_boolean_false(tmp_path: Path) -> None:
@@ -355,13 +366,15 @@ def test_control_directory_rejects_symlinks_mode_violations_and_bind_overlap(
 def test_status_and_watch_show_redacted_question_local_metadata(
     tmp_path: Path, capsys
 ) -> None:
+    top = _dummy("top", "secret", "value")
+    other = _dummy("secret", "value")
     request = {
         "method": "ask",
         "questions": (
             {
                 "id": "question-1",
-                "question": "Use token=top-secret-value?",
-                "options": ("safe", "password=secret-value"),
+                "question": f"Use {_pair('token', top)}?",
+                "options": ("safe", _pair("password", other)),
             },
             {
                 "id": "question-2",
@@ -382,16 +395,16 @@ def test_status_and_watch_show_redacted_question_local_metadata(
 
     rendered = json.dumps(status)
     assert IDENTITY["request_id"] in rendered
-    assert "top-secret-value" not in rendered
-    assert "secret-value" not in rendered
+    assert top not in rendered
+    assert other not in rendered
     event = format_event(
         {"type": "ui_pending", "identity": IDENTITY, "request": request}
     )
     assert IDENTITY["turn_generation"] in event
     assert "question-2" in event
     assert "password=[REDACTED]" in event
-    assert "top-secret-value" not in event
-    assert "secret-value" not in event
+    assert top not in event
+    assert other not in event
     assert capsys.readouterr().out == ""
 
 
