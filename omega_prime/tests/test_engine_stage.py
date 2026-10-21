@@ -307,6 +307,56 @@ def test_mcp_desk_parent_reads_the_stage_from_its_env(monkeypatch) -> None:
     assert _DeskParent(ToolRegistry(), None).engine_stage == "plan"
 
 
+def test_real_desk_parent_routes_a_staged_delegate_to_the_execute_engine(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The MCP server's own parent, with a full live registry, not a stub."""
+    from omega_prime.mcp_server import _DeskParent, _RlmParent
+    from omega_prime.tools.delegate import register_delegate_tools
+    from omega_prime.tools.registry import ToolRegistry
+
+    env = _chatgpt_env(tmp_path, OMEGA_PRIME_ENGINE="auto")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    registry = ToolRegistry()
+    registry.register(
+        "noop", "no-op", {"type": "object", "properties": {}}, lambda: "ok"
+    )
+    child = ScriptedModel([{"role": "assistant", "content": "from-python-child"}])
+    parent = _DeskParent(registry, child, {"OMEGA_PRIME_ENGINE_STAGE": "plan"})
+    register_delegate_tools(registry, parent)
+    assert parent.tools, "the desk parent maps the live registry"
+    raw = json.loads(registry.dispatch("delegate_task", {"goal": "say PONG"}))
+    assert (raw["summary"], raw["stage"], raw["model"]) == (
+        "PONG",
+        "execute",
+        "gpt-6-luna",
+    )
+    assert child.call_count == 0
+    # RLM children keep the desk child model even when staged.
+    rlm = _RlmParent(registry, child, tmp_path / "rlm")
+    monkeypatch.setenv("OMEGA_PRIME_ENGINE_STAGE", "plan")
+    assert rlm.engine_full_tools is False
+
+
+def test_staged_mcp_server_has_a_delegate_parent_without_a_child_provider(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.mcp_server import default_registry
+    from omega_prime.tests.test_desk_wiring import ROOT
+    from omega_prime.tools.delegate import DELEGATE_PARENT_BINDING
+
+    base = {"OMEGA_PRIME_STATE_DIR": str(tmp_path / "state")}
+    bare = default_registry(ROOT, tmp_path / "home", env=base)
+    assert bare.runtime_bindings[DELEGATE_PARENT_BINDING] is None
+    staged = default_registry(
+        ROOT, tmp_path / "home", env={**base, "OMEGA_PRIME_ENGINE_STAGE": "plan"}
+    )
+    parent = staged.runtime_bindings[DELEGATE_PARENT_BINDING]
+    assert parent is not None and parent.child_model is None
+    assert parent.engine_stage == "plan"
+
+
 def test_staged_omp_process_env_names_the_stage(tmp_path: Path) -> None:
     import stat as _stat
 

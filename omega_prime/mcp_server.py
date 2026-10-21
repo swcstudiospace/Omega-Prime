@@ -237,7 +237,17 @@ class _DeskParent:
     each access, so the parent can exist before the last families register.
     """
 
-    def __init__(self, registry: ToolRegistry, model: Any) -> None:
+    # `tools` is the whole live registry, which is exactly the roster the
+    # engine's omp reaches through this MCP server, so routing a staged
+    # delegate to the engine narrows nothing (see attach._restricted).
+    engine_full_tools = True
+
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        model: Any,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         self._registry = registry
         self.child_model = model
         self.delegate_depth = 0
@@ -248,7 +258,7 @@ class _DeskParent:
         # server; a staged parent delegates to the execute stage.
         from omega_prime.engine.attach import engine_stage
 
-        self.engine_stage = engine_stage(os.environ)
+        self.engine_stage = engine_stage(os.environ if env is None else env)
 
     @property
     def tools(self) -> dict[str, Any]:
@@ -278,6 +288,10 @@ class _RlmParent(_DeskParent):
     (the desk store convention), and `session_name` is the owning bot
     identity a restarted host recovers its own children by.
     """
+
+    # RLM children keep the desk child model: RlmHost owns their model
+    # selection, so they never take the engine's staged route.
+    engine_full_tools = False
 
     def __init__(self, registry: ToolRegistry, model: Any, session_dir: Path) -> None:
         super().__init__(registry, model)
@@ -1039,8 +1053,12 @@ def default_registry(
     # see every family registered below.
     parent = None
     child_model = _desk_child_model(env, policy)
-    if child_model is not None:
-        parent = _DeskParent(registry, child_model)
+    from omega_prime.engine.attach import engine_stage
+
+    # A staged engine turn delegates to the engine's execute stage, so it
+    # gets a parent even with no Python child provider configured.
+    if child_model is not None or engine_stage(env) is not None:
+        parent = _DeskParent(registry, child_model, env)
         try:
             from omega_prime.durable.journal import TurnJournal
 
