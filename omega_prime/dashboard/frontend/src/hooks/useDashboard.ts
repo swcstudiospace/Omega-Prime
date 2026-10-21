@@ -143,11 +143,15 @@ export function useDashboard(): DashboardState {
     let streamFailed = false
     let generation = 0
     let repairing = false
+    // Deltas that arrive while a repair fetch is in flight: the HTTP snapshot
+    // may predate them, so they are replayed in order on top of it.
+    let pendingDeltas: WsMessage[] = []
 
     /** Stream data is newer than any in-flight HTTP snapshot: drop the
      *  pending request so a late response cannot restore older rows. */
     const invalidateFetch = () => {
       repairing = false
+      pendingDeltas = []
       generation++
       controller?.abort()
       controller = null
@@ -169,8 +173,13 @@ export function useDashboard(): DashboardState {
         if (!response.ok) throw new Error(`Snapshot request failed (${response.status})`)
         const next = await response.json() as Snapshot
         if (disposed || request !== generation) return
+        let merged = next
+        if (repairing) {
+          for (const delta of pendingDeltas) merged = applyDelta(merged, delta) ?? merged
+        }
         repairing = false
-        commit(next)
+        pendingDeltas = []
+        commit(merged)
       } catch (cause) {
         if (disposed || (cause instanceof DOMException && cause.name === 'AbortError')) return
         setError(cause instanceof Error ? cause.message : 'Snapshot unavailable')
@@ -238,10 +247,12 @@ export function useDashboard(): DashboardState {
         if (message.type === 'snapshot') { invalidateFetch(); commit(message.snapshot); setLoading(false); setLive(true); stopPolling(); return }
         const current = dataRef.current
         const nextData = current === null ? null : applyDelta(current, message)
-        if (nextData === null) { repairing = true; void fetchSnapshot(); return }
+        if (nextData === null) { repairing = true; pendingDeltas.push(message); void fetchSnapshot(); return }
         // A repair fetch (issued because a delta could not be applied) must
-        // land; otherwise this newer delta supersedes any pending request.
-        if (!repairing) invalidateFetch()
+        // land, so keep this delta for replay on top of it; otherwise this
+        // newer delta supersedes any pending request.
+        if (repairing) pendingDeltas.push(message)
+        else invalidateFetch()
         setLoading(false)
         dataRef.current = nextData
         setData(nextData)

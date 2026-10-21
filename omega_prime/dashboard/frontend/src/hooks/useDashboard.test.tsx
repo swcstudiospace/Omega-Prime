@@ -93,6 +93,25 @@ describe('useDashboard websocket tier', () => {
     expect(result.current.loading).toBe(false)
     unmount()
   })
+  it('replays deltas received during a repair fetch on top of its snapshot', async () => {
+    vi.stubGlobal('EventSource', RecordingEventSource); vi.stubGlobal('WebSocket', FakeWebSocket)
+    const resolvers: Array<(value: unknown) => void> = []
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(resolve => { resolvers.push(resolve) })))
+    const { result, unmount } = renderHook(() => useDashboard())
+    const socket = FakeWebSocket.latest
+    socket.open()
+    socket.emit({ type: 'snapshot', snapshot: fixture })
+    await waitFor(() => expect(result.current.data).toEqual(fixture))
+    socket.emit({ type: 'stale_changed', id: 'no-such-task', stale: null })
+    expect(resolvers).toHaveLength(2)
+    socket.emit({ type: 'task_changed', task: { ...fixture.active![0]!, title: 'Live during repair' } })
+    await act(async () => { resolvers[1]!({ ok: true, json: async () => ({ ...fixture, generated_at: 'repair' }) }) })
+    expect(result.current.data?.generated_at).toBe('repair')
+    expect(result.current.data?.active![0]!.title).toBe('Live during repair')
+    socket.emit({ type: 'task_changed', task: { ...fixture.active![0]!, title: 'After repair' } })
+    expect(result.current.data?.active![0]!.title).toBe('After repair')
+    unmount()
+  })
   it('fetches /api/snapshot for a message it cannot apply', async () => {
     vi.stubGlobal('EventSource', RecordingEventSource); vi.stubGlobal('WebSocket', FakeWebSocket); stubFetchSnapshot()
     const { unmount } = renderHook(() => useDashboard())
