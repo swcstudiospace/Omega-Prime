@@ -185,4 +185,4 @@ Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's roun
 4. A worktree outside the allowlisted roots is refused before any sandbox starts.
 5. `cd omp-sandbox && npx tsc --noEmit` exits 0 and `npm test` is green including the new folded-ops tests; `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/<new file>` is green; no existing test weakened, skipped or deleted; fakes only (no podman, openshell, herdr, gh, network, or model calls).
 
-- [ ] Phase 112: omp-sandbox engine backend (sbx-3)
+- [x] Phase 112: omp-sandbox engine backend (sbx-3) — completed 2026-10-21 (audit C4 + C7 → PASS; C3 reachable per-run via engine_plan; default ChatGPT-first stage routing unchanged)
