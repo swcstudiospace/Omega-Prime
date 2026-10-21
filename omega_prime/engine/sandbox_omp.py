@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import queue
 import shutil
 import subprocess
@@ -37,6 +38,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from omega_prime.engine.jobs import append_event, child_env
+from omega_prime.engine.omp_driver import EngineError, EngineResult, _system
+from omega_prime.engine.plan_router import read_usage, select
 from omega_prime.engine.sandbox import SandboxUnavailable
 
 BACKEND_ENV = "OMEGA_PRIME_OMP_BACKEND"
@@ -74,6 +78,119 @@ def anda_binary(env: Mapping[str, str]) -> str | None:
             return None
         return None
     return shutil.which("omp-sandbox-anda", path=env.get("PATH") or None)
+
+
+def selected(env: Mapping[str, str]) -> bool:
+    """Whether ``OMEGA_PRIME_OMP_BACKEND`` selects this backend.
+
+    One explicit knob: the value must be exactly ``omp-sandbox``; unset or
+    any other value keeps the bwrap path byte-identical. Selection also
+    wins over the unsandboxed override — an explicit choice of a different
+    sandbox is not an escape hatch.
+    """
+    return str(env.get(BACKEND_ENV, "")).strip() == BACKEND_NAME
+
+
+def workspace_roots(env: Mapping[str, str]) -> list[str]:
+    """Colon-split ``OMP_SANDBOX_WORKSPACE_ROOTS`` (paths.ts semantics)."""
+    raw = env.get(WORKSPACE_ROOTS_ENV)
+    text = DEFAULT_WORKSPACE_ROOTS if raw is None else str(raw)
+    return [root for root in text.split(":") if root]
+
+
+def allowed_worktree(work: Path, env: Mapping[str, str]) -> Path:
+    """Engine-side admission for the job worktree, before any spawn.
+
+    Mirrors paths.ts ``allowedDir``: absolute, no ``..`` component, and
+    after ``resolve()`` strictly inside one allowlisted root. A refused
+    worktree raises SandboxUnavailable with ``path_refused`` in the detail;
+    the TS core re-validates the same knob in its own ``allowedDir``
+    (defense in depth, T-112-04).
+    """
+    roots = workspace_roots(env)
+    what = "the job worktree"
+    if not str(work):
+        raise SandboxUnavailable(
+            f"path_refused: {what} must be a non-empty path ({WORKSPACE_ROOTS_ENV})"
+        )
+    if not work.is_absolute():
+        raise SandboxUnavailable(
+            f"path_refused: {what} must be an absolute path ({WORKSPACE_ROOTS_ENV})"
+        )
+    if ".." in work.parts:
+        raise SandboxUnavailable(
+            f"path_refused: {what} must not contain '..' ({WORKSPACE_ROOTS_ENV})"
+        )
+    try:
+        real = work.resolve()
+    except OSError as exc:
+        raise SandboxUnavailable(
+            f"path_refused: {what} does not resolve ({WORKSPACE_ROOTS_ENV})"
+        ) from exc
+    if not real.is_dir():
+        raise SandboxUnavailable(
+            f"path_refused: {what} is not a directory ({WORKSPACE_ROOTS_ENV})"
+        )
+    for root in roots:
+        try:
+            root_real = Path(root).resolve()
+        except OSError:
+            continue
+        rel = os.path.relpath(real, root_real)
+        if (
+            rel not in (".", "..")
+            and not rel.startswith(".." + os.sep)
+            and not os.path.isabs(rel)
+        ):
+            return real
+    raise SandboxUnavailable(
+        f"path_refused: {what} is not under an allowlisted "
+        f"{WORKSPACE_ROOTS_ENV} root ({', '.join(roots)})"
+    )
+
+
+def wrapper_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Child env for the wrapper: ``child_env`` plus every OMP_SANDBOX_* key.
+
+    ``child_env`` copies only named keys, so the TS core's own knobs —
+    ``OMP_SANDBOX_WORKSPACE_ROOTS`` among them — would otherwise be
+    dropped; forwarding them is how the engine-side allowlist value reaches
+    the core's independent re-validation. Values are never logged.
+    """
+    child = child_env(env)
+    for name, value in env.items():
+        if name.startswith("OMP_SANDBOX_") and isinstance(value, str) and value:
+            child[name] = value
+    return child
+
+
+def _seed_ref(work: Path) -> str:
+    """The worktree's branch name for ``up``'s ``seed_repo`` argument.
+
+    One ``git symbolic-ref`` subprocess, no shell. Job worktrees are always
+    git checkouts on a branch; anything else refuses before the wrapper
+    spawns (export_commits needs the seeded repo).
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(work), "symbolic-ref", "--short", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SandboxUnavailable(
+            f"seed ref derivation failed: {type(exc).__name__}"
+        ) from exc
+    if proc.returncode != 0:
+        raise SandboxUnavailable(
+            "seed ref derivation failed: git symbolic-ref --short HEAD was refused"
+        )
+    ref = proc.stdout.strip()
+    if not ref:
+        raise SandboxUnavailable("seed ref derivation failed: git named no branch")
+    return ref
 
 
 class AndaClient:
@@ -324,3 +441,148 @@ class AndaClient:
                     self._stderr_parts.append(line)
         except (OSError, ValueError):
             pass
+
+
+def run_backend(
+    prompt: str,
+    *,
+    job_id: str,
+    directory: Path,
+    cwd: str | Path | None,
+    system_prompt: str | None,
+    thinking: str,
+    plan: str | None,
+    mode: str,
+    env: Mapping[str, str],
+    binary: str,
+    omp_major: int,
+    stage: str | None,
+    interrupt: Any | None,
+) -> EngineResult:
+    """One engine stage run through the omp-sandbox wrapper.
+
+    Admission order before any wrapper spawn: the worktree is allowlist-
+    checked, the seed ref is derived from it, ``read_usage``/``select`` run
+    exactly as on the bwrap path (so ``PlanNotAllowed`` raises pre-spawn),
+    and a stageless run refuses with ``invalid_stage`` — ``run_gsd_stage``
+    has no stageless form. The wrapper then seeds the worktree (``up`` with
+    ``seed_repo`` so ``export_commits`` has a repo), runs the stage
+    (``run_gsd_stage`` returns immediately), waits for the matching
+    ``stage_done`` event with no deadline, reads the stage record from
+    ``sandbox_status``, and exports commits after a completed stage.
+    ``down`` always runs in the finally. Every wrapper failure raises
+    ``SandboxUnavailable``; there is no bwrap fallback.
+    """
+    work = allowed_worktree(
+        Path(cwd).resolve() if cwd is not None else Path.cwd(), env
+    )
+    seed_ref = _seed_ref(work)
+    usage = read_usage(binary, env)
+    choice = select(env, usage, requested=plan, stage=stage)
+    if stage is None:
+        raise EngineError(
+            "invalid_stage",
+            "the omp-sandbox backend requires stage 'plan' or 'execute'",
+        )
+    anda = anda_binary(env)
+    if anda is None:
+        raise SandboxUnavailable(
+            f"{ANDA_BIN_ENV} is not set and omp-sandbox-anda is not on PATH"
+        )
+    events_path = directory / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.touch(exist_ok=True)
+    gsd_command = "gsd-plan-phase" if stage == "plan" else "gsd-execute-phase"
+    # system_prompt cannot ride an omp flag inside the sandbox, so it opens
+    # the task text (same _system helper as the bwrap path).
+    if system_prompt:
+        task_text = _system(system_prompt) + "\n\n" + prompt
+    else:
+        task_text = prompt
+    client = AndaClient(anda, wrapper_env(env))
+    started = False
+    try:
+        client.start()
+        client.wait_ready()
+        _tool(
+            client,
+            "up",
+            {"seed_repo": {"path": str(work), "ref": seed_ref}},
+            events_path,
+        )
+        stage_result = _tool(
+            client,
+            "run_gsd_stage",
+            {
+                "stage": stage,
+                "plan": choice.decision.plan,
+                "model": f"{choice.decision.provider}/{choice.decision.model_id}",
+                "gsd_command": gsd_command,
+                "task": task_text,
+                "thinking": thinking,
+            },
+            events_path,
+        )
+        started = True
+        stage_id = str(stage_result.get("stageId") or "")
+        if not stage_id:
+            raise SandboxUnavailable("run_gsd_stage returned no stageId")
+        done_event = _wait_stage_done(client, stage_id, events_path)
+        done_status = str(done_event.get("status") or "")
+        status_record = _tool(
+            client, "sandbox_status", {"stage_id": stage_id}, events_path
+        )
+        if done_status == "completed":
+            _tool(client, "export_commits", {}, events_path)
+    finally:
+        client.down()
+        client.close()
+    return EngineResult(
+        ok=done_status == "completed",
+        job_id=job_id,
+        final_text=str(status_record.get("lastText") or ""),
+        plan=choice.decision.plan,
+        provider=choice.decision.provider,
+        model=choice.decision.model_id,
+        stage=choice.stage,
+        fallback_from=choice.fallback_from,
+        events_path=str(events_path),
+        sandbox=BACKEND_NAME,
+        started=started,
+    )
+
+
+def _tool(
+    client: AndaClient,
+    tool: str,
+    args: dict[str, Any],
+    events_path: Path,
+) -> dict[str, Any]:
+    """One wrapper tool call; interleaved events land in events.jsonl."""
+    reply = client.call(tool, args)
+    for event in client.drain_events():
+        append_event(events_path, event)
+    return reply
+
+
+def _wait_stage_done(
+    client: AndaClient,
+    stage_id: str,
+    events_path: Path,
+) -> dict[str, Any]:
+    """Consume events until the stage's ``stage_done`` arrives.
+
+    No deadline: the wrapper's event stream is the liveness signal, and
+    EOF or a dead wrapper raises SandboxUnavailable instead of hanging.
+    Every event is appended through the redacting ``append_event``.
+    """
+    while True:
+        event = client.next_event(_POLL_TICK)
+        for buffered in client.drain_events():
+            append_event(events_path, buffered)
+        if (
+            event is not None
+            and event.get("event") == "stage_done"
+            and str(event.get("stageId") or "") == stage_id
+        ):
+            return event

@@ -426,6 +426,28 @@ def _run(
     if binary is None:
         raise EngineError("not_configured", "omp is not on PATH")
     version = omp_version(binary, env)
+    # The omp-sandbox backend branches before the bwrap gates. Selecting it
+    # is one explicit knob (OMEGA_PRIME_OMP_BACKEND=omp-sandbox) and never
+    # falls back to bwrap on failure; the lazy import keeps the bwrap path
+    # independent of the module.
+    from omega_prime.engine import sandbox_omp
+
+    if sandbox_omp.selected(env):
+        return sandbox_omp.run_backend(
+            prompt,
+            job_id=job_id,
+            directory=directory,
+            cwd=cwd,
+            system_prompt=system_prompt,
+            thinking=thinking,
+            plan=plan,
+            mode=mode,
+            env=env,
+            binary=binary,
+            omp_major=version[0],
+            stage=stage,
+            interrupt=interrupt,
+        )
     if not sandbox_ready(env, unsandboxed_override=unsandboxed):
         raise SandboxUnavailable(
             "bubblewrap is not available; set OMEGA_PRIME_ENGINE_UNSANDBOXED=1 "
@@ -712,6 +734,19 @@ def probe(
             select(env, stage=stage)
     except PlanNotAllowed:
         return False, "plan_not_allowed"
+    from omega_prime.engine import sandbox_omp
+
+    if sandbox_omp.selected(env):
+        # The backend's honest readiness, in its own order: the host omp
+        # binary still backs read_usage, so the same version check applies;
+        # bwrap readiness never gates the backend.
+        try:
+            omp_version(binary, env)
+        except EngineError as exc:
+            return False, exc.reason
+        if sandbox_omp.anda_binary(env) is None:
+            return False, "sandbox_unavailable"
+        return True, "ok"
     if not sandbox_ready(env, unsandboxed_override=unsandboxed):
         return False, "sandbox_unavailable"
     try:
