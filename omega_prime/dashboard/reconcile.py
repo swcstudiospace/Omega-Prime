@@ -17,7 +17,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,7 +41,7 @@ def _pane_map(runner: Runner) -> dict[str, dict[str, Any]] | None:
     """`herdr pane list` through the injectable runner; None when unusable."""
     try:
         payload = json.loads(runner(["herdr", "pane", "list"]))
-    except (OSError, ValueError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return normalize_pane_list(payload)
 
@@ -55,7 +57,7 @@ def _pane_pid(runner: Runner, pane_id: str) -> int | None:
         payload = json.loads(
             runner(["herdr", "pane", "process-info", "--pane", pane_id])
         )
-    except (OSError, ValueError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
     source: Any = payload
     if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
@@ -75,7 +77,7 @@ def _positive_pid(value: Any) -> int | None:
 def _row_verdict(
     row: dict[str, Any],
     panes: dict[str, dict[str, Any]] | None,
-    runner: Runner,
+    pane_pids: dict[str, int | None],
     pid_alive: PidAlive,
     *,
     now: datetime,
@@ -99,7 +101,7 @@ def _row_verdict(
             return "pane_gone"
         if stale.pane_exited(info):
             return "pane_exited"
-        evidence_pid = _pane_pid(runner, pane_id)
+        evidence_pid = pane_pids.get(pane_id)
         if evidence_pid is not None and not pid_alive(evidence_pid):
             return "pid_dead"
     if stale.no_heartbeat(row, now=now, stale_minutes=stale_minutes):
@@ -183,26 +185,56 @@ def main(
         now = now.replace(tzinfo=UTC)
 
     try:
-        with locked_tasks(path, write=args.apply) as data:
-            return _reconcile(args, data, path, run, alive, now)
+        # Herdr can take up to 15s per call, and the dashboard takes the same
+        # lock on its event loop, so external evidence is gathered with the
+        # lock released and the rows are re-read before any write.
+        with locked_tasks(path, write=False) as current:
+            snapshot = copy.deepcopy(current)
+        panes, pane_pids = _gather_evidence(snapshot, run)
+        if not args.apply:
+            return _reconcile(args, snapshot, path, panes, pane_pids, alive, now)
+        with locked_tasks(path, write=True) as data:
+            return _reconcile(args, data, path, panes, pane_pids, alive, now)
     except ValueError as exc:
         error = redact_value({"error": "invalid tasks file", "detail": str(exc)})
         sys.stderr.write(json.dumps(error, sort_keys=True) + "\n")
         return 1
 
 
+def _gather_evidence(
+    data: dict[str, Any], run: Runner
+) -> tuple[dict[str, dict[str, Any]] | None, dict[str, int | None]]:
+    """Pane map plus per-pane pids for working/blocked rows, taken unlocked."""
+    panes = _pane_map(run)
+    pane_pids: dict[str, int | None] = {}
+    if panes is None:
+        return None, pane_pids
+    for row in data["tasks"]:
+        if not isinstance(row, dict) or row.get("state") not in ("working", "blocked"):
+            continue
+        pane = row.get("herdr_pane")
+        pane_id = pane.get("pane_id") if isinstance(pane, dict) else None
+        if not isinstance(pane_id, str) or pane_id in pane_pids:
+            continue
+        info = panes.get(pane_id)
+        if info is None or stale.pane_exited(info):
+            continue
+        pane_pids[pane_id] = _pane_pid(run, pane_id)
+    return panes, pane_pids
+
+
 def _reconcile(
     args: argparse.Namespace,
     data: dict[str, Any],
     path: Path,
-    run: Runner,
+    panes: dict[str, dict[str, Any]] | None,
+    pane_pids: dict[str, int | None],
     alive: PidAlive,
     now: datetime,
 ) -> int:
     age = _updated_age_minutes(data.get("updated_at"), now)
     protected = age is not None and age < _PROTECTION_MINUTES and not args.force
 
-    panes = _pane_map(run)
     dead: list[dict[str, Any]] = []
     heartbeatless: list[dict[str, Any]] = []
     marked: list[tuple[dict[str, Any], str]] = []
@@ -210,7 +242,7 @@ def _reconcile(
         if not isinstance(row, dict) or row.get("state") not in ("working", "blocked"):
             continue
         verdict = _row_verdict(
-            row, panes, run, alive, now=now, stale_minutes=args.stale_minutes
+            row, panes, pane_pids, alive, now=now, stale_minutes=args.stale_minutes
         )
         if verdict in ("pid_dead", "pane_gone", "pane_exited"):
             pane = row.get("herdr_pane")

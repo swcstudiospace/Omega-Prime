@@ -71,6 +71,8 @@ class DashboardPoller:
         self._in_flight: set[asyncio.Task[None]] = set()
         self._running: set[str] = set()
         self._build_lock = asyncio.Lock()
+        self._build_pending = False
+        self._build_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Start the background polling loop once."""
@@ -109,12 +111,34 @@ class DashboardPoller:
         self._running.add(spec.source)
         try:
             await self._collect(spec)
-            await self._maybe_build()
         finally:
             self._running.discard(spec.source)
+        # Collection is done; the source may be rescheduled while the build
+        # (and its possibly slow Herdr pane check) runs.
+        self._request_build()
+
+    def _request_build(self) -> asyncio.Task[None]:
+        """Coalesce build requests into one worker sharing each pane check.
+
+        Any number of collectors finishing during a slow build schedule just
+        one follow-up build over the latest results, not one build each.
+        """
+        self._build_pending = True
+        if self._build_task is None or self._build_task.done():
+            self._build_task = asyncio.create_task(self._drain_builds())
+            self._in_flight.add(self._build_task)
+            self._build_task.add_done_callback(self._in_flight.discard)
+        return self._build_task
+
+    async def _drain_builds(self) -> None:
+        while self._build_pending:
+            self._build_pending = False
+            await self._maybe_build()
 
     async def _run_specs(self, specs: list[CollectorSpec]) -> None:
         await asyncio.gather(*(self._run_one(spec) for spec in specs))
+        if self._build_task is not None:
+            await self._build_task
 
     async def _maybe_build(self) -> None:
         if not all(spec.source in self._results for spec in self.specs):

@@ -56,6 +56,7 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
   const [wsOpen, setWsOpen] = useState(false)
   const [wsFailed, setWsFailed] = useState(false)
   const [epoch, setEpoch] = useState(0)
+  const [sessionEpoch, setSessionEpoch] = useState(0)
   const [paneStatus, setPaneStatus] = useState<Status | null>(null)
   const [frame, setFrame] = useState<Frame>(empty)
   const [connected, setConnected] = useState(false)
@@ -67,6 +68,7 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
   const terminalRef = useRef<Terminal | null>(null)
   const writableRef = useRef(false)
   const noRetryRef = useRef(false)
+  const authRetryRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const region = useRef<HTMLDivElement>(null)
 
@@ -90,10 +92,16 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
       if (typeof body.token !== 'string' || typeof body.readonly !== 'boolean') throw new Error('Malformed session payload')
       if (cancelled) return
       tokenRef.current = body.token
+      setSessionFailed(false)
+      setWsFailed(false)
+      // A fresh object on every fetch so the socket reconnects with the
+      // new token and readonly flag even when they did not change.
       setSession({ readonly: body.readonly })
     }).catch(() => { if (!cancelled) setSessionFailed(true) })
     return () => { cancelled = true }
-  }, [])
+    // The server mints a new token on every restart: sessionEpoch bumps
+    // refetch it before each reconnect so a stale token cannot loop on 4401.
+  }, [sessionEpoch])
 
   useEffect(() => {
     if (!interactive || session === null) return
@@ -108,6 +116,7 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
       next.onmessage = (event: MessageEvent<string>) => {
         try {
           const message = JSON.parse(event.data) as { type?: string; text?: unknown; updated_at?: unknown; status?: string }
+          authRetryRef.current = 0
           if (message.type === 'frame') {
             const text = typeof message.text === 'string' ? message.text : ''
             terminalRef.current?.reset()
@@ -122,16 +131,24 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
           }
         } catch { /* malformed server frame: ignore */ }
       }
-      next.onclose = () => {
+      next.onclose = (event?: CloseEvent) => {
         if (socketRef.current === next) socketRef.current = null
         setWsOpen(false)
         if (noRetryRef.current || !attached) return
+        if (event?.code === 4401 && authRetryRef.current < 1) {
+          authRetryRef.current += 1
+          // Token rejected (server restarted): refresh the session now and
+          // reconnect with it instead of retrying the stale token.
+          setSessionEpoch(value => value + 1)
+          return
+        }
         setWsFailed(true)
         if (retryTimerRef.current === undefined) retryTimerRef.current = setTimeout(() => {
           retryTimerRef.current = undefined
           noRetryRef.current = false
-          setWsFailed(false)
-          setEpoch(value => value + 1)
+          // wsFailed clears when the fresh session lands, so the retry opens
+          // exactly one socket, with the new token.
+          setSessionEpoch(value => value + 1)
         }, RECONNECT_MS)
       }
       next.onerror = () => { /* the close event always follows */ }

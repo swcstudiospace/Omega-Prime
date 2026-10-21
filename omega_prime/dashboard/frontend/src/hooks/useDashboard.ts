@@ -52,13 +52,38 @@ export function parseMessage(raw: string): WsMessage | null {
   }
 }
 
+const STATE_RANKS: Record<string, number> = { blocked: 0, working: 1, quiet: 2, 'stopped?': 3, waiting_on_ove: 4, idle: 5, unknown: 6, done: 7, failed: 8 }
+const FINISHED_CAP = 50
+const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+
+/** Mirror normalize_tasks ordering so a delta-built list matches a fresh
+ *  snapshot: active by state rank then id; waiting newest `since` first;
+ *  finished newest `finished_at` first (undated first), capped at 50. */
+export function sortActive(tasks: Task[]): Task[] {
+  return [...tasks].sort((a, b) => ((STATE_RANKS[a.state] ?? 6) - (STATE_RANKS[b.state] ?? 6)) || cmp(a.id, b.id))
+}
+export function sortWaiting(items: WaitingItem[]): WaitingItem[] {
+  return [...items].sort((a, b) => {
+    const as = a.since ?? null, bs = b.since ?? null
+    if ((as === null) !== (bs === null)) return as === null ? 1 : -1
+    return cmp(bs ?? '', as ?? '') || cmp(b.id, a.id)
+  })
+}
+export function sortFinished(items: FinishedItem[]): FinishedItem[] {
+  return [...items].sort((a, b) => {
+    const af = a.finished_at ?? null, bf = b.finished_at ?? null
+    if ((af === null) !== (bf === null)) return af === null ? -1 : 1
+    return cmp(bf ?? '', af ?? '') || cmp(b.id, a.id)
+  }).slice(0, FINISHED_CAP)
+}
+
 /** Apply one delta immutably; null means the delta cannot be applied. */
 export function applyDelta(current: Snapshot, message: WsMessage): Snapshot | null {
   switch (message.type) {
     case 'task_changed': {
       const active = current.active ?? []
       const exists = active.some(task => task.id === message.task.id)
-      return { ...current, active: exists ? active.map(task => task.id === message.task.id ? message.task : task) : [...active, message.task] }
+      return { ...current, active: sortActive(exists ? active.map(task => task.id === message.task.id ? message.task : task) : [...active, message.task]) }
     }
     case 'task_finished': {
       const finished = current.finished ?? []
@@ -67,13 +92,13 @@ export function applyDelta(current: Snapshot, message: WsMessage): Snapshot | nu
         ...current,
         active: (current.active ?? []).filter(task => task.id !== message.task.id),
         idle_sessions: (current.idle_sessions ?? []).filter(task => task.id !== message.task.id),
-        finished: exists ? finished.map(item => item.id === message.task.id ? message.task as unknown as FinishedItem : item) : [...finished, message.task as unknown as FinishedItem],
+        finished: sortFinished(exists ? finished.map(item => item.id === message.task.id ? message.task as unknown as FinishedItem : item) : [...finished, message.task as unknown as FinishedItem]),
       }
     }
     case 'waiting_added': {
       const waiting = current.waiting_on_ove ?? []
       if (waiting.some(item => item.id === message.item.id)) return current
-      return { ...current, waiting_on_ove: [...waiting, message.item] }
+      return { ...current, waiting_on_ove: sortWaiting([...waiting, message.item]) }
     }
     case 'waiting_cleared':
       return { ...current, waiting_on_ove: (current.waiting_on_ove ?? []).filter(item => item.id !== message.id) }
@@ -111,6 +136,7 @@ export function useDashboard(): DashboardState {
     let socket: WebSocket | undefined
     let socketTimer: ReturnType<typeof setTimeout> | undefined
     let socketRetryTimer: ReturnType<typeof setTimeout> | undefined
+    let socketOpen = false
     let failures = 0
     let backoff = WS_BASE_MS
     let controller: AbortController | null = null
@@ -158,12 +184,14 @@ export function useDashboard(): DashboardState {
       void fetchSnapshot()
       pollTimer = setInterval(() => void fetchSnapshot(), POLL_MS)
     }
+    const wsOwnsStream = () => socket !== undefined && socketOpen
     const connect = () => {
-      if (disposed || eventSource) return
+      if (disposed || eventSource || wsOwnsStream()) return
       streamFailed = false
       const source = new EventSource('/api/stream')
       eventSource = source
       source.addEventListener('snapshot', ((event: MessageEvent<string>) => {
+        if (eventSource !== source) return
         try {
           const next = JSON.parse(event.data) as Snapshot
           if (!disposed) { invalidateFetch(); commit(next); setLoading(false); setLive(true); stopPolling() }
@@ -173,9 +201,10 @@ export function useDashboard(): DashboardState {
       source.onerror = () => {
         if (disposed || streamFailed) return
         streamFailed = true
-        setLive(false)
         source.close()
         if (eventSource === source) eventSource = undefined
+        if (wsOwnsStream()) return
+        setLive(false)
         startPolling()
         if (reconnectTimer === undefined) reconnectTimer = setTimeout(() => { reconnectTimer = undefined; connect() }, RECONNECT_MS)
       }
@@ -189,12 +218,17 @@ export function useDashboard(): DashboardState {
       socket = next
       next.onopen = () => {
         if (disposed) { next.close(); return }
+        socketOpen = true
         failures = 0
         backoff = WS_BASE_MS
         setLive(true)
         setError(null)
         stopPolling()
+        // The socket owns the stream now: close SSE and cancel any pending
+        // SSE retry so it cannot reopen beside the healthy socket.
         if (eventSource) { eventSource.close(); eventSource = undefined }
+        clearTimeout(reconnectTimer)
+        reconnectTimer = undefined
       }
       next.onmessage = (event: MessageEvent<string>) => {
         if (disposed) return
@@ -217,6 +251,7 @@ export function useDashboard(): DashboardState {
         if (counted || disposed || socket !== next) return
         counted = true
         socket = undefined
+        socketOpen = false
         setLive(false)
         failures += 1
         if (failures >= WS_FALLBACK_AFTER) {

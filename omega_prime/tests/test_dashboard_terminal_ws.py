@@ -869,14 +869,19 @@ def test_input_is_not_sent_to_a_pane_the_task_no_longer_maps():
         while ws.receive_json().get("type") != "frame":
             pass
         ws.send_json({"type": "input", "text": "fresh\n"})
-        while not any(c[1:3] == ["pane", "send-text"] for c in runner.calls):
+        while ["herdr", "pane", "send-text", "w2:p9", "fresh\n"] not in runner.calls:
             ws.receive_json()
     sends = [
         c
         for c in runner.calls
         if c[1:3] in (["pane", "send-text"], ["pane", "send-keys"])
     ]
-    assert sends == [["herdr", "pane", "send-text", "w2:p9", "fresh\n"]]
+    # The reader resolves the pane when it processes each frame, so the
+    # "late" frames may be read before or after the remap. Either way they
+    # must never reach the old pane, and the new input reaches the new one.
+    assert sends, "no input was delivered"
+    assert all(c[3] == "w2:p9" for c in sends), sends
+    assert sends[-1] == ["herdr", "pane", "send-text", "w2:p9", "fresh\n"]
 
 
 @pytest.mark.parametrize(

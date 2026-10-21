@@ -55,12 +55,13 @@ describe('useDashboard websocket tier', () => {
     const finishedTask = { ...fixture.active![0]!, state: 'done' }
     socket.emit({ type: 'task_finished', task: finishedTask })
     expect(result.current.data?.active).toHaveLength(0)
-    expect(result.current.data?.finished?.at(-1)?.id).toBe('worker/1')
+    // Matches normalize_tasks: undated (just finished) rows lead the list.
+    expect(result.current.data?.finished?.[0]?.id).toBe('worker/1')
     socket.emit({ type: 'waiting_added', item: { id: 'wait-2', ask: 'Rotate keys' } })
     expect(result.current.data?.waiting_on_ove).toHaveLength(2)
     socket.emit({ type: 'waiting_added', item: { id: 'wait-2', ask: 'Rotate keys twice' } })
     expect(result.current.data?.waiting_on_ove).toHaveLength(2)
-    expect(result.current.data?.waiting_on_ove?.at(-1)?.ask).toBe('Rotate keys')
+    expect(result.current.data?.waiting_on_ove?.find(item => item.id === 'wait-2')?.ask).toBe('Rotate keys')
     socket.emit({ type: 'waiting_cleared', id: 'wait-1' })
     expect(result.current.data?.waiting_on_ove?.map(item => item.id)).toEqual(['wait-2'])
     const stale = { reason: 'pid_dead', since: '2026-01-01T00:06:00Z' }
@@ -146,5 +147,17 @@ describe('useDashboard websocket tier', () => {
     expect(FakeWebSocket.instances).toHaveLength(5)
     unmount()
     expect(setIntervalSpy).toHaveBeenCalled()
+  })
+})
+
+describe('delta ordering mirrors normalize_tasks', () => {
+  it('sorts active, waiting and finished like the server', async () => {
+    const { sortActive, sortWaiting, sortFinished } = await import('./useDashboard')
+    const task = (id: string, state: string) => ({ ...fixture.active![0]!, id, state })
+    expect(sortActive([task('b', 'idle'), task('c', 'working'), task('a', 'working'), task('z', 'blocked')]).map(t => t.id)).toEqual(['z', 'a', 'c', 'b'])
+    expect(sortWaiting([{ id: 'x', ask: '' }, { id: 'old', ask: '', since: '2026-01-01T00:00:00Z' }, { id: 'new', ask: '', since: '2026-01-02T00:00:00Z' }]).map(i => i.id)).toEqual(['new', 'old', 'x'])
+    const done = (id: string, finished_at: string | null) => ({ id, title: id, result: 'ok', finished_at })
+    expect(sortFinished([done('old', '2026-01-01T00:00:00Z'), done('undated', null), done('new', '2026-01-02T00:00:00Z')]).map(i => i.id)).toEqual(['undated', 'new', 'old'])
+    expect(sortFinished(Array.from({ length: 60 }, (_, n) => done(`f${n}`, null)))).toHaveLength(50)
   })
 })

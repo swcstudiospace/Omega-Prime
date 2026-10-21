@@ -44,7 +44,7 @@ class FakeWebSocket {
   static instances: FakeWebSocket[] = []
   onopen: (() => void) | null = null
   onmessage: ((event: MessageEvent) => void) | null = null
-  onclose: (() => void) | null = null
+  onclose: ((event?: CloseEvent) => void) | null = null
   onerror: ((event: Event) => void) | null = null
   sent: unknown[] = []
   closed = false
@@ -53,7 +53,7 @@ class FakeWebSocket {
   close() { this.closed = true }
   open() { act(() => this.onopen?.()) }
   emit(message: object) { act(() => this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent)) }
-  drop() { act(() => { this.onclose?.() }) }
+  drop(code?: number) { act(() => { this.onclose?.(code === undefined ? undefined : ({ code } as CloseEvent)) }) }
 }
 const FAKE_TOKEN = 'fixed-fake-token'
 const stubSession = (session: { token: string; readonly: boolean } | null, rejectAll = false) => {
@@ -333,5 +333,25 @@ describe('TerminalPanel', () => {
     FakeWebSocket.instances[1]!.open()
     expect(screen.queryByText('Read only · redacted · last 200 lines')).not.toBeInTheDocument()
     expect(FakeEventSource.instances[0]!.closed).toBe(true)
+  })
+  it('refetches the session and reconnects with the new token after a 4401 rejection', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    vi.stubGlobal('EventSource', FakeEventSource)
+    let token = 'token-before-restart'
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => url === '/api/session'
+      ? { ok: true, json: async () => ({ token, readonly: false }) }
+      : { ok: false, status: 404 }))
+    render(<TerminalPanel taskId="one" />)
+    await flush()
+    const first = FakeWebSocket.instances[0]!
+    first.open()
+    expect(first.sent[0]).toMatchObject({ type: 'auth', token: 'token-before-restart' })
+    token = 'token-after-restart'
+    first.drop(4401)
+    await flush()
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    FakeWebSocket.instances[1]!.open()
+    expect(FakeWebSocket.instances[1]!.sent[0]).toMatchObject({ type: 'auth', token: 'token-after-restart' })
+    expect(FakeEventSource.instances).toHaveLength(0)
   })
 })

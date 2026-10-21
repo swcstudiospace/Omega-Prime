@@ -337,3 +337,105 @@ def test_unusable_pane_listing_is_unavailable_not_pane_gone(tmp_path, capsys):
     report = _report(capsys)
     assert report["herdr"] == "unavailable"
     assert report["dead"] == []
+
+
+# --- Greptile round 3 regressions -------------------------------------------
+
+
+def test_herdr_timeouts_degrade_to_unavailable_evidence(tmp_path, capsys):
+    import subprocess
+
+    path = tmp_path / "tasks.json"
+    _seed(path, _fixture_rows())
+
+    def list_times_out(argv):
+        raise subprocess.TimeoutExpired(argv, 15)
+
+    assert (
+        main(
+            ["--tasks", str(path)],
+            runner=list_times_out,
+            pid_alive=_alive,
+            clock=lambda: NOW,
+        )
+        == 0
+    )
+    assert _report(capsys)["herdr"] == "unavailable"
+
+    def info_times_out(argv):
+        if argv[1:3] == ["pane", "list"]:
+            return json.dumps(_panes())
+        raise subprocess.TimeoutExpired(argv, 15)
+
+    assert (
+        main(
+            ["--tasks", str(path)],
+            runner=info_times_out,
+            pid_alive=_alive,
+            clock=lambda: NOW,
+        )
+        == 0
+    )
+    report = _report(capsys)
+    assert report["herdr"] == "ok"
+    # w1:p2 is absent from the pane list; w1:p1's pid is unknown, not dead.
+    assert {d["id"]: d["reason"] for d in report["dead"]} == {"gb:00031-a": "pane_gone"}
+
+
+def test_herdr_calls_run_without_holding_the_tasks_lock(tmp_path, capsys):
+    import fcntl
+    import os
+
+    path = tmp_path / "tasks.json"
+    _seed(path, _fixture_rows())
+    lock_path = path.with_name(path.name + ".lock")
+    observed = []
+
+    def probing(argv):
+        fd = os.open(lock_path, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observed.append("free")
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except BlockingIOError:
+            observed.append("held")
+        finally:
+            os.close(fd)
+        return _runner()(argv)
+
+    for argv in (["--tasks", str(path)], ["--tasks", str(path), "--apply"]):
+        assert main(argv, runner=probing, pid_alive=_alive, clock=lambda: NOW) == 0
+        capsys.readouterr()
+    assert observed and set(observed) == {"free"}
+
+
+def test_apply_rechecks_rows_reread_after_evidence(tmp_path, capsys):
+    path = tmp_path / "tasks.json"
+    _seed(path, _fixture_rows())
+
+    def finishing_runner(argv):
+        # While Herdr evidence is gathered, another writer finishes the row
+        # whose pane is gone; the apply pass must not stamp it stale.
+        if argv[1:3] == ["pane", "list"]:
+            with locked_tasks(path, write=True) as data:
+                for row in data["tasks"]:
+                    if row["id"] == "gb:00031-a":
+                        row["state"] = "done"
+                from omega_prime.dashboard.status_file import _write_locked
+
+                _write_locked(data, path)
+        return _runner()(argv)
+
+    assert (
+        main(
+            ["--tasks", str(path), "--apply"],
+            runner=finishing_runner,
+            pid_alive=_alive,
+            clock=lambda: NOW,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    rows = _rows(path)
+    assert rows["gb:00031-a"]["state"] == "done"
+    assert rows["gb:00031-a"].get("stale") is None, rows["gb:00031-a"].get("stale")
