@@ -39,19 +39,19 @@ type FakeTier = SandboxTier & { download: (remote: string, dir: string) => Promi
 let tierSeq = 0;
 /** A fake tier: sandbox-side /sandbox paths map onto a per-tier tmp dir; exec runs the command locally.
  *  NO upload method, so Core.#put exercises its exec-stdin base64 fallback; download copies the mapped file. */
-function mappedTier(spawnEnv: Record<string, string> = {}) {
+function mappedTier(spawnEnv: Record<string, string> = {}, root = "/sandbox") {
   const hostRoot = mkdtempSync(join(tmpdir(), "omp-sbx-ops-sbx-"));
-  const hostHome = join(hostRoot, "sandbox", "home");
-  const hostWork = join(hostRoot, "sandbox", "work");
+  const hostHome = join(hostRoot, root, "home");
+  const hostWork = join(hostRoot, root, "work");
   mkdirSync(hostHome, { recursive: true });
   mkdirSync(hostWork, { recursive: true });
-  const map = (s: string) => s.split("/sandbox/").join(`${hostRoot}/sandbox/`);
+  const map = (s: string) => s.split(`${root}/`).join(`${hostRoot}${root}/`);
   const run = (argv: string[], o: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; input?: string } = {}) =>
     // new Promise executor form: the tsconfig pins lib ES2023, which has no Promise.withResolvers types.
     new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
     // Every /sandbox path — argv items AND the sh -c script bodies — must rewrite onto this tier's tmp mapping;
     // an unmapped argv would let "sandbox" paths touch the real host /sandbox (T-112-01's mapping-bug leak).
-    const p = spawn(argv[0], argv.slice(1).map(map), { cwd: map(o.cwd ?? "/sandbox/work"), env: { ...process.env, ...o.env } });
+    const p = spawn(argv[0], argv.slice(1).map(map), { cwd: map(o.cwd ?? `${root}/work`), env: { ...process.env, ...o.env } });
     let stdout = "", stderr = "";
     p.stdout!.on("data", (b) => (stdout += b));
     p.stderr!.on("data", (b) => (stderr += b));
@@ -65,7 +65,7 @@ function mappedTier(spawnEnv: Record<string, string> = {}) {
   });
   const tier: FakeTier = {
     name: "bwrap", id: `ops-${++tierSeq}`, isolation: "none (test)",
-    workdir: "/sandbox/work", sandboxRoot: "/sandbox",
+    workdir: `${root}/work`, sandboxRoot: root,
     start: async () => {},
     sandboxAgent: () => ({ baseUrl: "", token: "" }),
     exec: run,
@@ -317,4 +317,127 @@ test("runStage keeps the chatgpt default carrying the zai fallback; an explicit 
   const m = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T4", model: "zai/glm-5.3-flash" });
   assert.deepEqual({ plan: m.plan, model: m.model, fallback: m.fallback }, { plan: "chatgpt", model: "zai/glm-5.3-flash", fallback: "zai/glm-5.3" });
   await answerAndFinish(core, m.stageId);
+});
+
+// --- Greptile #61 round fixes -----------------------------------------------------------------------------------
+
+/** Wait until a stage asks its question, answer with `selected`, and wait for the stage to settle. */
+async function answerWith(core: InstanceType<typeof Core>, stageId: string, selected: string) {
+  for (let i = 0; i < 100; i++) {
+    const v = core.status(stageId);
+    if (!("stages" in v) && v.status === "waiting") break;
+    await delay(50);
+  }
+  core.answer(stageId, "q1", { selected: [selected] });
+  await core.stages.get(stageId)!.done;
+}
+
+test("a full refs/heads ref seeds a real branch, so commits made in the sandbox are exported", async () => {
+  const repo = makeSeedRepo("full-ref-src");
+  const { tier, hostWork } = mappedTier();
+  const core = new Core();
+  const up = (await core.attachTierForTests(tier, { seed_repo: { path: repo, ref: "refs/heads/main" } })) as UpResult;
+  assert.equal(up.seeded!.ref, "main", "refs/heads/<b> is shortened to the branch");
+  assert.equal(git(["symbolic-ref", "HEAD"], hostWork).trim(), "refs/heads/main", "the sandbox checkout is on the branch, not detached");
+  writeFileSync(join(hostWork, "new.txt"), "work\n");
+  git(["add", "new.txt"], hostWork);
+  git(["-c", "user.name=t", "-c", "user.email=t@local", "commit", "-qm", "sandbox work"], hostWork);
+  const ex = (await core.exportCommits()) as ExportResult;
+  assert.equal(ex.commits.length, 1, "the new commit moved the exported ref");
+  assert.equal(ex.head, git(["rev-parse", "HEAD"], hostWork).trim());
+});
+
+test("seed refs that are not plain branch names are refused before any git runs", async () => {
+  const { seedRef } = await import("../src/core/repo.ts");
+  assert.equal(seedRef("feature/x"), "feature/x");
+  assert.equal(seedRef("refs/heads/feature/x"), "feature/x");
+  for (const bad of ["refs/tags/v1", "refs/remotes/origin/main", "HEAD", "-x", "a..b", "a/.hidden", "x.lock", "a//b", ""]) {
+    assert.throws(() => seedRef(bad), /must be a branch name/, bad);
+  }
+});
+
+test("seeding, py_deps, staging and export use the tier's own home (bwrap /sbx), not /sandbox/home", async () => {
+  const repo = makeSeedRepo("sbx-root-src");
+  const fixture = mkdtempSync(join(tmpdir(), "omp-sbx-ops-pydeps-sbx-"));
+  writeFileSync(join(fixture, "pytest.py"), "__version__ = '8.0.0-fixture'\n");
+  for (const m of ["starlette", "httpx"]) { mkdirSync(join(fixture, m), { recursive: true }); writeFileSync(join(fixture, m, "__init__.py"), ""); }
+  const refs = mkdtempSync(join(tmpdir(), "omp-sbx-ops-refs-"));
+  writeFileSync(join(refs, "spec.md"), "spec\n");
+  const { tier, hostWork, hostHome } = mappedTier({}, "/sbx");
+  const core = new Core();
+  const up = (await core.attachTierForTests(tier, { seed_repo: { path: repo, ref: "main" }, py_deps: fixture, stage: [{ from: refs, to: "/sandbox/home/refs" }] })) as UpResult;
+  assert.equal(git(["rev-parse", "HEAD"], hostWork).trim(), up.seeded!.base);
+  assert.equal(up.pyDeps!.dir, "/sbx/home/pydeps");
+  assert.equal(existsSync(join(hostHome, "pydeps", "pytest.py")), true);
+  assert.deepEqual((up.staged as Array<{ to: string; files: number }>).map((x) => [x.to, x.files]), [["/sbx/home/refs", 1]]);
+  assert.equal(readFileSync(join(hostHome, "refs", "spec.md"), "utf8"), "spec\n");
+  writeFileSync(join(hostWork, "b.txt"), "b\n");
+  git(["add", "b.txt"], hostWork);
+  git(["-c", "user.name=t", "-c", "user.email=t@local", "commit", "-qm", "b"], hostWork);
+  const ex = (await core.exportCommits()) as ExportResult;
+  assert.equal(ex.commits.length, 1);
+  assert.equal(existsSync(ex.bundle), true);
+  assert.equal(existsSync(join(hostRoot(hostHome), "sandbox")), false, "nothing was written under a /sandbox path on this tier");
+});
+const hostRoot = (hostHome: string) => join(hostHome, "..", "..");
+
+test("run_check scrubs the exact sandbox secrets and credential shapes from its result and receipt", async () => {
+  const { tier } = mappedTier();
+  const core = new Core();
+  const plain = ["plain", "value", "1234567"].join("-");          // looks like nothing, but was handed to the sandbox
+  const shaped = ["sk", "abcdefghijklmnopqrstuvwx"].join("-");     // credential-shaped
+  await core.attachTierForTests(tier, undefined, [plain]);
+  const before = existsSync(receiptsDir) ? readdirSync(receiptsDir) : [];
+  const r = await core.runCheck({ argv: ["node", "-e", `console.log(${JSON.stringify(plain)}); console.error(${JSON.stringify(shaped)})`], label: `probe ${plain}` });
+  const receipt = readFileSync(receiptWrittenSince(before), "utf8");
+  for (const text of [JSON.stringify(r), receipt]) {
+    assert.equal(text.includes(plain), false, "exact secret value scrubbed");
+    assert.equal(text.includes(shaped), false, "credential-shaped value scrubbed");
+  }
+  assert.match(r.stdoutTail, /\[redacted\]/);
+});
+
+test("down() waits for a running check once the tier is gone, and refuses new checks while stopping", async () => {
+  let kill: (() => void) | null = null;
+  const { tier } = mappedTier();
+  const t: any = { ...tier,
+    exec: (argv: string[]) => argv[0] === "node" ? new Promise((resolve) => { kill = () => resolve({ code: null, stdout: "", stderr: "killed" }); }) : tier.exec(argv),
+    dispose: async () => { kill?.(); return { leftovers: [] }; } };
+  const core = new Core();
+  await core.attachTierForTests(t);
+  const check = core.runCheck({ argv: ["node", "-e", "setInterval(() => {}, 1000)"] });
+  await delay(20);
+  const downing = core.down();
+  await assert.rejects(core.runCheck({ argv: ["node", "-e", "1"] }), /shutting down/);
+  const out = await downing;
+  assert.deepEqual(out.leftovers, []);
+  assert.equal((await check).code, null, "the check settled with the tier teardown");
+});
+
+test("runStage only falls back to the plan the caller approved", async () => {
+  const { tier } = mappedTier();
+  const core = new Core();
+  await core.attachTierForTests(tier);
+  const none = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T", fallbackPlan: null });
+  assert.equal(none.fallback, null, "null approves no fallback");
+  assert.equal(core.stages.get(none.stageId)!.fallbackModel, null);
+  await answerWith(core, none.stageId, "French");
+  const zai = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T", fallbackPlan: "zai" });
+  assert.equal(zai.fallback, "zai/glm-5.3");
+  await answerWith(core, zai.stageId, "French");
+  assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T", plan: "zai", fallbackPlan: "chatgpt" }), /not this route's fallback/);
+});
+
+test("status(stageId) carries the full final text; the listing keeps the short preview", async () => {
+  const { tier } = mappedTier();
+  const core = new Core();
+  await core.attachTierForTests(tier);
+  const long = "x".repeat(5000) + "END";
+  const a = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T", plan: "zai" });
+  await answerWith(core, a.stageId, long);
+  const one = core.status(a.stageId) as { finalText: string; lastText: string };
+  assert.equal(one.finalText, "picked " + long, "nothing dropped from the start of a long answer");
+  assert.equal(one.lastText.length, 600);
+  const all = core.status() as { stages: Array<Record<string, unknown>> };
+  assert.equal("finalText" in all.stages[0], false);
 });

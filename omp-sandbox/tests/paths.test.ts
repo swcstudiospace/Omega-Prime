@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, symlinkSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { allowedDir, seedFiles, PathRefused } from "../src/core/paths.ts";
-import { ROOT } from "../src/core/config.ts";
+import { dirname, join } from "node:path";
+import { allowedDir, copySeed, seedFiles, PathRefused, pinDir, pinStillNamed, unpinDir } from "../src/core/paths.ts";
+import { ROOT, NODE24_BIN, SANDBOX_AGENT_BIN } from "../src/core/config.ts";
 import { SANDBOX_MOUNT, vmRoundTrip } from "../src/core/vm.ts";
 import { gatewayToml, mountDriverConfig, podmanPolicyYaml } from "../src/core/providers/openshell-podman.ts";
 import { startTier, MOUNT_TIERS } from "../src/core/providers/tiers.ts";
@@ -40,8 +40,48 @@ test("seed is binary-safe and skips .git, .venv, node_modules and symlinks", () 
   const { files, skipped } = seedFiles(src);
   assert.deepEqual(files.map((f) => f.rel), ["README.md", "a/b/blob.bin"]);
   assert.equal(files[1].path, join(src, "a", "b", "blob.bin"));
-  assert.equal(readFileSync(files[1].path).equals(bin), true, "bytes the copier reads are intact on disk");
   assert.deepEqual(skipped.sort(), [".git", ".venv", "a/.git", "link", "node_modules"].sort());
+});
+
+/** A fake agentOS VM filesystem that records the exact bytes handed to writeFile. `onMkdir` runs during each await. */
+function fakeVmFs(onMkdir: (p: string) => void = () => {}) {
+  const written = new Map<string, Buffer>(); const dirs: string[] = [];
+  return {
+    written, dirs,
+    fs: {
+      mkdir: async (p: string) => { dirs.push(p); onMkdir(p); },
+      writeFile: async (p: string, data: Uint8Array) => { assert.ok(data instanceof Uint8Array, "raw bytes, never a string"); written.set(p, Buffer.from(data)); },
+    },
+  };
+}
+
+test("the seed copy hands the VM the exact binary bytes", async () => {
+  const src = join(root, "binseed"); mkdirSync(join(src, "a", "b"), { recursive: true });
+  const bin = Buffer.from([0, 255, 254, 0x80, 10, 0xc3, 0x28]);
+  writeFileSync(join(src, "a", "b", "blob.bin"), bin);
+  writeFileSync(join(src, "README.md"), "hi\n");
+  const vm = fakeVmFs();
+  const out = await copySeed(src, "/mnt/work", vm.fs);
+  assert.deepEqual(out.files, ["README.md", "a/b/blob.bin"]);
+  assert.equal(out.bytes, bin.length + 3);
+  assert.deepEqual(vm.dirs, ["/mnt/work/a/b"]);
+  assert.equal(vm.written.get("/mnt/work/a/b/blob.bin")!.equals(bin), true, "bytes passed to writeFile equal the source bytes");
+  assert.equal(vm.written.get("/mnt/work/README.md")!.toString("utf8"), "hi\n");
+});
+
+test("a file or parent folder swapped for a symlink during the copy is refused, never followed", async () => {
+  const secret = join(outside, "secret.txt"); writeFileSync(secret, "outside-bytes");
+  for (const swap of ["file", "parent"] as const) {
+    const src = join(root, `race-${swap}`); mkdirSync(join(src, "d"), { recursive: true });
+    writeFileSync(join(src, "d", "secret.txt"), "inside");
+    const vm = fakeVmFs(() => {
+      // Another job edits the workspace while the copy waits on the VM.
+      if (swap === "file") { rmSync(join(src, "d", "secret.txt")); symlinkSync(secret, join(src, "d", "secret.txt")); }
+      else { renameSync(join(src, "d"), join(src, "d.old")); symlinkSync(outside, join(src, "d")); }
+    });
+    await assert.rejects(copySeed(src, "/mnt/work", vm.fs), (e: unknown) => e instanceof PathRefused, swap);
+    for (const b of vm.written.values()) assert.equal(b.toString("utf8").includes("outside-bytes"), false, `${swap}: no outside bytes reached the VM`);
+  }
 });
 
 test("seedFiles carries rel + absolute source path only (no bytes buffered during the walk)", () => {
@@ -139,4 +179,40 @@ test("vmRoundTrip probes only the tier's private home, never the mounted workdir
       assert.ok(s.includes("/home"), `every probe access stays under the private home: ${s}`);
     }
   }
+});
+
+// Greptile round 3 on sbx-2: a checked worktree swapped for a symlink before (or after) the mount cannot redirect it.
+test("pinDir holds the checked directory and refuses a name swapped for a symlink", () => {
+  const parent = join(root, "pin-parent"); const child = join(parent, "child"); mkdirSync(child, { recursive: true });
+  const checked = allowedDir(child, [root], "ws");
+  const pin = pinDir(checked, "ws");
+  try {
+    assert.equal(pinStillNamed(pin), true);
+    const st = statSync(checked); assert.deepEqual([pin.dev, pin.ino], [st.dev, st.ino]);
+    // Another job owning `parent` swaps `child` for a link to a folder outside the allowlisted roots.
+    renameSync(child, join(parent, "child-orig")); symlinkSync(outside, child);
+    assert.equal(pinStillNamed(pin), false, "the name now leads elsewhere");
+    assert.throws(() => pinDir(checked, "ws"), (e: any) => e instanceof PathRefused && /changed since it was checked/.test(e.message));
+    // A swapped parent folder is caught too.
+    rmSync(child); renameSync(join(parent, "child-orig"), child);
+    renameSync(parent, join(root, "pin-parent-orig")); symlinkSync(join(root, "pin-parent-orig"), parent);
+    assert.throws(() => pinDir(checked, "ws"), /changed since it was checked/);
+  } finally { unpinDir(pin); }
+});
+
+const bwrapReady = existsSync("/usr/bin/bwrap") && existsSync(NODE24_BIN) && existsSync(dirname(SANDBOX_AGENT_BIN));
+test("bwrap binds the pinned descriptor, so a later symlink swap does not move the mount", { skip: !bwrapReady }, async () => {
+  const { BwrapTier } = await import("../src/core/providers/bwrap.ts");
+  const parent = join(root, "pin-bwrap"); const ws = join(parent, "job"); mkdirSync(ws, { recursive: true });
+  const hostRoot = join(box, "bw-host"); for (const d of ["work", "home", "bin"]) mkdirSync(join(hostRoot, d), { recursive: true });
+  const t = new BwrapTier(hostRoot, allowedDir(ws, [root], "ws"));
+  assert.throws(() => t.exec(["true"]), /not pinned/, "no pin before start(): refuse rather than bind by name");
+  t.pinWorkspace();
+  try {
+    renameSync(ws, join(parent, "job-orig")); symlinkSync(outside, ws);
+    const r = await t.exec(["sh", "-c", "echo pinned > /sbx/work/proof.txt"], { cwd: "/sbx" });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(join(parent, "job-orig", "proof.txt"), "utf8"), "pinned\n", "write lands in the checked directory");
+    assert.equal(existsSync(join(outside, "proof.txt")), false, "never in the symlink's target");
+  } finally { await t.dispose(); }
 });

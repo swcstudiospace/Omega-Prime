@@ -11,8 +11,8 @@ import { ensureGsd } from "./gsd.ts";
 import { OmpRpcClient, StaleAnswerError, textOf, type AnswerInput, type PendingQuestion } from "./omp-rpc.ts";
 import { mockAttestation, type AttestationDoc } from "./attest.ts";
 import { redactSecrets, rid, execCapture } from "./providers/util.ts";
-import { allowedDir, seedFiles, PathRefused, SEED_ROOTS, WORKSPACE_ROOTS } from "./paths.ts";
-import { repoSeedScript, CHECK_BINS, SANDBOX_PYDEPS, type SeedRepo } from "./repo.ts";
+import { allowedDir, copySeed, PathRefused, SEED_ROOTS, WORKSPACE_ROOTS } from "./paths.ts";
+import { repoSeedScript, CHECK_BINS, CHECK_TIMEOUT_MS, seedRef, sandboxHome, sandboxPath, type SeedRepo } from "./repo.ts";
 
 export type StageStatus = "starting" | "running" | "waiting" | "completed" | "failed" | "aborted";
 const TERMINAL: readonly StageStatus[] = ["completed", "failed", "aborted"];
@@ -21,6 +21,8 @@ type StageRec = {
   client: OmpRpcClient | null; startedAt: string; endedAt?: string; error?: string; fallbackFrom?: string;
   questions: Array<{ requestId: string; asked: string; answered?: AnswerInput; answeredAt?: string; method: string }>;
   lastText: string; done: Promise<void>;
+  /** True once the stage's omp session has fully wound down (status alone flips to aborted before omp exits). */
+  settled: boolean;
 };
 
 const PASS_ENV_NAME = /^(ZAI|ZHIPU|OPENROUTER)_API_KEY$/;
@@ -32,6 +34,9 @@ export function passEnv(src: Record<string, string | undefined> = process.env) {
 }
 
 type UpOpts = { tiers?: string[]; seed?: string; workspace_host_path?: string; seed_repo?: SeedRepo; py_deps?: string; stage?: Array<{ from: string; to: string }> };
+
+type DownReport = { leftovers: string[]; ownedBefore: Record<string, unknown> | null; brokerStopped: boolean; attestation: string };
+
 export class Core extends EventEmitter {
   broker = new AuthBroker();
   tier: (SandboxTier & { hostRoot?: string }) | null = null;
@@ -48,6 +53,14 @@ export class Core extends EventEmitter {
   repo: { path: string; ref: string; base: string } | null = null;
   #starting: Promise<Record<string, unknown>> | null = null;
   #ready = false;
+  /** Set for the whole of `down()`: no new startup or stage is accepted while shutdown is tearing things down. */
+  #stopping: Promise<DownReport> | null = null;
+  /** Exact values handed to the sandbox (broker env, opted-in API keys): scrubbed from every check result. */
+  #secrets: string[] = [];
+  /** run_check calls still running; down() waits for them after the tier (and their processes) is gone. */
+  #checks = new Set<Promise<unknown>>();
+  /** Sandbox-side dir py_deps were staged into (run_check's PYTHONPATH). */
+  #pydeps: string | null = null;
 
   /**
    * Bring the sandbox up once. Concurrent callers share one startup; a failed startup tears down everything it
@@ -60,6 +73,7 @@ export class Core extends EventEmitter {
    * sandbox workdir (results come back with export_commits). The three are mutually exclusive. Paths are checked before anything starts.
    */
   up(opts: UpOpts = {}): Promise<Record<string, unknown>> {
+    if (this.#stopping) return Promise.reject(new Error("shutting down; call up again after down finishes"));
     if (this.#ready) return Promise.resolve(this.up_);
     if (!this.#starting) this.#starting = this.#up(opts).finally(() => { this.#starting = null; });
     return this.#starting;
@@ -72,8 +86,8 @@ export class Core extends EventEmitter {
    * otherwise unreachable with a fake tier. Seeding is async, so the seeded form returns a promise of the same up_
    * stub shape with seeded/pyDeps/staged folded in. Still boots no broker, tier or VM. Not reachable over the API.
    */
-  async attachTierForTests(tier: SandboxTier & { hostRoot?: string }, seed?: { seed_repo?: SeedRepo; py_deps?: string; stage?: Array<{ from: string; to: string }> }): Promise<Record<string, unknown>> {
-    this.tier = tier; this.#ready = true; this.up_ = { tier: tier.name };
+  async attachTierForTests(tier: SandboxTier & { hostRoot?: string }, seed?: { seed_repo?: SeedRepo; py_deps?: string; stage?: Array<{ from: string; to: string }> }, secrets: string[] = []): Promise<Record<string, unknown>> {
+    this.tier = tier; this.#ready = true; this.up_ = { tier: tier.name }; this.#secrets = [...secrets];
     if (seed === undefined) return this.up_;
     const seedRepo = seed.seed_repo !== undefined ? { ...seed.seed_repo, path: allowedDir(seed.seed_repo.path, WORKSPACE_ROOTS, "seed_repo.path") } : null;
     const seeded = seedRepo ? await this.#seedRepo(seedRepo) : null;
@@ -92,7 +106,9 @@ export class Core extends EventEmitter {
     try {
       await this.broker.start();
       const passed = passEnv();
-      const { tier, skipped } = await startTier({ ...this.broker.env, ...passed.env }, opts.tiers as any, { workspaceHostPath: workspace });
+      const tierEnv: Record<string, string> = { ...this.broker.env, ...passed.env };
+      this.#secrets = Object.values(tierEnv).filter((v) => typeof v === "string" && v.length >= 8);
+      const { tier, skipped } = await startTier(tierEnv, opts.tiers as any, { workspaceHostPath: workspace });
       this.tier = tier as any; this.skipped = skipped;
       const { vm, bootMs } = await bootVm(tier); this.vm = vm;
       const roundTrip = await vmRoundTrip(vm, tier);
@@ -119,17 +135,9 @@ export class Core extends EventEmitter {
   async #seed(src: string) {
     const t = this.tier!;
     const rel = t.workdir.slice(t.sandboxRoot.length).replace(/^\/+/, "");
-    const { files, skipped } = seedFiles(src);
-    let bytes = 0;
-    for (const f of files) {
-      const dir = f.rel.includes("/") ? f.rel.slice(0, f.rel.lastIndexOf("/")) : "";
-      if (dir) await this.vm.filesystem.mkdir(`${SANDBOX_MOUNT}/${rel}/${dir}`, { recursive: true }).catch(() => {});
-      const data = readFileSync(f.path);
-      bytes += data.length;
-      await this.vm.filesystem.writeFile(`${SANDBOX_MOUNT}/${rel}/${f.rel}`, new Uint8Array(data));
-    }
+    const { files, skipped, bytes } = await copySeed(src, `${SANDBOX_MOUNT}/${rel}`, this.vm.filesystem);
     const g = await t.exec(["sh", "-c", "git init -q && git add -A && git -c user.name=omp-sandbox -c user.email=omp-sandbox@local commit -qm 'seed: disposable e2e fixture' && git log --oneline | head -1"], { timeoutMs: 60_000 });
-    return { fixture: src, files: files.map((f) => f.rel), bytes, skipped, viaVm: true, git: g.stdout.trim(), gitExit: g.code };
+    return { fixture: src, files, bytes, skipped, viaVm: true, git: g.stdout.trim(), gitExit: g.code };
   }
 
 
@@ -137,17 +145,20 @@ export class Core extends EventEmitter {
    *  Nothing on the host is mounted; the sandbox only ever sees this one ref. */
   async #seedRepo(s: SeedRepo) {
     const t = this.tier!;
-    if (!s?.path || !s?.ref || !/^[A-Za-z0-9._\/-]{1,200}$/.test(s.ref)) throw new Error("seed_repo needs {path, ref} with a plain ref name");
+    if (!s?.path || !s?.ref) throw new Error("seed_repo needs {path, ref}");
+    // A branch name only (refs/heads/x is shortened): the checkout must be on a writable branch so new commits move the exported ref.
+    const ref = seedRef(s.ref); s = { ...s, ref };
+    const home = sandboxHome(t);
     mkdirSync(join(STATE, "seeds"), { recursive: true });
     const bundle = join(STATE, "seeds", `${t.id}.bundle`);
     const b = await execCapture("git", ["-C", s.path, "bundle", "create", bundle, s.ref], { timeoutMs: 300_000 });
     if (b.code !== 0) throw new Error(`git bundle failed: ${b.stderr.slice(-400)}`);
-    await this.#put(bundle, "/sandbox/home/seed.bundle");
-    const g = await t.exec(["sh", "-c", repoSeedScript, "sh", s.ref, s.authorName ?? "omp-sandbox", s.authorEmail ?? "omp-sandbox@local"], { timeoutMs: 300_000 });
+    await this.#put(bundle, `${home}/seed.bundle`);
+    const g = await t.exec(["sh", "-c", repoSeedScript, "sh", s.ref, s.authorName ?? "omp-sandbox", s.authorEmail ?? "omp-sandbox@local", `${home}/seed.bundle`], { timeoutMs: 300_000 });
     if (g.code !== 0) throw new Error(`seed checkout failed (exit ${g.code}): ${g.stderr.slice(-400)}`);
     const [base, dirty] = g.stdout.trim().split("\n").slice(-2);
     this.repo = { path: s.path, ref: s.ref, base: base.trim() };
-    return { repo: s.path, ref: s.ref, base: base.trim(), bundleBytes: statSync(bundle).size, untrackedAfterSeed: Number(dirty), via: "git bundle via openshell sandbox upload (verified in-sandbox)" };
+    return { repo: s.path, ref: s.ref, base: base.trim(), bundleBytes: statSync(bundle).size, untrackedAfterSeed: Number(dirty), via: `git bundle via ${typeof (t as any).upload === "function" ? "tier upload" : "exec stdin"} (verified in-sandbox)` };
   }
 
   /** Host file -> sandbox path: OpenShell upload (mTLS gateway) when the tier has it, else exec stdin (small files only). */
@@ -166,38 +177,62 @@ export class Core extends EventEmitter {
   async #stagePyDeps(dir: string) {
     const t = this.tier!;
     if (!existsSync(dir)) throw new Error(`py_deps dir not found: ${dir}`);
+    const home = sandboxHome(t); const pydeps = `${home}/pydeps`;
     const tgz = join(STATE, "seeds", `${t.id}-pydeps.tgz`); mkdirSync(join(STATE, "seeds"), { recursive: true });
     const tar = await execCapture("tar", ["-C", dir, "-czf", tgz, "."], { timeoutMs: 300_000 });
     if (tar.code !== 0) throw new Error(`py_deps tar failed: ${tar.stderr.slice(-300)}`);
-    await this.#put(tgz, "/sandbox/home/pydeps.tgz");
-    const x = await t.exec(["sh", "-c", `mkdir -p ${SANDBOX_PYDEPS} && tar -xzf /sandbox/home/pydeps.tgz -C ${SANDBOX_PYDEPS} && rm -f /sandbox/home/pydeps.tgz && echo 'export PYTHONPATH=${SANDBOX_PYDEPS}' >> /sandbox/home/.omp-sandbox.env && python3 -c 'import sys; sys.path.insert(0, "${SANDBOX_PYDEPS}"); import pytest, starlette, httpx; print(sys.version.split()[0], pytest.__version__)'`], { timeoutMs: 300_000 });
+    await this.#put(tgz, `${home}/pydeps.tgz`);
+    // Paths ride as positional args ($1 dir, $2 archive, $3 env file), never spliced into the script text.
+    const x = await t.exec(["sh", "-c", `mkdir -p "$1" && tar -xzf "$2" -C "$1" && rm -f "$2" && echo "export PYTHONPATH=$1" >> "$3" && python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import pytest, starlette, httpx; print(sys.version.split()[0], pytest.__version__)' "$1"`, "sh", pydeps, `${home}/pydeps.tgz`, `${home}/.omp-sandbox.env`], { timeoutMs: 300_000 });
     if (x.code !== 0) throw new Error(`py_deps staging failed: ${x.stderr.slice(-400)}`);
-    return { dir: SANDBOX_PYDEPS, python_pytest: x.stdout.trim() };
+    this.#pydeps = pydeps;
+    return { dir: pydeps, python_pytest: x.stdout.trim() };
   }
 
-  /** Copy a host directory of reference files (read-only inputs such as specs) to /sandbox/home/<name>. */
+  /** Copy a host directory of reference files (read-only inputs such as specs) to <sandbox home>/<name>.
+   *  `to` is the logical `/sandbox/home/<name>`; it lands under the selected tier's own home. */
   async #stageDir(st: { from: string; to: string }) {
     const t = this.tier!;
     if (!existsSync(st.from) || !/^\/sandbox\/home\/[A-Za-z0-9._-]+$/.test(st.to)) throw new Error(`stage: bad from/to (${st.from} -> ${st.to})`);
+    const home = sandboxHome(t); const to = sandboxPath(t, st.to);
     const tgz = join(STATE, "seeds", `${t.id}-stage-${st.to.split("/").pop()}.tgz`); mkdirSync(join(STATE, "seeds"), { recursive: true });
     const tar = await execCapture("tar", ["-C", st.from, "-czf", tgz, "."], { timeoutMs: 300_000 });
     if (tar.code !== 0) throw new Error(`stage tar failed: ${tar.stderr.slice(-300)}`);
-    await this.#put(tgz, "/sandbox/home/stage.tgz");
-    const x = await t.exec(["sh", "-c", 'mkdir -p "$1" && tar -xzf /sandbox/home/stage.tgz -C "$1" && rm -f /sandbox/home/stage.tgz && find "$1" -type f | wc -l', "sh", st.to], { timeoutMs: 300_000 });
+    await this.#put(tgz, `${home}/stage.tgz`);
+    const x = await t.exec(["sh", "-c", 'mkdir -p "$1" && tar -xzf "$2" -C "$1" && rm -f "$2" && find "$1" -type f | wc -l', "sh", to, `${home}/stage.tgz`], { timeoutMs: 300_000 });
     if (x.code !== 0) throw new Error(`stage ${st.to} failed: ${x.stderr.slice(-300)}`);
-    return { from: st.from, to: st.to, files: Number(x.stdout.trim()) };
+    return { from: st.from, to, files: Number(x.stdout.trim()) };
   }
 
-  /** Run one build/test command inside the sandbox workdir (allowlisted binaries only; no shell). */
-  async runCheck(a: { argv: string[]; cwd?: string; timeout_ms?: number; label?: string }) {
+  /** Run one build/test command inside the sandbox workdir (allowlisted binaries only; no shell).
+   *  Every returned and receipted field is scrubbed: the exact values handed to the sandbox, then credential shapes.
+   *  The call is tracked so down() can wait for it once the tier has killed its processes; it is bounded by
+   *  `timeout_ms` (default CHECK_TIMEOUT_MS). */
+  runCheck(a: { argv: string[]; cwd?: string; timeout_ms?: number; label?: string }) {
+    if (this.#stopping) return Promise.reject(new Error("shutting down; no new checks"));
+    const p = this.#runCheck(a);
+    this.#checks.add(p); const forget = () => { this.#checks.delete(p); }; p.then(forget, forget);
+    return p;
+  }
+
+  /** Exact secret values first (they may not look like credentials), then credential-shaped text. */
+  #scrub(text: string) {
+    let out = text;
+    for (const v of this.#secrets) out = out.split(v).join("[redacted]");
+    return redactSecrets(out);
+  }
+
+  async #runCheck(a: { argv: string[]; cwd?: string; timeout_ms?: number; label?: string }) {
     const t = this.tier; if (!t) throw new Error("not up");
     if (!Array.isArray(a.argv) || !a.argv.length || !a.argv.every((x) => typeof x === "string")) throw new Error("argv must be a non-empty string array");
     if (!CHECK_BINS.includes(a.argv[0])) throw new Error(`run_check: ${a.argv[0]} is not allowlisted (${CHECK_BINS.join(", ")})`);
     const cwd = a.cwd ? `${t.workdir}/${a.cwd}`.replace(/\/+/g, "/") : t.workdir;
     if (cwd.includes("..")) throw new Error("run_check: cwd must stay inside the workdir");
     const startedAt = aedt(); const t0 = Date.now();
-    const r = await t.exec(a.argv, { cwd, env: { PYTHONPATH: SANDBOX_PYDEPS, CI: "1" }, timeoutMs: a.timeout_ms ?? 0 });
-    const out = { label: a.label ?? a.argv.join(" ").slice(0, 120), argv: a.argv, cwd, code: r.code, ms: Date.now() - t0, startedAt, endedAt: aedt(), tier: t.name, stdoutTail: r.stdout.slice(-20_000), stderrTail: r.stderr.slice(-8_000) };
+    const env: Record<string, string> = { CI: "1", ...(this.#pydeps ? { PYTHONPATH: this.#pydeps } : {}) };
+    const r = await t.exec(a.argv, { cwd, env, timeoutMs: a.timeout_ms ?? CHECK_TIMEOUT_MS });
+    const label = a.label ?? a.argv.join(" ").slice(0, 120);
+    const out = { label: this.#scrub(label), argv: a.argv.map((x) => this.#scrub(x)), cwd, code: r.code, ms: Date.now() - t0, startedAt, endedAt: aedt(), tier: t.name, stdoutTail: this.#scrub(r.stdout.slice(-20_000)), stderrTail: this.#scrub(r.stderr.slice(-8_000)) };
     this.#receipt(rid("check"), out);
     return out;
   }
@@ -211,15 +246,16 @@ export class Core extends EventEmitter {
     const [head, ...rest] = info.stdout.trim().split("\n"); const sep = rest.indexOf("--");
     const commits = rest.slice(0, sep); const dirty = rest.slice(sep + 1).filter(Boolean);
     if (!commits.length) return { head, base, commits: [], dirty, bundle: null };
-    const mk = await t.exec(["sh", "-c", 'git bundle create -q /sandbox/home/export.bundle "$2..$1" && wc -c < /sandbox/home/export.bundle', "sh", ref, base], { timeoutMs: 300_000 });
+    const remote = `${sandboxHome(t)}/export.bundle`;
+    const mk = await t.exec(["sh", "-c", 'git bundle create -q "$3" "$2..$1" && wc -c < "$3"', "sh", ref, base, remote], { timeoutMs: 300_000 });
     if (mk.code !== 0) throw new Error(`export: git bundle failed: ${mk.stderr.slice(-300)}`);
     const size = Number(mk.stdout.trim());
     const dir = join(STATE, "exports", `${t.id}-${Date.now().toString(36)}`); mkdirSync(dir, { recursive: true });
-    const dl = await (t as any).download?.("/sandbox/home/export.bundle", dir);
+    const dl = await (t as any).download?.(remote, dir);
     if (!dl || dl.code !== 0) throw new Error(`export download failed: ${dl?.stderr?.slice(-300) ?? "tier has no download"}`);
     const out = existsSync(join(dir, "export.bundle")) ? join(dir, "export.bundle") : join(dir, readdirSync(dir)[0]);
     if (statSync(out).size !== size) throw new Error(`export size mismatch ${statSync(out).size} != ${size}`);
-    const res = { head, base, ref, commits, dirty, bundle: out, bytes: size, via: "git bundle + openshell sandbox download (gateway mTLS)" };
+    const res = { head, base, ref, commits, dirty, bundle: out, bytes: size, via: `git bundle + ${t.name} download` };
     this.#receipt(rid("export"), res);
     return res;
   }
@@ -243,19 +279,28 @@ export class Core extends EventEmitter {
   }
 
   /** Start a GSD stage. Returns immediately; follow with status()/events. */
-  runStage(a: { stage: Stage; gsdCommand: string; task: string; thinking?: string; model?: string; plan?: string }) {
+  /** `fallbackPlan`: when given, the only plan this stage may fall back to (null = no fallback); it must be the
+   *  route's own next plan. Omitted keeps the route's default fallback. */
+  runStage(a: { stage: Stage; gsdCommand: string; task: string; thinking?: string; model?: string; plan?: string; fallbackPlan?: string | null }) {
+    if (this.#stopping) throw new Error("shutting down; no new stages");
     if (!this.tier || !this.#ready) throw new Error("not up");
     // Every stage runs in the same workdir, so overlapping stages would edit and commit each other's files.
-    const active = [...this.stages.values()].find((r) => !TERMINAL.includes(r.status));
-    if (active) throw new Error(`stage ${active.id} is still ${active.status}; one stage at a time per workdir (abort it or wait for stage_done)`);
+    // An aborted stage is terminal at once but its omp session can still be writing until it settles.
+    const active = [...this.stages.values()].find((r) => !r.settled);
+    if (active) throw new Error(`stage ${active.id} is still ${TERMINAL.includes(active.status) ? `winding down (${active.status})` : active.status}; one stage at a time per workdir (abort it and wait for stage_done)`);
     const route = stageRoute(a.stage, a.plan);
+    let fallbackModel = route.fallback;
+    if (a.fallbackPlan !== undefined) {
+      if (a.fallbackPlan === null) fallbackModel = null;
+      else if (a.fallbackPlan !== route.fallbackPlan) throw new Error(`fallback plan ${JSON.stringify(a.fallbackPlan)} is not this route's fallback (${route.fallbackPlan ?? "none"})`);
+    }
     const id = rid(`st-${a.stage}`);
     const model = a.model ?? route.primary;
     const message = `/${a.gsdCommand} ${MAGIC}\n\n${a.task}`;
-    const rec: StageRec = { id, stage: a.stage, plan: route.plan, fallbackModel: route.fallback, command: a.gsdCommand, modelRequested: model, status: "starting", client: null, startedAt: aedt(), questions: [], lastText: "", done: Promise.resolve() };
+    const rec: StageRec = { id, stage: a.stage, plan: route.plan, fallbackModel, command: a.gsdCommand, modelRequested: model, status: "starting", client: null, startedAt: aedt(), questions: [], lastText: "", done: Promise.resolve(), settled: false };
     this.stages.set(id, rec);
-    rec.done = this.#drive(rec, message, model, a.thinking ?? "max").catch((e: any) => { rec.status = rec.status === "aborted" ? "aborted" : "failed"; rec.error = String(e?.message ?? e); }).finally(() => { rec.endedAt = aedt(); this.#stageReceipt(rec); this.emit("event", { event: "stage_done", stageId: id, status: rec.status, error: rec.error }); });
-    return { stageId: id, plan: route.plan, model, fallback: route.fallback, command: a.gsdCommand };
+    rec.done = this.#drive(rec, message, model, a.thinking ?? "max").catch((e: any) => { rec.status = rec.status === "aborted" ? "aborted" : "failed"; rec.error = String(e?.message ?? e); }).finally(() => { rec.endedAt = aedt(); rec.settled = true; this.#stageReceipt(rec); this.emit("event", { event: "stage_done", stageId: id, status: rec.status, error: rec.error }); });
+    return { stageId: id, plan: route.plan, model, fallback: fallbackModel, command: a.gsdCommand };
   }
 
   async #drive(rec: StageRec, message: string, model: string, thinking: string): Promise<void> {
@@ -273,7 +318,7 @@ export class Core extends EventEmitter {
       this.emit("event", { event: "question", stageId: rec.id, requestId: q.requestId, method: q.method, questions: q.questions, title: q.title, options: q.options });
     });
     c.on("frame", (f) => {
-      if (f.type === "message_end" && f.message?.role === "assistant") { const t = textOf(f.message); if (t) rec.lastText = t.slice(-4000); }
+      if (f.type === "message_end" && f.message?.role === "assistant") { const t = textOf(f.message); if (t) rec.lastText = t; }
       // Never overwrite a requested abort (frames keep arriving while omp winds down).
       if (f.type === "agent_start" || f.type === "turn_start") if (rec.status === "starting" || rec.status === "running") rec.status = "running";
     });
@@ -320,7 +365,9 @@ export class Core extends EventEmitter {
 
   status(stageId?: string) {
     const view = (r: StageRec) => ({ stageId: r.id, stage: r.stage, plan: r.plan, command: r.command, status: r.status, modelRequested: r.modelRequested, fallbackFrom: r.fallbackFrom ?? null, modelsSeen: r.client ? [...r.client.models] : [], pendingQuestions: r.client?.pendingQuestions.map((q) => q.requestId) ?? [], questions: r.questions.length, startedAt: r.startedAt, endedAt: r.endedAt ?? null, error: r.error ?? null, lastText: r.lastText.slice(-600) });
-    if (stageId) { const r = this.stages.get(stageId); if (!r) throw new Error(`unknown stage ${stageId}`); return view(r); }
+    const single = (r: StageRec) => ({ ...view(r), finalText: r.lastText });
+    // One stage asked for by id also carries its full final assistant text; listings keep the short preview.
+    if (stageId) { const r = this.stages.get(stageId); if (!r) throw new Error(`unknown stage ${stageId}`); return single(r); }
     return { tier: this.tier?.name ?? null, isolation: this.tier?.isolation ?? null, owned: this.tier?.owned() ?? null, attestation: "mock", stages: [...this.stages.values()].map(view) };
   }
 
@@ -349,11 +396,27 @@ export class Core extends EventEmitter {
     return { leftovers, ownedBefore };
   }
 
-  async down() {
+  down(): Promise<DownReport> {
+    // One shutdown at a time; a second caller waits for the same one.
+    if (!this.#stopping) this.#stopping = this.#down().finally(() => { this.#stopping = null; });
+    return this.#stopping;
+  }
+
+  async #down(): Promise<DownReport> {
+    // Refuse new work before the first wait: `#stopping` is already set, and the core is no longer ready.
+    this.#ready = false;
     // Let an in-flight startup finish (or roll itself back) before tearing down.
     if (this.#starting) await this.#starting.catch(() => {});
-    for (const r of this.stages.values()) if (!TERMINAL.includes(r.status)) await this.abort(r.id).catch(() => {});
+    this.#ready = false;
+    for (const r of this.stages.values()) if (!r.settled) await this.abort(r.id).catch(() => {});
     const { leftovers, ownedBefore } = await this.#teardown();
+    // The tier is gone, so its check processes are dead; wait (bounded) for the run_check calls to settle.
+    if (this.#checks.size) {
+      let t: NodeJS.Timeout | undefined;
+      const settled = await Promise.race([Promise.allSettled([...this.#checks]).then(() => true), new Promise<boolean>((r) => { t = setTimeout(() => r(false), 15_000); })]).finally(() => clearTimeout(t));
+      if (!settled) leftovers.push(`${this.#checks.size} run_check call(s) still running after teardown`);
+    }
+    this.#secrets = []; this.#pydeps = null;
     const out = { leftovers, ownedBefore, brokerStopped: this.broker.proc === null, attestation: "mock" };
     this.#receipt(`down-${Date.now().toString(36)}`, out);
     return out;

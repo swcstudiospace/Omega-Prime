@@ -6,6 +6,7 @@
 
 - [Setup](setup.md)
 - [Local validation](local-validation.md)
+- [Configuration inventory](configuration.md)
 
 ## Use
 

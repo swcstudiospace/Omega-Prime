@@ -46,12 +46,17 @@ pub async fn run(root: &Path, addr: &str) -> Result<(), String> {
     let c2 = core.clone();
     let shutdown = async move {
         // Serve until the core exits (after `down`), then give clients a moment to read the reply.
-        if !c2.exited.load(Ordering::SeqCst) { c2.exit_notify.notified().await; }
+        // Register for the notification before reading the flag: `notify_waiters` only wakes waiters that already
+        // exist, so an exit landing between the check and the wait would otherwise be missed forever.
+        let notified = c2.exit_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !c2.exited.load(Ordering::SeqCst) { notified.await; }
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     };
     let sig = async {
         let mut t = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-        tokio::select! { _ = t.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
+        tokio::select! { _ = t.recv() => {}, _ = tokio::signal::ctrl_c() => {}, _ = parent_gone() => {} }
     };
     tokio::select! {
         r = axum_serve(listener, app, shutdown) => r?,
@@ -59,6 +64,19 @@ pub async fn run(root: &Path, addr: &str) -> Result<(), String> {
     }
     let _ = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait()).await;
     Ok(())
+}
+
+/// Env var a spawning `client` sets to its own pid: this server then shuts down (running `down`) if that parent
+/// dies without a graceful shutdown (SIGKILL, crash), instead of leaving the core and sandbox job running.
+pub const PARENT_ENV: &str = "OMP_SANDBOX_ANDA_PARENT";
+
+/// Resolves once the spawning parent named by `PARENT_ENV` is gone (we were reparented). Never resolves when unset.
+async fn parent_gone() {
+    let Some(want) = std::env::var(PARENT_ENV).ok().and_then(|v| v.parse::<u32>().ok()) else { return std::future::pending().await };
+    loop {
+        if std::os::unix::process::parent_id() != want { return; }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 async fn axum_serve(l: tokio::net::TcpListener, app: axum::Router, s: impl std::future::Future<Output = ()> + Send + 'static) -> Result<(), String> {

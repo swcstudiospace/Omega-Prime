@@ -1,0 +1,47 @@
+# Phase 103 validation strategy (planning only)
+
+**Status:** No validation commands or product-path smoke runs were executed for this planning artifact. This matrix defines parent-owned future verification only; it makes no coverage or passing-status claim. Source evidence is static and must be reread before execution. Fake-root smoke uses fake binaries only, never a real external Ultrathink CLI.
+
+## Task-to-behavior validation matrix
+
+| Plan / behavior | Permanent tests and assertions | Parent smoke or review | Limits / pass interpretation |
+|---|---|---|---|
+| 103-01: strict flag and bridge gate | Bridge matrix across `ult_ship_pr`, `ult_ship_review`, `ult_ship_merge`; only exact string `1`/`true` enable; all other inputs refuse with stable `ship_disabled` and zero runner calls. Verify disabled valid args gate before root; enabled empty root still reports `not_configured`. | Exercise public registry/MCP path with explicit fake env and recording fake runner. Approved+disabled refuses; enabled+approved runs exact existing argv; enabled but unapproved still reports approval required and makes no call. | No live CLI. Registry approval remains independent; `APPROVAL_TOOLS`, status/assess, argv, timeout and `autoMerge` unchanged. |
+| 103-01: env wiring and eval | Server explicit mappings authoritative against ambient env; eval cases use explicit per-case env, default omitted env remains off. Keep existing session-mark cases unchanged. | Fake runner proves selected env controls invocation and no ambient fallback is used. | Do not broadly enable fixtures or imply environment grants approval. |
+| 103-02: readiness state and setup contract | Fake-root tests for absent/empty root (`not_configured`), invalid root/non-executable/missing each required executable (`root_invalid`), complete executable root with ship off/on. Assert all three files required; setup retains bool/None shape and meaningful detail. | Inspect reported configured root/effective ship/preferred discovery directory for each state; confirm off is healthy. | Metadata checks only; no CLI invocation. `X_OK` cannot prove a binary will run. |
+| 103-02: discovery and doctor | Candidate precedence tests for `OMEGA_PRIME_STATE_DIR`, `ULTRATHINK_STATE_DIR`, and remaining existing order; explicit `state_dirs` replacement and stale-first-plan resolver semantics remain unchanged. Doctor tests preserve exact JSON keys/shape and map four states without altering severity behavior. | Guard diagnostic path against executable calls, config/settings reads, `last-plan.json` parsing or writes; use isolated fake home/root. | Preferred directory is a discovery target, not proof of plan existence/freshness. Do not claim `/omega-doctor` changes. |
+| 103-03: native optional lane | Python-only status test remains unmarked and usable. Exactly nine binding tests and four runtime E2Es are native-marked. Skip only when existing `extension_path()` finds no artifact; load/import/ABI failures with an artifact fail. | Parent runs no-artifact Python-only lane and, only when actual artifact is available, artifact-present native lane. | No native build. Artifact availability is unknown and no native pass is claimed. |
+| 103-03: OpenShell optional test | Hermetic tests for explicit `OPENSHELL_BIN` overriding PATH, unset override using existing PATH lookup, absent-only skip, and present non-executable/nonzero/unrunnable failure. Keep actual probe subprocess and argv/no-fallback behavioral tests; remove only source-text assertion. | If an operator provides an existing executable, optionally run the real selected version probe. | Test-only override; production sandbox resolver unchanged. No fixed build directory, build, external search, or live gateway. |
+| 103-04: documentation | Review exact environment names, exact ship values, current directory precedence and explicit override semantics against implementation and tests. Check optional marker and test-only OpenShell wording. | Check Phase 102 env checker reference only after identifying its real implementation/API; verify docs checker only if actually available. | Current-head evidence does not show Phase 102 checker; do not invent command/API or document unimplemented behavior as available. |
+| 103-05: phase handoff | Parent executes focused tests at each wave boundary; wave 4 runs the focused union and fake-root smoke, then required phase-wide gates once. Receipt and milestone evidence are reviewed separately. | Fake-root, public-product-path process smoke for setup/doctor/bridge using fake binaries and isolated env. Review PR45 as local-history evidence only and explicitly verify predecessor 102 before implementation. | No external Ultrathink CLI, live config, credentials, gateway, or external audit. No completion until actual evidence is recorded. |
+
+## Wave checkpoints
+
+These are future parent/orchestrator checks, not commands for this planning session or executor workers. After each wave lands, the parent runs the focused checkpoint below, records the exact command and outcome, and advances only after the checkpoint passes (or records a concrete blocker). Set `PATH="/workspace/omes-bot/.venv/bin:$PATH"` and `PYTHONPATH=/workspace/omes-bot-wt/p7`; use `/workspace/omes-bot/.venv/bin/python -m pytest` for pytest commands. Do not rerun full CI at each wave.
+
+- **Wave 1 — 103-01 and 103-03 (independent):** After both plans land, run `PYTHONPATH=/workspace/omes-bot-wt/p7 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_ultrathink.py omega_prime/tests/test_mcp_server.py omega_prime/tests/test_evals.py omega_prime/tests/test_prime_native.py omega_prime/tests/test_prime_runtime_e2e.py omega_prime/tests/test_sandbox_runner.py -q`. Confirm exact-flag/approval/gate ordering and explicit-env behavior; native absence may skip with reason, but present broken artifacts fail; OpenShell selection performs the real probe and skips only for absence. Record optional-artifact availability separately from test-code completion.
+- **Wave 2 — 103-02 (after wave 1 checkpoint):** Run `PYTHONPATH=/workspace/omes-bot-wt/p7 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_ultrathink.py omega_prime/tests/test_setup_check.py omega_prime/tests/test_grokbot_doctor.py -q`. Confirm the four readiness states, three executable-file checks, isolated discovery precedence, preserved setup/doctor schemas, and no CLI/config/plan-content access before advancing.
+- **Wave 3 — 103-04 (after wave 2 checkpoint):** Run `PYTHONPATH=/workspace/omes-bot-wt/p7 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q`. Locate and report the actual Phase 102 environment-checker interface from the updated predecessor; execute it only as a parent-owned, safely isolated check once its command/API and safety are evidenced. If absent, record the unmet prerequisite, do not invent an interface, and do not claim that checker coverage passed.
+- **Wave 4 — 103-05:** Run the focused test union from the actual 103-01 through 103-04 implementation files, then the fake-root process smoke through public product paths. After those succeed, run the exact full gates below once. Record commands and observed outcomes; do not substitute placeholders in executed commands.
+
+## Permanent tests versus one-off smoke
+
+Permanent tests belong at the subsystem seams and retain regression value: bridge/env/registry/eval cases; fake-root readiness and doctor shape/state cases; resolver precedence and stale-first behavior; native artifact absent/present-broken distinctions; hermetic OpenShell selection/probe and sandbox argv/fail-closed behavior. They must not merely inspect source text for wiring and must not use live external binaries as default requirements.
+
+The parent-only smoke is a one-off end-to-end wiring check through public product paths with temporary fake root/binaries and isolated env. It complements, not replaces, permanent tests; it does not validate actual external CLI semantics, interpreter dependencies, native build availability, OpenShell deployment, gateway health, external audit claims, or real plan freshness. Fake executables must not contact network or read live configuration.
+
+## Exact parent final gates
+
+Run once after implementation is complete, using required venv Python via PATH and explicit `PYTHONPATH`; workers do not run these:
+
+1. `ruff check omega_prime/`
+2. `ruff format --check omega_prime/`
+3. `mypy omega_prime/`
+4. `pytest omega_prime/tests -q`
+5. `bash omega_prime/scripts/assemble-prompts.sh --check` **only if prompts changed**.
+
+No prompt edits are planned; therefore assembly is conditional and not a default gate. Do not install packages. Do not run gates during planning or before all sibling changes land. No results or coverage claims are asserted here.
+
+## Unverified constraints
+
+Phase 102 checker and completion are unverified; resolve prerequisite before implementation. The external audit's G8/G12 and `claude-ultrathink` are prompt-supplied only. Native/OpenShell binaries and live gateway are unavailable or unknown, not presumed absent/present or verified. PR45 in local history is not runtime evidence. Preserve milestone `77.1 human_needed`; do not mark implementation, predecessor phases, live verification, or gates complete. Parent receipt must list rule adherence by future agents under `unverified`.

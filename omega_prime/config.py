@@ -163,8 +163,12 @@ def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
-def load_config(root: str | Path | None = None) -> dict[str, Any]:
-    """Load the merged configuration. A missing config file is not an error."""
+def load_config(
+    root: str | Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Load merged config; missing file is not an error, and env overrides file."""
     config = _defaults()
     if root is not None:
         path = Path(root) / "omega-prime.json"
@@ -179,7 +183,7 @@ def load_config(root: str | Path | None = None) -> dict[str, Any]:
                 # is also set.
                 loaded.setdefault("redteam", {})["roe_key_in_file"] = True
             _merge(config, loaded)
-    _merge(config, _env_overrides(os.environ))
+    _merge(config, _env_overrides(os.environ if env is None else env))
     _normalize_quotas_mode(config)
     _normalize_sandbox_scope(config)
     _normalize_evals(config)

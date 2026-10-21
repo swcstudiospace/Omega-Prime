@@ -30,6 +30,23 @@ from omega_prime.grokbot.interceptors import AuditInterceptor, ScopeInterceptor
 from omega_prime.grokbot.manifest import find_repo_root
 from omega_prime.grokbot.security import SCOPE_CALL, SCOPE_READ, Principal
 from omega_prime.mcp_server import call_tool_handler, load_runtime
+from omega_prime.tools.clarify import clarify
+
+
+class _EmulatorOperator:
+    """Deterministic operator stand-in; this is not a live human route."""
+
+    def ask(self, question: str) -> str:
+        return "Emulator stand-in answer: proceed to the operator-selected phase."
+
+
+_EMULATOR_OPERATOR = _EmulatorOperator()
+
+
+def _emulator_clarify(question: str) -> dict[str, Any]:
+    """Use a fixed stand-in answer for smoke scenarios, never a real operator."""
+    return clarify(_EMULATOR_OPERATOR, question)
+
 
 EMULATOR_CALLER = "emulator"
 SMOKE_APPROVER = "emulator-smoke"
@@ -81,6 +98,17 @@ class GrokBotTurnEmulator:
             else GrokBotAuditTracer(default_audit_path(self.root))
         )
         self.runtime = load_runtime(self.root, home, approvals=self.approvals, env=env)
+        clarify_schema = next(
+            schema["function"]
+            for schema in self.runtime.registry.schemas()
+            if schema.get("function", {}).get("name") == "clarify"
+        )
+        self.runtime.registry.register(
+            "clarify",
+            "Ask the emulator's deterministic operator stand-in; not a live human route.",
+            clarify_schema["parameters"],
+            _emulator_clarify,
+        )
         self.registry = self.runtime.registry
         self._principal = Principal(
             EMULATOR_CALLER, frozenset({SCOPE_READ, SCOPE_CALL})
@@ -252,7 +280,7 @@ class GrokBotTurnEmulator:
                 {"argv": ["echo", "omega-prime-grokbot-emulator"]},
             ),
             (
-                "Clarify prompt question",
+                "Clarify with deterministic emulator stand-in (not a live human)",
                 "clarify",
                 {"question": "What is the next phase?"},
             ),

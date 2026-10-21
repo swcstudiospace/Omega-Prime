@@ -10,7 +10,7 @@ tasks.json. Repeats update rather than duplicate; resolution clears.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from omega_prime.credentials.redact import redact_text
@@ -53,7 +53,7 @@ def raise_block(
     ``blocked``; a missing row still writes the item — the item, not the
     row, is the source of truth for the block.
     """
-    since = datetime.now(timezone.utc).isoformat()
+    since = datetime.now(UTC).isoformat()
     with locked_tasks(path, write=True) as data:
         items = data.setdefault("waiting_on_ove", [])
         item = next((row for row in items if row.get("id") == item_id), None)
@@ -68,26 +68,47 @@ def raise_block(
             items.append(item)
         item["ask"] = redact_text(ask)
         item["blocks"] = redact_text(blocks)
+        item["task_id"] = task_id
         for row in data.get("tasks", []):
             if row.get("id") == task_id:
                 row["state"] = "blocked"
         _write_locked(data, path)
 
 
-def clear_block(path: Any, item_id: str, task_id: str) -> None:
-    """Remove the item and return the owning task to ``working``.
+def _owned_by(item: dict[str, Any], task_id: str) -> bool:
+    """Whether a waiting_on_ove item blocks ``task_id``.
 
-    Idempotent: a missing item or row is a no-op that still persists
-    cleanly. Only a currently ``blocked`` row flips — ``done``/``failed``
-    rows are terminal and never resurrected by a late clear.
+    Items record their owner in ``task_id``; an item written before that
+    field existed is owned through its stable ``"<task_id>:"`` id prefix.
+    """
+    owner = item.get("task_id")
+    if owner is not None:
+        return owner == task_id
+    return str(item.get("id") or "").startswith(f"{task_id}:")
+
+
+def clear_block(path: Any, item_id: str, task_id: str) -> None:
+    """Remove the item; return the owning task to ``working`` once unblocked.
+
+    The task stays ``blocked`` while any other item for it remains (a plan
+    gate and a push gate can coexist), and flips back only when its last
+    block is cleared. Idempotent: a missing item or row is a no-op that
+    still persists cleanly. Only a currently ``blocked`` row flips —
+    ``done``/``failed`` rows are terminal and never resurrected by a late
+    clear.
     """
     with locked_tasks(path, write=True) as data:
         items = data.get("waiting_on_ove", [])
         kept = [row for row in items if row.get("id") != item_id]
         if len(kept) != len(items):
             data["waiting_on_ove"] = kept
+        still_blocked = any(_owned_by(row, task_id) for row in kept)
         for row in data.get("tasks", []):
-            if row.get("id") == task_id and row.get("state") == "blocked":
+            if (
+                row.get("id") == task_id
+                and row.get("state") == "blocked"
+                and not still_blocked
+            ):
                 row["state"] = "working"
         _write_locked(data, path)
 

@@ -314,6 +314,81 @@ def test_expiry_requires_reapproval() -> None:
     )
 
 
+def test_separate_pin_approval_is_manageable_but_not_gated_metadata() -> None:
+    clock = _Clock()
+    log = ApprovalLog(clock=clock)
+    audit = _Audit()
+    client = _client(
+        log,
+        audit,
+        separate_approval_name="pin_bump_apply",
+        default_ttl_seconds=30.0,
+    )
+    listing = client.get("/admin/approvals", headers=_as("alice")).json()
+    assert listing["gated_tools"] == GATED
+
+    unrelated = client.post(
+        "/admin/approvals",
+        json={"tool": "pin_bump_apply_extra"},
+        headers=_as("alice"),
+    )
+    assert unrelated.status_code == 404
+    assert not log.is_approved("pin_bump_apply")
+
+    granted = client.post(
+        "/admin/approvals",
+        json={"tool": "pin_bump_apply"},
+        headers=_as("alice"),
+    )
+    assert granted.status_code == 201
+    assert log.is_approved("pin_bump_apply")
+    assert (
+        client.get("/admin/approvals", headers=_as("alice")).json()["gated_tools"]
+        == GATED
+    )
+
+    clock.now += 31
+    assert not log.is_approved("pin_bump_apply")
+    assert (
+        client.delete(
+            "/admin/approvals/pin_bump_apply", headers=_as("alice")
+        ).status_code
+        == 404
+    )
+    again = client.post(
+        "/admin/approvals",
+        json={"tool": "pin_bump_apply", "ttl_seconds": 10},
+        headers=_as("alice"),
+    )
+    assert again.status_code == 201
+    revoked = client.delete("/admin/approvals/pin_bump_apply", headers=_as("alice"))
+    assert revoked.status_code == 200
+    assert not log.is_approved("pin_bump_apply")
+    assert [event["tool_name"] for event in audit.events] == [
+        "pin_bump_apply",
+        "pin_bump_apply",
+        "pin_bump_apply",
+    ]
+
+
+def test_separate_approval_name_is_exact_and_cannot_self_approve() -> None:
+    with pytest.raises(ValueError, match="unsupported separate approval name"):
+        approval_routes(
+            approval_log=ApprovalLog(),
+            gated_tools=lambda: GATED,
+            separate_approval_name="other_action",
+        )
+    log = ApprovalLog()
+    client = _client(log, separate_approval_name="pin_bump_apply")
+    denied = client.post(
+        "/admin/approvals",
+        json={"tool": "pin_bump_apply"},
+        headers=_as("bot"),
+    )
+    assert denied.status_code == 403
+    assert not log.is_approved("pin_bump_apply")
+
+
 def test_responses_do_not_echo_credentials() -> None:
     log = ApprovalLog()
     client = _client(log)

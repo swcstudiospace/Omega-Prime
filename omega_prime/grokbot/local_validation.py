@@ -1509,6 +1509,7 @@ def _run_profile() -> str:
         redteam_enabled,
     )
     from omega_prime.grokbot.emulator import GrokBotTurnEmulator
+    from omega_prime.tooling.catalog import EXEC_JOB_TOOL_NAMES
     from omega_prime.tooling.roster import roster_names
 
     install = Path(_os.environ["READINESS_INSTALL"])
@@ -1528,10 +1529,6 @@ def _run_profile() -> str:
     )
     canonical = roster_names((install / ROSTER_REL).read_text(encoding="utf-8"))
     env = dict(_os.environ)
-    # The disposable profile deliberately opts into loopback so the no-secret
-    # local substrate checks exercise the configured path without inheriting
-    # caller environment or relying on a production default.
-    env["SUBSTRATE_URL"] = "local"
     home = layout.home
 
     off_fixture = {
@@ -1594,6 +1591,20 @@ def _run_profile() -> str:
         main = off
 
     probe.attach(main)
+
+    offered_main = set(main.runtime.tool_names)
+    approval_gated_exec_jobs = tuple(
+        name
+        for name in EXEC_JOB_TOOL_NAMES
+        if name in offered_main and main.registry.approval_required(name)
+    )
+    if approval_gated_exec_jobs:
+        probe.blocked(
+            "exec-jobs:approval-gated",
+            approval_gated_exec_jobs,
+            ("explicit human approval",),
+            "Readiness does not dispatch approval-gated process controls.",
+        )
     _run_scenario_module(probe, "omega_prime.grokbot.readiness_local")
     _run_scenario_module(probe, "omega_prime.grokbot.readiness_workflows")
     if include_prime:

@@ -23,7 +23,7 @@ the engine call sites, exactly as ``omp_driver.run`` wraps ``raise_block``.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from omega_prime.credentials.redact import redact_text
@@ -36,7 +36,7 @@ __all__ = ["finish", "start", "touch"]
 
 def _now() -> str:
     """ISO-8601 UTC timestamp."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _row_by_id(data: dict[str, Any], task_id: str) -> dict[str, Any] | None:

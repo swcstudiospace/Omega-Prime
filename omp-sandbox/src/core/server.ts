@@ -40,7 +40,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     if (req.access) core.access = { via: String(req.access.via ?? ""), caller: String(req.access.caller ?? "") };
     switch (req.op) {
       case "up": return core.up(a as UpArgs);
-      case "run_gsd_stage": return core.runStage({ stage: a.stage as Stage, gsdCommand: a.gsd_command as string, task: a.task as string, thinking: a.thinking as string | undefined, model: a.model as string | undefined, plan: a.plan as string | undefined });
+      case "run_gsd_stage": return core.runStage({ stage: a.stage as Stage, gsdCommand: a.gsd_command as string, task: a.task as string, thinking: a.thinking as string | undefined, model: a.model as string | undefined, plan: a.plan as string | undefined, fallbackPlan: "fallback_plan" in a ? (a.fallback_plan as string | null) : undefined });
       case "answer_question": return core.answer(a.stage_id as string, a.request_id as string, { selected: a.selected as string[] | undefined, text: a.text as string | undefined, perQuestion: a.per_question as AnswerInput["perQuestion"] });
       case "sandbox_status": return core.status(a.stage_id as string | undefined);
       case "abort": return core.abort(a.stage_id as string);

@@ -1,6 +1,6 @@
 // Host paths the sandbox may touch. A workspace bind mount and a seed source must be absolute,
 // exist, resolve (after symlinks) strictly inside an allowlisted root, and be directories.
-import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { ROOT } from "./config.ts";
 
@@ -33,6 +33,36 @@ export function allowedDir(p: unknown, roots: readonly string[], what: string): 
   throw new PathRefused(`${what} is not under an allowlisted root (${roots.join(", ")})`);
 }
 
+/** A checked workspace directory held open, so a mount uses the directory that was checked, not whatever its name now points to. */
+export type PinnedDir = { readonly path: string; readonly fd: number; readonly dev: number; readonly ino: number };
+
+/**
+ * Open the allowlist-resolved directory `real` without following a link and confirm the descriptor is that exact
+ * directory (its /proc path, else its real path, still equals `real`). A parent or the folder itself replaced by a
+ * symlink since `allowedDir` is refused. Close it with `unpinDir`.
+ */
+export function pinDir(real: string, what: string): PinnedDir {
+  let fd: number;
+  try { fd = openSync(real, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); }
+  catch (e: any) { throw new PathRefused(`${what} changed since it was checked (${e?.code === "ELOOP" ? "replaced by a symlink" : "cannot be opened"})`); }
+  try {
+    let where: string | null = null;
+    try { where = readlinkSync(`/proc/self/fd/${fd}`); } catch { /* no procfs */ }
+    const st = fstatSync(fd);
+    const same = where !== null ? where === real : (() => { try { const r = statSync(realpathSync(real)); return realpathSync(real) === real && r.ino === st.ino && r.dev === st.dev; } catch { return false; } })();
+    if (!same || !st.isDirectory()) throw new PathRefused(`${what} changed since it was checked (now resolves elsewhere)`);
+    return { path: real, fd, dev: st.dev, ino: st.ino };
+  } catch (e) { closeSync(fd); throw e; }
+}
+
+/** Whether the name of a pinned directory still leads, link-free, to the same directory. */
+export function pinStillNamed(pin: PinnedDir): boolean {
+  try { const st = lstatSync(pin.path); return !st.isSymbolicLink() && realpathSync(pin.path) === pin.path && st.ino === pin.ino && st.dev === pin.dev; }
+  catch { return false; }
+}
+
+export function unpinDir(pin: PinnedDir | null) { if (pin) try { closeSync(pin.fd); } catch { /* already closed */ } }
+
 /** Files to seed from `src`. Path-only entries: bytes are read at copy time (core.ts #seed), never buffered here.
  *  Skips SEED_SKIP names at any depth and every symlink. */
 export function seedFiles(src: string): { files: Array<{ rel: string; path: string }>; skipped: string[] } {
@@ -51,4 +81,52 @@ export function seedFiles(src: string): { files: Array<{ rel: string; path: stri
   };
   walk("");
   return { files, skipped };
+}
+
+/**
+ * Read one seed file's bytes at copy time without following a link swapped in since the walk. Every parent folder
+ * below `src` must still be a real folder (not a symlink), the file is opened with O_NOFOLLOW, and the open
+ * descriptor itself must still name `src/rel` (via /proc/self/fd, else by inode against the real path), so a
+ * parent replaced between the checks and the open is caught too. `src` must already be allowlist-resolved.
+ */
+export function readSeedFile(src: string, rel: string): Buffer {
+  const parts = rel.split("/");
+  if (parts.some((p) => p === "" || p === "." || p === "..")) throw new PathRefused(`seed file ${rel}: bad relative path`);
+  for (let i = 1; i < parts.length; i++) {
+    const d = lstatSync(join(src, ...parts.slice(0, i)), { throwIfNoEntry: false });
+    if (!d || d.isSymbolicLink() || !d.isDirectory()) throw new PathRefused(`seed file ${rel}: a parent folder changed since the walk`);
+  }
+  const want = join(src, rel);
+  let fd: number;
+  try { fd = openSync(want, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0)); }
+  catch (e: any) { throw new PathRefused(`seed file ${rel}: ${e?.code === "ELOOP" ? "replaced by a symlink" : "cannot be opened"} since the walk`); }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new PathRefused(`seed file ${rel}: no longer a regular file`);
+    let where: string | null = null;
+    try { where = readlinkSync(`/proc/self/fd/${fd}`); } catch { /* no procfs */ }
+    if (where !== null ? where !== want : (() => { const r = statSync(realpathSync(want)); return realpathSync(want) !== want || r.ino !== st.ino || r.dev !== st.dev; })())
+      throw new PathRefused(`seed file ${rel}: resolves outside the seed source`);
+    const buf = Buffer.alloc(st.size); let off = 0;
+    while (off < st.size) { const n = readSync(fd, buf, off, st.size - off, off); if (n === 0) break; off += n; }
+    return off === st.size ? buf : buf.subarray(0, off);
+  } finally { closeSync(fd); }
+}
+
+/** The VM filesystem calls the seed copy uses (agentOS `vm.filesystem`, or a fake in tests). */
+export type SeedFs = { mkdir(p: string, o: { recursive: boolean }): Promise<unknown>; writeFile(p: string, data: Uint8Array): Promise<unknown> };
+
+/** Copy `src` (allowlist-resolved) into `dest` on `fs` one file at a time as raw bytes; nothing is buffered beyond one file. */
+export async function copySeed(src: string, dest: string, fs: SeedFs) {
+  const { files, skipped } = seedFiles(src);
+  let bytes = 0;
+  for (const f of files) {
+    const dir = f.rel.includes("/") ? f.rel.slice(0, f.rel.lastIndexOf("/")) : "";
+    if (dir) await fs.mkdir(`${dest}/${dir}`, { recursive: true }).catch(() => {});
+    // Read after every await: another job may edit `src` while the copy waits on the VM.
+    const data = readSeedFile(src, f.rel);
+    bytes += data.length;
+    await fs.writeFile(`${dest}/${f.rel}`, new Uint8Array(data.buffer, data.byteOffset, data.length));
+  }
+  return { files: files.map((f) => f.rel), skipped, bytes };
 }

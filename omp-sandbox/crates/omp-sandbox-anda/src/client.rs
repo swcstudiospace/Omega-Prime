@@ -84,7 +84,8 @@ pub async fn run(addr: Option<String>, spawn_server: bool) -> Result<(), String>
     let mut server = None;
     let (url, engine, ready) = if spawn_server {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let mut c = tokio::process::Command::new(exe).args(["serve", "--addr", "127.0.0.1:0"]).stdin(std::process::Stdio::null())
+        // The child is tied to us: it watches PARENT_ENV and runs `down` if we die without a graceful shutdown.
+        let mut c = tokio::process::Command::new(exe).args(["serve", "--addr", "127.0.0.1:0"]).env(crate::serve::PARENT_ENV, std::process::id().to_string()).stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()).kill_on_drop(true).spawn().map_err(|e| e.to_string())?;
         let mut lines = BufReader::new(c.stdout.take().unwrap()).lines();
         let mut ready = Value::Null;
@@ -129,10 +130,15 @@ pub async fn run(addr: Option<String>, spawn_server: bool) -> Result<(), String>
     let mut stdin = BufReader::new(tokio::io::stdin()).lines();
     let mut downed = false;
     let mut pump_done = false;
+    // SIGTERM/SIGINT take the same graceful path as stdin closing: `down` the core, then wait for the server.
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
+    let mut int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).map_err(|e| e.to_string())?;
     loop {
         let line = tokio::select! {
             l = stdin.next_line() => match l { Ok(Some(l)) => l, _ => break },
             _ = &mut pump, if !pump_done => { pump_done = true; break; }
+            _ = term.recv() => { emit(json!({"event": "wrapper_signal", "signal": "SIGTERM"})); break; }
+            _ = int.recv() => { emit(json!({"event": "wrapper_signal", "signal": "SIGINT"})); break; }
         };
         if line.trim().is_empty() { continue; }
         let req: Value = match serde_json::from_str(&line) { Ok(v) => v, Err(e) => { emit(json!({"ok": false, "error": format!("invalid json: {e}")})); continue; } };

@@ -5,19 +5,24 @@ from __future__ import annotations
 import difflib
 import json
 import socket
+import sys
+import time
 from pathlib import Path
+from typing import Any, cast
 
+from omega_prime.tooling.catalog import EXEC_JOB_TOOL_NAMES
 from omega_prime.tooling.roster import roster_names
 from omega_prime.tools.agent_message import MESSAGING_TOOL_NAMES
 from omega_prime.tools.autonomous import AUTONOMOUS_TOOL_NAMES
 from omega_prime.tools.capacity import CAPACITY_TOOL_NAMES
-from omega_prime.tools.clarify import ClarifyLog, clarify
+from omega_prime.tools.clarify import clarify
 from omega_prime.tools.coding import CODING_TOOL_NAMES, register_coding_tools
 from omega_prime.tools.cron_admin import CRON_ADMIN_TOOL_NAMES
 from omega_prime.tools.delegate import DELEG_TOOL_NAMES
 from omega_prime.tools.discord import DISCORD_TOOL_NAMES
 from omega_prime.tools.dispatch import DISPATCH_TOOL_NAMES
 from omega_prime.tools.durable_surface import DURABLE_TOOL_NAMES
+from omega_prime.tools.exec_jobs import JobControl
 from omega_prime.tools.goals import GOAL_TOOL_NAMES
 from omega_prime.tools.growth import GROWTH_TOOL_NAMES
 from omega_prime.tools.harness import HARNESS_TOOL_NAMES
@@ -47,9 +52,11 @@ OMEGA_PRIME = Path(__file__).resolve().parents[1]
 ROSTER = OMEGA_PRIME / "contracts" / "tool-rosters" / "omega-prime.yaml"
 
 
-def _registry(root: Path, web=None, vision=None) -> ToolRegistry:
+def _registry(root: Path, web=None, vision=None, interaction=None) -> ToolRegistry:
     registry = ToolRegistry()
-    register_coding_tools(registry, root, web=web, vision=vision)
+    register_coding_tools(
+        registry, root, web=web, vision=vision, interaction=interaction
+    )
     return registry
 
 
@@ -286,8 +293,17 @@ def test_run_terminal_reports_exit_code_and_refuses_a_path_outside_the_root(
     assert "exit_code" not in shell
 
 
-def test_todo_round_trip_and_clarify_returns_the_question(tmp_path: Path):
-    registry = _registry(tmp_path)
+def test_todo_round_trip_and_clarify_uses_live_operator_answer(tmp_path: Path):
+    class FakeClarifyInteraction:
+        def __init__(self):
+            self.questions = []
+
+        def ask(self, question: str) -> str:
+            self.questions.append(question)
+            return "Apply the patch to the engine package."
+
+    interaction = FakeClarifyInteraction()
+    registry = _registry(tmp_path, interaction=interaction)
     items = [
         {"id": "1", "content": "ship the tool", "status": "pending"},
         {"id": "2", "content": "read it back", "status": "in_progress"},
@@ -309,10 +325,30 @@ def test_todo_round_trip_and_clarify_returns_the_question(tmp_path: Path):
 
     question = "which root should the patch touch?"
     answered = _load(registry.dispatch("clarify", {"question": question}))
-    assert answered["question"] == question
-    log = ClarifyLog()
-    assert clarify(log, question) == {"question": question}
-    assert log.questions == [question]
+    assert interaction.questions == [question]
+    assert answered == {"answer": "Apply the patch to the engine package."}
+
+
+def test_clarify_without_interaction_is_undeliverable_not_an_echo(tmp_path: Path):
+    question = "which root should the patch touch?"
+    result = _load(_registry(tmp_path).dispatch("clarify", {"question": question}))
+
+    assert result == {"error": "undeliverable: no clarify interaction is configured"}
+    assert result.get("answer") != question
+
+
+def test_clarify_rejects_non_string_question():
+    assert clarify(None, cast(Any, 42)) == {"error": "question must be a string"}
+
+
+def test_clarify_interaction_failure_is_undeliverable_without_exception_text():
+    class BrokenInteraction:
+        def ask(self, _question: str) -> str:
+            raise RuntimeError("private operator response")
+
+    result = clarify(BrokenInteraction(), "question")
+
+    assert result == {"error": "undeliverable: live operator interaction failed"}
 
 
 def test_web_and_vision_return_the_transport_payload_without_opening_a_socket(
@@ -424,6 +460,7 @@ def test_roster_lists_exactly_the_names_register_coding_tools_registers(tmp_path
         + OMEGA_COMMAND_TOOL_NAMES
         + PLATFORM_TOOL_NAMES
         + IDE_TOOL_NAMES
+        + EXEC_JOB_TOOL_NAMES
         + X_TOOL_NAMES
         + TELEGRAM_TOOL_NAMES
         + DISCORD_TOOL_NAMES
@@ -450,3 +487,103 @@ def test_roster_lists_exactly_the_names_register_coding_tools_registers(tmp_path
         + KERNEL_TOOL_NAMES
         + REDTEAM_TOOL_NAMES
     )
+
+
+def test_exec_job_poll_reports_an_exited_child_without_blocking(tmp_path: Path):
+    jobs = JobControl(tmp_path)
+    job_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(0.05); print('finished')",
+        ]
+    )
+    deadline = time.monotonic() + 3
+    result = jobs.poll(job_id)
+    while result.get("running") and time.monotonic() < deadline:
+        time.sleep(0.01)
+        result = jobs.poll(job_id)
+
+    assert result["running"] is False
+    assert result["exit_code"] == 0
+    assert result["stdout"].strip() == "finished"
+
+
+def test_exec_job_poll_bounds_output_after_both_readers_finish(
+    tmp_path: Path,
+):
+    jobs = JobControl(tmp_path)
+    job_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            "import os; data=b'x'*65536; "
+            "[(os.write(1,data), os.write(2,data)) for _ in range(32)]",
+        ]
+    )
+
+    deadline = time.monotonic() + 10
+    result = jobs.poll(job_id)
+    while result.get("running") and time.monotonic() < deadline:
+        time.sleep(0.01)
+        result = jobs.poll(job_id)
+
+    assert result["running"] is False
+    assert result["exit_code"] == 0
+    retained_size = 1024 * 1024
+    assert result["stdout"] == "x" * retained_size
+    assert result["stderr"] == "x" * retained_size
+    job = jobs._job(job_id)
+    assert len(job["stdout"]) == 0
+    assert len(job["stderr"]) == 0
+
+
+def test_exec_job_drains_noisy_stdout_and_stderr_with_bounded_retention(
+    tmp_path: Path,
+):
+    jobs = JobControl(tmp_path)
+    job_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            "import os; data=b'x'*65536; "
+            "[(os.write(1,data), os.write(2,data)) for _ in range(32)]",
+        ]
+    )
+
+    result = jobs.wait(job_id, timeout=10)
+
+    assert result["running"] is False
+    assert result["exit_code"] == 0
+    assert len(result["stdout"]) == 1024 * 1024
+    assert len(result["stderr"]) == 1024 * 1024
+
+
+def test_exec_job_shutdown_continues_after_a_job_cleanup_error(tmp_path: Path):
+    jobs = JobControl(tmp_path)
+    first_id = jobs.start(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess,sys,time; "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+            "time.sleep(30)",
+        ]
+    )
+    second_id = jobs.start([sys.executable, "-c", "import time; time.sleep(30)"])
+    original_kill = jobs.kill
+    killed: list[str] = []
+
+    def fail_first_then_kill(job_id: str) -> dict:
+        if job_id == first_id:
+            raise OSError("simulated cleanup failure")
+        result = original_kill(job_id)
+        killed.append(job_id)
+        return result
+
+    jobs.kill = fail_first_then_kill  # type: ignore[method-assign]
+    try:
+        jobs.shutdown()
+        assert second_id in killed
+    finally:
+        original_kill(first_id)

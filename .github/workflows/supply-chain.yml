@@ -25,18 +25,16 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: install
         run: python3 -m pip install -e . pip-audit
       - name: pip-audit
-        # Audit the committed lock, not the runner's own pip. oauthlib stays
-        # below 4 because tweepy 4.17 requires oauthlib>=3.2.0,<4.
-        # PYSEC-2026-4114 is a PKCE timing oracle in oauthlib's
-        # authorization-server grant (code_challenge_method_*), which this
-        # process does not host. Drop the ignore when tweepy accepts
-        # oauthlib>=4. See SECURITY.md.
+        # Audit the committed lock, not the runner's own pip. PYSEC-2026-4114
+        # is a PKCE timing oracle in oauthlib's authorization-server grant
+        # (code_challenge_method_*), which this process does not host. See
+        # SECURITY.md for the bounded exception rationale.
         run: python3 -m pip_audit --progress-spinner off -r requirements-lock.txt --ignore-vuln PYSEC-2026-4114
   # CI-only supply-chain audit of the redteam sidecar backend's Node
   # dependencies. Nothing Node-related enters the runtime path or the image:
@@ -54,7 +52,7 @@ jobs:
       # Pinned major matches the mixed-major precedent in grokbot-image.yml
       # (checkout@v4 alongside artifact@v7). Node 22 satisfies the upstream
       # engines contract (redteam/package.json requires >=22.19.0).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - name: npm ci (no scripts)

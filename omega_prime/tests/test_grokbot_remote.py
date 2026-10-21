@@ -697,6 +697,76 @@ def test_serve_sse_installs_the_access_filter_once(
     assert len(installed) == 1
 
 
+@pytest.mark.parametrize("fail", [False, True])
+def test_serve_sse_desk_driver_stops_once_after_normal_or_error(
+    tmp_path: Path, clean_access_filters: Any, monkeypatch, fail: bool
+) -> None:
+    from types import SimpleNamespace
+
+    import omega_prime.grokbot.remote as remote
+
+    class Driver:
+        def __init__(self):
+            self.started = 0
+            self.stopped = 0
+
+        def start(self):
+            self.started += 1
+
+        def stop(self):
+            self.stopped += 1
+
+    driver = Driver()
+    shutdowns: list[str] = []
+    runtime = SimpleNamespace(
+        registry=SimpleNamespace(
+            runtime_bindings={
+                "desk_driver": driver,
+                "exec_job_control": SimpleNamespace(
+                    shutdown=lambda: shutdowns.append("shutdown")
+                ),
+            }
+        ),
+        tool_names=[],
+    )
+    state = SimpleNamespace(
+        runtime=runtime,
+        token_store=SimpleNamespace(enabled=False),
+        in_flight=SimpleNamespace(count=0),
+    )
+
+    class App:
+        def __init__(self):
+            self.state = state
+
+        async def __call__(self, *_args):
+            return None
+
+    monkeypatch.setattr(remote, "create_sse_app", lambda *args, **kwargs: App())
+    monkeypatch.setattr(remote, "configure_logging", lambda *_args: None)
+    monkeypatch.setattr(remote, "install_access_log_filter", lambda: None)
+
+    def run(self, sockets=None):
+        if fail:
+            raise RuntimeError("serve failed")
+
+    monkeypatch.setattr(GracefulServer, "run", run)
+    kwargs: dict[str, Any] = {
+        "home": tmp_path / "home",
+        "audit": GrokBotAuditTracer(tmp_path / "audit.jsonl"),
+        "env": {},
+        "log_format": "json",
+    }
+    if fail:
+        with pytest.raises(RuntimeError, match="serve failed"):
+            serve_sse(ROOT, port=8000, **kwargs)
+    else:
+        assert serve_sse(ROOT, port=8000, **kwargs) == 0
+    assert driver.started == 1
+    assert driver.stopped == 1
+    assert shutdowns == ["shutdown"]
+
+
 def test_serve_sse_forwards_interceptors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

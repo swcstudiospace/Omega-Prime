@@ -1,8 +1,8 @@
 // Greptile round-1 guards: tier names, prompt-admission failures, overlapping stages, abort during setup, receipt redaction.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, statSync, existsSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, existsSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxTier } from "../src/core/providers/types.ts";
@@ -13,7 +13,9 @@ const FAKE = new URL("./fake-omp.mjs", import.meta.url).pathname;
 const { OmpRpcClient, StaleAnswerError } = await import("../src/core/omp-rpc.ts");
 const { PathRefused } = await import("../src/core/paths.ts");
 const { validateTiers, startTier } = await import("../src/core/providers/tiers.ts");
-const { redactSecrets } = await import("../src/core/providers/util.ts");
+const utilMod = await import("../src/core/providers/util.ts");
+const { redactSecrets } = utilMod;
+const podmanMod = await import("../src/core/providers/openshell-podman.ts");
 // Dynamic imports are required here (not a style choice): config.ts captures OMP_SANDBOX_STATE into
 // STATE at module-evaluation time, and gsd.ts derives its CACHE from it — so they must load only
 // after the env override above, which a hoisted static import would precede.
@@ -21,6 +23,7 @@ const { Core } = await import("../src/core/core.ts");
 const { ensureGsd, gsdCommandsOnHost } = await import("../src/core/gsd.ts");
 const { STATE: CORE_STATE, VERSIONS } = await import("../src/core/config.ts");
 const GSD_CACHE = join(CORE_STATE, "cache", `gsd-core-${VERSIONS.gsdCore}`);
+const { AuthBroker } = await import("../src/core/auth.ts");
 
 const fakeProc = (env: Record<string, string> = {}) => spawn(process.execPath, [FAKE], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
 
@@ -83,9 +86,67 @@ test("an abort during set_ask_dialog wins: the prompt is never sent", async () =
   assert.equal(existsSync(log), false, "prompt was not sent after abort");
 });
 
+test("an aborted stage still blocks a new one until its omp session has settled", async () => {
+  const core: any = fakeCore({ FAKE_OMP_ASK_DELAY_MS: "400" });
+  const a = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" });
+  await new Promise((r) => setTimeout(r, 50));
+  const aborting = core.abort(a.stageId);
+  assert.equal(core.status(a.stageId).status, "aborted", "status flips to aborted before omp has exited");
+  assert.throws(() => core.runStage({ stage: "execute", gsdCommand: "gsd-execute-phase", task: "t2" }), /winding down \(aborted\)/);
+  await aborting; await core.stages.get(a.stageId).done;
+  const b = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t3" });
+  await core.abort(b.stageId);
+});
+
+test("ownsGroup signals only groups that still hold a process carrying our marker", () => {
+  const { ownsGroup } = utilMod;
+  const proc = mkdtempSync(join(tmpdir(), "omp-sbx-proc-"));
+  const fake = (pid: number, pgrp: number, env: string[]) => {
+    mkdirSync(join(proc, String(pid)));
+    // comm may itself contain spaces and parentheses; fields are read after the last ")".
+    writeFileSync(join(proc, String(pid), "stat"), `${pid} (we ird) cmd) S 1 ${pgrp} ${pgrp} 0 -1`);
+    writeFileSync(join(proc, String(pid), "environ"), env.join("\0") + "\0");
+  };
+  fake(101, 101, ["HOME=/x", "OMP_SANDBOX_TIER_ID=lo-mine"]);
+  fake(202, 202, ["HOME=/y", "OMP_SANDBOX_TIER_ID=lo-other"]);   // reused id, someone else's job
+  fake(303, 101, ["HOME=/z"]);
+  assert.equal(ownsGroup(101, "OMP_SANDBOX_TIER_ID=lo-mine", proc), true);
+  assert.equal(ownsGroup(202, "OMP_SANDBOX_TIER_ID=lo-mine", proc), false);
+  assert.equal(ownsGroup(404, "OMP_SANDBOX_TIER_ID=lo-mine", proc), false, "an ended group is not ours");
+});
+
+test("a tier still starting up holds a lease, so shared services are not stopped under it", () => {
+  const { otherLeases } = podmanMod;
+  const dir = mkdtempSync(join(tmpdir(), "omp-sbx-leases-"));
+  writeFileSync(join(dir, "osp-me"), String(process.pid));
+  writeFileSync(join(dir, "osp-starting"), String(process.pid));
+  writeFileSync(join(dir, "osp-crashed"), "2147483646");
+  writeFileSync(join(dir, "osp-garbage"), "not-a-pid");
+  assert.deepEqual(otherLeases("osp-me", dir), ["osp-starting"]);
+  assert.deepEqual(otherLeases("osp-me", join(dir, "missing")), []);
+});
+
+test("a lease-less CLI sandbox on either gateway keeps the shared Podman service up", () => {
+  const { listedSandboxes, gatewaySandboxUsers } = podmanMod;
+  const table = "NAME        PHASE\nosp-me      Ready\ncli-made    Ready\n";
+  assert.deepEqual(listedSandboxes(table, "osp-me"), ["cli-made"]);
+  assert.deepEqual(listedSandboxes("No sandboxes found\n", "osp-me"), []);
+  // The mount gateway's registry counts even though no tier holds a lease for its sandbox.
+  assert.deepEqual(gatewaySandboxUsers({ code: 0, stdout: table }, "osp-me", true, 18080), ["cli-made"]);
+  // A list that fails while the gateway still answers is an unknown user, never "none".
+  assert.equal(gatewaySandboxUsers({ code: 1, stdout: "" }, "osp-me", true, 18080).length, 1);
+  // Nothing listening: that gateway is gone and holds no one.
+  assert.deepEqual(gatewaySandboxUsers({ code: 1, stdout: "" }, "osp-me", false, 18080), []);
+});
+
 test("redactSecrets hides credential-shaped text", () => {
-  const s = redactSecrets("err: api_key=abcd1234efgh token: sk-proj-AAAAAAAAAAAAAAAAAAAA Bearer abcdefghijklmnop eyJhbGciOiJI.eyJzdWIiOiIx.sig ok");
-  for (const leak of ["abcd1234efgh", "sk-proj-AAAA", "abcdefghijklmnop", "eyJhbGciOiJI"]) assert.equal(s.includes(leak), false, leak);
+  // Built at runtime so no credential-shaped literal sits in the source.
+  const key = ["sk", "proj", "A".repeat(20)].join("-");
+  const kv = ["abcd", "1234", "efgh"].join("");
+  const bearer = "abcdefgh" + "ijklmnop";
+  const jwt = ["eyJ" + "hbGciOiJI", "eyJ" + "zdWIiOiIx", "sig"].join(".");
+  const s = redactSecrets(`err: api_key=${kv} token: ${key} Bearer ${bearer} ${jwt} ok`);
+  for (const leak of [kv, key.slice(0, 12), bearer, jwt.slice(0, 12)]) assert.equal(s.includes(leak), false, leak);
   assert.match(s, /ok$/);
 });
 
@@ -117,13 +178,27 @@ test("ensureGsd and gsdCommandsOnHost target the mounted workspace, never the hi
   // Cold: the in-sandbox install lands in the workspace through the bind; the host cache fills from it.
   const coldWs = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-cws-"));
   const coldHr = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-chr-"));
-  const cold = await ensureGsd(gsdTier(coldWs, coldHr, async () => {
-    mkdirSync(join(coldWs, ".claude", "commands"), { recursive: true });   // npx writes through the bind
-    writeFileSync(join(coldWs, ".claude", "commands", "gsd-plan-phase.md"), "plan");
+  // The job's own .claude files (and anything it adds while npx runs) must never reach the shared cache.
+  mkdirSync(join(coldWs, ".claude", "commands"), { recursive: true });
+  writeFileSync(join(coldWs, ".claude", "settings.json"), "{\"private\":true}");
+  writeFileSync(join(coldWs, ".claude", "commands", "project-only.md"), "mine");
+  let installCwd = "";
+  const cold = await ensureGsd(gsdTier(coldWs, coldHr, async (_argv, opts) => {
+    installCwd = opts?.cwd ?? "";
+    assert.match(installCwd, /^\/sbx\/work\/\.omp-gsd-install-/, "installs in a fresh staging folder under the workdir");
+    const staged = join(coldWs, installCwd.slice("/sbx/work/".length));
+    assert.deepEqual(readdirSync(staged), [], "staging folder starts empty");
+    mkdirSync(join(staged, ".claude", "commands"), { recursive: true });   // npx writes through the bind
+    writeFileSync(join(staged, ".claude", "commands", "gsd-plan-phase.md"), "plan");
+    writeFileSync(join(coldWs, ".claude", "commands", "added-mid-install.md"), "late");
     return { code: 0, stdout: "", stderr: "" };
   }));
   assert.equal(cold.source, "installed-in-sandbox");
-  assert.equal(existsSync(join(GSD_CACHE, ".claude", "commands", "gsd-plan-phase.md")), true, "host cache filled from the workspace");
+  assert.equal(existsSync(join(GSD_CACHE, ".claude", "commands", "gsd-plan-phase.md")), true, "host cache filled from the install");
+  assert.deepEqual(readdirSync(join(GSD_CACHE, ".claude")), ["commands"], "no private settings in the cache");
+  assert.deepEqual(readdirSync(join(GSD_CACHE, ".claude", "commands")), ["gsd-plan-phase.md"], "only installer output is cached");
+  assert.equal(existsSync(join(coldWs, ".claude", "commands", "gsd-plan-phase.md")), true, "the job still gets the install");
+  assert.equal(existsSync(join(coldWs, installCwd.slice("/sbx/work/".length))), false, "staging folder removed");
   assert.equal(existsSync(join(coldHr, "work")), false, "cold path never creates hostRoot/work");
 
   // Warm: the cache fills the workspace copy; exec never runs; hostRoot/work stays absent.
@@ -150,4 +225,165 @@ test("passEnv forwards only allowlisted *_API_KEY names that are set, and only w
   const r = passEnv({ OMP_SANDBOX_PASS_ENV: "ZAI_API_KEY, HOME ,OPENROUTER_API_KEY,GITHUB_TOKEN,ZHIPU_API_KEY", ZAI_API_KEY: "v", HOME: "/h", GITHUB_TOKEN: "t", ZHIPU_API_KEY: "" });
   assert.deepEqual(r.names, ["ZAI_API_KEY"]);
   assert.deepEqual(Object.keys(r.env), ["ZAI_API_KEY"]);
+});
+
+test("down() refuses new stages and startups for its whole duration", async () => {
+  const core: any = new Core();
+  let release: () => void = () => {};
+  const slow = new Promise<void>((r) => { release = r; });
+  const tier: any = { name: "fake", id: "fake", isolation: "none (test)", owned: () => ({}), spawnStdio: () => fakeProc(), dispose: async () => { await slow; return { leftovers: [] }; } };
+  core.attachTierForTests(tier);
+  const downing = core.down();
+  await new Promise((r) => setTimeout(r, 20));   // down() is now waiting on tier cleanup
+  assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" }), /shutting down/);
+  await assert.rejects(core.up(), /shutting down/);
+  assert.equal(core.down(), downing, "a second down() joins the same shutdown");
+  release();
+  const out = await downing;
+  assert.deepEqual(out.leftovers, []);
+  assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" }), /not up/);
+});
+
+test("AuthBroker.stop() returns at once for a broker already killed by a signal", async () => {
+  const b: any = new AuthBroker();
+  const p = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  await new Promise((r) => p.once("spawn", r));
+  p.kill("SIGKILL");
+  await new Promise((r) => p.once("exit", r));
+  assert.equal(p.exitCode, null); assert.equal(p.signalCode, "SIGKILL");
+  b.proc = p;
+  let t: NodeJS.Timeout | undefined;
+  const hung = new Promise((_, rej) => { t = setTimeout(() => rej(new Error("stop() hung")), 2000); });
+  await Promise.race([b.stop(), hung]).finally(() => clearTimeout(t));
+  assert.equal(b.proc, null);
+});
+
+test("a sandbox-agent binary that cannot launch rejects startup instead of crashing Node", async () => {
+  const { launched } = utilMod;
+  const p = spawn(join(STATE, "no-such-sandbox-agent"), [], { stdio: "ignore" });
+  const never = new Promise<void>(() => {});
+  await assert.rejects(launched(p, "sandbox-agent", never), /sandbox-agent could not start: .*ENOENT/);
+  const q = spawn(process.execPath, ["-e", "process.exit(4)"], { stdio: "ignore" });
+  await assert.rejects(launched(q, "sandbox-agent", never), /exited during startup \(4\)/);
+  const ok = spawn(process.execPath, ["-e", "setTimeout(() => {}, 200)"], { stdio: "ignore" });
+  assert.equal(await launched(ok, "x", Promise.resolve(7)), 7);
+});
+
+test("bwrap keeps the tier env (broker token, passed API keys) off argv and in a 0600 sourced file", async () => {
+  const { BwrapTier, envFileText, BWRAP_ENV_FILE } = await import("../src/core/providers/bwrap.ts");
+  const root = mkdtempSync(join(tmpdir(), "omp-sbx-bw-"));
+  const t = new BwrapTier(root);
+  const secret = ["zai", "value", "with'quote"].join("-");
+  t.writeEnvFile({ ZAI_API_KEY: secret });
+  const argv = t.argv(["omp", "--version"], { CI: "1" });
+  assert.equal(argv.join("\0").includes(secret), false, "no secret value on the bwrap command line");
+  assert.equal(argv.includes("CI"), true, "per-call non-secret env still rides --setenv");
+  assert.ok(argv.join(" ").includes(`. ${BWRAP_ENV_FILE}`), "the sandbox command sources the env file");
+  const file = join(root, "home", ".omp-sandbox.env");
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  // The quoting round-trips through a real POSIX shell.
+  const out = execFileSync("sh", ["-c", `. "$1"; printf %s "$ZAI_API_KEY"`, "sh", file], { encoding: "utf8" });
+  assert.equal(out, secret);
+  assert.throws(() => envFileText({ "BAD-NAME": "v" }), /bad env name/);
+});
+
+test("bwrap and agentos-local transfer files inside their own roots, and refuse paths outside", async () => {
+  const { BwrapTier } = await import("../src/core/providers/bwrap.ts");
+  const root = mkdtempSync(join(tmpdir(), "omp-sbx-bwx-"));
+  mkdirSync(join(root, "home"), { recursive: true });
+  const t = new BwrapTier(root);
+  const src = join(mkdtempSync(join(tmpdir(), "omp-sbx-src-")), "f.bin"); writeFileSync(src, "bytes");
+  assert.equal((await t.upload(src, "/sbx/home/f.bin")).code, 0);
+  assert.equal(readFileSync(join(root, "home", "f.bin"), "utf8"), "bytes");
+  const out = mkdtempSync(join(tmpdir(), "omp-sbx-dl-"));
+  assert.equal((await t.download("/sbx/home/f.bin", out)).code, 0);
+  assert.equal(readFileSync(join(out, "f.bin"), "utf8"), "bytes");
+  await assert.rejects(t.upload(src, "/etc/passwd"), /outside the sandbox root/);
+  await assert.rejects(t.download("/sbx/../etc/passwd", out), /outside the sandbox root/);
+  const { LocalTier } = await import("../src/core/providers/local.ts");
+  const l = new LocalTier(); mkdirSync(join(l.hostRoot, "home"), { recursive: true });
+  assert.equal((await l.upload(src, join(l.hostRoot, "home", "g.bin"))).code, 0);
+  assert.equal((await l.download(join(l.hostRoot, "home", "g.bin"), out)).code, 0);
+  assert.equal(readFileSync(join(out, "g.bin"), "utf8"), "bytes");
+  await assert.rejects(l.download("/etc/hostname", out), /outside the tier root/);
+  rmSync(l.hostRoot, { recursive: true, force: true });
+});
+
+test("agentos-local dispose reaps a check that exec started", async () => {
+  const { LocalTier } = await import("../src/core/providers/local.ts");
+  const l = new LocalTier(); mkdirSync(l.workdir, { recursive: true });
+  const running = l.exec(["sh", "-c", "sleep 30"], { timeoutMs: 0 });
+  await new Promise((r) => setTimeout(r, 200));
+  const groups = (l.owned() as { processGroups: number[] }).processGroups;
+  assert.equal(groups.length, 1, "the exec's process group is tracked");
+  const { leftovers } = await l.dispose();
+  assert.deepEqual(leftovers, []);
+  const r = await running;
+  assert.notEqual(r.code, 0, "the check was killed with the tier");
+});
+
+test("GSD agent conversion: host and in-sandbox paths write the same files and keep project-owned agents", async () => {
+  const { writeOmpAgents, IN_SANDBOX_CONVERT, GENERATED_MARK } = await import("../src/core/gsd.ts");
+  const fixture = (dir: string) => {
+    mkdirSync(join(dir, ".claude", "agents"), { recursive: true });
+    writeFileSync(join(dir, ".claude", "agents", "gsd-planner.md"), "---\nname: gsd-planner\ndescription: \"Plans phases\"\ntools: Read, Bash\n---\nYou plan.\n");
+    writeFileSync(join(dir, ".claude", "agents", "gsd-executor.md"), "---\nname: gsd-executor\ndescription: Executes plans\n---\nYou execute.\n");
+    writeFileSync(join(dir, ".claude", "agents", "gsd-nodesc.md"), "---\nname: gsd-nodesc\n---\nskipped\n");
+    writeFileSync(join(dir, ".claude", "agents", "other.md"), "---\nname: other\ndescription: not gsd\n---\n");
+  };
+  const host = mkdtempSync(join(tmpdir(), "omp-sbx-agents-h-")); fixture(host);
+  const guest = mkdtempSync(join(tmpdir(), "omp-sbx-agents-g-")); fixture(guest);
+  assert.equal(writeOmpAgents(host), 2);
+  assert.equal(execFileSync(process.execPath, ["-e", IN_SANDBOX_CONVERT], { cwd: guest, encoding: "utf8" }).trim(), "2");
+  for (const f of ["gsd-planner.md", "gsd-executor.md"]) {
+    const h = readFileSync(join(host, ".omp", "agents", f), "utf8");
+    assert.equal(h, readFileSync(join(guest, ".omp", "agents", f), "utf8"), `${f} matches across converters`);
+    assert.ok(h.includes(GENERATED_MARK));
+  }
+  assert.equal(readFileSync(join(host, ".omp", "agents", "gsd-planner.md"), "utf8"), `---\nname: "gsd-planner"\ndescription: "Plans phases"\nspawns: "*"\n---\n${GENERATED_MARK}\nYou plan.\n`);
+  assert.equal(existsSync(join(host, ".omp", "agents", "gsd-nodesc.md")), false);
+  assert.equal(existsSync(join(host, ".omp", "agents", "other.md")), false);
+  // A project's own agent file (no mark) survives both converters; a generated one is refreshed.
+  for (const [dir, run] of [[host, () => writeOmpAgents(host)], [guest, () => execFileSync(process.execPath, ["-e", IN_SANDBOX_CONVERT], { cwd: guest })]] as const) {
+    writeFileSync(join(dir, ".omp", "agents", "gsd-planner.md"), "---\nname: gsd-planner\ndescription: project tuned\n---\nlocal edits\n");
+    writeFileSync(join(dir, ".claude", "agents", "gsd-executor.md"), "---\nname: gsd-executor\ndescription: Executes plans v2\n---\nYou execute.\n");
+    run();
+    assert.equal(readFileSync(join(dir, ".omp", "agents", "gsd-planner.md"), "utf8"), "---\nname: gsd-planner\ndescription: project tuned\n---\nlocal edits\n");
+    assert.match(readFileSync(join(dir, ".omp", "agents", "gsd-executor.md"), "utf8"), /Executes plans v2/);
+  }
+});
+
+// Greptile round 4: the fallback tiers find Bun/omp wherever they are installed and link the configured omp.
+test("pickBin and onPath find a toolchain outside ~/.bun and honour an explicit setting", async () => {
+  const { pickBin, onPath, toolchainRoot } = await import("../src/core/config.ts");
+  const d = mkdtempSync(join(tmpdir(), "omp-sbx-bin-"));
+  const bun = join(d, "bun"); writeFileSync(bun, "#!/bin/sh\n");
+  assert.equal(onPath("bun", `/nonexistent:${d}`), bun);
+  assert.equal(onPath("bun", "/nonexistent"), null);
+  // A relative PATH entry is skipped: the result is used as an absolute symlink target.
+  const prev = process.cwd(); process.chdir(d);
+  try { assert.equal(onPath("bun", "."), null); assert.equal(pickBin("./bun", []), bun); } finally { process.chdir(prev); }
+  assert.equal(pickBin(undefined, [join(d, "missing"), onPath("bun", d)]), bun);
+  assert.equal(pickBin("/explicit/bun", [bun]), "/explicit/bun");
+  assert.equal(pickBin(undefined, [join(d, "missing"), null]), join(d, "missing"));
+  const pkg = join(d, "pkg", "node_modules", "@scope", "cli", "dist"); mkdirSync(pkg, { recursive: true });
+  writeFileSync(join(pkg, "cli.js"), "");
+  // Only the node_modules tree is exposed, not the project that holds it.
+  assert.equal(toolchainRoot(join(pkg, "cli.js")), join(d, "pkg", "node_modules"));
+  assert.equal(toolchainRoot(bun), d);
+});
+
+test("bwrap binds the configured omp and Bun folders read-only, deduplicated and skipping /usr", async () => {
+  const { toolchainBinds } = await import("../src/core/providers/bwrap.ts");
+  const d = mkdtempSync(join(tmpdir(), "omp-sbx-tc-"));
+  const inner = join(d, "inner"); mkdirSync(inner);
+  writeFileSync(join(d, "bun"), ""); writeFileSync(join(inner, "omp"), "");
+  assert.deepEqual(toolchainBinds([join(inner, "omp"), join(d, "bun")]), ["--ro-bind", d, d]);
+  assert.deepEqual(toolchainBinds(["/usr/bin/env"]), []);
+  assert.deepEqual(toolchainBinds([join(d, "gone", "omp")]), []);
+});
+
+test("launched rejects (instead of crashing) when a launcher cannot execute", async () => {
+  const p = spawn(join(STATE, "no-such-gateway"), [], { stdio: ["ignore", "pipe", "pipe"] });
+  await assert.rejects(utilMod.launched(p, "openshell-gateway", new Promise(() => {})), /openshell-gateway could not start/);
 });
