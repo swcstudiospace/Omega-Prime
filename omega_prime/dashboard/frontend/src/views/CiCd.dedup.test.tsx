@@ -6,7 +6,7 @@ import type { CiRow, Snapshot } from '../types'
 
 afterEach(() => cleanup())
 
-const dashboardProps = { loading: false, error: null, receivedAt: Date.now(), live: true, refresh: vi.fn() }
+function dashboardProps(snapshot: Snapshot) { return { snapshot, data: snapshot, loading: false, error: null, receivedAt: Date.now(), live: true, refresh: vi.fn() } }
 
 function snapshotWith(rows: CiRow[], latestMain: Array<{ repo: string; branch: string; head_sha: string; ci: string; checks: Array<{ name: string; status: string }> }>): Snapshot {
   return {
@@ -46,7 +46,7 @@ describe('CI/CD branch identity', () => {
       ],
     )
 
-    render(<CiCd snapshot={snapshot} {...dashboardProps} />)
+    render(<CiCd {...dashboardProps(snapshot)} />)
 
     expect(screen.getAllByRole('heading', { name: 'main' })).toHaveLength(2)
     expect(screen.getByText('backend backend-build')).toBeInTheDocument()
@@ -72,7 +72,7 @@ describe('CI/CD branch identity', () => {
       ],
     )
 
-    const view = render(<CiCd snapshot={snapshot} {...dashboardProps} />)
+    const view = render(<CiCd {...dashboardProps(snapshot)} />)
     expect(screen.getAllByRole('heading', { name: 'main' })).toHaveLength(1)
     expect(screen.getByText('first-build')).toBeInTheDocument()
     expect(screen.queryByText('second-build')).not.toBeInTheDocument()
@@ -82,7 +82,7 @@ describe('CI/CD branch identity', () => {
     expect(screen.getByRole('heading', { name: /Fix safe view/ })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: /Runner update/ })).toBeInTheDocument()
 
-    view.rerender(<CiCd snapshot={{ ...snapshot }} {...dashboardProps} />)
+    view.rerender(<CiCd {...dashboardProps({ ...snapshot })} />)
     expect(error).not.toHaveBeenCalledWith(expect.stringContaining('same key'))
     error.mockRestore()
   })
