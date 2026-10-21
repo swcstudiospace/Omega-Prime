@@ -775,3 +775,36 @@ def test_production_registry_notifies_only_when_solo_is_disabled(monkeypatch, tm
         else:
             assert acked["notify"]["delivered"] is False
             assert len(calls) == 1
+
+
+def test_explicit_desk_docs_endpoint_ignores_the_substrate_binding(
+    monkeypatch, tmp_path
+):
+    """Opting back into Desk keeps OMEGA_PRIME_DESK_DOCS_INDEX authoritative.
+
+    A saved Substrate binding (ready or skipped) steers only the Substrate
+    fallback, never an explicitly configured Desk docs index.
+    """
+    bases = []
+
+    def docs_call(self, name, arguments):
+        bases.append(self._resolve_base())
+        return {"ok": True, "body": {"chunks": []}}
+
+    monkeypatch.setattr(SubstrateClient, "_call_tool", docs_call)
+    env = {
+        "OMEGA_PRIME_SOLO": "0",
+        "OMEGA_PRIME_DESK_DOCS_INDEX": "https://desk.example/docs",
+        "OMEGA_PRIME_STATE_DIR": str(tmp_path / "state"),
+    }
+    for n, state in enumerate(("ready", "skipped")):
+        binding = fresh_binding()
+        binding["gateways"]["substrate"] = {
+            "state": state,
+            "url": "https://saved.example",
+        }
+        save_binding(binding, env)
+        registry = default_registry(ROOT, tmp_path / f"home-{n}", env=env)
+        docs = json.loads(registry.dispatch("lead_docs_search", {"query": "q"}))
+        assert docs.get("results") == [], docs
+        assert bases[-1] == ("https://desk.example/docs", None)
