@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, statSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, statSync, existsSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxTier } from "../src/core/providers/types.ts";
@@ -126,6 +126,19 @@ test("a tier still starting up holds a lease, so shared services are not stopped
   assert.deepEqual(otherLeases("osp-me", join(dir, "missing")), []);
 });
 
+test("a lease-less CLI sandbox on either gateway keeps the shared Podman service up", () => {
+  const { listedSandboxes, gatewaySandboxUsers } = podmanMod;
+  const table = "NAME        PHASE\nosp-me      Ready\ncli-made    Ready\n";
+  assert.deepEqual(listedSandboxes(table, "osp-me"), ["cli-made"]);
+  assert.deepEqual(listedSandboxes("No sandboxes found\n", "osp-me"), []);
+  // The mount gateway's registry counts even though no tier holds a lease for its sandbox.
+  assert.deepEqual(gatewaySandboxUsers({ code: 0, stdout: table }, "osp-me", true, 18080), ["cli-made"]);
+  // A list that fails while the gateway still answers is an unknown user, never "none".
+  assert.equal(gatewaySandboxUsers({ code: 1, stdout: "" }, "osp-me", true, 18080).length, 1);
+  // Nothing listening: that gateway is gone and holds no one.
+  assert.deepEqual(gatewaySandboxUsers({ code: 1, stdout: "" }, "osp-me", false, 18080), []);
+});
+
 test("redactSecrets hides credential-shaped text", () => {
   // Built at runtime so no credential-shaped literal sits in the source.
   const key = ["sk", "proj", "A".repeat(20)].join("-");
@@ -165,13 +178,27 @@ test("ensureGsd and gsdCommandsOnHost target the mounted workspace, never the hi
   // Cold: the in-sandbox install lands in the workspace through the bind; the host cache fills from it.
   const coldWs = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-cws-"));
   const coldHr = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-chr-"));
-  const cold = await ensureGsd(gsdTier(coldWs, coldHr, async () => {
-    mkdirSync(join(coldWs, ".claude", "commands"), { recursive: true });   // npx writes through the bind
-    writeFileSync(join(coldWs, ".claude", "commands", "gsd-plan-phase.md"), "plan");
+  // The job's own .claude files (and anything it adds while npx runs) must never reach the shared cache.
+  mkdirSync(join(coldWs, ".claude", "commands"), { recursive: true });
+  writeFileSync(join(coldWs, ".claude", "settings.json"), "{\"private\":true}");
+  writeFileSync(join(coldWs, ".claude", "commands", "project-only.md"), "mine");
+  let installCwd = "";
+  const cold = await ensureGsd(gsdTier(coldWs, coldHr, async (_argv, opts) => {
+    installCwd = opts?.cwd ?? "";
+    assert.match(installCwd, /^\/sbx\/work\/\.omp-gsd-install-/, "installs in a fresh staging folder under the workdir");
+    const staged = join(coldWs, installCwd.slice("/sbx/work/".length));
+    assert.deepEqual(readdirSync(staged), [], "staging folder starts empty");
+    mkdirSync(join(staged, ".claude", "commands"), { recursive: true });   // npx writes through the bind
+    writeFileSync(join(staged, ".claude", "commands", "gsd-plan-phase.md"), "plan");
+    writeFileSync(join(coldWs, ".claude", "commands", "added-mid-install.md"), "late");
     return { code: 0, stdout: "", stderr: "" };
   }));
   assert.equal(cold.source, "installed-in-sandbox");
-  assert.equal(existsSync(join(GSD_CACHE, ".claude", "commands", "gsd-plan-phase.md")), true, "host cache filled from the workspace");
+  assert.equal(existsSync(join(GSD_CACHE, ".claude", "commands", "gsd-plan-phase.md")), true, "host cache filled from the install");
+  assert.deepEqual(readdirSync(join(GSD_CACHE, ".claude")), ["commands"], "no private settings in the cache");
+  assert.deepEqual(readdirSync(join(GSD_CACHE, ".claude", "commands")), ["gsd-plan-phase.md"], "only installer output is cached");
+  assert.equal(existsSync(join(coldWs, ".claude", "commands", "gsd-plan-phase.md")), true, "the job still gets the install");
+  assert.equal(existsSync(join(coldWs, installCwd.slice("/sbx/work/".length))), false, "staging folder removed");
   assert.equal(existsSync(join(coldHr, "work")), false, "cold path never creates hostRoot/work");
 
   // Warm: the cache fills the workspace copy; exec never runs; hostRoot/work stays absent.

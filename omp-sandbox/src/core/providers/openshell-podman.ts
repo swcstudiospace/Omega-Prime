@@ -14,6 +14,7 @@
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, writeFileSync, readFileSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import { request } from "node:http";
+import { connect } from "node:net";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -95,6 +96,30 @@ const RELAY_PORT = 18990;           // sandbox-local loopback only
 const AGENT_PORT = 2468;            // sandbox-local loopback only, reached via `forward service`
 const SECRET = /TOKEN|KEY|SECRET|PASSWORD/i;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Sandbox names in `openshell sandbox list` output, other than `self`. */
+export function listedSandboxes(stdout: string, self: string): string[] {
+  return stdout.split("\n").map((x) => x.trim().split(/\s+/)[0] ?? "").filter((n) => n && n !== self && !/^(NAME|No)$/i.test(n));
+}
+
+/**
+ * Users of one gateway, as seen when deciding whether the shared Podman service may stop. A listed sandbox is a
+ * user; a failed list counts as an unknown user while something still answers on the gateway's port (it may be
+ * a gateway this tier never saw start, with sandboxes made by a plain CLI client and no tier lease).
+ */
+export function gatewaySandboxUsers(list: { code: number | null; stdout: string }, self: string, listening: boolean, port: number): string[] {
+  if (list.code === 0) return listedSandboxes(list.stdout, self);
+  return listening ? [`<unknown: sandbox list failed on gateway port ${port}>`] : [];
+}
+
+/** True when something accepts a TCP connection on 127.0.0.1:port. */
+function listening(port: number, timeoutMs = 2_000): Promise<boolean> {
+  return new Promise((res) => {
+    const s = connect({ host: "127.0.0.1", port });
+    const done = (v: boolean) => { s.destroy(); res(v); };
+    s.setTimeout(timeoutMs, () => done(false)); s.once("connect", () => done(true)); s.once("error", () => done(false));
+  });
+}
 
 function ping(socketPath: string) {
   return new Promise<boolean>((res) => {
@@ -300,7 +325,21 @@ export class OpenShellPodmanTier implements SandboxTier {
   async #otherSandboxes(): Promise<string[]> {
     const l = await this.#os(["sandbox", "list"], { timeoutMs: 30_000 });
     if (l.code !== 0) return this.#gw && this.#gw.exitCode === null ? ["<unknown: sandbox list failed>"] : [];
-    return l.stdout.split("\n").map((x) => x.trim().split(/\s+/)[0] ?? "").filter((n) => n && n !== this.id && !/^(NAME|No)$/i.test(n));
+    return listedSandboxes(l.stdout, this.id);
+  }
+
+  /**
+   * Sandboxes registered on either gateway (default and mount) other than ours. Both share the one Podman
+   * service, and a sandbox made by a local CLI client holds no tier lease, so the registries are the only record.
+   */
+  async #sandboxesOnBothGateways(): Promise<string[]> {
+    const users: string[] = [];
+    for (const port of [OPENSHELL_GATEWAY_PORT, OPENSHELL_MOUNT_GATEWAY_PORT]) {
+      const env = osEnv(port === OPENSHELL_GATEWAY_PORT ? null : port);
+      const l = await execCapture(OPENSHELL_BIN, ["sandbox", "list"], { env, timeoutMs: 30_000 });
+      users.push(...gatewaySandboxUsers(l, this.id, l.code === 0 ? true : await listening(port), port));
+    }
+    return users;
   }
 
   async #waitReady() {
@@ -391,15 +430,17 @@ export class OpenShellPodmanTier implements SandboxTier {
     // (`#ensureGateway` adopts a running one). A tier holds its leases from before it adopts or starts them, so a
     // wrapper still starting up (no sandbox yet) counts as a user. Stop the gateway only when no other tier of
     // this variant holds its lease and no other sandbox is registered on it; stop the Podman service only when
-    // no other tier of either variant holds a lease.
+    // no other tier of either variant holds a lease and no sandbox is registered on either gateway (a sandbox a
+    // plain CLI client made holds no lease).
     rmSync(join(LEASES, this.id), { force: true }); rmSync(join(this.#gwLeases, this.id), { force: true });
     const gwLeased = this.#gw ? otherLeases(this.id, this.#gwLeases) : [];
     const gwUsers = gwLeased.length ? gwLeased : this.#gw ? await this.#otherSandboxes() : [];
-    const svcUsers = this.#svc ? otherLeases(this.id, LEASES) : [];
+    const svcLeased = this.#svc ? otherLeases(this.id, LEASES) : [];
+    const svcUsers = svcLeased.length || !this.#svc || gwUsers.length ? svcLeased : await this.#sandboxesOnBothGateways();
     const kept: Record<string, unknown> = {};
     if (gwUsers.length) kept.gateway = { pid: this.#gw?.pid ?? null, reason: gwLeased.length ? `${gwLeased.length} other tier(s) hold a gateway lease` : `${gwUsers.length} other sandbox(es) still use the gateway` };
     else if (this.#gw) { await stopProc(this.#gw); if (this.#gw.pid && pidAlive(this.#gw.pid)) leftovers.push(`gateway pid ${this.#gw.pid}`); }
-    if (this.#svc && (svcUsers.length || gwUsers.length)) kept.podmanService = { pid: this.#svc?.pid ?? null, reason: svcUsers.length ? `${svcUsers.length} other tier(s) hold a Podman service lease` : "the gateway left running still needs it" };
+    if (this.#svc && (svcUsers.length || gwUsers.length)) kept.podmanService = { pid: this.#svc?.pid ?? null, reason: svcLeased.length ? `${svcLeased.length} other tier(s) hold a Podman service lease` : svcUsers.length ? `${svcUsers.length} sandbox(es) on the default or mount gateway still use it` : "the gateway left running still needs it" };
     else if (this.#svc) { await stopProc(this.#svc); if (this.#svc.pid && pidAlive(this.#svc.pid)) leftovers.push(`podman service pid ${this.#svc.pid}`); }
     if (Object.keys(kept).length) this.info.sharedServicesLeftRunning = kept;
     leftovers.push(...pids.filter(pidAlive).map((p) => `pid ${p}`));
