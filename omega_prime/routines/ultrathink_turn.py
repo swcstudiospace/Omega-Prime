@@ -96,13 +96,19 @@ def resolve_turn_plan(
             plan.get("specPath") if isinstance(plan.get("specPath"), str) else None
         )
         spec_exists = spec_path is not None and Path(spec_path).is_file()
-        return {
+        found: dict[str, Any] = {
             "found": True,
             "plan_path": str(path),
             "spec_path": spec_path,
             "spec_exists": spec_exists,
             "stale": False,
         }
+        # A saved plan may name its engine stage ("plan" or "execute");
+        # ultrathink_engine routes it. Absent means the env or caller decides.
+        stage = plan.get("stage")
+        if isinstance(stage, str) and stage.strip():
+            found["stage"] = stage
+        return found
     return {
         "found": False,
         "plan_path": None,

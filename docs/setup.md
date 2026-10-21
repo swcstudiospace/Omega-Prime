@@ -381,9 +381,12 @@ coding-fleet repository, not here.
 
 Stage routing: a run started with `stage="plan"` or `stage="execute"` tries
 the ChatGPT plan first, on `gpt-6.1-sol` for planning and `gpt-6-luna` for
-execution. It falls back to Z.ai (`glm-5.3`) when the ChatGPT plan is not
+execution. It falls back to Z.ai, which has its own pair (`glm-5.3` for
+planning, `glm-5.3-flash` for execution), when the ChatGPT plan is not
 allowlisted or its quota window is exhausted, and records the plan it fell
-back from. Override a stage model with
+back from. Pass `plan="zai"` to make Z.ai the primary for a run. The stage
+comes from the caller's `stage=`, then `Agent.engine_stage`, then
+`OMEGA_PRIME_ENGINE_STAGE`; a staged parent delegates to `execute`. Override a stage model with
 `OMEGA_PRIME_OMP_MODEL_<PLAN>_<STAGE>` (for example
 `OMEGA_PRIME_OMP_MODEL_CHATGPT_EXECUTE`); `OMEGA_PRIME_OMP_MODEL_<PLAN>` still
 applies to every stage of that plan. Runs without a stage keep the router's

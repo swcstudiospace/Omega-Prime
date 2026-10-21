@@ -1163,9 +1163,9 @@ def test_openai_codex_usage_row_maps_to_chatgpt_plan() -> None:
 
 def test_stage_routing_falls_back_to_zai_when_chatgpt_is_gated_off() -> None:
     env = {"OMEGA_PRIME_OMP_ALLOW_ZAI": "1", "OPENAI_API_KEY": _SECRET}
-    for stage in ("plan", "execute"):
+    for stage, model in (("plan", "glm-5.3"), ("execute", "glm-5.3-flash")):
         pick = select(env, stage=stage)
-        assert (pick.decision.provider, pick.decision.model_id) == ("zai", "glm-5.3")
+        assert (pick.decision.provider, pick.decision.model_id) == ("zai", model)
         assert pick.stage == stage
         assert pick.fallback_from == "chatgpt"
         assert pick.fallback_reason == "chatgpt: off the allowlist"

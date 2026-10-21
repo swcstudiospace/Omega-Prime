@@ -441,6 +441,11 @@ def _run(
         },
     )
     maybe_tmux(job_id, env, enabled=tmux)
+    process_env = child_env(env)
+    if choice.stage is not None:
+        # omp hands its env to the omega-prime MCP server it starts, so a
+        # delegate_task from a staged turn knows to build on execute.
+        process_env["OMEGA_PRIME_ENGINE_STAGE"] = choice.stage
     proc = subprocess.Popen(
         wrapped,
         stdin=subprocess.PIPE,
@@ -448,7 +453,7 @@ def _run(
         stderr=subprocess.PIPE,
         text=True,
         cwd=str(profile),
-        env=child_env(env),
+        env=process_env,
         bufsize=1,
     )
     session = OmpSession(proc, events_path)
@@ -638,14 +643,24 @@ def session_abort(session: OmpSession) -> dict[str, Any]:
 
 
 def probe(
-    env: Mapping[str, str], *, unsandboxed: bool | None = None
+    env: Mapping[str, str],
+    *,
+    unsandboxed: bool | None = None,
+    stage: str | None = None,
 ) -> tuple[bool, str]:
-    """Whether a turn can run on omp. Does not call a model API."""
+    """Whether a turn can run on omp. Does not call a model API.
+
+    With ``stage``, the stage's plan order (ChatGPT, then Z.ai) must have an
+    allowlisted plan, matching what ``run(stage=...)`` will select.
+    """
     binary = resolve_omp(env)
     if binary is None:
         return False, "not_configured"
     try:
-        select(env, requested=None)
+        if stage is None:
+            select(env, requested=None)
+        else:
+            select(env, stage=stage)
     except PlanNotAllowed:
         return False, "plan_not_allowed"
     if not sandbox_ready(env, unsandboxed_override=unsandboxed):
