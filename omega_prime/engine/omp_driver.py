@@ -75,6 +75,7 @@ from omega_prime.engine.ui_control import UIControlError, UIControlStore
 
 #: Env var naming the delegate depth of a child started through the engine.
 DELEGATE_DEPTH_ENV = "OMEGA_PRIME_DELEGATE_DEPTH"
+DELEGATE_MAX_DEPTH_ENV = "OMEGA_PRIME_DELEGATE_MAX_DEPTH"
 _READY_TIMEOUT = 15.0
 _COMMAND_TIMEOUT = 15.0
 
@@ -359,6 +360,7 @@ def run(
     cancel_event: _CancelEvent | None = None,
     interrupt: _CancelEvent | None = None,
     delegate_depth: int | None = None,
+    delegate_max_depth: int | None = None,
 ) -> EngineResult:
     """Run one prompt on omp and return the assistant text, usage, and cost.
 
@@ -373,7 +375,9 @@ def run(
 
     ``delegate_depth`` is the delegate depth of a child started by
     ``delegate_task``; omp's MCP server starts its delegate parent there, so
-    nested delegates keep the parent's ``max_depth``.
+    nested delegates keep the parent's ``max_depth``. ``delegate_max_depth``
+    is that parent's ``max_depth``, handed over the same way so a custom
+    limit is not reset to the server default.
     """
     mapping = dict(env if env is not None else {})
     if env is None:
@@ -412,6 +416,7 @@ def run(
             cancel_event=cancel_event if cancel_event is not None else interrupt,
             metadata=metadata,
             delegate_depth=delegate_depth,
+            delegate_max_depth=delegate_max_depth,
         )
     except (EngineError, PlanNotAllowed, SandboxUnavailable, OSError) as exc:
         if isinstance(exc, OSError):
@@ -512,6 +517,7 @@ def _run(
     cancel_event: _CancelEvent | None = None,
     metadata: dict[str, Any] | None = None,
     delegate_depth: int | None = None,
+    delegate_max_depth: int | None = None,
 ) -> EngineResult:
     run_metadata = metadata if metadata is not None else {}
     if mode not in MODES:
@@ -720,6 +726,9 @@ def _run(
         # The MCP server's delegate parent starts at this depth, so a child
         # run through the engine cannot reset the delegate depth limit.
         process_env[DELEGATE_DEPTH_ENV] = str(max(0, int(delegate_depth)))
+    if delegate_max_depth is not None:
+        # ...and stops at the parent's own limit, not the server default.
+        process_env[DELEGATE_MAX_DEPTH_ENV] = str(max(0, int(delegate_max_depth)))
     gate_read = gate_write = -1
     try:
         launch = wrapped
