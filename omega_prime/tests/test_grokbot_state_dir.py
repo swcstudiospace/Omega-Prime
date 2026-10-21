@@ -39,10 +39,10 @@ def test_state_dir_redirects_memory_and_sessions(tmp_path: Path) -> None:
     registry = default_registry(root, home, env={STATE_ENV: str(state)})
     _remember(registry, "state-dir sentinel")
 
-    assert "state-dir sentinel" in (state / "memory" / "MEMORY.md").read_text(
+    assert "state-dir sentinel" in (state / "agent" / "memory" / "MEMORY.md").read_text(
         encoding="utf-8"
     )
-    assert (state / "sessions.db").is_file()
+    assert (state / "agent" / "sessions.db").is_file()
     assert _snapshot(root) == before
 
 
@@ -86,7 +86,7 @@ def test_state_dir_through_load_runtime_on_a_copied_tree(tmp_path: Path) -> None
     runtime = load_runtime(root, home, no_roster=True, env={STATE_ENV: str(state)})
     _remember(runtime.registry, "runtime sentinel")
 
-    assert (state / "memory" / "MEMORY.md").is_file()
+    assert (state / "agent" / "memory" / "MEMORY.md").is_file()
     assert _snapshot(root) == before
 
 
@@ -106,7 +106,9 @@ def test_read_only_install_creates_state_skills_and_keeps_shipped_names(
     before = _snapshot(root)
     try:
         registry = default_registry(root, home, env={STATE_ENV: str(state)})
-        assert (state / "skills").is_dir()
+        # Learned skills live in the agent data folder, not the state root.
+        assert not (state / "skills").exists()
+        assert (state / "agent" / "skills").is_dir()
         viewed = json.loads(registry.dispatch("skill_view", {"name": "desk-gateway"}))
         assert viewed["success"] is True
         assert viewed["content"] == "shipped body\n"
@@ -127,7 +129,7 @@ def test_read_only_install_creates_state_skills_and_keeps_shipped_names(
             "success": False,
             "error": "A skill named 'desk-gateway' already exists.",
         }
-        assert not (state / "skills" / "desk-gateway").exists()
+        assert not (state / "agent" / "skills" / "desk-gateway").exists()
         created = json.loads(
             registry.dispatch(
                 "skill_manage",
@@ -139,7 +141,7 @@ def test_read_only_install_creates_state_skills_and_keeps_shipped_names(
             )
         )
         assert created["success"] is True
-        assert (state / "skills" / "deploy" / "SKILL.md").is_file()
+        assert (state / "agent" / "skills" / "deploy" / "SKILL.md").is_file()
         assert _snapshot(root) == before
     finally:
         install.chmod(0o755)

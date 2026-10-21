@@ -77,8 +77,10 @@ it after any change.
   `OMEGA_PRIME_WORK_ROOT`, else `--root`).
 - `--home DIR` — working directory of `execute_code` and `mcp_call`
   (default: `~`).
-- `OMEGA_PRIME_STATE_DIR` — where desk state is stored (including the
-  `intake.json` work-order queue).
+- `OMEGA_PRIME_STATE_DIR` — the state root. The agent's own data (memory,
+  history and the `intake.json` work-order queue) lives in its `agent/`
+  subfolder; `OMEGA_PRIME_AGENT_STATE_DIR` names that folder directly. See
+  `docs/setup.md#agent-data-folder`.
 
 Secrets are supplied privately in the host environment or a `0600` token
 file — never in chat, `argv`, examples, or saved output. See

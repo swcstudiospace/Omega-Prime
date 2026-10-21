@@ -73,7 +73,7 @@ Return the task list last stored by todo_write.
 - Approval: not required
 - Required params: question
 
-Record a question for the user and return that same question.
+Send a question to a live human operator and return their answer. If no operator interaction is configured, return an undeliverable error; never echo the question.
 
 ## web_search
 

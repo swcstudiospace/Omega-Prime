@@ -1,28 +1,32 @@
-"""Record a question and return it.
-
-Adapted from Hermes ``tools/clarify_tool.py``. This port does not open a UI.
-It appends the question it was given and returns that question.
-"""
+"""Define the injected interaction boundary for live clarification."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 
-@dataclass
-class ClarifyLog:
-    """Questions recorded for one registration of the clarify tool."""
+class ClarifyInteraction(Protocol):
+    """Live operator transport used to ask and receive a clarification."""
 
-    questions: list[str] = field(default_factory=list)
+    def ask(self, question: str) -> str:
+        """Send a question to the operator and return their answer."""
 
 
-def clarify(log: ClarifyLog, question: str) -> dict[str, Any]:
-    """Append ``question`` to ``log`` and return it unchanged."""
+def clarify(interaction: ClarifyInteraction | None, question: str) -> dict[str, Any]:
+    """Ask the live operator, failing closed when no transport is configured."""
     if not isinstance(question, str):
         return {"error": "question must be a string"}
-    log.questions.append(question)
-    return {"question": question}
+    if interaction is None:
+        return {"error": "undeliverable: no clarify interaction is configured"}
+    try:
+        answer = interaction.ask(question)
+    except Exception:
+        return {"error": "undeliverable: live operator interaction failed"}
+    if not isinstance(answer, str):
+        return {
+            "error": "undeliverable: live operator interaction returned invalid answer"
+        }
+    return {"answer": answer}
 
 
-__all__ = ["ClarifyLog", "clarify"]
+__all__ = ["ClarifyInteraction", "clarify"]

@@ -17,6 +17,7 @@
   without claiming production override or binary availability. The related
   code, test, setup, and skill changes do not make provider, live-config, or
   live-host changes.
+- Engine review fixes preserve paid token usage, discard terminal duplicate UI answers, isolate skill-loader fixtures, reject unsafe control-store child directories, and retain attachment/cleanup events in `omega ui status`.
 - Settings provenance follows the candidate repository, setup diagnostics share the loaded environment with Ultrathink, and malformed non-empty Substrate SSE frames fail as protocol errors.
 
 # Changelog
@@ -26,6 +27,24 @@ All notable changes to this project are documented here. Format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.html).
 
 ## [Unreleased]
+
+### Agent data folder
+
+- The agent's memory, session history and desk stores live in one folder,
+  `<state>/agent` (`OMEGA_PRIME_AGENT_STATE_DIR` overrides it). The host MCP
+  server and the sandboxed engine MCP child share it; the sandbox binds only
+  that folder writable and hides `settings.json`, `secrets/` and
+  `dashboard/`. A one-time, non-overwriting migration moves older data in,
+  and unmoved stores are still read in place
+  (`python -m omega_prime.agent_state --dry-run`).
+- The migration never replaces a file: each move is published with a
+  no-replace link (a copy to a scratch name first across filesystems), a
+  database moves together with its `-wal`/`-shm`/`-journal` sidecars,
+  `MEMORY.md` and `USER.md` move as one unit, and a failed move is undone.
+  Learned skills on a read-only install use `<agent>/skills`. Credential
+  files under the hidden `secrets/` folder are read on the host and passed
+  to the engine by environment, and scheduled desk passes open the same
+  intake file as the host's lead tools.
 
 ### omp engine (Phase A1a)
 

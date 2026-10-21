@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from omega_prime.receipts import append_execution
-from omega_prime.tools.clarify import ClarifyLog, clarify
+from omega_prime.tools.clarify import ClarifyInteraction, clarify
 from omega_prime.tools.file_ops import FileWorkspace
 from omega_prime.tools.registry import ToolRegistry
 from omega_prime.tools.search import search_text
@@ -44,11 +44,11 @@ def register_coding_tools(
     vision: Any = None,
     policy: Any = None,
     tracer: Any = None,
+    interaction: ClarifyInteraction | None = None,
 ) -> list[str]:
-    """Register every coding tool. ``web`` and ``vision`` are injected transports."""
+    """Register every coding tool; live interaction transports are injected."""
     workspace = FileWorkspace(root, policy=policy, tracer=tracer)
     store = TodoStore()
-    log = ClarifyLog()
     root_path = workspace.root
 
     def read_file(path: str) -> dict:
@@ -93,7 +93,7 @@ def register_coding_tools(
         return todo_read(store)
 
     def clarify_tool(question: str) -> dict:
-        return clarify(log, question)
+        return clarify(interaction, question)
 
     def web_search_tool(query: str, limit: int = 5) -> Any:
         return web_search(web, query, limit=limit)
@@ -249,9 +249,10 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
         _object({}, []),
     ),
     "clarify": (
-        "Record a question for the user and return that same question.",
+        "Send a question to a live human operator and return their answer. "
+        "If no operator interaction is configured, return an undeliverable error; never echo the question.",
         _object(
-            {"question": _string("The question to record and return.")},
+            {"question": _string("The question to send to the live human operator.")},
             ["question"],
         ),
     ),
