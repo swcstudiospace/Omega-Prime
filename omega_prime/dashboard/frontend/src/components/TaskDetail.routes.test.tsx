@@ -51,4 +51,18 @@ describe('Task detail routes', () => {
     expect(screen.getByRole('heading', { name: 'Loading task details…', level: 1 })).toBeInTheDocument()
     expect(screen.queryByText('Task not found')).not.toBeInTheDocument()
   })
+  it('shows a stale badge in the detail heading only for stale tasks', async () => {
+    state.data = { ...fixture, active: [{ ...fixture.active![0]!, stale: { reason: 'pid_dead', since: '2026-01-01T00:05:00Z' } }] }
+    window.location.hash = '#/tasks/worker%2F1'
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Compile release/, level: 2 })).toBeInTheDocument())
+    const badge = document.querySelector('.stale-pill')
+    expect(badge?.textContent).toBe('STALE · pid_dead')
+    expect(badge?.getAttribute('title')).toContain('2026')
+    cleanup()
+    state.data = fixture
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Compile release/, level: 2 })).toBeInTheDocument())
+    expect(document.querySelector('.stale-pill')).toBeNull()
+  })
 })
