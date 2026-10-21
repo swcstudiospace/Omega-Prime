@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import unicodedata
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -40,7 +41,7 @@ def resolve_task_pane(task: Any) -> str | None:
 
 def sanitize_terminal_text(value: str) -> str:
     text = _ANSI.sub("", value)
-    text = "".join(c for c in text if c in "\n\t" or ord(c) >= 32 and ord(c) != 127)
+    text = "".join(c for c in text if c in "\n\t" or unicodedata.category(c) != "Cc")
     text = str(redact_value(text))
     text = _BEARER.sub("Bearer [REDACTED]", text)
     text = _TOKEN.sub("[REDACTED]", text)

@@ -31,8 +31,8 @@ def test_pane_owner_fallback_is_explicit_and_validated():
 
 
 def test_sanitizer_redacts_controls_lines_bytes_and_tokens():
-    text = "\x1b[31mBearer abcdefghijkl\x1b[0m\n" + "\n".join(f"line{i}" for i in range(205))
+    text = "\x1b[31mBearer abcdefghijkl\x1b[0m\x85\n\t" + "\n".join(f"line{i}" for i in range(205))
     safe = sanitize_terminal_text(text)
-    assert "\x1b" not in safe and "abcdefghijkl" not in safe and "line0\n" not in safe
+    assert "\x1b" not in safe and "\x85" not in safe and "abcdefghijkl" not in safe and "line0\n" not in safe
     assert len(safe.splitlines()) <= 200
     assert len(safe.encode()) <= 65536
