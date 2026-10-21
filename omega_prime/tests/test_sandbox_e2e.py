@@ -23,7 +23,7 @@ import pytest
 from omega_prime.engine import sandbox_omp
 from omega_prime.engine.omp_driver import run
 from omega_prime.routines.ultrathink_turn import execute_ultrathink
-from omega_prime.tests.test_engine import _env, _install_fake
+from omega_prime.tests.test_engine import _install_fake
 from omega_prime.tests.test_engine_omp_sandbox import (
     _backend_env,
     _git,
