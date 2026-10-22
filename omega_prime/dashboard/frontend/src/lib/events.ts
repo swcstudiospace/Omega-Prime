@@ -190,33 +190,36 @@ function mergeTask(prev: Snapshot, next: Snapshot, merge: Merge): string | null 
     const owner = prTask(prev, gateRow) ?? prTask(next, gateRow)
     if (owner) return owner
   }
+  // Explicit links and branch wiring are pooled before the uniqueness check:
+  // a merge links to a task only when exactly one task claims it either way.
+  const claims = new Set<string>()
   const url = merge.url ?? (merge.repo && merge.number ? `https://github.com/${merge.repo}/pull/${merge.number}` : null)
-  if (url) {
-    const linked = new Set(taskSelection(next).filter(({ item }) => ('links' in item ? item.links ?? [] : []).some(link => samePullRequestUrl(link.path_or_url, url))).map(({ item }) => item.id))
-    if (linked.size === 1) return [...linked][0]!
+  if (url) for (const snapshot of [next, prev]) for (const { item } of taskSelection(snapshot)) {
+    if (('links' in item ? item.links ?? [] : []).some(link => samePullRequestUrl(link.path_or_url, url))) claims.add(item.id)
   }
   for (const snapshot of [next, prev]) {
     const row = merge.repo && typeof merge.number === 'number' ? ciRowForPr(snapshot, { repo: merge.repo, number: merge.number }) : null
     if (!row?.branch || !row.repo) continue
-    const wired = new Set(taskSelection(snapshot).filter(({ item }) => {
+    for (const { item } of taskSelection(snapshot)) {
       const wiring = 'wiring' in item ? item.wiring : null
-      return Boolean(wiring && wiring.branch === row.branch && wiring.repo?.toLowerCase() === row.repo!.toLowerCase())
-    }).map(({ item }) => item.id))
-    if (wired.size === 1) return [...wired][0]!
+      if (wiring && wiring.branch === row.branch && wiring.repo?.toLowerCase() === row.repo.toLowerCase()) claims.add(item.id)
+    }
   }
-  return null
+  return claims.size === 1 ? [...claims][0]! : null
 }
 
 function prEvents(prev: Snapshot, next: Snapshot): EventDraft[] {
   const out: EventDraft[] = []
   const before = byId<PrRow>(prev.pr_gate), after = byId<PrRow>(next.pr_gate)
-  const mergesBefore = new Set((prev.sources?.github?.command_center?.recent_merges ?? []).map(m => String(m.id)))
+  const baseline = mergeBaselineOf(prev)
+  const mergesBefore = new Set((baseline ?? []).map(m => String(m.id)))
   const merges = next.sources?.github?.command_center?.recent_merges ?? []
   const mergedNumbers = new Set<string>()
-  // Merges are only reported against a baseline from a successful GitHub
-  // load: an empty list from a failed first fetch is not a baseline, so a
-  // recovery cannot replay historical merges as news.
-  if (mergeBaseline(prev)) for (const merge of merges) {
+  // Merges are only reported against the last list from a successful GitHub
+  // load, kept across outages: an empty list from a failed first fetch is not
+  // a baseline (no replay of history), and merges made during an outage are
+  // still news once GitHub recovers.
+  if (baseline && !sourceFailed(next.sources?.github)) for (const merge of merges) {
     if (mergesBefore.has(String(merge.id))) continue
     mergedNumbers.add(`${(merge.repo ?? '').toLowerCase()}#${merge.number ?? ''}`)
     out.push({ type: 'pr.merged', severity: 'success', taskId: mergeTask(prev, next, merge), title: 'PR merged', summary: `${(merge.repo ?? 'repo').split('/').pop()} #${merge.number ?? '?'} · ${merge.title ?? ''}`.trim(), payload: { repo: merge.repo ?? null, number: merge.number ?? null, sha: merge.merge_commit_sha ? merge.merge_commit_sha.slice(0, 7) : null } })
@@ -255,10 +258,16 @@ const FAILED = new Set(['error', 'unreadable', 'unavailable', 'failed'])
 export function sourceFailed(source: Source | null | undefined): boolean {
   return Boolean(source && (FAILED.has(source.status ?? '') || (!HEALTHY.has(source.status ?? '') && source.error)))
 }
-const mergeBaseline = (snapshot: Snapshot): boolean => {
-  const github = snapshot.sources?.github
-  return Boolean(github && Array.isArray(github.command_center?.recent_merges) && !sourceFailed(github))
+type Baselines = { merges: Merge[] | null; tasks: boolean }
+/** Last-good baselines of stabilized snapshots: the merge list from the last
+ *  successful GitHub load, and whether the task file has ever been read. */
+const baselines = new WeakMap<Snapshot, Baselines>()
+const ownMerges = (snapshot: Snapshot): Merge[] | null => {
+  const github = snapshot.sources?.github, merges = github?.command_center?.recent_merges
+  return github && Array.isArray(merges) && !sourceFailed(github) ? merges : null
 }
+const mergeBaselineOf = (snapshot: Snapshot): Merge[] | null => baselines.has(snapshot) ? baselines.get(snapshot)!.merges : ownMerges(snapshot)
+const taskBaselineOf = (snapshot: Snapshot): boolean => baselines.has(snapshot) ? baselines.get(snapshot)!.tasks : !sourceFailed(snapshot.sources?.tasks_json)
 
 function sourceEvents(prev: Snapshot, next: Snapshot): EventDraft[] {
   const out: EventDraft[] = []
@@ -273,19 +282,46 @@ function sourceEvents(prev: Snapshot, next: Snapshot): EventDraft[] {
   return out
 }
 
+/** Rows that come from the task file (`tasks_json`), as opposed to Herdr,
+ *  fleet, GitHub or session collectors sharing the same lists. */
+export function fromTaskFile(row: { id: string; source?: string | null }): boolean {
+  return row.source === 'tasks_json' || (row.source == null && row.id.startsWith('tasks:'))
+}
+type RowLists = Pick<Snapshot, 'active' | 'idle_sessions' | 'waiting_on_ove' | 'finished'>
+const ROW_LISTS = ['active', 'idle_sessions', 'waiting_on_ove', 'finished'] as const
+/** `base` with the task-file rows of every list replaced by those of `from`;
+ *  rows from other collectors stay exactly as `base` has them. */
+function withTaskFileRows(base: Snapshot, from: Snapshot): Snapshot {
+  const lists: RowLists = {}
+  for (const key of ROW_LISTS) {
+    const own = (base[key] ?? []) as Array<{ id: string; source?: string | null }>
+    const kept = own.filter(row => !fromTaskFile(row))
+    const ids = new Set(kept.map(row => row.id))
+    const carried = ((from[key] ?? []) as Array<{ id: string; source?: string | null }>).filter(row => fromTaskFile(row) && !ids.has(row.id))
+    if (base[key] === undefined && carried.length === 0) continue
+    ;(lists as Record<string, unknown>)[key] = [...kept, ...carried]
+  }
+  return { ...base, ...lists }
+}
+
 /** Rows a failed source stopped reporting are unknown, not gone. Carry the
- *  last good rows forward for each failed source so the diff (and the next
- *  baseline) sees no removals during the outage and no replayed additions on
- *  recovery. Source health itself always comes from `next`. */
+ *  last good rows of that source only (other collectors' rows in the same
+ *  lists stay live), so the diff and the next baseline see no removals during
+ *  the outage and no replayed additions on recovery. Each source keeps its
+ *  own last-good baseline; one first read after a failed start becomes the
+ *  baseline instead of news. Source health always comes from `next`. */
 export function stabilizeSnapshot(prev: Snapshot | null, next: Snapshot): Snapshot {
-  if (prev === null) return next
   let out = next
-  if (sourceFailed(next.sources?.tasks_json)) out = { ...out, active: prev.active, idle_sessions: prev.idle_sessions, waiting_on_ove: prev.waiting_on_ove, finished: prev.finished }
+  const taskFailed = sourceFailed(next.sources?.tasks_json)
+  const priorTasks = prev !== null && taskBaselineOf(prev)
+  if (taskFailed && prev !== null) out = withTaskFileRows(out, prev)
   const github = next.sources?.github
-  if (github && sourceFailed(github)) {
+  const priorMerges = prev === null ? null : mergeBaselineOf(prev)
+  if (prev !== null && github && sourceFailed(github)) {
     const merges = prev.sources?.github?.command_center?.recent_merges
     out = { ...out, pr_gate: prev.pr_gate, sources: { ...out.sources, github: { ...github, command_center: { ...github.command_center, recent_merges: merges ?? github.command_center?.recent_merges ?? null } } } }
   }
+  baselines.set(out, { merges: ownMerges(next) ?? priorMerges, tasks: taskFailed ? priorTasks : true })
   return out
 }
 
@@ -298,7 +334,10 @@ export function deriveEvents(prev: Snapshot | null, next: Snapshot): EventDraft[
     return [{ type: 'snapshot.baseline', severity: 'info', taskId: null, title: 'Snapshot received', summary: `${active} active · ${waiting} waiting on Ove · ${prs} PRs at the gate`, payload: { active, waiting, prs, generated_at: next.generated_at ?? null } }]
   }
   if (prev === next) return []
-  return [...taskEvents(prev, next), ...prEvents(prev, next), ...sourceEvents(prev, next)]
+  // The task file's first successful read after a failed start is a baseline:
+  // its existing rows are known state, not news.
+  const taskPrev = !taskBaselineOf(prev) && !sourceFailed(next.sources?.tasks_json) ? withTaskFileRows(prev, next) : prev
+  return [...taskEvents(taskPrev, next), ...prEvents(prev, next), ...sourceEvents(prev, next)]
 }
 
 /** Toast-worthy events: the ones Ove acts on or should notice. */

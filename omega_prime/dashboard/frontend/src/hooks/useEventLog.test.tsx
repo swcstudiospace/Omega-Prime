@@ -55,7 +55,8 @@ describe('useEventLog', () => {
   it('keeps last-good rows through a source outage so recovery replays nothing', () => {
     const healthy: Snapshot = { ...fixture, sources: { ...fixture.sources, tasks_json: { status: 'ok' } } }
     const { result, rerender } = setup({ data: healthy, live: true, error: null })
-    const down: Snapshot = { ...healthy, active: [], waiting_on_ove: [], finished: [], sources: { ...healthy.sources, tasks_json: { status: 'unreadable', error: 'bad json' } } }
+    // The task file's rows vanish; other collectors keep reporting theirs.
+    const down: Snapshot = { ...healthy, finished: [], sources: { ...healthy.sources, tasks_json: { status: 'unreadable', error: 'bad json' } } }
     rerender({ data: down, live: true, error: null })
     expect(result.current.events.map(event => event.type)).toEqual(['source.degraded', 'snapshot.baseline'])
     expect(result.current.toasts.map(toast => toast.type)).toEqual(['source.degraded'])

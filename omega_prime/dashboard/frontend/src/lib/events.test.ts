@@ -114,12 +114,54 @@ describe('review-gated readiness and edge transitions', () => {
     const [event] = deriveEvents(left, mergedLate)
     expect(event).toMatchObject({ type: 'pr.merged', taskId: 'worker/1' })
   })
-  it('carries forward the rows of a failed source and nothing else', () => {
-    const down: Snapshot = { ...fixture, active: [], finished: [], waiting_on_ove: [], sources: { ...fixture.sources, tasks_json: { status: 'unreadable', error: 'x' } } }
-    const stable = stabilizeSnapshot(fixture, down)
-    expect(stable.active).toBe(fixture.active); expect(stable.finished).toBe(fixture.finished); expect(stable.waiting_on_ove).toBe(fixture.waiting_on_ove)
+  it('carries forward only the failed source\'s rows and keeps other collectors live', () => {
+    const fileTask = { ...task, id: 'tasks:file-1', title: 'From the task file', source: 'tasks_json' }
+    const fileWait = { id: 'tasks:wait-2', ask: 'Pick a name', source: 'tasks_json' }
+    const good: Snapshot = { ...fixture, active: [task, fileTask], waiting_on_ove: [...fixture.waiting_on_ove!, fileWait], sources: { ...fixture.sources, tasks_json: { status: 'ok' } } }
+    const blockedHerdr = { ...task, state: 'blocked' }
+    const down: Snapshot = { ...good, active: [blockedHerdr], finished: [], waiting_on_ove: fixture.waiting_on_ove, sources: { ...good.sources, tasks_json: { status: 'unreadable', error: 'x' } } }
+    const stable = stabilizeSnapshot(good, down)
+    expect(stable.active?.map(row => [row.id, row.state])).toEqual([['worker/1', 'blocked'], ['tasks:file-1', 'running']])
+    expect(stable.finished?.map(row => row.id)).toEqual(['finished/3'])
+    expect(stable.waiting_on_ove?.map(row => row.id)).toEqual(['wait-1', 'tasks:wait-2'])
     expect(stable.sources?.tasks_json?.status).toBe('unreadable')
+    // The Herdr pane that blocked during the task-file outage still alerts.
+    expect(types(deriveEvents(good, stable))).toEqual(['task.blocked', 'source.degraded'])
+    // Recovery replays nothing that was carried.
+    const back = stabilizeSnapshot(stable, { ...good, active: [blockedHerdr, fileTask] })
+    expect(types(deriveEvents(stable, back))).toEqual(['source.recovered'])
     expect(stabilizeSnapshot(fixture, { ...fixture, active: [] }).active).toEqual([])
+  })
+  it('treats the first task-file read after a failed start as a baseline, not news', () => {
+    const failedStart = stabilizeSnapshot(null, { ...fixture, finished: [], sources: { ...fixture.sources, tasks_json: { status: 'error', error: 'missing' } } })
+    const fileTask = { ...task, id: 'tasks:file-1', source: 'tasks_json' }
+    const read: Snapshot = { ...fixture, active: [task, fileTask], waiting_on_ove: [...fixture.waiting_on_ove!, { id: 'tasks:wait-2', ask: 'Old ask', source: 'tasks_json' }], sources: { ...fixture.sources, tasks_json: { status: 'ok' } } }
+    const recovered = stabilizeSnapshot(failedStart, read)
+    expect(types(deriveEvents(failedStart, recovered))).toEqual(['source.recovered'])
+    // From that baseline, a genuinely new task-file row is news again.
+    const newer = stabilizeSnapshot(recovered, { ...read, active: [...read.active!, { ...fileTask, id: 'tasks:file-2' }] })
+    expect(types(deriveEvents(recovered, newer))).toEqual(['task.added'])
+  })
+  it('announces merges made during a GitHub outage once it recovers', () => {
+    const merge = (id: string, number: number) => ({ id, repo: 'swcstudiospace/console', number, title: `PR ${number}` })
+    const withMerges = (status: string, merges: ReturnType<typeof merge>[]): Snapshot => ({ ...fixture, sources: { ...fixture.sources, github: { status, error: status === 'ok' ? undefined : 'timeout', command_center: { ...fixture.sources!.github!.command_center, recent_merges: merges } } } })
+    const good = stabilizeSnapshot(null, withMerges('ok', [merge('m-old', 3)]))
+    const outage = stabilizeSnapshot(good, withMerges('error', [merge('m-old', 3)]))
+    expect(types(deriveEvents(good, outage))).not.toContain('pr.merged')
+    const recovered = stabilizeSnapshot(outage, withMerges('ok', [merge('m-new', 4), merge('m-old', 3)]))
+    expect(deriveEvents(outage, recovered).filter(event => event.type === 'pr.merged').map(event => event.payload.number)).toEqual([4])
+    expect(deriveEvents(recovered, stabilizeSnapshot(recovered, withMerges('ok', [merge('m-new', 4), merge('m-old', 3)])))).toEqual([])
+  })
+  it('links a merge to no task when several tasks claim it by link or branch', () => {
+    const url = 'https://github.com/swcstudiospace/console/pull/12'
+    const linkedOnly = { ...task, id: 'worker/7', wiring: null, links: [{ label: 'PR', path_or_url: url }] }
+    const both = { ...task, links: [{ label: 'PR', path_or_url: url }] }
+    const left: Snapshot = { ...fixture, active: [both, linkedOnly], pr_gate: [] }
+    const merged: Snapshot = { ...left, sources: { ...left.sources, github: { ...fixture.sources!.github!, command_center: { ...fixture.sources!.github!.command_center, recent_merges: [{ id: 'm-12', repo: 'swcstudiospace/console', number: 12, title: 'Fix safe view', url }] } } } }
+    expect(deriveEvents(left, merged)[0]).toMatchObject({ type: 'pr.merged', taskId: null })
+    const branchOnly = { ...task, id: 'worker/8', links: [] }
+    const split: Snapshot = { ...left, active: [linkedOnly, branchOnly] }
+    expect(deriveEvents(split, { ...merged, active: split.active })[0]).toMatchObject({ type: 'pr.merged', taskId: null })
   })
   it('matches waiting requests to the task they are linked to', () => {
     const waiting = makeEvent({ type: 'waiting.added', severity: 'warning', taskId: 'wait-9', title: '', summary: '', payload: { related_task: 'worker/1' } }, { at, source: 'ws' })
