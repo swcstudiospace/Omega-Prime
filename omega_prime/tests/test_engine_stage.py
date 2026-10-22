@@ -752,3 +752,37 @@ def test_staged_entry_points_forward_the_requested_plan(tmp_path: Path) -> None:
         {"found": True, "spec_path": str(spec)}, env, stage="execute"
     )
     assert (body["plan"], body["model"]) == ("chatgpt", "gpt-6-luna")
+
+
+def test_the_desk_parent_hands_its_task_context_to_engine_delegates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The live delegate_task parent (not an injected stub) carries the
+    task store and id from the server's env into delegate_via_engine."""
+    import omega_prime.engine.attach as attach
+    from omega_prime.mcp_server import _DeskParent
+    from omega_prime.tools.delegate import register_delegate_tools
+    from omega_prime.tools.registry import ToolRegistry
+
+    seen: dict[str, Any] = {}
+
+    def capture(goal: str, **kwargs: Any) -> str:
+        seen.update(kwargs)
+        return json.dumps({"summary": "routed"})
+
+    monkeypatch.setattr(attach, "delegate_via_engine", capture)
+    store = tmp_path / "tasks.json"
+    registry = ToolRegistry()
+    parent = _DeskParent(
+        registry,
+        None,
+        {"OMEGA_PRIME_TASKS_PATH": str(store), "OMEGA_PRIME_TASK_ID": "gb:desk"},
+    )
+    assert (parent.engine_tasks_path, parent.engine_task_id) == (str(store), "gb:desk")
+    register_delegate_tools(registry, parent)
+    raw = json.loads(registry.dispatch("delegate_task", {"goal": "build it"}))
+    assert raw == {"summary": "routed"}
+    assert (seen["tasks_path"], seen["task_id"]) == (str(store), "gb:desk")
+    # Without task context the parent passes none.
+    bare = _DeskParent(ToolRegistry(), None, {})
+    assert (bare.engine_tasks_path, bare.engine_task_id) == (None, None)
