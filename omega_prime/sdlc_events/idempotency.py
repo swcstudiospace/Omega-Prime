@@ -6,6 +6,8 @@ and re-reads the shared ledger on every call, so separate listener wakes (or
 processes) sharing one path agree on who owns a delivery. A failed attempt calls
 ``release`` so a retry of the same delivery can resume; a crashed attempt's
 claim expires after ``claim_ttl_s`` so it cannot wedge the delivery forever.
+Every claim carries an owner token; ``complete`` and ``release`` only act on the
+caller's own claim, so an expired worker cannot clobber its replacement.
 """
 
 from __future__ import annotations
@@ -14,8 +16,10 @@ import fcntl
 import json
 import os
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -29,6 +33,16 @@ class ClaimOutcome(StrEnum):
     ACQUIRED = "acquired"
     IN_PROGRESS = "in_progress"
     DONE = "done"
+
+
+@dataclass(frozen=True, slots=True)
+class Claim:
+    outcome: ClaimOutcome
+    token: str | None = None
+
+    @property
+    def acquired(self) -> bool:
+        return self.outcome is ClaimOutcome.ACQUIRED
 
 
 class IdempotencyStore:
@@ -69,29 +83,41 @@ class IdempotencyStore:
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    def claim(self, delivery: DeliveryId) -> ClaimOutcome:
-        """Atomically claim a delivery; only ``ACQUIRED`` may do the work."""
+    def claim(self, delivery: DeliveryId) -> Claim:
+        """Atomically claim a delivery; only an acquired claim may do the work."""
         now = self._clock()
         with self._ledger() as data:
             entry = data.get(delivery.value)
             if entry is not None:
                 if entry.get("state") == "done":
-                    return ClaimOutcome.DONE
+                    return Claim(ClaimOutcome.DONE)
                 if now - float(entry.get("at", 0.0)) < self._ttl:
-                    return ClaimOutcome.IN_PROGRESS
-            data[delivery.value] = {"state": "claimed", "at": now}
-            return ClaimOutcome.ACQUIRED
+                    return Claim(ClaimOutcome.IN_PROGRESS)
+            token = uuid.uuid4().hex
+            data[delivery.value] = {"state": "claimed", "at": now, "token": token}
+            return Claim(ClaimOutcome.ACQUIRED, token)
 
-    def complete(self, delivery: DeliveryId) -> None:
-        with self._ledger() as data:
-            data[delivery.value] = {"state": "done", "at": self._clock()}
-
-    def release(self, delivery: DeliveryId) -> None:
-        """Drop an unfinished claim so a retry of the same delivery can resume."""
+    def complete(self, delivery: DeliveryId, token: str) -> bool:
+        """Mark done only if ``token`` still owns the claim; returns whether it did."""
         with self._ledger() as data:
             entry = data.get(delivery.value)
-            if entry is not None and entry.get("state") == "claimed":
-                del data[delivery.value]
+            if entry is None or entry.get("token") != token:
+                return False
+            data[delivery.value] = {"state": "done", "at": self._clock()}
+            return True
+
+    def release(self, delivery: DeliveryId, token: str) -> bool:
+        """Drop the caller's unfinished claim so a retry can resume."""
+        with self._ledger() as data:
+            entry = data.get(delivery.value)
+            if (
+                entry is None
+                or entry.get("state") != "claimed"
+                or entry.get("token") != token
+            ):
+                return False
+            del data[delivery.value]
+            return True
 
     def is_done(self, delivery: DeliveryId) -> bool:
         with self._ledger() as data:

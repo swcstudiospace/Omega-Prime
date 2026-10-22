@@ -56,10 +56,11 @@ def test_shared_file_ledger_is_seen_across_instances(tmp_path: Path) -> None:
     path = tmp_path / "idem.json"
     a, b = IdempotencyStore(path), IdempotencyStore(path)
     d = DeliveryId("gh-1")
-    assert a.claim(d) is ClaimOutcome.ACQUIRED
-    assert b.claim(d) is ClaimOutcome.IN_PROGRESS
-    a.complete(d)
-    assert b.claim(d) is ClaimOutcome.DONE
+    ca = a.claim(d)
+    assert ca.outcome is ClaimOutcome.ACQUIRED and ca.token
+    assert b.claim(d).outcome is ClaimOutcome.IN_PROGRESS
+    assert a.complete(d, ca.token)
+    assert b.claim(d).outcome is ClaimOutcome.DONE
 
 
 def test_stale_claim_expires(tmp_path: Path) -> None:
@@ -68,9 +69,28 @@ def test_stale_claim_expires(tmp_path: Path) -> None:
     a = IdempotencyStore(path, claim_ttl_s=60, clock=lambda: now[0])
     b = IdempotencyStore(path, claim_ttl_s=60, clock=lambda: now[0])
     d = DeliveryId("gh-2")
-    assert a.claim(d) is ClaimOutcome.ACQUIRED
+    assert a.claim(d).outcome is ClaimOutcome.ACQUIRED
     now[0] += 61
-    assert b.claim(d) is ClaimOutcome.ACQUIRED
+    assert b.claim(d).outcome is ClaimOutcome.ACQUIRED
+
+
+def test_expired_worker_cannot_clobber_replacement(tmp_path: Path) -> None:
+    now = [1000.0]
+    path = tmp_path / "idem.json"
+    a = IdempotencyStore(path, claim_ttl_s=60, clock=lambda: now[0])
+    b = IdempotencyStore(path, claim_ttl_s=60, clock=lambda: now[0])
+    c = IdempotencyStore(path, claim_ttl_s=60, clock=lambda: now[0])
+    d = DeliveryId("gh-3")
+    old = a.claim(d)
+    now[0] += 61
+    new = b.claim(d)
+    assert new.acquired and new.token != old.token
+    assert old.token is not None and new.token is not None
+    assert not a.release(d, old.token)
+    assert not a.complete(d, old.token)
+    assert c.claim(d).outcome is ClaimOutcome.IN_PROGRESS
+    assert b.complete(d, new.token)
+    assert c.claim(d).outcome is ClaimOutcome.DONE
 
 
 class _HeadCheckingMerge:

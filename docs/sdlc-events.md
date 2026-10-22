@@ -9,7 +9,7 @@ Replaces paused Grok Bot **cron/polling routines** with **event wakes** that upd
 | Paused routine | Capability | Trigger events (GitHub / Origin) | Handler | Command Center effect |
 |---|---|---|---|---|
 | Org CI/CD sweep (5m) | Merge when Greptile 5/5 + CI green + mergeable | `check_run.completed`, `check_suite.completed`, `pull_request.synchronize`, `pull_request_review.submitted`, Greptile `issue_comment` | `on_gate_signal` | Update PR-linked `gb:*` note; optional merge under standing gate (non-draft, non-auto-deploy) |
-| Per-PR Greptile loops | Re-review / fix loop | `issue_comment.created` (Greptile), `pull_request_review` | `on_review_signal` | Note score/threads; spawn fix work only when score &lt; 5 |
+| Per-PR Greptile loops | Re-review / fix loop | `issue_comment.created` (Greptile), `pull_request_review` | `on_review_signal` | Records score on the task row (blocked when &lt; 5). **Pending:** starting fix work is not in this package; the listener owner (parent agent) must launch the fix worker when the row goes blocked — wiring listeners alone does not restore the fix loop |
 | Blocked-task follow-up (30m) | Chase red CI / blocked / waiting-on-Ove | `check_run` failure, PR `mergeable_state` dirty/blocked, task state via CC | `on_blocked_signal` | Set `state=blocked`, note with check URL |
 | Fleet deploy (15m) | Railway deploy 729f319 | **HITL** until Railway CLI login; then optional deploy-success event | `on_fleet_signal` (stub) | Stay `blocked` until Ove pings / login restored |
 | Session digest (hourly) | Summarize to Ove | **No pure event** — HITL: drop / on-demand / weekday morning exception | n/a | n/a until Ove chooses |

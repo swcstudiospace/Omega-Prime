@@ -49,20 +49,20 @@ def _run_claimed(
     event: SdlcEvent, idem: IdempotencyStore, work: Callable[[], HandlerResult]
 ) -> HandlerResult:
     """Run ``work`` once per delivery; release the claim if it fails so it can retry."""
-    outcome = idem.claim(event.delivery)
-    if outcome is not ClaimOutcome.ACQUIRED:
+    claim = idem.claim(event.delivery)
+    if not claim.acquired or claim.token is None:
         detail = (
             "duplicate_delivery"
-            if outcome is ClaimOutcome.DONE
+            if claim.outcome is ClaimOutcome.DONE
             else "delivery_in_progress"
         )
         return HandlerResult(action="skip", detail=detail, skipped_duplicate=True)
     try:
         result = work()
     except BaseException:
-        idem.release(event.delivery)
+        idem.release(event.delivery, claim.token)
         raise
-    idem.complete(event.delivery)
+    idem.complete(event.delivery, claim.token)
     return result
 
 
