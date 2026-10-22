@@ -1236,8 +1236,8 @@ def _wait_stage_done(
     Every event also touches the run's tasks.json row when one was started
     (best-effort).
 
-    A ``question`` event with a non-empty requestId (and a started row)
-    raises exactly one waiting_on_ove item and the loop polls the store
+    A ``question`` event with a non-empty requestId (and a configured
+    task store, whether or not this run owns the row) raises exactly one waiting_on_ove item and the loop polls the store
     for its additive ``answer`` at most once per _ANSWER_POLL seconds —
     no wall-clock deadline — piping it back through ``answer_question``
     into the same live session; a stale answer clears the dead item and
@@ -1309,9 +1309,14 @@ def _wait_loop(
         for buffered in batch:
             if (
                 buffered.get("event") == "question"
-                and row_started
+                and tasks_path is not None
+                and task_id is not None
                 and str(buffered.get("requestId") or "")
             ):
+                # Questions follow the configured task store, not row
+                # ownership: a run whose start declined a finished row still
+                # launches its stage, so its questions must stay answerable
+                # (raise_block never reopens a finished row).
                 # A GSD follow-up question: raise it under its own stable id
                 # beside any other open one. A requestId-less question is
                 # informational only — append/touch already happened above.

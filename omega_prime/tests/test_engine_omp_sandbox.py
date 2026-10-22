@@ -2184,3 +2184,44 @@ def test_interrupt_during_a_cold_start_returns_promptly_and_submits_nothing(
     tools = _wrapper_tools(log)
     assert "up" in tools and "down" in tools
     assert "run_gsd_stage" not in tools
+
+
+def test_a_run_without_its_row_still_gets_answerable_questions(
+    tmp_path: Path,
+) -> None:
+    """start declines a finished row of no known run, but the stage still
+    launches: its question is raised and answered, and the row stays the
+    finished record it was."""
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "question")
+    _install_fake_herdr(tmp_path, "ok")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:q", "failed")])
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-unowned-q")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    try:
+        _answer_when_raised(store, "gb:q:question:req-1", "Round")
+    except BaseException as exc:
+        failures.append(exc)
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "the answer")
+    assert box["run"].ok is True, box["run"].detail
+    assert [
+        r["args"]["text"]
+        for r in _wrapper_log(log)
+        if r.get("tool") == "answer_question"
+    ] == ["Round"]
+    data = _read_tasks(store)
+    assert data["waiting_on_ove"] == []
+    assert data["tasks"] == [{"id": "gb:q", "state": "failed"}]
