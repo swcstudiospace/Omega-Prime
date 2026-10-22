@@ -29,6 +29,10 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Current focus:** v20 Wiring (Phases 97–103) is in progress. Phase 97 has local transport, settings, diagnostics, argument, and no-cap implementation with offline tests; current upstream MCP mount/schema compatibility remains unverified, so Phase 97 verification is deferred and no v20 phase is complete. Phase 98's branch implementation is being integrated after phase 97; preserve phase 97's authoritative endpoint resolver and source-aware `memory_search` errors. v19 Installer bindings and v1–v19 history remain unchanged. Phase 77.1 live import UAT remains user-owned and `human_needed`.
 
+## Parallel milestone — v21 Event Stream (00046)
+
+Started 2026-10-23 (AEDT) on branch `gsd/00046-event-stream`, in parallel with v20. Phase 104 (broker decision + spec) discuss complete: Apache Pulsar 5.0 LTS standalone behind a broker-agnostic EventBus port. Standing rule: no timer/schedule routines in Omega Prime — event-driven only. Next: phase 105 plan.
+
 ## Current Position
 
 Phase: v20 Phase 97 — substrate direct connect + settings loader + no time caps (local implementation executed; verification deferred on authoritative upstream MCP mount/schema evidence).
