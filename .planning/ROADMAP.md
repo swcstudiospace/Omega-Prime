@@ -323,7 +323,7 @@ Acceptance criteria:
 
 Additional safety constraints: exec-job operations remain approval-gated; plugins require exact `OMEGA_PRIME_PLUGINS=1` opt-in and remain off otherwise; `x_tweepy` is removed while urllib X behavior is retained. Preserve approval gates for sends, posts, merges, deploys, and pin-bump mutation. Do not activate live providers or integrations.
 
-### v21 Sandbox wiring (Phases 110-112) — in progress 2026-10-21
+### v21 Sandbox wiring (Phases 110-113) — in progress 2026-10-21
 
 Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's round-1 fixes into `feat/sbx-2-workspace-mount` is committed (3e7be33) but leaves follow-ups, all inside `omp-sandbox/`. Planning only in this stage; execution is one plan (110-01).
 
@@ -382,3 +382,21 @@ Task 00030 node n2 (`/sandbox/home/refs/uplift2.xml`): the merge of sbx-0's roun
 5. `cd omp-sandbox && npx tsc --noEmit` exits 0 and `npm test` is green including the new folded-ops tests; `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/<new file>` is green; no existing test weakened, skipped or deleted; fakes only (no podman, openshell, herdr, gh, network, or model calls).
 
 - [x] Phase 112: omp-sandbox engine backend (sbx-3) — completed 2026-10-21 (audit C4 + C7 → PASS; C3 reachable per-run via engine_plan; default ChatGPT-first stage routing unchanged)
+
+**Phase 113 goal:** Make sandbox runs visible and steerable (task 00030 node n4; audit C8 + C9, and C10's question half): routine- and tool-launched engine runs through the sbx-3 backend open one Herdr pane per run (labelled "{task} {stage}", live event stream; tmux fallback when herdr is missing), write one tasks.json row per run through `locked_tasks` + `_write_locked` (state `working` on start, `last_activity_at` on each event, `done`/`failed` with a receipt on finish, `herdr_pane` recorded), and forward GSD follow-up questions to `waiting_on_ove` through the phase-111 helper with the answer piped back via the wrapper's `answer_question` into the same live session. `delegate_task` (`omega_prime/agent/delegate.py`) and the ultrathink_turn routine (`omega_prime/routines/ultrathink_turn.py`) thread task context and the requested plan onto the backend when it is selected; planning only in this stage, execution is three file-disjoint plans (113-01/02/03). This is U4 in node n7's build order (U1 = Phase 110 ✅, U2 = Phase 111 ✅, U3 = Phase 112 ✅).
+
+**Requirements:**
+- **W113-01 Herdr pane launcher:** a new `omega_prime/dashboard/herdr_launch.py` runs `herdr workspace create --cwd DIR --label LABEL --no-focus` then `herdr pane run PANE CMD` (CMD streams the run's events), parses the pane id from stdout, and falls back to the engine's tmux pattern when herdr is missing or fails; a missing pane never fails the run. No `omega_prime/dashboard/herdr_launch.py` exists today, so this stage creates it with that CLI contract.
+- **W113-02 tasks.json row per run:** a new `omega_prime/dashboard/run_rows.py` writes the run's row through `locked_tasks(path, write=True)` + `_write_locked`: row created/moved to `working` with `herdr_pane` on start, `last_activity_at` stamped on each event, terminal `done`/`failed` with a redacted receipt (job id, stage id, ok, export summary) on finish; unknown fields on other rows pass through untouched.
+- **W113-03 question round-trip:** a `question` wrapper event raises exactly one `waiting_on_ove` item through the phase-111 helper (stable id per question, ask redacted, owning row blocked); the run then polls the store, and when the item carries an answer pipes it back with the wrapper's `answer_question` (`stage_id` + `request_id`) into the same live session and clears the item.
+- **W113-04 product-caller routing:** `delegate_task` reads the parent's task context and requested plan attributes and `execute_ultrathink` reads them from its env, both threaded through `delegate_via_engine`/`ultrathink_engine` into `run(tasks_path=…, task_id=…, plan=…)`; the backend wires those into the pane label, the row and the question items; bwrap default behaviour and entry-point defaults are unchanged.
+- **W113-05 fake-visible tests:** the fake Anda wrapper's question behavior waits for `answer_question` (with `requestId`) before `stage_done`, and tests with a temp tasks.json and a fake herdr runner cover: row created working → done/failed with `last_activity_at` advancing, pane opened with the "{task} {stage}" label and recorded on the row, question → one item → answered → `answer_question` called with the right ids → item cleared → run completes, tmux fallback when the fake herdr is absent, no secret-shaped value in rows/receipts, and the phase-112 question-event pin flipped to the n4 contract (stronger assertions, documented cutover).
+
+**Success criteria:**
+1. A routine-launched sandbox run shows a Herdr pane and a tasks.json row that moves `working` → `done`/`failed` within one poll of each event (node n4 acceptance).
+2. A GSD question appears in `waiting_on_ove` and its answer resumes the run through `answer_question` into the same live session; the item clears on answer.
+3. When herdr is missing, tmux and the tasks.json row still show progress; a pane failure never fails the run itself.
+4. With `OMEGA_PRIME_OMP_BACKEND` unset, every existing engine test passes unchanged (bwrap default untouched); `delegate_task`/`ultrathink_turn` defaults are unchanged without task context.
+5. `python3 -m pytest -q -p no:cacheprovider omega_prime/tests/<files>` green with a temp tasks.json, a fake herdr runner and the fake Anda wrapper only (no herdr, podman, gh, network, or model calls); no existing test weakened, skipped or deleted — the one phase-112 pin that asserted the n4 boundary is updated to assert the n4 contract instead.
+
+- [x] Phase 113: Sandbox runs visible in Herdr and tasks.json

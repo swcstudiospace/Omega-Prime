@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Spectrum Web Co
 """Dashboard status store: the locked tasks.json and its waiting_on_ove blocks."""
 
+from omega_prime.dashboard import herdr_launch, run_rows
 from omega_prime.dashboard.blocks import (
     PUSH_REASONS,
     clear_block,
@@ -21,7 +22,9 @@ __all__ = [
     "TASK_STATES",
     "_write_locked",
     "clear_block",
+    "herdr_launch",
     "locked_tasks",
     "push_block",
     "raise_block",
+    "run_rows",
 ]

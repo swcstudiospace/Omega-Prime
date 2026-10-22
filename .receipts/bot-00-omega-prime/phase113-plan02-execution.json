@@ -1,0 +1,128 @@
+{
+  "task_id": "phase113-plan02-execution",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T19:26:04Z",
+  "completed_at": "2026-10-21T19:36:17Z",
+  "scope": "Execution of plan 113-02 (task 00030 node n4 steps 1-4, engine visibility wiring): T1 tasks_path/task_id threading run()->_run->run_backend, T2 herdr pane + tasks.json row tracker (start after the up reply, per-event touch, finish first in the finally), T3 GSD question round-trip (raise via raise_block, _ANSWER_POLL store poll, answer_question, clear, stale_answer tolerated), T4 keyword-only pair on delegate_via_engine/ultrathink_engine, plus 113-02-SUMMARY.md and this receipt. Only omega_prime/engine/{sandbox_omp.py,omp_driver.py,attach.py} touched by the implementation commits. No push, no PR, no remotes.",
+  "plan": {
+    "note": "Four sequential auto tasks, one atomic commit each, verify gate after every task (py_compile + the four engine suites; the documented single deselect applies from T2 onward because the tracker wiring intentionally moves the n4 pin's exact-row assertion).",
+    "waves": [
+      {
+        "id": "t1-plumbing",
+        "steps": [
+          "Read plan, 113-CONTEXT, 113-01-SUMMARY (pinned open_pane/run_rows shapes), all read_first regions of the three engine files, tests, dashboard helpers, server.ts/e2e.py",
+          "Baseline four suites: 1 failed (pre-existing mcp import), 79 passed",
+          "Add keyword-only tasks_path/task_id to _run and run_backend; pass through run()'s _run call and _run's run_backend call; one run_backend docstring line",
+          "Gate: py_compile OK; 1 failed (pre-existing mcp), 79 passed — pin still green with inert params; commit 20c885e"
+        ],
+        "status": "done"
+      },
+      {
+        "id": "t2-tracker",
+        "steps": [
+          "Imports sys/state_dir + from omega_prime.dashboard import herdr_launch, run_rows; tracked/stage_id=None/row_started=False initialised before the try",
+          "Tracker block between the up reply and run_gsd_stage: suppress-wrapped open_pane (label f\"{task_id} {stage}\", watch argv, session omega-<job>) then run_rows.start then row_started=True; _tool/_wait_stage_done gain the trio and touch per event via _touch_row; run_rows.finish first in the finally gated on row_started with the {job_id, stage_id, ok, status, export} receipt",
+          "Gate: py_compile OK; 1 failed (pre-existing mcp), 78 passed, 1 deselected; pin run standalone fails ONLY on the exact-row equality assertion (documented 113-03 bridge); commit de3ef69"
+        ],
+        "status": "done"
+      },
+      {
+        "id": "t3-question-roundtrip",
+        "steps": [
+          "_ANSWER_POLL=1.0 beside _POLL_TICK; import clear_block/raise_block/locked_tasks",
+          "Five helpers (_question_item_id/_raise_question/_answer_from_store/_answer_args/_clear_question); _wait_stage_done gains stage=None, pending tuple, last-answer-check timestamp, question raise (supersede + stable id, row_started gate, requestId-less informational), answer poll (suppress on store read, answer_question with matching ids, stale_answer sniff -> clear + keep waiting, else re-raise), interrupt honoured while pending",
+          "Gate: py_compile OK; 1 failed (pre-existing mcp), 78 passed, 1 deselected; direct helper smoke (stable id, upsert pins seq/since, answer shape discrimination, args mapping, idempotent clear) all pass; commit 07a6cf7"
+        ],
+        "status": "done"
+      },
+      {
+        "id": "t4-attach-and-verify",
+        "steps": [
+          "Keyword-only tasks_path/task_id after engine_plan on delegate_via_engine and ultrathink_engine, threaded straight into run(...); one docstring line each; pathlib import added",
+          "Gate: py_compile on all three files OK; final four-suite run 1 failed (pre-existing mcp), 78 passed, 1 deselected",
+          "Diff scope check: exactly the three engine files across c195b4f..HEAD; end-to-end row-lifecycle observation (tracked happy run -> done row, receipt keys [export, job_id, ok, stage_id, status], herdr_pane absent, wrapper tools unchanged); commit 38a8d28",
+          "113-02-SUMMARY.md + this receipt; summary commit 00014 - phase 113: plan 113-02 summary (W113-03, W113-04)"
+        ],
+        "status": "done"
+      }
+    ]
+  },
+  "commands": [
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_engine.py omega_prime/tests/test_engine_stage.py omega_prime/tests/test_dashboard_blocks.py omega_prime/tests/test_engine_omp_sandbox.py  (BASELINE, before any edit)",
+      "exit_code": 1,
+      "duration_s": 6.1,
+      "output_tail": "1 failed, 79 passed — failure is test_mcp_desk_parent_reads_the_stage_from_its_env (ModuleNotFoundError: mcp, pre-existing per 112-CONTEXT)",
+      "phase": "baseline"
+    },
+    {
+      "cmd": "python3 -m py_compile omega_prime/engine/sandbox_omp.py omega_prime/engine/omp_driver.py && python3 -m pytest -q -p no:cacheprovider <four suites>  (T1 gate, NO deselect)",
+      "exit_code": 1,
+      "duration_s": 6.1,
+      "output_tail": "py_compile OK; 1 failed (same pre-existing mcp), 79 passed — n4 pin still green with inert params",
+      "phase": "t1"
+    },
+    {
+      "cmd": "python3 -m py_compile omega_prime/engine/sandbox_omp.py && python3 -m pytest -q -p no:cacheprovider <four suites> --deselect omega_prime/tests/test_engine_omp_sandbox.py::test_question_surfaces_as_event_only  (T2 gate)",
+      "exit_code": 1,
+      "duration_s": 6.5,
+      "output_tail": "py_compile OK; 1 failed (pre-existing mcp), 78 passed, 1 deselected; pin standalone fails only on data[\"tasks\"][0] == {\"id\": \"gb:q\", \"state\": \"working\"} (row now done with visibility fields — the documented 113-03 cutover bridge)",
+      "phase": "t2"
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider <four suites> --deselect ...::test_question_surfaces_as_event_only  (T3 gate) + direct helper smoke on a temp store",
+      "exit_code": 0,
+      "duration_s": 6.3,
+      "output_tail": "py_compile OK; 1 failed (pre-existing mcp), 78 passed, 1 deselected; QUESTION_HELPER_SMOKE_OK (stable id, blocked row, upsert pins seq/since, answer discrimination str/{selected}/other, text/selected args, idempotent clear -> working)",
+      "phase": "t3"
+    },
+    {
+      "cmd": "python3 -m py_compile omega_prime/engine/sandbox_omp.py omega_prime/engine/omp_driver.py omega_prime/engine/attach.py && python3 -m pytest -q -p no:cacheprovider <four suites> --deselect ...::test_question_surfaces_as_event_only  (FINAL acceptance at 38a8d28)",
+      "exit_code": 1,
+      "duration_s": 5.9,
+      "output_tail": "py_compile OK; 1 failed (pre-existing mcp only), 78 passed, 1 deselected — matches the plan's <verification> exactly",
+      "phase": "acceptance"
+    },
+    {
+      "cmd": "git diff --name-only c195b4f..HEAD | grep -v -E '^omega_prime/engine/(sandbox_omp|omp_driver|attach)\\.py$'; git diff --stat c195b4f..HEAD; git rev-list --count c195b4f..HEAD; git status --porcelain",
+      "exit_code": 0,
+      "duration_s": 0.1,
+      "output_tail": "grep -> NONE (only the three engine files); +313/-14 across attach.py/omp_driver.py/sandbox_omp.py; 4 commits; tree clean before the summary commit",
+      "phase": "acceptance"
+    },
+    {
+      "cmd": "inline run() end-to-end (fake Anda happy, seeded store, tasks_path/task_id set): inspect tasks.json row + wrapper log",
+      "exit_code": 0,
+      "duration_s": 0.3,
+      "output_tail": "row done, job_id/stage stamped, last_activity_at present, herdr_pane absent (no herdr/tmux here), receipt keys [export, job_id, ok, stage_id, status] status=completed, waiting_on_ove [], wrapper tools [up, run_gsd_stage, sandbox_status, export_commits, down]",
+      "phase": "acceptance"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Task context threads end-to-end and is provably inert when absent: run(tasks_path=..., task_id=...) reaches run_backend via _run; with either None (or OMEGA_PRIME_OMP_BACKEND unset) every path is byte-identical to phase 112 — baseline and T1 gates ran with 79 passed and no deselect",
+      "evidence_command_index": [0, 1]
+    },
+    {
+      "claim": "The tracker engages only after the up reply and only on a started row: tier (fails at up) and plan-gate (pre-spawn) paths perform zero tracker writes, so both exact-row assertions hold verbatim; the interrupt test passes no task context and stays green; finish is gated on row_started (not tracked) with stage_id pre-initialised so the receipt is buildable on every exit path including cancel",
+      "evidence_command_index": [2, 4, 5]
+    },
+    {
+      "claim": "The question round-trip is wired through the single block writer with stable ids f\"{task_id}:question:{request_id}\", <=1s store cadence, no deadline, stale_answer tolerated (detail sniff), non-stale failures propagating as SandboxUnavailable; helpers match the pinned signatures exactly",
+      "evidence_command_index": [3]
+    },
+    {
+      "claim": "Row lifecycle is real end-to-end: one tracked happy run moves the row to done with a redacted structural receipt and herdr_pane absent when no launcher exists; no second writer anywhere (rows via run_rows, items via raise_block/clear_block, events via append_event)",
+      "evidence_command_index": [6]
+    },
+    {
+      "claim": "The only suite reds are the documented ones: the pre-existing mcp-import failure (test_engine_stage.py, recorded in 112-CONTEXT, untouched) and the single planned deselect of the n4 pin whose exact-row assertion this plan intentionally moves and whose remaining assertions all still pass",
+      "evidence_command_index": [2, 4]
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents: 113-03 must flip test_question_surfaces_as_event_only to the strictly stronger n4 contract (item raised under the stable id, answer piped with matching stage_id/request_id, item cleared, run completes) and drop the deselect; it must never weaken any other existing assertion",
+    "behavioral end-to-end proof of the question round-trip and the pane label/argv via the fake herdr runner is wave-3 (113-03) work by design; this plan proved the helper contract directly and the row lifecycle through run()",
+    "the sbx-5 live e2e (real herdr, real wrapper, real models, audit re-run C8/C9/C10) is node n7, out of scope here"
+  ]
+}

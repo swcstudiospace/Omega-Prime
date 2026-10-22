@@ -203,6 +203,8 @@ The table records names and purposes only.
 | `OMEGA_PRIME_STATE_DIR` | Selects persistent state for Omega Prime integrations and engine jobs. |
 | `OMEGA_PRIME_STATE_DIR_FILE` | Names a protected file containing the Omega Prime state directory setting. |
 | `OMEGA_PRIME_SWEEP_MENTIONS` | Controls mention processing during scheduled sweeps. |
+| `OMEGA_PRIME_TASKS_PATH` | Path of the dashboard tasks.json an ultrathink turn reports into, so its engine run gets a visible task row and waiting_on_ove questions; unset means the run is untracked. |
+| `OMEGA_PRIME_TASK_ID` | Id of the tasks.json row an ultrathink turn's engine run updates; used together with OMEGA_PRIME_TASKS_PATH. |
 | `OMEGA_PRIME_TELEMETRY_OTLP_ENABLED` | Enables OpenTelemetry OTLP export. |
 | `OMEGA_PRIME_TELEMETRY_OTLP_ENDPOINT` | Selects the OTLP telemetry push endpoint. |
 | `OMEGA_PRIME_TELEMETRY_OTLP_INTERVAL_SECONDS` | Sets the OTLP telemetry export interval. |

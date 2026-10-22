@@ -271,6 +271,15 @@ class _DeskParent:
         from omega_prime.engine.attach import engine_stage
 
         self.engine_stage = engine_stage(mapping)
+        # The task this server works for (an engine child inherits it), so
+        # an engine-routed delegate gets its pane, row updates and
+        # answerable dashboard questions.
+        self.engine_tasks_path: str | None = (
+            str(mapping.get("OMEGA_PRIME_TASKS_PATH") or "").strip() or None
+        )
+        self.engine_task_id: str | None = (
+            str(mapping.get("OMEGA_PRIME_TASK_ID") or "").strip() or None
+        )
 
     @property
     def tools(self) -> dict[str, Any]:

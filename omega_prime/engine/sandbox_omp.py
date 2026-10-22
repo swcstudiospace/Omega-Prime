@@ -49,13 +49,17 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from omega_prime.engine.jobs import append_event, child_env, write_json
+from omega_prime.dashboard import herdr_launch, run_rows
+from omega_prime.dashboard.blocks import clear_block, raise_block
+from omega_prime.dashboard.status_file import locked_tasks
+from omega_prime.engine.jobs import append_event, child_env, state_dir, write_json
 from omega_prime.engine.omp_driver import EngineError, EngineResult, _system
 from omega_prime.engine.plan_router import (
     PlanNotAllowed,
@@ -97,6 +101,10 @@ _EXPORT_TIMEOUT = 120.0 + 120.0 + 120.0 + 300.0 + 600.0 + 300.0
 _EXIT_GRACE = 10.0
 # Wake-up tick for waits that must also notice an interrupt.
 _POLL_TICK = 0.2
+# Answer store-read cadence for a raised GSD question: one shared-lock
+# snapshot per second at most, riding these same event-loop ticks. The
+# question/stage wait itself has NO deadline (phase-112 lock).
+_ANSWER_POLL = 1.0
 
 _EOF = object()
 
@@ -572,6 +580,8 @@ def run_backend(
     omp_major: int,
     stage: str | None,
     interrupt: Any | None,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> EngineResult:
     """One engine stage run through the omp-sandbox wrapper.
@@ -597,8 +607,20 @@ def run_backend(
     ``metadata``) so callers never re-run the same task elsewhere. A stage
     that ends ``failed``/``aborted`` returns ``ok=False`` with reason
     ``engine`` instead of raising.
+    ``tasks_path``/``task_id`` are optional dashboard context (keyword-only,
+    default ``None``): both set switches on the visibility wiring (Herdr
+    pane, tasks.json row, question round-trip); with either absent the run
+    is unchanged. See the module docstring for the stats keys and
+    session.json/events parity.
     """
     run_metadata = metadata if metadata is not None else {}
+    tracked = tasks_path is not None and task_id is not None
+    # The receipt in the finally must be buildable on every path, and only a
+    # row that run_rows.start actually created (after the up reply) is ever
+    # touched or finished — never the existing `started`, which is set only
+    # after run_gsd_stage returns and would strand a started row.
+    stage_id: str | None = None
+    row_started = False
     work = allowed_worktree(Path(cwd).resolve() if cwd is not None else Path.cwd(), env)
     seed_ref = _seed_ref(work)
     _refuse_dirty(work)
@@ -648,6 +670,10 @@ def run_backend(
     commands: list[str] = []
     started = False
     outcome: dict[str, Any] | None = None
+    # Events that arrive before the stage-start reply (the real wrapper
+    # sends events and replies from separate tasks): the wait loop still
+    # acts on them, a question among them included.
+    early_events: list[dict[str, Any]] = []
     try:
         client.start(cwd=root)
         client.wait_ready()
@@ -657,12 +683,51 @@ def run_backend(
             {"seed_repo": {"path": str(work), "ref": seed_ref}},
             commands,
             events_path,
-            _UP_TIMEOUT,
-            interrupt,
+            timeout=_UP_TIMEOUT,
+            interrupt=interrupt,
+            tasks_path=tasks_path,
+            task_id=task_id,
+            row_started=row_started,
         )
         if interrupt is not None and interrupt.is_set():
-            # Cancelled while the sandbox came up: submit nothing.
+            # Cancelled while the sandbox came up: submit nothing (and open
+            # no row or pane for a stage that never runs).
             raise _cancelled("cancelled before the stage was submitted")
+        if tracked and tasks_path is not None and task_id is not None:
+            # Visibility wiring (W113-01/W113-02), only once the stage is
+            # actually launching: a run that fails at or before the up reply
+            # starts no row — pre-stage visibility stays run()'s raise_block.
+            # Every write is best-effort (omp_driver.py:385 discipline): a
+            # missing herdr or an unwritable/corrupt store can never fail a
+            # healthy stage.
+            pane: str | None = None
+            with contextlib.suppress(Exception):
+                pane = herdr_launch.open_pane(
+                    env,
+                    cwd=work,
+                    label=f"{task_id} {stage}",
+                    command=[
+                        sys.executable,
+                        "-m",
+                        "omega_prime.engine.watch",
+                        job_id,
+                        "--follow",
+                        "--state-dir",
+                        # Absolute: the pane runs in the worktree, so a
+                        # relative state dir would name another feed.
+                        str(state_dir(env).resolve()),
+                    ],
+                    session=f"omega-{job_id}",
+                )
+            with contextlib.suppress(Exception):
+                # After start, inside the same suppress: a failed start leaves
+                # the row un-started and the run un-finished. A start that
+                # declined to take the row over (a finished record of this
+                # run or of no known run) is not this run's row either, so
+                # nothing later touches, finishes or re-receipts it.
+                row_started = run_rows.start(
+                    tasks_path, task_id, job_id=job_id, stage=stage, pane=pane
+                )
         stage_result = _tool(
             client,
             "run_gsd_stage",
@@ -678,16 +743,37 @@ def run_backend(
             },
             commands,
             events_path,
+            tasks_path=tasks_path,
+            task_id=task_id,
+            row_started=row_started,
+            drained=early_events,
         )
         started = True
         run_metadata["started"] = True
         stage_id = str(stage_result.get("stageId") or "")
         if not stage_id:
             raise SandboxUnavailable("run_gsd_stage returned no stageId")
-        done_event = _wait_stage_done(client, stage_id, interrupt, events_path)
+        done_event = _wait_stage_done(
+            client,
+            stage_id,
+            interrupt,
+            events_path,
+            tasks_path=tasks_path,
+            task_id=task_id,
+            row_started=row_started,
+            stage=stage,
+            early_events=early_events,
+        )
         done_status = str(done_event.get("status") or "")
         status_record = _tool(
-            client, "sandbox_status", {"stage_id": stage_id}, commands, events_path
+            client,
+            "sandbox_status",
+            {"stage_id": stage_id},
+            commands,
+            events_path,
+            tasks_path=tasks_path,
+            task_id=task_id,
+            row_started=row_started,
         )
         export: dict[str, Any] | None = None
         applied: dict[str, Any] | None = None
@@ -700,7 +786,10 @@ def run_backend(
                 {"include_dirty": True},
                 commands,
                 events_path,
-                _EXPORT_TIMEOUT,
+                timeout=_EXPORT_TIMEOUT,
+                tasks_path=tasks_path,
+                task_id=task_id,
+                row_started=row_started,
             )
             applied = _apply_export(work, seed_ref, export)
             if export.get("dirty"):
@@ -736,6 +825,30 @@ def run_backend(
             setattr(exc, "started", True)  # noqa: B010 - SandboxUnavailable has no field
         raise
     finally:
+        # Terminal row before the shutdown: it lands even if `down` is slow.
+        # Gated on row_started, not tracked — a run that never started its
+        # row (tier error at the up reply, pre-spawn plan-gate refusal)
+        # writes nothing; that visibility is run()'s raise_block.
+        run_ok = bool(outcome["ok"]) if outcome is not None else False
+        if row_started and tasks_path is not None and task_id is not None:
+            with contextlib.suppress(Exception):
+                run_rows.finish(
+                    tasks_path,
+                    task_id,
+                    job_id=job_id,
+                    ok=run_ok,
+                    receipt={
+                        "job_id": job_id,
+                        "stage_id": stage_id,
+                        "ok": run_ok,
+                        "status": (
+                            str(outcome["status"]) if outcome is not None else "failed"
+                        ),
+                        "export": (
+                            outcome.get("export") if outcome is not None else None
+                        ),
+                    },
+                )
         down_summary = client.down()
         commands.append("down")
         _append_down_event(events_path, outcome, down_summary)
@@ -802,6 +915,24 @@ def run_backend(
         },
     )
     return result
+
+
+def _touch_row(
+    tasks_path: str | Path | None,
+    task_id: str | None,
+    row_started: bool,
+    event: dict[str, Any],
+) -> None:
+    """Best-effort ``run_rows.touch`` for one wrapper event.
+
+    Only a row that ``run_rows.start`` actually created is touched; a
+    missing/unwritable/corrupt store is suppressed — visibility never
+    kills a run.
+    """
+    if not row_started or tasks_path is None or task_id is None:
+        return
+    with contextlib.suppress(Exception):
+        run_rows.touch(tasks_path, task_id, event)
 
 
 def _git(work: Path, *argv: str) -> subprocess.CompletedProcess[str]:
@@ -894,17 +1025,192 @@ def _tool(
     args: dict[str, Any],
     commands: list[str],
     events_path: Path,
+    *,
     timeout: float | None = None,
     interrupt: Any | None = None,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
+    row_started: bool = False,
+    drained: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """One wrapper tool call; events land in events.jsonl via append_event,
     the tool name in commands. ``timeout`` overrides the per-tool bound; a
-    set ``interrupt`` ends the wait with ``cancelled``."""
-    reply = client.call(tool, args, timeout, interrupt)
-    for event in client.drain_events():
-        append_event(events_path, event)
+    set ``interrupt`` ends the wait with ``cancelled``. Each drained event
+    also touches the run's tasks.json row when one was started (best-effort,
+    never fatal), and is appended to ``drained`` when given, so a caller can
+    still act on it."""
+    try:
+        reply = client.call(tool, args, timeout, interrupt)
+    finally:
+        for event in client.drain_events():
+            append_event(events_path, event)
+            _touch_row(tasks_path, task_id, row_started, event)
+            if drained is not None:
+                drained.append(event)
     commands.append(tool)
     return reply
+
+
+def _question_item_id(task_id: str, request_id: str) -> str:
+    """The stable waiting_on_ove item id for one GSD question."""
+    return f"{task_id}:question:{request_id}"
+
+
+def _question_text(event: Mapping[str, Any]) -> str:
+    """The operator-facing ask for one wrapper ``question`` event.
+
+    The wrapper (core.ts) sends omp's shape: ``questions`` (each with its
+    ``question`` and option ``label``s), or a ``title`` with plain
+    ``options``, and the ``method``. Each question keeps its choices.
+    """
+    parts: list[str] = []
+    questions = event.get("questions")
+    if isinstance(questions, list):
+        for item in questions:
+            if not isinstance(item, Mapping):
+                continue
+            text = str(item.get("question") or "").strip()
+            raw = item.get("options")
+            labels = [
+                str(option.get("label") or "").strip()
+                for option in (raw if isinstance(raw, list) else [])
+                if isinstance(option, Mapping)
+            ]
+            labels = [label for label in labels if label]
+            if labels:
+                text = f"{text} (options: {' / '.join(labels)})".strip()
+            if text:
+                parts.append(text)
+    if not parts:
+        title = str(event.get("title") or "").strip()
+        raw = event.get("options")
+        options = [
+            str(option).strip()
+            for option in (raw if isinstance(raw, list) else [])
+            if str(option).strip()
+        ]
+        if title and options:
+            parts.append(f"{title} (options: {' / '.join(options)})")
+        elif title:
+            parts.append(title)
+        elif options:
+            parts.append(f"options: {' / '.join(options)}")
+    if not parts:
+        legacy = str(event.get("question") or "").strip()
+        if legacy:
+            parts.append(legacy)
+    if not parts:
+        method = str(event.get("method") or "").strip()
+        parts.append(f"the sandbox stage asks for input ({method or 'question'})")
+    return " | ".join(parts)
+
+
+def _raise_question(
+    tasks_path: str | Path | None,
+    task_id: str | None,
+    stage: str | None,
+    request_id: str,
+    question_text: Any,
+    question_ids: list[str] | None = None,
+) -> str:
+    """Raise exactly one question item through the only block writer.
+
+    The id embeds the wrapper's requestId, so a re-ask after a stale
+    answer raises under a new id instead of duplicating; ask/blocks pass
+    redact_text inside raise_block (the owning row goes ``blocked``).
+    Returns the item id.
+    """
+    item_id = _question_item_id(str(task_id), request_id)
+    raise_block(
+        tasks_path,
+        item_id,
+        ask=str(question_text or ""),
+        blocks=f"sandbox GSD question (stage {stage})",
+        task_id=str(task_id),
+        question_ids=question_ids,
+    )
+    return item_id
+
+
+def _question_ids(event: Mapping[str, Any]) -> list[str]:
+    """The ids of an ``ask`` event's questions, in order (empty for the
+    single-prompt methods); an answer's ``per_question`` map keys by them."""
+    questions = event.get("questions")
+    if not isinstance(questions, list):
+        return []
+    return [
+        str(item["id"])
+        for item in questions
+        if isinstance(item, Mapping) and str(item.get("id") or "")
+    ]
+
+
+def _answer_from_store(
+    tasks_path: str | Path | None, item_id: str
+) -> str | Mapping[str, Any] | None:
+    """The item's additive ``answer`` field, or ``None`` when not answered.
+
+    One shared-lock snapshot of the store. An answer is a text string, or a
+    mapping carrying ``selected`` (a list), ``text`` (a string) or
+    ``per_question`` (question id -> text string or ``selected``/``text``
+    mapping, one separate answer per question of a multi-question ask).
+    Anything else is not an answer yet.
+    """
+    if tasks_path is None:
+        return None
+    with locked_tasks(tasks_path) as data:
+        item = next(
+            (row for row in data.get("waiting_on_ove", []) if row.get("id") == item_id),
+            None,
+        )
+        answer = item.get("answer") if item is not None else None
+    if isinstance(answer, str):
+        return answer
+    if isinstance(answer, Mapping) and _answer_args(answer):
+        return answer
+    return None
+
+
+def _one_answer(value: Any) -> dict[str, Any]:
+    """One question's answer as wrapper args (``selected`` and/or ``text``),
+    or ``{}`` when the value is not an answer. Both fields pass through
+    together: the wrapper uses ``text`` as the custom input beside any
+    selection, so a written answer is never dropped for a ``selected`` list."""
+    if isinstance(value, str):
+        return {"text": value}
+    result: dict[str, Any] = {}
+    if isinstance(value, Mapping):
+        selected = value.get("selected")
+        if isinstance(selected, list):
+            result["selected"] = [str(choice) for choice in selected]
+        text = value.get("text")
+        if isinstance(text, str):
+            result["text"] = text
+    return result
+
+
+def _answer_args(answer: str | Mapping[str, Any]) -> dict[str, Any]:
+    """``answer_question`` args for one polled answer (server.ts:44); ``{}``
+    when the answer has no usable shape. A ``per_question`` map passes each
+    question its own answer (the wrapper applies a shared ``text`` or
+    ``selected`` to every question it has no per-question answer for)."""
+    if isinstance(answer, str):
+        return {"text": answer}
+    per = answer.get("per_question")
+    if isinstance(per, Mapping):
+        separate = {str(qid): _one_answer(value) for qid, value in per.items()}
+        separate = {qid: value for qid, value in separate.items() if value}
+        if separate:
+            return {"per_question": separate, **_one_answer(answer)}
+    return _one_answer(answer)
+
+
+def _clear_question(
+    tasks_path: str | Path | None, task_id: str | None, item_id: str
+) -> None:
+    """Clear the question item (idempotent; the blocked row returns to
+    ``working`` through clear_block's own semantics)."""
+    clear_block(tasks_path, item_id, task_id=str(task_id))
 
 
 def _wait_stage_done(
@@ -912,6 +1218,12 @@ def _wait_stage_done(
     stage_id: str,
     interrupt: Any | None,
     events_path: Path,
+    *,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
+    row_started: bool = False,
+    stage: str | None = None,
+    early_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Consume events until the stage's ``stage_done`` arrives.
 
@@ -924,15 +1236,136 @@ def _wait_stage_done(
     interrupt sends the ``abort`` tool once and keeps consuming until the
     terminal event, then raises ``cancelled`` with ``started=True`` so
     ``run()`` maps it exactly like the bwrap path.
+    Every event also touches the run's tasks.json row when one was started
+    (best-effort).
+
+    A ``question`` event with a non-empty requestId (and a configured
+    task store, whether or not this run owns the row) raises exactly one waiting_on_ove item and the loop polls the store
+    for its additive ``answer`` at most once per _ANSWER_POLL seconds —
+    no wall-clock deadline — piping it back through ``answer_question``
+    into the same live session; a stale answer clears the dead item and
+    keeps waiting (a re-ask arrives as a new question event), any other
+    answer_question failure propagates as SandboxUnavailable. A set
+    interrupt is honoured while an answer is pending.
+
+    ``early_events`` are events a tool call already logged (the stage-start
+    reply can trail them); they get the same question and completion
+    handling exactly once. A question still open when the wait ends for
+    any reason (wrapper closed, stage failed, cancelled) is cleared.
     """
+    # The open questions: wrapper requestId -> waiting_on_ove item id. The
+    # wrapper keeps every live request pending under its own id (a new
+    # question never cancels an earlier one), so each item lives until its
+    # own request is answered, found dead, or the wait ends.
+    pending: dict[str, str] = {}
+    try:
+        return _wait_loop(
+            client,
+            stage_id,
+            interrupt,
+            events_path,
+            tasks_path=tasks_path,
+            task_id=task_id,
+            row_started=row_started,
+            stage=stage,
+            early_events=early_events,
+            pending=pending,
+        )
+    finally:
+        # Questions still open when the wait ends (wrapper closed, stage
+        # failed, cancelled) belong to a dead session: clear their items.
+        for item_id in list(pending.values()):
+            with contextlib.suppress(Exception):
+                _clear_question(tasks_path, task_id, item_id)
+
+
+def _wait_loop(
+    client: AndaClient,
+    stage_id: str,
+    interrupt: Any | None,
+    events_path: Path,
+    *,
+    tasks_path: str | Path | None,
+    task_id: str | None,
+    row_started: bool,
+    stage: str | None,
+    early_events: list[dict[str, Any]] | None,
+    pending: dict[str, str],
+) -> dict[str, Any]:
+    """The body of ``_wait_stage_done``; ``pending`` maps each open
+    question's requestId to its item id, kept current so the caller can
+    clear what is left on any exit."""
     aborted = False
+    last_answer_check = 0.0
+    # Events a tool call already logged and touched, still to be acted on.
+    unhandled: list[dict[str, Any]] = list(early_events or [])
     while True:
         done = client.terminal.pop(stage_id, None)
-        if done is None:
+        if done is None and not unhandled:
             client.next_event(_POLL_TICK)
             done = client.terminal.pop(stage_id, None)
-        for buffered in client.drain_events():
+        fresh = client.drain_events()
+        for buffered in fresh:
             append_event(events_path, buffered)
+            _touch_row(tasks_path, task_id, row_started, buffered)
+        batch, unhandled = unhandled + fresh, []
+        for buffered in batch:
+            if (
+                buffered.get("event") == "question"
+                and tasks_path is not None
+                and task_id is not None
+                and str(buffered.get("requestId") or "")
+            ):
+                # Questions follow the configured task store, not row
+                # ownership: a run whose start declined a finished row still
+                # launches its stage, so its questions must stay answerable
+                # (raise_block never reopens a finished row).
+                # A GSD follow-up question: raise it under its own stable id
+                # beside any other open one. A requestId-less question is
+                # informational only — append/touch already happened above.
+                rid = str(buffered.get("requestId"))
+                with contextlib.suppress(Exception):
+                    pending[rid] = _raise_question(
+                        tasks_path,
+                        task_id,
+                        stage,
+                        rid,
+                        _question_text(buffered),
+                        _question_ids(buffered),
+                    )
+                    last_answer_check = time.monotonic()
+        if (
+            done is None
+            and pending
+            and time.monotonic() - last_answer_check >= _ANSWER_POLL
+        ):
+            last_answer_check = time.monotonic()
+            for rid, item_id in list(pending.items()):
+                answer: str | Mapping[str, Any] | None = None
+                with contextlib.suppress(Exception):
+                    answer = _answer_from_store(tasks_path, item_id)
+                if answer is None:
+                    continue
+                try:
+                    client.call(
+                        "answer_question",
+                        {
+                            "stage_id": stage_id,
+                            "request_id": rid,
+                            **_answer_args(answer),
+                        },
+                    )
+                except SandboxUnavailable as exc:
+                    if "stale_answer" not in str(exc):
+                        # Wrapper-level failure: propagate per the
+                        # no-silent-fallback rule.
+                        raise
+                    # The request died (answered/cancelled elsewhere): the
+                    # item is dead too — clear it and keep waiting; a fresh
+                    # ask arrives as a new question event with a new id.
+                with contextlib.suppress(Exception):
+                    _clear_question(tasks_path, task_id, item_id)
+                pending.pop(rid, None)
         if done is not None:
             if aborted and done.get("status") == "aborted":
                 # Our own abort landed (an externally aborted stage returns

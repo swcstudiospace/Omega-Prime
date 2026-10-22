@@ -24,12 +24,15 @@ from __future__ import annotations
 import json
 import stat
 import subprocess
+import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from omega_prime.agent.interrupt import InterruptFlag
+from omega_prime.dashboard.status_file import _write_locked, locked_tasks
 from omega_prime.engine import sandbox_omp
 from omega_prime.engine.attach import delegate_via_engine, ultrathink_engine
 from omega_prime.engine.omp_driver import probe, run
@@ -46,11 +49,13 @@ _ANDA_FAKE = r'''#!/usr/bin/env python3
 """Fake omp-sandbox-anda wrapper: the client.rs stdio protocol, stdlib only.
 
 Behaviour is selected by ``behavior.json`` beside this script -- never
-argv: ``{"behavior": "happy" | "tier_error" | "question" | "hang" |
-"early_done" | "abort_race" | "fallback" | "long" | "status_fail" |
-"host_moved" | "leaves_edits" | "stuck_dirty" | "up_hangs"}``. ``up`` clones the
-seeded branch into a private sandbox checkout beside this script (the host worktree is never written by the
-fake), and ``export_commits`` commits there and bundles ``base..ref``. One
+argv: ``{"behavior": "happy" | "tier_error" | "question" |
+"question_reask" | "question_early" | "hang" | "early_done" | "abort_race" |
+"fallback" | "long" | "status_fail" | "host_moved" | "leaves_edits" |
+"stuck_dirty" | "two_questions" | "up_hangs"}``.
+``up`` clones the seeded branch into a private sandbox checkout beside this
+script (the host worktree is never written by the fake), and
+``export_commits`` commits there and bundles ``base..ref``. One
 receipt line per request ({"id", "tool", "args"}) is appended to
 wrapper-log.jsonl beside this script before the reply is written. Every
 emitted line carries "attestation": "mock". ``down`` is answered and the
@@ -136,6 +141,18 @@ def export_commit(box, tag, include_dirty=False, stuck=False):
 
 LONG_TEXT = "BEGIN-" + "x" * 5000 + "-END"
 
+# The real wrapper's question shape (core.ts: omp's questions + method).
+QUESTION = {
+    "method": "ask",
+    "questions": [
+        {
+            "id": "shape",
+            "question": "Which shape do you want?",
+            "options": [{"label": "French"}, {"label": "Round"}],
+        }
+    ],
+}
+
 
 with open(os.path.join(HERE, "behavior.json"), encoding="utf-8") as handle:
     behavior = json.load(handle).get("behavior", "happy")
@@ -156,6 +173,19 @@ model = None
 stage_id = None
 hanging = False
 exports = 0
+pending = None
+reasked = False
+# two_questions: every live request id, each answerable on its own.
+open_requests = set()
+
+# A multi-question ask (two ids), as core.ts forwards omp's ask.
+MULTI = {
+    "method": "ask",
+    "questions": [
+        {"id": "a", "question": "Which crust?", "options": [{"label": "Thin"}]},
+        {"id": "b", "question": "Why?", "options": []},
+    ],
+}
 
 for line in sys.stdin:
     text = line.strip()
@@ -206,6 +236,15 @@ for line in sys.stdin:
         if behavior == "early_done":
             # The terminal event lands before the stage-start reply.
             emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
+        if behavior == "question_early":
+            # The question lands before the stage-start reply.
+            pending = {"stage": stage_id, "request": "req-1", "answered": False}
+            emit({
+                "event": "question",
+                "stageId": stage_id,
+                "requestId": "req-1",
+                **QUESTION,
+            })
         emit({
             "id": rid,
             "ok": True,
@@ -220,7 +259,7 @@ for line in sys.stdin:
         if behavior in ("hang", "abort_race"):
             hanging = True
             continue
-        if behavior == "early_done":
+        if behavior in ("early_done", "question_early"):
             continue
         if behavior == "host_moved":
             # Something else commits on the host branch while the stage runs.
@@ -237,15 +276,76 @@ for line in sys.stdin:
             # The stage edits a file in the sandbox but never commits it.
             with open(os.path.join(box, "left-by-stage.txt"), "w", encoding="utf-8") as handle:
                 handle.write("uncommitted stage output\n")
-        if behavior == "question":
+        if behavior == "two_questions":
+            # Two live requests at once; a new one never cancels the first.
+            open_requests = {"req-1", "req-2"}
+            emit({"event": "question", "stageId": stage_id, "requestId": "req-1", **QUESTION})
+            emit({"event": "question", "stageId": stage_id, "requestId": "req-2", **MULTI})
+            continue
+        if behavior in ("question", "question_reask"):
+            # The real wrapper holds stage_done until answer_question:
+            # one question at a time, a requestId per ask (e2e.py).
+            pending = {"stage": stage_id, "request": "req-1", "answered": False}
             emit({
                 "event": "question",
                 "stageId": stage_id,
-                "question": "Which shape do you want?",
+                "requestId": pending["request"],
+                **QUESTION,
             })
+            continue
         emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
         continue
+    if tool == "answer_question":
+        stale = {
+            "id": rid,
+            "ok": False,
+            "error": "stale answer (fake)",
+            "code": "stale_answer",
+        }
+        matching = (
+            pending is not None
+            and not pending["answered"]
+            and args.get("stage_id") == pending["stage"]
+            and args.get("request_id") == pending["request"]
+        )
+        if behavior == "two_questions":
+            if args.get("request_id") in open_requests:
+                open_requests.discard(args.get("request_id"))
+                emit({"id": rid, "ok": True, "result": {"answered": True}})
+                if not open_requests:
+                    emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
+                continue
+            emit(stale)
+            continue
+        if behavior == "question_reask" and pending is not None and not reasked:
+            # The first answer ALWAYS arrives stale: the ask was already
+            # superseded server-side. Re-ask under a fresh requestId; the
+            # engine is expected to drop the dead item and raise the new
+            # one. Any later answer goes stale again once req-2 is done.
+            reasked = True
+            emit(stale)
+            pending = {"stage": stage_id, "request": "req-2", "answered": False}
+            emit({
+                "event": "question",
+                "stageId": stage_id,
+                "requestId": "req-2",
+                **QUESTION,
+            })
+            continue
+        if matching:
+            pending["answered"] = True
+            emit({"id": rid, "ok": True, "result": {"answered": True}})
+            emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
+            continue
+        emit(stale)
+        continue
     if tool == "abort":
+        if pending is not None and not pending["answered"]:
+            # Aborting a stage that waits on a question ends it.
+            pending["answered"] = True
+            emit({"id": rid, "ok": True, "result": {}})
+            emit({"event": "stage_done", "stageId": stage_id, "status": "aborted"})
+            continue
         if behavior == "abort_race" and hanging and stage_id is not None:
             # Core.abort waits for the stage to settle, so stage_done can
             # precede the abort reply.
@@ -322,6 +422,85 @@ def _install_fake_anda(tmp_path: Path, behavior: str) -> tuple[Path, Path]:
         json.dumps({"behavior": behavior}) + "\n", encoding="utf-8"
     )
     return script, home / "wrapper-log.jsonl"
+
+
+_HERDR_FAKE = r'''#!/usr/bin/env python3
+"""Fake herdr runner: argv receipts beside itself, mode-baked output.
+
+``ok`` mode prints a workspace line whose last whitespace token is the
+pane id (the pinned parse contract) and exits 0 for create/run;
+``fail`` mode exits 1 on every call, receipts still written. The create
+receipt carries the exact pane id it printed so tests can compare the
+row's ``herdr_pane`` against what the launcher parsed. Stdlib only, no
+env knobs: the same two-key child env the launcher passes is enough.
+"""
+import json
+import os
+import sys
+
+MODE = "__MODE__"
+LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "herdr-log.jsonl")
+
+argv = sys.argv[1:]
+row = {"argv": argv}
+created = MODE == "ok" and argv[:2] == ["workspace", "create"]
+if created:
+    row["pane"] = "pane-%d" % os.getpid()
+with open(LOG, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(row) + "\n")
+if created:
+    sys.stdout.write("workspace created %s\n" % row["pane"])
+    sys.exit(0)
+if MODE == "ok" and argv[:2] == ["pane", "run"]:
+    sys.exit(0)
+sys.exit(1)
+'''
+
+
+def _install_fake_herdr(tmp_path: Path, mode: str = "ok") -> tuple[Path, Path]:
+    """Write an executable fake ``herdr`` into the tmp bin dir (first on PATH).
+
+    Returns the script and its receipt log. ``ok`` mode prints a pane id
+    that parses under the pinned contract; ``fail`` mode fails every call
+    so the no-pane path is deterministic on any box. Receipts let the
+    tests pin the exact argv the engine passed (label, watch command).
+    """
+    binary = tmp_path / "bin" / "herdr"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text(_HERDR_FAKE.replace("__MODE__", mode), encoding="utf-8")
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+    return binary, binary.parent / "herdr-log.jsonl"
+
+
+_TMUX_FAKE = r'''#!/usr/bin/env python3
+"""Fake tmux: argv receipts beside itself; has-session misses, new-session wins."""
+import json
+import os
+import sys
+
+LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmux-log.jsonl")
+argv = sys.argv[1:]
+with open(LOG, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({"argv": argv}) + "\n")
+if argv[:1] == ["has-session"]:
+    sys.exit(1)
+if argv[:1] == ["new-session"]:
+    sys.exit(0)
+sys.exit(1)
+'''
+
+
+def _install_fake_tmux(tmp_path: Path) -> Path:
+    """Write an executable fake ``tmux`` into the tmp bin dir (first on PATH).
+
+    The receipts pin the fallback session-spawn argv; ``has-session``
+    always misses so every test exercises the ``new-session`` path.
+    """
+    binary = tmp_path / "bin" / "tmux"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text(_TMUX_FAKE, encoding="utf-8")
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+    return binary
 
 
 def _jsonl(path: Path) -> list[dict]:
@@ -404,7 +583,15 @@ def _backend_env(
     roots: Path,
     **extra: str,
 ) -> dict[str, str]:
-    """The engine env for the omp-sandbox backend against the fake wrapper."""
+    """The engine env for the omp-sandbox backend against the fake wrapper.
+
+    Hermetic by default: without an explicitly installed stub the run gets
+    a fail-mode fake herdr (deterministic no-pane path) — a herdr on the
+    executor box can never be reached, because the tmp bin dir is FIRST
+    on PATH and always carries the fake.
+    """
+    if not (tmp_path / "bin" / "herdr").exists():
+        _install_fake_herdr(tmp_path, "fail")
     return _env(
         tmp_path,
         omp,
@@ -862,34 +1049,476 @@ def test_no_secret_shaped_value_lands_in_any_durable_artifact(tmp_path: Path) ->
     assert hits == [], "secret-shaped value leaked into durable artifacts"
 
 
-def test_question_surfaces_as_event_only(tmp_path: Path) -> None:
+# --- W113-05: the run is visible (row, pane argv, fallback, absence) --------
+
+
+def test_tracked_run_lands_a_row_working_to_done(tmp_path: Path) -> None:
     omp = _install_fake(tmp_path)
-    script, log = _install_fake_anda(tmp_path, "question")
+    script, _log = _install_fake_anda(tmp_path, "happy")
+    _install_fake_herdr(tmp_path, "ok")
     roots = tmp_path / "roots"
     work = _git_worktree(roots)
     env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
-    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:q")])
+    other = _row("gb:other", "queued", owner="sol", nested={"keep": [1, 2, 3]})
+    store = _seed(tmp_path / "tasks.json", rows=[other])
     result = run(
         "plan the thing",
         cwd=work,
         env=env,
-        job_id="job-q",
+        job_id="job-vis",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:vis",
+    )
+    assert result.ok is True, result.detail
+    data = _read_tasks(store)
+    row = next(r for r in data["tasks"] if r["id"] == "gb:vis")
+    assert row["state"] == "done"
+    receipts = _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
+    create = next(e for e in receipts if e["argv"][:2] == ["workspace", "create"])
+    assert row["herdr_pane"] == create["pane"]
+    started = datetime.fromisoformat(row["started_at"])
+    activity = datetime.fromisoformat(row["last_activity_at"])
+    assert started <= activity
+    assert row["last_event"] == "stage_done completed"
+    assert set(row["receipt"]) == {"job_id", "stage_id", "ok", "status", "export"}
+    assert row["receipt"]["job_id"] == "job-vis"
+    assert row["receipt"]["stage_id"] == "stage-1"
+    assert row["receipt"]["ok"] is True
+    assert row["receipt"]["status"] == "completed"
+    assert set(row["receipt"]["export"]) == {
+        "head",
+        "base",
+        "ref",
+        "commits",
+        "dirty",
+        "bundle",
+        "bytes",
+        "via",
+    }
+    assert row["receipt"]["export"]["via"] == "fake"
+    # An unrelated row's unknown fields survive the run byte-for-byte.
+    assert next(r for r in data["tasks"] if r["id"] == "gb:other") == other
+
+
+def test_pane_label_and_watch_argv_are_pinned(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "happy")
+    _install_fake_herdr(tmp_path, "ok")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:argv")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-argv",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:argv",
+    )
+    assert result.ok is True, result.detail
+    receipts = _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
+    create = next(e for e in receipts if e["argv"][:2] == ["workspace", "create"])
+    pane_run = next(e for e in receipts if e["argv"][:2] == ["pane", "run"])
+    assert create["argv"] == [
+        "workspace",
+        "create",
+        "--cwd",
+        str(work),
+        "--label",
+        "gb:argv plan",
+        "--no-focus",
+    ]
+    assert pane_run["argv"] == [
+        "pane",
+        "run",
+        create["pane"],
+        sys.executable,
+        "-m",
+        "omega_prime.engine.watch",
+        "job-argv",
+        "--follow",
+        "--state-dir",
+        str((tmp_path / "state").resolve()),
+    ]
+
+
+def test_tmux_fallback_records_the_session(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "happy")
+    _, herdr_log = _install_fake_herdr(tmp_path, "fail")
+    _install_fake_tmux(tmp_path)
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(
+        tmp_path,
+        omp,
+        script,
+        roots,
+        OMEGA_PRIME_OMP_ALLOW_ZAI="1",
+        OMEGA_PRIME_ENGINE_TMUX="1",
+    )
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:tmux")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-tmux",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:tmux",
+    )
+    assert result.ok is True, result.detail
+    data = _read_tasks(store)
+    row = next(r for r in data["tasks"] if r["id"] == "gb:tmux")
+    assert row["state"] == "done"
+    assert row["herdr_pane"] == "tmux:omega-job-tmux"
+    receipts = _jsonl(tmp_path / "bin" / "tmux-log.jsonl")
+    assert receipts[0]["argv"] == ["has-session", "-t", "omega-job-tmux"]
+    assert receipts[1]["argv"] == [
+        "new-session",
+        "-d",
+        "-s",
+        "omega-job-tmux",
+        "--",
+        sys.executable,
+        "-m",
+        "omega_prime.engine.watch",
+        "job-tmux",
+        "--follow",
+        "--state-dir",
+        str((tmp_path / "state").resolve()),
+    ]
+    # The failed herdr create was receipted; pane run never happened.
+    assert [e["argv"][:2] for e in _jsonl(herdr_log)] == [["workspace", "create"]]
+
+
+def test_no_pane_leaves_the_key_absent_and_the_run_healthy(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "happy")
+    # No explicit stub: _backend_env installs the fail-mode herdr itself,
+    # and OMEGA_PRIME_ENGINE_TMUX stays "0" — the deterministic no-pane path.
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:nopane")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-nopane",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:nopane",
+    )
+    assert result.ok is True, result.detail
+    data = _read_tasks(store)
+    row = next(r for r in data["tasks"] if r["id"] == "gb:nopane")
+    assert row["state"] == "done"
+    assert "herdr_pane" not in row
+    # The failing create was attempted exactly once — never fatal.
+    assert [e["argv"][:2] for e in _jsonl(tmp_path / "bin" / "herdr-log.jsonl")] == [
+        ["workspace", "create"]
+    ]
+
+
+def test_untracked_backend_run_writes_nothing(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    _install_fake_herdr(tmp_path, "fail")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = tmp_path / "tasks.json"
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-untracked",
+        stage="plan",
+        plan="zai",
+    )
+    assert result.ok is True, result.detail
+    # Exactly the phase-112 shape: the backend ran, nothing was tracked.
+    assert result.sandbox == "omp-sandbox"
+    assert result.stage == "plan"
+    assert result.final_text == "fake final text"
+    assert not store.exists()
+    assert _jsonl(tmp_path / "bin" / "herdr-log.jsonl") == []
+    assert "answer_question" not in _wrapper_tools(log)
+
+
+def _shaped_answer_token() -> str:
+    """A credential-shaped value built at runtime, never a literal."""
+    return "".join(("sk-", "ans", "wer-", "not", "-for-", "disk"))
+
+
+def _answer_when_raised(
+    store: Path, item_id: str, answer: str | dict[str, Any], timeout: float = 10.0
+) -> None:
+    """Responder side of the round-trip: poll, then write the answer.
+
+    The poll bound is TEST-side only — the engine wait has no deadline
+    (phase-112 lock). The write is the exact production responder
+    convention: one ``locked_tasks(write=True)`` block plus
+    ``_write_locked``, so it serializes against the engine's polls.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with locked_tasks(store) as data:
+            raised = any(item.get("id") == item_id for item in data["waiting_on_ove"])
+        if raised:
+            with locked_tasks(store, write=True) as data:
+                target = next(
+                    item for item in data["waiting_on_ove"] if item["id"] == item_id
+                )
+                target["answer"] = answer
+                _write_locked(data, store)
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{item_id} never appeared within {timeout:.0f}s")
+
+
+def _question_fixture(
+    tmp_path: Path, behavior: str
+) -> tuple[dict[str, str], Path, Path, Path]:
+    """Fixture shape shared by the question round-trip tests.
+
+    Built in the MAIN thread before the run thread starts, so the
+    responder can hold the store path while the run is still waiting.
+    """
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, behavior)
+    _install_fake_herdr(tmp_path, "ok")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:q")])
+    return env, store, log, work
+
+
+def _run_tracked(env: dict[str, str], work: Path, store: Path, job_id: str) -> Any:
+    """One tracked question-stage run through the real engine."""
+    return run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id=job_id,
         stage="plan",
         plan="zai",
         tasks_path=store,
         task_id="gb:q",
     )
+
+
+def test_question_round_trip_resumes_the_run(tmp_path: Path) -> None:
+    """The n4 contract: a GSD question is answerable mid-run.
+
+    Cutover (documented): this replaces the phase-112 pin
+    ``test_question_surfaces_as_event_only``, which asserted the n4
+    BOUNDARY — a requestId-less question stayed an event only, no item
+    was raised, no answer_question call, row exactly
+    ``{"id": "gb:q", "state": "working"}``. n4 ships the round-trip, so
+    the pin flips to the strictly stronger contract: every old axis is
+    re-asserted on the new shape (one question event, attestation mock)
+    and MORE is asserted — the item raised under the stable id, the
+    answer piped through answer_question with matching ids, the item
+    cleared, the row done, the run ok.
+    """
+    env, store, log, work = _question_fixture(tmp_path, "question")
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-q")
+        except BaseException as exc:  # surfaced in the main thread
+            failures.append(exc)
+
+    def responder() -> None:
+        try:
+            deadline = time.monotonic() + 10.0
+            item = None
+            while time.monotonic() < deadline:
+                with locked_tasks(store) as data:
+                    raised = [
+                        row
+                        for row in data["waiting_on_ove"]
+                        if row.get("id") == "gb:q:question:req-1"
+                    ]
+                if raised:
+                    item = raised[0]
+                    break
+                time.sleep(0.05)
+            if item is None:
+                raise AssertionError("the question item never appeared")
+            # Mid-run: exactly one live item, and the row is blocked.
+            assert item["ask"] == "Which shape do you want? (options: French / Round)"
+            assert item["blocks"] == "sandbox GSD question (stage plan)"
+            with locked_tasks(store) as data:
+                assert [row["id"] for row in data["waiting_on_ove"]] == [
+                    "gb:q:question:req-1"
+                ]
+                row = next(r for r in data["tasks"] if r["id"] == "gb:q")
+                assert row["state"] == "blocked"
+            _answer_when_raised(store, "gb:q:question:req-1", "the square one")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    responder()
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "the answer")
+    result = box["run"]
     assert result.ok is True, result.detail
-    # The question is visible in events.jsonl as an event — and only there.
+    # The question event survived — exactly one, requestId stamped.
     events = _jsonl(Path(result.events_path))
     questions = [row for row in events if row.get("event") == "question"]
     assert len(questions) == 1
+    assert questions[0]["requestId"] == "req-1"
     assert questions[0]["attestation"] == "mock"
-    # No waiting_on_ove item, no answer_question round-trip (node n4).
+    # The answer travelled through answer_question with the matching ids.
+    assert [
+        (row["tool"], row["args"])
+        for row in _wrapper_log(log)
+        if row.get("tool") == "answer_question"
+    ] == [
+        (
+            "answer_question",
+            {
+                "stage_id": "stage-1",
+                "request_id": "req-1",
+                "text": "the square one",
+            },
+        )
+    ]
+    # The item cleared and the run finished.
     data = _read_tasks(store)
     assert data["waiting_on_ove"] == []
-    assert data["tasks"][0] == {"id": "gb:q", "state": "working"}
-    assert "answer_question" not in _wrapper_tools(log)
+    row = next(r for r in data["tasks"] if r["id"] == "gb:q")
+    assert row["state"] == "done"
+
+
+def _check_round_trip(
+    box: dict[str, Any],
+    failures: list[BaseException],
+    thread: threading.Thread,
+    what: str,
+) -> None:
+    """Shared round-trip epilogue: surface responder/run errors, join bound."""
+    if failures:
+        raise failures[0]
+    assert not thread.is_alive(), f"the run never resumed after {what}"
+
+
+def test_stale_answer_reasks_under_a_new_item(tmp_path: Path) -> None:
+    """A stale answer clears the dead item; the re-ask arrives under a new id."""
+    env, store, log, work = _question_fixture(tmp_path, "question_reask")
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-reask")
+        except BaseException as exc:
+            failures.append(exc)
+
+    def responder() -> None:
+        try:
+            _answer_when_raised(store, "gb:q:question:req-1", "first instinct")
+            # The stale reply killed req-1: exactly the re-asked item remains.
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                with locked_tasks(store) as data:
+                    ids = [row["id"] for row in data["waiting_on_ove"]]
+                if ids == ["gb:q:question:req-2"]:
+                    break
+                time.sleep(0.05)
+            else:
+                raise AssertionError(f"req-2 never replaced req-1; last ids {ids}")
+            _answer_when_raised(store, "gb:q:question:req-2", "the square one")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    responder()
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "the re-ask")
+    result = box["run"]
+    assert result.ok is True, result.detail
+    # Both asks are in the event feed, each under its own requestId.
+    events = _jsonl(Path(result.events_path))
+    assert [row["requestId"] for row in events if row.get("event") == "question"] == [
+        "req-1",
+        "req-2",
+    ]
+    # Exactly two answer_question calls: the stale one and the good one.
+    answers = [
+        row["args"] for row in _wrapper_log(log) if row.get("tool") == "answer_question"
+    ]
+    assert [args["request_id"] for args in answers] == ["req-1", "req-2"]
+    assert [args["text"] for args in answers] == ["first instinct", "the square one"]
+    data = _read_tasks(store)
+    assert data["waiting_on_ove"] == []
+    row = next(r for r in data["tasks"] if r["id"] == "gb:q")
+    assert row["state"] == "done"
+
+
+def test_answer_text_never_lands_in_durable_dashboard_artifacts(
+    tmp_path: Path,
+) -> None:
+    """The answer travels only into the answer_question call.
+
+    Byte-scan of every product artifact the run writes: tasks.json,
+    events.jsonl, the herdr receipts. The fake wrapper's own
+    wrapper-log.jsonl is excluded — it receipts the call the test itself
+    made (that call IS the product behavior under test), and no
+    production surface logs answers.
+    """
+    token = _shaped_answer_token()
+    answer = f"paste {token} to unblock"
+    env, store, log, work = _question_fixture(tmp_path, "question")
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-secret-answer")
+        except BaseException as exc:
+            failures.append(exc)
+
+    def responder() -> None:
+        try:
+            _answer_when_raised(store, "gb:q:question:req-1", answer)
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    responder()
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "the answer")
+    result = box["run"]
+    assert result.ok is True, result.detail
+    # The call itself carried the answer (the product behavior).
+    assert any(
+        row.get("tool") == "answer_question" and row["args"].get("text") == answer
+        for row in _wrapper_log(log)
+    )
+    # The durable product surfaces never saw it — byte-scan, paths only.
+    assert token.encode("utf-8") not in store.read_bytes()
+    assert token.encode("utf-8") not in Path(result.events_path).read_bytes()
+    assert (
+        token.encode("utf-8") not in (tmp_path / "bin" / "herdr-log.jsonl").read_bytes()
+    )
 
 
 # --- Greptile #61: backend fixes ------------------------------------------------
@@ -1183,6 +1812,218 @@ def test_edits_still_uncommitted_after_export_are_not_a_success(tmp_path: Path) 
     assert result.started is True
 
 
+def test_question_text_keeps_the_real_wrappers_questions_and_choices() -> None:
+    from omega_prime.engine.sandbox_omp import _question_text
+
+    assert (
+        _question_text(
+            {
+                "event": "question",
+                "method": "ask",
+                "questions": [
+                    {
+                        "id": "a",
+                        "question": "Which shape?",
+                        "options": [{"label": "French"}, {"label": "Round"}],
+                    },
+                    {"id": "b", "question": "Why?", "options": []},
+                ],
+            }
+        )
+        == "Which shape? (options: French / Round) | Why?"
+    )
+    assert (
+        _question_text({"method": "select", "title": "Pick", "options": ["x", "y"]})
+        == "Pick (options: x / y)"
+    )
+    assert _question_text({"method": "confirm", "title": "Go on?"}) == "Go on?"
+    assert _question_text({"method": "input"}) == (
+        "the sandbox stage asks for input (input)"
+    )
+
+
+def test_a_question_before_the_stage_start_reply_is_still_answered(
+    tmp_path: Path,
+) -> None:
+    env, store, log, work = _question_fixture(tmp_path, "question_early")
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-q-early")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    try:
+        _answer_when_raised(store, "gb:q:question:req-1", "the square one")
+    except BaseException as exc:
+        failures.append(exc)
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "an early question")
+    assert box["run"].ok is True, box["run"].detail
+    answers = [
+        r["args"] for r in _wrapper_log(log) if r.get("tool") == "answer_question"
+    ]
+    assert answers == [
+        {"stage_id": "stage-1", "request_id": "req-1", "text": "the square one"}
+    ]
+    assert _read_tasks(store)["waiting_on_ove"] == []
+
+
+def test_a_cancelled_run_clears_its_open_question(tmp_path: Path) -> None:
+    env, store, _log, work = _question_fixture(tmp_path, "question")
+    interrupt = InterruptFlag()
+    outcome: dict[str, Any] = {}
+    worker = threading.Thread(
+        target=lambda: outcome.update(
+            result=run(
+                "plan the thing",
+                cwd=work,
+                env=env,
+                job_id="job-q-cancel",
+                stage="plan",
+                plan="zai",
+                tasks_path=store,
+                task_id="gb:q",
+                interrupt=interrupt,
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if _read_tasks(store)["waiting_on_ove"]:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("the question item never appeared")
+    interrupt.set()
+    worker.join(timeout=30.0)
+    assert not worker.is_alive(), "cancellation waited forever"
+    assert outcome["result"].reason == "cancelled"
+    data = _read_tasks(store)
+    assert data["waiting_on_ove"] == []
+    row = next(r for r in data["tasks"] if r["id"] == "gb:q")
+    assert row["state"] == "failed"
+
+
+def test_a_relative_state_dir_reaches_the_pane_absolute(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "happy")
+    _install_fake_herdr(tmp_path, "ok")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    monkeypatch.chdir(tmp_path)
+    env["OMEGA_PRIME_STATE_DIR"] = "rel-state"
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:rel")])
+    result = run(
+        "plan",
+        cwd=work,
+        env=env,
+        job_id="job-rel",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:rel",
+    )
+    assert result.ok is True, result.detail
+    receipts = _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
+    pane_run = next(e for e in receipts if e["argv"][:2] == ["pane", "run"])
+    state = pane_run["argv"][pane_run["argv"].index("--state-dir") + 1]
+    assert state == str((tmp_path / "rel-state").resolve())
+    assert (Path(state) / "jobs").is_dir()
+
+
+def test_a_hung_herdr_still_falls_back_to_tmux(monkeypatch: Any) -> None:
+    from omega_prime.dashboard import herdr_launch
+
+    def hung(*_args: Any, **_kwargs: Any) -> str | None:
+        raise subprocess.TimeoutExpired(["herdr"], 1)
+
+    calls: list[str | None] = []
+
+    def tmux(_env: Any, *, command: list[str], session: str | None) -> str | None:
+        calls.append(session)
+        return f"tmux:{session}"
+
+    monkeypatch.setattr(herdr_launch, "_herdr_pane", hung)
+    monkeypatch.setattr(herdr_launch, "_tmux_pane", tmux)
+    pane = herdr_launch.open_pane(
+        {}, cwd="/tmp", label="x", command=["true"], session="omega-job"
+    )
+    assert pane == "tmux:omega-job"
+    assert calls == ["omega-job"]
+
+
+def test_watch_shows_sandbox_events_by_name_and_detail() -> None:
+    from omega_prime.engine.watch import format_event
+
+    question = format_event(
+        {
+            "event": "question",
+            "stageId": "st-1",
+            "requestId": "req-1",
+            "method": "ask",
+            "questions": [
+                {
+                    "id": "shape",
+                    "question": "Which shape?",
+                    "options": [{"label": "French"}],
+                }
+            ],
+        }
+    )
+    assert question.startswith("question stage=st-1 request=req-1 method=ask")
+    assert "Which shape?" in question and "French" in question
+    assert format_event(
+        {"event": "stage_done", "stageId": "st-1", "status": "completed"}
+    ) == ("stage_done stage=st-1 status=completed")
+    assert format_event(
+        {"event": "fallback", "stageId": "st-1", "from": "a/b", "to": "c/d"}
+    ) == ("fallback stage=st-1 from=a/b to=c/d")
+    # omp's own events keep their type-keyed rendering.
+    assert format_event({"type": "agent_end"}) == "agent_end"
+
+
+def test_a_failed_run_keeps_its_terminal_row_beside_the_repair_item(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.dashboard.blocks import clear_block
+
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "status_fail")
+    _install_fake_herdr(tmp_path, "ok")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:late")])
+    result = run(
+        "plan",
+        cwd=work,
+        env=env,
+        job_id="job-late-row",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:late",
+    )
+    assert result.reason == "sandbox_unavailable" and result.started is True
+    data = _read_tasks(store)
+    # The run ended failed; the repair request is its own item.
+    assert next(r for r in data["tasks"] if r["id"] == "gb:late")["state"] == "failed"
+    assert [i["id"] for i in data["waiting_on_ove"]] == ["gb:late:sandbox_unavailable"]
+    clear_block(store, "gb:late:sandbox_unavailable", "gb:late")
+    data = _read_tasks(store)
+    assert next(r for r in data["tasks"] if r["id"] == "gb:late")["state"] == "failed"
+
+
 def test_startup_and_export_get_deadlines_that_cover_their_inner_steps(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -1213,6 +2054,111 @@ def test_startup_and_export_get_deadlines_that_cover_their_inner_steps(
     assert seen["up"] is not None and seen["up"] > 1800.0 + 600.0
     assert seen["export_commits"] is not None and seen["export_commits"] > 600.0 + 300.0
     assert seen["run_gsd_stage"] is None  # the per-tool bound
+
+
+def test_two_live_questions_each_keep_their_item_and_their_own_answers(
+    tmp_path: Path,
+) -> None:
+    """A second live request never clears the first one's item, and a
+    multi-question ask passes each question its own answer (per_question)."""
+    env, store, log, work = _question_fixture(tmp_path, "two_questions")
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-two-q")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10.0
+        items: dict[str, dict[str, Any]] = {}
+        while time.monotonic() < deadline and len(items) < 2:
+            with locked_tasks(store) as data:
+                items = {row["id"]: row for row in data["waiting_on_ove"]}
+            time.sleep(0.05)
+        # Both requests stay answerable side by side.
+        assert sorted(items) == ["gb:q:question:req-1", "gb:q:question:req-2"]
+        assert items["gb:q:question:req-2"]["question_ids"] == ["a", "b"]
+        assert items["gb:q:question:req-1"]["question_ids"] == ["shape"]
+        _answer_when_raised(
+            store,
+            "gb:q:question:req-2",
+            {"per_question": {"a": {"selected": ["Thin"]}, "b": "it is crisp"}},
+        )
+        _answer_when_raised(store, "gb:q:question:req-1", "Round")
+    except BaseException as exc:
+        failures.append(exc)
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "both answers")
+    assert box["run"].ok is True, box["run"].detail
+    answers = {
+        r["args"]["request_id"]: r["args"]
+        for r in _wrapper_log(log)
+        if r.get("tool") == "answer_question"
+    }
+    assert answers == {
+        "req-1": {"stage_id": "stage-1", "request_id": "req-1", "text": "Round"},
+        "req-2": {
+            "stage_id": "stage-1",
+            "request_id": "req-2",
+            "per_question": {"a": {"selected": ["Thin"]}, "b": {"text": "it is crisp"}},
+        },
+    }
+    data = _read_tasks(store)
+    assert data["waiting_on_ove"] == []
+    assert next(r for r in data["tasks"] if r["id"] == "gb:q")["state"] == "done"
+
+
+def test_answer_args_shapes() -> None:
+    from omega_prime.engine.sandbox_omp import _answer_args
+
+    assert _answer_args("x") == {"text": "x"}
+    assert _answer_args({"selected": ["a"]}) == {"selected": ["a"]}
+    assert _answer_args({"text": "t"}) == {"text": "t"}
+    assert _answer_args({"per_question": {"q1": "t", "q2": {"selected": ["s"]}}}) == {
+        "per_question": {"q1": {"text": "t"}, "q2": {"selected": ["s"]}}
+    }
+    # A written answer beside a selection (even an empty one) reaches the
+    # wrapper too: text is its custom input, never dropped for `selected`.
+    assert _answer_args({"selected": [], "text": "use the existing layout"}) == {
+        "selected": [],
+        "text": "use the existing layout",
+    }
+    assert _answer_args(
+        {"per_question": {"q1": {"selected": ["s"], "text": "and also this"}}}
+    ) == {"per_question": {"q1": {"selected": ["s"], "text": "and also this"}}}
+    # Not an answer yet: nothing usable to send.
+    assert _answer_args({"per_question": {"q1": 3}}) == {}
+    assert _answer_args({"note": "later"}) == {}
+
+
+def test_a_run_that_does_not_own_the_row_never_finishes_it(tmp_path: Path) -> None:
+    """A finished row of no known run stays that record: the new run gets no
+    row (start declines), so its finish never overwrites the old receipt."""
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "happy")
+    _install_fake_herdr(tmp_path, "ok")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:closed", "failed")])
+    before = store.read_bytes()
+    result = run(
+        "plan",
+        cwd=work,
+        env=env,
+        job_id="job-closed",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:closed",
+    )
+    assert result.ok is True, result.detail
+    assert store.read_bytes() == before
 
 
 def test_interrupt_during_a_cold_start_returns_promptly_and_submits_nothing(
@@ -1247,3 +2193,44 @@ def test_interrupt_during_a_cold_start_returns_promptly_and_submits_nothing(
     tools = _wrapper_tools(log)
     assert "up" in tools and "down" in tools
     assert "run_gsd_stage" not in tools
+
+
+def test_a_run_without_its_row_still_gets_answerable_questions(
+    tmp_path: Path,
+) -> None:
+    """start declines a finished row of no known run, but the stage still
+    launches: its question is raised and answered, and the row stays the
+    finished record it was."""
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "question")
+    _install_fake_herdr(tmp_path, "ok")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:q", "failed")])
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-unowned-q")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    try:
+        _answer_when_raised(store, "gb:q:question:req-1", "Round")
+    except BaseException as exc:
+        failures.append(exc)
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "the answer")
+    assert box["run"].ok is True, box["run"].detail
+    assert [
+        r["args"]["text"]
+        for r in _wrapper_log(log)
+        if r.get("tool") == "answer_question"
+    ] == ["Round"]
+    data = _read_tasks(store)
+    assert data["waiting_on_ove"] == []
+    assert data["tasks"] == [{"id": "gb:q", "state": "failed"}]

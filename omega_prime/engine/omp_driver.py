@@ -416,6 +416,8 @@ def run(
             cancel_event=cancel_event if cancel_event is not None else interrupt,
             metadata=metadata,
             delegate_depth=delegate_depth,
+            tasks_path=tasks_path,
+            task_id=task_id,
             delegate_max_depth=delegate_max_depth,
         )
     except (EngineError, PlanNotAllowed, SandboxUnavailable, OSError) as exc:
@@ -517,6 +519,8 @@ def _run(
     cancel_event: _CancelEvent | None = None,
     metadata: dict[str, Any] | None = None,
     delegate_depth: int | None = None,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
     delegate_max_depth: int | None = None,
 ) -> EngineResult:
     run_metadata = metadata if metadata is not None else {}
@@ -562,6 +566,8 @@ def _run(
             stage=stage,
             interrupt=cancel_event,
             metadata=run_metadata,
+            tasks_path=tasks_path,
+            task_id=task_id,
         )
     if not sandbox_ready(env, unsandboxed_override=unsandboxed):
         raise SandboxUnavailable(
