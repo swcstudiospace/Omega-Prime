@@ -18,6 +18,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StrictStr,
+    ValidationError,
     field_serializer,
     field_validator,
     model_validator,
@@ -123,7 +124,7 @@ def _taxonomy_validate(type_name: str, payload: Mapping[str, Any]) -> Mapping[st
         raise SchemaError("event taxonomy is unavailable") from exc
     try:
         return validate_payload(type_name, payload)
-    except (ValueError, TypeError) as exc:
+    except (ValidationError, ValueError, TypeError) as exc:
         raise ContractError("event payload violates its registered schema") from exc
 
 
@@ -339,7 +340,7 @@ class CloudEvent(BaseModel):
                 )
         try:
             CloudEvent.model_validate(sanitized)
-        except (ValueError, TypeError) as exc:
+        except (ValidationError, ValueError, TypeError) as exc:
             raise ContractError(
                 "redacted event violates the CloudEvents contract"
             ) from exc
@@ -362,7 +363,7 @@ class CloudEvent(BaseModel):
             raise ContractError("structured event must be a JSON object")
         try:
             return cls.model_validate(document)
-        except (ValueError, TypeError) as exc:
+        except (ValidationError, ValueError, TypeError) as exc:
             if isinstance(exc, ContractError):
                 raise
             raise ContractError(

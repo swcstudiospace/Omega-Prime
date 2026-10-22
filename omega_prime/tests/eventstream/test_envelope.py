@@ -6,10 +6,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
+from omega_prime.credentials.redact import redact_value
 from omega_prime.eventstream.envelope import (
     CloudEvent,
     Delivery,
@@ -425,5 +426,17 @@ async def test_delivery_ack_failure_and_cancellation_propagate(
 
 @given(st.text(min_size=1, max_size=60).filter(lambda value: bool(value.strip())))
 def test_webhook_ids_roundtrip_without_ulid_restriction(event_id: str) -> None:
+    # Ids that the redactor would rewrite (secret-shaped, e.g. "Bearer 0") are
+    # refused fail-closed; that contract is pinned by the test below.
+    assume(redact_value(event_id) == event_id)
     event = valid_event(id=event_id)
     assert CloudEvent.from_bytes(event.to_bytes()).id == event_id
+
+
+@pytest.mark.parametrize("event_id", ["Bearer 0", "Bearer abcdefghijklmnop"])
+def test_secret_shaped_ids_are_refused_rather_than_silently_rewritten(
+    event_id: str,
+) -> None:
+    assert redact_value(event_id) != event_id
+    with pytest.raises(ContractError):
+        valid_event(id=event_id).to_bytes()
