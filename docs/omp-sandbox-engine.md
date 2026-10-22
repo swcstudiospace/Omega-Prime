@@ -109,8 +109,11 @@ When the run carries task context (tasks path and task id both set):
 - **Row lifecycle.** The tasks.json row goes `working` on start (with
   `started_at`, `last_activity_at`, and `herdr_pane` when a pane opened),
   stays fresh through `touch` on wrapper events, and ends `done`/`failed` via
-  `finish` with a recursively redacted `receipt`. A terminal row is never
-  resurrected; only a row the run actually started is ever touched.
+  `finish` with a recursively redacted `receipt`. A terminal row stays closed
+  for the same `job_id`, or when no prior job is known. A later run with a
+  different `job_id` reopens it as `working` and drops the old `receipt` and
+  `herdr_pane` (the rerun's own record replaces them); only a row the run
+  actually started is ever touched.
 - **Question round-trip.** A GSD follow-up question raises exactly one
   `waiting_on_ove` item (id embedding the wrapper's request id, ask/blocks
   redacted, owning row `blocked`); the engine polls the store at most once a
