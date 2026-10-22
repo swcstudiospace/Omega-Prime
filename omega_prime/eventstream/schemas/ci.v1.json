@@ -1,0 +1,307 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:omega:schema:ci:1",
+  "title": "Omega ci payload contracts",
+  "$defs": {
+    "omega.ci.run.started": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "in_progress"
+          ]
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "run_id",
+        "head_sha",
+        "actor",
+        "status"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "run_id": "r-1",
+          "head_sha": "b8eb05f",
+          "actor": "github",
+          "status": "in_progress"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "run_id": "r-1",
+          "head_sha": "b8eb05f",
+          "actor": "github",
+          "status": "in_progress"
+        }
+      ]
+    },
+    "omega.ci.run.passed": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "conclusion": {
+          "enum": [
+            "success"
+          ]
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "run_id",
+        "head_sha",
+        "actor",
+        "conclusion"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "run_id": "r-1",
+          "head_sha": "b8eb05f",
+          "actor": "github",
+          "conclusion": "success"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "run_id": "r-1",
+          "head_sha": "b8eb05f",
+          "actor": "github",
+          "conclusion": "success"
+        }
+      ]
+    },
+    "omega.ci.run.failed": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "conclusion": {
+          "enum": [
+            "failure",
+            "cancelled",
+            "timed_out"
+          ]
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "run_id",
+        "head_sha",
+        "actor",
+        "conclusion"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "run_id": "r-1",
+          "head_sha": "b8eb05f",
+          "actor": "github",
+          "conclusion": "failure"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "run_id": "r-1",
+          "head_sha": "b8eb05f",
+          "actor": "github",
+          "conclusion": "failure"
+        }
+      ]
+    },
+    "omega.ci.branch.passed": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "conclusion": {
+          "enum": [
+            "success"
+          ]
+        }
+      },
+      "required": [
+        "repo",
+        "branch",
+        "run_id",
+        "head_sha",
+        "actor",
+        "conclusion"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "branch": "main",
+          "run_id": "r-2",
+          "head_sha": "b8eb05f",
+          "actor": "github",
+          "conclusion": "success"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "branch": "main",
+          "run_id": "r-2",
+          "head_sha": "b8eb05f",
+          "actor": "github",
+          "conclusion": "success"
+        }
+      ]
+    },
+    "omega.ci.branch.failed": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "conclusion": {
+          "enum": [
+            "failure",
+            "cancelled",
+            "timed_out"
+          ]
+        }
+      },
+      "required": [
+        "repo",
+        "branch",
+        "run_id",
+        "head_sha",
+        "actor",
+        "conclusion"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "branch": "main",
+          "run_id": "r-2",
+          "head_sha": "b8eb05f",
+          "actor": "github",
+          "conclusion": "timed_out"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "branch": "main",
+          "run_id": "r-2",
+          "head_sha": "b8eb05f",
+          "actor": "github",
+          "conclusion": "timed_out"
+        }
+      ]
+    }
+  }
+}

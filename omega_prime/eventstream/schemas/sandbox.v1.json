@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:omega:schema:sandbox:1",
+  "$defs": {
+    "omega.sandbox.created": {
+      "$id": "urn:omega:schema:omega.sandbox.created:1",
+      "title": "Sandbox created",
+      "description": "A sandbox was provisioned from an image.",
+      "type": "object",
+      "properties": {"sandbox_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "state": {"const": "created"}, "image": {"type": "string", "minLength": 1}},
+      "required": ["sandbox_id", "actor", "state", "image"],
+      "additionalProperties": false,
+      "examples": [{"sandbox_id": "sb-1", "actor": "runner", "state": "created", "image": "python:3.13-slim"}],
+      "x-omega-invalid-examples": [{"sandbox_id": "sb-1", "actor": "runner", "state": "started", "image": "python:3.13-slim"}, {"sandbox_id": "sb-1", "actor": "runner", "state": "created", "image": ""}]
+    },
+    "omega.sandbox.started": {
+      "$id": "urn:omega:schema:omega.sandbox.started:1",
+      "title": "Sandbox started",
+      "description": "The sandbox container began execution.",
+      "type": "object",
+      "properties": {"sandbox_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "state": {"const": "started"}, "container_id": {"type": "string", "minLength": 1}},
+      "required": ["sandbox_id", "actor", "state", "container_id"],
+      "additionalProperties": false,
+      "examples": [{"sandbox_id": "sb-1", "actor": "runner", "state": "started", "container_id": "ctr-8f3a"}],
+      "x-omega-invalid-examples": [{"sandbox_id": "sb-1", "actor": "runner", "state": "created", "container_id": "ctr-8f3a"}, {"sandbox_id": "sb-1", "actor": "runner", "state": "started", "container_id": ""}]
+    },
+    "omega.sandbox.ready": {
+      "$id": "urn:omega:schema:omega.sandbox.ready:1",
+      "title": "Sandbox ready",
+      "description": "The running sandbox accepts work at its service address.",
+      "type": "object",
+      "properties": {"sandbox_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "state": {"const": "ready"}, "address": {"type": "string", "minLength": 1}},
+      "required": ["sandbox_id", "actor", "state", "address"],
+      "additionalProperties": false,
+      "examples": [{"sandbox_id": "sb-1", "actor": "runner", "state": "ready", "address": "http://10.2.0.14:8080"}],
+      "x-omega-invalid-examples": [{"sandbox_id": "sb-1", "actor": "runner", "state": "started", "address": "http://10.2.0.14:8080"}, {"sandbox_id": "sb-1", "actor": "runner", "state": "ready", "address": ""}]
+    },
+    "omega.sandbox.unhealthy": {
+      "$id": "urn:omega:schema:omega.sandbox.unhealthy:1",
+      "title": "Sandbox unhealthy",
+      "description": "A sandbox health check failed with a sanitized reason.",
+      "type": "object",
+      "properties": {"sandbox_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "state": {"const": "unhealthy"}, "reason": {"type": "string", "minLength": 1}},
+      "required": ["sandbox_id", "actor", "state", "reason"],
+      "additionalProperties": false,
+      "examples": [{"sandbox_id": "sb-1", "actor": "monitor", "state": "unhealthy", "reason": "readiness probe failed three times"}],
+      "x-omega-invalid-examples": [{"sandbox_id": "sb-1", "actor": "monitor", "state": "unhealthy", "reason": ""}, {"sandbox_id": "sb-1", "actor": "monitor", "state": "ready", "reason": "probe failed"}]
+    },
+    "omega.sandbox.oom": {
+      "$id": "urn:omega:schema:omega.sandbox.oom:1",
+      "title": "Sandbox out of memory",
+      "description": "The sandbox exceeded its configured positive memory limit.",
+      "type": "object",
+      "properties": {"sandbox_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "state": {"const": "oom"}, "memory_limit_bytes": {"type": "integer", "exclusiveMinimum": 0}},
+      "required": ["sandbox_id", "actor", "state", "memory_limit_bytes"],
+      "additionalProperties": false,
+      "examples": [{"sandbox_id": "sb-1", "actor": "monitor", "state": "oom", "memory_limit_bytes": 536870912}, {"sandbox_id": "sb-1", "actor": "monitor", "state": "oom", "memory_limit_bytes": 536870912.0}],
+      "x-omega-invalid-examples": [{"sandbox_id": "sb-1", "actor": "monitor", "state": "oom", "memory_limit_bytes": 0}, {"sandbox_id": "sb-1", "actor": "monitor", "state": "oom", "memory_limit_bytes": 536870912.5}]
+    },
+    "omega.sandbox.exited": {
+      "$id": "urn:omega:schema:omega.sandbox.exited:1",
+      "title": "Sandbox exited",
+      "description": "The sandbox process exited with its operating-system status code.",
+      "type": "object",
+      "properties": {"sandbox_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "state": {"const": "exited"}, "exit_code": {"type": "integer", "minimum": 0, "maximum": 255}},
+      "required": ["sandbox_id", "actor", "state", "exit_code"],
+      "additionalProperties": false,
+      "examples": [{"sandbox_id": "sb-1", "actor": "runner", "state": "exited", "exit_code": 0}],
+      "x-omega-invalid-examples": [{"sandbox_id": "sb-1", "actor": "runner", "state": "exited", "exit_code": 256}, {"sandbox_id": "sb-1", "actor": "runner", "state": "exited", "exit_code": -1}]
+    },
+    "omega.sandbox.removed": {
+      "$id": "urn:omega:schema:omega.sandbox.removed:1",
+      "title": "Sandbox removed",
+      "description": "The sandbox and its resources were removed.",
+      "type": "object",
+      "properties": {"sandbox_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "state": {"const": "removed"}, "reason": {"type": "string", "minLength": 1}},
+      "required": ["sandbox_id", "actor", "state", "reason"],
+      "additionalProperties": false,
+      "examples": [{"sandbox_id": "sb-1", "actor": "controller", "state": "removed", "reason": "job completed and cleanup finished"}],
+      "x-omega-invalid-examples": [{"sandbox_id": "sb-1", "actor": "controller", "state": "removed", "reason": ""}, {"sandbox_id": "sb-1", "actor": "controller", "state": "exited", "reason": "cleanup"}]
+    }
+  }
+}
