@@ -58,6 +58,16 @@ class _McpResponse:
         self.close()
 
 
+class _HttpStatusError(ProviderError):
+    """A sanitized HTTP status failure with structured status metadata."""
+
+    status_code: int
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class HttpTransport:
     """POST JSON over HTTP. `max_retries` counts retries after the first try."""
 
@@ -361,7 +371,7 @@ def _check_status(status: int, url: str, headers: dict[str, str]) -> None:
     if 500 <= status <= 599:
         raise _Retryable(f"HTTP {status}")
     if 400 <= status <= 499:
-        raise ProviderError(f"HTTP {status} from {url}")
+        raise _HttpStatusError(f"HTTP {status} from {url}", status)
 
 
 def _retry_after(headers: dict[str, str]) -> float | None:

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from omega_prime.cron.apscheduler_backend import SchedulerService
 from omega_prime.cron.desk_driver import DeskDriver
 from omega_prime.cron.scheduler import (
     PURPLE_CYCLE_KIND,
@@ -145,7 +144,76 @@ def test_desk_driver_fires_a_due_purple_cycle(
     assert saved[0]["due_at"] == 1060.0
 
 
-def test_scheduler_service_runs_purple_cycles_not_the_model(
+def test_desk_driver_dispatches_due_prompt_with_delegate_parent(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.agent.conversation_loop import Agent
+    from omega_prime.agent.model import ScriptedModel
+
+    root = tmp_path / "install"
+    store = JobStore(root / "cron" / "jobs.json")
+    store.schedule("summarize the scheduled task", due_at=1000)
+    parent = Agent(model=ScriptedModel([]), tools={})
+    parent.child_model = ScriptedModel(
+        [{"role": "assistant", "content": "scheduled task completed"}]
+    )
+
+    DeskDriver(root, parent=parent, clock=lambda: 1000.0).tick_once()
+
+    saved = JobStore(root / "cron" / "jobs.json").jobs[0]
+    assert saved["last_result"] == {
+        "state": "succeeded",
+        "summary": "scheduled task completed",
+    }
+    assert saved["history"][-1]["disposition"] == "succeeded"
+
+
+def test_desk_driver_writes_blocked_receipt_for_prompt_without_parent(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "install"
+    store = JobStore(root / "cron" / "jobs.json")
+    store.schedule("summarize the scheduled task", due_at=1000)
+
+    DeskDriver(root, clock=lambda: 1000.0).tick_once()
+
+    saved = JobStore(root / "cron" / "jobs.json").jobs[0]
+    assert saved["last_result"] == {
+        "state": "blocked",
+        "error": "ValueError: delegate returned error or pending output",
+    }
+    assert saved["history"][-1]["disposition"] == "blocked"
+
+
+def test_desk_driver_hides_tick_exception_text_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sentinel = "credential-shaped-tick-sentinel"
+    later_ticks: list[str] = []
+
+    def fail_watchdog(store: JobStore, now: float) -> None:
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr("omega_prime.cron.desk_driver.tick_roe_watchdog", fail_watchdog)
+    monkeypatch.setattr(
+        "omega_prime.cron.desk_driver.tick_pin_bump_schedules",
+        lambda *args, **kwargs: later_ticks.append("pin-bump"),
+    )
+    monkeypatch.setattr(
+        "omega_prime.cron.desk_driver.tick_purple_cycles",
+        lambda *args, **kwargs: later_ticks.append("purple-cycle"),
+    )
+
+    DeskDriver(tmp_path, clock=lambda: 1000.0).tick_once()
+
+    stderr = capsys.readouterr().err
+    assert "RuntimeError" in stderr
+    assert "roe-watchdog tick failed" in stderr
+    assert sentinel not in stderr
+    assert later_ticks == ["pin-bump", "purple-cycle"]
+
+
+def test_desk_driver_runs_purple_cycles_not_the_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[str] = []
@@ -157,24 +225,16 @@ def test_scheduler_service_runs_purple_cycles_not_the_model(
     monkeypatch.setattr(
         "omega_prime.cron.scheduler._default_purple_cycle_runner", runner
     )
-    store = JobStore(tmp_path / "jobs.json")
+    root = tmp_path / "install"
+    store = JobStore(root / "cron" / "jobs.json")
     schedule_purple_cycle(store, due_at=1, interval_seconds=3600, mode="run")
-    seen: list[str] = []
 
-    def _model(prompt: str) -> str:
-        seen.append(prompt)
-        return "nope"
+    DeskDriver(root, clock=lambda: 2.0).tick_once()
 
-    service = SchedulerService(store, _model)
-    try:
-        service.start()
-    finally:
-        service.stop()
     assert calls == ["run"]
-    assert seen == []
-    ran_at = store.jobs[0]["last_ran_at"]
-    assert isinstance(ran_at, float)
-    assert store.jobs[0]["due_at"] > ran_at
+    saved = JobStore(root / "cron" / "jobs.json").jobs[0]
+    assert saved["last_ran_at"] == 2.0
+    assert saved["due_at"] > saved["last_ran_at"]
 
 
 def test_desk_driver_passes_the_install_root(
@@ -208,3 +268,80 @@ def test_second_tick_before_next_due_does_not_run(tmp_path: Path) -> None:
     assert ran[0]["history"][-1]["status"] == "ok"
     tick_purple_cycles(store, 50, runner=runner)
     assert calls == [1]
+
+
+def test_purple_cycle_claim_preserves_concurrent_create_and_removal(
+    tmp_path: Path,
+) -> None:
+    from threading import Event, Thread
+
+    store = _store(tmp_path)
+    other_store = JobStore(store.path)
+    job_id = schedule_purple_cycle(store, due_at=10, interval_seconds=30)
+    entered = Event()
+    release = Event()
+    result = []
+
+    def runner(job: dict) -> dict:
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"ok": True, "exit": 0, "state": "completed"}
+
+    worker = Thread(
+        target=lambda: result.extend(tick_purple_cycles(store, 10, runner=runner))
+    )
+    worker.start()
+    assert entered.wait(timeout=5)
+    created_id = other_store.schedule("concurrent prompt", 100)
+    assert other_store.remove(job_id, kind=PURPLE_CYCLE_KIND)
+    release.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert result == []
+    persisted = JobStore(store.path).jobs
+    assert [job["id"] for job in persisted] == [created_id]
+
+
+def test_stale_purple_occurrence_is_missed_and_coalesced_forward(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    schedule_purple_cycle(store, due_at=10, interval_seconds=30)
+    calls = []
+
+    def runner(job: dict) -> dict:
+        calls.append(job)
+        return {"ok": True, "exit": 0}
+
+    ran = tick_purple_cycles(
+        store,
+        1000,
+        runner=runner,
+    )
+    assert calls == []
+    assert len(ran) == 1
+    assert ran[0]["history"][-1]["status"] == "missed"
+    assert ran[0]["last_result"]["state"] == "missed"
+    assert ran[0]["due_at"] == 1030
+
+
+def test_purple_runner_failure_is_settled_before_next_job(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = schedule_purple_cycle(store, due_at=10, interval_seconds=30)
+    second = schedule_purple_cycle(store, due_at=10, interval_seconds=30)
+    calls = []
+
+    def runner(job: dict) -> dict:
+        calls.append(job["id"])
+        if job["id"] == first:
+            raise RuntimeError("sensitive runner detail")
+        return {"ok": True, "exit": 0, "state": "completed"}
+
+    ran = tick_purple_cycles(store, 10, runner=runner)
+    assert calls == [first, second]
+    assert [job["id"] for job in ran] == [second]
+    jobs = {job["id"]: job for job in JobStore(store.path).jobs}
+    assert jobs[first]["history"][-1]["status"] == "failed"
+    assert jobs[first]["last_result"]["error"] == "RuntimeError"
+    assert "sensitive runner detail" not in str(jobs[first]["last_result"])
+    assert jobs[first]["due_at"] == jobs[second]["due_at"] == 40

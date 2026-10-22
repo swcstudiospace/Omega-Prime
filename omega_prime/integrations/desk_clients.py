@@ -19,6 +19,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from omega_prime.integrations.binding import secret_value
+
 RAILWAY_URL = "https://backboard.railway.com/graphql/v2"
 GREPTILE_URL = "https://api.greptile.com/v2"
 VERCEL_URL = "https://api.vercel.com"
@@ -153,9 +155,14 @@ def asc_signing_available() -> bool:
     return callable(getattr(jwt, "encode", None)) and hasattr(ec, "SECP256R1")
 
 
+def _env_token(env: Mapping[str, Any], name: str) -> str | None:
+    token = secret_value(env, name)
+    return token or None
+
+
 def clients_from_env(env: Mapping[str, Any] | None) -> dict[str, Any]:
     """Build desk clients for tokens present in ``env``. Missing tokens are None."""
-    source: Mapping[str, Any] = env or {}
+    source: Mapping[str, Any] = env if env is not None else {}
     railway_token = _env_token(source, "RAILWAY_TOKEN")
     greptile_token = _env_token(source, "GREPTILE_API_KEY")
     vercel_token = _env_token(source, "VERCEL_TOKEN")
@@ -588,14 +595,6 @@ def _require_token(token: str, service: str) -> str:
     if not isinstance(token, str) or token.strip() == "":
         raise ValueError(f"{service} token must be a non-empty string")
     return token.strip()
-
-
-def _env_token(env: Mapping[str, Any], name: str) -> str | None:
-    """``NAME``, ``NAME_FILE``, or ``$OMEGA_PRIME_STATE_DIR/secrets/NAME``."""
-    from omega_prime.integrations.binding import secret_value
-
-    text = secret_value(env, name)
-    return text or None
 
 
 def _railway_projects(env: Mapping[str, Any]) -> list[str]:

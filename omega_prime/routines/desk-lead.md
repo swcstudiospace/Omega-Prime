@@ -1,6 +1,6 @@
 <routine name="desk-lead" version="1">
 <summary>Load `skills/lead-pack/SKILL.md`. Run `omega_prime.routines.desk_lead.run_lead_pass` via `/omega-desk-lead` or `python -m omega_prime.routines.desk_lead`.</summary>
-Claims intake from `$OMEGA_PRIME_STATE_DIR/intake.json`. Without a child model the pass still runs and reports each ticket blocked. It does not invent a done receipt.
+Claims intake from `$OMEGA_PRIME_STATE_DIR/agent/intake.json` (the agent data folder; `OMEGA_PRIME_AGENT_STATE_DIR` overrides it). Without a child model the pass still runs and reports each ticket blocked. It does not invent a done receipt.
 
 Grok Bot routine a new install can create:
 - name: Omega Prime desk-lead

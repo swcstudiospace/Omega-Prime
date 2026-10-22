@@ -21,6 +21,8 @@ PLAN_MODE_BLOCKED = frozenset(
         "x_post",
         "x_post_thread",
         "x_upload_media",
+        "exec_job_start",
+        "exec_job_kill",
     }
 )
 
