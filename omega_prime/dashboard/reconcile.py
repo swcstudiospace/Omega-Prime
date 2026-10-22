@@ -133,8 +133,11 @@ def _orphan_attaches(
 
     A pane counts as referenced when any task or finished row owns it, through
     herdr_pane or a herdr-pane owner; exited panes are never chosen.
-    Several panes matching one row pick the lowest pane id; one pane matching
-    several rows prefers the first row in file order.
+    Several panes matching one row pick the lowest pane id. Workspace labels
+    drop the namespace, fold case and truncate, so distinct tasks (``gb:build``
+    and ``tasks:build``) can share one; a label shared by more than one task
+    row is ambiguous and attaches nothing, since guessing could show one
+    task's output, and send input, to another task's pane.
     """
     referenced: set[str] = set()
     for bucket in ("tasks", "finished"):
@@ -143,6 +146,11 @@ def _orphan_attaches(
             owned = _mapped_pane(row)
             if owned is not None:
                 referenced.add(owned)
+    label_counts: dict[str, int] = {}
+    for row in data["tasks"]:
+        if isinstance(row, dict) and isinstance(row.get("id"), str):
+            shared = workspace_label(row["id"])
+            label_counts[shared] = label_counts.get(shared, 0) + 1
     attaches: list[dict[str, str]] = []
     claimed: set[str] = set()
     for row in data["tasks"]:
@@ -151,6 +159,8 @@ def _orphan_attaches(
         if _mapped_pane(row) is not None:
             continue
         label = workspace_label(row["id"])
+        if label_counts.get(label, 0) > 1:
+            continue
         matches = sorted(
             pane_id
             for pane_id, info in panes.items()

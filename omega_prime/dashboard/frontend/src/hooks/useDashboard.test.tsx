@@ -213,8 +213,14 @@ describe('useDashboard websocket tier', () => {
     act(() => { vi.advanceTimersByTime(30_000) })
     expect(FakeWebSocket.instances).toHaveLength(4)
     RecordingEventSource.made[0]!.onerror?.()
-    const pollsBeforeOpen = vi.mocked(fetch).mock.calls.length
     FakeWebSocket.instances[3]!.open()
+    // Opening alone proves nothing: polling continues until the socket
+    // delivers a snapshot.
+    const pollsAtOpen = vi.mocked(fetch).mock.calls.length
+    act(() => { vi.advanceTimersByTime(5_000) })
+    expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(pollsAtOpen)
+    const pollsBeforeOpen = vi.mocked(fetch).mock.calls.length
+    FakeWebSocket.instances[3]!.emit({ type: 'snapshot', snapshot: fixture })
     expect(RecordingEventSource.made[0]!.closed).toBe(true)
     act(() => { vi.advanceTimersByTime(12_000) })
     expect(vi.mocked(fetch).mock.calls.length).toBe(pollsBeforeOpen)
@@ -223,6 +229,35 @@ describe('useDashboard websocket tier', () => {
     expect(FakeWebSocket.instances).toHaveLength(5)
     unmount()
     expect(setIntervalSpy).toHaveBeenCalled()
+  })
+})
+
+describe('useDashboard sockets that open without data', () => {
+  it('still fall back to SSE and keep polling until a snapshot arrives', () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('EventSource', RecordingEventSource); vi.stubGlobal('WebSocket', FakeWebSocket)
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
+    const { unmount } = renderHook(() => useDashboard())
+    act(() => { vi.advanceTimersByTime(0) })
+    FakeWebSocket.instances[0]!.open()
+    FakeWebSocket.instances[0]!.fail()
+    const fetchesAfterFirstDrop = vi.mocked(fetch).mock.calls.length
+    act(() => { vi.advanceTimersByTime(499) })
+    act(() => { vi.advanceTimersByTime(5_000) })
+    // HTTP polling keeps the page fresh while the socket retries.
+    expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(fetchesAfterFirstDrop)
+    expect(FakeWebSocket.instances.length).toBeGreaterThanOrEqual(2)
+    FakeWebSocket.instances[1]!.open()
+    FakeWebSocket.instances[1]!.fail()
+    act(() => { vi.advanceTimersByTime(1_000) })
+    expect(FakeWebSocket.instances).toHaveLength(3)
+    FakeWebSocket.instances[2]!.open()
+    FakeWebSocket.instances[2]!.fail()
+    // Three opens that never delivered a snapshot still count as failures.
+    expect(RecordingEventSource.made).toHaveLength(1)
+    expect(RecordingEventSource.made[0]!.closed).toBe(false)
+    unmount()
   })
 })
 

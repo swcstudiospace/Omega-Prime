@@ -2,8 +2,9 @@
 # Coding names from register_coding_tools, then growth names from register_growth_tools,
 # then delegate_task from register_delegate_tools, then omega_command from
 # register_omega_command_tools, then platform names from
-# register_platform_tools, then IDE names from register_ide_tools,
-# then X names from register_x_tools, then Telegram names from
+# register_platform_tools, then IDE names from register_ide_tools, then
+# exec-job names from register_exec_job_tools, then X names from
+# register_x_tools, then Telegram names from
 # register_telegram_tools, then Discord names from register_discord_tools,
 # then Lead names from register_lead_tools, then Systems names from
 # register_systems_tools, then Web names from register_web_tools, then
@@ -59,6 +60,10 @@ tools:
   - browser_snapshot
   - lsp_diagnostics
   - dap_stop
+  - exec_job_start
+  - exec_job_poll
+  - exec_job_wait
+  - exec_job_kill
   - x_mentions
   - x_read_post
   - x_post

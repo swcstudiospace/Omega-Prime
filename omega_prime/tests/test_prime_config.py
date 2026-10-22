@@ -47,6 +47,15 @@ def test_env_override_beats_file(tmp_path, monkeypatch):
     assert prime_enabled(config, "rlm") is False
 
 
+def test_explicit_environment_mapping_beats_file_and_ambient_env(tmp_path, monkeypatch):
+    (tmp_path / "omega-prime.json").write_text(
+        json.dumps({"prime": {"rlm": {"enabled": True}}})
+    )
+    monkeypatch.setenv("OMEGA_PRIME_PRIME_RLM_ENABLED", "1")
+    config = load_config(tmp_path, env={"OMEGA_PRIME_PRIME_RLM_ENABLED": "0"})
+    assert prime_enabled(config, "rlm") is False
+
+
 def test_unknown_family_is_disabled(tmp_path):
     config = load_config(tmp_path)
     assert prime_enabled(config, "nonexistent") is False

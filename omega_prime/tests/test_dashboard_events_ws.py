@@ -68,6 +68,29 @@ def test_events_module_carries_the_locked_constants():
     assert EVENTS_WATCH_INTERVAL_S == 0.5
 
 
+def test_duplicate_finished_ids_force_a_full_snapshot():
+    """Greptile: the bridge can hold a new and an older finished record for
+    one task; ids that repeat cannot be patched by id-keyed deltas."""
+    from omega_prime.dashboard.events import needs_full_snapshot
+
+    old = _task("tasks:one", result="failed", finished_at="2026-10-20T00:00:00Z")
+    new = _task("tasks:one", result="ok", finished_at="2026-10-21T00:00:00Z")
+    before = _snapshot(finished=[old])
+    after = _snapshot(finished=[new, old])
+    assert needs_full_snapshot(before, after) is True
+    assert needs_full_snapshot(after, _snapshot(finished=[new])) is True
+
+
+def test_finished_deltas_prefer_the_newest_duplicate():
+    old = _task("tasks:one", result="failed")
+    new = _task("tasks:one", result="ok")
+    deltas = compute_deltas(
+        _snapshot(active=[_task("tasks:one")]), _snapshot(finished=[new, old])
+    )
+    finished = [d for d in deltas if d["type"] == "task_finished"]
+    assert finished and all(d.get("task", {}).get("result") == "ok" for d in finished)
+
+
 def test_identical_snapshots_produce_no_deltas():
     snap = _snapshot(active=[_task("tasks:one")])
     assert compute_deltas(snap, snap) == []

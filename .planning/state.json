@@ -8,6 +8,18 @@
       "name": "Solo mode, Desk optional",
       "status": "completed",
       "directory": ".planning/phases/99-solo-mode-desk-optional"
+    },
+    {
+      "number": 100,
+      "name": "omp engine wiring",
+      "status": "completed",
+      "directory": ".planning/phases/100-omp-engine-wiring"
+    },
+    {
+      "number": 103,
+      "name": "Ultrathink integration and cleanup",
+      "status": "completed",
+      "directory": ".planning/phases/103-ultrathink-integration-and-cleanup"
     }
   ],
   "next": {

@@ -327,7 +327,17 @@ def test_poller_collects_stale_evidence_off_the_event_loop():
             "finished": [],
         },
     )
-    asyncio.run(poller._maybe_build())
+
+    async def build_and_settle() -> None:
+        # The first build starts the pane listing on its own task; the
+        # listing then triggers the rebuild that carries pane evidence.
+        await poller._maybe_build()
+        assert poller._panes_task is not None
+        await poller._panes_task
+        assert poller._build_task is not None
+        await poller._build_task
+
+    asyncio.run(build_and_settle())
     assert seen == [False]
     snapshot = poller.snapshot()
     assert snapshot is not None
@@ -343,7 +353,7 @@ def test_build_applies_stale_evidence_only_to_the_rows_it_was_gathered_for():
 
     class _RacingChecker(StaleChecker):
         def stale_map(
-            self, rows: list[Any], *, now: datetime | None = None
+            self, rows: list[Any], *, now: datetime | None = None, panes: Any = None
         ) -> dict[str, dict[str, str | None] | None]:
             assert [row["title"] for row in rows] == ["old"]
             poller._results["tasks_json"] = SourceResult(
@@ -365,3 +375,65 @@ def test_build_applies_stale_evidence_only_to_the_rows_it_was_gathered_for():
     assert not any(
         task.get("title") == "recovered" and task.get("stale") for task in rows
     )
+
+
+def test_hung_pane_listing_does_not_delay_snapshot_builds():
+    """Greptile: a slow `herdr pane list` delays only pane badges."""
+    import threading
+
+    release = threading.Event()
+
+    def lister():
+        release.wait(5)
+        return {}
+
+    checker = StaleChecker(
+        clock=lambda: NOW, pid_alive=lambda pid: True, pane_lister=lister
+    )
+    poller = DashboardPoller([], stale_checker=checker, clock=lambda: NOW)
+    poller._results["tasks_json"] = SourceResult(
+        "tasks_json",
+        "ok",
+        extra={
+            "tasks": [
+                _row(
+                    id="gb:mapped",
+                    herdr_pane={"pane_id": "w1:p1"},
+                    last_activity_at=NOW.isoformat(),
+                )
+            ],
+            "waiting_on_ove": [],
+            "finished": [],
+        },
+    )
+
+    async def run() -> None:
+        try:
+            await asyncio.wait_for(poller._maybe_build(), timeout=1.0)
+            snapshot = poller.snapshot()
+            assert snapshot is not None
+            stale = {task["id"]: task.get("stale") for task in snapshot["active"]}
+            # No pane evidence yet: unavailable, so no pane verdict either way.
+            assert stale["gb:mapped"] is None
+        finally:
+            release.set()
+            if poller._panes_task is not None:
+                await poller._panes_task
+
+    asyncio.run(run())
+
+
+def test_owner_herdr_pane_mapping_gets_pane_checks():
+    """Rows mapped through owner.kind herdr-pane get the same pane checks."""
+    checker = StaleChecker(
+        clock=lambda: NOW, pid_alive=lambda pid: True, pane_lister=lambda: {}
+    )
+    row = _row(
+        id="gb:owned",
+        owner={"kind": "herdr-pane", "ref": "w3:p2"},
+        last_activity_at=NOW.isoformat(),
+    )
+    assert checker.stale_reason(row, now=NOW) == {
+        "reason": "pane_gone",
+        "since": NOW.isoformat(),
+    }

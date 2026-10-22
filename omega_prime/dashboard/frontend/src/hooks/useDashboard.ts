@@ -143,6 +143,10 @@ export function useDashboard(): DashboardState {
     let socketTimer: ReturnType<typeof setTimeout> | undefined
     let socketRetryTimer: ReturnType<typeof setTimeout> | undefined
     let socketOpen = false
+    // The socket owns the stream only once it has delivered a snapshot: a
+    // socket that opens and drops before any data must keep counting toward
+    // the SSE fallback, and must not stop the update path that still works.
+    let socketLive = false
     let failures = 0
     let backoff = WS_BASE_MS
     let controller: AbortController | null = null
@@ -226,6 +230,7 @@ export function useDashboard(): DashboardState {
       if (old === undefined || !socketOpen) { requestRepair(); return }
       socket = undefined
       socketOpen = false
+      socketLive = false
       old.close()
       connectWs()
     }
@@ -241,7 +246,7 @@ export function useDashboard(): DashboardState {
       void fetchSnapshot()
       pollTimer = setInterval(() => void fetchSnapshot(), POLL_MS)
     }
-    const wsOwnsStream = () => socket !== undefined && socketOpen
+    const wsOwnsStream = () => socket !== undefined && socketOpen && socketLive
     const connect = () => {
       if (disposed || eventSource || wsOwnsStream()) return
       streamFailed = false
@@ -276,9 +281,13 @@ export function useDashboard(): DashboardState {
       next.onopen = () => {
         if (disposed) { next.close(); return }
         socketOpen = true
+      }
+      /** First usable data on this socket: only now does it own the stream. */
+      const markLive = () => {
+        if (socketLive) return
+        socketLive = true
         failures = 0
         backoff = WS_BASE_MS
-        setLive(true)
         setError(null)
         stopPolling()
         // The socket owns the stream now: close SSE and cancel any pending
@@ -292,7 +301,7 @@ export function useDashboard(): DashboardState {
         const message = parseMessage(typeof event.data === 'string' ? event.data : '')
         if (message === null) { requestRepair(); return }
         if (message.type === 'heartbeat') return
-        if (message.type === 'snapshot') { invalidateFetch(); commit(message.snapshot); setLoading(false); setLive(true); stopPolling(); return }
+        if (message.type === 'snapshot') { invalidateFetch(); commit(message.snapshot); setLoading(false); setLive(true); markLive(); return }
         const current = dataRef.current
         const nextData = current === null ? null : applyDelta(current, message)
         if (nextData === null) { if (queueDelta(message)) requestRepair(); return }
@@ -311,7 +320,12 @@ export function useDashboard(): DashboardState {
         counted = true
         socket = undefined
         socketOpen = false
+        socketLive = false
         setLive(false)
+        // Keep another update path running while the socket retries: HTTP
+        // polling, unless the SSE fallback is already open (it stops polling
+        // itself once it delivers a snapshot).
+        if (!eventSource) startPolling()
         failures += 1
         if (failures >= WS_FALLBACK_AFTER) {
           connect()

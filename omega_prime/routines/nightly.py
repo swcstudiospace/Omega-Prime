@@ -160,17 +160,35 @@ def growth_skills_root() -> Path:
 def writable_skills_root(
     install: str | Path | None = None,
     env: Mapping[str, str] | None = None,
+    *,
+    agent_dir: Path | None = None,
 ) -> Path:
     """Where a new skill is written, and where ``skill_view`` reads it.
 
     The install directory wins when this process can create a skill there.
-    A read-only install uses ``<state>/skills`` so the nightly pass and the
-    host's growth tools share the volume the container can write.
+    A read-only install uses the agent data folder's ``skills``
+    (``OMEGA_PRIME_AGENT_STATE_DIR``, or ``<OMEGA_PRIME_STATE_DIR>/agent``),
+    the folder the migration moves learned skills into, so the nightly pass
+    and the host's growth tools share one writable copy. An unmigrated
+    ``<state>/skills`` is still used in place until it moves. ``agent_dir``
+    names the folder the caller already resolved. Without an agent folder
+    the state directory's ``skills`` is used.
     """
     target = Path(install) if install is not None else growth_skills_root()
     if _directory_writable(target):
         return target
-    state = state_dir(env)
+    from omega_prime.agent_state import agent_path, agent_state_dir
+
+    mapping: Mapping[str, str] = os.environ if env is None else env
+    state = state_dir(mapping)
+    # Same default as the MCP host: with only HOME configured the agent
+    # folder is ``~/.omega-prime/agent``, so a separately launched nightly
+    # pass writes the skills the host reads.
+    home = str(mapping.get("HOME", "") or "").strip() or None
+    agent = agent_dir if agent_dir is not None else agent_state_dir(mapping, home=home)
+    if agent is not None:
+        legacy = (Path(state) / "skills",) if state is not None else ()
+        return agent_path(agent, "skills", legacy)
     if state is None:
         return target
     return Path(state) / "skills"

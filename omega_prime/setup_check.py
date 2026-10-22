@@ -19,6 +19,10 @@ from typing import Any
 
 from omega_prime.assemble import load_roster
 from omega_prime.integrations.submodules import check_submodules
+from omega_prime.integrations.ultrathink import (
+    READINESS_ENV_KEYS,
+    ultrathink_readiness,
+)
 from omega_prime.mcp_server import default_registry, roster_names
 from omega_prime.settings import SettingsResult, load_settings
 
@@ -150,17 +154,28 @@ def check_ultrathink(
     root: Path, env: Mapping[str, str] | None = None
 ) -> tuple[bool | None, str]:
     """Ultrathink checkout configured, or clearly skipped."""
-    del root
-    effective_env = os.environ if env is None else env
-    configured = effective_env.get("ULTRATHINK_ROOT", "")
-    if not configured:
-        return (
-            None,
-            "ultrathink root not set (ULTRATHINK_ROOT) — bridge tools stay unconfigured",
+    source = os.environ if env is None else env
+    readiness = ultrathink_readiness(
+        {key: source[key] for key in READINESS_ENV_KEYS if key in source}
+    )
+    state = readiness["state"]
+    ship = "on" if readiness["ship_enabled"] else "off"
+    discovery = readiness["preferred_state_dir"]
+    root = readiness["root"]
+    if state == "not_configured":
+        return None, (
+            f"ultrathink {state}: ULTRATHINK_ROOT not set; ship {ship}; "
+            f"plan discovery dir: {discovery}"
         )
-    if not Path(configured, "bin", "ultrathink-ship").is_file():
-        return False, f"ULTRATHINK_ROOT={configured} has no bin/ultrathink-ship"
-    return True, f"ultrathink checkout ok ({configured})"
+    if state == "root_invalid":
+        problems = "; ".join(readiness["problems"])
+        return False, (
+            f"ultrathink {state}: ULTRATHINK_ROOT={root}; {problems}; "
+            f"ship {ship}; plan discovery dir: {discovery}"
+        )
+    return True, (
+        f"ultrathink {state}: root={root}; ship {ship}; plan discovery dir: {discovery}"
+    )
 
 
 def check_substrate(

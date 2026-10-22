@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import urllib.request
 
 import pytest
 
@@ -153,3 +154,33 @@ def test_plan_mode_refuses_publishing_but_not_reads():
 
     assert wrapped["x_post"]() == "error: plan mode forbids x_post"
     assert wrapped["x_mentions"] is x_mentions
+
+
+def test_runtime_transport_uses_urllib_offline(monkeypatch):
+    from omega_prime.mcp_server import _UrllibXTransport
+
+    seen = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"data":{"id":"u1"}}'
+
+    def urlopen(request, timeout):
+        seen.append((request, timeout))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    client = XClient(_UrllibXTransport(), token="offline-token")
+
+    assert client.me() == {"id": "u1"}
+    request, timeout = seen[0]
+    assert request.full_url == "https://api.x.com/2/users/me"
+    assert request.get_method() == "GET"
+    assert request.get_header("Authorization") == "Bearer offline-token"
+    assert timeout == 30

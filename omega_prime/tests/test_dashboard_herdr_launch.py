@@ -300,3 +300,76 @@ def test_launch_names_the_running_pane_when_saving_fails(tmp_path, monkeypatch):
     assert caught.value.pane_id == "w9:p1"
     assert "--attach w9:p1" in str(caught.value)
     assert [c[1:3] for c in calls] == [["workspace", "create"], ["pane", "run"]]
+
+
+def test_restart_drops_the_previous_runs_liveness_evidence(tmp_path):
+    """Greptile: a relaunched task must not inherit the old run's pid."""
+    path = tmp_path / "tasks.json"
+    write_tasks(
+        {
+            "version": 1,
+            "updated_at": "now",
+            "waiting_on_ove": [],
+            "finished": [],
+            "tasks": [
+                {
+                    "id": "gb:a",
+                    "title": "a",
+                    "owner": {"kind": "herdr-pane", "ref": "/w"},
+                    "state": "blocked",
+                    "pid": 424242,
+                    "last_heartbeat_at": "2026-10-21T11:00:00+00:00",
+                    "herdr_pane": {"pane_id": "w1:p1"},
+                }
+            ],
+        },
+        path=path,
+    )
+    record_pane(
+        path=path,
+        identity="gb:a",
+        title="a",
+        pane_id="w2:p3",
+        workspace=None,
+        owner_ref="/w",
+        now=NOW,
+        restart=True,
+    )
+    with locked_tasks(path, write=False) as data:
+        row = data["tasks"][0]
+    assert row["herdr_pane"] == {"pane_id": "w2:p3"}
+    assert row["state"] == "working"
+    assert row.get("pid") is None and row.get("last_heartbeat_at") is None
+
+
+def test_attach_without_restart_keeps_liveness_evidence(tmp_path):
+    path = tmp_path / "tasks.json"
+    write_tasks(
+        {
+            "version": 1,
+            "updated_at": "now",
+            "waiting_on_ove": [],
+            "finished": [],
+            "tasks": [
+                {
+                    "id": "gb:a",
+                    "title": "a",
+                    "owner": {"kind": "herdr-pane", "ref": "/w"},
+                    "state": "working",
+                    "pid": 424242,
+                }
+            ],
+        },
+        path=path,
+    )
+    record_pane(
+        path=path,
+        identity="gb:a",
+        title="a",
+        pane_id="w2:p3",
+        workspace=None,
+        owner_ref="/w",
+        now=NOW,
+    )
+    with locked_tasks(path, write=False) as data:
+        assert data["tasks"][0]["pid"] == 424242

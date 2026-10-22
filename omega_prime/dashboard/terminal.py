@@ -150,14 +150,9 @@ class TerminalService:
         await self._slots.acquire()
         return True
 
-    async def stream(self, pane: str, *, reserved: bool = False) -> AsyncIterator[str]:
-        if not _PANE.fullmatch(pane):
-            yield self._event("no_session", "", None)
-            return
-        if not reserved and not await self.reserve():
-            yield self._event("unavailable", "", None)
-            return
-        argv = [
+    @staticmethod
+    def _read_argv(pane: str) -> list[str]:
+        return [
             "herdr",
             "pane",
             "read",
@@ -169,11 +164,41 @@ class TerminalService:
             "--format",
             "text",
         ]
+
+    async def stream(
+        self,
+        pane: str,
+        *,
+        reserved: bool = False,
+        resolve: Callable[[], str | None] | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream bounded captures of ``pane``.
+
+        ``resolve``, when given, re-reads the task's pane mapping every cycle
+        so a task relaunched into a new pane is followed live instead of
+        showing the previous run's output; a task that no longer maps any
+        pane ends the stream with ``no_session``.
+        """
+        if not _PANE.fullmatch(pane):
+            yield self._event("no_session", "", None)
+            return
+        if not reserved and not await self.reserve():
+            yield self._event("unavailable", "", None)
+            return
+        argv = self._read_argv(pane)
         previous: tuple[str, str] | None = None
         updated: str | None = None
         try:
             yield "retry: 3000\n\n"
             while True:
+                if resolve is not None:
+                    current = resolve()
+                    if current is None or not _PANE.fullmatch(current):
+                        yield self._event("no_session", "", None)
+                        return
+                    if current != pane:
+                        pane, argv = current, self._read_argv(current)
+                        previous, updated = None, None
                 try:
                     raw = await asyncio.wait_for(
                         self.runner(argv), TERMINAL_READ_TIMEOUT_S

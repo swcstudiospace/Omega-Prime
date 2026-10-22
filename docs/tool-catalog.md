@@ -73,7 +73,7 @@ Return the task list last stored by todo_write.
 - Approval: not required
 - Required params: question
 
-Record a question for the user and return that same question.
+Send a question to a live human operator and return their answer. If no operator interaction is configured, return an undeliverable error; never echo the question.
 
 ## web_search
 
@@ -194,6 +194,38 @@ Ask a spawned language server for one file's diagnostics inside the workspace ro
 - Required params: command, path, line
 
 Launch one file under a spawned debug adapter, stop on one breakpoint line, and report the stop with its stack frames. The command is an argv list that speaks DAP over stdio.
+
+## exec_job_start
+
+- Family: Exec jobs
+- Approval: required
+- Required params: argv
+
+Start a screened argv process in the configured work directory.
+
+## exec_job_poll
+
+- Family: Exec jobs
+- Approval: required
+- Required params: job_id
+
+Check whether a process-local argv job has finished.
+
+## exec_job_wait
+
+- Family: Exec jobs
+- Approval: required
+- Required params: job_id
+
+Wait up to 30 seconds for a process-local argv job.
+
+## exec_job_kill
+
+- Family: Exec jobs
+- Approval: required
+- Required params: job_id
+
+Terminate a process-local argv job.
 
 ## x_mentions
 

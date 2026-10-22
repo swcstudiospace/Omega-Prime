@@ -6,9 +6,12 @@ import json
 import shutil
 import socket
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from omega_prime.assemble import _prime_family_tools
+from omega_prime.config import PRIME_FAMILIES, load_config
 from omega_prime.grokbot import doctor as doctor_module
 from omega_prime.grokbot.audit import GrokBotAuditTracer, default_audit_path
 from omega_prime.grokbot.doctor import (
@@ -17,15 +20,26 @@ from omega_prime.grokbot.doctor import (
     run_doctor_checks,
 )
 from omega_prime.grokbot.manifest import find_repo_root
+from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
 
 NEW_CHECK_IDS = (
     "policy_loads",
     "roster_consistency",
+    "prime_family_rlm",
+    "prime_family_harness",
+    "prime_family_goals",
+    "prime_family_heartbeat",
+    "prime_family_autonomous",
+    "prime_family_messaging",
+    "prime_family_kernel",
+    "redteam_availability",
+    "scheduled_jobs",
     "template_integrity",
     "audit_chain",
     "bind_exposure",
     "token_strength",
     "connector_secrets",
+    "ui_control_health",
 )
 
 
@@ -80,6 +94,352 @@ def test_new_check_ids_present_and_shape():
             "fix_hint",
         }
         assert check["status"] in {"ok", "warn", "fail"}
+
+
+@pytest.mark.parametrize("family", PRIME_FAMILIES)
+def test_known_prime_families_are_reported_off_by_default(tmp_path, family):
+    doctor = GrokBotDoctor(tmp_path, env={})
+    config = load_config(tmp_path, env={})
+    check = next(
+        item
+        for item in doctor._check_prime_family_availability(
+            config, registered_tools=set()
+        )
+        if item.id == f"prime_family_{family}"
+    )
+    assert check.status == "PASS"
+    assert "disabled by configuration; execution was not checked" in check.message
+
+
+def test_enabled_prime_family_missing_exact_tools_fails(tmp_path):
+    config = load_config(tmp_path, env={"OMEGA_PRIME_PRIME_RLM_ENABLED": "1"})
+    check = next(
+        item
+        for item in GrokBotDoctor(tmp_path, env={})._check_prime_family_availability(
+            config, registered_tools=set()
+        )
+        if item.id == "prime_family_rlm"
+    )
+    assert check.status == "FAIL"
+    assert "expected tools are missing" in check.message
+    assert _prime_family_tools()["rlm"][0] in check.message
+
+
+def test_roster_uses_supplied_family_environment_without_loading_plugins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    roster_path = tmp_path / "omega_prime/contracts/tool-rosters/omega-prime.yaml"
+    roster_path.parent.mkdir(parents=True)
+    roster_path.write_text("tools: []\n", encoding="utf-8")
+    from omega_prime import mcp_server
+    from omega_prime.tools import plugins
+
+    rlm_tool = _prime_family_tools()["rlm"][0]
+    monkeypatch.setattr(mcp_server, "roster_names", lambda _text: [rlm_tool])
+    monkeypatch.setenv("OMEGA_PRIME_PRIME_RLM_ENABLED", "1")
+    monkeypatch.setenv("OMEGA_PRIME_PLUGINS", "1")
+    loaded_plugins = []
+    monkeypatch.setattr(
+        plugins, "load_plugins", lambda *args, **kwargs: loaded_plugins.append(True)
+    )
+
+    doctor = GrokBotDoctor(
+        tmp_path,
+        env={
+            "OMEGA_PRIME_PRIME_RLM_ENABLED": "0",
+            "OMEGA_PRIME_PLUGINS": "1",
+        },
+    )
+    check = doctor._check_roster()
+    rlm_check = next(
+        item
+        for item in doctor._check_prime_family_availability(
+            doctor._load_family_config(), registered_tools=doctor._registered_tool_names
+        )
+        if item.id == "prime_family_rlm"
+    )
+
+    assert check.status == "PASS"
+    assert doctor._registered_tool_names is not None
+    assert rlm_tool not in doctor._registered_tool_names
+    assert "disabled by configuration" in rlm_check.message
+    assert loaded_plugins == []
+
+
+def test_unknown_prefix_like_roster_tool_is_not_flag_gated(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    from omega_prime import mcp_server
+
+    roster = tmp_path / "omega_prime/contracts/tool-rosters/omega-prime.yaml"
+    roster.parent.mkdir(parents=True)
+    roster.write_text("tools: []\n", encoding="utf-8")
+    known = _prime_family_tools()["rlm"][0]
+    monkeypatch.setattr(
+        mcp_server, "roster_names", lambda _text: [known, "rlm_unknown"]
+    )
+    observed_env = {}
+
+    def make_registry(*_args, **kwargs):
+        observed_env.update(kwargs["env"])
+        return SimpleNamespace(schemas=lambda: [], runtime_bindings={})
+
+    monkeypatch.setattr(mcp_server, "default_registry", make_registry)
+    doctor = GrokBotDoctor(
+        tmp_path,
+        env={"OMEGA_PRIME_PLUGINS": "1", "OMEGA_PRIME_PRIME_RLM_ENABLED": "1"},
+    )
+    check = doctor._check_roster()
+    assert observed_env["OMEGA_PRIME_PRIME_RLM_ENABLED"] == "1"
+    assert observed_env["OMEGA_PRIME_PLUGINS"] == "0"
+    assert check.status == "WARN"
+    assert "rlm_unknown" in check.message
+    assert known not in check.message
+
+
+def test_redteam_availability_requires_supplied_authorization_metadata(tmp_path):
+    doctor = GrokBotDoctor(tmp_path, env={})
+    off_config = load_config(tmp_path, env={})
+    off = doctor._check_redteam_availability(
+        off_config, registered_tools=set(), runtime_bindings={"sidecar_state": "IDLE"}
+    )
+    assert off.status == "PASS"
+
+    (tmp_path / "omega-prime.json").write_text(
+        json.dumps({"redteam": {"enabled": True}}), encoding="utf-8"
+    )
+    enabled = load_config(tmp_path, env={})
+    blocked = doctor._check_redteam_availability(
+        enabled,
+        registered_tools=set(),
+        runtime_bindings={
+            "sidecar_state": "BLOCKED",
+            "sidecar_cause": "roe-missing",
+        },
+    )
+    assert blocked.status == "WARN"
+    assert "roe-missing" in blocked.message
+
+    unobserved = doctor._check_redteam_availability(
+        enabled, registered_tools=set(), runtime_bindings={}
+    )
+    assert unobserved.status == "WARN"
+    assert "authorization was not observed" in unobserved.message
+
+    authorized_missing = doctor._check_redteam_availability(
+        enabled, registered_tools=set(), runtime_bindings={"sidecar_state": "IDLE"}
+    )
+    assert authorized_missing.status == "FAIL"
+    assert "no allowed tools are registered" in authorized_missing.message
+
+    served = doctor._check_redteam_availability(
+        enabled,
+        registered_tools=set(REDTEAM_TOOL_NAMES),
+        runtime_bindings={"sidecar_state": "IDLE"},
+    )
+    assert served.status == "PASS"
+    assert "all registered authorized tools" in served.message
+
+
+def test_redteam_authorization_accepts_registered_allowed_subset(tmp_path):
+    doctor = GrokBotDoctor(tmp_path, env={})
+    (tmp_path / "omega-prime.json").write_text(
+        json.dumps({"redteam": {"enabled": True}}), encoding="utf-8"
+    )
+    enabled = load_config(tmp_path, env={})
+
+    check = doctor._check_redteam_availability(
+        enabled,
+        registered_tools={next(iter(REDTEAM_TOOL_NAMES))},
+        runtime_bindings={"sidecar_state": "IDLE"},
+    )
+
+    assert check.status == "PASS"
+
+
+def test_registry_bindings_refresh_each_collection_unless_caller_supplied(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    from omega_prime import mcp_server
+
+    roster = tmp_path / "omega_prime/contracts/tool-rosters/omega-prime.yaml"
+    roster.parent.mkdir(parents=True)
+    roster.write_text("tools: []\n", encoding="utf-8")
+    bindings = iter([{"prime_heartbeat": "first"}, {"prime_heartbeat": "second"}])
+    monkeypatch.setattr(mcp_server, "roster_names", lambda _text: [])
+    monkeypatch.setattr(
+        mcp_server,
+        "default_registry",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            schemas=lambda: [], runtime_bindings=next(bindings)
+        ),
+    )
+    doctor = GrokBotDoctor(tmp_path, env={})
+
+    doctor._check_roster()
+    assert doctor.runtime_bindings == {"prime_heartbeat": "first"}
+    doctor._check_roster()
+    assert doctor.runtime_bindings == {"prime_heartbeat": "second"}
+
+    supplied = {"prime_heartbeat": "caller"}
+    caller_doctor = GrokBotDoctor(tmp_path, env={}, runtime_bindings=supplied)
+    caller_doctor._check_roster()
+    assert caller_doctor.runtime_bindings is supplied
+
+
+def test_scheduled_job_report_is_redacted_and_store_read_only(tmp_path):
+    path = tmp_path / "cron/jobs.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "kind": "prompt",
+                        "due_at": 1000,
+                        "completed": False,
+                        "prompt": "private-prompt-marker",
+                        "last_result": "private-result-marker",
+                        "history": [{"result": "private-history-marker"}],
+                    },
+                    {
+                        "kind": "session_heartbeat",
+                        "due_at": 3000,
+                        "completed": False,
+                        "session": "private-session-marker",
+                        "prompt": "private-prompt-marker",
+                    },
+                    {
+                        "kind": "unrecognized_private_kind",
+                        "due_at": 3000,
+                        "completed": False,
+                        "prompt": "private-prompt-marker",
+                    },
+                    {"kind": "prompt", "due_at": 1000, "completed": True},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    original = path.read_bytes()
+    original_mtime = path.stat().st_mtime_ns
+    config = load_config(tmp_path, env={})
+    doctor = GrokBotDoctor(tmp_path, env={})
+    first = doctor._check_scheduled_jobs(config, now=2000)
+    second = doctor._check_scheduled_jobs(config, now=2000)
+
+    assert first.status == "WARN"
+    assert "3 pending schedule(s)" in first.message
+    assert "prompt: 1" in first.message
+    assert "session_heartbeat: 1" in first.message
+    assert "unknown: 1" in first.message
+    assert "1 are overdue" in first.message
+    assert "heartbeat: 1" in first.message
+    assert "runner not observed by this diagnostic" in first.message
+    assert "named heartbeat session(s) lack supplied binding metadata" in first.message
+    assert first.message == second.message
+    for marker in (
+        "private-prompt-marker",
+        "private-result-marker",
+        "private-history-marker",
+        "private-session-marker",
+        "unrecognized_private_kind",
+    ):
+        assert marker not in first.message
+    assert path.read_bytes() == original
+    assert path.stat().st_mtime_ns == original_mtime
+
+
+def test_scheduled_job_report_observes_supplied_bindings_not_ticks(tmp_path):
+    path = tmp_path / "cron/jobs.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {"kind": "prompt", "due_at": 3000, "completed": False},
+                    {
+                        "kind": "session_heartbeat",
+                        "due_at": 3000,
+                        "completed": False,
+                        "session": "private-session-marker",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(tmp_path, env={})
+    bindings = {
+        "desk_driver": object(),
+        "delegate_parent": object(),
+        "prime_heartbeat": object(),
+        "heartbeat_sessions": ["private-session-marker"],
+    }
+    check = GrokBotDoctor(tmp_path, env={})._check_scheduled_jobs(
+        config, runtime_bindings=bindings, now=2000
+    )
+    assert check.status == "WARN"
+    assert "In-process binding metadata was supplied" in check.message
+    assert "a runner tick was not observed" in check.message
+    assert "lack supplied binding metadata" not in check.message
+
+
+def test_prompt_schedule_requires_both_driver_bindings(tmp_path):
+    path = tmp_path / "cron/jobs.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps({"jobs": [{"kind": "prompt", "due_at": 3000, "completed": False}]}),
+        encoding="utf-8",
+    )
+    config = load_config(tmp_path, env={})
+    doctor = GrokBotDoctor(tmp_path, env={})
+
+    missing = doctor._check_scheduled_jobs(
+        config, runtime_bindings={"desk_driver": object()}, now=2000
+    )
+    present = doctor._check_scheduled_jobs(
+        config,
+        runtime_bindings={"desk_driver": object(), "delegate_parent": object()},
+        now=2000,
+    )
+
+    assert "Delivery runner not observed" in missing.message
+    assert "In-process binding metadata was supplied" in present.message
+    assert "runner tick was not observed" in present.message
+
+
+def test_scheduled_jobs_require_real_prime_heartbeat_binding(tmp_path):
+    config = load_config(tmp_path, env={})
+    path = tmp_path / "cron/jobs.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {"jobs": [{"kind": "heartbeat", "due_at": 3000, "completed": False}]}
+        ),
+        encoding="utf-8",
+    )
+    check = GrokBotDoctor(tmp_path, env={})._check_scheduled_jobs(
+        config, runtime_bindings={"heartbeat": object()}, now=2000
+    )
+
+    assert "Delivery runner not observed" in check.message
+
+    assert "private-session-marker" not in check.message
+
+
+def test_completed_schedules_are_pass_without_runner_claim(tmp_path):
+    path = tmp_path / "cron/jobs.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps({"jobs": [{"kind": "prompt", "completed": True}]}),
+        encoding="utf-8",
+    )
+    check = GrokBotDoctor(tmp_path, env={})._check_scheduled_jobs(
+        load_config(tmp_path, env={}), now=2000
+    )
+    assert check.status == "PASS"
+    assert "No pending schedules" in check.message
 
 
 def test_manifest_check_reports_counts():
@@ -303,3 +663,151 @@ def test_main_human_output(
     )
     assert doctor_module.main([]) == 0
     assert "All preflight checks passed" in capsys.readouterr().out
+
+
+def test_ui_control_health_passes_for_existing_private_store(tmp_path: Path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    control = state / "ui-control"
+    control.mkdir(mode=0o700)
+
+    check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
+
+    assert check.id == "ui_control_health"
+    assert check.status == "PASS"
+    assert str(control) in check.message
+    assert "mode=0700" in check.message
+
+
+def test_ui_control_health_fails_when_control_overlaps_writable_bind(tmp_path: Path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    (state / "ui-control").mkdir(mode=0o700)
+    env = {
+        "OMEGA_PRIME_STATE_DIR": str(state),
+        "OMEGA_PRIME_WORK_ROOT": str(state / "ui-control" / "child"),
+    }
+
+    check = GrokBotDoctor(env=env)._check_ui_control()
+
+    assert check.status == "FAIL"
+    assert "overlaps" in check.message
+
+
+def test_ui_control_health_fails_for_unwritable_control_mode(tmp_path: Path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    control = state / "ui-control"
+    control.mkdir(mode=0o700)
+    control.chmod(0o500)
+
+    check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
+
+    assert check.status == "FAIL"
+    assert "mode 0700" in check.message
+
+
+def test_ui_control_health_fails_for_unsafe_symlink_path(tmp_path: Path):
+    actual_state = tmp_path / "actual-state"
+    actual_state.mkdir(mode=0o700)
+    (actual_state / "ui-control").mkdir(mode=0o700)
+    state_link = tmp_path / "state-link"
+    state_link.symlink_to(actual_state, target_is_directory=True)
+
+    check = GrokBotDoctor(
+        env={"OMEGA_PRIME_STATE_DIR": str(state_link)}
+    )._check_ui_control()
+
+    assert check.status == "FAIL"
+    assert "symlink" in check.message
+
+
+def test_ui_control_health_does_not_create_missing_store(tmp_path: Path):
+    state = tmp_path / "missing-state"
+
+    check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
+
+    assert check.status == "WARN"
+    assert "RPC-UI asks are unavailable" in check.message
+    assert not state.exists()
+
+
+def test_ui_control_health_checks_existing_store_children(tmp_path: Path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    control = state / "ui-control"
+    control.mkdir(mode=0o700)
+    requests = control / "requests"
+    queue = control / "queue"
+    requests.mkdir(mode=0o700)
+    queue.mkdir(mode=0o700)
+    (requests / "request.json").write_text("{}", encoding="utf-8")
+    (requests / "request.json").chmod(0o644)
+
+    check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
+
+    assert check.status == "FAIL"
+    assert "control record has unsafe type, owner or mode" in check.message
+
+
+def test_ui_control_health_allows_absent_request_and_queue_directories(
+    tmp_path: Path,
+):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    (state / "ui-control").mkdir(mode=0o700)
+
+    check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
+
+    assert check.status == "PASS"
+
+
+@pytest.mark.parametrize(
+    ("unsafe_child", "unsafe_type"),
+    [
+        ("queue", "mode"),
+        ("requests", "mode"),
+        ("queue", "symlink"),
+        ("requests", "symlink"),
+    ],
+)
+def test_ui_control_health_fails_for_unsafe_child_directory(
+    tmp_path: Path, unsafe_child: str, unsafe_type: str
+):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    control = state / "ui-control"
+    control.mkdir(mode=0o700)
+    child = control / unsafe_child
+    child.mkdir(mode=0o700)
+    if unsafe_type == "mode":
+        child.chmod(0o755)
+    else:
+        child.rmdir()
+        target = tmp_path / f"{unsafe_child}-target"
+        target.mkdir(mode=0o700)
+        child.symlink_to(target, target_is_directory=True)
+
+    check = GrokBotDoctor(env={"OMEGA_PRIME_STATE_DIR": str(state)})._check_ui_control()
+
+    assert check.status == "FAIL"
+    assert "unsafe" in check.message or "symlink" in check.message
+
+
+@pytest.mark.parametrize("agent", ["state", "ui-control"])
+def test_ui_control_health_fails_when_agent_folder_overlaps_control(
+    tmp_path: Path, agent: str
+):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    (state / "ui-control").mkdir(mode=0o700)
+    folder = state if agent == "state" else state / "ui-control" / "agent"
+    env = {
+        "OMEGA_PRIME_STATE_DIR": str(state),
+        "OMEGA_PRIME_AGENT_STATE_DIR": str(folder),
+    }
+
+    check = GrokBotDoctor(env=env)._check_ui_control()
+
+    assert check.status == "FAIL"
+    assert "overlaps" in check.message

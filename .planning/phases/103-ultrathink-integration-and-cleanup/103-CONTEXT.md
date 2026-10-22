@@ -1,0 +1,30 @@
+# Phase 103: Ultrathink integration and cleanup — context
+
+## Purpose and evidence boundary
+
+Planning-only context for the frozen five-plan Phase 103 DAG. Durable source research and proposed interfaces are summarized below and in `103-RESEARCH.md`; repository source paths are named directly so this handoff does not depend on session-local artifacts. Re-read source evidence before implementation because line references can move.
+
+The parent reports PR45/stage models in local git history at the initial HEAD; this is evidence of local history only, not runtime behavior, verification, completion of any predecessor phase, or proof of the Phase 102 prerequisite. External `AUDIT.md` G8/G12 and `claude-ultrathink` claims are prompt-supplied, not audited or independently established in this work. Use repository GSD conventions and the exact plan artifact format in this phase's execution plans.
+
+## Requirements and decisions
+
+- **WIRE-07-01 — ship write gate:** Only exact `ULTRATHINK_SHIP` strings `1` and `true` enable shipping. Unset, empty, `0`, and every other value are off. Block `ult_ship_pr`, `ult_ship_review`, and `ult_ship_merge` with stable `ship_disabled` error plus fix hint, before runner invocation, including when approved. For valid arguments, the bridge gate precedes root/config resolution. Status and assess remain usable. Keep every existing approval requirement and tool registration; merge remains independently registry/MCP approval-gated. Never change or infer `autoMerge`. Environment mapping is explicit and authoritative; no implicit `os.environ` fallback in the bridge.
+- **WIRE-07-02 — readiness:** Expose exactly `not_configured`, `root_invalid`, `ready_ship_off`, and `ready_ship_on`. Require `bin/ultrathink`, `bin/ultrathink-mcp`, and `bin/ultrathink-ship` all to be regular files and executable. Preserve setup's bool/None and GrokBotDoctor's JSON shape. Report configured root (or unset), effective ship state, and preferred plan discovery directory; do not claim a plan exists or is fresh. Doctor must not invoke CLIs or read configuration/plan contents. Default-off is healthy.
+- **WIRE-07-03 — operator documentation:** Document exact names `ULTRATHINK_ROOT`, `ULTRATHINK_SHIP`, and `ULTRATHINK_STATE_DIR`, plus current plan-discovery precedence. The Phase 102 env checker is absent from current-HEAD evidence: it is a prerequisite to resolve after Phase 102, not a planning blocker, and must not be invented or reimplemented here. Leave the decisions provider untouched; no live config read is needed.
+- **WIRE-07-04 — optional native/OpenShell checks:** Native-only tests are explicitly marked optional with a reason; preserve Python-only native status test and make present-but-broken artifacts fail rather than skip. OpenShell test wiring selects an actual optional operator-provided build binary through test-only `OPENSHELL_BIN` or falls back to PATH and probes that selected binary. Skip only when absent; a present broken binary fails. Do not build native code, change production sandbox selection, hardcode a build location, or touch live gateway behavior.
+- **WIRE-07-05 — honest milestone handoff:** Keep the stage-models/PR45 plus seven-phase (97–103) milestone mapping. Do not state phases 97–102 complete, Phase 103 implemented, or live verification performed. Preserve `77.1 human_needed`. Phase 102 remains an unverified execution prerequisite.
+
+## Scope and safety
+
+This is planning, not implementation: no source changes or claimed behavior. No config changes, time caps, builds, installs, external CLI invocation, secrets/live settings, network, live gateway, deployment, push, PR, merge, or execution of gates/tests/formatters by workers. Future executor workers skip checks; after each wave the parent runs that wave's focused behavioral checks before advancing, followed by one final full gate pass in wave 4. Plan can be ready while Phase 102 verification blocks implementation. Use `/workspace/omes-bot/.venv/bin/python` with `PYTHONPATH=/workspace/omes-bot-wt/p7` (and put the venv bin directory on `PATH` when invoking tools). No tracker identifiers or Notion URLs were provided.
+
+## Local source facts (not runtime proof)
+
+- `omega_prime/tools/ultrathink.py` currently has context `root/run/timeout`, no ship flag; `omega_prime/mcp_server.py:980-983` injects root only. Registry approval occurs before handler dispatch. `omega_prime/evals/runner.py:249` constructs a fake context without env. Existing shipped eval cases cover `session_mark`, not ship writes.
+- `omega_prime/setup_check.py:146-156` checks only the ship executable. `GrokBotDoctor` has no Ultrathink diagnostic row. `omega_prime/routines/ultrathink_turn.py` has ordered state candidates: `OMEGA_PRIME_STATE_DIR/ultrathink`, `ULTRATHINK_STATE_DIR`, `GROK_PLUGIN_DATA/ultrathink`, `${GROK_HOME:-$HOME/.grok}/plugin-data/ultrathink`, `${HERMES_HOME:-$HOME/.hermes}/ultrathink`, `${XDG_CONFIG_HOME:-$HOME/.config}/muse/ultrathink`, `$PI_CODING_AGENT_DIR/ultrathink` or `$HOME/.omp/agent/ultrathink`, then `$HOME/.claude/ultrathink`. Explicit `state_dirs` replaces default search; first valid stale plan stops search. Preserve those resolver semantics.
+- Native skip handling can conflate missing with unloadable; use existing `extension_path()` to distinguish absence. Mark nine native binding tests, not status; mark four native E2Es. Current OpenShell probe is PATH-only. Phase 103 changes its test wiring only; production sandbox runner stays unchanged.
+- No native build, optional OpenShell binary, usable external checkout, live gateway status, Phase 102 env checker, or external audit has been established. Do not convert absence of evidence into an availability or completion claim.
+
+## Explicit non-goals
+
+No production OpenShell executable-selection feature; no native build; no `/omega-doctor` or `lead_doctor` behavior claim/change; no broad eval opt-in; no approval, timeout, auto-merge, config, or decisions-provider change; no plan-content freshness checks in doctor; no live gateway collection; no invented Phase 102 checker/API; no changes to prompts unless a demonstrated requirement demands them.

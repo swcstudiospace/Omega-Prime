@@ -551,3 +551,22 @@ def test_attach_skips_exited_panes_with_the_same_label(tmp_path, capsys):
     assert _report(capsys)["attach"] == [
         {"id": "gb:00031-c", "pane_id": "w2:p1", "workspace": "00031-c"}
     ]
+
+
+def test_attach_refuses_a_workspace_label_shared_by_two_tasks(tmp_path, capsys):
+    """Greptile: gb:build and tasks:build share the label "build"; an orphan
+    "build" pane is ambiguous and must not be saved on either row."""
+    path = tmp_path / "tasks.json"
+    _seed(path, [_row("gb:build"), _row("tasks:build")])
+    payload = {"panes": [{"pane_id": "w3:p1", "workspace": "build"}]}
+    code = main(
+        ["--tasks", str(path), "--apply", "--force"],
+        runner=_runner(list_payload=payload),
+        pid_alive=_alive,
+        clock=lambda: NOW,
+    )
+    assert code == 0
+    assert _report(capsys)["attach"] == []
+    rows = _rows(path)
+    assert rows["gb:build"].get("herdr_pane") is None
+    assert rows["tasks:build"].get("herdr_pane") is None

@@ -463,9 +463,27 @@ def create_app(
             )
         started = [False]
 
+        def current_pane() -> str | None:
+            # Re-resolved from the latest snapshot every cycle: a relaunch
+            # replaces herdr_pane, and the open panel must follow it rather
+            # than keep showing the previous run's pane as live.
+            latest = poller.snapshot() or _empty_snapshot()
+            row = next(
+                (
+                    item
+                    for group in ("active", "idle_sessions", "finished")
+                    for item in latest.get(group, [])
+                    if isinstance(item, dict) and item.get("id") == task_id
+                ),
+                None,
+            )
+            return resolve_task_pane(row) if row is not None else None
+
         async def events() -> AsyncIterator[str]:
             started[0] = True
-            async for event in terminal_backend.stream(pane, reserved=True):
+            async for event in terminal_backend.stream(
+                pane, reserved=True, resolve=current_pane
+            ):
                 yield event
 
         return _SSEResponse(
