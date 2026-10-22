@@ -40,6 +40,7 @@ from omega_prime.tools.prime_runtime import KERNEL_TOOL_NAMES
 from omega_prime.tools.quality import QUALITY_TOOL_NAMES
 from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
 from omega_prime.tools.rlm import RLM_TOOL_NAMES
+from omega_prime.tools.sandbox_control import SANDBOX_TOOL_NAMES
 from omega_prime.tools.substrate_tools import SUBSTRATE_TOOL_NAMES
 from omega_prime.tools.systems import SYS_TOOL_NAMES
 from omega_prime.tools.telegram import TELEGRAM_TOOL_NAMES
@@ -79,6 +80,7 @@ FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Learning", LEARNING_TOOL_NAMES),
     ("Durable", DURABLE_TOOL_NAMES),
     ("Engine", (*CAPACITY_TOOL_NAMES, *DISPATCH_TOOL_NAMES)),
+    ("Sandbox", SANDBOX_TOOL_NAMES),
     ("RLM", RLM_TOOL_NAMES),
     ("Harness", HARNESS_TOOL_NAMES),
     ("Goals", GOAL_TOOL_NAMES),

@@ -82,6 +82,7 @@ def run(probe: ReadinessProbe) -> None:
     _negatives(probe)
     _capacity(probe)
     _dispatch_lane(probe)
+    _sandbox_control(probe)
 
 
 def _result(probe: ReadinessProbe, name: str, arguments: dict[str, Any]) -> Any:
@@ -171,6 +172,48 @@ def _dispatch_lane(probe: ReadinessProbe) -> None:
         ("omega_dispatch", "omega_jobs_status", "omega_jobs_cancel"),
         "omega_dispatch rejected the confirm token; job status and cancel "
         "reported the fleet coordinator unset; no coordinator HTTP call",
+    )
+
+
+def _sandbox_control(probe: ReadinessProbe) -> None:
+    """Exercise the Sandbox family without OpenShell or Podman.
+
+    The isolated child has no OpenShell CLI under its HOME and no approvals
+    for the sandbox mutations, so the reads fail closed with a structured
+    ``binary_missing`` and the mutations stop at the approval gate. Nothing
+    is created, executed or deleted.
+    """
+    listed = _refused(probe, "sandbox_list", {})
+    probe.check(
+        listed.get("error") == "binary_missing",
+        f"sandbox_list must report the OpenShell CLI missing, got {listed}",
+    )
+    status = _refused(probe, "sandbox_status", {"name": "ompsbx-readiness-000000"})
+    probe.check(
+        status.get("error") == "binary_missing",
+        f"sandbox_status must report the OpenShell CLI missing, got {status}",
+    )
+    for name, arguments in (
+        ("sandbox_create", {"slug": "readiness"}),
+        ("sandbox_exec", {"name": "ompsbx-readiness-000000", "argv": ["true"]}),
+        ("sandbox_down", {"name": "ompsbx-readiness-000000"}),
+    ):
+        refused = _refused(probe, name, arguments)
+        probe.check(
+            refused.get("error") == "approval required",
+            f"{name} must stop at the approval gate, got {refused}",
+        )
+    probe.record(
+        "sandbox:fail-closed",
+        (
+            "sandbox_create",
+            "sandbox_exec",
+            "sandbox_down",
+            "sandbox_status",
+            "sandbox_list",
+        ),
+        "sandbox_list and sandbox_status reported the OpenShell CLI missing; "
+        "create, exec and down stopped at the approval gate; nothing created",
     )
 
 

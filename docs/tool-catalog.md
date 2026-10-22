@@ -1003,6 +1003,46 @@ Read coding-fleet job status. Pass job_id to poll one job and its events. Omit i
 
 Cancel one coding-fleet job (POST /jobs/:id/cancel). Requires approval. Does not call a model HTTP API.
 
+## sandbox_create
+
+- Family: Sandbox
+- Approval: required
+- Required params: slug
+
+Create an OpenShell sandbox (Podman driver) named ompsbx-<slug>-<hex> from the omp-sandbox image and policy, wait for Ready, and evaluate the readiness gate (container, broker relay, tools, skills). Fails closed when the gateway is not Connected or the policy is missing. Never starts the gateway or builds an image. Requires approval.
+
+## sandbox_exec
+
+- Family: Sandbox
+- Approval: required
+- Required params: name, argv
+
+Run one argv (no shell string) in an ompsbx-* sandbox. The cwd must be under /sandbox. Secret-shaped env names are refused. Output tails are bounded and redacted. report_exit=true marks this as the task's agent process: a non-zero exit blocks the owning task. Requires approval.
+
+## sandbox_down
+
+- Family: Sandbox
+- Approval: required
+- Required params: name
+
+Delete an ompsbx-* sandbox and verify no containers, volumes or list rows remain. Emits the removed lifecycle event. Requires approval.
+
+## sandbox_status
+
+- Family: Sandbox
+- Approval: not required
+- Required params: name
+
+Read one OpenShell sandbox: phase, Ready condition, exit code, owner and owning task. Read-only.
+
+## sandbox_list
+
+- Family: Sandbox
+- Approval: not required
+- Required params: none
+
+List OpenShell sandboxes on this gateway with phase and whether these tools own them (ompsbx-*). Read-only.
+
 ## rlm_spawn
 
 - Family: RLM
