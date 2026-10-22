@@ -130,6 +130,8 @@ def needs_full_snapshot(
     now_active = _row_map(current.get("active"))
     now_waiting = _row_map(current.get("waiting_on_ove"))
     now_finished = _row_map(current.get("finished"), first_wins=True)
+    # The client drops a task_finished id from Idle as well as Active.
+    now_idle = _row_map(current.get("idle_sessions"))
     for row_id in prev_active:
         if row_id in now_active:
             continue
@@ -143,8 +145,9 @@ def needs_full_snapshot(
     for row_id in now_finished:
         # task_finished drops the active row client-side; a row that newly
         # finishes while an active row with the same id is still served
-        # (the bridge lets both coexist) would vanish from the live view.
-        if row_id not in prev_finished and row_id in now_active:
+        # (the bridge lets both coexist), or an idle pane row with that id,
+        # would vanish from the live view.
+        if row_id not in prev_finished and (row_id in now_active or row_id in now_idle):
             return True
     for row_id, item in prev_waiting.items():
         if row_id in now_waiting and now_waiting[row_id] != item:

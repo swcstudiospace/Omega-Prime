@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import types
+import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -29,10 +31,54 @@ class _FleetEndpointPolicy:
         return bool(self._host) and host == self._host
 
 
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: it would carry the bearer token to a new URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        raise urllib.error.HTTPError(
+            req.full_url, code, "redirect refused", headers, fp
+        )
+
+
+_OPENER = urllib.request.build_opener(_RefuseRedirect)
+
+
 def _request(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
-    with urllib.request.urlopen(request, timeout=10.0) as response:
+    with _OPENER.open(request, timeout=10.0) as response:
         return response.status, response.read(1_000_000)
+
+
+def _loopback(hostname: str) -> bool:
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _coordinator_base(raw: str) -> str | None:
+    """The coordinator URL if credentials may travel to it, else None.
+
+    Mirrors ``omega_prime.engine.fleet_client``: HTTPS anywhere, plain HTTP
+    only on loopback, and never embedded userinfo, query or fragment.
+    """
+    try:
+        parts = urlsplit(raw)
+        hostname = parts.hostname or ""
+        parts.port  # noqa: B018 - raises ValueError on a malformed port
+    except ValueError:
+        return None
+    if parts.scheme not in {"http", "https"} or not hostname:
+        return None
+    if parts.username or parts.password or "@" in parts.netloc:
+        return None
+    if parts.query or parts.fragment:
+        return None
+    if parts.scheme == "http" and not _loopback(hostname):
+        return None
+    return raw
 
 
 def make_fleet_collector(
@@ -72,9 +118,19 @@ def make_fleet_collector(
             return SourceResult(
                 "fleet", "unavailable", error="fleet coordinator not configured"
             )
-        base = (
-            values.get("FLEET_COORDINATOR_URL") or values.get("COORDINATOR_URL") or ""
-        ).rstrip("/")
+        configured = (
+            (values.get("FLEET_COORDINATOR_URL") or values.get("COORDINATOR_URL") or "")
+            .strip()
+            .rstrip("/")
+        )
+        base = _coordinator_base(configured) if configured else None
+        if configured and base is None:
+            return SourceResult(
+                "fleet",
+                "unavailable",
+                error="fleet coordinator URL refused (HTTPS required off loopback)",
+            )
+        base = base or ""
         try:
             host = urlsplit(base).hostname or ""
             provider = types.SimpleNamespace(

@@ -112,9 +112,12 @@ def next_task_id(*, path: Path) -> int:
 def allocate_task_id(
     *, path: Path, identity: str, title: str, now: datetime
 ) -> dict[str, Any]:
+    # A stored bridge id ("abc") and its canonical form ("tasks:abc") are one
+    # task: canonicalize first so the backfilled record is reused, not doubled.
+    canonical = _canonical_identity(identity) if isinstance(identity, str) else identity
     with locked_tasks(path, write=True) as data:
         _backfill(data)
-        record = _record(data, identity, title)
+        record = _record(data, canonical, title)
         _write_locked(data, path)
         return {
             "seq": record["seq"],

@@ -639,6 +639,15 @@ def test_changes_outside_the_delta_types_need_a_full_snapshot(mutate):
     assert needs_full_snapshot(before, after) is True
 
 
+def test_finishing_an_id_still_shown_in_idle_needs_a_full_snapshot():
+    """task_finished removes the id client-side, idle row included."""
+    before = _snapshot()
+    before["idle_sessions"] = [_task("herdr:p1")]
+    after = json.loads(json.dumps(before))
+    after["finished"] = [_task("herdr:p1")]
+    assert needs_full_snapshot(before, after) is True
+
+
 def test_source_timing_noise_alone_is_not_a_change():
     before = _snapshot()
     before["sources"] = {"github": {"status": "ok", "took_ms": 1.0}}

@@ -35,6 +35,7 @@ from omega_prime.dashboard.github_data import (
     ci_state,
     merge_row,
     repository_row,
+    status_rows,
 )
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.redact import redact_value
@@ -52,6 +53,11 @@ TARGETS = (
 
 _SAFE_REPO = re.compile(r"^swcstudiospace/[A-Za-z0-9_.-]{1,100}$")
 _SAFE_REF = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+# Branch names may hold "/" and "." (release/2026.10, main.v2); requests
+# URL-encode them. Path traversal and git-invalid shapes stay refused.
+_SAFE_BRANCH = re.compile(
+    r"^(?!/|-|.*//|.*\.\.|.*/$|.*\.$|.*\.lock$)[A-Za-z0-9._/-]{1,200}$"
+)
 
 MAX_RESPONSE_BYTES = 1_000_000
 
@@ -247,7 +253,20 @@ def make_github_collector(
                     truncated["ci_cd"] = True
                     failed_ci_repos.add(owner)
                     partial["ci_cd"], reason["ci_cd"] = True, "partial"
-            return check_rows({"check_runs": runs}, sha)
+            # Commit statuses are a separate API; green check runs alone never
+            # prove CI passed while a status context is failing or pending.
+            combined = get(
+                base
+                + "/commits/"
+                + quote(sha, safe="")
+                + "/status?"
+                + urlencode({"per_page": PAGE_SIZE})
+            )
+            statuses = status_rows(combined, sha)
+            total = combined.get("total_count") if isinstance(combined, dict) else None
+            if isinstance(total, int) and total > len(statuses):
+                mark_ci_truncated(owner)
+            return check_rows({"check_runs": runs}, sha) + statuses
 
         def associated_merged_pr(
             base: str, full_name: str, branch: str, sha: str
@@ -299,7 +318,9 @@ def make_github_collector(
                     base_name
                 ):
                     raise ValueError("payload")
-                if not isinstance(base_ref, str) or not _SAFE_REF.fullmatch(base_ref):
+                if not isinstance(base_ref, str) or not _SAFE_BRANCH.fullmatch(
+                    base_ref
+                ):
                     raise ValueError("payload")
                 if not isinstance(head_sha, str) or not _SAFE_REF.fullmatch(head_sha):
                     raise ValueError("payload")
@@ -445,7 +466,7 @@ def make_github_collector(
             )
             latest: dict[str, Any] | None = None
             branch = repo_data.get("default_branch")
-            if isinstance(branch, str) and _SAFE_REF.fullmatch(branch):
+            if isinstance(branch, str) and _SAFE_BRANCH.fullmatch(branch):
                 try:
                     ref = get(base + "/commits/" + quote(branch, safe=""))
                     sha = ref.get("sha") if isinstance(ref, dict) else None
@@ -772,14 +793,23 @@ def make_github_collector(
                 ]
         if partial["ci_cd"] and isinstance(previous_cc, dict):
             old_rows = previous_cc.get("ci_cd", [])
+            # pr_gate and its waiting requests read SourceResult.items, so the
+            # same cached evidence is restored there as in command_center.
+            old_items = list(previous_result.items) if previous_result else []
             if failed_ci_repos:
                 cc["ci_cd"] = [
                     item
                     for item in cc["ci_cd"]
                     if item.get("repo") not in failed_ci_repos
                 ] + [item for item in old_rows if item.get("repo") in failed_ci_repos]
+                legacy_items = [
+                    item
+                    for item in legacy_items
+                    if item.get("repo") not in failed_ci_repos
+                ] + [item for item in old_items if item.get("repo") in failed_ci_repos]
             else:
                 cc["ci_cd"] = old_rows
+                legacy_items = old_items
         if partial["recent_merges"] and isinstance(previous_cc, dict):
             old_merges = previous_cc.get("recent_merges", [])
             if failed_merge_repos:
@@ -850,6 +880,8 @@ def _greptile(
             "matches_head": None,
         }
 
+    incomplete = [False]
+
     def read_records(endpoint: str) -> list[Any]:
         records: list[Any] = []
         for page in range(1, MAX_PAGES + 1):
@@ -862,6 +894,7 @@ def _greptile(
             if len(data) < PAGE_SIZE:
                 break
             if len(data) == PAGE_SIZE and page == MAX_PAGES:
+                incomplete[0] = True
                 on_truncate()
         return records
 
@@ -870,6 +903,10 @@ def _greptile(
         reviews = read_records(f"/pulls/{number}/reviews")
     except Exception as exc:
         on_error(exc)
+        return None
+    if incomplete[0]:
+        # A newer review may sit past the page window, so no score read from
+        # this partial history may approve a merge.
         return None
     candidates = []
     if isinstance(reviews, list):

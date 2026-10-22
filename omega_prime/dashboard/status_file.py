@@ -144,6 +144,19 @@ def _pane(value: Any, prefix: str) -> dict[str, str] | None:
     return result
 
 
+_WIRING_KEYS = ("phase", "branch", "head_sha", "stage", "repo", "worktree")
+
+
+def _task_wiring(value: Any, prefix: str) -> dict[str, str | None] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - set(_WIRING_KEYS):
+        raise ValueError(f"{prefix}.wiring must be a wiring mapping")
+    return {
+        key: _optional_string(value, key, f"{prefix}.wiring") for key in _WIRING_KEYS
+    }
+
+
 def _canonical_identity(identity: str) -> str:
     return identity if ":" in identity else f"tasks:{identity}"
 
@@ -177,6 +190,9 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
                     "kind": _string(owner, "kind", f"{prefix}.owner"),
                     "ref": _string(owner, "ref", f"{prefix}.owner"),
                 }
+                label = _optional_string(owner, "label", f"{prefix}.owner")
+                if label is not None:
+                    item["owner"]["label"] = label
                 state = _string(row, "state", prefix)
                 if state not in _STATES:
                     raise ValueError(f"{prefix}.state is invalid")
@@ -194,6 +210,15 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
                 )
                 item["pid"] = _optional_pid(row, "pid", prefix)
                 item["stale"] = _optional_stale(row.get("stale"), prefix)
+                # Fields the task model renders; kept only when the writer
+                # supplied them so older files round-trip unchanged.
+                for key in ("model", "summary"):
+                    value = _optional_string(row, key, prefix)
+                    if value is not None:
+                        item[key] = value
+                wiring = _task_wiring(row.get("wiring"), prefix)
+                if wiring is not None:
+                    item["wiring"] = wiring
             elif category == "waiting_on_ove":
                 item["since"] = _optional_string(row, "since", prefix)
                 item["blocks"] = _string(row, "blocks", prefix)

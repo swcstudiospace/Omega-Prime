@@ -6,12 +6,12 @@ import { SourceHealth } from '../components/SourceHealth'
 import { ViewState } from '../components/ViewState'
 import { BlurFade } from '../components/BlurFade'
 import { AnimatedShinyText } from '../components/AnimatedShinyText'
-import { githubFreshness, idleTasks, observedActivity, workingTasks } from '../lib/selectors'
+import { githubFreshness, idleTasks, observedActivity, waitingRows, workingTasks } from '../lib/selectors'
 import { formatSydney } from '../lib/time'
 import { taskHref } from '../lib/routes'
 export function Overview({ snapshot, loading, error, receivedAt, refresh }: DashboardState & { snapshot: Snapshot }) {
   const [idleOpen, setIdleOpen] = useState(false)
-  const active = workingTasks(snapshot), waiting = snapshot.waiting_on_ove ?? [], prs = snapshot.pr_gate ?? [], finished = snapshot.finished ?? [], idle = idleTasks(snapshot)
+  const active = workingTasks(snapshot), waiting = waitingRows(snapshot).map(row => row.item), prs = snapshot.pr_gate ?? [], finished = snapshot.finished ?? [], idle = idleTasks(snapshot)
   const cards = [{ label: 'Active work', value: active.length, note: 'Non-terminal runner tasks', icon: '◈', bucket: 'working' as const }, { label: 'Waiting on Ove', value: waiting.length, note: 'Recorded requests', icon: '⌁', bucket: 'waiting' as const }, { label: 'PR gate', value: prs.length, note: 'Open merge checks', icon: '⇄', bucket: 'pr-gate' as const }, { label: 'Finished', value: new Set(finished.map(item => item.id)).size, note: 'Unique task identities', icon: '✓', bucket: 'finished' as const }]
   const activity = observedActivity(snapshot)
   const merges = snapshot.sources?.github?.command_center?.recent_merges ?? []

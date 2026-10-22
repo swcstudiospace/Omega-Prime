@@ -281,16 +281,22 @@ def normalize_tasks(
     finished: list[FinishedItem] = []
     sessions = _items(sources, "omp_session")
     pane_rows = _items(sources, "herdr_pane")
-    procs = _items(sources, "omp_proc")
-    matched_cwds = (
-        {item.get("cwd") for item in pane_rows if isinstance(item.get("cwd"), str)}
-        | {item.get("cwd") for item in sessions if isinstance(item.get("cwd"), str)}
-        | {
-            item.get("worktree")
-            for item in _items(sources, "wiring")
-            if isinstance(item.get("worktree"), str)
-        }
+    # Daemons (auth broker, gateway, Herdr server) are not agent work.
+    procs = [p for p in _items(sources, "omp_proc") if p.get("role") != "service"]
+    # Absence of a process only proves a session ended after a scan that
+    # actually ran; a failed or timed-out scan says nothing either way.
+    procs_known = bool(procs) or any(
+        (scan := sources.get(name)) is not None and scan.status in {"ok", "empty"}
+        for name in ("procs", "omp_procs", "omp_proc")
     )
+    # Checkouts already shown by a live row. Finished sessions do not claim
+    # their checkout, so a new process started there still appears.
+    live_cwds: set[str] = set()
+
+    def claim(cwd: Any) -> None:
+        if isinstance(cwd, str):
+            live_cwds.add(cwd)
+
     claimed: set[int] = set()
 
     def proc_detail(cwd: Any) -> list[str]:
@@ -350,6 +356,8 @@ def normalize_tasks(
             "; ".join(detail) or None,
         )
         live_agent = pane.get("has_live_agent")
+        if live_agent is not False and not s.get("stop_reason"):
+            claim(pane.get("cwd"))
         if (
             state in {"unknown", "quiet"}
             or bool(s.get("stop_reason"))
@@ -389,13 +397,15 @@ def normalize_tasks(
             continue
         state = "working" if age * 60 < quiet_minutes else "quiet"
         if (
-            state == "working"
+            procs_known
+            and state == "working"
             and s.get("cwd") is not None
             and not any(p.get("cwd") == s.get("cwd") for p in procs)
         ):
             state = "stopped?"
         if (
-            state == "quiet"
+            procs_known
+            and state == "quiet"
             and isinstance(s.get("cwd"), str)
             and not live(s.get("cwd"))
         ):
@@ -410,6 +420,7 @@ def normalize_tasks(
             detail.append(
                 f"tokens in/out {usage.get('input', 0)}/{usage.get('output', 0)}"
             )
+        claim(s.get("cwd"))
         active.append(
             Task(
                 f"omp:{sid}",
@@ -430,6 +441,8 @@ def normalize_tasks(
         if not isinstance(phase, str):
             continue
         stamp = item.get("last_log_ts")
+        if item.get("stage") != "done":
+            claim(item.get("worktree"))
         if item.get("stage") == "done":
             finished.append(
                 FinishedItem(
@@ -607,7 +620,7 @@ def normalize_tasks(
 
     for item in procs:
         pid, cwd = item.get("pid"), item.get("cwd")
-        if not isinstance(pid, int) or not isinstance(cwd, str) or cwd in matched_cwds:
+        if not isinstance(pid, int) or not isinstance(cwd, str) or cwd in live_cwds:
             continue
         elapsed_s = item.get("elapsed_s")
         measured = _anchor(item.get("elapsed_measured_at"))
@@ -647,7 +660,7 @@ def normalize_tasks(
             ci,
             gt,
             "Greptile 5/5 + green CI, merge commit"
-            if repo == "swcstudiospace/omes-bot"
+            if repo.lower() in {"swcstudiospace/omega-prime", "swcstudiospace/omes-bot"}
             else "needs Ove's yes",
             item.get("updated_at"),
         )
@@ -805,9 +818,15 @@ def normalize_tasks(
     waiting_list.sort(
         key=lambda x: (x.since is not None, x.since or "", x.id), reverse=True
     )
-    finished.sort(key=lambda x: (x.finished_at is None, x.finished_at or "", x.id))
-    finished.reverse()
-    finished = finished[:50]
+    # Newest dated results first; undated ones last so they never crowd out
+    # recent completions before the cap.
+    dated = sorted(
+        (x for x in finished if x.finished_at),
+        key=lambda x: (str(x.finished_at), x.id),
+        reverse=True,
+    )
+    undated = sorted((x for x in finished if not x.finished_at), key=lambda x: x.id)
+    finished = (dated + undated)[:50]
     idle_sessions.sort(key=lambda t: t.id)
     return Snapshot(
         active=active,

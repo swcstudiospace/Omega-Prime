@@ -14,6 +14,35 @@ from typing import Any
 from omega_prime.dashboard.model import SourceResult
 
 _PID = re.compile(r"[0-9]+\Z")
+# procfs truncates comm to 15 bytes, so "openshell-gateway" reads back short.
+_AGENT_COMM = "omp"
+_SERVICE_COMMS = {"omp", "herdr", "openshell-gatew", "openshell-gateway"}
+_DEAD_STATES = {"Z", "X", "x"}
+
+
+def _service(comm: str, cmdline: bytes) -> str | None:
+    """Name a long-lived daemon, or None for an agent run.
+
+    Daemons share an agent's binary or worktree, so counting them as agents
+    would show a permanent "omp process N" task with no work behind it.
+    """
+    args = [part.decode("utf-8", errors="replace") for part in cmdline.split(b"\0")]
+    names = [Path(arg).name for arg in args if arg]
+    if comm.startswith("openshell-gatew") or "openshell-gateway" in names:
+        return "openshell-gateway"
+    if comm == "herdr" and "server" in names:
+        return "herdr server"
+    if comm == _AGENT_COMM and "auth-broker" in names:
+        return "omp auth-broker"
+    return None
+
+
+def _stat_fields(entry: Path) -> list[str]:
+    stat = (entry / "stat").read_text(encoding="utf-8").strip()
+    closing = stat.rfind(")")
+    if closing < 0:
+        raise ValueError("invalid stat")
+    return stat[closing + 1 :].split()
 
 
 def _boot_time() -> float:
@@ -60,7 +89,9 @@ def make_procs_collector(
             )
         now = (now_fn or (lambda: datetime.now(UTC)))().timestamp()
         items: list[dict[str, Any]] = []
+        services: list[dict[str, Any]] = []
         skipped = 0
+        exited = 0
         try:
             entries = list(proc_root.iterdir())
         except OSError:
@@ -71,38 +102,67 @@ def make_procs_collector(
             if not _PID.fullmatch(entry.name) or not entry.is_dir():
                 continue
             try:
-                if (entry / "comm").read_text(encoding="utf-8").strip() != "omp":
+                comm = (entry / "comm").read_text(encoding="utf-8").strip()
+                if comm not in _SERVICE_COMMS:
                     continue
-                stat = (entry / "stat").read_text(encoding="utf-8").strip()
-                closing = stat.rfind(")")
-                if closing < 0:
-                    raise ValueError("invalid stat")
-                fields = stat[closing + 1 :].split()
+                fields = _stat_fields(entry)
+                if fields[0] in _DEAD_STATES:
+                    exited += 1
+                    continue
                 starttime = int(fields[19])
+                cmdline = (entry / "cmdline").read_bytes()
+                if not cmdline:
+                    # Only zombies and kernel threads have an empty cmdline.
+                    exited += 1
+                    continue
+                service = _service(comm, cmdline)
+                if service is None and comm != _AGENT_COMM:
+                    continue
                 cwd: str | None
                 try:
                     cwd = os.readlink(entry / "cwd")
                 except OSError:
                     cwd = None
-                mode = _mode((entry / "cmdline").read_bytes())
+                # Re-read stat last: a pid that exited (or was reused) during
+                # the scan is dropped instead of reported as live work.
+                try:
+                    again = _stat_fields(entry)
+                except OSError:
+                    exited += 1
+                    continue
+                if again[0] in _DEAD_STATES or int(again[19]) != starttime:
+                    exited += 1
+                    continue
                 elapsed = max(0.0, now - (boot + starttime / clock_ticks))
-                items.append(
-                    {
-                        "kind": "omp_proc",
-                        "pid": int(entry.name),
-                        "elapsed_s": elapsed,
-                        "elapsed_measured_at": datetime.fromtimestamp(
-                            now, tz=UTC
-                        ).isoformat(),
-                        "cwd": cwd,
-                        "mode": mode,
-                    }
-                )
+                row = {
+                    "kind": "omp_proc",
+                    "pid": int(entry.name),
+                    "elapsed_s": elapsed,
+                    "elapsed_measured_at": datetime.fromtimestamp(
+                        now, tz=UTC
+                    ).isoformat(),
+                    "cwd": cwd,
+                }
+                if service is not None:
+                    services.append(
+                        {
+                            **row,
+                            "kind": "service_proc",
+                            "role": "service",
+                            "name": service,
+                        }
+                    )
+                    continue
+                items.append({**row, "role": "agent", "mode": _mode(cmdline)})
             except (OSError, ValueError, IndexError, UnicodeError):
                 skipped += 1
         items.sort(key=lambda item: item["pid"])
+        services.sort(key=lambda item: item["pid"])
         return SourceResult(
-            "omp_procs", "ok" if items else "empty", items, extra={"skipped": skipped}
+            "omp_procs",
+            "ok" if items else "empty",
+            items,
+            extra={"skipped": skipped, "exited": exited, "services": services},
         )
 
     return collect

@@ -22,10 +22,20 @@ export function selectedTask(snapshot: Snapshot, key: string | null): Task | Wai
 }
 export function rawTaskId(key: string): string { return key.startsWith('task:') || key.startsWith('wait:') ? key.slice(key.indexOf(':') + 1) : key }
 export type BucketRow = TaskSelection | { key: string; item: PrRow }
-export function workingTasks(snapshot: Snapshot): Task[] { return (snapshot.active ?? []).filter(item => !['done', 'failed', 'complete', 'finished'].includes(item.state.toLowerCase())) }
+// A bridge task in waiting_on_ove stays in `active` on the server but is
+// waiting on Ove, not working: it belongs to the Waiting bucket.
+export function isAwaitingOve(item: Task): boolean { return item.state.toLowerCase() === 'waiting_on_ove' }
+export function workingTasks(snapshot: Snapshot): Task[] { return (snapshot.active ?? []).filter(item => !isAwaitingOve(item) && !['done', 'failed', 'complete', 'finished'].includes(item.state.toLowerCase())) }
+export function waitingRows(snapshot: Snapshot): Array<{ key: string; item: Task | WaitingItem }> {
+  const asks = snapshot.waiting_on_ove ?? []
+  const askIds = new Set(asks.map(item => item.id))
+  const rows: Array<{ key: string; item: Task | WaitingItem }> = asks.map(item => ({ key: `wait:${item.id}`, item }))
+  for (const item of snapshot.active ?? []) if (isAwaitingOve(item) && !askIds.has(item.id)) rows.push({ key: `task:${item.id}`, item })
+  return rows
+}
 export function idleTasks(snapshot: Snapshot): Task[] { return snapshot.idle_sessions ?? [] }
 export function bucketRows(snapshot: Snapshot, bucket: 'all' | 'waiting' | 'working' | 'pr-gate' | 'finished'): BucketRow[] {
-  if (bucket === 'waiting') return (snapshot.waiting_on_ove ?? []).map(item => ({ key: `wait:${item.id}`, item }))
+  if (bucket === 'waiting') return waitingRows(snapshot)
   if (bucket === 'working') return workingTasks(snapshot).map(item => ({ key: `task:${item.id}`, item }))
   if (bucket === 'pr-gate') return (snapshot.pr_gate ?? []).map(item => ({ key: `pr:${item.id}`, item }))
   if (bucket === 'finished') {
@@ -48,7 +58,10 @@ export function taskPrRows(snapshot: Snapshot, task: Task | WaitingItem | Finish
   if (explicit.length) return explicit
   const wiring = 'wiring' in task ? task.wiring : null
   if (!wiring?.branch) return []
-  const matches = rows.filter(row => row.kind === 'pull_request' && row.branch === wiring.branch && (!wiring.repo || row.repo?.toLowerCase() === wiring.repo.toLowerCase()))
+  // Branch names repeat across repositories: without a known repository a
+  // branch match is not evidence, so only an explicit link can claim a PR.
+  if (!wiring.repo) return []
+  const matches = rows.filter(row => row.kind === 'pull_request' && row.branch === wiring.branch && row.repo?.toLowerCase() === wiring.repo!.toLowerCase())
   return matches.length === 1 ? matches : []
 }
 export function tasksForPr(snapshot: Snapshot, pr: PrRow): TaskSelection[] {

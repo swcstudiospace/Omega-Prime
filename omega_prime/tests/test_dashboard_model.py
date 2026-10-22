@@ -94,7 +94,9 @@ def test_session_quiet_stopped_and_exit_paths() -> None:
                     "last_ts": NOW.isoformat(),
                 },
             ],
-        )
+        ),
+        # The process scan ran and found nothing in /missing.
+        "procs": source("procs", []),
     }
     snap = normalize_tasks(src, now=NOW)
     # Unmatched OMP sessions keep their existing Active/Finished classification.
@@ -104,6 +106,109 @@ def test_session_quiet_stopped_and_exit_paths() -> None:
     }
     assert {(x.id, x.result) for x in snap.finished} == {("omp:exit", "stopped")}
     assert snap.idle_sessions == []
+
+
+def _quiet_and_working_sessions() -> SourceResult:
+    return source(
+        "omp_session",
+        [
+            {
+                "session_path": "/s/quiet",
+                "session_id": "quiet",
+                "cwd": "/w/quiet",
+                "last_ts": (NOW - timedelta(minutes=20)).isoformat(),
+            },
+            {
+                "session_path": "/s/busy",
+                "session_id": "busy",
+                "cwd": "/w/busy",
+                "last_ts": NOW.isoformat(),
+            },
+        ],
+    )
+
+
+def test_failed_process_scan_never_infers_stopped_work() -> None:
+    for scan in (
+        SourceResult("procs", "unavailable", error="processes unavailable"),
+        SourceResult("procs", "error", error="timeout after 5s"),
+        None,
+    ):
+        src = {"omp_session": _quiet_and_working_sessions()}
+        if scan is not None:
+            src["procs"] = scan
+        snap = normalize_tasks(src, now=NOW)
+        assert {x.id: x.state for x in snap.active} == {
+            "omp:busy": "working",
+            "omp:quiet": "quiet",
+        }
+        assert snap.finished == []
+    ran = normalize_tasks(
+        {"omp_session": _quiet_and_working_sessions(), "procs": source("procs", [])},
+        now=NOW,
+    )
+    assert {x.id: x.state for x in ran.active} == {"omp:busy": "stopped?"}
+    assert [(x.id, x.result) for x in ran.finished] == [("omp:quiet", "stopped")]
+
+
+def test_new_process_in_a_finished_sessions_checkout_stays_visible() -> None:
+    proc = {"kind": "omp_proc", "pid": 77, "cwd": "/w/repo", "role": "agent"}
+    src = {
+        "omp_session": source(
+            "omp_session",
+            [
+                {
+                    "session_path": "/s/done",
+                    "session_id": "done",
+                    "cwd": "/w/repo",
+                    "stop_reason": "end_turn",
+                    "last_ts": NOW.isoformat(),
+                }
+            ],
+        ),
+        "procs": source("procs", [proc]),
+        "omp_proc": source("omp_proc", [proc]),
+    }
+    snap = normalize_tasks(src, now=NOW)
+    assert [x.id for x in snap.active] == ["proc:77"]
+    assert [x.id for x in snap.finished] == ["omp:done"]
+
+
+def test_service_daemons_are_never_agent_tasks() -> None:
+    daemon = {"kind": "omp_proc", "pid": 5, "cwd": "/w/sandbox", "role": "service"}
+    snap = normalize_tasks(
+        {"procs": source("procs", [daemon]), "omp_proc": source("omp_proc", [daemon])},
+        now=NOW,
+    )
+    assert snap.active == []
+
+
+def test_undated_finished_rows_never_crowd_out_recent_results() -> None:
+    finished = [{"id": f"u{i}", "title": "undated"} for i in range(60)] + [
+        {"id": "old", "title": "old", "finished_at": "2026-10-19T00:00:00+00:00"},
+        {"id": "new", "title": "new", "finished_at": "2026-10-20T00:00:00+00:00"},
+    ]
+    tasks = SourceResult("tasks_json", "ok", extra={"finished": finished})
+    snap = normalize_tasks({"tasks_json": tasks}, now=NOW)
+    assert [x.id for x in snap.finished[:3]] == ["tasks:new", "tasks:old", "tasks:u0"]
+    assert len(snap.finished) == 50
+
+
+def test_omega_prime_prs_carry_the_autonomous_merge_rule() -> None:
+    pr = {
+        "repo": "swcstudiospace/Omega-Prime",
+        "number": 58,
+        "title": "t",
+        "ci": "pass",
+        "greptile": "5/5",
+    }
+    other = {**pr, "repo": "swcstudiospace/other", "number": 1}
+    snap = normalize_tasks({"github_pr": source("github_pr", [pr, other])}, now=NOW)
+    rules = {p.repo: p.merge_rule for p in snap.pr_gate}
+    assert (
+        rules["swcstudiospace/Omega-Prime"] == "Greptile 5/5 + green CI, merge commit"
+    )
+    assert rules["swcstudiospace/other"] == "needs Ove's yes"
 
 
 def test_wiring_join_done_and_waiting_derivation() -> None:

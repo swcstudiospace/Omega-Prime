@@ -141,6 +141,24 @@ describe('TerminalPanel', () => {
     expect(screen.getByText('Terminal output cannot be read on this host. Other task details remain available.')).toBeInTheDocument()
     view.unmount()
   })
+  it('keeps retrying a temporarily unavailable read-only stream', async () => {
+    vi.stubGlobal('WebSocket', undefined)
+    vi.stubGlobal('EventSource', FakeEventSource)
+    stubSession(null, true)
+    const view = render(<TerminalPanel taskId="flaky" />)
+    await flush()
+    const first = FakeEventSource.instances.at(-1)!
+    first.emit({ status: 'unavailable', text: '', updated_at: null })
+    expect(first.closed).toBe(false)
+    first.emit({ status: 'live', text: 'back again', updated_at: '2026-10-21T00:00:02Z' })
+    expect(screen.getByText('back again')).toBeInTheDocument()
+    first.emit({ status: 'unavailable', text: '', updated_at: null })
+    const before = FakeEventSource.instances.length
+    fireEvent.click(screen.getByRole('button', { name: 'Retry now' }))
+    expect(first.closed).toBe(true)
+    expect(FakeEventSource.instances.length).toBe(before + 1)
+    view.unmount()
+  })
   it('derives the socket url, authenticates first, and renders full-screen frames', async () => {
     vi.stubGlobal('WebSocket', FakeWebSocket)
     stubSession({ token: FAKE_TOKEN, readonly: false })

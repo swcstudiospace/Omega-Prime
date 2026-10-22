@@ -256,3 +256,52 @@ def test_tasks_json_collector_preserves_validated_numbering_metadata(
     assert result.extra["tasks"][0]["seq"] == 7
     assert result.extra["next_seq"] == 8
     assert result.extra["identity_registry"] == {}
+
+
+def test_bridge_task_fields_survive_a_write_read_cycle(tmp_path: Path) -> None:
+    from omega_prime.dashboard.model import normalize_tasks
+
+    wiring = {
+        "phase": "104",
+        "branch": "feat/x",
+        "head_sha": "abc1234",
+        "stage": "review",
+        "repo": "swcstudiospace/Omega-Prime",
+        "worktree": "/workspace/x",
+    }
+    tasks_path = tmp_path / "tasks.json"
+    write_tasks(
+        {
+            "version": 1,
+            "updated_at": _NOW.isoformat(),
+            "tasks": [
+                {
+                    "id": "live",
+                    "title": "Live work",
+                    "owner": {"kind": "agent", "ref": "a1", "label": "Planner"},
+                    "state": "working",
+                    "model": "model-x",
+                    "wiring": wiring,
+                },
+                {
+                    "id": "shipped",
+                    "title": "Shipped",
+                    "owner": {"kind": "agent", "ref": "a2"},
+                    "state": "done",
+                    "summary": "merged #58",
+                },
+            ],
+            "waiting_on_ove": [],
+            "finished": [],
+        },
+        path=tasks_path,
+    )
+    source = make_tasks_json_collector(tasks_path=tasks_path, now_fn=_clock)()
+    snap = normalize_tasks({"tasks_json": source}, now=_NOW).to_dict()
+    live = next(t for t in snap["active"] if t["id"] == "tasks:live")
+    assert live["owner"]["label"] == "Planner"
+    assert live["model"] == "model-x"
+    assert live["wiring"] == wiring
+    shipped = next(t for t in snap["finished"] if t["id"] == "tasks:shipped")
+    assert shipped["summary"] == "merged #58"
+    assert shipped["owner"]["label"] == "a2"

@@ -36,6 +36,18 @@ def _log_lines(path: Path) -> list[str]:
     return data.decode("utf-8", errors="replace").splitlines()
 
 
+_GITHUB_REMOTE = re.compile(
+    r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+    r"([A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}?)(?:\.git)?/?$"
+)
+
+
+def _github_repo(remote: str) -> str | None:
+    """owner/name for a github.com origin; anything else stays unknown."""
+    match = _GITHUB_REMOTE.match(remote.strip())
+    return match.group(1) if match else None
+
+
 def make_wiring_collector(
     *,
     repo_root: Path,
@@ -75,6 +87,32 @@ def make_wiring_collector(
                         line[7:].removeprefix("refs/heads/"),
                     )
             phases = set(worktrees)
+            # Published so the UI can require a repository match before it
+            # borrows a PR's evidence by branch name. Read once, and only when
+            # a phase is actually emitted.
+            origin: list[str | None] = []
+
+            def repo_name() -> str | None:
+                if not origin:
+                    try:
+                        origin.append(
+                            _github_repo(
+                                run(
+                                    [
+                                        "git",
+                                        "-C",
+                                        str(repo_root),
+                                        "remote",
+                                        "get-url",
+                                        "origin",
+                                    ]
+                                )
+                            )
+                        )
+                    except Exception:
+                        origin.append(None)
+                return origin[0]
+
             if runs_root.exists():
                 phases.update(
                     path.name
@@ -166,6 +204,7 @@ def make_wiring_collector(
                             "last_log_ts": stamp,
                             "progress": progress,
                             "worktree": worktree,
+                            "repo": repo_name(),
                         }
                     )
                 )

@@ -293,3 +293,16 @@ def test_finished_rows_record_result_not_none_and_stay_stable(tmp_path):
         for record in data["identity_registry"].values()
         for event in record["timeline"]
     )
+
+
+def test_assigning_a_stored_bridge_id_reuses_its_canonical_number(tmp_path):
+    path = tmp_path / "tasks.json"
+    write_tasks(_document(tasks=[_task("bridge-1", "Bridge")]), path=path)
+    first = allocate_task_id(path=path, identity="bridge-1", title="Bridge", now=NOW)
+    again = allocate_task_id(
+        path=path, identity="tasks:bridge-1", title="Bridge", now=NOW
+    )
+    assert first == again == {"seq": 1, "display_id": "00001 - Bridge"}
+    assert next_task_id(path=path) == 2
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert len(data["identity_registry"]) == 1
