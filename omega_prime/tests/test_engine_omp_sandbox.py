@@ -1976,3 +1976,31 @@ def test_a_failed_run_keeps_its_terminal_row_beside_the_repair_item(
     clear_block(store, "gb:late:sandbox_unavailable", "gb:late")
     data = _read_tasks(store)
     assert next(r for r in data["tasks"] if r["id"] == "gb:late")["state"] == "failed"
+
+
+def test_startup_and_export_get_deadlines_that_cover_their_inner_steps(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    seen: dict[str, float | None] = {}
+    original = sandbox_omp.AndaClient.call
+
+    def spy(
+        self: Any, tool: str, args: Any = None, timeout: float | None = None
+    ) -> Any:
+        seen[tool] = timeout
+        return original(self, tool, args, timeout)
+
+    monkeypatch.setattr(sandbox_omp.AndaClient, "call", spy)
+    result = run(
+        "plan", cwd=work, env=env, job_id="job-deadlines", stage="plan", plan="zai"
+    )
+    assert result.ok is True, result.detail
+    # A cold start (image build alone may take 1800s) is not cut at 300s.
+    assert seen["up"] is not None and seen["up"] > 1800.0 + 600.0
+    assert seen["export_commits"] is not None and seen["export_commits"] > 600.0 + 300.0
+    assert seen["run_gsd_stage"] is None  # the per-tool bound

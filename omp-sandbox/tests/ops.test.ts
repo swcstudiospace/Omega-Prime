@@ -370,6 +370,34 @@ test("export_commits with includeDirty commits edits the stage left uncommitted,
   assert.equal(again.commits.length, 1);
 });
 
+test("export_commits follows a stage that moved to a feature branch, and refuses diverged work with a recovery bundle", async () => {
+  const repo = makeSeedRepo("moved-branch-src");
+  const { tier, hostWork } = mappedTier();
+  const core = new Core();
+  await core.attachTierForTests(tier, { seed_repo: { path: repo, ref: "main" } });
+  // The stage branches off the seeded ref and commits there.
+  git(["checkout", "-q", "-b", "feature/x"], hostWork);
+  writeFileSync(join(hostWork, "feat.txt"), "feature work\n");
+  git(["add", "feat.txt"], hostWork);
+  git(["-c", "user.name=t", "-c", "user.email=t@local", "commit", "-qm", "feature work"], hostWork);
+  const ex = (await core.exportCommits()) as ExportResult & { movedFrom: string | null };
+  assert.equal(ex.movedFrom, "feature/x");
+  assert.equal(ex.commits.length, 1);
+  assert.match(ex.commits[0], /feature work$/);
+  assert.equal(ex.head, git(["rev-parse", "HEAD"], hostWork).trim());
+  assert.equal(git(["rev-parse", "refs/heads/main"], hostWork).trim(), ex.head, "the seeded ref now carries the work");
+
+  // Work that does not extend the seeded ref is refused, never reported as nothing new.
+  const other = new Core();
+  const second = mappedTier();
+  await other.attachTierForTests(second.tier, { seed_repo: { path: repo, ref: "main" } });
+  git(["checkout", "-q", "--orphan", "elsewhere"], second.hostWork);
+  writeFileSync(join(second.hostWork, "lone.txt"), "unrelated\n");
+  git(["add", "-A"], second.hostWork);
+  git(["-c", "user.name=t", "-c", "user.email=t@local", "commit", "-qm", "unrelated"], second.hostWork);
+  await assert.rejects(other.exportCommits(), /left main for elsewhere with work that does not extend it; nothing was exported \(recovery bundle: \/.+recovery\.bundle\)/);
+});
+
 test("seed refs that are not plain branch names are refused before any git runs", async () => {
   const { seedRef } = await import("../src/core/repo.ts");
   assert.equal(seedRef("feature/x"), "feature/x");
@@ -455,6 +483,21 @@ test("runStage only falls back to the plan the caller approved", async () => {
   await answerWith(core, tuned.stageId, "French");
   assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T", fallbackPlan: "zai", fallbackModel: "openai-codex/gpt-6.1-sol" }), /is not a zai model/);
   assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T", fallbackPlan: null, fallbackModel: "zai/glm-5.3" }), /without an approved fallback plan/);
+});
+
+test("stage text, errors and events are scrubbed of the exact passed secret values", async () => {
+  const { tier } = mappedTier();
+  const core = new Core();
+  const secret = "plainvalue-" + "q7Zr4kLm";
+  await core.attachTierForTests(tier, undefined, [secret]);
+  const events: Array<Record<string, unknown>> = [];
+  core.on("event", (e) => events.push(e));
+  const a = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T", plan: "zai" });
+  await answerWith(core, a.stageId, secret);
+  const one = core.status(a.stageId) as { finalText: string; lastText: string };
+  assert.equal(one.finalText, "picked [redacted]");
+  assert.equal(one.lastText, "picked [redacted]");
+  assert.equal(JSON.stringify(events).includes(secret), false);
 });
 
 test("status(stageId) carries the full final text; the listing keeps the short preview", async () => {

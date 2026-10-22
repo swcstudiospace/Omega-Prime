@@ -89,6 +89,14 @@ DEFAULT_WORKSPACE_ROOTS = "/workspace/omes-bot-wt"
 # per-tool replies are bounded; the stage wait never times out.
 _WRAPPER_READY_TIMEOUT = 30.0
 _TOOL_TIMEOUT = 300.0
+# `up` and `export_commits` run the core's own long bounded steps, so their
+# replies get deadlines that cover those steps instead of the per-tool one:
+# a cold `up` can build the Podman image (1800s), create the sandbox (600s),
+# try the GSD install twice (600s each) and upload the seed (600s); an
+# export commits leftovers and reads HEAD (120s each), bundles (300s) and
+# downloads (600s).
+_UP_TIMEOUT = 1800.0 + 600.0 + 2 * 600.0 + 600.0 + 600.0
+_EXPORT_TIMEOUT = 120.0 + 120.0 + 120.0 + 300.0 + 600.0 + 300.0
 # The wrapper exits shortly after replying to `down`; grace before terminate.
 _EXIT_GRACE = 10.0
 # Wake-up tick for waits that must also notice an interrupt.
@@ -665,6 +673,7 @@ def run_backend(
             {"seed_repo": {"path": str(work), "ref": seed_ref}},
             commands,
             events_path,
+            timeout=_UP_TIMEOUT,
             tasks_path=tasks_path,
             task_id=task_id,
             row_started=row_started,
@@ -760,6 +769,7 @@ def run_backend(
                 {"include_dirty": True},
                 commands,
                 events_path,
+                timeout=_EXPORT_TIMEOUT,
                 tasks_path=tasks_path,
                 task_id=task_id,
                 row_started=row_started,
@@ -791,6 +801,12 @@ def run_backend(
             "export": export,
             "applied": applied,
         }
+    except (EngineError, SandboxUnavailable) as exc:
+        if started:
+            # Submitted means started, on every later failure path too, so
+            # no caller re-runs the same task elsewhere.
+            setattr(exc, "started", True)  # noqa: B010 - SandboxUnavailable has no field
+        raise
     finally:
         # Terminal row before the shutdown: it lands even if `down` is slow.
         # Gated on row_started, not tracked — a run that never started its
@@ -984,17 +1000,19 @@ def _tool(
     commands: list[str],
     events_path: Path,
     *,
+    timeout: float | None = None,
     tasks_path: str | Path | None = None,
     task_id: str | None = None,
     row_started: bool = False,
     drained: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """One wrapper tool call; events land in events.jsonl via append_event,
-    the tool name in commands. Each drained event also touches the run's
-    tasks.json row when one was started (best-effort, never fatal), and is
-    appended to ``drained`` when given, so a caller can still act on it."""
+    the tool name in commands. ``timeout`` overrides the per-tool bound. Each
+    drained event also touches the run's tasks.json row when one was started
+    (best-effort, never fatal), and is appended to ``drained`` when given, so
+    a caller can still act on it."""
     try:
-        reply = client.call(tool, args)
+        reply = client.call(tool, args, timeout)
     finally:
         for event in client.drain_events():
             append_event(events_path, event)

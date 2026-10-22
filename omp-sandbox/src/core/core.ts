@@ -217,9 +217,37 @@ export class Core extends EventEmitter {
 
   /** Exact secret values first (they may not look like credentials), then credential-shaped text. */
   #scrub(text: string) {
+    return redactSecrets(this.#scrubExact(text));
+  }
+
+  /** Only the exact passed secret values: stage text keeps everything else byte-for-byte (the engine applies
+   *  its own credential-shape redaction before saving). */
+  #scrubExact(text: string) {
     let out = text;
     for (const v of this.#secrets) out = out.split(v).join("[redacted]");
-    return redactSecrets(out);
+    return out;
+  }
+
+  /** #scrubExact over every string in a JSON-shaped value (event bodies, question payloads). */
+  #scrubDeep<T>(value: T): T {
+    if (typeof value === "string") return this.#scrubExact(value) as T;
+    if (Array.isArray(value)) return value.map((x) => this.#scrubDeep(x)) as T;
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, this.#scrubDeep(v)])) as T;
+    return value;
+  }
+
+  /** Emit one unsolicited event with stage text, errors and questions scrubbed of the passed secret values. */
+  #event(body: Record<string, unknown>) { this.emit("event", this.#scrubDeep(body)); }
+
+  /** Download one sandbox file into a fresh STATE/<kind> folder, size-checked against the in-sandbox `wc -c`. */
+  async #fetch(t: SandboxTier, remote: string, size: number, kind: string) {
+    const dir = join(STATE, kind, `${t.id}-${Date.now().toString(36)}`); mkdirSync(dir, { recursive: true });
+    const dl = await (t as any).download?.(remote, dir);
+    if (!dl || dl.code !== 0) throw new Error(`${kind} download failed: ${dl?.stderr?.slice(-300) ?? "tier has no download"}`);
+    const name = remote.split("/").pop()!;
+    const out = existsSync(join(dir, name)) ? join(dir, name) : join(dir, readdirSync(dir)[0]);
+    if (statSync(out).size !== size) throw new Error(`${kind} size mismatch ${statSync(out).size} != ${size}`);
+    return out;
   }
 
   async #runCheck(a: { argv: string[]; cwd?: string; timeout_ms?: number; label?: string }) {
@@ -249,21 +277,34 @@ export class Core extends EventEmitter {
       if (wip.code !== 0) throw new Error(`export: committing uncommitted edits failed: ${wip.stderr.slice(-300)}`);
       dirtyCommitted = wip.stdout.split("\n").filter(Boolean);
     }
+    // The work is wherever the stage left HEAD, not necessarily the seeded branch: a feature branch (or detached
+    // HEAD) that extends it moves the seeded ref onto that tip; anything else is refused with a recovery bundle.
+    const where = await t.exec(["sh", "-c", 'git symbolic-ref -q --short HEAD || echo "(detached)"; if git merge-base --is-ancestor "refs/heads/$1" HEAD; then echo extends; else echo diverged; fi', "sh", ref], { timeoutMs: 120_000 });
+    if (where.code !== 0) throw new Error(`export: reading HEAD failed: ${where.stderr.slice(-300)}`);
+    const [onBranch, relation] = where.stdout.trim().split("\n").map((x) => x.trim());
+    let movedFrom: string | null = null;
+    if (onBranch !== ref) {
+      if (relation !== "extends") {
+        const keep = `${sandboxHome(t)}/recovery.bundle`;
+        const rb = await t.exec(["sh", "-c", 'git bundle create -q "$1" --all && wc -c < "$1"', "sh", keep], { timeoutMs: 300_000 });
+        const saved = rb.code === 0 ? await this.#fetch(t, keep, Number(rb.stdout.trim()), "recovery").catch(() => null) : null;
+        throw new Error(`export: the stage left ${ref} for ${onBranch} with work that does not extend it; nothing was exported (recovery bundle: ${saved ?? "unavailable"})`);
+      }
+      const mv = await t.exec(["git", "update-ref", `refs/heads/${ref}`, "HEAD"], { timeoutMs: 60_000 });
+      if (mv.code !== 0) throw new Error(`export: moving ${ref} onto the stage's HEAD failed: ${mv.stderr.slice(-300)}`);
+      movedFrom = onBranch;
+    }
     const info = await t.exec(["sh", "-c", 'git rev-parse "$1" && git log --format="%h %s" "$2..$1" && echo "--" && git status --porcelain | head -50', "sh", ref, base], { timeoutMs: 120_000 });
     if (info.code !== 0) throw new Error(`export: git log failed: ${info.stderr.slice(-300)}`);
     const [head, ...rest] = info.stdout.trim().split("\n"); const sep = rest.indexOf("--");
     const commits = rest.slice(0, sep); const dirty = rest.slice(sep + 1).filter(Boolean);
-    if (!commits.length) return { head, base, commits: [], dirty, dirtyCommitted, bundle: null };
+    if (!commits.length) return { head, base, commits: [], dirty, dirtyCommitted, movedFrom, bundle: null };
     const remote = `${sandboxHome(t)}/export.bundle`;
     const mk = await t.exec(["sh", "-c", 'git bundle create -q "$3" "$2..$1" && wc -c < "$3"', "sh", ref, base, remote], { timeoutMs: 300_000 });
     if (mk.code !== 0) throw new Error(`export: git bundle failed: ${mk.stderr.slice(-300)}`);
     const size = Number(mk.stdout.trim());
-    const dir = join(STATE, "exports", `${t.id}-${Date.now().toString(36)}`); mkdirSync(dir, { recursive: true });
-    const dl = await (t as any).download?.(remote, dir);
-    if (!dl || dl.code !== 0) throw new Error(`export download failed: ${dl?.stderr?.slice(-300) ?? "tier has no download"}`);
-    const out = existsSync(join(dir, "export.bundle")) ? join(dir, "export.bundle") : join(dir, readdirSync(dir)[0]);
-    if (statSync(out).size !== size) throw new Error(`export size mismatch ${statSync(out).size} != ${size}`);
-    const res = { head, base, ref, commits, dirty, dirtyCommitted, bundle: out, bytes: size, via: `git bundle + ${t.name} download` };
+    const out = await this.#fetch(t, remote, size, "exports");
+    const res = { head, base, ref, commits, dirty, dirtyCommitted, movedFrom, bundle: out, bytes: size, via: `git bundle + ${t.name} download` };
     this.#receipt(rid("export"), res);
     return res;
   }
@@ -315,7 +356,7 @@ export class Core extends EventEmitter {
     const message = `/${a.gsdCommand} ${MAGIC}\n\n${a.task}`;
     const rec: StageRec = { id, stage: a.stage, plan: route.plan, fallbackModel, command: a.gsdCommand, modelRequested: model, status: "starting", client: null, startedAt: aedt(), questions: [], lastText: "", done: Promise.resolve(), settled: false };
     this.stages.set(id, rec);
-    rec.done = this.#drive(rec, message, model, a.thinking ?? "max").catch((e: any) => { rec.status = rec.status === "aborted" ? "aborted" : "failed"; rec.error = String(e?.message ?? e); }).finally(() => { rec.endedAt = aedt(); rec.settled = true; this.#stageReceipt(rec); this.emit("event", { event: "stage_done", stageId: id, status: rec.status, error: rec.error }); });
+    rec.done = this.#drive(rec, message, model, a.thinking ?? "max").catch((e: any) => { rec.status = rec.status === "aborted" ? "aborted" : "failed"; rec.error = String(e?.message ?? e); }).finally(() => { rec.endedAt = aedt(); rec.settled = true; this.#stageReceipt(rec); this.#event({ event: "stage_done", stageId: id, status: rec.status, error: rec.error }); });
     return { stageId: id, plan: route.plan, model, fallback: fallbackModel, command: a.gsdCommand };
   }
 
@@ -331,7 +372,7 @@ export class Core extends EventEmitter {
       if (rec.status !== "aborted") rec.status = "waiting";
       const asked = q.questions?.map((x) => x.question).join(" | ") ?? q.title ?? q.method;
       rec.questions.push({ requestId: q.requestId, asked, method: q.method });
-      this.emit("event", { event: "question", stageId: rec.id, requestId: q.requestId, method: q.method, questions: q.questions, title: q.title, options: q.options });
+      this.#event({ event: "question", stageId: rec.id, requestId: q.requestId, method: q.method, questions: q.questions, title: q.title, options: q.options });
     });
     c.on("frame", (f) => {
       if (f.type === "message_end" && f.message?.role === "assistant") { const t = textOf(f.message); if (t) rec.lastText = t; }
@@ -348,7 +389,7 @@ export class Core extends EventEmitter {
     if (failedEarly && !rec.fallbackFrom && rec.fallbackModel && st() !== "aborted") {
       const fb = rec.fallbackModel;
       rec.fallbackFrom = model; rec.modelRequested = fb; await c.close();
-      this.emit("event", { event: "fallback", stageId: rec.id, from: model, to: fb, reason: r.error?.message ?? r.status });
+      this.#event({ event: "fallback", stageId: rec.id, from: model, to: fb, reason: r.error?.message ?? r.status });
       return this.#drive(rec, message, fb, thinking);
     }
     if (r.status === "aborted" && st() !== "aborted") rec.status = "aborted";
@@ -380,8 +421,9 @@ export class Core extends EventEmitter {
   }
 
   status(stageId?: string) {
-    const view = (r: StageRec) => ({ stageId: r.id, stage: r.stage, plan: r.plan, command: r.command, status: r.status, modelRequested: r.modelRequested, fallbackFrom: r.fallbackFrom ?? null, modelsSeen: r.client ? [...r.client.models] : [], pendingQuestions: r.client?.pendingQuestions.map((q) => q.requestId) ?? [], questions: r.questions.length, startedAt: r.startedAt, endedAt: r.endedAt ?? null, error: r.error ?? null, lastText: r.lastText.slice(-600) });
-    const single = (r: StageRec) => ({ ...view(r), finalText: r.lastText });
+    const view = (r: StageRec) => ({ stageId: r.id, stage: r.stage, plan: r.plan, command: r.command, status: r.status, modelRequested: r.modelRequested, fallbackFrom: r.fallbackFrom ?? null, modelsSeen: r.client ? [...r.client.models] : [], pendingQuestions: r.client?.pendingQuestions.map((q) => q.requestId) ?? [], questions: r.questions.length, startedAt: r.startedAt, endedAt: r.endedAt ?? null, error: r.error ? this.#scrub(r.error) : null, lastText: this.#scrubExact(r.lastText).slice(-600) });
+    // Stage text is scrubbed of the exact passed secret values too, not just credential-shaped text.
+    const single = (r: StageRec) => ({ ...view(r), finalText: this.#scrubExact(r.lastText) });
     // One stage asked for by id also carries its full final assistant text; listings keep the short preview.
     if (stageId) { const r = this.stages.get(stageId); if (!r) throw new Error(`unknown stage ${stageId}`); return single(r); }
     return { tier: this.tier?.name ?? null, isolation: this.tier?.isolation ?? null, owned: this.tier?.owned() ?? null, attestation: "mock", stages: [...this.stages.values()].map(view) };
@@ -389,8 +431,8 @@ export class Core extends EventEmitter {
 
   #stageReceipt(r: StageRec) {
     // Answers are never persisted (only whether and when a question was answered); free text is redacted.
-    const questions = r.questions.map((q) => ({ requestId: q.requestId, method: q.method, asked: redactSecrets(q.asked), answered: q.answered !== undefined, answeredAt: q.answeredAt ?? null }));
-    this.#receipt(r.id, { stageId: r.id, stage: r.stage, plan: r.plan, gsdCommand: r.command, magicKeywords: MAGIC, modelRequested: r.modelRequested, fallbackFrom: r.fallbackFrom ?? null, modelsSeen: r.client ? [...r.client.models] : [], status: r.status, error: r.error ? redactSecrets(r.error) : null, questions, startedAt: r.startedAt, endedAt: r.endedAt, tier: this.tier?.name, isolation: this.tier?.isolation, skippedTiers: this.skipped, attestation: "mock", attestationDoc: this.attestation, ompBin: OMP_BIN, lastText: redactSecrets(r.lastText.slice(-1500)) });
+    const questions = r.questions.map((q) => ({ requestId: q.requestId, method: q.method, asked: this.#scrub(q.asked), answered: q.answered !== undefined, answeredAt: q.answeredAt ?? null }));
+    this.#receipt(r.id, { stageId: r.id, stage: r.stage, plan: r.plan, gsdCommand: r.command, magicKeywords: MAGIC, modelRequested: r.modelRequested, fallbackFrom: r.fallbackFrom ?? null, modelsSeen: r.client ? [...r.client.models] : [], status: r.status, error: r.error ? this.#scrub(r.error) : null, questions, startedAt: r.startedAt, endedAt: r.endedAt, tier: this.tier?.name, isolation: this.tier?.isolation, skippedTiers: this.skipped, attestation: "mock", attestationDoc: this.attestation, ompBin: OMP_BIN, lastText: this.#scrub(r.lastText).slice(-1500) });
   }
   #receipt(name: string, body: Record<string, unknown>) {
     mkdirSync(this.#receipts, { recursive: true, mode: 0o700 });
