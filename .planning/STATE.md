@@ -1,21 +1,22 @@
 ---
 gsd_state_version: "1.0"
-milestone: v20
-milestone_name: Wiring
-status: Phase 97 local implementation executed; verification deferred pending authoritative upstream MCP contract evidence.
-stopped_at: Phase 97 local verification finished; current upstream MCP mount/schema evidence is still needed before phase verification can pass.
-last_updated: "2026-10-21"
-last_activity: 2026-10-21
-last_activity_desc: Phase 98 shared memory merged (PR #51); Phase 99 solo mode integrated onto main (PR #48); Phase 100 omp engine wiring integrated after it (PR #50); phase 97 verification remains deferred on authoritative upstream contract evidence; Phase 102 integrated (PR #52); Phase 103 integrated (PR #46).
-state_head: 0b1fad3
+milestone: v21
+milestone_name: Task Dashboard
+current_phase: 106
+current_phase_name: Command Center polish
+status: Phase 106 local implementation and offline verification complete with environment and outer-driver gates pending; no milestone audit, completion, or cleanup was run.
+stopped_at: Phase 106 local implementation and offline verification; broad Python collection and host-only evidence remain pending.
+last_updated: "2026-10-21T10:16:57Z"
+state_head: ad3942b0c18db0c0f845746642323e075dada117
 progress:
-  total_phases: 7
-  completed_phases: 0
-  total_plans: 5
-  completed_plans: 1
+  total_phases: 3
+  completed_phases: 1
+  total_plans: 22
+  completed_plans: 17
   percent: 0
-current_phase: 97
-current_plan: "02"
+last_activity: 2026-10-21
+current_plan: 05
+last_activity_desc: Phase 106 plans 01–05 implemented; frontend install/full tests/build, focused dashboard tests and docs/public-repo tests passed. Broad dashboard collection is blocked by missing mcp/apscheduler; host GitHub/Herdr/browser/signed-sandbox evidence remains outer-driver work.
 ---
 
 # Project State
@@ -27,13 +28,15 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 **Core value:** One Omega Prime agent runs Hermes, Omp, and Prime in one Python process, and one command attaches it to Grok Bot as a hardened tool host.
 **Historical current focus (v19 closeout):** v19 Installer bindings is complete (phase 96). v18 stays shipped. v17 stays shipped. Historical v17 note: every first-party prompt is wrapped in XML and `python -m omega_prime.tooling.prompt_format --check` enforces it. v1–v16 stay shipped. Phase 77.1 is a separate unchecked ROADMAP phase whose live import UAT is user-owned and stays `human_needed`. Purple-Team SOTA batches 01–18 are on main (`.planning/BATCH-01-REPORT.md` … `BATCH-18-REPORT.md`); batch 19 was not the accepted seven. The accepted seven are implemented as v18 phases 89-95. `ci / lint` on main was RED from batch 05 to 17 (21 ruff errors the batch reports had called clean) and was repaired in PR #31: every batch gate MUST run the exact CI commands (`ruff check omega_prime/`, `ruff format --check omega_prime/`, `mypy omega_prime/`, `pytest omega_prime/tests -q`) against current source; never trust old green prose.
 
-**Current focus:** v20 Wiring (Phases 97–103) is in progress. Phase 97 has local transport, settings, diagnostics, argument, and no-cap implementation with offline tests; current upstream MCP mount/schema compatibility remains unverified, so Phase 97 verification is deferred and no v20 phase is complete. Phase 98's branch implementation is being integrated after phase 97; preserve phase 97's authoritative endpoint resolver and source-aware `memory_search` errors. v19 Installer bindings and v1–v19 history remain unchanged. Phase 77.1 live import UAT remains user-owned and `human_needed`.
+**v20 Wiring (on main):** Phase 97 local implementation is executed with verification deferred on authoritative upstream MCP contract evidence; Phase 98 shared memory merged (PR #51); Phase 99 solo mode integrated (PR #48).
+
+**Current focus:** v21 Task Dashboard (Phases 104–106). Phase 104 is complete. Phase 105 local implementation is recorded on `feat/command-center`; Phase 106 local implementation and offline verification are recorded on `feat/command-center-polish`, with broad Python collection and host evidence pending. v20 Phase 97 remains separately deferred pending upstream MCP contract evidence; Phase 77.1 UAT remains user-owned.
 
 ## Current Position
 
-Phase: v20 Phase 97 — substrate direct connect + settings loader + no time caps (local implementation executed; verification deferred on authoritative upstream MCP mount/schema evidence).
-Plan: 02 (5 total; 1 complete; local transport and argument changes are present, but server-contract preflight tasks remain open).
-Status: Phase 97 local implementation is not verified against current upstream transport/schema. Phase 98 runtime work is present on the parallel branch and is being rebased after phase 97; phase 97 contracts take precedence at integration. Resume with authoritative MCP path/schema preflight in plans 97-02/97-03. Do not audit, complete, or clean up v20. Phase 77.1 remains `verification_deferred_human`; do not re-execute phases 85–96 or mark 77.1 passed.
+Phase: 106 (Command Center polish) — LOCAL IMPLEMENTATION COMPLETE; ACCEPTANCE GATES PENDING
+Plan: 05 (5/5 phase plans executed; `106-SUMMARY.md` records tests and limitations).
+Status: Frontend npm install, full Vitest suite, production build and build-asset inspection passed; dashboard-file family passed 158 with 1 skipped; dashboard app/static serving passed 13 with 1 skipped; docs/public-repo tests passed 31. The required broad dashboard selector exited 2 during collection because `mcp` and `apscheduler` are absent. Ruff, mypy and polyglot-check are unavailable in this environment. Live GitHub/Herdr, browser screenshots, signed sandbox evidence and real-terminal verification remain pending. No milestone audit/complete/cleanup, export, push, PR, restart of 7421, or merge was run.
 
 Phase 100 (omp engine wiring) is complete and integrated after Phase 99 (PR #50). Evidence: .planning/phases/100-omp-engine-wiring/100-SUMMARY.md.
 
@@ -154,13 +157,14 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Session
 
-**Last session:** 2026-10-20
-**Stopped at:** Phase 97 local implementation and offline gates; authoritative upstream MCP mount/schema evidence remains an open verification gap. Phase 98 implementation is being integrated in order after phase 97.
-**Resume file:** `.planning/phases/97-substrate-direct-connect/97-02-PLAN.md`
+**Last session:** 2026-10-21
+**Stopped at:** Phase 106 local implementation and offline verification. Host-only verification and missing Python tooling/dependencies remain pending; no milestone lifecycle or remote publication was run.
+**Resume file:** `.planning/phases/106-command-center-polish/106-SUMMARY.md`
 
 ## Operator Next Steps
 
-- Phase 97 is locally implemented but not verified against the current upstream server. Obtain authoritative MCP path/schema evidence, then resume the preflight/gap work; live endpoint verification and live settings/connector changes remain operator-owned. Phase 98's endpoint and source-aware search behavior must retain this phase 97 authority. Phase 77.1 live UAT stays user-owned (`/gsd:verify-work 77.1`).
+- Phase 105 outer-driver work remains: compare live GitHub PR/check/Greptile evidence and organization inventory (a2/a3); inspect fonts, contrast, motion and reduced motion in a browser (a4); produce the signed openshell-podman/Anda receipt (a6); capture all four views with real data (a7); then perform the separately authorized export/publication flow. No local fixtures prove these outcomes.
+- Phase 97 remains deferred pending authoritative upstream MCP path/schema evidence; phase 77.1 live UAT remains user-owned (`/gsd:verify-work 77.1`).
 - Phase 99 is integrated onto main after Phases 97 and 98; it does not mark the milestone complete.
 - Phase 100 (omp engine wiring) is integrated after Phase 99 (PR #50); see `.planning/phases/100-omp-engine-wiring/100-SUMMARY.md`.
 
