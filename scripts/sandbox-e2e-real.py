@@ -35,6 +35,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from omega_prime.engine import sandbox_omp  # noqa: E402
+from omega_prime.engine.plan_router import model_id  # noqa: E402
 from omega_prime.routines.ultrathink_turn import execute_ultrathink  # noqa: E402
 
 SPEC = "Wire the demo greeting for the throwaway project."
@@ -107,10 +108,18 @@ def main() -> int:
             )
             plan = execute_ultrathink(dict(env, OMEGA_PRIME_TASK_ID=task_id))
             engine = plan.get("engine") or {}
-            ran = bool(engine.get("used")) and not plan.get("failed")
+            # The live Z.ai path is what this proves: a stage that ran on any
+            # other plan (ChatGPT allowed with quota left) or model is a FAIL.
+            want_model = model_id("zai", env, stage)
+            on_zai = engine.get("plan") == "zai" and str(engine.get("model") or "") in (
+                want_model,
+                f"zai/{want_model}",
+            )
+            ran = bool(engine.get("used")) and not plan.get("failed") and on_zai
             print(
                 f"{stage}: {'ok' if ran else 'FAILED'} job={engine.get('job_id')} "
-                f"reason={engine.get('reason')}"
+                f"plan={engine.get('plan')} model={engine.get('model')} "
+                f"(want zai/{want_model}) reason={engine.get('reason')}"
             )
             ok = ok and ran
         rows = {
