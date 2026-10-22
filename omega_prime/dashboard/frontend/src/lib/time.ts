@@ -13,3 +13,10 @@ export function ageLabel(value?: string | null, now = Date.now()): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
   return `${Math.floor(seconds / 3600)}h ago`
 }
+/** Wall-clock time in Sydney with seconds and the zone label, for log rows. */
+export function formatSydneyClock(value?: string | null): string {
+  if (!value) return 'Unavailable'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return 'Unavailable'
+  return new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Sydney', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZoneName: 'short' }).format(date)
+}

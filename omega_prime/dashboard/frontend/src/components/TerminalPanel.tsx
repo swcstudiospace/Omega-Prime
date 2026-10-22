@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { formatSydney } from '../lib/time'
+import type { EventDraft } from '../lib/events'
 import './TerminalPanel.css'
 
 type Status = 'live' | 'no_session' | 'pane_closed' | 'unavailable'
@@ -14,8 +15,11 @@ const KEY_NAMES: Record<string, string> = {
   '\x1b[C': 'right', '\x1b[D': 'left', '\x1b': 'escape', '\x7f': 'backspace',
 }
 
-export function TerminalPanel({ taskId, note }: { taskId: string; note?: string | null }) {
-  return <TerminalPanelStream key={taskId} taskId={taskId} note={note} />
+type TerminalLog = (draft: EventDraft) => void
+type PanelProps = { taskId: string; note?: string | null; onLog?: TerminalLog }
+
+export function TerminalPanel({ taskId, note, onLog }: PanelProps) {
+  return <TerminalPanelStream key={taskId} taskId={taskId} note={note} onLog={onLog} />
 }
 
 function TerminalSurface({ onData, terminalRef }: { onData: (payload: string) => void; terminalRef: RefObject<Terminal | null> }) {
@@ -48,7 +52,15 @@ function TerminalSurface({ onData, terminalRef }: { onData: (payload: string) =>
   return <div className="terminal-screen" role="region" aria-label="Interactive terminal" tabIndex={0} ref={surface} />
 }
 
-function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string | null }) {
+function TerminalPanelStream({ taskId, note, onLog }: PanelProps) {
+  // Lifecycle logging for the task event stream. Held in a ref so a new
+  // callback identity never reconnects the socket.
+  const onLogRef = useRef(onLog)
+  useEffect(() => { onLogRef.current = onLog }, [onLog])
+  const framesRef = useRef(0)
+  const emit = useCallback((type: EventDraft['type'], severity: EventDraft['severity'], title: string, summary: string, payload: EventDraft['payload'] = {}) => {
+    onLogRef.current?.({ type, severity, title, summary, payload: { ...payload }, taskId, source: 'terminal' })
+  }, [taskId])
   const [session, setSession] = useState<{ readonly: boolean } | null>(null)
   const [sessionFailed, setSessionFailed] = useState(false)
   const [attached, setAttached] = useState(true)
@@ -132,6 +144,8 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
       next.onopen = () => {
         next.send(JSON.stringify({ type: 'auth', token: tokenRef.current ?? '', mode: effectiveReadOnly ? 'ro' : 'rw' }))
         setWsOpen(true)
+        framesRef.current = 0
+        emit('terminal.attached', 'success', 'Terminal attached', `Herdr pane socket open · ${effectiveReadOnly ? 'read-only' : 'read-write'}`, { mode: effectiveReadOnly ? 'ro' : 'rw' })
       }
       next.onmessage = (event: MessageEvent<string>) => {
         try {
@@ -141,9 +155,12 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
             const text = typeof message.text === 'string' ? message.text : ''
             terminalRef.current?.reset()
             terminalRef.current?.write(text)
+            framesRef.current += 1
+            if (framesRef.current === 1) emit('terminal.frame', 'info', 'First frame received', `${text ? text.split('\n').length : 0} lines mirrored from the pane`, { lines: text ? text.split('\n').length : 0, bytes: text.length })
             setPaneStatus(null)
             setFrame(previous => ({ status: 'live', text, updated_at: typeof message.updated_at === 'string' ? message.updated_at : previous.updated_at }))
           } else if (message.type === 'status') {
+            if (typeof message.status === 'string') emit('terminal.status', message.status === 'live' ? 'info' : message.status === 'pane_closed' ? 'warning' : 'warning', 'Terminal status', `Pane reported ${message.status.replaceAll('_', ' ')}`, { status: message.status })
             if (message.status === 'pane_closed') { noRetryRef.current = true; setPaneStatus('pane_closed'); next.close() }
             else if (message.status === 'no_session') setPaneStatus('no_session')
             else if (message.status === 'unavailable') setPaneStatus('unavailable')
@@ -154,9 +171,11 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
       next.onclose = (event?: CloseEvent) => {
         if (socketRef.current === next) socketRef.current = null
         setWsOpen(false)
+        emit('terminal.closed', noRetryRef.current || !attached ? 'info' : 'warning', 'Terminal socket closed', `Close code ${event?.code ?? 'unknown'} after ${framesRef.current} frames`, { code: event?.code ?? null, frames: framesRef.current })
         if (noRetryRef.current || !attached) return
         if (event?.code === 4401 && authRetryRef.current < 1) {
           authRetryRef.current += 1
+          emit('terminal.auth_retry', 'warning', 'Terminal token refreshed', 'Token rejected (server restarted); refreshing the session', { code: 4401 })
           // Token rejected (server restarted): refresh the session now and
           // reconnect with it instead of retrying the stale token.
           setSessionEpoch(value => value + 1)
@@ -197,6 +216,7 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
   useEffect(() => {
     setFrame(empty); setConnected(false); setPaused(false); setCopyStatus('')
     if (!degraded) return
+    emit('terminal.fallback', 'warning', 'Terminal fallback', 'Interactive socket unavailable; showing the read-only SSE mirror', { mode: 'sse' })
     const source = connectSse()
     return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
   }, [degraded, connectSse])
@@ -218,6 +238,7 @@ function TerminalPanelStream({ taskId, note }: { taskId: string; note?: string |
       clearTimeout(retryTimerRef.current)
       retryTimerRef.current = undefined
       setAttached(false)
+      emit('terminal.detached', 'info', 'Terminal detached', 'Detached from the Herdr pane by the operator')
       return
     }
     noRetryRef.current = false

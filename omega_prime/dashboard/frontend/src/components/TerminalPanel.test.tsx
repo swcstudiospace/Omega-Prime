@@ -382,3 +382,26 @@ describe('TerminalPanel', () => {
     expect(FakeWebSocket.instances).toHaveLength(2)
   })
 })
+describe('TerminalPanel lifecycle logging', () => {
+  it('reports attach, first frame, status and close to the task event stream', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    vi.stubGlobal('EventSource', FakeEventSource)
+    stubSession({ token: FAKE_TOKEN, readonly: false })
+    const onLog = vi.fn()
+    render(<TerminalPanel taskId="worker/1" onLog={onLog} />)
+    await flush()
+    const socket = FakeWebSocket.instances.at(-1)!
+    socket.open()
+    socket.emit({ type: 'frame', text: 'line one\nline two', updated_at: '2026-01-01T00:00:00Z' })
+    socket.emit({ type: 'frame', text: 'line three', updated_at: '2026-01-01T00:00:01Z' })
+    socket.emit({ type: 'status', status: 'unavailable' })
+    const types = onLog.mock.calls.map(([draft]) => draft.type)
+    expect(types).toEqual(['terminal.attached', 'terminal.frame', 'terminal.status'])
+    expect(onLog.mock.calls[0]![0]).toMatchObject({ taskId: 'worker/1', source: 'terminal', payload: { mode: 'rw' } })
+    expect(onLog.mock.calls[1]![0].payload).toMatchObject({ lines: 2 })
+    // The interactive terminal keeps working while logging.
+    expect(socket.sent[0]).toMatchObject({ type: 'auth', token: FAKE_TOKEN, mode: 'rw' })
+    fireEvent.click(screen.getByRole('button', { name: 'Detach' }))
+    expect(onLog.mock.calls.map(([draft]) => draft.type)).toContain('terminal.detached')
+  })
+})

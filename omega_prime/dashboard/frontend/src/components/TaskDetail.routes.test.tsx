@@ -66,3 +66,13 @@ describe('Task detail routes', () => {
     expect(document.querySelector('.stale-pill')).toBeNull()
   })
 })
+describe('Task detail event stream', () => {
+  it('renders the task-scoped event stream beside the terminal', async () => {
+    window.location.hash = '#/tasks/worker%2F1'
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Compile release/, level: 2 })).toBeInTheDocument())
+    expect(screen.getByRole('heading', { name: 'Task event stream', level: 2 })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Live terminal', level: 3 })).toBeInTheDocument()
+    expect(document.querySelector('.terminal-workbench .task-event-stream')).not.toBeNull()
+  })
+})
