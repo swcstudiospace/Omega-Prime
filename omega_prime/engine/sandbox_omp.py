@@ -652,6 +652,10 @@ def run_backend(
     commands: list[str] = []
     started = False
     outcome: dict[str, Any] | None = None
+    # Events that arrive before the stage-start reply (the real wrapper
+    # sends events and replies from separate tasks): the wait loop still
+    # acts on them, a question among them included.
+    early_events: list[dict[str, Any]] = []
     try:
         client.start(cwd=root)
         client.wait_ready()
@@ -685,7 +689,9 @@ def run_backend(
                         job_id,
                         "--follow",
                         "--state-dir",
-                        str(state_dir(env)),
+                        # Absolute: the pane runs in the worktree, so a
+                        # relative state dir would name another feed.
+                        str(state_dir(env).resolve()),
                     ],
                     session=f"omega-{job_id}",
                 )
@@ -714,6 +720,7 @@ def run_backend(
             tasks_path=tasks_path,
             task_id=task_id,
             row_started=row_started,
+            drained=early_events,
         )
         started = True
         run_metadata["started"] = True
@@ -729,6 +736,7 @@ def run_backend(
             task_id=task_id,
             row_started=row_started,
             stage=stage,
+            early_events=early_events,
         )
         done_status = str(done_event.get("status") or "")
         status_record = _tool(
@@ -794,6 +802,7 @@ def run_backend(
                 run_rows.finish(
                     tasks_path,
                     task_id,
+                    job_id=job_id,
                     ok=run_ok,
                     receipt={
                         "job_id": job_id,
@@ -978,14 +987,20 @@ def _tool(
     tasks_path: str | Path | None = None,
     task_id: str | None = None,
     row_started: bool = False,
+    drained: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """One wrapper tool call; events land in events.jsonl via append_event,
     the tool name in commands. Each drained event also touches the run's
-    tasks.json row when one was started (best-effort, never fatal)."""
-    reply = client.call(tool, args)
-    for event in client.drain_events():
-        append_event(events_path, event)
-        _touch_row(tasks_path, task_id, row_started, event)
+    tasks.json row when one was started (best-effort, never fatal), and is
+    appended to ``drained`` when given, so a caller can still act on it."""
+    try:
+        reply = client.call(tool, args)
+    finally:
+        for event in client.drain_events():
+            append_event(events_path, event)
+            _touch_row(tasks_path, task_id, row_started, event)
+            if drained is not None:
+                drained.append(event)
     commands.append(tool)
     return reply
 
@@ -993,6 +1008,55 @@ def _tool(
 def _question_item_id(task_id: str, request_id: str) -> str:
     """The stable waiting_on_ove item id for one GSD question."""
     return f"{task_id}:question:{request_id}"
+
+
+def _question_text(event: Mapping[str, Any]) -> str:
+    """The operator-facing ask for one wrapper ``question`` event.
+
+    The wrapper (core.ts) sends omp's shape: ``questions`` (each with its
+    ``question`` and option ``label``s), or a ``title`` with plain
+    ``options``, and the ``method``. Each question keeps its choices.
+    """
+    parts: list[str] = []
+    questions = event.get("questions")
+    if isinstance(questions, list):
+        for item in questions:
+            if not isinstance(item, Mapping):
+                continue
+            text = str(item.get("question") or "").strip()
+            raw = item.get("options")
+            labels = [
+                str(option.get("label") or "").strip()
+                for option in (raw if isinstance(raw, list) else [])
+                if isinstance(option, Mapping)
+            ]
+            labels = [label for label in labels if label]
+            if labels:
+                text = f"{text} (options: {' / '.join(labels)})".strip()
+            if text:
+                parts.append(text)
+    if not parts:
+        title = str(event.get("title") or "").strip()
+        raw = event.get("options")
+        options = [
+            str(option).strip()
+            for option in (raw if isinstance(raw, list) else [])
+            if str(option).strip()
+        ]
+        if title and options:
+            parts.append(f"{title} (options: {' / '.join(options)})")
+        elif title:
+            parts.append(title)
+        elif options:
+            parts.append(f"options: {' / '.join(options)}")
+    if not parts:
+        legacy = str(event.get("question") or "").strip()
+        if legacy:
+            parts.append(legacy)
+    if not parts:
+        method = str(event.get("method") or "").strip()
+        parts.append(f"the sandbox stage asks for input ({method or 'question'})")
+    return " | ".join(parts)
 
 
 def _raise_question(
@@ -1068,6 +1132,7 @@ def _wait_stage_done(
     task_id: str | None = None,
     row_started: bool = False,
     stage: str | None = None,
+    early_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Consume events until the stage's ``stage_done`` arrives.
 
@@ -1091,21 +1156,68 @@ def _wait_stage_done(
     keeps waiting (a re-ask arrives as a new question event), any other
     answer_question failure propagates as SandboxUnavailable. A set
     interrupt is honoured while an answer is pending.
+
+    ``early_events`` are events a tool call already logged (the stage-start
+    reply can trail them); they get the same question and completion
+    handling exactly once. A question still open when the wait ends for
+    any reason (wrapper closed, stage failed, cancelled) is cleared.
     """
-    aborted = False
     # The open question, if any: (wrapper requestId, waiting_on_ove item
     # id). One question at a time per stage is the wrapper's contract.
-    pending: tuple[str, str] | None = None
+    pending_box: list[tuple[str, str] | None] = [None]
+    try:
+        return _wait_loop(
+            client,
+            stage_id,
+            interrupt,
+            events_path,
+            tasks_path=tasks_path,
+            task_id=task_id,
+            row_started=row_started,
+            stage=stage,
+            early_events=early_events,
+            pending_ref=pending_box,
+        )
+    finally:
+        # A question still open when the wait ends (wrapper closed, stage
+        # failed, cancelled) belongs to a dead session: clear its item.
+        if pending_box[0] is not None:
+            with contextlib.suppress(Exception):
+                _clear_question(tasks_path, task_id, pending_box[0][1])
+
+
+def _wait_loop(
+    client: AndaClient,
+    stage_id: str,
+    interrupt: Any | None,
+    events_path: Path,
+    *,
+    tasks_path: str | Path | None,
+    task_id: str | None,
+    row_started: bool,
+    stage: str | None,
+    early_events: list[dict[str, Any]] | None,
+    pending_ref: list[tuple[str, str] | None],
+) -> dict[str, Any]:
+    """The body of ``_wait_stage_done``; ``pending_ref[0]`` is the open
+    question, kept current so the caller can clear it on any exit."""
+    aborted = False
     answer: str | Mapping[str, Any] | None = None
     last_answer_check = 0.0
+    # Events a tool call already logged and touched, still to be acted on.
+    unhandled: list[dict[str, Any]] = list(early_events or [])
     while True:
         done = client.terminal.pop(stage_id, None)
-        if done is None:
+        if done is None and not unhandled:
             client.next_event(_POLL_TICK)
             done = client.terminal.pop(stage_id, None)
-        for buffered in client.drain_events():
+        fresh = client.drain_events()
+        for buffered in fresh:
             append_event(events_path, buffered)
             _touch_row(tasks_path, task_id, row_started, buffered)
+        batch, unhandled = unhandled + fresh, []
+        for buffered in batch:
+            pending = pending_ref[0]
             if (
                 buffered.get("event") == "question"
                 and row_started
@@ -1119,13 +1231,15 @@ def _wait_stage_done(
                 with contextlib.suppress(Exception):
                     if pending is not None:
                         _clear_question(tasks_path, task_id, pending[1])
-                    pending = (
+                        pending_ref[0] = None
+                    pending_ref[0] = (
                         rid,
                         _raise_question(
-                            tasks_path, task_id, stage, rid, buffered.get("question")
+                            tasks_path, task_id, stage, rid, _question_text(buffered)
                         ),
                     )
                     last_answer_check = time.monotonic()
+        pending = pending_ref[0]
         if (
             done is None
             and pending is not None
@@ -1155,7 +1269,7 @@ def _wait_stage_done(
                     # ask arrives as a new question event with a new id.
                 with contextlib.suppress(Exception):
                     _clear_question(tasks_path, task_id, pending[1])
-                pending = None
+                pending_ref[0] = None
         if done is not None:
             if aborted and done.get("status") == "aborted":
                 # Our own abort landed (an externally aborted stage returns
