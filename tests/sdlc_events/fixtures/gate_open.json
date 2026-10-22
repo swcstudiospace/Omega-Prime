@@ -1,0 +1,16 @@
+{
+  "events": [
+    {
+      "kind": "check_completed",
+      "delivery_id": "deliv-1",
+      "owner": "swcstudiospace",
+      "repo": "Omega-Prime",
+      "pr": 74,
+      "head_sha": "f21a888cd2f1c320324591b296a17fd1ec0c18ec",
+      "greptile_score": 5,
+      "greptile_on_head": true,
+      "ci_green": true,
+      "mergeable": true
+    }
+  ]
+}
