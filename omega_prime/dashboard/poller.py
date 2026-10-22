@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import time
@@ -128,7 +129,7 @@ class DashboardPoller:
                 # occupied until that call really returns; the scheduler never
                 # starts a second overlapping call into the same collector.
                 straggler.add_done_callback(
-                    lambda worker, source=spec.source: self._release(source, worker)
+                    functools.partial(self._release, spec.source)
                 )
         # Collection is done; the source may be rescheduled while the build
         # (and its possibly slow Herdr pane check) runs.

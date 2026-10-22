@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import email.message
 import io
 import json
 import time
@@ -250,16 +251,17 @@ def test_fleet_default_request_refuses_redirects(monkeypatch) -> None:
 
         def http_open(self, req):
             if req.full_url.startswith("http://127.0.0.1"):
+                headers = email.message.Message()
+                headers["Location"] = "http://evil.example/steal"
                 response = urllib.response.addinfourl(
-                    io.BytesIO(b""),
-                    {"Location": "http://evil.example/steal"},
-                    req.full_url,
-                    302,
+                    io.BytesIO(b""), headers, req.full_url, 302
                 )
-                response.msg = "Found"
+                response.msg = "Found"  # type: ignore[attr-defined]
                 return response
             forwarded.append(req.get_header("Authorization") or "")
-            return urllib.response.addinfourl(io.BytesIO(b"{}"), {}, req.full_url, 200)
+            return urllib.response.addinfourl(
+                io.BytesIO(b"{}"), email.message.Message(), req.full_url, 200
+            )
 
     opener = urllib.request.build_opener(Redirecting, fleet_module._RefuseRedirect)
     monkeypatch.setattr(fleet_module, "_OPENER", opener)
