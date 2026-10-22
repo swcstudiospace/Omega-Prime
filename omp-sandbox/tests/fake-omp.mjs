@@ -11,7 +11,7 @@ createInterface({ input: process.stdin }).on("line", async (l) => {
     return delay ? setTimeout(ack, delay) : ack();
   }
   if (m.type === "abort") return out({ type: "response", id: m.id, command: "abort", success: true });
-  if (m.type === "prompt" && process.env.FAKE_OMP_PROMPT_LOG) (await import("node:fs")).appendFileSync(process.env.FAKE_OMP_PROMPT_LOG, "prompt\n");
+  if (m.type === "prompt" && process.env.FAKE_OMP_PROMPT_LOG) (await import("node:fs")).appendFileSync(process.env.FAKE_OMP_PROMPT_LOG, m.message + "\n");
   if (m.type === "prompt" && process.env.FAKE_OMP_EXIT_ON_PROMPT) process.exit(3);
   if (m.type === "prompt") {
     promptId = m.id; out({ type: "response", id: m.id, command: "prompt", success: true });

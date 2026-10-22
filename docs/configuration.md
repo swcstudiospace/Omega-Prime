@@ -105,6 +105,8 @@ The table records names and purposes only.
 | `OMEGA_PRIME_CLARIFY_SOCKET` | Names the per-run clarify broker socket an engine child uses to ask the operator a question. |
 | `OMEGA_PRIME_COMMAND_LOG` | Selects the command history log destination. |
 | `OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS` | Sets the maximum accepted lateness for scheduled actions. |
+| `OMEGA_PRIME_DELEGATE_DEPTH` | Sets the delegate depth an engine child's MCP server starts at, so nested delegates keep the parent's depth limit; set by the engine, not by operators. |
+| `OMEGA_PRIME_DELEGATE_MAX_DEPTH` | Sets the delegate depth limit of an engine child's MCP server to the parent's own max_depth, so a custom limit is not reset to the default; set by the engine, not by operators. |
 | `OMEGA_PRIME_DESK_BUS_URL` | Selects the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_BUS_URL_FILE` | Names a protected file containing the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_CHILD_MODEL` | Selects the model used for the managed desk child process. |
@@ -118,6 +120,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_DISPATCH_CONFIRM` | Confirms dispatch operations requiring the Fleet credential helper. |
 | `OMEGA_PRIME_DISPATCH_CONFIRM_FILE` | Names a protected file containing the dispatch confirmation token. |
 | `OMEGA_PRIME_ENGINE` | Controls whether engine execution is enabled or required. |
+| `OMEGA_PRIME_ENGINE_STAGE` | Names the GSD stage (plan or execute) an engine run is on, so staged turns and their delegates pick the stage model. |
 | `OMEGA_PRIME_ENGINE_TMUX` | Controls tmux session attachment for engine jobs. |
 | `OMEGA_PRIME_ENGINE_UNSANDBOXED` | Opts engine execution out of the sandbox. |
 | `OMEGA_PRIME_EVALS_JUDGE_API_KEY` | Authenticates requests to the live evaluation judge. |
@@ -132,6 +135,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_OMP_ALLOW_CURSOR` | Enables the Cursor plan in engine model routing. |
 | `OMEGA_PRIME_OMP_ALLOW_XAI` | Enables the xAI plan in engine model routing. |
 | `OMEGA_PRIME_OMP_ALLOW_ZAI` | Enables the Z.ai plan in engine model routing. |
+| `OMEGA_PRIME_OMP_BACKEND` | Selects the omp engine backend; omp-sandbox routes engine stages through the omp-sandbox wrapper instead of bwrap. |
 | `OMEGA_PRIME_OMP_BIN` | Selects the omp executable used by the engine. |
 | `OMEGA_PRIME_OMP_HOME` | Selects the omp configuration home directory. |
 | `OMEGA_PRIME_OMP_MODEL_ANTHROPIC` | Overrides the default model for the Anthropic engine plan. |
@@ -152,6 +156,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_OMP_MODEL_ZAI` | Overrides the default model for the Z.ai engine plan. |
 | `OMEGA_PRIME_OMP_MODEL_ZAI_EXECUTE` | Overrides the execution-stage Z.ai model. |
 | `OMEGA_PRIME_OMP_MODEL_ZAI_PLAN` | Overrides the planning-stage Z.ai model. |
+| `OMEGA_PRIME_OMP_SANDBOX_ANDA` | Selects the omp-sandbox-anda wrapper executable used by the omp-sandbox engine backend. |
 | `OMEGA_PRIME_PACKS_JSON` | Selects the configured tool-pack description file. |
 | `OMEGA_PRIME_PACKS_JSON_FILE` | Names a protected file containing the tool-pack description setting. |
 | `OMEGA_PRIME_PACK_API_BASES_JSON` | Selects the tool-pack API base configuration. |
@@ -203,6 +208,8 @@ The table records names and purposes only.
 | `OMEGA_PRIME_TELEMETRY_OTLP_INTERVAL_SECONDS` | Sets the OTLP telemetry export interval. |
 | `OMEGA_PRIME_WORK_ROOT` | Selects the workspace root used by Omega Prime operations. |
 | `OMEGA_PRIME_WORK_ROOT_FILE` | Names a protected file containing the Omega Prime workspace root. |
+| `OMP_SANDBOX_ROOT` | Selects the omp-sandbox package root the wrapper starts its TS core from. |
+| `OMP_SANDBOX_WORKSPACE_ROOTS` | Lists the allowlisted roots a job worktree may live under for the omp-sandbox backend. |
 | `OPENAI_API_KEY` | Authenticates OpenAI API requests. |
 | `OPENAI_API_KEY_FILE` | Names a protected file containing the OpenAI API credential. |
 | `OPENCODE_API_KEY` | Authenticates OpenCode provider requests. |
@@ -239,6 +246,8 @@ The table records names and purposes only.
 | `TMPDIR_FILE` | Forwarded file-name counterpart for the child-process temporary directory. |
 | `ULTRATHINK_ROOT` | Selects the ultrathink integration root directory. |
 | `ULTRATHINK_ROOT_FILE` | Names a protected file containing the ultrathink integration root. |
+| `ULTRATHINK_SHIP` | Enables ultrathink ship writes only for the exact values 1 and true. |
+| `ULTRATHINK_SHIP_FILE` | Names a protected file supplying ULTRATHINK_SHIP: Enables ultrathink ship writes only for the exact values 1 and true. |
 | `ULTRATHINK_STATE_DIR` | Selects persistent state for the ultrathink integration. |
 | `USER` | Identifies the host user inherited by child processes. |
 | `USER_FILE` | Forwarded file-name counterpart for the child-process user name. |

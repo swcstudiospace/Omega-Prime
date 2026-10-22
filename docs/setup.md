@@ -212,6 +212,63 @@ Preflight doctor for host/transport readiness:
 Add `--auth --strict` when checking a remote authenticated bind; exit 1 on
 any failure (with `--strict`, on any warning too).
 
+### Ultrathink environment and readiness
+
+The optional Ultrathink bridge uses three environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `ULTRATHINK_ROOT` | Path to the Ultrathink checkout. Readiness checks metadata for `bin/ultrathink`, `bin/ultrathink-mcp`, and `bin/ultrathink-ship`; each must be a regular executable file. |
+| `ULTRATHINK_SHIP` | Ship-write opt-in. Only the exact strings `1` or `true` enable it. Unset, empty, `0`, and every other value disable it. |
+| `ULTRATHINK_STATE_DIR` | An additional plan-discovery directory, searched after `$OMEGA_PRIME_STATE_DIR/ultrathink`; it does not replace the other candidates. |
+
+The readiness report uses `not_configured` when `ULTRATHINK_ROOT` is unset or
+empty, `root_invalid` when any required executable is missing, not a regular
+file, or not executable, and `ready_ship_off` or `ready_ship_on` when all
+three checks pass, according to the exact ship opt-in value. Readiness checks
+root and executable metadata only. It does not run Ultrathink, inspect provider
+or live configuration, or read a plan; a ready state does not mean a plan
+exists or is fresh.
+
+Turn-plan discovery searches these candidates in order:
+
+1. `$OMEGA_PRIME_STATE_DIR/ultrathink`
+2. `$ULTRATHINK_STATE_DIR`
+3. `$GROK_PLUGIN_DATA/ultrathink`
+4. `$GROK_HOME/plugin-data/ultrathink` (default `$HOME/.grok/plugin-data/ultrathink`)
+5. `$HERMES_HOME/ultrathink` (default `$HOME/.hermes/ultrathink`)
+6. `$XDG_CONFIG_HOME/muse/ultrathink` (default `$HOME/.config/muse/ultrathink`)
+7. `$PI_CODING_AGENT_DIR/ultrathink`, or `$HOME/.omp/agent/ultrathink` only when `PI_CODING_AGENT_DIR` is unset
+8. `$HOME/.claude/ultrathink`
+
+An explicit `state_dirs` argument or `--state-dir` replaces that candidate
+search. Discovery can find no plan even when readiness succeeds. If the first
+valid plan candidate is stale, it is treated as no plan for this turn and
+discovery stops; it does not fall through to an older candidate.
+
+`ult_ship_assess` is read-only: it assesses but does not approve or perform a
+PR, review, or merge. Ship writes (`ult_ship_pr`, `ult_ship_review`, and
+`ult_ship_merge`) remain off unless `ULTRATHINK_SHIP` is exactly `1` or
+`true`; enabling them does not grant approval. Each action's existing approval
+requirement remains independent. See the
+[Ultrathink skill](../omega_prime/skills/ultrathink/SKILL.md) for the workflow.
+
+For test contributors, the optional native-test marker identifies tests that
+need the locally built native extension; Python-only status coverage remains
+available, and an extension that exists but cannot load is a failure, not an
+absence skip. `OPENSHELL_BIN` is test-only: it can select an operator-supplied
+existing executable for the test probe. It does not build or discover a
+binary, override production executable selection, or establish that a binary
+is available. An absent optional executable may be skipped; a selected
+present-but-broken executable must fail.
+
+Provider installation or configuration, secrets, and live-host changes are
+operator-only and are not performed by these setup instructions or by the
+Ultrathink integration work. Provider decisions and live configuration remain
+unchanged. No Phase 102 environment-check command is documented here: its
+actual checker remains an unresolved prerequisite, and no substitute command
+is provided.
+
 ## 6. Optional: start the tool host
 
 Without this step the checked-out code still answers every local command
@@ -411,9 +468,12 @@ coding-fleet repository, not here.
 
 Stage routing: a run started with `stage="plan"` or `stage="execute"` tries
 the ChatGPT plan first, on `gpt-6.1-sol` for planning and `gpt-6-luna` for
-execution. It falls back to Z.ai (`glm-5.3`) when the ChatGPT plan is not
+execution. It falls back to Z.ai, which has its own pair (`glm-5.3` for
+planning, `glm-5.3-flash` for execution), when the ChatGPT plan is not
 allowlisted or its quota window is exhausted, and records the plan it fell
-back from. Override a stage model with
+back from. Pass `plan="zai"` to make Z.ai the primary for a run. The stage
+comes from the caller's `stage=`, then `Agent.engine_stage`, then
+`OMEGA_PRIME_ENGINE_STAGE`; a staged parent delegates to `execute`. Override a stage model with
 `OMEGA_PRIME_OMP_MODEL_<PLAN>_<STAGE>` (for example
 `OMEGA_PRIME_OMP_MODEL_CHATGPT_EXECUTE`); `OMEGA_PRIME_OMP_MODEL_<PLAN>` still
 applies to every stage of that plan. Runs without a stage keep the router's

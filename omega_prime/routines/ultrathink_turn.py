@@ -18,39 +18,36 @@ from pathlib import Path
 from typing import Any
 
 
-def _candidates(env: dict[str, str]) -> list[Path]:
+def candidate_state_dirs(env: Mapping[str, str]) -> list[Path]:
+    """Return the ordered state directories used for turn-plan discovery."""
     home = env.get("HOME", os.path.expanduser("~"))
     grok_home = env.get("GROK_HOME", str(Path(home) / ".grok"))
     hermes_home = env.get("HERMES_HOME", str(Path(home) / ".hermes"))
     xdg = env.get("XDG_CONFIG_HOME", str(Path(home) / ".config"))
     ordered: list[str] = []
     if env.get("OMEGA_PRIME_STATE_DIR"):
-        ordered.append(
-            str(Path(env["OMEGA_PRIME_STATE_DIR"]) / "ultrathink" / "last-plan.json")
-        )
+        ordered.append(str(Path(env["OMEGA_PRIME_STATE_DIR"]) / "ultrathink"))
     if env.get("ULTRATHINK_STATE_DIR"):
-        ordered.append(str(Path(env["ULTRATHINK_STATE_DIR"]) / "last-plan.json"))
+        ordered.append(str(Path(env["ULTRATHINK_STATE_DIR"])))
     if env.get("GROK_PLUGIN_DATA"):
-        ordered.append(
-            str(Path(env["GROK_PLUGIN_DATA"]) / "ultrathink" / "last-plan.json")
-        )
+        ordered.append(str(Path(env["GROK_PLUGIN_DATA"]) / "ultrathink"))
     ordered.extend(
         [
-            str(Path(grok_home) / "plugin-data" / "ultrathink" / "last-plan.json"),
-            str(Path(hermes_home) / "ultrathink" / "last-plan.json"),
-            str(Path(xdg) / "muse" / "ultrathink" / "last-plan.json"),
+            str(Path(grok_home) / "plugin-data" / "ultrathink"),
+            str(Path(hermes_home) / "ultrathink"),
+            str(Path(xdg) / "muse" / "ultrathink"),
         ]
     )
     if env.get("PI_CODING_AGENT_DIR"):
-        ordered.append(
-            str(Path(env["PI_CODING_AGENT_DIR"]) / "ultrathink" / "last-plan.json")
-        )
+        ordered.append(str(Path(env["PI_CODING_AGENT_DIR"]) / "ultrathink"))
     else:
-        ordered.append(
-            str(Path(home) / ".omp" / "agent" / "ultrathink" / "last-plan.json")
-        )
-    ordered.append(str(Path(home) / ".claude" / "ultrathink" / "last-plan.json"))
-    return [Path(p) for p in ordered]
+        ordered.append(str(Path(home) / ".omp" / "agent" / "ultrathink"))
+    ordered.append(str(Path(home) / ".claude" / "ultrathink"))
+    return [Path(path) for path in ordered]
+
+
+def _candidates(env: dict[str, str]) -> list[Path]:
+    return [directory / "last-plan.json" for directory in candidate_state_dirs(env)]
 
 
 def resolve_turn_plan(
@@ -96,13 +93,19 @@ def resolve_turn_plan(
             plan.get("specPath") if isinstance(plan.get("specPath"), str) else None
         )
         spec_exists = spec_path is not None and Path(spec_path).is_file()
-        return {
+        found: dict[str, Any] = {
             "found": True,
             "plan_path": str(path),
             "spec_path": spec_path,
             "spec_exists": spec_exists,
             "stale": False,
         }
+        # A saved plan may name its engine stage ("plan" or "execute");
+        # ultrathink_engine routes it. Absent means the env or caller decides.
+        stage = plan.get("stage")
+        if isinstance(stage, str) and stage.strip():
+            found["stage"] = stage
+        return found
     return {
         "found": False,
         "plan_path": None,

@@ -85,6 +85,10 @@ export class OpenShellTier implements SandboxTier {
     return [...a, "--", ...argv];
   }
   sandboxAgent() { return { baseUrl: this.#url, token: this.#token }; }
+  /** Host file -> guest path over the gateway's upload channel (exec stdin is capped). */
+  upload(local: string, dest: string) { return os(["sandbox", "upload", "--no-git-ignore", this.id, local, dest], { timeoutMs: 600_000 }); }
+  /** Guest file -> host dir over the gateway's download channel (export_commits' bundle). */
+  download(path: string, destDir: string) { return os(["sandbox", "download", this.id, path, destDir], { timeoutMs: 600_000 }); }
   #execArgs(argv: string[], opts: { cwd?: string; env?: Record<string, string> }) {
     // Non-secret env via --env; secrets only from the guest's 0600 env file. `[ -f ] &&` keeps sh alive if it is absent.
     const extra = Object.fromEntries(Object.entries({ ...this.#env, ...(opts.env ?? {}) }).filter(([k]) => !SECRET.test(k)));

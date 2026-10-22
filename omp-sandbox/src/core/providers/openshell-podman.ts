@@ -379,6 +379,11 @@ export class OpenShellPodmanTier implements SandboxTier {
 
   sandboxAgent() { return { baseUrl: this.#agentUrl, token: this.#agentToken }; }
 
+  /** Copy one host file into the sandbox over the gateway's mTLS upload channel (exec stdin is capped at 4 MiB). */
+  upload(local: string, dest: string) { return this.#os(["sandbox", "upload", "--no-git-ignore", this.id, local, dest], { timeoutMs: 600_000 }); }
+  /** Copy one sandbox file out to a host directory over the same channel. */
+  download(path: string, destDir: string) { return this.#os(["sandbox", "download", this.id, path, destDir], { timeoutMs: 600_000 }); }
+
   spawnStdio(argv: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
     const tag = randomBytes(6).toString("hex");
     const p = spawn(OPENSHELL_BIN, this.#execArgs(argv, opts, tag), { env: this.#osEnv, stdio: ["pipe", "pipe", "pipe"] });

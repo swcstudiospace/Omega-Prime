@@ -82,3 +82,71 @@ def test_mark_approval_removal_breaks_redteam_eval(tmp_path: Path, monkeypatch):
         monkeypatch.undo()
     assert run_case(dict(redteam), tmp_path / "sensitivity-restored")["passed"] is True
     assert run_case(dict(golden), tmp_path / "sensitivity-golden")["passed"] is True
+
+
+def test_ultrathink_eval_cases_use_explicit_env_and_separate_approval(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("ULTRATHINK_SHIP", "1")
+    base = {
+        "registry": True,
+        "family": "ultrathink",
+        "tool": "ult_ship_pr",
+        "arguments": {"state": "plan.json"},
+        "approve": True,
+    }
+    disabled = run_case(
+        {
+            **base,
+            "id": "eval-ultrathink-ship-default-off",
+            "expect": [
+                {"type": "refusal_contains", "text": "ship_disabled"},
+                {"type": "tool_not_called", "name": "ult_ship_pr"},
+            ],
+        },
+        tmp_path / "disabled",
+    )
+    assert disabled["passed"] is True
+
+    enabled = run_case(
+        {
+            **base,
+            "id": "eval-ultrathink-ship-explicitly-enabled",
+            "env": {"ULTRATHINK_SHIP": "1"},
+            "expect": [{"type": "tool_called", "name": "ult_ship_pr"}],
+        },
+        tmp_path / "enabled",
+    )
+    assert enabled["passed"] is True
+
+    unapproved = run_case(
+        {
+            **base,
+            "id": "eval-ultrathink-enabled-but-unapproved",
+            "tool": "ult_ship_merge",
+            "env": {"ULTRATHINK_SHIP": "true"},
+            "approve": False,
+            "expect": [
+                {"type": "refusal_contains", "text": "approval required"},
+                {"type": "tool_not_called", "name": "ult_ship_merge"},
+            ],
+        },
+        tmp_path / "unapproved",
+    )
+    assert unapproved["passed"] is True
+
+    for tool in ("ult_status", "ult_ship_assess"):
+        case = run_case(
+            {
+                "registry": True,
+                "family": "ultrathink",
+                "id": f"eval-ultrathink-readonly-{tool}",
+                "tool": tool,
+                "arguments": {"state": "plan.json"}
+                if tool == "ult_ship_assess"
+                else {},
+                "expect": [{"type": "tool_called", "name": tool}],
+            },
+            tmp_path / tool,
+        )
+        assert case["passed"] is True
