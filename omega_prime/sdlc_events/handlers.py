@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
 from omega_prime.sdlc_events.gate import GateInput, evaluate_merge_gate
-from omega_prime.sdlc_events.idempotency import IdempotencyStore
+from omega_prime.sdlc_events.idempotency import ClaimOutcome, IdempotencyStore
 from omega_prime.sdlc_events.types import EventKind, SdlcEvent
 
 
@@ -15,7 +16,19 @@ class TaskStorePort(Protocol):
 
 
 class MergePort(Protocol):
-    def merge(self, repo: str, pr: int) -> str: ...
+    """Live merge adapter.
+
+    Implementations MUST merge only if the PR head still equals
+    ``expected_head_sha`` (e.g. GitHub's ``sha`` merge parameter) and raise
+    ``HeadMovedError`` otherwise, so a push between gate check and merge can
+    never land an unchecked commit.
+    """
+
+    def merge(self, repo: str, pr: int, *, expected_head_sha: str) -> str: ...
+
+
+class HeadMovedError(RuntimeError):
+    """The PR head changed after the gate evaluated it; the merge was refused."""
 
 
 DEFAULT_ALLOWLIST = frozenset({"swcstudiospace/Omega-Prime", "swcstudiospace/*"})
@@ -30,6 +43,27 @@ class HandlerResult:
 
 def _task_id_for(event: SdlcEvent) -> str:
     return f"gb:pr-{event.pr.repo.name}-{event.pr.number}"
+
+
+def _run_claimed(
+    event: SdlcEvent, idem: IdempotencyStore, work: Callable[[], HandlerResult]
+) -> HandlerResult:
+    """Run ``work`` once per delivery; release the claim if it fails so it can retry."""
+    outcome = idem.claim(event.delivery)
+    if outcome is not ClaimOutcome.ACQUIRED:
+        detail = (
+            "duplicate_delivery"
+            if outcome is ClaimOutcome.DONE
+            else "delivery_in_progress"
+        )
+        return HandlerResult(action="skip", detail=detail, skipped_duplicate=True)
+    try:
+        result = work()
+    except BaseException:
+        idem.release(event.delivery)
+        raise
+    idem.complete(event.delivery)
+    return result
 
 
 def on_gate_signal(
@@ -51,11 +85,35 @@ def on_gate_signal(
         EventKind.REVIEW_SIGNAL,
     }:
         return HandlerResult(action="ignore", detail=f"kind={event.kind.value}")
-    if idem.seen(event.delivery):
-        return HandlerResult(
-            action="skip", detail="duplicate_delivery", skipped_duplicate=True
+
+    def work() -> HandlerResult:
+        return _gate_work(
+            event,
+            store=store,
+            greptile_score=greptile_score,
+            greptile_on_head=greptile_on_head,
+            ci_green=ci_green,
+            mergeable=mergeable,
+            merge=merge,
+            allowlist=allowlist,
+            dry_run=dry_run,
         )
-    idem.mark(event.delivery)
+
+    return _run_claimed(event, idem, work)
+
+
+def _gate_work(
+    event: SdlcEvent,
+    *,
+    store: TaskStorePort,
+    greptile_score: int | None,
+    greptile_on_head: bool,
+    ci_green: bool,
+    mergeable: bool,
+    merge: MergePort | None,
+    allowlist: frozenset[str],
+    dry_run: bool,
+) -> HandlerResult:
     gate = evaluate_merge_gate(
         GateInput(
             greptile_score=greptile_score,
@@ -78,7 +136,9 @@ def on_gate_signal(
     if dry_run or merge is None:
         store.upsert_note(tid, "working", note + " [dry-run; no merge]")
         return HandlerResult(action="gate_open_dry_run", detail=note)
-    sha = merge.merge(event.pr.repo.full, event.pr.number)
+    sha = merge.merge(
+        event.pr.repo.full, event.pr.number, expected_head_sha=event.pr.head_sha
+    )
     store.upsert_note(tid, "done", note + f" merged={sha}")
     return HandlerResult(action="merged", detail=sha)
 
@@ -90,17 +150,14 @@ def on_review_signal(
     idem: IdempotencyStore,
     greptile_score: int | None,
 ) -> HandlerResult:
-    if idem.seen(event.delivery):
-        return HandlerResult(
-            action="skip", detail="duplicate_delivery", skipped_duplicate=True
-        )
-    idem.mark(event.delivery)
-    tid = _task_id_for(event)
-    score = greptile_score if greptile_score is not None else -1
-    note = f"Greptile signal score={score} head={event.pr.head_sha[:7]}"
-    state = "working" if score >= 5 else "blocked"
-    store.upsert_note(tid, state, note)
-    return HandlerResult(action="review_noted", detail=note)
+    def work() -> HandlerResult:
+        score = greptile_score if greptile_score is not None else -1
+        note = f"Greptile signal score={score} head={event.pr.head_sha[:7]}"
+        state = "working" if score >= 5 else "blocked"
+        store.upsert_note(_task_id_for(event), state, note)
+        return HandlerResult(action="review_noted", detail=note)
+
+    return _run_claimed(event, idem, work)
 
 
 def on_blocked_signal(
@@ -110,12 +167,9 @@ def on_blocked_signal(
     idem: IdempotencyStore,
     reason: str,
 ) -> HandlerResult:
-    if idem.seen(event.delivery):
-        return HandlerResult(
-            action="skip", detail="duplicate_delivery", skipped_duplicate=True
-        )
-    idem.mark(event.delivery)
-    tid = _task_id_for(event)
-    note = f"blocked: {reason} head={event.pr.head_sha[:7]}"
-    store.upsert_note(tid, "blocked", note)
-    return HandlerResult(action="blocked", detail=note)
+    def work() -> HandlerResult:
+        note = f"blocked: {reason} head={event.pr.head_sha[:7]}"
+        store.upsert_note(_task_id_for(event), "blocked", note)
+        return HandlerResult(action="blocked", detail=note)
+
+    return _run_claimed(event, idem, work)

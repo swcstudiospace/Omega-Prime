@@ -63,3 +63,8 @@ HITL may drop Origin. **Do not** add a cron schedule to this routine.
 ## Graph
 
 `ut-tnau6h-870e8435` — Linear SPE-19091…SPE-19097 — Notion Task https://app.notion.com/p/401bc1a0c7ae817a8766f4a9edda9f20
+
+## Delivery safety
+
+- **Exactly-once work per delivery.** `IdempotencyStore.claim()` is atomic (file `flock` + fresh read of the shared ledger), so separate listener wakes agree on who owns a delivery. Work runs only on `ACQUIRED`; success calls `complete()`, failure calls `release()` so a redelivery can resume. A crashed claim expires after `claim_ttl_s`.
+- **No unchecked merges.** `MergePort.merge()` receives `expected_head_sha` (the head the gate checked) and must refuse with `HeadMovedError` if the PR head moved. Live merges stay off (`dry_run=True`) until Ming approves the merge posture.
