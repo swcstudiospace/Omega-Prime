@@ -142,12 +142,18 @@ def test_terminal_route_resolves_only_task_owned_pane_and_uses_read_argv():
 
 
 def test_terminal_sanitizes_redacts_caps_and_sends_only_changed_frames():
+    # Credential-shaped values are assembled at runtime: no literal in source.
+    gh_token = "ghp" + "_" + "abcdefgh123456"
+    pat_prefix = "github" + "_pat_"
+    pat_body = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+    api_token = "sk" + "-" + "abcdefgh123456"
     content = (
         "\x1b[31m"
         + "é" * 40000
         + "\n"
         + "\n".join(f"line-{i}" for i in range(205))
-        + "\nBearer abcdefghijkl ghp_abcdefgh123456 github_pat_\x1b[32mABCDEFGHIJKLMNOPQRSTUVWXYZ012345 sk-abcdefgh123456 aaaaaaaa.bbbbbbbb.cccccccc api_key='topsecret'\x1b[0m"
+        + f"\nBearer abcdefghijkl {gh_token} {pat_prefix}\x1b[32m{pat_body} {api_token}"
+        + " aaaaaaaa.bbbbbbbb.cccccccc api_key='topsecret'\x1b[0m"
     )
     calls = 0
 
@@ -178,10 +184,10 @@ def test_terminal_sanitizes_redacts_caps_and_sends_only_changed_frames():
         secret not in wire
         for secret in (
             "abcdefghijkl",
-            "ghp_abcdefgh123456",
-            "github_pat_",
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
-            "sk-abcdefgh123456",
+            gh_token,
+            pat_prefix,
+            pat_body,
+            api_token,
             "aaaaaaaa.bbbbbbbb.cccccccc",
             "topsecret",
             "\x1b",

@@ -26,14 +26,32 @@ def _service(comm: str, cmdline: bytes) -> str | None:
     Daemons share an agent's binary or worktree, so counting them as agents
     would show a permanent "omp process N" task with no work behind it.
     """
-    args = [part.decode("utf-8", errors="replace") for part in cmdline.split(b"\0")]
-    names = [Path(arg).name for arg in args if arg]
-    if comm.startswith("openshell-gatew") or "openshell-gateway" in names:
+    args = [
+        part.decode("utf-8", errors="replace") for part in cmdline.split(b"\0") if part
+    ]
+    if comm.startswith("openshell-gatew") or (
+        _subcommand(args, "openshell-gateway") is not None
+    ):
         return "openshell-gateway"
-    if comm == "herdr" and "server" in names:
+    if comm == "herdr" and _subcommand(args, "herdr") == "server":
         return "herdr server"
-    if comm == _AGENT_COMM and "auth-broker" in names:
+    if comm == _AGENT_COMM and _subcommand(args, _AGENT_COMM) == "auth-broker":
         return "omp auth-broker"
+    return None
+
+
+def _subcommand(args: list[str], program: str) -> str | None:
+    """The first positional argument after `program`, when `program` is the
+    executable itself or the script an interpreter (bun, node) runs.
+
+    Only those command positions count: an argument value such as
+    ``--cwd /work/auth-broker`` never names a daemon. Returns "" when the
+    program runs with no subcommand, None when it is not the program.
+    """
+    for index, arg in enumerate(args[:2]):
+        if Path(arg).name == program:
+            rest = [part for part in args[index + 1 :] if not part.startswith("-")]
+            return rest[0] if rest else ""
     return None
 
 
