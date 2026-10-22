@@ -13,6 +13,7 @@
 - [User guide](user-guide.md)
 - [Driving the bot](driving-the-bot.md)
 - [Agent loop](agent-loop.md)
+- [Sandbox engine](omp-sandbox-engine.md)
 - [Connectors](connectors.md)
 - [Notion task dashboard](notion-task-dashboard.md)
 - [Compatibility and migration](migration.md)
