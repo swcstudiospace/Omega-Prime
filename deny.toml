@@ -17,4 +17,7 @@ allow = [
   "Zlib",
   "Unicode-3.0",
   "CDLA-Permissive-2.0",
+  # notify (pa-tui file index watcher, since the 72f790b pin): CC0 public
+  # domain dedication. Mirrors prime-agent/deny.toml (upstream 6aaa3fa06).
+  "CC0-1.0",
 ]
