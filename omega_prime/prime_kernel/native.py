@@ -24,6 +24,7 @@ and CLI mode names. Nothing here starts the terminal UI or a daemon worker.
 from __future__ import annotations
 
 import importlib.util
+import tomllib
 from pathlib import Path
 from types import ModuleType
 
@@ -47,25 +48,22 @@ _CANDIDATES = (
 _MODULE: ModuleType | None = None
 
 
-def _members_from_cargo() -> list[str]:
-    text = (_REPO / "prime-agent" / "Cargo.toml").read_text(encoding="utf-8")
+def _members_from_cargo(root: Path | None = None) -> list[str]:
+    """Same answer as ``checkout.workspace_members()``, read with ``tomllib``.
+
+    A member whose manifest sets ``package.publish = false`` is upstream dev
+    tooling (``pa-perf``), not a linked crate, so it is left out.
+    """
+    root = root or _REPO / "prime-agent"
+    cargo = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
     members: list[str] = []
-    in_members = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("members"):
-            in_members = True
+    for member in cargo["workspace"]["members"]:
+        manifest = tomllib.loads(
+            (root / member / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        if manifest.get("package", {}).get("publish", True) is False:
             continue
-        if in_members:
-            if stripped.startswith("]"):
-                break
-            if stripped.startswith('"'):
-                path = stripped.strip('",')
-                manifest = _REPO / "prime-agent" / path / "Cargo.toml"
-                lines = manifest.read_text(encoding="utf-8").splitlines()
-                if any(row.replace(" ", "") == "publish=false" for row in lines):
-                    continue  # dev tooling (pa-perf), not a linked crate
-                members.append(path.rsplit("/", 1)[-1])
+        members.append(Path(member).name)
     return members
 
 

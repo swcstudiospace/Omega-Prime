@@ -14,6 +14,7 @@ from omega_prime.prime_kernel import (
     InProcessHost,
     checkout,
     ensure_runtime_imported,
+    native,
     workspace_members,
 )
 
@@ -51,20 +52,39 @@ def _parent(tmp_path):
     )
 
 
-def test_workspace_members_skip_unpublished_dev_tooling(tmp_path, monkeypatch) -> None:
+def _fake_workspace(tmp_path):
     root = tmp_path / "prime-agent"
-    for name, publish in (("pa-core", ""), ("pa-perf", "publish = false\n")):
+    manifests = {
+        "pa-core": "",
+        # Valid TOML a line scan would misread: trailing comment and a tab.
+        "pa-perf": "publish\t= false # dev tooling\n",
+        # publish = false outside [package] must not drop a shipped crate.
+        "pa-tui": "[package.metadata.docs]\npublish = false\n",
+    }
+    for name, extra in manifests.items():
         crate = root / "crates" / name
         crate.mkdir(parents=True)
         (crate / "Cargo.toml").write_text(
-            f'[package]\nname = "{name}"\n{publish}', encoding="utf-8"
+            f'[package]\nname = "{name}"\n{extra}', encoding="utf-8"
         )
+    members = ", ".join(f'"crates/{name}"' for name in manifests)
     (root / "Cargo.toml").write_text(
-        '[workspace]\nmembers = ["crates/pa-core", "crates/pa-perf"]\n',
-        encoding="utf-8",
+        f"[workspace]\nmembers = [{members}]\n", encoding="utf-8"
     )
+    return root
+
+
+def test_workspace_members_skip_unpublished_dev_tooling(tmp_path, monkeypatch) -> None:
+    root = _fake_workspace(tmp_path)
     monkeypatch.setattr(checkout, "checkout_root", lambda: root)
-    assert checkout.workspace_members() == ["pa-core"]
+    assert checkout.workspace_members() == ["pa-core", "pa-tui"]
+
+
+def test_native_fallback_matches_workspace_members(tmp_path, monkeypatch) -> None:
+    assert native._members_from_cargo() == workspace_members() == _MEMBERS
+    root = _fake_workspace(tmp_path)
+    monkeypatch.setattr(checkout, "checkout_root", lambda: root)
+    assert native._members_from_cargo(root) == checkout.workspace_members()
 
 
 def test_prime_kernel_host_round_trip(tmp_path) -> None:
