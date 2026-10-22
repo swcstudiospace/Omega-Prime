@@ -323,7 +323,8 @@ def test_real_desk_parent_routes_a_staged_delegate_to_the_execute_engine(
         "noop", "no-op", {"type": "object", "properties": {}}, lambda: "ok"
     )
     child = ScriptedModel([{"role": "assistant", "content": "from-python-child"}])
-    parent = _DeskParent(registry, child, {"OMEGA_PRIME_ENGINE_STAGE": "plan"})
+    # The server hands its parent the whole resolved environment.
+    parent = _DeskParent(registry, child, {**env, "OMEGA_PRIME_ENGINE_STAGE": "plan"})
     register_delegate_tools(registry, parent)
     assert parent.tools, "the desk parent maps the live registry"
     raw = json.loads(registry.dispatch("delegate_task", {"goal": "say PONG"}))
@@ -337,6 +338,28 @@ def test_real_desk_parent_routes_a_staged_delegate_to_the_execute_engine(
     rlm = _RlmParent(registry, child, tmp_path / "rlm")
     monkeypatch.setenv("OMEGA_PRIME_ENGINE_STAGE", "plan")
     assert rlm.engine_full_tools is False
+
+
+def test_desk_delegate_uses_the_servers_resolved_env_not_the_process_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Settings resolved only into the server's env (settings.json) still
+    reach the engine-routed delegate; the process env does not have them."""
+    from omega_prime.mcp_server import _DeskParent
+    from omega_prime.tools.delegate import register_delegate_tools
+    from omega_prime.tools.registry import ToolRegistry
+
+    env = _chatgpt_env(tmp_path, OMEGA_PRIME_ENGINE="auto")
+    for key in env:
+        if key.startswith("OMEGA_PRIME_"):
+            monkeypatch.delenv(key, raising=False)
+    registry = ToolRegistry()
+    child = ScriptedModel([{"role": "assistant", "content": "from-python-child"}])
+    parent = _DeskParent(registry, child, {**env, "OMEGA_PRIME_ENGINE_STAGE": "plan"})
+    register_delegate_tools(registry, parent)
+    raw = json.loads(registry.dispatch("delegate_task", {"goal": "say PONG"}))
+    assert (raw["summary"], raw["stage"]) == ("PONG", "execute")
+    assert child.call_count == 0
 
 
 def test_staged_mcp_server_has_a_delegate_parent_without_a_child_provider(

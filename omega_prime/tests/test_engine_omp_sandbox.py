@@ -46,8 +46,8 @@ _ANDA_FAKE = r'''#!/usr/bin/env python3
 Behaviour is selected by ``behavior.json`` beside this script -- never
 argv: ``{"behavior": "happy" | "tier_error" | "question" | "hang" |
 "early_done" | "abort_race" | "fallback" | "long" | "status_fail" |
-"host_moved"}``. ``up`` clones the seeded branch into a private sandbox
-checkout beside this script (the host worktree is never written by the
+"host_moved" | "leaves_edits" | "stuck_dirty"}``. ``up`` clones the
+seeded branch into a private sandbox checkout beside this script (the host worktree is never written by the
 fake), and ``export_commits`` commits there and bundles ``base..ref``. One
 receipt line per request ({"id", "tool", "args"}) is appended to
 wrapper-log.jsonl beside this script before the reply is written. Every
@@ -88,9 +88,21 @@ def git(work, *argv):
     return proc.stdout.strip()
 
 
-def export_commit(box, tag):
-    """Make one real commit in the sandbox checkout and bundle base..ref."""
+def export_commit(box, tag, include_dirty=False, stuck=False):
+    """Make one real commit in the sandbox checkout and bundle base..ref.
+
+    ``include_dirty`` first commits what the stage left uncommitted, as the
+    real core does; ``stuck`` reports an edit that could not be committed.
+    """
     base = git(box, "rev-parse", "HEAD")
+    if include_dirty and git(box, "status", "--porcelain"):
+        git(box, "add", "-A")
+        git(
+            box,
+            "-c", "user.name=Fake Anda",
+            "-c", "user.email=fake-anda@example.invalid",
+            "commit", "-q", "-m", "omp-sandbox: edits the stage left uncommitted",
+        )
     name = ".fake-export-%s.txt" % tag
     with open(os.path.join(box, name), "w", encoding="utf-8") as handle:
         handle.write("exported by the fake anda wrapper\n")
@@ -103,7 +115,7 @@ def export_commit(box, tag):
     )
     head = git(box, "rev-parse", "HEAD")
     ref = git(box, "symbolic-ref", "--short", "HEAD")
-    dirty = git(box, "status", "--porcelain") != ""
+    dirty = git(box, "status", "--porcelain") != "" or stuck
     bundle = os.path.join(HERE, "export-%s.bundle" % tag)
     if os.path.exists(bundle):
         os.unlink(bundle)
@@ -216,6 +228,10 @@ for line in sys.stdin:
                 "-c", "user.email=host@example.invalid",
                 "commit", "-q", "-m", "host moved",
             )
+        if behavior == "leaves_edits":
+            # The stage edits a file in the sandbox but never commits it.
+            with open(os.path.join(box, "left-by-stage.txt"), "w", encoding="utf-8") as handle:
+                handle.write("uncommitted stage output\n")
         if behavior == "question":
             emit({
                 "event": "question",
@@ -264,7 +280,12 @@ for line in sys.stdin:
         emit({
             "id": rid,
             "ok": True,
-            "result": export_commit(box, "%d-%d" % (os.getpid(), exports)),
+            "result": export_commit(
+                box,
+                "%d-%d" % (os.getpid(), exports),
+                include_dirty=args.get("include_dirty") is True,
+                stuck=behavior == "stuck_dirty",
+            ),
         })
         continue
     emit({
@@ -940,6 +961,35 @@ def test_the_sandbox_gets_only_a_fallback_python_approved(tmp_path: Path) -> Non
     assert second.ok is True, second.detail
     assert [args["plan"] for args in _stage_args(log)] == ["chatgpt", "chatgpt"]
     assert [args["fallback_plan"] for args in _stage_args(log)] == [None, "zai"]
+    assert [args["fallback_model"] for args in _stage_args(log)] == [
+        None,
+        "zai/glm-5.3",
+    ]
+    # An operator model override reaches the sandbox-side fallback too.
+    env["OMEGA_PRIME_OMP_MODEL_ZAI_PLAN"] = "glm-5.3-tuned"
+    third = run("plan", cwd=work, env=env, job_id="job-fb-tuned", stage="plan")
+    assert third.ok is True, third.detail
+    assert _stage_args(log)[-1]["fallback_model"] == "zai/glm-5.3-tuned"
+
+
+def test_backend_refuses_a_plan_its_core_cannot_route(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots)
+    env["ANTHROPIC_API_KEY"] = "anthropic-key-for-the-router-only"
+    assert probe(env, stage="execute", plan="anthropic") == (False, "plan_not_allowed")
+    result = run(
+        "x", cwd=work, env=env, job_id="job-anth", stage="execute", plan="anthropic"
+    )
+    assert result.ok is False
+    assert result.reason == "plan_not_allowed"
+    assert result.started is False
+    # Refused before any wrapper started.
+    assert not log.exists() or not [
+        r for r in _wrapper_log(log) if r.get("tool") == "up"
+    ]
 
 
 def test_results_name_the_model_the_sandbox_fell_back_to(tmp_path: Path) -> None:
@@ -1079,3 +1129,33 @@ def test_a_host_branch_that_moved_is_never_overwritten(tmp_path: Path) -> None:
     assert result.started is True
     assert _git("log", "-1", "--format=%s", cwd=work) == "host moved"
     assert "bundle kept at" in result.detail
+
+
+def test_edits_a_stage_left_uncommitted_reach_the_host(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "leaves_edits")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run("plan", cwd=work, env=env, job_id="job-left", stage="plan", plan="zai")
+    assert result.ok is True, result.detail
+    exports = [r for r in _wrapper_log(log) if r.get("tool") == "export_commits"]
+    assert [r["args"] for r in exports] == [{"include_dirty": True}]
+    assert (work / "left-by-stage.txt").read_text(encoding="utf-8") == (
+        "uncommitted stage output\n"
+    )
+    assert _git("status", "--porcelain", cwd=work) == ""
+
+
+def test_edits_still_uncommitted_after_export_are_not_a_success(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "stuck_dirty")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run(
+        "plan", cwd=work, env=env, job_id="job-stuck", stage="plan", plan="zai"
+    )
+    assert result.ok is False
+    assert result.reason == "export_dirty"
+    assert result.started is True

@@ -1638,7 +1638,9 @@ def probe(
     if backend:
         stage = sandbox_omp.backend_stage(stage)
     try:
-        select(env, requested=plan, stage=stage)
+        choice = select(env, requested=plan, stage=stage)
+        if backend:
+            sandbox_omp.check_backend_plan(choice.decision.plan)
     except PlanNotAllowed:
         return False, "plan_not_allowed"
     if backend:

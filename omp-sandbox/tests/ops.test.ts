@@ -32,7 +32,7 @@ type UpResult = {
   staged: unknown[] | null;
 };
 /** Core.exportCommits' success shape (core.ts:190-210). */
-type ExportResult = { head: string; base: string; ref: string; commits: string[]; dirty: string[]; bundle: string; bytes: number; via: string };
+type ExportResult = { head: string; base: string; ref: string; commits: string[]; dirty: string[]; dirtyCommitted: string[]; bundle: string; bytes: number; via: string };
 /** The fake tier with the one extra method Core.#put's fallback forgoes... rather, the download Core.exportCommits uses. */
 type FakeTier = SandboxTier & { download: (remote: string, dir: string) => Promise<{ code: number }> };
 
@@ -347,6 +347,29 @@ test("a full refs/heads ref seeds a real branch, so commits made in the sandbox 
   assert.equal(ex.head, git(["rev-parse", "HEAD"], hostWork).trim());
 });
 
+test("export_commits with includeDirty commits edits the stage left uncommitted, so they reach the bundle", async () => {
+  const repo = makeSeedRepo("dirty-export-src");
+  const { tier, hostWork } = mappedTier();
+  const core = new Core();
+  await core.attachTierForTests(tier, { seed_repo: { path: repo, ref: "main" } });
+  // Without the flag the edit is only reported, and no bundle is made.
+  writeFileSync(join(hostWork, "left.txt"), "uncommitted\n");
+  const plain = (await core.exportCommits()) as ExportResult & { bundle: string | null };
+  assert.equal(plain.bundle, null);
+  assert.deepEqual(plain.dirty, ["?? left.txt"]);
+  assert.deepEqual(plain.dirtyCommitted, []);
+  const ex = (await core.exportCommits({ includeDirty: true })) as ExportResult;
+  assert.deepEqual(ex.dirtyCommitted, ["?? left.txt"]);
+  assert.deepEqual(ex.dirty, [], "nothing is left behind");
+  assert.equal(ex.commits.length, 1);
+  assert.match(ex.commits[0], /omp-sandbox: edits the stage left uncommitted$/);
+  assert.equal(git(["show", "--name-only", "--format=", "HEAD"], hostWork).trim(), "left.txt");
+  // A clean workdir makes no extra commit.
+  const again = (await core.exportCommits({ includeDirty: true })) as ExportResult;
+  assert.deepEqual(again.dirtyCommitted, []);
+  assert.equal(again.commits.length, 1);
+});
+
 test("seed refs that are not plain branch names are refused before any git runs", async () => {
   const { seedRef } = await import("../src/core/repo.ts");
   assert.equal(seedRef("feature/x"), "feature/x");
@@ -426,6 +449,12 @@ test("runStage only falls back to the plan the caller approved", async () => {
   assert.equal(zai.fallback, "zai/glm-5.3");
   await answerWith(core, zai.stageId, "French");
   assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T", plan: "zai", fallbackPlan: "chatgpt" }), /not this route's fallback/);
+  // The caller's resolved fallback model (an operator override) replaces the built-in default.
+  const tuned = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T", fallbackPlan: "zai", fallbackModel: "zai/glm-5.3-tuned" });
+  assert.equal(tuned.fallback, "zai/glm-5.3-tuned");
+  await answerWith(core, tuned.stageId, "French");
+  assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T", fallbackPlan: "zai", fallbackModel: "openai-codex/gpt-6.1-sol" }), /is not a zai model/);
+  assert.throws(() => core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "T", fallbackPlan: null, fallbackModel: "zai/glm-5.3" }), /without an approved fallback plan/);
 });
 
 test("status(stageId) carries the full final text; the listing keeps the short preview", async () => {

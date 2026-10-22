@@ -2,7 +2,7 @@
 import { chmodSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
-import { STATE, STAGE_MODELS, MAGIC, OMP_BIN, VERSIONS, aedt, stageRoute, type Stage } from "./config.ts";
+import { STATE, STAGE_MODELS, MAGIC, OMP_BIN, VERSIONS, PLAN_MODELS, aedt, stageRoute, type Stage } from "./config.ts";
 import { AuthBroker } from "./auth.ts";
 import { startTier } from "./providers/tiers.ts";
 import type { SandboxTier } from "./providers/types.ts";
@@ -237,15 +237,23 @@ export class Core extends EventEmitter {
     return out;
   }
 
-  /** Export the commits made inside the sandbox since the seed base as a git bundle written on the host. */
-  async exportCommits(_a: { out?: string } = {}) {
+  /** Export the commits made inside the sandbox since the seed base as a git bundle written on the host.
+   *  `includeDirty`: first commit any edits the stage left uncommitted (one labelled commit on the seeded branch),
+   *  so finished work is never lost when the sandbox is torn down; `dirtyCommitted` lists what that commit took. */
+  async exportCommits(a: { out?: string; includeDirty?: boolean } = {}) {
     const t = this.tier; if (!t || !this.repo) throw new Error("no seeded repo");
     const { ref, base } = this.repo;
+    let dirtyCommitted: string[] = [];
+    if (a.includeDirty) {
+      const wip = await t.exec(["sh", "-c", 'git status --porcelain | head -50; [ -z "$(git status --porcelain)" ] || { git add -A && git commit -qm "omp-sandbox: edits the stage left uncommitted"; }'], { timeoutMs: 120_000 });
+      if (wip.code !== 0) throw new Error(`export: committing uncommitted edits failed: ${wip.stderr.slice(-300)}`);
+      dirtyCommitted = wip.stdout.split("\n").filter(Boolean);
+    }
     const info = await t.exec(["sh", "-c", 'git rev-parse "$1" && git log --format="%h %s" "$2..$1" && echo "--" && git status --porcelain | head -50', "sh", ref, base], { timeoutMs: 120_000 });
     if (info.code !== 0) throw new Error(`export: git log failed: ${info.stderr.slice(-300)}`);
     const [head, ...rest] = info.stdout.trim().split("\n"); const sep = rest.indexOf("--");
     const commits = rest.slice(0, sep); const dirty = rest.slice(sep + 1).filter(Boolean);
-    if (!commits.length) return { head, base, commits: [], dirty, bundle: null };
+    if (!commits.length) return { head, base, commits: [], dirty, dirtyCommitted, bundle: null };
     const remote = `${sandboxHome(t)}/export.bundle`;
     const mk = await t.exec(["sh", "-c", 'git bundle create -q "$3" "$2..$1" && wc -c < "$3"', "sh", ref, base, remote], { timeoutMs: 300_000 });
     if (mk.code !== 0) throw new Error(`export: git bundle failed: ${mk.stderr.slice(-300)}`);
@@ -255,7 +263,7 @@ export class Core extends EventEmitter {
     if (!dl || dl.code !== 0) throw new Error(`export download failed: ${dl?.stderr?.slice(-300) ?? "tier has no download"}`);
     const out = existsSync(join(dir, "export.bundle")) ? join(dir, "export.bundle") : join(dir, readdirSync(dir)[0]);
     if (statSync(out).size !== size) throw new Error(`export size mismatch ${statSync(out).size} != ${size}`);
-    const res = { head, base, ref, commits, dirty, bundle: out, bytes: size, via: `git bundle + ${t.name} download` };
+    const res = { head, base, ref, commits, dirty, dirtyCommitted, bundle: out, bytes: size, via: `git bundle + ${t.name} download` };
     this.#receipt(rid("export"), res);
     return res;
   }
@@ -280,8 +288,10 @@ export class Core extends EventEmitter {
 
   /** Start a GSD stage. Returns immediately; follow with status()/events. */
   /** `fallbackPlan`: when given, the only plan this stage may fall back to (null = no fallback); it must be the
-   *  route's own next plan. Omitted keeps the route's default fallback. */
-  runStage(a: { stage: Stage; gsdCommand: string; task: string; thinking?: string; model?: string; plan?: string; fallbackPlan?: string | null }) {
+   *  route's own next plan. Omitted keeps the route's default fallback. `fallbackModel`: the caller's resolved
+   *  model for that approved fallback plan (operator overrides), used instead of the built-in default; it must
+   *  belong to that plan's provider. */
+  runStage(a: { stage: Stage; gsdCommand: string; task: string; thinking?: string; model?: string; plan?: string; fallbackPlan?: string | null; fallbackModel?: string }) {
     if (this.#stopping) throw new Error("shutting down; no new stages");
     if (!this.tier || !this.#ready) throw new Error("not up");
     // Every stage runs in the same workdir, so overlapping stages would edit and commit each other's files.
@@ -293,6 +303,12 @@ export class Core extends EventEmitter {
     if (a.fallbackPlan !== undefined) {
       if (a.fallbackPlan === null) fallbackModel = null;
       else if (a.fallbackPlan !== route.fallbackPlan) throw new Error(`fallback plan ${JSON.stringify(a.fallbackPlan)} is not this route's fallback (${route.fallbackPlan ?? "none"})`);
+    }
+    if (a.fallbackModel !== undefined) {
+      if (!a.fallbackPlan || !route.fallbackPlan) throw new Error("fallback model given without an approved fallback plan");
+      const provider = PLAN_MODELS[route.fallbackPlan][a.stage].split("/")[0];
+      if (!a.fallbackModel.startsWith(`${provider}/`) || a.fallbackModel.length <= provider.length + 1) throw new Error(`fallback model ${JSON.stringify(a.fallbackModel)} is not a ${route.fallbackPlan} model (${provider}/...)`);
+      fallbackModel = a.fallbackModel;
     }
     const id = rid(`st-${a.stage}`);
     const model = a.model ?? route.primary;
