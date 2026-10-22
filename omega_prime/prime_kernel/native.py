@@ -61,6 +61,10 @@ def _members_from_cargo() -> list[str]:
                 break
             if stripped.startswith('"'):
                 path = stripped.strip('",')
+                manifest = _REPO / "prime-agent" / path / "Cargo.toml"
+                lines = manifest.read_text(encoding="utf-8").splitlines()
+                if any(row.replace(" ", "") == "publish=false" for row in lines):
+                    continue  # dev tooling (pa-perf), not a linked crate
                 members.append(path.rsplit("/", 1)[-1])
     return members
 

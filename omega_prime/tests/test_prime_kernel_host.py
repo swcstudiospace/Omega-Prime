@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 from omega_prime.prime_kernel import (
     InProcessHost,
+    checkout,
     ensure_runtime_imported,
     workspace_members,
 )
@@ -48,6 +49,22 @@ def _parent(tmp_path):
         max_depth=2,
         max_children=4,
     )
+
+
+def test_workspace_members_skip_unpublished_dev_tooling(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "prime-agent"
+    for name, publish in (("pa-core", ""), ("pa-perf", "publish = false\n")):
+        crate = root / "crates" / name
+        crate.mkdir(parents=True)
+        (crate / "Cargo.toml").write_text(
+            f'[package]\nname = "{name}"\n{publish}', encoding="utf-8"
+        )
+    (root / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["crates/pa-core", "crates/pa-perf"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(checkout, "checkout_root", lambda: root)
+    assert checkout.workspace_members() == ["pa-core"]
 
 
 def test_prime_kernel_host_round_trip(tmp_path) -> None:
