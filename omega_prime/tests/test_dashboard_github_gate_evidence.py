@@ -152,3 +152,45 @@ def test_default_branch_with_slash_and_dot_keeps_its_card():
     ]
     assert [row["branch"] for row in branches] == ["release/2026.10"]
     assert any("release%2F2026.10" in url for url in calls)
+
+
+def test_status_build_links_keep_external_https_hosts_only() -> None:
+    from omega_prime.dashboard.github_data import status_rows
+
+    rows = status_rows(
+        {
+            "statuses": [
+                {
+                    "id": 1,
+                    "context": "ci/a",
+                    "state": "failure",
+                    "target_url": "https://ci.example.com/build/7",
+                },
+                {
+                    "id": 2,
+                    "context": "ci/b",
+                    "state": "failure",
+                    "target_url": "http://ci.example.com/build/8",
+                },
+                {
+                    "id": 3,
+                    "context": "ci/c",
+                    "state": "failure",
+                    "target_url": "https://user:pw@ci.example.com/9",
+                },
+                {
+                    "id": 4,
+                    "context": "ci/d",
+                    "state": "failure",
+                    "target_url": "javascript:alert(1)",
+                },
+            ]
+        },
+        "abc123",
+    )
+    assert [row["details_url"] for row in rows] == [
+        "https://ci.example.com/build/7",
+        None,
+        None,
+        None,
+    ]

@@ -100,7 +100,7 @@ def status_rows(payload: Any, expected_sha: str) -> list[dict[str, Any]]:
                 if conclusion
                 else None,
                 "duration_s": None,
-                "details_url": _url(status.get("target_url")),
+                "details_url": _https_url(status.get("target_url")),
                 "head_sha": _text(expected_sha, 80),
             }
         )
@@ -141,6 +141,24 @@ def merge_row(repo: str, pr: dict[str, Any]) -> dict[str, Any] | None:
 
 def _text(value: Any, limit: int) -> str | None:
     return value[:limit] if isinstance(value, str) else None
+
+
+def _https_url(value: Any) -> str | None:
+    """A commit status's build link: any HTTPS host (CI providers link to
+    their own sites), but never credentials in the URL."""
+    if not isinstance(value, str) or len(value) > 1000:
+        return None
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    return value
 
 
 def _url(value: Any) -> str | None:

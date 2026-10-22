@@ -95,6 +95,25 @@ def test_known_daemons_are_services_not_agent_work(tmp_path: Path) -> None:
     assert all(s["role"] == "service" for s in result.extra["services"])
 
 
+def test_argument_values_never_turn_an_agent_into_a_service(tmp_path: Path) -> None:
+    """Only the executable and its subcommand position name a daemon."""
+    _proc(tmp_path, 311, cmdline=b"bun\0omp\0--cwd\0/work/auth-broker\0-p\0")
+    _proc(tmp_path, 312, cmdline=b"omp\0--cwd\0/work/openshell-gateway\0-p\0")
+    _proc(tmp_path, 313, cmdline=b"bun\0omp\0--mode\0rpc\0/work/server\0")
+    result = make_procs_collector(
+        proc_root=tmp_path,
+        now_fn=lambda: datetime.fromtimestamp(1020, UTC),
+        clock_hz=10,
+        boot_time=1000,
+    )()
+    assert [(item["pid"], item["role"]) for item in result.items] == [
+        (311, "agent"),
+        (312, "agent"),
+        (313, "agent"),
+    ]
+    assert result.extra["services"] == []
+
+
 def test_dead_and_reused_pids_are_dropped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
