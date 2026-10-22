@@ -61,7 +61,13 @@ from omega_prime.dashboard.blocks import clear_block, raise_block
 from omega_prime.dashboard.status_file import locked_tasks
 from omega_prime.engine.jobs import append_event, child_env, state_dir, write_json
 from omega_prime.engine.omp_driver import EngineError, EngineResult, _system
-from omega_prime.engine.plan_router import read_usage, select, stage_fallback
+from omega_prime.engine.plan_router import (
+    PlanNotAllowed,
+    evaluate_all,
+    read_usage,
+    select,
+    stage_fallback,
+)
 from omega_prime.engine.sandbox import SandboxUnavailable
 
 BACKEND_ENV = "OMEGA_PRIME_OMP_BACKEND"
@@ -132,6 +138,35 @@ def sandbox_root(env: Mapping[str, str]) -> Path | None:
     except OSError:
         return None
     return None
+
+
+#: Plans the omp-sandbox core can route (its ``PLAN_MODELS``). The router may
+#: pick another plan (Anthropic with only its key set), which the core would
+#: reject only after a sandbox was started, so readiness and selection refuse
+#: it up front.
+SANDBOX_PLANS = ("chatgpt", "zai")
+
+
+def check_backend_plan(plan: str) -> None:
+    """Refuse a selected plan the omp-sandbox core cannot run."""
+    if plan not in SANDBOX_PLANS:
+        raise PlanNotAllowed(
+            f"plan {plan!r} is not supported by the omp-sandbox backend; "
+            f"expected one of {SANDBOX_PLANS}"
+        )
+
+
+def fallback_model(env: Mapping[str, str], stage: str, plan: str | None) -> str | None:
+    """``provider/model`` the approved fallback ``plan`` resolves to for ``stage``.
+
+    The same resolution the router uses for a primary choice, so operator
+    model overrides (for example ``OMEGA_PRIME_OMP_MODEL_ZAI_EXECUTE``) apply
+    to a sandbox-side fallback too instead of the core's built-in default.
+    """
+    if plan is None:
+        return None
+    match = next((item for item in evaluate_all(env, stage) if item.plan == plan), None)
+    return None if match is None else f"{match.provider}/{match.model_id}"
 
 
 def backend_stage(stage: str | None) -> str:
@@ -544,7 +579,9 @@ def run_backend(
     with the only fallback plan Python approved), waits for the matching
     ``stage_done`` event with no deadline (a set interrupt aborts the stage
     explicitly and raises ``cancelled``), reads the stage record from
-    ``sandbox_status``, exports commits after a completed stage and
+    ``sandbox_status``, exports commits after a completed stage (edits it
+    left uncommitted are committed first, ``include_dirty``; any that still
+    remain make the run ``export_dirty`` rather than a success) and
     fast-forwards the host branch onto them. ``down`` always runs in the
     finally, followed by the down-summary job event. Every wrapper failure
     raises ``SandboxUnavailable``; there is no bwrap fallback. Once the
@@ -572,7 +609,9 @@ def run_backend(
     stage = backend_stage(stage)
     usage = read_usage(binary, env)
     choice = select(env, usage, requested=plan, stage=stage)
+    check_backend_plan(choice.decision.plan)
     fallback_plan = stage_fallback(env, usage, choice)
+    fallback_model_id = fallback_model(env, stage, fallback_plan)
     anda = anda_binary(env)
     if anda is None:
         raise SandboxUnavailable(
@@ -665,6 +704,7 @@ def run_backend(
                 "plan": choice.decision.plan,
                 "model": f"{choice.decision.provider}/{choice.decision.model_id}",
                 "fallback_plan": fallback_plan,
+                "fallback_model": fallback_model_id,
                 "gsd_command": gsd_command,
                 "task": task_text,
                 "thinking": thinking,
@@ -704,10 +744,12 @@ def run_backend(
         export: dict[str, Any] | None = None
         applied: dict[str, Any] | None = None
         if done_status == "completed":
+            # include_dirty: edits the stage left uncommitted ride one extra
+            # commit, so finished work is never torn down with the sandbox.
             export = _tool(
                 client,
                 "export_commits",
-                {},
+                {"include_dirty": True},
                 commands,
                 events_path,
                 tasks_path=tasks_path,
@@ -715,6 +757,13 @@ def run_backend(
                 row_started=row_started,
             )
             applied = _apply_export(work, seed_ref, export)
+            if export.get("dirty"):
+                raise EngineError(
+                    "export_dirty",
+                    "the sandbox still had uncommitted edits after the export "
+                    "commit; the stage is not reported as done",
+                    started=True,
+                )
         tier = up_result.get("tier")
         final_text = status_record.get("finalText")
         if not isinstance(final_text, str):

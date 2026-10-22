@@ -59,6 +59,7 @@ def delegate_task(
             engine_cwd = getattr(parent, "engine_cwd", None)
             routed = delegate_via_engine(
                 goals[0],
+                env=getattr(parent, "engine_env", None),
                 interrupt=getattr(parent, "interrupt", None),
                 stage=child_stage,
                 cwd=None if engine_cwd is None else str(engine_cwd),
@@ -66,6 +67,7 @@ def delegate_task(
                 plan=getattr(parent, "engine_plan", None),
                 tasks_path=getattr(parent, "engine_tasks_path", None),
                 task_id=getattr(parent, "engine_task_id", None),
+                delegate_max_depth=max_depth,
             )
             if routed is not None:
                 return routed

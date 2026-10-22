@@ -75,6 +75,7 @@ from omega_prime.engine.ui_control import UIControlError, UIControlStore
 
 #: Env var naming the delegate depth of a child started through the engine.
 DELEGATE_DEPTH_ENV = "OMEGA_PRIME_DELEGATE_DEPTH"
+DELEGATE_MAX_DEPTH_ENV = "OMEGA_PRIME_DELEGATE_MAX_DEPTH"
 _READY_TIMEOUT = 15.0
 _COMMAND_TIMEOUT = 15.0
 
@@ -359,6 +360,7 @@ def run(
     cancel_event: _CancelEvent | None = None,
     interrupt: _CancelEvent | None = None,
     delegate_depth: int | None = None,
+    delegate_max_depth: int | None = None,
 ) -> EngineResult:
     """Run one prompt on omp and return the assistant text, usage, and cost.
 
@@ -373,7 +375,9 @@ def run(
 
     ``delegate_depth`` is the delegate depth of a child started by
     ``delegate_task``; omp's MCP server starts its delegate parent there, so
-    nested delegates keep the parent's ``max_depth``.
+    nested delegates keep the parent's ``max_depth``. ``delegate_max_depth``
+    is that parent's ``max_depth``, handed over the same way so a custom
+    limit is not reset to the server default.
     """
     mapping = dict(env if env is not None else {})
     if env is None:
@@ -414,6 +418,7 @@ def run(
             delegate_depth=delegate_depth,
             tasks_path=tasks_path,
             task_id=task_id,
+            delegate_max_depth=delegate_max_depth,
         )
     except (EngineError, PlanNotAllowed, SandboxUnavailable, OSError) as exc:
         if isinstance(exc, OSError):
@@ -516,6 +521,7 @@ def _run(
     delegate_depth: int | None = None,
     tasks_path: str | Path | None = None,
     task_id: str | None = None,
+    delegate_max_depth: int | None = None,
 ) -> EngineResult:
     run_metadata = metadata if metadata is not None else {}
     if mode not in MODES:
@@ -726,6 +732,9 @@ def _run(
         # The MCP server's delegate parent starts at this depth, so a child
         # run through the engine cannot reset the delegate depth limit.
         process_env[DELEGATE_DEPTH_ENV] = str(max(0, int(delegate_depth)))
+    if delegate_max_depth is not None:
+        # ...and stops at the parent's own limit, not the server default.
+        process_env[DELEGATE_MAX_DEPTH_ENV] = str(max(0, int(delegate_max_depth)))
     gate_read = gate_write = -1
     try:
         launch = wrapped
@@ -1635,7 +1644,9 @@ def probe(
     if backend:
         stage = sandbox_omp.backend_stage(stage)
     try:
-        select(env, requested=plan, stage=stage)
+        choice = select(env, requested=plan, stage=stage)
+        if backend:
+            sandbox_omp.check_backend_plan(choice.decision.plan)
     except PlanNotAllowed:
         return False, "plan_not_allowed"
     if backend:

@@ -240,6 +240,35 @@ def test_clear_never_resurrects_terminal_rows(tmp_path: Path) -> None:
     assert data["waiting_on_ove"] == []
 
 
+def test_raise_never_reopens_terminal_rows(tmp_path: Path) -> None:
+    store = _seed(
+        tmp_path / "tasks.json",
+        rows=[_row("gb:done", "done"), _row("gb:failed", "failed")],
+    )
+    # A late failure or a repeated push notice still records the item, but
+    # the finished rows keep their terminal state, and clearing changes
+    # nothing either.
+    raise_block(store, "gb:done:late", "ask", "blocks", "gb:done")
+    push_block(store, "gb:failed", "auto_review_blocked")
+    push_block(store, "gb:failed", "auto_review_blocked")
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert {row["id"]: row["state"] for row in data["tasks"]} == {
+        "gb:done": "done",
+        "gb:failed": "failed",
+    }
+    assert sorted(item["id"] for item in data["waiting_on_ove"]) == [
+        "gb:done:late",
+        "gb:failed:push",
+    ]
+    clear_block(store, "gb:done:late", "gb:done")
+    clear_block(store, "gb:failed:push", "gb:failed")
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert {row["id"]: row["state"] for row in data["tasks"]} == {
+        "gb:done": "done",
+        "gb:failed": "failed",
+    }
+
+
 # --- W111-05: push-step hook -------------------------------------------------
 
 

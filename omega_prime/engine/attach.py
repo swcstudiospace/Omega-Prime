@@ -349,6 +349,7 @@ def delegate_via_engine(
     plan: str | None = None,
     tasks_path: str | Path | None = None,
     task_id: str | None = None,
+    delegate_max_depth: int | None = None,
 ) -> str | None:
     """JSON summary from omp, or None when the Python child path should run.
 
@@ -358,7 +359,8 @@ def delegate_via_engine(
     ``probe`` and used by ``run`` the same way ``route_turn`` uses
     ``agent.engine_plan``.
     ``delegate_depth`` is the child's depth, handed to omp's MCP server so
-    the child's own delegates still stop at the parent's ``max_depth``.
+    the child's own delegates still stop at the parent's ``max_depth``;
+    ``delegate_max_depth`` is that ``max_depth`` (a custom limit carries over).
     ``tasks_path``/``task_id`` are optional dashboard context threaded into
     ``run(...)`` unchanged; they switch on the run's visibility wiring when
     both are set.
@@ -381,6 +383,8 @@ def delegate_via_engine(
     extra: dict[str, Any] = {}
     if delegate_depth is not None:
         extra["delegate_depth"] = delegate_depth
+    if delegate_max_depth is not None:
+        extra["delegate_max_depth"] = delegate_max_depth
     result = run(
         goal,
         env=mapping,
