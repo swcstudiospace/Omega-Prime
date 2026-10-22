@@ -45,6 +45,20 @@ def ensure_runtime_imported() -> ModuleType:
 
 
 def workspace_members() -> list[str]:
-    """Crate names from ``prime-agent/Cargo.toml`` ``members``, in file order."""
-    cargo = tomllib.loads((checkout_root() / "Cargo.toml").read_text(encoding="utf-8"))
-    return [Path(member).name for member in cargo["workspace"]["members"]]
+    """Shipped crate names from ``prime-agent/Cargo.toml`` ``members``, in file order.
+
+    A member whose own manifest sets ``publish = false`` is upstream dev tooling
+    (``pa-perf``: the corpus generator and bench harness, which never ships), not
+    a library the native bridge links, so it is left out.
+    """
+    root = checkout_root()
+    cargo = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    members: list[str] = []
+    for member in cargo["workspace"]["members"]:
+        manifest = tomllib.loads(
+            (root / member / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        if manifest.get("package", {}).get("publish", True) is False:
+            continue
+        members.append(Path(member).name)
+    return members
