@@ -52,7 +52,7 @@ Behaviour is selected by ``behavior.json`` beside this script -- never
 argv: ``{"behavior": "happy" | "tier_error" | "question" |
 "question_reask" | "question_early" | "hang" | "early_done" | "abort_race" |
 "fallback" | "long" | "status_fail" | "host_moved" | "leaves_edits" |
-"stuck_dirty"}``.
+"stuck_dirty" | "two_questions"}``.
 ``up`` clones the seeded branch into a private sandbox checkout beside this
 script (the host worktree is never written by the fake), and
 ``export_commits`` commits there and bundles ``base..ref``. One
@@ -175,6 +175,17 @@ hanging = False
 exports = 0
 pending = None
 reasked = False
+# two_questions: every live request id, each answerable on its own.
+open_requests = set()
+
+# A multi-question ask (two ids), as core.ts forwards omp's ask.
+MULTI = {
+    "method": "ask",
+    "questions": [
+        {"id": "a", "question": "Which crust?", "options": [{"label": "Thin"}]},
+        {"id": "b", "question": "Why?", "options": []},
+    ],
+}
 
 for line in sys.stdin:
     text = line.strip()
@@ -262,6 +273,12 @@ for line in sys.stdin:
             # The stage edits a file in the sandbox but never commits it.
             with open(os.path.join(box, "left-by-stage.txt"), "w", encoding="utf-8") as handle:
                 handle.write("uncommitted stage output\n")
+        if behavior == "two_questions":
+            # Two live requests at once; a new one never cancels the first.
+            open_requests = {"req-1", "req-2"}
+            emit({"event": "question", "stageId": stage_id, "requestId": "req-1", **QUESTION})
+            emit({"event": "question", "stageId": stage_id, "requestId": "req-2", **MULTI})
+            continue
         if behavior in ("question", "question_reask"):
             # The real wrapper holds stage_done until answer_question:
             # one question at a time, a requestId per ask (e2e.py).
@@ -288,6 +305,15 @@ for line in sys.stdin:
             and args.get("stage_id") == pending["stage"]
             and args.get("request_id") == pending["request"]
         )
+        if behavior == "two_questions":
+            if args.get("request_id") in open_requests:
+                open_requests.discard(args.get("request_id"))
+                emit({"id": rid, "ok": True, "result": {"answered": True}})
+                if not open_requests:
+                    emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
+                continue
+            emit(stale)
+            continue
         if behavior == "question_reask" and pending is not None and not reasked:
             # The first answer ALWAYS arrives stale: the ask was already
             # superseded server-side. Re-ask under a fresh requestId; the
@@ -1213,7 +1239,7 @@ def _shaped_answer_token() -> str:
 
 
 def _answer_when_raised(
-    store: Path, item_id: str, answer: str, timeout: float = 10.0
+    store: Path, item_id: str, answer: str | dict[str, Any], timeout: float = 10.0
 ) -> None:
     """Responder side of the round-trip: poll, then write the answer.
 
@@ -2004,3 +2030,99 @@ def test_startup_and_export_get_deadlines_that_cover_their_inner_steps(
     assert seen["up"] is not None and seen["up"] > 1800.0 + 600.0
     assert seen["export_commits"] is not None and seen["export_commits"] > 600.0 + 300.0
     assert seen["run_gsd_stage"] is None  # the per-tool bound
+
+
+def test_two_live_questions_each_keep_their_item_and_their_own_answers(
+    tmp_path: Path,
+) -> None:
+    """A second live request never clears the first one's item, and a
+    multi-question ask passes each question its own answer (per_question)."""
+    env, store, log, work = _question_fixture(tmp_path, "two_questions")
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-two-q")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10.0
+        items: dict[str, dict[str, Any]] = {}
+        while time.monotonic() < deadline and len(items) < 2:
+            with locked_tasks(store) as data:
+                items = {row["id"]: row for row in data["waiting_on_ove"]}
+            time.sleep(0.05)
+        # Both requests stay answerable side by side.
+        assert sorted(items) == ["gb:q:question:req-1", "gb:q:question:req-2"]
+        assert items["gb:q:question:req-2"]["question_ids"] == ["a", "b"]
+        assert items["gb:q:question:req-1"]["question_ids"] == ["shape"]
+        _answer_when_raised(
+            store,
+            "gb:q:question:req-2",
+            {"per_question": {"a": {"selected": ["Thin"]}, "b": "it is crisp"}},
+        )
+        _answer_when_raised(store, "gb:q:question:req-1", "Round")
+    except BaseException as exc:
+        failures.append(exc)
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "both answers")
+    assert box["run"].ok is True, box["run"].detail
+    answers = {
+        r["args"]["request_id"]: r["args"]
+        for r in _wrapper_log(log)
+        if r.get("tool") == "answer_question"
+    }
+    assert answers == {
+        "req-1": {"stage_id": "stage-1", "request_id": "req-1", "text": "Round"},
+        "req-2": {
+            "stage_id": "stage-1",
+            "request_id": "req-2",
+            "per_question": {"a": {"selected": ["Thin"]}, "b": {"text": "it is crisp"}},
+        },
+    }
+    data = _read_tasks(store)
+    assert data["waiting_on_ove"] == []
+    assert next(r for r in data["tasks"] if r["id"] == "gb:q")["state"] == "done"
+
+
+def test_answer_args_shapes() -> None:
+    from omega_prime.engine.sandbox_omp import _answer_args
+
+    assert _answer_args("x") == {"text": "x"}
+    assert _answer_args({"selected": ["a"]}) == {"selected": ["a"]}
+    assert _answer_args({"text": "t"}) == {"text": "t"}
+    assert _answer_args({"per_question": {"q1": "t", "q2": {"selected": ["s"]}}}) == {
+        "per_question": {"q1": {"text": "t"}, "q2": {"selected": ["s"]}}
+    }
+    # Not an answer yet: nothing usable to send.
+    assert _answer_args({"per_question": {"q1": 3}}) == {}
+    assert _answer_args({"note": "later"}) == {}
+
+
+def test_a_run_that_does_not_own_the_row_never_finishes_it(tmp_path: Path) -> None:
+    """A finished row of no known run stays that record: the new run gets no
+    row (start declines), so its finish never overwrites the old receipt."""
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "happy")
+    _install_fake_herdr(tmp_path, "ok")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:closed", "failed")])
+    before = store.read_bytes()
+    result = run(
+        "plan",
+        cwd=work,
+        env=env,
+        job_id="job-closed",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:closed",
+    )
+    assert result.ok is True, result.detail
+    assert store.read_bytes() == before

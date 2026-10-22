@@ -75,8 +75,12 @@ def start(
     job_id: str,
     stage: str | None,
     pane: str | None,
-) -> None:
+) -> bool:
     """Create or refresh the run's row in the ``working`` state.
+
+    Returns ``True`` when the row is now this run's record, ``False`` when
+    it was left untouched (see below); a caller that gets ``False`` owns no
+    row and must not touch or finish it.
 
     A missing row is created with ``started_at``/``last_activity_at``
     stamped now and ``herdr_pane`` only when a pane actually opened. A
@@ -103,10 +107,10 @@ def start(
                 row["herdr_pane"] = pane
             data.setdefault("tasks", []).append(row)
             _write_locked(data, path)
-            return
+            return True
         if row.get("state") in _TERMINAL_STATES:
             if _run_of(row) in (None, job_id):
-                return
+                return False
             row.pop("receipt", None)
             row.pop("herdr_pane", None)
             row["started_at"] = _now()
@@ -118,6 +122,7 @@ def start(
         if pane is not None:
             row["herdr_pane"] = pane
         _write_locked(data, path)
+        return True
 
 
 def touch(path: Any, task_id: str, event: Mapping[str, Any] | str) -> None:

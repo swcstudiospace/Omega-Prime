@@ -506,8 +506,10 @@ def test_run_rows_start_never_resurrects_terminal_rows(tmp_path: Path) -> None:
     before = store.read_bytes()
     # The same run (a crash-resume) never reopens its own finished record,
     # and a finished row of no known run stays finished.
-    start(store, "gb:done", job_id="job-0", stage="plan", pane="pane-7")
-    start(store, "gb:plain", job_id="job-1", stage="plan", pane="pane-7")
+    assert start(store, "gb:done", job_id="job-0", stage="plan", pane="pane-7") is False
+    assert (
+        start(store, "gb:plain", job_id="job-1", stage="plan", pane="pane-7") is False
+    )
     assert store.read_bytes() == before
 
 
