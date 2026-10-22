@@ -8,7 +8,14 @@ from typing import Protocol
 
 from omega_prime.sdlc_events.gate import GateInput, evaluate_merge_gate
 from omega_prime.sdlc_events.idempotency import ClaimOutcome, IdempotencyStore
-from omega_prime.sdlc_events.types import EventKind, SdlcEvent
+from omega_prime.sdlc_events.types import DeliveryId, EventKind, SdlcEvent
+
+
+class Delivered(Protocol):
+    """Anything carrying an idempotency key (PR events, sandbox events)."""
+
+    @property
+    def delivery(self) -> DeliveryId: ...
 
 
 class TaskStorePort(Protocol):
@@ -46,7 +53,7 @@ def _task_id_for(event: SdlcEvent) -> str:
 
 
 def _run_claimed(
-    event: SdlcEvent, idem: IdempotencyStore, work: Callable[[], HandlerResult]
+    event: Delivered, idem: IdempotencyStore, work: Callable[[], HandlerResult]
 ) -> HandlerResult:
     """Run ``work`` once per delivery; release the claim if it fails so it can retry."""
     claim = idem.claim(event.delivery)
