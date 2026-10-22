@@ -238,3 +238,13 @@ def test_config_defaults_overrides_allowlist_and_bad_file(tmp_path) -> None:
     assert load_dashboard_config(path) == DashboardConfig(3, 4, True)
     path.write_text("not json")
     assert load_dashboard_config(path) == DashboardConfig()
+
+
+def test_standalone_fine_grained_github_tokens_are_redacted() -> None:
+    token = "github_pat_" + "A1b2C3d4E5" * 4
+    note = f"pushed with {token} then retried"
+    assert redact_value(note, env={}) == "pushed with [REDACTED] then retried"
+    nested = redact_value({"task": {"detail": note, "links": [token]}}, env={})
+    assert token not in str(nested)
+    # The prefix alone (no token body) is a name, not a credential.
+    assert redact_value("github_pat_", env={}) == "github_pat_"

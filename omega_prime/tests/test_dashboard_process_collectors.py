@@ -53,14 +53,80 @@ def test_procs_filters_allowlisted_fields_and_extracts_mode(
     )()
     assert result.status == "ok"
     assert {frozenset(item) for item in result.items} == {
-        frozenset({"kind", "pid", "elapsed_s", "elapsed_measured_at", "cwd", "mode"})
+        frozenset(
+            {"kind", "pid", "elapsed_s", "elapsed_measured_at", "cwd", "mode", "role"}
+        )
     }
     measured_at = datetime.fromisoformat(result.items[0]["elapsed_measured_at"])
     assert measured_at.tzinfo is not None
     assert abs((measured_at - now).total_seconds()) <= 2
     assert [item["mode"] for item in result.items] == ["rpc", None]
     assert all(item["elapsed_s"] == 10 for item in result.items)
-    assert result.extra == {"skipped": 0}
+    assert result.extra == {"skipped": 0, "exited": 0, "services": []}
+
+
+def test_known_daemons_are_services_not_agent_work(tmp_path: Path) -> None:
+    _proc(
+        tmp_path,
+        301,
+        cmdline=b"bun\0/home/box/.bun/bin/omp\0auth-broker\0serve\0--bind=127.0.0.1:35137\0",
+    )
+    _proc(
+        tmp_path,
+        302,
+        comm="openshell-gatew",
+        cmdline=b"/opt/openshell/bin/openshell-gateway\0--config\0g.toml\0",
+    )
+    _proc(tmp_path, 303, comm="herdr", cmdline=b"/home/box/.local/bin/herdr\0server\0")
+    _proc(tmp_path, 304, comm="herdr", cmdline=b"herdr\0pane\0list\0")
+    _proc(tmp_path, 305, cmdline=b"bun\0omp\0-p\0--mode\0json\0")
+    result = make_procs_collector(
+        proc_root=tmp_path,
+        now_fn=lambda: datetime.fromtimestamp(1020, UTC),
+        clock_hz=10,
+        boot_time=1000,
+    )()
+    assert [(item["pid"], item["role"]) for item in result.items] == [(305, "agent")]
+    assert [(s["pid"], s["name"]) for s in result.extra["services"]] == [
+        (301, "omp auth-broker"),
+        (302, "openshell-gateway"),
+        (303, "herdr server"),
+    ]
+    assert all(s["role"] == "service" for s in result.extra["services"])
+
+
+def test_dead_and_reused_pids_are_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _proc(tmp_path, 401)
+    stat = tmp_path / "401" / "stat"
+    stat.write_text(stat.read_text().replace(") S ", ") Z "), encoding="utf-8")
+    _proc(tmp_path, 402, cmdline=b"")
+    _proc(tmp_path, 403)
+    _proc(tmp_path, 404)
+    original = os.readlink
+
+    def exit_during_scan(path: os.PathLike[str] | str, *args: Any, **kwargs: Any):
+        target = original(path, *args, **kwargs)
+        name = Path(os.fspath(path)).parent.name
+        if name == "403":
+            (tmp_path / "403" / "stat").unlink()
+        if name == "404":
+            again = tmp_path / "404" / "stat"
+            again.write_text(again.read_text().replace(" 100 ", " 999 ", 1))
+        return target
+
+    monkeypatch.setattr(os, "readlink", exit_during_scan)
+    result = make_procs_collector(
+        proc_root=tmp_path,
+        now_fn=lambda: datetime.fromtimestamp(1020, UTC),
+        clock_hz=10,
+        boot_time=1000,
+    )()
+    assert result.items == []
+    assert result.status == "empty"
+    assert result.extra["exited"] == 4
+    assert result.extra["skipped"] == 0
 
 
 def test_procs_skips_racing_pid_and_handles_missing_or_empty_root(

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import time
@@ -117,13 +118,27 @@ class DashboardPoller:
 
     async def _run_one(self, spec: CollectorSpec) -> None:
         self._running.add(spec.source)
+        straggler: asyncio.Future[SourceResult] | None = None
         try:
-            await self._collect(spec)
+            straggler = await self._collect(spec)
         finally:
-            self._running.discard(spec.source)
+            if straggler is None or straggler.done():
+                self._running.discard(spec.source)
+            else:
+                # A timeout cannot stop the worker thread, so the source stays
+                # occupied until that call really returns; the scheduler never
+                # starts a second overlapping call into the same collector.
+                straggler.add_done_callback(
+                    functools.partial(self._release, spec.source)
+                )
         # Collection is done; the source may be rescheduled while the build
         # (and its possibly slow Herdr pane check) runs.
         self._request_build()
+
+    def _release(self, source: str, worker: asyncio.Future[SourceResult]) -> None:
+        self._running.discard(source)
+        if not worker.cancelled():
+            worker.exception()  # retrieved: a late failure is already reported
 
     def _request_build(self) -> asyncio.Task[None]:
         """Coalesce build requests into one worker sharing each pane check.
@@ -209,9 +224,17 @@ class DashboardPoller:
                     now=now,
                     panes=self._pane_evidence(),
                 )
-                self._build_snapshot(
-                    now=now, stale_values=stale_values, results=results, status=status
+                # Composition (including task numbering, which takes the
+                # tasks.json file lock and writes) runs off the event loop;
+                # publication stays on it, ordered by the build lock.
+                composed = await asyncio.to_thread(
+                    self._compose_snapshot,
+                    now=now,
+                    stale_values=stale_values,
+                    results=results,
+                    status=status,
                 )
+                self._publish(*composed)
             except Exception as exc:
                 self._status["normalization"] = {
                     "status": "error",
@@ -226,12 +249,19 @@ class DashboardPoller:
             return []
         return [row for row in result.extra.get("tasks", []) if isinstance(row, dict)]
 
-    async def _collect(self, spec: CollectorSpec) -> None:
+    async def _collect(
+        self, spec: CollectorSpec
+    ) -> asyncio.Future[SourceResult] | None:
+        """Run one collection; return the worker if it outlived its timeout."""
         started = time.perf_counter()
+        straggler: asyncio.Future[SourceResult] | None = None
         try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(spec.fn), timeout=spec.timeout_s
-            )
+            worker = asyncio.ensure_future(asyncio.to_thread(spec.fn))
+            done, _ = await asyncio.wait({worker}, timeout=spec.timeout_s)
+            if not done:
+                straggler = worker
+                raise TimeoutError
+            result = worker.result()
             if not isinstance(result, SourceResult):
                 raise TypeError("collector returned an invalid result")
             if result.source != spec.source:
@@ -275,6 +305,7 @@ class DashboardPoller:
                     continue
             status[key] = redact_value(extra)
         self._status[spec.source] = status
+        return straggler
 
     def _build_snapshot(
         self,
@@ -290,6 +321,21 @@ class DashboardPoller:
         omitted (direct synchronous callers such as tests) it is computed
         inline.
         """
+        self._publish(
+            *self._compose_snapshot(
+                now=now, stale_values=stale_values, results=results, status=status
+            )
+        )
+
+    def _compose_snapshot(
+        self,
+        *,
+        now: datetime | None = None,
+        stale_values: dict[str, dict[str, str | None] | None] | None = None,
+        results: dict[str, SourceResult] | None = None,
+        status: dict[str, dict[str, Any]] | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Return the redacted snapshot and its canonical digest (no publish)."""
         if now is None:
             now = self.clock()
         if results is None:
@@ -332,14 +378,25 @@ class DashboardPoller:
             for task in snapshot.active:
                 if task.source == "tasks_json" and task.id in stale_values:
                     task.stale = stale_values[task.id]
+        sources = dict(self._status if status is None else status)
         if self.task_ids_path is not None:
             from omega_prime.dashboard.task_ids import number_snapshot
 
-            snapshot = number_snapshot(snapshot, path=self.task_ids_path, now=now)
+            try:
+                snapshot = number_snapshot(snapshot, path=self.task_ids_path, now=now)
+            except Exception as exc:
+                # A malformed, locked-out or unwritable tasks.json must not
+                # freeze every other source. Numbering raises before writing,
+                # so the damaged file is left untouched for repair; rows are
+                # published unnumbered with the failure in source health.
+                sources["task_ids"] = {
+                    "status": "error",
+                    "error": f"task numbering failed: {type(exc).__name__}",
+                }
         normalized = snapshot.to_dict()
         value = {
             "generated_at": now.isoformat(),
-            "sources": redact_value(self._status if status is None else status),
+            "sources": redact_value(sources),
             **normalized,
         }
         safe = redact_value(value)
@@ -356,6 +413,9 @@ class DashboardPoller:
                 canonical, sort_keys=True, separators=(",", ":"), default=str
             ).encode()
         ).hexdigest()
+        return safe, digest
+
+    def _publish(self, safe: dict[str, Any], digest: str) -> None:
         self._snapshot = safe
         if digest != self._hash:
             self._hash = digest

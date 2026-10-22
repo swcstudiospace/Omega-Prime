@@ -158,6 +158,8 @@ def _fixture_tree(tmp_path: Path) -> list[CollectorSpec]:
                     }
                 ]
                 if "pulls" in url
+                else {"state": "success", "statuses": [], "total_count": 0}
+                if "/status?" in url
                 else {"check_runs": [{"name": "CI", "conclusion": "success"}]}
                 if "check-runs" in url
                 else [{"body": "Confidence score: 5/5"}]

@@ -11,7 +11,7 @@ import { cardModel, finishedState } from '../lib/taskCard'
 import { greptileScore, gateReady } from '../lib/events'
 
 const COLUMN_CAP = 25
-type Props = DashboardState & { snapshot: Snapshot; onTask: (id: string) => void }
+type Props = DashboardState & { snapshot: Snapshot; onTask: (id: string, kind: 'task' | 'wait') => void }
 
 export function Board({ snapshot, loading, error, receivedAt, refresh, onTask }: Props) {
   const [showMalformed, setShowMalformed] = useState(true)
@@ -37,12 +37,12 @@ export function Board({ snapshot, loading, error, receivedAt, refresh, onTask }:
             const ready = gateReady(pr, snapshot)
             return <article key={pr.id} className={`task-card pr-card ${ready ? 'is-ready' : ''}`}>
               <header><span className="card-id">PR #{pr.number}</span>{pr.draft && <span className="state-pill">draft</span>}<span className={`state-pill ci-${pr.ci}`}>CI {pr.ci}</span><span className={`state-pill ${greptileScore(pr.greptile) === 5 ? 'state-done' : ''}`}>Greptile {pr.greptile}</span></header>
-              {href ? <a className="card-title" href={href} {...(task ? { onClick: () => onTask(task.id) } : { target: '_blank', rel: 'noreferrer' })}>{pr.title}</a> : <span className="card-title">{pr.title}</span>}
+              {href ? <a className="card-title" href={href} {...(task ? { onClick: () => onTask(task.id, 'task') } : { target: '_blank', rel: 'noreferrer' })}>{pr.title}</a> : <span className="card-title">{pr.title}</span>}
               <p className="card-desc">{task ? `Task ${cardModel(task).taskNumber ?? cardModel(task).seq} · ${cardModel(task).title ?? ''}` : `${pr.branch} · no unique task link`}</p>
               <footer><span>{pr.repo.split('/').pop()}</span><span>{ready ? (pr.draft ? 'gate 5/5 · held (draft)' : 'gate 5/5') : pr.merge_rule}</span></footer>
             </article>
           })
-          : taskItems.slice(0, cap).map(item => <TaskCard key={item.id} item={item} compact state={column.key === 'waiting' ? 'Waiting on Ove' : column.key === 'finished' && !isWaiting(item) ? finishedState(item) : isTask(item) ? item.state : undefined} onOpen={onTask} />)}
+          : taskItems.slice(0, cap).map(item => <TaskCard key={item.id} item={item} compact state={column.key === 'waiting' ? 'Waiting on Ove' : column.key === 'finished' && !isWaiting(item) ? finishedState(item) : isTask(item) ? item.state : undefined} onOpen={id => onTask(id, isWaiting(item) ? 'wait' : 'task')} />)}
           {items.length > cap && column.bucket && <a className="column-more" href={bucketHref(column.bucket)}>+{items.length - cap} more</a>}</div>
       </section>
     })}</div>

@@ -70,6 +70,8 @@ def test_branch_uses_merged_pr_score_and_actual_reviewed_sha():
             return 200, json.dumps(
                 {"sha": "merge-omega" if repo == "Omega-Prime" else "merge-fleet"}
             ).encode()
+        if path.endswith("/status"):
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in path:
             return 200, b'{"check_runs":[]}'
         if path.endswith("/commits/merge-omega/pulls"):
@@ -173,6 +175,8 @@ def test_direct_commit_is_not_applicable_and_lookup_failure_is_row_local(
             ).encode()
         if path.endswith("/commits/main"):
             return 200, b'{"sha":"branch-merge"}'
+        if path.endswith("/status"):
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in path:
             return 200, b'{"check_runs":[]}'
         if path.endswith("/commits/branch-merge/pulls"):
@@ -259,6 +263,8 @@ def test_merged_pr_without_greptile_review_names_the_pr_instead_of_unavailable()
             ).encode()
         if path.endswith("/commits/main"):
             return 200, b'{"sha":"branch-merge"}'
+        if path.endswith("/status"):
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in path:
             return 200, b'{"check_runs":[]}'
         if path.endswith("/commits/branch-merge/pulls"):

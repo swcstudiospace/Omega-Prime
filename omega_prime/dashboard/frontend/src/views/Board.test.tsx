@@ -21,9 +21,19 @@ describe('Kanban board', () => {
     expect(card).toHaveAttribute('href', '#/tasks/worker%2F1')
     expect(within(working).getByText('Compile and verify the release.')).toBeInTheDocument()
     fireEvent.click(card)
-    expect(onTask).toHaveBeenCalledWith('worker/1')
+    expect(onTask).toHaveBeenCalledWith('worker/1', 'task')
     // The PR card links through to its uniquely associated task.
     expect(within(screen.getByRole('region', { name: 'PR gate' })).getByRole('link', { name: 'Fix safe view' })).toHaveAttribute('href', '#/tasks/worker%2F1')
+  })
+  it('puts tasks awaiting Ove in Waiting and opens waiting cards as requests', () => {
+    const awaiting: Snapshot = { ...snapshot, active: [...snapshot.active!, { ...fixture.active![0]!, id: 'tasks:ask', title: '00070 - Needs Ove', state: 'waiting_on_ove', display_id: '00070 - Needs Ove' }] }
+    expect(boardColumns(awaiting).find(column => column.key === 'waiting')!.items.map(item => item.id)).toEqual(['wait-1', 'tasks:ask'])
+    expect(boardColumns(awaiting).find(column => column.key === 'working')!.items.map(item => item.id)).toEqual(['worker/1'])
+    const onTask = vi.fn()
+    render(<Board snapshot={awaiting} data={awaiting} loading={false} error={null} receivedAt={Date.now()} live refresh={vi.fn()} onTask={onTask} />)
+    const waiting = screen.getByRole('region', { name: 'Waiting on Ove' })
+    fireEvent.click(within(waiting).getAllByRole('link').find(link => link.getAttribute('href') === '#/tasks/wait-1')!)
+    expect(onTask).toHaveBeenCalledWith('wait-1', 'wait')
   })
   it('keeps every blocked card on the board (Blocked has no list page)', () => {
     const many = Array.from({ length: 27 }, (_, i) => ({ ...fixture.active![0]!, id: `b/${i}`, title: `000${String(40 + i).padStart(2, '0')} - Blocked ${i}`, state: 'blocked' }))

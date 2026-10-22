@@ -7,7 +7,7 @@ import { ViewState } from '../components/ViewState'
 import { BlurFade } from '../components/BlurFade'
 import { AnimatedShinyText } from '../components/AnimatedShinyText'
 import { EventStream } from '../components/EventStream'
-import { githubFreshness, idleTasks, isTask, isWaiting, observedActivity, tasksForPr, workingTasks } from '../lib/selectors'
+import { githubFreshness, idleTasks, isTask, isWaiting, observedActivity, tasksForPr, waitingRows, workingTasks } from '../lib/selectors'
 import { ageLabel, formatSydney, formatSydneyClock } from '../lib/time'
 import { taskHref } from '../lib/routes'
 import { cardModel, snippet } from '../lib/taskCard'
@@ -22,7 +22,7 @@ const FILTER_LABELS: Record<StatusFilter, string> = { all: 'All current', workin
 /** Rows for one overview status filter; "all current" is active work plus
  *  requests waiting on Ove (idle sessions live behind their own filter). */
 export function overviewRows(snapshot: Snapshot, filter: StatusFilter): Row[] {
-  const active = workingTasks(snapshot), waiting = snapshot.waiting_on_ove ?? [], idle = idleTasks(snapshot)
+  const active = workingTasks(snapshot), waiting = waitingRows(snapshot).map(row => row.item), idle = idleTasks(snapshot)
   switch (filter) {
     case 'working': return active.filter(task => task.state !== 'blocked')
     case 'blocked': return active.filter(task => task.state === 'blocked')
@@ -43,7 +43,7 @@ function stateOf(item: Row, filter: StatusFilter): string {
 export function Overview({ snapshot, loading, error, receivedAt, refresh, live }: DashboardState & { snapshot: Snapshot }) {
   const [filter, setFilter] = useState<StatusFilter>('all')
   const { events, clear } = useEvents()
-  const active = workingTasks(snapshot), waiting = snapshot.waiting_on_ove ?? [], prs = snapshot.pr_gate ?? [], finished = snapshot.finished ?? []
+  const active = workingTasks(snapshot), waiting = waitingRows(snapshot).map(row => row.item), prs = snapshot.pr_gate ?? [], finished = snapshot.finished ?? []
   const blocked = active.filter(task => task.state === 'blocked').length
   const ready = prs.filter(pr => gateReady(pr, snapshot)).length
   const cards = [

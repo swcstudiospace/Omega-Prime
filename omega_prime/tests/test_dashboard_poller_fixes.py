@@ -389,3 +389,77 @@ def test_build_freezes_source_status_with_its_results() -> None:
     snapshot = poller.snapshot()
     assert snapshot is not None
     assert snapshot["sources"]["github"] == {"status": "ok"}
+
+
+def test_timed_out_collector_is_not_reentered_while_its_thread_runs() -> None:
+    """A timeout reports an error but keeps the source busy until it returns."""
+
+    async def run() -> None:
+        inside = False
+        calls = 0
+        reentered: list[int] = []
+
+        def hung() -> SourceResult:
+            nonlocal inside, calls
+            calls += 1
+            if inside:
+                reentered.append(calls)
+            inside = True
+            time.sleep(0.3)
+            inside = False
+            return SourceResult("hung", "ok")
+
+        poller = DashboardPoller([CollectorSpec("hung", hung, 0.01, 0.05)], tick_s=0.01)
+        await poller.start()
+        try:
+            for _ in range(100):
+                if poller.sources_status().get("hung", {}).get("status") == "error":
+                    break
+                await asyncio.sleep(0.01)
+            assert poller.sources_status()["hung"]["error"] == "TimeoutError"
+            # Well past the timeout and many ticks later, still one call.
+            await asyncio.sleep(0.15)
+            assert calls == 1
+            assert "hung" in poller._running
+
+            async def wait_for_second_call() -> None:
+                while calls < 2:
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_second_call(), timeout=2.0)
+            assert reentered == []
+        finally:
+            await poller.stop()
+            await asyncio.sleep(0.35)  # let the last worker thread finish
+
+    asyncio.run(run())
+
+
+def test_unreadable_task_numbering_still_publishes_every_source(
+    tmp_path: Path,
+) -> None:
+    """A malformed tasks.json is preserved and only numbering is reported."""
+
+    async def run() -> None:
+        ids = tmp_path / "tasks.json"
+        damaged = b"{not json"
+        ids.write_bytes(damaged)
+
+        def collect() -> SourceResult:
+            return SourceResult("local", "ok")
+
+        poller = DashboardPoller(
+            [CollectorSpec("local", collect, 60.0, 1.0)],
+            task_ids_path=ids,
+        )
+        await poller.refresh_now()
+        snapshot = poller.snapshot()
+        assert snapshot is not None
+        assert snapshot["sources"]["local"]["status"] == "ok"
+        assert snapshot["sources"]["task_ids"] == {
+            "status": "error",
+            "error": "task numbering failed: JSONDecodeError",
+        }
+        assert ids.read_bytes() == damaged
+
+    asyncio.run(run())

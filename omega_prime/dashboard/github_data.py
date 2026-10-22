@@ -70,6 +70,43 @@ def check_rows(payload: Any, expected_sha: str) -> list[dict[str, Any]]:
     return result
 
 
+_STATUS_CONCLUSION = {"success": "success", "failure": "failure", "error": "failure"}
+
+
+def status_rows(payload: Any, expected_sha: str) -> list[dict[str, Any]]:
+    """Project a combined commit status into check-shaped rows.
+
+    Commit statuses (``/commits/{sha}/status``) are reported apart from check
+    runs. A ``pending`` context has no conclusion, so it keeps CI pending; an
+    ``error`` or ``failure`` context fails it, exactly like a failed run.
+    """
+    statuses = payload.get("statuses", []) if isinstance(payload, dict) else None
+    if not isinstance(statuses, list):
+        raise ValueError("payload")
+    result = []
+    for status in statuses[:MAX_CHECKS]:
+        if not isinstance(status, dict):
+            continue
+        state = status.get("state")
+        conclusion = _STATUS_CONCLUSION.get(state) if isinstance(state, str) else None
+        result.append(
+            {
+                "id": status.get("id"),
+                "name": _text(status.get("context"), 200),
+                "status": "completed" if conclusion else "pending",
+                "conclusion": conclusion,
+                "started_at": _text(status.get("created_at"), 40),
+                "completed_at": _text(status.get("updated_at"), 40)
+                if conclusion
+                else None,
+                "duration_s": None,
+                "details_url": _url(status.get("target_url")),
+                "head_sha": _text(expected_sha, 80),
+            }
+        )
+    return result
+
+
 def repository_row(
     repo: dict[str, Any], count: int | None, latest: dict[str, Any] | None
 ) -> dict[str, Any]:

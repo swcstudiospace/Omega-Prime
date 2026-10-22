@@ -43,6 +43,8 @@ def test_closed_pages_avoid_legacy_1_2mb_truncation():
             return 200, b"[]"
         if "/commits/" in url:
             return 200, b'{"sha":"main"}'
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs?" in url:
             return 200, b'{"check_runs":[]}'
         return 200, b"[]"
@@ -74,6 +76,8 @@ def test_oversize_response_reports_too_large_and_keeps_stale_merges(monkeypatch)
             return 200, b"[]"
         if "/commits/" in url:
             return 200, b'{"sha":"main"}'
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs?" in url:
             return 200, b'{"check_runs":[]}'
         return 200, b"[]"
@@ -112,6 +116,8 @@ def test_closed_paging_stops_at_max_merged_rows_per_target():
             return 200, b"[]"
         if "/commits/" in url:
             return 200, b'{"sha":"main"}'
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs?" in url:
             return 200, b'{"check_runs":[]}'
         return 200, b"[]"

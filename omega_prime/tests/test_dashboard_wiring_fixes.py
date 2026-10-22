@@ -79,3 +79,25 @@ def test_fresh_wiring_log_is_emitted_with_recent_stamp(tmp_path: Path) -> None:
     stamp = datetime.fromisoformat(item["last_log_ts"])
     assert item["stage"] == "sol"
     assert abs((now - stamp).total_seconds()) < 5 * 60
+
+
+def test_wiring_publishes_the_github_repository_of_its_checkout(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tmp_path / "runs" / "p1").mkdir(parents=True)
+    now = datetime.now().astimezone()
+
+    def runner(args: list[str]) -> str:
+        if args[-3:] == ["remote", "get-url", "origin"]:
+            return "git@github.com:swcstudiospace/Omega-Prime.git\n"
+        return ""
+
+    def collect(run):
+        return make_wiring_collector(
+            repo_root=repo, runs_root=tmp_path / "runs", now_fn=lambda: now, runner=run
+        )()
+
+    assert collect(runner).items[0]["repo"] == "swcstudiospace/Omega-Prime"
+    assert collect(lambda _args: "https://gitlab.com/x/y.git").items[0]["repo"] is None

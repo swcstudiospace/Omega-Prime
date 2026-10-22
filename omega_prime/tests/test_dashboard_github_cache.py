@@ -31,6 +31,8 @@ def test_ttl_403_and_missing_token_preserve_original_successful_section_data():
             return 200, b"[]"
         if "/pulls?" in url:
             return 200, b"[]"
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return (
                 200,
@@ -102,6 +104,8 @@ def test_failed_org_inventory_does_not_discard_healthy_target_pull_data():
                 200,
                 b'[{"id":3,"number":2,"title":"visible","head":{"sha":"head"},"body":"<!-- greptile_confidence_score: 0 -->"}]',
             )
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return 200, b'{"check_runs":[]}'
         return 200, b'{"state":"success","statuses":[]}'
@@ -159,6 +163,8 @@ def test_one_target_failure_retains_only_that_repository_while_other_refreshes()
                     }
                 ]
             ).encode()
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return 200, b'{"check_runs":[]}'
         if "/commits/main" in url:
@@ -196,6 +202,8 @@ def test_greptile_request_failure_is_partial_not_missing_review_evidence():
                 200,
                 b'[{"id":5,"number":5,"title":"pr","head":{"sha":"head"},"body":""}]',
             )
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return 200, b'{"check_runs":[]}'
         if "/comments" in url and mode[0] == "fail":
@@ -253,6 +261,8 @@ def test_poller_publication_redacts_credentials_from_github_command_center():
                     }
                 ]
             ).encode()
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return 200, b'{"check_runs":[]}'
         return 200, b"[]"

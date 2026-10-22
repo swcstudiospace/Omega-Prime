@@ -74,6 +74,7 @@ function TerminalPanelStream({ taskId, note, onLog }: PanelProps) {
   const [connected, setConnected] = useState(false)
   const [paused, setPaused] = useState(false)
   const [copyStatus, setCopyStatus] = useState('')
+  const [sseEpoch, setSseEpoch] = useState(0)
   const tokenRef = useRef<string | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const sourceRef = useRef<EventSource | null>(null)
@@ -206,7 +207,10 @@ function TerminalPanelStream({ taskId, note, onLog }: PanelProps) {
         const next = JSON.parse(event.data) as Frame
         setFrame(previous => ({ ...next, text: next.text || (next.status === 'unavailable' || next.status === 'pane_closed' ? previous.text : '') }))
         setConnected(next.status === 'live')
-        if (next.status === 'no_session' || next.status === 'pane_closed' || next.status === 'unavailable') source.close()
+        // `unavailable` is temporary (a failed read or a two-second timeout):
+        // the stream stays open and EventSource reconnects if the server ends
+        // it. Only an ended or unmapped session closes for good.
+        if (next.status === 'no_session' || next.status === 'pane_closed') source.close()
       } catch { setConnected(false) }
     }) as EventListener)
     source.onerror = () => setConnected(false)
@@ -219,7 +223,7 @@ function TerminalPanelStream({ taskId, note, onLog }: PanelProps) {
     emit('terminal.fallback', 'warning', 'Terminal fallback', 'Interactive socket unavailable; showing the read-only SSE mirror', { mode: 'sse' })
     const source = connectSse()
     return () => { source.close(); if (sourceRef.current === source) sourceRef.current = null }
-  }, [degraded, connectSse])
+  }, [degraded, connectSse, sseEpoch])
 
   useEffect(() => {
     if (!paused && region.current) region.current.scrollTop = region.current.scrollHeight
@@ -258,7 +262,7 @@ function TerminalPanelStream({ taskId, note, onLog }: PanelProps) {
       {frame.status === 'no_session' && <p>This task has no mapped Herdr pane. Other task details remain available.{note ? ` Last note: ${note}` : ''}</p>}
       {frame.status === 'pane_closed' && <p>This session has ended. Other task details remain available.</p>}
       {!connected && frame.text && frame.status === 'live' && <p>Showing the last received output while the connection is restored.</p>}
-      {frame.status === 'unavailable' && <p>Terminal output cannot be read on this host. Other task details remain available.</p>}
+      {frame.status === 'unavailable' && <><p>Terminal output cannot be read on this host. Other task details remain available.</p><p className="subtle">Retrying automatically.</p><button type="button" onClick={() => setSseEpoch(value => value + 1)}>Retry now</button></>}
       <p role="status">{copyStatus}</p>
     </section>
   }

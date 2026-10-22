@@ -4,13 +4,19 @@
 
 from __future__ import annotations
 
+import email.message
+import io
 import json
 import time
+import urllib.error
+import urllib.request
+import urllib.response
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from omega_prime.dashboard.collectors import fleet as fleet_module
 from omega_prime.dashboard.collectors.fleet import make_fleet_collector
 from omega_prime.dashboard.collectors.github import make_github_collector
 
@@ -47,6 +53,8 @@ def test_github_collects_and_caches_prs() -> None:
                     }
                 ]
             ).encode()
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return 200, b'{"check_runs":[{"conclusion":"success"}]}'
         return (
@@ -83,6 +91,8 @@ def test_github_body_marker_wins_over_bot_comment() -> None:
                     }
                 ]
             ).encode()
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return 200, b'{"check_runs":[]}'
         if "/comments" in url:
@@ -109,6 +119,8 @@ def test_github_ignores_human_score_comment() -> None:
     def transport(url: str, headers: Any) -> tuple[int, bytes]:
         if "/pulls?" in url:
             return 200, b'[{"number":1,"head":{"sha":"head"}}]'
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return 200, b'{"check_runs":[]}'
         if "/comments" in url:
@@ -127,6 +139,8 @@ def test_github_latest_bot_comment_beats_matching_review() -> None:
     def transport(url: str, headers: Any) -> tuple[int, bytes]:
         if "/pulls?" in url:
             return 200, b'[{"number":1,"head":{"sha":"head"}}]'
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return 200, b'{"check_runs":[]}'
         if "/comments" in url:
@@ -168,6 +182,8 @@ def test_github_review_score_matches_capitalized_score() -> None:
     def transport(url: str, headers: Any) -> tuple[int, bytes]:
         if "/pulls?" in url:
             return 200, b'[{"number":1,"head":{"sha":"head"}}]'
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return 200, b'{"check_runs":[]}'
         if "/comments" in url:
@@ -205,6 +221,59 @@ def test_fleet_disallowed_url_is_unavailable_without_request(tmp_path: Path) -> 
     )()
     assert result.status == "unavailable"
     assert calls == []
+
+
+def test_fleet_refuses_plain_http_off_loopback(tmp_path: Path) -> None:
+    config = tmp_path / "coordinator.env"
+    token = "fleet" + "_" + "t" * 16
+    config.write_text(
+        f"FLEET_COORDINATOR_URL=http://fleet.example:8080\nFLEET_COORDINATOR_TOKEN={token}\n",
+        encoding="utf-8",
+    )
+    calls: list[Any] = []
+
+    def transport(url: str, headers: Any) -> tuple[int, bytes]:
+        calls.append((url, headers))
+        return (200, b"{}")
+
+    result = make_fleet_collector(enabled=True, env_file=config, transport=transport)()
+    assert result.status == "unavailable"
+    assert "HTTPS" in (result.error or "")
+    assert calls == []
+
+
+def test_fleet_default_request_refuses_redirects(monkeypatch) -> None:
+    """A coordinator redirect never carries the bearer token to a new URL."""
+    forwarded: list[str] = []
+
+    class Redirecting(urllib.request.BaseHandler):
+        handler_order = 100  # ahead of the real HTTPHandler: no network
+
+        def http_open(self, req):
+            if req.full_url.startswith("http://127.0.0.1"):
+                headers = email.message.Message()
+                headers["Location"] = "http://evil.example/steal"
+                response = urllib.response.addinfourl(
+                    io.BytesIO(b""), headers, req.full_url, 302
+                )
+                response.msg = "Found"  # type: ignore[attr-defined]
+                return response
+            forwarded.append(req.get_header("Authorization") or "")
+            return urllib.response.addinfourl(
+                io.BytesIO(b"{}"), email.message.Message(), req.full_url, 200
+            )
+
+    opener = urllib.request.build_opener(Redirecting, fleet_module._RefuseRedirect)
+    monkeypatch.setattr(fleet_module, "_OPENER", opener)
+    try:
+        fleet_module._request(
+            "http://127.0.0.1:1/status", {"Authorization": "Bearer x"}
+        )
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 302
+    else:  # pragma: no cover - the redirect must be refused
+        raise AssertionError("redirect was followed")
+    assert forwarded == []
 
 
 def test_fleet_disabled_without_io() -> None:
@@ -258,6 +327,8 @@ def _slow_pr_transport(
                 ]
             ).encode()
         time.sleep(delay)
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return 200, b'{"check_runs":[]}'
         return 200, b"[]"

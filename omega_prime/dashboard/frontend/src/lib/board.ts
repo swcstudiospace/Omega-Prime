@@ -1,5 +1,5 @@
 import type { FinishedItem, PrRow, Snapshot, Task, WaitingItem } from '../types'
-import { bucketRows, workingTasks } from './selectors'
+import { bucketRows, waitingRows, workingTasks } from './selectors'
 import type { TaskBucket } from './routes'
 
 export type BoardColumnKey = 'working' | 'blocked' | 'waiting' | 'pr-gate' | 'finished'
@@ -15,7 +15,7 @@ export function boardColumns(snapshot: Snapshot): BoardColumn[] {
   return [
     { key: 'working', label: 'Working', bucket: 'working', items: working.filter(task => task.state !== 'blocked') },
     { key: 'blocked', label: 'Blocked', bucket: null, items: working.filter(task => task.state === 'blocked') },
-    { key: 'waiting', label: 'Waiting on Ove', bucket: 'waiting', items: snapshot.waiting_on_ove ?? [] },
+    { key: 'waiting', label: 'Waiting on Ove', bucket: 'waiting', items: waitingRows(snapshot).map(row => row.item) },
     { key: 'pr-gate', label: 'PR gate', bucket: 'pr-gate', items: snapshot.pr_gate ?? [] },
     { key: 'finished', label: 'Finished', bucket: 'finished', items: finished },
   ]

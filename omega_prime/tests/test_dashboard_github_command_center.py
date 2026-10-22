@@ -97,6 +97,8 @@ def test_default_scope_projects_org_pr_branch_checks_and_actual_merges():
             return 200, json.dumps(
                 {"sha": "branch-" + path.rsplit("/", 1)[-1]}
             ).encode()
+        if path.endswith("/status"):
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/commits/" in path and "/check-runs" in path:
             sha = path.split("/commits/")[1].split("/")[0]
             return 200, json.dumps(
@@ -169,6 +171,8 @@ def test_comment_score_has_unknown_reviewed_sha_and_old_head_review_is_not_curre
                 200,
                 b'[{"id":1,"number":4,"head":{"sha":"new","ref":"x"},"body":""}]',
             )
+        if "/status?" in url:
+            return 200, b'{"state":"success","statuses":[],"total_count":0}'
         if "/check-runs" in url:
             return 200, b'{"check_runs":[]}'
         if "/comments" in url:
