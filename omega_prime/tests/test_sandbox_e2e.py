@@ -5,22 +5,18 @@ fake herdr runner and a self-contained two-stage fake omp-sandbox-anda
 wrapper doing real GSD-shaped git work in a throwaway temp worktree under
 a temp allowlisted root, with a temp tasks store and a temp state dir.
 No herdr, tmux, podman, gh, openshell, network or model call ever happens.
-The one opt-in test drives the REAL wrapper on the host only, behind the
-OMEGA_PRIME_SANDBOX_E2E_REAL marker; it reads consent/API envs
-presence/truthiness-only and never prints any env value — effects only.
+The live check against the REAL wrapper is not a test: it is the host-only
+``scripts/sandbox-e2e-real.py``, run by hand, so this suite stays fakes-only.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import stat
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
-import pytest
-
-from omega_prime.engine import sandbox_omp
 from omega_prime.engine.omp_driver import run
 from omega_prime.routines.ultrathink_turn import execute_ultrathink
 from omega_prime.tests.test_engine import _install_fake
@@ -38,8 +34,6 @@ from omega_prime.tests.test_engine_omp_sandbox import (
     _wrapper_log,
     _wrapper_tools,
 )
-
-_REAL_MARKER = "OMEGA_PRIME_SANDBOX_E2E_REAL"
 
 _SPEC_TEXT = "Wire the demo greeting for the throwaway project."
 
@@ -69,6 +63,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(HERE, "wrapper-log.jsonl")
 EXPORTS = [0]
+SEED_BASE = [None]
 
 
 def emit(obj):
@@ -125,23 +120,38 @@ def run_gsd_stage(work, args):
     return "stage-e2e"
 
 
-def export_commits(work):
-    """Bundle the branch after the stage's commit."""
+def export_commits(work, include_dirty):
+    """Bundle the branch after the stage's commit, in core.ts's reply shape.
+
+    ``commits`` is the ``%h %s`` line list and ``dirty`` the porcelain lines,
+    as the real core sends them; every stage (a fresh wrapper process)
+    writes its own bundle, so one stage never replaces another's.
+    """
     EXPORTS[0] += 1
+    committed = []
+    if include_dirty and git(work, "status", "--porcelain"):
+        committed = git(work, "status", "--porcelain").splitlines()
+        git(work, "add", "-A")
+        git(
+            work,
+            "-c", "user.name=E2E Anda",
+            "-c", "user.email=e2e-anda@example.invalid",
+            "commit", "-q", "-m", "omp-sandbox: edits the stage left uncommitted",
+        )
     head = git(work, "rev-parse", "HEAD")
-    base = git(work, "rev-parse", "HEAD~1")
+    base = SEED_BASE[0]
     ref = git(work, "symbolic-ref", "--short", "HEAD")
-    dirty = git(work, "status", "--porcelain") != ""
-    bundle = os.path.join(HERE, "export-%d.bundle" % EXPORTS[0])
-    if os.path.exists(bundle):
-        os.unlink(bundle)
-    git(work, "bundle", "create", bundle, ref)
+    commits = git(work, "log", "--format=%h %s", "%s..%s" % (base, ref)).splitlines()
+    dirty = [line for line in git(work, "status", "--porcelain").splitlines() if line]
+    bundle = os.path.join(HERE, "export-%d-%d.bundle" % (os.getpid(), EXPORTS[0]))
+    git(work, "bundle", "create", "-q", bundle, "%s..%s" % (base, ref))
     return {
         "head": head,
         "base": base,
         "ref": ref,
-        "commits": 1,
+        "commits": commits,
         "dirty": dirty,
+        "dirtyCommitted": committed,
         "bundle": bundle,
         "bytes": os.path.getsize(bundle),
         "via": "fake",
@@ -185,6 +195,7 @@ for line in sys.stdin:
             check=True,
             capture_output=True,
         )
+        SEED_BASE[0] = git(box, "rev-parse", "HEAD")
         emit({
             "id": rid,
             "ok": True,
@@ -223,7 +234,7 @@ for line in sys.stdin:
         emit({
             "id": rid,
             "ok": True,
-            "result": export_commits(box),
+            "result": export_commits(box, args.get("include_dirty") is True),
         })
         continue
     emit({
@@ -343,6 +354,7 @@ def test_routine_drives_plan_then_execute_end_to_end(
     # Rows and panes: one row per stage, each with its own timeline.
     data = _read_tasks(store)
     herdr_receipts = _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
+    bundles: list[str] = []
     for task_id, stage in (("gb:sbx5-plan", "plan"), ("gb:sbx5-exec", "execute")):
         row = next(r for r in data["tasks"] if r["id"] == task_id)
         assert row["state"] == "done"
@@ -376,12 +388,23 @@ def test_routine_drives_plan_then_execute_end_to_end(
             "ref",
             "commits",
             "dirty",
+            "dirtyCommitted",
             "bundle",
             "bytes",
             "via",
         }
-        assert export["commits"] >= 1
-        assert Path(export["bundle"]).is_file()
+        assert len(export["commits"]) == 1
+        assert export["dirty"] == [] and export["dirtyCommitted"] == []
+        # Each stage's bundle is its own and carries exactly its receipted tip.
+        heads = subprocess.run(
+            ["git", "bundle", "list-heads", export["bundle"]],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+        assert heads[0] == export["head"]
+        bundles.append(export["bundle"])
+    assert len(set(bundles)) == 2
 
 
 def test_forced_plan_gate_blocks_the_row_in_the_same_call(
@@ -452,70 +475,3 @@ def test_forced_plan_gate_blocks_the_row_in_the_same_call(
         scanned.append(herdr_log)
     hits = [str(p) for p in scanned if token in p.read_text(encoding="utf-8")]
     assert hits == [], "secret-shaped value leaked into durable artifacts"
-
-
-def test_opt_in_real_run_drives_the_real_wrapper_on_the_host(
-    tmp_path: Path, monkeypatch
-) -> None:
-    if os.environ.get(_REAL_MARKER) != "1":
-        pytest.skip(
-            "host-only: set OMEGA_PRIME_SANDBOX_E2E_REAL=1 to run the real "
-            "omp-sandbox-anda binary"
-        )
-    resolver: dict[str, str] = {"PATH": os.environ.get("PATH", "")}
-    override = os.environ.get("OMEGA_PRIME_OMP_SANDBOX_ANDA")
-    if override:
-        resolver["OMEGA_PRIME_OMP_SANDBOX_ANDA"] = override
-    if sandbox_omp.anda_binary(resolver) is None:
-        pytest.skip(
-            "host-only: no real wrapper found via OMEGA_PRIME_OMP_SANDBOX_ANDA or PATH"
-        )
-    roots = tmp_path / "roots"
-    work = _git_worktree(roots)
-    store = _seed(
-        tmp_path / "tasks.json",
-        rows=[_row("gb:sbx5-plan"), _row("gb:sbx5-exec")],
-    )
-    state = tmp_path / "state"
-    base = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": str(tmp_path / "home"),
-        "OMEGA_PRIME_STATE_DIR": str(state),
-        "OMEGA_PRIME_OMP_BACKEND": "omp-sandbox",
-        "OMP_SANDBOX_WORKSPACE_ROOTS": str(roots),
-        "OMEGA_PRIME_OMP_ALLOW_ZAI": "1",
-        "OMEGA_PRIME_TASKS_PATH": str(store),
-    }
-    monkeypatch.chdir(work)
-    for stage, task_id, model in (
-        ("plan", "gb:sbx5-plan", "glm-5.3"),
-        ("execute", "gb:sbx5-exec", "glm-5.3-flash"),
-    ):
-        _seed_turn(state, stage, _SPEC_TEXT)
-        env = dict(base, OMEGA_PRIME_TASK_ID=task_id)
-        plan = execute_ultrathink(env)
-        assert plan["found"] is True
-        engine = plan["engine"]
-        assert engine["used"] is True, engine
-        assert engine["plan"] == "zai"
-        assert engine["stage"] == stage
-        assert engine["model"] == model
-        assert "failed" not in plan
-        session = json.loads(
-            (state / "jobs" / engine["job_id"] / "session.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        assert session["sandbox"] == "omp-sandbox"
-        assert session["model"] == model
-        assert session["stage"] == stage
-        assert session["ok"] is True
-        subjects = _git("log", "--format=%s", cwd=work).splitlines()
-        assert len(subjects) > 1
-    data = _read_tasks(store)
-    for task_id in ("gb:sbx5-plan", "gb:sbx5-exec"):
-        row = next(r for r in data["tasks"] if r["id"] == task_id)
-        assert row["state"] == "done"
-        export = row["receipt"]["export"]
-        assert export["commits"] >= 1
-        assert Path(export["bundle"]).is_file()

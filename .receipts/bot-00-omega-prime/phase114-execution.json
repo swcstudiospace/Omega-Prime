@@ -63,7 +63,7 @@
     "(closeout) 00015 - phase 114 summary, roadmap tick, execution receipt"
   ],
   "contract_changes": [],
-  "rollback_plan": "git revert of the commit range ae82c58..HEAD restores the planning-commit tree (da165f8); no data migration, no external state touched",
+  "rollback_plan": "git revert of the commit range da165f8..HEAD restores the planning-commit tree (da165f8); no data migration, no external state touched",
   "approvals": [],
   "approved_by": null
 }

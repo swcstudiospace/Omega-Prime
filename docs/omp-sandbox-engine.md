@@ -38,7 +38,6 @@ and API-key entries are presence/truthiness facts, never values.
 | `OMEGA_PRIME_TASK_ID` | `ultrathink_turn`, `attach` | The task row the run reports against; both this and the tasks path must be set for visibility to switch on. |
 | `OMEGA_PRIME_ENGINE_TMUX` | `jobs`/engine launch | Base tmux gate for engine jobs; the value `0` keeps engine runs off tmux (the hermetic test base). |
 | `OMEGA_PRIME_STATE_DIR` | `jobs.state_dir` | State root for per-job artifacts: `<state>/jobs/<job>/session.json` and `events.jsonl`, and the routine's `ultrathink/last-plan.json` probe. Defaults to `~/.omega-prime`. |
-| `OMEGA_PRIME_SANDBOX_E2E_REAL` | `omega_prime/tests/test_sandbox_e2e.py` | Opt-in test marker (presence-only). Un-skips the e2e harness against the real wrapper on the host. Never set in hermetic environments. |
 | `last-plan.json` `stage` field | `ultrathink_turn.resolve_turn_plan` | A saved plan may name its engine stage (`plan` or `execute`); the routine's stage precedence is explicit stage arg, then this field, then `OMEGA_PRIME_ENGINE_STAGE`. |
 
 Per-stage model overrides also exist: `OMEGA_PRIME_OMP_MODEL_<PLAN>_<STAGE>`
@@ -78,10 +77,15 @@ One backend run is one GSD stage:
    `stage_done` event with no deadline (an interrupt aborts the stage
    explicitly).
 3. `sandbox_status` is read after the stage ends, giving the stage record
-   (`status`, `error`, `lastText`, `tier`, the requested model).
-4. A **completed** stage exports commits: head, base, ref, commit list,
-   dirty flag, git bundle, bundle bytes, and the export mechanism ride the
-   run's stats (`omp_sandbox.export`) and the task row's receipt.
+   (`status`, `error`, `modelRequested`, `finalText`, and `lastText`).
+   `finalText` holds the full answer; `lastText` is the last 600 characters.
+   The engine gets `tier` from the earlier `up` reply.
+4. A **completed** stage exports commits (`include_dirty`: edits the stage
+   left uncommitted are committed first, listed in `dirtyCommitted`; any
+   still left make the run `export_dirty`): head, base, ref, the commit
+   list, the remaining dirty lines, git bundle, bundle bytes, and the export
+   mechanism ride the run's stats (`omp_sandbox.export`) and the task row's
+   receipt.
 
 Every wrapper failure — `ok:false` including `path_refused` and tier errors,
 protocol garbage, EOF, non-zero exit — is a refused run (`SandboxUnavailable`),
@@ -122,9 +126,17 @@ work, a fake herdr and a temp store:
 python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_sandbox_e2e.py
 ```
 
-Setting `OMEGA_PRIME_SANDBOX_E2E_REAL` (presence is enough; never a value)
-un-skips the same harness against the real wrapper on the host — it is
-skipped with a reason naming the marker wherever the marker is unset.
+The suite is fakes-only. The live check against the real wrapper is a
+separate host-only script, run by hand on a configured host (it uses the
+host's Node, logins and wrapper binary, and the network):
+
+```bash
+python3 scripts/sandbox-e2e-real.py
+```
+
+It drives the same plan and execute stages through the routine in a
+throwaway project and prints pass/fail per stage, never an environment
+value.
 
 The routine entrypoint a reader can run and inspect:
 
