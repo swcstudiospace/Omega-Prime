@@ -38,9 +38,15 @@ Phase: 106 (Command Center polish) — LOCAL IMPLEMENTATION COMPLETE; ACCEPTANCE
 Plan: 05 (5/5 phase plans executed; `106-SUMMARY.md` records tests and limitations).
 Status: Frontend npm install, full Vitest suite, production build and build-asset inspection passed; dashboard-file family passed 158 with 1 skipped; dashboard app/static serving passed 13 with 1 skipped; docs/public-repo tests passed 31. The required broad dashboard selector exited 2 during collection because `mcp` and `apscheduler` are absent. Ruff, mypy and polyglot-check are unavailable in this environment. Live GitHub/Herdr, browser screenshots, signed sandbox evidence and real-terminal verification remain pending. No milestone audit/complete/cleanup, export, push, PR, restart of 7421, or merge was run.
 
+Phase 100 (omp engine wiring) is complete and integrated after Phase 99 (PR #50). Evidence: .planning/phases/100-omp-engine-wiring/100-SUMMARY.md.
+
+Phase 103 (Ultrathink integration and cleanup) is integrated in wiring order (PR #46); see `.planning/phases/` for its summary.
+
 Phase 99 (solo mode, Desk optional) is implemented and integrated onto main after Phase 98; see `.planning/phases/99-solo-mode-desk-optional/99-SUMMARY.md`.
 
 ## Closeout — Historical v19
+
+Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.
 
 Audit: milestones/v19-MILESTONE-AUDIT.md. Requirements INST-01 through INST-07 are checked. v18 audit remains at milestones/v18-MILESTONE-AUDIT.md. Requirements OPS-01 through OPS-07 stay checked. Pytest after the command-file commit: the three stdio overlay tests passed. The earlier full suite was 4639 passed, 3 skipped, and those three failures only. Ruff, ruff format, and mypy were clean on this branch. Cleanup leaves phase directories in place, matching v17, which is still under .planning/phases.
 
@@ -160,3 +166,8 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 - Phase 105 outer-driver work remains: compare live GitHub PR/check/Greptile evidence and organization inventory (a2/a3); inspect fonts, contrast, motion and reduced motion in a browser (a4); produce the signed openshell-podman/Anda receipt (a6); capture all four views with real data (a7); then perform the separately authorized export/publication flow. No local fixtures prove these outcomes.
 - Phase 97 remains deferred pending authoritative upstream MCP path/schema evidence; phase 77.1 live UAT remains user-owned (`/gsd:verify-work 77.1`).
 - Phase 99 is integrated onto main after Phases 97 and 98; it does not mark the milestone complete.
+- Phase 100 (omp engine wiring) is integrated after Phase 99 (PR #50); see `.planning/phases/100-omp-engine-wiring/100-SUMMARY.md`.
+
+Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.
+
+Phase 103 (Ultrathink integration and cleanup) is integrated in wiring order (PR #46); see `.planning/phases/` for its summary.

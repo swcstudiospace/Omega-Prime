@@ -19,7 +19,6 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "tweepy>=4.17",
   "mcp>=2.3,<3",
   "pyrit>=1.1",
   "apscheduler>=3.11",
@@ -72,7 +71,9 @@ omega_prime = [
 [tool.pytest.ini_options]
 testpaths = ["omega_prime/tests"]
 pythonpath = ["."]
-
+markers = [
+  "native: requires the optional locally built omega_prime_prime extension",
+]
 [tool.ruff]
 target-version = "py311"
 line-length = 88

@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from omega_prime.agent import OmegaPrimeAgent
-from omega_prime.prime_kernel.native import load_extension
+from omega_prime.prime_kernel.native import extension_path, load_extension
 from omega_prime.providers.base import ProviderError
 from omega_prime.providers.prime import PrimeProviderModel
 from omega_prime.tools.approvals import ApprovalLog
@@ -98,13 +98,12 @@ def _model(base_url):
 
 @pytest.fixture
 def native_ai():
-    try:
-        extension = load_extension()
-    except ImportError:
-        pytest.skip("omega_prime_prime extension is not built")
-    return extension.ai
+    if extension_path() is None:
+        pytest.skip("optional omega_prime_prime extension is not built")
+    return load_extension().ai
 
 
+@pytest.mark.native
 def test_real_prime_provider_reads_disk_through_the_omega_loop(tmp_path, native_ai):
     fact = tmp_path / "fact.txt"
     fact.write_text("a verified local fact", encoding="utf-8")
@@ -144,6 +143,7 @@ def test_real_prime_provider_reads_disk_through_the_omega_loop(tmp_path, native_
     assert assistants[-1]["prime_message"]["stopReason"] == "stop"
 
 
+@pytest.mark.native
 def test_native_tool_round_does_not_bypass_registry_approval(tmp_path, native_ai):
     output = tmp_path / "must-not-exist"
     registry = ToolRegistry(approval_log=ApprovalLog())
@@ -169,6 +169,7 @@ def test_native_tool_round_does_not_bypass_registry_approval(tmp_path, native_ai
     assert tool["content"].startswith("error:")
 
 
+@pytest.mark.native
 def test_native_timeout_cannot_be_reported_as_a_success(native_ai):
     with _provider_peer(delay=0.5) as (base_url, requests):
         model = PrimeProviderModel(
@@ -182,6 +183,7 @@ def test_native_timeout_cannot_be_reported_as_a_success(native_ai):
         assert len(requests) == 1
 
 
+@pytest.mark.native
 def test_native_unknown_options_are_rejected_before_dispatch(native_ai):
     with _provider_peer() as (base_url, requests):
         with pytest.raises(ValueError, match="Unsupported Prime completion option"):

@@ -51,7 +51,10 @@ References: `omes/tools/registry.py#L76-L110`, `omes/agent/turn_tool_round.py#L2
 
 ## Local execution boundaries
 
-Local execution is bound to a directory so tools can act on the agent's workspace without receiving an unrestricted path from the model. File access resolves inside the root, terminal work directories stay inside it, and short-lived code jobs use the bot home as their working directory.
+Local execution is bound to a directory so tools can act on the agent's
+workspace without receiving an unrestricted path from the model. File access
+resolves inside the root, terminal work directories stay inside it, and
+short-lived code jobs use the bot home as their working directory.
 
 The platform uses separate local boundaries for different kinds of work:
 
@@ -60,9 +63,14 @@ The platform uses separate local boundaries for different kinds of work:
 - **Code boundary:** Python source runs in a short-lived child process. A timeout kills the process, and no persistent kernel or remote sandbox is part of this path.
 - **Protocol boundary:** LSP, DAP, and MCP commands start from explicit argument lists. Their sessions exchange structured messages with the child and close it after the operation.
 
-These boundaries make the tool interface useful for coding work while keeping path, process, and lifetime rules outside the model's control. [Coding, workspace, and service tools](coding-workspace-and-service-tools.md) describes the user-facing tool families and their workflows.
+`exec_job_start`, `exec_job_poll`, `exec_job_wait`, and `exec_job_kill` are
+retained approval-gated registry-local tools. Plan mode blocks start and kill;
+the argv cwd is fixed to the approved work root. `DeskDriver` owns desk,
+watchdog, pin, and purple schedules; prompt jobs need an available delegate
+parent or write blocked receipts, and stale cron jobs are receipted missed.
 
-References: `omes/tools/file_ops.py#L31-L79`, `omes/tools/file_ops.py#L165-L182`, `omes/tools/terminal.py#L18-L72`, `omes/tools/execute.py#L19-L40`, `omes/tools/platform.py#L26-L66`
+X integration is a urllib transport; this contract does not introduce posting
+behavior.
 
 ## Injected service transports
 
@@ -74,11 +82,13 @@ References: `omes/tools/web.py#L12-L34`, `omes/tools/vision.py#L12-L28`, `omes/t
 
 ## Plugin extension boundary
 
-Plugins extend the platform with tools that are local to one bot home. The loader scans valid directories under `{home}/plugins`, imports a `plugin.py` only when its resolved path remains inside that home, and calls its `register(registry)` function. The plugin can add normal registry entries, so its tools use the same schemas, dispatch results, policy checks, audit records, and traces as built-in tools.
+Plugin modules load only when `OMEGA_PRIME_PLUGINS=1` exactly; disabled mode
+does not scan or import plugin files. Enabled plugins are trusted local Python
+and run unsandboxed. They can add capabilities or replace handlers and approval
+metadata, so plugin trust is part of the host trust boundary rather than a
+sandbox guarantee.
 
-Plugin discovery is ordered by directory name. A plugin without a callable registration hook is ignored, while a registration error is allowed to surface. A symlink that resolves outside the bot home is skipped before its code can run. This gives local extension points without turning every filesystem path into an executable plugin source.
-
-References: `omes/tools/plugins.py#L21-L54`, `omes/tools/plugins.py#L57-L78`, `omes/tests/test_platform.py#L257-L310`
+References: `omega_prime/tooling/plugin.py`
 
 ## Result and control signals
 

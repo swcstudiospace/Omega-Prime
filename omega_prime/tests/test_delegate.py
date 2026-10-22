@@ -260,62 +260,174 @@ def test_background_join_runs_the_child_once():
     assert parent_model.call_count == 0
 
 
-def test_due_job_tick_runs_through_the_conversation(tmp_path: Path):
+def _scheduled_parent(child_model: ScriptedModel, tools: dict | None = None) -> Agent:
+    parent = Agent(model=ScriptedModel([]), tools=tools or {})
+    parent.child_model = child_model
+    return parent
+
+
+def test_due_prompt_dispatches_through_live_registry_tool(tmp_path: Path):
     path = tmp_path / "jobs.json"
     store = JobStore(path)
-    now = 1_700_000_000
-    tools = {"unused": lambda: "no"}
-    model = ScriptedModel(
+    effect = tmp_path / "effect.txt"
+    registry = ToolRegistry()
+    registry.register(
+        "write_effect",
+        "Write harmless effect",
+        {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+        lambda path: effect.write_text("executed", encoding="utf-8") or {"ok": True},
+    )
+
+    def dispatch(path: str):
+        return _load(registry.dispatch("write_effect", {"path": path}))
+
+    child_model = ScriptedModel(
         [
-            {"role": "assistant", "content": "oneshot-text"},
-            {"role": "assistant", "content": "interval-first"},
-            {"role": "assistant", "content": "interval-second"},
+            _tool_call("write_effect", {"path": str(effect)}),
+            {"role": "assistant", "content": "scheduled result"},
         ]
     )
-    oneshot_id = store.schedule("oneshot prompt", now)
-    later_id = store.schedule("later prompt", now + 100)
-    interval_id = store.schedule("interval prompt", now, interval_seconds=30)
-    later_before = json.loads(
-        json.dumps(next(job for job in store.jobs if job["id"] == later_id))
+    parent = _scheduled_parent(child_model, {"write_effect": dispatch})
+    now = 1_700_000_000
+    job_id = store.schedule("perform the harmless effect", now)
+
+    ran = run_due_jobs(store, now, parent)
+
+    assert [job["id"] for job in ran] == [job_id]
+    assert effect.read_text(encoding="utf-8") == "executed"
+    assert ran[0]["last_result"] == {
+        "state": "succeeded",
+        "summary": "scheduled result",
+    }
+    assert ran[0]["history"][-1]["scheduled_for"] == now
+    assert ran[0]["history"][-1]["disposition"] == "succeeded"
+    assert JobStore(path).jobs == store.jobs
+
+
+def test_missing_parent_and_empty_delegate_output_are_durable_blocks(tmp_path: Path):
+    now = 1_700_000_000
+    absent_store = JobStore(tmp_path / "absent.json")
+    empty_store = JobStore(tmp_path / "empty.json")
+    absent_store.schedule("blocked without parent", now)
+    empty_id = empty_store.schedule("blocked empty", now)
+    parent = _scheduled_parent(ScriptedModel([{"role": "assistant", "content": ""}]))
+
+    absent_run = run_due_jobs(absent_store, now, None)
+    empty_run = run_due_jobs(empty_store, now, parent)
+
+    absent = JobStore(absent_store.path).jobs[0]
+    empty = JobStore(empty_store.path).jobs[0]
+    assert absent_run[0]["last_result"]["state"] == "blocked"
+    assert absent_run[0]["last_result"]["error"] == (
+        "ValueError: delegate returned error or pending output"
     )
+    assert "delegate parent unavailable" not in json.dumps(absent_run[0]["last_result"])
+    assert empty_run[0]["id"] == empty_id
+    assert empty_run[0]["last_result"]["state"] == "blocked"
+    assert "empty" in empty_run[0]["last_result"]["error"]
+    assert absent["completed"] is True
+    assert empty["completed"] is True
+    assert absent["history"][-1]["scheduled_for"] == now
+    assert empty["history"][-1]["scheduled_for"] == now
 
-    ran = run_due_jobs(store, now, model, tools)
 
-    assert [job["id"] for job in ran] == [oneshot_id, interval_id]
-    oneshot = next(job for job in store.jobs if job["id"] == oneshot_id)
-    later = next(job for job in store.jobs if job["id"] == later_id)
-    interval = next(job for job in store.jobs if job["id"] == interval_id)
-    assert oneshot["last_result"] == "oneshot-text"
-    assert oneshot["last_ran_at"] == now
-    assert oneshot["completed"] is True
-    assert oneshot["due_at"] == now
-    assert later == later_before
-    assert interval["last_result"] == "interval-first"
-    assert interval["last_ran_at"] == now
-    assert interval["completed"] is False
-    assert interval["due_at"] == now + 30
-    assert model.call_count == 2
-    assert model.tools_seen[0] is tools
-    assert model.tools_seen[1] is tools
-    assert _user_texts(model.seen[0]) == ["oneshot prompt"]
-    assert _user_texts(model.seen[1]) == ["interval prompt"]
-    assert "later prompt" not in json.dumps(model.seen)
+def test_stale_prompt_is_missed_without_delegate_dispatch(tmp_path: Path):
+    store = JobStore(tmp_path / "jobs.json")
+    now = 1_700_000_301
+    job_id = store.schedule("too late to run", now - 301)
+    parent = _scheduled_parent(ScriptedModel([]))
 
-    run_due_jobs(store, now + 29, model, tools)
-    assert model.call_count == 2
-    assert oneshot["last_result"] == "oneshot-text"
-    assert oneshot["last_ran_at"] == now
-    assert interval["due_at"] == now + 30
-    assert interval["last_result"] == "interval-first"
+    ran = run_due_jobs(store, now, parent)
+    settled = JobStore(store.path).jobs[0]
 
-    run_due_jobs(store, now + 30, model, tools)
-    assert model.call_count == 3
-    assert interval["last_result"] == "interval-second"
-    assert interval["last_ran_at"] == now + 30
-    assert interval["due_at"] == now + 60
-    assert oneshot["last_result"] == "oneshot-text"
-    assert later == later_before
-    assert _user_texts(model.seen[2]) == ["interval prompt"]
+    assert [job["id"] for job in ran] == [job_id]
+    child_model = parent.child_model
+    assert isinstance(child_model, ScriptedModel)
+    assert child_model.call_count == 0
+    assert settled["last_result"]["state"] == "missed"
+    assert settled["history"][-1]["disposition"] == "missed"
+    assert settled["completed"] is True
 
-    reloaded = JobStore(path)
-    assert reloaded.jobs == store.jobs
+
+def test_malformed_delegate_output_is_a_blocked_receipt(tmp_path: Path, monkeypatch):
+    from omega_prime.agent import delegate as delegate_module
+
+    store = JobStore(tmp_path / "jobs.json")
+    now = 1_700_000_000
+    job_id = store.schedule("malformed delegate output", now)
+    monkeypatch.setattr(
+        delegate_module, "delegate_task", lambda parent, prompt: "{not-json"
+    )
+    parent = _scheduled_parent(ScriptedModel([]))
+
+    ran = run_due_jobs(store, now, parent)
+
+    assert ran[0]["id"] == job_id
+    assert ran[0]["last_result"]["state"] == "blocked"
+    assert "malformed" in ran[0]["last_result"]["error"]
+    assert JobStore(store.path).jobs[0]["history"][-1]["scheduled_for"] == now
+
+
+def test_delegate_exception_settles_without_persisting_error_text_and_later_job_executes(
+    tmp_path: Path,
+):
+    store = JobStore(tmp_path / "jobs.json")
+    now = 1_700_000_000
+    failed_id = store.schedule("first", now)
+    later_id = store.schedule("later", now)
+    sentinel = "credential-shaped-scheduler-sentinel"
+
+    class RaisingModel:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError(sentinel)
+            return {"role": "assistant", "content": "later succeeded"}
+
+    parent = _scheduled_parent(RaisingModel())  # type: ignore[arg-type]
+    ran = run_due_jobs(store, now, parent)
+    rows = {job["id"]: job for job in JobStore(store.path).jobs}
+
+    assert [job["id"] for job in ran] == [failed_id, later_id]
+    assert rows[failed_id]["last_result"]["state"] == "failed"
+    assert (
+        rows[failed_id]["last_result"]["error"]
+        == "RuntimeError: scheduler runner failed"
+    )
+    assert sentinel not in json.dumps(rows[failed_id]["last_result"])
+    assert rows[later_id]["last_result"] == {
+        "state": "succeeded",
+        "summary": "later succeeded",
+    }
+    assert rows[failed_id]["claim_token"] is None
+    assert rows[later_id]["completed"] is True
+
+
+def test_delegate_error_payload_is_not_persisted(tmp_path: Path, monkeypatch):
+    from omega_prime.agent import delegate as delegate_module
+
+    sentinel = "credential-shaped-delegate-sentinel"
+    store = JobStore(tmp_path / "jobs.json")
+    now = 1_700_000_000
+    job_id = store.schedule("delegate error", now)
+    monkeypatch.setattr(
+        delegate_module,
+        "delegate_task",
+        lambda parent, prompt: json.dumps({"error": sentinel}),
+    )
+    parent = _scheduled_parent(ScriptedModel([]))
+
+    ran = run_due_jobs(store, now, parent)
+    receipt = JobStore(store.path).jobs[0]["last_result"]
+
+    assert ran[0]["id"] == job_id
+    assert receipt["state"] == "blocked"
+    assert receipt["error"] == "ValueError: delegate returned error or pending output"
+    assert sentinel not in json.dumps(receipt)

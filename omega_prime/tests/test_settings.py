@@ -382,3 +382,16 @@ def test_git_discovery_errors_reject_candidate_and_git_paths_are_isolated(
     result = settings.load_settings({}, path=candidate)
     assert result.status == "rejected"
     assert result.effective_env == {}
+
+
+def test_settings_file_can_name_the_agent_data_folder(git_guard) -> None:
+    base, _ = git_guard
+    path = write_settings(
+        base / "settings.json", {"OMEGA_PRIME_AGENT_STATE_DIR": "/state/agent"}
+    )
+    result = settings.load_settings({}, path=path)
+    assert result.status == "loaded"
+    assert result.effective_env["OMEGA_PRIME_AGENT_STATE_DIR"] == "/state/agent"
+    # A process value still wins over the file.
+    kept = settings.load_settings({"OMEGA_PRIME_AGENT_STATE_DIR": "/env"}, path=path)
+    assert kept.effective_env["OMEGA_PRIME_AGENT_STATE_DIR"] == "/env"

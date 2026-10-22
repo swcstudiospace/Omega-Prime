@@ -44,15 +44,33 @@ def desk_intake_path(
 ) -> Path:
     """The one ``IntakeStore`` file the lead tools and the cron job share.
 
-    ``OMEGA_PRIME_STATE_DIR`` wins — the lead tools build their stores under
-    it — so a cron pass and ``lead_intake_next``/``lead_intake_ack`` see the
-    same records. Without that env, the work root's ``omega_prime/state``
+    ``OMEGA_PRIME_AGENT_STATE_DIR`` wins, then ``OMEGA_PRIME_STATE_DIR``
+    (its ``agent`` subfolder) — the lead tools build their stores there — so
+    a cron pass and ``lead_intake_next``/``lead_intake_ack`` see the same
+    records. Without either env, the work root's ``omega_prime/state``
     directory is used. Pass ``state_dir`` explicitly in tests to pin the file.
     """
+    from omega_prime.agent_state import (
+        AGENT_STATE_ENV,
+        AGENT_SUBDIR,
+        LEGACY_MCP_STATE,
+        agent_path,
+    )
+
     if state_dir is None:
+        agent = (os.environ.get(AGENT_STATE_ENV) or "").strip()
+        if agent:
+            return agent_path(Path(os.path.abspath(agent)), "intake.json")
         state_dir = os.environ.get(STATE_DIR_ENV) or ""
     if state_dir:
-        return Path(state_dir) / "intake.json"
+        # Agent data lives in `<state>/agent`; an unmigrated copy directly
+        # under the state root is still read until it moves.
+        root = Path(state_dir)
+        return agent_path(
+            root / AGENT_SUBDIR,
+            "intake.json",
+            (root / "intake.json", root / LEGACY_MCP_STATE / "intake.json"),
+        )
     base = Path(work_root) if work_root is not None else Path.cwd()
     return base / "omega_prime" / "state" / "intake.json"
 
@@ -388,30 +406,43 @@ def host_intake_path(
 ) -> Path | None:
     """The intake file the lead tools open, or None when no host is named.
 
-    ``state_dir_path`` and ``OMEGA_PRIME_STATE_DIR`` win, matching
-    :func:`desk_intake_path`. Otherwise the file is
-    ``<work root>/omega_prime/state/intake.json`` from
-    ``OMEGA_PRIME_WORK_ROOT`` or the install root — the same path
-    ``lead_intake_next`` uses. ``HOME`` marks a live host; it does not
-    move the queue to ``~/.local/state``. An empty caller env returns
+    ``state_dir_path``, ``OMEGA_PRIME_AGENT_STATE_DIR`` and
+    ``OMEGA_PRIME_STATE_DIR`` win, matching :func:`desk_intake_path`.
+    ``HOME`` marks a live host: the file is
+    ``~/.omega-prime/agent/intake.json``, the folder the host MCP server
+    uses, while an unmigrated ``<work root>/omega_prime/state/intake.json``
+    (from ``OMEGA_PRIME_WORK_ROOT`` or the install root) is still read in
+    place. It does not move the queue to ``~/.local/state``. An empty caller env returns
     None so a unit test does not create a queue in the working tree.
     """
     if state_dir_path is not None:
         return desk_intake_path(state_dir=state_dir_path)
+    from omega_prime.agent_state import AGENT_STATE_ENV, AGENT_SUBDIR, agent_path
+
     mapping: Mapping[str, str] = os.environ if env is None else env
+    agent = mapping.get(AGENT_STATE_ENV, "").strip()
+    if agent:
+        return agent_path(Path(os.path.abspath(agent)), "intake.json")
     configured = mapping.get(STATE_DIR_ENV, "").strip()
     if configured:
         return desk_intake_path(state_dir=configured)
+    home = mapping.get("HOME", "").strip()
     if not (
         mapping.get(_WORK_ROOT_ENV, "").strip()
-        or mapping.get("HOME", "").strip()
+        or home
         or mapping.get("XDG_STATE_HOME", "").strip()
     ):
         return None
     from omega_prime.mcp_server import resolve_work_root
 
     # Empty state_dir skips the process env, so the passed mapping wins.
-    return desk_intake_path(resolve_work_root(_INSTALL_ROOT, mapping), state_dir="")
+    legacy = desk_intake_path(resolve_work_root(_INSTALL_ROOT, mapping), state_dir="")
+    if home:
+        # A live host server keeps agent data in ~/.omega-prime/agent; an
+        # unmigrated work-root queue is still read until it moves.
+        agent_dir = Path(os.path.abspath(Path(home) / ".omega-prime" / AGENT_SUBDIR))
+        return agent_path(agent_dir, "intake.json", (legacy,))
+    return legacy
 
 
 def _host_child_model(registry: Any) -> Any | None:

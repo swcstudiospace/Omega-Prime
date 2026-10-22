@@ -50,8 +50,8 @@ substrate URLs are rejected; `SUBSTRATE_URL=local` is the only HTTP exception.
 The connector can load optional non-secret settings from
 `~/.omega-prime/settings.json`. `OMEGA_PRIME_SETTINGS_FILE` is the only path
 override. The JSON object accepts string values for exactly these keys:
-`SUBSTRATE_URL`, `HINDSIGHT_URL`, `ULTRATHINK_ROOT`, `ULTRATHINK_SHIP`, and
-`OMEGA_PRIME_STATE_DIR`. The intended Ultrathink values are
+`SUBSTRATE_URL`, `HINDSIGHT_URL`, `ULTRATHINK_ROOT`, `ULTRATHINK_SHIP`,
+`OMEGA_PRIME_STATE_DIR`, and `OMEGA_PRIME_AGENT_STATE_DIR`. The intended Ultrathink values are
 `ULTRATHINK_ROOT=/workspace/claude-ultrathink` and `ULTRATHINK_SHIP=0`;
 these are setup inputs, not evidence that the checkout or live file exists.
 

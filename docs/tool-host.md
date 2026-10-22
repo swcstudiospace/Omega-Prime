@@ -15,14 +15,37 @@ and units: [Deploying the tool host](deploy.md).
 `--root` is the repo checkout (default: cwd). Without
 `--no-roster` the server exposes the shipped roster's default set — the
 intersection `setup_check` reports (the count moves with the roster; read it
-from `/healthz` `rostered_tools`). Prime families stay off by
-default. `delegate_task` is served; without a provider env it returns
-`not_configured: provider`. All seven Prime families (harness, goals,
-heartbeat, autonomous, kernel, rlm, messaging) join when their
-`omega-prime.json` flags are on. `rlm` is served on the desk parent and,
-without a child-model provider, `rlm_spawn` and `rlm_create_session` return
-`not_configured: provider`. `messaging` is served on the seat session
-`bot-00-omega-prime`.
+from `/healthz` `rostered_tools`).
+Prime families are default off; exact host exceptions are the listed
+registrations including `delegate_task`; X remains urllib transport without
+posting behavior changes. Other enabled families join the registry according
+to their flags. Plugin loading is a separate exact opt-in:
+`OMEGA_PRIME_PLUGINS=1` enables it.
+Off mode does not scan or import plugins. Enabled plugins are trusted local
+Python, unsandboxed, and can replace handlers and approval metadata.
+
+`DeskDriver` is passive at registry construction and owns desk, watchdog, pin,
+and purple ticks. Prompt jobs dispatch through an available delegate parent;
+when no parent is available, they write blocked receipts. Stale cron jobs are
+receipted missed, each queued job judged on a fresh clock; a late RoE watchdog
+still reads its grant. The four `exec_job_start`, `exec_job_poll`, `exec_job_wait`,
+and `exec_job_kill` tools are retained, approval-gated, and registry-local.
+Start and kill are blocked in plan mode; argv cwd is fixed to the approved work
+root.
+
+Pin apply requires an exact human `pin_bump_apply` grant through the existing
+admin grant/revoke route. Served-tool metadata is not a grant.
+
+The doctor reports the seven Prime families individually: known disabled
+families are `ok` with execution explicitly unchecked, while enabled families
+with missing expected tools fail. Red Team is separate; configuration does not
+prove authorization, and an unobserved authorization state remains a warning.
+Persisted schedules are reported by kind and count, with overdue counts; the
+diagnostic never ticks or dispatches them. In standalone use, runner state is
+reported as “not observed by this diagnostic,” not absent. Added family and
+schedule checks do not resolve credentials or start runtimes. Other doctor
+checks retain their existing registry and audit effects, so the doctor as a
+whole is not side-effect-free.
 
 Remote endpoints, all on the same process:
 
@@ -46,9 +69,9 @@ exits 3. Start with `./scripts/grokbot-1click.sh` or
 [Grok Bot native host](grok-bot-native.md).
 
 Policy and approval denials come back as MCP error results with
-the registry's own text. Approval-gated tools (deploys,
-publishes, merges, tracker writes) stay gated: pre-approve in
-the host process or call them from a session that approves.
+the registry's own text. Approval-gated operations stay gated; pin apply
+requires the exact human `pin_bump_apply` grant through the existing
+admin grant/revoke route, independently of served-tool metadata.
 
 The host speaks MCP spec `2026-07-28` via the v2 Python SDK
 (`mcp>=2,<3`): snake_case in Python (`is_error`,

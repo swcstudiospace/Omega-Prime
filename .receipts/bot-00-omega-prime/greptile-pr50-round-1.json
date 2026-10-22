@@ -1,0 +1,89 @@
+{
+  "task_id": "greptile-pr50-round-1",
+  "bot": "bot-00-omega-prime",
+  "started_at": null,
+  "completed_at": "2026-10-20T18:57:19Z",
+  "commands": [
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m ruff check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "All checks passed."
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m ruff format --check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "599 files already formatted."
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m mypy omega_prime/",
+      "exit_code": 0,
+      "output_tail": "Success: no issues found in 472 source files."
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_engine.py omega_prime/tests/test_engine_clarify_driver.py omega_prime/tests/test_engine_clarify_ipc.py omega_prime/tests/test_engine_skills_real.py omega_prime/tests/test_grokbot_doctor.py omega_prime/tests/test_ui_control.py -q",
+      "exit_code": 0,
+      "output_tail": "129 passed in 69.03s."
+    },
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/p4 /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "output_tail": "5 failed, 4897 passed, 20 skipped. Failures: test_desk_wiring::test_warm_registry_consumes_independent_intake_and_acks and four test_omega_commands prompt-install cases; all fail because install_prompt returns an error without prompt/sha256."
+    },
+    {
+      "cmd": "GIT_TERMINAL_PROMPT=0 git submodule update --init --recursive >/dev/null 2>&1; rc=$?; printf 'git submodule update exit=%s\\n' \"$rc\"",
+      "exit_code": 0,
+      "output_tail": "git submodule update exit=0"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Ruff lint passes for omega_prime.",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "Ruff formatting check passes for omega_prime.",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "mypy passes for omega_prime.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "All six touched test files pass (129 tests).",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "The full suite was run and remains red on five prompt-install failures outside the changed paths.",
+      "evidence_command_index": 4,
+      "expects_failure": true
+    }
+  ],
+  "unverified": [
+    "Five full-suite prompt-install failures were not reproduced against the base branch; no claim that the full suite is green.",
+    "Live provider/API behavior was not exercised; coverage uses the local MCP server and test fixtures.",
+    "rule adherence by future agents",
+    "Initial task start timestamp was not recorded."
+  ],
+  "files_changed": [
+    "docs/setup.md",
+    "omega_prime/engine/attach.py",
+    "omega_prime/engine/clarify_ipc.py",
+    "omega_prime/engine/cli.py",
+    "omega_prime/engine/mcp_bridge.py",
+    "omega_prime/engine/omp_driver.py",
+    "omega_prime/engine/ui_control.py",
+    "omega_prime/engine/watch.py",
+    "omega_prime/grokbot/doctor.py",
+    "omega_prime/tests/test_engine.py",
+    "omega_prime/tests/test_engine_clarify_driver.py",
+    "omega_prime/tests/test_engine_clarify_ipc.py",
+    "omega_prime/tests/test_engine_skills_real.py",
+    "omega_prime/tests/test_grokbot_doctor.py",
+    "omega_prime/tests/test_ui_control.py",
+    ".receipts/bot-00-omega-prime/greptile-pr50-round-1.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": null,
+  "approvals": [],
+  "approved_by": null
+}

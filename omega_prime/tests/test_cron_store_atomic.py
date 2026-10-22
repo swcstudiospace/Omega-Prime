@@ -82,3 +82,208 @@ def test_an_existing_store_keeps_its_file_mode(tmp_path: Path) -> None:
     os.chmod(path, 0o640)
     store.schedule("second", 2)
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_two_store_instances_cannot_claim_one_occurrence_twice(tmp_path: Path) -> None:
+
+    path = tmp_path / "jobs.json"
+    first = JobStore(path)
+    second = JobStore(path)
+    now = 1_700_000_000
+    first.schedule("one occurrence", now)
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def runner(prompt: str) -> str:
+        calls.append(prompt)
+        started.set()
+        assert release.wait(timeout=5)
+        return '{"summary":"done"}'
+
+    result: list[dict] = []
+    worker = threading.Thread(
+        target=lambda: result.extend(first.tick(now, runner, write_receipts=True))
+    )
+    worker.start()
+    assert started.wait(timeout=5)
+
+    def duplicate_runner(prompt: str) -> str:
+        calls.append(prompt)
+        return '{"summary":"duplicate"}'
+
+    assert second.tick(now, duplicate_runner, write_receipts=True) == []
+    release.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert calls == ["one occurrence"]
+    assert len(result) == 1
+    assert JobStore(path).jobs[0]["history"][-1]["scheduled_for"] == now
+
+
+def test_stale_claim_settlement_is_refused_and_preserves_unrelated_rows(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "jobs.json"
+    store = JobStore(path)
+    now = 1_700_000_000
+    job_id = store.schedule("claimed", now)
+    unrelated_id = store.schedule("unrelated future", now + 600)
+    claim = store._claim(job_id, now)
+    assert claim is not None
+
+    with store._store_transaction():
+        row = next(job for job in store.jobs if job["id"] == job_id)
+        row["claim_token"] = "new-owner"
+        row["unrelated_state"] = "kept"
+        store._save()
+
+    assert (
+        store._settle_claim(
+            claim, now, {"state": "succeeded", "summary": "stale"}, "succeeded"
+        )
+        is None
+    )
+    rows = {job["id"]: job for job in JobStore(path).jobs}
+    assert rows[job_id]["claim_token"] == "new-owner"
+    assert rows[job_id]["unrelated_state"] == "kept"
+    assert rows[job_id]["history"] == []
+    assert rows[unrelated_id]["due_at"] == now + 600
+
+
+def test_worker_restart_recovers_persisted_claim_token(tmp_path: Path) -> None:
+    path = tmp_path / "jobs.json"
+    store = JobStore(path)
+    now = 1_700_000_000
+    job_id = store.schedule("recover after restart", now)
+    claims = []
+    worker = threading.Thread(target=lambda: claims.append(store._claim(job_id, now)))
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert claims[0] is not None
+
+    ran = JobStore(path).tick(now, lambda _prompt: "recovered")
+
+    assert [job["id"] for job in ran] == [job_id]
+    recovered = JobStore(path).jobs[0]
+    assert recovered["claim_token"] is None
+    assert recovered["last_result"] == "recovered"
+
+
+def test_typed_claim_recovers_after_worker_thread_exits(tmp_path: Path) -> None:
+    path = tmp_path / "jobs.json"
+    store = JobStore(path)
+    now = 1_700_000_000
+    kind = "typed-recovery-test"
+    job_id = store._schedule_typed("recover typed claim", now, kind=kind)
+    claims = []
+    worker = threading.Thread(
+        target=lambda: claims.append(store._claim_typed(job_id, kind, now))
+    )
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    abandoned = claims[0]
+    assert abandoned is not None
+
+    recovered = JobStore(path)._claim_typed(job_id, kind, now)
+
+    assert recovered is not None
+    assert recovered["job"]["id"] == job_id
+    assert recovered["token"] != abandoned["token"]
+
+
+def test_invalid_lateness_grace_does_not_leave_a_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = JobStore(tmp_path / "jobs.json")
+    job_id = store.schedule("must remain unclaimed", 100)
+    monkeypatch.setenv("OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS", "invalid")
+
+    with pytest.raises(ValueError, match="OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS"):
+        store.tick(100, lambda _prompt: "unexpected")
+
+    row = next(job for job in JobStore(store.path).jobs if job["id"] == job_id)
+    assert row["claim_token"] is None
+    assert row["claimed_at"] is None
+
+
+@pytest.mark.parametrize("kind", ["desk_lead_pass", "roe_watchdog"])
+def test_invalid_lateness_grace_does_not_leave_a_specialized_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    from omega_prime.cron.scheduler import tick_desk_lead_passes, tick_roe_watchdog
+
+    store = JobStore(tmp_path / "jobs.json")
+    job_id = store._schedule_typed("must remain unclaimed", 100, kind=kind)
+    monkeypatch.setenv("OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS", "invalid")
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("no work may start with invalid settings")
+
+    with pytest.raises(ValueError, match="OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS"):
+        if kind == "desk_lead_pass":
+            tick_desk_lead_passes(store, 100, unexpected)
+        else:
+            tick_roe_watchdog(store, 100, checker=unexpected)
+
+    row = next(job for job in JobStore(store.path).jobs if job["id"] == job_id)
+    assert row["claim_token"] is None
+    assert row["claimed_at"] is None
+
+
+def test_claim_from_a_previous_process_with_a_reused_pid_is_recovered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restarted worker often gets the same pid (containers); its claim is stale."""
+    import omega_prime.cron.scheduler as scheduler
+
+    if scheduler._process_start(os.getpid()) is None:
+        pytest.skip("process start identity needs /proc")
+    path = tmp_path / "jobs.json"
+    store = JobStore(path)
+    now = 1_700_000_000
+    job_id = store.schedule("recover after restart with the same pid", now)
+    claim = store._claim(job_id, now)
+    assert claim is not None
+    # Same pid and the claiming thread is still alive, but the saved start
+    # identity belongs to an earlier process that owned this pid.
+    pid, _start, thread_id, nonce = claim["token"].split(":", 3)
+    with store._store_transaction():
+        store.jobs[0]["claim_token"] = f"{pid}:previousboot-1:{thread_id}:{nonce}"
+        store._save()
+
+    ran = JobStore(path).tick(now, lambda _prompt: "recovered")
+
+    assert [job["id"] for job in ran] == [job_id]
+    assert JobStore(path).jobs[0]["claim_token"] is None
+
+
+def test_legacy_claim_naming_this_pid_is_recovered(tmp_path: Path) -> None:
+    import omega_prime.cron.scheduler as scheduler
+
+    if scheduler._process_start(os.getpid()) is None:
+        pytest.skip("process start identity needs /proc")
+    path = tmp_path / "jobs.json"
+    store = JobStore(path)
+    now = 1_700_000_000
+    job_id = store.schedule("legacy token", now)
+    with store._store_transaction():
+        store.jobs[0]["claim_token"] = f"{os.getpid()}:{threading.get_ident()}:legacy"
+        store._save()
+
+    ran = JobStore(path).tick(now, lambda _prompt: "recovered")
+
+    assert [job["id"] for job in ran] == [job_id]
+
+
+def test_live_claim_in_this_process_is_still_respected(tmp_path: Path) -> None:
+    path = tmp_path / "jobs.json"
+    store = JobStore(path)
+    now = 1_700_000_000
+    job_id = store.schedule("still owned", now)
+    assert store._claim(job_id, now) is not None
+
+    assert JobStore(path).tick(now, lambda _prompt: "must not run") == []
