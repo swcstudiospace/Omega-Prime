@@ -27,7 +27,7 @@ and API-key entries are presence/truthiness facts, never values.
 
 | Name | Read by | Semantics |
 | --- | --- | --- |
-| `OMEGA_PRIME_ENGINE` | `attach.engine_mode` | Engine mode gate: `off` disables the engine path; `required` turns a readiness miss into a hard failure; anything else is `auto` (fall back to the Python loop). |
+| `OMEGA_PRIME_ENGINE` | `attach.engine_mode` | Engine mode gate (case-insensitive): `off`, `0`, `false`, `no` or `python` disables the engine path; `required`, `omp`, `on`, `1`, `true` or `yes` turns a readiness miss into a hard failure; anything else (including unset) is `auto` (fall back to the Python loop). |
 | `OMEGA_PRIME_ENGINE_STAGE` | `attach.engine_stage` | Stage fallback for one engine run when neither the caller nor a saved plan names one; blank means no stage, any other value is passed through so the router refuses it with a clear reason. |
 | `OMEGA_PRIME_OMP_BACKEND` | `sandbox_omp.selected` | Selects the omp-sandbox backend only when the value is exactly `omp-sandbox`; otherwise the bwrap path is unchanged. |
 | `OMEGA_PRIME_OMP_SANDBOX_ANDA` | `sandbox_anda` binary resolution | Explicit path to the `omp-sandbox-anda` wrapper binary; when unset, `omp-sandbox-anda` is resolved from `PATH`. Neither resolving means the backend refuses before spawning. |
