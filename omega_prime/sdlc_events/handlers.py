@@ -45,10 +45,16 @@ def on_gate_signal(
     allowlist: frozenset[str] = DEFAULT_ALLOWLIST,
     dry_run: bool = True,
 ) -> HandlerResult:
-    if event.kind not in {EventKind.CHECK_COMPLETED, EventKind.PR_UPDATED, EventKind.REVIEW_SIGNAL}:
+    if event.kind not in {
+        EventKind.CHECK_COMPLETED,
+        EventKind.PR_UPDATED,
+        EventKind.REVIEW_SIGNAL,
+    }:
         return HandlerResult(action="ignore", detail=f"kind={event.kind.value}")
     if idem.seen(event.delivery):
-        return HandlerResult(action="skip", detail="duplicate_delivery", skipped_duplicate=True)
+        return HandlerResult(
+            action="skip", detail="duplicate_delivery", skipped_duplicate=True
+        )
     idem.mark(event.delivery)
     gate = evaluate_merge_gate(
         GateInput(
@@ -64,7 +70,9 @@ def on_gate_signal(
     tid = _task_id_for(event)
     if not gate.ok:
         note = f"gate blocked on {event.pr.head_sha[:7]}: {', '.join(gate.reasons)}"
-        store.upsert_note(tid, "blocked" if "ci_not_green" in gate.reasons else "working", note)
+        store.upsert_note(
+            tid, "blocked" if "ci_not_green" in gate.reasons else "working", note
+        )
         return HandlerResult(action="gate_blocked", detail=note)
     note = f"gate open on {event.pr.head_sha[:7]} (Greptile 5/5, CI green, mergeable)"
     if dry_run or merge is None:
@@ -83,7 +91,9 @@ def on_review_signal(
     greptile_score: int | None,
 ) -> HandlerResult:
     if idem.seen(event.delivery):
-        return HandlerResult(action="skip", detail="duplicate_delivery", skipped_duplicate=True)
+        return HandlerResult(
+            action="skip", detail="duplicate_delivery", skipped_duplicate=True
+        )
     idem.mark(event.delivery)
     tid = _task_id_for(event)
     score = greptile_score if greptile_score is not None else -1
@@ -101,7 +111,9 @@ def on_blocked_signal(
     reason: str,
 ) -> HandlerResult:
     if idem.seen(event.delivery):
-        return HandlerResult(action="skip", detail="duplicate_delivery", skipped_duplicate=True)
+        return HandlerResult(
+            action="skip", detail="duplicate_delivery", skipped_duplicate=True
+        )
     idem.mark(event.delivery)
     tid = _task_id_for(event)
     note = f"blocked: {reason} head={event.pr.head_sha[:7]}"

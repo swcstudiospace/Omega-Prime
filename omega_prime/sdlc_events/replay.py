@@ -50,9 +50,13 @@ def main(argv: list[str] | None = None) -> int:
     for raw in events:
         ev = _event_from(raw)
         if ev.kind == EventKind.BLOCKED_SIGNAL:
-            r = on_blocked_signal(ev, store=store, idem=idem, reason=raw.get("reason", "ci_red"))
+            r = on_blocked_signal(
+                ev, store=store, idem=idem, reason=raw.get("reason", "ci_red")
+            )
         elif ev.kind == EventKind.REVIEW_SIGNAL:
-            r = on_review_signal(ev, store=store, idem=idem, greptile_score=raw.get("greptile_score"))
+            r = on_review_signal(
+                ev, store=store, idem=idem, greptile_score=raw.get("greptile_score")
+            )
         else:
             r = on_gate_signal(
                 ev,

@@ -12,7 +12,9 @@ class IdempotencyStore:
         self._path = path
         self._seen: set[str] = set()
         if path and path.exists():
-            self._seen = {line.strip() for line in path.read_text().splitlines() if line.strip()}
+            self._seen = {
+                line.strip() for line in path.read_text().splitlines() if line.strip()
+            }
 
     def seen(self, delivery: DeliveryId) -> bool:
         return delivery.value in self._seen
