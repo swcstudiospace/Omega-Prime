@@ -44,6 +44,19 @@ def _row_by_id(data: dict[str, Any], task_id: str) -> dict[str, Any] | None:
     return next((row for row in tasks if row.get("id") == task_id), None)
 
 
+def _run_of(row: Mapping[str, Any]) -> str | None:
+    """The job id of the run a row records (row field, else its receipt)."""
+    job = row.get("job_id")
+    if isinstance(job, str) and job:
+        return job
+    receipt = row.get("receipt")
+    if isinstance(receipt, Mapping):
+        job = receipt.get("job_id")
+        if isinstance(job, str) and job:
+            return job
+    return None
+
+
 def _redact(value: Any) -> Any:
     """Recursive redact_text pass: strings through, containers rebuilt."""
     if isinstance(value, str):
@@ -68,8 +81,12 @@ def start(
     A missing row is created with ``started_at``/``last_activity_at``
     stamped now and ``herdr_pane`` only when a pane actually opened. A
     non-terminal row moves back to ``working`` with ``started_at``
-    untouched (a crash-resume must not look brand new). A terminal
-    (``done``/``failed``) row is never resurrected: no write at all.
+    untouched (a crash-resume must not look brand new), stamped only when
+    the row never had one. A terminal (``done``/``failed``) row of this
+    same ``job_id``, or of no known run, is never resurrected: no write at
+    all. A terminal row left by an earlier run is this run's record now: it starts fresh
+    (``started_at`` now, the old receipt and pane dropped), so the
+    dashboard never shows the old run while the new one works.
     """
     with locked_tasks(path, write=True) as data:
         row = _row_by_id(data, task_id)
@@ -88,10 +105,15 @@ def start(
             _write_locked(data, path)
             return
         if row.get("state") in _TERMINAL_STATES:
-            return
+            if _run_of(row) in (None, job_id):
+                return
+            row.pop("receipt", None)
+            row.pop("herdr_pane", None)
+            row["started_at"] = _now()
         row["state"] = "working"
         row["job_id"] = job_id
         row["stage"] = stage
+        row.setdefault("started_at", _now())
         row["last_activity_at"] = _now()
         if pane is not None:
             row["herdr_pane"] = pane
@@ -134,8 +156,18 @@ def _event_label(event: Mapping[str, Any] | str) -> str | None:
     return None
 
 
-def finish(path: Any, task_id: str, ok: bool, receipt: Mapping[str, Any]) -> None:
+def finish(
+    path: Any,
+    task_id: str,
+    ok: bool,
+    receipt: Mapping[str, Any],
+    *,
+    job_id: str | None = None,
+) -> None:
     """Set the row terminal (``done``/``failed``) with a redacted receipt.
+
+    With ``job_id``, only the record that run started is finished: a row
+    a later run has taken over (another ``job_id``) is left alone.
 
     Upsert: a missing row is created terminal (``started_at`` now) so a
     run whose start was suppressed still gets its record. The receipt is
@@ -149,15 +181,18 @@ def finish(path: Any, task_id: str, ok: bool, receipt: Mapping[str, Any]) -> Non
         redacted = _redact(dict(receipt))
         stamp = _now()
         if row is None:
-            data.setdefault("tasks", []).append(
-                {
-                    "id": task_id,
-                    "state": state,
-                    "started_at": stamp,
-                    "last_activity_at": stamp,
-                    "receipt": redacted,
-                }
-            )
+            created: dict[str, Any] = {
+                "id": task_id,
+                "state": state,
+                "started_at": stamp,
+                "last_activity_at": stamp,
+                "receipt": redacted,
+            }
+            if job_id is not None:
+                created["job_id"] = job_id
+            data.setdefault("tasks", []).append(created)
+        elif job_id is not None and _run_of(row) not in (None, job_id):
+            return
         else:
             row["state"] = state
             row["last_activity_at"] = stamp

@@ -240,6 +240,35 @@ def test_clear_never_resurrects_terminal_rows(tmp_path: Path) -> None:
     assert data["waiting_on_ove"] == []
 
 
+def test_raise_never_reopens_terminal_rows(tmp_path: Path) -> None:
+    store = _seed(
+        tmp_path / "tasks.json",
+        rows=[_row("gb:done", "done"), _row("gb:failed", "failed")],
+    )
+    # A late failure or a repeated push notice still records the item, but
+    # the finished rows keep their terminal state, and clearing changes
+    # nothing either.
+    raise_block(store, "gb:done:late", "ask", "blocks", "gb:done")
+    push_block(store, "gb:failed", "auto_review_blocked")
+    push_block(store, "gb:failed", "auto_review_blocked")
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert {row["id"]: row["state"] for row in data["tasks"]} == {
+        "gb:done": "done",
+        "gb:failed": "failed",
+    }
+    assert sorted(item["id"] for item in data["waiting_on_ove"]) == [
+        "gb:done:late",
+        "gb:failed:push",
+    ]
+    clear_block(store, "gb:done:late", "gb:done")
+    clear_block(store, "gb:failed:push", "gb:failed")
+    data = json.loads(store.read_text(encoding="utf-8"))
+    assert {row["id"]: row["state"] for row in data["tasks"]} == {
+        "gb:done": "done",
+        "gb:failed": "failed",
+    }
+
+
 # --- W111-05: push-step hook -------------------------------------------------
 
 
@@ -469,11 +498,55 @@ def test_run_rows_start_creates_the_working_row_and_pins_started_at(
 def test_run_rows_start_never_resurrects_terminal_rows(tmp_path: Path) -> None:
     store = _seed(
         tmp_path / "tasks.json",
-        rows=[_row("gb:done", "done", receipt={"job_id": "job-0"})],
+        rows=[
+            _row("gb:done", "done", receipt={"job_id": "job-0"}),
+            _row("gb:plain", "failed"),
+        ],
     )
     before = store.read_bytes()
-    start(store, "gb:done", job_id="job-1", stage="plan", pane="pane-7")
+    # The same run (a crash-resume) never reopens its own finished record,
+    # and a finished row of no known run stays finished.
+    start(store, "gb:done", job_id="job-0", stage="plan", pane="pane-7")
+    start(store, "gb:plain", job_id="job-1", stage="plan", pane="pane-7")
     assert store.read_bytes() == before
+
+
+def test_run_rows_a_new_run_gets_its_own_record(tmp_path: Path) -> None:
+    store = _seed(
+        tmp_path / "tasks.json",
+        rows=[
+            _row(
+                "gb:again",
+                "done",
+                job_id="job-0",
+                herdr_pane="pane-old",
+                started_at="2026-01-01T00:00:00+00:00",
+                receipt={"job_id": "job-0", "ok": True},
+            )
+        ],
+    )
+    start(store, "gb:again", job_id="job-1", stage="execute", pane=None)
+    row = _row_by_id(store, "gb:again")
+    assert row["state"] == "working"
+    assert row["job_id"] == "job-1"
+    assert row["started_at"] != "2026-01-01T00:00:00+00:00"
+    assert "receipt" not in row and "herdr_pane" not in row
+    # A late finish from the earlier run leaves the new run's record alone.
+    before = store.read_bytes()
+    finish(store, "gb:again", ok=False, receipt={"job_id": "job-0"}, job_id="job-0")
+    assert store.read_bytes() == before
+    finish(store, "gb:again", ok=True, receipt={"job_id": "job-1"}, job_id="job-1")
+    done = _row_by_id(store, "gb:again")
+    assert (done["state"], done["receipt"]) == ("done", {"job_id": "job-1"})
+
+
+def test_run_rows_start_stamps_a_missing_started_at(tmp_path: Path) -> None:
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:bare")])
+    start(store, "gb:bare", job_id="job-1", stage="plan", pane=None)
+    row = _row_by_id(store, "gb:bare")
+    assert datetime.fromisoformat(row["started_at"]) <= datetime.fromisoformat(
+        row["last_activity_at"]
+    )
 
 
 def test_run_rows_start_returns_a_blocked_row_to_working(tmp_path: Path) -> None:

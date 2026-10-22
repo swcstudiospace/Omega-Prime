@@ -154,10 +154,14 @@ def open_pane(
     layer must not derive, so the caller passes it in.
     """
     argv = [str(part) for part in command]
+    pane: str | None = None
     try:
         pane = _herdr_pane(env, cwd=str(cwd), label=label, command=argv)
-        if pane is not None:
-            return pane
+    except Exception:  # a hung or missing herdr still gets the fallback
+        pane = None
+    if pane is not None:
+        return pane
+    try:
         return _tmux_pane(env, command=argv, session=session)
     except Exception:  # visibility never kills runs
         return None

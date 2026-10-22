@@ -34,6 +34,9 @@ PUSH_REASONS: dict[str, tuple[str, str]] = {
     ),
 }
 
+# Finished task states: neither raising nor clearing a block reopens them.
+_TERMINAL = ("done", "failed")
+
 
 def raise_block(
     path: Any,
@@ -50,7 +53,7 @@ def raise_block(
     since unchanged, so a retrying caller can neither duplicate the item nor
     reset the block's age. ``ask`` and ``blocks`` pass the secret redaction
     before storage. The tasks[] row whose id == ``task_id`` becomes
-    ``blocked``; a missing row still writes the item — the item, not the
+    ``blocked`` unless it is already ``done``/``failed``; a missing row still writes the item — the item, not the
     row, is the source of truth for the block.
     """
     since = datetime.now(UTC).isoformat()
@@ -70,7 +73,9 @@ def raise_block(
         item["blocks"] = redact_text(blocks)
         item["task_id"] = task_id
         for row in data.get("tasks", []):
-            if row.get("id") == task_id:
+            # A finished task stays finished: a late or repeated raise must
+            # not reopen a done/failed row (clear_block keeps them too).
+            if row.get("id") == task_id and row.get("state") not in _TERMINAL:
                 row["state"] = "blocked"
         _write_locked(data, path)
 

@@ -60,7 +60,45 @@ def _safe_questions(request: dict) -> list[dict]:
     return _question_summaries(questions)
 
 
+def _sandbox_event(event: dict) -> str:
+    """One omp-sandbox wrapper event (``event`` key, not omp's ``type``)."""
+    kind = "".join(c if c.isprintable() else "?" for c in str(event["event"]))[:40]
+    fields = [kind]
+
+    def add(name: str, value: object) -> None:
+        if isinstance(value, str) and value:
+            fields.append(f"{name}={redact_text(value)[:200]}")
+
+    add("stage", event.get("stageId"))
+    if kind == "question":
+        add("request", event.get("requestId"))
+        add("method", event.get("method"))
+        questions = _safe_questions(event)
+        if questions:
+            fields.append(f"questions={json.dumps(questions, ensure_ascii=False)}")
+        else:
+            title = event.get("title")
+            if isinstance(title, str) and title:
+                fields.append(
+                    f"prompt={json.dumps(redact_text(title), ensure_ascii=False)}"
+                )
+            options = event.get("options")
+            if isinstance(options, list) and options:
+                safe = [redact_text(str(item))[:80] for item in options]
+                fields.append(f"options={json.dumps(safe, ensure_ascii=False)}")
+    elif kind == "stage_done":
+        add("status", event.get("status"))
+        add("error", event.get("error"))
+    elif kind == "fallback":
+        add("from", event.get("from"))
+        add("to", event.get("to"))
+        add("reason", event.get("reason"))
+    return " ".join(fields)
+
+
 def format_event(event: dict) -> str:
+    if not event.get("type") and isinstance(event.get("event"), str):
+        return _sandbox_event(event)
     kind = str(event.get("type") or "event")
     if kind in {
         "ui_pending",
