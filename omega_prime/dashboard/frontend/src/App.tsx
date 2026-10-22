@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useDashboard } from './hooks/useDashboard'
 import { CommandSidebar } from './components/CommandSidebar'
 import { Overview } from './views/Overview'
+import { Board } from './views/Board'
 import { Tasks } from './views/Tasks'
 import { CiCd } from './views/CiCd'
 import { Repositories } from './views/Repositories'
@@ -10,6 +11,10 @@ import { parseHash, taskHref, taskOrigin, type RouteState, type TaskBucket } fro
 import { selectedTask } from './lib/selectors'
 import { ViewState } from './components/ViewState'
 import type { Snapshot } from './types'
+import { useEventLog } from './hooks/useEventLog'
+import { EventLogContext } from './lib/eventContext'
+import { Toaster } from './components/Toaster'
+import { formatSydneyClock } from './lib/time'
 export type View = RouteState['view']
 type SelectionKind = 'task' | 'wait'
 function selectionKind(id: string): SelectionKind | null {
@@ -23,6 +28,8 @@ function clearTaskOriginState(): void {
 }
 export function App() {
   const dashboard = useDashboard()
+  const eventLog = useEventLog(dashboard.data, dashboard.origin, dashboard.live, dashboard.error)
+  const lastEvent = eventLog.events[0]
   const [route, setRoute] = useState(() => parseHash(window.location.hash))
   const previousRoute = useRef(route)
   const pendingTaskOrigin = useRef<{ id: string; bucket: TaskBucket; kind: SelectionKind } | null>(null)
@@ -62,8 +69,8 @@ export function App() {
   const activeBucket = route.taskId ? origin : route.bucket
   const title = route.taskId !== null
     ? resolved ? 'Task details' : !dashboard.data ? dashboard.loading ? 'Loading task details…' : 'Task details' : 'Task not found'
-    : ({ overview: 'Overview', tasks: 'Task Control', cicd: 'CI / CD', repositories: 'Repositories' }[route.view])
-  return <div className="app-shell"><CommandSidebar snapshot={snapshot} view={route.view} bucket={activeBucket} taskId={route.taskId} onTask={rememberOrigin} />
-    <main id="main-content" className="main-content"><header className="topbar"><div><p className="eyebrow">OMEGA PRIME / COMMAND CENTER</p><h1 tabIndex={-1}>{title}</h1></div><div className="connection" aria-live="polite"><span className={`connection-dot ${dashboard.live ? 'is-live' : ''}`} />{dashboard.live ? 'Live' : 'Polling'}<button className="quiet-button" onClick={dashboard.refresh} disabled={dashboard.loading}>Refresh</button></div></header>
-      {route.taskId !== null ? resolved ? <ViewState loading={false} error={dashboard.error} receivedAt={dashboard.receivedAt} retry={dashboard.refresh}><TaskDetail item={resolved} taskId={route.taskId} snapshot={snapshot} backBucket={origin} loading={dashboard.loading} /></ViewState> : !dashboard.data ? dashboard.loading ? <p className="empty-state">Loading task details…</p> : <ViewState loading={false} error={dashboard.error} receivedAt={dashboard.receivedAt} retry={dashboard.refresh}><p className="empty-state">Task details cannot be resolved until snapshot data is available.</p></ViewState> : <section className="panel"><h2>Task not found</h2><p>This task is not in the current snapshot.</p><a href="#/tasks">View tasks</a></section> : route.view === 'overview' ? <Overview {...dashboard} snapshot={snapshot} /> : route.view === 'tasks' ? <Tasks {...dashboard} snapshot={snapshot} bucket={route.bucket} notice={route.notice} onTask={(id, rowKind) => rememberOrigin(id, route.bucket, rowKind)} /> : route.view === 'cicd' ? <CiCd {...dashboard} snapshot={snapshot} /> : <Repositories {...dashboard} snapshot={snapshot} />}</main></div>
+    : ({ overview: 'Overview', board: 'Board', tasks: 'Task Control', cicd: 'CI / CD', repositories: 'Repositories' }[route.view])
+  return <EventLogContext.Provider value={eventLog}><div className="app-shell"><CommandSidebar snapshot={snapshot} view={route.view} bucket={activeBucket} taskId={route.taskId} onTask={rememberOrigin} />
+    <main id="main-content" className="main-content"><header className="topbar"><div><p className="eyebrow">OMEGA PRIME / COMMAND CENTER</p><h1 tabIndex={-1}>{title}</h1></div><div className="connection" aria-live="polite"><span className={`connection-dot ${dashboard.live ? 'is-live' : ''}`} />{dashboard.live ? 'Live' : 'Polling'}{lastEvent && <span className="last-event" title={lastEvent.summary}>· last event {formatSydneyClock(lastEvent.at)}</span>}<button className="quiet-button" onClick={dashboard.refresh} disabled={dashboard.loading}>Refresh</button></div></header>
+      {route.taskId !== null ? resolved ? <ViewState loading={false} error={dashboard.error} receivedAt={dashboard.receivedAt} retry={dashboard.refresh}><TaskDetail item={resolved} taskId={route.taskId} snapshot={snapshot} backBucket={origin} loading={dashboard.loading} /></ViewState> : !dashboard.data ? dashboard.loading ? <p className="empty-state">Loading task details…</p> : <ViewState loading={false} error={dashboard.error} receivedAt={dashboard.receivedAt} retry={dashboard.refresh}><p className="empty-state">Task details cannot be resolved until snapshot data is available.</p></ViewState> : <section className="panel"><h2>Task not found</h2><p>This task is not in the current snapshot.</p><a href="#/tasks">View tasks</a></section> : route.view === 'overview' ? <Overview {...dashboard} snapshot={snapshot} /> : route.view === 'board' ? <Board {...dashboard} snapshot={snapshot} onTask={(id, kind) => rememberOrigin(id, 'all', kind)} /> : route.view === 'tasks' ? <Tasks {...dashboard} snapshot={snapshot} bucket={route.bucket} notice={route.notice} onTask={(id, rowKind) => rememberOrigin(id, route.bucket, rowKind)} /> : route.view === 'cicd' ? <CiCd {...dashboard} snapshot={snapshot} /> : <Repositories {...dashboard} snapshot={snapshot} />}</main><Toaster toasts={eventLog.toasts} onDismiss={eventLog.dismissToast} /></div></EventLogContext.Provider>
 }

@@ -163,6 +163,7 @@ class WaitingItem:
     display_id: str | None = None
     timeline: list[dict[str, str]] = field(default_factory=list)
     related_task_id: str | None = None
+    source: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _dict(self, tuple(self.__dataclass_fields__))
@@ -769,6 +770,7 @@ def normalize_tasks(
                     str(raw.get("ask", "")),
                     raw.get("since"),
                     str(raw.get("blocks", "")),
+                    source="tasks_json",
                 )
         for raw in task_source.extra.get("finished", []):
             if isinstance(raw, dict) and isinstance(raw.get("id"), str):
@@ -780,6 +782,7 @@ def normalize_tasks(
                         raw.get("finished_at"),
                         str(raw.get("result", "ok")),
                         raw.get("receipt"),
+                        source="tasks_json",
                         herdr_pane=raw.get("herdr_pane")
                         if isinstance(raw.get("herdr_pane"), dict)
                         else None,

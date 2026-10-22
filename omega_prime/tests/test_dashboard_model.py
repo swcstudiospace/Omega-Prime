@@ -383,3 +383,29 @@ def test_waiting_and_finished_model_fields_are_additive() -> None:
     assert waiting["timeline"] == [] and waiting["related_task_id"] is None
     assert finished["seq"] is None and finished["display_id"] is None
     assert finished["timeline"] == [] and finished["wiring"] is None
+
+
+def test_task_file_waiting_and_finished_rows_name_their_source() -> None:
+    """The client carries forward only task-file rows during a task-file
+    outage, so every row that file produced must say so."""
+    snap = normalize_tasks(
+        {
+            "tasks_json": SourceResult(
+                "tasks_json",
+                "ok",
+                [],
+                extra={
+                    "tasks": [],
+                    "waiting_on_ove": [{"id": "ask-1", "ask": "Pick a name"}],
+                    "finished": [{"id": "done-1", "title": "Shipped"}],
+                },
+            ),
+            "fleet": SourceResult("fleet", "ok", [], extra={"hitl_count": 1}),
+        },
+        now=NOW,
+    )
+    sources = {row.id: row.source for row in snap.waiting_on_ove}
+    assert sources == {"tasks:ask-1": "tasks_json", "wait:fleet:hitl": None}
+    assert [(row.id, row.source) for row in snap.finished] == [
+        ("tasks:done-1", "tasks_json")
+    ]

@@ -10,7 +10,7 @@ export type Task = {
   plan?: string | null; phase?: string | null; stage?: string | null; worktree?: string | null; herdr_pane?: HerdrPane | null
   stale?: { reason: string; since: string } | null
 }
-export type WaitingItem = { id: string; ask: string; since?: string | null; blocks?: string; seq?: number | null; display_id?: string | null; timeline?: TimelineEntry[]; related_task_id?: string | null }
+export type WaitingItem = { id: string; ask: string; since?: string | null; blocks?: string; seq?: number | null; display_id?: string | null; timeline?: TimelineEntry[]; related_task_id?: string | null; source?: string | null }
 export type FinishedItem = { id: string; title: string; finished_at?: string | null; result: string; receipt?: string | null; summary?: string | null; seq?: number | null; display_id?: string | null; timeline?: TimelineEntry[]; wiring?: Wiring | null; state?: string | null; source?: string | null; owner?: Task['owner']; model?: string | null; detail?: string | null; links?: LinkRecord[]; started_at?: string | null; last_activity_at?: string | null; progress?: Task['progress']; plan?: string | null; phase?: string | null; stage?: string | null; worktree?: string | null; herdr_pane?: HerdrPane | null }
 export type PrRow = { id: string; repo: string; number: number; title: string; branch: string; draft: boolean; mergeable: boolean | null; ci: string; greptile: string; merge_rule: string; updated_at: string | null }
 export type Check = { id?: string; name: string; status: string; conclusion?: string | null; started_at?: string | null; completed_at?: string | null; duration_s?: number | null; details_url?: string | null; head_sha?: string | null }
