@@ -362,8 +362,13 @@ class AndaClient:
         tool: str,
         args: Mapping[str, Any] | None = None,
         timeout: float | None = None,
+        interrupt: Any | None = None,
     ) -> dict[str, Any]:
         """Send one tool request and return its ``result`` (``ok:true``).
+
+        A set ``interrupt`` ends the wait early with ``cancelled`` (checked
+        every _POLL_TICK), so a long bounded call such as a cold ``up``
+        never holds a cancelled caller for its whole deadline.
 
         Interleaved event lines are buffered; the first reply whose echoed
         ``id`` matches wins. ``ok:false`` raises SandboxUnavailable with
@@ -391,7 +396,7 @@ class AndaClient:
         bound = _TOOL_TIMEOUT if timeout is None else timeout
         deadline = time.monotonic() + bound
         while True:
-            message = self._take(deadline, f"the {tool} reply")
+            message = self._take(deadline, f"the {tool} reply", interrupt)
             if "event" in message and "id" not in message:
                 self._buffer(message)
                 continue
@@ -492,9 +497,14 @@ class AndaClient:
                 with contextlib.suppress(Exception):
                     proc.kill()
 
-    def _take(self, deadline: float, what: str) -> dict[str, Any]:
-        """Next protocol dict, bounded by ``deadline``; sentinel → failure."""
+    def _take(
+        self, deadline: float, what: str, interrupt: Any | None = None
+    ) -> dict[str, Any]:
+        """Next protocol dict, bounded by ``deadline``; sentinel → failure.
+        A set ``interrupt`` raises ``cancelled`` instead of waiting on."""
         while True:
+            if interrupt is not None and interrupt.is_set():
+                raise _cancelled(f"interrupted while waiting for {what}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise SandboxUnavailable(f"timed out waiting for {what}")
@@ -674,10 +684,15 @@ def run_backend(
             commands,
             events_path,
             timeout=_UP_TIMEOUT,
+            interrupt=interrupt,
             tasks_path=tasks_path,
             task_id=task_id,
             row_started=row_started,
         )
+        if interrupt is not None and interrupt.is_set():
+            # Cancelled while the sandbox came up: submit nothing (and open
+            # no row or pane for a stage that never runs).
+            raise _cancelled("cancelled before the stage was submitted")
         if tracked and tasks_path is not None and task_id is not None:
             # Visibility wiring (W113-01/W113-02), only once the stage is
             # actually launching: a run that fails at or before the up reply
@@ -995,6 +1010,15 @@ def _apply_export(work: Path, ref: str, export: Mapping[str, Any]) -> dict[str, 
     return {"applied": True, "head": head}
 
 
+def _cancelled(detail: str) -> EngineError:
+    """``cancelled`` for an interrupt honoured outside the stage wait.
+
+    ``started=True`` as on every cancel path (bwrap's included): the caller
+    asked to stop, so no caller may re-run the same task elsewhere.
+    """
+    return EngineError("cancelled", detail, started=True)
+
+
 def _tool(
     client: AndaClient,
     tool: str,
@@ -1003,18 +1027,20 @@ def _tool(
     events_path: Path,
     *,
     timeout: float | None = None,
+    interrupt: Any | None = None,
     tasks_path: str | Path | None = None,
     task_id: str | None = None,
     row_started: bool = False,
     drained: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """One wrapper tool call; events land in events.jsonl via append_event,
-    the tool name in commands. ``timeout`` overrides the per-tool bound. Each
-    drained event also touches the run's tasks.json row when one was started
-    (best-effort, never fatal), and is appended to ``drained`` when given, so
-    a caller can still act on it."""
+    the tool name in commands. ``timeout`` overrides the per-tool bound; a
+    set ``interrupt`` ends the wait with ``cancelled``. Each drained event
+    also touches the run's tasks.json row when one was started (best-effort,
+    never fatal), and is appended to ``drained`` when given, so a caller can
+    still act on it."""
     try:
-        reply = client.call(tool, args, timeout)
+        reply = client.call(tool, args, timeout, interrupt)
     finally:
         for event in client.drain_events():
             append_event(events_path, event)

@@ -52,7 +52,7 @@ Behaviour is selected by ``behavior.json`` beside this script -- never
 argv: ``{"behavior": "happy" | "tier_error" | "question" |
 "question_reask" | "question_early" | "hang" | "early_done" | "abort_race" |
 "fallback" | "long" | "status_fail" | "host_moved" | "leaves_edits" |
-"stuck_dirty" | "two_questions"}``.
+"stuck_dirty" | "two_questions" | "up_hangs"}``.
 ``up`` clones the seeded branch into a private sandbox checkout beside this
 script (the host worktree is never written by the fake), and
 ``export_commits`` commits there and bundles ``base..ref``. One
@@ -204,6 +204,9 @@ for line in sys.stdin:
         })
         break
     if tool == "up":
+        if behavior == "up_hangs":
+            # A cold start still building: no reply until it is torn down.
+            continue
         if behavior == "tier_error":
             emit({
                 "id": rid,
@@ -519,6 +522,25 @@ def _wrapper_tools(log: Path) -> list[str]:
     return [str(row.get("tool")) for row in _wrapper_log(log) if "tool" in row]
 
 
+def _interrupt_once_the_stage_runs(log: Path, interrupt: Any) -> threading.Thread:
+    """Started thread that sets ``interrupt`` once ``run_gsd_stage`` was
+    sent, so an abort test cancels a live stage (an interrupt during the
+    cold start cancels before any stage is submitted). Test-side bound."""
+
+    def wait_then_set() -> None:
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if "run_gsd_stage" in _wrapper_tools(log):
+                break
+            time.sleep(0.05)
+        time.sleep(0.3)
+        interrupt.set()
+
+    thread = threading.Thread(target=wait_then_set, daemon=True)
+    thread.start()
+    return thread
+
+
 def _read_tasks(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -830,8 +852,7 @@ def test_interrupt_aborts_the_stage_and_returns_cancelled(tmp_path: Path) -> Non
     work = _git_worktree(roots)
     env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
     interrupt = InterruptFlag()
-    timer = threading.Timer(0.8, interrupt.set)
-    timer.start()
+    timer = _interrupt_once_the_stage_runs(log, interrupt)
     try:
         result = run(
             "build it",
@@ -1705,8 +1726,7 @@ def test_a_stage_done_before_the_abort_reply_still_cancels(tmp_path: Path) -> No
     work = _git_worktree(roots)
     env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
     interrupt = InterruptFlag()
-    timer = threading.Timer(0.5, interrupt.set)
-    timer.start()
+    timer = _interrupt_once_the_stage_runs(log, interrupt)
     outcome: dict = {}
     worker = threading.Thread(
         target=lambda: outcome.update(
@@ -2016,10 +2036,14 @@ def test_startup_and_export_get_deadlines_that_cover_their_inner_steps(
     original = sandbox_omp.AndaClient.call
 
     def spy(
-        self: Any, tool: str, args: Any = None, timeout: float | None = None
+        self: Any,
+        tool: str,
+        args: Any = None,
+        timeout: float | None = None,
+        interrupt: Any = None,
     ) -> Any:
         seen[tool] = timeout
-        return original(self, tool, args, timeout)
+        return original(self, tool, args, timeout, interrupt)
 
     monkeypatch.setattr(sandbox_omp.AndaClient, "call", spy)
     result = run(
@@ -2126,3 +2150,37 @@ def test_a_run_that_does_not_own_the_row_never_finishes_it(tmp_path: Path) -> No
     )
     assert result.ok is True, result.detail
     assert store.read_bytes() == before
+
+
+def test_interrupt_during_a_cold_start_returns_promptly_and_submits_nothing(
+    tmp_path: Path,
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "up_hangs")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    interrupt = InterruptFlag()
+    timer = threading.Timer(0.5, interrupt.set)
+    timer.start()
+    began = time.monotonic()
+    try:
+        result = run(
+            "build it",
+            cwd=work,
+            env=env,
+            job_id="job-cold-cancel",
+            stage="execute",
+            plan="zai",
+            interrupt=interrupt,
+        )
+    finally:
+        timer.join()
+    # Not the up deadline (well over an hour): the interrupt ends the wait.
+    assert time.monotonic() - began < 30.0
+    assert result.ok is False
+    assert result.reason == "cancelled"
+    assert result.started is True  # a cancelled task is never re-run elsewhere
+    tools = _wrapper_tools(log)
+    assert "up" in tools and "down" in tools
+    assert "run_gsd_stage" not in tools
