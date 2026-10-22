@@ -131,10 +131,16 @@ def main() -> int:
             export = (row.get("receipt") or {}).get("export") or {}
             commits = export.get("commits") or []
             exported = row.get("state") == "done" and len(commits) >= 1
+            # Visibility is part of the proof: a pane failure never fails the
+            # backend, so a run nobody could watch (no herdr pane and no tmux
+            # fallback recorded on the row) is a FAIL here.
+            pane = row.get("herdr_pane")
+            visible = isinstance(pane, str) and bool(pane.strip())
             print(
                 f"{task_id}: state={row.get('state')} exported_commits={len(commits)}"
+                f" pane={'yes' if visible else 'MISSING'}"
             )
-            ok = ok and exported
+            ok = ok and exported and visible
         print("PASS" if ok else "FAIL")
         return 0 if ok else 1
 

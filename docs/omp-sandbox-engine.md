@@ -56,8 +56,13 @@ requested per run (the routine's stage via `last-plan.json`, or `engine_plan`
 on the delegate/turn paths); it is never a default change to the engine. Z.ai
 serves a stage only when the consent flag above is truthy. A requested stage
 with no allowlisted plan refuses with `plan_not_allowed` before any wrapper
-spawn, and when task context is present the refusal raises exactly one
-`waiting_on_ove` item in the same failing call.
+spawn. When that refusal happens inside `run()` with task context present
+(the delegate and turn paths, which call `run()` directly), it raises exactly
+one `waiting_on_ove` item in the same failing call. The ultrathink routine is
+different: `ultrathink_engine()` checks readiness with `probe()` first and
+returns on a miss before it ever calls `run()`, so a routine readiness miss
+(`plan_not_allowed`, `sandbox_unavailable`) comes back as the routine's
+`engine.reason` and raises no item; its task row is left as it was.
 
 ## The workspace allowlist
 
@@ -112,10 +117,14 @@ When the run carries task context (tasks path and task id both set):
   second for its additive `answer` — no wall-clock deadline — and pipes the
   answer back through `answer_question` into the live session. A stale answer
   clears the dead item and the re-ask arrives under a new id.
-- **Gate blocks.** `plan_not_allowed` and `sandbox_unavailable` raise one
-  `waiting_on_ove` item each in the same failing call, with static ask text;
-  a run that fails before starting its row writes no row at all — the block
-  is the visibility.
+- **Gate blocks.** When `run()` itself refuses with `plan_not_allowed` or
+  `sandbox_unavailable`, it raises one `waiting_on_ove` item each in the same
+  failing call, with static ask text; a run that fails before starting its
+  row writes no row at all — the block is the visibility. This covers only
+  failures that reach `run()`. The ultrathink routine's readiness miss stops
+  at `probe()` before `run()` (see Stage routing), raises no item and leaves
+  the row as it was, so check the routine's `engine.reason` instead of
+  waiting for an approval item.
 
 ## Testing it
 
