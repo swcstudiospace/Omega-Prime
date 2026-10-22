@@ -341,3 +341,67 @@ def test_terminal_has_no_input_route_or_subcommand():
     }
     assert "/api/tasks/{task_id:path}/terminal" in paths
     assert not any("send" in path or "input" in path for path in paths)
+
+
+def test_stream_follows_a_relaunch_into_a_new_pane():
+    """Greptile: an open terminal must not keep showing the previous run."""
+    from omega_prime.dashboard.terminal import TerminalService
+
+    reads: list[str] = []
+    mapping = ["w1:p1"]
+
+    async def runner(argv):
+        reads.append(argv[3])
+        return f"output of {argv[3]}"
+
+    async def no_sleep(_seconds):
+        return None
+
+    async def run():
+        service = TerminalService(runner=runner, sleep=no_sleep)
+        frames = []
+        stream = service.stream("w1:p1", resolve=lambda: mapping[0])
+        async for event in stream:
+            if not event.startswith("event: terminal"):
+                continue
+            payload = json.loads(event.split("data: ", 1)[1])
+            frames.append(payload)
+            if len(frames) == 1:
+                mapping[0] = "w2:p7"  # the task was relaunched
+            if payload["text"] == "output of w2:p7" or len(frames) > 5:
+                break
+        return frames
+
+    frames = asyncio.run(run())
+    assert frames[0]["text"] == "output of w1:p1"
+    assert frames[-1] == {
+        "status": "live",
+        "text": "output of w2:p7",
+        "updated_at": frames[-1]["updated_at"],
+    }
+    assert reads[-1] == "w2:p7"
+
+
+def test_stream_ends_when_the_task_no_longer_maps_a_pane():
+    from omega_prime.dashboard.terminal import TerminalService
+
+    mapping: list[str | None] = ["w1:p1"]
+
+    async def runner(argv):
+        return "text"
+
+    async def no_sleep(_seconds):
+        return None
+
+    async def run():
+        service = TerminalService(runner=runner, sleep=no_sleep)
+        statuses = []
+        async for event in service.stream("w1:p1", resolve=lambda: mapping[0]):
+            if event.startswith("event: terminal"):
+                statuses.append(json.loads(event.split("data: ", 1)[1])["status"])
+                mapping[0] = None
+            if len(statuses) > 5:
+                break
+        return statuses
+
+    assert asyncio.run(run()) == ["live", "no_session"]

@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from omega_prime.dashboard.terminal import resolve_task_pane
+
 DEFAULT_STALE_MINUTES = 20.0
 REASONS = ("pid_dead", "pane_gone", "pane_exited", "no_heartbeat")
 
@@ -29,6 +31,9 @@ Clock = Callable[[], datetime]
 _STALE_STATES = ("working", "blocked")
 _PANE_LIST_KEYS = ("panes", "result", "items")
 _EXITED_STATUSES = ("exited", "dead", "closed")
+# Sentinel for stale_map's ``panes``: "ask the pane lister" (the default),
+# as opposed to an explicit listing or an explicit ``None`` ("unavailable").
+LOAD_PANES: Any = object()
 
 
 def _canonical_identity(identity: str) -> str:
@@ -186,12 +191,22 @@ class StaleChecker:
         return self._evaluate(row, self._now(now), pane_map)
 
     def stale_map(
-        self, rows: list[Any], *, now: datetime | None = None
+        self,
+        rows: list[Any],
+        *,
+        now: datetime | None = None,
+        panes: Any = LOAD_PANES,
     ) -> dict[str, dict[str, str | None] | None]:
-        """Batch form: pane lister at most once, keyed by row identity."""
+        """Batch form: pane lister at most once, keyed by row identity.
+
+        ``panes`` lets a caller supply pane evidence it already holds (a
+        listing, or ``None`` for "unavailable") so the batch never waits on
+        Herdr itself; by default the lister is asked lazily.
+        """
         current = self._now(now)
-        panes: dict[str, dict[str, Any]] | None = None
-        panes_loaded = False
+        panes_loaded = panes is not LOAD_PANES
+        if not panes_loaded:
+            panes = None
 
         def pane_map() -> dict[str, dict[str, Any]] | None:
             nonlocal panes, panes_loaded
@@ -230,9 +245,10 @@ class StaleChecker:
         ):
             return {"reason": "pid_dead", "since": anchor}
 
-        pane = row.get("herdr_pane")
-        pane_id = pane.get("pane_id") if isinstance(pane, dict) else None
-        if isinstance(pane_id, str) and pane_id:
+        # The same mapping the terminal and reconciler use: herdr_pane, or an
+        # owner of kind herdr-pane whose ref is the pane id.
+        pane_id = resolve_task_pane(row)
+        if pane_id:
             panes = pane_map()
             if panes is not None:
                 info = panes.get(pane_id)

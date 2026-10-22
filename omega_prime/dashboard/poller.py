@@ -18,11 +18,14 @@ from typing import Any
 from omega_prime.dashboard.model import SourceResult, normalize_tasks
 from omega_prime.dashboard.redact import redact_value
 from omega_prime.dashboard.stale import StaleChecker
+from omega_prime.dashboard.terminal import resolve_task_pane
 
 LOCAL_SOURCES = 3.0
 HERDR_PODMAN = 5.0
 FLEET = 30.0
 GITHUB = 60.0
+# Pane evidence older than this is treated as unavailable rather than trusted.
+PANE_EVIDENCE_MAX_AGE = 4 * HERDR_PODMAN
 _STATUS_EXTRA = {
     "agentos": ("routing_summary", "state_entries"),
     "command_log": ("count", "last_exit_codes"),
@@ -73,6 +76,11 @@ class DashboardPoller:
         self._build_lock = asyncio.Lock()
         self._build_pending = False
         self._build_task: asyncio.Task[None] | None = None
+        # Herdr pane evidence for stale checks is refreshed on its own task so
+        # a slow or hung `herdr pane list` never holds back a snapshot build.
+        self._panes: dict[str, dict[str, Any]] | None = None
+        self._panes_at: float | None = None
+        self._panes_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Start the background polling loop once."""
@@ -140,29 +148,69 @@ class DashboardPoller:
         if self._build_task is not None:
             await self._build_task
 
+    def _pane_evidence(self) -> dict[str, dict[str, Any]] | None:
+        """The cached pane listing, or None when missing or too old to trust."""
+        if self._panes_at is None:
+            return None
+        if time.monotonic() - self._panes_at > PANE_EVIDENCE_MAX_AGE:
+            return None
+        return self._panes
+
+    def _ensure_pane_refresh(self, rows: list[dict[str, Any]]) -> None:
+        """Start a background pane listing when a row needs fresh evidence."""
+        if self._panes_task is not None and not self._panes_task.done():
+            return
+        if not any(resolve_task_pane(row) for row in rows):
+            return
+        if (
+            self._panes_at is not None
+            and time.monotonic() - self._panes_at < HERDR_PODMAN
+        ):
+            return
+        self._panes_task = asyncio.create_task(self._refresh_panes())
+        self._in_flight.add(self._panes_task)
+        self._panes_task.add_done_callback(self._in_flight.discard)
+
+    async def _refresh_panes(self) -> None:
+        """List Herdr panes off the event loop and rebuild if they changed."""
+        try:
+            panes = await asyncio.to_thread(self.stale_checker.pane_lister)
+        except Exception:
+            panes = None
+        changed = panes != self._pane_evidence()
+        self._panes = panes
+        self._panes_at = time.monotonic()
+        if changed:
+            self._request_build()
+
     async def _maybe_build(self) -> None:
         if not all(spec.source in self._results for spec in self.specs):
             return
-        # Builds are serialized so a slow stale probe can never let an older
-        # build overwrite a newer one; the stale evidence (Herdr pane list
-        # subprocess and /proc probes) is gathered in a worker thread so a
-        # slow or hung Herdr never blocks the event loop that serves HTTP,
-        # terminal input and every stream.
+        # Builds are serialized so an older build can never overwrite a newer
+        # one. Stale checks use the cached pane listing (refreshed on its own
+        # task), so a slow Herdr delays only the pane badges, never task-file
+        # or GitHub updates; the /proc probes run in a worker thread.
         async with self._build_lock:
             try:
                 self._status.pop("normalization", None)
                 now = self.clock()
-                # Freeze the results the stale evidence is gathered for: a
-                # collector may replace tasks_json while the probe runs, and
-                # applying old evidence to a newer row would show a false
-                # stale badge. The newer result triggers its own build.
+                # Freeze the results and their source status together: a
+                # collector may replace a result while the probe runs, and a
+                # snapshot must never mix one collection's rows with another
+                # collection's status (or apply old stale evidence to a newer
+                # row). The newer result triggers its own build.
                 results = dict(self._results)
+                status = dict(self._status)
                 rows = self._stale_rows(results)
+                self._ensure_pane_refresh(rows)
                 stale_values = await asyncio.to_thread(
-                    self.stale_checker.stale_map, rows, now=now
+                    self.stale_checker.stale_map,
+                    rows,
+                    now=now,
+                    panes=self._pane_evidence(),
                 )
                 self._build_snapshot(
-                    now=now, stale_values=stale_values, results=results
+                    now=now, stale_values=stale_values, results=results, status=status
                 )
             except Exception as exc:
                 self._status["normalization"] = {
@@ -234,6 +282,7 @@ class DashboardPoller:
         now: datetime | None = None,
         stale_values: dict[str, dict[str, str | None] | None] | None = None,
         results: dict[str, SourceResult] | None = None,
+        status: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """Build and cache the snapshot.
 
@@ -290,7 +339,7 @@ class DashboardPoller:
         normalized = snapshot.to_dict()
         value = {
             "generated_at": now.isoformat(),
-            "sources": self.sources_status(),
+            "sources": redact_value(self._status if status is None else status),
             **normalized,
         }
         safe = redact_value(value)
@@ -337,7 +386,12 @@ class DashboardPoller:
         return True
 
     async def refresh_now(self) -> None:
-        """Run every collector immediately and rebuild the shared snapshot."""
+        """Run every collector immediately and rebuild the shared snapshot.
+
+        Fresh pane evidence is gathered first so this one-shot build (the
+        ``--once`` CLI and tests) reports pane staleness directly.
+        """
+        await self._refresh_panes()
         await self._run_specs(self.specs)
         now = time.monotonic()
         for spec in self.specs:

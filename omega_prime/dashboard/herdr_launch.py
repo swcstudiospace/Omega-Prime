@@ -100,6 +100,11 @@ def record_pane(
         row["herdr_pane"] = pane
         row["last_activity_at"] = stamp
         state = row.get("state")
+        if restart:
+            # Liveness evidence belongs to the run that wrote it; a relaunch
+            # must not be judged by the previous process or heartbeat.
+            for field in ("pid", "last_heartbeat_at", "stale"):
+                row[field] = None
         if restart and state in {"done", "failed"}:
             # New work for a finished task is a fresh run, not the old result.
             row["started_at"] = stamp

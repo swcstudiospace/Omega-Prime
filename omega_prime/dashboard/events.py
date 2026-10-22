@@ -38,8 +38,13 @@ _EMPTY_SNAPSHOT: dict[str, Any] = {
 }
 
 
-def _row_map(bucket: Any) -> dict[str, dict[str, Any]]:
-    """Index one snapshot bucket by row id, keeping the last row per id."""
+def _row_map(bucket: Any, *, first_wins: bool = False) -> dict[str, dict[str, Any]]:
+    """Index one snapshot bucket by row id.
+
+    The last row per id wins, except for ``finished`` (``first_wins``): it is
+    newest first and the Finished view keeps the first row per id, so a delta
+    must never prefer an older duplicate the view would hide.
+    """
     rows: dict[str, dict[str, Any]] = {}
     if not isinstance(bucket, list):
         return rows
@@ -49,8 +54,23 @@ def _row_map(bucket: Any) -> dict[str, dict[str, Any]]:
         row_id = row.get("id")
         if not isinstance(row_id, str):
             continue
-        rows[row_id] = row
+        if first_wins:
+            rows.setdefault(row_id, row)
+        else:
+            rows[row_id] = row
     return rows
+
+
+def _has_duplicate_ids(bucket: Any) -> bool:
+    """True when a bucket lists the same row id more than once."""
+    if not isinstance(bucket, list):
+        return False
+    ids = [
+        row.get("id")
+        for row in bucket
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+    ]
+    return len(ids) != len(set(ids))
 
 
 def _without_stale(row: dict[str, Any]) -> dict[str, Any]:
@@ -96,12 +116,20 @@ def needs_full_snapshot(
             before, after = _canonical_sources(before), _canonical_sources(after)
         if before != after:
             return True
+    # Delta messages are keyed by row id; a bucket that repeats an id (the
+    # bridge can hold a new and an older finished record for one task)
+    # cannot be patched safely, so the client gets the whole snapshot.
+    for bucket in _DELTA_BUCKETS:
+        if _has_duplicate_ids(previous.get(bucket)) or _has_duplicate_ids(
+            current.get(bucket)
+        ):
+            return True
     prev_active = _row_map(previous.get("active"))
     prev_waiting = _row_map(previous.get("waiting_on_ove"))
-    prev_finished = _row_map(previous.get("finished"))
+    prev_finished = _row_map(previous.get("finished"), first_wins=True)
     now_active = _row_map(current.get("active"))
     now_waiting = _row_map(current.get("waiting_on_ove"))
-    now_finished = _row_map(current.get("finished"))
+    now_finished = _row_map(current.get("finished"), first_wins=True)
     for row_id in prev_active:
         if row_id in now_active:
             continue
@@ -138,10 +166,10 @@ def compute_deltas(
     prev = previous if isinstance(previous, dict) else {}
     prev_active = _row_map(prev.get("active"))
     prev_waiting = _row_map(prev.get("waiting_on_ove"))
-    prev_finished = _row_map(prev.get("finished"))
+    prev_finished = _row_map(prev.get("finished"), first_wins=True)
     now_active = _row_map(current.get("active"))
     now_waiting = _row_map(current.get("waiting_on_ove"))
-    now_finished = _row_map(current.get("finished"))
+    now_finished = _row_map(current.get("finished"), first_wins=True)
 
     messages: list[dict[str, Any]] = []
     for row_id, row in now_finished.items():

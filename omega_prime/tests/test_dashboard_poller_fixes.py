@@ -342,7 +342,7 @@ def test_slow_pane_check_is_shared_and_does_not_hold_collectors() -> None:
             self.calls = 0
 
         def stale_map(
-            self, rows: list[Any], *, now: datetime | None = None
+            self, rows: list[Any], *, now: datetime | None = None, panes: Any = None
         ) -> dict[str, dict[str, str | None] | None]:
             self.calls += 1
             time.sleep(0.3)
@@ -368,3 +368,24 @@ def test_slow_pane_check_is_shared_and_does_not_hold_collectors() -> None:
         assert stale.calls - first <= 2
 
     asyncio.run(run())
+
+
+def test_build_freezes_source_status_with_its_results() -> None:
+    """Greptile: one snapshot never mixes one collection's rows with a
+    newer collection's source status."""
+
+    class _RacingChecker(StaleChecker):
+        def stale_map(
+            self, rows: list[Any], *, now: datetime | None = None, panes: Any = None
+        ) -> dict[str, dict[str, str | None] | None]:
+            # GitHub refreshes (and fails) while the stale probe runs.
+            poller._status["github"] = {"status": "error", "error": "Boom"}
+            return {}
+
+    poller = DashboardPoller([], stale_checker=_RacingChecker())
+    poller._results["github"] = SourceResult("github", "ok")
+    poller._status["github"] = {"status": "ok"}
+    asyncio.run(poller._maybe_build())
+    snapshot = poller.snapshot()
+    assert snapshot is not None
+    assert snapshot["sources"]["github"] == {"status": "ok"}
