@@ -9,7 +9,7 @@ class PassiveEventSource {
   addEventListener(_name: string, _listener: EventListenerOrEventListenerObject) {}
   close() {}
 }
-vi.mock('./hooks/useDashboard', () => ({ useDashboard: () => ({ data: fixture, loading: false, error: null, receivedAt: Date.now(), live: true, refresh: vi.fn() }) }))
+vi.mock('./hooks/useDashboard', () => ({ useDashboard: () => ({ data: fixture, origin: "ws", loading: false, error: null, receivedAt: Date.now(), live: true, refresh: vi.fn() }) }))
 beforeEach(() => { vi.stubGlobal('EventSource', PassiveEventSource); window.history.replaceState(null, ''); window.location.hash = '#/overview'; sessionStorage.clear() })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 describe('Command Center hash routes', () => {

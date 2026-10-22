@@ -29,7 +29,9 @@ export function EventStream({ events, title = 'Event stream', eyebrow = 'LIVE ·
   const [frozen, setFrozen] = useState<DashEvent[] | null>(null)
   const source = frozen ?? events
   const shown = useMemo(() => filterEvents(source, filter, query).slice(0, limit), [source, filter, query, limit])
-  const pending = frozen ? events.length - frozen.length : 0
+  // Count arrivals by identity, not length: once the log sits at its cap new
+  // events evict old ones and the length stops changing.
+  const pending = frozen ? newerThan(events, frozen[0]?.id ?? null) : 0
   const chips = FILTERS.filter(item => !filters || filters.includes(item.key))
   const count = (key: EventFilter) => filterEvents(source, key).length
   return <section className={`panel event-stream ${className ?? ''}`} aria-labelledby={`${title.replaceAll(' ', '-')}-heading`}>
@@ -42,6 +44,14 @@ export function EventStream({ events, title = 'Event stream', eyebrow = 'LIVE ·
     {shown.length === 0 ? <p className="empty-state event-empty">{source.length === 0 ? emptyLabel : 'No events match the current filter.'}</p>
       : <ol className="event-list" aria-label={`${title} entries`}>{shown.map(event => <EventRow key={event.id} event={event} linkTask={linkTasks} />)}</ol>}
   </section>
+}
+
+/** Events (newest first) that arrived after `anchorId`; every event when the
+ *  anchor is absent or has already been evicted from the bounded log. */
+export function newerThan(events: DashEvent[], anchorId: string | null): number {
+  if (anchorId === null) return events.length
+  const index = events.findIndex(event => event.id === anchorId)
+  return index === -1 ? events.length : index
 }
 
 function EventRow({ event, linkTask }: { event: DashEvent; linkTask: boolean }) {

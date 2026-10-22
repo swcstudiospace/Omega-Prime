@@ -35,7 +35,7 @@ export function bucketRows(snapshot: Snapshot, bucket: 'all' | 'waiting' | 'work
   const idleIds = new Set((snapshot.idle_sessions ?? []).map(item => item.id))
   return taskSelection(snapshot).filter(({ key }) => !key.startsWith('task:') || !idleIds.has(key.slice(5)))
 }
-function samePullRequestUrl(first: string, second: string): boolean {
+export function samePullRequestUrl(first: string, second: string): boolean {
   try {
     const a = new URL(first), b = new URL(second)
     return a.protocol === 'https:' && b.protocol === 'https:' && a.hostname === 'github.com' && b.hostname === 'github.com' && a.pathname.replace(/\/+$/, '') === b.pathname.replace(/\/+$/, '')

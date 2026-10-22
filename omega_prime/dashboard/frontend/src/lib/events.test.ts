@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { fixture } from '../test/fixtures'
 import type { Snapshot } from '../types'
-import { appendEvents, deriveEvents, filterEvents, gateReady, greptileScore, makeEvent, mergeEligible, payloadSummary, shortId, shouldToast, type DashEvent } from './events'
+import { appendEvents, deriveEvents, filterEvents, gateReady, greptileScore, makeEvent, matchesTask, mergeEligible, payloadSummary, shortId, shouldToast, stabilizeSnapshot, type DashEvent } from './events'
 
 const at = '2026-10-23T00:00:00Z'
 const stamp = (snapshot: Snapshot | null, next: Snapshot) => deriveEvents(snapshot, next).map(draft => makeEvent(draft, { at, source: 'ws' }))
@@ -55,13 +55,87 @@ describe('deriveEvents', () => {
   })
 })
 
+const github = fixture.sources!.github!
+const withReview = (review: Record<string, unknown> | null): Snapshot => ({ ...fixture, sources: { ...fixture.sources, github: { ...github, command_center: { ...github.command_center, ci_cd: github.command_center!.ci_cd!.map(row => ({ ...row, greptile_review: review })) } } } })
+
+describe('review-gated readiness and edge transitions', () => {
+  it('never declares the gate ready on a 5/5 that is not confirmed for the current head', () => {
+    const pr = { ...fixture.pr_gate![0]!, greptile: '5/5', ci: 'pass' }
+    expect(gateReady(pr, withReview({ score: 5, reviewed_sha: null, source: 'issue_comment', matches_head: null }))).toBe(false)
+    expect(gateReady(pr, withReview({ score: 5, reviewed_sha: 'old', source: 'review', matches_head: false }))).toBe(false)
+    expect(gateReady(pr, withReview(null))).toBe(false)
+    expect(gateReady(pr, { ...fixture, sources: {} })).toBe(false)
+    // A score from a PR body after a new push: no gate event, no success toast.
+    const unverified = withReview({ score: 5, reviewed_sha: null, source: 'pr_body', matches_head: null })
+    expect(types(deriveEvents(unverified, { ...unverified, pr_gate: [{ ...pr, ci: 'success' }] }))).toEqual(['pr.greptile'])
+  })
+  it('emits the actionable event for rows first seen blocked or with CI red', () => {
+    const blocked = { ...task, id: 'worker/5', state: 'blocked', display_id: '00011 - Late arrival' }
+    const events = deriveEvents(fixture, { ...fixture, active: [task, blocked] })
+    expect(types(events)).toEqual(['task.added', 'task.blocked'])
+    expect(events[1]).toMatchObject({ taskId: 'worker/5', severity: 'error', payload: { from: null, to: 'blocked' } })
+    const red = { ...fixture.pr_gate![0]!, id: 'gate-13', number: 13, ci: 'failure' }
+    const prEventsSeen = deriveEvents(fixture, { ...fixture, pr_gate: [...fixture.pr_gate!, red] })
+    expect(types(prEventsSeen)).toEqual(['pr.opened', 'pr.ci'])
+    expect(shouldToast(makeEvent(prEventsSeen[1]!, { at, source: 'ws' }))).toBe(true)
+  })
+  it('treats a pane parking in idle_sessions as a state change, not a removal', () => {
+    const parked = { ...fixture, active: [], idle_sessions: [...fixture.idle_sessions!, { ...task, state: 'quiet' }] }
+    expect(types(deriveEvents(fixture, parked))).toEqual(['task.state'])
+    expect(types(deriveEvents(parked, fixture))).toEqual(['task.state'])
+  })
+  it('reports a later completion of an id that already finished', () => {
+    const first = fixture.finished![0]!
+    const rerun = { ...fixture, finished: [first, { ...first, result: 'failed', state: 'failed', finished_at: '2026-01-02T00:00:00Z', receipt: 'receipt-4' }] }
+    const [event] = deriveEvents(fixture, rerun)
+    expect(event).toMatchObject({ type: 'task.finished', severity: 'error', taskId: 'finished/3', payload: { result: 'failed' } })
+    expect(deriveEvents(rerun, rerun)).toEqual([])
+    expect(deriveEvents(rerun, { ...rerun, finished: [...rerun.finished].reverse() })).toEqual([])
+  })
+  it('alerts on any collector failure status, not only "error"', () => {
+    const unreadable = { ...fixture, sources: { ...fixture.sources, local: { status: 'unreadable', error: 'bad json' } } }
+    const [event] = deriveEvents(fixture, unreadable)
+    expect(event).toMatchObject({ type: 'source.degraded', severity: 'error' })
+    expect(shouldToast(makeEvent(event!, { at, source: 'ws' }))).toBe(true)
+    const partial = { ...fixture, sources: { ...fixture.sources, github: { ...github, status: 'degraded' } } }
+    expect(deriveEvents(fixture, partial)[0]).toMatchObject({ type: 'source.degraded', severity: 'warning' })
+  })
+  it('does not replay merges after a failed first GitHub load', () => {
+    const failed: Snapshot = { ...fixture, sources: { ...fixture.sources, github: { status: 'error', error: 'rate limited', command_center: { ...github.command_center, recent_merges: [] } } } }
+    const recovered: Snapshot = { ...fixture, sources: { ...fixture.sources, github: { ...github, command_center: { ...github.command_center, recent_merges: [{ id: 'm-old', repo: 'swcstudiospace/console', number: 3, title: 'Old work' }] } } } }
+    expect(types(deriveEvents(stabilizeSnapshot(null, failed), recovered))).not.toContain('pr.merged')
+    // From a good baseline, a genuinely new merge is still news.
+    const newer: Snapshot = { ...recovered, sources: { ...recovered.sources, github: { ...github, command_center: { ...github.command_center, recent_merges: [{ id: 'm-new', repo: 'swcstudiospace/console', number: 4, title: 'New work' }, { id: 'm-old', repo: 'swcstudiospace/console', number: 3, title: 'Old work' }] } } } }
+    expect(types(deriveEvents(recovered, newer))).toEqual(['pr.merged'])
+  })
+  it('keeps the merge linked to its task when the PR left the gate before the merge list refreshed', () => {
+    const left: Snapshot = { ...fixture, pr_gate: [] }
+    const mergedLate: Snapshot = { ...left, sources: { ...left.sources, github: { ...github, command_center: { ...github.command_center, recent_merges: [{ id: 'm-12', repo: 'swcstudiospace/console', number: 12, title: 'Fix safe view', url: 'https://github.com/swcstudiospace/console/pull/12' }] } } } }
+    const [event] = deriveEvents(left, mergedLate)
+    expect(event).toMatchObject({ type: 'pr.merged', taskId: 'worker/1' })
+  })
+  it('carries forward the rows of a failed source and nothing else', () => {
+    const down: Snapshot = { ...fixture, active: [], finished: [], waiting_on_ove: [], sources: { ...fixture.sources, tasks_json: { status: 'unreadable', error: 'x' } } }
+    const stable = stabilizeSnapshot(fixture, down)
+    expect(stable.active).toBe(fixture.active); expect(stable.finished).toBe(fixture.finished); expect(stable.waiting_on_ove).toBe(fixture.waiting_on_ove)
+    expect(stable.sources?.tasks_json?.status).toBe('unreadable')
+    expect(stabilizeSnapshot(fixture, { ...fixture, active: [] }).active).toEqual([])
+  })
+  it('matches waiting requests to the task they are linked to', () => {
+    const waiting = makeEvent({ type: 'waiting.added', severity: 'warning', taskId: 'wait-9', title: '', summary: '', payload: { related_task: 'worker/1' } }, { at, source: 'ws' })
+    const cleared = makeEvent({ type: 'waiting.cleared', severity: 'success', taskId: 'wait-9', title: '', summary: '', payload: { related_task: 'worker/1' } }, { at, source: 'ws' })
+    expect(matchesTask(waiting, 'worker/1')).toBe(true); expect(matchesTask(cleared, 'worker/1')).toBe(true)
+    expect(matchesTask(waiting, 'worker/2')).toBe(false); expect(matchesTask(waiting, 'wait-9')).toBe(true)
+  })
+})
+
 describe('event helpers', () => {
   it('scores Greptile and separates the gate from merge eligibility for drafts', () => {
     expect(greptileScore('5/5')).toBe(5); expect(greptileScore('not reviewed')).toBeNull(); expect(greptileScore(4)).toBe(4)
     const pr = { ...fixture.pr_gate![0]!, greptile: '5/5', ci: 'pass' }
-    expect(gateReady(pr)).toBe(true); expect(mergeEligible(pr)).toBe(true)
-    expect(gateReady({ ...pr, draft: true })).toBe(true); expect(mergeEligible({ ...pr, draft: true })).toBe(false)
-    expect(gateReady({ ...pr, mergeable: false })).toBe(false); expect(gateReady({ ...pr, ci: 'pending' })).toBe(false)
+    expect(gateReady(pr, fixture)).toBe(true); expect(mergeEligible(pr, fixture)).toBe(true)
+    expect(gateReady({ ...pr, draft: true }, fixture)).toBe(true); expect(mergeEligible({ ...pr, draft: true }, fixture)).toBe(false)
+    expect(gateReady({ ...pr, mergeable: false }, fixture)).toBe(false); expect(gateReady({ ...pr, ci: 'pending' }, fixture)).toBe(false)
   })
   it('keeps the log newest first and bounded', () => {
     const batch = Array.from({ length: 6 }, (_, i) => makeEvent({ type: 'task.state', severity: 'info', taskId: null, title: `e${i}`, summary: '', payload: {} }, { at, source: 'ws' }))

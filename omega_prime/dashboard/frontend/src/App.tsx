@@ -23,7 +23,7 @@ function clearTaskOriginState(): void {
 }
 export function App() {
   const dashboard = useDashboard()
-  const eventLog = useEventLog(dashboard.data, dashboard.live, dashboard.error)
+  const eventLog = useEventLog(dashboard.data, dashboard.origin, dashboard.live, dashboard.error)
   const lastEvent = eventLog.events[0]
   const [route, setRoute] = useState(() => parseHash(window.location.hash))
   const previousRoute = useRef(route)

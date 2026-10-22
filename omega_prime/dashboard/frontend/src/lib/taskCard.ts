@@ -2,8 +2,28 @@ import type { FinishedItem, Task, WaitingItem } from '../types'
 import { isWaiting } from './selectors'
 import { shortId, truncate } from './events'
 
-/** Ove's tracking rule: every task is "000NN - Title" with a description. */
-export const TRACKED_TITLE = /^\s*(\d{5})\s+-\s+(\S.*)$/
+/** Ove's tracking rule: every task is "000NN - Title" with a description.
+ *  The prefix is matched on its own, so a numbered row with no title text
+ *  still reports its number and a missing title rather than a missing prefix. */
+const NUMBERED_PREFIX = /^\s*(\d{5})\s+-(?:\s+|$)(.*)$/s
+/** Bare outcome codes the producer writes into `result`; they are a status,
+ *  not a description of the work. */
+const RESULT_CODES = new Set(['ok', 'done', 'success', 'succeeded', 'complete', 'completed', 'finished', 'fail', 'failed', 'failure', 'error', 'stopped', 'cancelled', 'canceled', 'timeout', 'timed_out', 'skipped'])
+const isResultCode = (value: string | null): boolean => value !== null && RESULT_CODES.has(value.toLowerCase())
+
+/** Board/badge state for a finished row: the recorded state, else its result
+ *  (`ok`-style codes read as `done`), keeping failed and stopped distinct. */
+export function finishedState(item: { state?: string | null; result?: string | null }): string {
+  const state = text(item.state)
+  if (state) return state
+  const result = text(item.result)
+  if (!result) return 'done'
+  const code = result.toLowerCase()
+  if (['ok', 'done', 'success', 'succeeded', 'complete', 'completed', 'finished'].includes(code)) return 'done'
+  if (['fail', 'failed', 'failure', 'error', 'timeout', 'timed_out'].includes(code)) return 'failed'
+  if (['stopped', 'cancelled', 'canceled'].includes(code)) return 'stopped'
+  return result
+}
 
 export type CardModel = {
   /** Server sequence number from the display id ("00374"). */
@@ -39,9 +59,10 @@ export function cardModel(item: Task | WaitingItem | FinishedItem): CardModel {
     return { seq, taskNumber, title: ask, rawTitle: item.ask ?? '', description, problems, malformed: problems.length > 0 }
   }
   const raw = item.title ?? ''
-  const match = TRACKED_TITLE.exec(raw)
+  const match = NUMBERED_PREFIX.exec(raw)
   const title = match ? text(match[2]) : text(raw)
-  const description = 'result' in item ? text(item.summary) ?? text(item.detail) ?? text(item.result) : text(item.detail)
+  const result = 'result' in item ? text(item.result) : null
+  const description = 'result' in item ? text(item.summary) ?? text(item.detail) ?? (isResultCode(result) ? null : result) : text(item.detail)
   const problems = [...(match ? [] : ['no 000NN - prefix']), ...(title ? [] : ['missing title']), ...(description ? [] : ['missing description'])]
   return { seq, taskNumber: match ? match[1]! : null, title, rawTitle: raw, description, problems, malformed: problems.length > 0 }
 }

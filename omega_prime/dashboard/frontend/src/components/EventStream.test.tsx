@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { EventStream } from './EventStream'
+import { EventStream, newerThan } from './EventStream'
 import { makeEvent, type EventDraft } from '../lib/events'
 
 afterEach(cleanup)
@@ -36,5 +36,15 @@ describe('EventStream', () => {
     expect(screen.getAllByRole('listitem')).toHaveLength(2)
     fireEvent.click(screen.getByRole('button', { name: 'Resume (1 new)' }))
     expect(screen.getAllByRole('listitem')).toHaveLength(3)
+  })
+  it('counts arrivals by identity once the bounded log stops growing', () => {
+    // At the cap a new event evicts the oldest, so the length is unchanged.
+    const { rerender } = render(<EventStream events={events.slice(1)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    rerender(<EventStream events={events.slice(0, 2)} />)
+    expect(screen.getByRole('button', { name: 'Resume (1 new)' })).toBeInTheDocument()
+    expect(newerThan(events, events[2]!.id)).toBe(2)
+    expect(newerThan(events, 'evicted')).toBe(3)
+    expect(newerThan(events, null)).toBe(3)
   })
 })

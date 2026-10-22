@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Snapshot } from '../types'
-import { appendEvents, deriveEvents, makeEvent, shouldToast, type DashEvent, type EventDraft } from '../lib/events'
+import { appendEvents, deriveEvents, makeEvent, shouldToast, stabilizeSnapshot, type DashEvent, type EventDraft, type EventOrigin } from '../lib/events'
 
 /** Most toasts on screen at once; older ones are dropped first. */
 export const MAX_TOASTS = 4
@@ -27,13 +27,15 @@ export function toastBatch(events: DashEvent[], at: string): DashEvent[] {
 }
 
 /** Turn every dashboard change into structured, timestamped events: diffs of
- *  consecutive snapshots (whatever transport delivered them), connection
- *  transitions and errors. Feeds the event stream and the toasts. */
-export function useEventLog(data: Snapshot | null, live: boolean, error: string | null): EventLogState {
+ *  consecutive snapshots, connection transitions and errors. `origin` is the
+ *  transport that delivered `data` (websocket, SSE fallback or an HTTP
+ *  fetch), reported by `useDashboard` alongside it, so each event names the
+ *  path it really arrived on. Feeds the event stream and the toasts. */
+export function useEventLog(data: Snapshot | null, origin: EventOrigin | null, live: boolean, error: string | null): EventLogState {
   const [events, setEvents] = useState<DashEvent[]>([])
   const [toasts, setToasts] = useState<DashEvent[]>([])
   const previous = useRef<Snapshot | null>(null)
-  const liveRef = useRef(live)
+  const lastData = useRef<Snapshot | null>(null)
   const everLive = useRef(false)
   const lostAt = useRef<number | null>(null)
   const lastError = useRef<string | null>(null)
@@ -48,16 +50,19 @@ export function useEventLog(data: Snapshot | null, live: boolean, error: string 
 
   useEffect(() => {
     if (data === null) return
+    if (lastData.current === data) return
+    lastData.current = data
     const prior = previous.current
-    if (prior === data) return
-    previous.current = data
+    // Diff against the last good rows of any failed source, and keep that as
+    // the baseline, so an outage neither removes nor later replays its rows.
+    const next = stabilizeSnapshot(prior, data)
+    previous.current = next
     const at = new Date().toISOString()
-    const source = liveRef.current ? 'ws' : 'poll'
-    push(deriveEvents(prior, data).map(draft => makeEvent(draft, { at, source })), prior !== null)
+    push(deriveEvents(prior, next).map(draft => makeEvent(draft, { at, source: origin ?? 'poll' })), prior !== null)
+    // `origin` is committed in the same render as `data`: read here, not a trigger.
   }, [data, push])
 
   useEffect(() => {
-    liveRef.current = live
     const at = new Date().toISOString()
     if (live) {
       if (lostAt.current !== null) {

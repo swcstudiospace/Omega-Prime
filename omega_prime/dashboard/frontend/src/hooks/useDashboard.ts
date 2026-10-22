@@ -23,7 +23,12 @@ type WsMessage =
   | { type: 'stale_changed'; id: string; stale: Stale | null }
   | { type: 'heartbeat' }
 
+/** The transport that delivered the current `data`: the websocket, the SSE
+ *  fallback, or an HTTP snapshot fetch (initial load, poll, repair, refresh). */
+export type SnapshotOrigin = 'ws' | 'sse' | 'poll'
 export type DashboardState = { data: Snapshot | null; loading: boolean; error: string | null; receivedAt: number | null; live: boolean; refresh: () => void }
+/** What `useDashboard` returns: the view state plus the delivering transport. */
+export type DashboardFeed = DashboardState & { origin: SnapshotOrigin | null }
 
 /** Validate one /ws/events frame; the protocol shapes are the contract, so
  *  the discriminant and identity fields are checked and the named type is
@@ -124,8 +129,9 @@ export function applyDelta(current: Snapshot, message: WsMessage): Snapshot | nu
   }
 }
 
-export function useDashboard(): DashboardState {
+export function useDashboard(): DashboardFeed {
   const [data, setData] = useState<Snapshot | null>(null)
+  const [origin, setOrigin] = useState<SnapshotOrigin | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [receivedAt, setReceivedAt] = useState<number | null>(null)
@@ -176,10 +182,11 @@ export function useDashboard(): DashboardState {
       controller?.abort()
       controller = null
     }
-    const commit = (next: Snapshot) => {
+    const commit = (next: Snapshot, via: SnapshotOrigin) => {
       hasData.current = true
       dataRef.current = next
       setData(next)
+      setOrigin(via)
       setError(null)
       setReceivedAt(Date.now())
     }
@@ -200,7 +207,7 @@ export function useDashboard(): DashboardState {
         repairing = false
         pendingDeltas = []
         clearRepairRetry()
-        commit(merged)
+        commit(merged, 'poll')
       } catch (cause) {
         if (disposed || (cause instanceof DOMException && cause.name === 'AbortError')) return
         setError(cause instanceof Error ? cause.message : 'Snapshot unavailable')
@@ -256,7 +263,7 @@ export function useDashboard(): DashboardState {
         if (eventSource !== source) return
         try {
           const next = JSON.parse(event.data) as Snapshot
-          if (!disposed) { invalidateFetch(); commit(next); setLoading(false); setLive(true); stopPolling() }
+          if (!disposed) { invalidateFetch(); commit(next, 'sse'); setLoading(false); setLive(true); stopPolling() }
         } catch { setError('Received an invalid snapshot event') }
       }) as EventListener)
       source.onopen = () => { if (!disposed && !streamFailed) { setLive(true); setError(null); stopPolling() } }
@@ -301,7 +308,7 @@ export function useDashboard(): DashboardState {
         const message = parseMessage(typeof event.data === 'string' ? event.data : '')
         if (message === null) { requestRepair(); return }
         if (message.type === 'heartbeat') return
-        if (message.type === 'snapshot') { invalidateFetch(); commit(message.snapshot); setLoading(false); setLive(true); markLive(); return }
+        if (message.type === 'snapshot') { invalidateFetch(); commit(message.snapshot, 'ws'); setLoading(false); setLive(true); markLive(); return }
         const current = dataRef.current
         const nextData = current === null ? null : applyDelta(current, message)
         if (nextData === null) { if (queueDelta(message)) requestRepair(); return }
@@ -313,6 +320,7 @@ export function useDashboard(): DashboardState {
         setLoading(false)
         dataRef.current = nextData
         setData(nextData)
+        setOrigin('ws')
         setReceivedAt(Date.now())
       }
       const fail = () => {
@@ -356,5 +364,5 @@ export function useDashboard(): DashboardState {
       clearTimeout(repairTimer)
     }
   }, [refreshKey])
-  return { data, loading, error, receivedAt, live, refresh }
+  return { data, origin, loading, error, receivedAt, live, refresh }
 }

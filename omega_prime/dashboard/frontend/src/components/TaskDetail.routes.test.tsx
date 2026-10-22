@@ -11,7 +11,7 @@ class PassiveEventSource {
   close() {}
 }
 const state = vi.hoisted(() => ({ data: null as Snapshot | null, loading: false }))
-vi.mock('../hooks/useDashboard', () => ({ useDashboard: () => ({ data: state.data, loading: state.loading, error: null, receivedAt: state.data ? Date.now() : null, live: true, refresh: vi.fn() }) }))
+vi.mock('../hooks/useDashboard', () => ({ useDashboard: () => ({ data: state.data, origin: state.data ? "ws" : null, loading: state.loading, error: null, receivedAt: state.data ? Date.now() : null, live: true, refresh: vi.fn() }) }))
 beforeEach(() => { vi.stubGlobal('EventSource', PassiveEventSource); vi.stubGlobal('WebSocket', undefined); vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('terminal session unavailable'))); state.data = fixture; state.loading = false; window.history.replaceState(null, ''); window.location.hash = '#/overview'; sessionStorage.clear() })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 describe('Task detail routes', () => {

@@ -25,6 +25,20 @@ describe('Kanban board', () => {
     // The PR card links through to its uniquely associated task.
     expect(within(screen.getByRole('region', { name: 'PR gate' })).getByRole('link', { name: 'Fix safe view' })).toHaveAttribute('href', '#/tasks/worker%2F1')
   })
+  it('keeps every blocked card on the board (Blocked has no list page)', () => {
+    const many = Array.from({ length: 27 }, (_, i) => ({ ...fixture.active![0]!, id: `b/${i}`, title: `000${String(40 + i).padStart(2, '0')} - Blocked ${i}`, state: 'blocked' }))
+    const crowded: Snapshot = { ...snapshot, active: many }
+    render(<Board snapshot={crowded} data={crowded} loading={false} error={null} receivedAt={Date.now()} live refresh={vi.fn()} onTask={vi.fn()} />)
+    expect(within(screen.getByRole('region', { name: 'Blocked' })).getAllByRole('article')).toHaveLength(27)
+  })
+  it('badges failed and stopped finished work by its result, never as done', () => {
+    const finished: Snapshot = { ...snapshot, finished: [{ id: 'f/1', title: '00050 - Fleet job', result: 'failed', summary: 'Job crashed.' }, { id: 'f/2', title: '00051 - Halted', result: 'stopped', summary: 'Stopped by Ove.' }] }
+    render(<Board snapshot={finished} data={finished} loading={false} error={null} receivedAt={Date.now()} live refresh={vi.fn()} onTask={vi.fn()} />)
+    const column = screen.getByRole('region', { name: 'Finished' })
+    expect(within(column).getByText('failed')).toBeInTheDocument()
+    expect(within(column).getByText('stopped')).toBeInTheDocument()
+    expect(within(column).queryByText('done')).not.toBeInTheDocument()
+  })
   it('shows malformed rows as not tracked instead of hiding them, with an opt-out toggle', () => {
     view()
     const blocked = screen.getByRole('region', { name: 'Blocked' })
