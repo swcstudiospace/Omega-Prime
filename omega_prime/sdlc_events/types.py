@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class EventKind(str, Enum):
+class EventKind(StrEnum):
     CHECK_COMPLETED = "check_completed"
     REVIEW_SIGNAL = "review_signal"
     PR_UPDATED = "pr_updated"

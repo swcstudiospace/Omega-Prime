@@ -5,9 +5,20 @@ typed envelopes before handlers run. Merge side-effects are gated and
 default to dry-run.
 """
 
-from omega_prime.sdlc_events.types import DeliveryId, EventKind, PrRef, RepoRef, SdlcEvent
 from omega_prime.sdlc_events.gate import GateInput, GateResult, evaluate_merge_gate
-from omega_prime.sdlc_events.handlers import HandlerResult, on_blocked_signal, on_gate_signal, on_review_signal
+from omega_prime.sdlc_events.handlers import (
+    HandlerResult,
+    on_blocked_signal,
+    on_gate_signal,
+    on_review_signal,
+)
+from omega_prime.sdlc_events.types import (
+    DeliveryId,
+    EventKind,
+    PrRef,
+    RepoRef,
+    SdlcEvent,
+)
 
 __all__ = [
     "DeliveryId",

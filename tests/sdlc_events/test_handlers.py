@@ -1,7 +1,17 @@
-from omega_prime.sdlc_events.handlers import on_blocked_signal, on_gate_signal, on_review_signal
+from omega_prime.sdlc_events.handlers import (
+    on_blocked_signal,
+    on_gate_signal,
+    on_review_signal,
+)
 from omega_prime.sdlc_events.idempotency import IdempotencyStore
 from omega_prime.sdlc_events.task_store import MemoryTaskStore
-from omega_prime.sdlc_events.types import DeliveryId, EventKind, PrRef, RepoRef, SdlcEvent
+from omega_prime.sdlc_events.types import (
+    DeliveryId,
+    EventKind,
+    PrRef,
+    RepoRef,
+    SdlcEvent,
+)
 
 
 def _ev(kind: EventKind, delivery: str = "d1") -> SdlcEvent:
