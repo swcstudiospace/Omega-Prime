@@ -1172,18 +1172,21 @@ def _answer_from_store(
 
 
 def _one_answer(value: Any) -> dict[str, Any]:
-    """One question's answer as wrapper args (``selected`` or ``text``), or
-    ``{}`` when the value is not an answer."""
+    """One question's answer as wrapper args (``selected`` and/or ``text``),
+    or ``{}`` when the value is not an answer. Both fields pass through
+    together: the wrapper uses ``text`` as the custom input beside any
+    selection, so a written answer is never dropped for a ``selected`` list."""
     if isinstance(value, str):
         return {"text": value}
+    result: dict[str, Any] = {}
     if isinstance(value, Mapping):
         selected = value.get("selected")
         if isinstance(selected, list):
-            return {"selected": [str(choice) for choice in selected]}
+            result["selected"] = [str(choice) for choice in selected]
         text = value.get("text")
         if isinstance(text, str):
-            return {"text": text}
-    return {}
+            result["text"] = text
+    return result
 
 
 def _answer_args(answer: str | Mapping[str, Any]) -> dict[str, Any]:
