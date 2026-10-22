@@ -2122,6 +2122,15 @@ def test_answer_args_shapes() -> None:
     assert _answer_args({"per_question": {"q1": "t", "q2": {"selected": ["s"]}}}) == {
         "per_question": {"q1": {"text": "t"}, "q2": {"selected": ["s"]}}
     }
+    # A written answer beside a selection (even an empty one) reaches the
+    # wrapper too: text is its custom input, never dropped for `selected`.
+    assert _answer_args({"selected": [], "text": "use the existing layout"}) == {
+        "selected": [],
+        "text": "use the existing layout",
+    }
+    assert _answer_args(
+        {"per_question": {"q1": {"selected": ["s"], "text": "and also this"}}}
+    ) == {"per_question": {"q1": {"selected": ["s"], "text": "and also this"}}}
     # Not an answer yet: nothing usable to send.
     assert _answer_args({"per_question": {"q1": 3}}) == {}
     assert _answer_args({"note": "later"}) == {}
