@@ -1,0 +1,38 @@
+# Apache Pulsar 5.0.0 process-runtime worker configuration.
+# Production secret paths below use /run/secrets/omega-pulsar; the Task4 helper
+# renders owned CI overrides under /pulsar/ci-secrets after checkout.
+workerId: standalone
+workerHostname: localhost
+workerPort: null
+workerPortTls: 6751
+
+useTls: true
+pulsarServiceUrl: pulsar+ssl://localhost:6651
+pulsarWebServiceUrl: https://localhost:8443
+brokerClientTrustCertsFilePath: /run/secrets/omega-pulsar/ca.crt
+brokerClientAuthenticationEnabled: true
+# Worker bootstrap uses the privileged internal identity; Function instances must
+# be provisioned separately with their least-privilege omega-functions identity.
+brokerClientAuthenticationPlugin: org.apache.pulsar.client.impl.auth.AuthenticationToken
+brokerClientAuthenticationParameters: token:file:///run/secrets/omega-pulsar/broker-internal.token
+
+# Each Function process is deployed with a FunctionAuthenticationSpec using this
+# protected least-privilege identity; never reuse the worker bootstrap token.
+# Function instance auth params: token:file:///run/secrets/omega-pulsar/omega-functions.token
+
+functionRuntimeFactoryClassName: org.apache.pulsar.functions.runtime.process.ProcessRuntimeFactory
+functionsWorkerEnablePackageManagement: false
+
+authenticationEnabled: true
+authorizationEnabled: true
+authenticationProviders:
+  - org.apache.pulsar.broker.authentication.AuthenticationProviderToken
+superUserRoles:
+  - omega-broker-internal
+
+tlsEnabled: true
+tlsCertificateFilePath: /run/secrets/omega-pulsar/tls.crt
+tlsKeyFilePath: /run/secrets/omega-pulsar/tls.key
+tlsTrustCertsFilePath: /run/secrets/omega-pulsar/ca.crt
+tlsAllowInsecureConnection: false
+tlsEnableHostnameVerification: true
