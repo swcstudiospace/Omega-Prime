@@ -85,6 +85,14 @@ async def _until_running(s: Supervisor, name: str) -> None:
     await asyncio.wait_for(check(), 10)
 
 
+async def _until_file(path: Path) -> None:
+    async def check() -> None:
+        while not path.exists() or not path.read_text():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(check(), 10)
+
+
 def test_stop_terminates_process_group(tmp_path: Path) -> None:
     exits = Exits()
 
@@ -113,10 +121,15 @@ def test_term_ignored_escalates_to_kill(tmp_path: Path) -> None:
     exits = Exits()
 
     async def main() -> None:
-        root = _sleeping(tmp_path, tail="trap '' TERM\nexec sleep 30")
+        # The marker is written only after the trap is installed, so SIGTERM
+        # can never land in the window before the child starts ignoring it.
+        root = _sleeping(
+            tmp_path, tail="trap '' TERM\necho 1 > \"$d/trapped\"\nexec sleep 30"
+        )
         s = supervisor(tmp_path, root, exits)
         s.admit(NAME, "g", JIT)
         await _until_running(s, NAME)
+        await _until_file(tmp_path / "report" / "trapped")
         s.stop(NAME)
         await exits.wait()
 

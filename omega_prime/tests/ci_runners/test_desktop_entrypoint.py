@@ -87,12 +87,17 @@ def test_starts_agent_then_execs_upstream_unchanged(tmp_path: Path) -> None:
 def test_upstream_replaces_wrapper_and_receives_signals(tmp_path: Path) -> None:
     env, upstream = _setup(
         tmp_path,
-        tail="trap 'echo term > \"$0.sig\"; exit 143' TERM\nwhile :; do sleep 0.05; done",
+        tail=(
+            "trap 'echo term > \"$0.sig\"; exit 143' TERM\n"
+            'echo 1 > "$0.trapped"\n'
+            "while :; do sleep 0.05; done"
+        ),
     )
     proc = subprocess.Popen([str(WRAPPER), str(upstream)], env=env)
     try:
         pid = int(_wait_for(tmp_path / "out" / "upstream.pid"))
         assert pid == proc.pid  # exec: the upstream supervisor kept the PID
+        _wait_for(tmp_path / "upstream.trapped")  # trap installed before SIGTERM
         os.kill(proc.pid, signal.SIGTERM)
         assert proc.wait(timeout=10) == 143
         assert (tmp_path / "upstream.sig").read_text().strip() == "term"
