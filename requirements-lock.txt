@@ -129,7 +129,7 @@ termcolor==3.3.0
 tinytag==2.3.2
 tokenizers==0.23.2
 tqdm==4.70.1
-transformers==5.18.0
+transformers==5.20.2
 treelib==1.8.0
 trio-websocket==0.12.2
 trio==0.34.0
