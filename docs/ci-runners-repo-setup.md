@@ -1,7 +1,8 @@
 # CI runner repository setup
 
-This is the how-to for putting repositories on the autoscaling runner pool
-described in [CI runner fleet](ci-runners.md). The per-repository change is one
+This is the how-to for putting repositories on the autoscaling runner pool of
+the Autonomous Event-Driven ADLC Programming Bot, described in
+[CI runner fleet](ci-runners.md). The per-repository change is one
 line. Everything else is a one-time, organisation-level setup.
 
 > Every step marked **HELD** is an operator action (D-120-10). Automation never
@@ -19,7 +20,9 @@ jobs:
 
 That label set is the filter. The controller sees every `workflow_job` event
 for the organisation, and only jobs whose labels are a **subset** of the pool
-labels, in an allowlisted **private** repository, get a runner. No secrets,
+labels, in an allowlisted **private** repository, get a runner. Public
+repositories are refused unless opted in (see
+[Public repositories](#public-repositories)). No secrets,
 tokens or extra steps are added to the workflow.
 
 Jobs that need Docker (`container:`, `services:`, `docker build`, docker
@@ -30,10 +33,29 @@ at the VPS runner instead:
     runs-on: [self-hosted, vps-docker]
 ```
 
-> **Rollout caveat.** Because matching is "job labels ⊆ pool labels", a job
-> that says only `runs-on: self-hosted` also matches the pool. Before turning
-> the pool on, retarget every Docker-needing `self-hosted` job to
+> **Rollout caveat.** Because matching is "job labels ⊆ pool labels" (labels
+> compare case-insensitively), a job that says only `runs-on: self-hosted`, or
+> `[self-hosted, Linux, X64]`, also matches the pool. Before turning the pool
+> on, retarget every Docker-needing `self-hosted` job to
 > `[self-hosted, vps-docker]`, and give the VPS runner that extra label.
+
+## Public repositories
+
+Public repositories are refused by default, because anyone can run code on a
+self-hosted runner through a fork pull request. To serve one anyway:
+
+1. Add it to both `OMEGA_CI_REPOS` and `OMEGA_CI_PUBLIC_REPOS` in
+   `/etc/omega-ci/controller.env`, then restart the controller.
+2. In the repository, set Settings → Actions → General → fork pull request
+   approval to **Require approval for all outside collaborators**.
+3. Give the `omega-ci` runner group access to that repository and turn on its
+   **Allow public repositories** option.
+
+The controller then serves only jobs whose workflow run is a same-repository
+`push`, `workflow_dispatch` or `pull_request`. Fork pull requests,
+`pull_request_target` and anything it cannot verify are refused with an
+`omega.ci.runner.refused` event. Details and the risk are in
+[CI runner fleet](ci-runners.md#public-repositories).
 
 ## One-time organisation setup (HELD)
 
@@ -50,7 +72,10 @@ at the VPS runner instead:
      the one startup check of saved queued jobs against GitHub).
    - Webhook: active, URL `https://<controller host>/github/webhook`, a random
      secret, event **Workflow job** only.
-   - Record the App id and installation id, and download the private key.
+   - Record the App id and installation id. Then generate and download the
+     **private key**: it is in the "Private keys" section at the bottom of the
+     App's General page. A "client secret" is a different value (OAuth only)
+     and the controller cannot use it.
    - For repo scope instead (`OMEGA_CI_SCOPE=repo`, e.g. a personal
      repository), grant Repository **Administration: Read and write** instead
      of the organisation permission.
@@ -64,18 +89,28 @@ at the VPS runner instead:
      `/etc/omega-ci/secrets/`, each owned by `omega-ci` with mode 0600. The
      credential broker refuses a secret file with any group or other bit.
    - Install `deploy/ci-runner-controller/omega-ci-autoscaler.service`, and add
-     the `deploy/ci-runner-controller/Caddyfile.snippet` site with your host.
+     the proxy site with your host: `Caddyfile.snippet` for Caddy, or
+     `nginx-site.conf.example` for nginx. The production VPS runs nginx, and
+     its port 8788 is already taken, so the unit and site there use 8798.
    - Validate first, without installing anything:
      `systemd-analyze verify` on the unit, and `caddy validate` on a throwaway
-     copy of the snippet.
+     copy of the snippet (or `nginx -t` with the site added).
 4. **Railway Desktop.** Follow `deploy/ci-runner-desktop/README.md`.
    - Set a `PASSWORD` of **at least 16 characters** first. The upstream
      desktop refuses to start without it, and a previous deploy failed on
      exactly this.
+   - Leave **Root Directory blank** and set the service variable
+     `RAILWAY_DOCKERFILE_PATH=deploy/ci-runner-desktop/Dockerfile`. On the
+     first real deploy the config-as-code path was ignored and Railway built
+     the root MCP-server `Dockerfile`, which failed on
+     `/run/secrets/omega_prime_token`.
    - Deploy the overlay, keep the desktop domain on port 3000, and add a second
      domain on port 8787 for the agent.
    - Set `OMEGA_CI_AGENT_TOKEN` (same value as the controller's desktop token
      file), `OMEGA_CI_CONTROLLER_URL` and `SERVERLESS_FRIENDLY=1`.
+     `OMEGA_CI_CONTROLLER_URL` is **required** even before the controller
+     exists: without it the agent does not start and the 8787 domain answers
+     502.
    - **Static outbound IP:** Railway warns it may keep an idle service awake
      (≈ $22/month). Keep it only if a third party allowlists your runners'
      egress IP; it plays no part in the webhook path.

@@ -6,6 +6,9 @@
 # Non-installing validation (copy into a throwaway file first):
 #   caddy validate --adapter caddyfile --config /tmp/omega-ci-caddy.Caddyfile
 #
+# Using nginx instead (the production VPS does)? See nginx-site.conf.example.
+# Change 8788 below if the unit uses another --port (production uses 8798).
+#
 # TLS terminates here; the controller listens on loopback only. Only the two
 # POST endpoints and the non-secret health check are exposed; everything else
 # is 404. The 1 MiB body cap matches the controller's own limit.

@@ -53,6 +53,8 @@ class Rig:
         self.delayed = FakeDelayed()
         self.scaler = Scaler(
             labels=DEFAULT_LABELS,
+            repos=kw.pop("repos", ()),
+            public_repos=kw.pop("public_repos", ()),
             max_runners=kw.pop("max_runners", 8),
             idle_grace_s=30,
             new_generation=self.ids.generation,

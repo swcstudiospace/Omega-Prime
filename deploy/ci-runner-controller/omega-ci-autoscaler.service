@@ -4,6 +4,9 @@
 # the operator (D-120-10). See docs/ci-runners-repo-setup.md.
 #
 # Before installing:
+#   * the port: 8788 is the CLI default; the production VPS uses 8798
+#     because 8788 is already taken there. Keep it equal to the proxy's
+#     upstream (Caddyfile.snippet or nginx-site.conf.example).
 #   * replace /opt/omega-ci-venv with the virtualenv that has
 #     `pip install 'omega-prime[ci-runners]' cryptography`
 #   * create the unprivileged system account `omega-ci` (no login shell)

@@ -227,13 +227,13 @@ def parse_labels(raw: str | None) -> tuple[str, ...]:
     return labels
 
 
-def _repos(raw: str | None) -> frozenset[str]:
+def _repos(raw: str | None, name: str = "OMEGA_CI_REPOS") -> frozenset[str]:
     if raw is None:
         return frozenset()
     repos = [p.strip() for p in raw.split(",") if p.strip()]
     for repo in repos:
         if not _REPO.match(repo):
-            raise SettingsError("OMEGA_CI_REPOS: comma-separated owner/repo names")
+            raise SettingsError(f"{name}: comma-separated owner/repo names")
     return frozenset(repo.lower() for repo in repos)
 
 
@@ -260,6 +260,9 @@ class ControllerSettings:
     publisher: Literal["jsonl", "null", "eventstream"]
     events_path: Path
     demand_path: Path = DEFAULT_DEMAND_PATH
+    # Public repositories explicitly opted in (subset of ``repos``). Their jobs
+    # still pass the fork guard (see :mod:`omega_prime.ci_runners.forkguard`).
+    public_repos: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> ControllerSettings:
@@ -280,6 +283,14 @@ class ControllerSettings:
         repos = _repos(_get(env, "OMEGA_CI_REPOS"))
         if scope == "repo" and repo:
             repos = frozenset({repo.lower()})
+        public_repos = _repos(
+            _get(env, "OMEGA_CI_PUBLIC_REPOS"), "OMEGA_CI_PUBLIC_REPOS"
+        )
+        if public_repos and not (repos and public_repos <= repos):
+            raise SettingsError(
+                "OMEGA_CI_PUBLIC_REPOS: every public repo must also be listed in "
+                "OMEGA_CI_REPOS (an empty OMEGA_CI_REPOS cannot opt public repos in)"
+            )
         group = _get(env, "OMEGA_CI_RUNNER_GROUP") or DEFAULT_RUNNER_GROUP
         group_id = _int(
             env, "OMEGA_CI_RUNNER_GROUP_ID", 1 if scope == "repo" else None, low=1
@@ -339,6 +350,7 @@ class ControllerSettings:
             demand_path=Path(demand).expanduser()
             if demand
             else DEFAULT_DEMAND_PATH.expanduser(),
+            public_repos=public_repos,
         )
 
 

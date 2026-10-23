@@ -77,6 +77,7 @@ class DemandStore:
                         "run_id": j.run_id,
                         "repo": j.repo,
                         "private": j.private,
+                        "public": j.public,
                         "labels": list(j.labels),
                         "seen_at": self._seen[j.job_id],
                     }
@@ -98,6 +99,7 @@ def _job(row: Any) -> tuple[WorkflowJob, float] | None:
     job_id, run_id = _positive(row.get("job_id")), _positive(row.get("run_id"))
     repo, labels = row.get("repo"), row.get("labels")
     seen_at, private = row.get("seen_at"), row.get("private")
+    public = row.get("public") is True and private is not True
     if job_id is None or run_id is None or not isinstance(repo, str):
         return None
     if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
@@ -111,6 +113,7 @@ def _job(row: Any) -> tuple[WorkflowJob, float] | None:
         private=private is True,
         labels=tuple(labels),
         status=JobStatus.QUEUED,
+        public=public,  # ``trusted`` is never persisted; replay re-verifies
     )
     return job, float(seen_at)
 

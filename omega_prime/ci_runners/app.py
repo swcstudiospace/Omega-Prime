@@ -167,6 +167,7 @@ def build_controller_app(settings: Any, **overrides: Any) -> ASGIApp:
         scaler=Scaler(
             labels=settings.labels,
             repos=settings.repos,
+            public_repos=settings.public_repos,
             max_runners=settings.max_runners,
             idle_grace_s=settings.idle_grace_s,
         ),

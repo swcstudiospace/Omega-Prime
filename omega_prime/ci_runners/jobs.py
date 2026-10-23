@@ -43,6 +43,12 @@ class WorkflowJob:
     status: JobStatus
     runner_name: str | None = None
     runner_id: int | None = None
+    # Explicitly public (``private: false`` and ``visibility: public``). A repo
+    # that is neither clearly private nor clearly public is never served.
+    public: bool = False
+    # Set only by the controller's fork guard after it verified the job's
+    # workflow run (same repository, allowed trigger). Never parsed from input.
+    trusted: bool = False
 
 
 def _int_field(obj: Mapping[str, Any], key: str) -> int:
@@ -85,6 +91,7 @@ def parse_workflow_job(payload: Mapping[str, Any]) -> WorkflowJob | None:
         "private",
         "internal",
     )
+    public = repo.get("private") is False and repo.get("visibility") == "public"
     return WorkflowJob(
         job_id=_int_field(job, "id"),
         run_id=_int_field(job, "run_id"),
@@ -94,20 +101,38 @@ def parse_workflow_job(payload: Mapping[str, Any]) -> WorkflowJob | None:
         status=status,
         runner_name=runner_name or None,
         runner_id=runner_id or None,
+        public=public,
     )
 
 
-def matches(
+def wants_pool(
     job: WorkflowJob, pool_labels: Collection[str], repos: Collection[str]
 ) -> bool:
-    """A job is ours iff it runs in a private allowed repo and asks only for
-    labels the pool carries (labels ⊆ pool). An empty allowlist means every
-    repo the runner group admits; public repos are always refused."""
-    if not job.private or not job.labels:
+    """The job asks only for labels the pool carries (labels ⊆ pool) and its
+    repository passes the allowlist (empty = every repo the group admits).
+    Says nothing about visibility: see :func:`matches`."""
+    if not job.labels:
         return False
     if repos and job.repo not in repos:
         return False
     return set(job.labels) <= set(pool_labels)
+
+
+def matches(
+    job: WorkflowJob,
+    pool_labels: Collection[str],
+    repos: Collection[str],
+    public_repos: Collection[str] = (),
+) -> bool:
+    """A job is ours iff it wants the pool (:func:`wants_pool`) and either its
+    repository is private, or it is public, explicitly opted in through
+    ``public_repos`` *and* marked trusted by the controller's fork guard.
+    Public repositories are refused by default."""
+    if not wants_pool(job, pool_labels, repos):
+        return False
+    if job.private:
+        return True
+    return job.public and job.trusted and job.repo in public_repos
 
 
 def is_pool_runner(name: str | None) -> bool:
@@ -317,4 +342,5 @@ __all__ = [
     "is_pool_runner",
     "matches",
     "parse_workflow_job",
+    "wants_pool",
 ]

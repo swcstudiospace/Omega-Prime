@@ -1,15 +1,17 @@
 # CI runner Desktop overlay (Railway "Ubuntu Desktop")
 
 This directory turns the existing Railway **Ubuntu Desktop** service into the
-data plane for the omega-ci autoscaling runner pool. The image is the upstream
+data plane for the omega-ci autoscaling runner pool of the Autonomous
+Event-Driven ADLC Programming Bot. The image is the upstream
 desktop, unchanged, plus three additions:
 
 - the omega-ci **runner agent** on port 8787,
 - a read-only **actions/runner 2.338.1** install at `/opt/actions-runner`,
 - a dedicated non-root **job identity** (`omega-ci-job`, UID/GID 1500).
 
-> **Status: NOT DEPLOYED.** Building and deploying this image, adding the
-> agent domain and setting variables is the paid cutover. That cutover is
+> **Status: deployed to Railway on 2026-10-24** (agent `/healthz` answers ok).
+> Building and deploying this image, adding the agent domain and setting
+> variables is the paid cutover. That cutover is
 > **HELD for the operator** (D-120-10). Nothing in this repository runs it.
 
 ## How it fits
@@ -114,15 +116,17 @@ the backed-up `/config` volume.
 |---|---|
 | `PASSWORD` | **≥16 characters, required.** A recent deploy failed health checks on exactly this. |
 | `OMEGA_CI_AGENT_TOKEN` | Random value of at least 32 characters. It must equal the controller's `OMEGA_CI_DESKTOP_TOKEN_FILE` contents. |
-| `OMEGA_CI_CONTROLLER_URL` | `https://<autoscaler domain>` (the Caddy site on the VPS). |
+| `OMEGA_CI_CONTROLLER_URL` | **Required.** `https://<autoscaler domain>` (the nginx or Caddy site on the VPS). Set it at deploy time even if the controller is not up yet: the agent only calls it after a job ends, but refuses to start without it (the 8787 domain then answers 502). |
+| `RAILWAY_DOCKERFILE_PATH` | `deploy/ci-runner-desktop/Dockerfile`. Needed because Railway ignored the config-as-code path on the first real deploy and built the root MCP-server `Dockerfile`, which failed on `/run/secrets/omega_prime_token`. |
 | `OMEGA_CI_AGENT_MAX_RUNNERS` | `8` (default; hard ceiling 10). Keep it ≥ the controller's `OMEGA_CI_MAX_RUNNERS`. |
 | `SERVERLESS_FRIENDLY` | `1` (recommended). Upstream's own knob: it stops Chromium's background/update/GCM traffic, which would otherwise keep an idle Desktop awake and defeat sleep-as-teardown. |
 
 The image already sets `OMEGA_CI_AGENT_RUNNER_ROOT`, `OMEGA_CI_AGENT_WORK_ROOT`,
 `OMEGA_CI_AGENT_JOB_UID` and `OMEGA_CI_AGENT_JOB_GID`.
 
-If the agent variables are missing, the agent exits with a one-line error and
-the desktop still starts normally. The wrapper does not supervise the agent: if
+If the agent variables are missing (including `OMEGA_CI_CONTROLLER_URL`), the
+agent exits with a one-line error and the desktop still starts normally, but
+nothing listens on 8787. The wrapper does not supervise the agent: if
 it crashes, launches fail until the next restart or redeploy, and the controller
 reports `wake_failed`.
 
@@ -135,8 +139,13 @@ while jobs run fails those jobs; drain first with `POST /v1/drain`.
 
 1. Set `PASSWORD` (≥16 characters) and confirm that the current desktop deploy
    is healthy.
-2. Point the service at this repo, using config-as-code
-   `deploy/ci-runner-desktop/railway.toml`, and deploy.
+2. Point the service at this repo (Settings → Source: the **source** repo is
+   this one; leave the upstream repo alone). Leave **Root Directory blank**.
+   Set config-as-code `/deploy/ci-runner-desktop/railway.toml` and the variable
+   `RAILWAY_DOCKERFILE_PATH=deploy/ci-runner-desktop/Dockerfile`, then deploy.
+   The build log must show the `accetto/ubuntu-vnc-xfce-g3` base and the
+   actions-runner download; an error about `/run/secrets/omega_prime_token`
+   means Railway built the root MCP-server `Dockerfile` instead.
 3. Keep the existing desktop domain on port **3000**. Add a **second** domain
    targeting port **8787** (the agent). Its readiness check is
    `GET https://<agent domain>/healthz` → `{"status":"ok",…}`.

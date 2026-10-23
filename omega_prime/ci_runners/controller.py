@@ -19,12 +19,18 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
+from collections import OrderedDict
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 from omega_prime.ci_runners.delayed import AsyncioDelayedEvents, Deadline, DelayedEvents
 from omega_prime.ci_runners.demand import DemandStore
 from omega_prime.ci_runners.desktop import DesktopClient, DesktopError, LaunchOutcome
+from omega_prime.ci_runners.forkguard import (
+    LOOKUP_FAILED,
+    NOT_OPTED_IN,
+    run_refusal,
+)
 from omega_prime.ci_runners.github import GitHubClient, GitHubError
 from omega_prime.ci_runners.jobs import (
     AgentRunner,
@@ -46,6 +52,7 @@ from omega_prime.ci_runners.jobs import (
     ScheduleIdle,
     ScheduleRetry,
     WorkflowJob,
+    wants_pool,
 )
 from omega_prime.ci_runners.publisher import (
     CloudEvent,
@@ -61,6 +68,9 @@ DEMAND_CHECK_CONCURRENCY = 4
 # Exit callbacks held while startup is still reconciling (bounded; the pool
 # itself is capped far below this).
 STARTUP_EXIT_MEMORY = 64
+# Fork-guard verdicts cached per workflow run (a run has many jobs, and its
+# repository and trigger never change), so a public run costs one GitHub call.
+RUN_VERDICT_MEMORY = 512
 
 
 class Controller:
@@ -92,6 +102,8 @@ class Controller:
         self._saved_demand: tuple[int, ...] | None = None
         self.ready = asyncio.Event()
         self._startup_exits: dict[tuple[str, str], int] = {}
+        self._verdicts: OrderedDict[tuple[str, int], str | None] = OrderedDict()
+        self._verifying: dict[tuple[str, int], asyncio.Future[str | None]] = {}
 
     # -- admission (called from HTTP handlers; never blocks) -------------------
 
@@ -100,8 +112,86 @@ class Controller:
         if self._external >= self.max_pending:
             return False
         self._external += 1
-        self._queue.put_nowait((True, JobEvent(job)))
+        if self._guarded(job):
+            # Public repo asking for the pool: verify before the scaler sees it.
+            self._spawn(self._guard(job))
+        else:
+            self._queue.put_nowait((True, JobEvent(job)))
         return True
+
+    # -- public-repository fork guard ---------------------------------------------
+
+    def _guarded(self, job: WorkflowJob) -> bool:
+        """A new public job that asks for the pool must pass the fork guard.
+
+        Later statuses (in_progress / completed) pass straight through
+        untrusted: the scaler only follows them for jobs it already queued or
+        runners it owns, so they can never cause a launch.
+        """
+        return (
+            job.public
+            and not job.private
+            and job.status is JobStatus.QUEUED
+            and wants_pool(job, self.scaler.labels, self.scaler.repos)
+        )
+
+    async def _guard(self, job: WorkflowJob) -> None:
+        try:
+            reason = await self._refusal(job)
+        except Exception as exc:  # fail closed, keep the admission count honest
+            log.warning("ci-runners: fork guard failed (%s)", type(exc).__name__)
+            reason = LOOKUP_FAILED
+        if reason is None:
+            self._queue.put_nowait(
+                (True, JobEvent(dataclasses.replace(job, trusted=True)))
+            )
+            return
+        self._external -= 1
+        self._refused(job, reason)
+
+    def _refused(self, job: WorkflowJob, reason: str) -> None:
+        self._publish(
+            "refused",
+            {
+                "job_id": job.job_id,
+                "run_id": job.run_id,
+                "repo": job.repo,
+                "reason": reason,
+            },
+        )
+
+    async def _refusal(self, job: WorkflowJob) -> str | None:
+        """``None`` when the public job may run, else why not (fails closed)."""
+        if job.repo not in self.scaler.public_repos:
+            return NOT_OPTED_IN
+        key = (job.repo, job.run_id)
+        if key in self._verdicts:
+            self._verdicts.move_to_end(key)
+            return self._verdicts[key]
+        pending = self._verifying.get(key)
+        if pending is not None:
+            return await asyncio.shield(pending)
+        future: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+        self._verifying[key] = future
+        verdict: str | None
+        try:
+            try:
+                run = await self.github.workflow_run(job.repo, job.run_id)
+            except GitHubError:
+                verdict = LOOKUP_FAILED  # transient: not cached, a redelivery retries
+            else:
+                verdict = run_refusal(run, job.repo)
+                self._verdicts[key] = verdict
+                while len(self._verdicts) > RUN_VERDICT_MEMORY:
+                    self._verdicts.popitem(last=False)
+            future.set_result(verdict)
+            return verdict
+        except BaseException:
+            if not future.done():
+                future.set_result(LOOKUP_FAILED)
+            raise
+        finally:
+            self._verifying.pop(key, None)
 
     def submit(self, event: InputEvent) -> None:
         """Internal events (effect outcomes, deadlines) are always admitted."""
@@ -238,14 +328,24 @@ class Controller:
                     status = await self.github.job_status(job.repo, job.job_id)
                 except GitHubError:
                     return job, "unverified"
-            if status is JobStatus.QUEUED:
-                return job, "queued"
-            return job, "gone" if status is None else status.name.lower()
+            if status is not JobStatus.QUEUED:
+                return job, "gone" if status is None else status.name.lower()
+            if job.public and not job.private:
+                # Trust is never persisted: re-run the fork guard on replay.
+                try:
+                    reason = await self._refusal(job)
+                except Exception:
+                    reason = LOOKUP_FAILED
+                if reason is not None:
+                    self._refused(job, reason)
+                    return job, "refused"
+                return dataclasses.replace(job, trusted=True), "queued"
+            return job, "queued"
 
         results = await asyncio.gather(*(check(job) for job in saved))
         kept = tuple(job for job, verdict in results if verdict == "queued")
         dropped: dict[str, int] = {}
-        for _job, verdict in results:
+        for _, verdict in results:
             if verdict != "queued":
                 dropped[verdict] = dropped.get(verdict, 0) + 1
         if dropped:

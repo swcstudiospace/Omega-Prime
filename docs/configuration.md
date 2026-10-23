@@ -119,6 +119,7 @@ The table records names and purposes only.
 | `OMEGA_CI_LABELS` | Sets the runner labels the CI autoscaler pool carries and matches jobs against. |
 | `OMEGA_CI_MAX_RUNNERS` | Caps concurrent CI autoscaler runners (hard ceiling 10). |
 | `OMEGA_CI_ORG` | Names the GitHub organisation whose self-hosted runner group the CI autoscaler serves. |
+| `OMEGA_CI_PUBLIC_REPOS` | Opts listed public repositories (a subset of OMEGA_CI_REPOS) into the CI autoscaler; each workflow run is verified same-repository and not a fork before a runner is launched. |
 | `OMEGA_CI_PUBLISHER` | Selects the CI autoscaler event publisher (jsonl, null or eventstream). |
 | `OMEGA_CI_REPO` | Names the owner/repo the CI autoscaler serves in repository scope. |
 | `OMEGA_CI_REPOS` | Restricts the CI autoscaler to a comma-separated owner/repo allowlist. |

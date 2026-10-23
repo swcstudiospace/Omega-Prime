@@ -420,6 +420,25 @@ class GitHubClient:
             return JobStatus.IN_PROGRESS
         return JobStatus.QUEUED  # queued / waiting / pending / requested
 
+    async def workflow_run(self, repo: str, run_id: int) -> dict[str, Any] | None:
+        """One workflow run object; ``None`` when GitHub has no such run.
+
+        Used by the public-repository fork guard to see where a run's code
+        came from (``head_repository``) and what triggered it (``event``).
+        Needs the repository permission ``Actions: Read``.
+        """
+        if not REPO_RE.match(repo) or repo.endswith(("/.", "/..")) or run_id <= 0:
+            return None
+        response = await self._call(
+            "get_run",
+            "GET",
+            f"/repos/{repo}/actions/runs/{int(run_id)}",
+            ok=(200, 404),
+        )
+        if response.status == 404:
+            return None
+        return _json(response, "get_run")
+
     async def generate_jit(self, name: str) -> JitConfig:
         if not RUNNER_NAME_RE.match(name):
             raise ValueError("runner name does not match the pool pattern")

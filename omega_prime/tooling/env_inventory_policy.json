@@ -256,6 +256,7 @@
     "OMEGA_CI_PUBLISHER": "Selects the CI autoscaler event publisher (jsonl, null or eventstream).",
     "OMEGA_CI_EVENTS_PATH": "Overrides the JSONL file the CI autoscaler appends redacted events to.",
     "OMEGA_CI_DEMAND_PATH": "Overrides the JSON file where the CI autoscaler persists queued jobs so a restart replays them.",
+    "OMEGA_CI_PUBLIC_REPOS": "Opts listed public repositories (a subset of OMEGA_CI_REPOS) into the CI autoscaler; each workflow run is verified same-repository and not a fork before a runner is launched.",
     "OMEGA_CI_AGENT_TOKEN": "Supplies the Desktop runner agent bearer token as a Railway variable.",
     "OMEGA_CI_AGENT_TOKEN_FILE": "Names a protected file containing the Desktop runner agent bearer token.",
     "OMEGA_CI_AGENT_MAX_RUNNERS": "Caps concurrent runner processes on the Desktop runner agent.",
