@@ -134,6 +134,9 @@ read. A sanitized template is in `deploy/ci-runner-controller/env.example`.
 | `OMEGA_CI_AGENT_RUNNER_ROOT` | `/opt/actions-runner` | Read-only shared runner install. |
 | `OMEGA_CI_AGENT_WORK_ROOT` | `/config/ci-runners` | Per-runner workdirs. The image sets `/var/lib/omega-ci/work`, because upstream re-owns `/config` at boot. |
 | `OMEGA_CI_AGENT_JOB_UID` / `OMEGA_CI_AGENT_JOB_GID` | unset (image: 1500) | Dedicated non-root job identity, distinct from the agent's. |
+| `OMEGA_CI_AGENT_REPOS` | empty | **Required for jobs to run on the image.** Comma-separated `owner/repo` list the runner-side pre-job guard lets run; set it to the controller's `OMEGA_CI_REPOS`. Empty → the guard refuses every job (fails closed). Repository names only, no secret. |
+| `OMEGA_CI_AGENT_JOB_HOOK` | unset (image: `/opt/omega-ci/job-started.sh`) | Pre-job guard the agent sets as `ACTIONS_RUNNER_HOOK_JOB_STARTED` for every runner. Must be a regular file the job identity cannot modify, or the agent refuses to start. |
+| `OMEGA_CI_AGENT_JOB_POLICY` | `/var/lib/omega-ci/job-policy.json` | Root-owned allowlist file the agent writes at startup from `OMEGA_CI_AGENT_REPOS`; the guard reads it. |
 | `OMEGA_CI_CONTROLLER_URL` | — | **Required: the agent will not start without it.** Controller base URL for the exit callback. Set it at deploy time, even before the controller exists: the agent only calls it after a job ends. Without it, the agent exits with `OMEGA_CI_CONTROLLER_URL: required callback base URL`, so nothing listens on 8787 and Railway answers 502 Bad Gateway. |
 
 ## Interfaces
@@ -227,6 +230,43 @@ public job is checked again before it is replayed. Each refusal emits
 `public_not_opted_in`, `fork`, `pull_request_target`, `event_not_allowed`,
 `head_unknown`, `run_repo_mismatch`, `run_not_found` or `run_lookup_failed`.
 A refused job is not cancelled; it waits for another runner or times out.
+
+**State only moves forward.** A `queued` delivery for a job the controller
+has already seen `in_progress` or `completed` is acknowledged and ignored, as
+is a verified `queued` event whose job started or finished while its run
+lookup was in flight. Stale demand therefore never keeps the queue non-empty
+(which would keep an unused runner and the Desktop awake).
+
+**Restart during a lookup.** An accepted public job is written to the demand
+file *before* its run lookup, so a restart mid-lookup replays it, and the
+replay re-runs the fork guard. A refused job is removed from the file.
+
+**Runner-side pre-job guard (the enforcement point).** Refusing a webhook
+only decides whether the controller *launches* a runner. A JIT runner
+registers into the shared runner group with the pool labels, so GitHub may
+assign it *any* matching job, including one the controller refused (an
+approved fork pull request, say). The Desktop image therefore installs
+`/opt/omega-ci/job-started.sh` as every runner's
+`ACTIONS_RUNNER_HOOK_JOB_STARTED`. The runner executes it after a job is
+assigned and before the first workflow step; a non-zero exit fails the job, so
+no user code runs. It reads `GITHUB_EVENT_NAME`, `GITHUB_REPOSITORY` and
+`GITHUB_EVENT_PATH` and refuses:
+
+- a repository not in `OMEGA_CI_AGENT_REPOS` (empty list → every job);
+- `pull_request_target`, always;
+- any pull request whose head repository is a fork, is another repository,
+  or cannot be determined (private repositories included);
+- for a repository the event payload does not mark `private: true`, any
+  event other than `push`, `workflow_dispatch` or `pull_request`;
+- missing context or an unreadable or mismatched event payload.
+
+The allowlist reaches the hook through a root-owned policy file the agent
+writes at startup, not through the job's environment, and the hook runs as
+`python3 -I` with absolute paths, so the job cannot redirect it. Its rules
+and tests are `omega_prime/ci_runners/agent/jobhook.py` and
+`test_jobhook.py`. A refused job fails in GitHub with
+`omega-ci job guard refused this job (<reason>)`. The runner then exits, and
+the controller treats that like any other finished job.
 
 **Defence in depth.** Also set the repository's Actions fork policy to
 **Require approval for all outside collaborators** (Settings → Actions →

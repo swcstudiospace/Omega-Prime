@@ -54,7 +54,10 @@ self-hosted runner through a fork pull request. To serve one anyway:
 The controller then serves only jobs whose workflow run is a same-repository
 `push`, `workflow_dispatch` or `pull_request`. Fork pull requests,
 `pull_request_target` and anything it cannot verify are refused with an
-`omega.ci.runner.refused` event. Details and the risk are in
+`omega.ci.runner.refused` event. On the runner itself, the Desktop image's
+pre-job guard fails any such job before its first step, even if GitHub
+assigns it to one of our runners, so also add the repository to the
+Desktop's `OMEGA_CI_AGENT_REPOS`. Details and the risk are in
 [CI runner fleet](ci-runners.md#public-repositories).
 
 ## One-time organisation setup (HELD)

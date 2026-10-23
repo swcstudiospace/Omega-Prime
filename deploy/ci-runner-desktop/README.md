@@ -37,6 +37,7 @@ controller (VPS) ──HTTPS POST /v1/runners──▶ agent :8787 (this image)
 |---|---|
 | `Dockerfile` | Pinned overlay. The build context is the repo root. |
 | `entrypoint.sh` | Starts the agent (`python3 -m omega_prime.ci_runners agent --host 0.0.0.0 --port 8787`), then `exec`s the upstream command (`CMD ["python3", "/opt/railway-desktop.py"]`) unchanged. |
+| `job-started.sh` | Runner-side pre-job guard, installed as every runner's `ACTIONS_RUNNER_HOOK_JOB_STARTED`. Fails the job before any step for `pull_request_target`, fork pull requests, repositories not in `OMEGA_CI_AGENT_REPOS`, and (for non-private repositories) any event but `push` / `workflow_dispatch` / `pull_request`. Logic: `omega_prime/ci_runners/agent/jobhook.py`. The build runs it once and requires a refusal (fail closed). |
 | `smoke.sh` | Build-time check: builds the real agent app (settings, credential broker, token read, supervisor) from `/opt/omega-ci/site` alone with an isolated interpreter, so a module missing from the image fails the build, not the first boot. |
 | `railway.toml` | Dockerfile builder, desktop `/healthz` readiness, `sleepApplication = true`, `/config` mount. |
 
@@ -77,7 +78,18 @@ corresponding `ARG`. Never hand-type a hash.
 - **Jobs.** They run as `omega-ci-job` (UID/GID 1500, no supplementary groups)
   with `nice 10`, `RLIMIT_NPROC` 4096 and `RLIMIT_NOFILE` 65536. The child
   environment is an allowlist (`PATH`, locale, `TZ`, `TERM`), plus `HOME` and
-  `ACTIONS_RUNNER_INPUT_JITCONFIG`. The JIT config is never on argv or disk.
+  `ACTIONS_RUNNER_INPUT_JITCONFIG`, plus `ACTIONS_RUNNER_HOOK_JOB_STARTED`,
+  which the agent sets itself (never inherited). The JIT config is never on
+  argv or disk.
+- **Pre-job guard.** A JIT runner sits in a shared runner group with shared
+  labels, so GitHub may assign it any matching job, not only the one the
+  controller launched it for. `job-started.sh` runs before the job's first
+  step and fails refused jobs (see [Files](#files)). It reads its allowlist
+  from `/var/lib/omega-ci/job-policy.json`, which the root agent writes at
+  startup from `OMEGA_CI_AGENT_REPOS` (mode 0644, in a 0711 root directory),
+  and runs `/usr/bin/python3 -I` with absolute paths, so a job cannot
+  redirect it. The agent refuses to start if the hook is missing or
+  modifiable by the job identity.
 - **Agent token.** If you use `OMEGA_CI_AGENT_TOKEN_FILE`, the agent refuses to
   start unless the file is private (no "other" access, not owned by the job
   identity, not group-readable by it). The Railway variable
@@ -89,8 +101,9 @@ corresponding `ARG`. Never hand-type a hash.
   shared install.
 - **Concurrent jobs.** They share one UID, so the per-runner 0700 workdirs are
   hygiene, **not** a confidentiality boundary between jobs. Treat the pool as
-  running same-trust (your private repos only). The controller enforces that
-  with its repo allowlist plus `private: true`.
+  running same-trust (your own repositories only). The controller enforces
+  that with its repo allowlist plus `private: true` (or the public opt-in and
+  fork guard), and the pre-job guard enforces it again on the runner.
 - **Docker.** There is no Docker, no DinD and no privileged mode; Railway is
   unprivileged. Workflows that need Docker must stay on the VPS runner
   (`runs-on: [self-hosted, vps-docker]`) (D-120-08).
@@ -120,10 +133,12 @@ the backed-up `/config` volume.
 | `OMEGA_CI_CONTROLLER_URL` | **Required.** `https://<autoscaler domain>` (the nginx or Caddy site on the VPS). Set it at deploy time even if the controller is not up yet: the agent only calls it after a job ends, but refuses to start without it (the 8787 domain then answers 502). |
 | `RAILWAY_DOCKERFILE_PATH` | `deploy/ci-runner-desktop/Dockerfile`. Needed because Railway ignored the config-as-code path on the first real deploy and built the root MCP-server `Dockerfile`, which failed on `/run/secrets/omega_prime_token`. |
 | `OMEGA_CI_AGENT_MAX_RUNNERS` | `8` (default; hard ceiling 10). Keep it ≥ the controller's `OMEGA_CI_MAX_RUNNERS`. |
+| `OMEGA_CI_AGENT_REPOS` | **Required for jobs to run.** The controller's `OMEGA_CI_REPOS`, e.g. `swcstudiospace/Omega-Prime`. Repository names only, not a secret. Unset → the pre-job guard fails every job (fail closed). |
 | `SERVERLESS_FRIENDLY` | `1` (recommended). Upstream's own knob: it stops Chromium's background/update/GCM traffic, which would otherwise keep an idle Desktop awake and defeat sleep-as-teardown. |
 
 The image already sets `OMEGA_CI_AGENT_RUNNER_ROOT`, `OMEGA_CI_AGENT_WORK_ROOT`,
-`OMEGA_CI_AGENT_JOB_UID` and `OMEGA_CI_AGENT_JOB_GID`.
+`OMEGA_CI_AGENT_JOB_UID`, `OMEGA_CI_AGENT_JOB_GID`, `OMEGA_CI_AGENT_JOB_HOOK`
+and `OMEGA_CI_AGENT_JOB_POLICY`.
 
 If the agent variables are missing (including `OMEGA_CI_CONTROLLER_URL`), the
 agent exits with a one-line error and the desktop still starts normally, but

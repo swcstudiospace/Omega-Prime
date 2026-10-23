@@ -43,6 +43,9 @@ The table records names and purposes only.
 | `GEMINI_API_KEY_FILE` | Names a protected file containing the Gemini API credential. |
 | `GH_TOKEN` | Authenticates GitHub CLI and GitHub integrations. |
 | `GH_TOKEN_FILE` | Names a protected file supplying GH_TOKEN: Authenticates GitHub CLI and GitHub integrations. |
+| `GITHUB_EVENT_NAME` | Set by the GitHub runner; the Desktop pre-job guard refuses pull_request_target and, for non-private repositories, events other than push, workflow_dispatch and pull_request. |
+| `GITHUB_EVENT_PATH` | Set by the GitHub runner; the Desktop pre-job guard reads the event payload there to refuse fork pull requests. |
+| `GITHUB_REPOSITORY` | Set by the GitHub runner; the Desktop pre-job guard checks it against its repository allowlist and the event payload. |
 | `GITHUB_RUN_ID` | Binds the eventstream IT ownership record to one GitHub Actions run. |
 | `GITHUB_SHA` | Records the source commit identifier as evaluation-history provenance. |
 | `GITHUB_TOKEN` | Authenticates GitHub API requests. |
@@ -100,8 +103,11 @@ The table records names and purposes only.
 | `NOTION_TOKEN` | Authenticates Notion connector API requests. |
 | `NOTION_TOKEN_FILE` | Names a protected file containing the Notion integration credential. |
 | `OMEGA_CI_AGENT_JOB_GID` | Sets the unprivileged gid CI job processes run as on the Desktop. |
+| `OMEGA_CI_AGENT_JOB_HOOK` | Points the Desktop runner agent at the pre-job guard script it installs as ACTIONS_RUNNER_HOOK_JOB_STARTED. |
+| `OMEGA_CI_AGENT_JOB_POLICY` | Sets where the Desktop runner agent writes the pre-job guard's repository allowlist file. |
 | `OMEGA_CI_AGENT_JOB_UID` | Sets the unprivileged uid CI job processes run as on the Desktop. |
 | `OMEGA_CI_AGENT_MAX_RUNNERS` | Caps concurrent runner processes on the Desktop runner agent. |
+| `OMEGA_CI_AGENT_REPOS` | Lists the owner/repo names the Desktop runner pre-job guard lets run; empty refuses every job. |
 | `OMEGA_CI_AGENT_RUNNER_ROOT` | Points the Desktop runner agent at the unpacked actions/runner directory. |
 | `OMEGA_CI_AGENT_TOKEN` | Supplies the Desktop runner agent bearer token as a Railway variable. |
 | `OMEGA_CI_AGENT_TOKEN_FILE` | Names a protected file containing the Desktop runner agent bearer token. |

@@ -40,6 +40,8 @@ DEFAULT_EVENTS_PATH = Path("~/.omega/ci-runners/events.jsonl")
 DEFAULT_DEMAND_PATH = Path("~/.omega/ci-runners/demand.json")
 DEFAULT_AGENT_RUNNER_ROOT = Path("/opt/actions-runner")
 DEFAULT_AGENT_WORK_ROOT = Path("/config/ci-runners")
+# Root-owned allowlist the pre-job hook reads (deploy/ci-runner-desktop/job-started.sh).
+DEFAULT_AGENT_JOB_POLICY = Path("/var/lib/omega-ci/job-policy.json")
 
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9._-]{1,100}$")
@@ -395,6 +397,10 @@ class AgentSettings:
     controller_url: str
     job_uid: int | None
     job_gid: int | None
+    # Repositories the runner-side pre-job hook lets run (empty → none).
+    job_repos: frozenset[str] = frozenset()
+    job_hook: Path | None = None
+    job_policy: Path = DEFAULT_AGENT_JOB_POLICY
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> AgentSettings:
@@ -446,10 +452,28 @@ class AgentSettings:
             controller_url=_url(controller, "OMEGA_CI_CONTROLLER_URL", https=False),
             job_uid=uid,
             job_gid=gid,
+            job_repos=_repos(_get(env, "OMEGA_CI_AGENT_REPOS"), "OMEGA_CI_AGENT_REPOS"),
+            job_hook=_absolute(
+                _get(env, "OMEGA_CI_AGENT_JOB_HOOK"), "OMEGA_CI_AGENT_JOB_HOOK"
+            ),
+            job_policy=_absolute(
+                _get(env, "OMEGA_CI_AGENT_JOB_POLICY"), "OMEGA_CI_AGENT_JOB_POLICY"
+            )
+            or DEFAULT_AGENT_JOB_POLICY,
         )
 
 
+def _absolute(raw: str | None, name: str) -> Path | None:
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        raise SettingsError(f"{name}: absolute path required")
+    return path
+
+
 __all__ = [
+    "DEFAULT_AGENT_JOB_POLICY",
     "DEFAULT_DEMAND_PATH",
     "DEFAULT_IDLE_GRACE_S",
     "DEFAULT_LABELS",
