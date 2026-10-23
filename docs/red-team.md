@@ -484,7 +484,7 @@ The tools speak the upstream loopback HTTP API, not MCP:
 
 The TypeScript backend is separate upstream source reached through the
 `redteam/` gitlink. The Python package, the registry adapter
-(`omega_prime/tools/redteam.py`), and the vendored 14-skill / five-seat
+(`omega_prime/tools/redteam.py`), and the vendored 47-skill / five-seat
 pack (`omega_prime/redteam/pack/`) are ordinary parent content; the
 backend is not ported and never starts on its own.
 
@@ -516,7 +516,7 @@ engagement needs it.
 
 `omega_prime/redteam/pack/` holds T3MP3ST's declarative Grok Bot pack
 copied verbatim: the seat templates (COMMANDER, RED, BLACK, BLUE,
-WHITE), the red-team roster, and 14 saved skills. The skills are the
+WHITE), the red-team roster, and 47 saved skills. The skills are the
 upstream descriptions, one line each:
 
 | Skill | Use |
