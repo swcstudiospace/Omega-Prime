@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:omega:schema:hitl:1",
+  "title": "Omega human-in-the-loop payloads",
+  "$defs": {
+    "omega.hitl.asked": {
+      "type":"object","required":["task_id","request_id","question"],
+      "properties":{"task_id":{"type":"string","minLength":1},"request_id":{"type":"string","minLength":1},"question":{"type":"string","minLength":1}},"additionalProperties":false,
+      "examples":[{"task_id":"task-17","request_id":"request-42","question":"May I proceed with the deployment?"}],
+      "x-omega-invalid-examples":[{"task_id":"task-17","request_id":"request-42"},{"task_id":"task-17","request_id":"request-42","question":""}]
+    },
+    "omega.hitl.answered": {
+      "type":"object","required":["task_id","request_id","answer","answered_by"],
+      "properties":{"task_id":{"type":"string","minLength":1},"request_id":{"type":"string","minLength":1},"answer":{"type":"string","minLength":1},"answered_by":{"type":"string","minLength":1}},"additionalProperties":false,
+      "examples":[{"task_id":"task-17","request_id":"request-42","answer":"Approved; proceed with the deployment.","answered_by":"operator@example.test"}],
+      "x-omega-invalid-examples":[{"task_id":"task-17","request_id":"request-42","answer":"Approved"},{"task_id":"task-17","request_id":"request-42","answer":"","answered_by":"operator@example.test"}]
+    }
+  }
+}

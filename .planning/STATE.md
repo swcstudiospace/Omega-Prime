@@ -32,6 +32,12 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Current focus:** v21 Task Dashboard (Phases 104–106). Phase 104 is complete. Phase 105 local implementation is recorded on `feat/command-center`; Phase 106 local implementation and offline verification are recorded on `feat/command-center-polish`, with broad Python collection and host evidence pending. v20 Phase 97 remains separately deferred pending upstream MCP contract evidence; Phase 77.1 UAT remains user-owned.
 
+## Parallel milestone — v21 Event Stream (00046)
+
+Phase 105 complete on `gsd/00046-event-stream` (PR #86). Plans 105-01..04 shipped; coverage ≥90%; next 106–108, stop before paid Railway cutover.
+
+Started 2026-10-23 (AEDT) on branch `gsd/00046-event-stream`, in parallel with v20. Phase 104 (broker decision + spec) discuss complete: Apache Pulsar 5.0 LTS standalone behind a broker-agnostic EventBus port. Standing rule: no timer/schedule routines in Omega Prime — event-driven only. Next: phase 105 plan.
+
 ## Current Position
 
 Phase: 106 (Command Center polish) — LOCAL IMPLEMENTATION COMPLETE; ACCEPTANCE GATES PENDING

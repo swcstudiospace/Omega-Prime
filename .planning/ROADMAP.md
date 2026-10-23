@@ -31,6 +31,8 @@ Phase 99 (solo mode, Desk optional) is implemented on its own branch and integra
 Phase 100 (omp engine wiring) is complete and integrated after Phase 99 (PR #50); see `.planning/phases/100-omp-engine-wiring/`.
 
 Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.
+- **v21 Event Stream** — Phases 104–108 (started 2026-10-23, task 00046). Apache Pulsar event backbone for the Autonomous Event-Driven ADLC; timer routines banned (event-driven only). Runs in parallel with v20; see `phases/104-event-stream-broker-decision-and-railway-spec/DESIGN.md`.
+
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
 `milestones/v16-phases/`.
@@ -424,6 +426,58 @@ Local implementation and offline verification are recorded in `106-SUMMARY.md`. 
 - [x] 115-04-PLAN.md — after 115-02/03: `/ws/events` tier in useDashboard with jittered backoff and SSE fallback, interactive xterm TerminalPanel, STALE badges, sole `static/cc` rebuild.
 
 Local implementation and offline verification are recorded in `115-SUMMARY.md` (ACs a1–a7 mapped to evidence). Live-Herdr checks and the 7421 server swap remain outer-driver work. Local commits only; no push, merge, or deploy.
+
+### v21 Event Stream (Phases 104–108) — in progress 2026-10-23
+
+> Note (00046 rebase, 2026-10-23): the v21 Event Stream phase numbers 104–108 overlap the v21 Task Dashboard / Command Center phase numbers above; phase directories are disambiguated by slug (`104-event-stream-broker-decision-and-railway-spec`, `105-event-stream-core-library`, …).
+
+Source: Ove's `/gsd-autonomous` prompt (00046), 2026-10-23 AEDT. Standing rule: Omega Prime may not create timer/schedule routines; everything is event-triggered (deadlines are delayed events). Decision and spec: `phases/104-event-stream-broker-decision-and-railway-spec/{CONTEXT,DESIGN,RESEARCH,UPLIFT}.md`.
+
+- [x] Phase 104: Event stream broker decision + Railway deploy spec
+- [x] Phase 105: Event stream core library (Python + TypeScript)
+- [ ] Phase 106: Box hub + VPS leaf live feed
+- [ ] Phase 107: ADLC taxonomy wiring + timer retirement
+- [ ] Phase 108: Event stream ops + verification
+
+### Phase 104: Event stream broker decision + Railway deploy spec
+
+**Goal:** Decide the broker (Pulsar vs NATS vs other) with verified SDK/Railway evidence and write the enterprise-grade spec: topology, CloudEvents contract, tenancy/topics/schemas, delivery semantics, security, FMEA, test strategy, Railway deploy spec.
+
+**Requirements:** ES-104-01 decision with evidence; ES-104-02 DESIGN.md complete; ES-104-03 topology-as-code draft (`topology.yaml` shape); ES-104-04 HITL list with defaults.
+
+**Success criteria:** CONTEXT.md records the decision and auto-accepted answers; DESIGN.md covers §1–§18; RESEARCH.md verifies every pasted claim.
+
+### Phase 105: Event stream core library (Python + TypeScript)
+
+**Depends on:** Phase 104
+
+**Goal:** `omega_prime/eventstream/` (envelope, taxonomy, schemas, ports, memory + Pulsar adapters, SQLite outbox with broker dedup, consumer runtime with Key_Shared/Failover/Exclusive/Reader, retry topics + DLQ, idempotency ledger, reconnect/backoff/circuit, graceful shutdown, admin REST reconcile, CLI) and `packages/eventstream-ts/` with the same semantics; Pulsar Functions scaffold.
+
+**Success criteria:** Integration tests against pinned `apachepulsar/pulsar:5.0.0` prove no loss across broker restart, dedup of resends, per-key ordering, delayed delivery, retry→DLQ, schema-compat rejection and ACL denial; ruff/format/mypy --strict/pytest/vitest/polyglot-check green.
+
+### Phase 106: Box hub + VPS leaf live feed
+
+**Depends on:** Phase 105
+
+**Goal:** Pulsar standalone on the box (podman, loopback, JWT, persistent volume, topology applied) and the VPS leaf publisher (systemd unit, outbox, box-initiated reverse SSH tunnel) emitting auth/login, job, CI and Hindsight events as a live feed.
+
+**Success criteria:** VPS events reach the box hub within seconds; a tunnel outage loses nothing (outbox drains on reconnect); all sources are push streams (no polling).
+
+### Phase 107: ADLC taxonomy wiring + timer retirement
+
+**Depends on:** Phase 105 (106 for VPS-sourced types)
+
+**Goal:** Wire 00043's handlers and listeners L1–L23 onto the bus; express deadlines as delayed events; retire every timer routine (`omega_prime/cron`, routine schedules, heartbeats, collector loops); Command Center bridge via Reader → `poller.nudge`.
+
+**Success criteria:** Every former timer is event-triggered, on-demand, or removed; Command Center updates from events; gate/blocked/review flows pass end-to-end against the hub.
+
+### Phase 108: Event stream ops + verification
+
+**Depends on:** Phases 106, 107
+
+**Goal:** OTel metrics/traces, structured logs, `/healthz` + `/readyz`, `omega eventstream {status,tail,replay,dlq}`, chaos tests, no-timer CI gate, Railway Dockerfile + cutover runbook + tiered storage config.
+
+**Success criteria:** Chaos suite shows zero loss and zero duplicate effects; no-timer gate in CI; runbook reviewed; Railway artefacts ready for cutover.
 
 ## v23 CI Runner Fleet (task 00050)
 

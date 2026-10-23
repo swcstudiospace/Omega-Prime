@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:omega:schema:control:1",
+  "title": "Omega control payloads",
+  "$defs": {
+    "omega.control.signal.gate": {
+      "type": "object",
+      "required": ["repo", "number", "head_sha", "actor", "decision", "reason"],
+      "properties": {"repo": {"type": "string", "minLength": 1}, "number": {"type": "integer", "minimum": 1}, "head_sha": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "decision": {"enum": ["allow", "block"]}, "reason": {"type": "string", "minLength": 1}},
+      "additionalProperties": false,
+      "examples": [{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"gate","decision":"block","reason":"required review is missing"}],
+      "x-omega-invalid-examples": [{"repo":"Omega-Prime","number":0,"head_sha":"b8eb05f","actor":"gate","decision":"block","reason":"required review is missing"},{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"gate","decision":"defer","reason":"required review is missing"}]
+    },
+    "omega.control.signal.blocked": {
+      "oneOf": [
+        {"type":"object","required":["kind","repo","number","head_sha","actor","reason"],"properties":{"kind":{"const":"pr"},"repo":{"type":"string","minLength":1},"number":{"type":"integer","minimum":1},"head_sha":{"type":"string","minLength":1},"actor":{"type":"string","minLength":1},"reason":{"type":"string","minLength":1}},"additionalProperties":false},
+        {"type":"object","required":["kind","origin_topic","aggregate_key","source_ce_id","reason","history"],"properties":{"kind":{"const":"dlq"},"origin_topic":{"type":"string","minLength":1},"aggregate_key":{"type":"string","minLength":1},"source_ce_id":{"type":"string","minLength":1},"reason":{"type":"string","minLength":1},"history":{"type":"array","minItems":1,"items":{"type":"object","required":["attempt","reason"],"properties":{"attempt":{"type":"integer","minimum":1},"reason":{"type":"string","minLength":1}},"additionalProperties":false}}},"additionalProperties":false}
+      ],
+      "examples": [
+        {"kind":"pr","repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"gate","reason":"required review is missing"},
+        {"kind":"dlq","origin_topic":"persistent://omega/auth/session","aggregate_key":"box:gh","source_ce_id":"ce-auth-001","reason":"retry limit reached after authentication session processing","history":[{"attempt":1,"reason":"temporary authorization service unavailable"},{"attempt":2,"reason":"authentication backend still unavailable"}]},
+        {"kind":"dlq","origin_topic":"persistent://omega/job/lifecycle","aggregate_key":"job-842","source_ce_id":"ce-job-002","reason":"retry limit reached while processing job lifecycle event","history":[{"attempt":1,"reason":"worker state store temporarily unavailable"}]},
+        {"kind":"dlq","origin_topic":"persistent://omega/task/state","aggregate_key":"task-17","source_ce_id":"ce-task-003","reason":"retry limit reached while recording task state","history":[{"attempt":1,"reason":"state storage temporarily unavailable"},{"attempt":2,"reason":"task state update could not be persisted"}]}
+      ],
+      "x-omega-invalid-examples": [
+        {"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"gate","reason":"missing discriminator"},
+        {"kind":"unknown","repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"gate","reason":"wrong discriminator"},
+        {"kind":"pr","repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"gate","reason":"mixed branch","origin_topic":"persistent://omega/job/lifecycle"},
+        {"kind":"dlq","origin_topic":"persistent://omega/job/lifecycle","aggregate_key":"job-842","source_ce_id":"ce-job-002","reason":"fake PR","history":[{"attempt":1,"reason":"retry failed"}],"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"gate"},
+        {"kind":"dlq","origin_topic":"persistent://omega/task/state","aggregate_key":"task-17","source_ce_id":"ce-task-003","reason":"bad history","history":[{"attempt":0,"reason":"retry failed"}]},
+        {"kind":"dlq","origin_topic":"persistent://omega/task/state","aggregate_key":"","source_ce_id":"ce-task-003","reason":"bad provenance","history":[{"attempt":1,"reason":"retry failed"}]},
+        {"kind":"dlq","origin_topic":"persistent://omega/task/state","aggregate_key":"task-17","source_ce_id":"ce-task-003","reason":"bad history type","history":"not an array"}
+      ]
+    },
+    "omega.control.signal.review": {
+      "type":"object","required":["repo","number","head_sha","actor","review_state","review_id"],
+      "properties":{"repo":{"type":"string","minLength":1},"number":{"type":"integer","minimum":1},"head_sha":{"type":"string","minLength":1},"actor":{"type":"string","minLength":1},"review_state":{"enum":["pending","approved","changes_requested"]},"review_id":{"type":"string","minLength":1}},"additionalProperties":false,
+      "examples":[{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"review-bot","review_state":"approved","review_id":"review-75"}],"x-omega-invalid-examples":[{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"review-bot","review_state":"dismissed","review_id":"review-75"}]
+    },
+    "omega.control.action.merge_requested": {
+      "type":"object","required":["repo","number","head_sha","actor","requested_by"],"properties":{"repo":{"type":"string","minLength":1},"number":{"type":"integer","minimum":1},"head_sha":{"type":"string","minLength":1},"actor":{"type":"string","minLength":1},"requested_by":{"type":"string","minLength":1}},"additionalProperties":false,
+      "examples":[{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"gate","requested_by":"operator"}],"x-omega-invalid-examples":[{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"gate"}]
+    },
+    "omega.control.action.merged": {
+      "type":"object","required":["repo","number","head_sha","actor","merged_by","merge_sha"],"properties":{"repo":{"type":"string","minLength":1},"number":{"type":"integer","minimum":1},"head_sha":{"type":"string","minLength":1},"actor":{"type":"string","minLength":1},"merged_by":{"type":"string","minLength":1},"merge_sha":{"type":"string","minLength":1}},"additionalProperties":false,
+      "examples":[{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"merge-executor","merged_by":"operator","merge_sha":"merge123"}],"x-omega-invalid-examples":[{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"merge-executor","merged_by":"operator"}]
+    },
+    "omega.control.action.merge_refused": {
+      "type":"object","required":["repo","number","head_sha","actor","reason"],"properties":{"repo":{"type":"string","minLength":1},"number":{"type":"integer","minimum":1},"head_sha":{"type":"string","minLength":1},"actor":{"type":"string","minLength":1},"reason":{"type":"string","minLength":1}},"additionalProperties":false,
+      "examples":[{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"merge-executor","reason":"head SHA changed before merge"}],"x-omega-invalid-examples":[{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"merge-executor","reason":""}]
+    },
+    "omega.control.action.fix_requested": {
+      "type":"object","required":["repo","number","head_sha","actor","requested_by","reason"],"properties":{"repo":{"type":"string","minLength":1},"number":{"type":"integer","minimum":1},"head_sha":{"type":"string","minLength":1},"actor":{"type":"string","minLength":1},"requested_by":{"type":"string","minLength":1},"reason":{"type":"string","minLength":1}},"additionalProperties":false,
+      "examples":[{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"escalator","requested_by":"operator","reason":"please resolve the failing check"}],"x-omega-invalid-examples":[{"repo":"Omega-Prime","number":75,"head_sha":"b8eb05f","actor":"escalator","requested_by":"operator"}]
+    },
+    "omega.control.deadline.greptile_review_due": {
+      "type":"object","required":["aggregate","deadline_id","due_at","head_sha"],"properties":{"aggregate":{"type":"string","minLength":1},"deadline_id":{"type":"string","minLength":1},"due_at":{"type":"string","format":"date-time"},"head_sha":{"type":"string","minLength":1}},"additionalProperties":false,
+      "examples":[{"aggregate":"Omega-Prime#75","deadline_id":"greptile-75-b8eb05f","due_at":"2026-10-23T08:00:00Z","head_sha":"b8eb05f"}],"x-omega-invalid-examples":[{"aggregate":"Omega-Prime#75","deadline_id":"greptile-75-b8eb05f","due_at":"2026-10-23T08:00:00Z"},{"aggregate":"Omega-Prime#75","deadline_id":"greptile-75-b8eb05f","due_at":"2026-10-23T08:00:00"}]
+    },
+    "omega.control.deadline.heartbeat_due": {
+      "type":"object","required":["aggregate","deadline_id","due_at","sequence"],"properties":{"aggregate":{"type":"string","minLength":1},"deadline_id":{"type":"string","minLength":1},"due_at":{"type":"string","format":"date-time"},"sequence":{"type":"integer","minimum":0}},"additionalProperties":false,
+      "examples":[{"aggregate":"task-17","deadline_id":"heartbeat-task-17-8","due_at":"2026-10-23T08:00:00Z","sequence":8}],"x-omega-invalid-examples":[{"aggregate":"task-17","deadline_id":"heartbeat-task-17-8","due_at":"2026-10-23T08:00:00Z","sequence":-1},{"aggregate":"task-17","deadline_id":"heartbeat-task-17-8","due_at":"2026-10-23T08:00:00","sequence":8}]
+    },
+    "omega.control.deadline.hitl_followup_due": {
+      "type":"object","required":["aggregate","deadline_id","due_at","task_id","sequence"],"properties":{"aggregate":{"type":"string","minLength":1},"deadline_id":{"type":"string","minLength":1},"due_at":{"type":"string","format":"date-time"},"task_id":{"type":"string","minLength":1},"sequence":{"type":"integer","minimum":0}},"additionalProperties":false,
+      "examples":[{"aggregate":"task-17","deadline_id":"hitl-followup-task-17-8","due_at":"2026-10-23T08:30:00Z","task_id":"task-17","sequence":8}],"x-omega-invalid-examples":[{"aggregate":"task-17","deadline_id":"hitl-followup-task-17-8","due_at":"2026-10-23T08:30:00Z","task_id":"task-17","sequence":-1},{"aggregate":"task-17","deadline_id":"hitl-followup-task-17-8","due_at":"2026-10-23T08:30:00","task_id":"task-17","sequence":8}]
+    }
+  }
+}
