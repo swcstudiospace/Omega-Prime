@@ -99,6 +99,17 @@ jobs:
           podman --version
           if ! out="$(podman unshare true 2>&1)"; then
             echo "::error::rootless podman cannot enter a user namespace on this runner (the image needs one to build and run containers): $out"
+            # Facts for the runner-image fix: subordinate ID ranges need a
+            # privileged newuidmap; a single-ID namespace does not.
+            grep -E '^(NoNewPrivs|CapEff|CapBnd):' /proc/self/status || true
+            ls -l /usr/bin/newuidmap /usr/bin/newgidmap || true
+            grep -E "^$(id -un):" /etc/subuid /etc/subgid || echo "no subordinate ID ranges for $(id -un)"
+            cat /proc/sys/user/max_user_namespaces 2>/dev/null || true
+            if unshare --user --map-root-user true 2>&1; then
+              echo "single-ID user namespace: available"
+            else
+              echo "single-ID user namespace: unavailable"
+            fi
             exit 1
           fi
           podman info --format 'rootless={{.Host.Security.Rootless}} graph={{.Store.GraphDriverName}} cgroups={{.Host.CgroupsVersion}} network={{.Host.NetworkBackend}}'
@@ -439,7 +450,10 @@ jobs:
 
       - name: Remove the containers
         if: always()
-        run: docker rm -f "$SSE_CONTAINER" "$HTTP_CONTAINER"
+        # Nothing to remove when the engine step failed before the shim existed.
+        run: |
+          command -v docker >/dev/null || exit 0
+          docker rm -f "$SSE_CONTAINER" "$HTTP_CONTAINER"
 
       - name: Retain the sanitized verifier reports
         if: always()
@@ -622,6 +636,17 @@ jobs:
           podman --version
           if ! out="$(podman unshare true 2>&1)"; then
             echo "::error::rootless podman cannot enter a user namespace on this runner (the image needs one to build and run containers): $out"
+            # Facts for the runner-image fix: subordinate ID ranges need a
+            # privileged newuidmap; a single-ID namespace does not.
+            grep -E '^(NoNewPrivs|CapEff|CapBnd):' /proc/self/status || true
+            ls -l /usr/bin/newuidmap /usr/bin/newgidmap || true
+            grep -E "^$(id -un):" /etc/subuid /etc/subgid || echo "no subordinate ID ranges for $(id -un)"
+            cat /proc/sys/user/max_user_namespaces 2>/dev/null || true
+            if unshare --user --map-root-user true 2>&1; then
+              echo "single-ID user namespace: available"
+            else
+              echo "single-ID user namespace: unavailable"
+            fi
             exit 1
           fi
           podman info --format 'rootless={{.Host.Security.Rootless}} graph={{.Store.GraphDriverName}} cgroups={{.Host.CgroupsVersion}} network={{.Host.NetworkBackend}}'
