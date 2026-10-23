@@ -3,14 +3,17 @@ import { open, type FileHandle } from "node:fs/promises";
 import { isIP } from "node:net";
 import { ConfigurationError, redactValue } from "./errors.js";
 
-export type SecretFileName = "tokenFile" | "tlsCaFile" | "encryptionKeyFile";
+export type SecretFileName = "tokenFile" | "tlsCaFile" | "encryptionKeyFile" | "privateKeyFile";
 
 export interface EventStreamConfigOptions {
   readonly serviceUrl?: string;
   readonly adminUrl?: string;
   readonly tokenFile?: string;
   readonly tlsCaFile?: string;
+  /** PEM public key used by producers for native Pulsar end-to-end encryption. */
   readonly encryptionKeyFile?: string;
+  /** PEM private key used by consumers/readers to decrypt auth-family payloads. */
+  readonly privateKeyFile?: string;
   readonly outboxMaxBytes?: number;
   readonly maxInFlight?: number;
   readonly receiverQueueSize?: number;
@@ -22,7 +25,8 @@ const DEFAULT_ADMIN_URL = "http://127.0.0.1:28080";
 const FILE_FIELDS: Readonly<Record<SecretFileName, string>> = Object.freeze({
   tokenFile: "OMEGA_EVENTSTREAM_TOKEN_FILE",
   tlsCaFile: "OMEGA_EVENTSTREAM_TLS_CA_FILE",
-  encryptionKeyFile: "OMEGA_EVENTSTREAM_ENCRYPTION_KEY_FILE"
+  encryptionKeyFile: "OMEGA_EVENTSTREAM_ENCRYPTION_KEY_FILE",
+  privateKeyFile: "OMEGA_EVENTSTREAM_PRIVATE_KEY_FILE"
 });
 
 function parseUrl(value: string, kind: "service" | "admin"): URL {
@@ -55,6 +59,7 @@ export class EventStreamConfig {
   readonly tokenFile: string | undefined;
   readonly tlsCaFile: string | undefined;
   readonly encryptionKeyFile: string | undefined;
+  readonly privateKeyFile: string | undefined;
   readonly outboxMaxBytes: number;
   readonly maxInFlight: number;
   readonly receiverQueueSize: number;
@@ -67,6 +72,7 @@ export class EventStreamConfig {
     this.tokenFile = optionalPath(options.tokenFile);
     this.tlsCaFile = optionalPath(options.tlsCaFile);
     this.encryptionKeyFile = optionalPath(options.encryptionKeyFile);
+    this.privateKeyFile = optionalPath(options.privateKeyFile);
     const local = isLoopback(service.hostname) && isLoopback(admin.hostname);
     if (!local && (service.protocol !== "pulsar+ssl:" || admin.protocol !== "https:" || this.tokenFile === undefined || this.tlsCaFile === undefined)) {
       throw new ConfigurationError("non-loopback event-stream endpoints require TLS, a token file, and a CA file");
@@ -104,6 +110,7 @@ export class EventStreamConfig {
     const tokenFile = environment[FILE_FIELDS.tokenFile];
     const tlsCaFile = environment[FILE_FIELDS.tlsCaFile];
     const encryptionKeyFile = environment[FILE_FIELDS.encryptionKeyFile];
+    const privateKeyFile = environment[FILE_FIELDS.privateKeyFile];
     const outboxMaxBytes = environment.OMEGA_EVENTSTREAM_OUTBOX_MAX_BYTES;
     const maxInFlight = environment.OMEGA_EVENTSTREAM_MAX_IN_FLIGHT;
     const receiverQueueSize = environment.OMEGA_EVENTSTREAM_RECEIVER_QUEUE_SIZE;
@@ -113,6 +120,7 @@ export class EventStreamConfig {
       ...(tokenFile === undefined ? {} : { tokenFile }),
       ...(tlsCaFile === undefined ? {} : { tlsCaFile }),
       ...(encryptionKeyFile === undefined ? {} : { encryptionKeyFile }),
+      ...(privateKeyFile === undefined ? {} : { privateKeyFile }),
       ...(outboxMaxBytes === undefined ? {} : { outboxMaxBytes: Number(outboxMaxBytes) }),
       ...(maxInFlight === undefined ? {} : { maxInFlight: Number(maxInFlight) }),
       ...(receiverQueueSize === undefined ? {} : { receiverQueueSize: Number(receiverQueueSize) })
@@ -146,6 +154,6 @@ export class EventStreamConfig {
   }
 
   toString(): string {
-    return `[EventStreamConfig serviceUrl=${this.serviceUrl} tokenFileConfigured=${this.tokenFile !== undefined} tlsCaConfigured=${this.tlsCaFile !== undefined} encryptionKeyConfigured=${this.encryptionKeyFile !== undefined}]`;
+    return `[EventStreamConfig serviceUrl=${this.serviceUrl} tokenFileConfigured=${this.tokenFile !== undefined} tlsCaConfigured=${this.tlsCaFile !== undefined} encryptionKeyConfigured=${this.encryptionKeyFile !== undefined} privateKeyConfigured=${this.privateKeyFile !== undefined}]`;
   }
 }

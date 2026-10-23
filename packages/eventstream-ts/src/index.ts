@@ -65,6 +65,7 @@ export {
   applyRetryOutcome,
   forwardRetryDelivery,
   handleDelivery,
+  buildDeadLetterRequest,
   retryTopicsFor,
   runSharedRetryHandoff,
   shouldProcessTargeted
@@ -73,24 +74,29 @@ export type { DeliveryOutcome, HandlerOptions, ApplyRetryOptions, RetryResult } 
 export { Outbox, OutboxTransaction } from "./outbox.js";
 export type { OutboxOptions } from "./outbox.js";
 export {
+  AUTH_ENCRYPTION_KEY_NAME,
   createPulsarEventBus,
   loadPulsarClient,
   nativeJsonMetadataForTopic,
   PulsarEventBus,
+  requiresAuthDecryption,
+  requiresAuthEncryption,
   toNativeSequenceId
 } from "./pulsar.js";
 export type {
   NativeJsonMetadata,
-  PayloadCrypto,
   PulsarClient,
+  PulsarConsumerDecryption,
   PulsarClientConstructor,
   PulsarConsumer,
   PulsarEventBusOptions,
   PulsarMessage,
+  PulsarMessageEncryption,
   PulsarMessageHandle,
   PulsarMessageId,
   PulsarModuleLoader,
   PulsarProducer,
+  PulsarProducerEncryption,
   PulsarProducerOptions,
   PulsarReaderClient,
   PulsarReaderOptions,

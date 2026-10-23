@@ -17,7 +17,13 @@ from omega_prime.eventstream.envelope import (
 from omega_prime.eventstream.errors import AuthenticationError
 from omega_prime.eventstream.observability import EventStreamObserver
 from omega_prime.eventstream.ports import Ack, DeadLetter, Retry
-from omega_prime.eventstream.retry import DlqTriage, RetryRouter, SingletonRetryHandoff
+from omega_prime.eventstream.retry import (
+    DlqTriage,
+    InvalidRetryMetadata,
+    RetryRouter,
+    SingletonRetryHandoff,
+    parse_retry_attempt,
+)
 from omega_prime.eventstream.taxonomy import derive_key, schema_uri_for_type
 
 
@@ -686,3 +692,60 @@ def test_dlq_triage_uses_a_single_use_per_event_producer() -> None:
         assert request.single_use is True
 
     asyncio.run(scenario())
+
+
+def test_singleton_handoffs_for_different_targets_use_distinct_producers() -> None:
+    """merge-executor and audit-projector share control/action; Pulsar dedup
+    keys on (producer name, sequence), so a shared name would drop one."""
+
+    async def scenario() -> None:
+        publisher = Publisher()
+        for target in ("merge-executor", "audit-projector"):
+            source = make_delivery(
+                [],
+                properties={
+                    "omega_retry_target": target,
+                    "omega_origin_topic": "persistent://omega/task/state",
+                    "omega_attempt": 2,
+                },
+            )
+            assert (
+                await SingletonRetryHandoff(publisher, target).handle(source)
+                == "republished"
+            )
+        first, second = publisher.requests
+        assert first.topic == second.topic
+        assert first.sequence_id == second.sequence_id == 2
+        assert first.producer_name != second.producer_name
+        assert "merge-executor" in first.producer_name
+        assert "audit-projector" in second.producer_name
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        {"omega_attempt": "invalid"},
+        {"omega_attempt": True},
+        {"omega_attempt": "0"},
+        {"omega_attempt": "6"},
+        {"omega_attempt": -1},
+        {"omega_attempt": "1e3"},
+        {"omega_attempt": 2, "omega_retry_previous": "nan"},
+        {"omega_attempt": 2, "omega_retry_previous": "inf"},
+        {"omega_attempt": 2, "omega_retry_previous": "-3"},
+        {"omega_attempt": 2, "omega_retry_previous": "soon"},
+    ],
+)
+def test_malformed_retry_metadata_is_rejected_as_schema_error(
+    properties: dict[str, object],
+) -> None:
+    with pytest.raises(InvalidRetryMetadata):
+        parse_retry_attempt(properties)
+
+
+def test_well_formed_retry_metadata_parses_from_transport_strings() -> None:
+    assert parse_retry_attempt({}) == 1
+    assert parse_retry_attempt({"omega_attempt": "3"}) == 3
+    assert parse_retry_attempt({"omega_attempt": 5, "omega_retry_previous": "2.5"}) == 5

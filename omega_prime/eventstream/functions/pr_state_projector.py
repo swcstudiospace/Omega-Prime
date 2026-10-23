@@ -386,7 +386,14 @@ def _message_position(message_id: object) -> tuple[int, int, int] | None:
         if not callable(getter):
             return None
         value = getter()
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        if name == "partition" and value == -1:
+            # Non-partitioned topics report partition -1; the source topic is
+            # already normalized without a ``-partition-N`` suffix, so treat it
+            # as the single partition 0 and keep stale-replay ordering active.
+            value = 0
+        if value < 0:
             return None
         values.append(value)
     return values[0], values[1], values[2]

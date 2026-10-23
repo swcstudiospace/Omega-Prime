@@ -156,7 +156,9 @@ export class Outbox {
     await previous;
     try {
       const receipts: PublishReceipt[] = [];
-      for (const row of this.#rows) {
+      // Iterate a snapshot: cleanupSent() may splice #rows while a publish is
+      // awaited, which would shift live indexes and skip the next row.
+      for (const row of [...this.#rows]) {
         if (row.sent) continue;
         const receipt = await publisher.publish(row.request);
         row.sent = true;

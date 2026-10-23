@@ -17,20 +17,30 @@ from omega_prime.eventstream.errors import (
     AuthenticationError,
     PermanentError,
     RetryableError,
+    SchemaError,
 )
 from omega_prime.eventstream.observability import EventStreamObserver
 from omega_prime.eventstream.ports import (
     Ack,
+    ClaimResult,
     DeadLetter,
     IdempotencyStore,
     Publisher,
     Retry,
     Subscriber,
 )
-from omega_prime.eventstream.retry import RetryRouter
+from omega_prime.eventstream.retry import (
+    InvalidRetryMetadata,
+    RetryRouter,
+    parse_retry_attempt,
+)
 
 _LOG = logging.getLogger(__name__)
 Handler = Callable[[Delivery, "HandlerContext"], Awaitable[Any]]
+#: First wait before re-claiming a ``busy`` delivery; doubles up to the max.
+CLAIM_RETRY_INITIAL_DELAY = 0.05
+#: Upper bound for one wait between ``busy`` claim attempts, in seconds.
+CLAIM_RETRY_MAX_DELAY = 2.0
 
 
 @dataclass(slots=True)
@@ -144,7 +154,13 @@ class ConsumerRuntime:
     async def run(
         self, *, deadline_reached: asyncio.Event | None = None
     ) -> ShutdownResult:
-        """Receive until stop/deadline, then drain bounded work and close resources."""
+        """Receive until stop/deadline, then drain bounded work and close resources.
+
+        The deadline is watched for the whole run, including the drain after
+        ``stop()``: if it fires while handlers are still draining, remaining
+        work is cancelled (its claims released, sources left unsettled) and
+        the run reports an unclean shutdown instead of waiting forever.
+        """
         queue: asyncio.Queue[Delivery | None] = asyncio.Queue(self.queue_size)
         clean = True
         try:
@@ -158,30 +174,51 @@ class ConsumerRuntime:
                     )
                     for i in range(self.max_in_flight)
                 ]
-                if deadline_reached is None:
-                    await self._stopping.wait()
-                else:
-                    stop_task = group.create_task(self._stopping.wait())
-                    deadline_task = group.create_task(deadline_reached.wait())
-                    done, pending = await asyncio.wait(
-                        (stop_task, deadline_task), return_when=asyncio.FIRST_COMPLETED
-                    )
-                    clean = deadline_task not in done
-                    for pending_task in pending:
-                        pending_task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
-                    if not clean:
-                        self._stopping.set()
+                deadline_task = (
+                    None
+                    if deadline_reached is None
+                    else group.create_task(deadline_reached.wait())
+                )
+                stop_task = group.create_task(self._stopping.wait())
+                waiters = (
+                    {stop_task}
+                    if deadline_task is None
+                    else {
+                        stop_task,
+                        deadline_task,
+                    }
+                )
+                done, _pending = await asyncio.wait(
+                    waiters, return_when=asyncio.FIRST_COMPLETED
+                )
+                if deadline_task is not None and deadline_task in done:
+                    clean = False
+                self._stopping.set()
+                await stop_task
                 receiver.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await receiver
+                if clean:
+                    drain = group.create_task(self._drain(queue, workers))
+                    drain_waiters: set[asyncio.Task[Any]] = {drain}
+                    if deadline_task is not None:
+                        drain_waiters.add(deadline_task)
+                    drained, _waiting = await asyncio.wait(
+                        drain_waiters, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if drain not in drained:
+                        # Deadline fired mid-drain: stop waiting on handlers.
+                        clean = False
+                        drain.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await drain
                 if not clean:
                     for worker in workers:
                         worker.cancel()
-                else:
-                    # Sentinels drain already-received work after receiving stops.
-                    for _ in workers:
-                        await queue.put(None)
+                if deadline_task is not None and not deadline_task.done():
+                    deadline_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await deadline_task
                 results = await asyncio.gather(*workers, return_exceptions=True)
                 if any(
                     isinstance(result, BaseException)
@@ -192,6 +229,15 @@ class ConsumerRuntime:
         finally:
             await self._close_once()
         return ShutdownResult(clean, self._completed)
+
+    @staticmethod
+    async def _drain(
+        queue: asyncio.Queue[Delivery | None], workers: list[asyncio.Task[None]]
+    ) -> None:
+        # Sentinels drain already-received work after receiving stops.
+        for _ in workers:
+            await queue.put(None)
+        await asyncio.wait(workers)
 
     async def _close_once(self) -> None:
         if self._cleanup_task is None:
@@ -251,14 +297,66 @@ class ConsumerRuntime:
                 if entry.users == 0 and self._key_locks.get(delivery.key) is entry:
                     del self._key_locks[delivery.key]
 
+    async def _claim_until_settled(
+        self, delivery: Delivery, owner: str
+    ) -> ClaimResult | None:
+        """Claim, retrying ``busy`` with bounded backoff while the runtime is open.
+
+        ``busy`` means SQLite contention or another live owner; both clear on
+        their own, so the delivery is retried in place instead of being
+        stranded in flight until a restart. Each wait is capped at
+        ``CLAIM_RETRY_MAX_DELAY`` and wakes early on ``stop()``; on shutdown
+        the delivery is left unsettled so closing the receiver releases it.
+        """
+        delay = CLAIM_RETRY_INITIAL_DELAY
+        while True:
+            claim = await self.store.claim(self.subscription, delivery.event.id, owner)
+            if claim.status != "busy":
+                return claim
+            if self._stopping.is_set():
+                return None
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._stopping.wait(), timeout=delay)
+            if self._stopping.is_set():
+                return None
+            delay = min(CLAIM_RETRY_MAX_DELAY, delay * 2)
+
+    async def _reject_invalid_metadata(self, delivery: Delivery, reason: str) -> None:
+        """Dead-letter a delivery whose retry metadata cannot be trusted.
+
+        Runs before any ledger claim so malformed transport properties never
+        reach handler bookkeeping; failures are logged (redacted) and leave the
+        source unsettled rather than escaping into the worker TaskGroup.
+        """
+        try:
+            await self.router.handle(
+                delivery, SchemaError(reason), attempt=1, latency=0.0
+            )
+        except Exception as exc:
+            _LOG.warning(
+                "eventstream invalid retry metadata could not be dead-lettered",
+                extra={
+                    "ce_id": str(redact_value(delivery.event.id, self.known_secrets)),
+                    "ce_type": delivery.event.type,
+                    "subscription": str(
+                        redact_value(self.subscription, self.known_secrets)
+                    )[:64],
+                    "error": str(redact_value(str(exc), self.known_secrets))[:256],
+                },
+            )
+
     async def _process_locked(self, delivery: Delivery) -> None:
-        props = delivery.properties
+        try:
+            attempt = parse_retry_attempt(delivery.properties)
+        except InvalidRetryMetadata as exc:
+            await self._reject_invalid_metadata(delivery, str(exc))
+            return
         owner = uuid.uuid4().hex
-        claim = await self.store.claim(self.subscription, delivery.event.id, owner)
+        claim = await self._claim_until_settled(delivery, owner)
+        if claim is None:
+            return
         if claim.status == "already-complete":
             await delivery.acknowledge()
-            return
-        if claim.status == "busy":
             return
         token = claim.owner_token
         assert token is not None
@@ -277,7 +375,7 @@ class ConsumerRuntime:
             "subscription": str(redact_value(self.subscription, self.known_secrets))[
                 :64
             ],
-            "attempt": int(props.get("omega_attempt", 1)),
+            "attempt": attempt,
             "trace_id": trace_id,
         }
         self._active += 1
@@ -317,7 +415,7 @@ class ConsumerRuntime:
             action = await self.router.handle(
                 delivery,
                 outcome,
-                attempt=int(props.get("omega_attempt", 1)),
+                attempt=attempt,
                 settle_before_ack=settle_before_ack,
                 latency=latency,
             )

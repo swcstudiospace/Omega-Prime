@@ -461,3 +461,31 @@ def test_legacy_list_buckets_are_replayed_on_push() -> None:
     )
     assert state["review"]["approved"]["reviewer"] == "reviewer"
     assert state["pending_by_head"] == {}
+
+
+def test_process_orders_nonpartitioned_topic_positions() -> None:
+    """Pulsar reports partition=-1 for nonpartitioned topics (sdlc/review,
+    sdlc/ci); stale redelivery must still be detected there."""
+    context = _FunctionContext()
+    context.position = (-1, 4, 1)
+    process(_event("omega.sdlc.pr.pushed").to_bytes(), context)
+    context.position = (-1, 4, 3)
+    process(
+        _event(
+            "omega.sdlc.pr.pushed", head_sha="head-b", before_sha="head-a"
+        ).to_bytes(),
+        context,
+    )
+    context.position = (-1, 4, 2)
+    process(
+        _event(
+            "omega.sdlc.pr.pushed", head_sha="head-c", before_sha="head-b"
+        ).to_bytes(),
+        context,
+    )
+    _, newer, stale = context.published
+    assert json.loads(newer[1])["head_sha"] == "head-b"
+    assert stale == newer
+    persisted = json.loads(next(iter(context.state.values())))
+    # Partition -1 is normalized to the single partition 0 of the source topic.
+    assert list(persisted["source_positions"].values()) == [[0, 4, 3]]

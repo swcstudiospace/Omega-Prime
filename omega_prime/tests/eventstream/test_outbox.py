@@ -787,6 +787,8 @@ def test_outbox_serve_records_redacted_failures_and_resumes(tmp_path: Path) -> N
             with pytest.raises(asyncio.CancelledError):
                 await task
 
+    asyncio.run(scenario())
+
 
 def test_outbox_secret_supplier_failure_and_producer_mismatch_are_typed(
     tmp_path: Path,
@@ -923,5 +925,57 @@ def test_outbox_validation_edges_for_config_clock_and_relay_identity(
             SQLiteOutbox._plain_json({1: "nope"})  # type: ignore[dict-item]
         with pytest.raises(ContractError, match="not valid JSON"):
             SQLiteOutbox._json_bytes({1, 2, 3})  # type: ignore[arg-type]
+
+    asyncio.run(scenario())
+
+
+def test_outbox_serve_bounds_failed_send_self_wake(tmp_path: Path) -> None:
+    """A failing publisher that triggers relay_wake must not hot-loop serve()."""
+
+    async def scenario() -> None:
+        outbox = SQLiteOutbox(
+            tmp_path / "outbox.sqlite3", producer_name="test-producer"
+        )
+        with outbox.transaction() as connection:
+            outbox.append(connection, make_request("self-wake"))
+
+        class SelfWakingFailingPublisher:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def publish(self, request: PublishRequest) -> PublishReceipt:
+                self.calls += 1
+                # PulsarEventBus invokes relay_wake (wired to notify_reconnected)
+                # from its send-error path before serve() waits.
+                outbox.notify_reconnected()
+                raise RuntimeError("broker rejected send")
+
+            async def close(self) -> None:
+                return None
+
+        waits: list[float] = []
+        gate = asyncio.Event()
+
+        async def failure_wait(delay: float) -> None:
+            waits.append(delay)
+            if len(waits) >= 3:
+                await gate.wait()
+
+        publisher = SelfWakingFailingPublisher()
+        task = asyncio.create_task(outbox.serve(publisher, failure_wait=failure_wait))
+        try:
+            for _ in range(200):
+                if len(waits) >= 3:
+                    break
+                await asyncio.sleep(0.005)
+            await asyncio.sleep(0.05)
+            assert publisher.calls == 3
+            assert len(waits) == 3
+            assert waits[0] > 0
+            assert waits[0] < waits[1] < waits[2]
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
     asyncio.run(scenario())

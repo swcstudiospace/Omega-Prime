@@ -8,8 +8,11 @@ import { AuthenticationError, ConfigurationError, ContractError } from "../src/e
 import { NATIVE_REDELIVERY_SCHEMA_SAMPLES, NATIVE_TOPIC_SCHEMAS } from "../src/native-schemas.generated.js";
 import { EventStreamConfig } from "../src/config.js";
 import {
+  AUTH_ENCRYPTION_KEY_NAME,
   createPulsarEventBus,
   PulsarEventBus,
+  requiresAuthDecryption,
+  requiresAuthEncryption,
   loadPulsarClient,
   nativeJsonMetadataForTopic,
   toNativeSequenceId
@@ -30,6 +33,19 @@ const makeEvent = (type = "omega.sdlc.pr.pushed") =>
         : { repo: "repo", number: 3, head_sha: "head", actor: "test", before_sha: "base" },
     ...(type === "omega.sdlc.pr.pushed" ? { omegakey: "repo#3" } : {})
   });
+async function writeKeyPair(): Promise<{ directory: string; publicKeyPath: string; privateKeyPath: string }> {
+  const directory = await mkdtemp(join(tmpdir(), "eventstream-auth-"));
+  const publicKeyPath = join(directory, "omega-auth.pub.pem");
+  const privateKeyPath = join(directory, "omega-auth.key.pem");
+  for (const path of [publicKeyPath, privateKeyPath]) {
+    await writeFile(path, `-----BEGIN TEST KEY-----\n${randomBytes(16).toString("hex")}\n-----END TEST KEY-----\n`, {
+      mode: 0o600
+    });
+    await chmod(path, 0o600);
+  }
+  return { directory, publicKeyPath, privateKeyPath };
+}
+
 interface CapturedNativeSend {
   readonly data: Buffer;
   readonly properties: Record<string, string>;
@@ -90,7 +106,7 @@ describe("lazy Pulsar adapter", () => {
       expect(nativeJsonMetadataForTopic(topic).schema).toBe(schema);
     }
   });
-  it("refuses auth-family publication without a file-backed key and crypto provider", async () => {
+  it("refuses auth-family publication without file-backed encryption keys", async () => {
     const bus = new PulsarEventBus({
       client: {
         createProducer: async () => ({ send: async () => ({}), close: async () => undefined }),
@@ -474,44 +490,156 @@ describe("lazy Pulsar adapter", () => {
   });
 
 
-  it("encrypts auth-family payloads even when publishing to a retry topic", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "eventstream-auth-"));
-    const encryptionKey = join(directory, "key");
+  it("publishes auth-family payloads with native Pulsar encryption, including retry topics", async () => {
+    const { directory, publicKeyPath, privateKeyPath } = await writeKeyPair();
     try {
-      await writeFile(encryptionKey, "key-material", { mode: 0o600 });
-      await chmod(encryptionKey, 0o600);
       const authEvent = makeEvent("omega.auth.session.login_started");
+      const producerOptions: { topic: string; options: PulsarProducerOptions }[] = [];
+      const subscribeOptions: PulsarSubscribeOptions[] = [];
       let sent:
         | { data: Uint8Array; properties: Readonly<Record<string, string>>; partitionKey: string }
         | undefined;
-      let encrypted = 0;
-      let decrypted = 0;
-      const transform = (bytes: Uint8Array) => Uint8Array.from(bytes, (byte) => byte ^ 0xff);
       const bus = new PulsarEventBus({
         client: {
-          createProducer: async () => ({
-            send: async (message) => {
-              sent = {
-                data: message.data,
-                properties: message.properties,
-                partitionKey: message.partitionKey
-              };
-              return { messageId: "auth-published" };
-            },
+          createProducer: async (topic, options) => {
+            producerOptions.push({ topic, options });
+            return {
+              send: async (message) => {
+                sent = { data: message.data, properties: message.properties, partitionKey: message.partitionKey };
+                return { messageId: "auth-published" };
+              },
+              close: async () => undefined
+            };
+          },
+          subscribe: async (options) => {
+            subscribeOptions.push(options);
+            return {
+              receive: async () => {
+                if (sent === undefined) throw new Error("auth event has not been published");
+                // The native client decrypted the payload and reports the
+                // encryption context of the broker message.
+                return {
+                  data: sent.data,
+                  properties: sent.properties,
+                  partitionKey: sent.partitionKey,
+                  messageId: "auth-received",
+                  encryption: { encrypted: true, decryptionFailed: false }
+                };
+              },
+              acknowledge: async () => undefined,
+              negativeAcknowledge: () => undefined,
+              close: async () => undefined
+            };
+          },
+          createReader: async () => ({
+            readNext: async () => ({ data: authEvent.toBytes(), messageId: "reader-message" }),
+            seek: async () => undefined,
             close: async () => undefined
           }),
+          close: async () => undefined
+        },
+        config: new EventStreamConfig({
+          serviceUrl: "pulsar://127.0.0.1:26650",
+          encryptionKeyFile: publicKeyPath,
+          privateKeyFile: privateKeyPath
+        })
+      });
+
+      await bus.publish(
+        new PublishRequest({
+          event: authEvent,
+          topic: "persistent://omega/system/retry.auth-worker",
+          key: "box:gh"
+        })
+      );
+      expect(producerOptions).toHaveLength(1);
+      expect(producerOptions[0]?.options.encryption).toEqual({
+        keyName: AUTH_ENCRYPTION_KEY_NAME,
+        publicKeyPath
+      });
+      expect(AUTH_ENCRYPTION_KEY_NAME).toBe("omega-auth");
+      // Native Pulsar encrypts on the wire; the SDK hands over CloudEvent bytes
+      // and no application-level marker that the Python SDK would not honour.
+      expect(sent?.data).toEqual(authEvent.toBytes());
+      expect(sent?.properties.omega_encrypted).toBeUndefined();
+
+      const subscriber = await bus.subscribe("persistent://omega/system/retry.auth-worker", {
+        subscriptionName: "auth-worker",
+        mode: "Shared"
+      });
+      expect(subscribeOptions[0]?.decryption).toEqual({ privateKeyPath });
+      const delivery = await subscriber.receive();
+      expect(delivery?.event.id).toBe(authEvent.id);
+      await delivery?.ack();
+      await bus.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("encrypts redelivery of auth-origin events and leaves other topics in plaintext", async () => {
+    const { directory, publicKeyPath, privateKeyPath } = await writeKeyPair();
+    try {
+      const producers: { topic: string; options: PulsarProducerOptions }[] = [];
+      const bus = new PulsarEventBus({
+        client: {
+          createProducer: async (topic, options) => {
+            producers.push({ topic, options });
+            return { send: async () => ({}), close: async () => undefined };
+          },
+          subscribe: async () => {
+            throw new Error("not used");
+          },
+          createReader: async () => {
+            throw new Error("not used");
+          },
+          close: async () => undefined
+        },
+        config: new EventStreamConfig({
+          serviceUrl: "pulsar://127.0.0.1:26650",
+          encryptionKeyFile: publicKeyPath,
+          privateKeyFile: privateKeyPath
+        })
+      });
+      const event = makeEvent();
+      await bus.publish(new PublishRequest({ event, topic: "persistent://omega/sdlc/pr", key: "repo#3" }));
+      await bus.publish(
+        new PublishRequest({
+          event,
+          topic: "persistent://omega/system/dlq.auth-worker",
+          key: "repo#3",
+          properties: { omega_origin_topic: "persistent://omega/auth/session" }
+        })
+      );
+      expect(producers.map((entry) => entry.options.encryption?.keyName)).toEqual([undefined, "omega-auth"]);
+      expect(requiresAuthEncryption("omega.sdlc.pr.pushed", "persistent://omega/system/retry.gate", {})).toBe(false);
+      expect(requiresAuthDecryption("persistent://omega/auth/session")).toBe(true);
+      expect(requiresAuthDecryption("persistent://omega/system/dlq.gate")).toBe(true);
+      expect(requiresAuthDecryption("persistent://omega/sdlc/pr")).toBe(false);
+      await bus.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses auth-family deliveries that did not arrive natively encrypted", async () => {
+    const { directory, publicKeyPath, privateKeyPath } = await writeKeyPair();
+    try {
+      const authEvent = makeEvent("omega.auth.session.login_started");
+      const acknowledgements: string[] = [];
+      const bus = new PulsarEventBus({
+        client: {
+          createProducer: async () => ({ send: async () => undefined, close: async () => undefined }),
           subscribe: async () => ({
-            receive: async () => {
-              if (sent === undefined) throw new Error("auth event has not been published");
-              return {
-                data: sent.data,
-                properties: sent.properties,
-                partitionKey: sent.partitionKey,
-                messageId: "auth-received"
-              };
+            receive: async () => ({
+              data: authEvent.toBytes(),
+              messageId: "plaintext-auth",
+              encryption: { encrypted: false, decryptionFailed: false }
+            }),
+            acknowledge: async (messageId) => {
+              acknowledgements.push(String(messageId));
             },
-            acknowledge: async () => undefined,
-            negativeAcknowledge: () => undefined,
+            negativeAcknowledge: () => acknowledgements.push("nack"),
             close: async () => undefined
           }),
           createReader: async () => ({
@@ -523,83 +651,238 @@ describe("lazy Pulsar adapter", () => {
         },
         config: new EventStreamConfig({
           serviceUrl: "pulsar://127.0.0.1:26650",
-          encryptionKeyFile: encryptionKey
-        }),
-        crypto: {
-          encrypt: async (plaintext) => {
-            encrypted += 1;
-            return transform(plaintext);
-          },
-          decrypt: async (ciphertext) => {
-            decrypted += 1;
-            return transform(ciphertext);
-          }
-        }
-      });
-
-      await bus.publish(
-        new PublishRequest({
-          event: authEvent,
-          topic: "persistent://omega/system/retry.auth-worker",
-          key: "box:gh"
+          encryptionKeyFile: publicKeyPath,
+          privateKeyFile: privateKeyPath
         })
-      );
-      expect(sent?.properties.omega_encrypted).toBe("true");
-      expect(sent?.data).not.toEqual(authEvent.toBytes());
-      const subscriber = await bus.subscribe("persistent://omega/system/retry.auth-worker", {
+      });
+      const subscriber = await bus.subscribe("persistent://omega/auth/session", {
         subscriptionName: "auth-worker",
         mode: "Shared"
       });
-      const delivery = await subscriber.receive();
-      expect(delivery?.event.id).toBe(authEvent.id);
-      expect(encrypted).toBe(1);
-      expect(decrypted).toBe(1);
-      await delivery?.ack();
+      await expect(subscriber.receive()).rejects.toThrow(AuthenticationError);
+      const reader = await bus.read("persistent://omega/auth/session");
+      // No native encryption context reported at all also fails closed.
+      await expect(reader.receive()).rejects.toThrow(AuthenticationError);
+      expect(acknowledgements).toEqual([]);
       await bus.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
   it("keeps encrypted auth messages unacked when key refresh is required", async () => {
-    const authEvent = makeEvent("omega.auth.session.login_started");
-    const acknowledgements: string[] = [];
+    const { directory, publicKeyPath, privateKeyPath } = await writeKeyPair();
+    try {
+      const authEvent = makeEvent("omega.auth.session.login_started");
+      const acknowledgements: string[] = [];
+      const failures: AuthenticationError[] = [];
+      const bus = new PulsarEventBus({
+        client: {
+          createProducer: async () => ({
+            send: async () => undefined,
+            close: async () => undefined
+          }),
+          subscribe: async () => ({
+            receive: async () => ({
+              data: authEvent.toBytes(),
+              messageId: "auth-message",
+              encryption: { encrypted: true, decryptionFailed: true }
+            }),
+            acknowledge: async (messageId) => {
+              acknowledgements.push(String(messageId));
+            },
+            negativeAcknowledge: () => acknowledgements.push("nack"),
+            close: async () => undefined
+          }),
+          createReader: async () => ({
+            readNext: async () => ({ data: authEvent.toBytes(), messageId: "reader-message" }),
+            seek: async () => undefined,
+            close: async () => undefined
+          }),
+          close: async () => undefined
+        },
+        config: new EventStreamConfig({
+          serviceUrl: "pulsar://127.0.0.1:26650",
+          encryptionKeyFile: publicKeyPath,
+          privateKeyFile: privateKeyPath
+        }),
+        onAuthenticationFailure: (error) => failures.push(error)
+      });
+      const subscriber = await bus.subscribe("persistent://omega/auth/session", {
+        subscriptionName: "auth-worker",
+        mode: "Shared"
+      });
+      await expect(subscriber.receive()).rejects.toThrow(AuthenticationError);
+      expect(acknowledgements).toEqual([]);
+      expect(failures).toHaveLength(1);
+      expect(bus.healthy).toBe(false);
+      await bus.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps poison messages from auth topics encrypted on the dead-letter topic", async () => {
+    const { directory, publicKeyPath, privateKeyPath } = await writeKeyPair();
+    try {
+      const producers: { topic: string; options: PulsarProducerOptions }[] = [];
+      const acknowledgements: string[] = [];
+      let delivered = false;
+      const bus = new PulsarEventBus({
+        client: {
+          createProducer: async (topic, options) => {
+            producers.push({ topic, options });
+            return { send: async () => ({}), close: async () => undefined };
+          },
+          subscribe: async () => ({
+            receive: async () => {
+              if (delivered) return new Promise<never>(() => undefined);
+              delivered = true;
+              return {
+                data: new TextEncoder().encode("not-a-cloudevent"),
+                properties: { ce_id: "poison-auth" },
+                messageId: "poison-auth-message",
+                encryption: { encrypted: true, decryptionFailed: false }
+              };
+            },
+            acknowledge: async (messageId) => {
+              acknowledgements.push(String(messageId));
+            },
+            negativeAcknowledge: () => undefined,
+            close: async () => undefined
+          }),
+          createReader: async () => {
+            throw new Error("not used");
+          },
+          close: async () => undefined
+        },
+        config: new EventStreamConfig({
+          serviceUrl: "pulsar://127.0.0.1:26650",
+          encryptionKeyFile: publicKeyPath,
+          privateKeyFile: privateKeyPath
+        })
+      });
+      const subscriber = await bus.subscribe("persistent://omega/auth/session", {
+        subscriptionName: "auth-worker",
+        mode: "Shared"
+      });
+      const controller = new AbortController();
+      const pending = subscriber.receive(controller.signal);
+      for (let attempt = 0; attempt < 50 && acknowledgements.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      controller.abort();
+      await pending.catch(() => undefined);
+      expect(producers).toHaveLength(1);
+      expect(producers[0]?.topic).toBe("persistent://omega/system/dlq.auth-worker");
+      expect(producers[0]?.options.encryption).toEqual({ keyName: "omega-auth", publicKeyPath });
+      expect(acknowledgements).toEqual(["poison-auth-message"]);
+      await bus.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("requires both key files before subscribing to auth or redelivery topics", async () => {
+    let subscribed = 0;
     const failures: AuthenticationError[] = [];
     const bus = new PulsarEventBus({
       client: {
-        createProducer: async () => ({
-          send: async () => undefined,
-          close: async () => undefined
-        }),
-        subscribe: async () => ({
-          receive: async () => ({
-            data: authEvent.toBytes(),
-            properties: { omega_encrypted: "true" },
-            messageId: "auth-message"
-          }),
-          acknowledge: async (messageId) => {
-            acknowledgements.push(String(messageId));
-          },
-          negativeAcknowledge: () => acknowledgements.push("nack"),
-          close: async () => undefined
-        }),
-        createReader: async () => ({
-          readNext: async () => ({ data: authEvent.toBytes(), messageId: "reader-message" }),
-          seek: async () => undefined,
-          close: async () => undefined
-        }),
+        createProducer: async () => ({ send: async () => undefined, close: async () => undefined }),
+        subscribe: async () => {
+          subscribed += 1;
+          throw new Error("must not subscribe without decryption keys");
+        },
+        createReader: async () => {
+          throw new Error("must not read without decryption keys");
+        },
         close: async () => undefined
       },
       onAuthenticationFailure: (error) => failures.push(error)
     });
-    const subscriber = await bus.subscribe("persistent://omega/auth/session", {
-      subscriptionName: "auth-worker",
-      mode: "Shared"
-    });
-    await expect(subscriber.receive()).rejects.toThrow(AuthenticationError);
-    expect(acknowledgements).toEqual([]);
-    expect(failures).toHaveLength(1);
-    expect(bus.healthy).toBe(false);
+    await expect(
+      bus.subscribe("persistent://omega/auth/session", { subscriptionName: "auth-worker", mode: "Shared" })
+    ).rejects.toThrow(AuthenticationError);
+    await expect(bus.read("persistent://omega/system/dlq.gate")).rejects.toThrow(AuthenticationError);
+    expect(subscribed).toBe(0);
+    expect(failures).toHaveLength(2);
     await bus.close();
+  });
+
+  it("maps native encryption options onto the pinned pulsar-client API", async () => {
+    const { directory, publicKeyPath, privateKeyPath } = await writeKeyPair();
+    try {
+      const authEvent = makeEvent("omega.auth.session.login_started");
+      const producerConfigs: Readonly<Record<string, unknown>>[] = [];
+      const consumerConfigs: Readonly<Record<string, unknown>>[] = [];
+      const readerConfigs: Readonly<Record<string, unknown>>[] = [];
+      const nativeMessage = {
+        getData: () => Buffer.from(authEvent.toBytes()),
+        getProperties: () => ({ ...authEvent.toProperties() }),
+        getPartitionKey: () => "box:gh",
+        getMessageId: () => ({ toString: () => "1:1" }),
+        getPublishTimestamp: () => 1,
+        getRedeliveryCount: () => 0,
+        getEncryptionContext: () => ({ keys: [{ key: "omega-auth", value: Buffer.alloc(0) }], isDecryptionFailed: false })
+      };
+      class NativeClientFake {
+        async createProducer(options: Readonly<Record<string, unknown>>) {
+          producerConfigs.push(options);
+          return { send: async () => ({ toString: () => "sent" }), flush: async () => null, close: async () => null };
+        }
+        async subscribe(options: Readonly<Record<string, unknown>>) {
+          consumerConfigs.push(options);
+          return {
+            receive: async () => nativeMessage,
+            acknowledge: async () => null,
+            negativeAcknowledge: () => undefined,
+            close: async () => null
+          };
+        }
+        async createReader(options: Readonly<Record<string, unknown>>) {
+          readerConfigs.push(options);
+          return { readNext: async () => nativeMessage, seekTimestamp: async () => null, close: async () => null };
+        }
+        async close() {
+          return null;
+        }
+      }
+      class MessageIdFake {
+        static earliest() {
+          return { toString: () => "earliest" };
+        }
+      }
+      const bus = await createPulsarEventBus({
+        config: new EventStreamConfig({
+          serviceUrl: "pulsar://127.0.0.1:26650",
+          encryptionKeyFile: publicKeyPath,
+          privateKeyFile: privateKeyPath
+        }),
+        loader: async () => ({ default: { Client: NativeClientFake, MessageId: MessageIdFake } })
+      });
+      await bus.publish(
+        new PublishRequest({ event: authEvent, topic: "persistent://omega/auth/session", key: "box:gh" })
+      );
+      expect(producerConfigs[0]).toMatchObject({
+        topic: "persistent://omega/auth/session",
+        publicKeyPath,
+        encryptionKey: "omega-auth",
+        cryptoFailureAction: "FAIL"
+      });
+      const subscriber = await bus.subscribe("persistent://omega/auth/session", {
+        subscriptionName: "auth-worker",
+        mode: "Shared"
+      });
+      expect(consumerConfigs[0]).toMatchObject({ privateKeyPath, cryptoFailureAction: "FAIL" });
+      const delivery = await subscriber.receive();
+      expect(delivery?.event.id).toBe(authEvent.id);
+      const reader = await bus.read("persistent://omega/auth/session");
+      expect(readerConfigs[0]).toMatchObject({ privateKeyPath, cryptoFailureAction: "FAIL" });
+      expect((await reader.receive())?.event.id).toBe(authEvent.id);
+      await bus.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("maps broker authentication failures without retrying creation or exposing details", async () => {
@@ -672,6 +955,16 @@ describe("lazy Pulsar adapter", () => {
       OMEGA_EVENTSTREAM_TOKEN_FILE: "/run/credentials/eventstream-token"
     });
     expect(config.tokenFile).toBe("/run/credentials/eventstream-token");
+    // Same *_FILE names as the Python EventStreamConfig (ENCRYPTION_KEY_FILE /
+    // PRIVATE_KEY_FILE), so one deployment secret layout serves both SDKs.
+    const keyed = EventStreamConfig.fromEnv({
+      OMEGA_EVENTSTREAM_ENCRYPTION_KEY_FILE: "/run/credentials/omega-auth.pub.pem",
+      OMEGA_EVENTSTREAM_PRIVATE_KEY_FILE: "/run/credentials/omega-auth.key.pem"
+    });
+    expect(keyed.encryptionKeyFile).toBe("/run/credentials/omega-auth.pub.pem");
+    expect(keyed.privateKeyFile).toBe("/run/credentials/omega-auth.key.pem");
+    expect(String(keyed)).not.toContain("/run/credentials");
+    expect(() => EventStreamConfig.fromEnv({ OMEGA_EVENTSTREAM_PRIVATE_KEY: "inline" })).toThrow(ConfigurationError);
     expect(() => new EventStreamConfig({
       serviceUrl: "pulsar://broker.example:6650",
       adminUrl: "http://admin.example:8080",

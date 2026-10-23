@@ -6,7 +6,7 @@ import asyncio
 import json
 import sqlite3
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -22,6 +22,10 @@ from omega_prime.eventstream.ports import Publisher
 
 _MAX_REJECTION_REASON_CHARS = 512
 _MAX_REJECTION_REASON_BYTES = _MAX_REJECTION_REASON_CHARS * 4
+#: First relay back-off after a failed pass; doubles per consecutive failure.
+RELAY_FAILURE_INITIAL_DELAY = 0.1
+#: Upper bound on one relay back-off wait, in seconds.
+RELAY_FAILURE_MAX_DELAY = 30.0
 
 OutboxStatus: TypeAlias = Literal["pending", "sent", "rejected"]
 ConfigSupplier: TypeAlias = EventStreamConfig | Callable[[], EventStreamConfig]
@@ -852,10 +856,21 @@ class SQLiteOutbox:
                 sent += 1
             return sent
 
-    async def serve(self, publisher: Publisher) -> None:
-        """Run an event-woken relay in the caller-owned task until cancellation."""
+    async def serve(
+        self,
+        publisher: Publisher,
+        *,
+        failure_wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        """Run an event-woken relay in the caller-owned task until cancellation.
+
+        After a failed pass the relay backs off (``RELAY_FAILURE_INITIAL_DELAY``
+        doubling to ``RELAY_FAILURE_MAX_DELAY``) before honouring the next wake,
+        so a persistent broker failure cannot become a tight retry loop.
+        """
         self.bind_loop()
         self.notify_reconnected()
+        failure_delay = 0.0
         while True:
             self._wake_event.clear()
             try:
@@ -864,8 +879,18 @@ class SQLiteOutbox:
                 raise
             except Exception as exc:
                 self._last_failure = self._safe_failure(str(exc))
+                # The failing publish itself signals the relay wake (the
+                # adapter notifies on every settled send), so waiting on the
+                # wake alone would spin on a persistent broker failure. Back
+                # off before the next attempt; the wake still gates it.
+                failure_delay = min(
+                    RELAY_FAILURE_MAX_DELAY,
+                    max(RELAY_FAILURE_INITIAL_DELAY, failure_delay * 2),
+                )
+                await failure_wait(failure_delay)
                 await self._wake_event.wait()
                 continue
+            failure_delay = 0.0
             if await self.pending():
                 continue
             await self._wake_event.wait()

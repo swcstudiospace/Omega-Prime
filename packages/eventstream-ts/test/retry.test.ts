@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { CloudEvent, PublishRequest } from "../src/envelope.js";
+import type { PublishReceipt } from "../src/envelope.js";
 import { AuthenticationError, PermanentError } from "../src/errors.js";
 import { decorrelatedJitter, withCreationBackoff } from "../src/backoff.js";
 import { ManualClock, MemoryEventBus } from "../src/memory.js";
 import {
   acknowledgeIfNotTargeted,
   applyRetryOutcome,
+  buildDeadLetterRequest,
   retryTopicsFor,
   runSharedRetryHandoff,
   shouldProcessTargeted
@@ -300,5 +302,104 @@ describe("retry policy", () => {
       await deadLetter.ack();
       await bus.close();
     }
+  });
+});
+
+describe("dead-letter blocked signal parity", () => {
+  const taskEvent = new CloudEvent({
+    specversion: "1.0",
+    id: "ce-task",
+    source: "test://retry",
+    type: "omega.task.state_changed",
+    datacontenttype: "application/json",
+    dataschema: "urn:omega:schema:omega.task.state_changed:1",
+    data: { task_id: "task-9", previous_state: "queued", state: "running", sequence: 1, actor: "test" }
+  });
+
+  it("publishes the same omega.control.signal.blocked envelope as the Python runtime", async () => {
+    const calls: string[] = [];
+    const published: PublishRequest[] = [];
+    const taskDelivery: MessageDelivery = {
+      event: taskEvent,
+      metadata: {
+        topic: "persistent://omega/task/state",
+        key: "task-9",
+        properties: {
+          ce_id: taskEvent.id,
+          omega_attempt: "2",
+          omega_retry_target: "gate",
+          omega_failure_history: '[{"attempt":1,"reason":"temporary"}]'
+        },
+        redelivered: false,
+        publishedAt: 1
+      },
+      ack: async () => {
+        calls.push("ack");
+      },
+      nack: async () => {
+        calls.push("nack");
+      }
+    };
+    const result = await applyRetryOutcome({
+      delivery: taskDelivery,
+      outcome: { kind: "dead-letter", reason: "handler gave up" },
+      publisher: {
+        publish: async (request) => {
+          calls.push("publish");
+          published.push(request);
+          return { topic: request.topic, eventId: request.event.id, publishedAt: 2 } satisfies PublishReceipt;
+        }
+      },
+      subscription: "gate",
+      attempt: 2,
+      previousDelaySeconds: 1
+    });
+    expect(result).toEqual({ kind: "dead-letter", topic: "persistent://omega/system/dlq.gate" });
+    expect(calls).toEqual(["publish", "ack"]);
+    const [request] = published;
+    if (request === undefined) throw new Error("dead-letter was not published");
+    // Expected values captured from omega_prime.eventstream.retry.RetryRouter
+    // for the identical delivery (same id scheme, key, payload and history).
+    expect(request.topic).toBe("persistent://omega/system/dlq.gate");
+    expect(request.key).toBe('dlq:["persistent://omega/task/state","task-9"]');
+    expect(request.event.id).toBe("dlq:gate:ce-task");
+    expect(request.event.source).toBe("test://retry");
+    expect(request.event.type).toBe("omega.control.signal.blocked");
+    expect(request.event.dataschema).toBe("urn:omega:schema:omega.control.signal.blocked:1");
+    expect(request.event.data).toEqual({
+      kind: "dlq",
+      origin_topic: "persistent://omega/task/state",
+      aggregate_key: "task-9",
+      source_ce_id: "ce-task",
+      reason: "handler gave up",
+      history: [
+        { attempt: 1, reason: "temporary" },
+        { attempt: 2, reason: "handler gave up" }
+      ]
+    });
+    expect(request.properties.omega_attempt).toBe("2");
+    expect(request.properties.omega_origin_topic).toBe("persistent://omega/task/state");
+    expect(request.properties.omega_source_ce_id).toBe("ce-task");
+    expect(request.properties.omega_last_error).toBe("handler gave up");
+    expect(request.properties.omega_retry_target).toBeUndefined();
+    expect(JSON.parse(request.properties.omega_failure_history ?? "[]")).toEqual([
+      { attempt: 1, reason: "temporary" },
+      { attempt: 2, reason: "handler gave up" }
+    ]);
+  });
+
+  it("keys pull-request dead letters by repo#number with a pr blocked payload", () => {
+    const request = buildDeadLetterRequest(delivery([]), "gate", 5, "exhausted");
+    expect(request.key).toBe("repo#5");
+    expect(request.event.id).toBe("dlq:gate:ce-retry");
+    expect(request.event.type).toBe("omega.control.signal.blocked");
+    expect(request.event.data).toEqual({
+      kind: "pr",
+      repo: "repo",
+      number: 5,
+      head_sha: "head",
+      actor: "test",
+      reason: "exhausted"
+    });
   });
 });

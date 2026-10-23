@@ -26,6 +26,34 @@ export interface PulsarMessage {
   readonly redeliveryCount?: number;
   readonly sequenceId?: number | string;
   readonly publishTimestamp?: number;
+  /**
+   * Native end-to-end encryption context. `encrypted` is true when the broker
+   * message carried Pulsar encryption metadata; `decryptionFailed` mirrors the
+   * native flag. Undefined when the client cannot report encryption state.
+   */
+  readonly encryption?: PulsarMessageEncryption;
+}
+
+export interface PulsarMessageEncryption {
+  readonly encrypted: boolean;
+  readonly decryptionFailed: boolean;
+}
+
+/**
+ * Pulsar encryption key name shared with the Python SDK
+ * (omega_prime.eventstream.adapters.pulsar, ``encryption_key="omega-auth"``).
+ * Both SDKs hand the same PEM files to the native C++ DefaultCryptoKeyReader,
+ * so either language can decrypt what the other published.
+ */
+export const AUTH_ENCRYPTION_KEY_NAME = "omega-auth";
+
+export interface PulsarProducerEncryption {
+  readonly keyName: string;
+  readonly publicKeyPath: string;
+}
+
+export interface PulsarConsumerDecryption {
+  readonly privateKeyPath: string;
 }
 
 export interface PulsarProducer {
@@ -44,6 +72,8 @@ export interface PulsarProducerOptions {
   readonly initialSequenceId: number;
   /** Generated native JSON schema metadata, converted to pinned-peer SchemaInfo by the native adapter. */
   readonly jsonMetadata?: NativeJsonMetadata;
+  /** Native Pulsar end-to-end encryption (crypto failure action FAIL). */
+  readonly encryption?: PulsarProducerEncryption;
 }
 
 export interface StructuredJsonCodec {
@@ -76,12 +106,15 @@ export interface PulsarSubscribeOptions {
   readonly initialPosition: "Earliest" | "Latest";
   readonly receiverQueueSize: number;
   readonly maxInFlight: number;
+  /** Native decryption for auth-family and system redelivery topics (FAIL). */
+  readonly decryption?: PulsarConsumerDecryption;
 }
 
 export interface PulsarReaderOptions {
   readonly topic: string;
   readonly startAt?: number | Date;
   readonly receiverQueueSize: number;
+  readonly decryption?: PulsarConsumerDecryption;
 }
 
 export interface PulsarClient {
@@ -97,15 +130,9 @@ export interface PulsarClientConstructor {
 
 export type PulsarModuleLoader = () => Promise<unknown>;
 
-export interface PayloadCrypto {
-  encrypt(plaintext: Uint8Array, key: string): Promise<Uint8Array>;
-  decrypt(ciphertext: Uint8Array, key: string): Promise<Uint8Array>;
-}
-
 export interface PulsarEventBusOptions {
   readonly client?: PulsarClient;
   readonly config?: EventStreamConfig;
-  readonly crypto?: PayloadCrypto;
   readonly structuredJsonCodec?: StructuredJsonCodec;
   readonly creationRetry?: CreationRetryOptions;
   readonly onAuthenticationFailure?: (error: AuthenticationError) => void;
@@ -137,6 +164,7 @@ interface NativePulsarMessage {
   getMessageId(): NativePulsarMessageId;
   getPublishTimestamp(): number;
   getRedeliveryCount(): number;
+  getEncryptionContext?(): { readonly isDecryptionFailed: boolean } | null;
 }
 
 interface NativeProducerConfig {
@@ -148,6 +176,9 @@ interface NativeProducerConfig {
     readonly name: string;
     readonly schema: string;
   };
+  readonly publicKeyPath?: string;
+  readonly encryptionKey?: string;
+  readonly cryptoFailureAction?: "FAIL";
 }
 
 interface NativeProducerMessage {
@@ -173,6 +204,8 @@ interface NativeConsumerConfig {
   readonly receiverQueueSizeAcrossPartitions: number;
   readonly batchIndexAckEnabled: true;
   readonly keySharedPolicy?: { readonly keyShareMode: "AutoSplit" };
+  readonly privateKeyPath?: string;
+  readonly cryptoFailureAction?: "FAIL";
 }
 
 interface NativePulsarConsumer {
@@ -186,6 +219,8 @@ interface NativeReaderConfig {
   readonly topic: string;
   readonly startMessageId: NativePulsarMessageId;
   readonly receiverQueueSize: number;
+  readonly privateKeyPath?: string;
+  readonly cryptoFailureAction?: "FAIL";
 }
 
 interface NativePulsarReader {
@@ -242,7 +277,6 @@ function nativeMessageIdConstructor(value: unknown): NativePulsarMessageIdConstr
 export async function createPulsarEventBus(options: {
   readonly config?: EventStreamConfig;
   readonly loader?: PulsarModuleLoader;
-  readonly crypto?: PayloadCrypto;
   readonly structuredJsonCodec?: StructuredJsonCodec;
   readonly creationRetry?: CreationRetryOptions;
   readonly onAuthenticationFailure?: (error: AuthenticationError) => void;
@@ -266,7 +300,6 @@ export async function createPulsarEventBus(options: {
   return new PulsarEventBus({
     client: new NativePulsarClientAdapter(nativeClient, messageIds),
     config,
-    ...(options.crypto === undefined ? {} : { crypto: options.crypto }),
     ...(options.structuredJsonCodec === undefined ? {} : { structuredJsonCodec: options.structuredJsonCodec }),
     ...(options.creationRetry === undefined ? {} : { creationRetry: options.creationRetry }),
     ...(options.onAuthenticationFailure === undefined
@@ -296,7 +329,13 @@ function toPulsarMessage(message: NativePulsarMessage): PulsarMessage {
   const properties = Object.freeze({ ...message.getProperties() });
   const partitionKey = message.getPartitionKey();
   const sequenceId = properties.omega_sequence_id;
+  const context = typeof message.getEncryptionContext === "function" ? message.getEncryptionContext() : undefined;
+  const encryption: PulsarMessageEncryption | undefined =
+    context === undefined
+      ? undefined
+      : Object.freeze({ encrypted: context !== null, decryptionFailed: context?.isDecryptionFailed === true });
   return Object.freeze({
+    ...(encryption === undefined ? {} : { encryption }),
     data: message.getData(),
     properties,
     ...(partitionKey.length === 0 ? {} : { partitionKey }),
@@ -412,7 +451,14 @@ class NativePulsarClientAdapter implements PulsarClient {
       topic,
       producerName: options.producerName,
       initialSequenceId: options.initialSequenceId,
-      ...(schema === undefined ? {} : { schema })
+      ...(schema === undefined ? {} : { schema }),
+      ...(options.encryption === undefined
+        ? {}
+        : {
+            publicKeyPath: options.encryption.publicKeyPath,
+            encryptionKey: options.encryption.keyName,
+            cryptoFailureAction: "FAIL" as const
+          })
     });
     return new NativePulsarProducerAdapter(producer);
   }
@@ -427,7 +473,10 @@ class NativePulsarClientAdapter implements PulsarClient {
       receiverQueueSize: options.receiverQueueSize,
       receiverQueueSizeAcrossPartitions: options.maxInFlight,
       batchIndexAckEnabled: true,
-      ...(options.mode === "Key_Shared" ? { keySharedPolicy: { keyShareMode: "AutoSplit" } } : {})
+      ...(options.mode === "Key_Shared" ? { keySharedPolicy: { keyShareMode: "AutoSplit" } } : {}),
+      ...(options.decryption === undefined
+        ? {}
+        : { privateKeyPath: options.decryption.privateKeyPath, cryptoFailureAction: "FAIL" as const })
     });
     return new NativePulsarConsumerAdapter(consumer);
   }
@@ -436,7 +485,10 @@ class NativePulsarClientAdapter implements PulsarClient {
     const reader = await this.#client.createReader({
       topic: options.topic,
       startMessageId: this.#messageIds.earliest(),
-      receiverQueueSize: options.receiverQueueSize
+      receiverQueueSize: options.receiverQueueSize,
+      ...(options.decryption === undefined
+        ? {}
+        : { privateKeyPath: options.decryption.privateKeyPath, cryptoFailureAction: "FAIL" as const })
     });
     try {
       if (options.startAt !== undefined) {
@@ -562,6 +614,31 @@ function isAuthenticationFailure(error: unknown): boolean {
   );
 }
 
+const AUTH_TOPIC_PREFIX = "persistent://omega/auth/";
+
+function isSystemRedeliveryTopic(topic: string): boolean {
+  return /^persistent:\/\/omega\/system\/(?:retry|dlq)\./.test(topic);
+}
+
+/**
+ * Same rule as the Python adapter's ``_requires_encryption``: auth-family
+ * events, and anything on a system retry/DLQ topic whose origin is an auth
+ * topic, are published with native Pulsar encryption.
+ */
+export function requiresAuthEncryption(
+  eventType: string,
+  topic: string,
+  properties: Readonly<Record<string, string>>
+): boolean {
+  const origin = properties.omega_origin_topic ?? "";
+  return eventType.startsWith("omega.auth.") || (isSystemRedeliveryTopic(topic) && origin.startsWith(AUTH_TOPIC_PREFIX));
+}
+
+/** Python parity: consumers/readers on auth or system redelivery topics decrypt (FAIL). */
+export function requiresAuthDecryption(topic: string): boolean {
+  return topic.startsWith(AUTH_TOPIC_PREFIX) || isSystemRedeliveryTopic(topic);
+}
+
 function redactedStringProperties(properties: Readonly<Record<string, string>> = {}): Record<string, string> {
   const redacted = redactValue({ ...properties });
   if (!isPlainRecord(redacted)) return {};
@@ -606,7 +683,6 @@ function poisonHistory(properties: Readonly<Record<string, string>>, reason: str
 export class PulsarEventBus implements EventBus {
   readonly #client: PulsarClient | undefined;
   readonly #config: EventStreamConfig;
-  readonly #crypto: PayloadCrypto | undefined;
   readonly #structuredJsonCodec: StructuredJsonCodec;
   readonly #creationRetry: CreationRetryOptions;
   readonly #onAuthenticationFailure: ((error: AuthenticationError) => void) | undefined;
@@ -621,7 +697,6 @@ export class PulsarEventBus implements EventBus {
     this.#client = options.client;
     this.#config = options.config ?? new EventStreamConfig();
     this.#structuredJsonCodec = options.structuredJsonCodec ?? cloudEventJsonCodec;
-    this.#crypto = options.crypto;
     const creationRetry = options.creationRetry ?? {};
     this.#creationRetry = {
       ...creationRetry,
@@ -647,28 +722,18 @@ export class PulsarEventBus implements EventBus {
       ...request.event.toProperties()
     };
     if (request.sequenceId !== undefined) properties.omega_sequence_id = String(request.sequenceId);
-    let payload = data;
-    if (request.event.type.startsWith("omega.auth.")) {
-      const key = await this.#readEncryptionKey();
-      const crypto = this.#crypto;
-      if (crypto === undefined) throw this.#authenticationFailure("auth-family encryption capability is unavailable");
-      try {
-        payload = await crypto.encrypt(data, key);
-      } catch {
-        throw this.#authenticationFailure("auth-family payload encryption failed");
-      }
-      this.#authenticationHealthy = true;
-      properties.omega_encrypted = "true";
-    }
+    const encryption = requiresAuthEncryption(request.event.type, request.topic, request.properties)
+      ? await this.#producerEncryption()
+      : undefined;
     const sequenceId = request.sequenceId === undefined ? undefined : toNativeSequenceId(request.sequenceId);
-    const producer = await this.#producer(client, request.topic, request.producerName);
+    const producer = await this.#producer(client, request.topic, request.producerName, encryption);
     const deliverAfterMs =
       request.deliverAfterSeconds === undefined
         ? undefined
         : Math.max(0, Math.floor(request.deliverAfterSeconds * 1000));
     try {
       await producer.send({
-        data: payload,
+        data,
         properties: Object.freeze(properties),
         partitionKey: request.key,
         ...(sequenceId === undefined ? {} : { sequenceId }),
@@ -708,6 +773,7 @@ export class PulsarEventBus implements EventBus {
     if (!Number.isSafeInteger(maxInFlight) || maxInFlight < 1) {
       throw new ContractError("max in-flight must be a positive safe integer");
     }
+    const decryption = requiresAuthDecryption(topic) ? await this.#consumerDecryption() : undefined;
     const consumer = await this.#createResource(
       () =>
         client.subscribe({
@@ -716,13 +782,14 @@ export class PulsarEventBus implements EventBus {
           mode: options.mode,
           initialPosition: options.initialPosition ?? "Earliest",
           receiverQueueSize,
-          maxInFlight
+          maxInFlight,
+          ...(decryption === undefined ? {} : { decryption })
         }),
       "consumer"
     );
     const subscriber = new PulsarSubscriber(
       consumer,
-      this.#decodeMessage.bind(this),
+      (message: PulsarMessage) => this.#decodeMessage(message, topic),
       topic,
       (error, operation) => this.#normalizePulsarFailure(error, operation),
       (message, error) => this.#publishPoisonMessage(message, topic, options.subscriptionName, error)
@@ -746,18 +813,20 @@ export class PulsarEventBus implements EventBus {
     if (!Number.isSafeInteger(receiverQueueSize) || receiverQueueSize < 1) {
       throw new ContractError("reader queue size must be a positive safe integer");
     }
+    const decryption = requiresAuthDecryption(topic) ? await this.#consumerDecryption() : undefined;
     const reader = await this.#createResource(
       () =>
         client.createReader({
           topic,
           ...(options.startAt === undefined ? {} : { startAt: options.startAt }),
-          receiverQueueSize
+          receiverQueueSize,
+          ...(decryption === undefined ? {} : { decryption })
         }),
       "reader"
     );
     const wrapped = new PulsarEventReader(
       reader,
-      this.#decodeMessage.bind(this),
+      (message: PulsarMessage) => this.#decodeMessage(message, topic),
       topic,
       (error, operation) => this.#normalizePulsarFailure(error, operation)
     );
@@ -795,8 +864,14 @@ export class PulsarEventBus implements EventBus {
     if (errors.length > 0) throw new PulsarError(`Pulsar shutdown failed for ${errors.length} resource(s)`);
   }
 
-  async #producer(client: PulsarClient, topic: string, producerName?: string): Promise<PulsarProducer> {
-    const cacheKey = `${topic}\0${producerName ?? ""}`;
+  async #producer(
+    client: PulsarClient,
+    topic: string,
+    producerName?: string,
+    encryption?: PulsarProducerEncryption
+  ): Promise<PulsarProducer> {
+    // Encrypting and plaintext producers are distinct native resources.
+    const cacheKey = `${topic}\0${producerName ?? ""}\0${encryption === undefined ? "plain" : "encrypted"}`;
     let producerPromise = this.#producers.get(cacheKey);
     if (producerPromise === undefined) {
       producerPromise = withCreationBackoff(
@@ -806,7 +881,8 @@ export class PulsarEventBus implements EventBus {
             initialSequenceId: 0,
             ...(/^persistent:\/\/omega\/system\/(?:retry|dlq)\./.test(topic)
               ? {}
-              : { jsonMetadata: nativeJsonMetadataForTopic(topic) })
+              : { jsonMetadata: nativeJsonMetadataForTopic(topic) }),
+            ...(encryption === undefined ? {} : { encryption })
           }),
         this.#creationRetry
       );
@@ -832,26 +908,20 @@ export class PulsarEventBus implements EventBus {
     }
   }
 
-  async #decodeMessage(message: PulsarMessage): Promise<CloudEvent> {
-    const encrypted = message.properties?.omega_encrypted === "true";
-    if (message.properties?.omega_encrypted !== undefined && !encrypted) {
-      throw this.#authenticationFailure("event payload encryption marker is invalid");
+  async #decodeMessage(message: PulsarMessage, topic: string): Promise<CloudEvent> {
+    // Native Pulsar decrypts before delivery (crypto failure action FAIL), so
+    // the payload is plaintext here. Undecryptable messages surface as an
+    // authentication failure and stay unacknowledged for key refresh.
+    if (message.encryption?.decryptionFailed === true) {
+      throw this.#authenticationFailure("auth-family payload decryption failed");
     }
-    let data = message.data;
-    if (encrypted) {
-      const key = await this.#readEncryptionKey();
-      const crypto = this.#crypto;
-      if (crypto === undefined) throw this.#authenticationFailure("auth-family decrypt capability is unavailable");
-      try {
-        data = await crypto.decrypt(data, key);
-      } catch {
-        throw this.#authenticationFailure("auth-family payload decryption failed");
+    const event = this.#structuredJsonCodec.decode(message.data);
+    if (requiresAuthEncryption(event.type, topic, message.properties ?? {})) {
+      if (message.encryption?.encrypted !== true) {
+        throw this.#authenticationFailure("auth-family payload encryption policy was violated");
       }
+      this.#authenticationHealthy = true;
     }
-    const event = this.#structuredJsonCodec.decode(data);
-    const isAuthEvent = event.type.startsWith("omega.auth.");
-    if (isAuthEvent !== encrypted) throw this.#authenticationFailure("auth-family payload encryption policy was violated");
-    if (isAuthEvent) this.#authenticationHealthy = true;
     return event;
   }
 
@@ -865,17 +935,25 @@ export class PulsarEventBus implements EventBus {
     const properties = redactedStringProperties(message.properties);
     const reason = safeErrorMessage(error);
     const topic = `persistent://omega/system/dlq.${subscription}`;
+    // Bytes from an auth topic (or an auth-origin redelivery) stay encrypted
+    // on the DLQ, matching the Python adapter's preserved-origin rule.
+    const origin = properties.omega_origin_topic ?? sourceTopic;
+    const encryption =
+      sourceTopic.startsWith(AUTH_TOPIC_PREFIX) || origin.startsWith(AUTH_TOPIC_PREFIX)
+        ? await this.#producerEncryption()
+        : undefined;
     const producer = await this.#producer(
       this.#requireClient(),
       topic,
-      `omega-dlq-${subscription}`
+      `omega-dlq-${subscription}`,
+      encryption
     );
     try {
       await producer.send({
         data: Uint8Array.from(message.data),
         properties: Object.freeze({
           ...properties,
-          omega_origin_topic: sourceTopic,
+          omega_origin_topic: origin.startsWith(AUTH_TOPIC_PREFIX) ? origin : sourceTopic,
           omega_origin_message_id: safeErrorMessage(message.messageId),
           omega_origin_ce_id: properties.omega_origin_ce_id ?? properties.ce_id ?? "unknown",
           omega_poison: "true",
@@ -889,12 +967,34 @@ export class PulsarEventBus implements EventBus {
     }
   }
 
-  async #readEncryptionKey(): Promise<string> {
-    try {
-      return await this.#config.readSecret("encryptionKeyFile");
-    } catch {
-      throw this.#authenticationFailure("auth-family encryption key is unavailable");
+  /**
+   * Validate both PEM files (mode 0600, readable, nonempty) on every protected
+   * operation, like the Python adapter's ``_crypto_reader``, and return the
+   * paths the native client reads when it encrypts or decrypts.
+   */
+  async #encryptionKeyPaths(): Promise<{ readonly publicKeyPath: string; readonly privateKeyPath: string }> {
+    const publicKeyPath = this.#config.encryptionKeyFile;
+    const privateKeyPath = this.#config.privateKeyFile;
+    if (publicKeyPath === undefined || privateKeyPath === undefined) {
+      throw this.#authenticationFailure("auth payload encryption keys are not configured");
     }
+    try {
+      await this.#config.readSecret("encryptionKeyFile");
+      await this.#config.readSecret("privateKeyFile");
+    } catch {
+      throw this.#authenticationFailure("auth payload encryption keys are unavailable");
+    }
+    return { publicKeyPath, privateKeyPath };
+  }
+
+  async #producerEncryption(): Promise<PulsarProducerEncryption> {
+    const { publicKeyPath } = await this.#encryptionKeyPaths();
+    return Object.freeze({ keyName: AUTH_ENCRYPTION_KEY_NAME, publicKeyPath });
+  }
+
+  async #consumerDecryption(): Promise<PulsarConsumerDecryption> {
+    const { privateKeyPath } = await this.#encryptionKeyPaths();
+    return Object.freeze({ privateKeyPath });
   }
 
   #authenticationFailure(message: string): AuthenticationError {

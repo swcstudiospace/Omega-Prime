@@ -96,6 +96,41 @@ describe("process-local outbox", () => {
     const outbox = new Outbox({ component: "test", maxBytes: 4096 });
     expect(outbox.append(event("ce-first"), topic, "repo#3").sequenceId).toBe("1");
   });
+  it("still publishes later rows when cleanupSent runs during an awaited publish", async () => {
+    const outbox = new Outbox({ component: "worker", maxBytes: 8192 });
+    for (const id of ["ce-a", "ce-b", "ce-c"]) {
+      outbox.append(event(id), "persistent://omega/sdlc/pr", "repo#3");
+    }
+    const published: string[] = [];
+    let releaseB!: () => void;
+    const bGate = new Promise<void>((resolve) => {
+      releaseB = resolve;
+    });
+    let bStarted!: () => void;
+    const bInFlight = new Promise<void>((resolve) => {
+      bStarted = resolve;
+    });
+    const publisher: Publisher = {
+      publish: async (request) => {
+        published.push(request.event.id);
+        if (request.event.id === "ce-b") {
+          bStarted();
+          await bGate;
+        }
+        return { topic: request.topic, eventId: request.event.id, publishedAt: 1 };
+      }
+    };
+    const relay = outbox.relayOnce(publisher);
+    await bInFlight;
+    // A is already sent: cleanup splices it out while B's publish is pending.
+    expect(outbox.cleanupSent()).toBe(1);
+    releaseB();
+    const receipts = await relay;
+    expect(published).toEqual(["ce-a", "ce-b", "ce-c"]);
+    expect(receipts.map((receipt) => receipt.eventId)).toEqual(["ce-a", "ce-b", "ce-c"]);
+    expect(outbox.pendingCount).toBe(0);
+  });
+
   it("wakes the relay on append and drains it on event-driven shutdown", async () => {
     const outbox = new Outbox({ component: "worker", maxBytes: 4096 });
     const published: string[] = [];

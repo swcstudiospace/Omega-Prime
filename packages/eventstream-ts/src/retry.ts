@@ -1,7 +1,7 @@
 import { MAX_BUSINESS_ATTEMPTS, MAX_RETRY_DELAY_SECONDS, decorrelatedJitter } from "./backoff.js";
 import { ContractError, AuthenticationError, isPlainRecord, PermanentError, safeErrorMessage } from "./errors.js";
-import { PublishRequest } from "./envelope.js";
-import type { CloudEvent } from "./envelope.js";
+import { CloudEvent, PublishRequest } from "./envelope.js";
+import type { JsonValue } from "./taxonomy.js";
 import type { ConsumerMode, EventSubscriber, MessageDelivery, Publisher } from "./ports.js";
 
 export type DeliveryOutcome =
@@ -49,7 +49,10 @@ function failureHistory(
   failedAttempt: number,
   reason: string
 ): readonly { attempt: number; reason: string }[] {
-  const existing = delivery.metadata.properties.omega_retry_history;
+  // omega_failure_history is the cross-language name the Python runtime reads
+  // and writes; omega_retry_history is the legacy TypeScript alias.
+  const existing =
+    delivery.metadata.properties.omega_failure_history ?? delivery.metadata.properties.omega_retry_history;
   let parsed: unknown = [];
   if (existing !== undefined) {
     try {
@@ -97,8 +100,89 @@ function retryProperties(
     omega_origin_topic: properties.omega_origin_topic ?? delivery.metadata.topic,
     omega_origin_ce_id: properties.omega_origin_ce_id ?? delivery.event.id,
     omega_last_error: safeErrorMessage(reason),
+    omega_failure_history: JSON.stringify(history),
     omega_retry_history: JSON.stringify(history)
   };
+}
+
+/**
+ * Build the omega.control.signal.blocked envelope for a dead-lettered delivery.
+ *
+ * Mirrors omega_prime.eventstream.retry.RetryRouter._dead_letter so DLQ triage
+ * and the merge executor see one contract regardless of which SDK failed: PR
+ * events become a `kind: "pr"` blocked signal keyed `repo#number`; everything
+ * else becomes `kind: "dlq"` with origin topic, aggregate key, source id and
+ * bounded failure history, keyed `dlq:["origin","aggregate"]`.
+ */
+export function buildDeadLetterRequest(
+  delivery: MessageDelivery,
+  subscription: string,
+  attempt: number,
+  reason: string
+): PublishRequest {
+  validateSubscriptionName(subscription);
+  const source = delivery.event;
+  const properties = delivery.metadata.properties;
+  const safeReason = safeErrorMessage(reason);
+  const history = failureHistory(delivery, attempt, safeReason);
+  const origin = properties.omega_origin_topic ?? delivery.metadata.topic;
+  const data = source.data;
+  let payload: Record<string, JsonValue>;
+  let key: string;
+  if (["repo", "number", "head_sha", "actor"].every((name) => Object.hasOwn(data, name))) {
+    payload = {
+      kind: "pr",
+      repo: data.repo as JsonValue,
+      number: data.number as JsonValue,
+      head_sha: data.head_sha as JsonValue,
+      actor: data.actor as JsonValue,
+      reason: safeReason
+    };
+    key = `${String(data.repo)}#${String(data.number)}`;
+  } else {
+    const aggregate = delivery.metadata.key;
+    payload = {
+      kind: "dlq",
+      origin_topic: origin,
+      aggregate_key: aggregate,
+      source_ce_id: source.id,
+      reason: safeReason,
+      history: history.map((entry) => ({ attempt: entry.attempt, reason: entry.reason }))
+    };
+    key = `dlq:${JSON.stringify([origin, aggregate])}`;
+  }
+  const traceparent = source.extensions.traceparent;
+  const blocked = new CloudEvent({
+    specversion: "1.0",
+    id: `dlq:${subscription}:${source.id}`,
+    source: source.source,
+    type: "omega.control.signal.blocked",
+    datacontenttype: "application/json",
+    dataschema: "urn:omega:schema:omega.control.signal.blocked:1",
+    data: payload,
+    ...(typeof traceparent === "string" ? { traceparent } : {})
+  });
+  const forwarded: Record<string, string> = {};
+  for (const [name, value] of Object.entries(properties)) {
+    if (name === "omega_retry_target" || name.startsWith("ce_")) continue;
+    forwarded[name] = value;
+  }
+  const serializedHistory = JSON.stringify(history);
+  return new PublishRequest({
+    event: blocked,
+    topic: `persistent://omega/system/dlq.${subscription}`,
+    key,
+    properties: {
+      ...forwarded,
+      omega_attempt: String(attempt),
+      omega_origin_topic: origin,
+      omega_origin_ce_id: properties.omega_origin_ce_id ?? source.id,
+      omega_source_ce_id: source.id,
+      omega_last_error: safeReason,
+      omega_failure_history: serializedHistory,
+      omega_retry_history: serializedHistory
+    }
+  });
 }
 
 
@@ -115,26 +199,29 @@ export async function applyRetryOutcome(options: ApplyRetryOptions): Promise<Ret
   validateSubscriptionName(subscription);
   const mustDeadLetter = options.outcome.kind === "dead-letter" || attempt >= MAX_BUSINESS_ATTEMPTS;
   const reason = options.outcome.reason;
-  const nextAttempt = mustDeadLetter ? attempt : attempt + 1;
+  if (mustDeadLetter) {
+    const deadLetter = buildDeadLetterRequest(delivery, subscription, attempt, reason);
+    await publisher.publish(deadLetter);
+    await delivery.ack();
+    return Object.freeze({ kind: "dead-letter", topic: deadLetter.topic });
+  }
+  const nextAttempt = attempt + 1;
   const properties = retryProperties(delivery, attempt, nextAttempt, reason);
-  const topic = `persistent://omega/system/${mustDeadLetter ? "dlq" : "retry"}.${subscription}`;
-  const deliverAfterSeconds = mustDeadLetter
-    ? undefined
-    : Math.min(
-        MAX_RETRY_DELAY_SECONDS,
-        Math.max(options.outcome.kind === "retry" ? options.outcome.afterSeconds ?? 0 : 0, decorrelatedJitter(options.previousDelaySeconds, options.rng))
-      );
+  const topic = `persistent://omega/system/retry.${subscription}`;
+  const deliverAfterSeconds = Math.min(
+    MAX_RETRY_DELAY_SECONDS,
+    Math.max(options.outcome.kind === "retry" ? options.outcome.afterSeconds ?? 0 : 0, decorrelatedJitter(options.previousDelaySeconds, options.rng))
+  );
   const request = new PublishRequest({
     event: delivery.event,
     topic,
     key: delivery.metadata.key,
     properties,
-    ...(deliverAfterSeconds === undefined ? {} : { deliverAfterSeconds })
+    deliverAfterSeconds
   });
   await publisher.publish(request);
   await delivery.ack();
-  if (mustDeadLetter) return Object.freeze({ kind: "dead-letter", topic });
-  return Object.freeze({ kind: "retry", delaySeconds: deliverAfterSeconds ?? 0, topic });
+  return Object.freeze({ kind: "retry", delaySeconds: deliverAfterSeconds, topic });
 }
 
 export async function handleDelivery(options: HandlerOptions): Promise<RetryResult> {

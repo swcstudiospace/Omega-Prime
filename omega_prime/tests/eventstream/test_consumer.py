@@ -94,6 +94,7 @@ def delivery(
     event_id: str = "event-1",
     task_id: str = "task-1",
     order: list[str] | None = None,
+    properties: dict[str, Any] | None = None,
 ) -> Delivery:
     event = CloudEvent.model_validate(
         {
@@ -121,13 +122,15 @@ def delivery(
         if acked_event is not None:
             acked_event.set()
 
-    properties = {"omega_retry_target": target} if target is not None else {}
+    base: dict[str, Any] = dict(properties or {})
+    if target is not None:
+        base["omega_retry_target"] = target
     return Delivery(
         event=event,
         topic="persistent://omega/task/state",
         key=task_id,
         message_id=f"m-{event_id}",
-        properties=properties,
+        properties=base,
         ack=ack,
     )
 
@@ -189,6 +192,8 @@ def test_non_target_retry_is_acked_before_idempotency_claim() -> None:
         assert store.calls == []
         assert not called.is_set()
 
+    asyncio.run(scenario())
+
 
 def test_busy_claim_remains_unsettled() -> None:
     async def scenario() -> None:
@@ -208,6 +213,143 @@ def test_busy_claim_remains_unsettled() -> None:
         await task
         assert acked == []
         assert store.calls == [("claim", "event-1")]
+
+    asyncio.run(scenario())
+
+
+def test_transient_busy_claim_is_retried_while_consumer_stays_open() -> None:
+    """A short SQLite lock must not strand the delivery until restart."""
+
+    class TransientlyBusyStore(Store):
+        def __init__(self) -> None:
+            super().__init__()
+            self.busy_remaining = 2
+
+        async def claim(
+            self, subscription: str, event_id: str, owner_token: str
+        ) -> ClaimResult:
+            self.calls.append(("claim", event_id))
+            if self.busy_remaining:
+                self.busy_remaining -= 1
+                return ClaimResult.busy()
+            return ClaimResult.acquired(owner_token)
+
+    async def scenario() -> None:
+        acked: list[bool] = []
+        acked_event = asyncio.Event()
+        subscriber = Subscriber([delivery(acked, acked_event=acked_event)])
+        store = TransientlyBusyStore()
+
+        async def handler(_delivery: Delivery, _context: HandlerContext) -> Ack:
+            return Ack()
+
+        runtime = ConsumerRuntime(
+            subscriber, Publisher(), store, "gate", handler, max_in_flight=1
+        )
+        task = asyncio.create_task(runtime.run())
+        try:
+            await asyncio.wait_for(acked_event.wait(), timeout=5)
+        finally:
+            runtime.stop()
+            await task
+        assert acked == [True]
+        assert store.calls == [
+            ("claim", "event-1"),
+            ("claim", "event-1"),
+            ("claim", "event-1"),
+            ("complete", "event-1"),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_invalid_attempt_metadata_is_dead_lettered_without_stopping_workers() -> None:
+    """omega_attempt="invalid" must not escape into the TaskGroup."""
+
+    class RecordingPublisher(Publisher):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requests: list[PublishRequest] = []
+
+        async def publish(self, request: PublishRequest) -> PublishReceipt:
+            self.requests.append(request)
+            return await super().publish(request)
+
+    async def scenario() -> None:
+        acked: list[bool] = []
+        good_acked = asyncio.Event()
+        bad = delivery(
+            acked,
+            event_id="event-bad",
+            task_id="task-bad",
+            properties={"omega_attempt": "invalid"},
+        )
+        good = delivery(
+            acked, event_id="event-good", task_id="task-good", acked_event=good_acked
+        )
+        subscriber = Subscriber([bad, good])
+        publisher = RecordingPublisher()
+        store = Store()
+        handled: list[str] = []
+
+        async def handler(item: Delivery, _context: HandlerContext) -> Ack:
+            handled.append(item.event.id)
+            return Ack()
+
+        runtime = ConsumerRuntime(
+            subscriber, publisher, store, "gate", handler, max_in_flight=1
+        )
+        task = asyncio.create_task(runtime.run())
+        try:
+            await asyncio.wait_for(good_acked.wait(), timeout=5)
+        finally:
+            runtime.stop()
+            result = await task
+        assert result.clean
+        assert handled == ["event-good"]
+        assert acked == [True, True]
+        # The malformed delivery never claims the ledger and is dead-lettered.
+        assert ("claim", "event-bad") not in store.calls
+        assert [request.topic for request in publisher.requests] == [
+            "persistent://omega/system/dlq.gate"
+        ]
+        blocked = publisher.requests[0]
+        assert blocked.event.type == "omega.control.signal.blocked"
+        assert blocked.event.data["source_ce_id"] == "event-bad"
+        assert blocked.properties["omega_attempt"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_deadline_still_cancels_hung_handler_after_graceful_stop() -> None:
+    """stop() before the deadline must keep the deadline watcher alive."""
+
+    async def scenario() -> None:
+        acked: list[bool] = []
+        subscriber = Subscriber([delivery(acked)])
+        store = Store()
+        started = asyncio.Event()
+
+        async def handler(_delivery: Delivery, _context: HandlerContext) -> Ack:
+            started.set()
+            await asyncio.Event().wait()
+            return Ack()
+
+        deadline = asyncio.Event()
+        runtime = ConsumerRuntime(
+            subscriber, Publisher(), store, "gate", handler, max_in_flight=1
+        )
+        task = asyncio.create_task(runtime.run(deadline_reached=deadline))
+        await started.wait()
+        runtime.stop()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        deadline.set()
+        result = await asyncio.wait_for(task, timeout=5)
+        assert not result.clean
+        assert acked == []
+        assert store.calls == [("claim", "event-1"), ("release", "event-1")]
+        assert subscriber.closed
 
     asyncio.run(scenario())
 

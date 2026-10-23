@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -32,6 +34,55 @@ from omega_prime.eventstream.ports import (
 from omega_prime.eventstream.taxonomy import derive_key, get_event_type
 
 _LOG = logging.getLogger(__name__)
+
+
+#: Highest business attempt carried in ``omega_attempt`` (dead-letter at five).
+MAX_BUSINESS_ATTEMPTS = 5
+_DECIMAL = re.compile(r"[0-9]{1,3}")
+
+
+class InvalidRetryMetadata(SchemaError):
+    """Transport retry properties are malformed and cannot drive retry policy."""
+
+
+def parse_retry_previous(properties: Mapping[str, Any]) -> float:
+    """Return the previous retry delay (default 1.0) after validating it."""
+    previous = properties.get("omega_retry_previous")
+    if previous is None:
+        return 1.0
+    if isinstance(previous, bool) or not isinstance(previous, (int, float, str)):
+        raise InvalidRetryMetadata("omega_retry_previous must be a positive number")
+    try:
+        value = float(previous)
+    except (TypeError, ValueError, OverflowError):
+        raise InvalidRetryMetadata(
+            "omega_retry_previous must be a positive number"
+        ) from None
+    if not math.isfinite(value) or value <= 0:
+        raise InvalidRetryMetadata("omega_retry_previous must be a positive number")
+    return value
+
+
+def parse_retry_attempt(properties: Mapping[str, Any]) -> int:
+    """Validate retry transport properties and return the business attempt.
+
+    Pulsar message properties are arbitrary strings, so ``omega_attempt`` and
+    ``omega_retry_previous`` are checked before they reach any arithmetic.
+    Raises :class:`InvalidRetryMetadata` for values the router cannot honour.
+    """
+    raw = properties.get("omega_attempt", 1)
+    if isinstance(raw, bool):
+        raise InvalidRetryMetadata("omega_attempt must be an integer from 1 to 5")
+    if isinstance(raw, int):
+        attempt = raw
+    elif isinstance(raw, str) and _DECIMAL.fullmatch(raw):
+        attempt = int(raw)
+    else:
+        raise InvalidRetryMetadata("omega_attempt must be an integer from 1 to 5")
+    if not 1 <= attempt <= MAX_BUSINESS_ATTEMPTS:
+        raise InvalidRetryMetadata("omega_attempt must be an integer from 1 to 5")
+    parse_retry_previous(properties)
+    return attempt
 
 
 def _safe_reason(reason: object, secrets: tuple[str, ...]) -> str:
@@ -97,9 +148,7 @@ class RetryRouter:
         latency: float = 0.0,
     ) -> str:
         props, event = delivery.properties, delivery.event
-        current = max(
-            1, attempt if attempt is not None else int(props.get("omega_attempt", 1))
-        )
+        current = max(1, attempt if attempt is not None else parse_retry_attempt(props))
         traceparent = (
             event.model_extra.get("traceparent") if event.model_extra else None
         )
@@ -171,7 +220,12 @@ class RetryRouter:
         reason = _safe_reason(retry_outcome.reason, self.known_secrets)
         history = self._history_for(delivery)
         history.append({"attempt": current, "reason": reason})
-        previous = float(props.get("omega_retry_previous", 1.0))
+        # Consumers dead-letter malformed metadata before claiming; direct
+        # callers that pass ``attempt`` explicitly fall back to the base delay.
+        try:
+            previous = parse_retry_previous(props)
+        except InvalidRetryMetadata:
+            previous = 1.0
         delay = min(
             600.0,
             max(float(retry_outcome.after), decorrelated_jitter(previous, self.rng)),
@@ -353,13 +407,19 @@ class SingletonRetryHandoff:
         origin = str(props.get("omega_origin_topic", ""))
         if not origin:
             raise ValueError("retry handoff lacks original topic")
-        attempt = int(props.get("omega_attempt", 1))
+        attempt = parse_retry_attempt(props)
         request = PublishRequest(
             event=delivery.event,
             topic=origin,
             key=delivery.key,
             sequence_id=attempt,
-            producer_name=f"omega-eventstream-{delivery.event.id}",
+            # Subscription-scoped producer: two singletons on one input topic
+            # (merge-executor and audit-projector on control/action) can hand
+            # off the same event at the same attempt, and Pulsar dedup keys on
+            # (producer name, sequence id) per topic.
+            producer_name=(
+                f"omega-eventstream-handoff-{self.target}-{delivery.event.id}"
+            ),
             single_use=True,
             properties=dict(props),
         )
@@ -390,7 +450,7 @@ class DlqTriage:
 
     async def handle(self, delivery: Delivery) -> None:
         event = delivery.event
-        attempt = int(delivery.properties.get("omega_attempt", 1))
+        attempt = parse_retry_attempt(delivery.properties)
         request = PublishRequest(
             event=event,
             topic=get_event_type(event.type).topic,

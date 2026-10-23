@@ -9,6 +9,8 @@ const SECRET_PATTERNS = [
   /sk-[A-Za-z0-9_.-]{8,}/g,
   /xai-[A-Za-z0-9]{8,}/g,
   /gh[pousr]_[A-Za-z0-9_]{8,}/g,
+  // Fine-grained GitHub PATs; mirrors omega_prime.credentials.redact.
+  /github_pat_[A-Za-z0-9_]{20,}/g,
   /AKIA[0-9A-Z]{16}/g
 ] as const;
 const BEARER_PATTERN = /(Bearer )([^\s]+)/g;
