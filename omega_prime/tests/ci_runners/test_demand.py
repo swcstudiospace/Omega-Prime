@@ -36,7 +36,15 @@ def test_round_trip_keeps_first_seen_and_drops_non_queued(tmp_path: Path) -> Non
         (1, 1_000_000.0),
         (3, 1_000_060.0),
     ]
-    assert set(rows[0]) == {"job_id", "run_id", "repo", "private", "labels", "seen_at"}
+    assert set(rows[0]) == {
+        "job_id",
+        "run_id",
+        "repo",
+        "private",
+        "public",
+        "labels",
+        "seen_at",
+    }
     assert DemandStore(path, wall=wall).load() == (_job(1), _job(3))
 
 

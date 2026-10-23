@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import enum
+import json
 import logging
 import os
 import re
@@ -36,11 +37,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from omega_prime.ci_runners.agent.jobhook import policy_document
 from omega_prime.ci_runners.settings import RUNNER_NAME_RE
 
 log = logging.getLogger(__name__)
 
 JIT_ENV = "ACTIONS_RUNNER_INPUT_JITCONFIG"
+HOOK_ENV = "ACTIONS_RUNNER_HOOK_JOB_STARTED"
 ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM")
 DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 TERM_GRACE_S = 10.0
@@ -89,13 +92,50 @@ class Child:
         }
 
 
-def child_env(base: Mapping[str, str], jit: str, home: Path) -> dict[str, str]:
-    """Allowlisted environment: nothing from the agent's secrets survives."""
+def child_env(
+    base: Mapping[str, str], jit: str, home: Path, hook: Path | None = None
+) -> dict[str, str]:
+    """Allowlisted environment: nothing from the agent's secrets survives.
+
+    ``hook`` (the image's pre-job guard) is set by the agent itself, never
+    inherited, so the runner always runs it before a job's first step.
+    """
     env = {k: base[k] for k in ENV_ALLOWLIST if k in base}
     env.setdefault("PATH", DEFAULT_PATH)
     env["HOME"] = str(home)
+    if hook is not None:
+        env[HOOK_ENV] = str(hook)
     env[JIT_ENV] = jit
     return env
+
+
+class UnsafeJobHook(RuntimeError):
+    """The pre-job hook is missing or could be altered by the job identity."""
+
+
+def check_hook(path: Path, job_uid: int | None, job_gid: int | None) -> None:
+    """Fail closed unless the hook is a root-owned file the job cannot change."""
+    try:
+        st = path.stat()
+    except OSError as exc:
+        raise UnsafeJobHook(f"{path}: not readable ({type(exc).__name__})") from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise UnsafeJobHook(f"{path}: not a regular file")
+    if st.st_mode & stat.S_IWOTH:
+        raise UnsafeJobHook(f"{path}: world-writable")
+    if job_uid is not None and st.st_uid == job_uid:
+        raise UnsafeJobHook(f"{path}: owned by the job identity")
+    if job_gid is not None and st.st_gid == job_gid and st.st_mode & stat.S_IWGRP:
+        raise UnsafeJobHook(f"{path}: group-writable by the job identity")
+
+
+def write_job_policy(path: Path, repos: frozenset[str]) -> None:
+    """The hook's allowlist: repository names only, 0644, replaced atomically."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(policy_document(repos)), encoding="utf-8")
+    tmp.chmod(0o644)
+    os.replace(tmp, path)
 
 
 def check_private(path: Path, job_uid: int | None, job_gid: int | None) -> None:
@@ -191,6 +231,9 @@ class Supervisor:
         base_env: Mapping[str, str] | None = None,
         spawn: Spawn | None = None,
         term_grace_s: float = TERM_GRACE_S,
+        job_hook: Path | None = None,
+        job_policy: Path | None = None,
+        job_repos: frozenset[str] = frozenset(),
     ) -> None:
         if max_runners < 1:
             raise ValueError("max_runners must be ≥ 1")
@@ -209,6 +252,11 @@ class Supervisor:
         self._base_env = dict(os.environ if base_env is None else base_env)
         self._spawn: Spawn = spawn or asyncio.create_subprocess_exec
         self._grace = term_grace_s
+        if job_hook is not None and job_policy is None:
+            raise ValueError("job_hook needs job_policy")
+        self.job_hook = job_hook
+        self.job_policy = job_policy
+        self.job_repos = job_repos
         self.children: dict[str, Child] = {}
         # name → (generation, exit code) of children that already ran
         self._finished: OrderedDict[str, tuple[str, int]] = OrderedDict()
@@ -276,6 +324,14 @@ class Supervisor:
 
     def prepare(self) -> None:
         """One-shot at startup: private work root, stale trees removed."""
+        if self.job_hook is not None:
+            assert self.job_policy is not None
+            check_hook(self.job_hook, self.job_uid, self.job_gid)
+            write_job_policy(self.job_policy, self.job_repos)
+            if not self.job_repos:
+                log.warning(
+                    "OMEGA_CI_AGENT_REPOS unset: the job guard refuses every job"
+                )
         self.work_root.mkdir(parents=True, exist_ok=True)
         self.work_root.chmod(0o711)
         for entry in self.work_root.iterdir():
@@ -303,7 +359,7 @@ class Supervisor:
             child.process = await self._spawn(
                 str(workdir / "run.sh"),
                 cwd=str(workdir),
-                env=child_env(self._base_env, jit, workdir),
+                env=child_env(self._base_env, jit, workdir, self.job_hook),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
@@ -375,15 +431,19 @@ class Supervisor:
 __all__ = [
     "ENV_ALLOWLIST",
     "FINISHED_MEMORY",
+    "HOOK_ENV",
     "JIT_ENV",
     "SPAWN_FAILED",
     "Admission",
     "Child",
     "Supervisor",
     "UnsafeCredentialFile",
+    "UnsafeJobHook",
     "UnsafeWorkdir",
     "build_workdir",
+    "check_hook",
     "check_private",
     "child_env",
     "limit_child",
+    "write_job_policy",
 ]

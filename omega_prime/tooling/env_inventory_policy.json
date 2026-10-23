@@ -256,6 +256,7 @@
     "OMEGA_CI_PUBLISHER": "Selects the CI autoscaler event publisher (jsonl, null or eventstream).",
     "OMEGA_CI_EVENTS_PATH": "Overrides the JSONL file the CI autoscaler appends redacted events to.",
     "OMEGA_CI_DEMAND_PATH": "Overrides the JSON file where the CI autoscaler persists queued jobs so a restart replays them.",
+    "OMEGA_CI_PUBLIC_REPOS": "Opts listed public repositories (a subset of OMEGA_CI_REPOS) into the CI autoscaler; each workflow run is verified same-repository and not a fork before a runner is launched.",
     "OMEGA_CI_AGENT_TOKEN": "Supplies the Desktop runner agent bearer token as a Railway variable.",
     "OMEGA_CI_AGENT_TOKEN_FILE": "Names a protected file containing the Desktop runner agent bearer token.",
     "OMEGA_CI_AGENT_MAX_RUNNERS": "Caps concurrent runner processes on the Desktop runner agent.",
@@ -263,7 +264,13 @@
     "OMEGA_CI_AGENT_WORK_ROOT": "Sets where the Desktop runner agent creates per-runner private work directories.",
     "OMEGA_CI_CONTROLLER_URL": "Selects the CI autoscaler URL the Desktop runner agent reports runner exits to.",
     "OMEGA_CI_AGENT_JOB_UID": "Sets the unprivileged uid CI job processes run as on the Desktop.",
-    "OMEGA_CI_AGENT_JOB_GID": "Sets the unprivileged gid CI job processes run as on the Desktop."
+    "OMEGA_CI_AGENT_JOB_GID": "Sets the unprivileged gid CI job processes run as on the Desktop.",
+    "OMEGA_CI_AGENT_REPOS": "Lists the owner/repo names the Desktop runner pre-job guard lets run; empty refuses every job.",
+    "OMEGA_CI_AGENT_JOB_HOOK": "Points the Desktop runner agent at the pre-job guard script it installs as ACTIONS_RUNNER_HOOK_JOB_STARTED.",
+    "OMEGA_CI_AGENT_JOB_POLICY": "Names the Desktop runner agent's pre-job guard allowlist file; only /var/lib/omega-ci/job-policy.json (the path the shipped hook reads) is accepted.",
+    "GITHUB_EVENT_NAME": "Set by the GitHub runner; the Desktop pre-job guard refuses pull_request_target and, for non-private repositories, events other than push, workflow_dispatch and pull_request.",
+    "GITHUB_REPOSITORY": "Set by the GitHub runner; the Desktop pre-job guard checks it against its repository allowlist and the event payload.",
+    "GITHUB_EVENT_PATH": "Set by the GitHub runner; the Desktop pre-job guard reads the event payload there to refuse fork pull requests."
   },
   "helpers": {
     "omega_prime/commands/redteam_readiness.py:_first": {

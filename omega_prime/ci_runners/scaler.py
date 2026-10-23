@@ -101,6 +101,7 @@ class Scaler:
         *,
         labels: Collection[str],
         repos: Collection[str] = (),
+        public_repos: Collection[str] = (),
         max_runners: int = 8,
         idle_grace_s: float = 180.0,
         new_generation: Callable[[], str] = _new_generation,
@@ -110,6 +111,9 @@ class Scaler:
             raise ValueError(f"max_runners must be 1..{HARD_MAX_RUNNERS}")
         self.labels = frozenset(labels)
         self.repos = frozenset(r.lower() for r in repos)
+        self.public_repos = frozenset(r.lower() for r in public_repos)
+        if self.public_repos and not (self.repos and self.public_repos <= self.repos):
+            raise ValueError("public_repos must be a subset of a non-empty repos")
         self.max_runners = max_runners
         self.idle_grace_s = idle_grace_s
         self._new_generation = new_generation
@@ -196,7 +200,7 @@ class Scaler:
             return  # duplicate or late (monotonic)
         ours = job.runner_name in self.runners if job.runner_name else False
         relevant = (
-            matches(job, self.labels, self.repos)
+            matches(job, self.labels, self.repos, self.public_repos)
             or ours
             or is_pool_runner(job.runner_name)
             or job.job_id in self.queued

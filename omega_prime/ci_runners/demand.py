@@ -3,7 +3,8 @@
 GitHub sends each ``queued`` webhook once. If the controller restarts with a
 backlog larger than its live runners, those jobs would otherwise be forgotten:
 the surviving runners finish and nothing launches replacements. The
-controller therefore mirrors the scaler's queue to a small JSON file
+controller therefore mirrors the scaler's queue, plus every acknowledged job
+the scaler has not taken yet (written before the webhook's 202), to a small JSON file
 (non-secret job fields only, written atomically with mode 0600) and replays
 it in the one startup reconcile. Entries older than ``DEMAND_TTL_S`` are
 dropped on load: GitHub cancels a job that waits that long anyway.
@@ -77,6 +78,7 @@ class DemandStore:
                         "run_id": j.run_id,
                         "repo": j.repo,
                         "private": j.private,
+                        "public": j.public,
                         "labels": list(j.labels),
                         "seen_at": self._seen[j.job_id],
                     }
@@ -98,6 +100,7 @@ def _job(row: Any) -> tuple[WorkflowJob, float] | None:
     job_id, run_id = _positive(row.get("job_id")), _positive(row.get("run_id"))
     repo, labels = row.get("repo"), row.get("labels")
     seen_at, private = row.get("seen_at"), row.get("private")
+    public = row.get("public") is True and private is not True
     if job_id is None or run_id is None or not isinstance(repo, str):
         return None
     if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
@@ -111,6 +114,7 @@ def _job(row: Any) -> tuple[WorkflowJob, float] | None:
         private=private is True,
         labels=tuple(labels),
         status=JobStatus.QUEUED,
+        public=public,  # ``trusted`` is never persisted; replay re-verifies
     )
     return job, float(seen_at)
 

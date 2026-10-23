@@ -35,6 +35,7 @@ RUNNER_KINDS = frozenset(
         "launch_retry",
         "launch_circuit_open",
         "launch_circuit_closed",
+        "refused",  # public-repo fork guard said no (reason only, no payload)
     }
 )
 DESKTOP_KINDS = frozenset({"wake_requested", "woke"})

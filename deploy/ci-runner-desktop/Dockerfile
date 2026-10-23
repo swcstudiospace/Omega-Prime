@@ -79,16 +79,22 @@ RUN mkdir -p /opt/omega-ci/site /tmp/wheels && cd /tmp/wheels \
 COPY omega_prime /opt/omega-ci/site/omega_prime
 COPY deploy/ci-runner-desktop/entrypoint.sh /opt/omega-ci/entrypoint.sh
 COPY deploy/ci-runner-desktop/smoke.sh /opt/omega-ci/smoke.sh
+COPY deploy/ci-runner-desktop/job-started.sh /opt/omega-ci/job-started.sh
 # Fail the build unless the real agent app builds from this site alone.
 RUN chown -R root:root /opt/omega-ci && chmod -R a+rX,go-w /opt/omega-ci \
-    && chmod 0755 /opt/omega-ci/entrypoint.sh /opt/omega-ci/smoke.sh \
-    && /opt/omega-ci/smoke.sh uvicorn
+    && chmod 0755 /opt/omega-ci/entrypoint.sh /opt/omega-ci/smoke.sh /opt/omega-ci/job-started.sh \
+    && /opt/omega-ci/smoke.sh uvicorn \
+    && ! /opt/omega-ci/job-started.sh
+# ^ The pre-job guard runs under the image's own interpreter and, with no
+#   policy written yet and no job context, refuses (fails closed).
 
 ENV HOME=/config PORT=3000 VNC_RESOLUTION=1440x900 \
     OMEGA_CI_AGENT_RUNNER_ROOT=/opt/actions-runner \
     OMEGA_CI_AGENT_WORK_ROOT=/var/lib/omega-ci/work \
     OMEGA_CI_AGENT_JOB_UID=${JOB_UID} \
-    OMEGA_CI_AGENT_JOB_GID=${JOB_GID}
+    OMEGA_CI_AGENT_JOB_GID=${JOB_GID} \
+    OMEGA_CI_AGENT_JOB_HOOK=/opt/omega-ci/job-started.sh \
+    OMEGA_CI_AGENT_JOB_POLICY=/var/lib/omega-ci/job-policy.json
 WORKDIR /config
 EXPOSE 3000 8787
 

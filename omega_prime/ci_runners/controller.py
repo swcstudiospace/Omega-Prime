@@ -19,12 +19,18 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
+from collections import OrderedDict
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 from omega_prime.ci_runners.delayed import AsyncioDelayedEvents, Deadline, DelayedEvents
 from omega_prime.ci_runners.demand import DemandStore
 from omega_prime.ci_runners.desktop import DesktopClient, DesktopError, LaunchOutcome
+from omega_prime.ci_runners.forkguard import (
+    LOOKUP_FAILED,
+    NOT_OPTED_IN,
+    run_refusal,
+)
 from omega_prime.ci_runners.github import GitHubClient, GitHubError
 from omega_prime.ci_runners.jobs import (
     AgentRunner,
@@ -46,6 +52,7 @@ from omega_prime.ci_runners.jobs import (
     ScheduleIdle,
     ScheduleRetry,
     WorkflowJob,
+    wants_pool,
 )
 from omega_prime.ci_runners.publisher import (
     CloudEvent,
@@ -61,6 +68,12 @@ DEMAND_CHECK_CONCURRENCY = 4
 # Exit callbacks held while startup is still reconciling (bounded; the pool
 # itself is capped far below this).
 STARTUP_EXIT_MEMORY = 64
+# Fork-guard verdicts cached per workflow run (a run has many jobs, and its
+# repository and trigger never change), so a public run costs one GitHub call.
+RUN_VERDICT_MEMORY = 512
+# Job ids already seen past ``queued`` (in_progress / completed). A ``queued``
+# delivery that arrives later is stale: state only moves forward.
+JOB_STATE_MEMORY = 4096
 
 
 class Controller:
@@ -92,16 +105,149 @@ class Controller:
         self._saved_demand: tuple[int, ...] | None = None
         self.ready = asyncio.Event()
         self._startup_exits: dict[tuple[str, str], int] = {}
+        self._verdicts: OrderedDict[tuple[str, int], str | None] = OrderedDict()
+        self._verifying: dict[tuple[str, int], asyncio.Future[str | None]] = {}
+        # Acknowledged ``queued`` pool jobs the scaler has not taken yet: a
+        # public one awaiting its run lookup, or any one still waiting in the
+        # worker queue. They are written to the demand file *before* the 202
+        # (see ``offer_job``), so a restart at any point replays them; public
+        # ones are re-verified on replay because trust is never persisted.
+        self._accepted: dict[int, WorkflowJob] = {}
+        # Saved demand read from disk but not yet reconciled at startup. Until
+        # ``ControllerStarted`` is applied every save keeps these entries, so
+        # a job acknowledged during startup never overwrites older demand.
+        self._replay: tuple[WorkflowJob, ...] | None = None
+        self._replay_loaded = False
+        self._advanced: OrderedDict[int, None] = OrderedDict()
 
     # -- admission (called from HTTP handlers; never blocks) -------------------
 
     def offer_job(self, job: WorkflowJob) -> bool:
-        """Admit a verified webhook job. False (→ 503) when saturated."""
+        """Admit a verified webhook job. False (→ 503) when saturated.
+
+        True means the caller may commit the delivery and answer 202, so a
+        ``queued`` pool job is durable before this returns: it is written to
+        the demand file first (also during startup, merged with the saved
+        demand not yet replayed). If that write fails the job is not admitted
+        (→ 503, delivery not committed) rather than acknowledged and then lost
+        on the next restart.
+        """
+        if job.status is JobStatus.QUEUED and job.job_id in self._advanced:
+            return True  # stale redelivery: the job already started or finished
         if self._external >= self.max_pending:
             return False
+        if job.status is JobStatus.QUEUED and wants_pool(
+            job, self.scaler.labels, self.scaler.repos
+        ):
+            fresh = job.job_id not in self._accepted
+            if fresh:
+                self._accepted[job.job_id] = job
+            if not self._persist_demand():
+                if fresh:
+                    self._accepted.pop(job.job_id, None)
+                return False
+        if job.status is not JobStatus.QUEUED:
+            self._advance(job.job_id)
         self._external += 1
-        self._queue.put_nowait((True, JobEvent(job)))
+        if self._guarded(job):
+            # Public repo asking for the pool: verify before the scaler sees it.
+            # Already on disk (above), so a restart during the lookup replays
+            # and re-verifies it.
+            self._spawn(self._guard(job))
+        else:
+            self._queue.put_nowait((True, JobEvent(job)))
         return True
+
+    def _advance(self, job_id: int) -> None:
+        self._advanced[job_id] = None
+        self._advanced.move_to_end(job_id)
+        while len(self._advanced) > JOB_STATE_MEMORY:
+            self._advanced.popitem(last=False)
+        if self._accepted.pop(job_id, None) is not None:
+            self._persist_demand()
+
+    # -- public-repository fork guard ---------------------------------------------
+
+    def _guarded(self, job: WorkflowJob) -> bool:
+        """A new public job that asks for the pool must pass the fork guard.
+
+        Later statuses (in_progress / completed) pass straight through
+        untrusted: the scaler only follows them for jobs it already queued or
+        runners it owns, so they can never cause a launch.
+        """
+        return (
+            job.public
+            and not job.private
+            and job.status is JobStatus.QUEUED
+            and wants_pool(job, self.scaler.labels, self.scaler.repos)
+        )
+
+    async def _guard(self, job: WorkflowJob) -> None:
+        try:
+            reason = await self._refusal(job)
+        except Exception as exc:  # fail closed, keep the admission count honest
+            log.warning("ci-runners: fork guard failed (%s)", type(exc).__name__)
+            reason = LOOKUP_FAILED
+        if job.job_id in self._advanced:
+            # It started or finished elsewhere while we were looking: admitting
+            # the old ``queued`` event now would leave demand nothing clears.
+            self._external -= 1
+            return
+        if reason is None:
+            # Stays in ``_accepted`` until the worker has queued it, so the
+            # persisted demand never has a gap.
+            self._queue.put_nowait(
+                (True, JobEvent(dataclasses.replace(job, trusted=True)))
+            )
+            return
+        self._external -= 1
+        if self._accepted.pop(job.job_id, None) is not None:
+            self._persist_demand()
+        self._refused(job, reason)
+
+    def _refused(self, job: WorkflowJob, reason: str) -> None:
+        self._publish(
+            "refused",
+            {
+                "job_id": job.job_id,
+                "run_id": job.run_id,
+                "repo": job.repo,
+                "reason": reason,
+            },
+        )
+
+    async def _refusal(self, job: WorkflowJob) -> str | None:
+        """``None`` when the public job may run, else why not (fails closed)."""
+        if job.repo not in self.scaler.public_repos:
+            return NOT_OPTED_IN
+        key = (job.repo, job.run_id)
+        if key in self._verdicts:
+            self._verdicts.move_to_end(key)
+            return self._verdicts[key]
+        pending = self._verifying.get(key)
+        if pending is not None:
+            return await asyncio.shield(pending)
+        future: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+        self._verifying[key] = future
+        verdict: str | None
+        try:
+            try:
+                run = await self.github.workflow_run(job.repo, job.run_id)
+            except GitHubError:
+                verdict = LOOKUP_FAILED  # transient: not cached, a redelivery retries
+            else:
+                verdict = run_refusal(run, job.repo)
+                self._verdicts[key] = verdict
+                while len(self._verdicts) > RUN_VERDICT_MEMORY:
+                    self._verdicts.popitem(last=False)
+            future.set_result(verdict)
+            return verdict
+        except BaseException:
+            if not future.done():
+                future.set_result(LOOKUP_FAILED)
+            raise
+        finally:
+            self._verifying.pop(key, None)
 
     def submit(self, event: InputEvent) -> None:
         """Internal events (effect outcomes, deadlines) are always admitted."""
@@ -174,12 +320,14 @@ class Controller:
         # Saved demand is checked first so the runner snapshot is the last
         # await before ControllerStarted is applied (freshest inventory).
         queued: tuple[WorkflowJob, ...] | None = None
-        if self._demand is not None:
-            queued = await self._verified_demand(self._demand.load())
+        saved = self._saved_demand_jobs()
+        if saved is not None:
+            queued = await self._verified_demand(saved)
         started = await self._snapshot()
         if queued is not None:
             started = dataclasses.replace(started, queued=queued)
         self._apply(self.scaler.handle(started))
+        self._replay = None  # reconciled: the scaler's queue supersedes it
         self._persist_demand()
         held, self._startup_exits = self._startup_exits, {}
         for (name, generation), code in held.items():
@@ -189,7 +337,20 @@ class Controller:
         while True:
             external, event = await self._queue.get()
             try:
-                self._apply(self.scaler.handle(event))
+                if (
+                    isinstance(event, JobEvent)
+                    and event.job.status is JobStatus.QUEUED
+                    and (event.job.trusted or not self._guarded(event.job))
+                ):
+                    # The scaler takes it now; the persist below records that.
+                    self._accepted.pop(event.job.job_id, None)
+                stale = (
+                    isinstance(event, JobEvent)
+                    and event.job.status is JobStatus.QUEUED
+                    and event.job.job_id in self._advanced
+                )
+                if not stale:  # else superseded while it waited in the queue
+                    self._apply(self.scaler.handle(event))
                 self._persist_demand()
             except Exception:  # keep the worker alive; never log payloads
                 log.exception("ci-runners: scaler step failed")
@@ -199,21 +360,40 @@ class Controller:
                     self._external -= 1
                 self._queue.task_done()
 
-    def _persist_demand(self) -> None:
+    def _saved_demand_jobs(self) -> tuple[WorkflowJob, ...] | None:
+        """The demand file as found at startup, read exactly once."""
         if self._demand is None:
-            return
-        ids = tuple(self.scaler.queued)
+            return None
+        if not self._replay_loaded:
+            self._replay_loaded = True
+            self._replay = self._demand.load()
+        return self._replay
+
+    def _persist_demand(self) -> bool:
+        """Mirror the demand to disk. False only when a needed write failed."""
+        if self._demand is None:
+            return True
+        jobs = list(self.scaler.queued.values())
+        if not self.ready.is_set():
+            # Startup: the saved demand is not reconciled yet; keep it.
+            jobs += self._saved_demand_jobs() or ()
+        seen = {j.job_id for j in jobs}
+        jobs += [j for i, j in self._accepted.items() if i not in seen]
+        ids = tuple(j.job_id for j in jobs)
         if ids == self._saved_demand:
-            return
+            return True
         try:
-            self._demand.save(self.scaler.queued.values())
+            self._demand.save(jobs)
         except OSError as exc:
-            # Degrades to the pre-persistence behaviour; never stops the worker.
+            # The worker keeps going (callers decide what a failure means);
+            # the last good file stays in place.
             self._publish(
                 "error", {"reason": "demand_persist", "errno": exc.errno or 0}
             )
-            return
+            self._saved_demand = None
+            return False
         self._saved_demand = ids
+        return True
 
     async def _verified_demand(
         self, saved: tuple[WorkflowJob, ...]
@@ -238,14 +418,24 @@ class Controller:
                     status = await self.github.job_status(job.repo, job.job_id)
                 except GitHubError:
                     return job, "unverified"
-            if status is JobStatus.QUEUED:
-                return job, "queued"
-            return job, "gone" if status is None else status.name.lower()
+            if status is not JobStatus.QUEUED:
+                return job, "gone" if status is None else status.name.lower()
+            if job.public and not job.private:
+                # Trust is never persisted: re-run the fork guard on replay.
+                try:
+                    reason = await self._refusal(job)
+                except Exception:
+                    reason = LOOKUP_FAILED
+                if reason is not None:
+                    self._refused(job, reason)
+                    return job, "refused"
+                return dataclasses.replace(job, trusted=True), "queued"
+            return job, "queued"
 
         results = await asyncio.gather(*(check(job) for job in saved))
         kept = tuple(job for job, verdict in results if verdict == "queued")
         dropped: dict[str, int] = {}
-        for _job, verdict in results:
+        for _, verdict in results:
             if verdict != "queued":
                 dropped[verdict] = dropped.get(verdict, 0) + 1
         if dropped:
