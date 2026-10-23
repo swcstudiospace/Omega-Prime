@@ -478,3 +478,18 @@ Source: Ove's `/gsd-autonomous` prompt (00046), 2026-10-23 AEDT. Standing rule: 
 **Goal:** OTel metrics/traces, structured logs, `/healthz` + `/readyz`, `omega eventstream {status,tail,replay,dlq}`, chaos tests, no-timer CI gate, Railway Dockerfile + cutover runbook + tiered storage config.
 
 **Success criteria:** Chaos suite shows zero loss and zero duplicate effects; no-timer gate in CI; runbook reviewed; Railway artefacts ready for cutover.
+
+## v23 CI Runner Fleet (task 00050)
+
+Autoscaling ephemeral GitHub Actions runners on the serverless Railway "Ubuntu Desktop" (Linux Containers project), driven only by `workflow_job` webhook events (timer ban). Spec: `phases/120-ci-runner-fleet/DESIGN.md`. Tracking: SPE-19875. Branch `gsd/00050-ci-runners`. Paid Railway cutover and VPS install are held for the operator.
+
+### Phase 120: CI runner fleet
+
+**Goal:** webhook → pure scaler → GitHub App JIT config → ephemeral runner on the Desktop runner-agent; Railway Serverless sleep as teardown; `omega.ci.runner.*` events; per-repo configuration guide.
+**Depends on:** none (00046 EventBus is an optional adapter).
+
+Plans:
+- [ ] 120-01-PLAN.md — core: settings, webhook verify/dedupe, WorkflowJob, pure Scaler, delayed-event + publisher ports.
+- [ ] 120-02-PLAN.md — after 120-01: GitHub App/PAT JIT client, Desktop wake client, controller, ASGI app, CLI.
+- [ ] 120-03-PLAN.md — after 120-02: runner-agent + supervisor + Desktop image overlay (not deployed).
+- [ ] 120-04-PLAN.md — after 120-03: docs, per-repo guide, VPS templates, cutover runbook, cost.

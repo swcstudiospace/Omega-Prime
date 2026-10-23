@@ -40,6 +40,9 @@ eventstream = [
   "pydantic>=2.13,<3",
   "httpx>=0.28,<1",
 ]
+ci-runners = [
+  "uvicorn>=0.30",
+]
 dev = [
   "ruff==0.17.1",
   "mypy==2.4.0",

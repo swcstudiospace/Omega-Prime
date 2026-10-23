@@ -1,0 +1,24 @@
+# Railway config-as-code for the Ubuntu Desktop service WITH the runner agent.
+# NOT APPLIED. Pointing the service at this file is part of the HELD cutover
+# (D-120-10). Schema: https://railway.com/railway.schema.json
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "deploy/ci-runner-desktop/Dockerfile"
+watchPatterns = [
+  "deploy/ci-runner-desktop/**",
+  "omega_prime/ci_runners/**",
+  "omega_prime/credentials/**",
+]
+
+[deploy]
+# Desktop readiness on PORT=3000 (upstream nginx → /healthz). The agent's own
+# readiness is GET /healthz on its separate 8787 domain (see README).
+healthcheckPath = "/healthz"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+# Serverless: Railway sleeps the idle Desktop; the controller's first launch
+# request wakes it. This is the teardown mechanism (D-120-05).
+sleepApplication = true
+requiredMountPath = "/config"

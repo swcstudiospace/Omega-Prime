@@ -235,7 +235,35 @@
     "FLEET_COORDINATOR_URL": "Selects the approved Fleet coordinator endpoint.",
     "GITHUB_WORKFLOW": "Names the GitHub Actions workflow that owns the eventstream IT service container.",
     "GITHUB_RUN_ID": "Binds the eventstream IT ownership record to one GitHub Actions run.",
-    "RUNNER_TEMP": "Directory for ephemeral eventstream IT ownership and TLS material."
+    "RUNNER_TEMP": "Directory for ephemeral eventstream IT ownership and TLS material.",
+    "OMEGA_CI_SCOPE": "Selects org-wide or single-repository scope for the CI runner autoscaler.",
+    "OMEGA_CI_ORG": "Names the GitHub organisation whose self-hosted runner group the CI autoscaler serves.",
+    "OMEGA_CI_REPO": "Names the owner/repo the CI autoscaler serves in repository scope.",
+    "OMEGA_CI_REPOS": "Restricts the CI autoscaler to a comma-separated owner/repo allowlist.",
+    "OMEGA_CI_LABELS": "Sets the runner labels the CI autoscaler pool carries and matches jobs against.",
+    "OMEGA_CI_RUNNER_GROUP": "Names the GitHub runner group used for CI autoscaler runners.",
+    "OMEGA_CI_RUNNER_GROUP_ID": "Gives the numeric GitHub runner group id used when minting JIT runner configs.",
+    "OMEGA_CI_MAX_RUNNERS": "Caps concurrent CI autoscaler runners (hard ceiling 10).",
+    "OMEGA_CI_IDLE_GRACE_S": "Sets how long an idle CI runner waits for work before it is reaped.",
+    "OMEGA_CI_WAKE_BUDGET_S": "Bounds the total time spent waking the Desktop runner agent.",
+    "OMEGA_CI_GITHUB_APP_ID": "Identifies the GitHub App the CI autoscaler authenticates as.",
+    "OMEGA_CI_GITHUB_INSTALLATION_ID": "Identifies the GitHub App installation the CI autoscaler uses.",
+    "OMEGA_CI_GITHUB_APP_KEY_FILE": "Names a protected file containing the CI autoscaler GitHub App private key.",
+    "OMEGA_CI_GITHUB_PAT_FILE": "Names a protected file containing a fallback-free PAT used only when no GitHub App is configured.",
+    "OMEGA_CI_WEBHOOK_SECRET_FILE": "Names a protected file containing the workflow_job webhook HMAC secret.",
+    "OMEGA_CI_DESKTOP_URL": "Selects the https base URL of the Desktop runner agent.",
+    "OMEGA_CI_DESKTOP_TOKEN_FILE": "Names a protected file containing the bearer token shared with the Desktop runner agent.",
+    "OMEGA_CI_PUBLISHER": "Selects the CI autoscaler event publisher (jsonl, null or eventstream).",
+    "OMEGA_CI_EVENTS_PATH": "Overrides the JSONL file the CI autoscaler appends redacted events to.",
+    "OMEGA_CI_DEMAND_PATH": "Overrides the JSON file where the CI autoscaler persists queued jobs so a restart replays them.",
+    "OMEGA_CI_AGENT_TOKEN": "Supplies the Desktop runner agent bearer token as a Railway variable.",
+    "OMEGA_CI_AGENT_TOKEN_FILE": "Names a protected file containing the Desktop runner agent bearer token.",
+    "OMEGA_CI_AGENT_MAX_RUNNERS": "Caps concurrent runner processes on the Desktop runner agent.",
+    "OMEGA_CI_AGENT_RUNNER_ROOT": "Points the Desktop runner agent at the unpacked actions/runner directory.",
+    "OMEGA_CI_AGENT_WORK_ROOT": "Sets where the Desktop runner agent creates per-runner private work directories.",
+    "OMEGA_CI_CONTROLLER_URL": "Selects the CI autoscaler URL the Desktop runner agent reports runner exits to.",
+    "OMEGA_CI_AGENT_JOB_UID": "Sets the unprivileged uid CI job processes run as on the Desktop.",
+    "OMEGA_CI_AGENT_JOB_GID": "Sets the unprivileged gid CI job processes run as on the Desktop."
   },
   "helpers": {
     "omega_prime/commands/redteam_readiness.py:_first": {
@@ -333,6 +361,36 @@
       "env_arg": 0,
       "source_sha256": "2048d543a98d7e03d1684665d756ac0bc05bebbe61330a89417d0a44966e832f",
       "suffixes": ["_FILE"]
+    },
+    "omega_prime/ci_runners/settings.py:_get": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "4bfa06068af65748036c22e48c2d9a79a36006a676935059bb5accd3444c9983",
+      "suffixes": []
+    },
+    "omega_prime/ci_runners/settings.py:_int": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "f066813141b56ce34afc783ec10636212406348b25580cc21f8f1399545fc1da",
+      "suffixes": []
+    },
+    "omega_prime/ci_runners/settings.py:_float": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "1cc31715c0b370b24f50353c5b7af861dc6ed264f1e931c2aa8d81db31ec0845",
+      "suffixes": []
+    },
+    "omega_prime/ci_runners/settings.py:_secret_file": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "9992cffd300f20e4da1e69d8d21245f23efeb3d6e489e20ca176d93f69dbfda8",
+      "suffixes": []
+    },
+    "omega_prime/ci_runners/settings.py:_required_secret_file": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "2965c836c0f6822f6b51a394d0a99563da9ad1aaa3ba4b175bf713c4b1db21ab",
+      "suffixes": []
     }
   },
   "dynamic": [
