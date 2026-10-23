@@ -232,7 +232,17 @@
     "OMEGA_PRIME_APPROVALS_SHA256": "Pins the expected digest of the approval grants file.",
     "OMEGA_PRIME_COMMAND_LOG": "Selects the command history log destination.",
     "OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS": "Sets the maximum accepted lateness for scheduled actions.",
-    "FLEET_COORDINATOR_URL": "Selects the approved Fleet coordinator endpoint."
+    "FLEET_COORDINATOR_URL": "Selects the approved Fleet coordinator endpoint.",
+    "CONTAINER_HOST": "Selects the Podman API endpoint inherited by the sandbox-control openshell/podman CLIs.",
+    "OPENSHELL_GATEWAY": "Selects the OpenShell gateway name used by the sandbox-control tools.",
+    "OPENSHELL_GATEWAY_ENDPOINT": "Selects a direct OpenShell gateway endpoint for the sandbox-control tools.",
+    "XDG_DATA_HOME": "Selects the XDG data directory inherited by the OpenShell CLI.",
+    "OMP_SANDBOX_ROOT": "Locates the omp-sandbox checkout whose Podman sandbox policy the sandbox-control tools apply.",
+    "OMP_SANDBOX_OPENSHELL": "Overrides the OpenShell CLI binary used by the sandbox-control tools.",
+    "OMP_SANDBOX_PODMAN": "Overrides the Podman binary used for sandbox leftover checks.",
+    "OMP_SANDBOX_PODMAN_IMAGE": "Selects the sandbox image the sandbox-control tools create from.",
+    "OMP_SANDBOX_POLICY": "Overrides the OpenShell policy file the sandbox-control tools apply.",
+    "OMEGA_PRIME_TASKS_FILE": "Overrides the Command Center tasks.json that sandbox lifecycle events update."
   },
   "helpers": {
     "omega_prime/commands/redteam_readiness.py:_first": {

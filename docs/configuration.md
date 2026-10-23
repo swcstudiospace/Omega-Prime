@@ -25,6 +25,7 @@ The table records names and purposes only.
 | `CEREBRAS_API_KEY_FILE` | Names a protected file supplying CEREBRAS_API_KEY: Authenticates Cerebras API requests. |
 | `CLOUDFLARE_API_KEY` | Authenticates Cloudflare AI provider requests. |
 | `CLOUDFLARE_API_KEY_FILE` | Names a protected file supplying CLOUDFLARE_API_KEY: Authenticates Cloudflare AI provider requests. |
+| `CONTAINER_HOST` | Selects the Podman API endpoint inherited by the sandbox-control openshell/podman CLIs. |
 | `COPILOT_GITHUB_TOKEN` | Authenticates GitHub Copilot provider requests. |
 | `COPILOT_GITHUB_TOKEN_FILE` | Names a protected file supplying COPILOT_GITHUB_TOKEN: Authenticates GitHub Copilot provider requests. |
 | `CURSOR_API_KEY` | Authenticates Cursor provider requests. |
@@ -199,17 +200,25 @@ The table records names and purposes only.
 | `OMEGA_PRIME_STATE_DIR` | Selects persistent state for Omega Prime integrations and engine jobs. |
 | `OMEGA_PRIME_STATE_DIR_FILE` | Names a protected file containing the Omega Prime state directory setting. |
 | `OMEGA_PRIME_SWEEP_MENTIONS` | Controls mention processing during scheduled sweeps. |
+| `OMEGA_PRIME_TASKS_FILE` | Overrides the Command Center tasks.json that sandbox lifecycle events update. |
 | `OMEGA_PRIME_TELEMETRY_OTLP_ENABLED` | Enables OpenTelemetry OTLP export. |
 | `OMEGA_PRIME_TELEMETRY_OTLP_ENDPOINT` | Selects the OTLP telemetry push endpoint. |
 | `OMEGA_PRIME_TELEMETRY_OTLP_INTERVAL_SECONDS` | Sets the OTLP telemetry export interval. |
 | `OMEGA_PRIME_WORK_ROOT` | Selects the workspace root used by Omega Prime operations. |
 | `OMEGA_PRIME_WORK_ROOT_FILE` | Names a protected file containing the Omega Prime workspace root. |
+| `OMP_SANDBOX_OPENSHELL` | Overrides the OpenShell CLI binary used by the sandbox-control tools. |
+| `OMP_SANDBOX_PODMAN` | Overrides the Podman binary used for sandbox leftover checks. |
+| `OMP_SANDBOX_PODMAN_IMAGE` | Selects the sandbox image the sandbox-control tools create from. |
+| `OMP_SANDBOX_POLICY` | Overrides the OpenShell policy file the sandbox-control tools apply. |
+| `OMP_SANDBOX_ROOT` | Locates the omp-sandbox checkout whose Podman sandbox policy the sandbox-control tools apply. |
 | `OPENAI_API_KEY` | Authenticates OpenAI API requests. |
 | `OPENAI_API_KEY_FILE` | Names a protected file containing the OpenAI API credential. |
 | `OPENCODE_API_KEY` | Authenticates OpenCode provider requests. |
 | `OPENCODE_API_KEY_FILE` | Names a protected file supplying OPENCODE_API_KEY: Authenticates OpenCode provider requests. |
 | `OPENROUTER_API_KEY` | Authenticates OpenRouter API requests. |
 | `OPENROUTER_API_KEY_FILE` | Names a protected file supplying OPENROUTER_API_KEY: Authenticates OpenRouter API requests. |
+| `OPENSHELL_GATEWAY` | Selects the OpenShell gateway name used by the sandbox-control tools. |
+| `OPENSHELL_GATEWAY_ENDPOINT` | Selects a direct OpenShell gateway endpoint for the sandbox-control tools. |
 | `P46_TEST_DATA` | Selects a temporary directory for the browser egress resolver-profile verification. |
 | `PATH` | Provides executable search paths to child processes. |
 | `PATH_FILE` | Forwarded file-name counterpart for the child-process executable search path. |
@@ -251,6 +260,7 @@ The table records names and purposes only.
 | `XAI_API_KEY` | Authenticates xAI API requests. |
 | `XAI_API_KEY_FILE` | Names a protected file containing the xAI provider credential. |
 | `XDG_CONFIG_HOME` | Selects the XDG configuration directory. |
+| `XDG_DATA_HOME` | Selects the XDG data directory inherited by the OpenShell CLI. |
 | `XDG_RUNTIME_DIR` | Selects the XDG runtime directory used by host processes. |
 | `XDG_RUNTIME_DIR_FILE` | Forwarded file-name counterpart for the XDG runtime directory. |
 | `XDG_STATE_HOME` | Selects the XDG state directory. |
