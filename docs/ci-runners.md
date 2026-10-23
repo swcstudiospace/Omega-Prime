@@ -487,12 +487,16 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   `rustup toolchain install`) needs a write to the read-only `RUSTUP_HOME`
   and fails. Pin `1.99.1`, or bump `RUST_VERSION` in the image.
 - **CPU budget versus visible CPUs.** Each runner is budgeted 2 vCPU but
-  sees every host CPU, and `RLIMIT_NPROC` counts all concurrent jobs of the
-  job uid. Tools that size their worker pools from the CPU count exhaust it
+  sees every host CPU (48 measured), and the Desktop's pid cgroup
+  (`pids.max` 1000, measured 2026-10-24; Railway's limit, well below the job
+  uid's `RLIMIT_NPROC` 4096) is shared by every concurrent job and the agent. Tools that size their worker pools from the CPU count exhaust it
   ("Cannot acquire required number of nodes", "can't spawn worker thread").
   Cap them at the budget in the workflow: `DOTNET_PROCESSOR_COUNT: 2`
   (MSBuild), `CARGO_BUILD_JOBS: "2"` (cargo), Next.js
-  `experimental.cpus` (task 00057).
+  `experimental.cpus`, vitest `--maxWorkers=2`, `dotnet test
+  --max-parallel-test-modules 2` (task 00057). These keep one job inside its
+  share; the 1000-task ceiling itself is a Railway service limit, so many
+  concurrent thread-heavy jobs can still exhaust it.
 - **Omega-Prime's own container jobs (task 00057).** `grokbot-image` builds
   and runs the tool-host image with rootless podman: its first step proves
   the runner can enter a user namespace (`podman unshare true`) and fails

@@ -318,12 +318,15 @@ jobs:
       - name: typecheck
         working-directory: packages/eventstream-ts
         run: npm run typecheck
+      # vitest sizes its pool from the visible CPUs (48 on a pool host); the
+      # Desktop's pid cgroup (pids.max 1000) is shared by every concurrent job,
+      # so cap it at the runner's 2 vCPU budget.
       - name: unit tests
         working-directory: packages/eventstream-ts
-        run: npm run test:unit
+        run: npm run test:unit -- --minWorkers=1 --maxWorkers=2
       - name: schema contract
         working-directory: packages/eventstream-ts
-        run: npm run test:contract
+        run: npm run test:contract -- --minWorkers=1 --maxWorkers=2
   # Not runnable on the pool yet: `services:` needs a Docker daemon, which
   # the omega-ci runners do not have, and omega_prime/scripts/eventstream_it.py
   # drives that service container through `docker inspect/exec/cp` with fixed
