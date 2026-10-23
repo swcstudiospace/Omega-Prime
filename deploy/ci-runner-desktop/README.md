@@ -101,11 +101,15 @@ needs root) and `requirements/*.txt` (hash-locked venvs).
 | trivy | `trivy_0.76.1_Linux-64bit.tar.gz` sha256 `c7cbe313…9c0` | `trivy_0.76.1_checksums.txt` on the v0.76.1 release |
 | GreptimeDB | `greptime-linux-amd64-v0.14.4.tar.gz` sha256 `50166e3f…e787` | the release's `.sha256sum` file and the GitHub asset digest (the version autonogrammer CI pins) |
 | Python 3.10.22 / 3.12.15 | `actions/python-versions` builds `-linux-24.04-x64` sha256 `4c96c0e9…fd16` / `fcb672b0…7ed8` | GitHub release asset digests; versions from `versions-manifest.json` |
+| Python 3.13.17 / 3.14.9 (00057) | `actions/python-versions` builds `-linux-24.04-x64` sha256 `f0b66c1c…e932` / `987af6a6…78d4` | GitHub release asset digests (releases `3.13.17-39711892467`, `3.14.9-39619022138`); versions from `versions-manifest.json` |
+| CodeQL bundle 2.27.3 (00057) | `codeql-bundle-linux64.tar.gz` sha256 `64518dc4…4c5c` | `codeql-bundle-linux64.tar.gz.checksum.txt` on `codeql-bundle-v2.27.3`; the bundle `github/codeql-action@6f2ac81` (v4) resolves |
+| cargo-deny 0.20.2 (00057) | `cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz` sha256 `9f12ed4c…8d5f` | the release's `.sha256` file and the GitHub asset digest |
+| ripgrep, ffmpeg (00057) | apt, same snapshot | asserted by `toolchain-check.sh` (`rg`, `ffmpeg`, `ffprobe`) |
 | Node.js 22.23.4 / 24.22.1 | `node-v*-linux-x64.tar.xz` sha256 `1805bcd3…e9ce` / `6c172a9a…95e6` | `nodejs.org/dist/v*/SHASUMS256.txt` |
 | .NET SDK 10.0.402 | `dotnet-sdk-10.0.402-linux-x64.tar.gz` sha512 `1904a98d…29c2` | `release-metadata/10.0/releases.json` (runtime 10.0.13); version from OmpOS `global.json` |
 | `maui-android` workload | workload set `10.0.402.1` | NuGet `Microsoft.NET.Workloads.10.0.400` (packages are signed and verified by the SDK) |
 | Android cmdline-tools 23.0 | `commandlinetools-linux-16111833_latest.zip` sha256 `0877a1d0…cfa8` | matches Google's published sha1 `e025545c…5f60` in `repository2-3.xml`; sdkmanager verifies the platform/build-tools packages |
-| rustup-init 1.29.2 | sha256 `5be191e8…f4` | `static.rust-lang.org/rustup/archive/1.29.2/…/rustup-init.sha256`; rustup verifies toolchain 1.99.1 against the channel manifest |
+| rustup-init 1.29.2 | sha256 `5be191e8…f4` | `static.rust-lang.org/rustup/archive/1.29.2/…/rustup-init.sha256`; rustup verifies toolchains 1.99.1 (default) and 1.98.1 (00057, Omega-Prime rust-parity pin) against their channel manifests |
 | semgrep 1.182.1, bandit 1.9.4, podman-compose 1.6.0 | `requirements/*.txt`, every wheel `--hash=sha256` | `uv pip compile --generate-hashes` against PyPI |
 
 ## Isolation and its limits

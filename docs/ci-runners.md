@@ -408,7 +408,8 @@ Everything else is version-pinned and checksum-verified in the Dockerfile.
 | jq, make, build-essential (gcc 13), pkg-config, libssl-dev, file, zip, unzip, xz-utils, rsync, curl | apt | `/usr/bin` | general; `unzip` is required by `oven-sh/setup-bun` |
 | age | 1.1.1 (apt) | `/usr/bin` | ultrathink off-host round-trip tests |
 | pipx 1.4.3, python3-venv, python3-pip | apt (system Python 3.12.3) | `/usr/bin` | `pipx install ...` (lands in the job's `HOME`) |
-| Python | 3.10.22, 3.12.15 | tool cache | `actions/setup-python` |
+| Python | 3.10.22, 3.12.15, 3.13.17, 3.14.9 (each with `bin/pip`) | tool cache | `actions/setup-python` (Omega-Prime matrix 3.12–3.14) |
+| CodeQL bundle | 2.27.3 | tool cache `CodeQL/2.27.3/x64` | `github/codeql-action/init@6f2ac81` (ultrathink); the cache is read-only, so the bundle must match the action pin |
 | Node.js (+ npm) | 22.23.4, 24.22.1 | tool cache | `actions/setup-node` (`22.x`, `24.x`) |
 | Bun | not pre-installed | job `HOME` | `oven-sh/setup-bun` downloads into `~/.bun/bin` (any version) |
 | .NET SDK | 10.0.402 (OmpOS `global.json`) + `maui-android` workload (workload set 10.0.402.1) | `/usr/share/dotnet` | `actions/setup-dotnet` (`global-json-file`) |
@@ -421,7 +422,10 @@ Everything else is version-pinned and checksum-verified in the Dockerfile.
 | trivy | 0.76.1 | `/usr/local/bin` | vulnerability scans |
 | semgrep | 1.182.1 (hash-locked venv) | `/usr/local/bin` | SAST |
 | bandit | 1.9.4 (hash-locked venv) | `/usr/local/bin` | Python SAST |
-| Rust | rustup 1.29.2, toolchain 1.99.1 (minimal + rustfmt + clippy) | `RUSTUP_HOME=/opt/rust/rustup`, proxies in `/opt/rust/cargo/bin` | faceless-desk |
+| Rust | rustup 1.29.2, toolchains 1.99.1 (default) and 1.98.1 (minimal + rustfmt + clippy) | `RUSTUP_HOME=/opt/rust/rustup`, proxies in `/opt/rust/cargo/bin` | faceless-desk (1.99.1); Omega-Prime rust-parity (1.98.1, via `RUSTUP_TOOLCHAIN`) |
+| cargo-deny | 0.20.2 | `/usr/local/bin` | Omega-Prime license gates (replaces `cargo-deny-action`, a Docker action) |
+| ripgrep | 14.x (apt) | `/usr/bin/rg` | autonogrammer branding gate |
+| ffmpeg / ffprobe | 6.1 (apt) | `/usr/bin` | faceless-desk CLI integration tests |
 
 The authoritative list is `deploy/ci-runner-desktop/Dockerfile` (the `ARG`
 block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
