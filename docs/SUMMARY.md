@@ -22,6 +22,8 @@
 - [Remote MCP host for Grok Bot](grok-bot-native.md)
 - [Red team module](red-team.md)
 - [Deploying the tool host](deploy.md)
+- [CI runner fleet](ci-runners.md)
+- [CI runner repository setup](ci-runners-repo-setup.md)
 - [Substrate surface](substrate.md)
 - [FAQ](faq.md)
 - [Marketing](marketing.md)

@@ -1,0 +1,194 @@
+{
+  "task_id": "00050-pr87-greptile-r3",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-23T05:07:52Z",
+  "completed_at": "2026-10-23T05:14:23Z",
+  "base_commit": "9a6462d",
+  "commands": [
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; cd /tmp/r3/repro && PYTHONPATH=/tmp/r3/repro timeout 300 python -m pytest \"omega_prime/tests/ci_runners/test_controller.py::test_exit_during_startup_is_applied_once_runners_are_restored\" \"omega_prime/tests/ci_runners/test_controller.py::test_startup_exit_memory_is_bounded\" -q -p no:cacheprovider",
+      "exit_code": 1,
+      "duration_s": 0.5,
+      "output_tail": "E       assert False\nE        +  where False = all([False, False, False, False, False, False, ...])\n\nomega_prime/tests/ci_runners/test_controller.py:570: AssertionError\n=========================== short test summary info ============================\nFAILED omega_prime/tests/ci_runners/test_controller.py::test_exit_during_startup_is_applied_once_runners_are_restored\nFAILED omega_prime/tests/ci_runners/test_controller.py::test_startup_exit_memory_is_bounded\n2 failed in 0.16s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; timeout 300 python -m pytest \"omega_prime/tests/ci_runners/test_controller.py::test_exit_during_startup_is_applied_once_runners_are_restored\" \"omega_prime/tests/ci_runners/test_controller.py::test_startup_exit_memory_is_bounded\" omega_prime/tests/ci_runners/test_agent.py -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 0.5,
+      "output_tail": "...........                                                              [100%]\n11 passed in 0.21s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; for i in 1 2 3 4 5; do timeout 300 python -m pytest omega_prime/tests/ci_runners/test_agent.py -q -p no:cacheprovider || exit 1; done",
+      "exit_code": 0,
+      "duration_s": 2.2,
+      "output_tail": ".........                                                                [100%]\n9 passed in 0.19s\n.........                                                                [100%]\n9 passed in 0.15s\n.........                                                                [100%]\n9 passed in 0.16s\n.........                                                                [100%]\n9 passed in 0.15s"
+    },
+    {
+      "cmd": "sh /tmp/r2/postfix.sh",
+      "exit_code": 0,
+      "duration_s": 1.4,
+      "output_tail": "omega-ci smoke: agent app built from /tmp/r2/post-site\nsmoke-ok\nOMEGA_CI_AGENT_JOB_UID unset: jobs run as the agent's own user"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; ruff check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": "\u001b[1;32mAll checks passed!\u001b[0m"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; ruff format --check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": "714 files already formatted"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; mypy omega_prime/",
+      "exit_code": 0,
+      "duration_s": 1.7,
+      "output_tail": "Success: no issues found in 587 source files"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; polyglot-check --changed HEAD~1",
+      "exit_code": 0,
+      "duration_s": 9.1,
+      "output_tail": "polyglot-check: 0 error(s), 0 warning(s) in 14/14 file(s) checked [pyright] 9035ms (daemon)"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; timeout 900 python -m pytest omega_prime/tests/ci_runners -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 3.8,
+      "output_tail": "........................................................................ [ 23%]\n........................................................................ [ 46%]\n........................................................................ [ 69%]\n.......................................................................s [ 92%]\n.........................                                                [100%]\n312 passed, 1 skipped in 3.40s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; export COVERAGE_FILE=/tmp/r3/coverage.data; PYTHONPATH=/tmp/covlib timeout 900 python -m coverage run --branch --source=omega_prime.ci_runners -m pytest omega_prime/tests/ci_runners -q -p no:cacheprovider && PYTHONPATH=/tmp/covlib python -m coverage report --fail-under=90 && PYTHONPATH=/tmp/covlib python -m coverage report --include='*/ci_runners/scaler.py,*/ci_runners/controller.py' --fail-under=90",
+      "exit_code": 0,
+      "duration_s": 8.1,
+      "output_tail": "Name                                   Stmts   Miss Branch BrPart  Cover\n------------------------------------------------------------------------\nomega_prime/ci_runners/controller.py     249      1     82      3    99%\nomega_prime/ci_runners/scaler.py         311      1    122      4    99%\n------------------------------------------------------------------------\nTOTAL                                    560      2    204      7    99%\n/tmp/covlib/coverage/core.py:108: CoverageWarning: Couldn't import C tracer: No module named 'coverage.tracer' (no-ctracer); see https://coverage.readthedocs.io/en/7.17.0/messages.html#warning-no-ctracer\n  warn(f\"Couldn't import C tracer: {IMPORT_ERROR}\", slug=\"no-ctracer\", once=True)"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_env_inventory.py omega_prime/tests/test_tool_catalog.py omega_prime/tests/test_prompt_format.py omega_prime/tests/test_grokbot_plugin.py -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 22.5,
+      "output_tail": "...............................................................          [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/discord/player.py:30\n  /workspace/omes-bot-00050/.venv/lib/python3.12/site-packages/discord/player.py:30: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13\n    import audioop\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n135 passed, 1 warning in 21.59s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; python -m omega_prime.tooling.env_inventory --root . --check",
+      "exit_code": 0,
+      "duration_s": 6.1,
+      "output_tail": ""
+    },
+    {
+      "cmd": "uv pip check -p .venv/bin/python",
+      "exit_code": 0,
+      "duration_s": 0.1,
+      "output_tail": "Checked 145 packages in 10ms\nAll installed packages are compatible"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot-00050/.venv/bin:$PATH; timeout 2400 python -m pytest omega_prime/tests -q -p no:cacheprovider > /tmp/r3/wt-suite.txt 2>&1; rc=$?; tail -3 /tmp/r3/wt-suite.txt; exit $rc",
+      "exit_code": 1,
+      "duration_s": 309.2,
+      "output_tail": "FAILED omega_prime/tests/test_prime_kernel_skills.py::test_load_skill_edit_replaces_a_unique_string\nFAILED omega_prime/tests/test_prime_kernel_skills.py::test_list_skills_does_not_import_attach_image\n17 failed, 6007 passed, 22 skipped, 16 warnings in 306.76s (0:05:06)"
+    },
+    {
+      "cmd": "comm -13 <(grep ^FAILED /tmp/r2/base-suite.txt | cut -d' ' -f2 | sort) <(grep ^FAILED /tmp/r3/wt-suite.txt | cut -d' ' -f2 | sort) | grep -c . ; test $? -eq 1",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": "0"
+    },
+    {
+      "cmd": "git status --porcelain --ignored | grep -E \"\\.coverage|coverage\\.data\" ; test $? -eq 1",
+      "exit_code": 0,
+      "duration_s": 0.1,
+      "output_tail": ""
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Against the pre-fix controller (HEAD 9a6462d, with a one-line constant shim so the new tests import), both new startup tests fail: the exit callback that arrives mid-startup is rejected (assert [False] == [True]).",
+      "evidence_command_index": 0,
+      "expects_failure": true
+    },
+    {
+      "claim": "With the fix, the startup-exit tests and the agent tests pass.",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "The agent replay tests are deterministic: the child is held alive by a gate file, so the retry is REPLAYED, and FINISHED with exit_code 0 once it exits. They passed in 5 consecutive runs.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "The Desktop image smoke check still builds the agent from the Dockerfile COPY set.",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "Ruff lint passes.",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "Ruff format check passes.",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "Mypy passes.",
+      "evidence_command_index": 6
+    },
+    {
+      "claim": "polyglot-check reports 0 errors on files changed since 9a6462d~1.",
+      "evidence_command_index": 7
+    },
+    {
+      "claim": "The ci_runners package suite passes (312 passed, 1 skipped).",
+      "evidence_command_index": 8
+    },
+    {
+      "claim": "ci_runners branch coverage is at or above the 90% gate; controller 99%, scaler 99%. Coverage data is written to /tmp.",
+      "evidence_command_index": 9
+    },
+    {
+      "claim": "The docs, public-repo, env-inventory, tool-catalog, prompt-format and grokbot-plugin tests pass.",
+      "evidence_command_index": 10
+    },
+    {
+      "claim": "The env inventory check passes.",
+      "evidence_command_index": 11
+    },
+    {
+      "claim": "Installed packages are compatible.",
+      "evidence_command_index": 12
+    },
+    {
+      "claim": "The full suite fails only on the 17 pre-existing environmental tests (prime-kernel/oneclick).",
+      "evidence_command_index": 13,
+      "expects_failure": true
+    },
+    {
+      "claim": "No full-suite failure is new relative to the base commit c741e90 run recorded in the r2 receipt.",
+      "evidence_command_index": 14
+    },
+    {
+      "claim": "No coverage data file is in the worktree.",
+      "evidence_command_index": 15
+    }
+  ],
+  "unverified": [
+    "No live agent \u2192 controller exit callback during a real VPS restart. The race is reproduced in-process: the callback is delivered on the event loop while startup awaits the agent inventory.",
+    "No docker build of the Desktop image. smoke.sh ran against a materialised copy of the COPY set.",
+    "No live GitHub, Railway, Pulsar or VPS run.",
+    "The 17 full-suite failures are environmental on this box (the prime-agent submodule is uninitialised).",
+    "The Greptile re-review and the GitHub Actions results are recorded after the push, not in this receipt."
+  ],
+  "files_changed": [
+    ".receipts/bot-00-omega-prime/00050-pr87-greptile-r3.json",
+    "docs/ci-runners.md",
+    "omega_prime/ci_runners/controller.py",
+    "omega_prime/tests/ci_runners/test_agent.py",
+    "omega_prime/tests/ci_runners/test_controller.py"
+  ],
+  "contract_changes": [
+    "Before startup applies ControllerStarted, /agent/events exit callbacks are accepted (202) and held, up to STARTUP_EXIT_MEMORY=64 keys. They are applied after startup for runners the snapshot restored; the rest are ignored.",
+    "Startup now verifies saved demand before the runner snapshot, not after it."
+  ],
+  "rollback_plan": "Revert the PR #87 round-3 commit. No deploy or host change was made.",
+  "approvals": [],
+  "approved_by": null
+}
