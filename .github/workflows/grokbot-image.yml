@@ -149,6 +149,9 @@ jobs:
           # Single-line -c: a YAML multiline single-quoted scalar would fold
           # newlines into spaces and corrupt the script.
           docker run --rm --entrypoint python \
+            --network=none \
+            --uidmap=10001:0:1 \
+            --gidmap=10001:0:1 \
             -v "$RUNNER_TEMP/ci-creds:/credentials" \
             "$IMAGE_TAG" -c 'from pathlib import Path; from omega_prime.grokbot.tokens import create_token; from omega_prime.tooling.fs import atomic_write_text; plaintext, _record = create_token(Path("/credentials/omega_prime_tokens.json"), scopes=["admin"], label="ci-admin", ttl_days=1); atomic_write_text(Path("/credentials/omega_prime_admin_token"), plaintext + "\n")'
           chmod 700 "$RUNNER_TEMP/ci-creds"

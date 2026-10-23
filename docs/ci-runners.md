@@ -503,9 +503,10 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   --max-parallel-test-modules 2` (task 00057). These keep one job inside its
   share; the 1000-task ceiling itself is a Railway service limit, so many
   concurrent thread-heavy jobs can still exhaust it.
-- **Omega-Prime's own container jobs (task 00057).** Measured on the live
-  pool (2026-10-24): a single-ID user namespace works (`unshare -r`), but the
-  65536-ID subordinate range does not: setuid `newuidmap` gets EPERM writing
+- **Omega-Prime's own container jobs (task 00057).** On image job
+  120662745206 the setup step's `podman info` printed `rootless=true` and
+  the step continued; the same job then failed while applying a layer.
+  The 65536-ID subordinate range does not work: setuid `newuidmap` gets EPERM writing
   `uid_map` (NoNewPrivs 0, CapEff 0, CapBnd `00000000800405fb`). `grokbot-image`
   therefore does not call the real `newuidmap`. PATH shims write the one
   mapping the job user is allowed to write, storage uses `ignore_chown_errors`

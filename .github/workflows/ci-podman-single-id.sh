@@ -79,7 +79,10 @@ compile_fakechown() {
   out="$1"
   src="${out}.c"
   cat > "$src" << 'EOF'
-/* libc-free: safe to preload into the Debian build image from an Ubuntu host. */
+/* libc-free: safe to preload into the Debian build image from an Ubuntu host.
+ * This makes chown return 0. It does not record uid 10001 in the image.
+ * A publishable image needs a real chown, which needs both uids mapped.
+ * This pool cannot do that until mounts and a subordinate range work. */
 int chown(const char *path, unsigned int owner, unsigned int group) {
   (void)path; (void)owner; (void)group; return 0;
 }
