@@ -71,6 +71,9 @@ STARTUP_EXIT_MEMORY = 64
 # Fork-guard verdicts cached per workflow run (a run has many jobs, and its
 # repository and trigger never change), so a public run costs one GitHub call.
 RUN_VERDICT_MEMORY = 512
+# Job ids already seen past ``queued`` (in_progress / completed). A ``queued``
+# delivery that arrives later is stale: state only moves forward.
+JOB_STATE_MEMORY = 4096
 
 
 class Controller:
@@ -104,20 +107,41 @@ class Controller:
         self._startup_exits: dict[tuple[str, str], int] = {}
         self._verdicts: OrderedDict[tuple[str, int], str | None] = OrderedDict()
         self._verifying: dict[tuple[str, int], asyncio.Future[str | None]] = {}
+        # Accepted public jobs awaiting the run lookup, persisted with the
+        # queue so a restart mid-lookup re-verifies them instead of losing them.
+        self._screening: dict[int, WorkflowJob] = {}
+        self._advanced: OrderedDict[int, None] = OrderedDict()
 
     # -- admission (called from HTTP handlers; never blocks) -------------------
 
     def offer_job(self, job: WorkflowJob) -> bool:
         """Admit a verified webhook job. False (→ 503) when saturated."""
+        if job.status is JobStatus.QUEUED and job.job_id in self._advanced:
+            return True  # stale redelivery: the job already started or finished
         if self._external >= self.max_pending:
             return False
+        if job.status is not JobStatus.QUEUED:
+            self._advance(job.job_id)
         self._external += 1
         if self._guarded(job):
             # Public repo asking for the pool: verify before the scaler sees it.
+            # Persist first: the webhook is acknowledged now, so a restart
+            # during the lookup must replay (and re-verify) it.
+            self._screening.setdefault(job.job_id, job)
+            if self.ready.is_set():
+                self._persist_demand()
             self._spawn(self._guard(job))
         else:
             self._queue.put_nowait((True, JobEvent(job)))
         return True
+
+    def _advance(self, job_id: int) -> None:
+        self._advanced[job_id] = None
+        self._advanced.move_to_end(job_id)
+        while len(self._advanced) > JOB_STATE_MEMORY:
+            self._advanced.popitem(last=False)
+        if self._screening.pop(job_id, None) is not None and self.ready.is_set():
+            self._persist_demand()
 
     # -- public-repository fork guard ---------------------------------------------
 
@@ -141,12 +165,21 @@ class Controller:
         except Exception as exc:  # fail closed, keep the admission count honest
             log.warning("ci-runners: fork guard failed (%s)", type(exc).__name__)
             reason = LOOKUP_FAILED
+        if job.job_id in self._advanced:
+            # It started or finished elsewhere while we were looking: admitting
+            # the old ``queued`` event now would leave demand nothing clears.
+            self._external -= 1
+            return
         if reason is None:
+            # Stays in ``_screening`` until the worker has queued it, so the
+            # persisted demand never has a gap.
             self._queue.put_nowait(
                 (True, JobEvent(dataclasses.replace(job, trusted=True)))
             )
             return
         self._external -= 1
+        if self._screening.pop(job.job_id, None) is not None and self.ready.is_set():
+            self._persist_demand()
         self._refused(job, reason)
 
     def _refused(self, job: WorkflowJob, reason: str) -> None:
@@ -279,7 +312,15 @@ class Controller:
         while True:
             external, event = await self._queue.get()
             try:
-                self._apply(self.scaler.handle(event))
+                if isinstance(event, JobEvent) and event.job.trusted:
+                    self._screening.pop(event.job.job_id, None)
+                stale = (
+                    isinstance(event, JobEvent)
+                    and event.job.status is JobStatus.QUEUED
+                    and event.job.job_id in self._advanced
+                )
+                if not stale:  # else superseded while it waited in the queue
+                    self._apply(self.scaler.handle(event))
                 self._persist_demand()
             except Exception:  # keep the worker alive; never log payloads
                 log.exception("ci-runners: scaler step failed")
@@ -292,11 +333,13 @@ class Controller:
     def _persist_demand(self) -> None:
         if self._demand is None:
             return
-        ids = tuple(self.scaler.queued)
+        jobs = list(self.scaler.queued.values())
+        jobs += [j for i, j in self._screening.items() if i not in self.scaler.queued]
+        ids = tuple(j.job_id for j in jobs)
         if ids == self._saved_demand:
             return
         try:
-            self._demand.save(self.scaler.queued.values())
+            self._demand.save(jobs)
         except OSError as exc:
             # Degrades to the pre-persistence behaviour; never stops the worker.
             self._publish(

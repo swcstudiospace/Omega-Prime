@@ -8,6 +8,8 @@ exactly as before: no run lookup, straight to launch.
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -303,6 +305,114 @@ def test_restart_reverifies_saved_public_demand(tmp_path: Path) -> None:
     assert second.scaler.queued == {}
     assert refusals(second) == [forkguard.FORK] * 2
     assert JIT_PATH not in http.paths()
+
+
+def gated(reply: Any) -> tuple[threading.Event, Callable[[Any], Any]]:
+    """A run lookup that blocks (in the transport thread) until released."""
+    gate = threading.Event()
+
+    def answer(_request: Any) -> Any:
+        assert gate.wait(5), "test never released the lookup"
+        return reply
+
+    return gate, answer
+
+
+async def until(predicate: Callable[[], bool]) -> None:
+    for _ in range(2000):
+        if predicate():
+            return
+        await asyncio.sleep(0.001)
+    raise AssertionError("condition never held")
+
+
+def saved_ids(path: Path) -> list[int]:
+    return [row["job_id"] for row in json.loads(path.read_text())["jobs"]]
+
+
+@pytest.mark.parametrize("later", ["in_progress", "completed"])
+def test_job_finished_during_lookup_leaves_no_demand(later: str) -> None:
+    http = routes()
+    gate, answer = gated(resp(200, run_body("push")))
+    http.on("GET", RUN, answer)
+    rig = opted_in(http)
+
+    async def body(r: Rig) -> None:
+        assert r.ctrl.offer_job(public_job())
+        await until(lambda: RUN in http.paths())
+        # Cancelled (or taken by another runner) before the lookup returns.
+        assert r.ctrl.offer_job(public_job(later))
+        gate.set()
+        await r.ctrl.settle()
+
+    scenario(rig, body)
+    assert rig.scaler.queued == {} and rig.scaler.runners == {}
+    assert JIT_PATH not in http.paths()
+    assert rig.ctrl.pending == 0 and refusals(rig) == []
+
+
+@pytest.mark.parametrize("private", [True, False])
+def test_queued_after_completed_is_dropped(private: bool) -> None:
+    http = routes()
+    http.on("GET", RUN, resp(200, run_body("push")))
+    rig = opted_in(http)
+    make = job if private else public_job
+
+    async def body(r: Rig) -> None:
+        assert r.ctrl.offer_job(make("completed"))
+        await r.ctrl.settle()
+        assert r.ctrl.offer_job(make())  # out-of-order redelivery: accepted, ignored
+        await r.ctrl.settle()
+
+    scenario(rig, body)
+    assert rig.scaler.queued == {} and rig.scaler.runners == {}
+    assert JIT_PATH not in http.paths() and RUN not in http.paths()
+    assert rig.ctrl.pending == 0
+
+
+def test_restart_during_lookup_replays_and_reverifies(tmp_path: Path) -> None:
+    path = tmp_path / "demand.json"
+    http = routes()
+    gate, answer = gated(resp(500, {"message": "never answered"}))
+    http.on("GET", RUN, answer)
+    first = Rig(http, repos=(REPO,), public_repos=(REPO,), demand=DemandStore(path))
+
+    async def crash_mid_lookup() -> None:
+        await first.ctrl.start()
+        await first.ctrl.settle()
+        try:
+            assert first.ctrl.offer_job(public_job())  # → 202 to GitHub
+            await until(lambda: RUN in http.paths())
+            # Accepted and on disk before the verdict exists.
+            assert saved_ids(path) == [101]
+            assert first.scaler.queued == {}
+        finally:
+            await first.ctrl.stop()  # restart while the lookup is in flight
+            gate.set()
+
+    asyncio.run(crash_mid_lookup())
+    assert saved_ids(path) == [101] and refusals(first) == []
+
+    http = routes()
+    http.on(
+        "GET", "/repos/acme/widgets/actions/jobs/101", resp(200, {"status": "queued"})
+    )
+    http.on("GET", RUN, resp(200, run_body("push")))
+    second = Rig(http, repos=(REPO,), public_repos=(REPO,), demand=DemandStore(path))
+    scenario(second, lambda r: r.ctrl.settle())
+    paths = http.paths()
+    assert paths.index(RUN) < paths.index(JIT_PATH)  # re-verified, then served
+    assert len(second.scaler.runners) == 1
+
+
+def test_refused_screening_job_is_removed_from_disk(tmp_path: Path) -> None:
+    path = tmp_path / "demand.json"
+    http = routes()
+    http.on("GET", RUN, resp(200, run_body("pull_request", head="mallory/widgets")))
+    rig = Rig(http, repos=(REPO,), public_repos=(REPO,), demand=DemandStore(path))
+    scenario(rig, offer(public_job()))
+    assert refusals(rig) == [forkguard.FORK]
+    assert saved_ids(path) == []
 
 
 # -- settings ---------------------------------------------------------------------
