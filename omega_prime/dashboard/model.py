@@ -645,12 +645,14 @@ def normalize_tasks(
                 Task(task_id, title, "fleet_job", owner, "unknown", updated, updated)
             )
 
-    # One row per run (or per agent pid when no run id). Helpers fold into
-    # the agent row that shares their checkout; separate agents never merge,
-    # even when they share a cwd.
+    # One row per run (or per agent pid when no run id). Separate agents never
+    # merge, even when they share a cwd. Helpers fold into the sole agent on
+    # their checkout; when several runs share it, helpers stay unassigned
+    # rather than appearing under the wrong task.
     groups: dict[str, list[dict[str, Any]]] = {}
     group_cwd: dict[str, str] = {}
     cwd_primary: dict[str, str] = {}
+    agents_on_cwd: dict[str, int] = {}
     for item in procs:
         pid, cwd = item.get("pid"), item.get("cwd")
         if not isinstance(pid, int) or not isinstance(cwd, str) or cwd in live_cwds:
@@ -661,6 +663,8 @@ def normalize_tasks(
         raw_label: dict[str, Any] = maybe_label if isinstance(maybe_label, dict) else {}
         run_id = raw_label.get("run_id")
         key = f"run:{run_id}" if isinstance(run_id, str) else f"pid:{pid}"
+        if key not in groups:
+            agents_on_cwd[cwd] = agents_on_cwd.get(cwd, 0) + 1
         groups.setdefault(key, []).append(item)
         group_cwd[key] = cwd
         cwd_primary.setdefault(cwd, key)
@@ -670,6 +674,8 @@ def normalize_tasks(
         if item.get("role") != "helper":
             continue
         if not isinstance(pid, int) or not isinstance(cwd, str) or cwd in live_cwds:
+            continue
+        if agents_on_cwd.get(cwd, 0) != 1:
             continue
         primary = cwd_primary.get(cwd)
         if primary is not None:

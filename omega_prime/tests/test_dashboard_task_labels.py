@@ -219,8 +219,9 @@ def test_separate_runs_sharing_a_checkout_stay_separate_rows() -> None:
     ]
     assert "Event Stream" in rows[0].title
     assert "CI Runner Fleet" in rows[1].title
-    # Helpers fold into the primary (lowest-pid agent) row only.
-    assert rows[0].detail is not None and "helper workers 150" in rows[0].detail
+    # Several runs share the checkout: helpers stay unassigned so no row
+    # claims another run's worker.
+    assert rows[0].detail is not None and "helper workers" not in rows[0].detail
     assert rows[1].detail is not None and "helper workers" not in rows[1].detail
 
 
