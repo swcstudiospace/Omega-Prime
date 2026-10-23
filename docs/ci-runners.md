@@ -416,7 +416,7 @@ Everything else is version-pinned and checksum-verified in the Dockerfile.
 | JDK | OpenJDK 17 (apt) | `JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64` | Android builds |
 | Android SDK | cmdline-tools 23.0 (build 16111833), `platforms;android-36` r2, `build-tools;36.0.0`, platform-tools 37.0.1 (fixed archives) | `ANDROID_HOME=/opt/android-sdk` | OmpOS `net10.0-android` |
 | Microsoft.NET.ILLink.Tasks | 10.0.13 (matches the SDK's runtime) in the SDK's offline `library-packs` source | `/usr/share/dotnet/library-packs` | every `net10.0-android` restore |
-| omega-ci-db | this repo (`deploy/ci-runner-desktop/omega-ci-db`) | `/usr/local/bin` | per-job PostgreSQL/GreptimeDB on free ports ([below](#databases-in-jobs-omega-ci-db)) |
+| omega-ci-db | this repo (`deploy/ci-runner-desktop/omega-ci-db`, plus its port tool `omega-ci-ports`) | `/usr/local/bin` | per-job PostgreSQL/GreptimeDB on free ports ([below](#databases-in-jobs-omega-ci-db)) |
 | PostgreSQL | 16.x (apt, server + client; no cluster, no service) | `/usr/lib/postgresql/16/bin` on `PATH` | agent-substrate (replaces the `postgres:16` service) |
 | GreptimeDB | 0.14.4 (`greptime standalone`) | `/usr/local/bin` | autonogrammer (replaces `docker run greptime/greptimedb`) |
 | podman / podman-compose | 4.9.3 (apt) / 1.6.0 | `/usr/bin`, `/usr/local/bin` | OmpOS compose validation (`config` only, see limits) |

@@ -92,7 +92,8 @@ uid 1500; fails the build if any tool is missing, at the wrong version, or
 needs root; it stops any database it started on every exit, and builds a
 `net10.0-android` app offline), `omega-ci-db` (installed as
 `/usr/local/bin/omega-ci-db`: per-job PostgreSQL/GreptimeDB on free loopback
-ports with data under `RUNNER_TEMP`, 00058) and `requirements/*.txt`
+ports with data under `RUNNER_TEMP`, 00058; its port primitives are
+`omega-ci-ports`, installed beside it) and `requirements/*.txt`
 (hash-locked venvs).
 
 ### Toolchain provenance (verified 2026-10-24 AEDT)

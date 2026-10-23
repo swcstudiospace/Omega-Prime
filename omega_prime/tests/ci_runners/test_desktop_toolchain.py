@@ -9,6 +9,7 @@ the setup-* actions at the read-only tool cache. The image build itself runs
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -254,7 +255,15 @@ def test_db_helper_ships_on_the_job_path() -> None:
         "COPY deploy/ci-runner-desktop/omega-ci-db /usr/local/bin/omega-ci-db"
         in DOCKERFILE
     )
-    assert "chmod 0755 /usr/local/bin/omega-ci-db" in DOCKERFILE
+    # Its port tool ships beside it: the helper finds it as $(dirname $0).
+    assert (
+        "COPY deploy/ci-runner-desktop/omega-ci-ports /usr/local/bin/omega-ci-ports"
+        in DOCKERFILE
+    )
+    assert (
+        "chmod 0755 /usr/local/bin/omega-ci-db /usr/local/bin/omega-ci-ports"
+        in DOCKERFILE
+    )
     assert "/usr/local/bin" in runner_env()["PATH"].split(":")
     assert (
         subprocess.run(
@@ -262,6 +271,9 @@ def test_db_helper_ships_on_the_job_path() -> None:
         ).returncode
         == 0
     )
+    ports = DESKTOP / "omega-ci-ports"
+    assert os.access(ports, os.X_OK)
+    compile(ports.read_text(), str(ports), "exec")
 
 
 def test_docs_examples_use_the_helper_not_fixed_ports() -> None:

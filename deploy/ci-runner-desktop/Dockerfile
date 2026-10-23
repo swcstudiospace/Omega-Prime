@@ -364,6 +364,7 @@ RUN chown -R root:root /opt/omega-ci && chmod -R a+rX,go-w /opt/omega-ci \
 # omega-ci-db (00058): per-job PostgreSQL/GreptimeDB on free loopback ports
 # with data under RUNNER_TEMP, so parallel jobs on one Desktop never collide.
 COPY deploy/ci-runner-desktop/omega-ci-db /usr/local/bin/omega-ci-db
+COPY deploy/ci-runner-desktop/omega-ci-ports /usr/local/bin/omega-ci-ports
 COPY deploy/ci-runner-desktop/toolchain-check.sh /opt/omega-ci/toolchain-check.sh
 RUN printf '%s=%s\n' GH "${GH_VERSION}" GITLEAKS "${GITLEAKS_VERSION}" TRIVY "${TRIVY_VERSION}" \
        GREPTIME "${GREPTIME_VERSION}" PY310 "${PY310_VERSION}" PY312 "${PY312_VERSION}" \
@@ -374,7 +375,8 @@ RUN printf '%s=%s\n' GH "${GH_VERSION}" GITLEAKS "${GITLEAKS_VERSION}" TRIVY "${
        ILLINK_TASKS "${ILLINK_TASKS_VERSION}" \
        RUST "${RUST_VERSION}" RUST_PARITY "${RUST_PARITY_VERSION}" CARGO_DENY "${CARGO_DENY_VERSION}" \
        PG_MAJOR "${PG_MAJOR}" > /opt/omega-ci/toolchain-versions \
-    && chown root:root /usr/local/bin/omega-ci-db && chmod 0755 /usr/local/bin/omega-ci-db \
+    && chown root:root /usr/local/bin/omega-ci-db /usr/local/bin/omega-ci-ports \
+    && chmod 0755 /usr/local/bin/omega-ci-db /usr/local/bin/omega-ci-ports \
     && chmod 0644 /opt/omega-ci/toolchain-versions && chmod 0755 /opt/omega-ci/toolchain-check.sh \
     && /opt/omega-ci/toolchain-check.sh --as-job "${JOB_UID}" "${JOB_GID}"
 

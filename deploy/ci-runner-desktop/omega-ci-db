@@ -27,22 +27,13 @@ wait_s="${OMEGA_CI_DB_WAIT:-60}"
 die() { echo "omega-ci-db: $*" >&2; exit 1; }
 usage() { die "usage: omega-ci-db start postgres|greptime [--name NAME] [--no-export] | env NAME | stop NAME|--all"; }
 
-# N distinct free loopback ports. All sockets stay bound until every port is
-# chosen, so the N ports differ; a race with another process is retried by
-# the caller (start tries up to $attempts port sets).
-free_ports() {
-    python3 -c '
-import socket, sys
-socks = []
-for _ in range(int(sys.argv[1])):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    socks.append(s)
-print(" ".join(str(s.getsockname()[1]) for s in socks))
-for s in socks:
-    s.close()
-' "$1"
-}
+# Port primitives live in omega-ci-ports (shipped next to this helper):
+#   free N        N distinct free loopback ports, all bound until chosen, so
+#                 they differ; a race with another process is retried here
+#                 (start tries up to $attempts port sets).
+#   owns PID PORT PID itself holds the listening TCP socket on PORT.
+ports_tool="${OMEGA_CI_PORTS:-$(dirname "$0")/omega-ci-ports}"
+free_ports() { "$ports_tool" free "$1"; }
 
 valid_name() {
     case "$1" in ''|*[!A-Za-z0-9_.-]*|.*) die "bad instance name '$1' (use letters, digits, . _ -)" ;; esac
@@ -86,34 +77,7 @@ pg_owned() {
 # owns_port PID PORT: PID itself holds the listening TCP socket on PORT, so a
 # health check on PORT is talking to our process, not another instance that
 # grabbed the port after free_ports released it.
-owns_port() {
-    python3 -c '
-import os, sys
-pid, port = sys.argv[1], int(sys.argv[2])
-inodes = set()
-for table in ("/proc/net/tcp", "/proc/net/tcp6"):
-    try:
-        rows = open(table).read().splitlines()[1:]
-    except OSError:
-        continue
-    for row in rows:
-        f = row.split()
-        if f[3] == "0A" and int(f[1].rsplit(":", 1)[1], 16) == port:
-            inodes.add(f[9])
-try:
-    fds = os.listdir(f"/proc/{pid}/fd")
-except OSError:
-    sys.exit(1)
-for fd in fds:
-    try:
-        target = os.readlink(f"/proc/{pid}/fd/{fd}")
-    except OSError:
-        continue
-    if target.startswith("socket:[") and target[8:-1] in inodes:
-        sys.exit(0)
-sys.exit(1)
-' "$1" "$2"
-}
+owns_port() { "$ports_tool" owns "$1" "$2"; }
 
 # Wait until pid $1 is gone, up to $2 seconds. 0 if gone.
 wait_gone() {

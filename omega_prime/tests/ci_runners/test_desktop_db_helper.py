@@ -3,8 +3,9 @@
 ``omega-ci-db`` gives each PostgreSQL / GreptimeDB its own free loopback
 ports and data dir, so parallel jobs on one Desktop cannot collide, and
 ``toolchain-check.sh`` stops every database it started on ANY exit. These
-tests drive the real scripts with stub database binaries (the image build
-runs them against the real ones).
+tests drive the real scripts with stub database binaries, a fake port tool
+and a fake curl, and open no sockets (the image build runs them against the
+real ones).
 """
 
 from __future__ import annotations
@@ -21,6 +22,43 @@ REPO = Path(__file__).resolve().parents[3]
 DESKTOP = REPO / "deploy" / "ci-runner-desktop"
 HELPER = DESKTOP / "omega-ci-db"
 CHECK = DESKTOP / "toolchain-check.sh"
+
+# No sockets anywhere in these tests (hermetic-tests rule): ports are plain
+# numbers handed out by a fake omega-ci-ports, and "holding" a port is an
+# owner file $STUB_PORTS/owner-PORT naming the holder's pid, claimed with
+# O_EXCL so a second holder fails like a real bind would. The fake curl
+# answers only while that owner is alive. The image build runs the real
+# omega-ci-ports, curl and databases (toolchain-check.sh).
+
+PORTS = r"""#!/bin/sh
+# Fake omega-ci-ports: "free N" hands out fresh numbers from a counter;
+# "owns PID PORT" reads the owner file.
+dir="$STUB_PORTS"
+case "$1" in
+    free)
+        exec 8>"$dir/.counter.lock"; flock 8
+        next="$(cat "$dir/counter" 2>/dev/null || echo 20000)"
+        out=""; i=0
+        while [ "$i" -lt "$2" ]; do
+            next=$(( next + 1 )); out="$out${out:+ }$next"; i=$(( i + 1 ))
+        done
+        echo "$next" >"$dir/counter"
+        echo "$out"
+        ;;
+    owns) [ "$(cat "$dir/owner-$3" 2>/dev/null)" = "$2" ] ;;
+    *) exit 2 ;;
+esac
+"""
+
+# hold PORT... : claim each port for this process (fails if already held).
+HOLD = r"""
+import os, sys
+def hold(ports, pid):
+    for p in ports:
+        fd = os.open(os.path.join(os.environ["STUB_PORTS"], f"owner-{p}"),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        os.write(fd, str(pid).encode()); os.close(fd)
+"""
 
 PG_CTL = r"""#!/bin/sh
 # Stub pg_ctl: "start" runs a detached sleeper that HOLDS the -p port (like a
@@ -41,23 +79,34 @@ done
 echo "pg_ctl $action $opts" >> "$log"
 if [ "$action" = start ]; then
     port="$(echo "$opts" | sed 's/.*-p \([0-9]*\).*/\1/')"
-    # Bind first, then fork: the parent exits only once the port is held.
-    # Like postgres, the sleeper handles SIGQUIT itself.
-    python3 -c '
-import os, signal, socket, sys, time
-s = socket.socket()
-s.bind(("127.0.0.1", int(sys.argv[1])))
-s.listen()
-pid = os.fork()
-if pid:
-    print(pid)
-    sys.exit(0)
-sys.stdout.close()
+    # The child detaches (setsid), moves into its data dir and claims the
+    # port, and only THEN publishes postmaster.pid (atomic rename); the
+    # parent exits once that file exists. So the pid a test sees is already
+    # a detached postmaster in its own session, never a half-started child.
+    python3 -c '__HOLD__
+import signal, time
+data = sys.argv[2]
+r, w = os.pipe()
+if os.fork():
+    os.close(w)
+    ok = os.read(r, 1) == b"1"
+    sys.exit(0 if ok else 1)
+os.close(r)
 os.setsid()  # detached from the caller, like a postmaster pg_ctl started
-os.chdir(sys.argv[2])  # a real postmaster runs with its data dir as cwd
-signal.signal(signal.SIGQUIT, signal.SIG_DFL)
+os.chdir(data)  # a real postmaster runs with its data dir as cwd
+signal.signal(signal.SIGQUIT, signal.SIG_DFL)  # postgres handles SIGQUIT
+try:
+    hold([sys.argv[1]], os.getpid())
+except FileExistsError:
+    os.write(w, b"0"); sys.exit(1)
+with open("postmaster.pid.tmp", "w") as fh:
+    fh.write(f"{os.getpid()}\n")
+os.rename("postmaster.pid.tmp", "postmaster.pid")
+os.write(w, b"1"); os.close(w)
+for fd in (0, 1, 2):
+    os.close(fd)
 time.sleep(600)
-' "$port" "$data" </dev/null >"$data/postmaster.pid" 2>/dev/null || exit 1
+' "$port" "$data" </dev/null >/dev/null 2>&1 || exit 1
     echo "pid $(head -n 1 "$data/postmaster.pid")" >> "$log"
     # Server up, pg_ctl -w still "waiting": lets a test interrupt the start.
     [ -n "${STUB_PG_CTL_START_SLEEP:-}" ] && sleep "$STUB_PG_CTL_START_SLEEP"
@@ -69,7 +118,7 @@ if [ "$action" = stop ]; then
     kill "$pid"; while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done
     rm -f "$data/postmaster.pid"
 fi
-"""
+""".replace("__HOLD__", HOLD)
 
 INITDB = r"""#!/bin/sh
 case "$1" in --version) echo "initdb (PostgreSQL) 16.9"; exit 0 ;; esac
@@ -83,40 +132,40 @@ PSQL = r"""#!/bin/sh
 echo omega-ci-pg-ok
 """
 
-# Stub greptime: a real HTTP server on --http-addr that also HOLDS its rpc,
-# mysql and postgres ports; /health is OK, SQL fails unless STUB_GT_SQL_OK is
-# set. exec, so the helper's recorded pid is it.
+# Stub greptime: HOLDS its http, rpc, mysql and postgres ports (owner files)
+# and sleeps. exec, so the helper's recorded pid is it.
 GREPTIME = r"""#!/bin/sh
 case "$1" in --version) echo "version: 0.14.4"; exit 0 ;; esac
 echo "greptime $*" >> "$STUB_LOG"
-http=""; others=""
+ports=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --http-addr) http="$2" ;;
-        --rpc-bind-addr|--mysql-addr|--postgres-addr) others="$others $2" ;;
+        --http-addr|--rpc-bind-addr|--mysql-addr|--postgres-addr) ports="$ports ${2##*:}" ;;
     esac
     shift
 done
-exec python3 -c '
-import http.server, os, socket, sys
-held = []
-for addr in sys.argv[2:]:
-    h, p = addr.rsplit(":", 1)
-    s = socket.socket()
-    s.bind((h, int(p)))
-    s.listen()
-    held.append(s)
-host, port = sys.argv[1].rsplit(":", 1)
-class H(http.server.BaseHTTPRequestHandler):
-    def log_message(self, *a): pass
-    def reply(self, code, body):
-        self.send_response(code); self.end_headers(); self.wfile.write(body)
-    def do_GET(self): self.reply(200, b"{}")
-    def do_POST(self):
-        ok = os.environ.get("STUB_GT_SQL_OK")
-        self.reply(200 if ok else 500, b"{\"rows\":[[1]]}" if ok else b"boom")
-http.server.HTTPServer((host, int(port)), H).serve_forever()
-' "$http" $others
+exec python3 -c '__HOLD__
+import time
+hold(sys.argv[1:], os.getpid())
+time.sleep(600)
+' $ports
+""".replace("__HOLD__", HOLD)
+
+# Fake curl for greptime: /health is OK and SQL answers (only with
+# STUB_GT_SQL_OK) while the port's owner is alive.
+CURL = r"""#!/bin/sh
+url=""
+for a in "$@"; do case "$a" in http://*) url="$a" ;; esac; done
+hostport="${url#http://}"; hostport="${hostport%%/*}"; port="${hostport##*:}"
+owner="$(cat "$STUB_PORTS/owner-$port" 2>/dev/null)"
+[ -n "$owner" ] && kill -0 "$owner" 2>/dev/null || { echo "curl: (7) connection refused" >&2; exit 7; }
+case "$url" in
+    */health) echo "{}" ;;
+    */v1/sql)
+        [ -n "${STUB_GT_SQL_OK:-}" ] || { echo "curl: (22) 500" >&2; exit 22; }
+        echo '{"rows":[[1]]}' ;;
+    *) exit 22 ;;
+esac
 """
 
 
@@ -129,6 +178,8 @@ def stubs(tmp_path: Path) -> dict[str, str]:
         "initdb": INITDB,
         "psql": PSQL,
         "greptime": GREPTIME,
+        "curl": CURL,
+        "omega-ci-ports": PORTS,
     }.items():
         path = bindir / name
         path.write_text(body)
@@ -136,11 +187,14 @@ def stubs(tmp_path: Path) -> dict[str, str]:
     versions = tmp_path / "versions"
     versions.write_text("PG_MAJOR=16\nGREPTIME=0.14.4\n")
     (tmp_path / "home").mkdir()
+    (tmp_path / "ports").mkdir()
     return {
         "PATH": f"{bindir}:/usr/local/bin:/usr/bin:/bin",
         "HOME": str(tmp_path / "home"),
         "TMPDIR": str(tmp_path / "home"),
         "STUB_LOG": str(tmp_path / "stub.log"),
+        "STUB_PORTS": str(tmp_path / "ports"),
+        "OMEGA_CI_PORTS": str(bindir / "omega-ci-ports"),
         "OMEGA_CI_DB": str(HELPER),
         "OMEGA_CI_TOOLCHAIN_VERSIONS": str(versions),
         "OMEGA_CI_DB_WAIT": "20",
