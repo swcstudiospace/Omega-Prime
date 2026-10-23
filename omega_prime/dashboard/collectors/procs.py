@@ -59,14 +59,32 @@ def _subcommand(args: list[str], program: str) -> str | None:
     """The first positional argument after `program`, when `program` is the
     executable itself or the script an interpreter (bun, node) runs.
 
-    Only those command positions count: an argument value such as
-    ``--cwd /work/auth-broker`` never names a daemon. Returns "" when the
-    program runs with no subcommand, None when it is not the program.
+    Option names and their values are skipped, so
+    ``omp --cwd server -p "Do the work"`` never treats ``server`` as a
+    daemon name. Returns "" when the program runs with no subcommand, None
+    when it is not the program.
     """
     for index, arg in enumerate(args[:2]):
-        if Path(arg).name == program:
-            rest = [part for part in args[index + 1 :] if not part.startswith("-")]
-            return rest[0] if rest else ""
+        if Path(arg).name != program:
+            continue
+        expect_value = False
+        for part in args[index + 1 :]:
+            if expect_value:
+                expect_value = False
+                if not part.startswith("-"):
+                    continue
+                # Previous flag was boolean; this token is another flag.
+            if part == "--":
+                # Everything after end-of-options is positional.
+                continue
+            if part.startswith("--"):
+                if "=" not in part:
+                    expect_value = True
+                continue
+            if part.startswith("-") and part != "-":
+                continue
+            return part
+        return ""
     return None
 
 

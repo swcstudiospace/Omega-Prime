@@ -109,6 +109,8 @@ def test_argument_values_never_turn_an_agent_into_a_service(tmp_path: Path) -> N
     _proc(tmp_path, 311, cmdline=b"bun\0omp\0--cwd\0/work/auth-broker\0-p\0")
     _proc(tmp_path, 312, cmdline=b"omp\0--cwd\0/work/openshell-gateway\0-p\0")
     _proc(tmp_path, 313, cmdline=b"bun\0omp\0--mode\0rpc\0/work/server\0")
+    # Bare option value equal to a daemon name must not classify as a service.
+    _proc(tmp_path, 314, cmdline=b"omp\0--cwd\0server\0-p\0Do the work\0")
     result = make_procs_collector(
         proc_root=tmp_path,
         now_fn=lambda: datetime.fromtimestamp(1020, UTC),
@@ -119,6 +121,7 @@ def test_argument_values_never_turn_an_agent_into_a_service(tmp_path: Path) -> N
         (311, "agent"),
         (312, "agent"),
         (313, "agent"),
+        (314, "agent"),
     ]
     assert result.extra["services"] == []
 
