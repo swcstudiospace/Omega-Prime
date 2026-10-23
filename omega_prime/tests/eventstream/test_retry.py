@@ -601,3 +601,88 @@ async def test_history_parses_json_string_properties_from_broker() -> None:
     history = publisher.requests[0].properties["omega_failure_history"]
     assert [item["attempt"] for item in history] == [1, 2]
     assert acknowledged == [True]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "attempt"),
+    [(DeadLetter("permanent"), 1), (Retry(after=0, reason="still failing"), 5)],
+)
+def test_dead_letter_counts_one_consume_with_handler_latency(
+    outcome: Any, attempt: int
+) -> None:
+    class Observer:
+        def __init__(self) -> None:
+            self.consumed: list[tuple[str, float]] = []
+            self.dead_letters = 0
+
+        def dead_letter(self) -> None:
+            self.dead_letters += 1
+
+        def publish(self, **_kwargs: Any) -> None:
+            pass
+
+        def retry(self) -> None:
+            pass
+
+        def consume(self, outcome: str, latency: float, **_kwargs: Any) -> None:
+            self.consumed.append((outcome, latency))
+
+    async def scenario() -> None:
+        observer = Observer()
+        acked: list[bool] = []
+        router = RetryRouter(
+            Publisher(), "gate", observer=cast(EventStreamObserver, observer)
+        )
+        result = await router.handle(
+            make_delivery(acked), outcome, attempt=attempt, latency=1.25
+        )
+        assert result == "dlq" and acked == [True]
+        assert observer.dead_letters == 1
+        # Exactly one consume record per dead-lettered delivery, with latency.
+        assert observer.consumed == [("dlq", 1.25)]
+
+    asyncio.run(scenario())
+
+
+def test_dlq_triage_uses_a_single_use_per_event_producer() -> None:
+    async def scenario() -> None:
+        payload = {
+            "kind": "dlq",
+            "origin_topic": "persistent://omega/task/state",
+            "aggregate_key": "task-1",
+            "source_ce_id": "source-event",
+            "reason": "invalid event",
+            "history": [{"attempt": 1, "reason": "schema rejected"}],
+        }
+        event = CloudEvent.model_validate(
+            {
+                "specversion": "1.0",
+                "id": "blocked-single-use",
+                "source": "urn:test",
+                "type": "omega.control.signal.blocked",
+                "datacontenttype": "application/json",
+                "dataschema": schema_uri_for_type("omega.control.signal.blocked"),
+                "data": payload,
+                "omegakey": derive_key("omega.control.signal.blocked", payload),
+            }
+        )
+
+        async def ack() -> None:
+            pass
+
+        publisher = Publisher()
+        await DlqTriage(publisher).handle(
+            Delivery(
+                event=event,
+                topic="persistent://omega/system/dlq.gate",
+                key=derive_key("omega.control.signal.blocked", payload),
+                message_id="dlq-message",
+                properties={"omega_attempt": 1},
+                ack=ack,
+            )
+        )
+        (request,) = publisher.requests
+        assert request.producer_name == "omega-eventstream-blocked-single-use"
+        assert request.single_use is True
+
+    asyncio.run(scenario())

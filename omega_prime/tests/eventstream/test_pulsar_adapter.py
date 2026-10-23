@@ -689,3 +689,187 @@ def test_pulsar_helper_predicates_and_property_encoding() -> None:
     assert _requires_encryption(auth_req) is True
     plain = _request("plain")
     assert _requires_encryption(plain) is False
+
+
+class _PoisonMessage(FakeMessage):
+    def __init__(
+        self,
+        *,
+        topic: str,
+        properties: dict[str, str],
+        payload: bytes = b"{not-json",
+    ) -> None:
+        self._payload = payload
+        self._key = "owner/repo#1"
+        self._topic = topic
+        self._properties = properties
+
+    def topic_name(self) -> str:
+        return self._topic
+
+    def message_id(self) -> str:
+        return "ledger:9:entry:3"
+
+    def properties(self) -> dict[str, str]:
+        return dict(self._properties)
+
+
+@pytest.mark.asyncio
+async def test_poison_is_quarantined_as_a_decodable_blocked_dlq_record() -> None:
+    from omega_prime.eventstream.taxonomy import validate_payload
+
+    native = FakeClient()
+    bus = _bus(native)
+    subscriber = await bus.subscribe("persistent://omega/sdlc/pr", "gate")
+    consumer = native.consumers[-1]
+    poison = _PoisonMessage(
+        topic="persistent://omega/sdlc/pr",
+        properties={"ce_id": "event-poison", "omega_attempt": "2"},
+    )
+    consumer.messages = [poison, FakeMessage(_event())]
+
+    delivery = await subscriber.receive()
+
+    assert delivery.event.id == "event-1"
+    assert consumer.acknowledged[0] is poison
+    topic, options = native.created[-1]
+    assert topic == "persistent://omega/system/dlq.gate"
+    payload, send_options = native.producers[-1].sent[-1]
+    # The quarantine record is a schema-valid CloudEvent that triage can decode
+    # (the raw undecodable bytes are never republished).
+    blocked = CloudEvent.from_bytes(payload)
+    validate_payload(blocked.type, blocked.data)
+    assert blocked.type == "omega.control.signal.blocked"
+    assert blocked.data["kind"] == "dlq"
+    assert blocked.data["origin_topic"] == "persistent://omega/sdlc/pr"
+    assert blocked.data["source_ce_id"] == "event-poison"
+    assert b"{not-json" not in payload
+    properties = send_options["properties"]
+    assert properties["omega_poison"] == "true"
+    assert properties["omega_origin_message_id"] == "ledger:9:entry:3"
+    assert "encryption_key" not in options
+    # The per-event poison producer is released after the send.
+    assert native.producers[-1].closed
+    await bus.close()
+
+
+def _crypto_bus(tmp_path: Path, native: FakeClient) -> PulsarEventBus:
+    public = tmp_path / "auth-public.pem"
+    private = tmp_path / "auth-private.pem"
+    public.write_text("public-key", encoding="utf-8")
+    private.write_text("private-key", encoding="utf-8")
+    public.chmod(0o600)
+    private.chmod(0o600)
+    return PulsarEventBus(
+        EventStreamConfig(encryption_key_file=public, private_key_file=private),
+        native_client=native,
+        acknowledged_watermark=lambda _topic, _name: 0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_poison_from_redelivery_topic_keeps_auth_origin_encrypted(
+    tmp_path: Path,
+) -> None:
+    native = FakeClient()
+    bus = _crypto_bus(tmp_path, native)
+    subscriber = await bus.subscribe("persistent://omega/system/retry.gate", "gate")
+    native.consumers[-1].messages = [
+        _PoisonMessage(
+            topic="persistent://omega/system/retry.gate",
+            properties={"omega_origin_topic": "persistent://omega/auth/session"},
+        ),
+        FakeMessage(_event()),
+    ]
+    await subscriber.receive()
+    topic, options = native.created[-1]
+    assert topic == "persistent://omega/system/dlq.gate"
+    # Auth origin is preserved through the retry hop, so the quarantine record
+    # is produced with payload encryption even though its source was retry.*.
+    assert options["encryption_key"] == "omega-auth"
+    _payload, send_options = native.producers[-1].sent[-1]
+    assert send_options["properties"]["omega_origin_topic"] == (
+        "persistent://omega/auth/session"
+    )
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_quarantine_leaves_the_poison_unacknowledged() -> None:
+    class RejectingClient(FakeClient):
+        async def create_producer(self, topic: str, **options: Any) -> FakeProducer:
+            raise RuntimeError("producer rejected")
+
+    native = RejectingClient()
+    bus = _bus(native)
+    subscriber = await bus.subscribe("persistent://omega/sdlc/pr", "gate")
+    native.consumers[-1].messages = [
+        _PoisonMessage(topic="persistent://omega/sdlc/pr", properties={})
+    ]
+    with pytest.raises(PulsarAdapterError, match="poison dead-letter failed"):
+        await subscriber.receive()
+    assert native.consumers[-1].acknowledged == []
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_poison_on_triage_input_goes_to_the_blocked_signal_topic(
+    tmp_path: Path,
+) -> None:
+    native = FakeClient()
+    bus = _crypto_bus(tmp_path, native)
+    subscriber = await bus.subscribe("persistent://omega/system/dlq.gate", "dlq-triage")
+    native.consumers[-1].messages = [
+        _PoisonMessage(topic="persistent://omega/system/dlq.gate", properties={}),
+        FakeMessage(_event()),
+    ]
+    await subscriber.receive()
+    topic, _options = native.created[-1]
+    assert topic == "persistent://omega/control/signal"
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_rejection_at_producer_creation_is_a_schema_error() -> None:
+    from omega_prime.eventstream.errors import SchemaError
+
+    class IncompatibleSchema(Exception):
+        pass
+
+    class RejectingClient(FakeClient):
+        async def create_producer(self, topic: str, **options: Any) -> FakeProducer:
+            raise IncompatibleSchema("schema version mismatch")
+
+    bus = _bus(RejectingClient())
+    with pytest.raises(SchemaError, match="native schema rejected producer"):
+        await bus.publish(_request())
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_single_use_producer_is_released_after_success_and_failure() -> None:
+    class FailingOnce(FakeProducer):
+        async def send(self, payload: bytes, **options: Any) -> str:
+            raise OSError("broker unavailable")
+
+    class Client(FakeClient):
+        fail = True
+
+        async def create_producer(self, topic: str, **options: Any) -> FakeProducer:
+            self.created.append((topic, options))
+            producer: FakeProducer = FailingOnce() if self.fail else FakeProducer()
+            self.producers.append(producer)
+            return producer
+
+    native = Client()
+    bus = _bus(native)
+    request = _request("per-event").model_copy(update={"single_use": True})
+    with pytest.raises(PulsarAdapterError):
+        await bus.publish(request)
+    assert native.producers[-1].closed
+    native.fail = False
+    await bus.publish(request)
+    assert native.producers[-1].closed
+    assert len(native.created) == 2
+    assert bus._producers == {}
+    await bus.close()
