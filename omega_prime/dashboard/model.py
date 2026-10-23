@@ -645,25 +645,44 @@ def normalize_tasks(
                 Task(task_id, title, "fleet_job", owner, "unknown", updated, updated)
             )
 
-    # One row per run: an agent and its helper workers share a checkout.
-    runs: dict[str, list[dict[str, Any]]] = {}
+    # One row per run (or per agent pid when no run id). Helpers fold into
+    # the agent row that shares their checkout; separate agents never merge,
+    # even when they share a cwd.
+    groups: dict[str, list[dict[str, Any]]] = {}
+    group_cwd: dict[str, str] = {}
+    cwd_primary: dict[str, str] = {}
     for item in procs:
         pid, cwd = item.get("pid"), item.get("cwd")
         if not isinstance(pid, int) or not isinstance(cwd, str) or cwd in live_cwds:
             continue
-        runs.setdefault(cwd, []).append(item)
-    for cwd, members in sorted(runs.items()):
-        members.sort(key=lambda member: member["pid"])
-        agents = [m for m in members if m.get("role") != "helper"]
-        if not agents:
-            # Helpers without their agent are leftovers, not work to show.
+        if item.get("role") == "helper":
             continue
-        helpers = [m["pid"] for m in members if m.get("role") == "helper"]
+        maybe_label = item.get("label")
+        raw_label: dict[str, Any] = maybe_label if isinstance(maybe_label, dict) else {}
+        run_id = raw_label.get("run_id")
+        key = f"run:{run_id}" if isinstance(run_id, str) else f"pid:{pid}"
+        groups.setdefault(key, []).append(item)
+        group_cwd[key] = cwd
+        cwd_primary.setdefault(cwd, key)
+    helpers_by_group: dict[str, list[int]] = {key: [] for key in groups}
+    for item in procs:
+        pid, cwd = item.get("pid"), item.get("cwd")
+        if item.get("role") != "helper":
+            continue
+        if not isinstance(pid, int) or not isinstance(cwd, str) or cwd in live_cwds:
+            continue
+        primary = cwd_primary.get(cwd)
+        if primary is not None:
+            helpers_by_group[primary].append(pid)
+    for key in sorted(groups, key=lambda k: (group_cwd[k], groups[k][0]["pid"])):
+        agents = sorted(groups[key], key=lambda member: member["pid"])
+        helpers = helpers_by_group[key]
+        cwd = group_cwd[key]
         label: dict[str, Any] = {}
         for member in agents:
-            for key, value in (member.get("label") or {}).items():
-                if value is not None and label.get(key) is None:
-                    label[key] = value
+            for name, value in (member.get("label") or {}).items():
+                if value is not None and label.get(name) is None:
+                    label[name] = value
         first = agents[0]
         elapsed_s = first.get("elapsed_s")
         measured = _anchor(first.get("elapsed_measured_at"))
