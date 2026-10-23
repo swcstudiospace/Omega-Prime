@@ -343,7 +343,7 @@ def test_prepare_removes_only_stale_runner_trees(tmp_path: Path) -> None:
     s = supervisor(tmp_path, tmp_path, Exits())
     s.prepare()
     assert sorted(p.name for p in work.iterdir()) == ["keep-me"]
-    assert stat.S_IMODE(work.stat().st_mode) == 0o711
+    assert stat.S_IMODE(work.stat().st_mode) == 0o755
 
 
 def test_build_workdir_links_shared_files(

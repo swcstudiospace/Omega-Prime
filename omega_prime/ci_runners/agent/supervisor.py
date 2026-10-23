@@ -16,6 +16,16 @@ Isolation (documented, not overstated):
 * Children share that UID, so per-runner workdirs (0700) are hygiene, not a
   confidentiality boundary between concurrent jobs. ``nice`` and rlimits are
   resource guards only. No Docker / privileged access is provided.
+* The work root and every directory above it must be listable (r-x) by the
+  job identity: actions/runner refuses to start otherwise ("Permission to read
+  the directory contents is required for ... and each directory up the
+  hierarchy") and exits 0 within a second. ``prepare()`` makes the work root
+  0755 and checks the chain, so a bad image fails at agent startup instead of
+  at every launch. Nothing secret lives in those directories.
+
+Each child's stdout/stderr, and the tail of its ``_diag`` logs when it exits
+without having taken a job, go to the agent log: bounded and redacted (secret
+patterns plus any long opaque blob, so a JIT config can never be echoed).
 """
 
 from __future__ import annotations
@@ -39,6 +49,7 @@ from typing import Any
 
 from omega_prime.ci_runners.agent.jobhook import policy_document
 from omega_prime.ci_runners.settings import RUNNER_NAME_RE
+from omega_prime.credentials.redact import REDACTED, redact_text
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +65,34 @@ SPAWN_FAILED = -1  # exit_code reported when the child never ran
 FINISHED_MEMORY = 1024  # (name, generation) identities kept after cleanup
 GENERATION_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 JIT_RE = re.compile(r"^[A-Za-z0-9+/=_-]{1,65536}$")
+WORK_ROOT_MODE = 0o755  # listable by the job identity (actions/runner requires it)
+LISTABLE = stat.S_IROTH | stat.S_IXOTH
+# Child output relayed to the agent log: bounded per child, redacted per line.
+LOG_MAX_LINES = 200
+LOG_MAX_BYTES = 64 * 1024
+LOG_LINE_CAP = 500
+DIAG_TAIL_BYTES = 8 * 1024
+DIAG_TAIL_LINES = 60
+JOB_STARTED_MARKER = "Running job:"
+_BLOB_RE = re.compile(r"[A-Za-z0-9+/=_.-]{64,}")
+_PATH_SEGMENT_MAX = 32
+
+
+def _blob(match: re.Match[str]) -> str:
+    """Redact a long opaque run (JIT config, JWT, encoded key); keep paths.
+
+    A path is kept only when it starts with ``/`` and every segment is short
+    and free of base64 padding/plus signs, which a long base64 value almost
+    never satisfies, so the runner's own directory errors stay readable.
+    """
+    text = match.group(0)
+    if text.startswith("/") and all(
+        len(part) <= _PATH_SEGMENT_MAX and "+" not in part and "=" not in part
+        for part in text.split("/")
+    ):
+        return text
+    return REDACTED
+
 
 Notify = Callable[[dict[str, Any]], Awaitable[None]]
 Spawn = Callable[..., Awaitable[Any]]
@@ -82,6 +121,8 @@ class Child:
     process: Any = field(default=None, repr=False)
     exited: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     task: asyncio.Task[None] | None = field(default=None, repr=False)
+    output: asyncio.Task[None] | None = field(default=None, repr=False)
+    took_job: bool = False  # the runner printed "Running job:"
 
     def row(self) -> dict[str, Any]:
         return {
@@ -218,6 +259,78 @@ def limit_child(
         setrlimit(limit, (cap, cap))
 
 
+def redact_runner_line(line: str, cap: int = LOG_LINE_CAP) -> str:
+    """One runner output line, safe for the agent log.
+
+    Known secret shapes (GitHub tokens, Bearer values, ``token=...``) plus any
+    long opaque blob (a JIT config, JWT or encoded credential is one) become
+    ``[REDACTED]``; control characters are dropped and the line is capped.
+    """
+    text = "".join(ch for ch in line if ch.isprintable() or ch == "\t")
+    text = redact_text(text)
+    text = _BLOB_RE.sub(_blob, text)
+    if len(text) > cap:
+        text = text[:cap] + "…"
+    return text
+
+
+def diag_tail(
+    workdir: Path, max_bytes: int = DIAG_TAIL_BYTES, max_lines: int = DIAG_TAIL_LINES
+) -> list[str]:
+    """Redacted tail of the newest ``_diag`` log (empty when there is none).
+
+    Reads only regular files directly in ``_diag`` (no symlinks followed), and
+    at most ``max_bytes`` from the end, so a job cannot make the agent read
+    elsewhere or read a lot.
+    """
+    diag = workdir / "_diag"
+    try:
+        if not stat.S_ISDIR(os.lstat(diag).st_mode):
+            return []
+        logs = []
+        for entry in os.scandir(diag):
+            if entry.name.endswith(".log") and entry.is_file(follow_symlinks=False):
+                logs.append((entry.stat(follow_symlinks=False).st_mtime, entry.path))
+        if not logs:
+            return []
+        newest = max(logs)[1]
+        fd = os.open(newest, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as fh:
+            size = os.fstat(fh.fileno()).st_size
+            fh.seek(max(0, size - max_bytes))
+            raw = fh.read(max_bytes)
+    except OSError:
+        return []
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    if len(raw) == max_bytes and lines:
+        lines = lines[1:]  # first line is probably cut mid-way
+    return [redact_runner_line(line) for line in lines[-max_lines:] if line.strip()]
+
+
+def ensure_listable_chain(path: Path, top: Path | None = None) -> None:
+    """Fail closed unless ``path`` and every ancestor are r-x for others.
+
+    actions/runner checks read permission on its directory and each one up the
+    hierarchy; without it the runner exits within a second (exit code 0).
+    ``top`` (tests only) stops the walk at that ancestor, inclusive.
+    """
+    chain = [path, *path.parents]
+    if top is not None:
+        chain = chain[: chain.index(top) + 1]
+    for directory in chain:
+        try:
+            mode = directory.stat().st_mode
+        except OSError as exc:
+            raise UnsafeWorkdir(
+                f"{directory}: not readable ({type(exc).__name__})"
+            ) from exc
+        if mode & LISTABLE != LISTABLE:
+            raise UnsafeWorkdir(
+                f"{directory}: mode {stat.S_IMODE(mode):04o} is not listable by"
+                " the job identity (needs o+rx; actions/runner refuses to start)"
+            )
+
+
 class Supervisor:
     def __init__(
         self,
@@ -333,7 +446,9 @@ class Supervisor:
                     "OMEGA_CI_AGENT_REPOS unset: the job guard refuses every job"
                 )
         self.work_root.mkdir(parents=True, exist_ok=True)
-        self.work_root.chmod(0o711)
+        self.work_root.chmod(WORK_ROOT_MODE)
+        if self.job_uid is not None:
+            ensure_listable_chain(self.work_root)
         for entry in self.work_root.iterdir():
             if RUNNER_NAME_RE.match(entry.name) and entry.name not in self.children:
                 shutil.rmtree(entry, ignore_errors=True)
@@ -361,8 +476,8 @@ class Supervisor:
                 cwd=str(workdir),
                 env=child_env(self._base_env, jit, workdir, self.job_hook),
                 stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
                 user=self.job_uid,
                 group=self.job_gid,
@@ -375,7 +490,15 @@ class Supervisor:
                 asyncio.get_running_loop().create_task(self._terminate(child))
             else:
                 child.status = "running"
+            stream = getattr(child.process, "stdout", None)
+            if isinstance(stream, asyncio.StreamReader):
+                child.output = asyncio.get_running_loop().create_task(
+                    self._relay(child, stream)
+                )
             exit_code = await child.process.wait()
+            if child.output is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(child.output, self._grace)
         except asyncio.CancelledError:
             if child.process is not None and child.process.returncode is None:
                 await self._terminate(child)
@@ -385,10 +508,58 @@ class Supervisor:
         finally:
             code = SPAWN_FAILED if exit_code is None else exit_code
             child.exited.set()
+            if child.output is not None and not child.output.done():
+                child.output.cancel()
+            if (
+                child.process is not None
+                and not child.took_job
+                and not child.stop_requested
+            ):
+                await self._log_diag(child, workdir, code)
             await asyncio.to_thread(shutil.rmtree, workdir, True)
             self._remember_finished(child, code)  # before the live record goes
             self.children.pop(child.name, None)
             await self._send_exit(child, code)
+
+    async def _relay(self, child: Child, stream: asyncio.StreamReader) -> None:
+        """Copy child output to the agent log, bounded; always drain the pipe."""
+        lines = 0
+        size = 0
+        truncated = False
+        while True:
+            try:
+                raw = await stream.readline()
+            except ValueError:  # one line over the reader's limit: skip it
+                raw = b"\n"
+            except Exception:
+                return
+            if not raw:
+                return
+            text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if JOB_STARTED_MARKER in text:
+                child.took_job = True
+            if lines >= LOG_MAX_LINES or size >= LOG_MAX_BYTES:
+                if not truncated:
+                    truncated = True
+                    log.info("runner %s: further output not logged", child.name)
+                continue  # keep draining so the child never blocks on the pipe
+            safe = redact_runner_line(text)
+            if safe:
+                lines += 1
+                size += len(safe)
+                log.info("runner %s: %s", child.name, safe)
+
+    async def _log_diag(self, child: Child, workdir: Path, code: int) -> None:
+        tail = await asyncio.to_thread(diag_tail, workdir)
+        log.warning(
+            "runner %s exited (code %s) before taking a job; _diag tail follows"
+            " (%d lines)",
+            child.name,
+            code,
+            len(tail),
+        )
+        for line in tail:
+            log.warning("runner %s diag: %s", child.name, line)
 
     def _remember_finished(self, child: Child, exit_code: int) -> None:
         self._finished[child.name] = (child.generation, exit_code)
@@ -444,6 +615,9 @@ __all__ = [
     "check_hook",
     "check_private",
     "child_env",
+    "diag_tail",
+    "ensure_listable_chain",
     "limit_child",
+    "redact_runner_line",
     "write_job_policy",
 ]

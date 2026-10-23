@@ -63,7 +63,27 @@ RUN groupadd --system --gid "${JOB_GID}" omega-ci-job \
     && useradd --system --uid "${JOB_UID}" --gid "${JOB_GID}" --no-create-home \
        --home-dir /nonexistent --shell /usr/sbin/nologin omega-ci-job \
     && mkdir -p /var/lib/omega-ci/work \
-    && chmod 0711 /var/lib/omega-ci /var/lib/omega-ci/work
+    && chown root:root /var/lib/omega-ci /var/lib/omega-ci/work \
+    && chmod 0755 /var/lib/omega-ci /var/lib/omega-ci/work
+# ^ 0755, not 0711: actions/runner refuses to start unless the job identity
+#   can READ its directory and every directory above it ("Permission to read
+#   the directory contents is required for ... and each directory up the
+#   hierarchy"), and then exits 0 within a second. Each runner's own workdir
+#   under work/ stays 0700 and owned by the job identity; nothing secret lives
+#   in either directory (job-policy.json is 0644 repository names only).
+# Fail the build unless the real runner, as the job identity, gets past that
+# directory check in the real work root (it then stops at "Not configured",
+# since no JIT config is given here).
+RUN check=/var/lib/omega-ci/work/omega-ci-build-check \
+    && cp -a /opt/actions-runner "$check" \
+    && chown "${JOB_UID}:${JOB_GID}" "$check" \
+    && chmod 0700 "$check" \
+    && out="$(cd "$check" && env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp \
+         setpriv --reuid="${JOB_UID}" --regid="${JOB_GID}" --clear-groups ./run.sh 2>&1 || true)" \
+    && rm -rf "$check" \
+    && printf '%s\n' "$out" \
+    && ! printf '%s\n' "$out" | grep -q 'Permission to read the directory contents' \
+    && printf '%s\n' "$out" | grep -q 'Not configured'
 
 # --- 4. Agent: stdlib-only omega_prime package + hash-pinned uvicorn (no pip) -
 RUN mkdir -p /opt/omega-ci/site /tmp/wheels && cd /tmp/wheels \

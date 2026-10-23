@@ -227,6 +227,7 @@
     <rule>The fork guard is mandatory for every public repository: the controller verifies each run (same repository, not a fork, push, workflow_dispatch or same-repository pull_request only) and the runner-side pre-job hook re-checks it. Never weaken or bypass either check to get a job running.</rule>
     <rule>An owner/* entry never admits a repository that is itself a GitHub fork of an upstream project; such a repository runs only when listed by its exact owner/repo name.</rule>
     <rule>Opening the runners to any other organisation or owner needs Ove's explicit say. Ask first; never widen the allowlists on your own.</rule>
+    <rule>Every CI/CD job in Ove's repositories runs on the Omega CI runner pool (runs-on: [self-hosted, linux, x64, omega-ci]), never on GitHub-hosted runners, by Ove's rule of 2026-10-24. When a job needs a tool, service or capacity the pool lacks, extend the runner image or the pool; never fall back to a GitHub-hosted runner.</rule>
   </ci_runner_scope>
 
   <ownership_rules>

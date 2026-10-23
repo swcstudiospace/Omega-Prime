@@ -15,8 +15,9 @@ once: on a rejected launch, the agent's exit callback, or a reap whose
 outcome confirms the child is gone. A completed job only moves its runner to
 FINISHING; a one-shot deadline then stops it if the exit callback never comes.
 
-Launch failures (a rejected launch, or a runner exiting non-zero before it
-took a job) back off: ``hold="failure"`` plus one ScheduleRetry of
+Launch failures (a rejected launch, or a runner exiting before it took a job,
+whatever its exit code: actions/runner exits 0 on fatal startup errors such as
+an unreadable work directory) back off: ``hold="failure"`` plus one ScheduleRetry of
 ``RETRY_BASE_S * 2**(n-1)`` (capped at ``RETRY_CAP_S``). New demand does not
 clear that hold; the retry deadline or a runner taking a job does. After
 ``MAX_CONSECUTIVE_FAILURES`` the circuit opens (``hold="circuit"``, no more
@@ -231,6 +232,8 @@ class Scaler:
         # (it still counts against capacity) until the exit callback, with a
         # one-shot deadline in case that callback is lost.
         name = job.runner_name
+        if name and (name in self.runners or is_pool_runner(name)):
+            self._healthy(out)  # a pool runner ran a job: launches work
         if name and name in self.runners:
             runner = self.runners[name]
             if runner.state is not RunnerState.REAPING:
@@ -320,17 +323,23 @@ class Scaler:
         if not self.registered(event.name, event.generation):
             return
         runner = self.runners[event.name]
-        early = (
-            runner.state in (RunnerState.STARTING, RunnerState.IDLE)
-            and event.exit_code != 0
-        )
+        # Any exit before a job is a failed launch, exit 0 included: the
+        # runner's run-helper exits 0 even on terminal errors (an unreadable
+        # work directory, a rejected JIT config), which is how a broken image
+        # once relaunched in a hot loop (00055). A runner that did take a job
+        # but whose in_progress webhook is late is corrected by that webhook
+        # (or the completed one), which resets the failure count.
+        early = runner.state in (RunnerState.STARTING, RunnerState.IDLE)
         self._release(event.name, out)
         out.event("exited", name=event.name, exit_code=event.exit_code)
         if early:
-            # Died before taking a job (spawn failure, bad config, missing
-            # binary): back off instead of relaunching straight away.
+            out.event(
+                "error",
+                name=event.name,
+                reason="exited_before_job",
+                exit_code=event.exit_code,
+            )
             self._failed(out)
-            out.event("error", name=event.name, reason="exited_before_job")
 
     def _on_deadline(self, event: IdleDeadline, out: _Out) -> None:
         if self._armed.get(event.name) != event.generation:
@@ -453,7 +462,13 @@ class Scaler:
         if self.failures >= MAX_CONSECUTIVE_FAILURES:
             self.hold = "circuit"
             self._retry_arm = None
-            out.event("launch_circuit_open", failures=self.failures)
+            out.event(
+                "launch_circuit_open",
+                failures=self.failures,
+                queued=len(self.queued),
+                action="launches stopped until a pool runner takes a job or the"
+                " controller restarts",
+            )
             return
         self.hold = "failure"
         delay = self.backoff(self.failures)

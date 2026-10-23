@@ -490,11 +490,62 @@ def test_a_runner_taking_a_job_closes_the_circuit(ids: Ids) -> None:
     assert scaler.hold is None and scaler.failures == 0
 
 
-def test_clean_exit_or_busy_exit_is_not_a_failure(ids: Ids) -> None:
+def test_exit_zero_before_a_job_backs_off(ids: Ids) -> None:
+    """Regression (00055): actions/runner exits 0 on fatal startup errors.
+
+    An unreadable work directory made every JIT runner exit 0 within a second;
+    exit 0 was treated as clean, so the controller relaunched 285 times.
+    """
     scaler = make(ids)
     step = _spawn_failure(scaler, 1, code=0)
+    assert scaler.failures == 1 and scaler.hold == "failure"
+    assert launches(step) == [] and _retry_of(step).delay_s == RETRY_BASE_S
+    errors = [e.data for e in step.events if e.kind == "error"]
+    assert errors == [
+        {"name": errors[0]["name"], "reason": "exited_before_job", "exit_code": 0}
+    ]
+    assert launches(scaler.handle(job(job_id=2))) == []  # new demand: still held
+
+
+def test_exit_zero_before_a_job_opens_the_circuit_without_looping(
+    ids: Ids,
+) -> None:
+    scaler = make(ids)
+    step = _spawn_failure(scaler, 1, code=0)
+    total = 1
+    for _ in range(50):
+        if scaler.hold == "circuit":
+            break
+        relaunch = scaler.handle(RetryDeadline(RETRY_KEY, _retry_of(step).generation))
+        [launch] = launches(relaunch)
+        total += 1
+        scaler.handle(LaunchSucceeded(launch.name, launch.generation))
+        step = scaler.handle(RunnerExited(launch.name, launch.generation, 0))
+    assert total == MAX_CONSECUTIVE_FAILURES and scaler.hold == "circuit"
+    [opened] = [e.data for e in step.events if e.kind == "launch_circuit_open"]
+    assert opened["failures"] == MAX_CONSECUTIVE_FAILURES and opened["queued"] == 1
+    assert not [d for d in step.decisions if isinstance(d, ScheduleRetry)]
+    assert launches(scaler.handle(job(job_id=99))) == []
+
+
+def test_busy_exit_zero_is_not_a_failure(ids: Ids) -> None:
+    scaler = make(ids)
+    launch = _idle(scaler, 1)
+    scaler.handle(job("in_progress", job_id=1, runner_name=launch.name))
+    step = scaler.handle(RunnerExited(launch.name, launch.generation, 0))
     assert scaler.failures == 0 and scaler.hold is None
     assert "error" not in kinds(step)
+
+
+def test_late_completed_webhook_clears_a_false_pre_job_failure(ids: Ids) -> None:
+    """A runner ran its job but the in_progress webhook was lost: its exit
+    looked pre-job; the completed webhook naming it resets the failure."""
+    scaler = make(ids)
+    step = _spawn_failure(scaler, 1, code=0)
+    name = next(e.data["name"] for e in step.events if e.kind == "exited")
+    assert scaler.hold == "failure"
+    scaler.handle(job("completed", job_id=1, runner_name=name))
+    assert scaler.failures == 0 and scaler.hold is None
 
 
 def test_capacity_rejections_retry_without_counting_failures(ids: Ids) -> None:

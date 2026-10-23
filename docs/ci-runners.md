@@ -197,6 +197,20 @@ its workdir is removed, the agent sends exactly one exit callback.
   concurrent jobs of one run share the lookup). Private repositories make no
   extra call.
 
+## Runner policy: every job on the pool (2026-10-24)
+
+Ove's rule, also a standing directive in the Autonomous Event-Driven ADLC
+Programming Bot's prompt (`ci_runner_scope` in
+`omega_prime/prompts/_shared/core-directives.xml`): every CI/CD job in his
+repositories runs on the Omega CI runner pool,
+`runs-on: [self-hosted, linux, x64, omega-ci]`, never on GitHub-hosted
+runners (`ubuntu-latest` and friends). When a job needs a tool, service or
+capacity the pool lacks, extend the runner image
+(`deploy/ci-runner-desktop/Dockerfile`) or the pool instead of falling back to
+a GitHub-hosted runner. The pool has no Docker (see
+[Security model](#security-model)); Docker jobs still use the self-hosted VPS
+runner (`[self-hosted, vps-docker]`) until the pool gains that capability.
+
 ## Org-wide setup (every repository of an owner)
 
 As of 2026-10-24 (Ove's decision), the Autonomous Event-Driven ADLC
@@ -389,12 +403,51 @@ the default cap is 8 (hard ceiling 10). Railway usage pricing:
 | Wake budget exhausted | The controller asks the agent inventory: present → launched, confirmed absent → rolled back, unknown → kept (never deleted blindly). Look for `omega.ci.runner.error`. |
 | Agent full (429) | Capacity hold: the job stays queued and a retry deadline re-evaluates after 240 s, or sooner when a runner is released. Not counted as a failure. |
 | Launch rejected or ambiguous | Exponential backoff (15 s, 30 s, 60 s, 120 s, capped at 240 s) via a retry deadline; new demand does not bypass it. After 5 consecutive failures the circuit opens (`launch_circuit_open`) until a runner registers or is assigned (`launch_circuit_closed`). |
-| Runner exits before taking a job | Counted as a launch failure (`exited_before_job`) and backed off as above. |
+| Runner exits before taking a job | Counted as a launch failure (`exited_before_job`, with its `exit_code`) and backed off as above, **whatever the exit code**: actions/runner exits 0 on fatal startup errors. A runner that did run a job but whose `in_progress` webhook was lost is corrected by the job's `completed` webhook, which resets the failure count. See [Troubleshooting](#troubleshooting). |
 | Job completed, runner never exits | The runner moves to FINISHING with a grace deadline, then is reaped from the agent. A failed agent stop keeps it FINISHING and re-arms; a failed GitHub delete keeps it IDLE and re-arms; a runner found busy stays BUSY. |
 | Controller restart | Each job saved in `OMEGA_CI_DEMAND_PATH` is first checked once against GitHub (`GET /repos/{repo}/actions/jobs/{id}`, needs **Actions: Read**): only jobs GitHub still reports as queued are replayed. Jobs taken, finished or deleted meanwhile are dropped, so they cannot keep idle runners (and the Desktop) awake. A job that cannot be checked is dropped too and reported as `omega.ci.runner.error` `demand_unverified`; re-run it if it stays queued. Rows saved by a controller older than 00054 have no `fork` field; when only that unknown fork status keeps one out of an `owner/*` entry (for example right after switching `OMEGA_CI_REPOS` from exact names to `swcstudiospace/*`), the controller first reads `repository.fork` from the job's workflow run (`GET /repos/{repo}/actions/runs/{run_id}`, **Actions: Read**). A repository confirmed not to be a fork is replayed as usual (public ones still go through the fork guard); a confirmed fork is dropped (`dropped_fork_repo`). If the flag stays unknown (lookup error, 404, missing field) the job is kept in the demand file but never launched, reported as `retained_fork_unknown` in the `demand` event and as `omega.ci.runner.error` `demand_fork_unknown`; a redelivery, the next restart or the job finishing clears it (the 24 h limit still applies). The `demand` event with `reconciled: true` gives the counts. Then comes the one-shot reconcile of GitHub runners and agent inventory (a partial snapshot never reaps). Agent exit callbacks that arrive before startup finishes are held (up to 64) and applied once the runners are restored, so a runner that exits mid-startup is never restored as idle. |
 | Launch retry after the runner already exited | The agent answers the retried launch with `finished` + exit code (the single-use JIT is never rerun); the controller treats it as that exit and frees the slot. |
 | Agent missing settings | Agent exits with a one-line error; the desktop still starts. |
 | Emergency stop | `POST /v1/drain` on the agent (no new runners); revert `runs-on` (see rollback). |
+
+## Troubleshooting
+
+### Every runner exits within a second: "Permission to read the directory contents is required"
+
+**Symptom** (smoke run 39999949179, 2026-10-24): the job stays queued; the
+agent log shows each JIT runner printing
+`An error occurred: Permission to read the directory contents is required for
+'/var/lib/omega-ci/work/omega-ci-…' and each directory up the hierarchy` and
+`Runner listener exit with terminated error, stop the service, no retry
+needed`, then exiting **0**. Before 00055 the controller treated exit 0 as a
+clean exit, relaunched immediately and looped (285 launches, each leaving an
+offline `omega-ci-<job>-*` registration in the runner group).
+
+**Cause:** actions/runner checks that its user can *read* (not only search)
+its directory and every directory above it. The image made
+`/var/lib/omega-ci` and `/var/lib/omega-ci/work` 0711, and the agent's
+`prepare()` re-applied 0711, so the non-root job identity could not list them.
+
+**Fix (00055):** both directories are root-owned 0755 in the image and the
+agent re-applies 0755 at startup; it refuses to start (`UnsafeWorkdir`, in the
+Railway log) if the work root or any parent is not listable. Per-runner
+workdirs stay 0700 and owned by the job identity, and the hook and policy
+files stay root-owned. The image build runs the real `run.sh` as the job
+identity and fails on this error. On the controller, any exit before a job
+backs off (15 s doubling to a 240 s cap) and after 5 in a row the circuit opens
+(`omega.ci.runner.launch_circuit_open`): no more launches until a pool runner
+takes a job or the controller restarts.
+
+**Where to look:** the agent now relays each runner's stdout/stderr
+(`runner <name>: …`) and, on a pre-job exit, the tail of its `_diag` log
+(`runner <name> diag: …`) to the Railway service log, bounded and redacted.
+Controller-side, look for `exited_before_job`, `launch_backoff` and
+`launch_circuit_open` in `OMEGA_CI_EVENTS_PATH`.
+
+**Cleanup after a loop:** delete the offline `omega-ci-<job>-*` registrations
+(org → Settings → Actions → Runners, or
+`DELETE /orgs/{org}/actions/runners/{id}`) and remove the dead job from
+`OMEGA_CI_DEMAND_PATH` while the controller is stopped.
 
 ## Offline replay
 
