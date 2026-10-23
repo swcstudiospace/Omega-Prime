@@ -34,9 +34,12 @@ no `sudo`), so the runner image ships the tools those jobs used to get from
 retarget a job:
 
 1. Set `runs-on: [self-hosted, linux, x64, omega-ci]`.
-2. Replace `services:` / `docker run` databases with the image binaries:
-   PostgreSQL 16 via `initdb` + `pg_ctl` in `$RUNNER_TEMP`, GreptimeDB via
-   `greptime standalone start`.
+2. Replace `services:` / `docker run` databases with the image binaries,
+   started by `omega-ci-db start postgres` / `omega-ci-db start greptime`
+   (free ports, data under `$RUNNER_TEMP`, settings exported to later steps)
+   and stopped by `omega-ci-db stop --all` in an `if: always()` step. Never
+   hard-code a port: parallel jobs share the Desktop's ports. See
+   [Databases in jobs](ci-runners.md#databases-in-jobs-omega-ci-db).
 3. Drop `sudo apt-get install` steps for tools the image already has
    (age, rsync, podman, jq, build-essential, ...). Anything missing is an
    image change, not a workflow workaround.
