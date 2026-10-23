@@ -104,7 +104,7 @@ The table records names and purposes only.
 | `NOTION_TOKEN_FILE` | Names a protected file containing the Notion integration credential. |
 | `OMEGA_CI_AGENT_JOB_GID` | Sets the unprivileged gid CI job processes run as on the Desktop. |
 | `OMEGA_CI_AGENT_JOB_HOOK` | Points the Desktop runner agent at the pre-job guard script it installs as ACTIONS_RUNNER_HOOK_JOB_STARTED. |
-| `OMEGA_CI_AGENT_JOB_POLICY` | Sets where the Desktop runner agent writes the pre-job guard's repository allowlist file. |
+| `OMEGA_CI_AGENT_JOB_POLICY` | Names the Desktop runner agent's pre-job guard allowlist file; only /var/lib/omega-ci/job-policy.json (the path the shipped hook reads) is accepted. |
 | `OMEGA_CI_AGENT_JOB_UID` | Sets the unprivileged uid CI job processes run as on the Desktop. |
 | `OMEGA_CI_AGENT_MAX_RUNNERS` | Caps concurrent runner processes on the Desktop runner agent. |
 | `OMEGA_CI_AGENT_REPOS` | Lists the owner/repo names the Desktop runner pre-job guard lets run; empty refuses every job. |

@@ -2,7 +2,7 @@
   "task_id": "00053-ci-public-fork-guard",
   "bot": "bot-00-omega-prime",
   "started_at": "2026-10-23T15:08:00Z",
-  "completed_at": "2026-10-23T15:51:49Z",
+  "completed_at": "2026-10-23T16:25:00Z",
   "base_commit": "7b1dd74",
   "commands": [
     {
@@ -70,6 +70,48 @@
       "exit_code": 0,
       "duration_s": 0.0,
       "output_tail": ""
+    },
+    {
+      "cmd": "cd /tmp/r53b/pre (git archive 13b2946 + round-2 tests) && PYTHONPATH=/tmp/r53b/pre python -m pytest omega_prime/tests/ci_runners/test_forkguard.py omega_prime/tests/ci_runners/test_jobhook.py -q -p no:cacheprovider",
+      "exit_code": 1,
+      "duration_s": 0.6,
+      "output_tail": "FAILED test_forkguard.py::test_job_accepted_during_startup_is_durable_with_saved_demand\nFAILED test_forkguard.py::test_private_job_queued_but_unprocessed_survives_restart\nFAILED test_forkguard.py::test_unpersistable_job_is_not_acknowledged[True]\nFAILED test_forkguard.py::test_unpersistable_job_is_not_acknowledged[False]\nFAILED test_jobhook.py::test_agent_settings\nFAILED test_jobhook.py::test_custom_policy_path_cannot_strand_the_guard\n6 failed, 72 passed in 0.61s"
+    },
+    {
+      "cmd": "/workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/ci_runners -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 6.8,
+      "output_tail": "390 passed, 1 skipped in 6.76s"
+    },
+    {
+      "cmd": "/workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_env_inventory.py -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 17.2,
+      "output_tail": "55 passed in 17.23s"
+    },
+    {
+      "cmd": "ruff check omega_prime/ && ruff format --check omega_prime/ && mypy omega_prime/",
+      "exit_code": 0,
+      "duration_s": 3.0,
+      "output_tail": "All checks passed!\n771 files already formatted\nSuccess: no issues found in 644 source files"
+    },
+    {
+      "cmd": "polyglot-check --no-daemon --changed HEAD",
+      "exit_code": 0,
+      "duration_s": 5.0,
+      "output_tail": "polyglot-check: 0 error(s), 0 warning(s) in 6/6 file(s) checked [pyright]"
+    },
+    {
+      "cmd": "python -m omega_prime.tooling.env_inventory --check",
+      "exit_code": 0,
+      "duration_s": 8.0,
+      "output_tail": ""
+    },
+    {
+      "cmd": "/workspace/omes-bot-00046/.venv/bin/python -m pytest omega_prime/tests -q -p no:cacheprovider -rf (Python 3.13.5)",
+      "exit_code": 1,
+      "duration_s": 354.2,
+      "output_tail": "17 failed, 6469 passed, 22 skipped, 15 warnings in 354.15s. All 17 are outside ci_runners (test_prime_kernel_* ModuleNotFoundError in this venv, test_grokbot_oneclick::test_oneclick_dry_run_sse) and also fail on a clean archive of 13b2946 run the same way (29 failed there); none are new."
     }
   ],
   "claims": [
@@ -113,6 +155,18 @@
     {
       "claim": "Greptile P1 (refused forks get runners): the runner-side pre-job hook refuses non-allowlisted repos, pull_request_target, fork/other-repo/unknown-head pull requests, and non-allowlisted events for non-private repos, failing closed on missing or unparseable data; the shipped script refuses under a hostile PYTHONPATH (-I); the agent sets ACTIONS_RUNNER_HOOK_JOB_STARTED itself in the child env and writes the root-owned policy; Dockerfile pins are asserted intact.",
       "evidence_command_index": 2
+    },
+    {
+      "claim": "Greptile r2 P1: OMEGA_CI_AGENT_JOB_POLICY accepts only /var/lib/omega-ci/job-policy.json (the path job-started.sh hard-codes); any other value is a SettingsError at agent startup, so the agent can no longer write an allowlist the shipped guard never reads. Covered end to end (settings -> Supervisor.prepare write -> shipped script).",
+      "evidence_command_index": 12
+    },
+    {
+      "claim": "A 202 means the job is on disk: every accepted queued pool job (public or private) is written to the demand file before offer_job returns True, including during startup (merged with the not-yet-reconciled saved demand) and while waiting in the worker queue; a restart replays it and re-verifies public ones. If the write fails, offer_job returns False (503, delivery not committed) and demand_persist is published.",
+      "evidence_command_index": 12
+    },
+    {
+      "claim": "The new restart / persistence / policy-path tests fail on the round-1 head 13b2946 and pass with the fix.",
+      "evidence_command_index": 11
     }
   ],
   "unverified": [
@@ -120,7 +174,8 @@
     "Full omega_prime/tests suite not re-run; only ci_runners, docs, public-repo and env-inventory tests.",
     "Controller not started on the VPS (held: runner group omega-ci missing, github-pat file not written).",
     "The pre-job hook has not run inside a real actions/runner on the built image (no image build here: heavy, and the Railway deploy is an operator step). The shipped script runs in tests with only its interpreter, module and policy paths rewritten; the Dockerfile runs it once at build and requires a refusal.",
-    "OMEGA_CI_AGENT_REPOS is not yet set on the Railway Desktop service. Until it is, a redeployed image fails every job closed (operator step)."
+    "OMEGA_CI_AGENT_REPOS is not yet set on the Railway Desktop service. Until it is, a redeployed image fails every job closed (operator step).",
+    "Round 2: full omega_prime/tests suite run locally with 17 pre-existing environment failures outside ci_runners (same tests fail on a clean archive of 13b2946); CI on the pushed head is the authority."
   ],
   "files_changed": [
     ".receipts/bot-00-omega-prime/00053-ci-public-fork-guard.json",
@@ -158,7 +213,8 @@
     "New event omega.ci.runner.refused {job_id, run_id, repo, reason}.",
     "demand.json entries gain a 'public' boolean; older files load as non-public unless private is false and visibility public.",
     "Desktop agent: new OMEGA_CI_AGENT_REPOS (required for jobs to run), OMEGA_CI_AGENT_JOB_HOOK, OMEGA_CI_AGENT_JOB_POLICY; the image sets the latter two and every runner gets ACTIONS_RUNNER_HOOK_JOB_STARTED.",
-    "Controller: queued after in_progress/completed for the same job id is acknowledged and ignored (bounded memory 4096); pending-lookup public jobs are included in demand.json."
+    "Controller: queued after in_progress/completed for the same job id is acknowledged and ignored (bounded memory 4096); pending-lookup public jobs are included in demand.json.",
+    "OMEGA_CI_AGENT_JOB_POLICY: only /var/lib/omega-ci/job-policy.json is accepted (other values are a SettingsError). POST /github/webhook answers 503 (not committed) when the demand file cannot be written for a queued pool job."
   ],
   "rollback_plan": "Revert the PR. With OMEGA_CI_PUBLIC_REPOS unset the controller matches main except that stale queued redeliveries are ignored. Reverting also removes the Desktop pre-job hook; no host or Railway change was made by this PR.",
   "approvals": [],

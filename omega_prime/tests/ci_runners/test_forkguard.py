@@ -415,6 +415,123 @@ def test_refused_screening_job_is_removed_from_disk(tmp_path: Path) -> None:
     assert saved_ids(path) == []
 
 
+def test_job_accepted_during_startup_is_durable_with_saved_demand(
+    tmp_path: Path,
+) -> None:
+    """A 202 sent while startup still reconciles must survive a restart too.
+
+    Before, the pending job was written only once startup finished, so a
+    restart in that window lost it; writing it early must not clobber the
+    saved demand that is still being replayed either.
+    """
+    path = tmp_path / "demand.json"
+    DemandStore(path).save([job(job_id=7)])  # saved by an earlier run
+    http = routes()
+    gate, answer = gated(resp(200, {"runners": []}))
+    http.on("GET", ORG, answer)  # startup snapshot hangs
+    http.on(
+        "GET", "/repos/acme/widgets/actions/jobs/7", resp(200, {"status": "queued"})
+    )
+    http.on("GET", RUN, resp(500, {"message": "never answered"}))
+    first = Rig(http, repos=(REPO,), public_repos=(REPO,), demand=DemandStore(path))
+
+    async def crash_during_startup() -> None:
+        await first.ctrl.start()
+        try:
+            await until(lambda: ORG in http.paths())
+            assert not first.ctrl.ready.is_set()
+            assert first.ctrl.offer_job(public_job())  # → 202 to GitHub
+            assert first.ctrl.offer_job(job(job_id=102))  # private, also → 202
+            assert saved_ids(path) == [7, 101, 102]
+        finally:
+            await first.ctrl.stop()
+            gate.set()
+
+    asyncio.run(crash_during_startup())
+    assert saved_ids(path) == [7, 101, 102]
+
+    http = routes()
+    for jid in (7, 101, 102):
+        http.on(
+            "GET",
+            f"/repos/acme/widgets/actions/jobs/{jid}",
+            resp(200, {"status": "queued"}),
+        )
+    http.on("GET", RUN, resp(200, run_body("push")))
+    second = Rig(http, repos=(REPO,), public_repos=(REPO,), demand=DemandStore(path))
+    scenario(second, lambda r: r.ctrl.settle())
+    assert RUN in http.paths()  # the public one was re-verified on replay
+    assert len(second.scaler.runners) == 3
+    assert refusals(second) == []
+
+
+def test_private_job_queued_but_unprocessed_survives_restart(tmp_path: Path) -> None:
+    path = tmp_path / "demand.json"
+    http = routes()
+    first = Rig(http, repos=(REPO,), demand=DemandStore(path))
+
+    async def crash_before_worker() -> None:
+        await first.ctrl.start()
+        await first.ctrl.settle()
+        try:
+            assert first.ctrl.offer_job(job(job_id=103))  # → 202
+            assert saved_ids(path) == [103]  # on disk before the worker ran
+        finally:
+            await first.ctrl.stop()
+
+    asyncio.run(crash_before_worker())
+    assert saved_ids(path) == [103]
+    assert JIT_PATH not in http.paths()
+
+    http = routes()
+    http.on(
+        "GET", "/repos/acme/widgets/actions/jobs/103", resp(200, {"status": "queued"})
+    )
+    second = Rig(http, repos=(REPO,), demand=DemandStore(path))
+    scenario(second, lambda r: r.ctrl.settle())
+    assert len(second.scaler.runners) == 1
+
+
+class BrokenStore(DemandStore):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.broken = False
+
+    def save(self, jobs: Any) -> None:
+        if self.broken:
+            raise OSError(28, "No space left on device")
+        super().save(jobs)
+
+
+@pytest.mark.parametrize("public", [True, False])
+def test_unpersistable_job_is_not_acknowledged(tmp_path: Path, public: bool) -> None:
+    """No 202 without a durable record: the delivery stays uncommitted (503)."""
+    path = tmp_path / "demand.json"
+    store = BrokenStore(path)
+    http = routes()
+    http.on("GET", RUN, resp(200, run_body("push")))
+    rig = Rig(http, repos=(REPO,), public_repos=(REPO,), demand=store)
+    make = public_job if public else job
+
+    async def body(r: Rig) -> None:
+        store.broken = True
+        assert not r.ctrl.offer_job(make())  # → 503, not committed
+        assert r.ctrl.pending == 0
+        await r.ctrl.settle()
+        assert r.scaler.queued == {} and RUN not in http.paths()
+        store.broken = False
+        assert r.ctrl.offer_job(make())  # GitHub's redelivery is admitted
+        assert saved_ids(path) == [101]
+        await r.ctrl.settle()
+
+    scenario(rig, body)
+    assert len(rig.scaler.runners) == 1
+    assert any(
+        e["type"] == "omega.ci.runner.error" and e["data"]["reason"] == "demand_persist"
+        for e in rig.publisher.events
+    )
+
+
 # -- settings ---------------------------------------------------------------------
 
 

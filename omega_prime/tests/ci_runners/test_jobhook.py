@@ -322,15 +322,55 @@ def test_agent_settings(tmp_path: Path) -> None:
             **base,
             "OMEGA_CI_AGENT_REPOS": "Acme/Widgets, acme/gadgets",
             "OMEGA_CI_AGENT_JOB_HOOK": "/opt/omega-ci/job-started.sh",
-            "OMEGA_CI_AGENT_JOB_POLICY": str(tmp_path / "p.json"),
+            "OMEGA_CI_AGENT_JOB_POLICY": str(DEFAULT_AGENT_JOB_POLICY),
         }
     )
     assert s.job_repos == frozenset({REPO, "acme/gadgets"})
     assert s.job_hook == Path("/opt/omega-ci/job-started.sh")
+    assert s.job_policy == DEFAULT_AGENT_JOB_POLICY
     for bad in (
         {"OMEGA_CI_AGENT_REPOS": "not a repo"},
         {"OMEGA_CI_AGENT_JOB_HOOK": "job-started.sh"},
         {"OMEGA_CI_AGENT_JOB_POLICY": "relative.json"},
+        # The shipped hook never reads another path: refuse at startup.
+        {"OMEGA_CI_AGENT_JOB_POLICY": str(tmp_path / "p.json")},
+        {"OMEGA_CI_AGENT_JOB_POLICY": "/var/lib/omega-ci/other.json"},
     ):
         with pytest.raises(SettingsError, match=next(iter(bad))):
             AgentSettings.from_env({**base, **bad})
+
+
+def test_custom_policy_path_cannot_strand_the_guard(tmp_path: Path) -> None:
+    """End to end: settings → agent writes the allowlist → shipped hook reads it.
+
+    The only policy path settings accept is the one ``job-started.sh`` reads,
+    so whatever the agent writes is what the guard enforces; a custom path is
+    refused before the agent writes anything (no allowlist the guard ignores).
+    """
+    base = {
+        "OMEGA_CI_AGENT_TOKEN": "t" * 40,
+        "OMEGA_CI_CONTROLLER_URL": "https://ci.example.test",
+        "OMEGA_CI_AGENT_REPOS": REPO,
+    }
+    custom = tmp_path / "custom" / "job-policy.json"
+    with pytest.raises(SettingsError, match="only reads"):
+        AgentSettings.from_env({**base, "OMEGA_CI_AGENT_JOB_POLICY": str(custom)})
+    assert not custom.exists()
+    settings = AgentSettings.from_env(base)
+    assert settings.job_policy == DEFAULT_AGENT_JOB_POLICY == Path(script_words()[4])
+    # Stand the image path up under tmp (same mapping run_script applies) and
+    # drive the real agent write + the real shipped script against it.
+    image_policy = tmp_path / "image" / "job-policy.json"
+    s = supervisor(
+        tmp_path,
+        tmp_path,
+        Exits(),
+        job_hook=make_hook(tmp_path),
+        job_policy=image_policy,
+        job_repos=settings.job_repos,
+    )
+    s.prepare()
+    _, path = files(tmp_path, event())
+    assert run_script(tmp_path, image_policy, env_for(path)) == 0
+    _, fork = files(tmp_path, pr(head="mallory/widgets"))
+    assert run_script(tmp_path, image_policy, env_for(fork, "pull_request")) == 1

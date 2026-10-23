@@ -136,7 +136,7 @@ read. A sanitized template is in `deploy/ci-runner-controller/env.example`.
 | `OMEGA_CI_AGENT_JOB_UID` / `OMEGA_CI_AGENT_JOB_GID` | unset (image: 1500) | Dedicated non-root job identity, distinct from the agent's. |
 | `OMEGA_CI_AGENT_REPOS` | empty | **Required for jobs to run on the image.** Comma-separated `owner/repo` list the runner-side pre-job guard lets run; set it to the controller's `OMEGA_CI_REPOS`. Empty → the guard refuses every job (fails closed). Repository names only, no secret. |
 | `OMEGA_CI_AGENT_JOB_HOOK` | unset (image: `/opt/omega-ci/job-started.sh`) | Pre-job guard the agent sets as `ACTIONS_RUNNER_HOOK_JOB_STARTED` for every runner. Must be a regular file the job identity cannot modify, or the agent refuses to start. |
-| `OMEGA_CI_AGENT_JOB_POLICY` | `/var/lib/omega-ci/job-policy.json` | Root-owned allowlist file the agent writes at startup from `OMEGA_CI_AGENT_REPOS`; the guard reads it. |
+| `OMEGA_CI_AGENT_JOB_POLICY` | `/var/lib/omega-ci/job-policy.json` | Root-owned allowlist file the agent writes at startup from `OMEGA_CI_AGENT_REPOS`; the guard reads it. Only this path is accepted: the shipped `job-started.sh` hard-codes it (a runner hook takes no arguments, and the job's environment is not agent-controlled), so any other value stops the agent at startup with a `SettingsError` instead of failing every job. |
 | `OMEGA_CI_CONTROLLER_URL` | — | **Required: the agent will not start without it.** Controller base URL for the exit callback. Set it at deploy time, even before the controller exists: the agent only calls it after a job ends. Without it, the agent exits with `OMEGA_CI_CONTROLLER_URL: required callback base URL`, so nothing listens on 8787 and Railway answers 502 Bad Gateway. |
 
 ## Interfaces
@@ -148,7 +148,7 @@ taken there):
 | Route | Auth | Result |
 |---|---|---|
 | `GET /healthz` | none | 200, non-secret status. |
-| `POST /github/webhook` | HMAC `X-Hub-Signature-256` | 202 once queued, before any GitHub/Desktop call; 503 when the queue is full (not committed, so GitHub can redeliver). |
+| `POST /github/webhook` | HMAC `X-Hub-Signature-256` | 202 once queued and written to the demand file, before any GitHub/Desktop call; 503 when the queue is full or the demand file cannot be written (not committed, so GitHub can redeliver). |
 | `POST /agent/events` | bearer | 202 for `{type:"agent.runner_exited",name,generation,exit_code}`. |
 
 Agent (`python -m omega_prime.ci_runners agent --host 0.0.0.0 --port 8787`):
@@ -237,9 +237,18 @@ is a verified `queued` event whose job started or finished while its run
 lookup was in flight. Stale demand therefore never keeps the queue non-empty
 (which would keep an unused runner and the Desktop awake).
 
-**Restart during a lookup.** An accepted public job is written to the demand
-file *before* its run lookup, so a restart mid-lookup replays it, and the
-replay re-runs the fork guard. A refused job is removed from the file.
+**Restart after a 202 (durable before acknowledging).** A `202` means the job
+is on disk. Every accepted `queued` pool job, public or private, is written
+to the demand file *before* the webhook handler commits the delivery and
+answers, so a restart at any later point replays it: during a public job's
+run lookup, while it waits in the worker queue, or while the controller is
+still starting up. During startup the write keeps the saved demand that is
+still being reconciled, so it is never overwritten. Replay re-checks each job
+against GitHub and re-runs the fork guard for public ones. A refused job is
+removed from the file. If the write fails, the job is not acknowledged: the
+handler answers `503`, does not commit the delivery, and emits
+`omega.ci.runner.error` `demand_persist`, so the delivery shows as failed in
+GitHub and can be redelivered.
 
 **Runner-side pre-job guard (the enforcement point).** Refusing a webhook
 only decides whether the controller *launches* a runner. A JIT runner

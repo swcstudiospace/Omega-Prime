@@ -138,7 +138,9 @@ the backed-up `/config` volume.
 
 The image already sets `OMEGA_CI_AGENT_RUNNER_ROOT`, `OMEGA_CI_AGENT_WORK_ROOT`,
 `OMEGA_CI_AGENT_JOB_UID`, `OMEGA_CI_AGENT_JOB_GID`, `OMEGA_CI_AGENT_JOB_HOOK`
-and `OMEGA_CI_AGENT_JOB_POLICY`.
+and `OMEGA_CI_AGENT_JOB_POLICY`. Do not override `OMEGA_CI_AGENT_JOB_POLICY`:
+the pre-job guard only reads `/var/lib/omega-ci/job-policy.json`, so the
+agent refuses any other value at startup.
 
 If the agent variables are missing (including `OMEGA_CI_CONTROLLER_URL`), the
 agent exits with a one-line error and the desktop still starts normally, but

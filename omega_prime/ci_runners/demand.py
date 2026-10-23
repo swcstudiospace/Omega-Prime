@@ -3,7 +3,8 @@
 GitHub sends each ``queued`` webhook once. If the controller restarts with a
 backlog larger than its live runners, those jobs would otherwise be forgotten:
 the surviving runners finish and nothing launches replacements. The
-controller therefore mirrors the scaler's queue to a small JSON file
+controller therefore mirrors the scaler's queue, plus every acknowledged job
+the scaler has not taken yet (written before the webhook's 202), to a small JSON file
 (non-secret job fields only, written atomically with mode 0600) and replays
 it in the one startup reconcile. Entries older than ``DEMAND_TTL_S`` are
 dropped on load: GitHub cancels a job that waits that long anyway.

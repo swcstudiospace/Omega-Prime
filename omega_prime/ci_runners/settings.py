@@ -456,11 +456,28 @@ class AgentSettings:
             job_hook=_absolute(
                 _get(env, "OMEGA_CI_AGENT_JOB_HOOK"), "OMEGA_CI_AGENT_JOB_HOOK"
             ),
-            job_policy=_absolute(
-                _get(env, "OMEGA_CI_AGENT_JOB_POLICY"), "OMEGA_CI_AGENT_JOB_POLICY"
-            )
-            or DEFAULT_AGENT_JOB_POLICY,
+            job_policy=_job_policy(_get(env, "OMEGA_CI_AGENT_JOB_POLICY")),
         )
+
+
+def _job_policy(raw: str | None) -> Path:
+    """The pre-job guard's allowlist path: only the one the shipped hook reads.
+
+    ``ACTIONS_RUNNER_HOOK_JOB_STARTED`` names a script and takes no arguments,
+    and the job's environment is not under the agent's sole control (the
+    workflow can shape it), so handing the path to the hook at run time would
+    give the job a say in its own guard. The shipped
+    ``job-started.sh`` therefore hard-codes it, and any other value is refused
+    here (fail closed at startup) instead of writing an allowlist the guard
+    never reads, which would fail every job.
+    """
+    path = _absolute(raw, "OMEGA_CI_AGENT_JOB_POLICY") or DEFAULT_AGENT_JOB_POLICY
+    if path != DEFAULT_AGENT_JOB_POLICY:
+        raise SettingsError(
+            f"OMEGA_CI_AGENT_JOB_POLICY: unsupported path; the pre-job guard "
+            f"(job-started.sh) only reads {DEFAULT_AGENT_JOB_POLICY}. Unset it."
+        )
+    return path
 
 
 def _absolute(raw: str | None, name: str) -> Path | None:

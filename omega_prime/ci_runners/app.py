@@ -2,9 +2,10 @@
 
 Routes: ``GET /healthz``, ``POST /github/webhook`` (HMAC), ``POST
 /agent/events`` (bearer) plus lifespan. A verified job is acknowledged with
-202 as soon as it is queued, before any GitHub or Desktop call. Queue
-admission happens before the delivery id is committed, so a 503 lets GitHub
-redeliver.
+202 as soon as it is queued and (for a ``queued`` pool job) written to the
+demand file, before any GitHub or Desktop call. Queue admission, including
+that write, happens before the delivery id is committed, so a 503 (queue
+full or demand file unwritable) lets GitHub redeliver.
 """
 
 from __future__ import annotations
