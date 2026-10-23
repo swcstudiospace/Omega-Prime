@@ -1,6 +1,7 @@
 # Summary
 
 - [Omega Prime](README.md)
+- [Autonomous Event-Driven ADLC Programming Bot](adlc.md)
 
 ## Install
 
