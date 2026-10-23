@@ -185,7 +185,7 @@ def work_title(
     known: Mapping[str, str] | None = None,
 ) -> str:
     """``000NN - <task title> · <activity>`` or a plain-language fallback."""
-    number = label.get("task") or task_number(cwd, label.get("run_id"))
+    number = label.get("task") or task_number(cwd)
     name = label.get("task_title")
     if not name and isinstance(number, str) and known:
         name = known.get(number)
