@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Spectrum Web Co
-"""Read safe omp process identity fields from procfs."""
+"""Read safe omp process identity fields from procfs.
+
+Agent rows carry a bounded ``label`` (task number/title, role, phase, plan,
+stage, run id, model) parsed by ``omega_prime.dashboard.labels`` so the model
+can title them like any other task. omp helper workers are marked
+``role: helper`` and long-lived daemons ``role: service``; neither is work.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from omega_prime.dashboard.labels import parse_omp_argv
 from omega_prime.dashboard.model import SourceResult
 
 _PID = re.compile(r"[0-9]+\Z")
@@ -18,6 +25,8 @@ _PID = re.compile(r"[0-9]+\Z")
 _AGENT_COMM = "omp"
 _SERVICE_COMMS = {"omp", "herdr", "openshell-gatew", "openshell-gateway"}
 _DEAD_STATES = {"Z", "X", "x"}
+# omp subcommands that run as long-lived servers rather than agent sessions.
+_OMP_DAEMONS = {"auth-broker", "daemon", "mcp", "serve", "server"}
 
 
 def _service(comm: str, cmdline: bytes) -> str | None:
@@ -26,18 +35,24 @@ def _service(comm: str, cmdline: bytes) -> str | None:
     Daemons share an agent's binary or worktree, so counting them as agents
     would show a permanent "omp process N" task with no work behind it.
     """
-    args = [
-        part.decode("utf-8", errors="replace") for part in cmdline.split(b"\0") if part
-    ]
+    args = _args(cmdline)
     if comm.startswith("openshell-gatew") or (
         _subcommand(args, "openshell-gateway") is not None
     ):
         return "openshell-gateway"
     if comm == "herdr" and _subcommand(args, "herdr") == "server":
         return "herdr server"
-    if comm == _AGENT_COMM and _subcommand(args, _AGENT_COMM) == "auth-broker":
-        return "omp auth-broker"
+    if comm == _AGENT_COMM:
+        sub = _subcommand(args, _AGENT_COMM)
+        if sub in _OMP_DAEMONS:
+            return f"omp {sub}"
     return None
+
+
+def _args(cmdline: bytes) -> list[str]:
+    return [
+        part.decode("utf-8", errors="replace") for part in cmdline.split(b"\0") if part
+    ]
 
 
 def _subcommand(args: list[str], program: str) -> str | None:
@@ -171,7 +186,15 @@ def make_procs_collector(
                         }
                     )
                     continue
-                items.append({**row, "role": "agent", "mode": _mode(cmdline)})
+                label = parse_omp_argv(_args(cmdline))
+                items.append(
+                    {
+                        **row,
+                        "role": "helper" if label["worker"] else "agent",
+                        "mode": _mode(cmdline),
+                        "label": label,
+                    }
+                )
             except (OSError, ValueError, IndexError, UnicodeError):
                 skipped += 1
         items.sort(key=lambda item: item["pid"])

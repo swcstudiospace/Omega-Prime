@@ -54,7 +54,16 @@ def test_procs_filters_allowlisted_fields_and_extracts_mode(
     assert result.status == "ok"
     assert {frozenset(item) for item in result.items} == {
         frozenset(
-            {"kind", "pid", "elapsed_s", "elapsed_measured_at", "cwd", "mode", "role"}
+            {
+                "kind",
+                "pid",
+                "elapsed_s",
+                "elapsed_measured_at",
+                "cwd",
+                "mode",
+                "role",
+                "label",
+            }
         )
     }
     measured_at = datetime.fromisoformat(result.items[0]["elapsed_measured_at"])
