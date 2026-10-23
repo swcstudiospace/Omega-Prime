@@ -496,7 +496,14 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
 - **Omega-Prime's own container jobs (task 00057).** `grokbot-image` builds
   and runs the tool-host image with rootless podman: its first step proves
   the runner can enter a user namespace (`podman unshare true`) and fails
-  naming the reason if Railway does not grant one. `ci.yml`
+  naming the reason if Railway does not grant one. Measured on the live pool
+  (2026-10-24): a single-ID user namespace works (`unshare -r`), but the
+  65536-ID subordinate range does not: setuid `newuidmap` gets EPERM writing
+  `uid_map` (NoNewPrivs 0, CapBnd `00000000800405fb`). So rootless podman
+  with the image's `/etc/subuid` range cannot start, and the job stays red
+  until the runner image supports a single-ID podman setup (no subordinate
+  range, `ignore_chown_errors`) that can still run the tool host as uid 10001,
+  or the pool gains a container engine. `ci.yml`
   `eventstream-it` still uses a `services:` Pulsar container and
   `docker exec` with fixed host ports, so it cannot run on the pool until its
   harness is rewritten for podman (per-job ports) or a Pulsar binary.
