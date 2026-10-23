@@ -31,6 +31,8 @@ _STATUS_EXTRA = {
     "agentos": ("routing_summary", "state_entries"),
     "command_log": ("count", "last_exit_codes"),
     "github": ("command_center",),
+    # Daemons the process scan classified as infrastructure, not tasks.
+    "procs": ("services",),
 }
 
 

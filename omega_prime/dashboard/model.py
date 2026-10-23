@@ -5,7 +5,7 @@
 Item kind registry (keys optional unless marked req; unknown keys ignored):
 - herdr_pane: pane_id(req), workspace, name, agent_status, cwd, terminal_title, session_path
 - omp_session: session_path(req), session_id, cwd, title, model, thinking_level, started_at, last_ts, stop_reason, usage{input,output}, progress{done,total}
-- omp_proc: pid(req), elapsed_s, elapsed_measured_at, cwd, mode
+- omp_proc: pid(req), elapsed_s, elapsed_measured_at, cwd, mode, role (agent|helper|service), label{task,task_title,agent,phase,plan,stage,run_id,model,worker}
 - wiring: phase(req), branch, head_sha, stage, last_log_ts, progress, worktree
 - sandbox_e2e: run_id(req), last_ts, path, stage
 - sandbox_receipt: name(req), last_ts, path
@@ -22,9 +22,14 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import PurePath
 from typing import Any
 
+from omega_prime.dashboard.labels import (
+    known_task_titles,
+    session_title,
+    work_description,
+    work_title,
+)
 from omega_prime.dashboard.redact import redact_value
 
 
@@ -282,8 +287,20 @@ def normalize_tasks(
     finished: list[FinishedItem] = []
     sessions = _items(sources, "omp_session")
     pane_rows = _items(sources, "herdr_pane")
-    # Daemons (auth broker, gateway, Herdr server) are not agent work.
+    # Daemons (auth broker, gateway, Herdr server) are not agent work. Helper
+    # workers prove their run is alive but are never a task of their own.
     procs = [p for p in _items(sources, "omp_proc") if p.get("role") != "service"]
+    task_source = sources.get("tasks_json")
+    known_titles = (
+        known_task_titles(
+            [
+                *task_source.extra.get("tasks", []),
+                *task_source.extra.get("finished", []),
+            ]
+        )
+        if task_source
+        else {}
+    )
     # Absence of a process only proves a session ended after a scan that
     # actually ran; a failed or timed-out scan says nothing either way.
     procs_known = bool(procs) or any(
@@ -379,8 +396,10 @@ def normalize_tasks(
             continue
         path = s["session_path"]
         stop = s.get("stop_reason")
-        title = s.get("title") or PurePath(path).name
         sid = s.get("session_id") or hashlib.sha1(path.encode()).hexdigest()[:10]
+        title = s.get("title") or session_title(
+            s.get("cwd"), session_id=str(sid), known=known_titles
+        )
         if stop:
             finished.append(
                 FinishedItem(
@@ -420,6 +439,13 @@ def normalize_tasks(
         if isinstance(usage, dict):
             detail.append(
                 f"tokens in/out {usage.get('input', 0)}/{usage.get('output', 0)}"
+            )
+        if not detail:
+            # Never leave a session row without a description.
+            where = s.get("cwd")
+            detail.append(
+                f"omp session {sid}"
+                + (f" in {where}" if isinstance(where, str) else "")
             )
         claim(s.get("cwd"))
         active.append(
@@ -619,28 +645,84 @@ def normalize_tasks(
                 Task(task_id, title, "fleet_job", owner, "unknown", updated, updated)
             )
 
+    # One row per run (or per agent pid when no run id). Separate agents never
+    # merge, even when they share a cwd. Helpers fold into the sole agent on
+    # their checkout; when several runs share it, helpers stay unassigned
+    # rather than appearing under the wrong task.
+    groups: dict[str, list[dict[str, Any]]] = {}
+    group_cwd: dict[str, str] = {}
+    cwd_primary: dict[str, str] = {}
+    agents_on_cwd: dict[str, int] = {}
     for item in procs:
         pid, cwd = item.get("pid"), item.get("cwd")
         if not isinstance(pid, int) or not isinstance(cwd, str) or cwd in live_cwds:
             continue
-        elapsed_s = item.get("elapsed_s")
-        measured = _anchor(item.get("elapsed_measured_at"))
+        if item.get("role") == "helper":
+            continue
+        maybe_label = item.get("label")
+        raw_label: dict[str, Any] = maybe_label if isinstance(maybe_label, dict) else {}
+        run_id = raw_label.get("run_id")
+        key = f"run:{run_id}" if isinstance(run_id, str) else f"pid:{pid}"
+        if key not in groups:
+            agents_on_cwd[cwd] = agents_on_cwd.get(cwd, 0) + 1
+        groups.setdefault(key, []).append(item)
+        group_cwd[key] = cwd
+        cwd_primary.setdefault(cwd, key)
+    helpers_by_group: dict[str, list[int]] = {key: [] for key in groups}
+    for item in procs:
+        pid, cwd = item.get("pid"), item.get("cwd")
+        if item.get("role") != "helper":
+            continue
+        if not isinstance(pid, int) or not isinstance(cwd, str) or cwd in live_cwds:
+            continue
+        if agents_on_cwd.get(cwd, 0) != 1:
+            continue
+        primary = cwd_primary.get(cwd)
+        if primary is not None:
+            helpers_by_group[primary].append(pid)
+    for key in sorted(groups, key=lambda k: (group_cwd[k], groups[k][0]["pid"])):
+        agents = sorted(groups[key], key=lambda member: member["pid"])
+        helpers = helpers_by_group[key]
+        cwd = group_cwd[key]
+        label: dict[str, Any] = {}
+        for member in agents:
+            for name, value in (member.get("label") or {}).items():
+                if value is not None and label.get(name) is None:
+                    label[name] = value
+        first = agents[0]
+        elapsed_s = first.get("elapsed_s")
+        measured = _anchor(first.get("elapsed_measured_at"))
         stamp = (
             ((measured or now) - timedelta(seconds=float(elapsed_s))).isoformat()
             if isinstance(elapsed_s, (int, float))
             else None
         )
-        mode = item.get("mode")
+        title = work_title(label, cwd, known=known_titles)
+        run_id = label.get("run_id")
+        who = label.get("agent") or label.get("stage") or "agent"
         active.append(
             Task(
-                f"proc:{pid}",
-                f"omp process {pid}",
+                f"omp-run:{run_id}"
+                if isinstance(run_id, str)
+                else f"proc:{first['pid']}",
+                title,
                 "omp_proc",
-                Owner("omp-proc", str(pid), f"omp process {pid}"),
+                Owner("omp-proc", str(first["pid"]), f"omp {who}"),
                 "working",
                 stamp,
                 stamp,
-                detail=f"mode {mode}" if mode else "unmatched process",
+                model=label.get("model")
+                if isinstance(label.get("model"), str)
+                else None,
+                detail=work_description(
+                    label,
+                    cwd,
+                    pids=[m["pid"] for m in agents],
+                    helpers=helpers,
+                    mode=first.get("mode")
+                    if isinstance(first.get("mode"), str)
+                    else None,
+                ),
             )
         )
     for item in _items(sources, "github_pr"):
@@ -675,7 +757,6 @@ def normalize_tasks(
                 f"{repo}#{number} merge",
             )
 
-    task_source = sources.get("tasks_json")
     if task_source:
         for t in task_source.extra.get("tasks", []):
             if not isinstance(t, dict) or not isinstance(t.get("id"), str):
