@@ -503,23 +503,23 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   --max-parallel-test-modules 2` (task 00057). These keep one job inside its
   share; the 1000-task ceiling itself is a Railway service limit, so many
   concurrent thread-heavy jobs can still exhaust it.
-- **Omega-Prime's own container jobs (task 00057).** On image job
-  120662745206 the setup step's `podman info` printed `rootless=true` and
-  the step continued; the same job then failed while applying a layer.
-  The 65536-ID subordinate range does not work: setuid `newuidmap` gets EPERM writing
-  `uid_map` (NoNewPrivs 0, CapEff 0, CapBnd `00000000800405fb`). `grokbot-image`
-  therefore does not call the real `newuidmap`. PATH shims write the one
-  mapping the job user is allowed to write, storage uses `ignore_chown_errors`
-  with fuse-overlayfs or vfs under `RUNNER_TEMP`, and the build uses chroot
-  isolation. That is not enough to build. vfs layer apply remounts `/`
-  (`MS_REC|MS_PRIVATE`), and buildah then bind-mounts the build root onto
-  itself (`MS_BIND`, flags `0x1000`). Both are EPERM on this pool, including
-  inside podman's user namespace: `CapBnd` is `00000000800405fb` (no
-  `CAP_SYS_ADMIN`, bit 21) and `unshare` cannot change root propagation.
-  `/dev/fuse` is not a device node, so fuse-overlayfs cannot replace the
-  mount. `deploy/ci-runner-desktop` has to be started with `CAP_SYS_ADMIN`
-  in the bounding set and run `mount --make-rslave /` before the job user
-  starts. Until then `grokbot-image` cannot build or run a container. The
+- **Omega-Prime's own container jobs (task 00057).** This page does not
+  claim `unshare -r` exited 0. Two image jobs on the pool exited 1, and
+  their logs are the record. Job 120657880461 (runner
+  `omega-ci-120656411281-w6to`) logged `unshare: cannot change root
+  filesystem propagation: Permission denied` and the step exited 1. Job
+  120662745206 (runner `omega-ci-120662861496-8hh0`) logged `podman info`
+  output `rootless=true graph=vfs` and then `marking filesystem ... as
+  private: mount ... flags: 0x1000: permission denied`; the job's
+  conclusion is failure. `CapBnd` in that log is `00000000800405fb` (no
+  `CAP_SYS_ADMIN`, bit 21). `/dev/fuse` was not a device node, so
+  fuse-overlayfs was not selected. setuid `newuidmap` is not called; PATH
+  shims write the one mapping the job user is allowed to write. Storage
+  uses `ignore_chown_errors` with vfs under `RUNNER_TEMP`, and the build
+  asks for chroot isolation. That does not finish a build.
+  `deploy/ci-runner-desktop` has to be started with `CAP_SYS_ADMIN` in the
+  bounding set and run `mount --make-rslave /` before the job user starts.
+  Until then `grokbot-image` cannot build or run a container. The
   container's single mapped uid is presented as 10001, and
   nothing is published on a host port. `ci.yml` `eventstream-it` still uses a
   `services:` Pulsar container. That needs a Docker daemon at job setup, and

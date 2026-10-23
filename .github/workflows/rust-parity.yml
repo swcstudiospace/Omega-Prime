@@ -38,6 +38,12 @@ permissions:
 # limit is shared across concurrent jobs: cap cargo's parallel rustc jobs.
 env:
   CARGO_BUILD_JOBS: "2"
+  # Tokio's multi-thread runtime sizes itself from the visible CPU count
+  # (48 on a pool host). The pid cgroup is shared, and the extra workers
+  # fail with EAGAIN ("OS can't spawn worker thread"). Two matches the
+  # runner's 2 vCPU budget.
+  TOKIO_WORKER_THREADS: "2"
+  RAYON_NUM_THREADS: "2"
 
 concurrency:
   group: rust-parity-${{ github.workflow }}-${{ github.ref }}
