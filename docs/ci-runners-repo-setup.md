@@ -98,7 +98,8 @@ self-hosted runner through a fork pull request. To serve one anyway:
    repositories**) and turn on its **Allow public repositories** option.
 
 The controller then serves only jobs whose workflow run is a same-repository
-`push`, `workflow_dispatch` or `pull_request`. Fork pull requests,
+`push`, `workflow_dispatch`, `pull_request`, or `schedule` on the default
+branch. Fork pull requests,
 `pull_request_target` and anything it cannot verify are refused with an
 `omega.ci.runner.refused` event. On the runner itself, the Desktop image's
 pre-job guard fails any such job before its first step, even if GitHub

@@ -318,6 +318,19 @@ def test_hook_with_org_wildcard(
     assert hook.refusal(name, repo, payload, {ORG_ALL}) == reason
 
 
+def test_hook_org_wildcard_admits_default_branch_schedule() -> None:
+    payload = _event(OTHER)
+    payload["repository"]["default_branch"] = "main"
+    assert (
+        hook.refusal("schedule", OTHER, payload, {ORG_ALL}, ref="refs/heads/main")
+        is None
+    )
+    assert (
+        hook.refusal("schedule", OTHER, payload, {ORG_ALL}, ref="refs/heads/feature")
+        == hook.EVENT_NOT_ALLOWED
+    )
+
+
 def test_hook_exact_entry_admits_an_org_fork_but_not_its_fork_prs() -> None:
     allowed = {ORG_ALL, OTHER}
     assert hook.refusal("push", OTHER, _event(OTHER, fork=True), allowed) is None

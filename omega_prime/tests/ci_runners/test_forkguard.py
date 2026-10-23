@@ -128,6 +128,7 @@ def test_scaler_requires_public_subset_of_repos() -> None:
         (run_body("pull_request", head="mallory/widgets"), forkguard.FORK),
         (run_body("pull_request", fork=True), forkguard.FORK),
         (run_body("pull_request_target"), forkguard.PULL_REQUEST_TARGET),
+        (run_body("schedule"), forkguard.EVENT_NOT_ALLOWED),
         (run_body("issue_comment"), forkguard.EVENT_NOT_ALLOWED),
         (run_body("workflow_run"), forkguard.EVENT_NOT_ALLOWED),
         (run_body(head=None), forkguard.HEAD_UNKNOWN),
@@ -152,6 +153,38 @@ def test_run_refusal(run: dict[str, Any] | None, reason: str | None) -> None:
     assert forkguard.run_refusal(run, REPO) == reason
 
 
+def _schedule(head_branch: str, default_branch: str | None) -> dict[str, Any]:
+    body = run_body("schedule")
+    body["head_branch"] = head_branch
+    if default_branch is not None:
+        assert isinstance(body["repository"], dict)
+        body["repository"]["default_branch"] = default_branch
+    return body
+
+
+@pytest.mark.parametrize(
+    ("run", "reason"),
+    [
+        (_schedule("main", "main"), None),
+        (_schedule("release/1", "release/1"), None),
+        (_schedule("feature", "main"), forkguard.EVENT_NOT_ALLOWED),
+        (_schedule("main", None), forkguard.EVENT_NOT_ALLOWED),
+        (_schedule(" main", " main"), forkguard.EVENT_NOT_ALLOWED),
+        (
+            {
+                **_schedule("main", "main"),
+                "head_repository": {"full_name": "mallory/widgets", "fork": False},
+            },
+            forkguard.FORK,
+        ),
+    ],
+)
+def test_schedule_is_trusted_only_on_the_default_branch(
+    run: dict[str, Any], reason: str | None
+) -> None:
+    assert forkguard.run_refusal(run, REPO) == reason
+
+
 # -- controller behaviour -----------------------------------------------------------
 
 
@@ -169,6 +202,24 @@ def test_public_repo_not_opted_in_is_refused_without_a_lookup() -> None:
         "repo": REPO,
         "reason": forkguard.NOT_OPTED_IN,
     }
+
+
+def test_opted_in_schedule_on_the_default_branch_launches() -> None:
+    http = routes()
+    http.on("GET", RUN, resp(200, _schedule("main", "main")))
+    rig = opted_in(http)
+    scenario(rig, offer(public_job()))
+    assert refusals(rig) == []
+    assert len(rig.scaler.runners) == 1
+
+
+def test_opted_in_schedule_off_the_default_branch_is_refused() -> None:
+    http = routes()
+    http.on("GET", RUN, resp(200, _schedule("feature", "main")))
+    rig = opted_in(http)
+    scenario(rig, offer(public_job()))
+    assert refusals(rig) == [forkguard.EVENT_NOT_ALLOWED]
+    assert JIT_PATH not in http.paths()
 
 
 def test_opted_in_same_repo_push_launches() -> None:
