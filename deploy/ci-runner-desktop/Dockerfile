@@ -44,6 +44,14 @@ ARG PY310_SHA256=4c96c0e9380150d436c38be322bafa04a5632db7eb2def147b7553ed7e88fd1
 ARG PY312_VERSION=3.12.15
 ARG PY312_BUILD=36805895057
 ARG PY312_SHA256=fcb672b0437c2d8df5565b7cc250b2b0d7455e2b8d6a4a107cfa6f2efe4f7ed8
+ARG PY313_VERSION=3.13.17
+ARG PY313_BUILD=39711892467
+ARG PY313_SHA256=f0b66c1cb0614c6ab2b8ff7500e93c3b34bf3691eb5073050f9e4e56a513e932
+ARG PY314_VERSION=3.14.9
+ARG PY314_BUILD=39619022138
+ARG PY314_SHA256=987af6a6858a59529d8f66a54d6484c7bc8127bafc19e651134ad3e01ea578d4
+ARG CODEQL_VERSION=2.27.3
+ARG CODEQL_SHA256=64518dc413c8e7b5733fee2489e830a899bb1e3f28c8873b5869d5cc90164c5c
 ARG NODE22_VERSION=22.23.4
 ARG NODE22_SHA256=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
 ARG NODE24_VERSION=24.22.1
@@ -58,6 +66,11 @@ ARG ANDROID_BUILD_TOOLS=36.0.0
 ARG RUSTUP_VERSION=1.29.2
 ARG RUSTUP_INIT_SHA256=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
 ARG RUST_VERSION=1.99.1
+# Second toolchain, never the default: Omega-Prime rust-parity builds the pinned
+# upstream with the toolchain its contract pin names (prime-agent.pin.json).
+ARG RUST_PARITY_VERSION=1.98.1
+ARG CARGO_DENY_VERSION=0.20.2
+ARG CARGO_DENY_SHA256=9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
 ARG PG_MAJOR=16
 
 # Tool locations, shared by the build steps, the self-check and runner-env.
@@ -146,24 +159,30 @@ RUN mkdir -p /etc/postgresql-common/createcluster.d \
        zip unzip xz-utils rsync jq age pipx python3-venv python3-pip \
        openjdk-17-jdk-headless postgresql-16 postgresql-client-16 \
        podman uidmap slirp4netns fuse-overlayfs \
+       ripgrep ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && echo "omega-ci-job:100000:65536" >> /etc/subuid \
     && echo "omega-ci-job:100000:65536" >> /etc/subgid
 
-# (b) Single-binary CLIs: gh, gitleaks, trivy, GreptimeDB (standalone mode).
+# (b) Single-binary CLIs: gh, gitleaks, trivy, GreptimeDB (standalone mode),
+#     cargo-deny (license gates; replaces EmbarkStudios/cargo-deny-action, a
+#     Docker container action).
 RUN mkdir -p /tmp/bin && cd /tmp/bin \
     && curl -fsSL -o gh.tgz "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
     && curl -fsSL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
     && curl -fsSL -o trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
     && curl -fsSL -o greptime.tgz "https://github.com/GreptimeTeam/greptimedb/releases/download/v${GREPTIME_VERSION}/greptime-linux-amd64-v${GREPTIME_VERSION}.tar.gz" \
+    && curl -fsSL -o cargo-deny.tgz "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
     && printf '%s  %s\n' "${GH_SHA256}" gh.tgz "${GITLEAKS_SHA256}" gitleaks.tgz \
-       "${TRIVY_SHA256}" trivy.tgz "${GREPTIME_SHA256}" greptime.tgz | sha256sum -c - \
+       "${TRIVY_SHA256}" trivy.tgz "${GREPTIME_SHA256}" greptime.tgz \
+       "${CARGO_DENY_SHA256}" cargo-deny.tgz | sha256sum -c - \
     && tar -xzf gh.tgz --strip-components=2 -C /usr/local/bin "gh_${GH_VERSION}_linux_amd64/bin/gh" \
     && tar -xzf gitleaks.tgz -C /usr/local/bin gitleaks \
     && tar -xzf trivy.tgz -C /usr/local/bin trivy \
     && tar -xzf greptime.tgz --strip-components=1 -C /usr/local/bin "greptime-linux-amd64-v${GREPTIME_VERSION}/greptime" \
-    && chown root:root /usr/local/bin/gh /usr/local/bin/gitleaks /usr/local/bin/trivy /usr/local/bin/greptime \
-    && chmod 0755 /usr/local/bin/gh /usr/local/bin/gitleaks /usr/local/bin/trivy /usr/local/bin/greptime \
+    && tar -xzf cargo-deny.tgz --strip-components=1 -C /usr/local/bin "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny" \
+    && chown root:root /usr/local/bin/gh /usr/local/bin/gitleaks /usr/local/bin/trivy /usr/local/bin/greptime /usr/local/bin/cargo-deny \
+    && chmod 0755 /usr/local/bin/gh /usr/local/bin/gitleaks /usr/local/bin/trivy /usr/local/bin/greptime /usr/local/bin/cargo-deny \
     && cd / && rm -rf /tmp/bin
 
 # (c) Hosted tool cache, in the layout actions/setup-python and
@@ -171,15 +190,25 @@ RUN mkdir -p /tmp/bin && cd /tmp/bin \
 #     the path GitHub's images use (the Python builds are compiled for it).
 #     A cache hit needs no write, so the read-only tree serves uid 1500.
 #     The Python step mirrors the build's own setup.sh, minus its unpinned
-#     "pip install --upgrade pip" (the bundled pip is kept).
+#     "pip install --upgrade pip" (the bundled pip is kept). setup.sh also
+#     creates bin/pip; without it `pip install` after setup-python resolves to
+#     the system /usr/bin/pip and fails with externally-managed-environment.
+#     CodeQL: the bundle github/codeql-action pins (2.27.3 for action
+#     6f2ac81), so init finds it here instead of trying to write the cache.
 RUN mkdir -p "${RUNNER_TOOL_CACHE}/Python" "${RUNNER_TOOL_CACHE}/node" /tmp/tc && cd /tmp/tc \
     && curl -fsSL -o py310.tgz "https://github.com/actions/python-versions/releases/download/${PY310_VERSION}-${PY310_BUILD}/python-${PY310_VERSION}-linux-24.04-x64.tar.gz" \
     && curl -fsSL -o py312.tgz "https://github.com/actions/python-versions/releases/download/${PY312_VERSION}-${PY312_BUILD}/python-${PY312_VERSION}-linux-24.04-x64.tar.gz" \
+    && curl -fsSL -o py313.tgz "https://github.com/actions/python-versions/releases/download/${PY313_VERSION}-${PY313_BUILD}/python-${PY313_VERSION}-linux-24.04-x64.tar.gz" \
+    && curl -fsSL -o py314.tgz "https://github.com/actions/python-versions/releases/download/${PY314_VERSION}-${PY314_BUILD}/python-${PY314_VERSION}-linux-24.04-x64.tar.gz" \
     && curl -fsSL -o node22.txz "https://nodejs.org/dist/v${NODE22_VERSION}/node-v${NODE22_VERSION}-linux-x64.tar.xz" \
     && curl -fsSL -o node24.txz "https://nodejs.org/dist/v${NODE24_VERSION}/node-v${NODE24_VERSION}-linux-x64.tar.xz" \
+    && curl -fsSL -o codeql.tgz "https://github.com/github/codeql-action/releases/download/codeql-bundle-v${CODEQL_VERSION}/codeql-bundle-linux64.tar.gz" \
     && printf '%s  %s\n' "${PY310_SHA256}" py310.tgz "${PY312_SHA256}" py312.tgz \
-       "${NODE22_SHA256}" node22.txz "${NODE24_SHA256}" node24.txz | sha256sum -c - \
-    && for spec in "${PY310_VERSION}:py310.tgz" "${PY312_VERSION}:py312.tgz"; do \
+       "${PY313_SHA256}" py313.tgz "${PY314_SHA256}" py314.tgz \
+       "${NODE22_SHA256}" node22.txz "${NODE24_SHA256}" node24.txz \
+       "${CODEQL_SHA256}" codeql.tgz | sha256sum -c - \
+    && for spec in "${PY310_VERSION}:py310.tgz" "${PY312_VERSION}:py312.tgz" \
+                   "${PY313_VERSION}:py313.tgz" "${PY314_VERSION}:py314.tgz"; do \
          ver="${spec%%:*}"; mm="${ver%.*}"; dest="${RUNNER_TOOL_CACHE}/Python/${ver}/x64"; \
          mkdir -p "$dest" && tar -xzf "${spec#*:}" -C "$dest" \
          && rm -f "$dest/setup.sh" "$dest/build_output.txt" "$dest/tools_structure.txt" \
@@ -187,6 +216,7 @@ RUN mkdir -p "${RUNNER_TOOL_CACHE}/Python" "${RUNNER_TOOL_CACHE}/node" /tmp/tc &
          && ln -sf "python${mm}" "$dest/bin/python$(echo "$mm" | tr -d .)" \
          && { [ -e "$dest/bin/python" ] || ln -s "python${mm}" "$dest/bin/python"; } \
          && { "$dest/python" -c "import pip" 2>/dev/null || "$dest/python" -m ensurepip; } \
+         && { [ -e "$dest/bin/pip" ] || ln -s pip3 "$dest/bin/pip"; } \
          && touch "${RUNNER_TOOL_CACHE}/Python/${ver}/x64.complete" || exit 1; \
        done \
     && for spec in "${NODE22_VERSION}:node22.txz" "${NODE24_VERSION}:node24.txz"; do \
@@ -194,6 +224,9 @@ RUN mkdir -p "${RUNNER_TOOL_CACHE}/Python" "${RUNNER_TOOL_CACHE}/node" /tmp/tc &
          mkdir -p "$dest" && tar -xJf "${spec#*:}" --strip-components=1 -C "$dest" \
          && touch "${RUNNER_TOOL_CACHE}/node/${ver}/x64.complete" || exit 1; \
        done \
+    && mkdir -p "${RUNNER_TOOL_CACHE}/CodeQL/${CODEQL_VERSION}/x64" \
+    && tar -xzf codeql.tgz -C "${RUNNER_TOOL_CACHE}/CodeQL/${CODEQL_VERSION}/x64" \
+    && touch "${RUNNER_TOOL_CACHE}/CodeQL/${CODEQL_VERSION}/x64.complete" \
     && cd / && rm -rf /tmp/tc \
     && chown -R root:root "${RUNNER_TOOL_CACHE}" && chmod -R a+rX,go-w "${RUNNER_TOOL_CACHE}"
 
@@ -227,13 +260,16 @@ RUN curl -fsSL -o /tmp/cmdline-tools.zip "https://dl.google.com/android/reposito
     && chown -R root:root "${ANDROID_HOME}" && chmod -R a+rX,go-w "${ANDROID_HOME}"
 
 # (f) Rust: rustup-init (published sha256), one pinned toolchain, minimal
-#     profile + rustfmt + clippy. RUSTUP_HOME is read-only for jobs; cargo's
+#     profile + rustfmt + clippy, plus RUST_PARITY_VERSION (select it with
+#     RUSTUP_TOOLCHAIN). RUSTUP_HOME is read-only for jobs; cargo's
 #     registry and target dirs use the job's own HOME (CARGO_HOME unset).
 RUN curl -fsSL -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
     && echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c - \
     && chmod 0755 /tmp/rustup-init \
     && CARGO_HOME=/opt/rust/cargo /tmp/rustup-init -y --no-modify-path --profile minimal \
        --default-toolchain "${RUST_VERSION}" -c rustfmt -c clippy \
+    && CARGO_HOME=/opt/rust/cargo /opt/rust/cargo/bin/rustup toolchain install "${RUST_PARITY_VERSION}" \
+       --profile minimal -c rustfmt -c clippy \
     && rm -f /tmp/rustup-init && rm -rf /opt/rust/cargo/registry /opt/rust/rustup/downloads/* /opt/rust/rustup/tmp/* \
     && chown -R root:root /opt/rust && chmod -R a+rX,go-w /opt/rust
 
@@ -285,9 +321,11 @@ RUN chown -R root:root /opt/omega-ci && chmod -R a+rX,go-w /opt/omega-ci \
 COPY deploy/ci-runner-desktop/toolchain-check.sh /opt/omega-ci/toolchain-check.sh
 RUN printf '%s=%s\n' GH "${GH_VERSION}" GITLEAKS "${GITLEAKS_VERSION}" TRIVY "${TRIVY_VERSION}" \
        GREPTIME "${GREPTIME_VERSION}" PY310 "${PY310_VERSION}" PY312 "${PY312_VERSION}" \
+       PY313 "${PY313_VERSION}" PY314 "${PY314_VERSION}" CODEQL "${CODEQL_VERSION}" \
        NODE22 "${NODE22_VERSION}" NODE24 "${NODE24_VERSION}" DOTNET_SDK "${DOTNET_SDK_VERSION}" \
        ANDROID_API "${ANDROID_API}" ANDROID_BUILD_TOOLS "${ANDROID_BUILD_TOOLS}" \
-       RUST "${RUST_VERSION}" PG_MAJOR "${PG_MAJOR}" > /opt/omega-ci/toolchain-versions \
+       RUST "${RUST_VERSION}" RUST_PARITY "${RUST_PARITY_VERSION}" CARGO_DENY "${CARGO_DENY_VERSION}" \
+       PG_MAJOR "${PG_MAJOR}" > /opt/omega-ci/toolchain-versions \
     && chmod 0644 /opt/omega-ci/toolchain-versions && chmod 0755 /opt/omega-ci/toolchain-check.sh \
     && /opt/omega-ci/toolchain-check.sh --as-job "${JOB_UID}" "${JOB_GID}"
 

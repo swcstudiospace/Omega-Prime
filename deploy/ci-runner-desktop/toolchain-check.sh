@@ -59,17 +59,26 @@ for tool in jq make gcc g++ zip unzip xz rsync age pipx curl file pkg-config; do
     command -v "$tool" >/dev/null || fail "$tool not on PATH"
 done
 echo "ok  jq make gcc g++ zip unzip xz rsync age pipx curl file pkg-config"
+check ripgrep "ripgrep " rg --version
+check ffmpeg "ffmpeg version" ffmpeg -hide_banner -version
+check ffprobe "ffprobe version" ffprobe -hide_banner -version
 check python3-venv "venv-ok" sh -c "python3 -m venv '$scratch/venv' && '$scratch/venv/bin/python' -m pip --version >/dev/null && echo venv-ok"
 
 # --- hosted tool cache (setup-python / setup-node cache hits) ----------------
 tc="${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE unset in the job env}"
 [ "${AGENT_TOOLSDIRECTORY:-}" = "$tc" ] || fail "AGENT_TOOLSDIRECTORY != RUNNER_TOOL_CACHE"
-for key in PY310 PY312; do
+for key in PY310 PY312 PY313 PY314; do
     v="$(want "$key")"
     [ -f "$tc/Python/$v/x64.complete" ] || fail "Python $v: no x64.complete marker"
     check "Python $v" "Python $v" "$tc/Python/$v/x64/python" --version
     check "Python $v pip" "pip " "$tc/Python/$v/x64/bin/python3" -m pip --version
+    # `pip` (not only pip3) must resolve to this interpreter once setup-python
+    # puts bin/ first on PATH, or it falls through to the system pip.
+    check "Python $v bin/pip" "python ${v%.*}" "$tc/Python/$v/x64/bin/pip" --version
 done
+v="$(want CODEQL)"
+[ -f "$tc/CodeQL/$v/x64.complete" ] || fail "CodeQL $v: no x64.complete marker"
+check "CodeQL $v" "$v" "$tc/CodeQL/$v/x64/codeql/codeql" version --format=terse
 for key in NODE22 NODE24; do
     v="$(want "$key")"
     [ -f "$tc/node/$v/x64.complete" ] || fail "node $v: no x64.complete marker"
@@ -80,6 +89,7 @@ done
 readonly_tree "$tc"
 readonly_tree "$tc/Python"
 readonly_tree "$tc/node"
+readonly_tree "$tc/CodeQL"
 
 # --- .NET + Android ---------------------------------------------------------
 check "dotnet sdk" "$(want DOTNET_SDK)" dotnet --list-sdks
@@ -137,6 +147,9 @@ check rustc "rustc $(want RUST)" rustc --version
 check cargo "cargo $(want RUST)" cargo --version
 check rustfmt "rustfmt" rustfmt --version
 check clippy "clippy" cargo clippy --version
+check "rustc (parity)" "rustc $(want RUST_PARITY)" env RUSTUP_TOOLCHAIN="$(want RUST_PARITY)" rustc --version
+check "clippy (parity)" "clippy" env RUSTUP_TOOLCHAIN="$(want RUST_PARITY)" cargo clippy --version
+check cargo-deny "cargo-deny $(want CARGO_DENY)" cargo deny --version
 readonly_tree "$RUSTUP_HOME"
 (cd "$scratch" && cargo new --vcs none -q hello && cd hello && cargo build -q --offline) \
     || fail "cargo build of a hello crate failed"

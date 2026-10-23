@@ -121,12 +121,17 @@ def test_self_check_runs_as_the_job_and_reads_every_pin() -> None:
         "GREPTIME",
         "PY310",
         "PY312",
+        "PY313",
+        "PY314",
+        "CODEQL",
         "NODE22",
         "NODE24",
         "DOTNET_SDK",
         "ANDROID_API",
         "ANDROID_BUILD_TOOLS",
         "RUST",
+        "RUST_PARITY",
+        "CARGO_DENY",
         "PG_MAJOR",
     ):
         assert key in keys, key
