@@ -26,7 +26,13 @@ class SQLiteIdempotencyStore:
     restarted worker that meets a ``claimed`` row whose incarnation lock is free
     knows that owner is dead and transfers the claim to itself instead of
     reporting ``busy`` forever. A live owner (same or other process) keeps its
-    lock, so its claims stay exclusive. WAL SQLite already requires every
+    lock, so its claims stay exclusive. When a second live incarnation
+    presents the same owner token, the original incarnation is kept and the
+    newcomer is recorded as an additional *holder* in
+    ``eventstream_idempotency_holders``; a claim is treated as orphaned only
+    when the stamped incarnation **and** every recorded holder are dead, so a
+    genuinely restarted owner can resume while a live owner is never
+    superseded. WAL SQLite already requires every
     sharer to be on one host, which is exactly the scope of ``flock``.
     ``reclaim`` remains for explicit, caller-proven recovery. ``connection=``
     on complete/release allows the caller to commit a local business effect and
@@ -89,6 +95,33 @@ class SQLiteIdempotencyStore:
         finally:
             os.close(descriptor)
 
+    def _claim_alive(
+        self,
+        database: sqlite3.Connection,
+        subscription_hash: str,
+        event_hash: str,
+        incarnation: str | None,
+    ) -> bool:
+        """True while the stamped incarnation or any co-holder is still alive."""
+        if self._incarnation_alive(incarnation):
+            return True
+        holders = database.execute(
+            "SELECT incarnation FROM eventstream_idempotency_holders "
+            "WHERE subscription_hash = ? AND event_hash = ?",
+            (subscription_hash, event_hash),
+        ).fetchall()
+        return any(self._incarnation_alive(str(row[0])) for row in holders)
+
+    @staticmethod
+    def _clear_holders(
+        database: sqlite3.Connection, subscription_hash: str, event_hash: str
+    ) -> None:
+        database.execute(
+            "DELETE FROM eventstream_idempotency_holders "
+            "WHERE subscription_hash = ? AND event_hash = ?",
+            (subscription_hash, event_hash),
+        )
+
     def open_connection(self) -> sqlite3.Connection:
         """Open a WAL/FULL connection suitable for caller-owned transactions."""
         connection = sqlite3.connect(
@@ -135,6 +168,13 @@ class SQLiteIdempotencyStore:
                 connection.execute(
                     "ALTER TABLE eventstream_idempotency ADD COLUMN incarnation TEXT"
                 )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS eventstream_idempotency_holders ("
+                "subscription_hash TEXT NOT NULL, "
+                "event_hash TEXT NOT NULL, "
+                "incarnation TEXT NOT NULL, "
+                "PRIMARY KEY (subscription_hash, event_hash, incarnation))"
+            )
             connection.commit()
         except BaseException:
             if connection.in_transaction:
@@ -212,6 +252,7 @@ class SQLiteIdempotencyStore:
                     (subscription_hash, event_hash),
                 ).fetchone()
                 if row is None:
+                    self._clear_holders(database, subscription_hash, event_hash)
                     database.execute(
                         "INSERT INTO eventstream_idempotency "
                         "(subscription_hash, event_hash, owner_hash, status, "
@@ -224,22 +265,39 @@ class SQLiteIdempotencyStore:
                     return ClaimResult.already_complete()
                 if persisted_owner == owner_hash:
                     if incarnation != self.incarnation:
-                        # The owner resumed in this (live) incarnation: move the
-                        # claim's liveness to it so no other worker can mistake
-                        # the old, dead incarnation for an orphaned claim.
-                        database.execute(
-                            "UPDATE eventstream_idempotency SET incarnation = ? "
-                            "WHERE subscription_hash = ? AND event_hash = ? "
-                            "AND owner_hash = ? AND status = 'claimed'",
-                            (
-                                self.incarnation,
-                                subscription_hash,
-                                event_hash,
-                                owner_hash,
-                            ),
-                        )
+                        if self._incarnation_alive(incarnation):
+                            # The original incarnation still holds its lock:
+                            # keep it as the claim's owner and record this
+                            # incarnation as a co-holder, so the claim stays
+                            # live while *either* of them is running.
+                            database.execute(
+                                "INSERT OR IGNORE INTO "
+                                "eventstream_idempotency_holders "
+                                "(subscription_hash, event_hash, incarnation) "
+                                "VALUES (?, ?, ?)",
+                                (subscription_hash, event_hash, self.incarnation),
+                            )
+                        else:
+                            # The prior incarnation is dead (restarted owner):
+                            # move the claim's liveness to this live
+                            # incarnation with a CAS on the dead incarnation.
+                            database.execute(
+                                "UPDATE eventstream_idempotency SET incarnation = ? "
+                                "WHERE subscription_hash = ? AND event_hash = ? "
+                                "AND owner_hash = ? AND status = 'claimed' "
+                                "AND incarnation IS ?",
+                                (
+                                    self.incarnation,
+                                    subscription_hash,
+                                    event_hash,
+                                    owner_hash,
+                                    incarnation,
+                                ),
+                            )
                     return ClaimResult.acquired(owner_token)
-                if not self._incarnation_alive(incarnation):
+                if not self._claim_alive(
+                    database, subscription_hash, event_hash, incarnation
+                ):
                     # The owning worker process has exited (its incarnation lock
                     # is free): transfer the orphaned claim with a CAS so a
                     # crash after claim() cannot strand the event forever.
@@ -257,6 +315,7 @@ class SQLiteIdempotencyStore:
                         ),
                     )
                     if result.rowcount == 1:
+                        self._clear_holders(database, subscription_hash, event_hash)
                         return ClaimResult.acquired(owner_token)
                 return ClaimResult.busy()
         except sqlite3.OperationalError as exc:
@@ -283,6 +342,8 @@ class SQLiteIdempotencyStore:
                 "AND owner_hash = ? AND status = 'claimed'",
                 (subscription_hash, event_hash, owner_hash),
             )
+            if result.rowcount == 1:
+                self._clear_holders(database, subscription_hash, event_hash)
             return result.rowcount == 1
 
     async def release(
@@ -304,6 +365,8 @@ class SQLiteIdempotencyStore:
                 "AND owner_hash = ? AND status = 'claimed'",
                 (subscription_hash, event_hash, owner_hash),
             )
+            if result.rowcount == 1:
+                self._clear_holders(database, subscription_hash, event_hash)
             return result.rowcount == 1
 
     async def reclaim(
@@ -350,6 +413,8 @@ class SQLiteIdempotencyStore:
                 "AND owner_hash = ? AND status = 'claimed'",
                 (new_hash, self.incarnation, subscription_hash, event_hash, stale_hash),
             )
+            if result.rowcount == 1:
+                self._clear_holders(database, subscription_hash, event_hash)
             return (
                 ClaimResult.acquired(new_owner_token)
                 if result.rowcount == 1

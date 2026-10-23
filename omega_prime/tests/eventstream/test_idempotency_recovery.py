@@ -180,3 +180,142 @@ def test_resumed_owner_moves_the_claim_to_its_live_incarnation(tmp_path: Path) -
             resumed.close()
 
     asyncio.run(scenario())
+
+
+def _stamped_incarnation(store: SQLiteIdempotencyStore) -> str | None:
+    connection = store.open_connection()
+    try:
+        row = connection.execute(
+            "SELECT incarnation FROM eventstream_idempotency"
+        ).fetchone()
+    finally:
+        connection.close()
+    return None if row is None else row[0]
+
+
+def test_live_owner_is_kept_when_same_token_rejoins_and_leaves(
+    tmp_path: Path,
+) -> None:
+    """Greptile 'Live claims become recoverable': the original stays the owner."""
+
+    async def scenario() -> None:
+        database = tmp_path / "ledger.sqlite3"
+        original = SQLiteIdempotencyStore(database)
+        rejoining = SQLiteIdempotencyStore(database)
+        third = SQLiteIdempotencyStore(database)
+        try:
+            assert (await original.claim("gate", "ce-1", "owner-a")).status == (
+                "acquired"
+            )
+            assert (await rejoining.claim("gate", "ce-1", "owner-a")).status == (
+                "acquired"
+            )
+            # The live original incarnation is not replaced by the newcomer.
+            assert _stamped_incarnation(original) == original.incarnation
+            rejoining.close()
+            # The original is still alive, so a different owner stays busy.
+            assert (await third.claim("gate", "ce-1", "owner-c")).status == "busy"
+            assert await original.complete("gate", "ce-1", "owner-a")
+            again = await third.claim("gate", "ce-1", "owner-c")
+            assert again.status == "already-complete"
+        finally:
+            third.close()
+            rejoining.close()
+            original.close()
+
+    asyncio.run(scenario())
+
+
+def test_claim_stays_live_while_any_same_token_holder_runs(tmp_path: Path) -> None:
+    """If the original ends first, the live co-holder still protects the claim."""
+
+    async def scenario() -> None:
+        database = tmp_path / "ledger.sqlite3"
+        original = SQLiteIdempotencyStore(database)
+        rejoining = SQLiteIdempotencyStore(database)
+        third = SQLiteIdempotencyStore(database)
+        try:
+            assert (await original.claim("gate", "ce-1", "owner-a")).status == (
+                "acquired"
+            )
+            assert (await rejoining.claim("gate", "ce-1", "owner-a")).status == (
+                "acquired"
+            )
+            original.close()
+            assert (await third.claim("gate", "ce-1", "owner-c")).status == "busy"
+            rejoining.close()
+            # Every holder is now dead: the orphaned claim becomes recoverable.
+            assert (await third.claim("gate", "ce-1", "owner-c")).status == ("acquired")
+            assert _stamped_incarnation(third) == third.incarnation
+            assert await third.complete("gate", "ce-1", "owner-c")
+        finally:
+            third.close()
+            rejoining.close()
+            original.close()
+
+    asyncio.run(scenario())
+
+
+def test_crashed_process_owner_resumes_with_same_token(tmp_path: Path) -> None:
+    """Greptile 'Restarted workers share a claim': a dead owner's token resumes."""
+    database = tmp_path / "ledger.sqlite3"
+    SQLiteIdempotencyStore(database).close()
+    crashed = subprocess.run(
+        [sys.executable, "-c", _WORKER, str(database), "crash"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert crashed.returncode == 0, crashed.stderr
+
+    async def scenario() -> None:
+        resumed = SQLiteIdempotencyStore(database)
+        competitor = SQLiteIdempotencyStore(database)
+        try:
+            claim = await resumed.claim("gate", "ce-crash", "dead-owner-token")
+            assert claim.status == "acquired"
+            assert _stamped_incarnation(resumed) == resumed.incarnation
+            busy = await competitor.claim("gate", "ce-crash", "other-owner")
+            assert busy.status == "busy"
+            assert await resumed.complete("gate", "ce-crash", "dead-owner-token")
+        finally:
+            competitor.close()
+            resumed.close()
+
+    asyncio.run(scenario())
+
+
+def test_live_process_owner_is_not_superseded_by_same_token(tmp_path: Path) -> None:
+    """A same-token store cannot strip a live worker process of its claim."""
+    database = tmp_path / "ledger.sqlite3"
+    SQLiteIdempotencyStore(database).close()
+    worker = subprocess.Popen(
+        [sys.executable, "-c", _WORKER, str(database), "hold"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert worker.stdout is not None
+        assert worker.stdout.readline() == "claimed\n"
+
+        async def scenario() -> None:
+            rejoining = SQLiteIdempotencyStore(database)
+            before = _stamped_incarnation(rejoining)
+            claim = await rejoining.claim("gate", "ce-crash", "dead-owner-token")
+            assert claim.status == "acquired"
+            assert _stamped_incarnation(rejoining) == before
+            rejoining.close()
+            third = SQLiteIdempotencyStore(database)
+            try:
+                busy = await third.claim("gate", "ce-crash", "other-owner")
+                assert busy.status == "busy"
+            finally:
+                third.close()
+
+        asyncio.run(scenario())
+    finally:
+        assert worker.stdin is not None
+        worker.stdin.close()
+        worker.wait(timeout=30)
