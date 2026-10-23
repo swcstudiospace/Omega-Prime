@@ -37,6 +37,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         id: checkout
+      - name: writable tool cache when the image lacks this Python
+        run: |
+          set -euo pipefail
+          ver="${{ matrix.python-version }}"
+          if compgen -G "/opt/hostedtoolcache/Python/${ver}."*/x64.complete > /dev/null; then
+            echo "image cache has Python ${ver}"
+            exit 0
+          fi
+          # The image's tool cache is read-only and currently ships 3.10 and
+          # 3.12. A missing interpreter is downloaded into this job's temp
+          # dir (setup-python's normal cache miss) instead of failing the
+          # mkdir on /opt/hostedtoolcache. Shipping 3.13 and 3.14 in
+          # deploy/ci-runner-desktop/Dockerfile remains the follow-up so the
+          # pool does not download them.
+          cache="$RUNNER_TEMP/hostedtoolcache"
+          mkdir -p "$cache"
+          echo "RUNNER_TOOL_CACHE=$cache" >> "$GITHUB_ENV"
+          echo "AGENT_TOOLSDIRECTORY=$cache" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v7
         id: setup_python
         with:
@@ -136,6 +154,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         id: checkout
+      - name: writable tool cache when the image lacks this Python
+        run: |
+          set -euo pipefail
+          ver="${{ matrix.python-version }}"
+          if compgen -G "/opt/hostedtoolcache/Python/${ver}."*/x64.complete > /dev/null; then
+            echo "image cache has Python ${ver}"
+            exit 0
+          fi
+          # The image's tool cache is read-only and currently ships 3.10 and
+          # 3.12. A missing interpreter is downloaded into this job's temp
+          # dir (setup-python's normal cache miss) instead of failing the
+          # mkdir on /opt/hostedtoolcache. Shipping 3.13 and 3.14 in
+          # deploy/ci-runner-desktop/Dockerfile remains the follow-up so the
+          # pool does not download them.
+          cache="$RUNNER_TEMP/hostedtoolcache"
+          mkdir -p "$cache"
+          echo "RUNNER_TOOL_CACHE=$cache" >> "$GITHUB_ENV"
+          echo "AGENT_TOOLSDIRECTORY=$cache" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v7
         id: setup_python
         with:
@@ -184,6 +220,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         id: checkout
+      - name: writable tool cache when the image lacks this Python
+        run: |
+          set -euo pipefail
+          ver="${{ matrix.python-version }}"
+          if compgen -G "/opt/hostedtoolcache/Python/${ver}."*/x64.complete > /dev/null; then
+            echo "image cache has Python ${ver}"
+            exit 0
+          fi
+          # The image's tool cache is read-only and currently ships 3.10 and
+          # 3.12. A missing interpreter is downloaded into this job's temp
+          # dir (setup-python's normal cache miss) instead of failing the
+          # mkdir on /opt/hostedtoolcache. Shipping 3.13 and 3.14 in
+          # deploy/ci-runner-desktop/Dockerfile remains the follow-up so the
+          # pool does not download them.
+          cache="$RUNNER_TEMP/hostedtoolcache"
+          mkdir -p "$cache"
+          echo "RUNNER_TOOL_CACHE=$cache" >> "$GITHUB_ENV"
+          echo "AGENT_TOOLSDIRECTORY=$cache" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v7
         id: setup_python
         with:
@@ -279,12 +333,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: regenerate sandbox policy
-        run: python3 -m omega_prime.sandbox.policy_gen --seat omega_prime/contracts/policies/omega-prime.json --out /tmp/sandbox-policy.regen.yaml
+        run: python3 -m omega_prime.sandbox.policy_gen --seat omega_prime/contracts/policies/omega-prime.json --out "$RUNNER_TEMP/sandbox-policy.regen.yaml"
       - name: diff against committed policy
         run: |
           set -o pipefail
-          diff -u omega_prime/hosting/openshell/sandbox-policy.yaml /tmp/sandbox-policy.regen.yaml \
-            | tee /tmp/sandbox-policy.diff || {
+          diff -u omega_prime/hosting/openshell/sandbox-policy.yaml "$RUNNER_TEMP/sandbox-policy.regen.yaml" \
+            | tee "$RUNNER_TEMP/sandbox-policy.diff" || {
             echo "::error::sandbox-policy.yaml drifted from the generator output (see diff above). Regenerate with: python3 -m omega_prime.sandbox.policy_gen --seat omega_prime/contracts/policies/omega-prime.json --out omega_prime/hosting/openshell/sandbox-policy.yaml"
             exit 1
           }
@@ -294,8 +348,8 @@ jobs:
         with:
           name: sandbox-policy-drift-${{ github.sha }}
           path: |
-            /tmp/sandbox-policy.regen.yaml
-            /tmp/sandbox-policy.diff
+            ${{ runner.temp }}/sandbox-policy.regen.yaml
+            ${{ runner.temp }}/sandbox-policy.diff
           if-no-files-found: warn
 
   eventstream-ts:

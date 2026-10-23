@@ -19,7 +19,8 @@ A job is refused when:
 * the payload carries a pull request whose head repository is a fork, is not
   this repository, or cannot be determined;
 * the repository is not explicitly private and the event is not ``push``,
-  ``workflow_dispatch`` or ``pull_request``.
+  ``workflow_dispatch``, ``pull_request``, or ``schedule`` on the
+  repository's default branch (``GITHUB_REF`` is ``refs/heads/<default>``).
 
 Every unknown fails closed. The module is stdlib-only and imports nothing
 from ``omega_prime`` so the image runs it as a plain file under
@@ -46,7 +47,9 @@ from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-ALLOWED_PUBLIC_EVENTS = frozenset({"push", "workflow_dispatch", "pull_request"})
+ALLOWED_PUBLIC_EVENTS = frozenset(
+    {"push", "workflow_dispatch", "pull_request", "schedule"}
+)
 MAX_EVENT_BYTES = 32 * 1024 * 1024
 POLICY_VERSION = 1
 
@@ -140,11 +143,34 @@ def _name(obj: Any) -> str | None:
     return name.lower() if isinstance(name, str) and "/" in name else None
 
 
+def _branch_name(value: Any) -> str | None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    if any(ch in value for ch in "\n\r\x00"):
+        return None
+    return value
+
+
+def trusted_schedule(source: Mapping[str, Any], ref: str | None) -> bool:
+    """A public ``schedule`` event is the default-branch workflow.
+
+    GitHub sets ``GITHUB_REF`` to ``refs/heads/<default_branch>`` and puts
+    ``default_branch`` on the repository object. Anything else is refused:
+    a missing branch, a missing ref, or a ref for some other branch.
+    """
+    default = _branch_name(source.get("default_branch"))
+    if default is None or not isinstance(ref, str):
+        return False
+    return ref == f"refs/heads/{default}"
+
+
 def refusal(
     event_name: str | None,
     repository: str | None,
     payload: Any,
     allowed: Collection[str],
+    *,
+    ref: str | None = None,
 ) -> str | None:
     """``None`` when the job may run, else why not. Pure; fails closed."""
     repos = {r.lower() for r in allowed if isinstance(r, str) and is_repo_pattern(r)}
@@ -169,6 +195,12 @@ def refusal(
     if event_name == "pull_request_target":
         return PULL_REQUEST_TARGET
     if source.get("private") is not True and event_name not in ALLOWED_PUBLIC_EVENTS:
+        return EVENT_NOT_ALLOWED
+    if (
+        event_name == "schedule"
+        and source.get("private") is not True
+        and not trusted_schedule(source, ref)
+    ):
         return EVENT_NOT_ALLOWED
     if event_name.startswith("pull_request") or "pull_request" in payload:
         pull = payload.get("pull_request")
@@ -235,6 +267,7 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
             environ.get("GITHUB_REPOSITORY"),
             _payload(environ.get("GITHUB_EVENT_PATH")),
             allowed,
+            ref=environ.get("GITHUB_REF"),
         )
     except Exception:  # fail closed on anything unexpected
         reason = EVENT_UNREADABLE
@@ -306,4 +339,5 @@ __all__ = [
     "policy_document",
     "refusal",
     "repo_allowed",
+    "trusted_schedule",
 ]

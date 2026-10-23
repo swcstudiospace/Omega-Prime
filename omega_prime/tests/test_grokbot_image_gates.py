@@ -42,6 +42,7 @@ from omega_prime.grokbot.image_gates import (
     image_id_matches,
     load_evidence_json,
     manifest_digest_matches,
+    normalize_podman_image_id,
     write_decision_json,
 )
 from omega_prime.grokbot.secret_guard import SecretLeakError
@@ -124,6 +125,24 @@ def _evidence_record(**overrides: object) -> dict[str, object]:
     }
     record.update(overrides)
     return record
+
+
+def test_podman_bare_hex_image_id_matches_the_prefixed_form() -> None:
+    """Podman ``.Id`` is bare hex; the publish check requires ``sha256:``."""
+    bare = "c3" * 32
+    normalized = normalize_podman_image_id(bare)
+    prefixed = "sha256:" + bare
+    assert normalized == prefixed
+    assert image_id_matches(ImageId(normalized), ImageId(prefixed))
+    assert normalize_podman_image_id("  " + bare + "\n") == prefixed
+    assert normalize_podman_image_id(prefixed) == prefixed
+    # A short or already-qualified value is not rewritten into a valid id.
+    assert normalize_podman_image_id(bare[:32]) == bare[:32]
+    assert normalize_podman_image_id("sha256:" + bare[:32]) == "sha256:" + bare[:32]
+    assert (
+        image_id_matches(ImageId(normalize_podman_image_id("abc")), ImageId(prefixed))
+        is False
+    )
 
 
 def test_allow_binds_the_exact_identities() -> None:

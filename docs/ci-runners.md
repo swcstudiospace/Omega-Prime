@@ -250,9 +250,10 @@ runner-side hook, so the two sides can never disagree):
   `OMEGA_CI_REPOS`. `owner/repo` is covered by itself or by `owner/*`;
   `owner/*` only by `owner/*` (a list of names never covers a wildcard).
 - Every fork-guard rule stays: public repositories still get the run lookup,
-  and only `push`, `workflow_dispatch` and same-repository `pull_request`
-  runs are served. Fork pull requests, `pull_request_target` and unknown
-  heads are refused by both the controller and the runner-side hook.
+  and only `push`, `workflow_dispatch`, same-repository `pull_request`, and
+  `schedule` on that repository's default branch are served. Fork pull
+  requests, `pull_request_target` and unknown heads are refused by both the
+  controller and the runner-side hook.
 
 **Org repositories that are themselves GitHub forks.** Some `swcstudiospace`
 repositories are forks of upstream projects. Their workflow files come from
@@ -303,10 +304,13 @@ scaler sees the job, and serves it only when all of these hold:
 
 - the run belongs to the same repository the webhook named;
 - `head_repository` is that same repository and is not a fork;
-- the trigger (`event`) is `push`, `workflow_dispatch` or `pull_request`
-  (which, given the check above, means a same-repository branch).
-  `pull_request_target` is refused by name, and so is every other trigger
-  (`workflow_run`, `issue_comment`, `schedule`, `merge_group` and so on).
+- the trigger (`event`) is `push`, `workflow_dispatch`, `pull_request`
+  (which, given the check above, means a same-repository branch), or
+  `schedule` whose `head_branch` is the repository's `default_branch`.
+  GitHub runs scheduled workflows from the default branch only, so that
+  run is the same trust as a push of it. A schedule run that does not say
+  so is refused. `pull_request_target` is refused by name, and so is every
+  other trigger (`workflow_run`, `issue_comment`, `merge_group` and so on).
 
 Everything unknown fails closed: a lookup error, a 404, a missing field or an
 unexpected shape refuses the job. Lookup errors are not cached, so a
@@ -355,7 +359,9 @@ no user code runs. It reads `GITHUB_EVENT_NAME`, `GITHUB_REPOSITORY` and
 - any pull request whose head repository is a fork, is another repository,
   or cannot be determined (private repositories included);
 - for a repository the event payload does not mark `private: true`, any
-  event other than `push`, `workflow_dispatch` or `pull_request`;
+  event other than `push`, `workflow_dispatch`, `pull_request`, or
+  `schedule` when `GITHUB_REF` is `refs/heads/<default_branch>` from the
+  payload;
 - missing context or an unreadable or mismatched event payload.
 
 The allowlist reaches the hook through a root-owned policy file the agent
@@ -497,20 +503,20 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   --max-parallel-test-modules 2` (task 00057). These keep one job inside its
   share; the 1000-task ceiling itself is a Railway service limit, so many
   concurrent thread-heavy jobs can still exhaust it.
-- **Omega-Prime's own container jobs (task 00057).** `grokbot-image` builds
-  and runs the tool-host image with rootless podman: its first step proves
-  the runner can enter a user namespace (`podman unshare true`) and fails
-  naming the reason if Railway does not grant one. Measured on the live pool
-  (2026-10-24): a single-ID user namespace works (`unshare -r`), but the
+- **Omega-Prime's own container jobs (task 00057).** Measured on the live
+  pool (2026-10-24): a single-ID user namespace works (`unshare -r`), but the
   65536-ID subordinate range does not: setuid `newuidmap` gets EPERM writing
-  `uid_map` (NoNewPrivs 0, CapBnd `00000000800405fb`). So rootless podman
-  with the image's `/etc/subuid` range cannot start, and the job stays red
-  until the runner image supports a single-ID podman setup (no subordinate
-  range, `ignore_chown_errors`) that can still run the tool host as uid 10001,
-  or the pool gains a container engine. `ci.yml`
-  `eventstream-it` still uses a `services:` Pulsar container and
-  `docker exec` with fixed host ports, so it cannot run on the pool until its
-  harness is rewritten for podman (per-job ports) or a Pulsar binary.
+  `uid_map` (NoNewPrivs 0, CapEff 0, CapBnd `00000000800405fb`). `grokbot-image`
+  therefore does not call the real `newuidmap`. PATH shims write the one
+  mapping the job user is allowed to write, storage uses `ignore_chown_errors`
+  with fuse-overlayfs or vfs under `RUNNER_TEMP`, and the build uses chroot
+  isolation. The container's single mapped uid is presented as 10001, and
+  nothing is published on a host port. `ci.yml` `eventstream-it` still uses a
+  `services:` Pulsar container. That needs a Docker daemon at job setup, and
+  the owned-secure harness execs as root and as uid 10000 inside one
+  container. A single-ID namespace cannot name both, so the job stays blocked
+  until the pool can apply a subordinate uid range or the runner image ships
+  a Pulsar binary and the harness stops using `services:`.
 - **`dotnet workload install`** needs a writable SDK directory. `maui-android`
   is pre-installed, so on this pool skip the step (the `maui` workload is
   macOS/Windows-only anyway).
