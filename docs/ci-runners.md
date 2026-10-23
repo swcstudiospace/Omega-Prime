@@ -548,9 +548,11 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   `setup-*` actions look up: `<Tool>/<version>/x64/` plus an
   `<version>/x64.complete` marker. A cache hit writes nothing, so the
   root-owned, read-only tree works for uid 1500. **Ask for a version the
-  image has** (`3.12`, `3.10`, `22.x`, `24.x`): any other version makes the
-  action try to download into the read-only cache, and the job fails. Add
-  the version to the image instead.
+  image has** (`3.12`, `3.10`, `22.x`, `24.x`). Another version makes
+  `setup-python` download into that cache. The CI workflow, when the
+  `x64.complete` marker is missing, points `RUNNER_TOOL_CACHE` at
+  `$RUNNER_TEMP/hostedtoolcache` so 3.13 and 3.14 can download. Shipping
+  those builds in the image is the follow-up.
 - **The job environment.** The agent gives each runner only an allowlisted
   environment (`PATH`, locale, `HOME`). The toolchain variables
   (`RUNNER_TOOL_CACHE`, `AGENT_TOOLSDIRECTORY`, `DOTNET_ROOT`,
@@ -565,6 +567,9 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   registry in `~/.cargo` (`CARGO_HOME` is unset on purpose). The pre-job
   guard, after allowing a job, appends `~/.local/bin` and `~/.cargo/bin` to
   `GITHUB_PATH`, so `pip install uv && uv ...` works as on hosted runners.
+  The CI verify, lint, and types jobs then create a venv under `$RUNNER_TEMP`
+  and put it on `PATH`. Tests set `HOME` or `PYTHONNOUSERSITE`, which hides
+  `~/.local`, so those installs have to live on the interpreter prefix.
 - **pip is the one each Python build bundles** (3.10.22: pip 23.0.1,
   3.12.15: pip 25.0.1). The image does not run the builds' unpinned
   `pip install --upgrade pip`. A job that needs a newer pip can upgrade it
