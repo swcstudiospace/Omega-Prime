@@ -26,8 +26,10 @@ name: grokbot-image
 # no Docker daemon and no sudo. Rootless podman cannot apply the image's
 # subordinate uid range (setuid newuidmap gets EPERM; CapEff is 0), but a
 # single-ID user namespace works. ci-podman-single-id.sh configures that
-# mapping, per-job storage with ignore_chown_errors, and a `docker` shim
-# (exec podman). Containers are not published on host ports: the verifier
+# mapping, per-job storage with ignore_chown_errors, and `podman`/`docker`
+# shims. Those shims re-enter a private mount namespace first: vfs layer
+# apply remounts `/`, which this runner's mount namespace rejects. Containers
+# are not published on host ports: the verifier
 # runs inside the container via `docker exec`. The single mapped uid is
 # presented as uid 10001 with --uidmap, so credential files stay owned by
 # the job user. The SBOM and the vulnerability scan use the runner image's
