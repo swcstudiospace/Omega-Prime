@@ -1,0 +1,224 @@
+#!/bin/sh
+# omega-ci-db: per-job PostgreSQL / GreptimeDB on the omega-ci runner image (00058).
+#
+# Several runners share one Desktop, so they share its network ports. Fixed
+# ports (54321, 4000) make the second job's database fail to start. This
+# helper gives every instance its own free loopback ports and its own data
+# dir under RUNNER_TEMP (wiped by the runner after each job), and tells
+# later steps where it is.
+#
+#   omega-ci-db start postgres|greptime [--name NAME] [--no-export]
+#   omega-ci-db env NAME             print NAME's KEY=VALUE lines
+#   omega-ci-db stop NAME|--all      stop and wait (safe to call twice)
+#
+# start prints KEY=VALUE lines and, unless --no-export, appends them to
+# $GITHUB_ENV so later steps see them:
+#   postgres: PGHOST PGPORT PGUSER PGDATABASE DATABASE_URL
+#   greptime: GREPTIME_HTTP_ADDR GREPTIME_HTTP_URL GREPTIME_GRPC_ADDR
+#             GREPTIME_MYSQL_ADDR GREPTIME_POSTGRES_ADDR
+# State root: $OMEGA_CI_DB_ROOT, else $RUNNER_TEMP/omega-ci-db, else
+# $TMPDIR/omega-ci-db. No root needed; nothing listens beyond 127.0.0.1.
+set -eu
+
+root="${OMEGA_CI_DB_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/omega-ci-db}"
+attempts="${OMEGA_CI_DB_ATTEMPTS:-5}"
+wait_s="${OMEGA_CI_DB_WAIT:-60}"
+
+die() { echo "omega-ci-db: $*" >&2; exit 1; }
+usage() { die "usage: omega-ci-db start postgres|greptime [--name NAME] [--no-export] | env NAME | stop NAME|--all"; }
+
+# N distinct free loopback ports. All sockets stay bound until every port is
+# chosen, so the N ports differ; a race with another process is retried by
+# the caller (start tries up to $attempts port sets).
+free_ports() {
+    python3 -c '
+import socket, sys
+socks = []
+for _ in range(int(sys.argv[1])):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    socks.append(s)
+print(" ".join(str(s.getsockname()[1]) for s in socks))
+for s in socks:
+    s.close()
+' "$1"
+}
+
+valid_name() {
+    case "$1" in ''|*[!A-Za-z0-9_.-]*|.*) die "bad instance name '$1' (use letters, digits, . _ -)" ;; esac
+}
+
+# alive PID: the process exists and is not a zombie (an exited server whose
+# parent has not reaped it yet holds no port, memory or files).
+alive() {
+    [ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
+    state="$(sed -n 's/^State:[[:space:]]*\([A-Z]\).*/\1/p' "/proc/$1/status" 2>/dev/null || true)"
+    [ "$state" != Z ]
+}
+
+# Wait until pid $1 is gone, up to $2 seconds. 0 if gone.
+wait_gone() {
+    n=0
+    while alive "$1"; do
+        [ "$n" -ge "$(( $2 * 10 ))" ] && return 1
+        sleep 0.1; n=$(( n + 1 ))
+    done
+    return 0
+}
+
+start_postgres() {
+    dir="$1"
+    initdb -D "$dir/data" -U postgres --auth=trust -E UTF8 >"$dir/initdb.log" 2>&1 \
+        || die "initdb failed: $(tail -n 5 "$dir/initdb.log")"
+    i=0
+    while [ "$i" -lt "$attempts" ]; do
+        i=$(( i + 1 ))
+        port="$(free_ports 1)"
+        # Socket dir inside the instance dir: no clash on /tmp/.s.PGSQL.<port>.
+        if pg_ctl -D "$dir/data" -l "$dir/server.log" -w -t "$wait_s" \
+            -o "-p $port -k $dir -c listen_addresses=127.0.0.1" start >/dev/null 2>&1; then
+            {
+                echo "PGHOST=127.0.0.1"
+                echo "PGPORT=$port"
+                echo "PGUSER=postgres"
+                echo "PGDATABASE=postgres"
+                echo "DATABASE_URL=postgresql://postgres@127.0.0.1:$port/postgres"
+            } >"$dir/env"
+            return 0
+        fi
+        # A stuck half-start must not hold the data dir for the next try.
+        pg_ctl -D "$dir/data" -m immediate -w stop >/dev/null 2>&1 || true
+    done
+    die "postgres did not start after $attempts port tries: $(tail -n 5 "$dir/server.log" 2>/dev/null)"
+}
+
+start_greptime() {
+    dir="$1"
+    i=0
+    while [ "$i" -lt "$attempts" ]; do
+        i=$(( i + 1 ))
+        # Four space-separated port numbers: split on purpose.
+        # shellcheck disable=SC2046
+        set -- $(free_ports 4)
+        http="127.0.0.1:$1"; rpc="127.0.0.1:$2"; mysql="127.0.0.1:$3"; pgw="127.0.0.1:$4"
+        # stdio detached so the calling step can finish; the pid is recorded.
+        greptime standalone start --http-addr "$http" --rpc-bind-addr "$rpc" \
+            --mysql-addr "$mysql" --postgres-addr "$pgw" \
+            --data-home "$dir/data" --log-dir "$dir/logs" \
+            </dev/null >"$dir/server.log" 2>&1 &
+        pid=$!
+        echo "$pid" >"$dir/pid"
+        n=0
+        while [ "$n" -lt "$wait_s" ]; do
+            if curl -fsS "http://$http/health" >/dev/null 2>&1; then
+                {
+                    echo "GREPTIME_HTTP_ADDR=$http"
+                    echo "GREPTIME_HTTP_URL=http://$http"
+                    echo "GREPTIME_GRPC_ADDR=$rpc"
+                    echo "GREPTIME_MYSQL_ADDR=$mysql"
+                    echo "GREPTIME_POSTGRES_ADDR=$pgw"
+                } >"$dir/env"
+                return 0
+            fi
+            alive "$pid" || break
+            sleep 1; n=$(( n + 1 ))
+        done
+        kill "$pid" 2>/dev/null || true
+        wait_gone "$pid" 10 || kill -9 "$pid" 2>/dev/null || true
+        rm -f "$dir/pid"
+    done
+    die "greptime did not come up after $attempts port tries: $(tail -n 5 "$dir/server.log" 2>/dev/null)"
+}
+
+# running DIR: 0 while the instance in DIR still has a live server process.
+running() {
+    case "$(cat "$1/kind" 2>/dev/null)" in
+        postgres) [ -f "$1/data/postmaster.pid" ] && alive "$(head -n 1 "$1/data/postmaster.pid")" ;;
+        greptime) [ -f "$1/pid" ] && alive "$(cat "$1/pid")" ;;
+        *) return 1 ;;
+    esac
+}
+
+stop_one() {
+    dir="$root/$1"
+    [ -f "$dir/kind" ] || return 0
+    running "$dir" || { rm -f "$dir/env"; return 0; }
+    rc=0
+    case "$(cat "$dir/kind")" in
+        postgres)
+            if [ -f "$dir/data/postmaster.pid" ]; then
+                pid="$(head -n 1 "$dir/data/postmaster.pid")"
+                pg_ctl -D "$dir/data" -m fast -w -t 30 stop >/dev/null 2>&1 || true
+                if alive "$pid"; then
+                    kill -QUIT "$pid" 2>/dev/null || true   # SIGQUIT = immediate shutdown
+                    wait_gone "$pid" 10 || { kill -9 "$pid" 2>/dev/null || true; wait_gone "$pid" 5 || rc=1; }
+                fi
+            fi
+            ;;
+        greptime)
+            if [ -f "$dir/pid" ]; then
+                pid="$(cat "$dir/pid")"
+                kill "$pid" 2>/dev/null || true
+                wait_gone "$pid" 30 || { kill -9 "$pid" 2>/dev/null || true; wait_gone "$pid" 5 || rc=1; }
+                rm -f "$dir/pid"
+            fi
+            ;;
+    esac
+    if [ "$rc" = 0 ]; then
+        rm -f "$dir/env"
+        echo "omega-ci-db: stopped $1" >&2
+    fi
+    return "$rc"
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+    start)
+        kind="${1:-}"; [ $# -gt 0 ] && shift
+        case "$kind" in postgres|greptime) ;; *) usage ;; esac
+        name="$kind"; export_env=1
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --name) [ $# -ge 2 ] || usage; name="$2"; shift 2 ;;
+                --no-export) export_env=0; shift ;;
+                *) usage ;;
+            esac
+        done
+        valid_name "$name"
+        dir="$root/$name"
+        if [ -e "$dir" ]; then
+            running "$dir" && die "instance '$name' is already running in $root (stop it, or pick --name)"
+            rm -rf "$dir"   # a stopped or failed earlier instance of this name
+        fi
+        mkdir -p "$root"
+        mkdir -m 0700 "$dir"
+        echo "$kind" >"$dir/kind"
+        "start_$kind" "$dir"
+        cat "$dir/env"
+        if [ "$export_env" = 1 ] && [ -n "${GITHUB_ENV:-}" ]; then
+            cat "$dir/env" >>"$GITHUB_ENV"
+        fi
+        ;;
+    env)
+        [ $# -eq 1 ] || usage
+        valid_name "$1"
+        [ -f "$root/$1/env" ] || die "no running instance '$1' in $root"
+        cat "$root/$1/env"
+        ;;
+    stop)
+        [ $# -eq 1 ] || usage
+        if [ "$1" = "--all" ]; then
+            rc=0
+            [ -d "$root" ] || exit 0
+            for d in "$root"/*/; do
+                [ -d "$d" ] || continue
+                n="$(basename "$d")"
+                stop_one "$n" || rc=1
+            done
+            exit "$rc"
+        fi
+        valid_name "$1"
+        stop_one "$1"
+        ;;
+    *) usage ;;
+esac

@@ -89,7 +89,11 @@ Extra files: `runner-env` (copied to `/opt/actions-runner/.env`, which
 `Runner.Listener` loads, so the toolchain variables reach jobs through the
 agent's allowlisted environment), `toolchain-check.sh` (run at build time as
 uid 1500; fails the build if any tool is missing, at the wrong version, or
-needs root) and `requirements/*.txt` (hash-locked venvs).
+needs root; it stops any database it started on every exit, and builds a
+`net10.0-android` app offline), `omega-ci-db` (installed as
+`/usr/local/bin/omega-ci-db`: per-job PostgreSQL/GreptimeDB on free loopback
+ports with data under `RUNNER_TEMP`, 00058) and `requirements/*.txt`
+(hash-locked venvs).
 
 ### Toolchain provenance (verified 2026-10-24 AEDT)
 
@@ -108,7 +112,11 @@ needs root) and `requirements/*.txt` (hash-locked venvs).
 | Node.js 22.23.4 / 24.22.1 | `node-v*-linux-x64.tar.xz` sha256 `1805bcd3…e9ce` / `6c172a9a…95e6` | `nodejs.org/dist/v*/SHASUMS256.txt` |
 | .NET SDK 10.0.402 | `dotnet-sdk-10.0.402-linux-x64.tar.gz` sha512 `1904a98d…29c2` | `release-metadata/10.0/releases.json` (runtime 10.0.13); version from OmpOS `global.json` |
 | `maui-android` workload | workload set `10.0.402.1` | NuGet `Microsoft.NET.Workloads.10.0.400` (packages are signed and verified by the SDK) |
-| Android cmdline-tools 23.0 | `commandlinetools-linux-16111833_latest.zip` sha256 `0877a1d0…cfa8` | matches Google's published sha1 `e025545c…5f60` in `repository2-3.xml`; sdkmanager verifies the platform/build-tools packages |
+| Android cmdline-tools 23.0 | `commandlinetools-linux-16111833_latest.zip` sha256 `0877a1d0…cfa8` | matches Google's published sha1 `e025545c…5f60` in `repository2-3.xml`; used only to record licence acceptance |
+| Android platform `android-36` r2 (00058) | `platform-36_r02.zip` sha256 `37607369…1d2e` | sha1 `2c1a80dd…f576` and size 65878410 in `repository2-3.xml` (checked 2026-10-24 AEDT) |
+| Android build-tools 36.0.0 (00058) | `build-tools_r36_linux.zip` sha256 `5d9ac77f…250b` | sha1 `b0b63769…c6fb` in `repository2-3.xml` |
+| Android platform-tools 37.0.1 (00058) | `platform-tools_r37.0.1-linux.zip` sha256 `d230f138…13f1` | sha1 `477254aa…53e0` in `repository2-3.xml` |
+| Microsoft.NET.ILLink.Tasks 10.0.13 (00058) | `microsoft.net.illink.tasks.10.0.13.nupkg` sha512 `d17dd7dd…7326` | equals the NuGet catalog `packageHash` (SHA512, base64 `0X3X3VG/…yI5zJg==`); version = the SDK's bundled runtime 10.0.13 |
 | rustup-init 1.29.2 | sha256 `5be191e8…f4` | `static.rust-lang.org/rustup/archive/1.29.2/…/rustup-init.sha256`; rustup verifies toolchains 1.99.1 (default) and 1.98.1 (00057, Omega-Prime rust-parity pin) against their channel manifests |
 | semgrep 1.182.1, bandit 1.9.4, podman-compose 1.6.0 | `requirements/*.txt`, every wheel `--hash=sha256` | `uv pip compile --generate-hashes` against PyPI |
 
@@ -149,6 +157,8 @@ needs root) and `requirements/*.txt` (hash-locked venvs).
   unprivileged. Since 2026-10-24 every job runs on this pool regardless
   (Ove's rule), so the image carries the binaries Docker used to provide
   (PostgreSQL 16, GreptimeDB, podman/podman-compose for `config` checks).
+  Jobs start the databases with `omega-ci-db`, which picks free ports, so
+  parallel jobs on one Desktop never collide.
   See [Toolchain](#toolchain-00056).
 - **Directory modes (00055).** `/var/lib/omega-ci` and `/var/lib/omega-ci/work`
   are root-owned **0755**, and the agent re-applies 0755 to the work root at

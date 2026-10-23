@@ -63,6 +63,8 @@ ARG ANDROID_CMDLINE_TOOLS_BUILD=16111833
 ARG ANDROID_CMDLINE_TOOLS_SHA256=0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8
 ARG ANDROID_API=36
 ARG ANDROID_BUILD_TOOLS=36.0.0
+# Pins added by 00058 (Android archives, ILLink.Tasks) are declared just
+# before section 3b (d2), so the layers above them keep their build cache.
 ARG RUSTUP_VERSION=1.29.2
 ARG RUSTUP_INIT_SHA256=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
 ARG RUST_VERSION=1.99.1
@@ -243,19 +245,60 @@ RUN curl -fsSL -o /tmp/dotnet.tgz "https://builds.dotnet.microsoft.com/dotnet/Sd
     && rm -rf /tmp/dotnet-home /tmp/dotnet-nuget /tmp/NuGetScratch* /root/.nuget /root/.local/share/NuGet \
     && chown -R root:root "${DOTNET_ROOT}" && chmod -R a+rX,go-w "${DOTNET_ROOT}"
 
-# (e) Android SDK for net10.0-android: pinned cmdline-tools (sha256 recorded
-#     after checking Google's published sha1), then sdkmanager installs the
-#     platform, build-tools and platform-tools (it verifies each package
-#     against Google's repository manifest).
-RUN curl -fsSL -o /tmp/cmdline-tools.zip "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_BUILD}_latest.zip" \
-    && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/cmdline-tools.zip" | sha256sum -c - \
-    && mkdir -p "${ANDROID_HOME}/cmdline-tools" \
-    && unzip -q /tmp/cmdline-tools.zip -d /tmp/android && mv /tmp/android/cmdline-tools "${ANDROID_HOME}/cmdline-tools/latest" \
-    && rm -rf /tmp/cmdline-tools.zip /tmp/android \
+# --- 00058 pins (see the ARG note at the top) --------------------------------
+# Android SDK packages as fixed archives from Google's repository (00058):
+# exact revisions, sha256 recorded after checking the sha1 in
+# repository2-3.xml. No sdkmanager resolution, so no drift between builds.
+ARG ANDROID_PLATFORM_REV=2
+ARG ANDROID_PLATFORM_ARCHIVE=platform-36_r02.zip
+ARG ANDROID_PLATFORM_SHA256=37607369a28c5b640b3a7998868d45898ebcb777565a0e85f9acf36f29631d2e
+ARG ANDROID_BUILD_TOOLS_ARCHIVE=build-tools_r36_linux.zip
+ARG ANDROID_BUILD_TOOLS_SHA256=5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b
+ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.1
+ARG ANDROID_PLATFORM_TOOLS_SHA256=d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
+# Microsoft.NET.ILLink.Tasks for the SDK's bundled runtime (10.0.13): every
+# net10.0-android build restores it; shipped in the SDK's offline
+# library-packs source so builds need no nuget.org for it (00058).
+ARG ILLINK_TASKS_VERSION=10.0.13
+ARG ILLINK_TASKS_SHA512=d17dd7dd51bf5be5263bd1224bcf0a94443cc29a517b46dcb6f7396faaaef2d141c5115f83f341c2b88d791ecb3186b403335a721a6fb669171c4e96c88e7326
+
+# (d2) Microsoft.NET.ILLink.Tasks into the SDK's own offline package source
+#      (library-packs, which every restore already lists). Pinned sha512 =
+#      NuGet catalog packageHash. Separate layer so (d) stays cached.
+RUN curl -fsSL -o "/tmp/microsoft.net.illink.tasks.${ILLINK_TASKS_VERSION}.nupkg" \
+       "https://api.nuget.org/v3-flatcontainer/microsoft.net.illink.tasks/${ILLINK_TASKS_VERSION}/microsoft.net.illink.tasks.${ILLINK_TASKS_VERSION}.nupkg" \
+    && echo "${ILLINK_TASKS_SHA512}  /tmp/microsoft.net.illink.tasks.${ILLINK_TASKS_VERSION}.nupkg" | sha512sum -c - \
+    && [ -d "${DOTNET_ROOT}/shared/Microsoft.NETCore.App/${ILLINK_TASKS_VERSION}" ] \
+    && install -o root -g root -m 0644 "/tmp/microsoft.net.illink.tasks.${ILLINK_TASKS_VERSION}.nupkg" "${DOTNET_ROOT}/library-packs/" \
+    && rm -f /tmp/*.nupkg
+# ^ The -d test fails the build if the SDK's runtime no longer matches the pin.
+
+# (e) Android SDK for net10.0-android. cmdline-tools: pinned zip (sha256
+#     recorded after checking Google's published sha1). The platform,
+#     build-tools and platform-tools are fixed archives at exact revisions
+#     (sha256-pinned above, sha1 cross-checked against repository2-3.xml),
+#     unpacked where sdkmanager would put them; each keeps its
+#     source.properties, which the self-check asserts. sdkmanager is used only
+#     to record the licence acceptances.
+RUN mkdir -p /tmp/android && cd /tmp/android \
+    && curl -fsSL -o cmdline-tools.zip "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_BUILD}_latest.zip" \
+    && curl -fsSL -o platform.zip "https://dl.google.com/android/repository/${ANDROID_PLATFORM_ARCHIVE}" \
+    && curl -fsSL -o build-tools.zip "https://dl.google.com/android/repository/${ANDROID_BUILD_TOOLS_ARCHIVE}" \
+    && curl -fsSL -o platform-tools.zip "https://dl.google.com/android/repository/platform-tools_r${ANDROID_PLATFORM_TOOLS_VERSION}-linux.zip" \
+    && printf '%s  %s\n' "${ANDROID_CMDLINE_TOOLS_SHA256}" cmdline-tools.zip "${ANDROID_PLATFORM_SHA256}" platform.zip \
+       "${ANDROID_BUILD_TOOLS_SHA256}" build-tools.zip "${ANDROID_PLATFORM_TOOLS_SHA256}" platform-tools.zip | sha256sum -c - \
+    && mkdir -p "${ANDROID_HOME}/cmdline-tools" "${ANDROID_HOME}/platforms" "${ANDROID_HOME}/build-tools" \
+    && unzip -q cmdline-tools.zip -d x-cmdline && mv x-cmdline/cmdline-tools "${ANDROID_HOME}/cmdline-tools/latest" \
+    && unzip -q platform.zip -d x-platform && mv x-platform/* "${ANDROID_HOME}/platforms/android-${ANDROID_API}" \
+    && unzip -q build-tools.zip -d x-build-tools && mv x-build-tools/* "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}" \
+    && unzip -q platform-tools.zip -d "${ANDROID_HOME}" \
+    && grep -qx "Pkg.Revision=${ANDROID_PLATFORM_REV}" "${ANDROID_HOME}/platforms/android-${ANDROID_API}/source.properties" \
+    && grep -qx "AndroidVersion.ApiLevel=${ANDROID_API}" "${ANDROID_HOME}/platforms/android-${ANDROID_API}/source.properties" \
+    && grep -qx "Pkg.Revision=${ANDROID_BUILD_TOOLS}" "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}/source.properties" \
+    && grep -qx "Pkg.Revision=${ANDROID_PLATFORM_TOOLS_VERSION}" "${ANDROID_HOME}/platform-tools/source.properties" \
+    && cd / && rm -rf /tmp/android \
     && export HOME=/tmp/android-home \
     && yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --sdk_root="${ANDROID_HOME}" --licenses > /dev/null \
-    && "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --sdk_root="${ANDROID_HOME}" \
-       "platforms;android-${ANDROID_API}" "build-tools;${ANDROID_BUILD_TOOLS}" platform-tools > /dev/null \
     && rm -rf /tmp/android-home \
     && chown -R root:root "${ANDROID_HOME}" && chmod -R a+rX,go-w "${ANDROID_HOME}"
 
@@ -318,14 +361,20 @@ RUN chown -R root:root /opt/omega-ci && chmod -R a+rX,go-w /opt/omega-ci \
 # Toolchain self-check (00056): every tool at its pinned version, run as the
 # job identity with the job's environment (runner-env), so a tool that only
 # works as root fails the build. Re-runnable on a live Desktop.
+# omega-ci-db (00058): per-job PostgreSQL/GreptimeDB on free loopback ports
+# with data under RUNNER_TEMP, so parallel jobs on one Desktop never collide.
+COPY deploy/ci-runner-desktop/omega-ci-db /usr/local/bin/omega-ci-db
 COPY deploy/ci-runner-desktop/toolchain-check.sh /opt/omega-ci/toolchain-check.sh
 RUN printf '%s=%s\n' GH "${GH_VERSION}" GITLEAKS "${GITLEAKS_VERSION}" TRIVY "${TRIVY_VERSION}" \
        GREPTIME "${GREPTIME_VERSION}" PY310 "${PY310_VERSION}" PY312 "${PY312_VERSION}" \
        PY313 "${PY313_VERSION}" PY314 "${PY314_VERSION}" CODEQL "${CODEQL_VERSION}" \
        NODE22 "${NODE22_VERSION}" NODE24 "${NODE24_VERSION}" DOTNET_SDK "${DOTNET_SDK_VERSION}" \
        ANDROID_API "${ANDROID_API}" ANDROID_BUILD_TOOLS "${ANDROID_BUILD_TOOLS}" \
+       ANDROID_PLATFORM_REV "${ANDROID_PLATFORM_REV}" ANDROID_PLATFORM_TOOLS "${ANDROID_PLATFORM_TOOLS_VERSION}" \
+       ILLINK_TASKS "${ILLINK_TASKS_VERSION}" \
        RUST "${RUST_VERSION}" RUST_PARITY "${RUST_PARITY_VERSION}" CARGO_DENY "${CARGO_DENY_VERSION}" \
        PG_MAJOR "${PG_MAJOR}" > /opt/omega-ci/toolchain-versions \
+    && chown root:root /usr/local/bin/omega-ci-db && chmod 0755 /usr/local/bin/omega-ci-db \
     && chmod 0644 /opt/omega-ci/toolchain-versions && chmod 0755 /opt/omega-ci/toolchain-check.sh \
     && /opt/omega-ci/toolchain-check.sh --as-job "${JOB_UID}" "${JOB_GID}"
 

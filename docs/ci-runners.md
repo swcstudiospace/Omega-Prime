@@ -213,7 +213,7 @@ a GitHub-hosted runner. There is no carve-out for side runners either. The
 pool has no Docker (see [Security model](#security-model)), so a job that
 needs a service container or a Docker build is rewritten to use binaries baked
 into the runner image (Postgres, GreptimeDB and similar, started as ordinary
-processes in the job; task 00056) and runs on the pool like everything
+processes in the job with `omega-ci-db`; tasks 00056, 00058) and runs on the pool like everything
 else.
 
 ## Org-wide setup (every repository of an owner)
@@ -414,7 +414,9 @@ Everything else is version-pinned and checksum-verified in the Dockerfile.
 | Bun | not pre-installed | job `HOME` | `oven-sh/setup-bun` downloads into `~/.bun/bin` (any version) |
 | .NET SDK | 10.0.402 (OmpOS `global.json`) + `maui-android` workload (workload set 10.0.402.1) | `/usr/share/dotnet` | `actions/setup-dotnet` (`global-json-file`) |
 | JDK | OpenJDK 17 (apt) | `JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64` | Android builds |
-| Android SDK | cmdline-tools 23.0 (build 16111833), `platforms;android-36`, `build-tools;36.0.0`, platform-tools | `ANDROID_HOME=/opt/android-sdk` | OmpOS `net10.0-android` |
+| Android SDK | cmdline-tools 23.0 (build 16111833), `platforms;android-36` r2, `build-tools;36.0.0`, platform-tools 37.0.1 (fixed archives) | `ANDROID_HOME=/opt/android-sdk` | OmpOS `net10.0-android` |
+| Microsoft.NET.ILLink.Tasks | 10.0.13 (matches the SDK's runtime) in the SDK's offline `library-packs` source | `/usr/share/dotnet/library-packs` | every `net10.0-android` restore |
+| omega-ci-db | this repo (`deploy/ci-runner-desktop/omega-ci-db`) | `/usr/local/bin` | per-job PostgreSQL/GreptimeDB on free ports ([below](#databases-in-jobs-omega-ci-db)) |
 | PostgreSQL | 16.x (apt, server + client; no cluster, no service) | `/usr/lib/postgresql/16/bin` on `PATH` | agent-substrate (replaces the `postgres:16` service) |
 | GreptimeDB | 0.14.4 (`greptime standalone`) | `/usr/local/bin` | autonogrammer (replaces `docker run greptime/greptimedb`) |
 | podman / podman-compose | 4.9.3 (apt) / 1.6.0 | `/usr/bin`, `/usr/local/bin` | OmpOS compose validation (`config` only, see limits) |
@@ -470,17 +472,9 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   Desktop), so treat running containers as unavailable. podman and
   podman-compose are installed for `podman-compose ... config` validation,
   which needs no engine. Databases
-  that used to come from containers come from the image binaries instead:
-
-  ```bash
-  # PostgreSQL 16 (agent-substrate): a throwaway cluster as the job user
-  initdb -D "$RUNNER_TEMP/pg" -U postgres --auth=trust
-  pg_ctl -D "$RUNNER_TEMP/pg" -l "$RUNNER_TEMP/pg.log" -w \
-    -o "-k $RUNNER_TEMP -p 54321 -c listen_addresses=127.0.0.1" start
-  # GreptimeDB (autonogrammer)
-  greptime standalone start --http-addr 127.0.0.1:4000 \
-    --data-home "$RUNNER_TEMP/greptime" --log-dir "$RUNNER_TEMP/greptime/logs" &
-  ```
+  that used to come from containers come from the image binaries instead,
+  started with the image's **`omega-ci-db`** helper (see
+  [Databases in jobs](#databases-in-jobs-omega-ci-db)).
 - **macOS jobs** (OmpOS `shells` on `macos-15`, ultrathink's
   `macos-latest` matrix leg) cannot run on a Linux pool. The Android part of
   OmpOS's MAUI head (`-f net10.0-android`) builds here; the iOS and
@@ -493,6 +487,57 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
 - **`dotnet workload install`** needs a writable SDK directory. `maui-android`
   is pre-installed, so on this pool skip the step (the `maui` workload is
   macOS/Windows-only anyway).
+
+### Databases in jobs (`omega-ci-db`)
+
+Up to 8 runners share one Desktop, so **they share its network ports**. A
+separate `RUNNER_TEMP` does not help: if two jobs both start PostgreSQL on a
+fixed port such as `54321`, or GreptimeDB on `4000`, the second one fails
+with "address already in use". So never hard-code a database port on this
+pool. Use `/usr/local/bin/omega-ci-db` (on every job's `PATH`) instead:
+
+1. **`omega-ci-db start postgres`** (or **`greptime`**) picks free loopback
+   ports, puts the data dir (and PostgreSQL's socket dir) under
+   `$RUNNER_TEMP/omega-ci-db/<name>/`, waits until the server answers, and
+   appends the connection settings to `$GITHUB_ENV` for the later steps.
+2. **Point your client at those variables**, never at a literal port:
+   - PostgreSQL: `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `DATABASE_URL`
+     (`psql` and libpq read the `PG*` ones by themselves).
+   - GreptimeDB: `GREPTIME_HTTP_URL`, `GREPTIME_HTTP_ADDR`,
+     `GREPTIME_GRPC_ADDR`, `GREPTIME_MYSQL_ADDR`, `GREPTIME_POSTGRES_ADDR`
+     (each of its four listeners gets its own port).
+3. **Stop them in an `if: always()` step** with `omega-ci-db stop --all`, so a
+   failed job does not leave a server running on the Desktop. Stopping waits
+   for the server to exit and is safe to run twice.
+
+```yaml
+jobs:
+  test:
+    runs-on: [self-hosted, linux, x64, omega-ci]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start PostgreSQL 16 (agent-substrate)
+        run: omega-ci-db start postgres
+      - name: Start GreptimeDB (autonogrammer)
+        run: omega-ci-db start greptime
+      - name: Test
+        run: pytest
+        env:
+          TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
+          GREPTIME_URL: ${{ env.GREPTIME_HTTP_URL }}
+      - name: Stop databases
+        if: always()
+        run: omega-ci-db stop --all
+```
+
+More than one of a kind: `omega-ci-db start postgres --name replica --no-export`
+starts a second cluster without touching `$GITHUB_ENV`; read its settings
+with `omega-ci-db env replica`. Names are letters, digits, `.`, `_` and `-`.
+A port race with another job is retried with a fresh port set (5 tries).
+Outside Actions (no `$GITHUB_ENV`) the helper just prints the `KEY=VALUE`
+lines; `OMEGA_CI_DB_ROOT` overrides the state directory. The image's
+self-check starts two of each side by side through this helper and fails the
+build if they share a port.
 
 ### Size and disk
 
@@ -524,14 +569,32 @@ Plan for:
 
 `deploy/ci-runner-desktop/toolchain-check.sh` runs at the end of every image
 build **as the job identity (uid 1500) with the job's environment**. It
-asserts each pinned version, that the shared trees are not writable by the
-job, and it really uses the tools: creates a venv, starts and queries a
-throwaway PostgreSQL cluster and a GreptimeDB standalone instance, runs
-`podman-compose config`, and compiles and runs a Rust crate. Any failure fails the build. On a live Desktop:
+asserts each pinned version (including the exact Android package revisions
+from each package's `source.properties`), that the shared trees are not
+writable by the job, and it really uses the tools: creates a venv, **builds a
+`net10.0-android` app offline** (`dotnet new android` + `dotnet build` with
+nuget.org removed, so only the SDK's own packs are used; output, NuGet cache
+and CLI home stay in its scratch dir), starts two PostgreSQL clusters and two
+GreptimeDB instances side by side through `omega-ci-db` and queries each,
+runs `podman-compose config`, and compiles and runs a Rust crate. Any failure
+fails the build.
+
+**Cleanup on any exit.** Whether a check fails, `set -e` trips, or the run
+gets HUP/INT/TERM, the exit trap first stops every database it started
+(`omega-ci-db stop --all`, which waits for each server to exit and falls back
+to SIGQUIT/SIGKILL), shuts down the .NET build servers, and only then deletes
+its scratch files. A failed re-run on a live Desktop leaves nothing holding
+ports or memory.
+
+On a live Desktop:
 
 ```bash
-/opt/omega-ci/toolchain-check.sh --as-job 1500 1500   # as root
+/opt/omega-ci/toolchain-check.sh --as-job 1500 1500   # as root, everything
+/opt/omega-ci/toolchain-check.sh --as-job 1500 1500 --only postgres,greptime
 ```
+
+Sections for `--only`: `base`, `toolcache`, `dotnet`, `android-build`,
+`postgres`, `greptime`, `containers`, `scanners`, `rust`.
 
 `omega_prime/tests/ci_runners/test_desktop_toolchain.py` keeps the inputs
 honest in normal CI: every checksum pin is a full digest and is actually
