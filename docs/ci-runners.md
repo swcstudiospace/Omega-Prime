@@ -9,8 +9,9 @@ work is done the runners exit, and Railway puts the idle Desktop to sleep.
 
 > **Status: built; deployment in progress (2026-10-24).** "Built" means the
 > code and its offline checks pass, with command-and-exit-code receipts: see
-> [Verification](#verification). The Railway Desktop overlay is deployed and
-> its agent answers `/healthz`. The VPS controller is installed (nginx site,
+> [Verification](#verification). Operator-reported and **unverified** by any
+> receipt in this repository: the Railway Desktop overlay is deployed and its
+> agent answers `/healthz`, and the VPS controller is installed (nginx site,
 > systemd unit, settings) but not started. Creating the GitHub App, installing
 > the VPS service, adding the proxy site, and redeploying the Railway Desktop
 > are operator steps that are **HELD** (D-120-10). Nothing in this repository

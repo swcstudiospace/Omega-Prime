@@ -61,8 +61,11 @@ def run_refusal(run: Mapping[str, Any] | None, repo: str) -> str | None:
     if head_name != repo.lower():
         return FORK
     assert isinstance(head, Mapping)
-    if head.get("fork") is True:
+    fork = head.get("fork")
+    if fork is True:
         return FORK
+    if fork is not False:
+        return HEAD_UNKNOWN
     return None
 
 

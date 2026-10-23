@@ -9,10 +9,11 @@ desktop, unchanged, plus three additions:
 - a read-only **actions/runner 2.338.1** install at `/opt/actions-runner`,
 - a dedicated non-root **job identity** (`omega-ci-job`, UID/GID 1500).
 
-> **Status: deployed to Railway on 2026-10-24** (agent `/healthz` answers ok).
-> Building and deploying this image, adding the agent domain and setting
-> variables is the paid cutover. That cutover is
-> **HELD for the operator** (D-120-10). Nothing in this repository runs it.
+> **Status: operator-reported as deployed to Railway on 2026-10-24**, with
+> the agent answering `/healthz`. That is **unverified**: no receipt in this
+> repository covers it. Building and deploying this image, adding the agent
+> domain and setting variables is the paid cutover, an operator step
+> (D-120-10). Nothing in this repository runs it.
 
 ## How it fits
 

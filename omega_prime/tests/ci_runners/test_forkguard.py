@@ -129,6 +129,18 @@ def test_scaler_requires_public_subset_of_repos() -> None:
         (run_body("issue_comment"), forkguard.EVENT_NOT_ALLOWED),
         (run_body("workflow_run"), forkguard.EVENT_NOT_ALLOWED),
         (run_body(head=None), forkguard.HEAD_UNKNOWN),
+        (
+            {**run_body(), "head_repository": {"full_name": REPO}},
+            forkguard.HEAD_UNKNOWN,
+        ),
+        (
+            {**run_body(), "head_repository": {"full_name": REPO, "fork": None}},
+            forkguard.HEAD_UNKNOWN,
+        ),
+        (
+            {**run_body(), "head_repository": {"full_name": REPO, "fork": "false"}},
+            forkguard.HEAD_UNKNOWN,
+        ),
         (run_body(repo="acme/other"), forkguard.REPO_MISMATCH),
         ({"event": "push"}, forkguard.REPO_MISMATCH),
         (None, forkguard.RUN_NOT_FOUND),
