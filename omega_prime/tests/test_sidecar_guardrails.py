@@ -167,9 +167,7 @@ def test_enabled_without_roe_is_blocked_with_zero_registrations(
     assert registry.runtime_bindings["sidecar_state"] == "BLOCKED"
 
 
-def test_enabled_with_valid_roe_reaches_idle_with_all_tools(
-    monkeypatch, sidecar_env
-):
+def test_enabled_with_valid_roe_reaches_idle_with_all_tools(monkeypatch, sidecar_env):
     artifact = _write_signed_roe(sidecar_env)
     registry = _build(
         monkeypatch,
