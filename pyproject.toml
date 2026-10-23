@@ -24,7 +24,7 @@ dependencies = [
   "apscheduler>=3.11",
   "aiogram>=3.31",
   "discord.py>=2.7",
-  "playwright>=1.63",
+  "playwright>=1.64.0",
   "Appium-Python-Client>=6.0",
   "PyYAML>=6.0.3",
 ]
