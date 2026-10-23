@@ -309,3 +309,25 @@ def test_pr_state_projector_process_adapter_ignores_malformed_input() -> None:
 
     process(b"not-json", Ctx())
     process(b"{}", Ctx())
+
+
+def test_review_arriving_before_push_is_applied_when_head_advances() -> None:
+    state = reduce_pr_state(None, _event("omega.sdlc.pr.opened"))
+    # Review for head-b arrives while aggregate is still on head-a.
+    state = reduce_pr_state(
+        state,
+        _event("omega.sdlc.review.approved", head_sha="head-b"),
+        source="sdlc/review",
+        source_position=(0, 3, 1),
+    )
+    assert state["review"] == {}
+    assert "head-b" in state.get("pending_by_head", {})
+    state = reduce_pr_state(
+        state,
+        _event("omega.sdlc.pr.pushed", head_sha="head-b", before_sha="head-a"),
+        source="sdlc/pr",
+        source_position=(0, 2, 1),
+    )
+    assert state["head_sha"] == "head-b"
+    assert state["review"]["approved"]["reviewer"] == "reviewer"
+    assert "head-b" not in state.get("pending_by_head", {})

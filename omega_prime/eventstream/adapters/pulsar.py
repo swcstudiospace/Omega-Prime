@@ -945,7 +945,7 @@ class PulsarEventBus:
             if isinstance(exc, EncryptionUnavailable):
                 raise
             raise _sanitized("Pulsar reader creation failed", exc) from None
-        result = _PulsarReader(reader, self._codec, self._notify)
+        result = _PulsarReader(reader, self._codec, self._notify, topic=topic)
         self._resources.add(result)
         self._notify(relay=True)
         return result
@@ -1083,10 +1083,18 @@ class _PulsarSubscriber:
 
 
 class _PulsarReader:
-    def __init__(self, reader: Any, codec: _Codec, notify: WakeCallback) -> None:
+    def __init__(
+        self,
+        reader: Any,
+        codec: _Codec,
+        notify: WakeCallback,
+        *,
+        topic: str,
+    ) -> None:
         self._reader = reader
         self._codec = codec
         self._notify = notify
+        self._topic = topic
         self._closed = False
 
     async def read(self) -> Delivery:
@@ -1094,7 +1102,7 @@ class _PulsarReader:
         try:
             message = await self._reader.read_next()
             self._notify()
-            return _delivery_from_message(message, self._codec)
+            return _delivery_from_message(message, self._codec, topic=self._topic)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1108,7 +1116,7 @@ class _PulsarReader:
                 return None
             message = await self._reader.read_next()
             self._notify()
-            return _delivery_from_message(message, self._codec)
+            return _delivery_from_message(message, self._codec, topic=self._topic)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1147,20 +1155,66 @@ class _PulsarReader:
             raise PulsarAdapterError("Pulsar reader is closed")
 
 
-def _delivery_from_message(message: Any, codec: _Codec) -> Delivery:
+def _delivery_from_message(
+    message: Any, codec: _Codec, *, topic: str | None = None
+) -> Delivery:
     properties = dict(message.properties())
-    event = codec.decode(bytes(message.data()))
+    raw = bytes(message.data())
+    logical = _logical_topic(message.topic_name()) if topic is None else topic
 
     async def no_ack() -> None:
         return None
 
+    topic_name = _logical_topic(message.topic_name())
+    key = message.partition_key() or str(properties.get("omega_key", ""))
+    message_id = str(message.message_id())
+    safe_props = cast(Mapping[str, Any], redact_value(properties))
+
+    if logical.endswith("/sdlc/pr-state") or topic_name.endswith("/sdlc/pr-state"):
+        # Compacted PR projection is plain JSON (id/key/state), not a CloudEvent.
+        # Build Delivery via model_construct so the unregistered projection shape
+        # can still be read without forcing CloudEvent taxonomy validation.
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PulsarAdapterError("pr-state projection payload is not JSON") from exc
+        if not isinstance(payload, dict):
+            raise PulsarAdapterError(
+                "pr-state projection payload must be a JSON object"
+            )
+        aggregate = str(payload.get("key") or key or "")
+        event = CloudEvent.model_construct(
+            specversion="1.0",
+            id=str(payload.get("id") or message_id),
+            source="omega://eventstream/pr-state",
+            type="omega.sdlc.pr_state.projected",
+            subject=aggregate or None,
+            time=None,
+            datacontenttype="application/json",
+            dataschema="urn:omega:schema:omega.sdlc.pr_state.projected:1",
+            data=payload,
+            model_extra={},
+        )
+        # Projection documents are not taxonomy CloudEvents; model_construct
+        # avoids forcing a false registered type onto compacted PR state.
+        return Delivery.model_construct(
+            event=event,
+            topic=topic_name,
+            key=aggregate or key or "pr-state",
+            message_id=message_id,
+            redelivered=False,
+            properties=safe_props,
+            ack=no_ack,
+        )
+
+    event = codec.decode(raw)
     return Delivery(
         event=event,
-        topic=_logical_topic(message.topic_name()),
-        key=message.partition_key() or str(properties.get("omega_key", "")),
-        message_id=str(message.message_id()),
+        topic=topic_name,
+        key=key,
+        message_id=message_id,
         redelivered=False,
-        properties=cast(Mapping[str, Any], redact_value(properties)),
+        properties=safe_props,
         ack=no_ack,
     )
 

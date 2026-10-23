@@ -161,6 +161,36 @@ def reduce_pr_state(
     if not isinstance(current_head, str) or not current_head:
         raise ValueError("previous PR projection has invalid head_sha")
 
+    def _apply_review_or_ci(
+        target: dict[str, Any], etype: str, payload: Mapping[str, Any]
+    ) -> None:
+        if target.get("closed"):
+            return
+        if etype in _REVIEW_TYPES:
+            review = dict(target.get("review", {}))
+            review[etype.rsplit(".", 1)[-1]] = {
+                key: payload[key]
+                for key in sorted(payload)
+                if key not in {"repo", "number", "head_sha", "actor"}
+            }
+            target["review"] = review
+            return
+        ci = dict(target.get("ci", {}))
+        run_id = payload.get("run_id")
+        if isinstance(run_id, str) and run_id:
+            ci[run_id] = {
+                "status": (
+                    "in_progress"
+                    if etype == "omega.ci.run.started"
+                    else "passed"
+                    if etype.endswith(".passed")
+                    else "failed"
+                ),
+                "event_type": etype,
+                "conclusion": payload.get("conclusion"),
+            }
+            target["ci"] = ci
+
     if event_type in _PR_TYPES:
         if event_type == "omega.sdlc.pr.pushed" and head != current_head:
             if (
@@ -175,6 +205,20 @@ def reduce_pr_state(
                 state["ci"] = {}
                 if not state.get("closed"):
                     state["status"] = "open"
+                # Apply reviews/CI that arrived for the new head before this push.
+                pending = state.get("pending_by_head", {})
+                if isinstance(pending, dict):
+                    pending = dict(pending)
+                    buffered = pending.pop(head, [])
+                    state["pending_by_head"] = pending
+                    if isinstance(buffered, list):
+                        for item in buffered:
+                            if not isinstance(item, Mapping):
+                                continue
+                            etype = item.get("type")
+                            payload = item.get("data")
+                            if isinstance(etype, str) and isinstance(payload, Mapping):
+                                _apply_review_or_ci(state, etype, payload)
             # A mismatch is a stale or conflicting branch transition.
         elif head != current_head:
             # Other historical lifecycle messages (and terminal events for an old
@@ -197,30 +241,19 @@ def reduce_pr_state(
             elif not state.get("merged"):
                 state.update(status="closed", closed=True)
     elif head == current_head and not state.get("closed"):
-        if event_type in _REVIEW_TYPES:
-            review = dict(state.get("review", {}))
-            review[event_type.rsplit(".", 1)[-1]] = {
-                key: data[key]
-                for key in sorted(data)
-                if key not in {"repo", "number", "head_sha", "actor"}
-            }
-            state["review"] = review
-        else:
-            ci = dict(state.get("ci", {}))
-            run_id = data.get("run_id")
-            if isinstance(run_id, str) and run_id:
-                ci[run_id] = {
-                    "status": (
-                        "in_progress"
-                        if event_type == "omega.ci.run.started"
-                        else "passed"
-                        if event_type.endswith(".passed")
-                        else "failed"
-                    ),
-                    "event_type": event_type,
-                    "conclusion": data.get("conclusion"),
-                }
-            state["ci"] = ci
+        _apply_review_or_ci(state, event_type, data)
+    elif (
+        head != current_head and not state.get("closed") and event_type not in _PR_TYPES
+    ):
+        # Buffer reviews/CI for a future head so an early arrival is not lost
+        # when source_positions would otherwise mark it already seen.
+        pending = state.get("pending_by_head", {})
+        pending = {} if not isinstance(pending, dict) else dict(pending)
+        bucket = pending.get(head, [])
+        bucket = [] if not isinstance(bucket, list) else list(bucket)
+        bucket.append({"type": event_type, "data": dict(data)})
+        pending[head] = bucket
+        state["pending_by_head"] = pending
     if position is not None:
         positions[source_key] = list(position)
         state["source_positions"] = positions

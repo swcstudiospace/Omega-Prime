@@ -88,7 +88,14 @@ export class EventStreamConfig {
 
   static fromEnv(environment: Readonly<Record<string, string | undefined>> = process.env): EventStreamConfig {
     for (const [name, value] of Object.entries(environment)) {
-      if (value !== undefined && SECRET_ENV_NAME.test(name) && !name.endsWith("_FILE")) {
+      // Only eventstream-owned names can block setup; unrelated process secrets
+      // (GITHUB_TOKEN, provider API_KEY, etc.) must not prevent configuration.
+      if (
+        value !== undefined &&
+        name.startsWith("OMEGA_EVENTSTREAM_") &&
+        SECRET_ENV_NAME.test(name) &&
+        !name.endsWith("_FILE")
+      ) {
         throw new ConfigurationError("secret environment values are forbidden; configure a *_FILE path");
       }
     }

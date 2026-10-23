@@ -57,6 +57,7 @@ export class Outbox {
   readonly #highWatermarks = new Map<string, bigint>();
   readonly #producerNames = new Map<string, string>();
   readonly #wake = new EventSignal();
+  #relayChain: Promise<void> = Promise.resolve();
   #queuedBytes = 0;
   #closing = false;
   #closed = false;
@@ -145,15 +146,27 @@ export class Outbox {
 
   async relayOnce(publisher: Publisher): Promise<readonly PublishReceipt[]> {
     if (this.#closed) throw new ContractError("outbox is closed");
-    const receipts: PublishReceipt[] = [];
-    for (const row of this.#rows) {
-      if (row.sent) continue;
-      const receipt = await publisher.publish(row.request);
-      row.sent = true;
-      this.#queuedBytes -= row.bytes;
-      receipts.push(receipt);
+    // Serialize drains so concurrent relayOnce/run callers cannot both mark the
+    // same row sent and double-subtract its bytes.
+    const previous = this.#relayChain;
+    let release!: () => void;
+    this.#relayChain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      const receipts: PublishReceipt[] = [];
+      for (const row of this.#rows) {
+        if (row.sent) continue;
+        const receipt = await publisher.publish(row.request);
+        row.sent = true;
+        this.#queuedBytes -= row.bytes;
+        receipts.push(receipt);
+      }
+      return Object.freeze(receipts);
+    } finally {
+      release();
     }
-    return Object.freeze(receipts);
   }
 
   cleanupSent(): number {
