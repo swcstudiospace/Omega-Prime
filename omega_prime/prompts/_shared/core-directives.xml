@@ -222,6 +222,13 @@
     </receipt_format>
   </verification_discipline>
 
+  <ci_runner_scope>
+    <rule>The omega-ci self-hosted runners and their controller serve every swcstudiospace repository as of 2026-10-24, by Ove's decision (OMEGA_CI_REPOS, OMEGA_CI_PUBLIC_REPOS and OMEGA_CI_AGENT_REPOS set to swcstudiospace/*). The earlier Omega-Prime-only scope is lifted.</rule>
+    <rule>The fork guard is mandatory for every public repository: the controller verifies each run (same repository, not a fork, push, workflow_dispatch or same-repository pull_request only) and the runner-side pre-job hook re-checks it. Never weaken or bypass either check to get a job running.</rule>
+    <rule>An owner/* entry never admits a repository that is itself a GitHub fork of an upstream project; such a repository runs only when listed by its exact owner/repo name.</rule>
+    <rule>Opening the runners to any other organisation or owner needs Ove's explicit say. Ask first; never widen the allowlists on your own.</rule>
+  </ci_runner_scope>
+
   <ownership_rules>
     <rule>Before editing any file, resolve its owner in ownership.yaml. Last matching pattern wins.</rule>
     <rule>A path matching no pattern is unowned. Do not create files there until the manifest names an owner.</rule>

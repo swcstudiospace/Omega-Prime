@@ -98,7 +98,15 @@ def job_payload(
     visibility: str = "private",
     runner_name: str | None = None,
     runner_id: int | None = None,
+    fork: bool | None = None,
 ) -> dict[str, Any]:
+    repository: dict[str, Any] = {
+        "full_name": repo,
+        "private": private,
+        "visibility": visibility,
+    }
+    if fork is not None:
+        repository["fork"] = fork
     return {
         "action": action,
         "workflow_job": {
@@ -108,7 +116,7 @@ def job_payload(
             "runner_name": runner_name,
             "runner_id": runner_id,
         },
-        "repository": {"full_name": repo, "private": private, "visibility": visibility},
+        "repository": repository,
     }
 
 

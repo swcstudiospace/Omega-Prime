@@ -37,7 +37,7 @@ controller (VPS) ──HTTPS POST /v1/runners──▶ agent :8787 (this image)
 |---|---|
 | `Dockerfile` | Pinned overlay. The build context is the repo root. |
 | `entrypoint.sh` | Starts the agent (`python3 -m omega_prime.ci_runners agent --host 0.0.0.0 --port 8787`), then `exec`s the upstream command (`CMD ["python3", "/opt/railway-desktop.py"]`) unchanged. |
-| `job-started.sh` | Runner-side pre-job guard, installed as every runner's `ACTIONS_RUNNER_HOOK_JOB_STARTED`. Fails the job before any step for `pull_request_target`, fork pull requests, repositories not in `OMEGA_CI_AGENT_REPOS`, and (for non-private repositories) any event but `push` / `workflow_dispatch` / `pull_request`. Logic: `omega_prime/ci_runners/agent/jobhook.py`. The build runs it once and requires a refusal (fail closed). |
+| `job-started.sh` | Runner-side pre-job guard, installed as every runner's `ACTIONS_RUNNER_HOOK_JOB_STARTED`. Fails the job before any step for `pull_request_target`, fork pull requests, repositories not in `OMEGA_CI_AGENT_REPOS` (an `owner/*` entry skips repositories that are themselves GitHub forks: `fork_repo_not_listed`), and (for non-private repositories) any event but `push` / `workflow_dispatch` / `pull_request`. Logic: `omega_prime/ci_runners/agent/jobhook.py`. The build runs it once and requires a refusal (fail closed). |
 | `smoke.sh` | Build-time check: builds the real agent app (settings, credential broker, token read, supervisor) from `/opt/omega-ci/site` alone with an isolated interpreter, so a module missing from the image fails the build, not the first boot. |
 | `railway.toml` | Dockerfile builder, desktop `/healthz` readiness, `sleepApplication = true`, `/config` mount. |
 
@@ -133,7 +133,7 @@ the backed-up `/config` volume.
 | `OMEGA_CI_CONTROLLER_URL` | **Required.** `https://<autoscaler domain>` (the nginx or Caddy site on the VPS). Set it at deploy time even if the controller is not up yet: the agent only calls it after a job ends, but refuses to start without it (the 8787 domain then answers 502). |
 | `RAILWAY_DOCKERFILE_PATH` | `deploy/ci-runner-desktop/Dockerfile`. Needed because Railway ignored the config-as-code path on the first real deploy and built the root MCP-server `Dockerfile`, which failed on `/run/secrets/omega_prime_token`. |
 | `OMEGA_CI_AGENT_MAX_RUNNERS` | `8` (default; hard ceiling 10). Keep it ≥ the controller's `OMEGA_CI_MAX_RUNNERS`. |
-| `OMEGA_CI_AGENT_REPOS` | **Required for jobs to run.** The controller's `OMEGA_CI_REPOS`, e.g. `swcstudiospace/Omega-Prime`. Repository names only, not a secret. Unset → the pre-job guard fails every job (fail closed). |
+| `OMEGA_CI_AGENT_REPOS` | **Required for jobs to run.** The controller's `OMEGA_CI_REPOS`: comma-separated `owner/repo` or `owner/*`. Org-wide (since 2026-10-24): `swcstudiospace/*`, which covers every `swcstudiospace` repository except ones that are themselves GitHub forks (list those by exact name). No bare `*`, no partial globs (the agent refuses to start). Repository names only, not a secret. Unset → the pre-job guard fails every job (fail closed). |
 | `SERVERLESS_FRIENDLY` | `1` (recommended). Upstream's own knob: it stops Chromium's background/update/GCM traffic, which would otherwise keep an idle Desktop awake and defeat sleep-as-teardown. |
 
 The image already sets `OMEGA_CI_AGENT_RUNNER_ROOT`, `OMEGA_CI_AGENT_WORK_ROOT`,
@@ -167,8 +167,10 @@ while jobs run fails those jobs; drain first with `POST /v1/drain`.
 3. Keep the existing desktop domain on port **3000**. Add a **second** domain
    targeting port **8787** (the agent). Its readiness check is
    `GET https://<agent domain>/healthz` → `{"status":"ok",…}`.
-4. Set the agent variables above, and set the controller's
-   `OMEGA_CI_DESKTOP_URL` to the 8787 domain.
+4. Set the agent variables above (org-wide: `OMEGA_CI_AGENT_REPOS=swcstudiospace/*`),
+   and set the controller's `OMEGA_CI_DESKTOP_URL` to the 8787 domain.
+   `OMEGA_CI_CONTROLLER_URL` points at the VPS controller's public site
+   (nginx on the VPS, proxying to the controller on `127.0.0.1:8798`).
 5. **Static outbound IP.** Railway says services with Static Outbound IPs
    enabled *may remain awake even when idle*. Decide whether to keep it (only
    useful for third-party egress allowlists; it plays no part in the webhook

@@ -100,8 +100,8 @@ the agent. Secret values are never logged, put in a repr, or placed on argv.
 | `OMEGA_CI_SCOPE` | `org` | `org` or `repo` registration scope. |
 | `OMEGA_CI_ORG` | — | Organisation login (derived from `OMEGA_CI_REPO` in repo scope). |
 | `OMEGA_CI_REPO` | — | `owner/repo`, repo scope only. |
-| `OMEGA_CI_REPOS` | empty | Comma-separated `owner/repo` allowlist. Empty = every private repo the runner group allows. |
-| `OMEGA_CI_PUBLIC_REPOS` | empty | Public repositories explicitly opted in. Each must also be in a non-empty `OMEGA_CI_REPOS`. Empty = every public repo is refused. See [Public repositories](#public-repositories). |
+| `OMEGA_CI_REPOS` | empty | Comma-separated allowlist of `owner/repo` names or `owner/*` (every repository of that owner that is not itself a GitHub fork). Empty = every private repo the runner group allows. See [Org-wide setup](#org-wide-setup-every-repository-of-an-owner). |
+| `OMEGA_CI_PUBLIC_REPOS` | empty | Public repositories explicitly opted in, as `owner/repo` or `owner/*`. Each entry must be covered by a non-empty `OMEGA_CI_REPOS` (`owner/*` only by `owner/*`). Empty = every public repo is refused. See [Public repositories](#public-repositories). |
 | `OMEGA_CI_LABELS` | `self-hosted,linux,x64,omega-ci` | Pool labels. |
 | `OMEGA_CI_RUNNER_GROUP` | `omega-ci` | Runner group display name. |
 | `OMEGA_CI_RUNNER_GROUP_ID` | — (org), `1` (repo) | Numeric group id; required in org scope and never inferred from the name. |
@@ -134,7 +134,7 @@ read. A sanitized template is in `deploy/ci-runner-controller/env.example`.
 | `OMEGA_CI_AGENT_RUNNER_ROOT` | `/opt/actions-runner` | Read-only shared runner install. |
 | `OMEGA_CI_AGENT_WORK_ROOT` | `/config/ci-runners` | Per-runner workdirs. The image sets `/var/lib/omega-ci/work`, because upstream re-owns `/config` at boot. |
 | `OMEGA_CI_AGENT_JOB_UID` / `OMEGA_CI_AGENT_JOB_GID` | unset (image: 1500) | Dedicated non-root job identity, distinct from the agent's. |
-| `OMEGA_CI_AGENT_REPOS` | empty | **Required for jobs to run on the image.** Comma-separated `owner/repo` list the runner-side pre-job guard lets run; set it to the controller's `OMEGA_CI_REPOS`. Empty → the guard refuses every job (fails closed). Repository names only, no secret. |
+| `OMEGA_CI_AGENT_REPOS` | empty | **Required for jobs to run on the image.** Comma-separated `owner/repo` or `owner/*` list the runner-side pre-job guard lets run; set it to the controller's `OMEGA_CI_REPOS` (org-wide: `swcstudiospace/*`). Empty → the guard refuses every job (fails closed). Repository names only, no secret. |
 | `OMEGA_CI_AGENT_JOB_HOOK` | unset (image: `/opt/omega-ci/job-started.sh`) | Pre-job guard the agent sets as `ACTIONS_RUNNER_HOOK_JOB_STARTED` for every runner. Must be a regular file the job identity cannot modify, or the agent refuses to start. |
 | `OMEGA_CI_AGENT_JOB_POLICY` | `/var/lib/omega-ci/job-policy.json` | Root-owned allowlist file the agent writes at startup from `OMEGA_CI_AGENT_REPOS`; the guard reads it. Only this path is accepted: the shipped `job-started.sh` hard-codes it (a runner hook takes no arguments, and the job's environment is not agent-controlled), so any other value stops the agent at startup with a `SettingsError` instead of failing every job. |
 | `OMEGA_CI_CONTROLLER_URL` | — | **Required: the agent will not start without it.** Controller base URL for the exit callback. Set it at deploy time, even before the controller exists: the agent only calls it after a job ends. Without it, the agent exits with `OMEGA_CI_CONTROLLER_URL: required callback base URL`, so nothing listens on 8787 and Railway answers 502 Bad Gateway. |
@@ -174,7 +174,8 @@ its workdir is removed, the agent sends exactly one exit callback.
 - **Job identity.** Jobs run as a dedicated non-root UID/GID, distinct from the
   agent (root, which owns the credentials). They get `nice 10` and
   `RLIMIT_NPROC` / `RLIMIT_NOFILE` caps. Concurrent jobs share that UID, so
-  treat the pool as same-trust: only your own private repositories.
+  treat the pool as same-trust: only your own organisation's repositories,
+  with public ones behind the fork guard.
 - **Public repositories are refused by default.** Self-hosted runners on
   public repositories are a known remote-code-execution vector. A public
   repository is served only through the explicit opt-in and fork guard below.
@@ -196,6 +197,64 @@ its workdir is removed, the agent sends exactly one exit callback.
   concurrent jobs of one run share the lookup). Private repositories make no
   extra call.
 
+## Org-wide setup (every repository of an owner)
+
+As of 2026-10-24 (Ove's decision), the Autonomous Event-Driven ADLC
+Programming Bot's runners serve **every `swcstudiospace` repository**, not only
+Omega-Prime. Listing 100+ repositories one by one does not scale and misses
+new ones, so each allowlist (`OMEGA_CI_REPOS`, `OMEGA_CI_PUBLIC_REPOS`,
+`OMEGA_CI_AGENT_REPOS`) accepts the owner wildcard `owner/*`:
+
+| Where | Setting | Value |
+|---|---|---|
+| GitHub org → Actions → Runner groups → `omega-ci` | Repository access | **All repositories**, and tick **Allow public repositories** |
+| GitHub org → Actions → General | Fork pull request workflows from outside collaborators | **Require approval for all outside collaborators** |
+| VPS `/etc/omega-ci/controller.env` | `OMEGA_CI_REPOS` | `swcstudiospace/*` |
+| VPS `/etc/omega-ci/controller.env` | `OMEGA_CI_PUBLIC_REPOS` | `swcstudiospace/*` |
+| Railway → Ubuntu Desktop → Variables | `OMEGA_CI_AGENT_REPOS` | `swcstudiospace/*` |
+
+How entries are read (one shared matcher, `repo_allowed` / `patterns_cover`
+in `omega_prime/ci_runners/agent/jobhook.py`, used by the controller's
+settings, webhook admission, demand replay and fork guard and by the
+runner-side hook, so the two sides can never disagree):
+
+- An entry is `owner/repo` or `owner/*`, matched case-insensitively. There is
+  **no bare `*`** and no partial glob (`owner/foo*`, `*/repo`, `owner/**`):
+  those are rejected at startup with a `SettingsError` that names the
+  variable. Opening the pool to every owner is not expressible.
+- `owner/*` matches that owner only (`swcstudiospace-evil/x` does not match
+  `swcstudiospace/*`) and covers repositories created later automatically.
+- Empty still means nothing for the guard: an empty `OMEGA_CI_AGENT_REPOS`
+  refuses every job, and an empty `OMEGA_CI_REPOS` cannot opt public
+  repositories in.
+- Subset rule: an `OMEGA_CI_PUBLIC_REPOS` entry must be covered by
+  `OMEGA_CI_REPOS`. `owner/repo` is covered by itself or by `owner/*`;
+  `owner/*` only by `owner/*` (a list of names never covers a wildcard).
+- Every fork-guard rule stays: public repositories still get the run lookup,
+  and only `push`, `workflow_dispatch` and same-repository `pull_request`
+  runs are served. Fork pull requests, `pull_request_target` and unknown
+  heads are refused by both the controller and the runner-side hook.
+
+**Org repositories that are themselves GitHub forks.** Some `swcstudiospace`
+repositories are forks of upstream projects. Their workflow files come from
+upstream (a "Sync fork" pushes them in), and an upstream workflow that asks
+for plain `runs-on: self-hosted` would match this pool. So an `owner/*`
+entry **never** admits a repository whose `repository.fork` is `true`, or
+whose fork status is missing from the payload (fails closed):
+
+- The controller ignores its jobs (no runner is launched for them).
+- The runner-side hook refuses them with `fork_repo_not_listed` if GitHub
+  assigns one to a runner anyway.
+- To serve such a repository on purpose, add its exact `owner/repo` name to
+  the allowlists (for example
+  `OMEGA_CI_REPOS=swcstudiospace/*,swcstudiospace/some-fork`). Even then, pull
+  requests inside it are refused, because GitHub reports every head
+  repository of a fork as `fork: true`, so only `push` and
+  `workflow_dispatch` run there.
+
+Opening the runners to any other organisation or owner needs Ove's explicit
+decision.
+
 ## Public repositories
 
 Anyone can open a pull request against a public repository. If that pull
@@ -204,9 +263,12 @@ your machine, next to other jobs that share the job UID. That is why the
 matcher refuses public repositories unless you opt one in, and why opting in
 is not enough on its own.
 
-**Opt-in.** List the repository in `OMEGA_CI_PUBLIC_REPOS`. It must also be in
-`OMEGA_CI_REPOS`, and `OMEGA_CI_REPOS` must not be empty. The default is empty,
-so behaviour for every repository is unchanged until you set it.
+**Opt-in.** List the repository in `OMEGA_CI_PUBLIC_REPOS`, or opt in every
+repository of an owner with `owner/*` (see
+[Org-wide setup](#org-wide-setup-every-repository-of-an-owner)). Each entry
+must be covered by `OMEGA_CI_REPOS`, and `OMEGA_CI_REPOS` must not be empty.
+The default is empty, so behaviour for every repository is unchanged until you
+set it.
 
 **Fork guard.** The `workflow_job` webhook alone cannot say where the code
 came from. For each new (`queued`) job from an opted-in public repository the
@@ -262,6 +324,8 @@ no user code runs. It reads `GITHUB_EVENT_NAME`, `GITHUB_REPOSITORY` and
 `GITHUB_EVENT_PATH` and refuses:
 
 - a repository not in `OMEGA_CI_AGENT_REPOS` (empty list → every job);
+- a repository that is itself a GitHub fork (or whose fork status is
+  missing) when only an `owner/*` entry covers it (`fork_repo_not_listed`);
 - `pull_request_target`, always;
 - any pull request whose head repository is a fork, is another repository,
   or cannot be determined (private repositories included);
@@ -277,13 +341,16 @@ and tests are `omega_prime/ci_runners/agent/jobhook.py` and
 `omega-ci job guard refused this job (<reason>)`. The runner then exits, and
 the controller treats that like any other finished job.
 
-**Defence in depth.** Also set the repository's Actions fork policy to
-**Require approval for all outside collaborators** (Settings → Actions →
-General → "Approval for running fork pull request workflows from
-contributors"). Then a fork pull request cannot start any workflow until a
-maintainer approves it. Keep the runner group's repository access limited to
-the opted-in repositories, and only turn on its "Allow public repositories"
-option for this case.
+**Defence in depth.** Set the Actions fork policy to **Require approval for
+all outside collaborators**. For the org-wide setup do it once at org level
+(Organisation settings → Actions → General → "Approval for running fork pull
+request workflows from contributors"), so every current and future
+repository inherits it; for a single repository it is the same option under
+the repository's Settings → Actions → General. Then a fork pull request
+cannot start any workflow until a maintainer approves it. The runner group's
+repository access should match the allowlists: **All repositories** with
+"Allow public repositories" for the org-wide setup, or only the opted-in
+repositories otherwise.
 
 ## Events
 
@@ -353,6 +420,28 @@ Each receipt's `unverified` list names what was not exercised: no live
 GitHub, Railway, Pulsar or VPS run, and no `docker build` of the Desktop
 image (the smoke check runs the image's own `smoke.sh` against the exact
 COPY set instead).
+
+## End-to-end smoke test
+
+`.github/workflows/omega-ci-smoke.yml` is the live end-to-end check of the
+pool. It is manual only (`on: workflow_dispatch`, no schedule and no
+pull-request trigger), has `permissions: contents: read`, and runs one job on
+`[self-hosted, linux, x64, omega-ci]` with `timeout-minutes: 10`. Its steps
+are `uname -a`, `whoami` and `echo omega-ci ok`: no checkout, no secrets.
+`.github/actionlint.yaml` declares the `omega-ci` and `vps-docker` labels so
+actionlint accepts the custom `runs-on`, and
+`omega_prime/tests/ci_runners/test_smoke_workflow.py` keeps the workflow this
+small.
+
+Run it from the Actions tab ("omega-ci-smoke" → Run workflow) or with
+`gh workflow run omega-ci-smoke.yml --repo swcstudiospace/Omega-Prime`. A
+green run proves the whole path: the `workflow_job` webhook reaches the
+controller, the controller mints a JIT runner and wakes the Railway Desktop,
+the runner-side pre-job guard admits the job (`workflow_dispatch` in an
+allowlisted repository), and the job runs as `omega-ci-job` on a runner named
+`omega-ci-…`. Expect `omega.ci.runner.demand → launch_requested → launched →
+busy → exited` in the controller's events. To smoke-test another repository,
+copy the file there; with the org-wide setup no allowlist change is needed.
 
 ## Held operations (D-120-10)
 

@@ -79,6 +79,7 @@ class DemandStore:
                         "repo": j.repo,
                         "private": j.private,
                         "public": j.public,
+                        "fork": j.fork,
                         "labels": list(j.labels),
                         "seen_at": self._seen[j.job_id],
                     }
@@ -101,6 +102,7 @@ def _job(row: Any) -> tuple[WorkflowJob, float] | None:
     repo, labels = row.get("repo"), row.get("labels")
     seen_at, private = row.get("seen_at"), row.get("private")
     public = row.get("public") is True and private is not True
+    fork = row.get("fork")
     if job_id is None or run_id is None or not isinstance(repo, str):
         return None
     if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
@@ -115,6 +117,7 @@ def _job(row: Any) -> tuple[WorkflowJob, float] | None:
         labels=tuple(labels),
         status=JobStatus.QUEUED,
         public=public,  # ``trusted`` is never persisted; replay re-verifies
+        fork=fork if isinstance(fork, bool) else None,  # unknown → exact only
     )
     return job, float(seen_at)
 

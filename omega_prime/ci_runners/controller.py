@@ -23,6 +23,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from omega_prime.ci_runners.agent.jobhook import repo_allowed
 from omega_prime.ci_runners.delayed import AsyncioDelayedEvents, Deadline, DelayedEvents
 from omega_prime.ci_runners.demand import DemandStore
 from omega_prime.ci_runners.desktop import DesktopClient, DesktopError, LaunchOutcome
@@ -218,7 +219,7 @@ class Controller:
 
     async def _refusal(self, job: WorkflowJob) -> str | None:
         """``None`` when the public job may run, else why not (fails closed)."""
-        if job.repo not in self.scaler.public_repos:
+        if not repo_allowed(job.repo, self.scaler.public_repos, fork=job.fork):
             return NOT_OPTED_IN
         key = (job.repo, job.run_id)
         if key in self._verdicts:
