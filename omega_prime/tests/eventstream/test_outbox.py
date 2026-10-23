@@ -9,12 +9,15 @@ from typing import Any
 
 import pytest
 
+from omega_prime.eventstream.config import EventStreamConfig
 from omega_prime.eventstream.envelope import CloudEvent, PublishReceipt, PublishRequest
-from omega_prime.eventstream.errors import SchemaError
+from omega_prime.eventstream.errors import ContractError, SchemaError
 from omega_prime.eventstream.observability import EventStreamObserver
 from omega_prime.eventstream.outbox import (
+    OutboxError,
     OutboxFullError,
     OutboxRecord,
+    OutboxRejectedError,
     SQLiteOutbox,
 )
 from omega_prime.eventstream.taxonomy import derive_key, schema_uri_for_type
@@ -631,5 +634,284 @@ def test_relay_does_not_lose_commit_between_empty_check_and_event_wait(
             serving.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await serving
+
+    asyncio.run(scenario())
+
+
+def test_sent_acknowledgement_must_match_row_identity_before_advancing_watermark(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        outbox = SQLiteOutbox(
+            tmp_path / "outbox.sqlite3", producer_name="test-producer"
+        )
+        with outbox.transaction() as connection:
+            row = outbox.append(connection, make_request("ack-identity"))
+
+        wrong_event = PublishReceipt(
+            event_id="different-event",
+            topic=row.topic,
+            message_id="wrong-event",
+            acknowledged_at=datetime(2026, 10, 23, 12, tzinfo=UTC),
+        )
+        with pytest.raises(OutboxError, match="acknowledgement identity"):
+            outbox.mark_sent(row.sequence_id, wrong_event)
+        assert (await outbox.get(row.sequence_id)).status == "pending"  # type: ignore[union-attr]
+        assert outbox.acknowledged_watermark == 0
+
+        wrong_topic = PublishReceipt(
+            event_id=row.event_id,
+            topic="persistent://omega/sdlc/other",
+            message_id="wrong-topic",
+            acknowledged_at=datetime(2026, 10, 23, 12, tzinfo=UTC),
+        )
+        with pytest.raises(OutboxError, match="acknowledgement identity"):
+            outbox.mark_sent(row.sequence_id, wrong_topic)
+        assert (await outbox.get(row.sequence_id)).status == "pending"  # type: ignore[union-attr]
+        assert (
+            outbox.mark_sent(
+                row.sequence_id,
+                PublishReceipt(
+                    event_id=row.event_id,
+                    topic=row.topic,
+                    message_id="accepted",
+                    acknowledged_at=datetime(2026, 10, 23, 12, tzinfo=UTC),
+                ),
+            )
+            == row.sequence_id
+        )
+        assert (await outbox.get(row.sequence_id)).status == "sent"  # type: ignore[union-attr]
+
+    asyncio.run(scenario())
+
+
+def test_outbox_constructor_and_mark_paths_reject_invalid_inputs(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="nonempty"):
+        SQLiteOutbox(tmp_path / "x.sqlite3", producer_name=" ")
+    with pytest.raises(ValueError, match="file-backed"):
+        SQLiteOutbox(":memory:", producer_name="producer")
+    with pytest.raises(ValueError, match="positive integer"):
+        SQLiteOutbox(tmp_path / "y.sqlite3", producer_name="producer", max_bytes=0)
+    with pytest.raises(ValueError, match="positive integer"):
+        SQLiteOutbox(tmp_path / "z.sqlite3", producer_name="producer", max_bytes=True)  # type: ignore[arg-type]
+
+    outbox = SQLiteOutbox(tmp_path / "outbox.sqlite3", producer_name="test-producer")
+    receipt = PublishReceipt(
+        event_id="missing",
+        topic="persistent://omega/sdlc/pr",
+        message_id="m",
+        acknowledged_at=datetime(2026, 10, 23, 12, tzinfo=UTC),
+    )
+    with pytest.raises(KeyError):
+        outbox.mark_sent(999, receipt)
+    with pytest.raises(KeyError):
+        outbox.mark_rejected(999, "gone")
+
+    with outbox.transaction() as connection:
+        row = outbox.append(connection, make_request("reject-then-send"))
+    rejected = outbox.mark_rejected(row.sequence_id, "token=sk-abcdefghijklmnop")
+    assert rejected.status == "rejected"
+    assert "sk-abcdefghijklmnop" not in (rejected.rejection_reason or "")
+    with pytest.raises(OutboxRejectedError, match="terminally rejected"):
+        outbox.mark_sent(
+            row.sequence_id,
+            PublishReceipt(
+                event_id=row.event_id,
+                topic=row.topic,
+                message_id="late",
+                acknowledged_at=datetime(2026, 10, 23, 12, tzinfo=UTC),
+            ),
+        )
+
+
+def test_outbox_serve_records_redacted_failures_and_resumes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        secret = "sk-serve-secret-value-123456"
+        outbox = SQLiteOutbox(
+            tmp_path / "outbox.sqlite3",
+            producer_name="test-producer",
+            known_secrets=(secret,),
+        )
+        with outbox.transaction() as connection:
+            outbox.append(connection, make_request("serve-resume"))
+
+        class FlakyPublisher:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def publish(self, request: PublishRequest) -> PublishReceipt:
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError(f"broker unavailable secret={secret}")
+                return PublishReceipt(
+                    event_id=request.event.id,
+                    topic=request.topic,
+                    message_id=f"ok-{request.sequence_id}",
+                    acknowledged_at=datetime(2026, 10, 23, 12, tzinfo=UTC),
+                )
+
+            async def close(self) -> None:
+                return None
+
+        publisher = FlakyPublisher()
+        task = asyncio.create_task(outbox.serve(publisher))
+        try:
+            for _ in range(50):
+                if outbox.last_failure is not None:
+                    break
+                await asyncio.sleep(0.01)
+            assert outbox.last_failure is not None
+            assert secret not in outbox.last_failure
+            outbox.notify_after_commit()
+            for _ in range(100):
+                pending = await outbox.pending()
+                if not pending:
+                    break
+                await asyncio.sleep(0.01)
+            assert publisher.calls >= 2
+            assert not await outbox.pending()
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+def test_outbox_secret_supplier_failure_and_producer_mismatch_are_typed(
+    tmp_path: Path,
+) -> None:
+    def boom_secrets() -> tuple[str, ...]:
+        raise RuntimeError("secret store down")
+
+    outbox = SQLiteOutbox(
+        tmp_path / "outbox.sqlite3",
+        producer_name="test-producer",
+        secret_supplier=boom_secrets,
+    )
+    with (
+        pytest.raises(OutboxError, match="secret supplier"),
+        outbox.transaction() as connection,
+    ):
+        outbox.append(connection, make_request("needs-secrets"))
+
+    healthy = SQLiteOutbox(tmp_path / "outbox2.sqlite3", producer_name="test-producer")
+    mismatched = make_request("mismatch")
+    mismatched = PublishRequest(
+        event=mismatched.event,
+        topic=mismatched.topic,
+        key=mismatched.key,
+        sequence_id=0,
+        producer_name="other-producer",
+        properties={},
+    )
+    with (
+        pytest.raises(ValueError, match="producer does not match"),
+        healthy.transaction() as connection,
+    ):
+        healthy.append(connection, mismatched)
+
+
+def test_outbox_deliver_after_round_trip_and_cleanup_respect_watermark(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        outbox = SQLiteOutbox(
+            tmp_path / "outbox.sqlite3", producer_name="test-producer"
+        )
+        request = make_request("delayed")
+        request = PublishRequest(
+            event=request.event,
+            topic=request.topic,
+            key=request.key,
+            sequence_id=0,
+            producer_name=request.producer_name,
+            deliver_after=datetime(2026, 10, 24, 12, tzinfo=UTC),
+            properties={"flag": True, "nested": {"ok": 1}},
+        )
+        with outbox.transaction() as connection:
+            row = outbox.append(connection, request)
+        loaded = await outbox.get(row.sequence_id)
+        assert loaded is not None
+        assert loaded.deliver_after == datetime(2026, 10, 24, 12, tzinfo=UTC)
+        assert loaded.properties["flag"] is True
+        assert outbox.initial_sequence_id == 0
+        publisher = AcceptingPublisher()
+        assert await outbox.relay_once(publisher) == 1
+        assert outbox.acknowledged_watermark == row.sequence_id
+        assert outbox.cleanup_sent() == 1
+        assert await outbox.get(row.sequence_id) is None
+
+    asyncio.run(scenario())
+
+
+def test_outbox_safe_failure_when_secret_resolution_itself_fails(
+    tmp_path: Path,
+) -> None:
+    def boom() -> tuple[str, ...]:
+        raise RuntimeError("no secrets")
+
+    outbox = SQLiteOutbox(
+        tmp_path / "outbox.sqlite3",
+        producer_name="test-producer",
+        secret_supplier=boom,
+    )
+    # Bypass append (which needs secrets) and exercise redaction fallback directly.
+    message = outbox._safe_failure("broker exploded token=sk-should-not-matter")
+    assert message == "relay failure (secret redaction unavailable)"
+
+
+def test_outbox_validation_edges_for_config_clock_and_relay_identity(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        config = EventStreamConfig()
+        outbox = SQLiteOutbox(
+            tmp_path / "outbox.sqlite3",
+            producer_name="test-producer",
+            config=config,
+            clock=lambda: datetime(2026, 10, 23, 12),  # naive on purpose
+        )
+        assert outbox.max_bytes == config.outbox_max_bytes
+        with (
+            pytest.raises(ValueError, match="aware datetime"),
+            outbox.transaction() as connection,
+        ):
+            outbox.append(connection, make_request("naive-clock"))
+
+        aware = SQLiteOutbox(
+            tmp_path / "outbox2.sqlite3", producer_name="test-producer"
+        )
+        with pytest.raises(ValueError, match="active caller transaction"):
+            aware.append(aware.open_connection(), make_request("no-txn"))
+        with closing(sqlite3.connect(tmp_path / "foreign.sqlite3")) as foreign:
+            foreign.execute("BEGIN IMMEDIATE")
+            with pytest.raises(ValueError, match="different database"):
+                aware.append(foreign, make_request("foreign-db"))
+            foreign.rollback()
+
+        with aware.transaction() as connection:
+            row = aware.append(connection, make_request("relay-mismatch"))
+
+        class WrongReceiptPublisher:
+            async def publish(self, request: PublishRequest) -> PublishReceipt:
+                return PublishReceipt(
+                    event_id="not-the-event",
+                    topic=request.topic,
+                    message_id="x",
+                    acknowledged_at=datetime(2026, 10, 23, 12, tzinfo=UTC),
+                )
+
+            async def close(self) -> None:
+                return None
+
+        with pytest.raises(OutboxError, match="acknowledgement identity"):
+            await aware.relay_once(WrongReceiptPublisher())
+        assert (await aware.get(row.sequence_id)).status == "pending"  # type: ignore[union-attr]
+
+        with pytest.raises(ContractError, match="keys must be strings"):
+            SQLiteOutbox._plain_json({1: "nope"})  # type: ignore[dict-item]
+        with pytest.raises(ContractError, match="not valid JSON"):
+            SQLiteOutbox._json_bytes({1, 2, 3})  # type: ignore[arg-type]
 
     asyncio.run(scenario())

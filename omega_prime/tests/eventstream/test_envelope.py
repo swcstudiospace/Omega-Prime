@@ -440,3 +440,44 @@ def test_secret_shaped_ids_are_refused_rather_than_silently_rewritten(
     assert redact_value(event_id) != event_id
     with pytest.raises(ContractError):
         valid_event(id=event_id).to_bytes()
+
+
+def test_freeze_rejects_non_json_values() -> None:
+    from omega_prime.eventstream.envelope import _freeze
+    from omega_prime.eventstream.errors import ContractError
+
+    with pytest.raises(ContractError):
+        _freeze(object())
+    with pytest.raises(ContractError):
+        _freeze({1: "x"})  # type: ignore[dict-item]
+    with pytest.raises(ContractError):
+        _freeze(float("nan"))
+
+
+def test_frozen_containers_reject_mutation_and_expose_repr() -> None:
+    from omega_prime.eventstream.envelope import _freeze, _FrozenDict, _FrozenMap
+
+    frozen = _freeze({"a": 1, "nested": {"b": 2}})
+    assert isinstance(frozen, _FrozenMap)
+    assert len(frozen) == 2
+    assert repr(frozen) == "<immutable mapping>"
+    assert list(frozen) == ["a", "nested"]
+    assert frozen["a"] == 1
+
+    extras = _FrozenDict({"omegaext": "keep"})
+    with pytest.raises(TypeError, match="immutable"):
+        extras["x"] = 1
+    with pytest.raises(TypeError, match="immutable"):
+        del extras["omegaext"]
+    with pytest.raises(TypeError, match="immutable"):
+        extras.clear()
+    with pytest.raises(TypeError, match="immutable"):
+        extras.pop("omegaext")
+    with pytest.raises(TypeError, match="immutable"):
+        extras.popitem()
+    with pytest.raises(TypeError, match="immutable"):
+        extras.setdefault("y", 1)
+    with pytest.raises(TypeError, match="immutable"):
+        extras.update({"z": 1})
+    with pytest.raises(TypeError, match="immutable"):
+        extras |= {"z": 1}

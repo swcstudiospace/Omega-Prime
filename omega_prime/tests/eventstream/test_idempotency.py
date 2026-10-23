@@ -4,6 +4,8 @@ import asyncio
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from omega_prime.eventstream.idempotency import SQLiteIdempotencyStore
 
 
@@ -268,5 +270,137 @@ def test_external_effect_deduplicates_by_cloud_event_id(tmp_path: Path) -> None:
         assert duplicate.status == "already-complete"
         assert external_effects == {event_id: event_id}
         assert external_calls == [event_id, event_id]
+
+    asyncio.run(scenario())
+
+
+def test_release_allows_a_fresh_owner_but_not_across_subscription_boundaries(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = SQLiteIdempotencyStore(tmp_path / "ledger.sqlite3")
+        assert (await store.claim("handler-a", "shared-event", "owner-a")).status == (
+            "acquired"
+        )
+        assert (await store.claim("handler-b", "shared-event", "owner-b")).status == (
+            "acquired"
+        )
+
+        assert await store.release("handler-a", "shared-event", "wrong-owner") is False
+        assert (await store.claim("handler-a", "shared-event", "intruder")).status == (
+            "busy"
+        )
+        assert await store.release("handler-a", "shared-event", "owner-a") is True
+
+        replacement = await store.claim("handler-a", "shared-event", "owner-new")
+        assert replacement.status == "acquired"
+        assert replacement.owner_token == "owner-new"
+        assert (await store.claim("handler-b", "shared-event", "intruder")).status == (
+            "busy"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_complete_requires_the_active_claim_and_completion_is_immutable(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = SQLiteIdempotencyStore(tmp_path / "ledger.sqlite3")
+        assert await store.complete("handler", "missing-event", "owner") is False
+        assert (await store.claim("handler", "event", "owner")).status == "acquired"
+        assert await store.complete("handler", "event", "not-owner") is False
+        assert await store.complete("handler", "event", "owner") is True
+        assert await store.complete("handler", "event", "owner") is False
+        assert await store.release("handler", "event", "owner") is False
+        assert (await store.claim("handler", "event", "new-owner")).status == (
+            "already-complete"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_idempotency_rejects_invalid_identities_and_caller_connections(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteIdempotencyStore(tmp_path / "ledger.sqlite3")
+
+    async def scenario() -> None:
+        with pytest.raises(ValueError, match="nonempty"):
+            await store.claim("", "event", "owner")
+        with pytest.raises(ValueError, match="nonempty"):
+            await store.claim("handler", "   ", "owner")
+        with pytest.raises(ValueError, match="nonempty"):
+            await store.claim("handler", "event", "")
+        foreign = sqlite3.connect(tmp_path / "other.sqlite3")
+        try:
+            foreign.execute("BEGIN IMMEDIATE")
+            with pytest.raises(ValueError, match="different database"):
+                await store.claim("handler", "event", "owner", connection=foreign)
+        finally:
+            foreign.rollback()
+            foreign.close()
+        connection = store.open_connection()
+        try:
+            with pytest.raises(ValueError, match="transaction"):
+                await store.claim("handler", "event", "owner", connection=connection)
+        finally:
+            connection.close()
+        # Caller connections must already be durable; degrade AFTER open, BEFORE begin.
+        degraded = store.open_connection()
+        try:
+            degraded.execute("PRAGMA synchronous=OFF")
+            degraded.execute("BEGIN IMMEDIATE")
+            with pytest.raises(ValueError, match="WAL and synchronous FULL"):
+                await store.claim("handler", "event", "owner", connection=degraded)
+        finally:
+            if degraded.in_transaction:
+                degraded.rollback()
+            degraded.close()
+
+        missing = await store.reclaim(
+            "handler",
+            "never-seen",
+            stale_owner_token="stale",
+            new_owner_token="fresh",
+        )
+        assert missing.status == "acquired"
+        assert (await store.claim("handler", "never-seen", "intruder")).status == "busy"
+        assert await store.complete("handler", "never-seen", "fresh") is True
+        completed = await store.reclaim(
+            "handler",
+            "never-seen",
+            stale_owner_token="fresh",
+            new_owner_token="after-complete",
+        )
+        assert completed.status == "already-complete"
+        assert (await store.claim("handler", "live", "owner-a")).status == "acquired"
+        busy = await store.reclaim(
+            "handler",
+            "live",
+            stale_owner_token="not-the-owner",
+            new_owner_token="owner-b",
+        )
+        assert busy.status == "busy"
+
+    asyncio.run(scenario())
+
+
+def test_reclaim_transfers_ownership_only_for_the_stated_stale_owner(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = SQLiteIdempotencyStore(tmp_path / "ledger.sqlite3")
+        assert (await store.claim("handler", "event", "owner-a")).status == "acquired"
+        transferred = await store.reclaim(
+            "handler",
+            "event",
+            stale_owner_token="owner-a",
+            new_owner_token="owner-b",
+        )
+        assert transferred.status == "acquired"
+        assert transferred.owner_token == "owner-b"
+        assert (await store.claim("handler", "event", "owner-a")).status == "busy"
+        assert await store.complete("handler", "event", "owner-b") is True
 
     asyncio.run(scenario())
