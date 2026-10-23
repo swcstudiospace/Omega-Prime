@@ -28,6 +28,47 @@ ARG H11_URL=https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d
 ARG H11_SHA256=63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
 ARG JOB_UID=1500
 ARG JOB_GID=1500
+# Toolchains (00056). Evidence for every pin: README.md "Toolchain provenance".
+ARG APT_SNAPSHOT=20261023T000000Z
+ARG GH_VERSION=2.103.1
+ARG GH_SHA256=57500f347b5e84efb6578c9b644eeb3b4e54046762635a939dd0ee2cca1c1add
+ARG GITLEAKS_VERSION=8.30.1
+ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+ARG TRIVY_VERSION=0.76.1
+ARG TRIVY_SHA256=c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
+ARG GREPTIME_VERSION=0.14.4
+ARG GREPTIME_SHA256=50166e3f429327f6e4003d62d7b3eb9010345346d855a2d4442a7d73e900e787
+ARG PY310_VERSION=3.10.22
+ARG PY310_BUILD=36876129702
+ARG PY310_SHA256=4c96c0e9380150d436c38be322bafa04a5632db7eb2def147b7553ed7e88fd16
+ARG PY312_VERSION=3.12.15
+ARG PY312_BUILD=36805895057
+ARG PY312_SHA256=fcb672b0437c2d8df5565b7cc250b2b0d7455e2b8d6a4a107cfa6f2efe4f7ed8
+ARG NODE22_VERSION=22.23.4
+ARG NODE22_SHA256=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
+ARG NODE24_VERSION=24.22.1
+ARG NODE24_SHA256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
+ARG DOTNET_SDK_VERSION=10.0.402
+ARG DOTNET_SDK_SHA512=1904a98dda2db34ba78ba3c4fb1b224455329af91c341d83547843c1839e112b04ae699ee92fa2449a8f62249196a938723078c0c60b9f65c88539d5687729c2
+ARG DOTNET_WORKLOAD_SET=10.0.402.1
+ARG ANDROID_CMDLINE_TOOLS_BUILD=16111833
+ARG ANDROID_CMDLINE_TOOLS_SHA256=0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8
+ARG ANDROID_API=36
+ARG ANDROID_BUILD_TOOLS=36.0.0
+ARG RUSTUP_VERSION=1.29.2
+ARG RUSTUP_INIT_SHA256=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+ARG RUST_VERSION=1.99.1
+ARG PG_MAJOR=16
+
+# Tool locations, shared by the build steps, the self-check and runner-env.
+ENV RUNNER_TOOL_CACHE=/opt/hostedtoolcache \
+    AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache \
+    DOTNET_ROOT=/usr/share/dotnet \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
+    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 \
+    ANDROID_HOME=/opt/android-sdk ANDROID_SDK_ROOT=/opt/android-sdk \
+    RUSTUP_HOME=/opt/rust/rustup \
+    PATH=/opt/rust/cargo/bin:/usr/lib/postgresql/16/bin:/usr/share/dotnet:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 USER root
 
@@ -85,6 +126,136 @@ RUN check=/var/lib/omega-ci/work/omega-ci-build-check \
     && ! printf '%s\n' "$out" | grep -q 'Permission to read the directory contents' \
     && printf '%s\n' "$out" | grep -q 'Not configured'
 
+# --- 3b. Toolchains every swcstudiospace workflow needs (00056) ---------------
+# Every CI job in Ove's repositories runs on this pool, never on GitHub-hosted
+# runners, so the image carries what ubuntu-latest would have provided. Jobs
+# run as uid 1500 with no sudo and no Docker daemon (Railway is unprivileged),
+# so nothing here may need root at job time. Shared trees are root-owned and
+# read-only for the job: a job cannot change the tools the next job uses.
+# Every download is version-pinned and checksum-verified (sha256sum/sha512sum
+# -c, fail closed). apt comes from a dated snapshot.ubuntu.com view, so the
+# package set is reproducible. Expected versions: toolchain-check.sh.
+
+# (a) apt: build tools, CLIs, JDK 17, PostgreSQL 16 server, podman. No cluster
+#     is created and no service starts; jobs run initdb/pg_ctl themselves.
+RUN mkdir -p /etc/postgresql-common/createcluster.d \
+    && echo 'create_main_cluster = false' > /etc/postgresql-common/createcluster.d/00-omega-ci.conf \
+    && apt-get update --snapshot "${APT_SNAPSHOT}" \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --snapshot "${APT_SNAPSHOT}" -y --no-install-recommends \
+       git make build-essential pkg-config libssl-dev file \
+       zip unzip xz-utils rsync jq age pipx python3-venv python3-pip \
+       openjdk-17-jdk-headless postgresql-16 postgresql-client-16 \
+       podman uidmap slirp4netns fuse-overlayfs \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "omega-ci-job:100000:65536" >> /etc/subuid \
+    && echo "omega-ci-job:100000:65536" >> /etc/subgid
+
+# (b) Single-binary CLIs: gh, gitleaks, trivy, GreptimeDB (standalone mode).
+RUN mkdir -p /tmp/bin && cd /tmp/bin \
+    && curl -fsSL -o gh.tgz "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+    && curl -fsSL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+    && curl -fsSL -o trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+    && curl -fsSL -o greptime.tgz "https://github.com/GreptimeTeam/greptimedb/releases/download/v${GREPTIME_VERSION}/greptime-linux-amd64-v${GREPTIME_VERSION}.tar.gz" \
+    && printf '%s  %s\n' "${GH_SHA256}" gh.tgz "${GITLEAKS_SHA256}" gitleaks.tgz \
+       "${TRIVY_SHA256}" trivy.tgz "${GREPTIME_SHA256}" greptime.tgz | sha256sum -c - \
+    && tar -xzf gh.tgz --strip-components=2 -C /usr/local/bin "gh_${GH_VERSION}_linux_amd64/bin/gh" \
+    && tar -xzf gitleaks.tgz -C /usr/local/bin gitleaks \
+    && tar -xzf trivy.tgz -C /usr/local/bin trivy \
+    && tar -xzf greptime.tgz --strip-components=1 -C /usr/local/bin "greptime-linux-amd64-v${GREPTIME_VERSION}/greptime" \
+    && chown root:root /usr/local/bin/gh /usr/local/bin/gitleaks /usr/local/bin/trivy /usr/local/bin/greptime \
+    && chmod 0755 /usr/local/bin/gh /usr/local/bin/gitleaks /usr/local/bin/trivy /usr/local/bin/greptime \
+    && cd / && rm -rf /tmp/bin
+
+# (c) Hosted tool cache, in the layout actions/setup-python and
+#     actions/setup-node look up (<Tool>/<version>/x64 + x64.complete), at
+#     the path GitHub's images use (the Python builds are compiled for it).
+#     A cache hit needs no write, so the read-only tree serves uid 1500.
+#     The Python step mirrors the build's own setup.sh, minus its unpinned
+#     "pip install --upgrade pip" (the bundled pip is kept).
+RUN mkdir -p "${RUNNER_TOOL_CACHE}/Python" "${RUNNER_TOOL_CACHE}/node" /tmp/tc && cd /tmp/tc \
+    && curl -fsSL -o py310.tgz "https://github.com/actions/python-versions/releases/download/${PY310_VERSION}-${PY310_BUILD}/python-${PY310_VERSION}-linux-24.04-x64.tar.gz" \
+    && curl -fsSL -o py312.tgz "https://github.com/actions/python-versions/releases/download/${PY312_VERSION}-${PY312_BUILD}/python-${PY312_VERSION}-linux-24.04-x64.tar.gz" \
+    && curl -fsSL -o node22.txz "https://nodejs.org/dist/v${NODE22_VERSION}/node-v${NODE22_VERSION}-linux-x64.tar.xz" \
+    && curl -fsSL -o node24.txz "https://nodejs.org/dist/v${NODE24_VERSION}/node-v${NODE24_VERSION}-linux-x64.tar.xz" \
+    && printf '%s  %s\n' "${PY310_SHA256}" py310.tgz "${PY312_SHA256}" py312.tgz \
+       "${NODE22_SHA256}" node22.txz "${NODE24_SHA256}" node24.txz | sha256sum -c - \
+    && for spec in "${PY310_VERSION}:py310.tgz" "${PY312_VERSION}:py312.tgz"; do \
+         ver="${spec%%:*}"; mm="${ver%.*}"; dest="${RUNNER_TOOL_CACHE}/Python/${ver}/x64"; \
+         mkdir -p "$dest" && tar -xzf "${spec#*:}" -C "$dest" \
+         && rm -f "$dest/setup.sh" "$dest/build_output.txt" "$dest/tools_structure.txt" \
+         && ln -s "./bin/python${mm}" "$dest/python" \
+         && ln -sf "python${mm}" "$dest/bin/python$(echo "$mm" | tr -d .)" \
+         && { [ -e "$dest/bin/python" ] || ln -s "python${mm}" "$dest/bin/python"; } \
+         && { "$dest/python" -c "import pip" 2>/dev/null || "$dest/python" -m ensurepip; } \
+         && touch "${RUNNER_TOOL_CACHE}/Python/${ver}/x64.complete" || exit 1; \
+       done \
+    && for spec in "${NODE22_VERSION}:node22.txz" "${NODE24_VERSION}:node24.txz"; do \
+         ver="${spec%%:*}"; dest="${RUNNER_TOOL_CACHE}/node/${ver}/x64"; \
+         mkdir -p "$dest" && tar -xJf "${spec#*:}" --strip-components=1 -C "$dest" \
+         && touch "${RUNNER_TOOL_CACHE}/node/${ver}/x64.complete" || exit 1; \
+       done \
+    && cd / && rm -rf /tmp/tc \
+    && chown -R root:root "${RUNNER_TOOL_CACHE}" && chmod -R a+rX,go-w "${RUNNER_TOOL_CACHE}"
+
+# (d) .NET SDK per OmpOS global.json, installed where actions/setup-dotnet
+#     looks on Linux (/usr/share/dotnet), so its install step finds the exact
+#     version and writes nothing; plus the maui-android workload (pinned
+#     workload set) for net10.0-android. Caches from the install are removed.
+RUN curl -fsSL -o /tmp/dotnet.tgz "https://builds.dotnet.microsoft.com/dotnet/Sdk/${DOTNET_SDK_VERSION}/dotnet-sdk-${DOTNET_SDK_VERSION}-linux-x64.tar.gz" \
+    && echo "${DOTNET_SDK_SHA512}  /tmp/dotnet.tgz" | sha512sum -c - \
+    && mkdir -p "${DOTNET_ROOT}" && tar -xzf /tmp/dotnet.tgz -C "${DOTNET_ROOT}" && rm -f /tmp/dotnet.tgz \
+    && ln -s "${DOTNET_ROOT}/dotnet" /usr/local/bin/dotnet \
+    && export DOTNET_CLI_HOME=/tmp/dotnet-home NUGET_PACKAGES=/tmp/dotnet-nuget \
+    && dotnet workload install maui-android --version "${DOTNET_WORKLOAD_SET}" \
+    && rm -rf /tmp/dotnet-home /tmp/dotnet-nuget /tmp/NuGetScratch* /root/.nuget /root/.local/share/NuGet \
+    && chown -R root:root "${DOTNET_ROOT}" && chmod -R a+rX,go-w "${DOTNET_ROOT}"
+
+# (e) Android SDK for net10.0-android: pinned cmdline-tools (sha256 recorded
+#     after checking Google's published sha1), then sdkmanager installs the
+#     platform, build-tools and platform-tools (it verifies each package
+#     against Google's repository manifest).
+RUN curl -fsSL -o /tmp/cmdline-tools.zip "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_BUILD}_latest.zip" \
+    && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/cmdline-tools.zip" | sha256sum -c - \
+    && mkdir -p "${ANDROID_HOME}/cmdline-tools" \
+    && unzip -q /tmp/cmdline-tools.zip -d /tmp/android && mv /tmp/android/cmdline-tools "${ANDROID_HOME}/cmdline-tools/latest" \
+    && rm -rf /tmp/cmdline-tools.zip /tmp/android \
+    && export HOME=/tmp/android-home \
+    && yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --sdk_root="${ANDROID_HOME}" --licenses > /dev/null \
+    && "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --sdk_root="${ANDROID_HOME}" \
+       "platforms;android-${ANDROID_API}" "build-tools;${ANDROID_BUILD_TOOLS}" platform-tools > /dev/null \
+    && rm -rf /tmp/android-home \
+    && chown -R root:root "${ANDROID_HOME}" && chmod -R a+rX,go-w "${ANDROID_HOME}"
+
+# (f) Rust: rustup-init (published sha256), one pinned toolchain, minimal
+#     profile + rustfmt + clippy. RUSTUP_HOME is read-only for jobs; cargo's
+#     registry and target dirs use the job's own HOME (CARGO_HOME unset).
+RUN curl -fsSL -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+    && echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c - \
+    && chmod 0755 /tmp/rustup-init \
+    && CARGO_HOME=/opt/rust/cargo /tmp/rustup-init -y --no-modify-path --profile minimal \
+       --default-toolchain "${RUST_VERSION}" -c rustfmt -c clippy \
+    && rm -f /tmp/rustup-init && rm -rf /opt/rust/cargo/registry /opt/rust/rustup/downloads/* /opt/rust/rustup/tmp/* \
+    && chown -R root:root /opt/rust && chmod -R a+rX,go-w /opt/rust
+
+# (g) Python CLIs, each in its own venv from a hash-locked requirements file
+#     (pip --require-hashes --no-deps: every wheel, direct or transitive, must
+#     match its sha256). Regenerate with the command in docs/ci-runners.md.
+COPY deploy/ci-runner-desktop/requirements /opt/omega-ci/requirements
+RUN for tool in semgrep bandit podman-compose; do \
+         python3 -m venv "/opt/venvs/${tool}" \
+         && "/opt/venvs/${tool}/bin/pip" install --no-cache-dir --disable-pip-version-check \
+            --require-hashes --no-deps --only-binary=:all: -r "/opt/omega-ci/requirements/${tool}.txt" \
+         && ln -s "/opt/venvs/${tool}/bin/${tool}" "/usr/local/bin/${tool}" || exit 1; \
+       done \
+    && chown -R root:root /opt/venvs /opt/omega-ci/requirements && chmod -R a+rX,go-w /opt/venvs /opt/omega-ci/requirements
+
+# (h) The job environment. The agent hands each runner an allowlisted env
+#     (PATH, locale, HOME), so the toolchain variables reach jobs through the
+#     runner's own root file, which Runner.Listener loads at startup and the
+#     agent hard-links into every per-runner work dir.
+COPY deploy/ci-runner-desktop/runner-env /opt/actions-runner/.env
+RUN chown root:root /opt/actions-runner/.env && chmod 0644 /opt/actions-runner/.env
+
 # --- 4. Agent: stdlib-only omega_prime package + hash-pinned uvicorn (no pip) -
 RUN mkdir -p /opt/omega-ci/site /tmp/wheels && cd /tmp/wheels \
     && curl -fsSL -o "${UVICORN_WHL}" "${UVICORN_URL}" \
@@ -107,6 +278,18 @@ RUN chown -R root:root /opt/omega-ci && chmod -R a+rX,go-w /opt/omega-ci \
     && ! /opt/omega-ci/job-started.sh
 # ^ The pre-job guard runs under the image's own interpreter and, with no
 #   policy written yet and no job context, refuses (fails closed).
+
+# Toolchain self-check (00056): every tool at its pinned version, run as the
+# job identity with the job's environment (runner-env), so a tool that only
+# works as root fails the build. Re-runnable on a live Desktop.
+COPY deploy/ci-runner-desktop/toolchain-check.sh /opt/omega-ci/toolchain-check.sh
+RUN printf '%s=%s\n' GH "${GH_VERSION}" GITLEAKS "${GITLEAKS_VERSION}" TRIVY "${TRIVY_VERSION}" \
+       GREPTIME "${GREPTIME_VERSION}" PY310 "${PY310_VERSION}" PY312 "${PY312_VERSION}" \
+       NODE22 "${NODE22_VERSION}" NODE24 "${NODE24_VERSION}" DOTNET_SDK "${DOTNET_SDK_VERSION}" \
+       ANDROID_API "${ANDROID_API}" ANDROID_BUILD_TOOLS "${ANDROID_BUILD_TOOLS}" \
+       RUST "${RUST_VERSION}" PG_MAJOR "${PG_MAJOR}" > /opt/omega-ci/toolchain-versions \
+    && chmod 0644 /opt/omega-ci/toolchain-versions && chmod 0755 /opt/omega-ci/toolchain-check.sh \
+    && /opt/omega-ci/toolchain-check.sh --as-job "${JOB_UID}" "${JOB_GID}"
 
 ENV HOME=/config PORT=3000 VNC_RESOLUTION=1440x900 \
     OMEGA_CI_AGENT_RUNNER_ROOT=/opt/actions-runner \

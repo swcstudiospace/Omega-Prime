@@ -25,18 +25,29 @@ repositories are refused unless opted in (see
 [Public repositories](#public-repositories)). No secrets,
 tokens or extra steps are added to the workflow.
 
-Jobs that need Docker (`container:`, `services:`, `docker build`, docker
-compose) cannot use Docker on the unprivileged Railway Desktop. They still run
-on the pool: rewrite them to use the binaries baked into the runner image
-(Postgres, GreptimeDB and similar, started as plain processes in the job;
-task 00056), and extend the image when a binary is missing. There is no
-separate Docker runner and no GitHub-hosted fallback.
+**Every job runs on this pool (Ove, 2026-10-24).** No job in a
+swcstudiospace repository stays on GitHub-hosted runners, and none is parked
+on a separate runner. The Railway Desktop is unprivileged (no Docker daemon,
+no `sudo`), so the runner image ships the tools those jobs used to get from
+`ubuntu-latest` or from containers instead (see
+[Runner image toolchain](ci-runners.md#runner-image-toolchain)). When you
+retarget a job:
+
+1. Set `runs-on: [self-hosted, linux, x64, omega-ci]`.
+2. Replace `services:` / `docker run` databases with the image binaries:
+   PostgreSQL 16 via `initdb` + `pg_ctl` in `$RUNNER_TEMP`, GreptimeDB via
+   `greptime standalone start`.
+3. Drop `sudo apt-get install` steps for tools the image already has
+   (age, rsync, podman, jq, build-essential, ...). Anything missing is an
+   image change, not a workflow workaround.
+4. Keep `actions/setup-python` / `setup-node` / `setup-dotnet` on the versions
+   the image pre-caches, so they resolve from the read-only tool cache.
 
 > **Rollout caveat.** Because matching is "job labels ⊆ pool labels" (labels
 > compare case-insensitively), a job that says only `runs-on: self-hosted`, or
-> `[self-hosted, Linux, X64]`, also matches the pool. Before turning the pool
-> on, make sure every such job can run on the pool (no `container:`,
-> `services:` or Docker build left; use the image's baked-in binaries).
+> `[self-hosted, Linux, X64]`, also matches the pool. That is intended now
+> that every job belongs here, but check such jobs need nothing the image
+> lacks before the pool serves them.
 
 ## Org-wide setup (every swcstudiospace repository)
 

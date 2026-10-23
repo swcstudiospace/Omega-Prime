@@ -179,11 +179,11 @@ its workdir is removed, the agent sends exactly one exit callback.
 - **Public repositories are refused by default.** Self-hosted runners on
   public repositories are a known remote-code-execution vector. A public
   repository is served only through the explicit opt-in and fork guard below.
-- **Docker (superseded D-120-08).** Railway is unprivileged: no Docker, DinD
-  or privileged mode. Jobs that used `container:`, `services:` or
-  `docker build` are migrated to run on the pool too, using binaries baked
-  into the runner image (for example Postgres or GreptimeDB started as plain
-  processes; task 00056). There is no separate Docker runner.
+- **Docker (D-120-08, superseded 2026-10-24).** Railway is unprivileged: no
+  Docker, DinD or privileged mode. Ove's rule since 2026-10-24: every job runs
+  on this pool anyway, so jobs that used `container:`, `services:` or
+  `docker run` switch to the binaries in the
+  [runner image toolchain](#runner-image-toolchain) instead of a Docker host.
 - **Redaction (D-120-07).** Every event passes through
   `omega_prime.credentials.redact` with the known transient secrets. Anything
   that still contains a secret, or is not plain JSON, is dropped.
@@ -384,6 +384,193 @@ CloudEvents with source `omega-prime/ci-runners`:
 and `omega.ci.desktop.{wake_requested,woke}`. The default publisher appends to
 `OMEGA_CI_EVENTS_PATH`; `eventstream` publishes to the event stream once it is
 available.
+
+## Runner image toolchain
+
+**Rule (Ove, 2026-10-24): every CI job in his repositories runs on this pool**
+(`[self-hosted, linux, x64, omega-ci]`), never on GitHub-hosted runners. When
+a job needs a tool, the answer is to add it to the image, not to send the job
+elsewhere. Task 00056 added the toolchains the swcstudiospace workflows use
+(PumpGrok, claude-ultrathink, OmpOS, agent-substrate, agent-realm,
+agent-swarm, autonogrammer, faceless-desk, spectrumwebco-marketing).
+
+### What is in the image
+
+Base: `accetto/ubuntu-vnc-xfce-g3` (digest-pinned), **Ubuntu 24.04.5 LTS
+(noble)**. apt packages come from the dated `snapshot.ubuntu.com` view
+`APT_SNAPSHOT` (`20261023T000000Z`), so a rebuild gets the same package set.
+Everything else is version-pinned and checksum-verified in the Dockerfile.
+
+| Tool | Version | Where | Used by |
+|---|---|---|---|
+| git | 2.43.0 (apt) | `/usr/bin` | everything (`actions/checkout` needs ≥ 2.18) |
+| gh | 2.103.1 | `/usr/local/bin` | scripts |
+| jq, make, build-essential (gcc 13), pkg-config, libssl-dev, file, zip, unzip, xz-utils, rsync, curl | apt | `/usr/bin` | general; `unzip` is required by `oven-sh/setup-bun` |
+| age | 1.1.1 (apt) | `/usr/bin` | ultrathink off-host round-trip tests |
+| pipx 1.4.3, python3-venv, python3-pip | apt (system Python 3.12.3) | `/usr/bin` | `pipx install ...` (lands in the job's `HOME`) |
+| Python | 3.10.22, 3.12.15 | tool cache | `actions/setup-python` |
+| Node.js (+ npm) | 22.23.4, 24.22.1 | tool cache | `actions/setup-node` (`22.x`, `24.x`) |
+| Bun | not pre-installed | job `HOME` | `oven-sh/setup-bun` downloads into `~/.bun/bin` (any version) |
+| .NET SDK | 10.0.402 (OmpOS `global.json`) + `maui-android` workload (workload set 10.0.402.1) | `/usr/share/dotnet` | `actions/setup-dotnet` (`global-json-file`) |
+| JDK | OpenJDK 17 (apt) | `JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64` | Android builds |
+| Android SDK | cmdline-tools 23.0 (build 16111833), `platforms;android-36`, `build-tools;36.0.0`, platform-tools | `ANDROID_HOME=/opt/android-sdk` | OmpOS `net10.0-android` |
+| PostgreSQL | 16.x (apt, server + client; no cluster, no service) | `/usr/lib/postgresql/16/bin` on `PATH` | agent-substrate (replaces the `postgres:16` service) |
+| GreptimeDB | 0.14.4 (`greptime standalone`) | `/usr/local/bin` | autonogrammer (replaces `docker run greptime/greptimedb`) |
+| podman / podman-compose | 4.9.3 (apt) / 1.6.0 | `/usr/bin`, `/usr/local/bin` | OmpOS compose validation (`config` only, see limits) |
+| gitleaks | 8.30.1 | `/usr/local/bin` | secret scans |
+| trivy | 0.76.1 | `/usr/local/bin` | vulnerability scans |
+| semgrep | 1.182.1 (hash-locked venv) | `/usr/local/bin` | SAST |
+| bandit | 1.9.4 (hash-locked venv) | `/usr/local/bin` | Python SAST |
+| Rust | rustup 1.29.2, toolchain 1.99.1 (minimal + rustfmt + clippy) | `RUSTUP_HOME=/opt/rust/rustup`, proxies in `/opt/rust/cargo/bin` | faceless-desk |
+
+The authoritative list is `deploy/ci-runner-desktop/Dockerfile` (the `ARG`
+block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
+
+### How jobs see the tools
+
+- **The tool cache** is `/opt/hostedtoolcache`, the same path GitHub's images
+  use (the Python builds are compiled for it). It follows the layout the
+  `setup-*` actions look up: `<Tool>/<version>/x64/` plus an
+  `<version>/x64.complete` marker. A cache hit writes nothing, so the
+  root-owned, read-only tree works for uid 1500. **Ask for a version the
+  image has** (`3.12`, `3.10`, `22.x`, `24.x`): any other version makes the
+  action try to download into the read-only cache, and the job fails. Add
+  the version to the image instead.
+- **The job environment.** The agent gives each runner only an allowlisted
+  environment (`PATH`, locale, `HOME`). The toolchain variables
+  (`RUNNER_TOOL_CACHE`, `AGENT_TOOLSDIRECTORY`, `DOTNET_ROOT`,
+  `DOTNET_INSTALL_DIR`, `JAVA_HOME`, `ANDROID_HOME`, `RUSTUP_HOME`, `PATH`)
+  reach jobs through the runner's own root env file,
+  `/opt/actions-runner/.env`, built from `deploy/ci-runner-desktop/runner-env`.
+  `Runner.Listener` loads it at startup, and the agent hard-links it into
+  every per-runner work dir.
+- **Installs land in the job's `HOME`.** `HOME` is the runner's private work
+  dir. `pip install` on a tool-cache Python cannot write the read-only
+  site-packages, so pip falls back to `--user` (`~/.local`). `cargo` keeps its
+  registry in `~/.cargo` (`CARGO_HOME` is unset on purpose). The pre-job
+  guard, after allowing a job, appends `~/.local/bin` and `~/.cargo/bin` to
+  `GITHUB_PATH`, so `pip install uv && uv ...` works as on hosted runners.
+- **pip is the one each Python build bundles** (3.10.22: pip 23.0.1,
+  3.12.15: pip 25.0.1). The image does not run the builds' unpinned
+  `pip install --upgrade pip`. A job that needs a newer pip can upgrade it
+  into its own `--user` site.
+- **No root at job time.** There is no `sudo`. A step like
+  `sudo apt-get install age rsync` must go; the tool is either already in the
+  image or belongs in it.
+
+### Limits (real technical constraints)
+
+- **No Docker, no running containers.** Railway runs the container
+  unprivileged: there is no Docker daemon, and rootless podman needs user
+  namespaces that Railway is not known to grant (not yet tried on the live
+  Desktop), so treat running containers as unavailable. podman and
+  podman-compose are installed for `podman-compose ... config` validation,
+  which needs no engine. Databases
+  that used to come from containers come from the image binaries instead:
+
+  ```bash
+  # PostgreSQL 16 (agent-substrate): a throwaway cluster as the job user
+  initdb -D "$RUNNER_TEMP/pg" -U postgres --auth=trust
+  pg_ctl -D "$RUNNER_TEMP/pg" -l "$RUNNER_TEMP/pg.log" -w \
+    -o "-k $RUNNER_TEMP -p 54321 -c listen_addresses=127.0.0.1" start
+  # GreptimeDB (autonogrammer)
+  greptime standalone start --http-addr 127.0.0.1:4000 \
+    --data-home "$RUNNER_TEMP/greptime" --log-dir "$RUNNER_TEMP/greptime/logs" &
+  ```
+- **macOS jobs** (OmpOS `shells` on `macos-15`, ultrathink's
+  `macos-latest` matrix leg) cannot run on a Linux pool. The Android part of
+  OmpOS's MAUI head (`-f net10.0-android`) builds here; the iOS and
+  MacCatalyst heads need macOS and Xcode. That is Ove's call: drop the macOS
+  legs, or add a macOS runner to the swarm later.
+- **Rust channel names.** The image has toolchain 1.99.1 as the default. A
+  `rust-toolchain.toml` that names `stable` (or an action that runs
+  `rustup toolchain install`) needs a write to the read-only `RUSTUP_HOME`
+  and fails. Pin `1.99.1`, or bump `RUST_VERSION` in the image.
+- **`dotnet workload install`** needs a writable SDK directory. `maui-android`
+  is pre-installed, so on this pool skip the step (the `maui` workload is
+  macOS/Windows-only anyway).
+
+### Size and disk
+
+Measured on the local build (rootless `podman build`, 2026-10-24 AEDT): the
+image is **9.6 GB uncompressed** (the base is 0.7 GB). Expect roughly a third
+of that as the compressed pull (estimate, not measured). Biggest parts:
+
+| Tree | Size |
+|---|---|
+| `/usr/share/dotnet` (.NET SDK 10.0.402 + `maui-android` packs) | 4.0 GB |
+| `/opt/hostedtoolcache` (2 Pythons, 2 Nodes) | 0.94 GB |
+| `/opt/rust` | 0.64 GB |
+| `/usr/local/bin` (gh, gitleaks, trivy, greptime, ...) | 0.55 GB |
+| `/opt/android-sdk` | 0.49 GB |
+| `/opt/venvs` (semgrep, bandit, podman-compose) | 0.42 GB |
+| `/usr/lib/jvm` (JDK 17) | 0.26 GB |
+| apt build tools, PostgreSQL 16, podman, the desktop | the rest |
+
+Plan for:
+
+- **Build host:** about 25 GB free (layers, plus the downloads inside each
+  layer). The local build used about 11 GB of container storage.
+- **Railway:** the image is pulled once per deploy and cold-starts a little
+  slower. Each running job also needs its own scratch disk under
+  `/var/lib/omega-ci/work` (checkout, `~/.nuget`, `~/.cargo`, `target/`):
+  budget 2–5 GB per concurrent runner for .NET/Rust jobs.
+
+### Self-check
+
+`deploy/ci-runner-desktop/toolchain-check.sh` runs at the end of every image
+build **as the job identity (uid 1500) with the job's environment**. It
+asserts each pinned version, that the shared trees are not writable by the
+job, and it really uses the tools: creates a venv, starts and queries a
+throwaway PostgreSQL cluster and a GreptimeDB standalone instance, runs
+`podman-compose config`, and compiles and runs a Rust crate. Any failure fails the build. On a live Desktop:
+
+```bash
+/opt/omega-ci/toolchain-check.sh --as-job 1500 1500   # as root
+```
+
+`omega_prime/tests/ci_runners/test_desktop_toolchain.py` keeps the inputs
+honest in normal CI: every checksum pin is a full digest and is actually
+verified, apt uses the snapshot, the Python CLIs are hash-locked, and
+`runner-env` matches the image `PATH`.
+
+### Adding a tool to the runner image
+
+1. **Check you need it** (`omega_prime/skills/security-supply-chain`):
+   name, publisher, maintenance, licence.
+2. **Pick the source, in this order:** an apt package (it is pinned by the
+   snapshot; to move the snapshot, bump `APT_SNAPSHOT`); an official release
+   binary with a published checksum; a PyPI tool in its own hash-locked
+   venv. Never `curl | sh`, never an unpinned `latest`.
+3. **Pin it.** Add `ARG <TOOL>_VERSION` and `ARG <TOOL>_SHA256` (or
+   `_SHA512`) next to the others. Copy the digest from the publisher's
+   checksum file or release API, download once and confirm the digest
+   matches, and record the source in the README's toolchain provenance
+   table. Never hand-type a hash.
+4. **Install it in section 3b**, in the layer it belongs to, with
+   `sha256sum -c -` before use. Leave it root-owned and not writable by the
+   job (`chmod -R a+rX,go-w`). For a PyPI tool, add
+   `requirements/<tool>.txt` generated with hashes:
+
+   ```bash
+   echo '<tool>==<version>' > /tmp/<tool>.in
+   uv pip compile --generate-hashes --python-version 3.12 \
+     --python-platform x86_64-manylinux_2_39 --no-header \
+     /tmp/<tool>.in -o deploy/ci-runner-desktop/requirements/<tool>.txt
+   ```
+
+   and add `<tool>` to the venv loop.
+5. **Wire the environment.** If jobs need a variable or a `PATH` entry, add
+   it to both the image `ENV` and `runner-env` (the test checks they agree).
+   For a new `setup-*` version, add it to the tool cache with its
+   `x64.complete` marker.
+6. **Assert it** in `toolchain-check.sh` (version, and a real use if it is
+   cheap), add its pin key to the `toolchain-versions` block, and run
+   `pytest omega_prime/tests/ci_runners/test_desktop_toolchain.py`.
+7. **Build locally** (`podman build -f deploy/ci-runner-desktop/Dockerfile .`
+   from the repo root, or `docker build`). The build only succeeds when the
+   self-check passes as uid 1500. Then update the table above, the README and
+   `CHANGELOG.md`.
 
 ## Capacity and cost
 
