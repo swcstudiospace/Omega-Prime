@@ -30,6 +30,15 @@ AUTH = [("Authorization", f"Bearer {AGENT_TOKEN}")]
 LAUNCH = {"name": NAME, "generation": "gen-a", "jitconfig": JIT}
 
 
+def gated_exit(gate: Path, code: int = 0) -> str:
+    """A run.sh tail that stays alive until ``gate`` exists, then exits.
+
+    Keeps "child still running" assertions deterministic: a replay is only
+    REPLAYED while the child lives, and FINISHED once it has exited.
+    """
+    return f"while [ ! -e '{gate}' ]; do sleep 0.01; done\nexit {code}"
+
+
 def rig(
     tmp_path: Path, tail: str = "exec sleep 30", **kw: Any
 ) -> tuple[Any, Supervisor, Exits]:
@@ -47,7 +56,8 @@ def test_tracer_launch_replay_conflict_exit(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    app, s, exits = rig(tmp_path, tail="exit 0")
+    gate = tmp_path / "release"
+    app, s, exits = rig(tmp_path, tail=gated_exit(gate))
     bodies: list[bytes] = []
 
     async def main() -> None:
@@ -59,6 +69,7 @@ def test_tracer_launch_replay_conflict_exit(
         assert (first.status, first.json()) == (201, {"status": "accepted"})
         assert (replay.status, replay.json()) == (200, {"status": "replayed"})
         assert (conflict.status, conflict.json()) == (409, {"error": "conflict"})
+        gate.touch()
         await exits.wait()
 
     asyncio.run(main())
@@ -182,7 +193,8 @@ def test_lifespan_prepares_and_shuts_down(tmp_path: Path) -> None:
 
 def test_controller_desktop_client_round_trip(tmp_path: Path) -> None:
     """02's DesktopClient against this agent: the shared contract agrees."""
-    app, _s, exits = rig(tmp_path, tail="exit 0")
+    gate = tmp_path / "release"
+    app, _s, exits = rig(tmp_path, tail=gated_exit(gate))
     loop_box: list[asyncio.AbstractEventLoop] = []
 
     def transport(req: HttpRequest) -> HttpResponse:
@@ -202,11 +214,15 @@ def test_controller_desktop_client_round_trip(tmp_path: Path) -> None:
         )
         result = await client.launch(NAME, "gen-a", JIT)
         assert result.outcome is LaunchOutcome.ACCEPTED
-        assert (await client.launch(NAME, "gen-a", JIT)).outcome in (
-            LaunchOutcome.REPLAYED,
-            LaunchOutcome.ACCEPTED,
+        # Child alive: the retry is a live replay.
+        assert (await client.launch(NAME, "gen-a", JIT)).outcome is (
+            LaunchOutcome.REPLAYED
         )
+        gate.touch()
         await exits.wait()
+        # Child gone: the retry reports the finished outcome and exit code.
+        finished = await client.launch(NAME, "gen-a", JIT)
+        assert (finished.outcome, finished.exit_code) == (LaunchOutcome.FINISHED, 0)
         assert await client.find(NAME, "gen-a") is False
         assert await client.stop(NAME) is True  # 404 → already gone
 

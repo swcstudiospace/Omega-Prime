@@ -58,6 +58,9 @@ log = logging.getLogger(__name__)
 
 MAX_PENDING_WEBHOOKS = 256
 DEMAND_CHECK_CONCURRENCY = 4
+# Exit callbacks held while startup is still reconciling (bounded; the pool
+# itself is capped far below this).
+STARTUP_EXIT_MEMORY = 64
 
 
 class Controller:
@@ -88,6 +91,7 @@ class Controller:
         self._demand = demand
         self._saved_demand: tuple[int, ...] | None = None
         self.ready = asyncio.Event()
+        self._startup_exits: dict[tuple[str, str], int] = {}
 
     # -- admission (called from HTTP handlers; never blocks) -------------------
 
@@ -104,7 +108,23 @@ class Controller:
         self._queue.put_nowait((False, event))
 
     def runner_exited(self, name: str, generation: str, exit_code: int) -> bool:
-        """Agent callback. Only a registered (name, generation) is accepted."""
+        """Agent callback. Only a registered (name, generation) is accepted.
+
+        Before startup has applied ``ControllerStarted`` no runner is
+        registered yet, but the agent sends each exit exactly once. Those
+        callbacks are held and replayed right after startup for any runner
+        the snapshot restored, so a runner that exits while startup awaits
+        GitHub or the agent is never restored as a live IDLE runner.
+        """
+        if not self.ready.is_set():
+            key = (name, generation)
+            if (
+                key not in self._startup_exits
+                and len(self._startup_exits) >= STARTUP_EXIT_MEMORY
+            ):
+                return False
+            self._startup_exits[key] = exit_code
+            return True
         if not self.scaler.registered(name, generation):
             return False
         self.submit(RunnerExited(name, generation, exit_code))
@@ -151,12 +171,20 @@ class Controller:
         self.submit(event)
 
     async def _run(self) -> None:
-        started = await self._snapshot()
+        # Saved demand is checked first so the runner snapshot is the last
+        # await before ControllerStarted is applied (freshest inventory).
+        queued: tuple[WorkflowJob, ...] | None = None
         if self._demand is not None:
             queued = await self._verified_demand(self._demand.load())
+        started = await self._snapshot()
+        if queued is not None:
             started = dataclasses.replace(started, queued=queued)
         self._apply(self.scaler.handle(started))
         self._persist_demand()
+        held, self._startup_exits = self._startup_exits, {}
+        for (name, generation), code in held.items():
+            if self.scaler.registered(name, generation):
+                self.submit(RunnerExited(name, generation, code))
         self.ready.set()
         while True:
             external, event = await self._queue.get()
@@ -408,4 +436,9 @@ class Controller:
         return ReapOutcome.DONE
 
 
-__all__ = ["DEMAND_CHECK_CONCURRENCY", "MAX_PENDING_WEBHOOKS", "Controller"]
+__all__ = [
+    "DEMAND_CHECK_CONCURRENCY",
+    "MAX_PENDING_WEBHOOKS",
+    "STARTUP_EXIT_MEMORY",
+    "Controller",
+]

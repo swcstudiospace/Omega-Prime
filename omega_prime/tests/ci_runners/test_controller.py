@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from omega_prime.ci_runners.controller import STARTUP_EXIT_MEMORY
 from omega_prime.ci_runners.github import AppTokenSource
 from omega_prime.ci_runners.http import TransportError
 from omega_prime.ci_runners.jobs import (
@@ -520,6 +521,58 @@ def test_restart_with_no_live_job_lets_idle_runners_be_reaped(tmp_path: Path) ->
     assert rig.scaler.queued == {}
     runner = rig.only()
     assert runner.state is RunnerState.IDLE and rig.scaler.armed(runner.name)
+
+
+def test_exit_during_startup_is_applied_once_runners_are_restored() -> None:
+    """The agent's one exit callback lands while startup still awaits the
+    snapshot: it is held and applied after ControllerStarted, so the dead
+    runner is not restored as a live IDLE runner that pins a slot."""
+    http = routes()
+    http.on(
+        "GET",
+        ORG,
+        resp(200, {"runners": [{"id": 42, "name": "omega-ci-x", "busy": False}]}),
+    )
+    accepted: list[bool] = []
+    loop: list[asyncio.AbstractEventLoop] = []
+
+    def inventory(_request: Any) -> Any:
+        # The child exits right after the agent reported it (transport runs in
+        # a worker thread; the callback is delivered on the event loop).
+        loop[0].call_soon_threadsafe(
+            lambda: accepted.append(rig.ctrl.runner_exited("omega-ci-x", "g", 0))
+        )
+        return resp(200, [{"name": "omega-ci-x", "generation": "g"}])
+
+    http.on("GET", "/v1/runners", inventory)
+    rig = Rig(http, max_runners=1)
+
+    async def main() -> None:
+        loop.append(asyncio.get_running_loop())
+        await rig.ctrl.start()
+        try:
+            await rig.ctrl.settle()
+        finally:
+            await rig.ctrl.stop()
+
+    asyncio.run(main())
+    assert accepted == [True]
+    assert rig.scaler.runners == {}
+    assert "exited" in rig.publisher.types()
+
+
+def test_startup_exit_memory_is_bounded() -> None:
+    rig = Rig(routes())
+    held = [
+        rig.ctrl.runner_exited(f"omega-ci-{n}", "g", 0)
+        for n in range(STARTUP_EXIT_MEMORY)
+    ]
+    assert all(held)
+    assert rig.ctrl.runner_exited("omega-ci-0", "g", 1)  # same key: replaced
+    assert not rig.ctrl.runner_exited("omega-ci-extra", "g", 0)
+    # None of the held exits names a restored runner, so none is applied.
+    scenario(rig, lambda r: r.ctrl.settle())
+    assert rig.scaler.runners == {} and "exited" not in rig.publisher.types()
 
 
 def test_finished_replay_releases_the_reservation() -> None:
