@@ -1,0 +1,125 @@
+{
+  "task_id": "00055-ci-runner-workdir",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-24T05:13:00+11:00",
+  "completed_at": "2026-10-24T05:45:00+11:00",
+  "base_commit": "09cbfe7",
+  "commands": [
+    {
+      "cmd": "cd /tmp/ar/t/parent/work/r1 (real actions/runner 2.338.1, parent chmod 0311 = owner lacks read, the 0711 failure mode) && ./run.sh",
+      "exit_code": 0,
+      "output_tail": "An error occurred: Permission to read the directory contents is required for '/tmp/ar/t/parent/work/r1' and each directory up the hierarchy. Access to the path '/tmp/ar/t/parent' is denied.\nRunner listener exit with terminated error, stop the service, no retry needed.\nExiting runner...  (exit code 0)"
+    },
+    {
+      "cmd": "same tree, parent chmod 0755 && ./run.sh",
+      "exit_code": 0,
+      "output_tail": "An error occurred: Not configured. Run config.(sh/cmd) to configure the runner.  (exit code 0: past the directory check)"
+    },
+    {
+      "cmd": "simulated Dockerfile build check (cp -a runner into a 0755 work root, 0700 probe dir, env -i ... ./run.sh; grep logic) as non-root box user",
+      "exit_code": 0,
+      "output_tail": "Not configured ... CHECK_PASS"
+    },
+    {
+      "cmd": "base 09cbfe7 scaler.py/supervisor.py swapped in: pytest test_scaler.py -k exit_zero; test_workdir_permissions.py",
+      "exit_code": 1,
+      "output_tail": "FAILED test_exit_zero_before_a_job_backs_off\nFAILED test_exit_zero_before_a_job_opens_the_circuit_without_looping\n(test_workdir_permissions.py: collection error, new helpers absent)"
+    },
+    {
+      "cmd": "python -m pytest omega_prime/tests/ci_runners -q -p no:cacheprovider",
+      "exit_code": 0,
+      "output_tail": "........................................................................ [ 86%]\n...............................s....................................s    [100%]\n499 passed, 2 skipped in 4.15s"
+    },
+    {
+      "cmd": "OMEGA_CI_TEST_RUNNER_ROOT=/tmp/ar/root python -m pytest omega_prime/tests/ci_runners/test_workdir_permissions.py -q -p no:cacheprovider -rs  # real actions/runner 2.338.1, sha256-verified",
+      "exit_code": 0,
+      "output_tail": "............                                                             [100%]\n12 passed in 0.51s"
+    },
+    {
+      "cmd": "python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_env_inventory.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_prompt_format.py -q -p no:cacheprovider",
+      "exit_code": 0,
+      "output_tail": "........................................................................ [ 93%]\n.....                                                                    [100%]\n77 passed in 13.94s"
+    },
+    {
+      "cmd": "ruff check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "\u001b[1;32mAll checks passed!\u001b[0m"
+    },
+    {
+      "cmd": "ruff format --check omega_prime/",
+      "exit_code": 0,
+      "output_tail": "774 files already formatted"
+    },
+    {
+      "cmd": "mypy omega_prime/",
+      "exit_code": 0,
+      "output_tail": "Success: no issues found in 647 source files"
+    },
+    {
+      "cmd": "polyglot-check --no-daemon --changed HEAD",
+      "exit_code": 0,
+      "output_tail": "polyglot-check: 0 error(s), 0 warning(s) in 6/6 file(s) checked [pyright] 4794ms"
+    },
+    {
+      "cmd": "python -m omega_prime.tooling.env_inventory --check",
+      "exit_code": 0,
+      "output_tail": ""
+    },
+    {
+      "cmd": "bash omega_prime/scripts/assemble-prompts.sh --check",
+      "exit_code": 0,
+      "output_tail": "assemble-prompts --check: OMEGA_PRIME up to date"
+    },
+    {
+      "cmd": "git diff --check HEAD",
+      "exit_code": 0,
+      "output_tail": ""
+    },
+    {
+      "cmd": "pytest omega_prime/tests/ci_runners omega_prime/tests/test_setup_check.py omega_prime/tests/test_prompt_format.py omega_prime/tests/test_grokbot_sync.py omega_prime/tests/test_lead.py omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py; ruff check; ruff format --check; mypy omega_prime/ci_runners; assemble --check",
+      "exit_code": 0,
+      "output_tail": "598 passed, 2 skipped; 33 passed; ruff/mypy clean; OMEGA_PRIME up to date"
+    }
+  ],
+  "claims": [
+    "Root cause reproduced with the real actions/runner 2.338.1: an unreadable ancestor makes run.sh print 'Permission to read the directory contents is required ... each directory up the hierarchy' and exit 0.",
+    "Dockerfile: /var/lib/omega-ci and /var/lib/omega-ci/work are root:root 0755 (was 0711); a build step runs the real run.sh as the job UID/GID via setpriv in the real work root and fails on the directory error or unless it reaches 'Not configured'.",
+    "Supervisor.prepare(): work root chmod 0755 (was 0711); with a separate job identity it raises UnsafeWorkdir unless the work root and every ancestor are o+rx. Per-runner workdirs remain 0700 job-owned; hook/policy checks unchanged.",
+    "Scaler: any exit while STARTING/IDLE counts as a failed launch regardless of exit code -> backoff 15/30/60/120 s (cap 240) and circuit open after 5 (launch_circuit_open with queued + action). completed webhook naming a pool runner resets failures. Regression tests fail on base.",
+    "Agent: runner stdout+stderr relayed to the agent log (200 lines / 64 KiB per runner, per-line redaction incl. long opaque blobs, pipe always drained); on pre-job exit the newest _diag log tail (60 lines / 8 KiB, O_NOFOLLOW) is logged redacted before the workdir is deleted.",
+    "Prompt: ci_runner_scope gains Ove's 2026-10-24 rule (all CI/CD on [self-hosted, linux, x64, omega-ci], never GitHub-hosted; extend image/pool instead). OMEGA_PRIME.xml reassembled; noted in docs/ci-runners.md.",
+    "Greptile P1 (open pipes hold runner slots) fixed: runner output now uses an agent-owned os.pipe(), so process.wait() returns on run.sh exit even when a leftover helper holds the pipe; the drain is bounded by term_grace_s, then the runner session is SIGKILLed. Regression test_leftover_process_holding_the_output_pipe_cannot_hold_the_slot fails on the previous head and passes now.",
+    "Greptile P1 (log reads can freeze cleanup) fixed: diag_tail opens with O_NONBLOCK and refuses non-regular files after fstat; _log_diag is bounded by term_grace_s. Regression test_diag_tail_never_blocks_on_a_fifo_swapped_in_after_the_listing fails on the previous head and passes now.",
+    "Docs, README, repo-setup guide, actionlint config and ci_runner_scope no longer carve out a vps-docker runner: Docker-needing jobs migrate onto omega-ci using binaries baked into the runner image (task 00056)."
+  ],
+  "unverified": [
+    "No docker build of the Desktop image (no docker on the box): the new Dockerfile build-check RUN (setpriv as UID 1500 in /var/lib/omega-ci/work) is verified only by simulation as the non-root box user, not in the real image. setpriv presence in the accetto base is assumed (util-linux).",
+    "The real-runner pytest runs as the non-root box user owning the tree, not as a distinct job UID (needs root).",
+    "No live Railway/VPS/GitHub run; the smoke workflow must be re-dispatched after the Desktop rebuilds from main.",
+    "Full omega_prime/tests suite not run locally; CI covers it.",
+    "Pool-level circuit only: there is no separate per-job breaker; the pool circuit stops all launches after 5 consecutive pre-job exits."
+  ],
+  "files_changed": [
+    ".receipts/bot-00-omega-prime/00055-ci-runner-workdir.json",
+    "CHANGELOG.md",
+    "deploy/ci-runner-desktop/Dockerfile",
+    "deploy/ci-runner-desktop/README.md",
+    "docs/ci-runners.md",
+    "omega_prime/ci_runners/agent/supervisor.py",
+    "omega_prime/ci_runners/scaler.py",
+    "omega_prime/prompts-assembled/OMEGA_PRIME.xml",
+    "omega_prime/prompts/_shared/core-directives.xml",
+    "omega_prime/tests/ci_runners/test_controller.py",
+    "omega_prime/tests/ci_runners/test_scaler.py",
+    "omega_prime/tests/ci_runners/test_supervisor.py",
+    "omega_prime/tests/ci_runners/test_workdir_permissions.py",
+    ".github/actionlint.yaml",
+    "docs/ci-runners-repo-setup.md"
+  ],
+  "contract_changes": [
+    "error event exited_before_job gains exit_code; launch_circuit_open gains queued and action; agent log now contains redacted runner output lines."
+  ],
+  "rollback_plan": "Revert the PR. Reverting restores 0711 (runners cannot start) and the exit-0 hot loop, so keep the controller stopped if reverted.",
+  "approvals": [],
+  "approved_by": null
+}

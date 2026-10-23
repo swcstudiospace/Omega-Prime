@@ -4,8 +4,10 @@ One reservation is one ``run.sh`` child. The JIT config crosses into the child
 only as ``ACTIONS_RUNNER_INPUT_JITCONFIG`` in its scrubbed environment; it is
 never written to disk, put on argv, logged, returned, or kept after spawn.
 
-Completion is pushed by the child's own ``process.wait()``; there are no
-timers, polling or sleep loops. Termination escalates SIGTERM → SIGKILL once,
+Completion is pushed by the child's own ``process.wait()``, which tracks the
+process exit only (output goes through a pipe the agent owns, so a leftover
+helper holding it cannot delay the exit); the output drain after exit is
+bounded by the grace period. There are no polling or sleep loops. Termination escalates SIGTERM → SIGKILL once,
 bounded by one ``wait_for``.
 
 Isolation (documented, not overstated):
@@ -16,6 +18,16 @@ Isolation (documented, not overstated):
 * Children share that UID, so per-runner workdirs (0700) are hygiene, not a
   confidentiality boundary between concurrent jobs. ``nice`` and rlimits are
   resource guards only. No Docker / privileged access is provided.
+* The work root and every directory above it must be listable (r-x) by the
+  job identity: actions/runner refuses to start otherwise ("Permission to read
+  the directory contents is required for ... and each directory up the
+  hierarchy") and exits 0 within a second. ``prepare()`` makes the work root
+  0755 and checks the chain, so a bad image fails at agent startup instead of
+  at every launch. Nothing secret lives in those directories.
+
+Each child's stdout/stderr, and the tail of its ``_diag`` logs when it exits
+without having taken a job, go to the agent log: bounded and redacted (secret
+patterns plus any long opaque blob, so a JIT config can never be echoed).
 """
 
 from __future__ import annotations
@@ -39,6 +51,7 @@ from typing import Any
 
 from omega_prime.ci_runners.agent.jobhook import policy_document
 from omega_prime.ci_runners.settings import RUNNER_NAME_RE
+from omega_prime.credentials.redact import REDACTED, redact_text
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +67,34 @@ SPAWN_FAILED = -1  # exit_code reported when the child never ran
 FINISHED_MEMORY = 1024  # (name, generation) identities kept after cleanup
 GENERATION_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 JIT_RE = re.compile(r"^[A-Za-z0-9+/=_-]{1,65536}$")
+WORK_ROOT_MODE = 0o755  # listable by the job identity (actions/runner requires it)
+LISTABLE = stat.S_IROTH | stat.S_IXOTH
+# Child output relayed to the agent log: bounded per child, redacted per line.
+LOG_MAX_LINES = 200
+LOG_MAX_BYTES = 64 * 1024
+LOG_LINE_CAP = 500
+DIAG_TAIL_BYTES = 8 * 1024
+DIAG_TAIL_LINES = 60
+JOB_STARTED_MARKER = "Running job:"
+_BLOB_RE = re.compile(r"[A-Za-z0-9+/=_.-]{64,}")
+_PATH_SEGMENT_MAX = 32
+
+
+def _blob(match: re.Match[str]) -> str:
+    """Redact a long opaque run (JIT config, JWT, encoded key); keep paths.
+
+    A path is kept only when it starts with ``/`` and every segment is short
+    and free of base64 padding/plus signs, which a long base64 value almost
+    never satisfies, so the runner's own directory errors stay readable.
+    """
+    text = match.group(0)
+    if text.startswith("/") and all(
+        len(part) <= _PATH_SEGMENT_MAX and "+" not in part and "=" not in part
+        for part in text.split("/")
+    ):
+        return text
+    return REDACTED
+
 
 Notify = Callable[[dict[str, Any]], Awaitable[None]]
 Spawn = Callable[..., Awaitable[Any]]
@@ -82,6 +123,8 @@ class Child:
     process: Any = field(default=None, repr=False)
     exited: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     task: asyncio.Task[None] | None = field(default=None, repr=False)
+    output: asyncio.Task[None] | None = field(default=None, repr=False)
+    took_job: bool = False  # the runner printed "Running job:"
 
     def row(self) -> dict[str, Any]:
         return {
@@ -218,6 +261,86 @@ def limit_child(
         setrlimit(limit, (cap, cap))
 
 
+def redact_runner_line(line: str, cap: int = LOG_LINE_CAP) -> str:
+    """One runner output line, safe for the agent log.
+
+    Known secret shapes (GitHub tokens, Bearer values, ``token=...``) plus any
+    long opaque blob (a JIT config, JWT or encoded credential is one) become
+    ``[REDACTED]``; control characters are dropped and the line is capped.
+    """
+    text = "".join(ch for ch in line if ch.isprintable() or ch == "\t")
+    text = redact_text(text)
+    text = _BLOB_RE.sub(_blob, text)
+    if len(text) > cap:
+        text = text[:cap] + "…"
+    return text
+
+
+def diag_tail(
+    workdir: Path, max_bytes: int = DIAG_TAIL_BYTES, max_lines: int = DIAG_TAIL_LINES
+) -> list[str]:
+    """Redacted tail of the newest ``_diag`` log (empty when there is none).
+
+    Reads only regular files directly in ``_diag`` (no symlinks followed, and
+    the opened file itself must be regular: a FIFO or device swapped in after
+    the listing is refused without blocking), and at most ``max_bytes`` from
+    the end, so a job cannot make the agent read elsewhere, read a lot, or
+    stall.
+    """
+    diag = workdir / "_diag"
+    try:
+        if not stat.S_ISDIR(os.lstat(diag).st_mode):
+            return []
+        logs = []
+        for entry in os.scandir(diag):
+            if entry.name.endswith(".log") and entry.is_file(follow_symlinks=False):
+                logs.append((entry.stat(follow_symlinks=False).st_mtime, entry.path))
+        if not logs:
+            return []
+        newest = max(logs)[1]
+        # O_NONBLOCK: a job owns ``_diag`` and can swap the checked file for a
+        # FIFO before the open; a blocking open of a writer-less FIFO would
+        # never return and hold the slot. The opened file is then re-checked.
+        fd = os.open(newest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as fh:
+            info = os.fstat(fh.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                return []
+            size = info.st_size
+            fh.seek(max(0, size - max_bytes))
+            raw = fh.read(max_bytes)
+    except OSError:
+        return []
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    if len(raw) == max_bytes and lines:
+        lines = lines[1:]  # first line is probably cut mid-way
+    return [redact_runner_line(line) for line in lines[-max_lines:] if line.strip()]
+
+
+def ensure_listable_chain(path: Path, top: Path | None = None) -> None:
+    """Fail closed unless ``path`` and every ancestor are r-x for others.
+
+    actions/runner checks read permission on its directory and each one up the
+    hierarchy; without it the runner exits within a second (exit code 0).
+    ``top`` (tests only) stops the walk at that ancestor, inclusive.
+    """
+    chain = [path, *path.parents]
+    if top is not None:
+        chain = chain[: chain.index(top) + 1]
+    for directory in chain:
+        try:
+            mode = directory.stat().st_mode
+        except OSError as exc:
+            raise UnsafeWorkdir(
+                f"{directory}: not readable ({type(exc).__name__})"
+            ) from exc
+        if mode & LISTABLE != LISTABLE:
+            raise UnsafeWorkdir(
+                f"{directory}: mode {stat.S_IMODE(mode):04o} is not listable by"
+                " the job identity (needs o+rx; actions/runner refuses to start)"
+            )
+
+
 class Supervisor:
     def __init__(
         self,
@@ -333,7 +456,9 @@ class Supervisor:
                     "OMEGA_CI_AGENT_REPOS unset: the job guard refuses every job"
                 )
         self.work_root.mkdir(parents=True, exist_ok=True)
-        self.work_root.chmod(0o711)
+        self.work_root.chmod(WORK_ROOT_MODE)
+        if self.job_uid is not None:
+            ensure_listable_chain(self.work_root)
         for entry in self.work_root.iterdir():
             if RUNNER_NAME_RE.match(entry.name) and entry.name not in self.children:
                 shutil.rmtree(entry, ignore_errors=True)
@@ -350,32 +475,49 @@ class Supervisor:
     async def _run(self, child: Child, jit: str) -> None:
         workdir = self.work_root / child.name
         exit_code: int | None = SPAWN_FAILED
+        output: asyncio.ReadTransport | None = None
         try:
             await asyncio.to_thread(
                 build_workdir, self.runner_root, workdir, self.job_uid, self.job_gid
             )
             if child.stop_requested:
                 return
-            child.process = await self._spawn(
-                str(workdir / "run.sh"),
-                cwd=str(workdir),
-                env=child_env(self._base_env, jit, workdir, self.job_hook),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=True,
-                user=self.job_uid,
-                group=self.job_gid,
-                extra_groups=[] if self.job_gid is not None else None,
-                preexec_fn=limit_child,
-            )
+            # Our own pipe, not asyncio's PIPE: with PIPE, process.wait() does
+            # not return until every holder of the write end closes it, so a
+            # helper left alive by run.sh would keep the slot forever. Here
+            # wait() tracks the process exit alone and the relay is drained
+            # separately, bounded by the grace period.
+            read_fd, write_fd = os.pipe()
+            stream: asyncio.StreamReader | None = None
+            try:
+                stream, output = await self._open_output(read_fd)
+                child.process = await self._spawn(
+                    str(workdir / "run.sh"),
+                    cwd=str(workdir),
+                    env=child_env(self._base_env, jit, workdir, self.job_hook),
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=write_fd,
+                    stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
+                    user=self.job_uid,
+                    group=self.job_gid,
+                    extra_groups=[] if self.job_gid is not None else None,
+                    preexec_fn=limit_child,
+                )
+            finally:
+                os.close(write_fd)  # the child holds its own copy
             del jit
             child.pid = child.process.pid
             if child.stop_requested:
                 asyncio.get_running_loop().create_task(self._terminate(child))
             else:
                 child.status = "running"
+            assert stream is not None
+            child.output = asyncio.get_running_loop().create_task(
+                self._relay(child, stream)
+            )
             exit_code = await child.process.wait()
+            await self._drain_output(child)
         except asyncio.CancelledError:
             if child.process is not None and child.process.returncode is None:
                 await self._terminate(child)
@@ -385,10 +527,108 @@ class Supervisor:
         finally:
             code = SPAWN_FAILED if exit_code is None else exit_code
             child.exited.set()
+            if child.output is not None and not child.output.done():
+                child.output.cancel()
+            if output is not None:
+                output.close()
+            if (
+                child.process is not None
+                and not child.took_job
+                and not child.stop_requested
+            ):
+                await self._log_diag(child, workdir, code)
             await asyncio.to_thread(shutil.rmtree, workdir, True)
             self._remember_finished(child, code)  # before the live record goes
             self.children.pop(child.name, None)
             await self._send_exit(child, code)
+
+    @staticmethod
+    async def _open_output(
+        read_fd: int,
+    ) -> tuple[asyncio.StreamReader, asyncio.ReadTransport]:
+        """Async reader over the read end of the child's output pipe.
+
+        Takes ownership of ``read_fd``: it is closed here on failure and by
+        closing the returned transport otherwise.
+        """
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        pipe = os.fdopen(read_fd, "rb", buffering=0, closefd=True)
+        try:
+            transport, _ = await loop.connect_read_pipe(
+                lambda: asyncio.StreamReaderProtocol(reader), pipe
+            )
+        except BaseException:
+            pipe.close()
+            raise
+        return reader, transport
+
+    async def _drain_output(self, child: Child) -> None:
+        """After run.sh exits, give its output ``grace`` seconds to finish.
+
+        If the pipe is still open then, a leftover process in the runner's
+        session holds it: stop that session and give up on the rest, so the
+        slot is released and the exit reported either way.
+        """
+        if child.output is None:
+            return
+        done, _ = await asyncio.wait({child.output}, timeout=self._grace)
+        if done:
+            return
+        log.warning(
+            "runner %s exited but its output stayed open for %.0fs; stopping"
+            " leftover processes in its session",
+            child.name,
+            self._grace,
+        )
+        if child.pid is not None:
+            self._signal(child.pid, signal.SIGKILL)
+        child.output.cancel()
+
+    async def _relay(self, child: Child, stream: asyncio.StreamReader) -> None:
+        """Copy child output to the agent log, bounded; always drain the pipe."""
+        lines = 0
+        size = 0
+        truncated = False
+        while True:
+            try:
+                raw = await stream.readline()
+            except ValueError:  # one line over the reader's limit: skip it
+                raw = b"\n"
+            except Exception:
+                return
+            if not raw:
+                return
+            text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if JOB_STARTED_MARKER in text:
+                child.took_job = True
+            if lines >= LOG_MAX_LINES or size >= LOG_MAX_BYTES:
+                if not truncated:
+                    truncated = True
+                    log.info("runner %s: further output not logged", child.name)
+                continue  # keep draining so the child never blocks on the pipe
+            safe = redact_runner_line(text)
+            if safe:
+                lines += 1
+                size += len(safe)
+                log.info("runner %s: %s", child.name, safe)
+
+    async def _log_diag(self, child: Child, workdir: Path, code: int) -> None:
+        try:  # optional logging never holds up cleanup
+            tail = await asyncio.wait_for(
+                asyncio.to_thread(diag_tail, workdir), self._grace
+            )
+        except TimeoutError:
+            tail = []
+        log.warning(
+            "runner %s exited (code %s) before taking a job; _diag tail follows"
+            " (%d lines)",
+            child.name,
+            code,
+            len(tail),
+        )
+        for line in tail:
+            log.warning("runner %s diag: %s", child.name, line)
 
     def _remember_finished(self, child: Child, exit_code: int) -> None:
         self._finished[child.name] = (child.generation, exit_code)
@@ -444,6 +684,9 @@ __all__ = [
     "check_hook",
     "check_private",
     "child_env",
+    "diag_tail",
+    "ensure_listable_chain",
     "limit_child",
+    "redact_runner_line",
     "write_job_policy",
 ]

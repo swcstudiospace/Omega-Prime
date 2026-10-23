@@ -241,8 +241,10 @@ def test_exit_callback_requires_registered_generation() -> None:
     names: list[str] = []
     scenario(rig, body)
     assert names[0] not in rig.scaler.runners and "exited" in rig.publisher.types()
-    # Job 101 is still queued, so the scaler (correctly) launched a replacement.
-    assert len(rig.scaler.runners) == 1
+    # It exited (code 0) before taking job 101: a failed launch, so the
+    # still-queued job waits for the backoff instead of an instant relaunch.
+    assert rig.scaler.runners == {} and rig.scaler.hold == "failure"
+    assert 101 in rig.scaler.queued
 
 
 def test_startup_reconcile_reaps_orphans_and_keeps_busy() -> None:
@@ -593,15 +595,13 @@ def test_finished_replay_releases_the_reservation() -> None:
 
     scenario(rig, body)
     types = rig.publisher.types()
-    # The dead runner's slot was freed, so the still-queued job got a fresh
-    # runner instead of waiting behind a reservation that never resolves.
-    assert types.count("launch_requested") == 2 and "exited" in types
-    first, second = (
-        e["data"]["name"]
-        for e in rig.publisher.events
-        if e["type"].endswith("launch_requested")
-    )
-    assert first != second and list(rig.scaler.runners) == [second]
+    # The dead runner's slot was freed (no reservation left that never
+    # resolves). It exited before taking a job, so even with exit code 0 the
+    # still-queued job waits for the backoff retry rather than relaunching.
+    assert types.count("launch_requested") == 1 and "exited" in types
+    assert "launch_backoff" in types
+    assert rig.scaler.runners == {} and rig.scaler.hold == "failure"
+    assert 101 in rig.scaler.queued
 
 
 def test_finished_replay_with_failure_backs_off() -> None:
