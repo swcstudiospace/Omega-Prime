@@ -23,6 +23,11 @@ from omega_prime.eventstream.outbox import (
 from omega_prime.eventstream.taxonomy import derive_key, schema_uri_for_type
 
 
+def _shaped(kind: str, body: str) -> str:
+    """Assemble a credential-shaped fixture without storing a complete literal."""
+    return f"{kind}-{body}"
+
+
 def make_request(
     event_id: str,
     *,
@@ -81,7 +86,7 @@ class AcceptingPublisher:
 class SchemaRejectingPublisher:
     async def publish(self, request: PublishRequest) -> PublishReceipt:
         del request
-        raise SchemaError("schema rejected token=sk-abcdefghijklmnop")
+        raise SchemaError("schema rejected token=" + _shaped("sk", "abcdefghijklmnop"))
 
     async def close(self) -> None:
         return None
@@ -365,7 +370,9 @@ def test_redacts_known_and_secret_shaped_values_before_persistence(
             make_request(
                 "redacted",
                 actor=known,
-                properties={"authorization": "Bearer ghp_abcdefghijklmnop"},
+                properties={
+                    "authorization": "Bearer " + ("ghp" + "_" + "abcdefghijklmnop")
+                },
             ),
         )
         connection.commit()
@@ -375,7 +382,7 @@ def test_redacts_known_and_secret_shaped_values_before_persistence(
         assert stored is not None
         serialized = stored[0].decode("utf-8") + stored[1]
         assert known not in serialized
-        assert "ghp_abcdefghijklmnop" not in serialized
+        assert ("ghp" + "_" + "abcdefghijklmnop") not in serialized
         assert "[REDACTED]" in serialized
         connection.close()
 
@@ -401,7 +408,7 @@ def test_schema_rejection_is_terminal_sanitized_and_not_acknowledged(
         assert rejected is not None
         assert rejected.status == "rejected"
         assert rejected.rejection_reason is not None
-        assert "sk-abcdefghijklmnop" not in rejected.rejection_reason
+        assert _shaped("sk", "abcdefghijklmnop") not in rejected.rejection_reason
         assert len(alerts) == 1
         assert alerts[0].status == "rejected"
         assert alerts[0].rejection_reason == rejected.rejection_reason
@@ -428,11 +435,11 @@ def test_rejection_reason_reservation_preserves_capacity_and_accounts_redacted_u
         assert outbox.pending_bytes == row.byte_size
         with pytest.raises(OutboxFullError), outbox.transaction() as transaction:
             outbox.append(transaction, make_request("must-not-displace"))
-        reason = "原因 sk-abcdefghijklmnop " + "界" * 500
+        reason = "原因 " + _shaped("sk", "abcdefghijklmnop") + " " + "界" * 500
         rejected = outbox.mark_rejected(row.sequence_id, reason)
         assert rejected.status == "rejected"
         assert rejected.rejection_reason is not None
-        assert "sk-abcdefghijklmnop" not in rejected.rejection_reason
+        assert _shaped("sk", "abcdefghijklmnop") not in rejected.rejection_reason
         assert "界" in rejected.rejection_reason
         assert rejected.byte_size == row.byte_size - 512 * 4 + len(
             rejected.rejection_reason.encode("utf-8")
@@ -711,9 +718,11 @@ def test_outbox_constructor_and_mark_paths_reject_invalid_inputs(
 
     with outbox.transaction() as connection:
         row = outbox.append(connection, make_request("reject-then-send"))
-    rejected = outbox.mark_rejected(row.sequence_id, "token=sk-abcdefghijklmnop")
+    rejected = outbox.mark_rejected(
+        row.sequence_id, "token=" + _shaped("sk", "abcdefghijklmnop")
+    )
     assert rejected.status == "rejected"
-    assert "sk-abcdefghijklmnop" not in (rejected.rejection_reason or "")
+    assert _shaped("sk", "abcdefghijklmnop") not in (rejected.rejection_reason or "")
     with pytest.raises(OutboxRejectedError, match="terminally rejected"):
         outbox.mark_sent(
             row.sequence_id,

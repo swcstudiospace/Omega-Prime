@@ -55,8 +55,8 @@ def _commented_event() -> CloudEvent:
             "repo": "acme/widget",
             "number": 17,
             "head_sha": "abc123",
-            "actor": "reviewer",
-            "reviewer": "reviewer",
+            "actor": "greptile-apps[bot]",
+            "reviewer": "greptile-apps[bot]",
             "comment_id": "c-1",
         },
     )
@@ -68,6 +68,8 @@ def _commented_event() -> CloudEvent:
         ("Score: 92", 92),
         ("Greptile score: 92%", 92),
         ("Confidence score: 92/100", 92),
+        ("Confidence score: 4/5", 80),
+        ("<!-- greptile_confidence_score: 5 -->", 100),
     ],
 )
 def test_explicit_score_grammars_preserve_identity(text: str, score: int) -> None:
@@ -159,6 +161,22 @@ def test_process_rejects_own_output_source() -> None:
     context = _Context({"comment_body": "Score: 92"})
 
     process(event.to_bytes(), context)
+    assert not context.published
+
+
+def test_process_rejects_non_greptile_actors() -> None:
+    event = _commented_event()
+    forged = CloudEvent(
+        specversion=event.specversion,
+        id=event.id,
+        source=event.source,
+        type=event.type,
+        datacontenttype=event.datacontenttype,
+        dataschema=event.dataschema,
+        data={**dict(event.data), "actor": "alice", "reviewer": "alice"},
+    )
+    context = _Context({"comment_body": "Score: 100"})
+    process(forged.to_bytes(), context)
     assert not context.published
 
 

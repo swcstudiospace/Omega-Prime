@@ -420,7 +420,7 @@ async def test_redelivery_consumers_require_auth_decryption_keys() -> None:
 
 @pytest.mark.asyncio
 async def test_subscription_modes_individual_ack_and_reader_seek() -> None:
-    import pulsar
+    pulsar = pytest.importorskip("pulsar")
 
     native = FakeClient()
     bus = _bus(native)

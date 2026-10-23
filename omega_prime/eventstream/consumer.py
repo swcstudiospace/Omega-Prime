@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -119,7 +118,7 @@ class ConsumerRuntime:
             or self.queue_size < 1
         ):
             raise ValueError("receiver_queue_size must be a positive integer")
-        self.target = target
+        self.target = subscription if target is None else target
         self.known_secrets = known_secrets
         self.close_consumers = close_consumers or (subscriber,)
         self.flush_producers = flush_producers
@@ -283,7 +282,6 @@ class ConsumerRuntime:
         self._active += 1
         if self.observer:
             self.observer.handler_in_flight(self._active)
-        started = time.monotonic()
         try:
             try:
                 outcome = await self.handler(delivery, context)
@@ -338,12 +336,6 @@ class ConsumerRuntime:
             self._completed += 1
             if self.observer:
                 self.observer.handler_in_flight(self._active)
-                self.observer.consume(
-                    "handled",
-                    time.monotonic() - started,
-                    traceparent=traceparent,
-                    attributes={"subscription": self.subscription},
-                )
 
     async def _close_ordered(self) -> None:
         for consumer in self.close_consumers:

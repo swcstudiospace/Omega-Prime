@@ -257,7 +257,7 @@ class RetryRouter:
         )
         blocked = CloudEvent(
             specversion="1.0",
-            id=event.id,
+            id=f"dlq:{self.subscription}:{event.id}",
             source=event.source,
             type="omega.control.signal.blocked",
             datacontenttype="application/json",
@@ -270,13 +270,18 @@ class RetryRouter:
             topic=f"persistent://omega/system/dlq.{self.subscription}",
             key=key,
             sequence_id=attempt,
-            producer_name=f"omega-eventstream-{event.id}",
+            producer_name=f"omega-eventstream-dlq-{self.subscription}",
             properties={
-                **dict(delivery.properties),
+                **{
+                    key: value
+                    for key, value in dict(delivery.properties).items()
+                    if key != "omega_retry_target"
+                },
                 "omega_attempt": attempt,
                 "omega_origin_topic": str(
                     delivery.properties.get("omega_origin_topic", delivery.topic)
                 ),
+                "omega_source_ce_id": event.id,
                 "omega_last_error": reason,
                 "omega_failure_history": tuple(history),
             },

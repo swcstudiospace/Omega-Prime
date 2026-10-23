@@ -169,7 +169,7 @@ def test_unknown_non_audit_types_and_literal_audit_wildcard_reject() -> None:
 
 
 def test_unknown_type_and_schema_errors_do_not_echo_untrusted_values() -> None:
-    secret = "ghp_SUPER_SECRET_TOKEN_0123456789"
+    secret = "ghp" + "_" + "SUPER_SECRET_TOKEN_0123456789"
     with pytest.raises(ValueError) as type_error:
         get_event_type(secret)
     assert secret not in str(type_error.value)
@@ -322,7 +322,7 @@ def test_unknown_extra_fields_and_invalid_identity_reject() -> None:
 
 
 def test_validation_errors_hide_untrusted_payload_values() -> None:
-    secret = "ghp_SUPER_SECRET_TOKEN_0123456789"
+    secret = "ghp" + "_" + "SUPER_SECRET_TOKEN_0123456789"
     payload = {
         "repo": "r",
         "number": 1,

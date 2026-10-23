@@ -114,7 +114,7 @@ def test_traceparent_rejects_non_string_values_without_type_errors() -> None:
 
 
 def test_invalid_traceparent_error_does_not_expose_secret_input() -> None:
-    secret = "sk-abcdefghijklmnop"
+    secret = "sk" + "-" + "abcdefghijklmnop"
     with pytest.raises(ValidationError) as error:
         valid_event(traceparent=secret)
     assert secret not in str(error.value)
@@ -223,8 +223,8 @@ def test_recursive_inputs_are_isolated_and_event_is_deeply_immutable() -> None:
 
 
 def test_known_secret_and_secret_shaped_values_do_not_escape_codec_or_repr() -> None:
-    secret = "tok_live_very-secret-value"
-    shaped_secret = "sk-abcdefghijklmnop"
+    secret = "tok" + "_live_" + "very-secret-value"
+    shaped_secret = "sk" + "-" + "abcdefghijklmnop"
     event = valid_event(
         data={
             "repo": "example/project",

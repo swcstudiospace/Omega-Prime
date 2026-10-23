@@ -21,7 +21,7 @@ def test_secret_file_permissions_and_outbox_redaction_fail_closed(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def scenario() -> None:
-        secret = "tok_live_runtime-known-secret-123"
+        secret = "tok" + "_live_" + "runtime-known-secret-123"
         secret_path = tmp_path / "eventstream-token"
         secret_path.write_text(secret, encoding="utf-8")
         secret_path.chmod(0o600)

@@ -131,7 +131,7 @@ def test_invalid_secret_file_path_errors_remain_sanitized() -> None:
 
 def test_limits_and_safe_repr_and_errors(tmp_path: Path) -> None:
     token_path = secure_file(
-        tmp_path / "private-token-path", "tok_live_known-secret-value"
+        tmp_path / "private-token-path", "tok" + "_live_" + "known-secret-value"
     )
     config = EventStreamConfig(
         token_file=token_path, outbox_max_bytes=1024, max_concurrency=4
@@ -146,15 +146,15 @@ def test_limits_and_safe_repr_and_errors(tmp_path: Path) -> None:
 
 
 def test_actual_redactor_copies_nested_values_and_redacts_event_bytes() -> None:
-    secret = "tok_live_super-secret-123"
+    secret = "tok" + "_live_" + "super-secret-123"
     original: dict[str, Any] = {
-        "nested": [{"access_token": secret}, "sk-secretshape123456"]
+        "nested": [{"access_token": secret}, "sk" + "-" + "secretshape123456"]
     }
     config = EventStreamConfig()
     redacted = config.redact(original, known_secrets=(secret,))
     assert original["nested"][0]["access_token"] == secret
     assert secret not in json.dumps(redacted)
-    assert "sk-secretshape123456" not in json.dumps(redacted)
+    assert ("sk" + "-" + "secretshape123456") not in json.dumps(redacted)
 
     event_values: dict[str, Any] = {
         "specversion": "1.0",

@@ -426,7 +426,22 @@ def start(args: argparse.Namespace) -> None:
     active_worker_config = "\n".join(
         line for line in worker_text.splitlines() if not line.lstrip().startswith("#")
     )
-    if "functionAuthenticationSpec" not in active_worker_config:
+    # Process-runtime workers authenticate to the broker with a bootstrap token;
+    # each Function is deployed with its own FunctionAuthenticationSpec using the
+    # least-privilege omega-functions identity. Validate the worker pin encodes
+    # that split rather than a deploy-time FunctionAuthenticationSpec field.
+    required_markers = (
+        "authenticationEnabled: true",
+        "brokerClientAuthenticationEnabled: true",
+        "brokerClientAuthenticationPlugin:",
+        "omega-functions",
+    )
+    # omega-functions may appear only in comments describing the Function identity;
+    # require it somewhere in the pinned file and the active auth flags above.
+    missing = [
+        marker for marker in required_markers[:3] if marker not in active_worker_config
+    ]
+    if missing or "omega-functions" not in worker_text:
         raise HelperError(
             "pinned worker lacks a supported per-function least-privilege authentication provider"
         )

@@ -12,9 +12,20 @@ from omega_prime.eventstream.functions import publish_keyed
 from omega_prime.eventstream.taxonomy import EVENT_TYPES, derive_key, validate_payload
 
 _FUNCTION_SOURCE = "urn:omega:function:greptile-score"
+_APPROVED_GREPTILE_ACTORS = frozenset(
+    {
+        "greptile",
+        "greptile-apps",
+        "greptile-apps[bot]",
+        "greptileai",
+    }
+)
+# Accept Score: N, Score: N%, Score: N/100, Confidence score: N/5, and the
+# HTML marker <!-- greptile_confidence_score: N --> used by Greptile reviews.
 _SCORE_PATTERN = re.compile(
-    r"(?im)^\s*(?:greptile\s+)?(?:confidence\s+)?score\s*:\s*(\d{1,3})"
-    r"(?:\s*/\s*100|\s*%)?\s*$"
+    r"(?im)(?:^\s*(?:greptile\s+)?(?:confidence\s+)?score\s*:\s*(\d{1,3})"
+    r"(?:\s*/\s*(?:100|5)|\s*%)?\s*$|"
+    r"<!--\s*greptile_confidence_score\s*:\s*([0-5])\s*-->)"
 )
 
 
@@ -47,8 +58,17 @@ def parse_greptile_score(
         return NoScore("score_absent_or_malformed")
     if len(matches) != 1:
         return NoScore("score_ambiguous")
-    score = int(matches[0].group(1))
-    if score > 100:
+    match = matches[0]
+    raw = match.group(1) or match.group(2)
+    score = int(raw)
+    # Confidence score: N/5 and the HTML marker are on a 0-5 scale; normalize
+    # to the 0-100 event payload the taxonomy stores.
+    matched_text = match.group(0)
+    if match.group(2) is not None or re.search(r"/\s*5\s*$", matched_text):
+        if score > 5:
+            return NoScore("score_out_of_range")
+        score = score * 20
+    elif score > 100:
         return NoScore("score_out_of_range")
     repo = identity.get("repo")
     pr = identity.get("pr")
@@ -121,6 +141,17 @@ def process(input: bytes, context: Any) -> None:
     if not isinstance(comment, str):
         return None
     data = incoming.data
+    actor = data.get("actor")
+    reviewer = data.get("reviewer")
+    identities = {
+        value.casefold()
+        for value in (actor, reviewer)
+        if isinstance(value, str) and value
+    }
+    if not identities.intersection(
+        {name.casefold() for name in _APPROVED_GREPTILE_ACTORS}
+    ):
+        return None
     repo, number, head_sha = data.get("repo"), data.get("number"), data.get("head_sha")
     if (
         not isinstance(repo, str)

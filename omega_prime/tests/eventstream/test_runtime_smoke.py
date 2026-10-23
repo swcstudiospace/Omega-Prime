@@ -222,7 +222,8 @@ def test_publish_read_ack(
             "runtime-smoke-subscription", source_delivery.message_id
         )
         dlq_delivery = await dlq_subscriber.receive()
-        assert dlq_delivery.event.id == poison.event.id
+        assert dlq_delivery.event.id == f"dlq:runtime-dlq-subscription:{poison.event.id}"
+        assert dlq_delivery.properties.get("omega_source_ce_id") == poison.event.id
         assert dlq_delivery.event.type == "omega.control.signal.blocked"
         await dlq_delivery.acknowledge()
         await dlq_subscriber.close()

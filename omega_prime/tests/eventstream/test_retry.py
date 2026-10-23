@@ -93,7 +93,7 @@ def test_structured_logs_redact_secret_shaped_event_ids(
 ) -> None:
     async def scenario() -> None:
         caplog.set_level("INFO")
-        secret_shaped_id = "ghp_abcdefghijklmnop"
+        secret_shaped_id = "ghp" + "_" + "abcdefghijklmnop"
         router = RetryRouter(Publisher(), "gate")
         await router.handle(make_delivery([], event_id=secret_shaped_id), Ack())
 

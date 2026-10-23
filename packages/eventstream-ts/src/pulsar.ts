@@ -31,6 +31,7 @@ export interface PulsarProducer {
     readonly properties: Readonly<Record<string, string>>;
     readonly partitionKey: string;
     readonly sequenceId?: number;
+    readonly deliverAfter?: number;
   }): Promise<unknown>;
   flush?(): Promise<void>;
   close(): Promise<void>;
@@ -149,6 +150,7 @@ interface NativeProducerMessage {
   readonly properties: Record<string, string>;
   readonly partitionKey: string;
   readonly sequenceId?: number;
+  readonly deliverAfter?: number;
 }
 
 interface NativePulsarProducer {
@@ -312,12 +314,14 @@ class NativePulsarProducerAdapter implements PulsarProducer {
     readonly properties: Readonly<Record<string, string>>;
     readonly partitionKey: string;
     readonly sequenceId?: number;
+    readonly deliverAfter?: number;
   }): Promise<void> {
     await this.#producer.send({
       data: Buffer.isBuffer(message.data) ? message.data : Buffer.from(message.data),
       properties: { ...message.properties },
       partitionKey: message.partitionKey,
-      ...(message.sequenceId === undefined ? {} : { sequenceId: message.sequenceId })
+      ...(message.sequenceId === undefined ? {} : { sequenceId: message.sequenceId }),
+      ...(message.deliverAfter === undefined ? {} : { deliverAfter: message.deliverAfter })
     });
   }
 
@@ -683,8 +687,8 @@ export class PulsarEventBus implements EventBus {
     const client = this.#requireClient();
     const data = this.#structuredJsonCodec.encode(request.event);
     const properties: Record<string, string> = {
-      ...request.event.toProperties(),
-      ...request.properties
+      ...request.properties,
+      ...request.event.toProperties()
     };
     if (request.sequenceId !== undefined) properties.omega_sequence_id = String(request.sequenceId);
     let payload = data;
@@ -702,12 +706,17 @@ export class PulsarEventBus implements EventBus {
     }
     const sequenceId = request.sequenceId === undefined ? undefined : toNativeSequenceId(request.sequenceId);
     const producer = await this.#producer(client, request.topic, request.producerName);
+    const deliverAfterMs =
+      request.deliverAfterSeconds === undefined
+        ? undefined
+        : Math.max(0, Math.floor(request.deliverAfterSeconds * 1000));
     try {
       await producer.send({
         data: payload,
         properties: Object.freeze(properties),
         partitionKey: request.key,
-        ...(sequenceId === undefined ? {} : { sequenceId })
+        ...(sequenceId === undefined ? {} : { sequenceId }),
+        ...(deliverAfterMs === undefined ? {} : { deliverAfter: deliverAfterMs })
       });
     } catch (error) {
       throw this.#normalizePulsarFailure(error, "publish");
@@ -831,7 +840,8 @@ export class PulsarEventBus implements EventBus {
   }
 
   async #producer(client: PulsarClient, topic: string, producerName?: string): Promise<PulsarProducer> {
-    let producerPromise = this.#producers.get(topic);
+    const cacheKey = `${topic}\0${producerName ?? ""}`;
+    let producerPromise = this.#producers.get(cacheKey);
     if (producerPromise === undefined) {
       producerPromise = withCreationBackoff(
         () =>
@@ -844,14 +854,14 @@ export class PulsarEventBus implements EventBus {
           }),
         this.#creationRetry
       );
-      this.#producers.set(topic, producerPromise);
+      this.#producers.set(cacheKey, producerPromise);
     }
     try {
       const producer = await producerPromise;
       this.#transportHealthy = true;
       return producer;
     } catch (error) {
-      if (this.#producers.get(topic) === producerPromise) this.#producers.delete(topic);
+      if (this.#producers.get(cacheKey) === producerPromise) this.#producers.delete(cacheKey);
       throw this.#normalizePulsarFailure(error, "producer creation");
     }
   }
