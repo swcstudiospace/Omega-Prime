@@ -43,9 +43,11 @@ The table records names and purposes only.
 | `GEMINI_API_KEY_FILE` | Names a protected file containing the Gemini API credential. |
 | `GH_TOKEN` | Authenticates GitHub CLI and GitHub integrations. |
 | `GH_TOKEN_FILE` | Names a protected file supplying GH_TOKEN: Authenticates GitHub CLI and GitHub integrations. |
+| `GITHUB_RUN_ID` | Binds the eventstream IT ownership record to one GitHub Actions run. |
 | `GITHUB_SHA` | Records the source commit identifier as evaluation-history provenance. |
 | `GITHUB_TOKEN` | Authenticates GitHub API requests. |
 | `GITHUB_TOKEN_FILE` | Names a protected file supplying GITHUB_TOKEN: Authenticates GitHub API requests. |
+| `GITHUB_WORKFLOW` | Names the GitHub Actions workflow that owns the eventstream IT service container. |
 | `GOOGLE_API_KEY` | Authenticates Google provider requests. |
 | `GOOGLE_API_KEY_FILE` | Names a protected file containing the Google API credential. |
 | `GOOGLE_CLOUD_API_KEY` | Authenticates Google Cloud provider requests. |
@@ -224,6 +226,7 @@ The table records names and purposes only.
 | `PYTHONPATH_FILE` | Forwarded file-name counterpart for the child-process Python import path. |
 | `RAILWAY_TOKEN` | Authenticates Railway project status and log operations. |
 | `RAILWAY_TOKEN_FILE` | Names a protected file containing the Railway credential. |
+| `RUNNER_TEMP` | Directory for ephemeral eventstream IT ownership and TLS material. |
 | `SUBSTRATE_TOKEN` | Authenticates requests to the Substrate service. |
 | `SUBSTRATE_TOKEN_FILE` | Names a protected file containing the Substrate credential. |
 | `SUBSTRATE_TOKEN_GROK_BOT` | Authenticates Grokbot requests to the Substrate service. |

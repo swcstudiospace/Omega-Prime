@@ -4,6 +4,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -146,23 +147,25 @@ def test_limits_and_safe_repr_and_errors(tmp_path: Path) -> None:
 
 def test_actual_redactor_copies_nested_values_and_redacts_event_bytes() -> None:
     secret = "tok_live_super-secret-123"
-    original = {"nested": [{"access_token": secret}, "sk-secretshape123456"]}
+    original: dict[str, Any] = {
+        "nested": [{"access_token": secret}, "sk-secretshape123456"]
+    }
     config = EventStreamConfig()
     redacted = config.redact(original, known_secrets=(secret,))
     assert original["nested"][0]["access_token"] == secret
     assert secret not in json.dumps(redacted)
     assert "sk-secretshape123456" not in json.dumps(redacted)
 
-    event = CloudEvent(
-        specversion="1.0",
-        id="webhook-delivery-1",
-        source="test://eventstream",
-        type="omega.sdlc.pr.opened",
-        subject="pr/2",
-        time=datetime(2026, 10, 23, tzinfo=UTC),
-        datacontenttype="application/json",
-        dataschema=schema_uri_for_type("omega.sdlc.pr.opened"),
-        data={
+    event_values: dict[str, Any] = {
+        "specversion": "1.0",
+        "id": "webhook-delivery-1",
+        "source": "test://eventstream",
+        "type": "omega.sdlc.pr.opened",
+        "subject": "pr/2",
+        "time": datetime(2026, 10, 23, tzinfo=UTC),
+        "datacontenttype": "application/json",
+        "dataschema": schema_uri_for_type("omega.sdlc.pr.opened"),
+        "data": {
             "repo": "example/repo",
             "number": 2,
             "head_sha": "abc123",
@@ -170,8 +173,9 @@ def test_actual_redactor_copies_nested_values_and_redacts_event_bytes() -> None:
             "title": "Example change",
             "base_ref": "main",
         },
-        omegakey="example/repo#2",  # pyright: ignore[reportCallIssue]  # CloudEvents extension attribute
-    )
+        "omegakey": "example/repo#2",
+    }
+    event = CloudEvent(**event_values)
     serialized = event.to_bytes(extra=(secret,))
     assert secret.encode() not in serialized
     assert secret not in repr(event)

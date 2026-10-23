@@ -232,7 +232,10 @@
     "OMEGA_PRIME_APPROVALS_SHA256": "Pins the expected digest of the approval grants file.",
     "OMEGA_PRIME_COMMAND_LOG": "Selects the command history log destination.",
     "OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS": "Sets the maximum accepted lateness for scheduled actions.",
-    "FLEET_COORDINATOR_URL": "Selects the approved Fleet coordinator endpoint."
+    "FLEET_COORDINATOR_URL": "Selects the approved Fleet coordinator endpoint.",
+    "GITHUB_WORKFLOW": "Names the GitHub Actions workflow that owns the eventstream IT service container.",
+    "GITHUB_RUN_ID": "Binds the eventstream IT ownership record to one GitHub Actions run.",
+    "RUNNER_TEMP": "Directory for ephemeral eventstream IT ownership and TLS material."
   },
   "helpers": {
     "omega_prime/commands/redteam_readiness.py:_first": {

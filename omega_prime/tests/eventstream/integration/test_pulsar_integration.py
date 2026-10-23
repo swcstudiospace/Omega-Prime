@@ -153,7 +153,7 @@ async def broker(
 
 async def _provision_external_loopback(admin: Any) -> None:
     """Create only resources consumed by these tests; never alter broker settings."""
-    resources = (
+    resources: tuple[tuple[str, dict[str, object]], ...] = (
         (
             "/admin/v2/tenants/omega",
             {"allowedClusters": ["standalone"], "adminRoles": []},

@@ -465,8 +465,9 @@ async def test_subscription_modes_individual_ack_and_reader_seek() -> None:
     native_reader = native.readers[-1][2]
     message = FakeMessage(_event())
     native_reader.messages.append(message)
-    delivery = await reader.read_nowait()
-    assert delivery is not None
+    maybe_delivery = await reader.read_nowait()
+    assert maybe_delivery is not None
+    delivery = maybe_delivery
     assert delivery.key == "owner/repo#1"
     await delivery.acknowledge()
     assert not native_reader.seeks

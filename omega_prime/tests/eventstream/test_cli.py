@@ -77,7 +77,12 @@ def test_apply_dry_run_and_status_emit_actual_boundary_results(
 
 def test_parent_dispatch_is_lazy_for_eventstream(monkeypatch: Any) -> None:
     called: list[list[str]] = []
-    monkeypatch.setattr(cli, "main", lambda argv: called.append(list(argv)) or 0)
+
+    def _capture(argv: list[str]) -> int:
+        called.append(list(argv))
+        return 0
+
+    monkeypatch.setattr(cli, "main", _capture)
     assert engine_main(["eventstream", "tail", "persistent://omega/sdlc/ci"]) == 0
     assert called == [["tail", "persistent://omega/sdlc/ci"]]
 

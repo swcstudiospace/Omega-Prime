@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from hypothesis import assume, given
@@ -204,7 +204,7 @@ def test_properties_expose_attributes_without_payload() -> None:
 
 
 def test_recursive_inputs_are_isolated_and_event_is_deeply_immutable() -> None:
-    data = {
+    data: dict[str, Any] = {
         "kind": "dlq",
         "origin_topic": "persistent://omega/auth/session",
         "aggregate_key": "host:tool",
@@ -215,8 +215,9 @@ def test_recursive_inputs_are_isolated_and_event_is_deeply_immutable() -> None:
     event = dlq_event(data=data)
     data["history"][0]["reason"] = "after"
     assert event.model_dump(mode="json")["data"]["history"][0]["reason"] == "before"
+    mutable_view = cast(Any, event.data)
     with pytest.raises((TypeError, AttributeError)):
-        event.data["history"][0]["reason"] = "mutated"
+        mutable_view["history"][0]["reason"] = "mutated"
     with pytest.raises(TypeError):
         event.data._values["repo"] = "mutated"  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
 

@@ -201,11 +201,11 @@ def test_empty_required_set_rejected() -> None:
 def test_process_rolls_up_configured_check_properties_and_reemits_duplicates() -> None:
     context = _Context({"check_name": "build"})
     first = _event("omega.ci.run.passed", "success")
-    assert process(first.to_bytes(), context) is None
+    process(first.to_bytes(), context)
     assert not context.published
     context.properties = {"check_name": "tests"}
     second = _event("omega.ci.run.failed", "failure")
-    assert process(second.to_bytes(), context) is None
+    process(second.to_bytes(), context)
     assert len(context.published) == 1
     topic, payload, key = context.published[0]
     result = CloudEvent.from_bytes(payload)
@@ -216,7 +216,7 @@ def test_process_rolls_up_configured_check_properties_and_reemits_duplicates() -
     assert result.data["head_sha"] == BASE["head_sha"]
     assert result.data["run_id"] == BASE["run_id"]
     assert result.data["conclusion"] == "failure"
-    assert process(second.to_bytes(), context) is None
+    process(second.to_bytes(), context)
     assert context.published[0][1] == context.published[1][1]
     state = next(iter(context.state.values()))
     assert json.loads(state)["result"] == "failed"
@@ -225,9 +225,9 @@ def test_process_rolls_up_configured_check_properties_and_reemits_duplicates() -
 def test_process_requires_real_check_metadata_and_filters_own_output() -> None:
     event = _event("omega.ci.run.failed", "failure")
     context = _Context({})
-    assert process(event.to_bytes(), context) is None
+    process(event.to_bytes(), context)
     assert not context.published
-    assert process(b"not-json", context) is None
+    process(b"not-json", context)
     output = CloudEvent(
         specversion="1.0",
         id="ci-output",
@@ -240,7 +240,7 @@ def test_process_requires_real_check_metadata_and_filters_own_output() -> None:
     assert not is_source_message(output)
 
     loop_context = _Context({"check_name": "build"})
-    assert process(output.to_bytes(), loop_context) is None
+    process(output.to_bytes(), loop_context)
     assert not loop_context.state and not loop_context.published
     assert is_source_message(event)
 

@@ -223,7 +223,7 @@ class _MessageId:
 def test_process_persists_before_output_and_duplicate_reemits_crash_gap() -> None:
     context = _FunctionContext()
     source = _event("omega.sdlc.pr.opened").to_bytes()
-    assert process(source, context) is None
+    process(source, context)
     assert context.state
     persisted = json.loads(next(iter(context.state.values())))
     assert persisted["repo"] == "acme/project"
@@ -233,33 +233,27 @@ def test_process_persists_before_output_and_duplicate_reemits_crash_gap() -> Non
     assert first_key == "acme/project#7"
     # Simulate the crash after durable state commit but before output publication:
     # replay must output current projection rather than suppressing the duplicate.
-    assert process(source, context) is None
+    process(source, context)
     assert context.published[1] == (first_topic, first_payload, first_key)
     assert json.loads(first_payload)["key"] == "acme/project#7"
 
 
 def test_process_uses_source_positions_and_reemits_current_projection() -> None:
     context = _FunctionContext()
-    assert process(_event("omega.sdlc.pr.pushed").to_bytes(), context) is None
+    process(_event("omega.sdlc.pr.pushed").to_bytes(), context)
     context.position = (0, 4, 3)
-    assert (
-        process(
-            _event(
-                "omega.sdlc.pr.pushed", head_sha="head-b", before_sha="head-a"
-            ).to_bytes(),
-            context,
-        )
-        is None
+    process(
+        _event(
+            "omega.sdlc.pr.pushed", head_sha="head-b", before_sha="head-a"
+        ).to_bytes(),
+        context,
     )
     context.position = (0, 4, 2)
-    assert (
-        process(
-            _event(
-                "omega.sdlc.pr.pushed", head_sha="head-c", before_sha="head-b"
-            ).to_bytes(),
-            context,
-        )
-        is None
+    process(
+        _event(
+            "omega.sdlc.pr.pushed", head_sha="head-c", before_sha="head-b"
+        ).to_bytes(),
+        context,
     )
     _, newer, stale = context.published
     assert json.loads(newer[1])["head_sha"] == "head-b"
@@ -275,10 +269,8 @@ def test_output_serialization_is_stable() -> None:
 
 def test_process_rejects_malformed_cloud_event_without_state_write() -> None:
     context = _FunctionContext()
-    assert process(b"not-json", context) is None
-    assert (
-        process(b'{"specversion":"1.0","type":"omega.sdlc.pr.opened"}', context) is None
-    )
+    process(b"not-json", context)
+    process(b'{"specversion":"1.0","type":"omega.sdlc.pr.opened"}', context)
     assert context.state == {}
 
 

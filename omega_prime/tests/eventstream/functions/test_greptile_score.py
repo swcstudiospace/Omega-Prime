@@ -106,7 +106,7 @@ def test_process_publishes_only_typed_score_and_preserves_pr_key() -> None:
     key = derive_key(event.type, event.data)
     context = _Context({"comment_body": "Review complete\nGreptile score: 92%"})
 
-    assert process(event.to_bytes(), context) is None
+    process(event.to_bytes(), context)
     assert len(context.published) == 1
     topic, payload, published_key = context.published[0]
     output = CloudEvent.from_bytes(payload)
@@ -120,7 +120,7 @@ def test_process_publishes_only_typed_score_and_preserves_pr_key() -> None:
         "actor": "greptile",
         "score": 92,
     }
-    assert process(event.to_bytes(), context) is None
+    process(event.to_bytes(), context)
     assert context.published[0][1] == context.published[1][1]
 
 
@@ -130,10 +130,10 @@ def test_process_has_no_output_for_absent_or_invalid_comment_body() -> None:
     invalid = _Context({"comment_body": "Score: 101"})
     malformed = _Context({"comment_body": "Score: 92\nScore: 91"})
 
-    assert process(event.to_bytes(), no_body) is None
-    assert process(event.to_bytes(), invalid) is None
-    assert process(event.to_bytes(), malformed) is None
-    assert process(b"not-json", invalid) is None
+    process(event.to_bytes(), no_body)
+    process(event.to_bytes(), invalid)
+    process(event.to_bytes(), malformed)
+    process(b"not-json", invalid)
     assert not no_body.published and not invalid.published and not malformed.published
 
 
@@ -158,7 +158,7 @@ def test_process_rejects_own_output_source() -> None:
     )
     context = _Context({"comment_body": "Score: 92"})
 
-    assert process(event.to_bytes(), context) is None
+    process(event.to_bytes(), context)
     assert not context.published
 
 

@@ -123,9 +123,18 @@ def _inspect(container_id: str) -> dict[str, Any]:
             raise ValueError
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise HelperError("service identity inspection failed") from exc
-    if config.get("Image") != PINNED_IMAGE or not any(
-        item.endswith(PINNED_DIGEST) for item in repo_digests
-    ):
+    # GHA service containers often report Config.Image as the bare digest
+    # (sha256:…) with empty RepoDigests; accept any of the pinned identities.
+    image_ref = config.get("Image")
+    digest_matched = (
+        image_ref in (PINNED_IMAGE, PINNED_DIGEST)
+        or image_id == PINNED_DIGEST
+        or any(
+            isinstance(item, str) and item.endswith(PINNED_DIGEST)
+            for item in repo_digests
+        )
+    )
+    if not digest_matched:
         raise HelperError("service image does not match the pinned digest")
     if (
         not image_id.startswith("sha256:")
