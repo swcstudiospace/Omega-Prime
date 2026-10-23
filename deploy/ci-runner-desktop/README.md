@@ -67,9 +67,46 @@ file list, because the agent reads its token through
 Upstream's apt steps (`nginx openssl dbus-x11 x11-utils`, plus our
 `ca-certificates curl` and the runner's `installdependencies.sh`) still take
 current Ubuntu packages at build time, exactly as upstream's own README notes.
+The toolchain layer (00056) instead installs from a dated
+`snapshot.ubuntu.com` view, so its package set is reproducible.
 
 To update a pin, re-derive it from upstream evidence and change the
 corresponding `ARG`. Never hand-type a hash.
+
+## Toolchain (00056)
+
+Every CI job in Ove's repositories runs on this pool, never on GitHub-hosted
+runners (2026-10-24), so section 3b of the Dockerfile adds the toolchains the
+swcstudiospace workflows need: build tools, gh, a read-only hosted tool cache
+(Python 3.10/3.12, Node 22/24) at `/opt/hostedtoolcache`, .NET SDK 10.0.402
+with `maui-android`, JDK 17, Android SDK (API 36), PostgreSQL 16, GreptimeDB,
+podman/podman-compose, gitleaks, trivy, semgrep, bandit and Rust. The tool
+list, how jobs see the tools, the limits (no running containers, no macOS)
+and how to add a tool are in
+[docs/ci-runners.md](../../docs/ci-runners.md#runner-image-toolchain).
+
+Extra files: `runner-env` (copied to `/opt/actions-runner/.env`, which
+`Runner.Listener` loads, so the toolchain variables reach jobs through the
+agent's allowlisted environment), `toolchain-check.sh` (run at build time as
+uid 1500; fails the build if any tool is missing, at the wrong version, or
+needs root) and `requirements/*.txt` (hash-locked venvs).
+
+### Toolchain provenance (verified 2026-10-24 AEDT)
+
+| Input | Pin | Evidence |
+|---|---|---|
+| apt (section 3b) | `snapshot.ubuntu.com` view `20261023T000000Z` | `apt-get update --snapshot` against the pinned base; package versions asserted by `toolchain-check.sh` |
+| gh | `gh_2.103.1_linux_amd64.tar.gz` sha256 `57500f34…1add` | `gh_2.103.1_checksums.txt` on the v2.103.1 release |
+| gitleaks | `gitleaks_8.30.1_linux_x64.tar.gz` sha256 `551f6fc8…70eb` | `gitleaks_8.30.1_checksums.txt`; same pin as OmpOS CI |
+| trivy | `trivy_0.76.1_Linux-64bit.tar.gz` sha256 `c7cbe313…9c0` | `trivy_0.76.1_checksums.txt` on the v0.76.1 release |
+| GreptimeDB | `greptime-linux-amd64-v0.14.4.tar.gz` sha256 `50166e3f…e787` | the release's `.sha256sum` file and the GitHub asset digest (the version autonogrammer CI pins) |
+| Python 3.10.22 / 3.12.15 | `actions/python-versions` builds `-linux-24.04-x64` sha256 `4c96c0e9…fd16` / `fcb672b0…7ed8` | GitHub release asset digests; versions from `versions-manifest.json` |
+| Node.js 22.23.4 / 24.22.1 | `node-v*-linux-x64.tar.xz` sha256 `1805bcd3…e9ce` / `6c172a9a…95e6` | `nodejs.org/dist/v*/SHASUMS256.txt` |
+| .NET SDK 10.0.402 | `dotnet-sdk-10.0.402-linux-x64.tar.gz` sha512 `1904a98d…29c2` | `release-metadata/10.0/releases.json` (runtime 10.0.13); version from OmpOS `global.json` |
+| `maui-android` workload | workload set `10.0.402.1` | NuGet `Microsoft.NET.Workloads.10.0.400` (packages are signed and verified by the SDK) |
+| Android cmdline-tools 23.0 | `commandlinetools-linux-16111833_latest.zip` sha256 `0877a1d0…cfa8` | matches Google's published sha1 `e025545c…5f60` in `repository2-3.xml`; sdkmanager verifies the platform/build-tools packages |
+| rustup-init 1.29.2 | sha256 `5be191e8…f4` | `static.rust-lang.org/rustup/archive/1.29.2/…/rustup-init.sha256`; rustup verifies toolchain 1.99.1 against the channel manifest |
+| semgrep 1.182.1, bandit 1.9.4, podman-compose 1.6.0 | `requirements/*.txt`, every wheel `--hash=sha256` | `uv pip compile --generate-hashes` against PyPI |
 
 ## Isolation and its limits
 
@@ -105,10 +142,10 @@ corresponding `ARG`. Never hand-type a hash.
   that with its repo allowlist plus `private: true` (or the public opt-in and
   fork guard), and the pre-job guard enforces it again on the runner.
 - **Docker.** There is no Docker, no DinD and no privileged mode; Railway is
-  unprivileged. Workflows that need Docker are migrated to run here anyway,
-  using binaries baked into this image (Postgres, GreptimeDB and similar,
-  started as plain processes; task 00056). There is no separate Docker
-  runner.
+  unprivileged. Since 2026-10-24 every job runs on this pool regardless
+  (Ove's rule), so the image carries the binaries Docker used to provide
+  (PostgreSQL 16, GreptimeDB, podman/podman-compose for `config` checks).
+  See [Toolchain](#toolchain-00056).
 - **Directory modes (00055).** `/var/lib/omega-ci` and `/var/lib/omega-ci/work`
   are root-owned **0755**, and the agent re-applies 0755 to the work root at
   startup and refuses to start (`UnsafeWorkdir`) if the work root or any

@@ -248,7 +248,34 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
         )
         return 1
     print("omega-ci job guard: ok", file=sys.stderr)
+    add_user_paths(environ)
     return 0
+
+
+#: Per-job bin dirs under the runner's own HOME (its private work dir). The
+#: image's tool trees are read-only, so ``pip install`` on a tool-cache Python
+#: falls back to ``--user`` (scripts in ~/.local/bin) and ``cargo install``
+#: writes to ~/.cargo/bin. GitHub-hosted runners have them on PATH; so do we.
+USER_BIN_DIRS = (".local/bin", ".cargo/bin")
+
+
+def add_user_paths(environ: Mapping[str, str]) -> bool:
+    """Append the job's per-HOME bin dirs to ``GITHUB_PATH`` (best effort).
+
+    Runs only after the guard allowed the job. Never fails the job: the guard
+    verdict is what matters, and a missing PATH entry only affects tools a
+    job installs itself.
+    """
+    home, target = environ.get("HOME", ""), environ.get("GITHUB_PATH", "")
+    if not (home.startswith("/") and target.startswith("/")):
+        return False
+    try:
+        with open(target, "a", encoding="utf-8") as fh:
+            for rel in USER_BIN_DIRS:
+                fh.write(f"{home.rstrip('/')}/{rel}\n")
+    except OSError:
+        return False
+    return True
 
 
 if __name__ == "__main__":
@@ -267,8 +294,10 @@ __all__ = [
     "PULL_REQUEST_TARGET",
     "REPO_MISMATCH",
     "REPO_NOT_ALLOWED",
+    "USER_BIN_DIRS",
     "WILDCARD",
     "RepoPatternError",
+    "add_user_paths",
     "is_repo_pattern",
     "load_policy",
     "main",

@@ -180,6 +180,40 @@ def test_main(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert hook.main([str(tmp_path / "absent.json")], env_for(path)) == 1
 
 
+def test_allowed_job_gets_per_home_bin_dirs_on_path(tmp_path: Path) -> None:
+    """00056: read-only tool trees push pip/cargo installs under HOME."""
+    policy, path = files(tmp_path, event())
+    gh_path = tmp_path / "github_path"
+    gh_path.write_text("")
+    home = tmp_path / "work" / "omega-ci-1"
+    env = {**env_for(path), "HOME": str(home), "GITHUB_PATH": str(gh_path)}
+    assert hook.main([str(policy)], env) == 0
+    assert gh_path.read_text().splitlines() == [
+        f"{home}/.local/bin",
+        f"{home}/.cargo/bin",
+    ]
+    # A refused job never gets the PATH entries.
+    gh_path.write_text("")
+    _, fork = files(tmp_path, pr(head="mallory/widgets"))
+    env = {
+        **env_for(fork, "pull_request"),
+        "HOME": str(home),
+        "GITHUB_PATH": str(gh_path),
+    }
+    assert hook.main([str(policy)], env) == 1
+    assert gh_path.read_text() == ""
+
+
+def test_user_paths_are_best_effort(tmp_path: Path) -> None:
+    assert hook.add_user_paths({}) is False
+    assert hook.add_user_paths({"HOME": "rel", "GITHUB_PATH": "/x"}) is False
+    missing = tmp_path / "no-such-dir" / "github_path"
+    assert hook.add_user_paths({"HOME": "/h", "GITHUB_PATH": str(missing)}) is False
+    policy, path = files(tmp_path, event())
+    env = {**env_for(path), "HOME": "/h", "GITHUB_PATH": str(missing)}
+    assert hook.main([str(policy)], env) == 0  # never fails an allowed job
+
+
 # -- the shipped script ---------------------------------------------------------------
 
 

@@ -45,6 +45,7 @@ The table records names and purposes only.
 | `GH_TOKEN_FILE` | Names a protected file supplying GH_TOKEN: Authenticates GitHub CLI and GitHub integrations. |
 | `GITHUB_EVENT_NAME` | Set by the GitHub runner; the Desktop pre-job guard refuses pull_request_target and, for non-private repositories, events other than push, workflow_dispatch and pull_request. |
 | `GITHUB_EVENT_PATH` | Set by the GitHub runner; the Desktop pre-job guard reads the event payload there to refuse fork pull requests. |
+| `GITHUB_PATH` | Set by the GitHub runner; after allowing a job, the Desktop pre-job guard appends the job's ~/.local/bin and ~/.cargo/bin there. |
 | `GITHUB_REPOSITORY` | Set by the GitHub runner; the Desktop pre-job guard checks it against its repository allowlist and the event payload. |
 | `GITHUB_RUN_ID` | Binds the eventstream IT ownership record to one GitHub Actions run. |
 | `GITHUB_SHA` | Records the source commit identifier as evaluation-history provenance. |

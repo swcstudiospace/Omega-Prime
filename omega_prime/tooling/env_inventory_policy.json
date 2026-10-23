@@ -270,7 +270,8 @@
     "OMEGA_CI_AGENT_JOB_POLICY": "Names the Desktop runner agent's pre-job guard allowlist file; only /var/lib/omega-ci/job-policy.json (the path the shipped hook reads) is accepted.",
     "GITHUB_EVENT_NAME": "Set by the GitHub runner; the Desktop pre-job guard refuses pull_request_target and, for non-private repositories, events other than push, workflow_dispatch and pull_request.",
     "GITHUB_REPOSITORY": "Set by the GitHub runner; the Desktop pre-job guard checks it against its repository allowlist and the event payload.",
-    "GITHUB_EVENT_PATH": "Set by the GitHub runner; the Desktop pre-job guard reads the event payload there to refuse fork pull requests."
+    "GITHUB_EVENT_PATH": "Set by the GitHub runner; the Desktop pre-job guard reads the event payload there to refuse fork pull requests.",
+    "GITHUB_PATH": "Set by the GitHub runner; after allowing a job, the Desktop pre-job guard appends the job's ~/.local/bin and ~/.cargo/bin there."
   },
   "helpers": {
     "omega_prime/commands/redteam_readiness.py:_first": {
