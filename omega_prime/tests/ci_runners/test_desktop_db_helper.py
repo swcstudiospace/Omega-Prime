@@ -23,7 +23,8 @@ HELPER = DESKTOP / "omega-ci-db"
 CHECK = DESKTOP / "toolchain-check.sh"
 
 PG_CTL = r"""#!/bin/sh
-# Stub pg_ctl: "start" runs a detached sleeper and records it as postmaster.
+# Stub pg_ctl: "start" runs a detached sleeper that HOLDS the -p port (like a
+# real postmaster, it fails if the port is taken) and records it as postmaster.
 log="$STUB_LOG"
 case "$1" in --version) echo "pg_ctl (PostgreSQL) 16.9"; exit 0 ;; esac
 data=""; action=""; opts=""
@@ -39,12 +40,23 @@ while [ $# -gt 0 ]; do
 done
 echo "pg_ctl $action $opts" >> "$log"
 if [ "$action" = start ]; then
-    # Like postgres, the sleeper handles SIGQUIT itself (a background job
-    # of a non-interactive shell starts with SIGQUIT ignored).
-    python3 -c 'import signal, time; signal.signal(signal.SIGQUIT, signal.SIG_DFL); time.sleep(600)' \
-        </dev/null >/dev/null 2>&1 &
-    echo "$!" > "$data/postmaster.pid"
-    echo "pid $!" >> "$log"
+    port="$(echo "$opts" | sed 's/.*-p \([0-9]*\).*/\1/')"
+    # Bind first, then fork: the parent exits only once the port is held.
+    # Like postgres, the sleeper handles SIGQUIT itself.
+    python3 -c '
+import os, signal, socket, sys, time
+s = socket.socket()
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen()
+pid = os.fork()
+if pid:
+    print(pid)
+    sys.exit(0)
+sys.stdout.close()
+signal.signal(signal.SIGQUIT, signal.SIG_DFL)
+time.sleep(600)
+' "$port" </dev/null >"$data/postmaster.pid" 2>/dev/null || exit 1
+    echo "pid $(head -n 1 "$data/postmaster.pid")" >> "$log"
     exit 0
 fi
 if [ "$action" = stop ]; then
@@ -57,6 +69,7 @@ fi
 
 INITDB = r"""#!/bin/sh
 case "$1" in --version) echo "initdb (PostgreSQL) 16.9"; exit 0 ;; esac
+[ -n "${STUB_INITDB_SLEEP:-}" ] && sleep "$STUB_INITDB_SLEEP"
 while [ $# -gt 0 ]; do [ "$1" = -D ] && mkdir -p "$2"; shift; done
 """
 
@@ -66,15 +79,29 @@ PSQL = r"""#!/bin/sh
 echo omega-ci-pg-ok
 """
 
-# Stub greptime: a real HTTP server on --http-addr; /health is OK, SQL fails
-# unless STUB_GT_SQL_OK is set. exec, so the helper's recorded pid is it.
+# Stub greptime: a real HTTP server on --http-addr that also HOLDS its rpc,
+# mysql and postgres ports; /health is OK, SQL fails unless STUB_GT_SQL_OK is
+# set. exec, so the helper's recorded pid is it.
 GREPTIME = r"""#!/bin/sh
 case "$1" in --version) echo "version: 0.14.4"; exit 0 ;; esac
 echo "greptime $*" >> "$STUB_LOG"
-http=""
-while [ $# -gt 0 ]; do [ "$1" = --http-addr ] && http="$2"; shift; done
+http=""; others=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --http-addr) http="$2" ;;
+        --rpc-bind-addr|--mysql-addr|--postgres-addr) others="$others $2" ;;
+    esac
+    shift
+done
 exec python3 -c '
-import http.server, os, sys
+import http.server, os, socket, sys
+held = []
+for addr in sys.argv[2:]:
+    h, p = addr.rsplit(":", 1)
+    s = socket.socket()
+    s.bind((h, int(p)))
+    s.listen()
+    held.append(s)
 host, port = sys.argv[1].rsplit(":", 1)
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -85,7 +112,7 @@ class H(http.server.BaseHTTPRequestHandler):
         ok = os.environ.get("STUB_GT_SQL_OK")
         self.reply(200 if ok else 500, b"{\"rows\":[[1]]}" if ok else b"boom")
 http.server.HTTPServer((host, int(port)), H).serve_forever()
-' "$http"
+' "$http" $others
 """
 
 
@@ -184,10 +211,21 @@ def test_failed_greptime_check_stops_the_instances(stubs: dict[str, str]) -> Non
         text=True,
     )
     seen: set[int] = set()
-    while proc.poll() is None:
-        seen.update(greptime_pids(home))
-        time.sleep(0.02)
-    _, err = proc.communicate()
+    deadline = time.monotonic() + 90
+    try:
+        while proc.poll() is None:
+            if time.monotonic() > deadline:
+                pytest.fail("toolchain-check.sh hung (no exit within 90s)")
+            seen.update(greptime_pids(home))
+            time.sleep(0.02)
+        _, err = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+        for pid in seen | set(greptime_pids(home)):
+            if alive(pid):
+                os.kill(pid, signal.SIGKILL)
     assert proc.returncode != 0
     assert "toolchain-check: FAIL greptime query" in err
     started = sorted(seen)
@@ -276,12 +314,12 @@ def test_helper_exports_to_github_env_and_stops(
         == f"postgresql://postgres@127.0.0.1:{vals['PGPORT']}/postgres"
     )
     assert kv(github_env.read_text()) == vals
-    # Data and socket dir live under RUNNER_TEMP, never a shared path.
+    # Data lives under RUNNER_TEMP; no Unix socket at all (TCP only), so a
+    # deep RUNNER_TEMP cannot overflow sun_path and /tmp sockets cannot clash.
     assert (tmp_path / "rt" / "omega-ci-db" / "postgres" / "data").is_dir()
-    assert (
-        f"-k {tmp_path / 'rt' / 'omega-ci-db' / 'postgres'}"
-        in Path(env["STUB_LOG"]).read_text()
-    )
+    log = Path(env["STUB_LOG"]).read_text()
+    assert "-c unix_socket_directories=''" in log
+    assert " -k " not in log
 
     second = helper(env, "start", "postgres", "--name", "other", "--no-export")
     assert second.returncode == 0, second.stderr
@@ -349,3 +387,70 @@ def test_helper_retries_when_a_port_is_taken(
         == 2
     )
     assert helper(env, "stop", "greptime").returncode == 0
+
+
+def test_overlapping_start_of_one_name_is_refused(
+    stubs: dict[str, str], tmp_path: Path
+) -> None:
+    # The first start is still in initdb (no postmaster.pid yet); a second
+    # start of the same name must refuse, not delete the first one's files.
+    env = {**stubs, "RUNNER_TEMP": str(tmp_path / "rt"), "STUB_INITDB_SLEEP": "2"}
+    first = subprocess.Popen(
+        ["/bin/sh", str(HELPER), "start", "postgres", "--no-export"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        data = tmp_path / "rt" / "omega-ci-db" / "postgres"
+        end = time.monotonic() + 10
+        while not data.exists() and time.monotonic() < end:
+            time.sleep(0.02)
+        second = helper(env, "start", "postgres", "--no-export")
+        assert second.returncode != 0
+        assert "already being started" in second.stderr
+        out, err = first.communicate(timeout=60)
+    finally:
+        if first.poll() is None:
+            first.kill()
+            first.communicate()
+    assert first.returncode == 0, err
+    assert kv(out)["PGPORT"]
+    assert helper(env, "stop", "postgres").returncode == 0
+    for pid in pids(env):
+        assert wait_dead(pid)
+
+
+def test_stop_never_signals_a_reused_pid(stubs: dict[str, str], tmp_path: Path) -> None:
+    # The database died and the kernel gave its PID to another job's process:
+    # same PID, different start time. stop must leave that process alone.
+    env = {**stubs, "RUNNER_TEMP": str(tmp_path / "rt")}
+    bystander = subprocess.Popen(["sleep", "60"])
+    try:
+        inst = tmp_path / "rt" / "omega-ci-db" / "greptime"
+        inst.mkdir(parents=True)
+        (inst / "kind").write_text("greptime\n")
+        (inst / "pid").write_text(f"{bystander.pid}\n")
+        (inst / "start").write_text("1\n")  # not the bystander's start time
+        (inst / "env").write_text("GREPTIME_HTTP_ADDR=127.0.0.1:1\n")
+        done = helper(env, "stop", "--all")
+        assert done.returncode == 0, done.stderr
+        time.sleep(0.3)
+        assert bystander.poll() is None, "stop signalled a process it did not start"
+        # And a fresh start of that name is not blocked by the stale record.
+        again = helper(env, "start", "greptime", "--no-export")
+        assert again.returncode == 0, again.stderr
+        assert helper(env, "stop", "greptime").returncode == 0
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+@pytest.mark.parametrize("only", ["postgress", "postgres,gretime", ",postgres"])
+def test_unknown_only_section_is_rejected(stubs: dict[str, str], only: str) -> None:
+    done = run(["/bin/sh", str(CHECK), "--only", only], stubs)
+    assert done.returncode == 2
+    assert "unknown section" in done.stderr
+    assert "present and usable" not in done.stdout
+    assert pids(stubs) == []

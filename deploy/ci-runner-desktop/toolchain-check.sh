@@ -48,6 +48,18 @@ if [ "${1:-}" = "--only" ]; then
     [ -n "${2:-}" ] || { echo "toolchain-check: --only needs a comma list" >&2; exit 2; }
     only="$2"
 fi
+# Reject unknown section names up front: a typo must not "pass" by running
+# nothing (or by silently skipping one check of a mixed list).
+sections="base toolcache dotnet android-build postgres greptime containers scanners rust"
+old_ifs="$IFS"; IFS=,; set -f
+for want_section in $only; do
+    case "$want_section" in ''|*[!a-z-]*) known=no ;; *) known=yes ;; esac
+    case "$known: all $sections " in
+        "yes:"*" $want_section "*) ;;
+        *) echo "toolchain-check: unknown section '$want_section' (known: all $sections)" >&2; exit 2 ;;
+    esac
+done
+IFS="$old_ifs"; set +f
 # section NAME: true when NAME should run (prints a header).
 section() {
     case ",$only," in *",all,"*|*",$1,"*) echo "== $1"; return 0 ;; esac
