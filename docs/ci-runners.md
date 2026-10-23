@@ -179,9 +179,11 @@ its workdir is removed, the agent sends exactly one exit callback.
 - **Public repositories are refused by default.** Self-hosted runners on
   public repositories are a known remote-code-execution vector. A public
   repository is served only through the explicit opt-in and fork guard below.
-- **Docker (D-120-08).** Railway is unprivileged: no Docker, DinD or
-  privileged mode. Jobs using `container:`, `services:` or `docker build` stay
-  on the VPS runner (`vps-docker`).
+- **Docker (superseded D-120-08).** Railway is unprivileged: no Docker, DinD
+  or privileged mode. Jobs that used `container:`, `services:` or
+  `docker build` are migrated to run on the pool too, using binaries baked
+  into the runner image (for example Postgres or GreptimeDB started as plain
+  processes; task 00056). There is no separate Docker runner.
 - **Redaction (D-120-07).** Every event passes through
   `omega_prime.credentials.redact` with the known transient secrets. Anything
   that still contains a secret, or is not plain JSON, is dropped.
@@ -207,9 +209,12 @@ repositories runs on the Omega CI runner pool,
 runners (`ubuntu-latest` and friends). When a job needs a tool, service or
 capacity the pool lacks, extend the runner image
 (`deploy/ci-runner-desktop/Dockerfile`) or the pool instead of falling back to
-a GitHub-hosted runner. The pool has no Docker (see
-[Security model](#security-model)); Docker jobs still use the self-hosted VPS
-runner (`[self-hosted, vps-docker]`) until the pool gains that capability.
+a GitHub-hosted runner. There is no carve-out for side runners either. The
+pool has no Docker (see [Security model](#security-model)), so a job that
+needs a service container or a Docker build is rewritten to use binaries baked
+into the runner image (Postgres, GreptimeDB and similar, started as ordinary
+processes in the job; task 00056) and runs on the pool like everything
+else.
 
 ## Org-wide setup (every repository of an owner)
 
@@ -487,7 +492,7 @@ pool. It is manual only (`on: workflow_dispatch`, no schedule and no
 pull-request trigger), has `permissions: contents: read`, and runs one job on
 `[self-hosted, linux, x64, omega-ci]` with `timeout-minutes: 10`. Its steps
 are `uname -a`, `whoami` and `echo omega-ci ok`: no checkout, no secrets.
-`.github/actionlint.yaml` declares the `omega-ci` and `vps-docker` labels so
+`.github/actionlint.yaml` declares the `omega-ci` label so
 actionlint accepts the custom `runs-on`, and
 `omega_prime/tests/ci_runners/test_smoke_workflow.py` keeps the workflow this
 small.

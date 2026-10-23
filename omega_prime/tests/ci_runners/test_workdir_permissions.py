@@ -20,6 +20,8 @@ import secrets
 import shutil
 import stat
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -170,6 +172,33 @@ def test_diag_tail_is_bounded_redacted_and_never_follows_symlinks(
     assert diag_tail(tmp_path / "missing") == []
 
 
+def test_diag_tail_never_blocks_on_a_fifo_swapped_in_after_the_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job can replace the checked log with a FIFO before the agent opens it."""
+    diag = tmp_path / "_diag"
+    diag.mkdir()
+    log_file = diag / "Runner_1.log"
+    log_file.write_text("hello\n")
+    real_open = os.open
+
+    def swap_then_open(path: str, flags: int, *a: object) -> int:
+        if path == str(log_file):
+            os.remove(log_file)
+            os.mkfifo(log_file)  # no writer: a blocking open never returns
+        return real_open(path, flags, *a)
+
+    monkeypatch.setattr(sup.os, "open", swap_then_open)
+    result: list[list[str]] = []
+    worker = threading.Thread(
+        target=lambda: result.append(diag_tail(tmp_path)), daemon=True
+    )
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive(), "diag_tail blocked on a FIFO"
+    assert result == [[]]
+
+
 # --- the relay, with real children --------------------------------------------
 
 
@@ -290,3 +319,31 @@ def test_real_runner_passes_its_directory_check_in_a_prepared_work_root(
     finally:
         lib.chmod(0o755)
     assert DIR_ERROR in bad.stdout + bad.stderr and bad.returncode == 0
+
+
+def test_leftover_process_holding_the_output_pipe_cannot_hold_the_slot(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """run.sh exits but leaves a helper with its stdout open (Greptile P1).
+
+    The exit must still be reported within about one grace period, and the
+    helper (same session) is stopped.
+    """
+    pidfile = tmp_path / "helper.pid"
+    tail = f"sleep 60 &\necho $! > '{pidfile}'\necho started\nexit 0"
+    caplog.set_level(logging.INFO, logger=sup.__name__)
+    started = time.monotonic()
+    [payload] = _run_one(tmp_path, tail)
+    assert payload["exit_code"] == 0
+    assert time.monotonic() - started < 10
+    assert "output stayed open" in caplog.text
+    helper = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(helper, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(helper, 9)
+        raise AssertionError("leftover helper was not stopped")

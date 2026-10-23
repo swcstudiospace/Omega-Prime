@@ -4,8 +4,10 @@ One reservation is one ``run.sh`` child. The JIT config crosses into the child
 only as ``ACTIONS_RUNNER_INPUT_JITCONFIG`` in its scrubbed environment; it is
 never written to disk, put on argv, logged, returned, or kept after spawn.
 
-Completion is pushed by the child's own ``process.wait()``; there are no
-timers, polling or sleep loops. Termination escalates SIGTERM → SIGKILL once,
+Completion is pushed by the child's own ``process.wait()``, which tracks the
+process exit only (output goes through a pipe the agent owns, so a leftover
+helper holding it cannot delay the exit); the output drain after exit is
+bounded by the grace period. There are no polling or sleep loops. Termination escalates SIGTERM → SIGKILL once,
 bounded by one ``wait_for``.
 
 Isolation (documented, not overstated):
@@ -279,9 +281,11 @@ def diag_tail(
 ) -> list[str]:
     """Redacted tail of the newest ``_diag`` log (empty when there is none).
 
-    Reads only regular files directly in ``_diag`` (no symlinks followed), and
-    at most ``max_bytes`` from the end, so a job cannot make the agent read
-    elsewhere or read a lot.
+    Reads only regular files directly in ``_diag`` (no symlinks followed, and
+    the opened file itself must be regular: a FIFO or device swapped in after
+    the listing is refused without blocking), and at most ``max_bytes`` from
+    the end, so a job cannot make the agent read elsewhere, read a lot, or
+    stall.
     """
     diag = workdir / "_diag"
     try:
@@ -294,9 +298,15 @@ def diag_tail(
         if not logs:
             return []
         newest = max(logs)[1]
-        fd = os.open(newest, os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK: a job owns ``_diag`` and can swap the checked file for a
+        # FIFO before the open; a blocking open of a writer-less FIFO would
+        # never return and hold the slot. The opened file is then re-checked.
+        fd = os.open(newest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as fh:
-            size = os.fstat(fh.fileno()).st_size
+            info = os.fstat(fh.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                return []
+            size = info.st_size
             fh.seek(max(0, size - max_bytes))
             raw = fh.read(max_bytes)
     except OSError:
@@ -465,40 +475,49 @@ class Supervisor:
     async def _run(self, child: Child, jit: str) -> None:
         workdir = self.work_root / child.name
         exit_code: int | None = SPAWN_FAILED
+        output: asyncio.ReadTransport | None = None
         try:
             await asyncio.to_thread(
                 build_workdir, self.runner_root, workdir, self.job_uid, self.job_gid
             )
             if child.stop_requested:
                 return
-            child.process = await self._spawn(
-                str(workdir / "run.sh"),
-                cwd=str(workdir),
-                env=child_env(self._base_env, jit, workdir, self.job_hook),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True,
-                user=self.job_uid,
-                group=self.job_gid,
-                extra_groups=[] if self.job_gid is not None else None,
-                preexec_fn=limit_child,
-            )
+            # Our own pipe, not asyncio's PIPE: with PIPE, process.wait() does
+            # not return until every holder of the write end closes it, so a
+            # helper left alive by run.sh would keep the slot forever. Here
+            # wait() tracks the process exit alone and the relay is drained
+            # separately, bounded by the grace period.
+            read_fd, write_fd = os.pipe()
+            stream: asyncio.StreamReader | None = None
+            try:
+                stream, output = await self._open_output(read_fd)
+                child.process = await self._spawn(
+                    str(workdir / "run.sh"),
+                    cwd=str(workdir),
+                    env=child_env(self._base_env, jit, workdir, self.job_hook),
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=write_fd,
+                    stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
+                    user=self.job_uid,
+                    group=self.job_gid,
+                    extra_groups=[] if self.job_gid is not None else None,
+                    preexec_fn=limit_child,
+                )
+            finally:
+                os.close(write_fd)  # the child holds its own copy
             del jit
             child.pid = child.process.pid
             if child.stop_requested:
                 asyncio.get_running_loop().create_task(self._terminate(child))
             else:
                 child.status = "running"
-            stream = getattr(child.process, "stdout", None)
-            if isinstance(stream, asyncio.StreamReader):
-                child.output = asyncio.get_running_loop().create_task(
-                    self._relay(child, stream)
-                )
+            assert stream is not None
+            child.output = asyncio.get_running_loop().create_task(
+                self._relay(child, stream)
+            )
             exit_code = await child.process.wait()
-            if child.output is not None:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(child.output, self._grace)
+            await self._drain_output(child)
         except asyncio.CancelledError:
             if child.process is not None and child.process.returncode is None:
                 await self._terminate(child)
@@ -510,6 +529,8 @@ class Supervisor:
             child.exited.set()
             if child.output is not None and not child.output.done():
                 child.output.cancel()
+            if output is not None:
+                output.close()
             if (
                 child.process is not None
                 and not child.took_job
@@ -520,6 +541,49 @@ class Supervisor:
             self._remember_finished(child, code)  # before the live record goes
             self.children.pop(child.name, None)
             await self._send_exit(child, code)
+
+    @staticmethod
+    async def _open_output(
+        read_fd: int,
+    ) -> tuple[asyncio.StreamReader, asyncio.ReadTransport]:
+        """Async reader over the read end of the child's output pipe.
+
+        Takes ownership of ``read_fd``: it is closed here on failure and by
+        closing the returned transport otherwise.
+        """
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        pipe = os.fdopen(read_fd, "rb", buffering=0, closefd=True)
+        try:
+            transport, _ = await loop.connect_read_pipe(
+                lambda: asyncio.StreamReaderProtocol(reader), pipe
+            )
+        except BaseException:
+            pipe.close()
+            raise
+        return reader, transport
+
+    async def _drain_output(self, child: Child) -> None:
+        """After run.sh exits, give its output ``grace`` seconds to finish.
+
+        If the pipe is still open then, a leftover process in the runner's
+        session holds it: stop that session and give up on the rest, so the
+        slot is released and the exit reported either way.
+        """
+        if child.output is None:
+            return
+        done, _ = await asyncio.wait({child.output}, timeout=self._grace)
+        if done:
+            return
+        log.warning(
+            "runner %s exited but its output stayed open for %.0fs; stopping"
+            " leftover processes in its session",
+            child.name,
+            self._grace,
+        )
+        if child.pid is not None:
+            self._signal(child.pid, signal.SIGKILL)
+        child.output.cancel()
 
     async def _relay(self, child: Child, stream: asyncio.StreamReader) -> None:
         """Copy child output to the agent log, bounded; always drain the pipe."""
@@ -550,7 +614,12 @@ class Supervisor:
                 log.info("runner %s: %s", child.name, safe)
 
     async def _log_diag(self, child: Child, workdir: Path, code: int) -> None:
-        tail = await asyncio.to_thread(diag_tail, workdir)
+        try:  # optional logging never holds up cleanup
+            tail = await asyncio.wait_for(
+                asyncio.to_thread(diag_tail, workdir), self._grace
+            )
+        except TimeoutError:
+            tail = []
         log.warning(
             "runner %s exited (code %s) before taking a job; _diag tail follows"
             " (%d lines)",

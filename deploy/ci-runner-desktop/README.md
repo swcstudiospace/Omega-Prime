@@ -105,8 +105,10 @@ corresponding `ARG`. Never hand-type a hash.
   that with its repo allowlist plus `private: true` (or the public opt-in and
   fork guard), and the pre-job guard enforces it again on the runner.
 - **Docker.** There is no Docker, no DinD and no privileged mode; Railway is
-  unprivileged. Workflows that need Docker must stay on the VPS runner
-  (`runs-on: [self-hosted, vps-docker]`) (D-120-08).
+  unprivileged. Workflows that need Docker are migrated to run here anyway,
+  using binaries baked into this image (Postgres, GreptimeDB and similar,
+  started as plain processes; task 00056). There is no separate Docker
+  runner.
 - **Directory modes (00055).** `/var/lib/omega-ci` and `/var/lib/omega-ci/work`
   are root-owned **0755**, and the agent re-applies 0755 to the work root at
   startup and refuses to start (`UnsafeWorkdir`) if the work root or any

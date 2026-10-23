@@ -26,18 +26,17 @@ repositories are refused unless opted in (see
 tokens or extra steps are added to the workflow.
 
 Jobs that need Docker (`container:`, `services:`, `docker build`, docker
-compose) cannot run on the unprivileged Railway Desktop (D-120-08). Point them
-at the VPS runner instead:
-
-```yaml
-    runs-on: [self-hosted, vps-docker]
-```
+compose) cannot use Docker on the unprivileged Railway Desktop. They still run
+on the pool: rewrite them to use the binaries baked into the runner image
+(Postgres, GreptimeDB and similar, started as plain processes in the job;
+task 00056), and extend the image when a binary is missing. There is no
+separate Docker runner and no GitHub-hosted fallback.
 
 > **Rollout caveat.** Because matching is "job labels ⊆ pool labels" (labels
 > compare case-insensitively), a job that says only `runs-on: self-hosted`, or
 > `[self-hosted, Linux, X64]`, also matches the pool. Before turning the pool
-> on, retarget every Docker-needing `self-hosted` job to
-> `[self-hosted, vps-docker]`, and give the VPS runner that extra label.
+> on, make sure every such job can run on the pool (no `container:`,
+> `services:` or Docker build left; use the image's baked-in binaries).
 
 ## Org-wide setup (every swcstudiospace repository)
 
