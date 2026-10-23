@@ -108,7 +108,9 @@ def pr(head: str = REPO, fork: Any = False, **kw: Any) -> dict[str, Any]:
             ALLOWED,
             hook.PULL_REQUEST_TARGET,
         ),
-        # public (or unknown visibility): only push / workflow_dispatch / pull_request
+        # public (or unknown visibility): push / workflow_dispatch /
+        # pull_request, plus schedule only when the ref is the default branch
+        ("schedule", REPO, event(), ALLOWED, hook.EVENT_NOT_ALLOWED),
         ("issue_comment", REPO, event(), ALLOWED, hook.EVENT_NOT_ALLOWED),
         ("workflow_run", REPO, event(private=None), ALLOWED, hook.EVENT_NOT_ALLOWED),
         # allowlist and context
@@ -136,6 +138,48 @@ def test_refusal(
     reason: str | None,
 ) -> None:
     assert hook.refusal(name, repository, payload, allowed) == reason
+
+
+def _public_schedule(default: str | None = "main") -> dict[str, Any]:
+    body = event()
+    if default is not None:
+        body["repository"]["default_branch"] = default
+    return body
+
+
+@pytest.mark.parametrize(
+    ("ref", "payload", "reason"),
+    [
+        ("refs/heads/main", _public_schedule("main"), None),
+        ("refs/heads/release/1", _public_schedule("release/1"), None),
+        ("refs/heads/feature", _public_schedule("main"), hook.EVENT_NOT_ALLOWED),
+        ("refs/heads/main", _public_schedule(None), hook.EVENT_NOT_ALLOWED),
+        (None, _public_schedule("main"), hook.EVENT_NOT_ALLOWED),
+        ("refs/tags/main", _public_schedule("main"), hook.EVENT_NOT_ALLOWED),
+        (" main", _public_schedule(" main"), hook.EVENT_NOT_ALLOWED),
+    ],
+)
+def test_public_schedule_is_trusted_only_on_the_default_branch(
+    ref: str | None, payload: dict[str, Any], reason: str | None
+) -> None:
+    assert hook.refusal("schedule", REPO, payload, ALLOWED, ref=ref) == reason
+
+
+def test_private_schedule_stays_allowed_without_a_ref() -> None:
+    assert hook.refusal("schedule", REPO, event(private=True), ALLOWED) is None
+
+
+def test_main_admits_a_default_branch_schedule(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy, path = files(tmp_path, _public_schedule("main"))
+    admitted = env_for(path, "schedule")
+    admitted["GITHUB_REF"] = "refs/heads/main"
+    assert hook.main([str(policy)], admitted) == 0
+    other = env_for(path, "schedule")
+    other["GITHUB_REF"] = "refs/heads/feature"
+    assert hook.main([str(policy)], other) == 1
+    assert "refused this job (event_not_allowed)" in capsys.readouterr().err
 
 
 def test_policy_round_trip_and_fail_closed(tmp_path: Path) -> None:

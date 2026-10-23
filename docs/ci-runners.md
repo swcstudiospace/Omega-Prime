@@ -250,9 +250,10 @@ runner-side hook, so the two sides can never disagree):
   `OMEGA_CI_REPOS`. `owner/repo` is covered by itself or by `owner/*`;
   `owner/*` only by `owner/*` (a list of names never covers a wildcard).
 - Every fork-guard rule stays: public repositories still get the run lookup,
-  and only `push`, `workflow_dispatch` and same-repository `pull_request`
-  runs are served. Fork pull requests, `pull_request_target` and unknown
-  heads are refused by both the controller and the runner-side hook.
+  and only `push`, `workflow_dispatch`, same-repository `pull_request`, and
+  `schedule` on that repository's default branch are served. Fork pull
+  requests, `pull_request_target` and unknown heads are refused by both the
+  controller and the runner-side hook.
 
 **Org repositories that are themselves GitHub forks.** Some `swcstudiospace`
 repositories are forks of upstream projects. Their workflow files come from
@@ -303,10 +304,13 @@ scaler sees the job, and serves it only when all of these hold:
 
 - the run belongs to the same repository the webhook named;
 - `head_repository` is that same repository and is not a fork;
-- the trigger (`event`) is `push`, `workflow_dispatch` or `pull_request`
-  (which, given the check above, means a same-repository branch).
-  `pull_request_target` is refused by name, and so is every other trigger
-  (`workflow_run`, `issue_comment`, `schedule`, `merge_group` and so on).
+- the trigger (`event`) is `push`, `workflow_dispatch`, `pull_request`
+  (which, given the check above, means a same-repository branch), or
+  `schedule` whose `head_branch` is the repository's `default_branch`.
+  GitHub runs scheduled workflows from the default branch only, so that
+  run is the same trust as a push of it. A schedule run that does not say
+  so is refused. `pull_request_target` is refused by name, and so is every
+  other trigger (`workflow_run`, `issue_comment`, `merge_group` and so on).
 
 Everything unknown fails closed: a lookup error, a 404, a missing field or an
 unexpected shape refuses the job. Lookup errors are not cached, so a
@@ -355,7 +359,9 @@ no user code runs. It reads `GITHUB_EVENT_NAME`, `GITHUB_REPOSITORY` and
 - any pull request whose head repository is a fork, is another repository,
   or cannot be determined (private repositories included);
 - for a repository the event payload does not mark `private: true`, any
-  event other than `push`, `workflow_dispatch` or `pull_request`;
+  event other than `push`, `workflow_dispatch`, `pull_request`, or
+  `schedule` when `GITHUB_REF` is `refs/heads/<default_branch>` from the
+  payload;
 - missing context or an unreadable or mismatched event payload.
 
 The allowlist reaches the hook through a root-owned policy file the agent
@@ -484,6 +490,41 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   `rust-toolchain.toml` that names `stable` (or an action that runs
   `rustup toolchain install`) needs a write to the read-only `RUSTUP_HOME`
   and fails. Pin `1.99.1`, or bump `RUST_VERSION` in the image.
+- **CPU budget versus visible CPUs.** Each runner is budgeted 2 vCPU but
+  sees every host CPU (48 measured), and the Desktop's pid cgroup
+  (`pids.max` 1000, measured 2026-10-24; Railway's limit, well below the job
+  uid's `RLIMIT_NPROC` 4096) is shared by every concurrent job and the agent. Tools that size their worker pools from the CPU count exhaust it
+  ("Cannot acquire required number of nodes", "can't spawn worker thread").
+  Cap them at the budget in the workflow: `DOTNET_PROCESSOR_COUNT: 2`
+  (MSBuild), `CARGO_BUILD_JOBS: "2"` (cargo), Next.js
+  `experimental.cpus`, vitest `--maxWorkers=2`, `dotnet test
+  --max-parallel-test-modules 2` (task 00057). These keep one job inside its
+  share; the 1000-task ceiling itself is a Railway service limit, so many
+  concurrent thread-heavy jobs can still exhaust it.
+- **Omega-Prime's own container jobs (task 00057).** This page does not
+  claim `unshare -r` exited 0. Two image jobs on the pool exited 1, and
+  their logs are the record. Job 120657880461 (runner
+  `omega-ci-120656411281-w6to`) logged `unshare: cannot change root
+  filesystem propagation: Permission denied` and the step exited 1. Job
+  120662745206 (runner `omega-ci-120662861496-8hh0`) logged `podman info`
+  output `rootless=true graph=vfs` and then `marking filesystem ... as
+  private: mount ... flags: 0x1000: permission denied`; the job's
+  conclusion is failure. `CapBnd` in that log is `00000000800405fb` (no
+  `CAP_SYS_ADMIN`, bit 21). `/dev/fuse` was not a device node, so
+  fuse-overlayfs was not selected. setuid `newuidmap` is not called; PATH
+  shims write the one mapping the job user is allowed to write. Storage
+  uses `ignore_chown_errors` with vfs under `RUNNER_TEMP`, and the build
+  asks for chroot isolation. That does not finish a build.
+  `deploy/ci-runner-desktop` has to be started with `CAP_SYS_ADMIN` in the
+  bounding set and run `mount --make-rslave /` before the job user starts.
+  Until then `grokbot-image` cannot build or run a container. The
+  container's single mapped uid is presented as 10001, and
+  nothing is published on a host port. `ci.yml` `eventstream-it` still uses a
+  `services:` Pulsar container. That needs a Docker daemon at job setup, and
+  the owned-secure harness execs as root and as uid 10000 inside one
+  container. A single-ID namespace cannot name both, so the job stays blocked
+  until the pool can apply a subordinate uid range or the runner image ships
+  a Pulsar binary and the harness stops using `services:`.
 - **`dotnet workload install`** needs a writable SDK directory. `maui-android`
   is pre-installed, so on this pool skip the step (the `maui` workload is
   macOS/Windows-only anyway).
