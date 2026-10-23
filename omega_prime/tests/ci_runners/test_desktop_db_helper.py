@@ -148,11 +148,9 @@ def wait_dead(pid: int, timeout: float = 5.0) -> bool:
     return False
 
 
-def run(
-    args: list[str], env: dict[str, str], **kw: object
-) -> subprocess.CompletedProcess[str]:
+def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        args, env=env, capture_output=True, text=True, timeout=120, check=False, **kw
+        args, env=env, capture_output=True, text=True, timeout=120, check=False
     )
 
 
