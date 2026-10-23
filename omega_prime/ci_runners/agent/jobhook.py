@@ -9,7 +9,10 @@ non-zero exit fails the job, so no user code runs.
 
 A job is refused when:
 
-* the allowlist is missing or empty, or the repository is not on it;
+* the allowlist is missing or empty, or the repository is not on it (an
+  ``owner/*`` entry admits only repositories that are *not* themselves GitHub
+  forks: an org fork of an upstream project carries upstream's workflows, so
+  it runs only when listed by its exact name);
 * ``GITHUB_EVENT_NAME`` / ``GITHUB_REPOSITORY`` / ``GITHUB_EVENT_PATH`` are
   missing, or the event payload is unreadable or names another repository;
 * the event is ``pull_request_target``;
@@ -23,14 +26,23 @@ from ``omega_prime`` so the image runs it as a plain file under
 ``python3 -I`` (environment-isolated, no ``PYTHONPATH``). The allowlist comes
 from a root-owned policy file the agent writes at startup, never from the
 job's environment. It carries repository names only, no secrets.
+
+This module is also the one source of truth for repository allowlists
+(``OMEGA_CI_REPOS``, ``OMEGA_CI_PUBLIC_REPOS``, ``OMEGA_CI_AGENT_REPOS``): the
+controller's settings, webhook admission, demand replay and fork guard all
+match through :func:`parse_repo_patterns`, :func:`repo_allowed` and
+:func:`patterns_cover` below, so the controller and the runner can never
+disagree about what an entry means. An entry is either ``owner/repo`` or the
+owner wildcard ``owner/*``; there is no bare ``*`` and no partial glob.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +59,78 @@ PULL_REQUEST_TARGET = "pull_request_target"
 EVENT_NOT_ALLOWED = "event_not_allowed"
 FORK = "fork"
 HEAD_UNKNOWN = "head_unknown"
+FORK_NOT_LISTED = "fork_repo_not_listed"
+
+_OWNER = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
+_EXACT_RE = re.compile(rf"^{_OWNER}/[A-Za-z0-9._-]{{1,100}}$")
+_WILDCARD_RE = re.compile(rf"^{_OWNER}/\*$")
+WILDCARD = "*"
+
+
+class RepoPatternError(ValueError):
+    """An allowlist entry is neither ``owner/repo`` nor ``owner/*``."""
+
+
+def _is_repo(name: str) -> bool:
+    return bool(_EXACT_RE.match(name)) and not name.endswith(("/.", "/.."))
+
+
+def is_repo_pattern(entry: str) -> bool:
+    """``owner/repo`` or ``owner/*``. Bare ``*``, ``*/x``, ``owner/foo*``,
+    ``owner/**`` and anything with other characters are not patterns."""
+    return _is_repo(entry) or bool(_WILDCARD_RE.match(entry))
+
+
+def parse_repo_patterns(entries: Iterable[str]) -> frozenset[str]:
+    """Validated, lower-cased allowlist entries. Raises on any bad entry."""
+    out: set[str] = set()
+    for raw in entries:
+        entry = raw.strip() if isinstance(raw, str) else ""
+        if not is_repo_pattern(entry):
+            raise RepoPatternError("allowlist entries are owner/repo or owner/*")
+        out.add(entry.lower())
+    return frozenset(out)
+
+
+def _owner_wildcard(owner: str) -> str:
+    return f"{owner}/{WILDCARD}"
+
+
+def repo_allowed(
+    repo: str | None, patterns: Collection[str], *, fork: bool | None
+) -> bool:
+    """Whether ``repo`` (``owner/name``) is on the allowlist ``patterns``.
+
+    Case-insensitive. An exact ``owner/repo`` entry always matches. An
+    ``owner/*`` entry matches any repository of that owner that is explicitly
+    *not* a GitHub fork (``fork is False``): a fork, or a repository whose
+    fork status is unknown, needs its exact entry. Invalid entries never
+    match, and an empty allowlist matches nothing. Fails closed.
+    """
+    if not isinstance(repo, str):
+        return False
+    name = repo.lower()
+    if not _is_repo(name):
+        return False
+    entries = {p.lower() for p in patterns if isinstance(p, str)}
+    if name in entries:
+        return True
+    owner = name.split("/", 1)[0]
+    return fork is False and _owner_wildcard(owner) in entries
+
+
+def patterns_cover(subset: Collection[str], superset: Collection[str]) -> bool:
+    """Every entry of ``subset`` is admitted by ``superset``: an exact entry
+    by the same entry or its owner's wildcard, a wildcard only by the same
+    wildcard. An empty ``superset`` covers nothing (only an empty subset)."""
+    sup = {p.lower() for p in superset}
+    for entry in (p.lower() for p in subset):
+        if entry in sup:
+            continue
+        if _is_repo(entry) and _owner_wildcard(entry.split("/", 1)[0]) in sup:
+            continue
+        return False
+    return True
 
 
 def _name(obj: Any) -> str | None:
@@ -63,22 +147,27 @@ def refusal(
     allowed: Collection[str],
 ) -> str | None:
     """``None`` when the job may run, else why not. Pure; fails closed."""
-    repos = {r.lower() for r in allowed if isinstance(r, str)}
+    repos = {r.lower() for r in allowed if isinstance(r, str) and is_repo_pattern(r)}
     if not repos:
         return NO_ALLOWLIST
     if not event_name or not repository:
         return CONTEXT_MISSING
     repo = repository.lower()
-    if repo not in repos:
+    if not repo_allowed(repo, repos, fork=False):  # name only; fork checked below
         return REPO_NOT_ALLOWED
     if not isinstance(payload, Mapping):
         return EVENT_UNREADABLE
     source = payload.get("repository")
     if _name(source) != repo:
         return REPO_MISMATCH
+    assert isinstance(source, Mapping)
+    fork_flag = source.get("fork")
+    if not repo_allowed(
+        repo, repos, fork=fork_flag if isinstance(fork_flag, bool) else None
+    ):
+        return FORK_NOT_LISTED
     if event_name == "pull_request_target":
         return PULL_REQUEST_TARGET
-    assert isinstance(source, Mapping)
     if source.get("private") is not True and event_name not in ALLOWED_PUBLIC_EVENTS:
         return EVENT_NOT_ALLOWED
     if event_name.startswith("pull_request") or "pull_request" in payload:
@@ -100,7 +189,7 @@ def refusal(
 
 
 def policy_document(repos: Collection[str]) -> dict[str, Any]:
-    return {"version": POLICY_VERSION, "repos": sorted({r.lower() for r in repos})}
+    return {"version": POLICY_VERSION, "repos": sorted(parse_repo_patterns(repos))}
 
 
 def load_policy(path: Path) -> frozenset[str]:
@@ -114,7 +203,10 @@ def load_policy(path: Path) -> frozenset[str]:
     repos = raw.get("repos")
     if not isinstance(repos, list) or not all(isinstance(r, str) for r in repos):
         return frozenset()
-    return frozenset(r.lower() for r in repos)
+    try:
+        return parse_repo_patterns(repos)
+    except RepoPatternError:
+        return frozenset()  # one bad entry voids the whole policy
 
 
 def _payload(path: str | None) -> Any:
@@ -149,7 +241,8 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
     if reason is not None:
         print(
             f"::error::omega-ci job guard refused this job ({reason}). "
-            "This self-hosted pool serves allowlisted repositories only, never "
+            "This self-hosted pool serves allowlisted repositories only (an "
+            "owner/* entry skips repositories that are forks), never "
             "pull_request_target or pull requests from forks.",
             file=sys.stderr,
         )
@@ -168,13 +261,20 @@ __all__ = [
     "EVENT_NOT_ALLOWED",
     "EVENT_UNREADABLE",
     "FORK",
+    "FORK_NOT_LISTED",
     "HEAD_UNKNOWN",
     "NO_ALLOWLIST",
     "PULL_REQUEST_TARGET",
     "REPO_MISMATCH",
     "REPO_NOT_ALLOWED",
+    "WILDCARD",
+    "RepoPatternError",
+    "is_repo_pattern",
     "load_policy",
     "main",
+    "parse_repo_patterns",
+    "patterns_cover",
     "policy_document",
     "refusal",
+    "repo_allowed",
 ]

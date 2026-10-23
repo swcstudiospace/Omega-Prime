@@ -27,6 +27,12 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
+from omega_prime.ci_runners.agent.jobhook import (
+    RepoPatternError,
+    parse_repo_patterns,
+    patterns_cover,
+)
+
 DEFAULT_LABELS: tuple[str, ...] = ("self-hosted", "linux", "x64", "omega-ci")
 DEFAULT_RUNNER_GROUP = "omega-ci"
 DEFAULT_MAX_RUNNERS = 8
@@ -230,13 +236,20 @@ def parse_labels(raw: str | None) -> tuple[str, ...]:
 
 
 def _repos(raw: str | None, name: str = "OMEGA_CI_REPOS") -> frozenset[str]:
+    """Comma-separated ``owner/repo`` or ``owner/*`` entries, lower-cased.
+
+    Parsed by the one shared matcher (:mod:`omega_prime.ci_runners.agent.jobhook`)
+    so the controller and the runner-side guard read entries identically.
+    """
     if raw is None:
         return frozenset()
-    repos = [p.strip() for p in raw.split(",") if p.strip()]
-    for repo in repos:
-        if not _REPO.match(repo):
-            raise SettingsError(f"{name}: comma-separated owner/repo names")
-    return frozenset(repo.lower() for repo in repos)
+    try:
+        return parse_repo_patterns(p for p in raw.split(",") if p.strip())
+    except RepoPatternError:
+        raise SettingsError(
+            f"{name}: comma-separated owner/repo or owner/* entries "
+            "(no bare * and no partial globs)"
+        ) from None
 
 
 @dataclass(frozen=True)
@@ -288,10 +301,11 @@ class ControllerSettings:
         public_repos = _repos(
             _get(env, "OMEGA_CI_PUBLIC_REPOS"), "OMEGA_CI_PUBLIC_REPOS"
         )
-        if public_repos and not (repos and public_repos <= repos):
+        if public_repos and not (repos and patterns_cover(public_repos, repos)):
             raise SettingsError(
-                "OMEGA_CI_PUBLIC_REPOS: every public repo must also be listed in "
-                "OMEGA_CI_REPOS (an empty OMEGA_CI_REPOS cannot opt public repos in)"
+                "OMEGA_CI_PUBLIC_REPOS: every public entry must also be covered by "
+                "OMEGA_CI_REPOS (owner/* is covered only by owner/*; an empty "
+                "OMEGA_CI_REPOS cannot opt public repos in)"
             )
         group = _get(env, "OMEGA_CI_RUNNER_GROUP") or DEFAULT_RUNNER_GROUP
         group_id = _int(

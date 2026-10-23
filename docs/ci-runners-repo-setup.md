@@ -39,17 +39,53 @@ at the VPS runner instead:
 > on, retarget every Docker-needing `self-hosted` job to
 > `[self-hosted, vps-docker]`, and give the VPS runner that extra label.
 
+## Org-wide setup (every swcstudiospace repository)
+
+Since 2026-10-24 (Ove's decision) the pool serves every `swcstudiospace`
+repository, public ones included, behind the fork guard. Instead of listing
+repositories one by one, use the owner wildcard in all three allowlists:
+
+1. Runner group `omega-ci`: Repository access **All repositories**, and tick
+   **Allow public repositories** (see the one-time setup below).
+2. Organisation settings → Actions → General → "Approval for running fork pull
+   request workflows from contributors": **Require approval for all outside
+   collaborators**. Set it once at org level so every repository, including
+   new ones, inherits it.
+3. VPS `/etc/omega-ci/controller.env`:
+   ```bash
+   OMEGA_CI_REPOS=swcstudiospace/*
+   OMEGA_CI_PUBLIC_REPOS=swcstudiospace/*
+   ```
+   then restart the controller.
+4. Railway → Ubuntu Desktop → Variables: `OMEGA_CI_AGENT_REPOS=swcstudiospace/*`
+   (Railway redeploys the Desktop).
+
+`owner/*` means every repository of that owner, matched case-insensitively,
+including ones created later. There is no bare `*` and no partial glob such
+as `swcstudiospace/foo*`; the controller and the agent refuse to start with
+one. An org repository that is itself a **GitHub fork** of an upstream
+project is *not* covered by `owner/*` (its workflows come from upstream). To
+serve a **private** one on purpose, add its exact name next to the wildcard,
+for example `swcstudiospace/*,swcstudiospace/some-fork`, in `OMEGA_CI_REPOS`
+and `OMEGA_CI_AGENT_REPOS`; pull requests inside it stay refused. A **public**
+fork is always refused, by design (the fork guard sees `fork: true` for every
+trigger), even when listed exactly. Each repository still opts in with the
+one-line `runs-on` change above. Opening the pool to another organisation
+needs Ove's say. Details:
+[CI runner fleet](ci-runners.md#org-wide-setup-every-repository-of-an-owner).
+
 ## Public repositories
 
 Public repositories are refused by default, because anyone can run code on a
 self-hosted runner through a fork pull request. To serve one anyway:
 
 1. Add it to both `OMEGA_CI_REPOS` and `OMEGA_CI_PUBLIC_REPOS` in
-   `/etc/omega-ci/controller.env`, then restart the controller.
+   `/etc/omega-ci/controller.env` (or use `swcstudiospace/*` in both, as in
+   the org-wide setup above), then restart the controller.
 2. In the repository, set Settings → Actions → General → fork pull request
    approval to **Require approval for all outside collaborators**.
-3. Give the `omega-ci` runner group access to that repository and turn on its
-   **Allow public repositories** option.
+3. Give the `omega-ci` runner group access to that repository (or **All
+   repositories**) and turn on its **Allow public repositories** option.
 
 The controller then serves only jobs whose workflow run is a same-repository
 `push`, `workflow_dispatch` or `pull_request`. Fork pull requests,
@@ -63,12 +99,15 @@ Desktop's `OMEGA_CI_AGENT_REPOS`. Details and the risk are in
 ## One-time organisation setup (HELD)
 
 1. **Runner group.** Organisation settings → Actions → Runner groups → New
-   group `omega-ci`. Repository access: *selected repositories* (only your
-   private CI repositories). Leave "Allow public repositories" off. Note the
+   group `omega-ci`. Repository access: **All repositories** with **Allow
+   public repositories** ticked for the org-wide setup (the allowlists and the
+   fork guard do the filtering), or *selected repositories* with "Allow public
+   repositories" off for a private-only pool. Note the
    group's numeric id (`gh api /orgs/<org>/actions/runner-groups`) for
    `OMEGA_CI_RUNNER_GROUP_ID`. If your plan cannot create extra groups, use the
    default group (id `1`) and rely on `OMEGA_CI_REPOS` as the allowlist.
-2. **GitHub App** (D-120-09), installed on the organisation, selected repos only:
+2. **GitHub App** (D-120-09), installed on the organisation (all repositories
+   for the org-wide setup, otherwise the selected ones):
    - Organisation permission **Self-hosted runners: Read and write**
      (registers JIT runners, lists and deletes them).
    - Repository permission **Actions: Read** (needed for the event, and for
@@ -83,7 +122,11 @@ Desktop's `OMEGA_CI_AGENT_REPOS`. Details and the risk are in
      repository), grant Repository **Administration: Read and write** instead
      of the organisation permission.
    - Fallback: a PAT file (`OMEGA_CI_GITHUB_PAT_FILE`) works, but it shares
-     that token's hourly budget. The App is preferred.
+     that token's hourly budget. The App is preferred. A fine-grained token
+     needs resource owner `swcstudiospace`, organisation permission
+     **Self-hosted runners: Read and write**, and repository **Actions: Read**
+     on the repositories it serves (the fork guard's run lookup and the
+     startup check of saved jobs).
 3. **VPS controller.**
    - Create an unprivileged `omega-ci` account and a virtualenv with
      `pip install 'omega-prime[ci-runners]' cryptography`.
@@ -118,10 +161,12 @@ Desktop's `OMEGA_CI_AGENT_REPOS`. Details and the risk are in
      (≈ $22/month). Keep it only if a third party allowlists your runners'
      egress IP; it plays no part in the webhook path.
 
-The controller runs the same CLI the unit uses:
+The controller runs the same CLI the unit uses. 8788 is the default; the
+production VPS listens on 8798 behind its nginx site because 8788 is taken
+there:
 
 ```bash
-python -m omega_prime.ci_runners controller --host 127.0.0.1 --port 8788
+python -m omega_prime.ci_runners controller --host 127.0.0.1 --port 8798
 ```
 
 ## Rehearse offline first
@@ -135,8 +180,10 @@ python -m pytest omega_prime/tests/ci_runners/test_app.py omega_prime/tests/ci_r
 
 ## Rollout (non-cancelling)
 
-1. Onboard **one** trusted private repository: add it to the runner group and
-   to `OMEGA_CI_REPOS`, then merge the one-line `runs-on` change.
+1. Onboard **one** trusted private repository first: merge its one-line
+   `runs-on` change (with the org-wide setup it is already covered by
+   `swcstudiospace/*`; otherwise add it to the runner group and to
+   `OMEGA_CI_REPOS`).
 2. In-flight jobs are not affected. Jobs already queued for the old runner keep
    their old labels and finish there. Do not add `cancel-in-progress` as part
    of the migration.

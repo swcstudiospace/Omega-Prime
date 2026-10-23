@@ -42,6 +42,7 @@ def test_round_trip_keeps_first_seen_and_drops_non_queued(tmp_path: Path) -> Non
         "repo",
         "private",
         "public",
+        "fork",
         "labels",
         "seen_at",
     }

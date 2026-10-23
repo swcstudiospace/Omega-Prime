@@ -1,0 +1,6 @@
+# Custom self-hosted runner labels used by this repository's workflows
+# (docs/ci-runners.md). Lets actionlint check runs-on for the omega-ci pool.
+self-hosted-runner:
+  labels:
+    - omega-ci
+    - vps-docker

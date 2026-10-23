@@ -31,6 +31,7 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from typing import Literal
 
+from omega_prime.ci_runners.agent.jobhook import parse_repo_patterns, patterns_cover
 from omega_prime.ci_runners.jobs import (
     CancelIdle,
     ControllerStarted,
@@ -110,10 +111,12 @@ class Scaler:
         if not 1 <= max_runners <= HARD_MAX_RUNNERS:
             raise ValueError(f"max_runners must be 1..{HARD_MAX_RUNNERS}")
         self.labels = frozenset(labels)
-        self.repos = frozenset(r.lower() for r in repos)
-        self.public_repos = frozenset(r.lower() for r in public_repos)
-        if self.public_repos and not (self.repos and self.public_repos <= self.repos):
-            raise ValueError("public_repos must be a subset of a non-empty repos")
+        self.repos = parse_repo_patterns(repos)
+        self.public_repos = parse_repo_patterns(public_repos)
+        if self.public_repos and not (
+            self.repos and patterns_cover(self.public_repos, self.repos)
+        ):
+            raise ValueError("public_repos must be covered by a non-empty repos")
         self.max_runners = max_runners
         self.idle_grace_s = idle_grace_s
         self._new_generation = new_generation

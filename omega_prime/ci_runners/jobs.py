@@ -11,6 +11,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from omega_prime.ci_runners.agent.jobhook import repo_allowed
 from omega_prime.ci_runners.settings import RUNNER_PREFIX
 
 
@@ -49,6 +50,9 @@ class WorkflowJob:
     # Set only by the controller's fork guard after it verified the job's
     # workflow run (same repository, allowed trigger). Never parsed from input.
     trusted: bool = False
+    # ``repository.fork`` from the payload; ``None`` when absent. An ``owner/*``
+    # allowlist entry admits only ``fork is False`` (see ``repo_allowed``).
+    fork: bool | None = None
 
 
 def _int_field(obj: Mapping[str, Any], key: str) -> int:
@@ -92,6 +96,7 @@ def parse_workflow_job(payload: Mapping[str, Any]) -> WorkflowJob | None:
         "internal",
     )
     public = repo.get("private") is False and repo.get("visibility") == "public"
+    fork_raw = repo.get("fork")
     return WorkflowJob(
         job_id=_int_field(job, "id"),
         run_id=_int_field(job, "run_id"),
@@ -102,6 +107,7 @@ def parse_workflow_job(payload: Mapping[str, Any]) -> WorkflowJob | None:
         runner_name=runner_name or None,
         runner_id=runner_id or None,
         public=public,
+        fork=fork_raw if isinstance(fork_raw, bool) else None,
     )
 
 
@@ -109,11 +115,12 @@ def wants_pool(
     job: WorkflowJob, pool_labels: Collection[str], repos: Collection[str]
 ) -> bool:
     """The job asks only for labels the pool carries (labels ⊆ pool) and its
-    repository passes the allowlist (empty = every repo the group admits).
+    repository passes the allowlist (empty = every repo the group admits;
+    ``owner/*`` entries match through the shared :func:`repo_allowed`).
     Says nothing about visibility: see :func:`matches`."""
     if not job.labels:
         return False
-    if repos and job.repo not in repos:
+    if repos and not repo_allowed(job.repo, repos, fork=job.fork):
         return False
     return set(job.labels) <= set(pool_labels)
 
@@ -132,7 +139,11 @@ def matches(
         return False
     if job.private:
         return True
-    return job.public and job.trusted and job.repo in public_repos
+    return (
+        job.public
+        and job.trusted
+        and repo_allowed(job.repo, public_repos, fork=job.fork)
+    )
 
 
 def is_pool_runner(name: str | None) -> bool:
