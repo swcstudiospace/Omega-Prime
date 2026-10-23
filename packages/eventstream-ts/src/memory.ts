@@ -95,6 +95,8 @@ export class MemoryEventBus implements EventBus {
   readonly #wake = new EventSignal();
   readonly #records: StoredEvent[] = [];
   readonly #subscribers = new Set<MemorySubscription>();
+  /** In-flight message indexes shared by subscribers of the same name. */
+  readonly #sharedInFlight = new Map<string, Map<number, StoredEvent>>();
   readonly #readers = new Set<MemoryReader>();
   readonly #unsubscribeClock: () => void;
   #closed = false;
@@ -193,6 +195,16 @@ export class MemoryEventBus implements EventBus {
     this.#subscribers.delete(subscriber);
   }
 
+  sharedInFlight(topic: string, subscriptionName: string): Map<number, StoredEvent> {
+    const key = `${topic}\0${subscriptionName}`;
+    let map = this.#sharedInFlight.get(key);
+    if (map === undefined) {
+      map = new Map();
+      this.#sharedInFlight.set(key, map);
+    }
+    return map;
+  }
+
   removeReader(reader: MemoryReader): void {
     this.#readers.delete(reader);
   }
@@ -204,7 +216,7 @@ class MemorySubscription implements EventSubscriber {
   readonly #subscriptionName: string;
   readonly #maxInFlight: number;
   readonly #startIndex: number;
-  readonly #inFlight = new Map<number, StoredEvent>();
+  readonly #inFlight: Map<number, StoredEvent>;
   readonly mode: SubscribeOptions["mode"];
   #closed = false;
 
@@ -212,6 +224,7 @@ class MemorySubscription implements EventSubscriber {
     this.#bus = bus;
     this.#topic = topic;
     this.#subscriptionName = name;
+    this.#inFlight = bus.sharedInFlight(topic, name);
     this.mode = mode;
     this.#maxInFlight = maxInFlight;
     this.#startIndex = startIndex;

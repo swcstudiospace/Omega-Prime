@@ -284,6 +284,32 @@ jobs:
             /tmp/sandbox-policy.regen.yaml
             /tmp/sandbox-policy.diff
           if-no-files-found: warn
+
+  eventstream-ts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: packages/eventstream-ts/package-lock.json
+      - name: install
+        working-directory: packages/eventstream-ts
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: typecheck
+        working-directory: packages/eventstream-ts
+        run: npm run typecheck
+      - name: unit tests
+        working-directory: packages/eventstream-ts
+        run: npm run test:unit
+      - name: schema contract
+        working-directory: packages/eventstream-ts
+        run: npm run test:contract
   eventstream-it:
     runs-on: ubuntu-latest
     timeout-minutes: 45

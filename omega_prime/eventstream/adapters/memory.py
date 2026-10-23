@@ -65,6 +65,8 @@ class _SubscriptionState:
     acknowledged: set[str] = field(default_factory=set)
     in_flight: dict[str, str] = field(default_factory=dict)
     delivered: set[str] = field(default_factory=set)
+    # Exclusive/Failover: at most one active receiver may own the subscription.
+    active_receiver: int | None = None
 
 
 class MemoryEventBus:
@@ -133,7 +135,7 @@ class MemoryEventBus:
             )
             state = _SubscriptionState(start_at=start_at)
             self._subscriptions[key] = state
-        return MemorySubscriber(
+        subscriber = MemorySubscriber(
             bus=self,
             topic=topic,
             subscription=subscription,
@@ -141,6 +143,18 @@ class MemoryEventBus:
             receiver_queue_size=receiver_queue_size,
             state=state,
         )
+        if subscription_type == "Exclusive":
+            if state.active_receiver is not None:
+                raise ValueError(
+                    "exclusive subscription already has an active consumer"
+                )
+            state.active_receiver = id(subscriber)
+        elif subscription_type == "Failover":
+            # Primary owns the fence; standby may construct but cannot receive
+            # until the primary closes and clears active_receiver.
+            if state.active_receiver is None:
+                state.active_receiver = id(subscriber)
+        return subscriber
 
     async def read(self, topic: str, *, start_at: int = 0) -> MemoryReader:
         self._ensure_open()
@@ -219,6 +233,14 @@ class MemorySubscriber:
             while True:
                 self._ensure_open()
                 event.clear()
+                if self.subscription_type in {"Exclusive", "Failover"}:
+                    owner = self._state.active_receiver
+                    if owner is None:
+                        self._state.active_receiver = id(self)
+                    elif owner != id(self):
+                        # Standby Failover / displaced Exclusive cannot consume.
+                        await event.wait()
+                        continue
                 if len(self._state.in_flight) < self.receiver_queue_size:
                     message = self._next_message()
                     if message is not None:
@@ -291,6 +313,8 @@ class MemorySubscriber:
         for message_id in self._owned_inflight:
             self._state.in_flight.pop(message_id, None)
         self._owned_inflight.clear()
+        if self._state.active_receiver == id(self):
+            self._state.active_receiver = None
         self._bus._notify()
 
     def _ensure_open(self) -> None:
