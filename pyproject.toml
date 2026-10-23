@@ -34,6 +34,9 @@ otel = [
   "opentelemetry-proto",
   "opentelemetry-exporter-otlp-proto-http",
 ]
+ci-runners = [
+  "uvicorn>=0.30",
+]
 dev = [
   "ruff==0.16.10",
   "mypy==2.4.0",
