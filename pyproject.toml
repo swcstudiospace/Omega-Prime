@@ -35,7 +35,7 @@ otel = [
   "opentelemetry-exporter-otlp-proto-http",
 ]
 dev = [
-  "ruff==0.16.10",
+  "ruff==0.17.1",
   "mypy==2.4.0",
   "pytest>=8.0",
 ]
