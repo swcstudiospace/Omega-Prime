@@ -24,6 +24,7 @@ FAKE_PYTHON = """#!/bin/sh
 printf '%s\\n' "$@" > '{out}/agent.argv'
 printf '%s' "${{PASSWORD-unset}}" > '{out}/agent.password'
 printf '%s' "$PYTHONPATH" > '{out}/agent.pythonpath'
+{agent_tail}
 """
 
 UPSTREAM = """#!/bin/sh
@@ -40,12 +41,33 @@ def _script(path: Path, body: str) -> Path:
     return path
 
 
-def _setup(tmp_path: Path, tail: str = "exit 7") -> tuple[dict[str, str], Path]:
+# A long-lived agent: on SIGTERM it "drains" (stands in for terminating its
+# runners and posting their exit callbacks) before exiting.
+DRAINING_AGENT = (
+    'trap \'echo term > "{out}/agent.sig"; sleep 0.3; '
+    'echo drained > "{out}/agent.drained"; exit 0\' TERM\n'
+    "echo 1 > '{out}/agent.trapped'\n"
+    "while :; do sleep 0.05; done"
+)
+
+TRAPPING_UPSTREAM = (
+    "trap 'echo term > \"$0.sig\"; exit 143' TERM\n"
+    'echo 1 > "$0.trapped"\n'
+    "while :; do sleep 0.05; done"
+)
+
+
+def _setup(
+    tmp_path: Path, tail: str = "exit 7", agent_tail: str = ""
+) -> tuple[dict[str, str], Path]:
     out = tmp_path / "out"
     out.mkdir()
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    _script(bindir / "python3", FAKE_PYTHON.format(out=out))
+    _script(
+        bindir / "python3",
+        FAKE_PYTHON.format(out=out, agent_tail=agent_tail.format(out=out)),
+    )
     upstream = _script(tmp_path / "upstream", UPSTREAM.format(out=out, tail=tail))
     env = {
         "PATH": f"{bindir}:/usr/bin:/bin",
@@ -63,8 +85,16 @@ def _wait_for(path: Path, timeout: float = 10.0) -> str:
     return path.read_text()
 
 
-def test_starts_agent_then_execs_upstream_unchanged(tmp_path: Path) -> None:
-    env, upstream = _setup(tmp_path)
+def test_starts_agent_then_runs_upstream_unchanged(tmp_path: Path) -> None:
+    # Upstream outlives the agent's start-up, as the real desktop does; an
+    # upstream exit stops the agent, so an instant exit would race it.
+    env, upstream = _setup(
+        tmp_path,
+        tail=(
+            'while [ ! -e "$(dirname "$0")/out/agent.pythonpath" ]; '
+            "do sleep 0.02; done\nexit 7"
+        ),
+    )
     args = [str(upstream), "--flag", "two words", ""]
     proc = subprocess.run([str(WRAPPER), *args], env=env, timeout=20, check=False)
     out = tmp_path / "out"
@@ -86,26 +116,46 @@ def test_starts_agent_then_execs_upstream_unchanged(tmp_path: Path) -> None:
     assert all(PASSWORD not in a for a in agent_argv)
 
 
-def test_upstream_replaces_wrapper_and_receives_signals(tmp_path: Path) -> None:
-    env, upstream = _setup(
-        tmp_path,
-        tail=(
-            "trap 'echo term > \"$0.sig\"; exit 143' TERM\n"
-            'echo 1 > "$0.trapped"\n'
-            "while :; do sleep 0.05; done"
-        ),
-    )
+def test_sigterm_reaches_agent_and_upstream_and_agent_drains(tmp_path: Path) -> None:
+    """00062: a redeploy's SIGTERM must reach the agent, not just upstream.
+
+    Without it the agent dies by SIGKILL with its runners and never posts the
+    exit callbacks that free the controller's slots.
+    """
+    env, upstream = _setup(tmp_path, tail=TRAPPING_UPSTREAM, agent_tail=DRAINING_AGENT)
+    out = tmp_path / "out"
     proc = subprocess.Popen([str(WRAPPER), str(upstream)], env=env)
     try:
-        pid = int(_wait_for(tmp_path / "out" / "upstream.pid"))
-        assert pid == proc.pid  # exec: the upstream supervisor kept the PID
-        _wait_for(tmp_path / "upstream.trapped")  # trap installed before SIGTERM
+        _wait_for(out / "agent.trapped")
+        _wait_for(tmp_path / "upstream.trapped")
         os.kill(proc.pid, signal.SIGTERM)
-        assert proc.wait(timeout=10) == 143
+        assert proc.wait(timeout=10) == 143  # upstream's status is the wrapper's
         assert (tmp_path / "upstream.sig").read_text().strip() == "term"
+        assert (out / "agent.sig").read_text().strip() == "term"
+        # The wrapper waited for the agent's drain before exiting.
+        assert (out / "agent.drained").read_text().strip() == "drained"
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+def test_upstream_exit_stops_agent_and_keeps_upstream_status(tmp_path: Path) -> None:
+    env, upstream = _setup(tmp_path, tail="exit 3", agent_tail=DRAINING_AGENT)
+    out = tmp_path / "out"
+    # The upstream may exit before the agent installs its trap; make it wait.
+    _script(
+        upstream,
+        upstream.read_text().replace(
+            "exit 3",
+            f"while [ ! -s '{out}/agent.trapped' ]; do sleep 0.02; done\nexit 3",
+        ),
+    )
+    proc = subprocess.run(
+        [str(WRAPPER), str(upstream)], env=env, timeout=20, check=False
+    )
+    assert proc.returncode == 3
+    assert (out / "agent.sig").read_text().strip() == "term"
+    assert (out / "agent.drained").read_text().strip() == "drained"
 
 
 def test_missing_upstream_command_fails_fast(tmp_path: Path) -> None:
