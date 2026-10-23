@@ -50,13 +50,38 @@
    "cmd": ".venv/bin/python -m ruff check omega_prime/ && .venv/bin/python -m ruff format --check omega_prime/",
    "exit_code": 0,
    "output_tail": "\u001b[1;32mAll checks passed!\u001b[0m\n776 files already formatted"
+  },
+  {
+   "cmd": "git diff --stat origin/ci/00057-omega-ci-runners -- scripts/redteam-audit-triage.py | wc -l",
+   "exit_code": 0,
+   "output_tail": "0"
   }
  ],
  "claims": [
-  "redteam gitlink, VENDOR.md and the omega_prime/redteam/__init__.py docstring agree at purple-team 6679b82 (f6d2fc2 + zod 4.2.1 -> 4.6.7 lock bump)",
-  "Vendored pack and tool surface unchanged from f6d2fc2",
-  "npm audit --omit=dev --audit-level=high on the new pin reports 0 high/critical; GHSA-mrhx-c7xc-m3w5 fixed, no new advisories",
-  "No triage exception added"
+  {
+   "claim": "redteam gitlink, VENDOR.md and the omega_prime/redteam/__init__.py docstring agree at purple-team 6679b82 (f6d2fc2 + zod 4.2.1 -> 4.6.7 lock bump)",
+   "evidence_command_index": 0
+  },
+  {
+   "claim": "Vendored pack is byte-identical to upstream at the new pin (unchanged from f6d2fc2)",
+   "evidence_command_index": 1
+  },
+  {
+   "claim": "Tool surface agrees across upstream, adapter and contract (14 names, unchanged)",
+   "evidence_command_index": 2
+  },
+  {
+   "claim": "npm audit --omit=dev --audit-level=high on the new pin has 0 untriaged high/critical findings",
+   "evidence_command_index": 5
+  },
+  {
+   "claim": "GHSA-mrhx-c7xc-m3w5 (zod) is fixed relative to f6d2fc2 and no advisory is new (delta verdict improved)",
+   "evidence_command_index": 6
+  },
+  {
+   "claim": "No triage exception added: scripts/redteam-audit-triage.py is unchanged",
+   "evidence_command_index": 9
+  }
  ],
  "unverified": [
   "CI results on the omega-ci pool (see the PR checks)"
