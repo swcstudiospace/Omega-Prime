@@ -31,12 +31,12 @@ the lanes that use them — the default Python-only path needs none of them:
 
 ## 2. Clone
 
-The repository is `swcstudiospace/omes-bot` (see `[project.urls]` in
+The repository is `swcstudiospace/Omega-Prime` (see `[project.urls]` in
 `pyproject.toml`). An ordinary clone leaves the tracked submodule checkouts
 empty, so clone recursively:
 
 ```bash
-git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/omes-bot.git /workspace/omes-bot
+git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/Omega-Prime.git /workspace/omes-bot
 cd /workspace/omes-bot
 ```
 

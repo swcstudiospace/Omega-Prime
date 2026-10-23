@@ -493,7 +493,7 @@ empty. Either clone recursively or init afterwards (targeted init
 suffices when only the backend is wanted):
 
 ```bash
-git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git omega-prime
+git clone --recurse-submodules https://github.com/swcstudiospace/Omega-Prime.git omega-prime
 # or, inside an existing checkout:
 git submodule update --init redteam
 ```
@@ -695,7 +695,7 @@ builds the report but skips all `gh` writes).
 3. **Green-upstream comment.** The workflow also audits upstream
    `main`; when it exits 0, it comments the green commit SHA plus the
    `npm audit` exit-0 proof line on the `redteam-remediation`-labeled
-   tracking issue in `swcstudiospace/omes-bot`, so the operator can run
+   tracking issue in `swcstudiospace/Omega-Prime`, so the operator can run
    the bump runbook above. When the pin itself audits green, the
    `notify-green` job posts the pin-green proof the same way.
 4. **Degrade path (first-class).** Without `REMEDIATION_TOKEN`, or when

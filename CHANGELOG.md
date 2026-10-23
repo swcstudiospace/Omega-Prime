@@ -839,5 +839,5 @@ First public release: one Grok programming bot, eight milestones deep.
 - Public launch (v8): branded README, community files, generated tool
   catalog with CI freshness, Greptile review standards + KB sync pipeline.
 
-[Unreleased]: https://github.com/swcstudiospace/omes-bot/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/swcstudiospace/omes-bot/releases/tag/v0.1.0
+[Unreleased]: https://github.com/swcstudiospace/Omega-Prime/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/swcstudiospace/Omega-Prime/releases/tag/v0.1.0

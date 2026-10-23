@@ -17,11 +17,11 @@ no single "no other toolchain" rule; the default Python-only path needs
 none of the optional ones.
 
 **Which repository do I clone?**
-`https://github.com/swcstudiospace/omes-bot.git`, recursively — an ordinary
+`https://github.com/swcstudiospace/Omega-Prime.git`, recursively — an ordinary
 clone leaves the `prime-agent/` and `redteam/` submodule checkouts empty:
 
 ```bash
-git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git omega-prime
+git clone --recurse-submodules https://github.com/swcstudiospace/Omega-Prime.git omega-prime
 ```
 
 or `git submodule update --init --recursive` inside an existing checkout
