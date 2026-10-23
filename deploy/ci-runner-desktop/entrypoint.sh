@@ -11,7 +11,8 @@
 # 24 Oct 09:10 AEDT redeploy stalled the pool for ~12 minutes). With the
 # signal forwarded, the agent drains: each runner gets SIGTERM, then SIGKILL
 # after its grace, and one exit callback per runner frees the slot at once.
-# RAILWAY_DEPLOYMENT_DRAINING_SECONDS must cover that grace.
+# The drain is best effort: RAILWAY_DEPLOYMENT_DRAINING_SECONDS bounds it
+# (see README for the budget).
 #
 # The agent never sees the desktop PASSWORD. If agent settings are missing it
 # exits (logged) and the desktop still starts: the desktop is never held
@@ -33,10 +34,22 @@ forward() {
     stopping=1
     # Agent first so runner exit callbacks are on their way while the
     # desktop tears down.
-    [ -n "$agent_pid" ] && kill -TERM "$agent_pid" 2>/dev/null || true
-    [ -n "$desktop_pid" ] && kill -TERM "$desktop_pid" 2>/dev/null || true
+    if [ -n "$agent_pid" ]; then kill -TERM "$agent_pid" 2>/dev/null || true; fi
+    if [ -n "$desktop_pid" ]; then kill -TERM "$desktop_pid" 2>/dev/null || true; fi
 }
 trap forward TERM INT
+
+# reap PID: wait until PID has really exited and set $status to its exit
+# status. A trapped signal interrupts `wait` (status > 128) while the child
+# still runs, so wait again for as long as the process exists.
+reap() {
+    status=0
+    wait "$1" || status=$?
+    while kill -0 "$1" 2>/dev/null; do
+        status=0
+        wait "$1" || status=$?
+    done
+}
 
 env -u PASSWORD PYTHONPATH="$OMEGA_CI_SITE" \
     python3 -m omega_prime.ci_runners agent --host 0.0.0.0 --port 8787 &
@@ -45,17 +58,14 @@ agent_pid=$!
 "$@" &
 desktop_pid=$!
 
-# A trapped signal interrupts `wait` (status > 128) while the child still
-# runs; wait again for its real status.
-status=0
-wait "$desktop_pid" || status=$?
-if [ "$stopping" -eq 1 ] && [ "$status" -gt 128 ]; then
-    status=0
-    wait "$desktop_pid" || status=$?
-fi
+# A stop that arrived before both PIDs were recorded reached neither child.
+if [ "$stopping" -eq 1 ]; then forward; fi
+
+reap "$desktop_pid"
+desktop_status=$status
 
 # The desktop is gone (signal or its own failure): stop the agent and let it
-# drain before the container exits.
+# drain before the container exits, even if more stop signals arrive.
 kill -TERM "$agent_pid" 2>/dev/null || true
-wait "$agent_pid" 2>/dev/null || true
-exit "$status"
+reap "$agent_pid"
+exit "$desktop_status"

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -77,6 +79,27 @@ def _setup(
     return env, upstream
 
 
+@contextlib.contextmanager
+def _wrapper(args: list[str], env: dict[str, str]) -> Iterator[subprocess.Popen[bytes]]:
+    """Run the wrapper in its own process group; always kill and reap the group.
+
+    The wrapper no longer execs upstream, so a failed test must not leave the
+    looping fake agent or desktop behind.
+    """
+    proc = subprocess.Popen([str(WRAPPER), *args], env=env, start_new_session=True)
+    try:
+        yield proc
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=10)
+
+
+def _run(args: list[str], env: dict[str, str], timeout: float = 20) -> int:
+    with _wrapper(args, env) as proc:
+        return proc.wait(timeout=timeout)
+
+
 def _wait_for(path: Path, timeout: float = 10.0) -> str:
     deadline = time.monotonic() + timeout
     while not path.exists() or not path.read_text():
@@ -96,9 +119,9 @@ def test_starts_agent_then_runs_upstream_unchanged(tmp_path: Path) -> None:
         ),
     )
     args = [str(upstream), "--flag", "two words", ""]
-    proc = subprocess.run([str(WRAPPER), *args], env=env, timeout=20, check=False)
+    returncode = _run(args, env)
     out = tmp_path / "out"
-    assert proc.returncode == 7  # upstream exit status is the wrapper's
+    assert returncode == 7  # upstream exit status is the wrapper's
     assert (out / "upstream.argv").read_text() == "--flag\ntwo words\n\n"
     assert (out / "upstream.password").read_text() == PASSWORD
     agent_argv = _wait_for(out / "agent.argv").splitlines()
@@ -124,19 +147,31 @@ def test_sigterm_reaches_agent_and_upstream_and_agent_drains(tmp_path: Path) -> 
     """
     env, upstream = _setup(tmp_path, tail=TRAPPING_UPSTREAM, agent_tail=DRAINING_AGENT)
     out = tmp_path / "out"
-    proc = subprocess.Popen([str(WRAPPER), str(upstream)], env=env)
-    try:
+    with _wrapper([str(upstream)], env) as proc:
         _wait_for(out / "agent.trapped")
         _wait_for(tmp_path / "upstream.trapped")
         os.kill(proc.pid, signal.SIGTERM)
         assert proc.wait(timeout=10) == 143  # upstream's status is the wrapper's
-        assert (tmp_path / "upstream.sig").read_text().strip() == "term"
-        assert (out / "agent.sig").read_text().strip() == "term"
-        # The wrapper waited for the agent's drain before exiting.
+    assert (tmp_path / "upstream.sig").read_text().strip() == "term"
+    assert (out / "agent.sig").read_text().strip() == "term"
+    # The wrapper waited for the agent's drain before exiting.
+    assert (out / "agent.drained").read_text().strip() == "drained"
+
+
+def test_repeated_sigterm_does_not_cut_the_agent_drain_short(tmp_path: Path) -> None:
+    env, upstream = _setup(
+        tmp_path, tail=TRAPPING_UPSTREAM, agent_tail=DRAINING_AGENT.replace("0.3", "1")
+    )
+    out = tmp_path / "out"
+    with _wrapper([str(upstream)], env) as proc:
+        _wait_for(out / "agent.trapped")
+        _wait_for(tmp_path / "upstream.trapped")
+        os.kill(proc.pid, signal.SIGTERM)
+        _wait_for(out / "agent.sig")  # the agent is now draining
+        os.kill(proc.pid, signal.SIGTERM)
+        assert proc.wait(timeout=10) == 143
+        # Exited only after the drain, despite the second signal.
         assert (out / "agent.drained").read_text().strip() == "drained"
-    finally:
-        if proc.poll() is None:
-            proc.kill()
 
 
 def test_upstream_exit_stops_agent_and_keeps_upstream_status(tmp_path: Path) -> None:
@@ -150,10 +185,7 @@ def test_upstream_exit_stops_agent_and_keeps_upstream_status(tmp_path: Path) -> 
             f"while [ ! -s '{out}/agent.trapped' ]; do sleep 0.02; done\nexit 3",
         ),
     )
-    proc = subprocess.run(
-        [str(WRAPPER), str(upstream)], env=env, timeout=20, check=False
-    )
-    assert proc.returncode == 3
+    assert _run([str(upstream)], env) == 3
     assert (out / "agent.sig").read_text().strip() == "term"
     assert (out / "agent.drained").read_text().strip() == "drained"
 
