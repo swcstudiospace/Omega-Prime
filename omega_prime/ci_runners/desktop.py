@@ -41,6 +41,7 @@ Wait = Callable[[float], Awaitable[None]]
 class LaunchOutcome(enum.Enum):
     ACCEPTED = "accepted"  # 201
     REPLAYED = "replayed"  # 200, same name+generation already running
+    FINISHED = "finished"  # 200, same name+generation already ran and exited
     CAPACITY = "capacity"  # 429
     CONFLICT = "conflict"  # 409, other generation or draining
     REJECTED = "rejected"  # any other definitive status
@@ -53,6 +54,7 @@ class WakeResult:
     status: int | None
     attempts: int
     elapsed_s: float
+    exit_code: int | None = None  # set only for FINISHED
 
     @property
     def accepted(self) -> bool:
@@ -76,6 +78,20 @@ _OUTCOMES = {
     429: LaunchOutcome.CAPACITY,
     409: LaunchOutcome.CONFLICT,
 }
+
+
+def _finished_exit(response: HttpResponse) -> int | None:
+    """Exit code from a 200 ``{"status": "finished", "exit_code": N}`` body."""
+    try:
+        data = json.loads(response.body or b"null")
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("status") != "finished":
+        return None
+    code = data.get("exit_code")
+    if isinstance(code, bool) or not isinstance(code, int):
+        return None
+    return code
 
 
 class DesktopClient:
@@ -164,7 +180,12 @@ class DesktopClient:
         if response is None:
             return WakeResult(LaunchOutcome.WAKE_FAILED, None, attempts, elapsed)
         outcome = _OUTCOMES.get(response.status, LaunchOutcome.REJECTED)
-        return WakeResult(outcome, response.status, attempts, elapsed)
+        exit_code = None
+        if outcome is LaunchOutcome.REPLAYED:
+            exit_code = _finished_exit(response)
+            if exit_code is not None:
+                outcome = LaunchOutcome.FINISHED
+        return WakeResult(outcome, response.status, attempts, elapsed, exit_code)
 
     async def inventory(self) -> list[AgentRunner]:
         response, _, _ = await self._with_wake("GET", "/v1/runners")

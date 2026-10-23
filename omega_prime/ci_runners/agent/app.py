@@ -4,8 +4,10 @@ Routes (all but ``/healthz`` need ``Authorization: Bearer <agent token>``):
 
 * ``GET  /healthz``            → 200 ``{status, draining, runners, capacity}``
 * ``GET  /v1/runners``         → 200 ``[{name, generation, status, pid}]``
-* ``POST /v1/runners``         → 201 first, 200 same-generation replay,
-  409 conflict/draining, 429 full, 400 malformed, 401, 413 over 1 MiB
+* ``POST /v1/runners``         → 201 first, 200 same-generation replay
+  (``{status: "replayed"}`` while running, ``{status: "finished", exit_code}``
+  once it ran and exited), 409 conflict/draining, 429 full, 400 malformed,
+  401, 413 over 1 MiB
 * ``DELETE /v1/runners/{name}`` → 202 stopping, 404 unknown
 * ``POST /v1/drain``           → 200 ``{draining: true}``
 """
@@ -48,6 +50,7 @@ LAUNCH_KEYS = frozenset({"name", "generation", "jitconfig"})
 _STATUS = {
     Admission.ACCEPTED: 201,
     Admission.REPLAYED: 200,
+    Admission.FINISHED: 200,
     Admission.CONFLICT: 409,
     Admission.DRAINING: 409,
     Admission.CAPACITY: 429,
@@ -117,10 +120,9 @@ def create_agent_app(supervisor: Supervisor, *, token: str) -> Any:
             or not all(isinstance(data[k], str) for k in LAUNCH_KEYS)
         ):
             raise WebhookRejected(400, "bad_request")
+        name, generation = data["name"], data["generation"]
         try:
-            admission = supervisor.admit(
-                data["name"], data["generation"], data["jitconfig"]
-            )
+            admission = supervisor.admit(name, generation, data["jitconfig"])
         except ValueError:
             raise WebhookRejected(400, "bad_request") from None
         finally:
@@ -128,6 +130,12 @@ def create_agent_app(supervisor: Supervisor, *, token: str) -> Any:
         status = _STATUS[admission]
         if status >= 400:
             await send_json(send_, status, {"error": admission.value})
+            return
+        if admission is Admission.FINISHED:
+            exit_code = supervisor.finished_exit(name, generation)
+            await send_json(
+                send_, status, {"status": admission.value, "exit_code": exit_code}
+            )
             return
         await send_json(send_, status, {"status": admission.value})
 

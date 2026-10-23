@@ -62,6 +62,28 @@ def test_first_request_is_the_launch_post(
     assert JIT not in repr(result) and clock.waits == []
 
 
+@pytest.mark.parametrize(
+    ("reply", "outcome", "exit_code"),
+    [
+        (resp(200, {"status": "finished", "exit_code": 3}), "finished", 3),
+        (resp(200, {"status": "finished", "exit_code": 0}), "finished", 0),
+        (resp(200, {"status": "replayed"}), "replayed", None),
+        (resp(200, {"status": "finished", "exit_code": True}), "replayed", None),
+        (resp(200, {"status": "finished"}), "replayed", None),
+        (resp(200, ["finished"]), "replayed", None),
+        (HttpResponse(200, {}, b"{"), "replayed", None),
+    ],
+)
+def test_finished_replay_carries_the_exit_code(
+    clock: FakeClock, reply: HttpResponse, outcome: str, exit_code: int | None
+) -> None:
+    http = FakeHttp().on("POST", "/v1/runners", reply)
+    result = launch(make(http, clock))
+    assert result.outcome is LaunchOutcome(outcome)
+    assert result.exit_code == exit_code
+    assert result.accepted is (outcome == "replayed")
+
+
 def test_wake_retries_502_503_and_connect_with_same_body(clock: FakeClock) -> None:
     http = FakeHttp().on(
         "POST",

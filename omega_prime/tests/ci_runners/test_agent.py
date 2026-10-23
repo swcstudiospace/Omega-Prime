@@ -213,6 +213,24 @@ def test_controller_desktop_client_round_trip(tmp_path: Path) -> None:
     asyncio.run(main())
 
 
+def test_retry_after_exit_reports_finished_with_exit_code(tmp_path: Path) -> None:
+    app, s, exits = rig(tmp_path, tail="exit 5")
+
+    async def main() -> None:
+        s.prepare()
+        assert (await post(app, LAUNCH)).status == 201
+        await exits.wait()
+        await asyncio.sleep(0)
+        retry = await post(app, LAUNCH)
+        assert (retry.status, retry.json()) == (
+            200,
+            {"status": "finished", "exit_code": 5},
+        )
+
+    asyncio.run(main())
+    assert len(exits.payloads) == 1  # the single-use JIT config never reran
+
+
 def test_controller_callback_posts_once() -> None:
     http = FakeHttp().on("POST", "/agent/events", resp(202), resp(404))
     callback = ControllerCallback("https://ctl.example.test/", AGENT_TOKEN, http)

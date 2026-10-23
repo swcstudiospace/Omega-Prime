@@ -25,6 +25,7 @@ from omega_prime.ci_runners.github import (
     rs256_sign,
 )
 from omega_prime.ci_runners.http import HttpResponse, TransportError
+from omega_prime.ci_runners.jobs import JobStatus
 from omega_prime.ci_runners.settings import (
     DEFAULT_LABELS,
     GITHUB_AUDIENCE,
@@ -41,6 +42,7 @@ ORG = "/orgs/acme/actions/runners"
 JIT = placeholder("jit-config")
 PAT = placeholder("pat")
 INSTALLATION_TOKEN = placeholder("installation-token")
+LEAK = placeholder("leaked-token")
 
 
 def client(http: FakeHttp, clock: FakeClock, **kw: Any) -> GitHubClient:
@@ -108,11 +110,11 @@ def test_jit_validation(clock: FakeClock) -> None:
 
 def test_auth_failure_is_sanitized_and_not_retried(clock: FakeClock) -> None:
     http = FakeHttp().on(
-        "POST", f"{ORG}/generate-jitconfig", resp(401, {"message": "token ghs_leak"})
+        "POST", f"{ORG}/generate-jitconfig", resp(401, {"message": f"token {LEAK}"})
     )
     with pytest.raises(GitHubAuthError) as info:
         run(client(http, clock).generate_jit("omega-ci-1-a"))
-    assert "leak" not in str(info.value) and len(http.calls) == 1
+    assert LEAK not in str(info.value) and len(http.calls) == 1
     http.on("POST", f"{ORG}/generate-jitconfig", resp(403, {"message": "no perms"}))
     with pytest.raises(GitHubAuthError):
         run(client(http, clock).generate_jit("omega-ci-1-a"))
@@ -407,3 +409,79 @@ def test_unreadable_credentials_are_github_auth_errors(
     with pytest.raises(GitHubAuthError) as info:
         run(source.token())
     assert info.value.code == "credential_unreadable"
+
+
+JOB = "/repos/acme/widgets/actions/jobs/77"
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        (resp(200, {"status": "queued"}), JobStatus.QUEUED),
+        (resp(200, {"status": "waiting"}), JobStatus.QUEUED),
+        (resp(200, {"status": "in_progress"}), JobStatus.IN_PROGRESS),
+        (resp(200, {"status": "completed"}), JobStatus.COMPLETED),
+        (resp(404), None),
+    ],
+)
+def test_job_status_maps_github_states(
+    clock: FakeClock, reply: HttpResponse, expected: JobStatus | None
+) -> None:
+    http = FakeHttp().on("GET", JOB, reply)
+    assert run(client(http, clock).job_status("acme/widgets", 77)) is expected
+    assert http.paths() == [JOB]
+
+
+@pytest.mark.parametrize(
+    "reply", [resp(200, {"status": 3}), resp(200, []), resp(500), resp(401)]
+)
+def test_job_status_failures_are_github_errors(
+    clock: FakeClock, reply: HttpResponse
+) -> None:
+    http = FakeHttp().on("GET", JOB, reply)
+    with pytest.raises(GitHubError):
+        run(client(http, clock).job_status("acme/widgets", 77))
+
+
+@pytest.mark.parametrize(
+    ("repo", "job_id"),
+    [
+        ("acme/../orgs", 1),
+        ("acme/..", 1),
+        ("acme", 1),
+        ("acme/w?x=1", 1),
+        ("acme/widgets", 0),
+    ],
+)
+def test_job_status_rejects_unsafe_lookups_without_a_request(
+    clock: FakeClock, repo: str, job_id: int
+) -> None:
+    http = FakeHttp()
+    assert run(client(http, clock).job_status(repo, job_id)) is None
+    assert http.calls == []
+
+
+class _RaisingToken:
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    async def token(self) -> str:
+        raise self.exc
+
+    def secrets(self) -> tuple[str, ...]:
+        return ()
+
+
+def test_unexpected_token_failures_become_github_auth_errors(
+    clock: FakeClock,
+) -> None:
+    http = FakeHttp()
+    gh = client(http, clock, auth=_RaisingToken(OSError("gone")))
+    with pytest.raises(GitHubAuthError) as info:
+        run(gh.generate_jit("omega-ci-101-abcd"))
+    assert info.value.code == "credential_OSError" and http.calls == []
+    typed = GitHubAuthError("pat", None, "credential_unreadable")
+    gh = client(http, clock, auth=_RaisingToken(typed))
+    with pytest.raises(GitHubAuthError) as again:
+        run(gh.list_pool_runners())
+    assert again.value is typed

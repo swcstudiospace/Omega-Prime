@@ -16,6 +16,13 @@ def placeholder(label: str) -> str:
     return f"fake-{label}-{secrets.token_hex(16)}"
 
 
+def provider_shaped(prefix: str) -> str:
+    """A value in a provider token *shape* (e.g. ``ghp_`` + 36 chars), minted
+    per run from :func:`secrets.token_hex`, for tests that prove the
+    pattern redactor catches that shape. Never a literal in source."""
+    return prefix + secrets.token_hex(18)
+
+
 def write_secret(path: Path, value: str) -> Path:
     """A secret file the credential broker accepts: regular, 0600, non-empty."""
     path.write_text(value + "\n")
@@ -23,4 +30,4 @@ def write_secret(path: Path, value: str) -> Path:
     return path
 
 
-__all__ = ["placeholder", "write_secret"]
+__all__ = ["placeholder", "provider_shaped", "write_secret"]

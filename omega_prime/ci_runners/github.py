@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, field
@@ -30,7 +31,7 @@ from omega_prime.ci_runners.http import (
     send,
     urllib_transport,
 )
-from omega_prime.ci_runners.jobs import is_pool_runner
+from omega_prime.ci_runners.jobs import JobStatus, is_pool_runner
 from omega_prime.ci_runners.settings import (
     RUNNER_NAME_RE,
     AppAuth,
@@ -48,6 +49,7 @@ RETRY_BUDGET_S = 60.0
 REQUEST_TIMEOUT_S = 20.0
 PAGE_SIZE = 100
 MAX_PAGES = 20
+REPO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
 
 Wait = Callable[[float], Awaitable[None]]
 Signer = Callable[[bytes, bytes], bytes]
@@ -353,7 +355,7 @@ class GitHubClient:
             remaining = deadline - self._clock()
             if remaining <= 0:
                 break
-            token = await self.auth.token()
+            token = await self._token(op)
             request = HttpRequest(
                 method,
                 self._api + path,
@@ -375,6 +377,48 @@ class GitHubClient:
                 raise GitHubRateLimited(op, response.status, "rate_limited")
             await self._wait(delay)
         raise GitHubRateLimited(op, None, "budget_exhausted")
+
+    async def _token(self, op: str) -> str:
+        """The bearer for one call. Every credential failure is a GitHubError.
+
+        Token sources already type their own failures; this is the last guard,
+        so an unexpected error (an OS error reading a key, a transport that
+        raises something else) can never escape a caller that handles only
+        ``GitHubError`` and strand a reservation or kill the worker.
+        """
+        try:
+            return await self.auth.token()
+        except GitHubError:
+            raise
+        except Exception as exc:
+            raise GitHubAuthError(
+                op, None, f"credential_{type(exc).__name__}"
+            ) from None
+
+    async def job_status(self, repo: str, job_id: int) -> JobStatus | None:
+        """Current state of one workflow job; ``None`` when GitHub has no job.
+
+        Used once at startup to check persisted demand before replaying it
+        (needs the repository permission ``Actions: Read``).
+        """
+        if not REPO_RE.match(repo) or repo.endswith(("/.", "/..")) or job_id <= 0:
+            return None
+        response = await self._call(
+            "get_job",
+            "GET",
+            f"/repos/{repo}/actions/jobs/{int(job_id)}",
+            ok=(200, 404),
+        )
+        if response.status == 404:
+            return None
+        status = _json(response, "get_job").get("status")
+        if not isinstance(status, str):
+            raise GitHubError("get_job", response.status, "bad_response")
+        if status == "completed":
+            return JobStatus.COMPLETED
+        if status == "in_progress":
+            return JobStatus.IN_PROGRESS
+        return JobStatus.QUEUED  # queued / waiting / pending / requested
 
     async def generate_jit(self, name: str) -> JitConfig:
         if not RUNNER_NAME_RE.match(name):
@@ -468,6 +512,7 @@ def _runner_info(row: object) -> RunnerInfo | None:
 
 __all__ = [
     "API",
+    "REPO_RE",
     "AppTokenSource",
     "CryptoUnavailable",
     "GitHubAuthError",

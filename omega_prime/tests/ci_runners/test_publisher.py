@@ -22,7 +22,7 @@ from omega_prime.ci_runners.publisher import (
     make_publisher,
     redact_event,
 )
-from omega_prime.tests.ci_runners._secrets import placeholder
+from omega_prime.tests.ci_runners._secrets import placeholder, provider_shaped
 
 SECRET = placeholder("jit-config")
 
@@ -43,11 +43,10 @@ def test_cloudevent_shape() -> None:
 
 
 def test_redaction_of_known_and_pattern_secrets() -> None:
-    event = CloudEvent.of(
-        "error", {"detail": f"cfg={SECRET}", "tok": "ghp_" + "a" * 36}
-    )
+    shaped = provider_shaped("ghp_")
+    event = CloudEvent.of("error", {"detail": f"cfg={SECRET}", "tok": shaped})
     text = json.dumps(redact_event(event, [SECRET, ""]))
-    assert SECRET not in text and "ghp_" + "a" * 36 not in text
+    assert SECRET not in text and shaped not in text
 
 
 def test_secret_as_key_is_unsafe() -> None:

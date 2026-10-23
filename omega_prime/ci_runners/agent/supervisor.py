@@ -59,6 +59,7 @@ Spawn = Callable[..., Awaitable[Any]]
 class Admission(enum.Enum):
     ACCEPTED = "accepted"
     REPLAYED = "replayed"
+    FINISHED = "finished"
     CONFLICT = "conflict"
     DRAINING = "draining"
     CAPACITY = "capacity"
@@ -209,7 +210,8 @@ class Supervisor:
         self._spawn: Spawn = spawn or asyncio.create_subprocess_exec
         self._grace = term_grace_s
         self.children: dict[str, Child] = {}
-        self._finished: OrderedDict[str, str] = OrderedDict()  # name → generation
+        # name → (generation, exit code) of children that already ran
+        self._finished: OrderedDict[str, tuple[str, int]] = OrderedDict()
         self.draining = False
         self.notified = 0
 
@@ -230,9 +232,12 @@ class Supervisor:
             return Admission.CONFLICT
         if name in self._finished:
             # A retried launch whose child already ran and was cleaned up:
-            # the JIT config is single-use, so never start it again.
-            if self._finished[name] == generation:
-                return Admission.REPLAYED
+            # the JIT config is single-use, so never start it again. Report
+            # FINISHED (with the exit code, see finished_exit) rather than a
+            # live replay, so the controller releases the slot even if the
+            # one exit callback was lost.
+            if self._finished[name][0] == generation:
+                return Admission.FINISHED
             return Admission.CONFLICT
         if self.draining:
             return Admission.DRAINING
@@ -242,6 +247,13 @@ class Supervisor:
         self.children[name] = child
         child.task = asyncio.get_running_loop().create_task(self._run(child, jit))
         return Admission.ACCEPTED
+
+    def finished_exit(self, name: str, generation: str) -> int | None:
+        """Exit code of (name, generation) if that child already finished."""
+        entry = self._finished.get(name)
+        if entry is None or entry[0] != generation:
+            return None
+        return entry[1]
 
     def inventory(self) -> list[dict[str, Any]]:
         return [c.row() for c in self.children.values()]
@@ -315,14 +327,15 @@ class Supervisor:
         except Exception as exc:
             log.warning("runner %s failed to start: %s", child.name, type(exc).__name__)
         finally:
+            code = SPAWN_FAILED if exit_code is None else exit_code
             child.exited.set()
             await asyncio.to_thread(shutil.rmtree, workdir, True)
-            self._remember_finished(child)  # before the live record goes
+            self._remember_finished(child, code)  # before the live record goes
             self.children.pop(child.name, None)
-            await self._send_exit(child, exit_code)
+            await self._send_exit(child, code)
 
-    def _remember_finished(self, child: Child) -> None:
-        self._finished[child.name] = child.generation
+    def _remember_finished(self, child: Child, exit_code: int) -> None:
+        self._finished[child.name] = (child.generation, exit_code)
         self._finished.move_to_end(child.name)
         while len(self._finished) > FINISHED_MEMORY:
             self._finished.popitem(last=False)
@@ -343,12 +356,12 @@ class Supervisor:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(pid, sig)
 
-    async def _send_exit(self, child: Child, exit_code: int | None) -> None:
+    async def _send_exit(self, child: Child, exit_code: int) -> None:
         payload = {
             "type": "agent.runner_exited",
             "name": child.name,
             "generation": child.generation,
-            "exit_code": SPAWN_FAILED if exit_code is None else exit_code,
+            "exit_code": exit_code,
         }
         self.notified += 1
         try:

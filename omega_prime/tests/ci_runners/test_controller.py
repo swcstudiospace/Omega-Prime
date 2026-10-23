@@ -23,6 +23,8 @@ from omega_prime.ci_runners.settings import GITHUB_AUDIENCE, AppAuth, SecretFile
 from ._fakes import ListPublisher, resp
 from ._rig import JIT, ORG, TOKEN, Rig, job, routes
 
+JOBS = "/repos/acme/widgets/actions/jobs"
+
 
 def scenario(rig: Rig, body: Callable[[Rig], Awaitable[None]]) -> None:
     async def main() -> None:
@@ -436,10 +438,19 @@ def test_restart_replays_persisted_demand(tmp_path: Path) -> None:
 
     scenario(first, body)
     assert list(first.scaler.queued) == [1, 2, 3]
-    # A fresh controller (restart) with an empty scaler picks the backlog up.
-    second = Rig(routes(), max_runners=2, demand=DemandStore(path))
+    # A fresh controller (restart) with an empty scaler picks the backlog up,
+    # after GitHub confirms every saved job is still queued.
+    http = routes()
+    for n in (1, 2, 3):
+        http.on("GET", f"{JOBS}/{n}", resp(200, {"status": "queued"}))
+    second = Rig(http, max_runners=2, demand=DemandStore(path))
     scenario(second, lambda r: r.ctrl.settle())
     assert list(second.scaler.queued) == [1, 2, 3]
+    assert sorted(p for p in http.paths("GET") if p.startswith(JOBS)) == [
+        f"{JOBS}/1",
+        f"{JOBS}/2",
+        f"{JOBS}/3",
+    ]
     assert second.publisher.types().count("launch_requested") == 2
     # Serving the jobs empties the persisted backlog.
     third = Rig(routes(), demand=DemandStore(path))
@@ -451,6 +462,155 @@ def test_restart_replays_persisted_demand(tmp_path: Path) -> None:
 
     scenario(third, serve)
     assert DemandStore(path).load() == ()
+
+
+def test_restart_drops_saved_jobs_github_no_longer_queues(tmp_path: Path) -> None:
+    """Jobs taken, finished or deleted while the controller was down (or that
+    cannot be checked) are not replayed, so they cannot pin idle runners."""
+    from omega_prime.ci_runners.demand import DemandStore
+
+    path = tmp_path / "demand.json"
+    DemandStore(path).save([job(job_id=n) for n in (1, 2, 3, 4, 5, 6)])
+    http = routes()
+    http.on("GET", f"{JOBS}/1", resp(200, {"status": "completed"}))
+    http.on("GET", f"{JOBS}/2", resp(200, {"status": "in_progress"}))
+    http.on("GET", f"{JOBS}/3", resp(404))
+    http.on("GET", f"{JOBS}/4", resp(500))
+    http.on("GET", f"{JOBS}/5", resp(200, {"status": "waiting"}))
+    http.on("GET", f"{JOBS}/6", resp(200, {"no": "status"}))
+    rig = Rig(http, demand=DemandStore(path))
+    scenario(rig, lambda r: r.ctrl.settle())
+    assert list(rig.scaler.queued) == [5]
+    [summary] = [
+        e["data"]
+        for e in rig.publisher.events
+        if e["type"].endswith(".demand") and e["data"].get("reconciled")
+    ]
+    assert summary == {
+        "reconciled": True,
+        "saved": 6,
+        "queued": 1,
+        "dropped_completed": 1,
+        "dropped_gone": 1,
+        "dropped_in_progress": 1,
+        "dropped_unverified": 2,
+    }
+    errors = {e["data"].get("reason"): e["data"] for e in rig.publisher.events}
+    assert errors["demand_unverified"]["count"] == 2
+    assert [j.job_id for j in DemandStore(path).load()] == [5]  # file rewritten
+
+
+def test_restart_with_no_live_job_lets_idle_runners_be_reaped(tmp_path: Path) -> None:
+    from omega_prime.ci_runners.demand import DemandStore
+
+    path = tmp_path / "demand.json"
+    DemandStore(path).save([job(job_id=9)])
+    http = routes()
+    http.on("GET", f"{JOBS}/9", resp(200, {"status": "completed"}))
+    http.on(
+        "GET",
+        ORG,
+        resp(200, {"runners": [{"id": 42, "name": "omega-ci-x", "busy": False}]}),
+    )
+    http.on(
+        "GET", "/v1/runners", resp(200, [{"name": "omega-ci-x", "generation": "g"}])
+    )
+    rig = Rig(http, demand=DemandStore(path))
+    scenario(rig, lambda r: r.ctrl.settle())
+    assert rig.scaler.queued == {}
+    runner = rig.only()
+    assert runner.state is RunnerState.IDLE and rig.scaler.armed(runner.name)
+
+
+def test_finished_replay_releases_the_reservation() -> None:
+    """The first launch reply and the one exit callback were both lost: the
+    retry learns the child already exited and frees its slot."""
+    http = routes()
+    http.on(
+        "POST",
+        "/v1/runners",
+        resp(200, {"status": "finished", "exit_code": 0}),
+        resp(201),
+    )
+    rig = Rig(http, max_runners=1)
+
+    async def body(r: Rig) -> None:
+        r.ctrl.offer_job(job())
+        await r.ctrl.settle()
+
+    scenario(rig, body)
+    types = rig.publisher.types()
+    # The dead runner's slot was freed, so the still-queued job got a fresh
+    # runner instead of waiting behind a reservation that never resolves.
+    assert types.count("launch_requested") == 2 and "exited" in types
+    first, second = (
+        e["data"]["name"]
+        for e in rig.publisher.events
+        if e["type"].endswith("launch_requested")
+    )
+    assert first != second and list(rig.scaler.runners) == [second]
+
+
+def test_finished_replay_with_failure_backs_off() -> None:
+    http = routes()
+    http.on("POST", "/v1/runners", resp(200, {"status": "finished", "exit_code": 1}))
+    rig = Rig(http, max_runners=1)
+
+    async def body(r: Rig) -> None:
+        r.ctrl.offer_job(job())
+        await r.ctrl.settle()
+
+    scenario(rig, body)
+    assert rig.scaler.runners == {} and rig.scaler.hold == "failure"
+    assert 101 in rig.scaler.queued
+
+
+class _BrokenToken:
+    """A token source that fails with something other than GitHubError."""
+
+    async def token(self) -> str:
+        raise OSError("disk gone")
+
+    def secrets(self) -> tuple[str, ...]:
+        return ()
+
+
+def test_unexpected_token_failure_never_strands_a_launch() -> None:
+    rig = Rig(routes(), auth=_BrokenToken())
+
+    async def main() -> None:
+        await rig.ctrl.start()
+        try:
+            await asyncio.wait_for(rig.ctrl.settle(), 5)
+            assert rig.ctrl.offer_job(job())
+            await asyncio.wait_for(rig.ctrl.settle(), 5)
+            assert rig.ctrl._worker is not None and not rig.ctrl._worker.done()
+        finally:
+            await rig.ctrl.stop()
+
+    asyncio.run(main())
+    assert rig.scaler.runners == {} and rig.scaler.hold == "failure"
+    reasons = {e["data"].get("reason") for e in rig.publisher.events}
+    assert "reconcile_github" in reasons and "jit_None" not in reasons
+
+
+def test_unexpected_jit_error_releases_the_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = Rig(routes())
+
+    async def boom(name: str) -> Any:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(rig.ctrl.github, "generate_jit", boom)
+
+    async def body(r: Rig) -> None:
+        r.ctrl.offer_job(job())
+        await r.ctrl.settle()
+
+    scenario(rig, body)
+    assert rig.scaler.runners == {} and rig.scaler.hold == "failure"
+    assert "jit_unexpected" in {e["data"].get("reason") for e in rig.publisher.events}
 
 
 def test_demand_persist_failure_is_published_not_raised(tmp_path: Path) -> None:

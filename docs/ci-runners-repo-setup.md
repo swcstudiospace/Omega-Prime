@@ -46,7 +46,8 @@ at the VPS runner instead:
 2. **GitHub App** (D-120-09), installed on the organisation, selected repos only:
    - Organisation permission **Self-hosted runners: Read and write**
      (registers JIT runners, lists and deletes them).
-   - Repository permission **Actions: Read** (needed for the event).
+   - Repository permission **Actions: Read** (needed for the event, and for
+     the one startup check of saved queued jobs against GitHub).
    - Webhook: active, URL `https://<controller host>/github/webhook`, a random
      secret, event **Workflow job** only.
    - Record the App id and installation id, and download the private key.

@@ -34,6 +34,7 @@ controller (VPS) ──HTTPS POST /v1/runners──▶ agent :8787 (this image)
 |---|---|
 | `Dockerfile` | Pinned overlay. The build context is the repo root. |
 | `entrypoint.sh` | Starts the agent (`python3 -m omega_prime.ci_runners agent --host 0.0.0.0 --port 8787`), then `exec`s the upstream command (`CMD ["python3", "/opt/railway-desktop.py"]`) unchanged. |
+| `smoke.sh` | Build-time check: builds the real agent app (settings, credential broker, token read, supervisor) from `/opt/omega-ci/site` alone with an isolated interpreter, so a module missing from the image fails the build, not the first boot. |
 | `railway.toml` | Dockerfile builder, desktop `/healthz` readiness, `sleepApplication = true`, `/config` mount. |
 
 ## Supply-chain provenance (verified 2026-10-23 AEDT)
@@ -53,7 +54,11 @@ the build fails closed on any mismatch.
 | h11 | `h11-0.16.0-py3-none-any.whl` sha256 `63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86` | PyPI JSON digest, matches the download |
 
 There is no pip in the image. The wheels are pure Python and are unzipped
-into `/opt/omega-ci/site`, next to a stdlib-only subset of `omega_prime`.
+into `/opt/omega-ci/site`, next to the `omega_prime` package (tests excluded
+by `.dockerignore`; stdlib-only at import). The whole package is copied, not a
+file list, because the agent reads its token through
+`omega_prime.credentials.broker`, whose imports span several subpackages;
+`smoke.sh` proves the copied set is complete on every build.
 
 Upstream's apt steps (`nginx openssl dbus-x11 x11-utils`, plus our
 `ca-certificates curl` and the runner's `installdependencies.sh`) still take
@@ -147,7 +152,7 @@ while jobs run fails those jobs; drain first with `POST /v1/drain`.
 ```
 bash -n deploy/ci-runner-desktop/entrypoint.sh
 python -c "import pathlib,tomllib; tomllib.loads(pathlib.Path('deploy/ci-runner-desktop/railway.toml').read_text())"
-python -m pytest omega_prime/tests/ci_runners/test_desktop_entrypoint.py -q
+python -m pytest omega_prime/tests/ci_runners/test_desktop_entrypoint.py omega_prime/tests/ci_runners/test_desktop_image.py -q
 # Optional, heavy (~2 GB), local only:
 # docker build -f deploy/ci-runner-desktop/Dockerfile -t omega-ci-desktop:local .
 ```

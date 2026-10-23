@@ -12,6 +12,7 @@ from omega_prime.tests.ci_runners._secrets import placeholder
 
 JIT = placeholder("jit-config")
 AGENT_TOKEN = placeholder("agent-token")
+DESKTOP_PASSWORD = placeholder("desktop-password")
 
 REPORT = """#!/bin/sh
 d='{report}'
@@ -66,7 +67,7 @@ def supervisor(tmp: Path, root: Path, exits: Exits, **kw: Any) -> Supervisor:
         {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "LANG": "C.UTF-8",
-            "PASSWORD": "desktop-password-1234567890",
+            "PASSWORD": DESKTOP_PASSWORD,
             "OMEGA_CI_AGENT_TOKEN": AGENT_TOKEN,
             "GITHUB_TOKEN": placeholder("ambient-github-token"),
         },

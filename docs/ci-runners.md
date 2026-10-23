@@ -7,7 +7,9 @@ webhooks, decides how many runners are needed, mints a single-use JIT runner
 config for each one, and asks the Desktop's runner agent to start it. When the
 work is done the runners exit, and Railway puts the idle Desktop to sleep.
 
-> **Status: built, not deployed.** Creating the GitHub App, installing the
+> **Status: built, not deployed.** "Built" means the code and its offline
+> checks pass, with command-and-exit-code receipts: see
+> [Verification](#verification). Creating the GitHub App, installing the
 > VPS service, adding the Caddy site, and redeploying the Railway Desktop are
 > all operator steps that are **HELD** (D-120-10). Nothing in this repository
 > performs them. Per-repository onboarding is in
@@ -109,7 +111,7 @@ the agent. Secret values are never logged, put in a repr, or placed on argv.
 | `OMEGA_CI_DESKTOP_TOKEN_FILE` | — | Path to the agent bearer token. Required. |
 | `OMEGA_CI_PUBLISHER` | `jsonl` | `jsonl`, `null` or `eventstream`. |
 | `OMEGA_CI_EVENTS_PATH` | `~/.omega/ci-runners/events.jsonl` | JSONL event log. |
-| `OMEGA_CI_DEMAND_PATH` | `~/.omega/ci-runners/demand.json` | Queued-job backlog replayed after a restart (non-secret fields, mode 0600, entries older than 24 h dropped). |
+| `OMEGA_CI_DEMAND_PATH` | `~/.omega/ci-runners/demand.json` | Queued-job backlog replayed after a restart (non-secret fields, mode 0600, entries older than 24 h dropped, each entry re-checked against GitHub before replay). |
 
 Auth selection fails closed. A complete App configuration selects App mode. No
 App settings plus a PAT file selects PAT mode. A partial App configuration, or
@@ -144,7 +146,7 @@ Agent (`python -m omega_prime.ci_runners agent --host 0.0.0.0 --port 8787`):
 |---|---|
 | `GET /healthz` (no auth) | 200 `{status, draining, runners, capacity}`. |
 | `GET /v1/runners` | 200, list of `{name, generation, status, pid}`. |
-| `POST /v1/runners` `{name, generation, jitconfig}` | 201 first launch; 200 same name+generation replay; 409 conflicting generation (the running child is kept) or draining; 429 full; 400 malformed; 401 unauthorized; 413 over 1 MiB. |
+| `POST /v1/runners` `{name, generation, jitconfig}` | 201 first launch; 200 same name+generation replay (`{"status": "replayed"}` while the child runs, `{"status": "finished", "exit_code": N}` once it has exited, so a retry settles a lost exit callback instead of holding a dead slot); 409 conflicting generation (the running child is kept) or draining; 429 full; 400 malformed; 401 unauthorized; 413 over 1 MiB. |
 | `DELETE /v1/runners/{name}` | 202 stopping; 404 unknown. |
 | `POST /v1/drain` | 200 `{draining: true}`: no new runners, in-flight jobs finish. |
 
@@ -210,7 +212,8 @@ the default cap is 8 (hard ceiling 10). Railway usage pricing:
 | Launch rejected or ambiguous | Exponential backoff (15 s, 30 s, 60 s, 120 s, capped at 240 s) via a retry deadline; new demand does not bypass it. After 5 consecutive failures the circuit opens (`launch_circuit_open`) until a runner registers or is assigned (`launch_circuit_closed`). |
 | Runner exits before taking a job | Counted as a launch failure (`exited_before_job`) and backed off as above. |
 | Job completed, runner never exits | The runner moves to FINISHING with a grace deadline, then is reaped from the agent. A failed agent stop keeps it FINISHING and re-arms; a failed GitHub delete keeps it IDLE and re-arms; a runner found busy stays BUSY. |
-| Controller restart | One-shot reconcile of GitHub runners and agent inventory (a partial snapshot never reaps), then queued jobs are replayed from `OMEGA_CI_DEMAND_PATH`. |
+| Controller restart | One-shot reconcile of GitHub runners and agent inventory (a partial snapshot never reaps). Each job saved in `OMEGA_CI_DEMAND_PATH` is then checked once against GitHub (`GET /repos/{repo}/actions/jobs/{id}`, needs **Actions: Read**): only jobs GitHub still reports as queued are replayed. Jobs taken, finished or deleted meanwhile are dropped, so they cannot keep idle runners (and the Desktop) awake. A job that cannot be checked is dropped too and reported as `omega.ci.runner.error` `demand_unverified`; re-run it if it stays queued. The `demand` event with `reconciled: true` gives the counts. |
+| Launch retry after the runner already exited | The agent answers the retried launch with `finished` + exit code (the single-use JIT is never rerun); the controller treats it as that exit and frees the slot. |
 | Agent missing settings | Agent exits with a one-line error; the desktop still starts. |
 | Emergency stop | `POST /v1/drain` on the agent (no new runners); revert `runs-on` (see rollback). |
 
@@ -222,7 +225,7 @@ Docker, GitHub or Railway. The tests use injected fake transports and a
 harmless fake runner executable:
 
 ```bash
-python -m pytest omega_prime/tests/ci_runners/test_app.py omega_prime/tests/ci_runners/test_controller.py omega_prime/tests/ci_runners/test_agent.py omega_prime/tests/ci_runners/test_supervisor.py omega_prime/tests/ci_runners/test_desktop_entrypoint.py -q
+python -m pytest omega_prime/tests/ci_runners/test_app.py omega_prime/tests/ci_runners/test_controller.py omega_prime/tests/ci_runners/test_agent.py omega_prime/tests/ci_runners/test_supervisor.py omega_prime/tests/ci_runners/test_desktop_entrypoint.py omega_prime/tests/ci_runners/test_desktop_image.py -q
 ```
 
 The full package suite is `python -m pytest omega_prime/tests/ci_runners -q`.
@@ -230,12 +233,19 @@ This is a rehearsal only; it is not live validation.
 
 ## Verification
 
-The Greptile round-1 fixes on PR #87 are backed by
-`.receipts/bot-00-omega-prime/00050-pr87-greptile-r1.json`: the new tests
-failing on the pre-fix source, then ruff, mypy, polyglot-check, the package
-suite, scaler coverage (99%, gate 90%), the docs and inventory checks, and a
-full-suite comparison against the base commit. Its `unverified` list names
-what was not exercised (no live GitHub, Railway or VPS run).
+Every "built" or "passing" claim on this page and in PR #87 rests on a
+receipt that records each command, its exit code and the tail of its output:
+
+| Receipt | Covers |
+|---|---|
+| `.receipts/bot-00-omega-prime/00050-pr87-greptile-r2.json` | Current head. The Desktop image smoke check failing on the pre-fix COPY set (`ModuleNotFoundError: omega_prime.credentials.broker`) and passing on the new one; restart-replay, finished-launch and token-failure tests; ruff, ruff format, mypy and polyglot-check; the `ci_runners` package suite; package coverage (gate 90%); the docs and env-inventory checks; the full suite. |
+| `.receipts/bot-00-omega-prime/00050-pr87-greptile-r1.json` | Round-1 fixes: the new tests failing on the pre-fix source, then the same lint, type, suite, coverage and docs checks, plus a full-suite comparison against the base commit. |
+| `.receipts/bot-00-omega-prime/00050-phase-120-plans.json` | Phase-120 plan checks only. |
+
+Each receipt's `unverified` list names what was not exercised: no live
+GitHub, Railway, Pulsar or VPS run, and no `docker build` of the Desktop
+image (the smoke check runs the image's own `smoke.sh` against the exact
+COPY set instead).
 
 ## Held operations (D-120-10)
 

@@ -33,6 +33,7 @@ from omega_prime.ci_runners.jobs import (
     IdleDeadline,
     InputEvent,
     JobEvent,
+    JobStatus,
     Launch,
     LaunchFailed,
     LaunchSucceeded,
@@ -56,6 +57,7 @@ from omega_prime.ci_runners.scaler import Scaler, Step
 log = logging.getLogger(__name__)
 
 MAX_PENDING_WEBHOOKS = 256
+DEMAND_CHECK_CONCURRENCY = 4
 
 
 class Controller:
@@ -151,7 +153,8 @@ class Controller:
     async def _run(self) -> None:
         started = await self._snapshot()
         if self._demand is not None:
-            started = dataclasses.replace(started, queued=self._demand.load())
+            queued = await self._verified_demand(self._demand.load())
+            started = dataclasses.replace(started, queued=queued)
         self._apply(self.scaler.handle(started))
         self._persist_demand()
         self.ready.set()
@@ -183,6 +186,56 @@ class Controller:
             )
             return
         self._saved_demand = ids
+
+    async def _verified_demand(
+        self, saved: tuple[WorkflowJob, ...]
+    ) -> tuple[WorkflowJob, ...]:
+        """Persisted jobs GitHub still reports as queued, oldest first.
+
+        While the controller was down another runner may have taken or
+        finished a saved job, and no webhook will ever say so. Replaying such
+        an entry would keep the queue non-empty, so idle runners would never
+        be reaped and the Desktop would never sleep. Each entry is therefore
+        checked once, here, against GitHub's current job state. An entry that
+        cannot be checked is dropped (and reported): an unverifiable job must
+        not hold capacity forever; at worst it waits for a re-run.
+        """
+        if not saved:
+            return ()
+        gate = asyncio.Semaphore(DEMAND_CHECK_CONCURRENCY)
+
+        async def check(job: WorkflowJob) -> tuple[WorkflowJob, str]:
+            async with gate:
+                try:
+                    status = await self.github.job_status(job.repo, job.job_id)
+                except GitHubError:
+                    return job, "unverified"
+            if status is JobStatus.QUEUED:
+                return job, "queued"
+            return job, "gone" if status is None else status.name.lower()
+
+        results = await asyncio.gather(*(check(job) for job in saved))
+        kept = tuple(job for job, verdict in results if verdict == "queued")
+        dropped: dict[str, int] = {}
+        for _job, verdict in results:
+            if verdict != "queued":
+                dropped[verdict] = dropped.get(verdict, 0) + 1
+        if dropped:
+            self._publish(
+                "demand",
+                {
+                    "reconciled": True,
+                    "saved": len(saved),
+                    "queued": len(kept),
+                    **{f"dropped_{k}": v for k, v in sorted(dropped.items())},
+                },
+            )
+        if "unverified" in dropped:
+            self._publish(
+                "error",
+                {"reason": "demand_unverified", "count": dropped["unverified"]},
+            )
+        return kept
 
     async def _snapshot(self) -> ControllerStarted:
         """The one startup reconcile. A failed side never causes a reap."""
@@ -270,6 +323,10 @@ class Controller:
                 LaunchFailed(d.name, d.generation, f"jit_{exc.status or exc.code}")
             )
             return
+        except Exception as exc:  # never strand the STARTING reservation
+            log.warning("ci-runners: jit failed (%s)", type(exc).__name__)
+            self.submit(LaunchFailed(d.name, d.generation, "jit_unexpected"))
+            return
         key = (d.name, d.generation)
         self._jits[key] = jit.encoded  # memory-only, dropped below
         try:
@@ -285,6 +342,13 @@ class Controller:
                     },
                 )
                 self.submit(LaunchSucceeded(d.name, d.generation, jit.runner_id))
+                return
+            if result.outcome is LaunchOutcome.FINISHED:
+                # A retried launch whose child already ran and exited (its one
+                # exit callback was lost): settle it as that exit, so the
+                # reservation is released instead of held by a dead runner.
+                assert result.exit_code is not None
+                self.submit(RunnerExited(d.name, d.generation, result.exit_code))
                 return
             if result.outcome is LaunchOutcome.WAKE_FAILED:
                 present = await self.desktop.find(d.name, d.generation)
@@ -344,4 +408,4 @@ class Controller:
         return ReapOutcome.DONE
 
 
-__all__ = ["MAX_PENDING_WEBHOOKS", "Controller"]
+__all__ = ["DEMAND_CHECK_CONCURRENCY", "MAX_PENDING_WEBHOOKS", "Controller"]

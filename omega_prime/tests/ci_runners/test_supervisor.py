@@ -23,7 +23,7 @@ from omega_prime.ci_runners.agent.supervisor import (
     child_env,
 )
 
-from ._runner import AGENT_TOKEN, JIT, Exits, runner_root, supervisor
+from ._runner import AGENT_TOKEN, DESKTOP_PASSWORD, JIT, Exits, runner_root, supervisor
 
 NAME = "omega-ci-101-abcd"
 
@@ -374,7 +374,7 @@ def test_child_env_is_an_allowlist(tmp_path: Path) -> None:
         {
             "PATH": "/x",
             "TZ": "UTC",
-            "PASSWORD": "p",
+            "PASSWORD": DESKTOP_PASSWORD,
             "OMEGA_CI_AGENT_TOKEN": AGENT_TOKEN,
         },
         JIT,
@@ -532,8 +532,14 @@ def test_retry_after_the_child_finished_is_replayed_not_restarted(
         await exits.wait()
         await asyncio.sleep(0)
         assert s.children == {}
-        # The 201 was lost; the controller retries the same identity.
-        assert s.admit(NAME, "gen-a", JIT) is Admission.REPLAYED
+        # The 201 was lost; the controller retries the same identity. The
+        # answer is the finished outcome (with its exit code), never a live
+        # replay, so a lost exit callback cannot leave a dead runner holding
+        # the controller's slot.
+        assert s.admit(NAME, "gen-a", JIT) is Admission.FINISHED
+        assert s.finished_exit(NAME, "gen-a") == 3
+        assert s.finished_exit(NAME, "gen-b") is None
+        assert s.finished_exit("omega-ci-999-zzzz", "gen-a") is None
         assert s.admit(NAME, "gen-b", JIT) is Admission.CONFLICT
         assert s.children == {}
         return s
@@ -550,6 +556,7 @@ def test_finished_memory_is_bounded(
         runner_root=tmp_path, work_root=tmp_path, max_runners=1, notify=AsyncMock()
     )
     for n in range(3):
-        s._remember_finished(sup.Child(f"omega-ci-{n}-a", "g"))
+        s._remember_finished(sup.Child(f"omega-ci-{n}-a", "g"), n)
     assert list(s._finished) == ["omega-ci-1-a", "omega-ci-2-a"]
+    assert s.finished_exit("omega-ci-2-a", "g") == 2
     assert sup.FINISHED_MEMORY == 2

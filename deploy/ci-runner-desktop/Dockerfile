@@ -65,7 +65,7 @@ RUN groupadd --system --gid "${JOB_GID}" omega-ci-job \
     && mkdir -p /var/lib/omega-ci/work \
     && chmod 0711 /var/lib/omega-ci /var/lib/omega-ci/work
 
-# --- 4. Agent: stdlib package subset + hash-pinned uvicorn wheels (no pip) ----
+# --- 4. Agent: stdlib-only omega_prime package + hash-pinned uvicorn (no pip) -
 RUN mkdir -p /opt/omega-ci/site /tmp/wheels && cd /tmp/wheels \
     && curl -fsSL -o "${UVICORN_WHL}" "${UVICORN_URL}" \
     && curl -fsSL -o "${CLICK_WHL}" "${CLICK_URL}" \
@@ -73,13 +73,16 @@ RUN mkdir -p /opt/omega-ci/site /tmp/wheels && cd /tmp/wheels \
     && printf '%s  %s\n' "${UVICORN_SHA256}" "${UVICORN_WHL}" "${CLICK_SHA256}" "${CLICK_WHL}" "${H11_SHA256}" "${H11_WHL}" | sha256sum -c - \
     && for whl in *.whl; do python3 -m zipfile -e "$whl" /opt/omega-ci/site; done \
     && rm -rf /tmp/wheels
-COPY omega_prime/__init__.py /opt/omega-ci/site/omega_prime/__init__.py
-COPY omega_prime/credentials/__init__.py omega_prime/credentials/redact.py /opt/omega-ci/site/omega_prime/credentials/
-COPY omega_prime/ci_runners /opt/omega-ci/site/omega_prime/ci_runners
+# The whole package (tests excluded by .dockerignore), not a hand-picked file
+# list: the agent's credential reads go through omega_prime.credentials.broker,
+# whose import chain spans several subpackages. It is stdlib-only at import.
+COPY omega_prime /opt/omega-ci/site/omega_prime
 COPY deploy/ci-runner-desktop/entrypoint.sh /opt/omega-ci/entrypoint.sh
+COPY deploy/ci-runner-desktop/smoke.sh /opt/omega-ci/smoke.sh
+# Fail the build unless the real agent app builds from this site alone.
 RUN chown -R root:root /opt/omega-ci && chmod -R a+rX,go-w /opt/omega-ci \
-    && chmod 0755 /opt/omega-ci/entrypoint.sh \
-    && PYTHONPATH=/opt/omega-ci/site python3 -c "import sys; assert sys.version_info >= (3, 11); import omega_prime.ci_runners.agent.app, uvicorn"
+    && chmod 0755 /opt/omega-ci/entrypoint.sh /opt/omega-ci/smoke.sh \
+    && /opt/omega-ci/smoke.sh uvicorn
 
 ENV HOME=/config PORT=3000 VNC_RESOLUTION=1440x900 \
     OMEGA_CI_AGENT_RUNNER_ROOT=/opt/actions-runner \
