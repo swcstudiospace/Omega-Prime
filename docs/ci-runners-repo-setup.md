@@ -65,9 +65,11 @@ including ones created later. There is no bare `*` and no partial glob such
 as `swcstudiospace/foo*`; the controller and the agent refuse to start with
 one. An org repository that is itself a **GitHub fork** of an upstream
 project is *not* covered by `owner/*` (its workflows come from upstream). To
-serve one on purpose, add its exact name next to the wildcard, for example
-`swcstudiospace/*,swcstudiospace/some-fork`, in all three settings; pull
-requests inside it stay refused. Each repository still opts in with the
+serve a **private** one on purpose, add its exact name next to the wildcard,
+for example `swcstudiospace/*,swcstudiospace/some-fork`, in `OMEGA_CI_REPOS`
+and `OMEGA_CI_AGENT_REPOS`; pull requests inside it stay refused. A **public**
+fork is always refused, by design (the fork guard sees `fork: true` for every
+trigger), even when listed exactly. Each repository still opts in with the
 one-line `runs-on` change above. Opening the pool to another organisation
 needs Ove's say. Details:
 [CI runner fleet](ci-runners.md#org-wide-setup-every-repository-of-an-owner).

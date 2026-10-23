@@ -408,6 +408,15 @@ class Controller:
         checked once, here, against GitHub's current job state. An entry that
         cannot be checked is dropped (and reported): an unverifiable job must
         not hold capacity forever; at worst it waits for a re-run.
+
+        Rows saved before fork status was persisted (``fork`` is ``None``)
+        would fail an ``owner/*`` entry and be silently forgotten when an
+        operator switches from exact names to a wildcard. For those the
+        repository's ``fork`` flag is refreshed from the job's workflow run
+        first (see :meth:`_refresh_fork`). If it stays unknown the row is
+        *retained*: kept in the demand file (so neither this restart nor the
+        next one loses it) but never handed to the scaler, so unknown fork
+        status can never launch a runner.
         """
         if not saved:
             return ()
@@ -419,6 +428,13 @@ class Controller:
                     status = await self.github.job_status(job.repo, job.job_id)
                 except GitHubError:
                     return job, "unverified"
+                if status is JobStatus.QUEUED and self._fork_blocks(job):
+                    fork = await self._refresh_fork(job)
+                    if fork is None:
+                        return job, "retained"
+                    job = dataclasses.replace(job, fork=fork)
+                    if not wants_pool(job, self.scaler.labels, self.scaler.repos):
+                        return job, "fork_repo"  # a verified fork: not listed
             if status is not JobStatus.QUEUED:
                 return job, "gone" if status is None else status.name.lower()
             if job.public and not job.private:
@@ -435,11 +451,17 @@ class Controller:
 
         results = await asyncio.gather(*(check(job) for job in saved))
         kept = tuple(job for job, verdict in results if verdict == "queued")
+        retained = [job for job, verdict in results if verdict == "retained"]
+        for job in retained:
+            # Persisted with the rest of the accepted demand, never scaled: a
+            # webhook redelivery (which carries ``repository.fork``) or the
+            # next restart can still serve it; in_progress / completed clear it.
+            self._accepted.setdefault(job.job_id, job)
         dropped: dict[str, int] = {}
         for _, verdict in results:
-            if verdict != "queued":
+            if verdict not in ("queued", "retained"):
                 dropped[verdict] = dropped.get(verdict, 0) + 1
-        if dropped:
+        if dropped or retained:
             self._publish(
                 "demand",
                 {
@@ -447,7 +469,12 @@ class Controller:
                     "saved": len(saved),
                     "queued": len(kept),
                     **{f"dropped_{k}": v for k, v in sorted(dropped.items())},
+                    **({"retained_fork_unknown": len(retained)} if retained else {}),
                 },
+            )
+        if retained:
+            self._publish(
+                "error", {"reason": "demand_fork_unknown", "count": len(retained)}
             )
         if "unverified" in dropped:
             self._publish(
@@ -455,6 +482,49 @@ class Controller:
                 {"reason": "demand_unverified", "count": dropped["unverified"]},
             )
         return kept
+
+    def _fork_blocks(self, job: WorkflowJob) -> bool:
+        """Only the unknown fork status keeps this saved job out of the pool:
+        it would pass an allowlist (``OMEGA_CI_REPOS``, or for a public job
+        ``OMEGA_CI_PUBLIC_REPOS``) if the repository were known not to be a
+        fork, i.e. it is admitted only through an ``owner/*`` entry."""
+        if job.fork is not None:
+            return False
+        labels, repos = self.scaler.labels, self.scaler.repos
+        as_source = dataclasses.replace(job, fork=False)
+        if not wants_pool(as_source, labels, repos):
+            return False  # not ours whatever the fork flag says
+        if not wants_pool(job, labels, repos):
+            return True
+        public = self.scaler.public_repos
+        return (
+            job.public
+            and not job.private
+            and not repo_allowed(job.repo, public, fork=None)
+            and repo_allowed(job.repo, public, fork=False)
+        )
+
+    async def _refresh_fork(self, job: WorkflowJob) -> bool | None:
+        """``repository.fork`` of the saved job's workflow run, or ``None``.
+
+        ``None`` (lookup error, missing run, another repository, a missing or
+        non-boolean flag) means unknown, and unknown never matches an
+        ``owner/*`` entry: the caller keeps the row but does not serve it.
+        """
+        try:
+            run = await self.github.workflow_run(job.repo, job.run_id)
+        except GitHubError:
+            return None
+        if not isinstance(run, dict):
+            return None
+        repo = run.get("repository")
+        if not isinstance(repo, dict):
+            return None
+        name = repo.get("full_name")
+        if not isinstance(name, str) or name.lower() != job.repo.lower():
+            return None
+        fork = repo.get("fork")
+        return fork if isinstance(fork, bool) else None
 
     async def _snapshot(self) -> ControllerStarted:
         """The one startup reconcile. A failed side never causes a reap."""

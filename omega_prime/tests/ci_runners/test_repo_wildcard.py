@@ -373,3 +373,169 @@ def test_hook_file_runs_standalone_with_the_wildcard(tmp_path: Path) -> None:
     assert _run_hook(tmp_path, [ORG_ALL], _event(OTHER, fork=True), OTHER) == 1
     assert _run_hook(tmp_path, ["acme/*"], _event(OTHER), OTHER) == 1
     assert _run_hook(tmp_path, [], _event(OTHER), OTHER) == 1
+
+
+# -- legacy demand rows (saved before fork status was persisted) ------------------
+
+
+def _legacy_demand(path: Path, *, public: bool = False, job_id: int = 1) -> None:
+    """A demand file as an older controller wrote it: no ``fork`` key."""
+    row = {
+        "job_id": job_id,
+        "run_id": 9001,
+        "repo": OTHER,
+        "private": not public,
+        "public": public,
+        "labels": list(DEFAULT_LABELS),
+        "seen_at": 1.0,
+    }
+    path.write_text(json.dumps({"version": 1, "jobs": [row]}), encoding="utf-8")
+
+
+def _job_path(job_id: int = 1) -> str:
+    return f"/repos/{OTHER}/actions/jobs/{job_id}"
+
+
+def _wall_rig(http: Any, path: Path, **kw: Any) -> Rig:
+    return Rig(http, demand=DemandStore(path, wall=lambda: 2.0), **kw)
+
+
+def _saved(path: Path) -> list[tuple[int, Any]]:
+    return [(r["job_id"], r["fork"]) for r in json.loads(path.read_text())["jobs"]]
+
+
+def test_legacy_row_has_its_fork_flag_refreshed_and_is_replayed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "demand.json"
+    _legacy_demand(path)
+    http = routes()
+    http.on("GET", _job_path(), resp(200, {"status": "queued"}))
+    http.on(
+        "GET",
+        _run_path(OTHER),
+        resp(200, {"repository": {"full_name": OTHER, "fork": False}}),
+    )
+    rig = _wall_rig(http, path, repos=(ORG_ALL,))
+    scenario(rig, lambda r: r.ctrl.settle())
+    assert list(rig.scaler.queued) == [1]
+    assert rig.scaler.queued[1].fork is False
+    assert len(rig.scaler.runners) == 1 and JIT_PATH in http.paths()
+    assert _saved(path) == [(1, False)]  # retained, now with a known flag
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        resp(500),
+        resp(404),
+        resp(200, {"repository": {"full_name": OTHER}}),  # flag missing
+        resp(200, {"repository": {"full_name": OTHER, "fork": "no"}}),
+        resp(200, {"repository": {"full_name": REPO, "fork": False}}),  # other repo
+    ],
+)
+def test_legacy_row_with_unknown_fork_is_kept_but_never_launched(
+    tmp_path: Path, reply: Any
+) -> None:
+    path = tmp_path / "demand.json"
+    _legacy_demand(path)
+    http = routes()
+    http.on("GET", _job_path(), resp(200, {"status": "queued"}))
+    http.on("GET", _run_path(OTHER), reply)
+    rig = _wall_rig(http, path, repos=(ORG_ALL,))
+    scenario(rig, lambda r: r.ctrl.settle())
+    assert rig.scaler.queued == {} and rig.scaler.runners == {}
+    assert JIT_PATH not in http.paths()
+    assert _saved(path) == [(1, None)]  # not forgotten
+    errors = [
+        e["data"]
+        for e in rig.publisher.events
+        if e["type"] == "omega.ci.runner.error"
+        and e["data"].get("reason") == "demand_fork_unknown"
+    ]
+    assert errors == [{"reason": "demand_fork_unknown", "count": 1}]
+    # A later restart that can see the flag serves it.
+    http = routes()
+    http.on("GET", _job_path(), resp(200, {"status": "queued"}))
+    http.on(
+        "GET",
+        _run_path(OTHER),
+        resp(200, {"repository": {"full_name": OTHER, "fork": False}}),
+    )
+    again = _wall_rig(http, path, repos=(ORG_ALL,))
+    scenario(again, lambda r: r.ctrl.settle())
+    assert list(again.scaler.queued) == [1] and len(again.scaler.runners) == 1
+
+
+def test_retained_legacy_row_is_cleared_once_the_job_moves_on(tmp_path: Path) -> None:
+    path = tmp_path / "demand.json"
+    _legacy_demand(path)
+    http = routes()
+    http.on("GET", _job_path(), resp(200, {"status": "queued"}))
+    http.on("GET", _run_path(OTHER), resp(500))
+    rig = _wall_rig(http, path, repos=(ORG_ALL,))
+    scenario(
+        rig, offer(job("completed", repo=OTHER, job_id=1, runner_name="elsewhere"))
+    )
+    assert json.loads(path.read_text())["jobs"] == []
+    assert JIT_PATH not in http.paths()
+
+
+def test_legacy_row_verified_as_a_fork_is_still_refused(tmp_path: Path) -> None:
+    path = tmp_path / "demand.json"
+    _legacy_demand(path)
+    http = routes()
+    http.on("GET", _job_path(), resp(200, {"status": "queued"}))
+    http.on(
+        "GET",
+        _run_path(OTHER),
+        resp(200, {"repository": {"full_name": OTHER, "fork": True}}),
+    )
+    rig = _wall_rig(http, path, repos=(ORG_ALL,))
+    scenario(rig, lambda r: r.ctrl.settle())
+    assert rig.scaler.queued == {} and rig.scaler.runners == {}
+    assert JIT_PATH not in http.paths()
+    assert _saved(path) == []
+    [summary] = [
+        e["data"]
+        for e in rig.publisher.events
+        if e["type"].endswith(".demand") and e["data"].get("reconciled")
+    ]
+    assert summary["dropped_fork_repo"] == 1
+
+
+def test_legacy_public_row_is_refreshed_then_fork_guarded(tmp_path: Path) -> None:
+    path = tmp_path / "demand.json"
+    _legacy_demand(path, public=True)
+    http = routes()
+    http.on("GET", _job_path(), resp(200, {"status": "queued"}))
+    body = run_body("push", OTHER, OTHER)
+    body["repository"]["fork"] = False
+    http.on("GET", _run_path(OTHER), resp(200, body))
+    rig = _wall_rig(http, path, repos=(ORG_ALL,), public_repos=(ORG_ALL,))
+    scenario(rig, lambda r: r.ctrl.settle())
+    assert refusals(rig) == []
+    assert list(rig.scaler.queued) == [1] and len(rig.scaler.runners) == 1
+
+
+def test_legacy_public_row_with_unknown_fork_never_launches(tmp_path: Path) -> None:
+    path = tmp_path / "demand.json"
+    _legacy_demand(path, public=True)
+    http = routes()
+    http.on("GET", _job_path(), resp(200, {"status": "queued"}))
+    http.on("GET", _run_path(OTHER), resp(200, run_body("push", OTHER, OTHER)))
+    rig = _wall_rig(http, path, repos=(ORG_ALL,), public_repos=(ORG_ALL,))
+    scenario(rig, lambda r: r.ctrl.settle())
+    assert rig.scaler.queued == {} and JIT_PATH not in http.paths()
+    assert _saved(path) == [(1, None)]
+
+
+def test_legacy_row_listed_exactly_needs_no_refresh(tmp_path: Path) -> None:
+    path = tmp_path / "demand.json"
+    _legacy_demand(path)
+    http = routes()
+    http.on("GET", _job_path(), resp(200, {"status": "queued"}))
+    rig = _wall_rig(http, path, repos=(OTHER,))
+    scenario(rig, lambda r: r.ctrl.settle())
+    assert _run_path(OTHER) not in http.paths()
+    assert list(rig.scaler.queued) == [1]

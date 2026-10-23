@@ -245,12 +245,18 @@ whose fork status is missing from the payload (fails closed):
 - The controller ignores its jobs (no runner is launched for them).
 - The runner-side hook refuses them with `fork_repo_not_listed` if GitHub
   assigns one to a runner anyway.
-- To serve such a repository on purpose, add its exact `owner/repo` name to
-  the allowlists (for example
-  `OMEGA_CI_REPOS=swcstudiospace/*,swcstudiospace/some-fork`). Even then, pull
-  requests inside it are refused, because GitHub reports every head
-  repository of a fork as `fork: true`, so only `push` and
-  `workflow_dispatch` run there.
+- To serve such a repository on purpose it must be **private**: add its
+  exact `owner/repo` name to `OMEGA_CI_REPOS` and `OMEGA_CI_AGENT_REPOS`
+  (for example `OMEGA_CI_REPOS=swcstudiospace/*,swcstudiospace/some-fork`).
+  Even then, pull requests inside it are refused, because GitHub reports
+  every head repository of a fork as `fork: true`, so only `push`,
+  `workflow_dispatch` and other non-pull-request triggers run there.
+- A **public** fork can never be served, by design. Listing it exactly in all
+  three lists (including `OMEGA_CI_PUBLIC_REPOS`) does not help: the
+  controller's fork guard checks the workflow run's `head_repository`, which
+  for a fork is always `fork: true`, so every trigger (`push` and
+  `workflow_dispatch` included) is refused with `fork`. There is no
+  exception for public forks.
 
 Opening the runners to any other organisation or owner needs Ove's explicit
 decision.
@@ -385,7 +391,7 @@ the default cap is 8 (hard ceiling 10). Railway usage pricing:
 | Launch rejected or ambiguous | Exponential backoff (15 s, 30 s, 60 s, 120 s, capped at 240 s) via a retry deadline; new demand does not bypass it. After 5 consecutive failures the circuit opens (`launch_circuit_open`) until a runner registers or is assigned (`launch_circuit_closed`). |
 | Runner exits before taking a job | Counted as a launch failure (`exited_before_job`) and backed off as above. |
 | Job completed, runner never exits | The runner moves to FINISHING with a grace deadline, then is reaped from the agent. A failed agent stop keeps it FINISHING and re-arms; a failed GitHub delete keeps it IDLE and re-arms; a runner found busy stays BUSY. |
-| Controller restart | Each job saved in `OMEGA_CI_DEMAND_PATH` is first checked once against GitHub (`GET /repos/{repo}/actions/jobs/{id}`, needs **Actions: Read**): only jobs GitHub still reports as queued are replayed. Jobs taken, finished or deleted meanwhile are dropped, so they cannot keep idle runners (and the Desktop) awake. A job that cannot be checked is dropped too and reported as `omega.ci.runner.error` `demand_unverified`; re-run it if it stays queued. The `demand` event with `reconciled: true` gives the counts. Then comes the one-shot reconcile of GitHub runners and agent inventory (a partial snapshot never reaps). Agent exit callbacks that arrive before startup finishes are held (up to 64) and applied once the runners are restored, so a runner that exits mid-startup is never restored as idle. |
+| Controller restart | Each job saved in `OMEGA_CI_DEMAND_PATH` is first checked once against GitHub (`GET /repos/{repo}/actions/jobs/{id}`, needs **Actions: Read**): only jobs GitHub still reports as queued are replayed. Jobs taken, finished or deleted meanwhile are dropped, so they cannot keep idle runners (and the Desktop) awake. A job that cannot be checked is dropped too and reported as `omega.ci.runner.error` `demand_unverified`; re-run it if it stays queued. Rows saved by a controller older than 00054 have no `fork` field; when only that unknown fork status keeps one out of an `owner/*` entry (for example right after switching `OMEGA_CI_REPOS` from exact names to `swcstudiospace/*`), the controller first reads `repository.fork` from the job's workflow run (`GET /repos/{repo}/actions/runs/{run_id}`, **Actions: Read**). A repository confirmed not to be a fork is replayed as usual (public ones still go through the fork guard); a confirmed fork is dropped (`dropped_fork_repo`). If the flag stays unknown (lookup error, 404, missing field) the job is kept in the demand file but never launched, reported as `retained_fork_unknown` in the `demand` event and as `omega.ci.runner.error` `demand_fork_unknown`; a redelivery, the next restart or the job finishing clears it (the 24 h limit still applies). The `demand` event with `reconciled: true` gives the counts. Then comes the one-shot reconcile of GitHub runners and agent inventory (a partial snapshot never reaps). Agent exit callbacks that arrive before startup finishes are held (up to 64) and applied once the runners are restored, so a runner that exits mid-startup is never restored as idle. |
 | Launch retry after the runner already exited | The agent answers the retried launch with `finished` + exit code (the single-use JIT is never rerun); the controller treats it as that exit and frees the slot. |
 | Agent missing settings | Agent exits with a one-line error; the desktop still starts. |
 | Emergency stop | `POST /v1/drain` on the agent (no new runners); revert `runs-on` (see rollback). |

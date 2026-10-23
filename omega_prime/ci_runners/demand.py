@@ -117,7 +117,7 @@ def _job(row: Any) -> tuple[WorkflowJob, float] | None:
         labels=tuple(labels),
         status=JobStatus.QUEUED,
         public=public,  # ``trusted`` is never persisted; replay re-verifies
-        fork=fork if isinstance(fork, bool) else None,  # unknown → exact only
+        fork=fork if isinstance(fork, bool) else None,  # unknown: refreshed on replay
     )
     return job, float(seen_at)
 
