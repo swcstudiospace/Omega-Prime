@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdtemp, chmod, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -405,10 +406,12 @@ describe("lazy Pulsar adapter", () => {
   it("durably dead-letters malformed messages before acknowledging them", async () => {
     const sourceTopic = "persistent://omega/sdlc/pr";
     const event = makeEvent();
+    // Generated per run so no credential-shaped literal is committed.
+    const secretPart = randomBytes(9).toString("hex");
     const messages = [
       {
         data: Uint8Array.from([0x7b]),
-        properties: { ce_id: "poison", omega_retry_history: "[]", token: "Bearer test-secret" },
+        properties: { ce_id: "poison", omega_retry_history: "[]", token: ["Bearer", secretPart].join(" ") },
         partitionKey: "repo#3",
         messageId: "poison-1"
       },
@@ -463,8 +466,8 @@ describe("lazy Pulsar adapter", () => {
     }[];
     expect(history).toHaveLength(1);
     expect(history[0]?.attempt).toBe(1);
-    expect(history[0]?.reason).not.toContain("test-secret");
-    expect(deadLetters[0]?.properties.token).not.toContain("test-secret");
+    expect(history[0]?.reason).not.toContain(secretPart);
+    expect(deadLetters[0]?.properties.token).not.toContain(secretPart);
     await delivery?.ack();
     expect(calls.at(-1)).toBe("ack:valid-1");
     await bus.close();
@@ -638,14 +641,16 @@ describe("lazy Pulsar adapter", () => {
     const directory = await mkdtemp(join(tmpdir(), "eventstream-config-"));
     const token = join(directory, "token");
     try {
-      await writeFile(token, "xai-abcdefgh1234", { mode: 0o600 });
+      // Generated per run so no credential-shaped literal is committed.
+      const tokenValue = ["xai", randomBytes(8).toString("hex")].join("-");
+      await writeFile(token, tokenValue, { mode: 0o600 });
       await chmod(token, 0o600);
       const config = new EventStreamConfig({
         serviceUrl: "pulsar://127.0.0.1:26650",
         tokenFile: token
       });
-      expect(await config.readSecret("tokenFile")).toBe("xai-abcdefgh1234");
-      expect(config.toString()).not.toContain("xai-abcdefgh1234");
+      expect(await config.readSecret("tokenFile")).toBe(tokenValue);
+      expect(config.toString()).not.toContain(tokenValue);
       await writeFile(token, "rotated-token", { mode: 0o600 });
       await chmod(token, 0o600);
       expect(await config.readSecret("tokenFile")).toBe("rotated-token");

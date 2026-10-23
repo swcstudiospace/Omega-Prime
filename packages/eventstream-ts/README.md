@@ -64,7 +64,7 @@ await bus.close();
 
 CloudEvent construction checks envelope fields, registered type/schema, payload shape, extensions, traceparent and routing identity. Values and nested JSON are immutable. `toBytes()` and `toProperties()` redact payload/property text before persistence or transport. Redaction is rejected if it changes envelope identity or the event’s routing key.
 
-The memory adapter is process-local, wakes receivers on publish or injected-clock advancement, and has no background poller. It supports delayed delivery, cancellation, seek, bounded in-flight delivery, per-key ordering and redelivery after `nack()` or an unacknowledged close. It is a test adapter, not a broker substitute.
+The memory adapter is process-local, wakes receivers on publish or injected-clock advancement, and has no background poller. It supports delayed delivery, cancellation, seek, bounded in-flight delivery, per-key ordering and redelivery after `nack()` or an unacknowledged close. In-flight holds are owned per receiver: closing one receiver redelivers only the messages it held, and a settlement from a receiver that no longer holds the message (for example after close) is rejected with `ContractError` instead of acknowledging another receiver's work. Delivery properties put caller-supplied properties first and the CloudEvent's own properties last, so envelope identity is authoritative. It is a test adapter, not a broker substitute.
 
 ## Pulsar adapter and configuration
 
@@ -87,7 +87,7 @@ Token and encryption-key paths are never printed. `readSecret()` opens the file 
 
 Native producer sends resolve only after the broker receipt. Sequence IDs remain decimal strings/BigInts until checked against JavaScript’s safe integer range for the native API. Producer names are stable per topic. Subscription setup uses `Earliest`, bounded receiver queues and batch-index acknowledgements. `Key_Shared`, `Shared`, `Failover` and `Exclusive` modes are supported; a non-durable `Reader` supports seek, cancellation and close. Ordering is per key/topic according to the selected Pulsar mode; there is no cross-topic global ordering guarantee.
 
-Pulsar’s registry boundary uses native `SchemaType.JSON` with Avro-format metadata. These native schemas are not Draft 2020-12 documents. SDK payload validators enforce the full event contract; the mandatory contract tests validate the canonical Draft 2020-12 bundles and every embedded valid/invalid fixture with Ajv, then compare their behavior to the typed SDK validators.
+Pulsar’s registry boundary uses native `SchemaType.JSON` with Avro-format metadata. These native schemas are not Draft 2020-12 documents. The TypeScript adapter does not derive its own native schemas: `src/native-schemas.generated.ts` is rendered from the Python SDK's `native_json_schema` (topic records, the redelivery template and sample retry/DLQ records), so a Python and a TypeScript producer always register the same record name, namespace and fields on a shared topic. Regenerate it with `python -m omega_prime.eventstream.native_schema_contract --write` after changing the Python schema; `--check` (run by the Python test suite) fails on drift. SDK payload validators enforce the full event contract; the mandatory contract tests validate the canonical Draft 2020-12 bundles and every embedded valid/invalid fixture with Ajv, then compare their behavior to the typed SDK validators.
 
 ## Retry, DLQ and ordering
 

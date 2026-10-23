@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from secrets import token_hex
 from typing import Any
 
 import pytest
@@ -737,7 +738,7 @@ def test_outbox_constructor_and_mark_paths_reject_invalid_inputs(
 
 def test_outbox_serve_records_redacted_failures_and_resumes(tmp_path: Path) -> None:
     async def scenario() -> None:
-        secret = "sk-serve-secret-value-123456"
+        secret = "sk" + "-" + token_hex(12)
         outbox = SQLiteOutbox(
             tmp_path / "outbox.sqlite3",
             producer_name="test-producer",
@@ -866,7 +867,7 @@ def test_outbox_safe_failure_when_secret_resolution_itself_fails(
         secret_supplier=boom,
     )
     # Bypass append (which needs secrets) and exercise redaction fallback directly.
-    message = outbox._safe_failure("broker exploded token=sk-should-not-matter")
+    message = outbox._safe_failure("broker exploded token=" + "sk" + "-" + token_hex(8))
     assert message == "relay failure (secret redaction unavailable)"
 
 

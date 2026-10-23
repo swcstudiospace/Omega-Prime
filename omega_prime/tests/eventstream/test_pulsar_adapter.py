@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from secrets import token_hex
 from typing import Any, cast
 
 import pytest
@@ -673,9 +674,10 @@ def test_pulsar_helper_predicates_and_property_encoding() -> None:
     assert _message_property(None) == "None"
     assert _message_property(True) == "True"
     assert '"a":1' in _message_property(_FrozenMap({"a": 1}))
-    err = _sanitized("boom", RuntimeError("token=sk-secret"))
+    shaped = "sk" + "-" + token_hex(8)
+    err = _sanitized("boom", RuntimeError("token=" + shaped))
     assert isinstance(err, PulsarAdapterError)
-    assert "sk-secret" not in str(err)
+    assert shaped not in str(err)
     auth_req = _request(
         "auth-retry",
         topic="persistent://omega/system/retry.gate",

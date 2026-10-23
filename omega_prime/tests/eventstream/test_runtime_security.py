@@ -6,6 +6,7 @@ import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from secrets import token_hex
 from typing import Any
 
 import pytest
@@ -35,12 +36,15 @@ def test_secret_file_permissions_and_outbox_redaction_fail_closed(
             config=config,
         )
 
+        # Generated at runtime so no credential-shaped literal is committed.
+        title_secret = "sk" + "-" + token_hex(12)
+        property_secret = "sk" + "-" + token_hex(12)
         payload: dict[str, Any] = {
             "repo": "Omega-Prime",
             "number": 75,
             "head_sha": "b8eb05f",
             "actor": secret,
-            "title": "Example sk-runtime-secret-shaped-value-123",
+            "title": f"Example {title_secret}",
             "base_ref": "main",
         }
         event_type = "omega.sdlc.pr.opened"
@@ -64,7 +68,7 @@ def test_secret_file_permissions_and_outbox_redaction_fail_closed(
             producer_name="runtime-security",
             properties={
                 "authorization": secret,
-                "nested": {"opaque": "sk-runtime-property-secret-987654"},
+                "nested": {"opaque": property_secret},
             },
         )
 
@@ -92,8 +96,8 @@ def test_secret_file_permissions_and_outbox_redaction_fail_closed(
         stored_bytes = event_bytes + properties_bytes
         for sensitive in (
             secret,
-            "sk-runtime-secret-shaped-value-123",
-            "sk-runtime-property-secret-987654",
+            title_secret,
+            property_secret,
         ):
             assert sensitive.encode("utf-8") not in stored_bytes
         persisted_event = json.loads(event_bytes)
