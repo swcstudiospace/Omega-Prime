@@ -155,3 +155,28 @@ def test_existing_ledger_without_incarnation_column_is_migrated(tmp_path: Path) 
         assert asyncio.run(store.claim("gate", "ce-1", "owner")).status == "acquired"
     finally:
         store.close()
+
+
+def test_resumed_owner_moves_the_claim_to_its_live_incarnation(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "ledger.sqlite3"
+        crashed = SQLiteIdempotencyStore(database)
+        assert (await crashed.claim("gate", "ce-1", "owner-a")).status == "acquired"
+        crashed.close()  # the first incarnation ends with the claim held
+        resumed = SQLiteIdempotencyStore(database)
+        competitor = SQLiteIdempotencyStore(database)
+        try:
+            # Same owner token resumes in a new live incarnation ...
+            assert (await resumed.claim("gate", "ce-1", "owner-a")).status == (
+                "acquired"
+            )
+            # ... so another worker must not treat the claim as orphaned.
+            assert (await competitor.claim("gate", "ce-1", "owner-b")).status == (
+                "busy"
+            )
+            assert await resumed.complete("gate", "ce-1", "owner-a")
+        finally:
+            competitor.close()
+            resumed.close()
+
+    asyncio.run(scenario())

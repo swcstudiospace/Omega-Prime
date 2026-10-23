@@ -223,6 +223,21 @@ class SQLiteIdempotencyStore:
                 if status == "complete":
                     return ClaimResult.already_complete()
                 if persisted_owner == owner_hash:
+                    if incarnation != self.incarnation:
+                        # The owner resumed in this (live) incarnation: move the
+                        # claim's liveness to it so no other worker can mistake
+                        # the old, dead incarnation for an orphaned claim.
+                        database.execute(
+                            "UPDATE eventstream_idempotency SET incarnation = ? "
+                            "WHERE subscription_hash = ? AND event_hash = ? "
+                            "AND owner_hash = ? AND status = 'claimed'",
+                            (
+                                self.incarnation,
+                                subscription_hash,
+                                event_hash,
+                                owner_hash,
+                            ),
+                        )
                     return ClaimResult.acquired(owner_token)
                 if not self._incarnation_alive(incarnation):
                     # The owning worker process has exited (its incarnation lock

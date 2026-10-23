@@ -333,22 +333,75 @@ def test_review_arriving_before_push_is_applied_when_head_advances() -> None:
     assert "head-b" not in state.get("pending_by_head", {})
 
 
-def test_late_results_for_heads_already_left_are_discarded() -> None:
+def test_results_for_a_left_head_survive_a_force_push_back() -> None:
     state = reduce_pr_state(None, _event("omega.sdlc.pr.opened"))
     state = reduce_pr_state(
         state,
         _event("omega.sdlc.pr.pushed", head_sha="head-b", before_sha="head-a"),
+        source="sdlc/pr",
+        source_position=(0, 1, 0),
     )
-    assert state["known_heads"] == ["head-a"]
-    for index in range(5):
+    # A late CI result for head-a arrives while the PR is on head-b; it is
+    # marked seen, so it must be kept (reduced) rather than discarded.
+    for index in range(3):
         state = reduce_pr_state(
             state,
-            _event("omega.ci.run.passed", head_sha="head-a", run_id=f"late-{index}"),
+            _event("omega.ci.run.passed", head_sha="head-a"),
             source="sdlc/ci",
             source_position=(0, 10, index),
         )
-    assert state.get("pending_by_head", {}) == {}
     assert state["ci"] == {}
+    assert list(state["pending_by_head"]["head-a"]["ci"]) == ["run-1"]
+    state = reduce_pr_state(
+        state,
+        _event("omega.sdlc.pr.pushed", head_sha="head-a", before_sha="head-b"),
+        source="sdlc/pr",
+        source_position=(0, 1, 1),
+    )
+    assert state["head_sha"] == "head-a"
+    assert state["ci"]["run-1"]["status"] == "passed"
+    assert "head-a" not in state["pending_by_head"]
+
+
+def test_departing_head_results_are_restored_when_the_pr_returns() -> None:
+    state = reduce_pr_state(None, _event("omega.sdlc.pr.opened"))
+    state = reduce_pr_state(state, _event("omega.sdlc.review.approved"))
+    assert state["review"]["approved"]["reviewer"] == "reviewer"
+    state = reduce_pr_state(
+        state,
+        _event("omega.sdlc.pr.pushed", head_sha="head-b", before_sha="head-a"),
+    )
+    assert state["review"] == {}
+    state = reduce_pr_state(
+        state,
+        _event("omega.sdlc.pr.pushed", head_sha="head-a", before_sha="head-b"),
+    )
+    assert state["review"]["approved"]["reviewer"] == "reviewer"
+
+
+def test_left_head_buffers_share_the_pending_bound() -> None:
+    from omega_prime.eventstream.functions.pr_state_projector import (
+        _MAX_PENDING_HEADS,
+    )
+
+    state = reduce_pr_state(None, _event("omega.sdlc.pr.opened"))
+    previous = "head-a"
+    for index in range(_MAX_PENDING_HEADS + 4):
+        state = reduce_pr_state(
+            state,
+            _event("omega.ci.run.passed", head_sha=previous),
+        )
+        state = reduce_pr_state(
+            state,
+            _event(
+                "omega.sdlc.pr.pushed",
+                head_sha=f"head-{index}",
+                before_sha=previous,
+            ),
+        )
+        previous = f"head-{index}"
+    assert len(state["pending_by_head"]) == _MAX_PENDING_HEADS
+    assert "head-a" not in state["pending_by_head"]
 
 
 def test_future_head_buffers_are_reduced_and_bounded() -> None:

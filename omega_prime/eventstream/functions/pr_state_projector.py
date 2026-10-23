@@ -35,7 +35,6 @@ _SUPPORTED_TYPES = _PR_TYPES | _REVIEW_TYPES | _CI_TYPES
 _STATE_VERSION = 1
 # Bounds for head bookkeeping so busy, long-lived PRs keep constant-size state.
 _MAX_PENDING_HEADS = 8
-_MAX_KNOWN_HEADS = 32
 
 
 def _required_string(value: object, name: str) -> str:
@@ -103,12 +102,16 @@ def _state_copy(previous: Mapping[str, Any] | None) -> dict[str, Any]:
     return result
 
 
-def _known_heads(state: Mapping[str, Any]) -> list[str]:
-    """Heads this PR has already left, oldest first (bounded)."""
-    known = state.get("known_heads", [])
-    if not isinstance(known, list):
-        return []
-    return [head for head in known if isinstance(head, str) and head]
+def _next_pending_seq(state: dict[str, Any]) -> int:
+    sequence = state.get("pending_seq", 0)
+    return sequence + 1 if isinstance(sequence, int) else 1
+
+
+def _bound_pending(pending: dict[str, dict[str, Any]]) -> None:
+    """Evict least recently touched head buckets beyond _MAX_PENDING_HEADS."""
+    while len(pending) > _MAX_PENDING_HEADS:
+        oldest = min(pending, key=lambda item: int(pending[item].get("seq", 0)))
+        del pending[oldest]
 
 
 def _pending_heads(state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
@@ -258,26 +261,31 @@ def reduce_pr_state(
             ):
                 # Only an active PR advances, and only when the push follows its
                 # known head, rejecting stale/conflicting branch transitions.
-                known = _known_heads(state)
-                if current_head not in known:
-                    known.append(current_head)
-                state["known_heads"] = known[-_MAX_KNOWN_HEADS:]
+                pending = _pending_heads(state)
+                sequence = _next_pending_seq(state)
+                departing_review = dict(state.get("review", {}) or {})
+                departing_ci = dict(state.get("ci", {}) or {})
+                if departing_review or departing_ci:
+                    # Keep the departing head's results (bounded) so a later
+                    # force-push back to this commit restores them.
+                    pending[current_head] = {
+                        "review": departing_review,
+                        "ci": departing_ci,
+                        "seq": sequence,
+                    }
                 state["head_sha"] = head
                 state["review"] = {}
                 state["ci"] = {}
                 if not state.get("closed"):
                     state["status"] = "open"
-                # Apply reduced reviews/CI that arrived for the new head before
-                # this push, and drop buckets for heads the PR has already left.
-                pending = _pending_heads(state)
+                # Apply reduced reviews/CI that arrived for the new head while
+                # the PR was elsewhere (early results or a returning commit).
                 buffered = pending.pop(head, None)
-                state["pending_by_head"] = {
-                    pending_head: bucket
-                    for pending_head, bucket in pending.items()
-                    if pending_head not in state["known_heads"]
-                }
                 if buffered is not None:
                     _merge_pending(state, buffered)
+                _bound_pending(pending)
+                state["pending_by_head"] = pending
+                state["pending_seq"] = sequence
             # A mismatch is a stale or conflicting branch transition.
         elif head != current_head:
             # Other historical lifecycle messages (and terminal events for an old
@@ -301,20 +309,15 @@ def reduce_pr_state(
                 state.update(status="closed", closed=True)
     elif head == current_head and not state.get("closed"):
         _apply_review_or_ci(state, event_type, data)
-    elif (
-        head != current_head
-        and not state.get("closed")
-        and event_type not in _PR_TYPES
-        and head not in _known_heads(state)
-    ):
-        # Buffer reduced reviews/CI for a possible future head so an early
-        # arrival is not lost when source_positions marks it already seen.
-        # Late results for heads the PR already left are discarded, buckets are
-        # reduced (latest review per kind, latest status per CI run), and at
-        # most _MAX_PENDING_HEADS heads are retained (oldest evicted first).
+    elif head != current_head and not state.get("closed"):
+        # Buffer reduced reviews/CI for any other head: a future head (early
+        # arrival) or one the PR already left (it may return via force-push).
+        # source_positions marks the record seen, so dropping it here would
+        # lose it for good. Buckets are reduced (latest review per kind,
+        # latest status per CI run) and at most _MAX_PENDING_HEADS heads are
+        # retained, least recently touched evicted first.
         pending = _pending_heads(state)
-        sequence = state.get("pending_seq", 0)
-        sequence = sequence + 1 if isinstance(sequence, int) else 1
+        sequence = _next_pending_seq(state)
         bucket = pending.get(head) or {"review": {}, "ci": {}}
         bucket = {
             "review": dict(bucket.get("review", {})),
@@ -323,9 +326,7 @@ def reduce_pr_state(
         }
         _apply_review_or_ci(bucket, event_type, data)
         pending[head] = bucket
-        while len(pending) > _MAX_PENDING_HEADS:
-            oldest = min(pending, key=lambda item: int(pending[item].get("seq", 0)))
-            del pending[oldest]
+        _bound_pending(pending)
         state["pending_by_head"] = pending
         state["pending_seq"] = sequence
     if state.get("closed"):
