@@ -510,11 +510,16 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   therefore does not call the real `newuidmap`. PATH shims write the one
   mapping the job user is allowed to write, storage uses `ignore_chown_errors`
   with fuse-overlayfs or vfs under `RUNNER_TEMP`, and the build uses chroot
-  isolation. vfs layer apply remounts `/` (`MS_REC|MS_PRIVATE`). The pool
-  rejects that remount (the root mount is locked; `unshare` cannot change
-  its propagation). `podman` and `docker` on `PATH` run under a seccomp
-  user notification that answers success for that one remount and lets
-  every other mount run. The container's single mapped uid is presented as 10001, and
+  isolation. That is not enough to build. vfs layer apply remounts `/`
+  (`MS_REC|MS_PRIVATE`), and buildah then bind-mounts the build root onto
+  itself (`MS_BIND`, flags `0x1000`). Both are EPERM on this pool, including
+  inside podman's user namespace: `CapBnd` is `00000000800405fb` (no
+  `CAP_SYS_ADMIN`, bit 21) and `unshare` cannot change root propagation.
+  `/dev/fuse` is not a device node, so fuse-overlayfs cannot replace the
+  mount. `deploy/ci-runner-desktop` has to be started with `CAP_SYS_ADMIN`
+  in the bounding set and run `mount --make-rslave /` before the job user
+  starts. Until then `grokbot-image` cannot build or run a container. The
+  container's single mapped uid is presented as 10001, and
   nothing is published on a host port. `ci.yml` `eventstream-it` still uses a
   `services:` Pulsar container. That needs a Docker daemon at job setup, and
   the owned-secure harness execs as root and as uid 10000 inside one
