@@ -293,3 +293,11 @@ def test_default_id_sources_are_unique() -> None:
     a = launches(scaler.handle(job(job_id=1)))[0]
     b = launches(scaler.handle(job(job_id=2)))[0]
     assert a.generation != b.generation and len(a.name.rsplit("-", 1)[1]) == 4
+
+
+def test_unknown_input_event_is_rejected(ids: Ids) -> None:
+    class Bogus:
+        pass
+
+    with pytest.raises(TypeError, match="unknown input event Bogus"):
+        make(ids).handle(Bogus())  # type: ignore[arg-type]

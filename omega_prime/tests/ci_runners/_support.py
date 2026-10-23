@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -65,8 +64,7 @@ async def asgi_call(
     async def receive() -> dict[str, Any]:
         if messages:
             return messages.pop(0)
-        await asyncio.Event().wait()  # pragma: no cover - never reached
-        return {}
+        return {"type": "http.disconnect"}  # what a server sends once drained
 
     async def send(message: dict[str, Any]) -> None:
         sent.append(message)

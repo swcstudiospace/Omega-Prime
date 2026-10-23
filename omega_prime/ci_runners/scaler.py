@@ -143,7 +143,7 @@ class Scaler:
             self._on_deadline(event, out)
         elif isinstance(event, ControllerStarted):
             self._on_started(event, out)
-        else:  # pragma: no cover - the union is closed
+        else:
             raise TypeError(f"unknown input event {type(event).__name__}")
         self._settle(out)
         return out.step()
