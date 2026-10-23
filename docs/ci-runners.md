@@ -510,7 +510,10 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   therefore does not call the real `newuidmap`. PATH shims write the one
   mapping the job user is allowed to write, storage uses `ignore_chown_errors`
   with fuse-overlayfs or vfs under `RUNNER_TEMP`, and the build uses chroot
-  isolation. The container's single mapped uid is presented as 10001, and
+  isolation. vfs layer apply remounts `/` (`MS_REC|MS_PRIVATE`), which the
+  runner's own mount namespace rejects, so each `podman` and `docker`
+  invocation re-enters a private mount namespace with
+  `unshare --mount --map-root-user`. The container's single mapped uid is presented as 10001, and
   nothing is published on a host port. `ci.yml` `eventstream-it` still uses a
   `services:` Pulsar container. That needs a Docker daemon at job setup, and
   the owned-secure harness execs as root and as uid 10000 inside one

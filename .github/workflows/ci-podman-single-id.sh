@@ -13,6 +13,13 @@
 # isolation. A libc-free LD_PRELOAD makes chown succeed during image build,
 # because a single mapped uid cannot also be uid 10001 while the build is root.
 #
+# vfs layer apply remounts / with MS_REC|MS_PRIVATE (flags 0x44000). That
+# mount is EPERM in the runner's mount namespace ("/" is not shared, CapEff
+# is 0). A combined user+mount unshare is the unprivileged way to own a
+# mount namespace, so the podman and docker shims re-enter one per command.
+# GitHub kills a step's process tree, so a namespace holder cannot outlive
+# the step that started it.
+#
 # `setup` is what the workflow runs. `install-shims DEST` only writes the two
 # shims (the unit test drives those directly).
 set -eu
@@ -56,6 +63,23 @@ install_shims() {
   mkdir -p "$shim_dir"
   write_idmap_shim "$shim_dir/newuidmap" u
   write_idmap_shim "$shim_dir/newgidmap" g
+}
+
+# podman and docker both enter a private mount namespace, then exec the real
+# podman. Layer extraction remounts /; that only succeeds in a mount
+# namespace this process owns. OMEGA_CI_IN_USENS stops the shim recursing.
+write_engine_shim() {
+  shim_path="$1"
+  cat > "$shim_path" << 'EOF'
+#!/bin/sh
+set -eu
+if [ -z "${OMEGA_CI_IN_USENS:-}" ]; then
+  export OMEGA_CI_IN_USENS=1
+  exec unshare --mount --map-root-user --propagation private -- "$0" "$@"
+fi
+exec /usr/bin/podman "$@"
+EOF
+  chmod 0755 "$shim_path"
 }
 
 compile_fakechown() {
@@ -136,13 +160,10 @@ setup() {
   mkdir -p "$bin" "$runtime" "$graph" "$conf_dir"
   chmod 700 "$runtime"
   install_shims "$bin"
-  # The workflow's docker CLI calls are podman. The shim lives beside the
-  # idmap shims so one PATH entry covers both.
-  cat > "${bin}/docker" << 'EOF'
-#!/bin/sh
-exec podman "$@"
-EOF
-  chmod 0755 "${bin}/docker"
+  # docker in the workflow is podman. Both names re-enter a private mount
+  # namespace before exec'ing /usr/bin/podman (see write_engine_shim).
+  write_engine_shim "${bin}/docker"
+  write_engine_shim "${bin}/podman"
   compile_fakechown "${root}/ci-fakechown.so"
 
   driver="vfs"
@@ -180,6 +201,9 @@ EOF
 case "${1:-}" in
   install-shims)
     install_shims "${2:?destination required}"
+    ;;
+  install-engine)
+    write_engine_shim "${2:?destination required}"
     ;;
   setup)
     setup

@@ -81,3 +81,43 @@ def test_idmap_shims_keep_only_the_callers_single_id(tmp_path: Path) -> None:
     finally:
         child.kill()
         child.wait(timeout=5)
+
+
+def test_engine_shim_enters_a_private_mount_namespace(tmp_path: Path) -> None:
+    """vfs layer apply remounts / (MS_REC|MS_PRIVATE). That needs a mount ns."""
+    dest = tmp_path / "podman"
+    subprocess.run(
+        ["sh", str(SCRIPT), "install-engine", str(dest)],
+        check=True,
+        timeout=30,
+    )
+    text = dest.read_text(encoding="utf-8")
+    assert "unshare --mount --map-root-user --propagation private" in text
+    assert "/usr/bin/podman" in text
+    subprocess.run(["sh", "-n", str(dest)], check=True, timeout=10)
+    probe = subprocess.run(
+        [
+            "unshare",
+            "--mount",
+            "--map-root-user",
+            "--propagation",
+            "private",
+            "--",
+            sys.executable,
+            "-c",
+            "import ctypes, os\n"
+            "libc = ctypes.CDLL(None, use_errno=True)\n"
+            "libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p]\n"
+            "rc = libc.mount(b'', b'/', None, 0x44000, None)\n"
+            "if rc != 0:\n"
+            "    raise SystemExit(os.strerror(ctypes.get_errno()))\n",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if probe.returncode != 0:
+        pytest.skip(
+            "this kernel refused a private mount namespace: "
+            + (probe.stderr or probe.stdout).strip()
+        )
