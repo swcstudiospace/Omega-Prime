@@ -97,6 +97,33 @@ The table records names and purposes only.
 | `MUSE_API_KEY_FILE` | Names a protected file containing the Muse provider credential. |
 | `NOTION_TOKEN` | Authenticates Notion connector API requests. |
 | `NOTION_TOKEN_FILE` | Names a protected file containing the Notion integration credential. |
+| `OMEGA_CI_AGENT_JOB_GID` | Sets the unprivileged gid CI job processes run as on the Desktop. |
+| `OMEGA_CI_AGENT_JOB_UID` | Sets the unprivileged uid CI job processes run as on the Desktop. |
+| `OMEGA_CI_AGENT_MAX_RUNNERS` | Caps concurrent runner processes on the Desktop runner agent. |
+| `OMEGA_CI_AGENT_RUNNER_ROOT` | Points the Desktop runner agent at the unpacked actions/runner directory. |
+| `OMEGA_CI_AGENT_TOKEN` | Supplies the Desktop runner agent bearer token as a Railway variable. |
+| `OMEGA_CI_AGENT_TOKEN_FILE` | Names a protected file containing the Desktop runner agent bearer token. |
+| `OMEGA_CI_AGENT_WORK_ROOT` | Sets where the Desktop runner agent creates per-runner private work directories. |
+| `OMEGA_CI_CONTROLLER_URL` | Selects the CI autoscaler URL the Desktop runner agent reports runner exits to. |
+| `OMEGA_CI_DESKTOP_TOKEN_FILE` | Names a protected file containing the bearer token shared with the Desktop runner agent. |
+| `OMEGA_CI_DESKTOP_URL` | Selects the https base URL of the Desktop runner agent. |
+| `OMEGA_CI_EVENTS_PATH` | Overrides the JSONL file the CI autoscaler appends redacted events to. |
+| `OMEGA_CI_GITHUB_APP_ID` | Identifies the GitHub App the CI autoscaler authenticates as. |
+| `OMEGA_CI_GITHUB_APP_KEY_FILE` | Names a protected file containing the CI autoscaler GitHub App private key. |
+| `OMEGA_CI_GITHUB_INSTALLATION_ID` | Identifies the GitHub App installation the CI autoscaler uses. |
+| `OMEGA_CI_GITHUB_PAT_FILE` | Names a protected file containing a fallback-free PAT used only when no GitHub App is configured. |
+| `OMEGA_CI_IDLE_GRACE_S` | Sets how long an idle CI runner waits for work before it is reaped. |
+| `OMEGA_CI_LABELS` | Sets the runner labels the CI autoscaler pool carries and matches jobs against. |
+| `OMEGA_CI_MAX_RUNNERS` | Caps concurrent CI autoscaler runners (hard ceiling 10). |
+| `OMEGA_CI_ORG` | Names the GitHub organisation whose self-hosted runner group the CI autoscaler serves. |
+| `OMEGA_CI_PUBLISHER` | Selects the CI autoscaler event publisher (jsonl, null or eventstream). |
+| `OMEGA_CI_REPO` | Names the owner/repo the CI autoscaler serves in repository scope. |
+| `OMEGA_CI_REPOS` | Restricts the CI autoscaler to a comma-separated owner/repo allowlist. |
+| `OMEGA_CI_RUNNER_GROUP` | Names the GitHub runner group used for CI autoscaler runners. |
+| `OMEGA_CI_RUNNER_GROUP_ID` | Gives the numeric GitHub runner group id used when minting JIT runner configs. |
+| `OMEGA_CI_SCOPE` | Selects org-wide or single-repository scope for the CI runner autoscaler. |
+| `OMEGA_CI_WAKE_BUDGET_S` | Bounds the total time spent waking the Desktop runner agent. |
+| `OMEGA_CI_WEBHOOK_SECRET_FILE` | Names a protected file containing the workflow_job webhook HMAC secret. |
 | `OMEGA_PRIME_AGENT_STATE_DIR` | Selects the agent data folder for sessions, memory, skills and intake; defaults to the state directory's agent folder. |
 | `OMEGA_PRIME_APPROVALS_FILE` | Selects the external approval grants file. |
 | `OMEGA_PRIME_APPROVALS_SHA256` | Pins the expected digest of the approval grants file. |
