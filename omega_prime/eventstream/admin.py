@@ -168,6 +168,7 @@ class PulsarAdminPort(AdminPort):
         files: dict[str, tuple[str, bytes, str]] | None = None,
         allow_not_found: bool = False,
         allow_method_not_allowed: bool = False,
+        allow_conflict: bool = False,
     ) -> httpx.Response:
         client = self._client
         if client is None:
@@ -196,6 +197,8 @@ class PulsarAdminPort(AdminPort):
             if allow_not_found and response.status_code == 404:
                 return response
             if allow_method_not_allowed and response.status_code == 405:
+                return response
+            if allow_conflict and response.status_code == 409:
                 return response
             response.raise_for_status()
             return response
@@ -229,7 +232,16 @@ class PulsarAdminPort(AdminPort):
             json_body=partitions if partitions > 1 else None,
         )
 
-    async def reconcile(self, *, dry_run: bool = False) -> ReconcileResult:
+    async def reconcile(
+        self, *, dry_run: bool = False, functions: bool = True
+    ) -> ReconcileResult:
+        """Reconcile the declared topology against the broker.
+
+        ``functions=False`` limits the pass to broker resources (tenants,
+        namespaces, topics, schemas, policies, grants) for a broker that runs
+        without a Functions worker, such as the owned secure CI lane started
+        with ``--no-functions-worker``. The default reconciles everything.
+        """
         if self._client is None:
             raise AdminError("admin port is not configured")
         topology = _load_topology()
@@ -342,11 +354,15 @@ class PulsarAdminPort(AdminPort):
                 retention_body,
                 f"set retention {namespace}",
             )
-            await reconcile_policy(
+            # Pulsar 5.0 takes and returns namespace deduplication as a bare
+            # JSON boolean (an object body is rejected with 400).
+            deduplication = bool(policy.get("deduplication", False))
+            await reconcile_resource(
                 "POST",
                 f"{base}/deduplication",
-                {"enableDeduplication": bool(policy.get("deduplication", False))},
+                deduplication,
                 f"set deduplication {namespace}",
+                equivalent=lambda current, expected=deduplication: current is expected,
             )
             # Pulsar's namespace schema compatibility endpoint returns the active
             # strategy as a scalar; only set a missing strategy.
@@ -373,11 +389,13 @@ class PulsarAdminPort(AdminPort):
                     "schemaCompatibilityStrategy": compatibility
                 }
                 if unset:
+                    # Pulsar 5.0 exposes setSchemaCompatibilityStrategy as PUT
+                    # (POST answers 405 Method Not Allowed).
                     description = f"set schema compatibility {namespace}"
-                    actions.append(ReconcileAction("POST", path, description))
+                    actions.append(ReconcileAction("PUT", path, description))
                     changes.append(description)
                     if not dry_run:
-                        pending.append(("POST", path, {"json_body": compatibility}))
+                        pending.append(("PUT", path, {"json_body": compatibility}))
                 elif not matched:
                     raise AdminError(f"unsupported or destructive drift at {path}")
 
@@ -464,7 +482,24 @@ class PulsarAdminPort(AdminPort):
                     )
                     permissions.setdefault(path, set()).add(operation)
 
+        # Pulsar's topic permissions collection reports *effective* grants:
+        # namespace-level grants are inherited into every topic listing. Topic
+        # checks therefore compare against declared topic ops plus the role's
+        # declared namespace ops, so an inherited grant is not drift.
+        namespace_ops: dict[tuple[str, str], set[str]] = {}
+        for grant_path, ops in permissions.items():
+            parts = grant_path.split("/")
+            if grant_path.startswith("/admin/v2/namespaces/omega/") and len(parts) == 8:
+                namespace_ops[(parts[5], parts[7])] = set(ops)
+
+        def inherited_ops(path: str) -> set[str]:
+            parts = path.split("/")
+            if path.startswith("/admin/v2/persistent/omega/") and len(parts) == 9:
+                return namespace_ops.get((parts[5], parts[8]), set())
+            return set()
+
         async def reject_undeclared_grant(path: str) -> None:
+            inherited = inherited_ops(path)
             response = await self._request(
                 "GET",
                 path,
@@ -488,6 +523,10 @@ class PulsarAdminPort(AdminPort):
                     isinstance(grants, Mapping)
                     and role in grants
                     and grants[role] not in ([], {}, None)
+                    and not (
+                        isinstance(grants[role], (list, tuple))
+                        and set(grants[role]) <= inherited
+                    )
                 ):
                     raise AdminError(f"unsupported or destructive drift at {path}")
                 return
@@ -539,11 +578,19 @@ class PulsarAdminPort(AdminPort):
                     grants = None
                 if isinstance(grants, Mapping) and role in grants:
                     current_ops = grants.get(role)
-                    if isinstance(current_ops, (list, tuple, set)) and set(
-                        current_ops
-                    ) == set(body):
-                        continue
-                    raise AdminError(f"unsupported or destructive drift at {path}")
+                    inherited = inherited_ops(path)
+                    if isinstance(current_ops, (list, tuple, set)):
+                        current_set = set(current_ops)
+                        if current_set == set(body) | inherited:
+                            continue
+                        if not inherited or current_set != inherited:
+                            raise AdminError(
+                                f"unsupported or destructive drift at {path}"
+                            )
+                        # Only the inherited namespace grant is present: the
+                        # declared topic-level grant still has to be applied.
+                    else:
+                        raise AdminError(f"unsupported or destructive drift at {path}")
                 if grants not in (None, {}, []):
                     # Collection present but role absent — safe to grant.
                     pass
@@ -576,6 +623,23 @@ class PulsarAdminPort(AdminPort):
                         )
                     ),
                 )
+        if functions:
+            await self._reconcile_functions(
+                topology, actions, changes, pending, dry_run=dry_run
+            )
+        for method, path, kwargs in pending:
+            await self._request(method, path, **kwargs)
+        return ReconcileResult(dry_run, tuple(actions), tuple(changes))
+
+    async def _reconcile_functions(
+        self,
+        topology: dict[str, Any],
+        actions: list[ReconcileAction],
+        changes: list[str],
+        pending: list[tuple[str, str, dict[str, Any]]],
+        *,
+        dry_run: bool,
+    ) -> None:
         module_classes = {
             "greptile-score": ("greptile_score", "GreptileScoreFunction"),
             "ci-rollup": ("ci_rollup", "CiRollupFunction"),
@@ -648,7 +712,15 @@ class PulsarAdminPort(AdminPort):
                 "userConfig": user_config,
             }
             path = f"/admin/v3/functions/omega/sdlc/{quote(name)}"
-            current_response = await self._request("GET", path, allow_not_found=True)
+            current_response = await self._request(
+                "GET", path, allow_not_found=True, allow_conflict=True
+            )
+            if current_response.status_code == 409:
+                raise AdminError(
+                    "Pulsar Functions worker is not enabled on the target "
+                    "broker; reconcile broker resources with functions=False "
+                    "or target a Functions-enabled broker"
+                )
             if current_response.status_code != 404:
                 try:
                     current = current_response.json()
@@ -701,16 +773,24 @@ class PulsarAdminPort(AdminPort):
                 "FunctionAuthProvider; the admin REST contract cannot provide "
                 "FunctionAuthenticationSpec"
             )
-        for method, path, kwargs in pending:
-            await self._request(method, path, **kwargs)
-        return ReconcileResult(dry_run, tuple(actions), tuple(changes))
 
     async def status(self) -> dict[str, object]:
+        """Report the active brokers of the ``standalone`` cluster.
+
+        Pulsar 5.0 answers ``GET /admin/v2/brokers/{cluster}`` with a JSON
+        list of active broker ids (``["host:port"]``), not an object. Function
+        runtime state is deliberately not claimed here.
+        """
         response = await self._request("GET", "/admin/v2/brokers/standalone")
-        value = response.json()
-        if not isinstance(value, dict):
+        try:
+            value = response.json()
+        except (ValueError, json.JSONDecodeError):
+            value = None
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item for item in value
+        ):
             raise AdminError("broker status response is malformed")
-        return value
+        return {"cluster": "standalone", "active_brokers": sorted(value)}
 
 
 def _schema_equivalent(current: object, expected: Mapping[str, object]) -> bool:

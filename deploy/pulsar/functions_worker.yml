@@ -14,11 +14,11 @@ brokerClientAuthenticationEnabled: true
 # Worker bootstrap uses the privileged internal identity; Function instances must
 # be provisioned separately with their least-privilege omega-functions identity.
 brokerClientAuthenticationPlugin: org.apache.pulsar.client.impl.auth.AuthenticationToken
-brokerClientAuthenticationParameters: token:file:///run/secrets/omega-pulsar/broker-internal.token
+brokerClientAuthenticationParameters: file:///run/secrets/omega-pulsar/broker-internal.token
 
 # Each Function process is deployed with a FunctionAuthenticationSpec using this
 # protected least-privilege identity; never reuse the worker bootstrap token.
-# Function instance auth params: token:file:///run/secrets/omega-pulsar/omega-functions.token
+# Function instance auth params: file:///run/secrets/omega-pulsar/omega-functions.token
 
 functionRuntimeFactoryClassName: org.apache.pulsar.functions.runtime.process.ProcessRuntimeFactory
 functionsWorkerEnablePackageManagement: false

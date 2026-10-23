@@ -222,7 +222,7 @@ async def test_reconcile_uses_pulsar_endpoints_and_exact_policy_and_grant_bodies
     compatibility = {
         path.split("/")[5]: body
         for method, path, body in recorder.mutations
-        if method == "POST" and path.endswith("/schemaCompatibilityStrategy")
+        if method == "PUT" and path.endswith("/schemaCompatibilityStrategy")
     }
     assert compatibility == {
         "sdlc": "BACKWARD_TRANSITIVE",
@@ -300,7 +300,7 @@ async def test_reconcile_uses_pulsar_endpoints_and_exact_policy_and_grant_bodies
     assert (
         "POST",
         "/admin/v2/namespaces/omega/sdlc/deduplication",
-        {"enableDeduplication": True},
+        True,  # Pulsar 5.0 contract: bare JSON boolean, not an object.
     ) in recorder.mutations
     assert all(method != "DELETE" for method, _, _ in recorder.calls)
     await admin.close()
@@ -471,7 +471,8 @@ async def test_admin_configure_loopback_gate_and_ensure_topic() -> None:
     recorder = RestRecorder()
     admin = await make_admin(recorder)
     recorder.resources["/admin/v2/namespaces/omega/sdlc"] = {}
-    recorder.resources["/admin/v2/brokers/standalone"] = {"broker": "standalone"}
+    # Pulsar 5.0 contract: the cluster brokers endpoint returns a list of ids.
+    recorder.resources["/admin/v2/brokers/standalone"] = ["127.0.0.1:8080"]
     await admin.ensure_topic("persistent://omega/sdlc/pr", partitions=4)
     await admin.ensure_topic("persistent://omega/sdlc/review", partitions=1)
     with pytest.raises(ValueError, match="negative"):
@@ -482,7 +483,13 @@ async def test_admin_configure_loopback_gate_and_ensure_topic() -> None:
         4,
     ) in recorder.mutations
     assert ("PUT", "/admin/v2/persistent/omega/sdlc/review", None) in recorder.mutations
-    assert (await admin.status())["broker"] == "standalone"
+    assert await admin.status() == {
+        "cluster": "standalone",
+        "active_brokers": ["127.0.0.1:8080"],
+    }
+    recorder.resources["/admin/v2/brokers/standalone"] = {"broker": "standalone"}
+    with pytest.raises(AdminError, match="malformed"):
+        await admin.status()
     await admin.close()
 
 
@@ -577,3 +584,82 @@ async def test_function_archives_import_without_repository_on_sys_path(
         )
         assert result.returncode == 0, result.stderr[-2000:]
     assert seen == set(classes)
+
+
+def _inherit_namespace_grants(recorder: RestRecorder) -> None:
+    """Mirror Pulsar 5.0: topic permission listings include namespace grants."""
+    namespace_grants = {
+        path.split("/")[5]: grants
+        for path, grants in recorder.resources.items()
+        if path.startswith("/admin/v2/namespaces/omega/")
+        and path.endswith("/permissions")
+        and isinstance(grants, dict)
+    }
+    for path in list(recorder.resources):
+        if path.startswith("/admin/v2/persistent/omega/") and path.endswith(
+            "/partitions"
+        ):
+            topic = path[: -len("/partitions")]
+            namespace = topic.split("/")[5]
+            current = recorder.resources.get(f"{topic}/permissions")
+            merged = dict(namespace_grants.get(namespace, {}))
+            if isinstance(current, dict):
+                merged.update(current)
+            if merged:
+                recorder.resources[f"{topic}/permissions"] = merged
+
+
+@pytest.mark.asyncio
+async def test_reconcile_treats_inherited_namespace_grants_as_declared() -> None:
+    recorder = RestRecorder()
+    original = recorder.handle
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        # Pulsar 5.0 answers GET on a per-role permissions path with 405.
+        parent, _, _role = request.url.path.rpartition("/")
+        if request.method == "GET" and parent.endswith("/permissions"):
+            return httpx.Response(405)
+        return await original(request)
+
+    recorder.handle = handle  # type: ignore[method-assign]
+    admin = await make_admin(recorder)
+    await admin.reconcile(functions=False)
+    _inherit_namespace_grants(recorder)
+    second = await admin.reconcile(functions=False)
+    assert second.actions == ()
+    # An operation beyond the declared topic + inherited namespace grant is drift.
+    topic_grants = recorder.resources["/admin/v2/persistent/omega/sdlc/pr/permissions"]
+    assert isinstance(topic_grants, dict)
+    topic_grants["omega-dashboard"] = ["consume", "produce"]
+    with pytest.raises(AdminError, match="drift"):
+        await admin.reconcile(functions=False)
+    await admin.close()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_functions_false_skips_function_endpoints() -> None:
+    recorder = RestRecorder()
+    admin = await make_admin(recorder)
+    result = await admin.reconcile(functions=False)
+    assert result.actions
+    assert not any("/admin/v3/functions/" in path for _, path, _ in recorder.calls)
+    await admin.close()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_reports_disabled_functions_worker() -> None:
+    recorder = RestRecorder()
+    original = recorder.handle
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/admin/v3/functions/"):
+            return httpx.Response(
+                409, json={"reason": "Pulsar Function Worker is not enabled"}
+            )
+        return await original(request)
+
+    recorder.handle = handle  # type: ignore[method-assign]
+    admin = await make_admin(recorder)
+    with pytest.raises(AdminError, match="Functions worker is not enabled"):
+        await admin.reconcile(dry_run=True)
+    await admin.close()

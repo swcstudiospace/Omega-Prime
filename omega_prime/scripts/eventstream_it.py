@@ -40,6 +40,38 @@ class HelperError(RuntimeError):
     """A safe-to-display operational failure."""
 
 
+_PEM_BLOCK = re.compile(
+    r"-----BEGIN [A-Z0-9 ]+-----.*?(?:-----END [A-Z0-9 ]+-----|$)", re.DOTALL
+)
+_JWT_LIKE = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+)
+_BEARER = re.compile(r"(?i)(bearer\s+|token[:=]\s*)\S+")
+_STDERR_LIMIT = 2000
+
+
+def _redact(text: str) -> str:
+    """Mask credential-shaped material before a diagnostic reaches CI logs.
+
+    The helper only passes file *paths* on argv, but stderr from docker/openssl
+    is still scrubbed of PEM blocks, compact JWTs and bearer/token values.
+    """
+    text = _PEM_BLOCK.sub("[redacted pem]", text)
+    text = _JWT_LIKE.sub("[redacted jwt]", text)
+    return _BEARER.sub(lambda m: f"{m.group(1)}[redacted]", text)
+
+
+def _describe_failure(args: list[str], returncode: int, stderr: str | None) -> str:
+    argv = " ".join(_redact(item) for item in args)
+    detail = _redact((stderr or "").strip())
+    if len(detail) > _STDERR_LIMIT:
+        detail = "..." + detail[-_STDERR_LIMIT:]
+    message = f"command failed: {Path(args[0]).name} (exit {returncode}): argv=[{argv}]"
+    if detail:
+        message += f" stderr=[{detail}]"
+    return message
+
+
 def _run(args: list[str], *, input_text: str | None = None, check: bool = True) -> str:
     try:
         result = subprocess.run(
@@ -51,12 +83,14 @@ def _run(args: list[str], *, input_text: str | None = None, check: bool = True) 
             timeout=45,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise HelperError(f"command failed: {Path(args[0]).name}") from exc
-    if check and result.returncode:
-        # Never surface subprocess output: docker/openssl errors can contain paths or data.
+        argv = " ".join(_redact(item) for item in args)
         raise HelperError(
-            f"command failed: {Path(args[0]).name} (exit {result.returncode})"
-        )
+            f"command failed: {Path(args[0]).name} ({type(exc).__name__}): argv=[{argv}]"
+        ) from exc
+    if check and result.returncode:
+        # argv carries container ids and file paths only (never credential
+        # values); stderr is redacted and bounded so failures stay diagnosable.
+        raise HelperError(_describe_failure(args, result.returncode, result.stderr))
     return result.stdout.strip()
 
 
@@ -296,6 +330,14 @@ def _prepare(args: argparse.Namespace) -> None:
             "1",
             "-subj",
             "/CN=Omega Eventstream CI CA",
+            # Python >= 3.13 verifies with VERIFY_X509_STRICT: a CA must carry
+            # critical basicConstraints and keyUsage(keyCertSign).
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
+            "-addext",
+            "subjectKeyIdentifier=hash",
             "-out",
             str(ca_cert),
         ]
@@ -316,7 +358,15 @@ def _prepare(args: argparse.Namespace) -> None:
     )
     ext = paths / "server.ext"
     _write_secret(
-        ext, b"subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n"
+        ext,
+        (
+            b"basicConstraints=critical,CA:FALSE\n"
+            b"keyUsage=critical,digitalSignature,keyEncipherment\n"
+            b"extendedKeyUsage=serverAuth\n"
+            b"subjectAltName=DNS:localhost,IP:127.0.0.1\n"
+            b"subjectKeyIdentifier=hash\n"
+            b"authorityKeyIdentifier=keyid,issuer\n"
+        ),
     )
     _run(
         [
@@ -367,10 +417,12 @@ def _prepare(args: argparse.Namespace) -> None:
     }
     _write_record(args.ownership_file, ownership)
     # File references only. The decryption key stays on the test host; JWT signer stays host-side.
+    # ENCRYPTION_KEY_FILE is the *public* key the producer's CryptoKeyReader
+    # encrypts with; PRIVATE_KEY_FILE is the consumer-side decryption key.
     _write_secret(
         env,
         (
-            f"OMEGA_EVENTSTREAM_TOKEN_FILE={admin_token}\nOMEGA_EVENTSTREAM_ADMIN_TOKEN_FILE={admin_token}\nOMEGA_EVENTSTREAM_TLS_CA_FILE={ca_cert}\nOMEGA_EVENTSTREAM_AUTH_KEY_FILE={decrypt_key}\nOMEGA_EVENTSTREAM_ENCRYPTION_KEY_FILE={decrypt_key}\nOMEGA_EVENTSTREAM_PRIVATE_KEY_FILE={decrypt_key}\nOMEGA_EVENTSTREAM_ENCRYPTION_PUBLIC_KEY_FILE={auth_public}\nOMEGA_EVENTSTREAM_JWT_PUBLIC_KEY_FILE={public}\nOMEGA_EVENTSTREAM_IT_URL={SERVICE_URL}\nOMEGA_EVENTSTREAM_IT_ADMIN_URL={ADMIN_URL}\nOMEGA_EVENTSTREAM_IT_OWNERSHIP_FILE={args.ownership_file}\n"
+            f"OMEGA_EVENTSTREAM_TOKEN_FILE={admin_token}\nOMEGA_EVENTSTREAM_ADMIN_TOKEN_FILE={admin_token}\nOMEGA_EVENTSTREAM_TLS_CA_FILE={ca_cert}\nOMEGA_EVENTSTREAM_AUTH_KEY_FILE={decrypt_key}\nOMEGA_EVENTSTREAM_ENCRYPTION_KEY_FILE={auth_public}\nOMEGA_EVENTSTREAM_PRIVATE_KEY_FILE={decrypt_key}\nOMEGA_EVENTSTREAM_ENCRYPTION_PUBLIC_KEY_FILE={auth_public}\nOMEGA_EVENTSTREAM_JWT_PUBLIC_KEY_FILE={public}\nOMEGA_EVENTSTREAM_IT_URL={SERVICE_URL}\nOMEGA_EVENTSTREAM_IT_ADMIN_URL={ADMIN_URL}\nOMEGA_EVENTSTREAM_IT_OWNERSHIP_FILE={args.ownership_file}\n"
         ).encode(),
     )
     # Stage runtime-only material without copying signing/decryption private keys.
@@ -393,17 +445,24 @@ def _docker(args: list[str], *, check: bool = True) -> str:
     return _run(["docker", *args], check=check)
 
 
+# ``bin/pulsar`` is a shell launcher that ``exec``s the JVM in the same PID,
+# so the durable identity of the owned broker is the Java main class plus its
+# owned config path, not the launcher's argv (which disappears after exec).
+_BROKER_MAIN = "org.apache.pulsar.PulsarStandaloneStarter"
+_BROKER_ARGV = (
+    f"{_BROKER_MAIN} --no-functions-worker --config /pulsar/conf/standalone.conf"
+)
+_BROKER_PATTERN = re.escape(_BROKER_ARGV)
+_BROKER_OUTPUT = "/pulsar/logs/omega-ci-standalone.out"
+_BROKER_LAUNCH = (
+    "cd /pulsar && exec bin/pulsar standalone --no-functions-worker "
+    f"--config /pulsar/conf/standalone.conf >>{_BROKER_OUTPUT} 2>&1"
+)
+
+
 async def _broker_pid(container_id: str) -> int:
     try:
-        output = _docker(
-            [
-                "exec",
-                container_id,
-                "/bin/bash",
-                "-lc",
-                "pgrep -fo 'bin/pulsar standalone'",
-            ]
-        )
+        output = _docker(["exec", container_id, "pgrep", "-fo", _BROKER_PATTERN])
         pid = output.splitlines()[0]
     except (HelperError, IndexError) as exc:
         raise OSError("owned Pulsar process is not yet available") from exc
@@ -453,32 +512,32 @@ def start(args: argparse.Namespace) -> None:
         worker_text = worker_text.replace(old_path, new_path)
     _write_secret(worker_config, worker_text.encode())
     secured = work / "runtime" / "standalone.conf"
-    shutil.copyfile(standalone, secured)
-    with secured.open("ab") as stream:
-        stream.write(
-            b"\n# Owned eventstream CI secure runtime overrides.\n"
-            b"authenticationEnabled=true\nauthorizationEnabled=true\n"
-            b"authenticationProviders=org.apache.pulsar.broker.authentication.AuthenticationProviderToken\n"
-            b"tokenPublicKey=file:///pulsar/ci-secrets/jwt-public.der\n"
-            b"superUserRoles=omega-admin,omega-broker-internal\n"
-            b"brokerClientAuthenticationPlugin=org.apache.pulsar.client.impl.auth.AuthenticationToken\n"
-            b"brokerClientAuthenticationParameters=token:file:///pulsar/ci-secrets/omega-broker-internal.token\n"
-            b"brokerServicePortTls=6651\nwebServicePortTls=8443\n"
-            b"tlsCertificateFilePath=/pulsar/ci-secrets/server.pem\n"
-            b"tlsKeyFilePath=/pulsar/ci-secrets/server-key.pem\n"
-            b"tlsTrustCertsFilePath=/pulsar/ci-secrets/ca.pem\n"
-        )
-    os.chmod(secured, 0o600)
-    _docker(["cp", str(secured), f"{args.container_id}:/pulsar/conf/standalone.conf"])
-    _docker(
-        [
-            "cp",
-            str(worker_config),
-            f"{args.container_id}:/pulsar/conf/functions_worker.yml",
-        ]
+    # The repo files are sparse Omega Prime overrides, not complete configs.
+    # They are merged key-by-key into the pinned image's stock file: the
+    # embedded bookie loads standalone.conf through Commons Configuration,
+    # which turns a repeated key into a list (journalSyncData=[false, true]
+    # reads as false), so appending duplicates is not a safe override.
+    _layer_config(
+        args.container_id,
+        "standalone.conf",
+        [standalone.read_text(encoding="utf-8"), _CI_STANDALONE_OVERRIDES],
+        secured,
     )
-    _docker(
-        ["cp", str(bookkeeper), f"{args.container_id}:/pulsar/conf/bookkeeper.conf"]
+    layered_bookkeeper = work / "runtime" / "bookkeeper.conf"
+    _layer_config(
+        args.container_id,
+        "bookkeeper.conf",
+        [bookkeeper.read_text(encoding="utf-8")],
+        layered_bookkeeper,
+    )
+    os.chmod(secured, 0o600)
+    _install_configs(
+        args.container_id,
+        {
+            "standalone.conf": secured,
+            "functions_worker.yml": worker_config,
+            "bookkeeper.conf": layered_bookkeeper,
+        },
     )
     _docker(["exec", args.container_id, "/bin/bash", "-lc", "mkdir -p /pulsar/data"])
     _docker(
@@ -488,7 +547,7 @@ def start(args: argparse.Namespace) -> None:
             args.container_id,
             "/bin/bash",
             "-lc",
-            "cd /pulsar && exec bin/pulsar standalone --no-functions-worker --config /pulsar/conf/standalone.conf",
+            _BROKER_LAUNCH,
         ]
     )
     pid = asyncio.run(
@@ -498,58 +557,169 @@ def start(args: argparse.Namespace) -> None:
     _write_record(path, record)
 
 
-def _stage(container_id: str, work: Path) -> None:
-    bundle = work / "runtime"
-    _docker(["exec", container_id, "mkdir", "-p", "/pulsar/ci-secrets"])
-    for name in (
-        "jwt-public.der",
-        "server-key.pem",
-        "server.pem",
-        "ca.pem",
-        "omega-broker-internal.token",
-        "omega-functions.token",
-    ):
-        _docker(["cp", str(bundle / name), f"{container_id}:/pulsar/ci-secrets/{name}"])
-    # Ensure restrictive mode in the container. Runtime UID/GID is detected, not assumed.
-    uid = _docker(["exec", container_id, "id", "-u", "pulsar"]).strip()
-    gid = _docker(["exec", container_id, "id", "-g", "pulsar"]).strip()
+_RUNTIME_USER = "pulsar"
+_STAGED_SECRETS = (
+    "jwt-public.der",
+    "server-key.pem",
+    "server.pem",
+    "ca.pem",
+    "omega-broker-internal.token",
+    "omega-functions.token",
+)
+_STAGED_CONFIGS = ("standalone.conf", "functions_worker.yml", "bookkeeper.conf")
+
+
+def _root_exec(container_id: str, *command: str) -> str:
+    """Run a one-shot setup command as root inside the owned service container.
+
+    The pinned image runs as the unprivileged ``pulsar`` user (uid 10000) and
+    ``/pulsar`` itself is root-owned 0755, so creating ``/pulsar/ci-secrets``
+    and re-owning ``docker cp`` output (which lands as root:root) both need
+    root. Only staging uses this; the broker itself still runs as ``pulsar``.
+    """
+    return _docker(["exec", "-u", "0", container_id, *command])
+
+
+def _runtime_identity(container_id: str) -> tuple[str, str]:
+    uid = _docker(["exec", container_id, "id", "-u", _RUNTIME_USER]).strip()
+    gid = _docker(["exec", container_id, "id", "-g", _RUNTIME_USER]).strip()
     if not uid.isdigit() or not gid.isdigit():
         raise HelperError("pinned service runtime identity could not be determined")
-    _docker(["exec", container_id, "chown", "-R", f"{uid}:{gid}", "/pulsar/ci-secrets"])
-    _docker(
-        [
-            "exec",
-            container_id,
-            "find",
-            "/pulsar/ci-secrets",
-            "-type",
-            "f",
-            "-exec",
-            "chmod",
-            "0600",
-            "{}",
-            ";",
-        ]
+    return uid, gid
+
+
+def _assert_runtime_readable(
+    container_id: str, uid: str, gid: str, paths: list[str]
+) -> None:
+    for target in paths:
+        _docker(["exec", "-u", f"{uid}:{gid}", container_id, "test", "-r", target])
+
+
+def _stage(container_id: str, work: Path) -> None:
+    bundle = work / "runtime"
+    _root_exec(container_id, "mkdir", "-p", "/pulsar/ci-secrets")
+    for name in _STAGED_SECRETS:
+        _docker(["cp", str(bundle / name), f"{container_id}:/pulsar/ci-secrets/{name}"])
+    # Runtime UID/GID is detected, not assumed; ownership is handed to it as root.
+    uid, gid = _runtime_identity(container_id)
+    _root_exec(container_id, "chown", "-R", f"{uid}:{gid}", "/pulsar/ci-secrets")
+    _root_exec(container_id, "chmod", "0700", "/pulsar/ci-secrets")
+    _root_exec(
+        container_id,
+        "find",
+        "/pulsar/ci-secrets",
+        "-type",
+        "f",
+        "-exec",
+        "chmod",
+        "0600",
+        "{}",
+        ";",
     )
-    for name in (
-        "jwt-public.der",
-        "server-key.pem",
-        "server.pem",
-        "ca.pem",
-        "omega-broker-internal.token",
-        "omega-functions.token",
-    ):
-        _docker(
-            [
-                "exec",
-                "-u",
-                f"{uid}:{gid}",
-                container_id,
-                "test",
-                "-r",
-                f"/pulsar/ci-secrets/{name}",
-            ]
-        )
+    _assert_runtime_readable(
+        container_id,
+        uid,
+        gid,
+        [f"/pulsar/ci-secrets/{name}" for name in _STAGED_SECRETS],
+    )
+
+
+_CI_STANDALONE_OVERRIDES = """
+# Owned eventstream CI secure runtime overrides.
+advertisedAddress=127.0.0.1
+authenticationEnabled=true
+authorizationEnabled=true
+authenticationProviders=org.apache.pulsar.broker.authentication.AuthenticationProviderToken
+tokenPublicKey=file:///pulsar/ci-secrets/jwt-public.der
+superUserRoles=omega-admin,omega-broker-internal
+brokerClientAuthenticationPlugin=org.apache.pulsar.client.impl.auth.AuthenticationToken
+brokerClientAuthenticationParameters=file:///pulsar/ci-secrets/omega-broker-internal.token
+brokerServicePortTls=6651
+webServicePortTls=8443
+tlsCertificateFilePath=/pulsar/ci-secrets/server.pem
+tlsKeyFilePath=/pulsar/ci-secrets/server-key.pem
+tlsTrustCertsFilePath=/pulsar/ci-secrets/ca.pem
+"""
+_PROPERTY = re.compile(r"^\s*([A-Za-z0-9_.\-]+)\s*[=:]")
+
+
+def _merge_properties(stock: str, overrides: list[str]) -> str:
+    """Merge ``key=value`` overrides into ``stock`` so every key occurs once.
+
+    Existing assignments are replaced in place (keeping the stock comments and
+    ordering); keys the stock file lacks are appended. Later override sources
+    win over earlier ones.
+    """
+    wanted: dict[str, str] = {}
+    for text in overrides:
+        for line in text.splitlines():
+            if line.lstrip().startswith(("#", "!")):
+                continue
+            match = _PROPERTY.match(line)
+            if match:
+                wanted[match.group(1)] = line.strip()
+    merged: list[str] = []
+    placed: set[str] = set()
+    for line in stock.splitlines():
+        match = None if line.lstrip().startswith(("#", "!")) else _PROPERTY.match(line)
+        if match and match.group(1) in wanted:
+            key = match.group(1)
+            if key not in placed:
+                merged.append(wanted[key])
+                placed.add(key)
+            continue
+        merged.append(line)
+    extra = [wanted[key] for key in wanted if key not in placed]
+    if extra:
+        merged.extend(["", "# Omega Prime overrides not present in the stock file."])
+        merged.extend(extra)
+    return "\n".join(merged) + "\n"
+
+
+def _layer_config(
+    container_id: str, name: str, overrides: list[str], target: Path
+) -> None:
+    """Write ``target`` as the image's stock ``name`` merged with ``overrides``.
+
+    The pristine stock file is preserved once in-container as
+    ``<name>.omega-stock`` so a re-run of ``start`` merges over the original,
+    never over a previously layered copy.
+    """
+    stock_path = f"/pulsar/conf/{name}.omega-stock"
+    _root_exec(
+        container_id,
+        "/bin/bash",
+        "-c",
+        f'test -f "$1" || cp -p "/pulsar/conf/{name}" "$1"',
+        "layer-config",
+        stock_path,
+    )
+    stock = target.with_name(f"{name}.omega-stock")
+    stock.unlink(missing_ok=True)
+    _docker(["cp", f"{container_id}:{stock_path}", str(stock)])
+    try:
+        stock_text = stock.read_text(encoding="utf-8")
+    finally:
+        stock.unlink(missing_ok=True)
+    target.unlink(missing_ok=True)
+    _write_secret(target, _merge_properties(stock_text, overrides).encode())
+
+
+def _install_configs(container_id: str, sources: dict[str, Path]) -> None:
+    """Copy broker configs in and hand them to the runtime user.
+
+    ``docker cp`` creates files as root:root while preserving the source mode
+    (0600 for the secured standalone.conf), which the ``pulsar`` user could
+    not read; ownership is therefore corrected as root and then verified as
+    the runtime identity before the broker starts.
+    """
+    for name in _STAGED_CONFIGS:
+        _docker(["cp", str(sources[name]), f"{container_id}:/pulsar/conf/{name}"])
+    uid, gid = _runtime_identity(container_id)
+    targets = [f"/pulsar/conf/{name}" for name in _STAGED_CONFIGS]
+    _root_exec(container_id, "chown", f"{uid}:{gid}", *targets)
+    _root_exec(container_id, "chmod", "0600", *targets)
+    _assert_runtime_readable(container_id, uid, gid, targets)
 
 
 async def _check_ready(args: argparse.Namespace, record: dict[str, Any]) -> bool:
@@ -558,7 +728,11 @@ async def _check_ready(args: argparse.Namespace, record: dict[str, Any]) -> bool
     if not isinstance(pid, int):
         raise HelperError("owned broker has not been started")
     if _docker_status(["exec", args.container_id, "kill", "-0", str(pid)]):
-        raise OSError("owned broker process is not ready")
+        # An exited broker never becomes ready: fail now with its last error.
+        raise HelperError(
+            "owned broker exited before readiness: "
+            + _broker_last_error(args.container_id)
+        )
     work = Path(record["workdir"])
     token = (work / "secrets" / "omega-admin.token").read_text().strip()
     request = urllib.request.Request(
@@ -577,14 +751,47 @@ async def _check_ready(args: argparse.Namespace, record: dict[str, Any]) -> bool
     return True
 
 
+def _broker_last_error(container_id: str) -> str:
+    lines = _docker(
+        [
+            "exec",
+            container_id,
+            "/bin/bash",
+            "-c",
+            "grep -aE 'ERROR|Exception' \"$1\" | tail -n 3 || true",
+            "broker-error",
+            _BROKER_OUTPUT,
+        ],
+        check=False,
+    )
+    detail = _redact(lines.strip())[-_STDERR_LIMIT:]
+    return detail or "no broker output captured"
+
+
+def _readiness_delay(low: float, high: float) -> float:
+    # Use the top of each decorrelated-jitter window (3s, 9s, 27s, 81s): a
+    # bounded ~2 minute budget that covers a cold JVM + embedded bookie on a
+    # shared hosted runner, instead of a random budget that can be ~4s.
+    del low
+    return high
+
+
 def wait_ready(args: argparse.Namespace) -> None:
     _, record = _load(args)
     try:
-        asyncio.run(create_with_backoff(lambda: _check_ready(args, record), attempts=5))
+        asyncio.run(
+            create_with_backoff(
+                lambda: _check_ready(args, record), attempts=5, rng=_readiness_delay
+            )
+        )
     except HelperError:
         raise
     except Exception as exc:
-        raise HelperError("owned secure broker failed bounded HTTPS readiness") from exc
+        cause = exc.__cause__ or exc
+        raise HelperError(
+            "owned secure broker failed bounded HTTPS readiness: "
+            + _redact(f"{type(cause).__name__}: {cause}")[:_STDERR_LIMIT]
+        ) from exc
     print("Owned broker HTTPS readiness and effective configuration verified.")
 
 
@@ -594,10 +801,21 @@ def _tls_context(work: Path) -> ssl.SSLContext:
     return context
 
 
+_EXPECTED_BROKER_RUNTIME = {
+    "brokerDeleteInactiveTopicsEnabled": "false",
+    "allowAutoTopicCreation": "false",
+    "brokerDeduplicationEnabled": "true",
+    "authenticationEnabled": "true",
+    "authorizationEnabled": "true",
+}
+
+
 def _verify_effective(container_id: str, work: Path) -> None:
     token = (work / "secrets" / "omega-admin.token").read_text().strip()
+    # ``/brokers/configuration`` only lists dynamic-config *names*; the loaded
+    # values live under ``/brokers/configuration/runtime`` (string-valued).
     request = urllib.request.Request(
-        ADMIN_URL + "/admin/v2/brokers/configuration",
+        ADMIN_URL + "/admin/v2/brokers/configuration/runtime",
         headers={"Authorization": f"Bearer {token}"},
     )
     try:
@@ -609,15 +827,63 @@ def _verify_effective(container_id: str, work: Path) -> None:
         raise HelperError(
             "broker effective configuration could not be queried"
         ) from exc
-    if (
-        not isinstance(observed, dict)
-        or observed.get("journalSyncData") is not True
-        or observed.get("brokerDeleteInactiveTopicsEnabled") is not False
-    ):
+    if not isinstance(observed, dict):
+        raise HelperError("broker effective configuration has an unexpected shape")
+    drift = sorted(
+        key
+        for key, value in _EXPECTED_BROKER_RUNTIME.items()
+        if str(observed.get(key)).lower() != value
+    )
+    if drift:
         raise HelperError(
-            "effective durability/retention configuration is not verified"
+            "effective retention/security configuration is not verified: "
+            + ", ".join(drift)
         )
+    _verify_bookie_fsync(container_id)
     _docker(["exec", container_id, "test", "-d", "/pulsar/data"])
+
+
+def _verify_bookie_fsync(container_id: str) -> None:
+    """Prove the embedded bookie *loaded* journalSyncData=true.
+
+    journalSyncData is a BookKeeper setting, absent from the broker REST
+    config. The pinned standalone loader builds the embedded bookie from
+    standalone.conf and logs the loaded map on "Starting Bookie server"; the
+    latest such line is the effective value (a duplicated key would show as a
+    list and is rejected). conf/bookkeeper.conf must also carry exactly one
+    active ``journalSyncData=true``.
+    """
+    loaded = _docker(
+        [
+            "exec",
+            container_id,
+            "/bin/bash",
+            "-c",
+            "grep -a 'Starting Bookie server' \"$1\" | tail -n 1 "
+            "| grep -o 'journalSyncData=[^,}]*' || true",
+            "verify-bookie",
+            _BROKER_OUTPUT,
+        ]
+    ).splitlines()
+    if loaded != ["journalSyncData=true"]:
+        raise HelperError(
+            "embedded bookie effective journalSyncData is not true: "
+            + (", ".join(loaded) or "no bookie startup evidence")
+        )
+    declared = _docker(
+        [
+            "exec",
+            container_id,
+            "grep",
+            "-E",
+            r"^[[:space:]]*journalSyncData[[:space:]]*[=:]",
+            "/pulsar/conf/bookkeeper.conf",
+        ]
+    ).splitlines()
+    if [line.strip() for line in declared] != ["journalSyncData=true"]:
+        raise HelperError(
+            "conf/bookkeeper.conf does not declare a single journalSyncData=true"
+        )
 
 
 def _docker_status(args: list[str]) -> bool:
@@ -644,7 +910,7 @@ def _assert_broker_pid(container_id: str, pid: int) -> None:
             f"tr '\\0' ' ' < /proc/{pid}/cmdline",
         ]
     )
-    if "bin/pulsar standalone" not in command:
+    if _BROKER_ARGV not in command:
         raise HelperError("recorded PID is not the owned Pulsar process")
 
 
@@ -676,7 +942,7 @@ def restart(args: argparse.Namespace) -> None:
             args.container_id,
             "/bin/bash",
             "-lc",
-            "cd /pulsar && exec bin/pulsar standalone --no-functions-worker --config /pulsar/conf/standalone.conf",
+            _BROKER_LAUNCH,
         ]
     )
     new_pid = asyncio.run(

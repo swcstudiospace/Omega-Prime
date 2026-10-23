@@ -140,7 +140,11 @@ async def broker(
     try:
         await admin.configure(config)
         if it_settings["mode"] == "owned-secure":
-            await admin.reconcile(dry_run=False)
+            # The owned secure lane runs the broker with --no-functions-worker
+            # (and secure Function deployment is refused by design), so the
+            # data-path suite reconciles broker resources only. The Functions
+            # refusal itself is asserted in the admin dry-run/apply test.
+            await admin.reconcile(dry_run=False, functions=False)
         else:
             await _provision_external_loopback(admin)
         bus = PulsarEventBus(config, acknowledged_watermark=lambda _topic, _name: 0)
@@ -228,12 +232,23 @@ async def test_admin_dry_run_apply_and_second_apply_are_read_only(
     broker: dict[str, Any],
 ) -> None:
     admin = broker["admin"]
-    dry = await admin.reconcile(dry_run=True)
-    assert dry.dry_run
     if broker["settings"]["mode"] == "owned-secure":
-        await admin.reconcile(dry_run=False)
-        second = await admin.reconcile(dry_run=False)
+        from omega_prime.eventstream.admin import AdminError
+
+        dry = await admin.reconcile(dry_run=True, functions=False)
+        assert dry.dry_run
+        await admin.reconcile(dry_run=False, functions=False)
+        second = await admin.reconcile(dry_run=False, functions=False)
         assert not second.actions
+        # A full (Functions-including) reconcile against the broker-only
+        # secure service must fail closed, never silently skip Functions.
+        with pytest.raises(AdminError, match="Functions worker is not enabled"):
+            await admin.reconcile(dry_run=True)
+        with pytest.raises(AdminError):
+            await admin.reconcile(dry_run=False)
+    else:
+        dry = await admin.reconcile(dry_run=True)
+        assert dry.dry_run
 
 
 async def test_structured_bytes_properties_and_individual_ack(
@@ -626,28 +641,48 @@ async def test_auth_encryption_is_required_even_on_loopback(
 ) -> None:
     if broker["settings"]["mode"] != "owned-secure":
         pytest.skip("auth-payload encryption requires the helper-owned secure matrix")
-    from omega_prime.eventstream.adapters.pulsar import PulsarEventBus
+    import dataclasses
+
+    from omega_prime.eventstream.adapters.pulsar import (
+        EncryptionUnavailable,
+        PulsarEventBus,
+    )
     from omega_prime.eventstream.errors import PermanentError
 
+    event = _event()
+    auth_event = event.model_copy(
+        update={
+            "type": "omega.auth.session.login_started",
+            "dataschema": "urn:omega:schema:omega.auth.session.login_started:1",
+            "data": {
+                "host": "integration",
+                "tool": "oauth",
+                "session_id": uuid.uuid4().hex,
+                "actor": "integration",
+                "action": "login",
+            },
+        }
+    )
+    # Without auth-payload keys the publish must fail closed, even though the
+    # broker is a loopback service with TLS + JWT.
+    keyless = dataclasses.replace(
+        broker["config"], encryption_key_file=None, private_key_file=None
+    )
+    unencrypted = PulsarEventBus(keyless, acknowledged_watermark=lambda _t, _n: 0)
+    try:
+        with pytest.raises(EncryptionUnavailable) as refused:
+            await unencrypted.publish(_request(auth_event))
+        assert isinstance(refused.value, PermanentError)
+    finally:
+        await unencrypted.close()
+    # With the helper-provisioned public/private key pair the same auth event
+    # is published encrypted.
     bus = PulsarEventBus(
         broker["config"], acknowledged_watermark=lambda _topic, _name: 0
     )
     try:
-        event = _event()
-        auth_event = event.model_copy(
-            update={
-                "type": "omega.auth.session.login_started",
-                "dataschema": "urn:omega:schema:omega.auth.session.login_started:1",
-                "data": {
-                    "host": "integration",
-                    "tool": "oauth",
-                    "session_id": uuid.uuid4().hex,
-                    "actor": "integration",
-                },
-            }
-        )
-        with pytest.raises(PermanentError):
-            await bus.publish(_request(auth_event))
+        receipt = await bus.publish(_request(auth_event))
+        assert receipt is not None
     finally:
         await bus.close()
 
@@ -660,4 +695,6 @@ async def test_owned_secure_admin_status_does_not_claim_function_runtime(
             "owned-secure admin status check requires the helper-owned CI service"
         )
     status = await broker["admin"].status()
-    assert status
+    assert status["cluster"] == "standalone"
+    assert status["active_brokers"]
+    assert not any("function" in str(key).lower() for key in status)

@@ -76,6 +76,15 @@ publication/approval and rollback; a contribution does not authorize deployment.
   The Pulsar owned-secure integration lane lives under
   `deploy/pulsar/integration/` and is invoked only by the dedicated
   eventstream CI job (never by default `pytest` / hermetic verify).
+  `omega_prime/scripts/eventstream_it.py` stages secrets and configs as root
+  inside the service container, hands them to the image's runtime user
+  (`pulsar`, verified readable as that uid), and layers the repo's Pulsar
+  settings key-by-key over the image's stock config files (no duplicate keys,
+  which the embedded bookie would read as lists). Pulsar token parameters use
+  `file:///path`, not `token:file:///path`. That lane reconciles the broker
+  topology with `functions=False`, because the standalone broker runs without
+  a Functions worker. Failed `docker` steps report the argv and bounded stderr
+  with secrets redacted.
 - **Credential safety.** Use the broker/private host environment or a mode-0600
   token file where the interface supports it. Never commit, print, paste or
   place values in argv/tracing/saved examples. See [SECURITY.md](SECURITY.md).
