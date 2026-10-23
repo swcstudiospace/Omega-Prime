@@ -22,8 +22,9 @@ directives disagree, the directives win and this page is stale (PD-18).
   someone (PD-9, PD-11).
 - **The one stop is money.** Before an actual paid deployment or
   infrastructure cutover that creates new spend, Omega Prime presents the
-  action and its projected cost and waits for a go. Merging the code for it
-  does not wait (PD-10).
+  action and its projected cost and waits for a go. Merging code does not
+  wait, unless the merge itself starts the new spend (a merge-triggered paid
+  deploy); then the cost check comes before that merge (PD-10).
 
 ## The loop
 
@@ -74,9 +75,10 @@ Current state, stated plainly:
 - `omega_prime/cron/` and the `cron_*` and `heartbeat_*` tools remain in
   the roster as capabilities. The directives forbid using them for new
   timer-based automation.
-- Three GitHub Actions workflows (`nightly-evals.yml`,
-  `nightly-readiness.yml`, `kb-refresh.yml`) still run on a schedule. They
-  predate PD-12 and are candidates for conversion to event triggers.
+- Four GitHub Actions workflows (`nightly-evals.yml`,
+  `nightly-readiness.yml`, `kb-refresh.yml`, `grokbot-image.yml`) still run
+  on a schedule. They predate PD-12 and are candidates for conversion to
+  event triggers.
 
 ## Standing operator rules
 

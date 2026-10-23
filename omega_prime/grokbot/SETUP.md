@@ -163,9 +163,9 @@ listener; do not give any routine a timer or cron schedule:
 
 | Routine | Command | Trigger |
 | --- | --- | --- |
-| desk-lead | `/omega-desk-lead` | a new intake item or ticket |
+| desk-lead | `/omega-desk-lead` | a new intake item or ticket, or a blocked ticket changing state |
 | ultrathink | `/omega-ultrathink-routine` | an operator message containing `ultrathink` |
-| sweep (drafts only, never publishes) | `/omega-sweep` | a new mention or inbound message |
+| sweep (drafts only, never publishes) | `/omega-sweep` | a new X mention |
 | nightly | `/omega-nightly` | a session ends and appends turns |
 
 The same entry points run in a shell: `python -m omega_prime.routines.desk_lead`,

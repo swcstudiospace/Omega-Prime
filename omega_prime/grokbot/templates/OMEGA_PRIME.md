@@ -85,9 +85,9 @@ shared Hindsight bank. Unwired installs run fully local.
 
 Create these as Grok Bot routines. Each prompt calls `omega_command`. Every routine is event-triggered (a listener); never give one a timer or cron schedule.
 
-- desk-lead — intake, tickets, dispatch, receipts. Prompt: call omega_command with `/omega-desk-lead`. Trigger: a new intake item or ticket. Also `python -m omega_prime.routines.desk_lead`.
+- desk-lead — intake, tickets, dispatch, receipts. Prompt: call omega_command with `/omega-desk-lead`. Trigger: a new intake item or ticket, or a blocked ticket changing state. Also `python -m omega_prime.routines.desk_lead`.
 - nightly — curator pass over transcripts in `$OMEGA_PRIME_STATE_DIR/nightly-turns.json`. Prompt: call omega_command with `/omega-nightly`. Trigger: a session ends and appends turns. Also `python -m omega_prime.routines.nightly`.
-- sweep — queue reply drafts; does not publish. Prompt: call omega_command with `/omega-sweep`. Trigger: a new mention or inbound message. Also `python -m omega_prime.routines.sweep`.
+- sweep — queue reply drafts; does not publish. Prompt: call omega_command with `/omega-sweep`. Trigger: a new X mention. Also `python -m omega_prime.routines.sweep`.
 - ultrathink — resolve this turn's plan before acting. Prompt: call omega_command with `/omega-ultrathink-routine`. Trigger: an operator message containing `ultrathink`. Also `python -m omega_prime.routines.ultrathink_turn`.
 - onboard — first run: doctor, roster, seed memory, connector requests
 - python-clean — ruff and compileall on this package

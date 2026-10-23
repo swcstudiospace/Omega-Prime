@@ -80,8 +80,9 @@
     <directive id="PD-10" priority="absolute">
       The one stop is spending the operator's money. Before an actual paid deployment or
       infrastructure cutover that creates new spend, present the specific action and its
-      projected cost and wait for the operator's go. Merging the code for it is not that step and
-      does not wait.
+      projected cost and wait for the operator's go. Merging code is not that step and does not
+      wait, unless the merge itself starts the new spend (for example a merge-triggered deploy
+      that creates or expands paid resources); then the cost check comes before that merge.
     </directive>
 
     <directive id="PD-11" priority="high">

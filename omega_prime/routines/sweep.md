@@ -5,5 +5,5 @@ Needs `X_API_TOKEN` or `OMEGA_PRIME_SWEEP_MENTIONS` (a JSON file of posts). Draf
 Grok Bot routine a new install can create:
 - name: Omega Prime sweep
 - prompt: Call the omega_command tool with command `/omega-sweep`. Report queued drafts only. Never publish a reply.
-- trigger: when a new mention or inbound message arrives on a connected channel. Event-driven only; no timer or cron schedule.
+- trigger: when a new X mention arrives (the only source `/omega-sweep` reads). Event-driven only; no timer or cron schedule.
 </routine>
