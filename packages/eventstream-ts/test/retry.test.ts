@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { CloudEvent, PublishRequest } from "../src/envelope.js";
 import type { PublishReceipt } from "../src/envelope.js";
-import { AuthenticationError, PermanentError } from "../src/errors.js";
+import { AuthenticationError, PermanentError, UNSPECIFIED_FAILURE_REASON } from "../src/errors.js";
 import { decorrelatedJitter, withCreationBackoff } from "../src/backoff.js";
 import { ManualClock, MemoryEventBus } from "../src/memory.js";
 import {
   acknowledgeIfNotTargeted,
   applyRetryOutcome,
   buildDeadLetterRequest,
+  handleDelivery,
   retryTopicsFor,
   runSharedRetryHandoff,
   shouldProcessTargeted
@@ -401,5 +402,59 @@ describe("dead-letter blocked signal parity", () => {
       actor: "test",
       reason: "exhausted"
     });
+  });
+
+  it("dead-letters failures with empty messages instead of stranding the delivery", async () => {
+    // Greptile PR #86: safeErrorMessage(new Error()) is "", and the blocked
+    // payload requires a nonempty reason, so CloudEvent construction threw
+    // before the dead letter was published or the source acknowledged.
+    for (const [failure, attempt] of [
+      [new Error(), 5],
+      [new PermanentError(""), 1],
+      [new PermanentError("   "), 2]
+    ] as const) {
+      for (const source of [delivery([]), { ...delivery([]), event: taskEvent, metadata: { ...delivery([]).metadata, key: "task-9" } }]) {
+        const calls: string[] = [];
+        const published: PublishRequest[] = [];
+        const result = await handleDelivery({
+          delivery: { ...source, ack: async () => { calls.push("ack"); } },
+          handler: async () => {
+            throw failure;
+          },
+          publisher: {
+            publish: async (request) => {
+              calls.push("publish");
+              published.push(request);
+              return { topic: request.topic, eventId: request.event.id, publishedAt: 2 } satisfies PublishReceipt;
+            }
+          },
+          subscription: "gate",
+          attempt,
+          previousDelaySeconds: 1
+        });
+        expect(result).toEqual({ kind: "dead-letter", topic: "persistent://omega/system/dlq.gate" });
+        expect(calls).toEqual(["publish", "ack"]);
+        const [request] = published;
+        expect((request?.event.data as { reason?: string }).reason).toBe(UNSPECIFIED_FAILURE_REASON);
+        expect(request?.properties.omega_last_error).toBe(UNSPECIFIED_FAILURE_REASON);
+      }
+    }
+  });
+
+  it("drops retry-only metadata such as a rejected omega_retry_previous from dead letters", () => {
+    const request = buildDeadLetterRequest(
+      delivery([], "persistent://omega/sdlc/pr", {
+        ce_id: event.id,
+        omega_attempt: "2",
+        omega_retry_previous: "nan",
+        omega_retry_target: "gate"
+      }),
+      "gate",
+      2,
+      "invalid retry metadata"
+    );
+    expect(request.properties.omega_retry_previous).toBeUndefined();
+    expect(request.properties.omega_retry_target).toBeUndefined();
+    expect(request.properties.omega_attempt).toBe("2");
   });
 });

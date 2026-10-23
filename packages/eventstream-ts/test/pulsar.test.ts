@@ -15,6 +15,7 @@ import {
   requiresAuthEncryption,
   loadPulsarClient,
   nativeJsonMetadataForTopic,
+  nativeProducerName,
   toNativeSequenceId
 } from "../src/pulsar.js";
 import type { PulsarProducerOptions, PulsarReaderOptions, PulsarSubscribeOptions, StructuredJsonCodec } from "../src/pulsar.js";
@@ -977,5 +978,113 @@ describe("lazy Pulsar adapter", () => {
       tokenFile: "/run/credentials/token",
       tlsCaFile: "/run/credentials/ca"
     })).toThrow(ConfigurationError);
+  });
+
+  it("gives encrypted and plain producers on one retry/DLQ topic distinct broker names", async () => {
+    // Greptile PR #86: both modes reused one producerName on the same topic,
+    // and Pulsar rejects the second live producer with a duplicate name.
+    const { directory, publicKeyPath, privateKeyPath } = await writeKeyPair();
+    try {
+      const live = new Set<string>();
+      const created: { topic: string; name: string | undefined; encrypted: boolean }[] = [];
+      const bus = new PulsarEventBus({
+        client: {
+          createProducer: async (topic, options) => {
+            const identity = `${topic}\0${String(options.producerName)}`;
+            if (live.has(identity)) throw new Error(`Producer with name '${String(options.producerName)}' is already connected to topic`);
+            live.add(identity);
+            created.push({ topic, name: options.producerName, encrypted: options.encryption !== undefined });
+            return { send: async () => ({}), close: async () => undefined };
+          },
+          subscribe: async () => {
+            throw new Error("not used");
+          },
+          createReader: async () => {
+            throw new Error("not used");
+          },
+          close: async () => undefined
+        },
+        config: new EventStreamConfig({
+          serviceUrl: "pulsar://127.0.0.1:26650",
+          encryptionKeyFile: publicKeyPath,
+          privateKeyFile: privateKeyPath
+        })
+      });
+      for (const topic of ["persistent://omega/system/retry.escalator", "persistent://omega/system/dlq.escalator"]) {
+        await bus.publish(
+          new PublishRequest({
+            event: makeEvent(),
+            topic,
+            key: "repo#3",
+            producerName: "escalator",
+            properties: { omega_origin_topic: "persistent://omega/auth/session" }
+          })
+        );
+        await bus.publish(
+          new PublishRequest({ event: makeEvent(), topic, key: "repo#3", producerName: "escalator" })
+        );
+      }
+      expect(created).toEqual([
+        { topic: "persistent://omega/system/retry.escalator", name: "escalator-encrypted", encrypted: true },
+        { topic: "persistent://omega/system/retry.escalator", name: "escalator", encrypted: false },
+        { topic: "persistent://omega/system/dlq.escalator", name: "escalator-encrypted", encrypted: true },
+        { topic: "persistent://omega/system/dlq.escalator", name: "escalator", encrypted: false }
+      ]);
+      expect(nativeProducerName("escalator", true)).toBe("escalator-encrypted");
+      expect(nativeProducerName("escalator", false)).toBe("escalator");
+      await bus.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("restores authentication health after a protected publish succeeds again", async () => {
+    // Greptile PR #86: only decoding reset the flag, so a publisher-only bus
+    // stayed unhealthy after its key file was repaired.
+    const { directory, publicKeyPath, privateKeyPath } = await writeKeyPair();
+    try {
+      let sends = 0;
+      const bus = new PulsarEventBus({
+        client: {
+          createProducer: async () => ({
+            send: async () => {
+              sends += 1;
+              return {};
+            },
+            close: async () => undefined
+          }),
+          subscribe: async () => {
+            throw new Error("not used");
+          },
+          createReader: async () => {
+            throw new Error("not used");
+          },
+          close: async () => undefined
+        },
+        config: new EventStreamConfig({
+          serviceUrl: "pulsar://127.0.0.1:26650",
+          encryptionKeyFile: publicKeyPath,
+          privateKeyFile: privateKeyPath
+        })
+      });
+      const authRequest = new PublishRequest({
+        event: makeEvent("omega.auth.session.login_started"),
+        topic: "persistent://omega/auth/session",
+        key: "box:gh"
+      });
+      await chmod(privateKeyPath, 0o644);
+      await expect(bus.publish(authRequest)).rejects.toThrow(AuthenticationError);
+      expect(bus.healthy).toBe(false);
+      // A plain publish proves nothing about the key material.
+      await bus.publish(new PublishRequest({ event: makeEvent(), topic: "persistent://omega/sdlc/pr", key: "repo#3" }));
+      expect(bus.healthy).toBe(false);
+      await chmod(privateKeyPath, 0o600);
+      await bus.publish(authRequest);
+      expect(sends).toBe(2);
+      expect(bus.healthy).toBe(true);
+      await bus.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

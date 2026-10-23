@@ -52,21 +52,33 @@ def _identity(data: Mapping[str, Any]) -> tuple[str, int, str]:
     return repo, number, head
 
 
-def _position(value: object) -> tuple[int, int, int] | None:
+Position = tuple[int, int, int, int]
+
+
+def _position(value: object) -> Position | None:
+    """Return a ``(partition, ledger, entry, batch_index)`` source position.
+
+    Messages in one Pulsar batch share ledger and entry ids and differ only by
+    batch index, so the batch index is part of the ordering key. Positions
+    persisted before the batch index was recorded are three-element lists;
+    they are read with batch index 0 (the first record of that entry).
+    """
     if value is None:
         return None
     if (
         not isinstance(value, (tuple, list))
-        or len(value) != 3
+        or len(value) not in (3, 4)
         or any(
             isinstance(part, bool) or not isinstance(part, int) or part < 0
             for part in value
         )
     ):
         raise ValueError(
-            "source_position must be a nonnegative (partition, ledger, entry) tuple"
+            "source_position must be a nonnegative "
+            "(partition, ledger, entry[, batch_index]) tuple"
         )
-    return value[0], value[1], value[2]
+    batch_index = value[3] if len(value) == 4 else 0
+    return value[0], value[1], value[2], batch_index
 
 
 def _initial(repo: str, number: int, head: str) -> dict[str, Any]:
@@ -194,12 +206,13 @@ def reduce_pr_state(
     event: CloudEvent | Mapping[str, Any],
     *,
     source: str | None = None,
-    source_position: tuple[int, int, int] | None = None,
+    source_position: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     """Reduce one catalogued event into explicit durable projection state.
 
-    Source positions are compared only within the same source topic and partition;
-    no ordering is inferred across topics. The returned state is independent of
+    Source positions (partition, ledger, entry, batch index) are compared only
+    within the same source topic and partition, so records sharing one batched
+    entry stay distinct; no ordering is inferred across topics. The returned state is independent of
     arrival time and input mapping identity.
     """
     if isinstance(event, CloudEvent):
@@ -374,29 +387,36 @@ def serialize_projection(state: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def _message_position(message_id: object) -> tuple[int, int, int] | None:
+def _message_position(message_id: object) -> Position | None:
     if message_id is None:
         return None
-    names = ("partition", "ledger_id", "entry_id")
+    names = ("partition", "ledger_id", "entry_id", "batch_index")
     values: list[int] = []
     for name in names:
         getter = getattr(message_id, f"get_{name}", None)
         if not callable(getter):
             getter = getattr(message_id, name, None)
         if not callable(getter):
+            if name == "batch_index":
+                # A message id without a batch-index accessor identifies a
+                # whole (non-batched) entry.
+                values.append(0)
+                continue
             return None
         value = getter()
         if isinstance(value, bool) or not isinstance(value, int):
             return None
-        if name == "partition" and value == -1:
+        if name in ("partition", "batch_index") and value == -1:
             # Non-partitioned topics report partition -1; the source topic is
             # already normalized without a ``-partition-N`` suffix, so treat it
             # as the single partition 0 and keep stale-replay ordering active.
+            # Non-batched messages report batch index -1: the entry holds one
+            # record, which sorts as batch index 0.
             value = 0
         if value < 0:
             return None
         values.append(value)
-    return values[0], values[1], values[2]
+    return values[0], values[1], values[2], values[3]
 
 
 def process(input: bytes, context: Any) -> None:

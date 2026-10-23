@@ -61,3 +61,17 @@ export function safeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return redactText(message);
 }
+
+/** Fallback reason when a failure carries no usable message (Python `_safe_reason` parity). */
+export const UNSPECIFIED_FAILURE_REASON = "unspecified failure";
+
+/**
+ * Redacted, trimmed, nonempty failure reason bounded to 256 characters.
+ *
+ * Mirrors omega_prime.eventstream.retry._safe_reason: blocked-signal payloads
+ * and failure-history rows require a nonempty `reason`, so `new Error()` or
+ * `PermanentError("")` must still produce a publishable dead letter.
+ */
+export function safeFailureReason(reason: unknown): string {
+  return (safeErrorMessage(reason).trim() || UNSPECIFIED_FAILURE_REASON).slice(0, 256);
+}

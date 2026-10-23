@@ -13,7 +13,9 @@ export {
   isPlainRecord,
   redactText,
   redactValue,
-  safeErrorMessage
+  safeErrorMessage,
+  safeFailureReason,
+  UNSPECIFIED_FAILURE_REASON
 } from "./errors.js";
 export { EventSignal } from "./ports.js";
 export type {
@@ -76,8 +78,10 @@ export type { OutboxOptions } from "./outbox.js";
 export {
   AUTH_ENCRYPTION_KEY_NAME,
   createPulsarEventBus,
+  ENCRYPTED_PRODUCER_SUFFIX,
   loadPulsarClient,
   nativeJsonMetadataForTopic,
+  nativeProducerName,
   PulsarEventBus,
   requiresAuthDecryption,
   requiresAuthEncryption,

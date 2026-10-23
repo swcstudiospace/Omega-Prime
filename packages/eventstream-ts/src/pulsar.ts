@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { withCreationBackoff, type CreationRetryOptions } from "./backoff.js";
 import { CloudEvent, PublishRequest, type PublishReceipt } from "./envelope.js";
-import { AuthenticationError, ConfigurationError, ContractError, isPlainRecord, PulsarError, redactValue, safeErrorMessage } from "./errors.js";
+import { AuthenticationError, ConfigurationError, ContractError, isPlainRecord, PulsarError, redactValue, safeErrorMessage, safeFailureReason } from "./errors.js";
 import { EventStreamConfig } from "./config.js";
 import { createAbortError } from "./ports.js";
 import type { ConsumerMode, DeliveryMetadata, EventBus, EventReader, EventSubscriber, MessageDelivery, ReadOptions, SubscribeOptions } from "./ports.js";
@@ -625,6 +625,17 @@ function isSystemRedeliveryTopic(topic: string): boolean {
  * events, and anything on a system retry/DLQ topic whose origin is an auth
  * topic, are published with native Pulsar encryption.
  */
+/** Suffix appended to the broker producer name of encrypting producers. */
+export const ENCRYPTED_PRODUCER_SUFFIX = "-encrypted";
+
+/**
+ * Broker-visible producer name for one (logical name, encryption mode) pair.
+ * Python parity: omega_prime.eventstream.adapters.pulsar.native_producer_name.
+ */
+export function nativeProducerName(producerName: string, encrypted: boolean): string {
+  return encrypted ? `${producerName}${ENCRYPTED_PRODUCER_SUFFIX}` : producerName;
+}
+
 export function requiresAuthEncryption(
   eventType: string,
   topic: string,
@@ -672,11 +683,11 @@ function poisonHistory(properties: Readonly<Record<string, string>>, reason: str
       ) {
         continue;
       }
-      history.push({ attempt: entry.attempt, reason: safeErrorMessage(entry.reason) });
+      history.push({ attempt: entry.attempt, reason: safeFailureReason(entry.reason) });
       previousAttempt = entry.attempt;
     }
   }
-  history.push({ attempt, reason: safeErrorMessage(reason) });
+  history.push({ attempt, reason: safeFailureReason(reason) });
   return JSON.stringify(history);
 }
 
@@ -743,6 +754,9 @@ export class PulsarEventBus implements EventBus {
       throw this.#normalizePulsarFailure(error, "publish");
     }
     this.#transportHealthy = true;
+    // A protected send that the broker accepted proves the key material is
+    // readable again, so a publisher-only bus leaves the unhealthy state.
+    if (encryption !== undefined) this.#authenticationHealthy = true;
     return Object.freeze({
       topic: request.topic,
       eventId: request.event.id,
@@ -870,14 +884,18 @@ export class PulsarEventBus implements EventBus {
     producerName?: string,
     encryption?: PulsarProducerEncryption
   ): Promise<PulsarProducer> {
-    // Encrypting and plaintext producers are distinct native resources.
+    // Encrypting and plaintext producers are distinct native resources. They
+    // must also carry distinct broker producer names: Pulsar rejects a second
+    // live producer that reuses a name on the same topic, and retry/DLQ topics
+    // legitimately receive both auth-origin (encrypted) and plain traffic.
     const cacheKey = `${topic}\0${producerName ?? ""}\0${encryption === undefined ? "plain" : "encrypted"}`;
     let producerPromise = this.#producers.get(cacheKey);
     if (producerPromise === undefined) {
+      const brokerName = nativeProducerName(producerName ?? `omega-${safeAvroName(topic)}`, encryption !== undefined);
       producerPromise = withCreationBackoff(
         () =>
           client.createProducer(topic, {
-            producerName: producerName ?? `omega-${safeAvroName(topic)}`,
+            producerName: brokerName,
             initialSequenceId: 0,
             ...(/^persistent:\/\/omega\/system\/(?:retry|dlq)\./.test(topic)
               ? {}
@@ -933,7 +951,7 @@ export class PulsarEventBus implements EventBus {
   ): Promise<void> {
     if (message.messageId === undefined) throw new ContractError("poison message has no native message id");
     const properties = redactedStringProperties(message.properties);
-    const reason = safeErrorMessage(error);
+    const reason = safeFailureReason(error);
     const topic = `persistent://omega/system/dlq.${subscription}`;
     // Bytes from an auth topic (or an auth-origin redelivery) stay encrypted
     // on the DLQ, matching the Python adapter's preserved-origin rule.
@@ -965,6 +983,8 @@ export class PulsarEventBus implements EventBus {
     } catch (publishError) {
       throw this.#normalizePulsarFailure(publishError, "poison dead-letter publish");
     }
+    this.#transportHealthy = true;
+    if (encryption !== undefined) this.#authenticationHealthy = true;
   }
 
   /**

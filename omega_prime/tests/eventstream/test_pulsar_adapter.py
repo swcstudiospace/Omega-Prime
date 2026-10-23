@@ -873,3 +873,49 @@ async def test_single_use_producer_is_released_after_success_and_failure() -> No
     assert len(native.created) == 2
     assert bus._producers == {}
     await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_mixed_encryption_producers_get_distinct_broker_names(
+    tmp_path: Path,
+) -> None:
+    """Greptile PR #86: encrypted and plain producers on one retry/DLQ topic
+    shared a broker producer name, which Pulsar rejects for the second one."""
+    public = tmp_path / "auth-public.pem"
+    private = tmp_path / "auth-private.pem"
+    public.write_text("public-key", encoding="utf-8")
+    private.write_text("private-key", encoding="utf-8")
+    public.chmod(0o600)
+    private.chmod(0o600)
+    native = FakeClient()
+    bus = PulsarEventBus(
+        EventStreamConfig(encryption_key_file=public, private_key_file=private),
+        native_client=native,
+        acknowledged_watermark=lambda _topic, _name: 0,
+    )
+    for destination in (
+        "persistent://omega/system/retry.escalator",
+        "persistent://omega/system/dlq.escalator",
+    ):
+        await bus.publish(
+            _request(
+                "shared",
+                topic=destination,
+                properties={
+                    "omega_attempt": 1,
+                    "omega_origin_topic": "persistent://omega/auth/session",
+                },
+            )
+        )
+        await bus.publish(
+            _request("shared", topic=destination, properties={"omega_attempt": 1})
+        )
+    names = [(topic, options["producer_name"]) for topic, options in native.created]
+    assert names == [
+        ("persistent://omega/system/retry.escalator", "shared-encrypted"),
+        ("persistent://omega/system/retry.escalator", "shared"),
+        ("persistent://omega/system/dlq.escalator", "shared-encrypted"),
+        ("persistent://omega/system/dlq.escalator", "shared"),
+    ]
+    assert len({name for name in names}) == len(names)
+    await bus.close()

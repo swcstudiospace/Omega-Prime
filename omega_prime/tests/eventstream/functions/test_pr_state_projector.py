@@ -101,7 +101,7 @@ def test_new_head_resets_head_scoped_state_and_stale_inputs_cannot_regress() -> 
     assert state["review"] == {}
     assert stale_review["review"] == {}
     assert stale_push["head_sha"] == "head-b"
-    assert stale_push["source_positions"]["sdlc/pr#0"] == [0, 2, 1]
+    assert stale_push["source_positions"]["sdlc/pr#0"] == [0, 2, 1, 0]
 
 
 def test_position_order_is_partition_local_not_cross_topic() -> None:
@@ -488,4 +488,90 @@ def test_process_orders_nonpartitioned_topic_positions() -> None:
     assert stale == newer
     persisted = json.loads(next(iter(context.state.values())))
     # Partition -1 is normalized to the single partition 0 of the source topic.
-    assert list(persisted["source_positions"].values()) == [[0, 4, 3]]
+    assert list(persisted["source_positions"].values()) == [[0, 4, 3, 0]]
+
+
+class _BatchedMessageId:
+    """Native ``pulsar.MessageId`` shape: plain accessors incl. batch index."""
+
+    def __init__(self, partition: int, ledger: int, entry: int, batch: int) -> None:
+        self._values = (partition, ledger, entry, batch)
+
+    def partition(self) -> int:
+        return self._values[0]
+
+    def ledger_id(self) -> int:
+        return self._values[1]
+
+    def entry_id(self) -> int:
+        return self._values[2]
+
+    def batch_index(self) -> int:
+        return self._values[3]
+
+
+class _BatchedTopicContext(_FunctionContext):
+    def __init__(self, topic: str) -> None:
+        super().__init__()
+        self.topic = topic
+        self.message_id: _BatchedMessageId | None = None
+
+    def get_current_message_topic_name(self) -> str:
+        return self.topic
+
+    def get_message_id(self) -> object:
+        return self.message_id
+
+
+def test_process_keeps_every_record_of_one_batched_entry() -> None:
+    """Greptile PR #86: two results for one PR in a single Pulsar batch share
+    ledger and entry ids; without the batch index the second was dropped as
+    stale and readers permanently missed it."""
+    context = _BatchedTopicContext("persistent://omega/sdlc/pr")
+    context.message_id = _BatchedMessageId(-1, 1, 1, -1)
+    process(_event("omega.sdlc.pr.opened").to_bytes(), context)
+
+    context.topic = "persistent://omega/sdlc/ci"
+    context.message_id = _BatchedMessageId(-1, 9, 4, 0)
+    process(_event("omega.ci.run.started").to_bytes(), context)
+    context.message_id = _BatchedMessageId(-1, 9, 4, 1)
+    process(_event("omega.ci.run.passed").to_bytes(), context)
+
+    context.topic = "persistent://omega/sdlc/review"
+    context.message_id = _BatchedMessageId(-1, 7, 2, 0)
+    process(_event("omega.sdlc.review.commented").to_bytes(), context)
+    context.message_id = _BatchedMessageId(-1, 7, 2, 1)
+    process(_event("omega.sdlc.review.approved").to_bytes(), context)
+
+    latest = json.loads(context.published[-1][1])
+    assert latest["ci"]["run-1"]["status"] == "passed"
+    assert latest["review"]["approved"]["reviewer"] == "reviewer"
+    persisted = json.loads(next(iter(context.state.values())))
+    assert persisted["source_positions"]["sdlc/ci#0"] == [0, 9, 4, 1]
+    assert persisted["source_positions"]["sdlc/review#0"] == [0, 7, 2, 1]
+
+    # A redelivered earlier record from the same batch is still stale.
+    context.topic = "persistent://omega/sdlc/ci"
+    context.message_id = _BatchedMessageId(-1, 9, 4, 0)
+    process(_event("omega.ci.run.failed").to_bytes(), context)
+    assert json.loads(context.published[-1][1])["ci"]["run-1"]["status"] == "passed"
+
+
+def test_reducer_reads_legacy_three_element_positions_as_batch_zero() -> None:
+    state = reduce_pr_state(None, _event("omega.sdlc.pr.opened"))
+    state["source_positions"] = {"sdlc/ci#0": [0, 9, 4]}
+    replay = reduce_pr_state(
+        state,
+        _event("omega.ci.run.failed"),
+        source="sdlc/ci",
+        source_position=(0, 9, 4, 0),
+    )
+    assert replay["ci"] == {}
+    later_in_batch = reduce_pr_state(
+        state,
+        _event("omega.ci.run.passed"),
+        source="sdlc/ci",
+        source_position=(0, 9, 4, 1),
+    )
+    assert later_in_batch["ci"]["run-1"]["status"] == "passed"
+    assert later_in_batch["source_positions"]["sdlc/ci#0"] == [0, 9, 4, 1]

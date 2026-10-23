@@ -749,3 +749,92 @@ def test_well_formed_retry_metadata_parses_from_transport_strings() -> None:
     assert parse_retry_attempt({}) == 1
     assert parse_retry_attempt({"omega_attempt": "3"}) == 3
     assert parse_retry_attempt({"omega_attempt": 5, "omega_retry_previous": "2.5"}) == 5
+
+
+@pytest.mark.parametrize("previous", ["nan", "inf", "-3", "soon"])
+def test_dead_letter_for_rejected_retry_metadata_survives_triage(
+    previous: str,
+) -> None:
+    """Greptile PR #86: _dead_letter copied a rejected omega_retry_previous, so
+    DlqTriage raised InvalidRetryMetadata and stranded the blocked signal."""
+
+    async def scenario() -> None:
+        acked: list[bool] = []
+        delivery = make_delivery(
+            acked,
+            properties={
+                "omega_attempt": 2,
+                "omega_retry_previous": previous,
+                "omega_retry_target": "gate",
+            },
+        )
+        with pytest.raises(InvalidRetryMetadata) as rejected:
+            parse_retry_attempt(delivery.properties)
+        publisher = Publisher()
+        router = RetryRouter(publisher, "gate")
+        assert await router.handle(delivery, rejected.value, attempt=1) == "dlq"
+        assert acked == [True]
+        (dead_letter,) = publisher.requests
+        assert "omega_retry_previous" not in dead_letter.properties
+        assert "omega_retry_target" not in dead_letter.properties
+
+        triage_acked: list[bool] = []
+
+        async def ack() -> None:
+            triage_acked.append(True)
+
+        triage_publisher = Publisher()
+        await DlqTriage(triage_publisher).handle(
+            Delivery(
+                event=dead_letter.event,
+                topic=dead_letter.topic,
+                key=dead_letter.key,
+                message_id="dlq-message",
+                properties=dict(dead_letter.properties),
+                ack=ack,
+            )
+        )
+        assert triage_acked == [True]
+        (signal,) = triage_publisher.requests
+        assert signal.topic == "persistent://omega/control/signal"
+        assert signal.event.type == "omega.control.signal.blocked"
+
+    asyncio.run(scenario())
+
+
+def test_dlq_triage_settles_legacy_dead_letter_with_rejected_retry_delay() -> None:
+    """A dead letter written before the strip (or by another SDK) still carries
+    the rejected delay; triage drops retry-only metadata and re-emits it."""
+
+    async def scenario() -> None:
+        dead_letter_source = make_delivery([], properties={"omega_attempt": 1})
+        publisher = Publisher()
+        await RetryRouter(publisher, "gate").handle(
+            dead_letter_source, DeadLetter("gave up")
+        )
+        (dead_letter,) = publisher.requests
+        acked: list[bool] = []
+
+        async def ack() -> None:
+            acked.append(True)
+
+        triage_publisher = Publisher()
+        await DlqTriage(triage_publisher).handle(
+            Delivery(
+                event=dead_letter.event,
+                topic=dead_letter.topic,
+                key=dead_letter.key,
+                message_id="legacy-dlq-message",
+                properties={
+                    **dict(dead_letter.properties),
+                    "omega_retry_previous": "nan",
+                },
+                ack=ack,
+            )
+        )
+        assert acked == [True]
+        (signal,) = triage_publisher.requests
+        assert "omega_retry_previous" not in signal.properties
+        assert signal.sequence_id == 1
+
+    asyncio.run(scenario())

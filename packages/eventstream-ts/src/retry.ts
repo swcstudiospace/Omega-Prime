@@ -1,5 +1,5 @@
 import { MAX_BUSINESS_ATTEMPTS, MAX_RETRY_DELAY_SECONDS, decorrelatedJitter } from "./backoff.js";
-import { ContractError, AuthenticationError, isPlainRecord, PermanentError, safeErrorMessage } from "./errors.js";
+import { ContractError, AuthenticationError, isPlainRecord, PermanentError, safeFailureReason } from "./errors.js";
 import { CloudEvent, PublishRequest } from "./envelope.js";
 import type { JsonValue } from "./taxonomy.js";
 import type { ConsumerMode, EventSubscriber, MessageDelivery, Publisher } from "./ports.js";
@@ -34,9 +34,9 @@ export interface HandlerOptions extends Omit<ApplyRetryOptions, "outcome"> {
 function errorOutcome(error: unknown): DeliveryOutcome {
   if (error instanceof AuthenticationError) return { kind: "authentication-failure", error };
   if (error instanceof PermanentError || error instanceof ContractError) {
-    return { kind: "dead-letter", reason: safeErrorMessage(error) };
+    return { kind: "dead-letter", reason: safeFailureReason(error) };
   }
-  return { kind: "retry", reason: safeErrorMessage(error) };
+  return { kind: "retry", reason: safeFailureReason(error) };
 }
 function validateSubscriptionName(subscription: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(subscription)) {
@@ -77,11 +77,11 @@ function failureHistory(
       ) {
         continue;
       }
-      history.push({ attempt: attemptValue, reason: safeErrorMessage(value.reason) });
+      history.push({ attempt: attemptValue, reason: safeFailureReason(value.reason) });
       previousAttempt = attemptValue;
     }
   }
-  history.push({ attempt: failedAttempt, reason: safeErrorMessage(reason) });
+  history.push({ attempt: failedAttempt, reason: safeFailureReason(reason) });
   return Object.freeze(history.map((entry) => Object.freeze(entry)));
 }
 
@@ -99,7 +99,7 @@ function retryProperties(
     omega_attempt: String(nextAttempt),
     omega_origin_topic: properties.omega_origin_topic ?? delivery.metadata.topic,
     omega_origin_ce_id: properties.omega_origin_ce_id ?? delivery.event.id,
-    omega_last_error: safeErrorMessage(reason),
+    omega_last_error: safeFailureReason(reason),
     omega_failure_history: JSON.stringify(history),
     omega_retry_history: JSON.stringify(history)
   };
@@ -114,6 +114,9 @@ function retryProperties(
  * else becomes `kind: "dlq"` with origin topic, aggregate key, source id and
  * bounded failure history, keyed `dlq:["origin","aggregate"]`.
  */
+/** Retry-routing properties that are meaningless (and unsafe) on a dead letter. */
+const RETRY_ONLY_PROPERTIES: ReadonlySet<string> = new Set(["omega_retry_target", "omega_retry_previous"]);
+
 export function buildDeadLetterRequest(
   delivery: MessageDelivery,
   subscription: string,
@@ -123,7 +126,7 @@ export function buildDeadLetterRequest(
   validateSubscriptionName(subscription);
   const source = delivery.event;
   const properties = delivery.metadata.properties;
-  const safeReason = safeErrorMessage(reason);
+  const safeReason = safeFailureReason(reason);
   const history = failureHistory(delivery, attempt, safeReason);
   const origin = properties.omega_origin_topic ?? delivery.metadata.topic;
   const data = source.data;
@@ -164,7 +167,10 @@ export function buildDeadLetterRequest(
   });
   const forwarded: Record<string, string> = {};
   for (const [name, value] of Object.entries(properties)) {
-    if (name === "omega_retry_target" || name.startsWith("ce_")) continue;
+    // Retry-only transport metadata never rides on a dead letter: DLQ triage
+    // validates retry metadata, so a rejected omega_retry_previous copied here
+    // would strand the blocked signal (Python _dead_letter parity).
+    if (RETRY_ONLY_PROPERTIES.has(name) || name.startsWith("ce_")) continue;
     forwarded[name] = value;
   }
   const serializedHistory = JSON.stringify(history);

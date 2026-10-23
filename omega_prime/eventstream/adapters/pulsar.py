@@ -440,6 +440,22 @@ def _requires_encryption(request: PublishRequest) -> bool:
     )
 
 
+#: Suffix appended to the broker producer name of encrypting producers.
+ENCRYPTED_PRODUCER_SUFFIX = "-encrypted"
+
+
+def native_producer_name(producer_name: str, *, encrypt: bool) -> str:
+    """Broker-visible producer name for one (logical name, encryption) pair.
+
+    Encrypting and plaintext producers are distinct native resources, and
+    retry/DLQ topics legitimately carry both auth-origin (encrypted) and plain
+    traffic. Pulsar rejects a second live producer that reuses a name on the
+    same topic, so the encrypted one gets its own name. TypeScript parity:
+    ``nativeProducerName`` in packages/eventstream-ts/src/pulsar.ts.
+    """
+    return f"{producer_name}{ENCRYPTED_PRODUCER_SUFFIX}" if encrypt else producer_name
+
+
 def _crypto_reader(config: EventStreamConfig) -> Any:
     if config.encryption_key_file is None or config.private_key_file is None:
         raise EncryptionUnavailable("auth payload encryption keys are not configured")
@@ -710,7 +726,9 @@ class PulsarEventBus:
             client = await self._client_instance()
             try:
                 options: dict[str, object] = {
-                    "producer_name": request.producer_name,
+                    "producer_name": native_producer_name(
+                        request.producer_name, encrypt=encrypt
+                    ),
                     "initial_sequence_id": watermark,
                     "send_timeout_millis": 0,
                     "max_pending_messages": 1000,

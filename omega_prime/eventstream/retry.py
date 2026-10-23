@@ -85,6 +85,13 @@ def parse_retry_attempt(properties: Mapping[str, Any]) -> int:
     return attempt
 
 
+#: Retry-routing transport properties that never ride on a dead letter. A
+#: dead letter is terminal, so a delay hint or singleton target is meaningless
+#: there, and a malformed ``omega_retry_previous`` copied onto it would make
+#: :class:`DlqTriage` reject the blocked signal and strand it unsettled.
+RETRY_ONLY_PROPERTIES = frozenset({"omega_retry_target", "omega_retry_previous"})
+
+
 def _safe_reason(reason: object, secrets: tuple[str, ...]) -> str:
     return (str(redact_value(str(reason), secrets)).strip() or "unspecified failure")[
         :256
@@ -337,7 +344,7 @@ class RetryRouter:
                 **{
                     key: value
                     for key, value in dict(delivery.properties).items()
-                    if key != "omega_retry_target"
+                    if key not in RETRY_ONLY_PROPERTIES
                 },
                 "omega_attempt": attempt,
                 "omega_origin_topic": str(
@@ -450,7 +457,15 @@ class DlqTriage:
 
     async def handle(self, delivery: Delivery) -> None:
         event = delivery.event
-        attempt = parse_retry_attempt(delivery.properties)
+        # Dead letters are terminal: retry-routing metadata is dropped rather
+        # than validated, so a record written before RetryRouter stripped it
+        # (or by another SDK) still re-emits instead of sticking unsettled.
+        properties = {
+            key: value
+            for key, value in dict(delivery.properties).items()
+            if key not in RETRY_ONLY_PROPERTIES
+        }
+        attempt = parse_retry_attempt(properties)
         request = PublishRequest(
             event=event,
             topic=get_event_type(event.type).topic,
@@ -460,7 +475,7 @@ class DlqTriage:
             # Per-event producer: release it after the send so triage never
             # accumulates one native producer per dead-lettered event.
             single_use=True,
-            properties=dict(delivery.properties),
+            properties=properties,
         )
         receipt = await self.publisher.publish(request)
         if not _matches(receipt, request):
