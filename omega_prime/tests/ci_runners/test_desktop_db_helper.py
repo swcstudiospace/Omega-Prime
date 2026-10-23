@@ -53,10 +53,14 @@ if pid:
     print(pid)
     sys.exit(0)
 sys.stdout.close()
+os.setsid()  # detached from the caller, like a postmaster pg_ctl started
+os.chdir(sys.argv[2])  # a real postmaster runs with its data dir as cwd
 signal.signal(signal.SIGQUIT, signal.SIG_DFL)
 time.sleep(600)
-' "$port" </dev/null >"$data/postmaster.pid" 2>/dev/null || exit 1
+' "$port" "$data" </dev/null >"$data/postmaster.pid" 2>/dev/null || exit 1
     echo "pid $(head -n 1 "$data/postmaster.pid")" >> "$log"
+    # Server up, pg_ctl -w still "waiting": lets a test interrupt the start.
+    [ -n "${STUB_PG_CTL_START_SLEEP:-}" ] && sleep "$STUB_PG_CTL_START_SLEEP"
     exit 0
 fi
 if [ "$action" = stop ]; then
@@ -211,6 +215,7 @@ def test_failed_greptime_check_stops_the_instances(stubs: dict[str, str]) -> Non
         text=True,
     )
     seen: set[int] = set()
+    leaked: list[int] = []
     deadline = time.monotonic() + 90
     try:
         while proc.poll() is None:
@@ -219,6 +224,9 @@ def test_failed_greptime_check_stops_the_instances(stubs: dict[str, str]) -> Non
             seen.update(greptime_pids(home))
             time.sleep(0.02)
         _, err = proc.communicate(timeout=30)
+        # Judge the script's own cleanup BEFORE the fallback teardown below,
+        # which would otherwise kill a leaked server and hide the leak.
+        leaked = [pid for pid in sorted(seen) if not wait_dead(pid)]
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -228,11 +236,50 @@ def test_failed_greptime_check_stops_the_instances(stubs: dict[str, str]) -> Non
                 os.kill(pid, signal.SIGKILL)
     assert proc.returncode != 0
     assert "toolchain-check: FAIL greptime query" in err
-    started = sorted(seen)
-    assert started, err
-    for pid in started:
-        assert wait_dead(pid), f"greptime stub {pid} left running"
+    assert seen, err
+    assert not leaked, f"greptime stubs {leaked} left running"
     assert list(home.iterdir()) == []
+
+
+def test_interrupted_postgres_start_is_still_stopped(
+    stubs: dict[str, str], tmp_path: Path
+) -> None:
+    # Greptile P1: the helper dies while pg_ctl -w waits, after the server is
+    # already up. stop --all must still find and stop that server, and a new
+    # start of the same name must refuse instead of deleting its data dir.
+    root = tmp_path / "dbroot"
+    env = {**stubs, "OMEGA_CI_DB_ROOT": str(root), "STUB_PG_CTL_START_SLEEP": "30"}
+    proc = subprocess.Popen(
+        ["/bin/sh", str(HELPER), "start", "postgres", "--no-export"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    started: list[int] = []
+    try:
+        end = time.monotonic() + 30
+        while not (started := pids(env)) and time.monotonic() < end:
+            time.sleep(0.02)
+        assert len(started) == 1
+        os.killpg(proc.pid, signal.SIGKILL)  # helper and its pg_ctl, not the server
+        proc.wait(timeout=10)
+        server = started[0]
+        assert alive(server)
+        again = run(["/bin/sh", str(HELPER), "start", "postgres", "--no-export"], env)
+        assert again.returncode != 0
+        assert "already running" in again.stderr
+        assert (root / "postgres" / "data").is_dir()
+        stopped = run(["/bin/sh", str(HELPER), "stop", "--all"], env)
+        assert stopped.returncode == 0, stopped.stderr
+        assert wait_dead(server), f"postgres stub {server} left running"
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        for pid in started:
+            if alive(pid):
+                os.kill(pid, signal.SIGKILL)
 
 
 def test_term_signal_still_stops_the_clusters(stubs: dict[str, str]) -> None:
@@ -454,3 +501,24 @@ def test_unknown_only_section_is_rejected(stubs: dict[str, str], only: str) -> N
     assert "unknown section" in done.stderr
     assert "present and usable" not in done.stdout
     assert pids(stubs) == []
+
+
+def test_postgres_stop_never_signals_a_reused_pid(
+    stubs: dict[str, str], tmp_path: Path
+) -> None:
+    # A stale postmaster.pid naming another job's process: it is not running
+    # in this instance's data dir, so stop must leave it alone.
+    env = {**stubs, "RUNNER_TEMP": str(tmp_path / "rt")}
+    bystander = subprocess.Popen(["sleep", "60"], cwd=tmp_path)
+    try:
+        inst = tmp_path / "rt" / "omega-ci-db" / "postgres"
+        (inst / "data").mkdir(parents=True)
+        (inst / "kind").write_text("postgres\n")
+        (inst / "data" / "postmaster.pid").write_text(f"{bystander.pid}\n")
+        done = helper(env, "stop", "--all")
+        assert done.returncode == 0, done.stderr
+        time.sleep(0.3)
+        assert bystander.poll() is None, "stop signalled a process it did not start"
+    finally:
+        bystander.kill()
+        bystander.wait()

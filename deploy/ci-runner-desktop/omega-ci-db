@@ -73,6 +73,16 @@ owned() {
     [ -n "$rec" ] && [ "$(start_time "$1")" = "$rec" ]
 }
 
+# pg_owned PID DIR: PID is alive AND is the postmaster of DIR's cluster. A
+# postmaster chdirs into its data dir, and DIR is private to this instance, so
+# a cwd match proves ownership without any record written after pg_ctl
+# returns. That covers a start interrupted while pg_ctl -w was still waiting:
+# the server is up but nothing else about it was saved yet.
+pg_owned() {
+    alive "$1" || return 1
+    [ "$(readlink "/proc/$1/cwd" 2>/dev/null)" = "$(cd "$2/data" 2>/dev/null && pwd -P)" ]
+}
+
 # owns_port PID PORT: PID itself holds the listening TCP socket on PORT, so a
 # health check on PORT is talking to our process, not another instance that
 # grabbed the port after free_ports released it.
@@ -131,7 +141,6 @@ start_postgres() {
         if pg_ctl -D "$dir/data" -l "$dir/server.log" -w -t "$wait_s" \
             -o "-p $port -c listen_addresses=127.0.0.1 -c unix_socket_directories=''" \
             start >/dev/null 2>&1 9>&-; then
-            start_time "$(head -n 1 "$dir/data/postmaster.pid")" >"$dir/start"
             {
                 echo "PGHOST=127.0.0.1"
                 echo "PGPORT=$port"
@@ -195,7 +204,7 @@ start_greptime() {
 # running DIR: 0 while the instance in DIR still has a live server process.
 running() {
     case "$(cat "$1/kind" 2>/dev/null)" in
-        postgres) [ -f "$1/data/postmaster.pid" ] && owned "$(head -n 1 "$1/data/postmaster.pid")" "$1/start" ;;
+        postgres) [ -f "$1/data/postmaster.pid" ] && pg_owned "$(head -n 1 "$1/data/postmaster.pid")" "$1" ;;
         greptime) [ -f "$1/pid" ] && owned "$(cat "$1/pid")" "$1/start" ;;
         *) return 1 ;;
     esac
@@ -213,10 +222,10 @@ stop_one() {
             if [ -f "$dir/data/postmaster.pid" ]; then
                 pid="$(head -n 1 "$dir/data/postmaster.pid")"
                 pg_ctl -D "$dir/data" -m fast -w -t 30 stop >/dev/null 2>&1 || true
-                if owned "$pid" "$dir/start"; then
+                if pg_owned "$pid" "$dir"; then
                     kill -QUIT "$pid" 2>/dev/null || true   # SIGQUIT = immediate shutdown
                     wait_gone "$pid" 10 || {
-                        owned "$pid" "$dir/start" && kill -9 "$pid" 2>/dev/null || true
+                        pg_owned "$pid" "$dir" && kill -9 "$pid" 2>/dev/null || true
                         wait_gone "$pid" 5 || one_rc=1
                     }
                 fi
