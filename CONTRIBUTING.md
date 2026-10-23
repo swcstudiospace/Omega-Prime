@@ -73,6 +73,9 @@ publication/approval and rollback; a contribution does not authorize deployment.
   doubles. Real owned local CLI/filesystem effects are valid proof. Never
   mutate a live account/provider/device/service in the suite; separately
   authorized live probes are not silently run as local verification.
+  The Pulsar owned-secure integration lane lives under
+  `deploy/pulsar/integration/` and is invoked only by the dedicated
+  eventstream CI job (never by default `pytest` / hermetic verify).
 - **Credential safety.** Use the broker/private host environment or a mode-0600
   token file where the interface supports it. Never commit, print, paste or
   place values in argv/tracing/saved examples. See [SECURITY.md](SECURITY.md).

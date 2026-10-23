@@ -64,7 +64,7 @@ jobs:
         # from this interpreter. Every shipping install carries it: the Bot
         # launcher and the image install requirements-lock.txt, and the
         # documented manual install is .[dev].
-        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev]'
+        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev,eventstream]'
       - name: resolved distributions
         id: resolved_distributions
         run: python3 omega_prime/scripts/ci_receipt.py run resolved_distributions -- python3 -m pip list --format=json
@@ -143,7 +143,7 @@ jobs:
         run: python3 omega_prime/scripts/ci_receipt.py run pip_identity -- python3 -m pip --version
       - name: install
         id: install
-        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev]'
+        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev,eventstream]'
       - name: resolved distributions
         id: resolved_distributions
         run: python3 omega_prime/scripts/ci_receipt.py run resolved_distributions -- python3 -m pip list --format=json
@@ -190,7 +190,7 @@ jobs:
         run: python3 omega_prime/scripts/ci_receipt.py run pip_identity -- python3 -m pip --version
       - name: install
         id: install
-        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev]'
+        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev,eventstream]'
       - name: resolved distributions
         id: resolved_distributions
         run: python3 omega_prime/scripts/ci_receipt.py run resolved_distributions -- python3 -m pip list --format=json

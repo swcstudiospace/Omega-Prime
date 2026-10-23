@@ -119,7 +119,7 @@ def test_process_publishes_only_typed_score_and_preserves_pr_key() -> None:
         "repo": "acme/widget",
         "number": 17,
         "head_sha": "abc123",
-        "actor": "greptile",
+        "actor": "greptile-apps[bot]",
         "score": 92,
     }
     process(event.to_bytes(), context)
@@ -215,3 +215,49 @@ def test_greptile_score_process_adapter_ignores_malformed_input() -> None:
 
     process(b"not-json", Ctx())
     process(b"{}", Ctx())
+
+
+def test_disagreeing_header_and_marker_is_ambiguous() -> None:
+    result = parse_greptile_score(
+        "Confidence score: 5/5\n<!-- greptile_confidence_score: 2 -->",
+        IDENTITY,
+    )
+    assert isinstance(result, NoScore)
+    assert result.reason == "score_ambiguous"
+
+
+def test_process_rejects_spoofed_non_bot_reviewer() -> None:
+    event = _commented_event()
+    event = CloudEvent(
+        specversion=event.specversion,
+        id=event.id,
+        source=event.source,
+        type=event.type,
+        datacontenttype=event.datacontenttype,
+        dataschema=event.dataschema,
+        data={
+            **dict(event.data),
+            "reviewer": "malicious-user",
+            "actor": "malicious-user",
+        },
+    )
+    context = _Context({"comment_body": "Confidence score: 5/5"})
+    process(event.to_bytes(), context)
+    assert context.published == []
+
+
+def test_process_rejects_near_miss_bot_login() -> None:
+    event = _commented_event()
+    for reviewer in ("greptile", "greptile-apps", "greptileai", "Greptile-Apps[bot]"):
+        forged = CloudEvent(
+            specversion=event.specversion,
+            id=event.id,
+            source=event.source,
+            type=event.type,
+            datacontenttype=event.datacontenttype,
+            dataschema=event.dataschema,
+            data={**dict(event.data), "reviewer": reviewer, "actor": reviewer},
+        )
+        context = _Context({"comment_body": "Score: 100"})
+        process(forged.to_bytes(), context)
+        assert context.published == [], reviewer

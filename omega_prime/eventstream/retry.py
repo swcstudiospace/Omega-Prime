@@ -94,6 +94,7 @@ class RetryRouter:
         attempt: int | None = None,
         aggregate_key: str | None = None,
         settle_before_ack: Callable[[str], Awaitable[bool]] | None = None,
+        latency: float = 0.0,
     ) -> str:
         props, event = delivery.properties, delivery.event
         current = max(
@@ -120,7 +121,7 @@ class RetryRouter:
                 self.observer.connection_state("unhealthy")
                 self.observer.consume(
                     "authentication",
-                    0.0,
+                    latency,
                     traceparent=traceparent,
                     attributes={"subscription": self.subscription},
                 )
@@ -134,7 +135,7 @@ class RetryRouter:
                 if self.observer:
                     self.observer.consume(
                         "ack",
-                        0.0,
+                        latency,
                         traceparent=traceparent,
                         attributes={"subscription": self.subscription},
                     )
@@ -191,6 +192,7 @@ class RetryRouter:
             sequence_id=current,
             producer_name=f"omega-eventstream-{event.id}",
             deliver_after=self.clock() + timedelta(seconds=delay),
+            single_use=True,
             properties=request_props,
         )
         receipt = await self.publisher.publish(request)
@@ -206,7 +208,7 @@ class RetryRouter:
                 )
                 self.observer.consume(
                     "retry",
-                    0.0,
+                    latency,
                     traceparent=traceparent,
                     attributes={"subscription": self.subscription},
                 )
@@ -270,7 +272,10 @@ class RetryRouter:
             topic=f"persistent://omega/system/dlq.{self.subscription}",
             key=key,
             sequence_id=attempt,
-            producer_name=f"omega-eventstream-dlq-{self.subscription}",
+            # Per-event producer name + single_use so Pulsar dedup cannot drop a
+            # later dead-letter that shares attempt=1 with an earlier one.
+            producer_name=f"omega-eventstream-dlq-{self.subscription}-{event.id}",
+            single_use=True,
             properties={
                 **{
                     key: value
@@ -344,6 +349,7 @@ class SingletonRetryHandoff:
             key=delivery.key,
             sequence_id=attempt,
             producer_name=f"omega-eventstream-{delivery.event.id}",
+            single_use=True,
             properties=dict(props),
         )
         receipt = await self.publisher.publish(request)

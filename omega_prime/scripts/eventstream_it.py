@@ -423,27 +423,22 @@ def start(args: argparse.Namespace) -> None:
         if not source.is_file():
             raise HelperError("required secure broker configuration is missing")
     worker_text = worker.read_text(encoding="utf-8")
+    # Broker IT starts standalone with --no-functions-worker. The worker pin is
+    # still staged for later Function deploys, but the process under test is the
+    # broker only — so do not require worker-only auth keys here. When a future
+    # lane enables the functions worker, require functionAuthProviderClassName
+    # on a non-comment line (keyword-in-comment is not a real gate).
+    functions_worker_enabled = False
     active_worker_config = "\n".join(
         line for line in worker_text.splitlines() if not line.lstrip().startswith("#")
     )
-    # Process-runtime workers authenticate to the broker with a bootstrap token;
-    # each Function is deployed with its own FunctionAuthenticationSpec using the
-    # least-privilege omega-functions identity. Validate the worker pin encodes
-    # that split rather than a deploy-time FunctionAuthenticationSpec field.
-    required_markers = (
-        "authenticationEnabled: true",
-        "brokerClientAuthenticationEnabled: true",
-        "brokerClientAuthenticationPlugin:",
-        "omega-functions",
-    )
-    # omega-functions may appear only in comments describing the Function identity;
-    # require it somewhere in the pinned file and the active auth flags above.
-    missing = [
-        marker for marker in required_markers[:3] if marker not in active_worker_config
-    ]
-    if missing or "omega-functions" not in worker_text:
+    if (
+        functions_worker_enabled
+        and "functionAuthProviderClassName:" not in active_worker_config
+    ):
         raise HelperError(
-            "pinned worker lacks a supported per-function least-privilege authentication provider"
+            "functions worker enabled but functionAuthProviderClassName "
+            "is missing from active (non-comment) functions_worker.yml"
         )
     _stage(args.container_id, work)
     worker_config = work / "runtime" / "functions_worker.yml"
@@ -493,7 +488,7 @@ def start(args: argparse.Namespace) -> None:
             args.container_id,
             "/bin/bash",
             "-lc",
-            "cd /pulsar && exec bin/pulsar standalone --config /pulsar/conf/standalone.conf",
+            "cd /pulsar && exec bin/pulsar standalone --no-functions-worker --config /pulsar/conf/standalone.conf",
         ]
     )
     pid = asyncio.run(
@@ -681,7 +676,7 @@ def restart(args: argparse.Namespace) -> None:
             args.container_id,
             "/bin/bash",
             "-lc",
-            "cd /pulsar && exec bin/pulsar standalone --config /pulsar/conf/standalone.conf",
+            "cd /pulsar && exec bin/pulsar standalone --no-functions-worker --config /pulsar/conf/standalone.conf",
         ]
     )
     new_pid = asyncio.run(

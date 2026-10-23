@@ -20,7 +20,12 @@ from omega_prime.eventstream.envelope import (
     PublishReceipt,
     PublishRequest,
 )
-from omega_prime.eventstream.errors import EventStreamError, PermanentError
+from omega_prime.eventstream.errors import (
+    AuthenticationError,
+    EventStreamError,
+    PermanentError,
+    SchemaError,
+)
 from omega_prime.eventstream.ports import (
     InitialPosition,
     Reader,
@@ -505,6 +510,17 @@ def _message_id(position: int) -> Any:
     )
 
 
+def _is_incompatible_schema(error: BaseException) -> bool:
+    """True when the native client rejected the payload against the topic schema."""
+    if type(error).__name__ == "IncompatibleSchema":
+        return True
+    try:
+        import pulsar
+    except ImportError:
+        return False
+    return isinstance(error, pulsar.IncompatibleSchema)
+
+
 def _sanitized(context: str, error: Exception) -> PulsarAdapterError:
     return PulsarAdapterError(
         str(redact_value(f"{context}: {type(error).__name__}: {error}"))
@@ -721,7 +737,20 @@ class PulsarEventBus:
             raise
         except Exception as exc:
             self._notify(relay=True)
+            # Native schema rejection must surface as SchemaError so the outbox
+            # marks the row rejected instead of retrying forever.
+            if _is_incompatible_schema(exc):
+                raise SchemaError(
+                    str(exc)[:256] or "native schema rejected publish"
+                ) from None
             raise _sanitized("Pulsar publish failed", exc) from None
+        if request.single_use:
+            identity = (request.topic, request.producer_name, encrypt)
+            producer = self._producers.pop(identity, None)
+            self._creation_locks.pop(identity, None)
+            if producer is not None:
+                with contextlib.suppress(Exception):
+                    await producer.close()
         self._notify(relay=True)
         return PublishReceipt(
             event_id=request.event.id,
@@ -729,6 +758,77 @@ class PulsarEventBus:
             message_id=str(message_id),
             acknowledged_at=datetime.now(UTC),
         )
+
+    async def _publish_poison(
+        self,
+        message: Any,
+        *,
+        source_topic: str,
+        subscription: str,
+        error: BaseException,
+    ) -> None:
+        """Publish undecodable raw bytes to ``dlq.<subscription>`` (TS mirror)."""
+        raw = bytes(message.data())
+        properties = {
+            str(key): str(value)
+            for key, value in dict(message.properties() or {}).items()
+        }
+        reason = str(redact_value(str(error), ()))[:256] or "undecodable payload"
+        props = {
+            **properties,
+            "omega_origin_topic": source_topic,
+            "omega_origin_message_id": str(message.message_id()),
+            "omega_origin_ce_id": (
+                properties.get("ce_id")
+                or properties.get("omega_origin_ce_id")
+                or "unknown"
+            ),
+            "omega_poison": "true",
+            "omega_last_error": reason,
+        }
+        topic = f"persistent://omega/system/dlq.{subscription}"
+        encrypt = source_topic.startswith("persistent://omega/auth/")
+        producer_name = (
+            f"omega-eventstream-poison-{subscription}-{message.message_id()}"
+        )
+        identity = (topic, producer_name, encrypt)
+        client = await self._client_instance()
+        options: dict[str, object] = {
+            "producer_name": producer_name,
+            "initial_sequence_id": 0,
+            "send_timeout_millis": 0,
+            "max_pending_messages": 1000,
+            "block_if_queue_full": True,
+            "batching_enabled": False,
+        }
+        if encrypt:
+            options.update(
+                {
+                    "encryption_key": "omega-auth",
+                    "crypto_key_reader": _crypto_reader(self.config),
+                }
+            )
+        producer = await create_with_backoff(
+            lambda: client.create_producer(topic, **options),
+            attempts=self._creation_attempts,
+            wait=self._backoff_wait,
+            retryable=_is_retryable_pulsar_error,
+        )
+        try:
+            await producer.send(
+                raw,
+                properties=props,
+                partition_key=str(
+                    message.partition_key() or properties.get("omega_key") or "poison"
+                ),
+                sequence_id=0,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                await producer.close()
+            self._producers.pop(identity, None)
+            self._creation_locks.pop(identity, None)
+        self._notify(relay=True)
 
     async def subscribe(
         self,
@@ -797,7 +897,14 @@ class PulsarEventBus:
             ):
                 raise
             raise _sanitized("Pulsar consumer creation failed", exc) from None
-        subscriber = _PulsarSubscriber(consumer, self._codec, self._notify)
+        subscriber = _PulsarSubscriber(
+            consumer,
+            self._codec,
+            self._notify,
+            bus=self,
+            topic=topic,
+            subscription=subscription,
+        )
         self._resources.add(subscriber)
         self._notify(relay=True)
         return subscriber
@@ -874,10 +981,22 @@ class PulsarEventBus:
 
 
 class _PulsarSubscriber:
-    def __init__(self, consumer: Any, codec: _Codec, notify: WakeCallback) -> None:
+    def __init__(
+        self,
+        consumer: Any,
+        codec: _Codec,
+        notify: WakeCallback,
+        *,
+        bus: PulsarEventBus,
+        topic: str,
+        subscription: str,
+    ) -> None:
         self._consumer = consumer
         self._codec = codec
         self._notify = notify
+        self._bus = bus
+        self._topic = topic
+        self._subscription = subscription
         self._closed = False
         # Native Pulsar receive futures must not be cancelled mid-flight; a timed
         # wait_for on receive() would otherwise poison later deliveries (failover
@@ -885,47 +1004,68 @@ class _PulsarSubscriber:
         self._inflight: asyncio.Task[Any] | None = None
 
     async def receive(self) -> Delivery:
+        """Receive the next decodable delivery; poison payloads go to the DLQ."""
         if self._closed:
             raise PulsarAdapterError("Pulsar subscriber is closed")
-        if self._inflight is None or (
-            self._inflight.done() and self._inflight.cancelled()
-        ):
-            self._inflight = asyncio.create_task(self._consumer.receive())
-        inflight = self._inflight
-        try:
-            message = await asyncio.shield(inflight)
-        except asyncio.CancelledError:
-            # Caller timed out or cancelled; leave inflight running for the next
-            # receive() so the broker handshake is not torn down.
-            raise
-        except Exception as exc:
-            self._inflight = None
-            self._notify()
-            raise _sanitized("Pulsar receive failed", exc) from None
-        if self._inflight is inflight:
-            self._inflight = None
-        try:
-            properties = dict(message.properties())
-            event = self._codec.decode(bytes(message.data()))
-
-            async def acknowledge() -> None:
-                await self._consumer.acknowledge(message)
+        while True:
+            if self._inflight is None or (
+                self._inflight.done() and self._inflight.cancelled()
+            ):
+                self._inflight = asyncio.create_task(self._consumer.receive())
+            inflight = self._inflight
+            try:
+                message = await asyncio.shield(inflight)
+            except asyncio.CancelledError:
+                # Caller timed out or cancelled; leave inflight running for the next
+                # receive() so the broker handshake is not torn down.
+                raise
+            except Exception as exc:
+                self._inflight = None
                 self._notify()
+                raise _sanitized("Pulsar receive failed", exc) from None
+            if self._inflight is inflight:
+                self._inflight = None
+            try:
+                properties = dict(message.properties())
+                event = self._codec.decode(bytes(message.data()))
+                held = message
 
-            return Delivery(
-                event=event,
-                topic=_logical_topic(message.topic_name()),
-                key=message.partition_key() or str(properties.get("omega_key", "")),
-                message_id=str(message.message_id()),
-                redelivered=message.redelivery_count() > 0,
-                properties=cast(Mapping[str, Any], redact_value(properties)),
-                ack=acknowledge,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._notify()
-            raise _sanitized("Pulsar receive failed", exc) from None
+                async def acknowledge(held_message: Any = held) -> None:
+                    await self._consumer.acknowledge(held_message)
+                    self._notify()
+
+                return Delivery(
+                    event=event,
+                    topic=_logical_topic(message.topic_name()),
+                    key=message.partition_key() or str(properties.get("omega_key", "")),
+                    message_id=str(message.message_id()),
+                    redelivered=message.redelivery_count() > 0,
+                    properties=cast(Mapping[str, Any], redact_value(properties)),
+                    ack=acknowledge,
+                )
+            except asyncio.CancelledError:
+                raise
+            except AuthenticationError:
+                self._notify()
+                raise
+            except Exception as exc:
+                # Mirror the TypeScript adapter: undecodable payloads are published
+                # to dlq.<subscription> with omega_poison markers, then acked so
+                # one bad message cannot stop the consumer TaskGroup.
+                try:
+                    await self._bus._publish_poison(
+                        message,
+                        source_topic=self._topic,
+                        subscription=self._subscription,
+                        error=exc,
+                    )
+                    await self._consumer.acknowledge(message)
+                    self._notify()
+                except Exception as poison_exc:
+                    self._notify()
+                    raise _sanitized(
+                        "Pulsar poison dead-letter failed", poison_exc
+                    ) from None
 
     async def close(self) -> None:
         if self._closed:

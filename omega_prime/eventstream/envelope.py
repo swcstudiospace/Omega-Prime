@@ -406,6 +406,7 @@ class PublishRequest(BaseModel):
     sequence_id: StrictInt = Field(ge=0)
     producer_name: StrictStr
     deliver_after: datetime | None = None
+    single_use: bool = False
     properties: Mapping[str, Any] = Field(default_factory=dict, repr=False)
 
     @field_validator("properties")

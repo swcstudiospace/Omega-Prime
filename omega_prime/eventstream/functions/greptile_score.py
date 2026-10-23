@@ -3,30 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
 from omega_prime.eventstream.functions import publish_keyed
 from omega_prime.eventstream.taxonomy import EVENT_TYPES, derive_key, validate_payload
+from omega_prime.greptile.score import GREPTILE_BOT_LOGIN, extract_greptile_score
 
 _FUNCTION_SOURCE = "urn:omega:function:greptile-score"
-_APPROVED_GREPTILE_ACTORS = frozenset(
-    {
-        "greptile",
-        "greptile-apps",
-        "greptile-apps[bot]",
-        "greptileai",
-    }
-)
-# Accept Score: N, Score: N%, Score: N/100, Confidence score: N/5, and the
-# HTML marker <!-- greptile_confidence_score: N --> used by Greptile reviews.
-_SCORE_PATTERN = re.compile(
-    r"(?im)(?:^\s*(?:greptile\s+)?(?:confidence\s+)?score\s*:\s*(\d{1,3})"
-    r"(?:\s*/\s*(?:100|5)|\s*%)?\s*$|"
-    r"<!--\s*greptile_confidence_score\s*:\s*([0-5])\s*-->)"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,26 +35,50 @@ class ScoreResult:
 def parse_greptile_score(
     comment: str, identity: Mapping[str, object]
 ) -> ScoreResult | NoScore:
-    """Parse one standalone ``Score: N``, ``Score: N%`` or ``Score: N/100`` line."""
+    """Parse one unambiguous Greptile score using the shared dashboard patterns.
+
+    Header ``Confidence score: N/5`` disagreeing with the HTML body marker is
+    rejected as ambiguous so a forged header cannot invent a score.
+    """
     if not isinstance(comment, str):
         return NoScore("score_absent_or_malformed")
-    matches = list(_SCORE_PATTERN.finditer(comment))
-    if not matches:
-        return NoScore("score_absent_or_malformed")
-    if len(matches) != 1:
-        return NoScore("score_ambiguous")
-    match = matches[0]
-    raw = match.group(1) or match.group(2)
-    score = int(raw)
-    # Confidence score: N/5 and the HTML marker are on a 0-5 scale; normalize
-    # to the 0-100 event payload the taxonomy stores.
-    matched_text = match.group(0)
-    if match.group(2) is not None or re.search(r"/\s*5\s*$", matched_text):
-        if score > 5:
+    parsed = extract_greptile_score(comment)
+    if parsed is None:
+        # Distinguish absent vs ambiguous vs out-of-range for callers/tests.
+        from omega_prime.greptile.score import (
+            BODY_SCORE,
+            CONFIDENCE_PERCENT,
+            CONFIDENCE_SCORE,
+            EXPLICIT_FRACTION,
+            EXPLICIT_PERCENT,
+        )
+
+        in_range: list[int] = []
+        out_of_range = False
+        for match in CONFIDENCE_SCORE.finditer(comment):
+            in_range.append(int(match.group(1)) * 20)
+        for match in BODY_SCORE.finditer(comment):
+            in_range.append(int(match.group(1)) * 20)
+        for match in CONFIDENCE_PERCENT.finditer(comment):
+            raw = int(match.group(1))
+            if raw > 100:
+                out_of_range = True
+            else:
+                in_range.append(raw)
+        for match in EXPLICIT_FRACTION.finditer(comment):
+            in_range.append(int(match.group(1)) * 20)
+        for match in EXPLICIT_PERCENT.finditer(comment):
+            raw = int(match.group(1))
+            if raw > 100:
+                out_of_range = True
+            else:
+                in_range.append(raw)
+        if out_of_range and not in_range:
             return NoScore("score_out_of_range")
-        score = score * 20
-    elif score > 100:
-        return NoScore("score_out_of_range")
+        if not in_range:
+            return NoScore("score_absent_or_malformed")
+        return NoScore("score_ambiguous")
+    score = parsed.percent
     repo = identity.get("repo")
     pr = identity.get("pr")
     head_sha = identity.get("head_sha")
@@ -93,7 +102,7 @@ def parse_greptile_score(
                 "repo": repo,
                 "number": pr,
                 "head_sha": head_sha,
-                "actor": "greptile",
+                "actor": GREPTILE_BOT_LOGIN,
                 "score": score,
             },
         )
@@ -141,16 +150,10 @@ def process(input: bytes, context: Any) -> None:
     if not isinstance(comment, str):
         return None
     data = incoming.data
-    actor = data.get("actor")
+    # Author must be the Greptile GitHub App exactly — matching a score pattern
+    # alone is spoofable. Dashboard collector uses the same login.
     reviewer = data.get("reviewer")
-    identities = {
-        value.casefold()
-        for value in (actor, reviewer)
-        if isinstance(value, str) and value
-    }
-    if not identities.intersection(
-        {name.casefold() for name in _APPROVED_GREPTILE_ACTORS}
-    ):
+    if reviewer != GREPTILE_BOT_LOGIN:
         return None
     repo, number, head_sha = data.get("repo"), data.get("number"), data.get("head_sha")
     if (
@@ -182,7 +185,7 @@ def process(input: bytes, context: Any) -> None:
             "repo": result.repo,
             "number": result.pr,
             "head_sha": result.head_sha,
-            "actor": "greptile",
+            "actor": GREPTILE_BOT_LOGIN,
             "score": result.score,
         },
     )

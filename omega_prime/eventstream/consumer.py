@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -282,11 +283,13 @@ class ConsumerRuntime:
         self._active += 1
         if self.observer:
             self.observer.handler_in_flight(self._active)
+        started = time.perf_counter()
         try:
             try:
                 outcome = await self.handler(delivery, context)
             except AuthenticationError as exc:
-                await self.router.handle(delivery, exc)
+                latency = time.perf_counter() - started
+                await self.router.handle(delivery, exc, latency=latency)
                 await self.store.release(self.subscription, delivery.event.id, token)
                 _LOG.warning("eventstream handler authentication failure", extra=fields)
                 return
@@ -296,6 +299,7 @@ class ConsumerRuntime:
                 outcome = exc
             if not isinstance(outcome, (Ack, Retry, DeadLetter, BaseException)):
                 outcome = Retry(0.0, "handler returned unsupported outcome")
+            latency = time.perf_counter() - started
 
             async def settle_before_ack(action: str) -> bool:
                 if action == "ack":
@@ -315,6 +319,7 @@ class ConsumerRuntime:
                 outcome,
                 attempt=int(props.get("omega_attempt", 1)),
                 settle_before_ack=settle_before_ack,
+                latency=latency,
             )
             if action == "unsettled":
                 await self.store.release(self.subscription, delivery.event.id, token)
