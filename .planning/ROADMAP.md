@@ -424,3 +424,18 @@ Local implementation and offline verification are recorded in `106-SUMMARY.md`. 
 - [x] 115-04-PLAN.md — after 115-02/03: `/ws/events` tier in useDashboard with jittered backoff and SSE fallback, interactive xterm TerminalPanel, STALE badges, sole `static/cc` rebuild.
 
 Local implementation and offline verification are recorded in `115-SUMMARY.md` (ACs a1–a7 mapped to evidence). Live-Herdr checks and the 7421 server swap remain outer-driver work. Local commits only; no push, merge, or deploy.
+
+## v23 CI Runner Fleet (task 00050)
+
+Autoscaling ephemeral GitHub Actions runners on the serverless Railway "Ubuntu Desktop" (Linux Containers project), driven only by `workflow_job` webhook events (timer ban). Spec: `phases/120-ci-runner-fleet/DESIGN.md`. Tracking: SPE-19875. Branch `gsd/00050-ci-runners`. Paid Railway cutover and VPS install are held for the operator.
+
+### Phase 120: CI runner fleet
+
+**Goal:** webhook → pure scaler → GitHub App JIT config → ephemeral runner on the Desktop runner-agent; Railway Serverless sleep as teardown; `omega.ci.runner.*` events; per-repo configuration guide.
+**Depends on:** none (00046 EventBus is an optional adapter).
+
+Plans:
+- [ ] 120-01-PLAN.md — core: settings, webhook verify/dedupe, WorkflowJob, pure Scaler, delayed-event + publisher ports.
+- [ ] 120-02-PLAN.md — after 120-01: GitHub App/PAT JIT client, Desktop wake client, controller, ASGI app, CLI.
+- [ ] 120-03-PLAN.md — after 120-02: runner-agent + supervisor + Desktop image overlay (not deployed).
+- [ ] 120-04-PLAN.md — after 120-03: docs, per-repo guide, VPS templates, cutover runbook, cost.
