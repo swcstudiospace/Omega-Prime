@@ -3,6 +3,13 @@ name: rust-parity
 # Pinned upstream parity and the product's optional native bridge.
 # prime-agent/ is ignored locally; both jobs check out the contract pin.
 # Keep the bridge job independent of the retained upstream test baseline.
+#
+# Both jobs run on the omega-ci pool (docs/ci-runners.md), never on
+# GitHub-hosted runners. The runner image ships the pin's toolchain (1.98.1,
+# beside the 1.99.1 default) in a read-only RUSTUP_HOME and a pinned
+# cargo-deny binary, so the toolchain is selected with RUSTUP_TOOLCHAIN (no
+# rustup install) and the license gates run cargo-deny directly instead of
+# the Docker-based cargo-deny-action. Fork pull requests never reach the pool.
 
 on:
   push:
@@ -27,13 +34,19 @@ on:
 permissions:
   contents: read
 
+# Each pool runner is budgeted 2 vCPU but sees every host CPU, and the process
+# limit is shared across concurrent jobs: cap cargo's parallel rustc jobs.
+env:
+  CARGO_BUILD_JOBS: "2"
+
 concurrency:
   group: rust-parity-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   parity:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -58,10 +71,19 @@ jobs:
           ref: ${{ steps.pin.outputs.commit }}
           path: prime-agent
 
-      - name: rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.pin.outputs.toolchain }}
+      - name: rust toolchain (runner image)
+        env:
+          PIN_TOOLCHAIN: ${{ steps.pin.outputs.toolchain }}
+        run: |
+          set -euo pipefail
+          echo "RUSTUP_TOOLCHAIN=$PIN_TOOLCHAIN" >> "$GITHUB_ENV"
+          case "$(RUSTUP_TOOLCHAIN="$PIN_TOOLCHAIN" rustc --version)" in
+            "rustc $PIN_TOOLCHAIN "*) ;;
+            *) echo "::error::Rust $PIN_TOOLCHAIN (the contract pin) is not in the omega-ci runner image; add it there (deploy/ci-runner-desktop/Dockerfile RUST_PARITY_VERSION)"; exit 1 ;;
+          esac
+          RUSTUP_TOOLCHAIN="$PIN_TOOLCHAIN" rustc --version
+          RUSTUP_TOOLCHAIN="$PIN_TOOLCHAIN" cargo --version
+          cargo deny --version
 
       - name: cargo cache
         uses: Swatinem/rust-cache@v2
@@ -74,12 +96,7 @@ jobs:
         run: cargo build --locked
 
       - name: license gate
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          rust-version: ${{ steps.pin.outputs.toolchain }}
-          command: check licenses
-          arguments: --locked --config prime-agent/deny.toml
-          manifest-path: prime-agent/Cargo.toml
+        run: cargo deny --manifest-path prime-agent/Cargo.toml --locked --config prime-agent/deny.toml check licenses
 
       # pa-daemon's kernel suites (for example
       # goal_turn_end_loop_runs_to_completion) run the ipython tool against the
@@ -120,7 +137,8 @@ jobs:
 
 
   native:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -146,10 +164,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.pin.outputs.toolchain }}
+      - name: rust toolchain (runner image)
+        env:
+          PIN_TOOLCHAIN: ${{ steps.pin.outputs.toolchain }}
+        run: |
+          set -euo pipefail
+          echo "RUSTUP_TOOLCHAIN=$PIN_TOOLCHAIN" >> "$GITHUB_ENV"
+          case "$(RUSTUP_TOOLCHAIN="$PIN_TOOLCHAIN" rustc --version)" in
+            "rustc $PIN_TOOLCHAIN "*) ;;
+            *) echo "::error::Rust $PIN_TOOLCHAIN (the contract pin) is not in the omega-ci runner image; add it there (deploy/ci-runner-desktop/Dockerfile RUST_PARITY_VERSION)"; exit 1 ;;
+          esac
+          RUSTUP_TOOLCHAIN="$PIN_TOOLCHAIN" rustc --version
+          RUSTUP_TOOLCHAIN="$PIN_TOOLCHAIN" cargo --version
+          cargo deny --version
 
       - name: cargo cache
         uses: Swatinem/rust-cache@v2
@@ -161,9 +188,4 @@ jobs:
         run: cargo build --locked --manifest-path native/omega-prime-prime/Cargo.toml --target-dir prime-agent/target
 
       - name: native bridge license gate
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          rust-version: ${{ steps.pin.outputs.toolchain }}
-          command: check licenses
-          arguments: --locked --config deny.toml
-          manifest-path: native/omega-prime-prime/Cargo.toml
+        run: cargo deny --manifest-path native/omega-prime-prime/Cargo.toml --locked --config deny.toml check licenses

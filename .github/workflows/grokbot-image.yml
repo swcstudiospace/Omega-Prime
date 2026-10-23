@@ -20,6 +20,18 @@ name: grokbot-image
 # it. No protected publication environment currently exists, so the gate
 # refuses until one is explicitly configured (a separately authorized future
 # prerequisite); that refusal is the safe behavior, not a misconfiguration.
+#
+# Runner: both jobs run on the omega-ci pool ([self-hosted, linux, x64,
+# omega-ci], docs/ci-runners.md), never on GitHub-hosted runners. The pool has
+# no Docker daemon and no sudo, so the container engine is rootless podman
+# from the runner image: the "Container engine" step proves it can run (user
+# namespaces) and fails naming the reason if it cannot, then puts a `docker`
+# shim (exec podman) on PATH so the docker CLI calls below run unchanged.
+# Files owned by the image user (uid 10001) are handled with
+# `podman unshare`, which maps that uid inside the job's own user namespace,
+# instead of sudo. The SBOM and the vulnerability scan use the runner image's
+# pinned trivy binary on an exported archive (no Docker daemon to read from).
+# Fork pull requests never reach the pool.
 
 on:
   push:
@@ -65,7 +77,8 @@ concurrency:
 
 jobs:
   image:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 45
     env:
       IMAGE_TAG: omega-prime-mcp:ci
@@ -74,17 +87,29 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v4
+      - name: Container engine (rootless podman on the omega-ci pool)
+        run: |
+          set -euo pipefail
+          # Per-job runtime dir, so concurrent jobs of the shared job uid never
+          # share podman's sockets or locks.
+          runtime="$RUNNER_TEMP/podman-runtime"
+          mkdir -p "$runtime" && chmod 700 "$runtime"
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          export XDG_RUNTIME_DIR="$runtime"
+          podman --version
+          if ! out="$(podman unshare true 2>&1)"; then
+            echo "::error::rootless podman cannot enter a user namespace on this runner (the image needs one to build and run containers): $out"
+            exit 1
+          fi
+          podman info --format 'rootless={{.Host.Security.Rootless}} graph={{.Store.GraphDriverName}} cgroups={{.Host.CgroupsVersion}} network={{.Host.NetworkBackend}}'
+          mkdir -p "$RUNNER_TEMP/engine-bin"
+          printf '#!/bin/sh\nexec podman "$@"\n' > "$RUNNER_TEMP/engine-bin/docker"
+          chmod 0755 "$RUNNER_TEMP/engine-bin/docker"
+          echo "$RUNNER_TEMP/engine-bin" >> "$GITHUB_PATH"
 
       - name: Build image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          push: false
-          tags: omega-prime-mcp:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        # --format docker keeps the Dockerfile HEALTHCHECK (OCI images drop it).
+        run: podman build --format docker --pull=missing --tag "$IMAGE_TAG" --file Dockerfile .
 
       - name: Bind the checkout to the event commit
         run: |
@@ -107,12 +132,12 @@ jobs:
           # admin store into it without ever broadening temp-dir permissions.
           # The runner creates the directory and the call token while it still
           # owns them, then hands both to uid 10001; from then on the runner
-          # reaches them only through sudo.
+          # reaches them only through `podman unshare` (no sudo on the pool).
           mkdir -p "$RUNNER_TEMP/ci-creds"
           chmod 700 "$RUNNER_TEMP/ci-creds"
           openssl rand -hex 24 > "$RUNNER_TEMP/ci-creds/omega_prime_token"
           # The image runs as uid 10001; the host rejects group/world-readable token files.
-          sudo chown -R 10001:10001 "$RUNNER_TEMP/ci-creds"
+          podman unshare chown -R 10001:10001 "$RUNNER_TEMP/ci-creds"
       - name: Mint the owned admin token store
         run: |
           set -euo pipefail
@@ -127,14 +152,17 @@ jobs:
           docker run --rm --entrypoint python \
             -v "$RUNNER_TEMP/ci-creds:/credentials" \
             "$IMAGE_TAG" -c 'from pathlib import Path; from omega_prime.grokbot.tokens import create_token; from omega_prime.tooling.fs import atomic_write_text; plaintext, _record = create_token(Path("/credentials/omega_prime_tokens.json"), scopes=["admin"], label="ci-admin", ttl_days=1); atomic_write_text(Path("/credentials/omega_prime_admin_token"), plaintext + "\n")'
-          sudo chmod 700 "$RUNNER_TEMP/ci-creds"
+          podman unshare chmod 700 "$RUNNER_TEMP/ci-creds"
 
+      # The state tmpfs is chowned to the image user (uid 10001) with podman's
+      # `U` option; podman has no uid=/gid= tmpfs options. The runtime uid is
+      # observed as 10001 below.
       - name: Start the hardened SSE container
         run: |
           docker run -d --name "$SSE_CONTAINER" \
             --read-only \
             --tmpfs /tmp \
-            --tmpfs /var/lib/omega-prime:uid=10001,gid=10001,mode=0700 \
+            --tmpfs /var/lib/omega-prime:mode=0700,U \
             --cap-drop ALL \
             --security-opt no-new-privileges:true \
             -v "$RUNNER_TEMP/ci-creds/omega_prime_token:/run/secrets/omega_prime_token:ro" \
@@ -153,7 +181,7 @@ jobs:
           docker run -d --name "$HTTP_CONTAINER" \
             --read-only \
             --tmpfs /tmp \
-            --tmpfs /var/lib/omega-prime:uid=10001,gid=10001,mode=0700 \
+            --tmpfs /var/lib/omega-prime:mode=0700,U \
             --cap-drop ALL \
             --security-opt no-new-privileges:true \
             -v "$RUNNER_TEMP/ci-creds/omega_prime_token:/run/secrets/omega_prime_token:ro" \
@@ -173,6 +201,10 @@ jobs:
           for container in "$SSE_CONTAINER" "$HTTP_CONTAINER"; do
             status=""
             for _ in $(seq 1 60); do
+              # Rootless podman without systemd schedules no healthcheck timer,
+              # so run the image's own HEALTHCHECK command here; the status read
+              # below is what that check recorded.
+              docker healthcheck run "$container" >/dev/null 2>&1 || true
               running=$(docker inspect -f '{{.State.Running}}' "$container")
               status=$(docker inspect -f '{{.State.Health.Status}}' "$container")
               if [ "$status" = "healthy" ]; then
@@ -205,22 +237,23 @@ jobs:
               echo "root filesystem is not read-only" >&2
               exit 1
             fi
-            caps="$(docker inspect -f '{{json .HostConfig.CapDrop}}' "$container")"
-            case "$caps" in
-              *ALL*) ;;
-              *)
+            # Observed from the running process, not the engine's config
+            # echo: podman reports --cap-drop ALL as the expanded capability
+            # list, so read PID 1's effective/permitted/bounding sets and its
+            # no_new_privs flag from the kernel instead.
+            status="$(docker exec "$container" cat /proc/1/status)"
+            for set in CapEff CapPrm CapBnd; do
+              value="$(printf '%s\n' "$status" | awk -v k="$set:" '$1 == k { print $2 }')"
+              if [ "$value" != "0000000000000000" ]; then
                 echo "capabilities were not dropped" >&2
                 exit 1
-                ;;
-            esac
-            opts="$(docker inspect -f '{{json .HostConfig.SecurityOpt}}' "$container")"
-            case "$opts" in
-              *no-new-privileges*) ;;
-              *)
-                echo "no-new-privileges is not set" >&2
-                exit 1
-                ;;
-            esac
+              fi
+            done
+            nnp="$(printf '%s\n' "$status" | awk '$1 == "NoNewPrivs:" { print $2 }')"
+            if [ "$nnp" != "1" ]; then
+              echo "no-new-privileges is not set" >&2
+              exit 1
+            fi
           done
 
       - name: Verify the live host over SSE
@@ -337,9 +370,9 @@ jobs:
           creds = runner_temp / "ci-creds"
           for name in ("omega_prime_token", "omega_prime_admin_token"):
               # The credential directory belongs to uid 10001 (the image
-              # user), so the runner reads the values through sudo.
+              # user), so the runner reads the values through podman unshare.
               read = subprocess.run(
-                  ["sudo", "cat", str(creds / name)],
+                  ["podman", "unshare", "cat", str(creds / name)],
                   capture_output=True,
                   text=True,
               )
@@ -422,14 +455,15 @@ jobs:
             ${{ runner.temp }}/verify-http.exit
           if-no-files-found: warn
 
+      - name: Export the image for the SBOM and the scan
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/scan"
+          docker save "$IMAGE_TAG" -o "$RUNNER_TEMP/scan/omega-prime-mcp-ci.tar"
+
       - name: Generate the SBOM
         id: sbom
-        uses: anchore/sbom-action@v0.24.3
-        with:
-          image: omega-prime-mcp:ci
-          format: spdx-json
-          output-file: omega-prime-mcp.spdx.json
-          upload-artifact: false
+        run: trivy image --quiet --input "$RUNNER_TEMP/scan/omega-prime-mcp-ci.tar" --format spdx-json --output omega-prime-mcp.spdx.json
 
       - name: Upload the SBOM
         id: sbom_upload
@@ -441,15 +475,13 @@ jobs:
 
       - name: Scan the image
         id: scan
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: omega-prime-mcp:ci
-          # Vulnerabilities only. The secret scanner flags PyRIT's own red-team
-          # privacy datasets (sample text with masked keys) inside site-packages.
-          scanners: vuln
-          severity: CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
+        # Vulnerabilities only. The secret scanner flags PyRIT's own red-team
+        # privacy datasets (sample text with masked keys) inside site-packages.
+        run: |
+          set -euo pipefail
+          trivy image --input "$RUNNER_TEMP/scan/omega-prime-mcp-ci.tar" \
+            --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1
+          rm -f "$RUNNER_TEMP/scan/omega-prime-mcp-ci.tar"
 
       - name: Save the validated bytes
         id: save_bytes
@@ -554,7 +586,7 @@ jobs:
     name: Publish the validated image
     needs: [image]
     if: github.event_name == 'workflow_dispatch' && inputs.publish == true
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 20
     # The environment name alone authorizes nothing: GitHub auto-creates an
     # unprotected environment on first use, so the observation step below fails
@@ -577,6 +609,26 @@ jobs:
       image_id: ${{ steps.transfer.outputs.image_id }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Container engine (rootless podman on the omega-ci pool)
+        run: |
+          set -euo pipefail
+          # Per-job runtime dir, so concurrent jobs of the shared job uid never
+          # share podman's sockets or locks.
+          runtime="$RUNNER_TEMP/podman-runtime"
+          mkdir -p "$runtime" && chmod 700 "$runtime"
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          export XDG_RUNTIME_DIR="$runtime"
+          podman --version
+          if ! out="$(podman unshare true 2>&1)"; then
+            echo "::error::rootless podman cannot enter a user namespace on this runner (the image needs one to build and run containers): $out"
+            exit 1
+          fi
+          podman info --format 'rootless={{.Host.Security.Rootless}} graph={{.Store.GraphDriverName}} cgroups={{.Host.CgroupsVersion}} network={{.Host.NetworkBackend}}'
+          mkdir -p "$RUNNER_TEMP/engine-bin"
+          printf '#!/bin/sh\nexec podman "$@"\n' > "$RUNNER_TEMP/engine-bin/docker"
+          chmod 0755 "$RUNNER_TEMP/engine-bin/docker"
+          echo "$RUNNER_TEMP/engine-bin" >> "$GITHUB_PATH"
 
       - name: Bind the manual input to this ref
         env:

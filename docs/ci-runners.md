@@ -486,6 +486,20 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   `rust-toolchain.toml` that names `stable` (or an action that runs
   `rustup toolchain install`) needs a write to the read-only `RUSTUP_HOME`
   and fails. Pin `1.99.1`, or bump `RUST_VERSION` in the image.
+- **CPU budget versus visible CPUs.** Each runner is budgeted 2 vCPU but
+  sees every host CPU, and `RLIMIT_NPROC` counts all concurrent jobs of the
+  job uid. Tools that size their worker pools from the CPU count exhaust it
+  ("Cannot acquire required number of nodes", "can't spawn worker thread").
+  Cap them at the budget in the workflow: `DOTNET_PROCESSOR_COUNT: 2`
+  (MSBuild), `CARGO_BUILD_JOBS: "2"` (cargo), Next.js
+  `experimental.cpus` (task 00057).
+- **Omega-Prime's own container jobs (task 00057).** `grokbot-image` builds
+  and runs the tool-host image with rootless podman: its first step proves
+  the runner can enter a user namespace (`podman unshare true`) and fails
+  naming the reason if Railway does not grant one. `ci.yml`
+  `eventstream-it` still uses a `services:` Pulsar container and
+  `docker exec` with fixed host ports, so it cannot run on the pool until its
+  harness is rewritten for podman (per-job ports) or a Pulsar binary.
 - **`dotnet workload install`** needs a writable SDK directory. `maui-android`
   is pre-installed, so on this pool skip the step (the `maui` workload is
   macOS/Windows-only anyway).
