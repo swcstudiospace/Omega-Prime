@@ -27,8 +27,8 @@ name: grokbot-image
 # subordinate uid range (setuid newuidmap gets EPERM; CapEff is 0), but a
 # single-ID user namespace works. ci-podman-single-id.sh configures that
 # mapping, per-job storage with ignore_chown_errors, and `podman`/`docker`
-# shims. Those shims re-enter a private mount namespace first: vfs layer
-# apply remounts `/`, which this runner's mount namespace rejects. Containers
+# shims. vfs layer apply remounts `/`, which this pool rejects, so the shims
+# run podman under a seccomp notification that skips that one remount. Containers
 # are not published on host ports: the verifier
 # runs inside the container via `docker exec`. The single mapped uid is
 # presented as uid 10001 with --uidmap, so credential files stay owned by
@@ -44,6 +44,8 @@ on:
       - requirements-lock.txt
       - omega_prime/**
       - .github/workflows/grokbot-image.yml
+      - .github/workflows/ci-podman-single-id.sh
+      - .github/workflows/ci-podman-mount-notif.py
   pull_request:
     paths:
       - Dockerfile
@@ -51,6 +53,8 @@ on:
       - requirements-lock.txt
       - omega_prime/**
       - .github/workflows/grokbot-image.yml
+      - .github/workflows/ci-podman-single-id.sh
+      - .github/workflows/ci-podman-mount-notif.py
   workflow_dispatch:
     inputs:
       publish:

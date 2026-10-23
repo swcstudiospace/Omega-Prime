@@ -92,32 +92,34 @@ def test_engine_shim_enters_a_private_mount_namespace(tmp_path: Path) -> None:
         timeout=30,
     )
     text = dest.read_text(encoding="utf-8")
-    assert "unshare --mount --map-root-user --propagation private" in text
+    assert "OMEGA_CI_MOUNT_NOTIF" in text
     assert "/usr/bin/podman" in text
     subprocess.run(["sh", "-n", str(dest)], check=True, timeout=10)
+    helper = ROOT / ".github" / "workflows" / "ci-podman-mount-notif.py"
     probe = subprocess.run(
         [
-            "unshare",
-            "--mount",
-            "--map-root-user",
-            "--propagation",
-            "private",
-            "--",
+            sys.executable,
+            str(helper),
             sys.executable,
             "-c",
             "import ctypes, os\n"
             "libc = ctypes.CDLL(None, use_errno=True)\n"
             "libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p]\n"
+            "libc.mount.restype = ctypes.c_int\n"
             "rc = libc.mount(b'', b'/', None, 0x44000, None)\n"
             "if rc != 0:\n"
-            "    raise SystemExit(os.strerror(ctypes.get_errno()))\n",
+            "    raise SystemExit('remount ' + os.strerror(ctypes.get_errno()))\n"
+            "rc = libc.mount(b'tmpfs', b'/no/such/ci-podman-dir', b'tmpfs', 0, None)\n"
+            "if rc == 0:\n"
+            "    raise SystemExit('a missing mount point was allowed')\n",
         ],
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=15,
     )
-    if probe.returncode != 0:
-        pytest.skip(
-            "this kernel refused a private mount namespace: "
-            + (probe.stderr or probe.stdout).strip()
-        )
+    if (
+        probe.returncode != 0
+        and "seccomp user notification is unavailable" in probe.stderr
+    ):
+        pytest.skip(probe.stderr.strip())
+    assert probe.returncode == 0, probe.stderr + probe.stdout

@@ -14,11 +14,11 @@
 # because a single mapped uid cannot also be uid 10001 while the build is root.
 #
 # vfs layer apply remounts / with MS_REC|MS_PRIVATE (flags 0x44000). That
-# mount is EPERM in the runner's mount namespace ("/" is not shared, CapEff
-# is 0). A combined user+mount unshare is the unprivileged way to own a
-# mount namespace, so the podman and docker shims re-enter one per command.
-# GitHub kills a step's process tree, so a namespace holder cannot outlive
-# the step that started it.
+# mount is EPERM here: the root mount is locked and unshare cannot change
+# its propagation. The podman and docker shims run the real podman under a
+# seccomp user notification that answers success for that one remount and
+# lets every other mount run. "/" is already not a shared mount, so skipping
+# the remount does not publish mounts into the host namespace.
 #
 # `setup` is what the workflow runs. `install-shims DEST` only writes the two
 # shims (the unit test drives those directly).
@@ -65,19 +65,14 @@ install_shims() {
   write_idmap_shim "$shim_dir/newgidmap" g
 }
 
-# podman and docker both enter a private mount namespace, then exec the real
-# podman. Layer extraction remounts /; that only succeeds in a mount
-# namespace this process owns. OMEGA_CI_IN_USENS stops the shim recursing.
+# podman and docker both exec the real podman under the mount notification
+# helper. OMEGA_CI_MOUNT_NOTIF is the absolute path, exported by setup.
 write_engine_shim() {
   shim_path="$1"
   cat > "$shim_path" << 'EOF'
 #!/bin/sh
 set -eu
-if [ -z "${OMEGA_CI_IN_USENS:-}" ]; then
-  export OMEGA_CI_IN_USENS=1
-  exec unshare --mount --map-root-user --propagation private -- "$0" "$@"
-fi
-exec /usr/bin/podman "$@"
+exec python3 "$OMEGA_CI_MOUNT_NOTIF" /usr/bin/podman "$@"
 EOF
   chmod 0755 "$shim_path"
 }
@@ -176,6 +171,7 @@ setup() {
   write_containers_conf "${conf_dir}/containers.conf"
 
   # GITHUB_PATH entries are prepended, so this directory wins over /usr/bin.
+  helper=$(CDPATH= cd -- "$(dirname "$0")" && pwd)/ci-podman-mount-notif.py
   printf '%s\n' "$bin" >> "$GITHUB_PATH"
   {
     printf 'XDG_RUNTIME_DIR=%s\n' "$runtime"
@@ -183,12 +179,14 @@ setup() {
     printf 'CONTAINERS_CONF=%s\n' "${conf_dir}/containers.conf"
     printf 'BUILDAH_ISOLATION=chroot\n'
     printf 'OMEGA_CI_FAKECHOWN=%s\n' "${root}/ci-fakechown.so"
+    printf 'OMEGA_CI_MOUNT_NOTIF=%s\n' "$helper"
   } >> "$GITHUB_ENV"
 
   export XDG_RUNTIME_DIR="$runtime"
   export CONTAINERS_STORAGE_CONF="${conf_dir}/storage.conf"
   export CONTAINERS_CONF="${conf_dir}/containers.conf"
   export BUILDAH_ISOLATION=chroot
+  export OMEGA_CI_MOUNT_NOTIF="$helper"
   export PATH="${bin}:${PATH}"
 
   if ! podman info --format 'rootless={{.Host.Security.Rootless}} graph={{.Store.GraphDriverName}} cgroups={{.Host.CgroupsVersion}} network={{.Host.NetworkBackend}}'; then
