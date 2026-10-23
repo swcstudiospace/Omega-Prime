@@ -442,6 +442,8 @@ def _requires_encryption(request: PublishRequest) -> bool:
 
 #: Suffix appended to the broker producer name of encrypting producers.
 ENCRYPTED_PRODUCER_SUFFIX = "-encrypted"
+#: Escape suffix for plain logical names that already end in a reserved suffix.
+PLAIN_PRODUCER_SUFFIX = "-plain"
 
 
 def native_producer_name(producer_name: str, *, encrypt: bool) -> str:
@@ -450,10 +452,17 @@ def native_producer_name(producer_name: str, *, encrypt: bool) -> str:
     Encrypting and plaintext producers are distinct native resources, and
     retry/DLQ topics legitimately carry both auth-origin (encrypted) and plain
     traffic. Pulsar rejects a second live producer that reuses a name on the
-    same topic, so the encrypted one gets its own name. TypeScript parity:
+    same topic, so the mapping is injective over every (name, mode) pair:
+    encrypted names always end in ``-encrypted``; plain names keep their
+    logical name unless it already ends in ``-encrypted`` or ``-plain``, in
+    which case ``-plain`` is appended. TypeScript parity:
     ``nativeProducerName`` in packages/eventstream-ts/src/pulsar.ts.
     """
-    return f"{producer_name}{ENCRYPTED_PRODUCER_SUFFIX}" if encrypt else producer_name
+    if encrypt:
+        return f"{producer_name}{ENCRYPTED_PRODUCER_SUFFIX}"
+    if producer_name.endswith((ENCRYPTED_PRODUCER_SUFFIX, PLAIN_PRODUCER_SUFFIX)):
+        return f"{producer_name}{PLAIN_PRODUCER_SUFFIX}"
+    return producer_name
 
 
 def _crypto_reader(config: EventStreamConfig) -> Any:

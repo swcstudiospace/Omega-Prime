@@ -919,3 +919,67 @@ async def test_mixed_encryption_producers_get_distinct_broker_names(
     ]
     assert len({name for name in names}) == len(names)
     await bus.close()
+
+
+def test_native_producer_names_are_injective_over_name_and_mode() -> None:
+    """Greptile PR #86: encrypted ``worker`` and plain ``worker-encrypted``
+    both mapped to ``worker-encrypted`` and collided on one topic."""
+    from omega_prime.eventstream.adapters.pulsar import native_producer_name
+
+    stems = ["worker", "w", "-", ""]
+    tails = ["", "-encrypted", "-plain"]
+    logical = {
+        stem + a + b + c
+        for stem in stems
+        for a in tails
+        for b in tails
+        for c in tails
+        if stem + a + b + c
+    }
+    mapped = {
+        native_producer_name(name, encrypt=encrypt): (name, encrypt)
+        for name in logical
+        for encrypt in (False, True)
+    }
+    assert len(mapped) == 2 * len(logical)
+    assert native_producer_name("worker", encrypt=False) == "worker"
+    assert native_producer_name("worker", encrypt=True) == "worker-encrypted"
+    assert (
+        native_producer_name("worker-encrypted", encrypt=False)
+        == "worker-encrypted-plain"
+    )
+
+
+@pytest.mark.asyncio
+async def test_encrypted_and_suffixed_plain_publishers_do_not_collide(
+    tmp_path: Path,
+) -> None:
+    public = tmp_path / "auth-public.pem"
+    private = tmp_path / "auth-private.pem"
+    public.write_text("public-key", encoding="utf-8")
+    private.write_text("private-key", encoding="utf-8")
+    public.chmod(0o600)
+    private.chmod(0o600)
+    native = FakeClient()
+    bus = PulsarEventBus(
+        EventStreamConfig(encryption_key_file=public, private_key_file=private),
+        native_client=native,
+        acknowledged_watermark=lambda _topic, _name: 0,
+    )
+    topic = "persistent://omega/system/retry.escalator"
+    await bus.publish(
+        _request(
+            "worker",
+            topic=topic,
+            properties={
+                "omega_attempt": 1,
+                "omega_origin_topic": "persistent://omega/auth/session",
+            },
+        )
+    )
+    await bus.publish(
+        _request("worker-encrypted", topic=topic, properties={"omega_attempt": 1})
+    )
+    names = [options["producer_name"] for _topic, options in native.created]
+    assert names == ["worker-encrypted", "worker-encrypted-plain"]
+    await bus.close()

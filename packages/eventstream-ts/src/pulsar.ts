@@ -627,13 +627,32 @@ function isSystemRedeliveryTopic(topic: string): boolean {
  */
 /** Suffix appended to the broker producer name of encrypting producers. */
 export const ENCRYPTED_PRODUCER_SUFFIX = "-encrypted";
+/** Escape suffix for plain logical names that already end in a reserved suffix. */
+export const PLAIN_PRODUCER_SUFFIX = "-plain";
 
 /**
  * Broker-visible producer name for one (logical name, encryption mode) pair.
+ *
+ * The mapping is injective over every (name, mode) pair, so two distinct
+ * publishers never register the same broker name on one topic:
+ * encrypted names always end in `-encrypted`; plain names keep their logical
+ * name unless it already ends in `-encrypted` or `-plain`, in which case
+ * `-plain` is appended (so plain outputs never end in `-encrypted`, and the
+ * escaped ones are distinguishable from unescaped ones).
  * Python parity: omega_prime.eventstream.adapters.pulsar.native_producer_name.
  */
 export function nativeProducerName(producerName: string, encrypted: boolean): string {
-  return encrypted ? `${producerName}${ENCRYPTED_PRODUCER_SUFFIX}` : producerName;
+  if (encrypted) return `${producerName}${ENCRYPTED_PRODUCER_SUFFIX}`;
+  return producerName.endsWith(ENCRYPTED_PRODUCER_SUFFIX) || producerName.endsWith(PLAIN_PRODUCER_SUFFIX)
+    ? `${producerName}${PLAIN_PRODUCER_SUFFIX}`
+    : producerName;
+}
+
+type AuthDirection = "send" | "receive";
+
+/** Which side's authentication health a failed native operation reflects. */
+function authDirection(operation: string): AuthDirection {
+  return /^(?:publish|producer|poison)/.test(operation) ? "send" : "receive";
 }
 
 export function requiresAuthEncryption(
@@ -701,7 +720,11 @@ export class PulsarEventBus implements EventBus {
   readonly #producers = new Map<string, Promise<PulsarProducer>>();
   readonly #closers = new Set<() => Promise<void>>();
   #transportHealthy = true;
-  #authenticationHealthy = true;
+  // Send and receive authentication health are tracked separately: a public
+  // key that still encrypts says nothing about a private key that cannot
+  // decrypt, so a successful send must not hide broken reads (or vice versa).
+  #sendAuthenticationHealthy = true;
+  #receiveAuthenticationHealthy = true;
   #closed = false;
 
   constructor(options: PulsarEventBusOptions = {}) {
@@ -721,7 +744,7 @@ export class PulsarEventBus implements EventBus {
   }
 
   get healthy(): boolean {
-    return this.#transportHealthy && this.#authenticationHealthy;
+    return this.#transportHealthy && this.#sendAuthenticationHealthy && this.#receiveAuthenticationHealthy;
   }
 
   async publish(request: PublishRequest): Promise<PublishReceipt> {
@@ -754,9 +777,9 @@ export class PulsarEventBus implements EventBus {
       throw this.#normalizePulsarFailure(error, "publish");
     }
     this.#transportHealthy = true;
-    // A protected send that the broker accepted proves the key material is
-    // readable again, so a publisher-only bus leaves the unhealthy state.
-    if (encryption !== undefined) this.#authenticationHealthy = true;
+    // A protected send that the broker accepted proves the send-side key
+    // material works again; receive-side health only recovers on a read.
+    if (encryption !== undefined) this.#sendAuthenticationHealthy = true;
     return Object.freeze({
       topic: request.topic,
       eventId: request.event.id,
@@ -931,14 +954,14 @@ export class PulsarEventBus implements EventBus {
     // the payload is plaintext here. Undecryptable messages surface as an
     // authentication failure and stay unacknowledged for key refresh.
     if (message.encryption?.decryptionFailed === true) {
-      throw this.#authenticationFailure("auth-family payload decryption failed");
+      throw this.#authenticationFailure("auth-family payload decryption failed", "receive");
     }
     const event = this.#structuredJsonCodec.decode(message.data);
     if (requiresAuthEncryption(event.type, topic, message.properties ?? {})) {
       if (message.encryption?.encrypted !== true) {
-        throw this.#authenticationFailure("auth-family payload encryption policy was violated");
+        throw this.#authenticationFailure("auth-family payload encryption policy was violated", "receive");
       }
-      this.#authenticationHealthy = true;
+      this.#receiveAuthenticationHealthy = true;
     }
     return event;
   }
@@ -984,7 +1007,7 @@ export class PulsarEventBus implements EventBus {
       throw this.#normalizePulsarFailure(publishError, "poison dead-letter publish");
     }
     this.#transportHealthy = true;
-    if (encryption !== undefined) this.#authenticationHealthy = true;
+    if (encryption !== undefined) this.#sendAuthenticationHealthy = true;
   }
 
   /**
@@ -992,33 +1015,36 @@ export class PulsarEventBus implements EventBus {
    * operation, like the Python adapter's ``_crypto_reader``, and return the
    * paths the native client reads when it encrypts or decrypts.
    */
-  async #encryptionKeyPaths(): Promise<{ readonly publicKeyPath: string; readonly privateKeyPath: string }> {
+  async #encryptionKeyPaths(
+    direction: AuthDirection
+  ): Promise<{ readonly publicKeyPath: string; readonly privateKeyPath: string }> {
     const publicKeyPath = this.#config.encryptionKeyFile;
     const privateKeyPath = this.#config.privateKeyFile;
     if (publicKeyPath === undefined || privateKeyPath === undefined) {
-      throw this.#authenticationFailure("auth payload encryption keys are not configured");
+      throw this.#authenticationFailure("auth payload encryption keys are not configured", direction);
     }
     try {
       await this.#config.readSecret("encryptionKeyFile");
       await this.#config.readSecret("privateKeyFile");
     } catch {
-      throw this.#authenticationFailure("auth payload encryption keys are unavailable");
+      throw this.#authenticationFailure("auth payload encryption keys are unavailable", direction);
     }
     return { publicKeyPath, privateKeyPath };
   }
 
   async #producerEncryption(): Promise<PulsarProducerEncryption> {
-    const { publicKeyPath } = await this.#encryptionKeyPaths();
+    const { publicKeyPath } = await this.#encryptionKeyPaths("send");
     return Object.freeze({ keyName: AUTH_ENCRYPTION_KEY_NAME, publicKeyPath });
   }
 
   async #consumerDecryption(): Promise<PulsarConsumerDecryption> {
-    const { privateKeyPath } = await this.#encryptionKeyPaths();
+    const { privateKeyPath } = await this.#encryptionKeyPaths("receive");
     return Object.freeze({ privateKeyPath });
   }
 
-  #authenticationFailure(message: string): AuthenticationError {
-    this.#authenticationHealthy = false;
+  #authenticationFailure(message: string, direction: AuthDirection): AuthenticationError {
+    if (direction === "send") this.#sendAuthenticationHealthy = false;
+    else this.#receiveAuthenticationHealthy = false;
     const error = new AuthenticationError(message);
     try {
       this.#onAuthenticationFailure?.(error);
@@ -1030,7 +1056,7 @@ export class PulsarEventBus implements EventBus {
 
   #normalizePulsarFailure(error: unknown, operation: string): Error {
     if (error instanceof AuthenticationError || isAuthenticationFailure(error)) {
-      return this.#authenticationFailure(`Pulsar ${operation} authentication failed`);
+      return this.#authenticationFailure(`Pulsar ${operation} authentication failed`, authDirection(operation));
     }
     this.#transportHealthy = false;
     return new PulsarError(`Pulsar ${operation} failed: ${safeErrorMessage(error)}`);

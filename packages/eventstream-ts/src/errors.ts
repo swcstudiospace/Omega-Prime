@@ -66,12 +66,16 @@ export function safeErrorMessage(error: unknown): string {
 export const UNSPECIFIED_FAILURE_REASON = "unspecified failure";
 
 /**
- * Redacted, trimmed, nonempty failure reason bounded to 256 characters.
+ * Redacted, trimmed, nonempty failure reason bounded to 256 code points.
  *
  * Mirrors omega_prime.eventstream.retry._safe_reason: blocked-signal payloads
  * and failure-history rows require a nonempty `reason`, so `new Error()` or
  * `PermanentError("")` must still produce a publishable dead letter.
  */
 export function safeFailureReason(reason: unknown): string {
-  return (safeErrorMessage(reason).trim() || UNSPECIFIED_FAILURE_REASON).slice(0, 256);
+  const text = safeErrorMessage(reason).trim() || UNSPECIFIED_FAILURE_REASON;
+  // Bound by Unicode code points (Python `str[:256]` parity), never by UTF-16
+  // units, so an astral character such as an emoji is never split into a lone
+  // surrogate that Python cannot encode back to UTF-8.
+  return Array.from(text).slice(0, 256).join("");
 }

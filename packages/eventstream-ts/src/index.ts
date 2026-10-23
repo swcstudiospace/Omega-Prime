@@ -82,6 +82,7 @@ export {
   loadPulsarClient,
   nativeJsonMetadataForTopic,
   nativeProducerName,
+  PLAIN_PRODUCER_SUFFIX,
   PulsarEventBus,
   requiresAuthDecryption,
   requiresAuthEncryption,

@@ -1087,4 +1087,116 @@ describe("lazy Pulsar adapter", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("maps every (logical name, encryption mode) pair to a distinct broker producer name", async () => {
+    // Greptile PR #86: encrypted "worker" and plain "worker-encrypted" both
+    // became "worker-encrypted" and collided on one retry/DLQ topic.
+    const tails = ["", "-encrypted", "-plain"];
+    const logical = new Set<string>();
+    for (const stem of ["worker", "w", "-", ""]) {
+      for (const a of tails) for (const b of tails) for (const c of tails) {
+        const name = `${stem}${a}${b}${c}`;
+        if (name.length > 0) logical.add(name);
+      }
+    }
+    const mapped = new Set<string>();
+    for (const name of logical) {
+      mapped.add(nativeProducerName(name, false));
+      mapped.add(nativeProducerName(name, true));
+    }
+    expect(mapped.size).toBe(2 * logical.size);
+    expect(nativeProducerName("worker-encrypted", false)).toBe("worker-encrypted-plain");
+
+    const { directory, publicKeyPath, privateKeyPath } = await writeKeyPair();
+    try {
+      const live = new Set<string>();
+      const names: (string | undefined)[] = [];
+      const bus = new PulsarEventBus({
+        client: {
+          createProducer: async (topic, options) => {
+            const identity = `${topic}\0${String(options.producerName)}`;
+            if (live.has(identity)) throw new Error("Producer with this name is already connected to topic");
+            live.add(identity);
+            names.push(options.producerName);
+            return { send: async () => ({}), close: async () => undefined };
+          },
+          subscribe: async () => {
+            throw new Error("not used");
+          },
+          createReader: async () => {
+            throw new Error("not used");
+          },
+          close: async () => undefined
+        },
+        config: new EventStreamConfig({
+          serviceUrl: "pulsar://127.0.0.1:26650",
+          encryptionKeyFile: publicKeyPath,
+          privateKeyFile: privateKeyPath
+        })
+      });
+      const topic = "persistent://omega/system/retry.escalator";
+      await bus.publish(
+        new PublishRequest({
+          event: makeEvent(),
+          topic,
+          key: "repo#3",
+          producerName: "worker",
+          properties: { omega_origin_topic: "persistent://omega/auth/session" }
+        })
+      );
+      await bus.publish(new PublishRequest({ event: makeEvent(), topic, key: "repo#3", producerName: "worker-encrypted" }));
+      expect(names).toEqual(["worker-encrypted", "worker-encrypted-plain"]);
+      await bus.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let a successful send hide broken auth reads", async () => {
+    // Greptile PR #86: a wrong private key stops reads while the public key
+    // still encrypts; a send must not report the bus healthy again.
+    const { directory, publicKeyPath, privateKeyPath } = await writeKeyPair();
+    try {
+      const authEvent = makeEvent("omega.auth.session.login_started");
+      let decryptionFailed = true;
+      const bus = new PulsarEventBus({
+        client: {
+          createProducer: async () => ({ send: async () => ({}), close: async () => undefined }),
+          subscribe: async () => ({
+            receive: async () => ({
+              data: authEvent.toBytes(),
+              messageId: "auth-message",
+              encryption: { encrypted: true, decryptionFailed }
+            }),
+            acknowledge: async () => undefined,
+            negativeAcknowledge: () => undefined,
+            close: async () => undefined
+          }),
+          createReader: async () => {
+            throw new Error("not used");
+          },
+          close: async () => undefined
+        },
+        config: new EventStreamConfig({
+          serviceUrl: "pulsar://127.0.0.1:26650",
+          encryptionKeyFile: publicKeyPath,
+          privateKeyFile: privateKeyPath
+        })
+      });
+      const subscriber = await bus.subscribe("persistent://omega/auth/session", {
+        subscriptionName: "auth-worker",
+        mode: "Shared"
+      });
+      await expect(subscriber.receive()).rejects.toThrow(AuthenticationError);
+      expect(bus.healthy).toBe(false);
+      await bus.publish(new PublishRequest({ event: authEvent, topic: "persistent://omega/auth/session", key: "box:gh" }));
+      expect(bus.healthy).toBe(false);
+      decryptionFailed = false;
+      expect((await subscriber.receive())?.event.id).toBe(authEvent.id);
+      expect(bus.healthy).toBe(true);
+      await bus.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
