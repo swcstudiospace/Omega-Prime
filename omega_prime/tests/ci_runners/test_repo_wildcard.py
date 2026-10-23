@@ -11,6 +11,7 @@ or partial globs, the public subset check understands wildcards, and an
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import subprocess
@@ -34,7 +35,7 @@ from omega_prime.ci_runners.settings import (
 
 from ._fakes import resp
 from ._rig import ORG, Rig, job, routes
-from .test_forkguard import offer, refusals, run_body, scenario
+from .test_forkguard import gated, offer, refusals, run_body, scenario, until
 from .test_settings import agent_env, base_env
 
 ORG_ALL = "swcstudiospace/*"
@@ -478,6 +479,38 @@ def test_retained_legacy_row_is_cleared_once_the_job_moves_on(tmp_path: Path) ->
         rig, offer(job("completed", repo=OTHER, job_id=1, runner_name="elsewhere"))
     )
     assert json.loads(path.read_text())["jobs"] == []
+    assert JIT_PATH not in http.paths()
+
+
+@pytest.mark.parametrize("later", ["in_progress", "completed"])
+def test_legacy_row_that_moves_on_during_a_failed_lookup_is_not_retained(
+    tmp_path: Path, later: str
+) -> None:
+    path = tmp_path / "demand.json"
+    _legacy_demand(path)
+    http = routes()
+    http.on("GET", _job_path(), resp(200, {"status": "queued"}))
+    gate, answer = gated(resp(500))
+    http.on("GET", _run_path(OTHER), answer)
+    rig = _wall_rig(http, path, repos=(ORG_ALL,))
+
+    async def main() -> None:
+        await rig.ctrl.start()
+        try:
+            await until(lambda: _run_path(OTHER) in http.paths())
+            # The job starts or finishes while the fork lookup is in flight.
+            assert rig.ctrl.offer_job(
+                job(later, repo=OTHER, job_id=1, runner_name="elsewhere")
+            )
+            gate.set()
+            await rig.ctrl.settle()
+        finally:
+            gate.set()
+            await rig.ctrl.stop()
+
+    asyncio.run(main())
+    assert json.loads(path.read_text())["jobs"] == []
+    assert rig.scaler.queued == {} and rig.scaler.runners == {}
     assert JIT_PATH not in http.paths()
 
 

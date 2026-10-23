@@ -456,7 +456,10 @@ class Controller:
             # Persisted with the rest of the accepted demand, never scaled: a
             # webhook redelivery (which carries ``repository.fork``) or the
             # next restart can still serve it; in_progress / completed clear it.
-            self._accepted.setdefault(job.job_id, job)
+            # One that already moved on during the lookup is not re-added:
+            # nothing would clear it again before the next restart.
+            if job.job_id not in self._advanced:
+                self._accepted.setdefault(job.job_id, job)
         dropped: dict[str, int] = {}
         for _, verdict in results:
             if verdict not in ("queued", "retained"):
