@@ -731,9 +731,7 @@ class RedteamClient:
 
     def white_report(self) -> dict[str, Any]:
         """White findings-to-evidence report-readiness audit. Read-only."""
-        return self._get(
-            "/api/teams/white/report-audit", tool="tempest_white_report"
-        )
+        return self._get("/api/teams/white/report-audit", tool="tempest_white_report")
 
     def hats_list(self) -> dict[str, Any]:
         """Specialist hats and parent teams, projected live from tool grants."""
@@ -896,22 +894,26 @@ def register_redteam_tools(
         "tempest_blue_gaps": lambda: _wrap(client.blue_gaps),
         "tempest_blue_rules": lambda: _wrap(client.blue_rules),
         "tempest_blue_hardening": lambda: _wrap(client.blue_hardening),
-        "tempest_blue_coverage": lambda runId=None, missionId=None, family=None, artifactIds=None, artifactBytes=None, findings=None, telemetry=None: _wrap(
-            client.blue_coverage,
-            runId=runId,
-            missionId=missionId,
-            family=family,
-            artifactIds=artifactIds,
-            artifactBytes=artifactBytes,
-            findings=findings,
-            telemetry=telemetry,
+        "tempest_blue_coverage": lambda runId=None, missionId=None, family=None, artifactIds=None, artifactBytes=None, findings=None, telemetry=None: (
+            _wrap(
+                client.blue_coverage,
+                runId=runId,
+                missionId=missionId,
+                family=family,
+                artifactIds=artifactIds,
+                artifactBytes=artifactBytes,
+                findings=findings,
+                telemetry=telemetry,
+            )
         ),
-        "tempest_black_workflow": lambda actions=None, paths=None, egress=None, requestKind=None: _wrap(
-            client.black_workflow,
-            actions=actions,
-            paths=paths,
-            egress=egress,
-            requestKind=requestKind,
+        "tempest_black_workflow": lambda actions=None, paths=None, egress=None, requestKind=None: (
+            _wrap(
+                client.black_workflow,
+                actions=actions,
+                paths=paths,
+                egress=egress,
+                requestKind=requestKind,
+            )
         ),
         "tempest_white_stage": lambda roeText=None, actions=None, meta=None: _wrap(
             client.white_stage, roeText=roeText, actions=actions, meta=meta
