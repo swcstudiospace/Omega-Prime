@@ -41,14 +41,19 @@ trap forward TERM INT
 
 # reap PID: wait until PID has really exited and set $status to its exit
 # status. A trapped signal interrupts `wait` (status > 128) while the child
-# still runs, so wait again for as long as the process exists.
+# may still run, so wait again while it exists. If it exited during the
+# interruption the shell has already collected it; one more `wait` returns
+# that saved status (127 means there was nothing left to collect).
 reap() {
-    status=0
-    wait "$1" || status=$?
-    while kill -0 "$1" 2>/dev/null; do
+    while :; do
         status=0
         wait "$1" || status=$?
+        [ "$status" -gt 128 ] || return 0
+        kill -0 "$1" 2>/dev/null || break
     done
+    saved=0
+    wait "$1" 2>/dev/null || saved=$?
+    if [ "$saved" -ne 127 ]; then status=$saved; fi
 }
 
 env -u PASSWORD PYTHONPATH="$OMEGA_CI_SITE" \

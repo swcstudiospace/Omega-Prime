@@ -174,6 +174,19 @@ def test_repeated_sigterm_does_not_cut_the_agent_drain_short(tmp_path: Path) -> 
         assert (out / "agent.drained").read_text().strip() == "drained"
 
 
+def test_upstream_status_on_sigterm_is_kept_not_the_signal(tmp_path: Path) -> None:
+    """Upstream exiting 3 on SIGTERM must surface as 3, never the trap's 143."""
+    tail = TRAPPING_UPSTREAM.replace("exit 143", "exit 3")
+    for i in range(5):  # the exit races the interrupted wait; try a few times
+        run = tmp_path / f"r{i}"
+        run.mkdir()
+        env, upstream = _setup(run, tail=tail)
+        with _wrapper([str(upstream)], env) as proc:
+            _wait_for(run / "upstream.trapped")
+            os.kill(proc.pid, signal.SIGTERM)
+            assert proc.wait(timeout=10) == 3
+
+
 def test_upstream_exit_stops_agent_and_keeps_upstream_status(tmp_path: Path) -> None:
     env, upstream = _setup(tmp_path, tail="exit 3", agent_tail=DRAINING_AGENT)
     out = tmp_path / "out"
