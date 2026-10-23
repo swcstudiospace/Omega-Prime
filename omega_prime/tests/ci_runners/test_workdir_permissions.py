@@ -182,11 +182,13 @@ def test_diag_tail_never_blocks_on_a_fifo_swapped_in_after_the_listing(
     log_file.write_text("hello\n")
     real_open = os.open
 
-    def swap_then_open(path: str, flags: int, *a: object) -> int:
+    def swap_then_open(
+        path: str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
         if path == str(log_file):
             os.remove(log_file)
             os.mkfifo(log_file)  # no writer: a blocking open never returns
-        return real_open(path, flags, *a)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(sup.os, "open", swap_then_open)
     result: list[list[str]] = []
