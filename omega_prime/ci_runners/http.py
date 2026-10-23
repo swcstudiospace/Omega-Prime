@@ -8,6 +8,7 @@ transport errors keep only the exception type name.
 from __future__ import annotations
 
 import asyncio
+import http.client
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
@@ -37,7 +38,7 @@ class HttpResponse:
 
 
 class TransportError(Exception):
-    """No HTTP response (connect failure, timeout, TLS). Secret-free."""
+    """No usable HTTP response (connect, timeout, TLS, truncated body). Secret-free."""
 
 
 Transport = Callable[[HttpRequest], HttpResponse]
@@ -48,7 +49,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
+def build_opener(*extra: urllib.request.BaseHandler) -> urllib.request.OpenerDirector:
+    """The transport's opener: redirects refused, plus optional extra handlers."""
+    return urllib.request.build_opener(_NoRedirect, *extra)
+
+
+_OPENER = build_opener()
 
 
 def _lower(headers: Message | Mapping[str, str] | None) -> dict[str, str]:
@@ -73,9 +79,17 @@ def urllib_transport(request: HttpRequest) -> HttpResponse:
                 resp.status, _lower(resp.headers), resp.read(MAX_RESPONSE_BYTES)
             )
     except urllib.error.HTTPError as exc:
-        body = exc.read(MAX_RESPONSE_BYTES) if exc.fp is not None else b""
+        try:
+            body = exc.read(MAX_RESPONSE_BYTES) if exc.fp is not None else b""
+        except (http.client.HTTPException, OSError, ValueError) as read_exc:
+            raise TransportError(type(read_exc).__name__) from None
         return HttpResponse(exc.code, _lower(exc.headers), body)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (
+        urllib.error.URLError,
+        http.client.HTTPException,  # IncompleteRead, BadStatusLine, ...
+        OSError,
+        ValueError,
+    ) as exc:
         raise TransportError(type(exc).__name__) from None
 
 
@@ -90,6 +104,7 @@ __all__ = [
     "HttpResponse",
     "Transport",
     "TransportError",
+    "build_opener",
     "send",
     "urllib_transport",
 ]

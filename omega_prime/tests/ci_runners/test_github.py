@@ -27,16 +27,20 @@ from omega_prime.ci_runners.github import (
 from omega_prime.ci_runners.http import HttpResponse, TransportError
 from omega_prime.ci_runners.settings import (
     DEFAULT_LABELS,
+    GITHUB_AUDIENCE,
     AppAuth,
     ControllerSettings,
     SecretFile,
 )
+from omega_prime.tests.ci_runners._secrets import placeholder, write_secret
 
 from ._fakes import FakeHttp, StaticToken, resp
 from ._support import FakeClock
 
 ORG = "/orgs/acme/actions/runners"
-JIT = "ZW5jb2RlZC1qaXQtY29uZmlnLXRlc3Q="
+JIT = placeholder("jit-config")
+PAT = placeholder("pat")
+INSTALLATION_TOKEN = placeholder("installation-token")
 
 
 def client(http: FakeHttp, clock: FakeClock, **kw: Any) -> GitHubClient:
@@ -65,7 +69,8 @@ def run(coro: Any) -> Any:
 
 def test_org_jit_request_shape(clock: FakeClock) -> None:
     http = FakeHttp().on("POST", f"{ORG}/generate-jitconfig", jit_reply())
-    jit = run(client(http, clock).generate_jit("omega-ci-101-abcd"))
+    auth = StaticToken()
+    jit = run(client(http, clock, auth=auth).generate_jit("omega-ci-101-abcd"))
     assert jit.runner_id == 42 and jit.encoded == JIT and JIT not in repr(jit)
     [body] = http.bodies(f"{ORG}/generate-jitconfig")
     assert body == {
@@ -75,7 +80,7 @@ def test_org_jit_request_shape(clock: FakeClock) -> None:
         "work_folder": "_work",
     }
     headers = http.calls[0].headers
-    assert headers["Authorization"] == "Bearer ghs_test_installation_token_000"
+    assert headers["Authorization"] == f"Bearer {auth.value}"
     assert headers["X-GitHub-Api-Version"] == "2022-11-28"
 
 
@@ -232,17 +237,23 @@ def test_delete_only_when_idle(clock: FakeClock) -> None:
 
 
 def test_pat_source(tmp_path: Path) -> None:
-    (tmp_path / "pat").write_text("ghp_test_pat_value\n")
-    source = PatTokenSource(SecretFile("OMEGA_CI_GITHUB_PAT_FILE", tmp_path / "pat"))
+    write_secret(tmp_path / "pat", PAT)
+    source = PatTokenSource(
+        SecretFile("OMEGA_CI_GITHUB_PAT_FILE", tmp_path / "pat", GITHUB_AUDIENCE)
+    )
     assert source.secrets() == ()
-    assert run(source.token()) == "ghp_test_pat_value"
-    assert source.secrets() == ("ghp_test_pat_value",)
+    assert run(source.token()) == PAT
+    assert source.secrets() == (PAT,)
 
 
 def _app(tmp_path: Path) -> AppAuth:
-    (tmp_path / "key.pem").write_text("-----BEGIN FAKE KEY-----\n")
+    write_secret(tmp_path / "key.pem", "-----BEGIN FAKE KEY-----")
     return AppAuth(
-        123, 456, SecretFile("OMEGA_CI_GITHUB_APP_KEY_FILE", tmp_path / "key.pem")
+        123,
+        456,
+        SecretFile(
+            "OMEGA_CI_GITHUB_APP_KEY_FILE", tmp_path / "key.pem", GITHUB_AUDIENCE
+        ),
     )
 
 
@@ -250,7 +261,7 @@ TOKEN_PATH = "/app/installations/456/access_tokens"
 
 
 def _token_reply(expires: str = "2026-10-23T01:00:00Z") -> HttpResponse:
-    return resp(201, {"token": "ghs_installation_token_test", "expires_at": expires})
+    return resp(201, {"token": INSTALLATION_TOKEN, "expires_at": expires})
 
 
 def test_app_token_single_flight_and_refresh_margin(tmp_path: Path) -> None:
@@ -264,7 +275,7 @@ def test_app_token_single_flight_and_refresh_margin(tmp_path: Path) -> None:
     async def burst() -> list[str]:
         return await asyncio.gather(*(source.token() for _ in range(8)))
 
-    assert set(run(burst())) == {"ghs_installation_token_test"}
+    assert set(run(burst())) == {INSTALLATION_TOKEN}
     assert source.refreshes == 1
     jwt = http.calls[0].headers["Authorization"].removeprefix("Bearer ")
     assert jwt.count(".") == 2 and jwt in source.secrets()
@@ -373,3 +384,26 @@ def test_import_does_not_load_optional_packages() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     assert out.stdout.strip() == "False"
+
+
+def test_app_token_connection_failure_is_a_github_error(tmp_path: Path) -> None:
+    http = FakeHttp().on("POST", TOKEN_PATH, TransportError("URLError"))
+    source = AppTokenSource(_app(tmp_path), http, signer=lambda k, d: b"sig")
+    with pytest.raises(GitHubError) as info:
+        run(source.token())
+    assert info.value.code == "transport_URLError" and info.value.status is None
+
+
+@pytest.mark.parametrize("make_source", ["app", "pat"])
+def test_unreadable_credentials_are_github_auth_errors(
+    tmp_path: Path, make_source: str
+) -> None:
+    missing = SecretFile("OMEGA_CI_X_FILE", tmp_path / "absent", GITHUB_AUDIENCE)
+    source: Any = (
+        AppTokenSource(AppAuth(1, 2, missing), FakeHttp(), signer=lambda k, d: b"s")
+        if make_source == "app"
+        else PatTokenSource(missing)
+    )
+    with pytest.raises(GitHubAuthError) as info:
+        run(source.token())
+    assert info.value.code == "credential_unreadable"

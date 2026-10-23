@@ -118,6 +118,8 @@ class RunnerState(enum.Enum):
     STARTING = "starting"  # reserved; JIT minted / launch in flight
     IDLE = "idle"  # agent accepted; waiting for a job
     BUSY = "busy"  # GitHub assigned a job
+    FINISHING = "finishing"  # job completed; agent slot held until the exit
+    REAPING = "reaping"  # cleanup in flight; still tracked until its outcome
 
 
 @dataclass
@@ -173,6 +175,30 @@ class IdleDeadline:
 
 
 @dataclass(frozen=True)
+class RetryDeadline:
+    """One-shot launch-backoff expiry. ``generation`` is the arm nonce."""
+
+    name: str
+    generation: str
+
+
+class ReapOutcome(enum.Enum):
+    DONE = "done"  # registration gone (or never needed) and the agent stopped
+    GITHUB_FAILED = "github_failed"  # GitHub delete errored; nothing changed
+    BUSY = "busy"  # GitHub says the runner took a job; it was kept
+    AGENT_FAILED = "agent_failed"  # registration gone but the agent stop failed
+
+
+@dataclass(frozen=True)
+class ReapFinished:
+    """The controller's report of one Reap decision's outcome."""
+
+    name: str
+    generation: str
+    outcome: ReapOutcome
+
+
+@dataclass(frozen=True)
 class ObservedRunner:
     """A pool runner as GitHub lists it (startup reconcile / idle guard)."""
 
@@ -196,6 +222,7 @@ class AgentRunner:
 class ControllerStarted:
     github: tuple[ObservedRunner, ...] = ()
     agent: tuple[AgentRunner, ...] = ()
+    queued: tuple[WorkflowJob, ...] = ()  # accepted demand persisted pre-restart
 
 
 InputEvent = (
@@ -204,6 +231,8 @@ InputEvent = (
     | LaunchFailed
     | RunnerExited
     | IdleDeadline
+    | RetryDeadline
+    | ReapFinished
     | ControllerStarted
 )
 
@@ -240,7 +269,16 @@ class CancelIdle:
     generation: str
 
 
-Decision = Launch | Reap | ScheduleIdle | CancelIdle
+@dataclass(frozen=True)
+class ScheduleRetry:
+    """Arm the one-shot launch-backoff deadline."""
+
+    name: str
+    generation: str
+    delay_s: float
+
+
+Decision = Launch | Reap | ScheduleIdle | CancelIdle | ScheduleRetry
 
 
 @dataclass(frozen=True)
@@ -267,10 +305,14 @@ __all__ = [
     "ObservedRunner",
     "PayloadError",
     "Reap",
+    "ReapFinished",
+    "ReapOutcome",
+    "RetryDeadline",
     "Runner",
     "RunnerExited",
     "RunnerState",
     "ScheduleIdle",
+    "ScheduleRetry",
     "WorkflowJob",
     "is_pool_runner",
     "matches",

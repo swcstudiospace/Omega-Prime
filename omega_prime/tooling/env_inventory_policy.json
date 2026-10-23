@@ -252,6 +252,7 @@
     "OMEGA_CI_DESKTOP_TOKEN_FILE": "Names a protected file containing the bearer token shared with the Desktop runner agent.",
     "OMEGA_CI_PUBLISHER": "Selects the CI autoscaler event publisher (jsonl, null or eventstream).",
     "OMEGA_CI_EVENTS_PATH": "Overrides the JSONL file the CI autoscaler appends redacted events to.",
+    "OMEGA_CI_DEMAND_PATH": "Overrides the JSON file where the CI autoscaler persists queued jobs so a restart replays them.",
     "OMEGA_CI_AGENT_TOKEN": "Supplies the Desktop runner agent bearer token as a Railway variable.",
     "OMEGA_CI_AGENT_TOKEN_FILE": "Names a protected file containing the Desktop runner agent bearer token.",
     "OMEGA_CI_AGENT_MAX_RUNNERS": "Caps concurrent runner processes on the Desktop runner agent.",
@@ -379,13 +380,13 @@
     "omega_prime/ci_runners/settings.py:_secret_file": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "72e0626ae0d1247136c1f16b3adda730b0317385d415c34c39c00974a155978e",
+      "source_sha256": "9992cffd300f20e4da1e69d8d21245f23efeb3d6e489e20ca176d93f69dbfda8",
       "suffixes": []
     },
     "omega_prime/ci_runners/settings.py:_required_secret_file": {
       "name_arg": 1,
       "env_arg": 0,
-      "source_sha256": "cf4aa9696a61b5d0b31159b731a04e02775b28589d18b8fbc539b7141255ff05",
+      "source_sha256": "2965c836c0f6822f6b51a394d0a99563da9ad1aaa3ba4b175bf713c4b1db21ab",
       "suffixes": []
     }
   },

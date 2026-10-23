@@ -10,13 +10,15 @@ from pathlib import Path
 
 import pytest
 
+from omega_prime.tests.ci_runners._secrets import placeholder
+
 WRAPPER = (
     Path(__file__).resolve().parents[3]
     / "deploy"
     / "ci-runner-desktop"
     / "entrypoint.sh"
 )
-PASSWORD = "desktop-password-1234567890"
+PASSWORD = placeholder("desktop-password")
 
 FAKE_PYTHON = """#!/bin/sh
 printf '%s\\n' "$@" > '{out}/agent.argv'

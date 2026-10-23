@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from omega_prime.ci_runners.agent.supervisor import Supervisor
+from omega_prime.tests.ci_runners._secrets import placeholder
 
-JIT = "ZmFrZS1qaXQtY29uZmlnLWZvci10ZXN0cw=="
-AGENT_TOKEN = "agent-bearer-token-for-tests-0000000000"
+JIT = placeholder("jit-config")
+AGENT_TOKEN = placeholder("agent-token")
 
 REPORT = """#!/bin/sh
 d='{report}'
@@ -67,7 +68,7 @@ def supervisor(tmp: Path, root: Path, exits: Exits, **kw: Any) -> Supervisor:
             "LANG": "C.UTF-8",
             "PASSWORD": "desktop-password-1234567890",
             "OMEGA_CI_AGENT_TOKEN": AGENT_TOKEN,
-            "GITHUB_TOKEN": "ghp_should_never_reach_jobs",
+            "GITHUB_TOKEN": placeholder("ambient-github-token"),
         },
     )
     return Supervisor(

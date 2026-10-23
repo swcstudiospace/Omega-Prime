@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,8 +17,9 @@ from omega_prime.ci_runners.settings import (
     SettingsError,
     parse_labels,
 )
+from omega_prime.tests.ci_runners._secrets import placeholder
 
-TOKEN = "agent-token-0123456789abcdef-0123456789"
+TOKEN = placeholder("agent-token")
 
 
 def base_env(tmp_path: Path, **extra: str) -> dict[str, str]:
@@ -44,6 +46,7 @@ def test_controller_app_defaults(tmp_path: Path) -> None:
     assert s.idle_grace_s == 180.0 and s.runner_group_id == 7
     assert s.desktop_url == "https://desktop.example.test"
     assert s.publisher == "jsonl" and s.events_path.name == "events.jsonl"
+    assert s.demand_path.name == "demand.json"
 
 
 def test_org_scope_requires_numeric_group_id(tmp_path: Path) -> None:
@@ -114,7 +117,11 @@ def test_pat_only_when_app_absent(tmp_path: Path) -> None:
 
 
 def test_ambient_tokens_are_ignored(tmp_path: Path) -> None:
-    env = base_env(tmp_path, GH_TOKEN="ghp_ambient", GITHUB_TOKEN="ghs_ambient")
+    env = base_env(
+        tmp_path,
+        GH_TOKEN=placeholder("ambient-gh"),
+        GITHUB_TOKEN=placeholder("ambient-github"),
+    )
     for key in (
         "OMEGA_CI_GITHUB_APP_ID",
         "OMEGA_CI_GITHUB_INSTALLATION_ID",
@@ -128,7 +135,8 @@ def test_ambient_tokens_are_ignored(tmp_path: Path) -> None:
 def test_secret_file_reads_and_never_reprs_value(tmp_path: Path) -> None:
     path = tmp_path / "s"
     path.write_text("  super-secret-value \n")
-    ref = SecretFile("X_FILE", path)
+    path.chmod(0o600)
+    ref = SecretFile("X_FILE", path, "https://api.github.com")
     assert ref.read() == "super-secret-value"
     assert "super-secret" not in repr(ref)
     s = ControllerSettings.from_env(
@@ -138,15 +146,77 @@ def test_secret_file_reads_and_never_reprs_value(tmp_path: Path) -> None:
 
 
 def test_secret_file_errors_name_variable_only(tmp_path: Path) -> None:
+    aud = "https://api.github.com"
     with pytest.raises(SettingsError, match="X_FILE: secret file unreadable"):
-        SecretFile("X_FILE", tmp_path / "missing").read()
+        SecretFile("X_FILE", tmp_path / "missing", aud).read()
     (tmp_path / "empty").write_text("\n")
+    (tmp_path / "empty").chmod(0o600)
     with pytest.raises(SettingsError, match="empty"):
-        SecretFile("X_FILE", tmp_path / "empty").read()
+        SecretFile("X_FILE", tmp_path / "empty", aud).read()
+    shared = tmp_path / "shared"
+    shared.write_text(TOKEN)
+    shared.chmod(0o640)  # group-readable: the broker's file rule refuses it
+    with pytest.raises(SettingsError, match=r"X_FILE: .*mode 0600") as info:
+        SecretFile("X_FILE", shared, aud).read()
+    assert TOKEN not in str(info.value) and str(shared) not in str(info.value)
+
+
+def test_secret_reads_go_through_the_credential_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each read is one broker lookup for the secret's own audience host, with
+    a filtered environment that holds only that secret's *_FILE path."""
+    from omega_prime.credentials import broker as broker_mod
+
+    seen: list[tuple[str, dict[str, str], str, tuple[str, ...]]] = []
+    real = broker_mod.CredentialBroker.key_for
+
+    def spy(self: Any, provider: Any, url: str) -> str:
+        seen.append((url, dict(self._env), provider.name, tuple(provider.env_vars)))
+        assert self._policy.allows_host("api.github.com")
+        assert not self._policy.allows_host("evil.example.test")
+        return real(self, provider, url)
+
+    monkeypatch.setattr(broker_mod.CredentialBroker, "key_for", spy)
+    path = tmp_path / "pat"
+    path.write_text(TOKEN)
+    path.chmod(0o600)
+    ref = SecretFile("OMEGA_CI_GITHUB_PAT_FILE", path, "https://api.github.com")
+    assert ref.read() == TOKEN
+    assert seen == [
+        (
+            "https://api.github.com",
+            {"OMEGA_CI_GITHUB_PAT_FILE": str(path)},
+            "OMEGA_CI_GITHUB_PAT_FILE",
+            ("OMEGA_CI_GITHUB_PAT",),
+        )
+    ]
+    value = SecretValue("OMEGA_CI_AGENT_TOKEN", TOKEN, "https://api.github.com")
+    assert value.read() == TOKEN
+    assert seen[-1][1] == {"OMEGA_CI_AGENT_TOKEN": TOKEN}
+
+
+def test_secret_without_an_audience_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "s"
+    path.write_text(TOKEN)
+    path.chmod(0o600)
+    with pytest.raises(SettingsError, match="X_FILE"):
+        SecretFile("X_FILE", path, "").read()
+    with pytest.raises(SettingsError, match="OMEGA_CI_AGENT_TOKEN"):
+        SecretValue("OMEGA_CI_AGENT_TOKEN", TOKEN, "").read()
+
+
+def test_settings_bind_each_secret_to_its_audience(tmp_path: Path) -> None:
+    s = ControllerSettings.from_env(base_env(tmp_path))
+    assert s.webhook_secret_file.audience == "https://github.com"
+    assert s.desktop_token_file.audience == s.desktop_url
+    assert s.app is not None and s.app.key_file.audience == "https://api.github.com"
+    agent = AgentSettings.from_env(agent_env())
+    assert agent.token.audience == agent.controller_url
 
 
 def test_secret_value_repr_redacted() -> None:
-    value = SecretValue("OMEGA_CI_AGENT_TOKEN", TOKEN)
+    value = SecretValue("OMEGA_CI_AGENT_TOKEN", TOKEN, "https://ctl.example.test")
     assert value.read() == TOKEN and TOKEN not in repr(value)
 
 

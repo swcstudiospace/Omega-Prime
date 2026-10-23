@@ -17,6 +17,7 @@ from omega_prime.ci_runners.app import (
 from omega_prime.ci_runners.http import HttpRequest, HttpResponse
 from omega_prime.ci_runners.jobs import RunnerState
 from omega_prime.ci_runners.settings import MAX_BODY_BYTES, ControllerSettings
+from omega_prime.tests.ci_runners._secrets import placeholder, write_secret
 
 from ._fakes import FakeHttp, ListPublisher, resp
 from ._rig import JIT, ORG, TOKEN, Rig, routes
@@ -250,9 +251,9 @@ def _env(tmp_path: Path) -> dict[str, str]:
     for name, value in (
         ("hook", "file-webhook-secret"),
         ("desk", TOKEN),
-        ("pat", "ghp_x"),
+        ("pat", placeholder("pat")),
     ):
-        (tmp_path / name).write_text(value + "\n")
+        write_secret(tmp_path / name, value)
     return {
         "OMEGA_CI_ORG": "acme",
         "OMEGA_CI_RUNNER_GROUP_ID": "7",
@@ -289,3 +290,46 @@ def test_build_controller_app_default_publisher(tmp_path: Path) -> None:
     }
     app = build_controller_app(ControllerSettings.from_env(env), transport=FakeHttp())
     assert callable(app)
+
+
+def test_non_ascii_signature_is_401_not_500() -> None:
+    """Raw UTF-8 bytes in the header arrive latin-1 decoded (non-ASCII str)."""
+    rig = Rig(routes())
+    app = make(rig)
+    body = encode(job_payload())
+    headers = [
+        (k, v) for k, v in signed_headers(body) if k.lower() != "x-hub-signature-256"
+    ]
+
+    async def main() -> None:
+        for bad in ("sha256=\u00e9", "sha256=" + "\u00e9" * 64):
+            response = await asgi_call(
+                app,
+                "POST",
+                "/github/webhook",
+                body=body,
+                headers=[*headers, ("X-Hub-Signature-256", bad)],
+            )
+            assert response.status == 401
+
+    asyncio.run(main())
+
+
+def test_injected_empty_dedupe_cache_is_used() -> None:
+    from omega_prime.ci_runners.webhook import DeliveryLRU
+
+    rig = Rig(routes())
+    cache = DeliveryLRU(size=4)
+    assert len(cache) == 0  # empty, hence falsy: the old `or` dropped it
+    app = create_app(
+        rig.ctrl, webhook_secret=WEBHOOK_SECRET, agent_token=TOKEN, dedupe=cache
+    )
+
+    async def main() -> None:
+        await rig.ctrl.start()
+        await rig.ctrl.settle()
+        assert (await hook(app, delivery="d-shared")).status == 202
+        await rig.ctrl.stop()
+
+    asyncio.run(main())
+    assert cache.seen("d-shared")

@@ -4,6 +4,13 @@ Secrets are referenced by file path only (``*_FILE``); the single exception is
 the Railway-only ``OMEGA_CI_AGENT_TOKEN`` variable on the agent. Secret values
 are read on demand, never stored in a repr, and never logged.
 
+Every read resolves through :class:`omega_prime.credentials.CredentialBroker`
+(the repository's one credential path): each secret carries the audience URL
+it is presented to, the broker's policy approves only that host, and the
+broker sees a filtered environment holding just that secret's ``*_FILE`` path
+(or the Railway variable). The broker's file rule applies: a regular,
+non-empty file with mode 0600 (no group/other bits), owned by the service.
+
 Auth selection is explicit and fail-closed: a complete GitHub App
 configuration selects App auth; a wholly absent App configuration plus
 ``OMEGA_CI_GITHUB_PAT_FILE`` selects PAT; a partial App configuration is an
@@ -30,6 +37,7 @@ MAX_BODY_BYTES = 1 << 20
 RUNNER_PREFIX = "omega-ci-"
 RUNNER_NAME_RE = re.compile(r"^omega-ci-[a-z0-9-]{1,48}$")
 DEFAULT_EVENTS_PATH = Path("~/.omega/ci-runners/events.jsonl")
+DEFAULT_DEMAND_PATH = Path("~/.omega/ci-runners/demand.json")
 DEFAULT_AGENT_RUNNER_ROOT = Path("/opt/actions-runner")
 DEFAULT_AGENT_WORK_ROOT = Path("/config/ci-runners")
 
@@ -47,23 +55,57 @@ class SettingsError(ValueError):
     """A setting is missing or invalid. Messages name variables, never values."""
 
 
+GITHUB_AUDIENCE = "https://api.github.com"
+WEBHOOK_AUDIENCE = "https://github.com"  # GitHub signs deliveries with it
+
+
+class _AudiencePolicy:
+    """Broker policy whose only approved host is the secret's audience."""
+
+    def __init__(self, host: str) -> None:
+        self._host = host
+
+    def allows_host(self, host: str) -> bool:
+        return bool(self._host) and host == self._host
+
+
+@dataclass(frozen=True)
+class _Credential:
+    """Provider-shaped shim: the one env var the broker may resolve."""
+
+    name: str
+    env_vars: tuple[str, ...]
+    requires_key: bool = True
+
+
+def _broker_read(env_name: str, var: str, env: Mapping[str, str], audience: str) -> str:
+    from omega_prime.credentials.broker import CredentialBroker
+    from omega_prime.providers.base import ProviderError
+
+    host = (urlsplit(audience).hostname or "").lower()
+    broker = CredentialBroker(_AudiencePolicy(host), env)
+    try:
+        return broker.key_for(_Credential(env_name, (var,)), audience)
+    except ProviderError:
+        # The broker's message names variables only; ours does too.
+        raise SettingsError(
+            f"{env_name}: secret file unreadable, empty or not mode 0600"
+        ) from None
+
+
 @dataclass(frozen=True)
 class SecretFile:
-    """Reference to a file that holds one secret. The value is read on demand."""
+    """Reference to a file that holds one secret. The value is read on demand,
+    through the credential broker, for the one ``audience`` it is sent to."""
 
     env_name: str
     path: Path
+    audience: str
 
     def read(self) -> str:
-        try:
-            value = self.path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise SettingsError(
-                f"{self.env_name}: secret file unreadable ({type(exc).__name__})"
-            ) from None
-        if not value:
-            raise SettingsError(f"{self.env_name}: secret file is empty")
-        return value
+        var = self.env_name.removesuffix("_FILE")
+        env = {f"{var}_FILE": str(self.path)}  # *_FILE only: never a raw value
+        return _broker_read(self.env_name, var, env, self.audience)
 
     def __repr__(self) -> str:
         return f"SecretFile({self.env_name}, path={str(self.path)!r})"
@@ -75,9 +117,11 @@ class SecretValue:
 
     env_name: str
     _value: str = field(repr=False)
+    audience: str = ""
 
     def read(self) -> str:
-        return self._value
+        env = {self.env_name: self._value}
+        return _broker_read(self.env_name, self.env_name, env, self.audience)
 
     def __repr__(self) -> str:
         return f"SecretValue({self.env_name}, <redacted>)"
@@ -139,13 +183,15 @@ def _float(
     return value
 
 
-def _secret_file(env: Mapping[str, str], name: str) -> SecretFile | None:
+def _secret_file(env: Mapping[str, str], name: str, audience: str) -> SecretFile | None:
     raw = _get(env, name)
-    return SecretFile(name, Path(raw).expanduser()) if raw else None
+    return SecretFile(name, Path(raw).expanduser(), audience) if raw else None
 
 
-def _required_secret_file(env: Mapping[str, str], name: str) -> SecretFile:
-    ref = _secret_file(env, name)
+def _required_secret_file(
+    env: Mapping[str, str], name: str, audience: str
+) -> SecretFile:
+    ref = _secret_file(env, name, audience)
     if ref is None:
         raise SettingsError(f"{name}: required (path to a secret file)")
     return ref
@@ -213,6 +259,7 @@ class ControllerSettings:
     desktop_token_file: SecretFile
     publisher: Literal["jsonl", "null", "eventstream"]
     events_path: Path
+    demand_path: Path = DEFAULT_DEMAND_PATH
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> ControllerSettings:
@@ -257,7 +304,9 @@ class ControllerSettings:
         desktop_url = _get(env, "OMEGA_CI_DESKTOP_URL")
         if not desktop_url:
             raise SettingsError("OMEGA_CI_DESKTOP_URL: required https:// agent URL")
+        desktop = _url(desktop_url, "OMEGA_CI_DESKTOP_URL", https=True)
         events = _get(env, "OMEGA_CI_EVENTS_PATH")
+        demand = _get(env, "OMEGA_CI_DEMAND_PATH")
         return cls(
             scope=scope,
             org=org,
@@ -277,16 +326,19 @@ class ControllerSettings:
             app=app,
             pat_file=pat,
             webhook_secret_file=_required_secret_file(
-                env, "OMEGA_CI_WEBHOOK_SECRET_FILE"
+                env, "OMEGA_CI_WEBHOOK_SECRET_FILE", WEBHOOK_AUDIENCE
             ),
-            desktop_url=_url(desktop_url, "OMEGA_CI_DESKTOP_URL", https=True),
+            desktop_url=desktop,
             desktop_token_file=_required_secret_file(
-                env, "OMEGA_CI_DESKTOP_TOKEN_FILE"
+                env, "OMEGA_CI_DESKTOP_TOKEN_FILE", desktop
             ),
             publisher=publisher,  # type: ignore[arg-type]
             events_path=Path(events).expanduser()
             if events
             else DEFAULT_EVENTS_PATH.expanduser(),
+            demand_path=Path(demand).expanduser()
+            if demand
+            else DEFAULT_DEMAND_PATH.expanduser(),
         )
 
 
@@ -294,7 +346,7 @@ def _select_auth(
     env: Mapping[str, str],
 ) -> tuple[AuthMode, AppAuth | None, SecretFile | None]:
     present = [name for name in _APP_KEYS if _get(env, name)]
-    pat = _secret_file(env, "OMEGA_CI_GITHUB_PAT_FILE")
+    pat = _secret_file(env, "OMEGA_CI_GITHUB_PAT_FILE", GITHUB_AUDIENCE)
     if present and len(present) != len(_APP_KEYS):
         missing = ", ".join(n for n in _APP_KEYS if n not in present)
         raise SettingsError(f"partial GitHub App configuration; missing {missing}")
@@ -307,7 +359,9 @@ def _select_auth(
         app_id = _int(env, "OMEGA_CI_GITHUB_APP_ID", None, low=1)
         inst = _int(env, "OMEGA_CI_GITHUB_INSTALLATION_ID", None, low=1)
         assert app_id is not None and inst is not None
-        key = _required_secret_file(env, "OMEGA_CI_GITHUB_APP_KEY_FILE")
+        key = _required_secret_file(
+            env, "OMEGA_CI_GITHUB_APP_KEY_FILE", GITHUB_AUDIENCE
+        )
         return AuthMode.APP, AppAuth(app_id, inst, key), None
     if pat is not None:
         return AuthMode.PAT, None, pat
@@ -332,7 +386,9 @@ class AgentSettings:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> AgentSettings:
-        token_file = _secret_file(env, "OMEGA_CI_AGENT_TOKEN_FILE")
+        # The agent token is presented to the controller (exit callbacks).
+        audience = _get(env, "OMEGA_CI_CONTROLLER_URL") or ""
+        token_file = _secret_file(env, "OMEGA_CI_AGENT_TOKEN_FILE", audience)
         token_raw = env.get("OMEGA_CI_AGENT_TOKEN", "").strip()
         token: SecretFile | SecretValue
         if token_file is not None and token_raw:
@@ -344,7 +400,7 @@ class AgentSettings:
         elif token_raw:
             if len(token_raw) < 32:
                 raise SettingsError("OMEGA_CI_AGENT_TOKEN: at least 32 characters")
-            token = SecretValue("OMEGA_CI_AGENT_TOKEN", token_raw)
+            token = SecretValue("OMEGA_CI_AGENT_TOKEN", token_raw, audience)
         else:
             raise SettingsError(
                 "OMEGA_CI_AGENT_TOKEN_FILE (or Railway OMEGA_CI_AGENT_TOKEN) required"
@@ -382,14 +438,17 @@ class AgentSettings:
 
 
 __all__ = [
+    "DEFAULT_DEMAND_PATH",
     "DEFAULT_IDLE_GRACE_S",
     "DEFAULT_LABELS",
     "DEFAULT_MAX_RUNNERS",
     "DEFAULT_WAKE_BUDGET_S",
+    "GITHUB_AUDIENCE",
     "HARD_MAX_RUNNERS",
     "MAX_BODY_BYTES",
     "RUNNER_NAME_RE",
     "RUNNER_PREFIX",
+    "WEBHOOK_AUDIENCE",
     "AgentSettings",
     "AppAuth",
     "AuthMode",

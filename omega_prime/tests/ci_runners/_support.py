@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from omega_prime.ci_runners.webhook import sign
+from omega_prime.tests.ci_runners._secrets import placeholder
 
-WEBHOOK_SECRET = b"test-webhook-secret-not-real"
+WEBHOOK_SECRET = placeholder("webhook-secret").encode()
 ASGIApp = Callable[..., Awaitable[None]]
 
 

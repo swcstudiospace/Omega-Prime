@@ -134,8 +134,14 @@ class DesktopClient:
                 method, path, body, min(REQUEST_TIMEOUT_S, remaining)
             )
             try:
-                response = await send(self._transport, request)
-            except TransportError:
+                # The socket timeout alone is per-operation (connect, each
+                # read), so a trickling peer could outlive the budget; the
+                # wait_for makes ``deadline`` a hard overall bound. A request
+                # still running in its worker thread is abandoned, not awaited.
+                response = await asyncio.wait_for(
+                    send(self._transport, request), timeout=remaining
+                )
+            except (TransportError, TimeoutError):
                 response = None
             if response is not None and response.status not in RETRYABLE:
                 return response, attempts, self._clock() - start

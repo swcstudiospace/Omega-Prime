@@ -37,6 +37,7 @@ from omega_prime.ci_runners.settings import (
     AuthMode,
     ControllerSettings,
     SecretFile,
+    SettingsError,
 )
 
 API = "https://api.github.com"
@@ -141,7 +142,10 @@ class PatTokenSource:
 
     async def token(self) -> str:
         if self._value is None:
-            self._value = self._file.read()
+            try:
+                self._value = self._file.read()
+            except SettingsError:
+                raise GitHubAuthError("pat", None, "credential_unreadable") from None
         return self._value
 
     def secrets(self) -> tuple[str, ...]:
@@ -191,19 +195,27 @@ class AppTokenSource:
         )
 
     async def _refresh(self) -> None:
-        key = self._app.key_file.read().encode()
+        try:
+            key = self._app.key_file.read().encode()
+        except SettingsError:
+            raise GitHubAuthError(
+                "installation_token", None, "credential_unreadable"
+            ) from None
         self._jwt = app_jwt(self._app.app_id, key, self._wall(), self._signer)
         path = f"/app/installations/{self._app.installation_id}/access_tokens"
-        response = await send(
-            self._transport,
-            HttpRequest(
-                "POST",
-                self._api + path,
-                _headers(self._jwt),
-                b"{}",
-                REQUEST_TIMEOUT_S,
-            ),
-        )
+        try:
+            response = await send(
+                self._transport,
+                HttpRequest(
+                    "POST",
+                    self._api + path,
+                    _headers(self._jwt),
+                    b"{}",
+                    REQUEST_TIMEOUT_S,
+                ),
+            )
+        except TransportError as exc:
+            raise GitHubError("installation_token", None, f"transport_{exc}") from None
         if response.status != 201:
             cls = GitHubAuthError if response.status in (401, 403, 404) else GitHubError
             raise cls("installation_token", response.status)

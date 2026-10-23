@@ -9,13 +9,14 @@ import pytest
 from omega_prime.ci_runners.delayed import (
     DEADLINE_TYPE,
     AsyncioDelayedEvents,
+    Deadline,
     PulsarDelayedEvents,
 )
 from omega_prime.ci_runners.jobs import IdleDeadline
 
 
 def test_asyncio_fires_once_and_cancels() -> None:
-    fired: list[IdleDeadline] = []
+    fired: list[Deadline] = []
 
     async def scenario() -> None:
         delayed = AsyncioDelayedEvents(fired.append)
@@ -34,7 +35,7 @@ def test_asyncio_fires_once_and_cancels() -> None:
 
 
 def test_asyncio_reschedule_replaces_and_cancel_all() -> None:
-    fired: list[IdleDeadline] = []
+    fired: list[Deadline] = []
 
     async def scenario() -> None:
         loop = asyncio.get_running_loop()
@@ -69,7 +70,7 @@ def test_schedule_validation(name, gen, delay, event) -> None:  # type: ignore[n
 
 def test_pulsar_delivery_gating() -> None:
     sent: list[tuple[dict[str, str], float]] = []
-    fired: list[IdleDeadline] = []
+    fired: list[Deadline] = []
     delayed = PulsarDelayedEvents(lambda p, d: sent.append((dict(p), d)), fired.append)
     delayed.schedule("n", "g1", 30, IdleDeadline("n", "g1"))
     handle = delayed.schedule("m", "g2", 30, IdleDeadline("m", "g2"))
@@ -85,3 +86,26 @@ def test_pulsar_delivery_gating() -> None:
     delayed.schedule("x", "g", 1, IdleDeadline("x", "g"))
     delayed.cancel_all()
     assert delayed.pending() == 0
+
+
+def test_retry_deadlines_round_trip_through_both_backends() -> None:
+    from omega_prime.ci_runners.delayed import RETRY_DEADLINE_TYPE
+    from omega_prime.ci_runners.jobs import RetryDeadline
+
+    fired: list[object] = []
+    sent: list[tuple[dict[str, str], float]] = []
+    pulsar = PulsarDelayedEvents(lambda p, d: sent.append((dict(p), d)), fired.append)
+    pulsar.schedule("retry", "a1", 15.0, RetryDeadline("retry", "a1"))
+    assert sent == [
+        ({"type": RETRY_DEADLINE_TYPE, "name": "retry", "generation": "a1"}, 15.0)
+    ]
+    assert pulsar.on_delivery(sent[0][0])
+    assert fired == [RetryDeadline("retry", "a1")]
+
+    async def scenario() -> None:
+        delayed = AsyncioDelayedEvents(fired.append)
+        delayed.schedule("retry", "a2", 0.01, RetryDeadline("retry", "a2"))
+        await asyncio.sleep(0.05)  # test-only wait; production code never sleeps
+
+    asyncio.run(scenario())
+    assert fired[-1] == RetryDeadline("retry", "a2")

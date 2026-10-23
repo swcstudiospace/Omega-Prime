@@ -88,6 +88,14 @@ def test_verify_delivery_happy_path() -> None:
     ("body", "headers", "status", "reason"),
     [
         (b"{}", {"x-hub-signature-256": "sha256=00"}, 401, "bad_signature"),
+        (b"{}", {"x-hub-signature-256": "sha256=\u00e9"}, 401, "bad_signature"),
+        (
+            b"{}",
+            {"x-hub-signature-256": "sha256=" + "\u00e9" * 64},
+            401,
+            "bad_signature",
+        ),
+        (b"{}", {"x-hub-signature-256": "sha256=" + "G" * 64}, 401, "bad_signature"),
         (b"{}", {"x-github-delivery": ""}, 400, "bad_delivery_id"),
         (b"{}", {"x-github-delivery": "d" * 129}, 400, "bad_delivery_id"),
         (b"{}", {"x-github-event": "push"}, 202, "event_ignored"),

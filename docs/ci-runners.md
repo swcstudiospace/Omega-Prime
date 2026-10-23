@@ -79,6 +79,10 @@ event for an old reservation can never act on a new one.
 
 All settings are validated by `omega_prime/ci_runners/settings.py`; nothing
 else defines configuration. Secrets are referenced **by file path** (`*_FILE`).
+Every secret is read through the `omega_prime.credentials` broker, bound to
+the one host it is sent to (GitHub API, the webhook origin, the desktop or
+controller URL). The file must be a non-empty regular file with mode 0600;
+errors name the variable, never the path contents.
 The single exception is `OMEGA_CI_AGENT_TOKEN`, a Railway service variable on
 the agent. Secret values are never logged, put in a repr, or placed on argv.
 
@@ -105,6 +109,7 @@ the agent. Secret values are never logged, put in a repr, or placed on argv.
 | `OMEGA_CI_DESKTOP_TOKEN_FILE` | — | Path to the agent bearer token. Required. |
 | `OMEGA_CI_PUBLISHER` | `jsonl` | `jsonl`, `null` or `eventstream`. |
 | `OMEGA_CI_EVENTS_PATH` | `~/.omega/ci-runners/events.jsonl` | JSONL event log. |
+| `OMEGA_CI_DEMAND_PATH` | `~/.omega/ci-runners/demand.json` | Queued-job backlog replayed after a restart (non-secret fields, mode 0600, entries older than 24 h dropped). |
 
 Auth selection fails closed. A complete App configuration selects App mode. No
 App settings plus a PAT file selects PAT mode. A partial App configuration, or
@@ -175,7 +180,7 @@ its workdir is removed, the agent sends exactly one exit callback.
 ## Events
 
 CloudEvents with source `omega-prime/ci-runners`:
-`omega.ci.runner.{demand,launch_requested,launched,busy,idle,reaped,exited,error}`
+`omega.ci.runner.{demand,launch_requested,launched,busy,idle,finished,reaped,exited,error,launch_backoff,launch_retry,launch_circuit_open,launch_circuit_closed}`
 and `omega.ci.desktop.{wake_requested,woke}`. The default publisher appends to
 `OMEGA_CI_EVENTS_PATH`; `eventstream` publishes to the event stream once it is
 available.
@@ -201,8 +206,11 @@ the default cap is 8 (hard ceiling 10). Railway usage pricing:
 |---|---|
 | Desktop asleep | First launch POST wakes it; retried within 150 s. |
 | Wake budget exhausted | The controller asks the agent inventory: present → launched, confirmed absent → rolled back, unknown → kept (never deleted blindly). Look for `omega.ci.runner.error`. |
-| Agent full (429) | The job stays queued; the next `completed` event re-evaluates. |
-| Controller restart | One-shot reconcile of GitHub runners and agent inventory. A partial snapshot never reaps. |
+| Agent full (429) | Capacity hold: the job stays queued and a retry deadline re-evaluates after 240 s, or sooner when a runner is released. Not counted as a failure. |
+| Launch rejected or ambiguous | Exponential backoff (15 s, 30 s, 60 s, 120 s, capped at 240 s) via a retry deadline; new demand does not bypass it. After 5 consecutive failures the circuit opens (`launch_circuit_open`) until a runner registers or is assigned (`launch_circuit_closed`). |
+| Runner exits before taking a job | Counted as a launch failure (`exited_before_job`) and backed off as above. |
+| Job completed, runner never exits | The runner moves to FINISHING with a grace deadline, then is reaped from the agent. A failed agent stop keeps it FINISHING and re-arms; a failed GitHub delete keeps it IDLE and re-arms; a runner found busy stays BUSY. |
+| Controller restart | One-shot reconcile of GitHub runners and agent inventory (a partial snapshot never reaps), then queued jobs are replayed from `OMEGA_CI_DEMAND_PATH`. |
 | Agent missing settings | Agent exits with a one-line error; the desktop still starts. |
 | Emergency stop | `POST /v1/drain` on the agent (no new runners); revert `runs-on` (see rollback). |
 
@@ -219,6 +227,15 @@ python -m pytest omega_prime/tests/ci_runners/test_app.py omega_prime/tests/ci_r
 
 The full package suite is `python -m pytest omega_prime/tests/ci_runners -q`.
 This is a rehearsal only; it is not live validation.
+
+## Verification
+
+The Greptile round-1 fixes on PR #87 are backed by
+`.receipts/bot-00-omega-prime/00050-pr87-greptile-r1.json`: the new tests
+failing on the pre-fix source, then ruff, mypy, polyglot-check, the package
+suite, scaler coverage (99%, gate 90%), the docs and inventory checks, and a
+full-suite comparison against the base commit. Its `unverified` list names
+what was not exercised (no live GitHub, Railway or VPS run).
 
 ## Held operations (D-120-10)
 

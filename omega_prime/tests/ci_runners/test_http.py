@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import http.client as httplib
 import io
 import threading
 import urllib.error
+import urllib.request
+import urllib.response
 from email.message import Message
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import pytest
 
@@ -71,34 +74,75 @@ def test_urllib_success_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
         urllib_transport(HttpRequest("GET", "https://x.test/", timeout=0))
 
 
-def test_redirects_are_returned_not_followed() -> None:
-    """A 302 (which could bounce the bearer token elsewhere) is surfaced as-is."""
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class _Scripted302(urllib.request.BaseHandler):
+    """Answers every https request with a 302 in-process (no socket)."""
 
-    hits: list[str] = []
+    handler_order = 100  # ahead of the stock HTTPSHandler
 
-    class Redirect(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            hits.append(self.path)
-            self.send_response(302)
-            self.send_header("Location", "/elsewhere")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+    def __init__(self) -> None:
+        self.hits: list[str] = []
 
-        def log_message(self, format: str, *args: Any) -> None:
-            return
+    def https_open(self, req: urllib.request.Request) -> urllib.response.addinfourl:
+        self.hits.append(req.selector)
+        hdrs = Message()
+        hdrs["Location"] = "https://elsewhere.test/steal"
+        hdrs["Content-Length"] = "0"
+        resp = urllib.response.addinfourl(io.BytesIO(b""), hdrs, req.full_url, 302)
+        # urllib's processors read ``.msg`` (the reason phrase) off responses.
+        setattr(resp, "msg", "Found")  # noqa: B010 - not in addinfourl's stubs
+        return resp
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        url = f"http://127.0.0.1:{server.server_address[1]}/start"
-        response = urllib_transport(HttpRequest("GET", url, timeout=5))
-    finally:
-        server.shutdown()
-        server.server_close()
-    assert response.status == 302 and response.header("location") == "/elsewhere"
-    assert hits == ["/start"]
+
+def test_redirects_are_returned_not_followed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 302 (which could bounce the bearer token elsewhere) is surfaced as-is.
+
+    The scripted handler sits inside the production opener, so urllib's real
+    redirect processing runs; following it would record a second hit.
+    """
+    scripted = _Scripted302()
+    monkeypatch.setattr(http, "_OPENER", http.build_opener(scripted))
+    response = urllib_transport(
+        HttpRequest("GET", "https://x.test/start", {"Authorization": "Bearer t"})
+    )
+    assert response.status == 302
+    assert response.header("location") == "https://elsewhere.test/steal"
+    assert scripted.hits == ["/start"]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httplib.IncompleteRead(b"partial", 10),
+        httplib.BadStatusLine("garbage"),
+        httplib.RemoteDisconnected("closed"),
+    ],
+)
+def test_broken_responses_become_transport_errors(
+    monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    class _Truncated(_Resp):
+        def read(self, *_: object) -> bytes:
+            raise exc
+
+    monkeypatch.setattr(http._OPENER, "open", lambda req, timeout: _Truncated(b""))
+    with pytest.raises(TransportError) as info:
+        urllib_transport(HttpRequest("GET", "https://x.test/"))
+    assert str(info.value) == type(exc).__name__ and info.value.__cause__ is None
+
+
+def test_truncated_error_body_becomes_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Body(io.BytesIO):
+        def read(self, *_: object) -> bytes:
+            raise httplib.IncompleteRead(b"", 5)
+
+    def http_error(req, timeout):  # type: ignore[no-untyped-def]
+        raise urllib.error.HTTPError(req.full_url, 500, "x", Message(), _Body())
+
+    monkeypatch.setattr(http._OPENER, "open", http_error)
+    with pytest.raises(TransportError, match="IncompleteRead"):
+        urllib_transport(HttpRequest("GET", "https://x.test/"))
 
 
 def test_send_runs_off_the_event_loop_thread() -> None:

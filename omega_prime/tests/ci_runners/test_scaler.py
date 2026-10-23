@@ -18,13 +18,26 @@ from omega_prime.ci_runners.jobs import (
     LaunchSucceeded,
     ObservedRunner,
     Reap,
+    ReapFinished,
+    ReapOutcome,
+    RetryDeadline,
     RunnerExited,
     RunnerState,
     ScheduleIdle,
+    ScheduleRetry,
+    WorkflowJob,
     parse_workflow_job,
 )
 from omega_prime.ci_runners.publisher import CloudEvent, JsonlPublisher
-from omega_prime.ci_runners.scaler import JOB_MEMORY, Scaler, Step
+from omega_prime.ci_runners.scaler import (
+    JOB_MEMORY,
+    MAX_CONSECUTIVE_FAILURES,
+    RETRY_BASE_S,
+    RETRY_CAP_S,
+    RETRY_KEY,
+    Scaler,
+    Step,
+)
 from omega_prime.ci_runners.settings import DEFAULT_LABELS
 from omega_prime.ci_runners.webhook import verify_delivery
 
@@ -124,9 +137,14 @@ def test_full_lifecycle_idle_reap(ids: Ids) -> None:
     busy = scaler.handle(job("in_progress", runner_name=launch.name, runner_id=77))
     assert kinds(busy) == ["busy"]
     done = scaler.handle(job("completed", runner_name=launch.name, runner_id=77))
-    assert "exited" in kinds(done) and launch.name not in scaler.runners
-    # The process callback after a completed job is a harmless no-op.
-    assert scaler.handle(RunnerExited(launch.name, launch.generation, 0)) == Step()
+    # The job is done but the agent slot is not free until the process exits.
+    assert "finished" in kinds(done)
+    assert scaler.runners[launch.name].state is RunnerState.FINISHING
+    [arm] = [d for d in done.decisions if isinstance(d, ScheduleIdle)]
+    exited = scaler.handle(RunnerExited(launch.name, launch.generation, 0))
+    assert kinds(exited) == ["exited"] and launch.name not in scaler.runners
+    assert CancelIdle(launch.name, arm.generation) in exited.decisions
+    assert scaler.failures == 0 and scaler.hold is None
 
 
 def test_idle_arm_fire_reaps_once(ids: Ids) -> None:
@@ -174,18 +192,24 @@ def test_rejected_launch_releases_and_rolls_back(ids: Ids) -> None:
         LaunchFailed(launch.name, launch.generation, "agent_400", runner_id=9)
     )
     assert launch.name not in scaler.runners and scaler.hold == "failure"
-    assert step.decisions == (
+    assert [d for d in step.decisions if isinstance(d, Reap)] == [
         Reap(launch.name, launch.generation, 9, delete_github=True, stop_agent=False),
-    )
-    # Held: no relaunch storm for the same queue; a new signal clears it.
-    assert launches(scaler.handle(job(job_id=2))) != []
+    ]
+    [retry] = [d for d in step.decisions if isinstance(d, ScheduleRetry)]
+    assert retry == ScheduleRetry(RETRY_KEY, retry.generation, RETRY_BASE_S)
+    # Held: new demand does not relaunch; only the backoff deadline does.
+    assert launches(scaler.handle(job(job_id=2))) == []
+    assert scaler.handle(RetryDeadline(RETRY_KEY, "stale")) == Step()
+    assert len(launches(scaler.handle(RetryDeadline(RETRY_KEY, retry.generation)))) == 2
+    assert scaler.hold is None
 
 
 def test_rejected_without_registration_has_no_reap(ids: Ids) -> None:
     scaler = make(ids)
     [launch] = launches(scaler.handle(job()))
     step = scaler.handle(LaunchFailed(launch.name, launch.generation, "jit_failed"))
-    assert step.decisions == ()
+    assert not [d for d in step.decisions if isinstance(d, Reap)]
+    assert [type(d) for d in step.decisions] == [ScheduleRetry]
 
 
 def test_capacity_hold_waits_for_exit(ids: Ids) -> None:
@@ -209,7 +233,7 @@ def test_ambiguous_failure_keeps_runner(ids: Ids) -> None:
         LaunchFailed(launch.name, launch.generation, "wake_timeout", rejected=False)
     )
     assert scaler.runners[launch.name].state is RunnerState.IDLE
-    assert kinds(step) == ["error"] and scaler.hold == "failure"
+    assert kinds(step) == ["launch_backoff", "error"] and scaler.hold == "failure"
 
 
 def test_stale_launch_results_ignored(ids: Ids) -> None:
@@ -301,3 +325,231 @@ def test_unknown_input_event_is_rejected(ids: Ids) -> None:
 
     with pytest.raises(TypeError, match="unknown input event Bogus"):
         make(ids).handle(Bogus())  # type: ignore[arg-type]
+
+
+# --- completion holds the slot until the exit (finding: stalled queue) -------
+
+
+def _idle(scaler: Scaler, job_id: int, runner_id: int = 5) -> Launch:
+    [launch] = launches(scaler.handle(job(job_id=job_id)))
+    scaler.handle(LaunchSucceeded(launch.name, launch.generation, runner_id))
+    return launch
+
+
+def test_completed_runner_keeps_capacity_until_exit_then_hold_clears(
+    ids: Ids,
+) -> None:
+    scaler = make(ids, max_runners=1)
+    a = _idle(scaler, 1)
+    scaler.handle(job("in_progress", job_id=1, runner_name=a.name))
+    scaler.handle(job(job_id=2))
+    done = scaler.handle(job("completed", job_id=1, runner_name=a.name))
+    assert launches(done) == []  # the agent slot is still occupied
+    assert scaler.wanted() == 0 and len(scaler.runners) == 1
+    exited = scaler.handle(RunnerExited(a.name, a.generation, 0))
+    assert len(launches(exited)) == 1 and scaler.hold is None
+
+
+def test_capacity_hold_is_cleared_by_a_finishing_runner_exit(ids: Ids) -> None:
+    """The reported stall: a 429 while the old runner cleans up."""
+    scaler = make(ids, max_runners=2)
+    a = _idle(scaler, 1)
+    b = launches(scaler.handle(job(job_id=2)))[0]
+    scaler.handle(job("in_progress", job_id=1, runner_name=a.name))
+    scaler.handle(job("completed", job_id=1, runner_name=a.name))
+    scaler.handle(LaunchFailed(b.name, b.generation, "agent_429", capacity=True))
+    assert scaler.hold == "capacity" and scaler.failures == 0
+    step = scaler.handle(RunnerExited(a.name, a.generation, 0))  # still tracked
+    assert scaler.hold is None and len(launches(step)) == 1
+
+
+def test_finish_deadline_stops_a_runner_whose_exit_was_lost(ids: Ids) -> None:
+    scaler = make(ids, idle_grace_s=30)
+    a = _idle(scaler, 1)
+    scaler.handle(job("in_progress", job_id=1, runner_name=a.name))
+    done = scaler.handle(job("completed", job_id=1, runner_name=a.name))
+    [arm] = [d for d in done.decisions if isinstance(d, ScheduleIdle)]
+    fired = scaler.handle(IdleDeadline(a.name, arm.generation))
+    assert fired.decisions == (
+        Reap(a.name, a.generation, None, delete_github=False, stop_agent=True),
+    )
+    assert scaler.runners[a.name].state is RunnerState.REAPING  # slot held
+    step = scaler.handle(ReapFinished(a.name, a.generation, ReapOutcome.DONE))
+    assert kinds(step) == ["exited"] and a.name not in scaler.runners
+
+
+# --- reaps keep the runner tracked until their outcome ------------------------
+
+
+def _reaping(scaler: Scaler) -> Launch:
+    a = _idle(scaler, 1)
+    step = scaler.handle(job("in_progress", job_id=1, runner_name="vps-runner"))
+    [arm] = [d for d in step.decisions if isinstance(d, ScheduleIdle)]
+    fired = scaler.handle(IdleDeadline(a.name, arm.generation))
+    assert fired.decisions == (Reap(a.name, a.generation, 5),)
+    assert scaler.runners[a.name].state is RunnerState.REAPING
+    return a
+
+
+def test_failed_github_reap_returns_runner_to_idle_and_rearms(ids: Ids) -> None:
+    scaler = make(ids)
+    a = _reaping(scaler)
+    step = scaler.handle(ReapFinished(a.name, a.generation, ReapOutcome.GITHUB_FAILED))
+    assert scaler.runners[a.name].state is RunnerState.IDLE
+    assert any(isinstance(d, ScheduleIdle) for d in step.decisions)
+    # Its exit callback is still accepted: the live child stays tracked.
+    assert scaler.registered(a.name, a.generation)
+
+
+def test_busy_reap_keeps_runner_busy(ids: Ids) -> None:
+    scaler = make(ids)
+    a = _reaping(scaler)
+    scaler.handle(ReapFinished(a.name, a.generation, ReapOutcome.BUSY))
+    assert scaler.runners[a.name].state is RunnerState.BUSY
+
+
+def test_agent_stop_failure_holds_slot_and_retries_stop(ids: Ids) -> None:
+    scaler = make(ids)
+    a = _reaping(scaler)
+    step = scaler.handle(ReapFinished(a.name, a.generation, ReapOutcome.AGENT_FAILED))
+    assert scaler.runners[a.name].state is RunnerState.FINISHING
+    [arm] = [d for d in step.decisions if isinstance(d, ScheduleIdle)]
+    again = scaler.handle(IdleDeadline(a.name, arm.generation))
+    assert again.decisions == (Reap(a.name, a.generation, None, delete_github=False),)
+
+
+def test_reaping_runner_that_takes_a_job_becomes_busy(ids: Ids) -> None:
+    scaler = make(ids)
+    a = _reaping(scaler)
+    scaler.handle(job(job_id=2))
+    scaler.handle(job("in_progress", job_id=2, runner_name=a.name))
+    assert scaler.runners[a.name].state is RunnerState.BUSY
+    assert scaler.handle(ReapFinished(a.name, a.generation, ReapOutcome.DONE)) == Step()
+
+
+def test_reap_outcomes_for_untracked_or_stale_runners_are_ignored(ids: Ids) -> None:
+    scaler = make(ids)
+    a = _reaping(scaler)
+    assert (
+        scaler.handle(ReapFinished("omega-ci-9-zzzz", "g", ReapOutcome.DONE)) == Step()
+    )
+    assert scaler.handle(ReapFinished(a.name, "other", ReapOutcome.DONE)) == Step()
+    assert scaler.runners[a.name].state is RunnerState.REAPING
+
+
+def test_reaping_runner_occupies_a_slot(ids: Ids) -> None:
+    scaler = make(ids, max_runners=1)
+    _reaping(scaler)
+    assert launches(scaler.handle(job(job_id=2))) == []
+
+
+# --- spawn failures back off, then open the circuit ---------------------------
+
+
+def _spawn_failure(scaler: Scaler, job_id: int, code: int = -1) -> Step:
+    launch = _idle(scaler, job_id)
+    return scaler.handle(RunnerExited(launch.name, launch.generation, code))
+
+
+def _retry_of(step: Step) -> ScheduleRetry:
+    [retry] = [d for d in step.decisions if isinstance(d, ScheduleRetry)]
+    return retry
+
+
+def test_spawn_failures_back_off_exponentially_then_open_circuit(ids: Ids) -> None:
+    scaler = make(ids)
+    step = _spawn_failure(scaler, 1)
+    assert launches(step) == [] and scaler.hold == "failure"
+    delays = []
+    for n in range(2, MAX_CONSECUTIVE_FAILURES + 1):
+        retry = _retry_of(step)
+        delays.append(retry.delay_s)
+        relaunch = scaler.handle(RetryDeadline(RETRY_KEY, retry.generation))
+        [launch] = launches(relaunch)
+        scaler.handle(LaunchSucceeded(launch.name, launch.generation))
+        step = scaler.handle(RunnerExited(launch.name, launch.generation, -1))
+        if n < MAX_CONSECUTIVE_FAILURES:
+            assert "launch_backoff" in kinds(step)
+    assert delays == [15.0, 30.0, 60.0, 120.0]
+    assert scaler.hold == "circuit" and "launch_circuit_open" in kinds(step)
+    assert not [d for d in step.decisions if isinstance(d, ScheduleRetry)]
+    assert launches(scaler.handle(job(job_id=99))) == []  # demand cannot reopen
+
+
+def test_backoff_is_capped() -> None:
+    assert Scaler.backoff(1) == RETRY_BASE_S
+    assert Scaler.backoff(50) == RETRY_CAP_S
+
+
+def test_a_runner_taking_a_job_closes_the_circuit(ids: Ids) -> None:
+    scaler = make(ids)
+    scaler.hold, scaler.failures = "circuit", MAX_CONSECUTIVE_FAILURES
+    scaler.handle(job(job_id=7))
+    step = scaler.handle(job("in_progress", job_id=7, runner_name="omega-ci-7-zzzz"))
+    assert "launch_circuit_closed" in kinds(step)
+    assert scaler.hold is None and scaler.failures == 0
+
+
+def test_clean_exit_or_busy_exit_is_not_a_failure(ids: Ids) -> None:
+    scaler = make(ids)
+    step = _spawn_failure(scaler, 1, code=0)
+    assert scaler.failures == 0 and scaler.hold is None
+    assert "error" not in kinds(step)
+
+
+def test_capacity_rejections_retry_without_counting_failures(ids: Ids) -> None:
+    scaler = make(ids)
+    [launch] = launches(scaler.handle(job(job_id=1)))
+    step = scaler.handle(
+        LaunchFailed(launch.name, launch.generation, "agent_429", capacity=True)
+    )
+    assert scaler.hold == "capacity" and scaler.failures == 0
+    assert _retry_of(step).delay_s == RETRY_CAP_S
+    relaunch = scaler.handle(RetryDeadline(RETRY_KEY, _retry_of(step).generation))
+    assert len(launches(relaunch)) == 1 and scaler.hold is None
+
+
+def test_retry_deadline_after_hold_cleared_is_a_noop(ids: Ids) -> None:
+    scaler = make(ids)
+    step = _spawn_failure(scaler, 1)
+    retry = _retry_of(step)
+    scaler.handle(job("in_progress", job_id=1, runner_name="omega-ci-1-zzzz"))
+    assert scaler.handle(RetryDeadline(RETRY_KEY, retry.generation)) == Step()
+    assert scaler.handle(RetryDeadline("other", retry.generation)) == Step()
+
+
+def test_circuit_ignores_further_failures(ids: Ids) -> None:
+    from omega_prime.ci_runners.scaler import _Out
+
+    scaler = make(ids)
+    scaler.hold, scaler.failures = "circuit", MAX_CONSECUTIVE_FAILURES
+    out = _Out()
+    scaler._failed(out)
+    assert scaler.failures == MAX_CONSECUTIVE_FAILURES and out.step() == Step()
+
+
+# --- restart re-enqueues persisted demand -------------------------------------
+
+
+def test_restart_recovers_queued_demand(ids: Ids) -> None:
+    pending = tuple(job(job_id=n).job for n in (11, 12, 13))
+    scaler = make(ids, started=False, max_runners=2)
+    step = scaler.handle(
+        ControllerStarted(
+            github=(ObservedRunner("omega-ci-1-aaaa", 1, busy=True, online=True),),
+            agent=(AgentRunner("omega-ci-1-aaaa", "g1", "running", 11),),
+            queued=pending,
+        )
+    )
+    assert list(scaler.queued) == [11, 12, 13]
+    assert len(launches(step)) == 1  # one survivor busy + one new = cap of 2
+    scaler.handle(job("completed", job_id=1, runner_name="omega-ci-1-aaaa"))
+    after = scaler.handle(RunnerExited("omega-ci-1-aaaa", "g1", 0))
+    assert len(launches(after)) == 1  # the backlog keeps draining
+
+
+def test_restart_ignores_non_queued_persisted_jobs(ids: Ids) -> None:
+    stale: WorkflowJob = job("in_progress", job_id=20).job
+    scaler = make(ids, started=False)
+    scaler.handle(ControllerStarted(queued=(stale,)))
+    assert not scaler.queued

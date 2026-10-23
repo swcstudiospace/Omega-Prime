@@ -60,7 +60,8 @@ at the VPS runner instead:
      `pip install 'omega-prime[ci-runners]' cryptography`.
    - Write `/etc/omega-ci/controller.env` from
      `deploy/ci-runner-controller/env.example`, and secret files under
-     `/etc/omega-ci/secrets/` (mode 0640, `root:omega-ci`).
+     `/etc/omega-ci/secrets/`, each owned by `omega-ci` with mode 0600. The
+     credential broker refuses a secret file with any group or other bit.
    - Install `deploy/ci-runner-controller/omega-ci-autoscaler.service`, and add
      the `deploy/ci-runner-controller/Caddyfile.snippet` site with your host.
    - Validate first, without installing anything:

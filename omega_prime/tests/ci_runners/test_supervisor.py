@@ -241,9 +241,13 @@ def test_job_identity_spawn_arguments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     chowned: list[tuple[str, int, int]] = []
-    monkeypatch.setattr(
-        sup.os, "chown", lambda p, u, g: chowned.append((Path(p).name, u, g))
-    )
+    follows: list[bool] = []
+
+    def chown(p: Any, u: int, g: int, *, follow_symlinks: bool = True) -> None:
+        chowned.append((Path(p).name, u, g))
+        follows.append(follow_symlinks)
+
+    monkeypatch.setattr(sup.os, "chown", chown)
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     exits = Exits()
 
@@ -272,6 +276,7 @@ def test_job_identity_spawn_arguments(
     assert JIT not in repr(args) and kwargs["env"][sup.JIT_ENV] == JIT
     assert sorted(c[0] for c in chowned) == ["_diag", "_work", NAME]
     assert {(u, g) for _, u, g in chowned} == {(4242, 4343)}
+    assert follows == [False, False, False]
 
 
 @pytest.mark.parametrize(
@@ -457,3 +462,94 @@ def test_limit_child_lowers_priority_and_caps_resources(
         sup.resource.RLIMIT_NPROC: (nproc, nproc),
         sup.resource.RLIMIT_NOFILE: (nofile, nofile),
     }
+
+
+# --- workdir ownership hand-over (finding: symlink chown race) ----------------
+
+
+def test_build_workdir_chowns_scratch_first_parent_last_without_following(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = runner_root(tmp_path)
+    dest = tmp_path / "w" / NAME
+    calls: list[tuple[str, int, int, bool]] = []
+
+    def record(path: Any, uid: int, gid: int, *, follow_symlinks: bool = True) -> None:
+        # While any scratch chown runs, the parent must still be ours, 0700.
+        assert stat.S_IMODE(os.lstat(dest).st_mode) == 0o700
+        assert os.lstat(dest).st_uid == os.geteuid()
+        calls.append((Path(path).name, uid, gid, follow_symlinks))
+
+    monkeypatch.setattr(sup.os, "chown", record)
+    build_workdir(root, dest, 4242, 4343)
+    assert calls == [
+        ("_work", 4242, 4343, False),
+        ("_diag", 4242, 4343, False),
+        (NAME, 4242, 4343, False),  # the parent is handed over last
+    ]
+
+
+@pytest.mark.parametrize("scratch", ["_work", "_diag"])
+def test_build_workdir_refuses_symlinked_scratch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scratch: str
+) -> None:
+    root = runner_root(tmp_path)
+    target = tmp_path / "root-owned-target"
+    target.mkdir()
+    (root / scratch).symlink_to(target)
+    chowned: list[Any] = []
+    monkeypatch.setattr(sup.os, "chown", lambda *a, **k: chowned.append(a))
+    with pytest.raises(sup.UnsafeWorkdir, match=scratch):
+        build_workdir(root, tmp_path / "w" / NAME, 4242, 4343)
+    assert chowned == []  # nothing was handed to the job identity
+
+
+def test_build_workdir_replaces_a_symlinked_workdir(tmp_path: Path) -> None:
+    root = runner_root(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep").write_text("x")
+    dest = tmp_path / "w" / NAME
+    dest.parent.mkdir()
+    dest.symlink_to(elsewhere)
+    build_workdir(root, dest, None, None)
+    assert not dest.is_symlink() and (elsewhere / "keep").exists()
+
+
+# --- finished identities stay replay-safe (finding: retries restart runners) --
+
+
+def test_retry_after_the_child_finished_is_replayed_not_restarted(
+    tmp_path: Path,
+) -> None:
+    root = runner_root(tmp_path)
+    exits = Exits()
+
+    async def main() -> Supervisor:
+        s = supervisor(tmp_path, root, exits)
+        s.prepare()
+        assert s.admit(NAME, "gen-a", JIT) is Admission.ACCEPTED
+        await exits.wait()
+        await asyncio.sleep(0)
+        assert s.children == {}
+        # The 201 was lost; the controller retries the same identity.
+        assert s.admit(NAME, "gen-a", JIT) is Admission.REPLAYED
+        assert s.admit(NAME, "gen-b", JIT) is Admission.CONFLICT
+        assert s.children == {}
+        return s
+
+    asyncio.run(main())
+    assert len(exits.payloads) == 1  # exactly one child ever ran
+
+
+def test_finished_memory_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sup, "FINISHED_MEMORY", 2)
+    s = Supervisor(
+        runner_root=tmp_path, work_root=tmp_path, max_runners=1, notify=AsyncMock()
+    )
+    for n in range(3):
+        s._remember_finished(sup.Child(f"omega-ci-{n}-a", "g"))
+    assert list(s._finished) == ["omega-ci-1-a", "omega-ci-2-a"]
+    assert sup.FINISHED_MEMORY == 2

@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from omega_prime.ci_runners.github import AppTokenSource
+from omega_prime.ci_runners.http import TransportError
 from omega_prime.ci_runners.jobs import (
     IdleDeadline,
+    RetryDeadline,
     RunnerState,
 )
 from omega_prime.ci_runners.publisher import UnsafeEventError
+from omega_prime.ci_runners.scaler import RETRY_BASE_S, RETRY_KEY
+from omega_prime.ci_runners.settings import GITHUB_AUDIENCE, AppAuth, SecretFile
 
 from ._fakes import ListPublisher, resp
 from ._rig import JIT, ORG, TOKEN, Rig, job, routes
@@ -140,6 +146,7 @@ def test_idle_deadline_reaps_github_then_agent() -> None:
         r.ctrl.offer_job(job("in_progress", runner_name="vps-runner"))
         await r.ctrl.settle()
         [(name, generation)] = list(r.delayed.armed)
+        r.http.on("DELETE", f"/v1/runners/{name}", resp(202))
         r.ctrl._deadline(IdleDeadline(name, generation))
         await r.ctrl.settle()
 
@@ -148,6 +155,47 @@ def test_idle_deadline_reaps_github_then_agent() -> None:
     tail = [(c.method, c.url.split("test")[-1]) for c in rig.http.calls[-3:]]
     assert [m for m, _ in tail] == ["GET", "DELETE", "DELETE"]
     assert "reaped" in rig.publisher.types()
+
+
+def test_failed_agent_stop_keeps_the_runner_tracked() -> None:
+    """GitHub deregistered it but the child may live: the slot stays held."""
+    rig = Rig(routes())
+
+    async def body(r: Rig) -> None:
+        r.ctrl.offer_job(job())
+        await r.ctrl.settle()
+        r.ctrl.offer_job(job("in_progress", runner_name="vps-runner"))
+        await r.ctrl.settle()
+        [(name, generation)] = list(r.delayed.armed)
+        r.http.on("DELETE", f"/v1/runners/{name}", resp(500))
+        r.ctrl._deadline(IdleDeadline(name, generation))
+        await r.ctrl.settle()
+
+    scenario(rig, body)
+    runner = rig.only()
+    assert runner.state is RunnerState.FINISHING
+    assert rig.scaler.registered(runner.name, runner.generation)
+    assert "reap_agent" in {e["data"].get("reason") for e in rig.publisher.events}
+
+
+def test_failed_github_reap_returns_runner_to_idle() -> None:
+    http = routes()
+    http.on("GET", f"{ORG}/42", resp(500))
+    rig = Rig(http)
+
+    async def body(r: Rig) -> None:
+        r.ctrl.offer_job(job())
+        await r.ctrl.settle()
+        r.ctrl.offer_job(job("in_progress", runner_name="vps-runner"))
+        await r.ctrl.settle()
+        [(name, generation)] = list(r.delayed.armed)
+        r.ctrl._deadline(IdleDeadline(name, generation))
+        await r.ctrl.settle()
+
+    scenario(rig, body)
+    runner = rig.only()
+    assert runner.state is RunnerState.IDLE
+    assert rig.scaler.armed(runner.name) is not None  # re-armed for another try
 
 
 def test_reap_keeps_runner_that_turned_busy() -> None:
@@ -170,7 +218,9 @@ def test_reap_keeps_runner_that_turned_busy() -> None:
     assert "/v1/runners/" not in " ".join(
         c.url for c in http.calls if c.method == "DELETE"
     )
-    assert rig.publisher.events[-1]["data"]["reason"] == "reap_runner_busy"
+    reasons = [e["data"].get("reason") for e in rig.publisher.events]
+    assert "reap_runner_busy" in reasons
+    assert rig.only().state is RunnerState.BUSY  # still tracked, not lost
 
 
 def test_exit_callback_requires_registered_generation() -> None:
@@ -338,3 +388,103 @@ def test_default_delayed_adapter_is_created_on_start() -> None:
         await rig.ctrl.stop()
 
     asyncio.run(main())
+
+
+def test_token_connection_failure_keeps_worker_and_releases_launch(
+    tmp_path: Path,
+) -> None:
+    """App token POST fails to connect: reconcile and launch both degrade to
+    GitHubError, the worker survives, and the reservation is released."""
+    key = tmp_path / "key.pem"
+    key.write_text("-----BEGIN FAKE KEY-----\n")
+    key.chmod(0o600)
+    http = routes()
+    http.on("POST", "/app/installations/2/access_tokens", TransportError("URLError"))
+    auth = AppTokenSource(
+        AppAuth(1, 2, SecretFile("OMEGA_CI_GITHUB_APP_KEY_FILE", key, GITHUB_AUDIENCE)),
+        http,
+        signer=lambda k, d: b"sig",
+    )
+    rig = Rig(http, auth=auth)
+
+    async def main() -> None:
+        await rig.ctrl.start()
+        try:  # bounded: the pre-fix bug killed the worker, so settle never returned
+            await asyncio.wait_for(rig.ctrl.settle(), 5)
+            assert rig.ctrl.ready.is_set()
+            assert rig.ctrl.offer_job(job())
+            await asyncio.wait_for(rig.ctrl.settle(), 5)
+            assert rig.ctrl._worker is not None and not rig.ctrl._worker.done()
+        finally:
+            await rig.ctrl.stop()
+
+    asyncio.run(main())
+    assert rig.scaler.runners == {} and rig.scaler.hold == "failure"
+    assert "error" in rig.publisher.types()
+
+
+def test_restart_replays_persisted_demand(tmp_path: Path) -> None:
+    from omega_prime.ci_runners.demand import DemandStore
+
+    path = tmp_path / "demand.json"
+    first = Rig(routes(), max_runners=1, demand=DemandStore(path))
+
+    async def body(r: Rig) -> None:
+        for n in (1, 2, 3):
+            r.ctrl.offer_job(job(job_id=n))
+        await r.ctrl.settle()
+
+    scenario(first, body)
+    assert list(first.scaler.queued) == [1, 2, 3]
+    # A fresh controller (restart) with an empty scaler picks the backlog up.
+    second = Rig(routes(), max_runners=2, demand=DemandStore(path))
+    scenario(second, lambda r: r.ctrl.settle())
+    assert list(second.scaler.queued) == [1, 2, 3]
+    assert second.publisher.types().count("launch_requested") == 2
+    # Serving the jobs empties the persisted backlog.
+    third = Rig(routes(), demand=DemandStore(path))
+
+    async def serve(r: Rig) -> None:
+        for n in (1, 2, 3):
+            r.ctrl.offer_job(job("in_progress", job_id=n, runner_name="vps-runner"))
+        await r.ctrl.settle()
+
+    scenario(third, serve)
+    assert DemandStore(path).load() == ()
+
+
+def test_demand_persist_failure_is_published_not_raised(tmp_path: Path) -> None:
+    from omega_prime.ci_runners.demand import DemandStore
+
+    blocker = tmp_path / "file"
+    blocker.write_text("")
+    rig = Rig(routes(), demand=DemandStore(blocker / "demand.json"))
+
+    async def body(r: Rig) -> None:
+        r.ctrl.offer_job(job())
+        await r.ctrl.settle()
+        assert r.ctrl._worker is not None and not r.ctrl._worker.done()
+
+    scenario(rig, body)
+    assert "demand_persist" in {e["data"].get("reason") for e in rig.publisher.events}
+
+
+def test_launch_failures_schedule_a_backoff_retry() -> None:
+    http = routes()
+    http.on("POST", f"{ORG}/generate-jitconfig", resp(500))
+    rig = Rig(http)
+
+    async def body(r: Rig) -> None:
+        r.ctrl.offer_job(job())
+        await r.ctrl.settle()
+        [(key, arm)] = [k for k in r.delayed.armed if k[0] == RETRY_KEY]
+        assert r.delayed.armed[(key, arm)] == RETRY_BASE_S
+        r.ctrl.offer_job(job(job_id=2))  # new demand does not relaunch
+        await r.ctrl.settle()
+        assert r.http.paths("POST").count(f"{ORG}/generate-jitconfig") == 1
+        r.ctrl._deadline(RetryDeadline(key, arm))
+        await r.ctrl.settle()
+        assert r.http.paths("POST").count(f"{ORG}/generate-jitconfig") == 3
+
+    scenario(rig, body)
+    assert "launch_backoff" in rig.publisher.types()

@@ -8,9 +8,10 @@ from collections.abc import Callable, Collection
 from typing import Any
 from urllib.parse import urlsplit
 
+from omega_prime.ci_runners.delayed import Deadline
 from omega_prime.ci_runners.http import HttpRequest, HttpResponse
-from omega_prime.ci_runners.jobs import IdleDeadline
 from omega_prime.ci_runners.publisher import CloudEvent, redact_event
+from omega_prime.tests.ci_runners._secrets import placeholder
 
 Reply = HttpResponse | BaseException | Callable[[HttpRequest], HttpResponse]
 
@@ -68,7 +69,7 @@ class FakeDelayed:
         self.cancelled: list[tuple[str, str]] = []
 
     def schedule(
-        self, name: str, generation: str, delay_s: float, event: IdleDeadline
+        self, name: str, generation: str, delay_s: float, event: Deadline
     ) -> Any:
         self.armed[(name, generation)] = delay_s
         return None
@@ -100,8 +101,8 @@ class ListPublisher:
 
 
 class StaticToken:
-    def __init__(self, token: str = "ghs_test_installation_token_000") -> None:
-        self.value = token
+    def __init__(self, token: str | None = None) -> None:
+        self.value = token or placeholder("installation-token")
 
     async def token(self) -> str:
         return self.value

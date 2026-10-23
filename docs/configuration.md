@@ -105,6 +105,7 @@ The table records names and purposes only.
 | `OMEGA_CI_AGENT_TOKEN_FILE` | Names a protected file containing the Desktop runner agent bearer token. |
 | `OMEGA_CI_AGENT_WORK_ROOT` | Sets where the Desktop runner agent creates per-runner private work directories. |
 | `OMEGA_CI_CONTROLLER_URL` | Selects the CI autoscaler URL the Desktop runner agent reports runner exits to. |
+| `OMEGA_CI_DEMAND_PATH` | Overrides the JSON file where the CI autoscaler persists queued jobs so a restart replays them. |
 | `OMEGA_CI_DESKTOP_TOKEN_FILE` | Names a protected file containing the bearer token shared with the Desktop runner agent. |
 | `OMEGA_CI_DESKTOP_URL` | Selects the https base URL of the Desktop runner agent. |
 | `OMEGA_CI_EVENTS_PATH` | Overrides the JSONL file the CI autoscaler appends redacted events to. |

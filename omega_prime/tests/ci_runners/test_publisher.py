@@ -22,8 +22,9 @@ from omega_prime.ci_runners.publisher import (
     make_publisher,
     redact_event,
 )
+from omega_prime.tests.ci_runners._secrets import placeholder
 
-SECRET = "jit-config-blob-ABCDEFGHIJKLMNOP"
+SECRET = placeholder("jit-config")
 
 
 def test_event_types() -> None:
@@ -106,3 +107,21 @@ def test_make_publisher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         make_publisher("eventstream", tmp_path)
     sink_pub = make_publisher("eventstream", tmp_path, sink=lambda _: None)
     assert isinstance(sink_pub, EventStreamPublisher)
+
+
+def test_every_kind_the_scaler_and_controller_emit_is_allowed() -> None:
+    """An unlisted kind is dropped at publish time; catch that statically."""
+    import re
+
+    import omega_prime.ci_runners.controller as controller
+    import omega_prime.ci_runners.scaler as scaler
+    from omega_prime.ci_runners.publisher import DESKTOP_KINDS, RUNNER_KINDS
+
+    emitted: set[str] = set()
+    for module in (scaler, controller):
+        text = Path(module.__file__ or "").read_text()
+        emitted |= set(
+            re.findall(r'(?:out\.event|self\._publish)\(\s*"([a-z_]+)"', text)
+        )
+    assert {"finished", "launch_backoff", "error", "woke"} <= emitted
+    assert emitted <= RUNNER_KINDS | DESKTOP_KINDS

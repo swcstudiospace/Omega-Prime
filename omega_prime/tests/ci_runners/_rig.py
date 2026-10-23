@@ -10,14 +10,15 @@ from omega_prime.ci_runners.github import GitHubClient
 from omega_prime.ci_runners.jobs import WorkflowJob, parse_workflow_job
 from omega_prime.ci_runners.scaler import Scaler
 from omega_prime.ci_runners.settings import DEFAULT_LABELS
+from omega_prime.tests.ci_runners._secrets import placeholder
 
 from ._fakes import FakeDelayed, FakeHttp, ListPublisher, StaticToken, resp
 from ._support import FakeClock, Ids, job_payload
 
 ORG = "/orgs/acme/actions/runners"
 URL = "https://desktop.example.test"
-TOKEN = "desktop-bearer-token-for-tests-000000"
-JIT = "ZW5jb2RlZC1qaXQtc2VjcmV0LXRlc3Q="
+TOKEN = placeholder("desktop-token")
+JIT = placeholder("jit-config")
 
 
 def job(action: str = "queued", **kw: Any) -> WorkflowJob:
@@ -65,7 +66,7 @@ class Rig:
                 repo=None,
                 runner_group_id=7,
                 labels=DEFAULT_LABELS,
-                auth=StaticToken(),
+                auth=kw.pop("auth", None) or StaticToken(),
                 transport=http,
                 clock=self.clock,
                 wall=self.clock,

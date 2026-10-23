@@ -7,17 +7,23 @@ new input events, so scaler transitions never interleave. Startup performs
 exactly one reconcile (one paginated GitHub listing + one agent inventory)
 before any queued event is processed. No timers beyond the one-shot idle
 deadlines in :mod:`delayed`, no polling.
+
+Every Reap reports its outcome back (``ReapFinished``) so the scaler keeps a
+runner tracked until cleanup really happened, and the queue is mirrored to a
+:class:`~omega_prime.ci_runners.demand.DemandStore` so a restart replays it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from omega_prime.ci_runners.delayed import AsyncioDelayedEvents, DelayedEvents
+from omega_prime.ci_runners.delayed import AsyncioDelayedEvents, Deadline, DelayedEvents
+from omega_prime.ci_runners.demand import DemandStore
 from omega_prime.ci_runners.desktop import DesktopClient, DesktopError, LaunchOutcome
 from omega_prime.ci_runners.github import GitHubClient, GitHubError
 from omega_prime.ci_runners.jobs import (
@@ -32,8 +38,12 @@ from omega_prime.ci_runners.jobs import (
     LaunchSucceeded,
     ObservedRunner,
     Reap,
+    ReapFinished,
+    ReapOutcome,
+    RetryDeadline,
     RunnerExited,
     ScheduleIdle,
+    ScheduleRetry,
     WorkflowJob,
 )
 from omega_prime.ci_runners.publisher import (
@@ -59,6 +69,7 @@ class Controller:
         delayed: DelayedEvents | None = None,
         extra_secrets: Callable[[], tuple[str, ...]] = tuple,
         max_pending: int = MAX_PENDING_WEBHOOKS,
+        demand: DemandStore | None = None,
     ) -> None:
         self.scaler = scaler
         self.github = github
@@ -72,6 +83,8 @@ class Controller:
         self._worker: asyncio.Task[None] | None = None
         self._effects: set[asyncio.Task[None]] = set()
         self._jits: dict[tuple[str, str], str] = {}
+        self._demand = demand
+        self._saved_demand: tuple[int, ...] | None = None
         self.ready = asyncio.Event()
 
     # -- admission (called from HTTP handlers; never blocks) -------------------
@@ -132,17 +145,21 @@ class Controller:
                 continue
             await asyncio.gather(*list(self._effects), return_exceptions=True)
 
-    def _deadline(self, event: IdleDeadline) -> None:
+    def _deadline(self, event: Deadline) -> None:
         self.submit(event)
 
     async def _run(self) -> None:
         started = await self._snapshot()
+        if self._demand is not None:
+            started = dataclasses.replace(started, queued=self._demand.load())
         self._apply(self.scaler.handle(started))
+        self._persist_demand()
         self.ready.set()
         while True:
             external, event = await self._queue.get()
             try:
                 self._apply(self.scaler.handle(event))
+                self._persist_demand()
             except Exception:  # keep the worker alive; never log payloads
                 log.exception("ci-runners: scaler step failed")
                 self._publish("error", {"reason": "scaler_step_failed"})
@@ -150,6 +167,22 @@ class Controller:
                 if external:
                     self._external -= 1
                 self._queue.task_done()
+
+    def _persist_demand(self) -> None:
+        if self._demand is None:
+            return
+        ids = tuple(self.scaler.queued)
+        if ids == self._saved_demand:
+            return
+        try:
+            self._demand.save(self.scaler.queued.values())
+        except OSError as exc:
+            # Degrades to the pre-persistence behaviour; never stops the worker.
+            self._publish(
+                "error", {"reason": "demand_persist", "errno": exc.errno or 0}
+            )
+            return
+        self._saved_demand = ids
 
     async def _snapshot(self) -> ControllerStarted:
         """The one startup reconcile. A failed side never causes a reap."""
@@ -198,6 +231,14 @@ class Controller:
                     decision.generation,
                     decision.delay_s,
                     IdleDeadline(decision.name, decision.generation),
+                )
+            elif isinstance(decision, ScheduleRetry):
+                assert self._delayed is not None
+                self._delayed.schedule(
+                    decision.name,
+                    decision.generation,
+                    decision.delay_s,
+                    RetryDeadline(decision.name, decision.generation),
                 )
             elif isinstance(decision, CancelIdle):
                 assert self._delayed is not None
@@ -274,6 +315,9 @@ class Controller:
             self._jits.pop(key, None)
 
     async def _reap(self, d: Reap) -> None:
+        self.submit(ReapFinished(d.name, d.generation, await self._reap_outcome(d)))
+
+    async def _reap_outcome(self, d: Reap) -> ReapOutcome:
         runner_id = d.runner_id or None
         if d.delete_github and runner_id is not None:
             try:
@@ -283,11 +327,11 @@ class Controller:
                     "error",
                     {"name": d.name, "reason": "reap_github", "status": exc.status},
                 )
-                return
+                return ReapOutcome.GITHUB_FAILED
             if not gone:
                 # Busy after all: keep the child; the assignment webhook re-adopts it.
                 self._publish("error", {"name": d.name, "reason": "reap_runner_busy"})
-                return
+                return ReapOutcome.BUSY
         if d.stop_agent:
             try:
                 await self.desktop.stop(d.name)
@@ -296,6 +340,8 @@ class Controller:
                     "error",
                     {"name": d.name, "reason": "reap_agent", "status": exc.status},
                 )
+                return ReapOutcome.AGENT_FAILED
+        return ReapOutcome.DONE
 
 
 __all__ = ["MAX_PENDING_WEBHOOKS", "Controller"]

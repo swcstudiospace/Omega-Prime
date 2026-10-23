@@ -1,8 +1,8 @@
 """One-shot delayed events (the only way anything happens "later").
 
-No timers, cron, or sleep loops: an idle deadline is a single cancellable
-``loop.call_later`` handle, or a Pulsar message sent with ``deliverAfter``
-once the mesh is live. Keys are ``(name, generation)`` where ``generation`` is
+No timers, cron, or sleep loops: an idle (or launch-backoff retry) deadline
+is a single cancellable ``loop.call_later`` handle, or a Pulsar message sent
+with ``deliverAfter`` once the mesh is live. Keys are ``(name, generation)`` where ``generation`` is
 an opaque nonce minted per arm, unique across controller restarts.
 """
 
@@ -13,11 +13,17 @@ import math
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
-from omega_prime.ci_runners.jobs import IdleDeadline
+from omega_prime.ci_runners.jobs import IdleDeadline, RetryDeadline
 
-Consumer = Callable[[IdleDeadline], None]
+Deadline = IdleDeadline | RetryDeadline
+Consumer = Callable[[Deadline], None]
 Key = tuple[str, str]
 DEADLINE_TYPE = "omega.ci.runner.idle_deadline"
+RETRY_DEADLINE_TYPE = "omega.ci.runner.retry_deadline"
+_TYPES: dict[str, type[IdleDeadline] | type[RetryDeadline]] = {
+    DEADLINE_TYPE: IdleDeadline,
+    RETRY_DEADLINE_TYPE: RetryDeadline,
+}
 
 
 class CancelHandle(Protocol):
@@ -26,7 +32,7 @@ class CancelHandle(Protocol):
 
 class DelayedEvents(Protocol):
     def schedule(
-        self, name: str, generation: str, delay_s: float, event: IdleDeadline
+        self, name: str, generation: str, delay_s: float, event: Deadline
     ) -> CancelHandle: ...
 
     def cancel(self, name: str, generation: str) -> bool: ...
@@ -43,7 +49,7 @@ class _Handle:
         return self._owner.cancel(*self._key)
 
 
-def _check(name: str, generation: str, delay_s: float, event: IdleDeadline) -> None:
+def _check(name: str, generation: str, delay_s: float, event: Deadline) -> None:
     if not name or not generation:
         raise ValueError("name and generation are required")
     if (event.name, event.generation) != (name, generation):
@@ -68,7 +74,7 @@ class AsyncioDelayedEvents:
         return len(self._handles)
 
     def schedule(
-        self, name: str, generation: str, delay_s: float, event: IdleDeadline
+        self, name: str, generation: str, delay_s: float, event: Deadline
     ) -> CancelHandle:
         _check(name, generation, delay_s, event)
         key = (name, generation)
@@ -77,7 +83,7 @@ class AsyncioDelayedEvents:
         self._handles[key] = loop.call_later(delay_s, self._fire, key, event)
         return _Handle(self, key)
 
-    def _fire(self, key: Key, event: IdleDeadline) -> None:
+    def _fire(self, key: Key, event: Deadline) -> None:
         if self._handles.pop(key, None) is not None:
             self._consumer(event)
 
@@ -114,12 +120,15 @@ class PulsarDelayedEvents:
         return len(self._live)
 
     def schedule(
-        self, name: str, generation: str, delay_s: float, event: IdleDeadline
+        self, name: str, generation: str, delay_s: float, event: Deadline
     ) -> CancelHandle:
         _check(name, generation, delay_s, event)
         key = (name, generation)
         self._live.add(key)
-        payload = {"type": DEADLINE_TYPE, "name": name, "generation": generation}
+        kind = (
+            RETRY_DEADLINE_TYPE if isinstance(event, RetryDeadline) else DEADLINE_TYPE
+        )
+        payload = {"type": kind, "name": name, "generation": generation}
         self._deliver_after(payload, float(delay_s))
         return _Handle(self, key)
 
@@ -135,7 +144,8 @@ class PulsarDelayedEvents:
 
     def on_delivery(self, payload: Mapping[str, Any]) -> bool:
         """Feed a delivered message. Returns True if it reached the consumer."""
-        if payload.get("type") != DEADLINE_TYPE:
+        factory = _TYPES.get(str(payload.get("type")))
+        if factory is None:
             return False
         name, generation = payload.get("name"), payload.get("generation")
         if not isinstance(name, str) or not isinstance(generation, str):
@@ -144,14 +154,16 @@ class PulsarDelayedEvents:
         if key not in self._live:
             return False
         self._live.discard(key)
-        self._consumer(IdleDeadline(name, generation))
+        self._consumer(factory(name, generation))
         return True
 
 
 __all__ = [
     "DEADLINE_TYPE",
+    "RETRY_DEADLINE_TYPE",
     "AsyncioDelayedEvents",
     "CancelHandle",
+    "Deadline",
     "DelayedEvents",
     "PulsarDelayedEvents",
 ]

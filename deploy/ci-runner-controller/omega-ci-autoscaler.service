@@ -8,7 +8,8 @@
 #     `pip install 'omega-prime[ci-runners]' cryptography`
 #   * create the unprivileged system account `omega-ci` (no login shell)
 #   * create /etc/omega-ci/controller.env from env.example (mode 0640, root:omega-ci)
-#   * put secret files under /etc/omega-ci/secrets/ (mode 0640, root:omega-ci)
+#   * put secret files under /etc/omega-ci/secrets/ (owner omega-ci, mode 0600;
+#     the credential broker refuses group/other-readable secret files)
 #
 # Non-installing validation:
 #   systemd-analyze verify deploy/ci-runner-controller/omega-ci-autoscaler.service
@@ -30,7 +31,8 @@ ExecStart=/opt/omega-ci-venv/bin/python -m omega_prime.ci_runners controller --h
 Restart=on-failure
 RestartSec=5s
 
-# Writable state: only the event log directory (OMEGA_CI_EVENTS_PATH).
+# Writable state: only /var/lib/omega-ci (OMEGA_CI_EVENTS_PATH and the
+# restart backlog OMEGA_CI_DEMAND_PATH).
 StateDirectory=omega-ci
 StateDirectoryMode=0750
 UMask=0077

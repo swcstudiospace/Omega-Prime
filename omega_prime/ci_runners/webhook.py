@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from omega_prime.ci_runners.settings import MAX_BODY_BYTES
 ALLOWED_EVENTS = frozenset({"workflow_job", "ping"})
 DEDUPE_SIZE = 4096
 _SIG_PREFIX = "sha256="
+_SIG_RE = re.compile(r"sha256=[0-9a-f]{64}")
 
 Scope = Mapping[str, Any]
 Message = dict[str, Any]
@@ -103,9 +105,12 @@ def sign(secret: bytes, body: bytes) -> str:
 
 def verify_signature(secret: bytes, body: bytes, header: str | None) -> bool:
     """Constant-time check of ``X-Hub-Signature-256``."""
-    if not secret or not header or not header.startswith(_SIG_PREFIX):
+    if not secret or not header:
         return False
-    return hmac.compare_digest(sign(secret, body), header.strip())
+    candidate = header.strip()
+    if not _SIG_RE.fullmatch(candidate):
+        return False  # wrong prefix, length or a non-hex/non-ASCII digest
+    return hmac.compare_digest(sign(secret, body).encode(), candidate.encode())
 
 
 def bearer_ok(header: str | None, token: str) -> bool:

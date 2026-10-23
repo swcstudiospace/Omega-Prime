@@ -30,6 +30,7 @@ import resource
 import shutil
 import signal
 import stat
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,7 @@ NICE = 10
 RLIMIT_NPROC = 4096
 RLIMIT_NOFILE = 65536
 SPAWN_FAILED = -1  # exit_code reported when the child never ran
+FINISHED_MEMORY = 1024  # (name, generation) identities kept after cleanup
 GENERATION_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 JIT_RE = re.compile(r"^[A-Za-z0-9+/=_-]{1,65536}$")
 
@@ -113,6 +115,13 @@ def _link_or_copy(src: str, dst: str) -> None:
         shutil.copy2(src, dst, follow_symlinks=False)
 
 
+class UnsafeWorkdir(RuntimeError):
+    """A scratch path in the per-runner tree is not a plain directory."""
+
+
+SCRATCH_DIRS = ("_work", "_diag")
+
+
 def build_workdir(
     runner_root: Path, workdir: Path, job_uid: int | None, job_gid: int | None
 ) -> None:
@@ -121,16 +130,31 @@ def build_workdir(
     Files are hard-linked (copy fallback) and keep their root ownership, so a
     job cannot modify the shared installation. Only the top directory and the
     runner's own scratch dirs belong to the job identity.
+
+    Ordering is the security property: the whole tree is built and checked
+    while it is still root-owned (0700), the scratch dirs are handed over
+    first with ``follow_symlinks=False``, and the top directory is chowned
+    last. Until that final call no job process can create, rename or replace
+    anything inside it, so no later ``chown`` can be redirected by a symlink.
     """
-    if workdir.exists():
+    if workdir.is_symlink():
+        workdir.unlink()
+    elif workdir.exists():
         shutil.rmtree(workdir)
     shutil.copytree(runner_root, workdir, symlinks=True, copy_function=_link_or_copy)
     workdir.chmod(0o700)
-    for scratch in ("_work", "_diag"):
-        (workdir / scratch).mkdir(mode=0o700, exist_ok=True)
+    scratch_paths = [workdir / name for name in SCRATCH_DIRS]
+    for scratch in scratch_paths:
+        with contextlib.suppress(FileExistsError):
+            scratch.mkdir(mode=0o700)
+        info = os.lstat(scratch)
+        if not stat.S_ISDIR(info.st_mode):  # a symlink (or file) from the root
+            raise UnsafeWorkdir(f"{scratch.name}: not a plain directory")
+        os.chmod(scratch, 0o700, follow_symlinks=False)
     if job_uid is not None and job_gid is not None:
-        for owned in (workdir, workdir / "_work", workdir / "_diag"):
-            os.chown(owned, job_uid, job_gid)
+        for scratch in scratch_paths:
+            os.chown(scratch, job_uid, job_gid, follow_symlinks=False)
+        os.chown(workdir, job_uid, job_gid, follow_symlinks=False)
 
 
 def limit_child(
@@ -185,6 +209,7 @@ class Supervisor:
         self._spawn: Spawn = spawn or asyncio.create_subprocess_exec
         self._grace = term_grace_s
         self.children: dict[str, Child] = {}
+        self._finished: OrderedDict[str, str] = OrderedDict()  # name → generation
         self.draining = False
         self.notified = 0
 
@@ -201,6 +226,12 @@ class Supervisor:
         existing = self.children.get(name)
         if existing is not None:
             if existing.generation == generation and not existing.stop_requested:
+                return Admission.REPLAYED
+            return Admission.CONFLICT
+        if name in self._finished:
+            # A retried launch whose child already ran and was cleaned up:
+            # the JIT config is single-use, so never start it again.
+            if self._finished[name] == generation:
                 return Admission.REPLAYED
             return Admission.CONFLICT
         if self.draining:
@@ -286,8 +317,15 @@ class Supervisor:
         finally:
             child.exited.set()
             await asyncio.to_thread(shutil.rmtree, workdir, True)
+            self._remember_finished(child)  # before the live record goes
             self.children.pop(child.name, None)
             await self._send_exit(child, exit_code)
+
+    def _remember_finished(self, child: Child) -> None:
+        self._finished[child.name] = child.generation
+        self._finished.move_to_end(child.name)
+        while len(self._finished) > FINISHED_MEMORY:
+            self._finished.popitem(last=False)
 
     async def _terminate(self, child: Child) -> None:
         process = child.process
@@ -323,12 +361,14 @@ class Supervisor:
 
 __all__ = [
     "ENV_ALLOWLIST",
+    "FINISHED_MEMORY",
     "JIT_ENV",
     "SPAWN_FAILED",
     "Admission",
     "Child",
     "Supervisor",
     "UnsafeCredentialFile",
+    "UnsafeWorkdir",
     "build_workdir",
     "check_private",
     "child_env",

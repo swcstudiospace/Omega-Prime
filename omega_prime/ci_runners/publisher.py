@@ -30,6 +30,11 @@ RUNNER_KINDS = frozenset(
         "reaped",
         "exited",
         "error",
+        "finished",  # job completed; slot held until the process exits
+        "launch_backoff",
+        "launch_retry",
+        "launch_circuit_open",
+        "launch_circuit_closed",
     }
 )
 DESKTOP_KINDS = frozenset({"wake_requested", "woke"})

@@ -14,13 +14,14 @@ from omega_prime.ci_runners.desktop import (
     LaunchOutcome,
 )
 from omega_prime.ci_runners.http import HttpRequest, HttpResponse, TransportError
+from omega_prime.tests.ci_runners._secrets import placeholder
 
 from ._fakes import FakeHttp, resp
 from ._support import FakeClock
 
 URL = "https://desktop.example.test"
-TOKEN = "desktop-bearer-token-for-tests-000000"
-JIT = "jit-blob-secret-for-tests"
+TOKEN = placeholder("desktop-token")
+JIT = placeholder("jit-config")
 
 
 def make(http: FakeHttp, clock: FakeClock, **kw: Any) -> DesktopClient:
@@ -96,16 +97,46 @@ def test_request_time_counts_and_timeouts_are_clamped(clock: FakeClock) -> None:
     timeouts: list[float] = []
 
     def slow(req: HttpRequest) -> HttpResponse:
+        # A socket that honours its timeout: 40 s of silence -> timed out.
         timeouts.append(req.timeout)
-        clock.advance(40)
-        return resp(503)
+        clock.advance(min(40, req.timeout))
+        raise TransportError("TimeoutError")
 
     http = FakeHttp().on("POST", "/v1/runners", slow)
     result = launch(make(http, clock))
     assert result.outcome is LaunchOutcome.WAKE_FAILED
-    assert result.elapsed_s <= 150 + 1e-9 or result.attempts <= 4
-    assert timeouts[0] == 30 and all(t <= 30 for t in timeouts)
-    assert len(timeouts) <= 4
+    assert result.elapsed_s == 150  # never beyond the budget
+    assert timeouts == [30, 30, 30, 30, 22.5]  # last one clamped to what's left
+    assert result.attempts == 5
+
+
+def test_budget_is_a_hard_deadline_for_a_hung_request() -> None:
+    """A request that ignores its socket timeout is cut off at the budget."""
+    import threading
+    import time
+
+    release = threading.Event()
+
+    def hung(req: HttpRequest) -> HttpResponse:
+        release.wait(10)  # a trickling peer: each read stays under the timeout
+        return resp(201)
+
+    client = DesktopClient(
+        URL, lambda: TOKEN, FakeHttp().on("POST", "/v1/runners", hung), budget_s=0.3
+    )
+
+    async def main() -> tuple[Any, float]:
+        started = time.monotonic()
+        try:
+            out = await client.launch("omega-ci-1-abcd", "gen-1", JIT)
+            return out, time.monotonic() - started
+        finally:
+            release.set()  # let the abandoned worker thread finish
+
+    result, took = asyncio.run(main())
+    assert took < 2
+    assert result.outcome is LaunchOutcome.WAKE_FAILED and result.attempts == 1
+    assert result.elapsed_s < 2
 
 
 def test_jitter_range(clock: FakeClock) -> None:

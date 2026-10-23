@@ -45,7 +45,7 @@ def create_app(
 ) -> ASGIApp:
     if not webhook_secret or not agent_token:
         raise ValueError("webhook secret and agent token are required")
-    seen = dedupe or DeliveryLRU()
+    seen = dedupe if dedupe is not None else DeliveryLRU()
 
     async def lifespan(receive: Receive, send: Send) -> None:
         while True:
@@ -153,6 +153,7 @@ def create_app(
 
 def build_controller_app(settings: Any, **overrides: Any) -> ASGIApp:
     """Wire production adapters from validated :class:`ControllerSettings`."""
+    from omega_prime.ci_runners.demand import DemandStore
     from omega_prime.ci_runners.desktop import DesktopClient
     from omega_prime.ci_runners.github import GitHubClient
     from omega_prime.ci_runners.http import urllib_transport
@@ -179,6 +180,7 @@ def build_controller_app(settings: Any, **overrides: Any) -> ASGIApp:
         publisher=overrides.pop("publisher", None)
         or make_publisher(settings.publisher, settings.events_path),
         extra_secrets=lambda: (webhook_secret, desktop_token),
+        demand=DemandStore(settings.demand_path),
     )
     return create_app(
         controller, webhook_secret=webhook_secret.encode(), agent_token=desktop_token

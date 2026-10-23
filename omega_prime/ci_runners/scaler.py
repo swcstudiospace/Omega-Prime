@@ -6,10 +6,21 @@ the feed. The controller interprets both; this module never publishes, never
 sleeps, and never touches the network.
 
 Capacity (DESIGN §4):
-    launch = max(0, min(max_runners, queued + busy) - (starting + idle + busy))
-so live runners can never exceed ``max_runners``. A reservation (a runner in
-the ledger) is released exactly once: on a rejected launch, an exit, a reap,
-or a completed job.
+    demand = min(max_runners, queued + busy) - (starting + idle + busy)
+    launch = max(0, min(demand, max_runners - tracked))
+where ``tracked`` counts every ledger entry, including FINISHING (job done,
+agent slot not yet confirmed free) and REAPING (cleanup in flight), so live
+runners can never exceed ``max_runners``. A reservation is released exactly
+once: on a rejected launch, the agent's exit callback, or a reap whose
+outcome confirms the child is gone. A completed job only moves its runner to
+FINISHING; a one-shot deadline then stops it if the exit callback never comes.
+
+Launch failures (a rejected launch, or a runner exiting non-zero before it
+took a job) back off: ``hold="failure"`` plus one ScheduleRetry of
+``RETRY_BASE_S * 2**(n-1)`` (capped at ``RETRY_CAP_S``). New demand does not
+clear that hold; the retry deadline or a runner taking a job does. After
+``MAX_CONSECUTIVE_FAILURES`` the circuit opens (``hold="circuit"``, no more
+automatic retries) until a pool runner takes a job or the controller restarts.
 """
 
 from __future__ import annotations
@@ -33,10 +44,14 @@ from omega_prime.ci_runners.jobs import (
     LaunchFailed,
     LaunchSucceeded,
     Reap,
+    ReapFinished,
+    ReapOutcome,
+    RetryDeadline,
     Runner,
     RunnerExited,
     RunnerState,
     ScheduleIdle,
+    ScheduleRetry,
     WorkflowJob,
     is_pool_runner,
     matches,
@@ -44,6 +59,10 @@ from omega_prime.ci_runners.jobs import (
 from omega_prime.ci_runners.settings import HARD_MAX_RUNNERS, RUNNER_PREFIX
 
 JOB_MEMORY = 4096
+RETRY_BASE_S = 15.0
+RETRY_CAP_S = 240.0
+MAX_CONSECUTIVE_FAILURES = 5
+RETRY_KEY = "omega-ci-launch-retry"  # DelayedEvents key for the backoff arm
 _SUFFIX_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 
@@ -100,7 +119,9 @@ class Scaler:
         self._jobs: OrderedDict[int, JobStatus] = OrderedDict()
         self._covered: set[int] = set()
         self._armed: dict[str, str] = {}
-        self.hold: Literal["failure", "capacity"] | None = None
+        self.hold: Literal["failure", "capacity", "circuit"] | None = None
+        self.failures = 0  # consecutive launch failures (reset by a busy runner)
+        self._retry_arm: str | None = None
         self.started = False
 
     # -- queries -------------------------------------------------------------
@@ -125,7 +146,12 @@ class Scaler:
         idle = self.count(RunnerState.IDLE)
         busy = self.count(RunnerState.BUSY)
         target = min(self.max_runners, len(self.queued) + busy)
-        return max(0, target - (starting + idle + busy))
+        free_slots = self.max_runners - len(self.runners)
+        return max(0, min(target - (starting + idle + busy), free_slots))
+
+    @staticmethod
+    def backoff(failures: int) -> float:
+        return min(RETRY_CAP_S, RETRY_BASE_S * 2 ** max(0, failures - 1))
 
     # -- the fold ------------------------------------------------------------
 
@@ -141,6 +167,10 @@ class Scaler:
             self._on_exited(event, out)
         elif isinstance(event, IdleDeadline):
             self._on_deadline(event, out)
+        elif isinstance(event, RetryDeadline):
+            self._on_retry(event, out)
+        elif isinstance(event, ReapFinished):
+            self._on_reap_finished(event, out)
         elif isinstance(event, ControllerStarted):
             self._on_started(event, out)
         else:
@@ -175,8 +205,8 @@ class Scaler:
             return
         self._remember(job.job_id, job.status)
         if job.status is JobStatus.QUEUED:
-            if self.hold == "failure":
-                self.hold = None
+            # New demand never clears a failure hold: that is what turned a
+            # broken launch path into an unbounded relaunch loop.
             if len(self.queued) >= JOB_MEMORY:
                 out.event("error", reason="queue_full", job_id=job.job_id)
                 return
@@ -187,21 +217,26 @@ class Scaler:
             return
         self._dequeue(job.job_id)
         if job.status is JobStatus.IN_PROGRESS:
-            if self.hold == "failure":
-                self.hold = None
             self._on_assigned(job, out)
             return
-        # COMPLETED: the ephemeral runner is done with its one job.
-        self.hold = None
+        # COMPLETED: the ephemeral runner is done with its one job, but its
+        # agent slot is free only once the process exits. Keep it tracked
+        # (it still counts against capacity) until the exit callback, with a
+        # one-shot deadline in case that callback is lost.
         name = job.runner_name
         if name and name in self.runners:
-            del self.runners[name]
-            self._disarm(name, out)
-            out.event("exited", name=name, job_id=job.job_id, reason="job_completed")
+            runner = self.runners[name]
+            if runner.state is not RunnerState.REAPING:
+                self._disarm(name, out)
+                runner.state = RunnerState.FINISHING
+                self._arm(runner, out)
+            out.event("finished", name=name, job_id=job.job_id)
         out.event("demand", job_id=job.job_id, repo=job.repo, queued=len(self.queued))
 
     def _on_assigned(self, job: WorkflowJob, out: _Out) -> None:
         name = job.runner_name
+        if name and (name in self.runners or is_pool_runner(name)):
+            self._healthy(out)  # a pool runner took a job: launches work
         if name and name in self.runners:
             runner = self.runners[name]
             self._disarm(name, out)
@@ -246,7 +281,7 @@ class Scaler:
         runner_id = event.runner_id or runner.runner_id
         if event.rejected:
             del self.runners[event.name]
-            self.hold = "capacity" if event.capacity else "failure"
+            self._failed(out, capacity=event.capacity)
             out.event(
                 "error",
                 name=event.name,
@@ -271,27 +306,75 @@ class Scaler:
         # let the normal idle path reap it once GitHub says it is idle.
         runner.state = RunnerState.IDLE
         runner.runner_id = runner_id
-        self.hold = "failure"
+        self._failed(out)
         out.event("error", name=event.name, reason=event.reason, ambiguous=True)
 
     def _on_exited(self, event: RunnerExited, out: _Out) -> None:
         if not self.registered(event.name, event.generation):
             return
-        del self.runners[event.name]
-        self._disarm(event.name, out)
-        self.hold = None
+        runner = self.runners[event.name]
+        early = (
+            runner.state in (RunnerState.STARTING, RunnerState.IDLE)
+            and event.exit_code != 0
+        )
+        self._release(event.name, out)
         out.event("exited", name=event.name, exit_code=event.exit_code)
+        if early:
+            # Died before taking a job (spawn failure, bad config, missing
+            # binary): back off instead of relaunching straight away.
+            self._failed(out)
+            out.event("error", name=event.name, reason="exited_before_job")
 
     def _on_deadline(self, event: IdleDeadline, out: _Out) -> None:
         if self._armed.get(event.name) != event.generation:
             return  # stale or cancelled arm
         del self._armed[event.name]
         runner = self.runners.get(event.name)
-        if runner is None or runner.state is not RunnerState.IDLE or self.queued:
+        if runner is None:
             return
-        del self.runners[event.name]
+        if runner.state is RunnerState.FINISHING:
+            # The exit callback never came: stop the child, keep the slot
+            # until the agent confirms.
+            runner.state = RunnerState.REAPING
+            out.decisions.append(
+                Reap(runner.name, runner.generation, None, delete_github=False)
+            )
+            out.event("reaped", name=runner.name, reason="finish_deadline")
+            return
+        if runner.state is not RunnerState.IDLE or self.queued:
+            return
+        runner.state = RunnerState.REAPING  # tracked until ReapFinished
         out.decisions.append(Reap(runner.name, runner.generation, runner.runner_id))
         out.event("reaped", name=runner.name, reason="idle_deadline")
+
+    def _on_reap_finished(self, event: ReapFinished, out: _Out) -> None:
+        runner = self.runners.get(event.name)
+        if (
+            runner is None
+            or runner.generation != event.generation
+            or runner.state is not RunnerState.REAPING
+        ):
+            return  # rollback / orphan reaps are untracked by design
+        if event.outcome is ReapOutcome.DONE:
+            self._release(event.name, out)
+            out.event("exited", name=event.name, reason="reaped")
+        elif event.outcome is ReapOutcome.GITHUB_FAILED:
+            runner.state = RunnerState.IDLE  # nothing changed; settle re-arms
+        elif event.outcome is ReapOutcome.BUSY:
+            runner.state = RunnerState.BUSY  # it took a job after all
+        else:  # AGENT_FAILED: deregistered, child may still run; retry later
+            runner.state = RunnerState.FINISHING
+            self._arm(runner, out)
+        if event.outcome is not ReapOutcome.DONE:
+            out.event("error", name=event.name, reason=f"reap_{event.outcome.value}")
+
+    def _on_retry(self, event: RetryDeadline, out: _Out) -> None:
+        if event.name != RETRY_KEY or event.generation != self._retry_arm:
+            return
+        self._retry_arm = None
+        if self.hold in ("failure", "capacity"):
+            self.hold = None
+            out.event("launch_retry", failures=self.failures)
 
     def _on_started(self, event: ControllerStarted, out: _Out) -> None:
         if self.started:
@@ -332,8 +415,56 @@ class Scaler:
             runners=len(self.runners),
             busy=self.count(RunnerState.BUSY),
         )
+        for job in event.queued:  # demand accepted before the restart
+            if job.status is JobStatus.QUEUED:
+                self._on_job(job, out)
 
     # -- settle ------------------------------------------------------------------
+
+    def _arm(self, runner: Runner, out: _Out) -> None:
+        arm = f"{runner.generation or 'adopted'}.{self._new_generation()}"
+        self._armed[runner.name] = arm
+        out.decisions.append(ScheduleIdle(runner.name, arm, self.idle_grace_s))
+
+    def _release(self, name: str, out: _Out) -> None:
+        """Drop a reservation whose agent slot is confirmed free."""
+        del self.runners[name]
+        self._disarm(name, out)
+        if self.hold == "capacity":
+            self.hold = None
+
+    def _failed(self, out: _Out, *, capacity: bool = False) -> None:
+        if self.hold == "circuit":
+            return
+        if capacity:
+            # The agent is full: wait for a slot to free (an exit) or, if
+            # none is ours to free, one bounded retry. Not a health failure.
+            self.hold = "capacity"
+            self._schedule_retry(RETRY_CAP_S, out)
+            return
+        self.failures += 1
+        if self.failures >= MAX_CONSECUTIVE_FAILURES:
+            self.hold = "circuit"
+            self._retry_arm = None
+            out.event("launch_circuit_open", failures=self.failures)
+            return
+        self.hold = "failure"
+        delay = self.backoff(self.failures)
+        self._schedule_retry(delay, out)
+        out.event("launch_backoff", failures=self.failures, delay_s=delay)
+
+    def _schedule_retry(self, delay_s: float, out: _Out) -> None:
+        arm = self._new_generation()  # a newer arm makes older ones stale
+        self._retry_arm = arm
+        out.decisions.append(ScheduleRetry(RETRY_KEY, arm, delay_s))
+
+    def _healthy(self, out: _Out) -> None:
+        self.failures = 0
+        if self.hold in ("failure", "circuit"):
+            if self.hold == "circuit":
+                out.event("launch_circuit_closed")
+            self.hold = None
+            self._retry_arm = None
 
     def _disarm(self, name: str, out: _Out) -> None:
         generation = self._armed.pop(name, None)
@@ -349,9 +480,7 @@ class Scaler:
             return
         for runner in self.runners.values():
             if runner.state is RunnerState.IDLE and runner.name not in self._armed:
-                arm = f"{runner.generation or 'adopted'}.{self._new_generation()}"
-                self._armed[runner.name] = arm
-                out.decisions.append(ScheduleIdle(runner.name, arm, self.idle_grace_s))
+                self._arm(runner, out)
                 out.event("idle", name=runner.name, grace_s=self.idle_grace_s)
 
     def _scale_up(self, out: _Out) -> None:
@@ -374,4 +503,12 @@ class Scaler:
         raise RuntimeError("could not mint a unique runner name")
 
 
-__all__ = ["JOB_MEMORY", "Scaler", "Step"]
+__all__ = [
+    "JOB_MEMORY",
+    "MAX_CONSECUTIVE_FAILURES",
+    "RETRY_BASE_S",
+    "RETRY_CAP_S",
+    "RETRY_KEY",
+    "Scaler",
+    "Step",
+]
