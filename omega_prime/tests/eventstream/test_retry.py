@@ -578,3 +578,26 @@ def test_retry_and_dead_letter_require_nonempty_string_reasons(reason: Any) -> N
         Retry(after=0, reason=reason)
     with pytest.raises(ValueError):
         DeadLetter(reason=reason)
+
+
+@pytest.mark.asyncio
+async def test_history_parses_json_string_properties_from_broker() -> None:
+    """Pulsar stores properties as strings; history must resume across attempts."""
+    publisher = Publisher()
+    router = RetryRouter(
+        publisher, "gate", subscription_type="Shared", rng=FixedRng(0.0).uniform
+    )
+    acknowledged: list[bool] = []
+    delivery = make_delivery(
+        acknowledged,
+        properties={
+            "omega_attempt": "2",
+            "omega_failure_history": json.dumps(
+                [{"attempt": 1, "reason": "attempt 1"}]
+            ),
+        },
+    )
+    assert await router.handle(delivery, Retry(1.0, "attempt 2")) == "retry"
+    history = publisher.requests[0].properties["omega_failure_history"]
+    assert [item["attempt"] for item in history] == [1, 2]
+    assert acknowledged == [True]

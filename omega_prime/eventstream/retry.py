@@ -66,6 +66,12 @@ class RetryRouter:
 
     def _history_for(self, delivery: Delivery) -> list[dict[str, Any]]:
         rows = delivery.properties.get("omega_failure_history", ())
+        if isinstance(rows, str):
+            # Pulsar message properties are strings; history is JSON-encoded.
+            try:
+                rows = json.loads(rows)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return []
         if not isinstance(rows, (list, tuple)):
             return []
         clean: list[dict[str, Any]] = []
