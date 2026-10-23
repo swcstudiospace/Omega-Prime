@@ -94,4 +94,58 @@ describe("memory EventBus", () => {
     await reader.close();
     await bus.close();
   });
+  it("closing one receiver releases only its own holds on a shared subscription", async () => {
+    const bus = new MemoryEventBus();
+    const options = { subscriptionName: "shared-gate", mode: "Shared" as const };
+    const busy = await bus.subscribe("persistent://omega/sdlc/pr", options);
+    const idle = await bus.subscribe("persistent://omega/sdlc/pr", options);
+    const third = await bus.subscribe("persistent://omega/sdlc/pr", options);
+    await bus.publish(request("ce-1"));
+    const active = await busy.receive();
+    expect(active?.event.id).toBe("ce-1");
+    await idle.close();
+    const controller = new AbortController();
+    const pending = third.receive(controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(busy.inFlightCount).toBe(1);
+    await active?.ack();
+    expect(busy.inFlightCount).toBe(0);
+    await bus.close();
+  });
+
+  it("rejects stale settlement after the receiver's hold was released", async () => {
+    const bus = new MemoryEventBus();
+    const options = { subscriptionName: "stale-gate", mode: "Shared" as const };
+    const first = await bus.subscribe("persistent://omega/sdlc/pr", options);
+    const second = await bus.subscribe("persistent://omega/sdlc/pr", options);
+    await bus.publish(request("ce-1"));
+    const stale = await first.receive();
+    await first.close();
+    const redelivered = await second.receive();
+    expect(redelivered?.event.id).toBe("ce-1");
+    expect(redelivered?.metadata.redelivered).toBe(true);
+    await expect(stale?.ack()).rejects.toThrow(/stale settlement/);
+    expect(second.inFlightCount).toBe(1);
+    await redelivered?.ack();
+    await bus.close();
+  });
+  it("keeps the event's CloudEvents properties authoritative over caller properties", async () => {
+    const bus = new MemoryEventBus();
+    const subscriber = await bus.subscribe("persistent://omega/sdlc/pr", { subscriptionName: "props", mode: "Shared" });
+    await bus.publish(
+      new PublishRequest({
+        event: event("ce-real"),
+        topic: "persistent://omega/sdlc/pr",
+        key: "repo#7",
+        properties: { ce_id: "ce-stale", omega_note: "kept" }
+      })
+    );
+    const delivery = await subscriber.receive();
+    expect(delivery?.metadata.properties.ce_id).toBe("ce-real");
+    expect(delivery?.metadata.properties.omega_note).toBe("kept");
+    await delivery?.ack();
+    await bus.close();
+  });
 });

@@ -33,6 +33,9 @@ _CI_TYPES = frozenset(
 )
 _SUPPORTED_TYPES = _PR_TYPES | _REVIEW_TYPES | _CI_TYPES
 _STATE_VERSION = 1
+# Bounds for head bookkeeping so busy, long-lived PRs keep constant-size state.
+_MAX_PENDING_HEADS = 8
+_MAX_KNOWN_HEADS = 32
 
 
 def _required_string(value: object, name: str) -> str:
@@ -100,6 +103,89 @@ def _state_copy(previous: Mapping[str, Any] | None) -> dict[str, Any]:
     return result
 
 
+def _known_heads(state: Mapping[str, Any]) -> list[str]:
+    """Heads this PR has already left, oldest first (bounded)."""
+    known = state.get("known_heads", [])
+    if not isinstance(known, list):
+        return []
+    return [head for head in known if isinstance(head, str) and head]
+
+
+def _pending_heads(state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Normalize buffered future-head observations into reduced buckets.
+
+    Older state stored an append-only list of raw events per head; those are
+    replayed into the reduced ``{"review", "ci", "seq"}`` bucket form.
+    """
+    raw = state.get("pending_by_head", {})
+    if not isinstance(raw, dict):
+        return {}
+    pending: dict[str, dict[str, Any]] = {}
+    for index, (head, bucket) in enumerate(sorted(raw.items())):
+        if not isinstance(head, str):
+            continue
+        if isinstance(bucket, list):
+            reduced: dict[str, Any] = {"review": {}, "ci": {}, "seq": index}
+            for item in bucket:
+                if not isinstance(item, Mapping):
+                    continue
+                etype, payload = item.get("type"), item.get("data")
+                if isinstance(etype, str) and isinstance(payload, Mapping):
+                    _apply_observation(reduced, etype, payload)
+            pending[head] = reduced
+        elif isinstance(bucket, Mapping):
+            pending[head] = {
+                "review": dict(bucket.get("review", {}) or {}),
+                "ci": dict(bucket.get("ci", {}) or {}),
+                "seq": bucket.get("seq", index)
+                if isinstance(bucket.get("seq"), int)
+                else index,
+            }
+    return pending
+
+
+def _apply_observation(
+    target: dict[str, Any], etype: str, payload: Mapping[str, Any]
+) -> None:
+    """Reduce one review or CI observation into ``target`` (latest wins)."""
+    if target.get("closed"):
+        return
+    if etype in _REVIEW_TYPES:
+        review = dict(target.get("review", {}))
+        review[etype.rsplit(".", 1)[-1]] = {
+            key: payload[key]
+            for key in sorted(payload)
+            if key not in {"repo", "number", "head_sha", "actor"}
+        }
+        target["review"] = review
+        return
+    ci = dict(target.get("ci", {}))
+    run_id = payload.get("run_id")
+    if isinstance(run_id, str) and run_id:
+        ci[run_id] = {
+            "status": (
+                "in_progress"
+                if etype == "omega.ci.run.started"
+                else "passed"
+                if etype.endswith(".passed")
+                else "failed"
+            ),
+            "event_type": etype,
+            "conclusion": payload.get("conclusion"),
+        }
+        target["ci"] = ci
+
+
+def _merge_pending(target: dict[str, Any], bucket: Mapping[str, Any]) -> None:
+    """Fold a reduced future-head bucket into the now-current head state."""
+    review = dict(target.get("review", {}))
+    review.update(dict(bucket.get("review", {}) or {}))
+    target["review"] = review
+    ci = dict(target.get("ci", {}))
+    ci.update(dict(bucket.get("ci", {}) or {}))
+    target["ci"] = ci
+
+
 def reduce_pr_state(
     previous: Mapping[str, Any] | None,
     event: CloudEvent | Mapping[str, Any],
@@ -161,35 +247,7 @@ def reduce_pr_state(
     if not isinstance(current_head, str) or not current_head:
         raise ValueError("previous PR projection has invalid head_sha")
 
-    def _apply_review_or_ci(
-        target: dict[str, Any], etype: str, payload: Mapping[str, Any]
-    ) -> None:
-        if target.get("closed"):
-            return
-        if etype in _REVIEW_TYPES:
-            review = dict(target.get("review", {}))
-            review[etype.rsplit(".", 1)[-1]] = {
-                key: payload[key]
-                for key in sorted(payload)
-                if key not in {"repo", "number", "head_sha", "actor"}
-            }
-            target["review"] = review
-            return
-        ci = dict(target.get("ci", {}))
-        run_id = payload.get("run_id")
-        if isinstance(run_id, str) and run_id:
-            ci[run_id] = {
-                "status": (
-                    "in_progress"
-                    if etype == "omega.ci.run.started"
-                    else "passed"
-                    if etype.endswith(".passed")
-                    else "failed"
-                ),
-                "event_type": etype,
-                "conclusion": payload.get("conclusion"),
-            }
-            target["ci"] = ci
+    _apply_review_or_ci = _apply_observation
 
     if event_type in _PR_TYPES:
         if event_type == "omega.sdlc.pr.pushed" and head != current_head:
@@ -200,25 +258,26 @@ def reduce_pr_state(
             ):
                 # Only an active PR advances, and only when the push follows its
                 # known head, rejecting stale/conflicting branch transitions.
+                known = _known_heads(state)
+                if current_head not in known:
+                    known.append(current_head)
+                state["known_heads"] = known[-_MAX_KNOWN_HEADS:]
                 state["head_sha"] = head
                 state["review"] = {}
                 state["ci"] = {}
                 if not state.get("closed"):
                     state["status"] = "open"
-                # Apply reviews/CI that arrived for the new head before this push.
-                pending = state.get("pending_by_head", {})
-                if isinstance(pending, dict):
-                    pending = dict(pending)
-                    buffered = pending.pop(head, [])
-                    state["pending_by_head"] = pending
-                    if isinstance(buffered, list):
-                        for item in buffered:
-                            if not isinstance(item, Mapping):
-                                continue
-                            etype = item.get("type")
-                            payload = item.get("data")
-                            if isinstance(etype, str) and isinstance(payload, Mapping):
-                                _apply_review_or_ci(state, etype, payload)
+                # Apply reduced reviews/CI that arrived for the new head before
+                # this push, and drop buckets for heads the PR has already left.
+                pending = _pending_heads(state)
+                buffered = pending.pop(head, None)
+                state["pending_by_head"] = {
+                    pending_head: bucket
+                    for pending_head, bucket in pending.items()
+                    if pending_head not in state["known_heads"]
+                }
+                if buffered is not None:
+                    _merge_pending(state, buffered)
             # A mismatch is a stale or conflicting branch transition.
         elif head != current_head:
             # Other historical lifecycle messages (and terminal events for an old
@@ -243,17 +302,36 @@ def reduce_pr_state(
     elif head == current_head and not state.get("closed"):
         _apply_review_or_ci(state, event_type, data)
     elif (
-        head != current_head and not state.get("closed") and event_type not in _PR_TYPES
+        head != current_head
+        and not state.get("closed")
+        and event_type not in _PR_TYPES
+        and head not in _known_heads(state)
     ):
-        # Buffer reviews/CI for a future head so an early arrival is not lost
-        # when source_positions would otherwise mark it already seen.
-        pending = state.get("pending_by_head", {})
-        pending = {} if not isinstance(pending, dict) else dict(pending)
-        bucket = pending.get(head, [])
-        bucket = [] if not isinstance(bucket, list) else list(bucket)
-        bucket.append({"type": event_type, "data": dict(data)})
+        # Buffer reduced reviews/CI for a possible future head so an early
+        # arrival is not lost when source_positions marks it already seen.
+        # Late results for heads the PR already left are discarded, buckets are
+        # reduced (latest review per kind, latest status per CI run), and at
+        # most _MAX_PENDING_HEADS heads are retained (oldest evicted first).
+        pending = _pending_heads(state)
+        sequence = state.get("pending_seq", 0)
+        sequence = sequence + 1 if isinstance(sequence, int) else 1
+        bucket = pending.get(head) or {"review": {}, "ci": {}}
+        bucket = {
+            "review": dict(bucket.get("review", {})),
+            "ci": dict(bucket.get("ci", {})),
+            "seq": sequence,
+        }
+        _apply_review_or_ci(bucket, event_type, data)
         pending[head] = bucket
+        while len(pending) > _MAX_PENDING_HEADS:
+            oldest = min(pending, key=lambda item: int(pending[item].get("seq", 0)))
+            del pending[oldest]
         state["pending_by_head"] = pending
+        state["pending_seq"] = sequence
+    if state.get("closed"):
+        # A closed or merged PR never advances again; its buffers are dead.
+        state.pop("pending_by_head", None)
+        state.pop("pending_seq", None)
     if position is not None:
         positions[source_key] = list(position)
         state["source_positions"] = positions

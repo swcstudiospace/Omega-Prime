@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import ipaddress
@@ -22,6 +23,69 @@ from omega_prime.eventstream.config import EventStreamConfig
 from omega_prime.eventstream.ports import AdminPort
 
 _TOPOLOGY = Path(__file__).with_name("topology.yaml")
+
+
+def function_module_sources(package_root: Path, module: str) -> tuple[Path, ...]:
+    """Return every ``omega_prime`` source file a Function module imports.
+
+    The deployed Function archive must be importable without the repository on
+    ``sys.path``, so its Python sources are derived from the module's static
+    import closure (including function-local imports and each parent package's
+    ``__init__.py``) instead of a hand-maintained list that can drift when a
+    Function gains a new shared import.
+    """
+    root = package_root.resolve()
+
+    def resolve(dotted: str) -> list[Path]:
+        parts = dotted.split(".")
+        if not parts or parts[0] != "omega_prime":
+            return []
+        found: list[Path] = []
+        for depth in range(1, len(parts) + 1):
+            package_init = root.joinpath(*parts[1:depth], "__init__.py")
+            if package_init.is_file():
+                found.append(package_init)
+        leaf = root.joinpath(*parts[1:]).with_suffix(".py") if len(parts) > 1 else None
+        if leaf is not None and leaf.is_file():
+            found.append(leaf)
+        return found
+
+    def dotted_name(path: Path) -> str:
+        relative = path.relative_to(root).with_suffix("")
+        parts = list(relative.parts)
+        if parts and parts[-1] == "__init__":
+            parts.pop()
+        return ".".join(["omega_prime", *parts])
+
+    start = root / "eventstream" / "functions" / f"{module}.py"
+    if not start.is_file():
+        raise AdminError(f"Function module {module!r} is missing")
+    pending = [start, *resolve(dotted_name(start))]
+    seen: set[Path] = set()
+    while pending:
+        source = pending.pop()
+        if source in seen:
+            continue
+        seen.add(source)
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        current = dotted_name(source)
+        current_package = (
+            current if source.name == "__init__.py" else current.rsplit(".", 1)[0]
+        )
+        for node in ast.walk(tree):
+            targets: list[str] = []
+            if isinstance(node, ast.Import):
+                targets = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                if node.level:
+                    anchor = current_package.split(".")
+                    anchor = anchor[: len(anchor) - (node.level - 1)]
+                    base = ".".join([*anchor, *([base] if base else [])])
+                targets = [base, *(f"{base}.{alias.name}" for alias in node.names)]
+            for target in targets:
+                pending.extend(resolve(target))
+    return tuple(sorted(seen))
 
 
 class AdminError(RuntimeError):
@@ -524,16 +588,6 @@ class PulsarAdminPort(AdminPort):
             "sdlc/pr-state": "persistent://omega/sdlc/pr-state",
         }
         package_root = Path(__file__).resolve().parents[1]
-        shared_sources = (
-            package_root / "__init__.py",
-            package_root / "credentials" / "__init__.py",
-            package_root / "credentials" / "redact.py",
-            package_root / "eventstream" / "envelope.py",
-            package_root / "eventstream" / "errors.py",
-            package_root / "eventstream" / "taxonomy.py",
-            package_root / "eventstream" / "functions" / "__init__.py",
-            package_root / "eventstream" / "schemas" / "__init__.py",
-        )
         schema_sources = tuple(
             sorted((package_root / "eventstream" / "schemas").glob("*.json"))
         )
@@ -552,9 +606,8 @@ class PulsarAdminPort(AdminPort):
             archive = io.BytesIO()
             with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
                 paths = (
-                    *shared_sources,
+                    *function_module_sources(package_root, module),
                     *schema_sources,
-                    package_root / "eventstream" / "functions" / f"{module}.py",
                 )
                 for source in paths:
                     if source.is_file():

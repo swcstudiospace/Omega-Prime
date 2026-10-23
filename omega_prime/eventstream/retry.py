@@ -149,6 +149,7 @@ class RetryRouter:
                     _safe_reason(outcome, self.known_secrets),
                     aggregate_key,
                     settle_before_ack=settle_before_ack,
+                    latency=latency,
                 )
                 return "dlq"
             retry_outcome: Retry | DeadLetter = Retry(
@@ -164,6 +165,7 @@ class RetryRouter:
                 _safe_reason(retry_outcome.reason, self.known_secrets),
                 aggregate_key,
                 settle_before_ack=settle_before_ack,
+                latency=latency,
             )
             return "dlq"
         reason = _safe_reason(retry_outcome.reason, self.known_secrets)
@@ -223,6 +225,7 @@ class RetryRouter:
         aggregate_key: str | None,
         *,
         settle_before_ack: Callable[[str], Awaitable[bool]] | None = None,
+        latency: float = 0.0,
     ) -> None:
         event, data = delivery.event, dict(delivery.event.data)
         history = self._history_for(delivery)
@@ -303,6 +306,14 @@ class RetryRouter:
             self.observer.publish(
                 traceparent=traceparent,
                 attributes={"topic": request.topic},
+            )
+            # One consume count per delivery, with the measured handler time,
+            # so dead-lettered work is visible in consume totals and latency.
+            self.observer.consume(
+                "dlq",
+                latency,
+                traceparent=traceparent,
+                attributes={"subscription": self.subscription},
             )
         trace_id = str(traceparent).split("-")[1] if traceparent else ""
         _LOG.warning(
@@ -386,6 +397,9 @@ class DlqTriage:
             key=derive_key(event.type, event.data),
             sequence_id=attempt,
             producer_name=f"omega-eventstream-{event.id}",
+            # Per-event producer: release it after the send so triage never
+            # accumulates one native producer per dead-lettered event.
+            single_use=True,
             properties=dict(delivery.properties),
         )
         receipt = await self.publisher.publish(request)

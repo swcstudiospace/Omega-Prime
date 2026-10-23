@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CloudEvent, PublishRequest } from "../src/envelope.js";
-import { AuthenticationError, ConfigurationError } from "../src/errors.js";
+import { AuthenticationError, ConfigurationError, ContractError } from "../src/errors.js";
+import { NATIVE_REDELIVERY_SCHEMA_SAMPLES, NATIVE_TOPIC_SCHEMAS } from "../src/native-schemas.generated.js";
 import { EventStreamConfig } from "../src/config.js";
 import {
   createPulsarEventBus,
@@ -66,13 +67,27 @@ describe("lazy Pulsar adapter", () => {
     const metadata = nativeJsonMetadataForTopic("persistent://omega/sdlc/pr");
     expect(metadata.schemaType).toBe("JSON");
     expect(metadata.format).toBe("avro-json");
-    expect(metadata.schema).toContain("OmegaSdlcPr");
+    // Same named record and schema name the Python SDK registers for sdlc/pr.
+    expect(metadata.name).toBe("OmegaCloudEvent_pr");
+    const parsed = JSON.parse(metadata.schema) as { name: string; namespace: string; fields: { name: string; type: unknown }[] };
+    expect(parsed.namespace).toBe("omega.eventstream");
+    const dataField = parsed.fields.find((field) => field.name === "data");
+    expect(Array.isArray(dataField?.type) && (dataField?.type as unknown[]).includes("null")).toBe(false);
     expect(metadata.schema).toContain("head_sha");
-    const blockedMetadata = nativeJsonMetadataForTopic("persistent://omega/control/signal");
-    expect(blockedMetadata.schema).toContain("OmegaControlSignalBlockedBranch1");
-    expect(blockedMetadata.schema).toContain("OmegaControlSignalBlockedBranch2");
-    const auditMetadata = nativeJsonMetadataForTopic("persistent://omega/audit/log");
-    expect(auditMetadata.schema).toContain("OmegaAuditPayload");
+    expect(nativeJsonMetadataForTopic("persistent://omega/control/signal").name).toBe("OmegaCloudEvent_signal");
+    expect(nativeJsonMetadataForTopic("persistent://omega/sdlc/pr-state").name).toBe("OmegaPrState");
+    expect(() => nativeJsonMetadataForTopic("persistent://omega/unknown/topic")).toThrow(ContractError);
+  });
+
+  it("derives every native schema from the shared Python-rendered contract", () => {
+    for (const [topic, schema] of Object.entries(NATIVE_TOPIC_SCHEMAS)) {
+      const metadata = nativeJsonMetadataForTopic(topic);
+      expect(metadata.schema).toBe(schema);
+      expect(metadata.name).toBe((JSON.parse(schema) as { name: string }).name);
+    }
+    for (const [topic, schema] of Object.entries(NATIVE_REDELIVERY_SCHEMA_SAMPLES)) {
+      expect(nativeJsonMetadataForTopic(topic).schema).toBe(schema);
+    }
   });
   it("refuses auth-family publication without a file-backed key and crypto provider", async () => {
     const bus = new PulsarEventBus({

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import json
 import re
@@ -35,6 +36,7 @@ from omega_prime.eventstream.ports import (
 )
 from omega_prime.eventstream.taxonomy import (
     EVENT_TYPES,
+    get_event_type,
     resolve_schema_uri,
     validate_payload,
 )
@@ -394,16 +396,29 @@ def _is_retryable_pulsar_error(error: Exception) -> bool:
         import pulsar  # type: ignore[import-not-found,unused-ignore]
     except ImportError:
         return False
+    names = ("ConnectError", "NotConnected", "Timeout")
     retryable = tuple(
         cls
-        for cls in (
-            getattr(pulsar, "ConnectError", None),
-            getattr(pulsar, "NotConnected", None),
-            getattr(pulsar, "Timeout", None),
-        )
+        for cls in (getattr(pulsar, name, None) for name in names)
         if isinstance(cls, type)
     )
-    return bool(retryable) and isinstance(error, retryable)
+    if retryable and isinstance(error, retryable):
+        return True
+    # pulsar.asyncio raises one PulsarException class carrying a Result code.
+    return _pulsar_result_name(error) in names
+
+
+def _pulsar_result_name(error: BaseException) -> str | None:
+    """Return the native ``pulsar.Result`` name carried by an asyncio error."""
+    result_of = getattr(error, "error", None)
+    if not callable(result_of):
+        return None
+    try:
+        result = result_of()
+    except Exception:
+        return None
+    name = getattr(result, "name", None)
+    return name if isinstance(name, str) else None
 
 
 def _is_system_retry_topic(topic: str) -> bool:
@@ -514,6 +529,10 @@ def _is_incompatible_schema(error: BaseException) -> bool:
     """True when the native client rejected the payload against the topic schema."""
     if type(error).__name__ == "IncompatibleSchema":
         return True
+    # pulsar.asyncio wraps every native failure in PulsarException(Result);
+    # the schema rejection is only visible through its Result code.
+    if _pulsar_result_name(error) == "IncompatibleSchema":
+        return True
     try:
         import pulsar
     except ImportError:
@@ -608,6 +627,7 @@ class PulsarEventBus:
         self._creation_locks: dict[tuple[str, str, bool], asyncio.Lock] = {}
         self._resources: set[Any] = set()
         self._pending_sends: set[asyncio.Task[Any]] = set()
+        self._release_tasks: set[asyncio.Task[None]] = set()
         self._changed = asyncio.Event()
         self._closed = False
         self._codec = _Codec()
@@ -647,7 +667,13 @@ class PulsarEventBus:
         self._notify(relay=True)
         return self._client
 
-    async def _producer(self, request: PublishRequest, *, encrypt: bool) -> Any:
+    async def _producer(
+        self,
+        request: PublishRequest,
+        *,
+        encrypt: bool,
+        initial_sequence: int | None = None,
+    ) -> Any:
         identity = (request.topic, request.producer_name, encrypt)
         cached = self._producers.get(identity)
         if cached is not None:
@@ -657,18 +683,24 @@ class PulsarEventBus:
             cached = self._producers.get(identity)
             if cached is not None:
                 return cached
-            if self._acknowledged_watermark is None:
-                raise PulsarAdapterError(
-                    "a persisted acknowledged-watermark callback is required"
+            watermark: object
+            if initial_sequence is not None:
+                # Adapter-owned single-use producers (poison quarantine) have
+                # no outbox row, so they start from an explicit sequence.
+                watermark = initial_sequence
+            else:
+                if self._acknowledged_watermark is None:
+                    raise PulsarAdapterError(
+                        "a persisted acknowledged-watermark callback is required"
+                    )
+                watermark_value = self._acknowledged_watermark(
+                    request.topic, request.producer_name
                 )
-            watermark_value = self._acknowledged_watermark(
-                request.topic, request.producer_name
-            )
-            watermark = (
-                await watermark_value
-                if inspect.isawaitable(watermark_value)
-                else watermark_value
-            )
+                watermark = (
+                    await watermark_value
+                    if inspect.isawaitable(watermark_value)
+                    else watermark_value
+                )
             if (
                 isinstance(watermark, bool)
                 or not isinstance(watermark, int)
@@ -703,12 +735,29 @@ class PulsarEventBus:
                 self._notify(relay=True)
                 if isinstance(exc, EncryptionUnavailable):
                     raise
+                # The broker runs its schema compatibility check when the
+                # producer registers, so an incompatible topic schema surfaces
+                # here first. Keep it typed so the outbox rejects the row
+                # instead of retrying it forever at the head of the queue.
+                if _is_incompatible_schema(exc):
+                    raise SchemaError(
+                        str(
+                            redact_value(
+                                f"native schema rejected producer: {type(exc).__name__}: {exc}"
+                            )
+                        )[:256]
+                    ) from None
                 raise _sanitized("Pulsar producer creation failed", exc) from None
             self._producers[identity] = producer
             self._notify(relay=True)
             return producer
 
     async def publish(self, request: PublishRequest) -> PublishReceipt:
+        return await self._send(request)
+
+    async def _send(
+        self, request: PublishRequest, *, initial_sequence: int | None = None
+    ) -> PublishReceipt:
         if self._closed:
             raise PulsarAdapterError("Pulsar event bus is closed")
         encrypt = _requires_encryption(request)
@@ -719,38 +768,52 @@ class PulsarEventBus:
             raise UnsupportedSubscriptionMode(
                 "delayed delivery is supported only on deadline or retry topics"
             )
-        producer = await self._producer(request, encrypt=encrypt)
-        options: dict[str, object] = {
-            "properties": _properties(request),
-            "partition_key": request.key,
-            "sequence_id": request.sequence_id,
-        }
-        if request.deliver_after is not None:
-            options["deliver_at"] = int(request.deliver_after.timestamp() * 1000)
-        send_task = asyncio.create_task(producer.send(payload, **options))
-        self._pending_sends.add(send_task)
-        send_task.add_done_callback(self._send_finished)
+        identity = (request.topic, request.producer_name, encrypt)
         try:
-            message_id = await asyncio.shield(send_task)
+            producer = await self._producer(
+                request, encrypt=encrypt, initial_sequence=initial_sequence
+            )
+            options: dict[str, object] = {
+                "properties": _properties(request),
+                "partition_key": request.key,
+                "sequence_id": request.sequence_id,
+            }
+            if request.deliver_after is not None:
+                options["deliver_at"] = int(request.deliver_after.timestamp() * 1000)
+            send_task = asyncio.create_task(producer.send(payload, **options))
+            self._pending_sends.add(send_task)
+            send_task.add_done_callback(self._send_finished)
+            try:
+                message_id = await asyncio.shield(send_task)
+            except asyncio.CancelledError:
+                self._notify(relay=True)
+                if request.single_use:
+                    # Release the per-event producer once the shielded native
+                    # send settles instead of leaking it until bus close.
+                    send_task.add_done_callback(
+                        lambda _done: self._schedule_release(identity)
+                    )
+                raise
+            except Exception as exc:
+                self._notify(relay=True)
+                # Native schema rejection must surface as SchemaError so the
+                # outbox marks the row rejected instead of retrying forever.
+                if _is_incompatible_schema(exc):
+                    raise SchemaError(
+                        str(redact_value(str(exc)))[:256]
+                        or "native schema rejected publish"
+                    ) from None
+                raise _sanitized("Pulsar publish failed", exc) from None
         except asyncio.CancelledError:
-            self._notify(relay=True)
+            # A cancelled caller leaves the native send running; the producer
+            # must stay open until that send completes.
             raise
-        except Exception as exc:
-            self._notify(relay=True)
-            # Native schema rejection must surface as SchemaError so the outbox
-            # marks the row rejected instead of retrying forever.
-            if _is_incompatible_schema(exc):
-                raise SchemaError(
-                    str(exc)[:256] or "native schema rejected publish"
-                ) from None
-            raise _sanitized("Pulsar publish failed", exc) from None
+        except BaseException:
+            if request.single_use:
+                await self._release_producer(identity)
+            raise
         if request.single_use:
-            identity = (request.topic, request.producer_name, encrypt)
-            producer = self._producers.pop(identity, None)
-            self._creation_locks.pop(identity, None)
-            if producer is not None:
-                with contextlib.suppress(Exception):
-                    await producer.close()
+            await self._release_producer(identity)
         self._notify(relay=True)
         return PublishReceipt(
             event_id=request.event.id,
@@ -758,6 +821,21 @@ class PulsarEventBus:
             message_id=str(message_id),
             acknowledged_at=datetime.now(UTC),
         )
+
+    def _schedule_release(self, identity: tuple[str, str, bool]) -> None:
+        if self._closed:
+            return
+        task = asyncio.get_running_loop().create_task(self._release_producer(identity))
+        self._release_tasks.add(task)
+        task.add_done_callback(self._release_tasks.discard)
+
+    async def _release_producer(self, identity: tuple[str, str, bool]) -> None:
+        """Close a per-event producer so retries/DLQs do not accumulate natives."""
+        producer = self._producers.pop(identity, None)
+        self._creation_locks.pop(identity, None)
+        if producer is not None:
+            with contextlib.suppress(Exception):
+                await producer.close()
 
     async def _publish_poison(
         self,
@@ -767,68 +845,103 @@ class PulsarEventBus:
         subscription: str,
         error: BaseException,
     ) -> None:
-        """Publish undecodable raw bytes to ``dlq.<subscription>`` (TS mirror)."""
+        """Quarantine an undecodable delivery as a decodable blocked record.
+
+        The raw bytes are never republished: a consumer that could not decode
+        them (including ``dlq-triage``) could not decode the copy either, and
+        for auth-origin traffic the bytes are already decrypted plaintext.
+        Instead a schema-valid ``omega.control.signal.blocked`` (kind=dlq)
+        record carries the origin, the native message id and a payload digest.
+        It goes to ``dlq.<subscription>`` through the normal publish path, so
+        the shared ``_requires_encryption`` rule applies to the preserved
+        origin. Poison read from a DLQ itself (the triage input) is raised
+        straight onto the blocked signal topic, because triage owns no
+        recursive ``dlq.dlq-triage`` resource.
+        """
         raw = bytes(message.data())
         properties = {
             str(key): str(value)
             for key, value in dict(message.properties() or {}).items()
         }
-        reason = str(redact_value(str(error), ()))[:256] or "undecodable payload"
-        props = {
-            **properties,
-            "omega_origin_topic": source_topic,
-            "omega_origin_message_id": str(message.message_id()),
-            "omega_origin_ce_id": (
-                properties.get("ce_id")
-                or properties.get("omega_origin_ce_id")
-                or "unknown"
-            ),
-            "omega_poison": "true",
-            "omega_last_error": reason,
-        }
-        topic = f"persistent://omega/system/dlq.{subscription}"
-        encrypt = source_topic.startswith("persistent://omega/auth/")
-        producer_name = (
-            f"omega-eventstream-poison-{subscription}-{message.message_id()}"
+        native_id = str(message.message_id())
+        reason = (
+            str(redact_value(str(error), ()))[:256].strip() or "undecodable payload"
         )
-        identity = (topic, producer_name, encrypt)
-        client = await self._client_instance()
-        options: dict[str, object] = {
-            "producer_name": producer_name,
-            "initial_sequence_id": 0,
-            "send_timeout_millis": 0,
-            "max_pending_messages": 1000,
-            "block_if_queue_full": True,
-            "batching_enabled": False,
-        }
-        if encrypt:
-            options.update(
-                {
-                    "encryption_key": "omega-auth",
-                    "crypto_key_reader": _crypto_reader(self.config),
-                }
-            )
-        producer = await create_with_backoff(
-            lambda: client.create_producer(topic, **options),
-            attempts=self._creation_attempts,
-            wait=self._backoff_wait,
-            retryable=_is_retryable_pulsar_error,
+        reason = f"undecodable payload quarantined: {reason}"[:256]
+        recorded_origin = properties.get("omega_origin_topic", "")
+        origin = (
+            recorded_origin
+            if _is_system_redelivery_topic(source_topic)
+            and recorded_origin.startswith("persistent://")
+            else source_topic
+        )
+        aggregate = (
+            str(message.partition_key() or "")
+            or properties.get("omega_key", "")
+            or f"poison:{native_id}"
+        )
+        source_ce_id = (
+            properties.get("ce_id")
+            or properties.get("omega_source_ce_id")
+            or properties.get("omega_origin_ce_id")
+            or f"native:{native_id}"
         )
         try:
-            await producer.send(
-                raw,
-                properties=props,
-                partition_key=str(
-                    message.partition_key() or properties.get("omega_key") or "poison"
-                ),
-                sequence_id=0,
-            )
-        finally:
-            with contextlib.suppress(Exception):
-                await producer.close()
-            self._producers.pop(identity, None)
-            self._creation_locks.pop(identity, None)
-        self._notify(relay=True)
+            attempt = int(properties.get("omega_attempt", "1"))
+        except ValueError:
+            attempt = 1
+        attempt = min(max(attempt, 1), 5)
+        digest = hashlib.sha256(raw).hexdigest()
+        blocked = CloudEvent(
+            specversion="1.0",
+            id=f"poison:{subscription}:{native_id}"[:256],
+            source="omega://eventstream/poison",
+            type="omega.control.signal.blocked",
+            datacontenttype="application/json",
+            dataschema="urn:omega:schema:omega.control.signal.blocked:1",
+            data={
+                "kind": "dlq",
+                "origin_topic": origin,
+                "aggregate_key": aggregate,
+                "source_ce_id": source_ce_id,
+                "reason": reason,
+                "history": [{"attempt": attempt, "reason": reason}],
+            },
+        )
+        triage_input = source_topic.startswith("persistent://omega/system/dlq.")
+        topic = (
+            get_event_type(blocked.type).topic
+            if triage_input
+            else f"persistent://omega/system/dlq.{subscription}"
+        )
+        safe_properties = {
+            key: value
+            for key, value in properties.items()
+            if not key.startswith("ce_") and key != "omega_retry_target"
+        }
+        request = PublishRequest(
+            event=blocked,
+            topic=topic,
+            key="dlq:"
+            + json.dumps(
+                [origin, aggregate], ensure_ascii=False, separators=(",", ":")
+            ),
+            sequence_id=1,
+            producer_name=f"omega-eventstream-poison-{subscription}-{native_id}",
+            single_use=True,
+            properties={
+                **safe_properties,
+                "omega_attempt": attempt,
+                "omega_origin_topic": origin,
+                "omega_origin_message_id": native_id,
+                "omega_source_ce_id": source_ce_id,
+                "omega_poison": "true",
+                "omega_poison_sha256": digest,
+                "omega_poison_bytes": len(raw),
+                "omega_last_error": reason,
+            },
+        )
+        await self._send(request, initial_sequence=0)
 
     async def subscribe(
         self,

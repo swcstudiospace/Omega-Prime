@@ -5,8 +5,11 @@ import { AuthenticationError, ConfigurationError, ContractError, isPlainRecord, 
 import { EventStreamConfig } from "./config.js";
 import { createAbortError } from "./ports.js";
 import type { ConsumerMode, DeliveryMetadata, EventBus, EventReader, EventSubscriber, MessageDelivery, ReadOptions, SubscribeOptions } from "./ports.js";
-import type { EventType, FieldRule, ObjectShape } from "./taxonomy.js";
-import { eventTypesForTopic, getEventType, payloadShapesFor } from "./taxonomy.js";
+import { eventTypesForTopic, getEventType } from "./taxonomy.js";
+import {
+  NATIVE_REDELIVERY_SCHEMA_TEMPLATE,
+  NATIVE_TOPIC_SCHEMAS
+} from "./native-schemas.generated.js";
 
 export interface PulsarMessageHandle {
   toString(): string;
@@ -113,6 +116,8 @@ export interface NativeJsonMetadata {
   readonly schemaType: "JSON";
   readonly format: "avro-json";
   readonly topic: string;
+  /** Native schema name; identical to the name the Python SDK registers. */
+  readonly name: string;
   readonly schema: string;
   readonly constraintMapping: Readonly<Record<string, string>>;
 }
@@ -400,7 +405,7 @@ class NativePulsarClientAdapter implements PulsarClient {
         ? undefined
         : {
             schemaType: "Json" as const,
-            name: safeAvroName(topic),
+            name: options.jsonMetadata.name,
             schema: options.jsonMetadata.schema
           };
     const producer = await this.#client.createProducer({
@@ -476,83 +481,34 @@ function safeAvroName(value: string): string {
   return /^[A-Za-z_]/.test(name) ? name : `Omega${name}`;
 }
 
-function avroType(rule: FieldRule): unknown {
-  switch (rule.kind) {
-    case "string":
-    case "date-time":
-      return "string";
-    case "integer":
-      return "long";
-    case "boolean":
-      return "boolean";
-    case "literal":
-    case "enum":
-      return typeof (rule.kind === "literal" ? rule.value : rule.values[0]) === "boolean" ? "boolean" :
-        typeof (rule.kind === "literal" ? rule.value : rule.values[0]) === "number" ? "long" : "string";
-    case "array":
-      return {
-        type: "array",
-        items: avroRecord("NestedPayload", rule.items)
-      };
-    case "details":
-      return { type: "map", values: ["string", "long", "boolean"] };
-  }
+/** Python `_avro_name`: replace non-identifier characters, prefix a non-letter start. */
+function pythonAvroName(value: string): string {
+  const name = value.replace(/[^A-Za-z0-9_]/g, "_");
+  return name.length > 0 && /^[A-Za-z_]/.test(name) ? name : `_${name}`;
 }
 
-function avroRecord(name: string, shape: ObjectShape): Record<string, unknown> {
-  const optional = new Set(shape.optional);
-  const fields = Object.entries(shape.fields).map(([fieldName, rule]) => {
-    const type = avroType(rule);
-    return optional.has(fieldName)
-      ? { name: fieldName, type: ["null", type], default: null }
-      : { name: fieldName, type };
-  });
-  return { type: "record", name, namespace: "omega.eventstream.payload", fields };
-}
-
+/**
+ * Native schema metadata for one topic, taken from the shared contract that
+ * Python renders (`omega_prime/eventstream/native_schema_contract.py`), so both
+ * SDKs register the same Avro named records under the same schema name.
+ */
 export function nativeJsonMetadataForTopic(topic: string): NativeJsonMetadata {
-  const events: readonly EventType[] = eventTypesForTopic(topic);
-  if (events.length === 0 && topic !== "persistent://omega/audit/log") {
+  let schema = NATIVE_TOPIC_SCHEMAS[topic];
+  if (schema === undefined && /^persistent:\/\/omega\/system\/(?:retry|dlq)\.[^/]+$/.test(topic)) {
+    const definition = JSON.parse(NATIVE_REDELIVERY_SCHEMA_TEMPLATE) as Record<string, unknown>;
+    definition.name = `OmegaCloudEvent_${pythonAvroName(topic.slice(topic.lastIndexOf("/") + 1))}`;
+    schema = JSON.stringify(definition);
+  }
+  if (schema === undefined) {
     throw new ContractError("topic has no registered event payloads");
   }
-  const payloadRecords: Record<string, unknown>[] = [];
-  for (const eventType of events) {
-    const shapes = payloadShapesFor(eventType.type);
-    for (const [index, shape] of shapes.entries()) {
-      const branch = shapes.length > 1 ? `Branch${index + 1}` : "";
-      payloadRecords.push(avroRecord(`${safeAvroName(eventType.type)}${branch}`, shape));
-    }
-  }
-  if (topic === "persistent://omega/audit/log") {
-    payloadRecords.push(...payloadShapesFor("omega.audit.*").map((shape) => avroRecord("OmegaAuditPayload", shape)));
-  }
-  const dataType: unknown[] = ["null", ...payloadRecords];
-  const schema = {
-    type: "record",
-    name: safeAvroName(topic),
-    namespace: "omega.eventstream",
-    fields: [
-      { name: "specversion", type: "string" },
-      { name: "id", type: "string" },
-      { name: "source", type: "string" },
-      { name: "type", type: "string" },
-      { name: "subject", type: ["null", "string"], default: null },
-      { name: "time", type: ["null", "string"], default: null },
-      { name: "datacontenttype", type: "string" },
-      { name: "dataschema", type: "string" },
-      { name: "traceparent", type: ["null", "string"], default: null },
-      { name: "omegakey", type: ["null", "string"], default: null },
-      { name: "omegatask", type: ["null", "string"], default: null },
-      { name: "omegagraph", type: ["null", "string"], default: null },
-      { name: "omegaheadsha", type: ["null", "string"], default: null },
-      { name: "data", type: dataType, default: null }
-    ]
-  };
+  const name = (JSON.parse(schema) as { name: string }).name;
   return Object.freeze({
     schemaType: "JSON",
     format: "avro-json",
     topic,
-    schema: JSON.stringify(schema),
+    name,
+    schema,
     constraintMapping: Object.freeze({
       "string.minLength": "Avro string; full constraint enforced by the SDK Draft 2020-12 validator",
       "integer.minimum/maximum": "Avro long; bounds enforced by the SDK Draft 2020-12 validator",

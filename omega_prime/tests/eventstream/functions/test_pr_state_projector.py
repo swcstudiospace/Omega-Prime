@@ -331,3 +331,80 @@ def test_review_arriving_before_push_is_applied_when_head_advances() -> None:
     assert state["head_sha"] == "head-b"
     assert state["review"]["approved"]["reviewer"] == "reviewer"
     assert "head-b" not in state.get("pending_by_head", {})
+
+
+def test_late_results_for_heads_already_left_are_discarded() -> None:
+    state = reduce_pr_state(None, _event("omega.sdlc.pr.opened"))
+    state = reduce_pr_state(
+        state,
+        _event("omega.sdlc.pr.pushed", head_sha="head-b", before_sha="head-a"),
+    )
+    assert state["known_heads"] == ["head-a"]
+    for index in range(5):
+        state = reduce_pr_state(
+            state,
+            _event("omega.ci.run.passed", head_sha="head-a", run_id=f"late-{index}"),
+            source="sdlc/ci",
+            source_position=(0, 10, index),
+        )
+    assert state.get("pending_by_head", {}) == {}
+    assert state["ci"] == {}
+
+
+def test_future_head_buffers_are_reduced_and_bounded() -> None:
+    from omega_prime.eventstream.functions.pr_state_projector import (
+        _MAX_PENDING_HEADS,
+    )
+
+    state = reduce_pr_state(None, _event("omega.sdlc.pr.opened"))
+    for entry in range(4):
+        state = reduce_pr_state(
+            state,
+            _event("omega.ci.run.passed", head_sha="head-b", run_id="run-1"),
+            source="sdlc/ci",
+            source_position=(0, 1, entry),
+        )
+    bucket = state["pending_by_head"]["head-b"]
+    assert list(bucket["ci"]) == ["run-1"]
+    for index in range(_MAX_PENDING_HEADS + 3):
+        state = reduce_pr_state(
+            state,
+            _event("omega.sdlc.review.approved", head_sha=f"future-{index}"),
+            source="sdlc/review",
+            source_position=(0, 2, index),
+        )
+    pending = state["pending_by_head"]
+    assert len(pending) == _MAX_PENDING_HEADS
+    assert "head-b" not in pending
+    assert f"future-{_MAX_PENDING_HEADS + 2}" in pending
+
+
+def test_closing_a_pr_drops_future_head_buffers() -> None:
+    state = reduce_pr_state(None, _event("omega.sdlc.pr.opened"))
+    state = reduce_pr_state(
+        state,
+        _event("omega.sdlc.review.approved", head_sha="head-z"),
+        source="sdlc/review",
+        source_position=(0, 1, 1),
+    )
+    assert "head-z" in state["pending_by_head"]
+    state = reduce_pr_state(state, _event("omega.sdlc.pr.closed"))
+    assert "pending_by_head" not in state
+
+
+def test_legacy_list_buckets_are_replayed_on_push() -> None:
+    state = reduce_pr_state(None, _event("omega.sdlc.pr.opened"))
+    state["pending_by_head"] = {
+        "head-b": [
+            {
+                "type": "omega.sdlc.review.approved",
+                "data": {**BASE, "head_sha": "head-b", "reviewer": "reviewer"},
+            }
+        ]
+    }
+    state = reduce_pr_state(
+        state,
+        _event("omega.sdlc.pr.pushed", head_sha="head-b", before_sha="head-a"),
+    )
+    assert state["review"]["approved"]["reviewer"] == "reviewer"
+    assert state["pending_by_head"] == {}

@@ -509,3 +509,71 @@ def test_admin_unit_helpers_for_retention_and_schema() -> None:
     )
     assert not _schema_equivalent({"type": "AVRO"}, expected)
     assert not _schema_equivalent("nope", expected)
+
+
+@pytest.mark.asyncio
+async def test_function_archives_import_without_repository_on_sys_path(
+    tmp_path: Path,
+) -> None:
+    import subprocess
+    import sys
+    import textwrap
+
+    recorder = RestRecorder()
+    admin = await make_admin(recorder)
+    await admin.reconcile()
+    await admin.close()
+    assert len(recorder.archives) == 3
+    classes = {
+        "greptile_score": "GreptileScoreFunction",
+        "ci_rollup": "CiRollupFunction",
+        "pr_state_projector": "PrStateProjectorFunction",
+    }
+    seen: set[str] = set()
+    for index, raw in enumerate(recorder.archives):
+        target = tmp_path / f"archive-{index}"
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            archive.extractall(target)
+            names = archive.namelist()
+        module = next(
+            Path(name).stem
+            for name in names
+            if name.startswith("src/omega_prime/eventstream/functions/")
+            and Path(name).stem in classes
+        )
+        seen.add(module)
+        src = target / "src"
+        script = textwrap.dedent(
+            f"""
+            import importlib, sys
+            from pathlib import Path
+            root = Path({str(src)!r}).resolve()
+            sys.path[:] = [str(root)] + [
+                entry for entry in sys.path
+                if entry and Path(entry).resolve() != Path({str(Path.cwd())!r}).resolve()
+            ]
+            loaded = importlib.import_module(
+                "omega_prime.eventstream.functions.{module}"
+            )
+            assert hasattr(loaded, {classes[module]!r})
+            for name, mod in list(sys.modules.items()):
+                if name == "omega_prime" or name.startswith("omega_prime."):
+                    locations = [getattr(mod, "__file__", None)] + list(
+                        getattr(mod, "__path__", []) or []
+                    )
+                    for location in filter(None, locations):
+                        assert Path(location).resolve().is_relative_to(root), (
+                            name, location
+                        )
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-P", "-c", script],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "PYTHONNOUSERSITE": "1"},
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+    assert seen == set(classes)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal, cast
 
 import pytest
@@ -822,5 +823,44 @@ def test_clean_shutdown_drains_then_closes_resources_in_order() -> None:
         result = await task
         assert result.clean and result.completed == 1
         assert order == ["ack", "consumer", "producer", "relay", "publisher", "client"]
+
+    asyncio.run(scenario())
+
+
+def test_restart_abandons_orphaned_claims_so_redelivery_runs_handler(
+    tmp_path: Path,
+) -> None:
+    """A killed worker leaves hashed owners; the next process must recover."""
+    from omega_prime.eventstream.idempotency import SQLiteIdempotencyStore
+
+    async def scenario() -> None:
+        db = tmp_path / "consumer.sqlite3"
+        prior = SQLiteIdempotencyStore(db)
+        orphan = await prior.claim("gate", "event-1", "dead-owner")
+        assert orphan.status == "acquired"
+        # Simulate process death: drop the incarnation flock without release.
+        prior.close()
+
+        handled = asyncio.Event()
+        acked: list[bool] = []
+
+        async def handler(_delivery: Delivery, context: HandlerContext) -> Ack:
+            handled.set()
+            return Ack()
+
+        store = SQLiteIdempotencyStore(db)
+        runtime = ConsumerRuntime(
+            Subscriber([delivery(acked)]),
+            Publisher(),
+            store,
+            "gate",
+            handler,
+            max_in_flight=1,
+        )
+        task = asyncio.create_task(runtime.run())
+        await handled.wait()
+        runtime.stop()
+        result = await task
+        assert result.clean and acked == [True]
 
     asyncio.run(scenario())

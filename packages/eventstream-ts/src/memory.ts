@@ -21,6 +21,13 @@ interface StoredEvent {
   readonly redeliveryCounts: Record<string, number>;
 }
 
+/** One receiver's hold on a message within a shared subscription. */
+interface InFlightEntry {
+  readonly record: StoredEvent;
+  readonly owner: object;
+  readonly lease: symbol;
+}
+
 export class ManualClock implements Clock {
   #current: number;
   readonly #listeners = new Set<() => void>();
@@ -60,9 +67,12 @@ class MemoryDelivery implements MessageDelivery {
     this.metadata = Object.freeze({
       topic: event.request.topic,
       key: event.request.key,
+      // Caller properties first, the event's own CloudEvents properties last
+      // (matching the Pulsar adapters), so a stale ce_* value cannot contradict
+      // the delivered event's identity.
       properties: Object.freeze({
-        ...event.request.event.toProperties(),
-        ...event.request.properties
+        ...event.request.properties,
+        ...event.request.event.toProperties()
       }),
       ...(event.request.sequenceId === undefined ? {} : { sequenceId: String(event.request.sequenceId) }),
       messageId: event.index,
@@ -75,14 +85,14 @@ class MemoryDelivery implements MessageDelivery {
 
   async ack(): Promise<void> {
     if (this.#settled) return;
-    this.#settled = true;
     this.#acknowledge();
+    this.#settled = true;
   }
 
   async nack(): Promise<void> {
     if (this.#settled) return;
-    this.#settled = true;
     this.#reject();
+    this.#settled = true;
   }
 }
 
@@ -96,7 +106,7 @@ export class MemoryEventBus implements EventBus {
   readonly #records: StoredEvent[] = [];
   readonly #subscribers = new Set<MemorySubscription>();
   /** In-flight message indexes shared by subscribers of the same name. */
-  readonly #sharedInFlight = new Map<string, Map<number, StoredEvent>>();
+  readonly #sharedInFlight = new Map<string, Map<number, InFlightEntry>>();
   readonly #readers = new Set<MemoryReader>();
   readonly #unsubscribeClock: () => void;
   #closed = false;
@@ -195,7 +205,7 @@ export class MemoryEventBus implements EventBus {
     this.#subscribers.delete(subscriber);
   }
 
-  sharedInFlight(topic: string, subscriptionName: string): Map<number, StoredEvent> {
+  sharedInFlight(topic: string, subscriptionName: string): Map<number, InFlightEntry> {
     const key = `${topic}\0${subscriptionName}`;
     let map = this.#sharedInFlight.get(key);
     if (map === undefined) {
@@ -216,7 +226,8 @@ class MemorySubscription implements EventSubscriber {
   readonly #subscriptionName: string;
   readonly #maxInFlight: number;
   readonly #startIndex: number;
-  readonly #inFlight: Map<number, StoredEvent>;
+  /** Shared by every receiver of this topic + subscription; entries record their owner. */
+  readonly #inFlight: Map<number, InFlightEntry>;
   readonly mode: SubscribeOptions["mode"];
   #closed = false;
 
@@ -231,7 +242,13 @@ class MemorySubscription implements EventSubscriber {
   }
 
   get inFlightCount(): number {
-    return this.#inFlight.size;
+    return this.#ownedCount();
+  }
+
+  #ownedCount(): number {
+    let count = 0;
+    for (const entry of this.#inFlight.values()) if (entry.owner === this) count += 1;
+    return count;
   }
 
   async receive(signal?: AbortSignal): Promise<MessageDelivery | undefined> {
@@ -257,8 +274,11 @@ class MemorySubscription implements EventSubscriber {
   #close(fromBus: boolean): void {
     if (this.#closed) return;
     this.#closed = true;
-    for (const [index, record] of this.#inFlight) {
-      record.redeliveryCounts[this.#subscriptionName] = (record.redeliveryCounts[this.#subscriptionName] ?? 0) + 1;
+    // Release only this receiver's holds; other receivers on the same
+    // subscription keep their active messages (no duplicate dispatch).
+    for (const [index, entry] of [...this.#inFlight]) {
+      if (entry.owner !== this) continue;
+      entry.record.redeliveryCounts[this.#subscriptionName] = (entry.record.redeliveryCounts[this.#subscriptionName] ?? 0) + 1;
       this.#inFlight.delete(index);
     }
     this.#bus.removeSubscriber(this);
@@ -266,9 +286,9 @@ class MemorySubscription implements EventSubscriber {
   }
 
   #nextAvailable(): MessageDelivery | undefined {
-    if (this.#inFlight.size >= this.#maxInFlight) return undefined;
+    if (this.#ownedCount() >= this.#maxInFlight) return undefined;
     const blockedKeys = new Set<string>();
-    for (const record of this.#inFlight.values()) blockedKeys.add(record.request.key);
+    for (const entry of this.#inFlight.values()) blockedKeys.add(entry.record.request.key);
     for (const record of this.#bus.recordsFrom(this.#startIndex)) {
       if (record.request.topic !== this.#topic || record.ackedBy.has(this.#subscriptionName)) continue;
       if (this.#inFlight.has(record.index)) continue;
@@ -277,20 +297,26 @@ class MemorySubscription implements EventSubscriber {
         continue;
       }
       if (blockedKeys.has(record.request.key)) continue;
-      this.#inFlight.set(record.index, record);
+      const entry: InFlightEntry = { record, owner: this, lease: Symbol("memory-lease") };
+      this.#inFlight.set(record.index, entry);
+      const settle = (action: () => void): void => {
+        // A hold released by close() (or re-leased to another receiver) is
+        // stale: its settlement must not ack or redeliver someone else's work.
+        if (this.#inFlight.get(record.index)?.lease !== entry.lease) {
+          throw new ContractError("stale settlement: this receiver no longer holds the message");
+        }
+        action();
+        this.#inFlight.delete(record.index);
+        this.#bus.wake();
+      };
       return new MemoryDelivery(
         record,
         this.#subscriptionName,
-        () => {
-          record.ackedBy.add(this.#subscriptionName);
-          this.#inFlight.delete(record.index);
-          this.#bus.wake();
-        },
-        () => {
-          record.redeliveryCounts[this.#subscriptionName] = (record.redeliveryCounts[this.#subscriptionName] ?? 0) + 1;
-          this.#inFlight.delete(record.index);
-          this.#bus.wake();
-        }
+        () => settle(() => record.ackedBy.add(this.#subscriptionName)),
+        () =>
+          settle(() => {
+            record.redeliveryCounts[this.#subscriptionName] = (record.redeliveryCounts[this.#subscriptionName] ?? 0) + 1;
+          })
       );
     }
     return undefined;

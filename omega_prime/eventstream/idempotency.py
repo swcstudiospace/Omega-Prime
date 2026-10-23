@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
+import os
 import sqlite3
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,15 +19,75 @@ class SQLiteIdempotencyStore:
     """Durable idempotency claims keyed by subscription and CloudEvent id.
 
     Claim owners are stored only as SHA-256 digests. A claim is not leased by
-    time: recovery must explicitly replace the prior owner with ``reclaim``
-    after that owner's lifecycle is known to have ended. ``connection=`` on
-    complete/release allows the caller to commit a local business effect and
+    time. Each store instance is a worker *incarnation* that holds an exclusive
+    ``flock`` on ``<database>.owners/<incarnation>.lock`` for its lifetime and
+    stamps every claim it makes with that incarnation. The kernel drops the
+    lock when the owning process exits for any reason (including SIGKILL), so a
+    restarted worker that meets a ``claimed`` row whose incarnation lock is free
+    knows that owner is dead and transfers the claim to itself instead of
+    reporting ``busy`` forever. A live owner (same or other process) keeps its
+    lock, so its claims stay exclusive. WAL SQLite already requires every
+    sharer to be on one host, which is exactly the scope of ``flock``.
+    ``reclaim`` remains for explicit, caller-proven recovery. ``connection=``
+    on complete/release allows the caller to commit a local business effect and
     the corresponding ledger transition in one SQLite transaction.
     """
 
     def __init__(self, database: str | Path) -> None:
         self.database = Path(database).expanduser().resolve()
         self._initialize()
+        self._owners_dir = self.database.with_name(self.database.name + ".owners")
+        self._owners_dir.mkdir(mode=0o700, exist_ok=True)
+        self.incarnation = uuid.uuid4().hex
+        self._lock_path = self._owners_dir / f"{self.incarnation}.lock"
+        descriptor = os.open(
+            self._lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600
+        )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._lock_fd: int | None = descriptor
+
+    def close(self) -> None:
+        """End this incarnation; its remaining claims become recoverable."""
+        descriptor, self._lock_fd = self._lock_fd, None
+        if descriptor is None:
+            return
+        with contextlib.suppress(FileNotFoundError):
+            self._lock_path.unlink()
+        os.close(descriptor)
+
+    def __del__(self) -> None:  # pragma: no cover - interpreter shutdown path
+        with contextlib.suppress(Exception):
+            self.close()
+
+    def _incarnation_alive(self, incarnation: str | None) -> bool:
+        """True unless ``incarnation``'s lock can be taken (its process ended)."""
+        if not incarnation:
+            # Claims without an incarnation predate recovery stamping; only an
+            # explicit ``reclaim`` may transfer them.
+            return True
+        if incarnation == self.incarnation:
+            return self._lock_fd is not None
+        if not all(char in "0123456789abcdef" for char in incarnation):
+            return True
+        path = self._owners_dir / f"{incarnation}.lock"
+        try:
+            descriptor = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return False
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+            return False
+        finally:
+            os.close(descriptor)
 
     def open_connection(self) -> sqlite3.Connection:
         """Open a WAL/FULL connection suitable for caller-owned transactions."""
@@ -56,10 +120,21 @@ class SQLiteIdempotencyStore:
                 "event_hash TEXT NOT NULL, "
                 "owner_hash TEXT, "
                 "status TEXT NOT NULL CHECK (status IN ('claimed', 'complete')), "
+                "incarnation TEXT, "
                 "PRIMARY KEY (subscription_hash, event_hash), "
                 "CHECK ((status = 'claimed' AND owner_hash IS NOT NULL) OR "
                 "(status = 'complete' AND owner_hash IS NULL)))"
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(eventstream_idempotency)"
+                ).fetchall()
+            }
+            if "incarnation" not in columns:
+                connection.execute(
+                    "ALTER TABLE eventstream_idempotency ADD COLUMN incarnation TEXT"
+                )
             connection.commit()
         except BaseException:
             if connection.in_transaction:
@@ -131,23 +206,43 @@ class SQLiteIdempotencyStore:
         try:
             with self._transaction(connection) as database:
                 row = database.execute(
-                    "SELECT owner_hash, status FROM eventstream_idempotency "
+                    "SELECT owner_hash, status, incarnation "
+                    "FROM eventstream_idempotency "
                     "WHERE subscription_hash = ? AND event_hash = ?",
                     (subscription_hash, event_hash),
                 ).fetchone()
                 if row is None:
                     database.execute(
                         "INSERT INTO eventstream_idempotency "
-                        "(subscription_hash, event_hash, owner_hash, status) "
-                        "VALUES (?, ?, ?, 'claimed')",
-                        (subscription_hash, event_hash, owner_hash),
+                        "(subscription_hash, event_hash, owner_hash, status, "
+                        "incarnation) VALUES (?, ?, ?, 'claimed', ?)",
+                        (subscription_hash, event_hash, owner_hash, self.incarnation),
                     )
                     return ClaimResult.acquired(owner_token)
-                persisted_owner, status = row
+                persisted_owner, status, incarnation = row
                 if status == "complete":
                     return ClaimResult.already_complete()
                 if persisted_owner == owner_hash:
                     return ClaimResult.acquired(owner_token)
+                if not self._incarnation_alive(incarnation):
+                    # The owning worker process has exited (its incarnation lock
+                    # is free): transfer the orphaned claim with a CAS so a
+                    # crash after claim() cannot strand the event forever.
+                    result = database.execute(
+                        "UPDATE eventstream_idempotency "
+                        "SET owner_hash = ?, incarnation = ? "
+                        "WHERE subscription_hash = ? AND event_hash = ? "
+                        "AND owner_hash = ? AND status = 'claimed'",
+                        (
+                            owner_hash,
+                            self.incarnation,
+                            subscription_hash,
+                            event_hash,
+                            persisted_owner,
+                        ),
+                    )
+                    if result.rowcount == 1:
+                        return ClaimResult.acquired(owner_token)
                 return ClaimResult.busy()
         except sqlite3.OperationalError as exc:
             if "locked" in str(exc).casefold() or "busy" in str(exc).casefold():
@@ -224,9 +319,9 @@ class SQLiteIdempotencyStore:
             if row is None:
                 database.execute(
                     "INSERT INTO eventstream_idempotency "
-                    "(subscription_hash, event_hash, owner_hash, status) "
-                    "VALUES (?, ?, ?, 'claimed')",
-                    (subscription_hash, event_hash, new_hash),
+                    "(subscription_hash, event_hash, owner_hash, status, "
+                    "incarnation) VALUES (?, ?, ?, 'claimed', ?)",
+                    (subscription_hash, event_hash, new_hash, self.incarnation),
                 )
                 return ClaimResult.acquired(new_owner_token)
             persisted_owner, status = row
@@ -235,10 +330,10 @@ class SQLiteIdempotencyStore:
             if persisted_owner != stale_hash:
                 return ClaimResult.busy()
             result = database.execute(
-                "UPDATE eventstream_idempotency SET owner_hash = ? "
+                "UPDATE eventstream_idempotency SET owner_hash = ?, incarnation = ? "
                 "WHERE subscription_hash = ? AND event_hash = ? "
                 "AND owner_hash = ? AND status = 'claimed'",
-                (new_hash, subscription_hash, event_hash, stale_hash),
+                (new_hash, self.incarnation, subscription_hash, event_hash, stale_hash),
             )
             return (
                 ClaimResult.acquired(new_owner_token)

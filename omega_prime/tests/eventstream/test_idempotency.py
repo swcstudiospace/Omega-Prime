@@ -404,3 +404,108 @@ def test_reclaim_transfers_ownership_only_for_the_stated_stale_owner(
         assert await store.complete("handler", "event", "owner-b") is True
 
     asyncio.run(scenario())
+
+
+def test_restarted_worker_recovers_claims_of_a_crashed_incarnation(
+    tmp_path: Path,
+) -> None:
+    """A new store incarnation takes over claims whose flock is free."""
+
+    async def scenario() -> None:
+        db = tmp_path / "ledger.sqlite3"
+        crashed = SQLiteIdempotencyStore(db)
+        assert (await crashed.claim("gate", "event-1", "dead-owner")).status == (
+            "acquired"
+        )
+        # Process death drops the exclusive incarnation lock.
+        crashed.close()
+
+        survivor = SQLiteIdempotencyStore(db)
+        recovered = await survivor.claim("gate", "event-1", "new-owner")
+        assert recovered.status == "acquired"
+        assert recovered.owner_token == "new-owner"
+        assert await survivor.complete("gate", "event-1", "new-owner") is True
+        survivor.close()
+
+    asyncio.run(scenario())
+
+
+def test_in_process_incarnations_and_clean_close(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = tmp_path / "ledger.sqlite3"
+        first = SQLiteIdempotencyStore(db)
+        second = SQLiteIdempotencyStore(db)
+        assert first.incarnation != second.incarnation
+        assert (await first.claim("gate", "event", "owner-a")).status == "acquired"
+        # A live incarnation in the same process keeps its claim exclusive.
+        assert (await second.claim("gate", "event", "owner-b")).status == "busy"
+        first.close()
+        # Once that incarnation has ended, the orphaned claim is recoverable.
+        recovered = await second.claim("gate", "event", "owner-b")
+        assert recovered.status == "acquired"
+        assert await second.complete("gate", "event", "owner-b") is True
+        second.close()
+
+    asyncio.run(scenario())
+
+
+def test_legacy_claims_without_incarnation_require_explicit_reclaim(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        db = tmp_path / "ledger.sqlite3"
+        store = SQLiteIdempotencyStore(db)
+        assert (await store.claim("gate", "legacy", "owner-a")).status == "acquired"
+        connection = store.open_connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE eventstream_idempotency SET incarnation = NULL")
+            connection.commit()
+        finally:
+            connection.close()
+        # Predating rows stay busy until an explicit reclaim.
+        assert (await store.claim("gate", "legacy", "owner-b")).status == "busy"
+        transferred = await store.reclaim(
+            "gate",
+            "legacy",
+            stale_owner_token="owner-a",
+            new_owner_token="owner-b",
+        )
+        assert transferred.status == "acquired"
+        assert await store.complete("gate", "legacy", "owner-b") is True
+        store.close()
+
+    asyncio.run(scenario())
+
+
+def test_existing_ledger_without_incarnation_column_is_migrated(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "legacy.sqlite3"
+    connection = sqlite3.connect(db)
+    try:
+        connection.execute(
+            "CREATE TABLE eventstream_idempotency ("
+            "subscription_hash TEXT NOT NULL, "
+            "event_hash TEXT NOT NULL, "
+            "owner_hash TEXT, "
+            "status TEXT NOT NULL, "
+            "PRIMARY KEY (subscription_hash, event_hash))"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = SQLiteIdempotencyStore(db)
+    connection = store.open_connection()
+    try:
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(eventstream_idempotency)"
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+    assert "incarnation" in columns
+    store.close()
