@@ -110,9 +110,20 @@ def test_task_number_is_exactly_five_digits() -> None:
 
 def test_secret_shaped_prompt_text_never_reaches_the_label() -> None:
     secret = "ghp_" + "A" * 36
-    label = parse_omp_argv(_exec_argv(prompt=EXEC_PROMPT + f"\ntoken={secret}"))
+    # Token lives inside the quoted task title that parse_omp_argv captures,
+    # so this fails if _clean stops redacting captured titles.
+    prompt = (
+        "You are the GSD executor (autonomous, unattended) for Omega Prime "
+        f'milestone 00046 "Event Stream {secret}", phase 105, plan 105-04.\n'
+        "Do the work."
+    )
+    label = parse_omp_argv(_exec_argv(prompt=prompt))
+    assert label["task_title"] is not None
+    assert secret not in label["task_title"]
     assert secret not in repr(label)
-    assert secret not in work_title(label, WT)
+    title = work_title(label, WT)
+    assert secret not in title
+    assert "[REDACTED]" in title
 
 
 # --- collector ---------------------------------------------------------------
@@ -189,16 +200,73 @@ def test_helper_only_group_is_not_a_task() -> None:
     assert normalize_tasks(_procs(helper), now=NOW).active == []
 
 
+def test_separate_runs_sharing_a_checkout_stay_separate_rows() -> None:
+    cwd = "/workspace/shared-checkout"
+    a = _agent(100, cwd, _exec_argv(run="omp-execute-aaaaaa-111111"))
+    b = _agent(
+        200,
+        cwd,
+        _exec_argv(prompt=PLAN_PROMPT, run="omp-plan-bbbbbb-222222"),
+    )
+    helper = _agent(150, cwd, ["bun.exe", "/x/cli.js", "__omp_worker_lsp_mux"])
+    snapshot = normalize_tasks(_procs(a, helper, b), now=NOW)
+    rows = sorted(
+        (t for t in snapshot.active if t.source == "omp_proc"), key=lambda t: t.id
+    )
+    assert [r.id for r in rows] == [
+        "omp-run:omp-execute-aaaaaa-111111",
+        "omp-run:omp-plan-bbbbbb-222222",
+    ]
+    assert "Event Stream" in rows[0].title
+    assert "CI Runner Fleet" in rows[1].title
+    # Helpers fold into the primary (lowest-pid agent) row only.
+    assert rows[0].detail is not None and "helper workers 150" in rows[0].detail
+    assert rows[1].detail is not None and "helper workers" not in rows[1].detail
+
+
+def test_run_id_hex_suffix_is_never_a_task_number() -> None:
+    # Hex suffix 00046a must not become task 00046 when the header and
+    # checkout carry no number.
+    label = parse_omp_argv(
+        [
+            "omp",
+            "-p",
+            "--session-dir",
+            "/home/box/agentos/state/omp/omp-execute-ab12cd-00046a/sessions",
+            "plain prompt with no GSD header",
+        ]
+    )
+    assert label["run_id"] == "omp-execute-ab12cd-00046a"
+    assert label["task"] is None
+    title = work_title(label, "/tmp/unnumbered", known={"00046": "Event Stream"})
+    assert "00046" not in title
+    assert "Event Stream" not in title
+
+
 def test_numbered_checkout_without_header_uses_recorded_task_title() -> None:
-    sources = _procs(_agent(77, "/workspace/omes-bot-00051", ["omp", "--mode", "rpc"]))
-    known = {"00051": "Command Center task labels"}
+    sources = {
+        **_procs(_agent(77, "/workspace/omes-bot-00051", ["omp", "--mode", "rpc"])),
+        "tasks_json": SourceResult(
+            "tasks_json",
+            "ok",
+            extra={
+                "tasks": [],
+                "finished": [
+                    {
+                        "id": "rec-51",
+                        "title": "00051 - Command Center task labels",
+                        "result": "ok",
+                    }
+                ],
+            },
+        ),
+    }
     snapshot = normalize_tasks(sources, now=NOW)
-    (row,) = snapshot.active
-    assert _UI_TITLE.match(row.title), row.title
-    assert row.title.startswith("00051 - ")
-    assert work_title(
-        parse_omp_argv(["omp"]), "/workspace/omes-bot-00051", known=known
-    ) == ("00051 - Command Center task labels · working")
+    rows = [t for t in snapshot.active if t.source == "omp_proc"]
+    assert len(rows) == 1
+    assert _UI_TITLE.match(rows[0].title), rows[0].title
+    assert "Command Center task labels" in rows[0].title
+    assert rows[0].title.startswith("00051 - ")
 
 
 def test_known_task_titles_first_recorded_title_wins() -> None:
