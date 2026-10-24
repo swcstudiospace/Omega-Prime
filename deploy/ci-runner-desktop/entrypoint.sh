@@ -9,10 +9,10 @@
 # exit callback reached the controller, which then held each dead runner's
 # slot until GitHub timed the job out plus the finish deadline (00062: the
 # 24 Oct 09:10 AEDT redeploy stalled the pool for ~12 minutes). With the
-# signal forwarded, the agent drains: each runner gets SIGTERM, then SIGKILL
-# after its grace, and one exit callback per runner frees the slot at once.
-# The drain is best effort: RAILWAY_DEPLOYMENT_DRAINING_SECONDS bounds it
-# (see README for the budget).
+# signal forwarded, the agent drains: idle runners get SIGTERM at once, runners
+# mid-job may finish within RAILWAY_DEPLOYMENT_DRAINING_SECONDS minus a stop
+# margin, then any left get SIGTERM and SIGKILL after their grace. One exit
+# callback per runner frees each slot (see README for the budget).
 #
 # The agent never sees the desktop PASSWORD. If agent settings are missing it
 # exits (logged) and the desktop still starts: the desktop is never held

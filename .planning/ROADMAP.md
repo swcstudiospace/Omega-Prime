@@ -501,3 +501,14 @@ Plans:
 
 Plans:
 - [x] 121-01-PLAN.md — settings (agents 1..5), DesktopClient.wake, pool.DesktopPool, controller/app wiring, tests, docs and cost.
+
+### Phase 122: Omega-Prime main green on the omega-ci pool (00065)
+
+**Goal:** every workflow on main is green on `[self-hosted, linux, x64, omega-ci]`, with each failure fixed at its root cause and no test weakened. Tracking: Notion Agent Task Graph (Linear is blocked by the free issue limit). Context and root causes: `phases/122-main-green/CONTEXT.md`.
+**Depends on:** Phase 121.
+
+Plans:
+- [x] 122-01-PLAN.md — CI venv in every pip job, GITHUB_REF purpose, readiness tmp tests (PR #100).
+- [x] 122-02-PLAN.md — redteam pin 1a1a4b0 for the npm audit highs (PR #101).
+- [x] 122-03-PLAN.md — runner agent budgeted drain (PR #102).
+- [ ] 122-04 — container-capable pool member for grokbot-image and eventstream-it (held for Ove: spend/security).
