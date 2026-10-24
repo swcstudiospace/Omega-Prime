@@ -1,0 +1,125 @@
+{
+  "task_id": "phase-105-03-eventstream-ts",
+  "bot": "bot-00-omega-prime",
+  "started_at": null,
+  "completed_at": "2026-10-23T00:08:30Z",
+  "commands": [
+    {
+      "cmd": "cd packages/eventstream-ts && npm run lint",
+      "exit_code": 1,
+      "output_tail": "27 ESLint errors in schema-contract.test.ts after the audit edit; fixed by defining the bundle/definition contract."
+    },
+    {
+      "cmd": "cd packages/eventstream-ts && npm run typecheck",
+      "exit_code": 2,
+      "output_tail": "Bundle type was undeclared and definition fields were unknown; fixed with explicit JSON bundle types."
+    },
+    {
+      "cmd": "cd packages/eventstream-ts && npm run test",
+      "exit_code": 1,
+      "output_tail": "Ajv rejected a duplicate concrete schema URN; changed the gate to reuse nested IDs and alias only missing IDs."
+    },
+    {
+      "cmd": "cd packages/eventstream-ts && npm run build",
+      "exit_code": 2,
+      "output_tail": "Build found the same undeclared Bundle type; fixed."
+    },
+    {
+      "cmd": "cd packages/eventstream-ts && npm run lint",
+      "exit_code": 0,
+      "output_tail": "ESLint passed after bundle types were added."
+    },
+    {
+      "cmd": "cd packages/eventstream-ts && npm run typecheck",
+      "exit_code": 0,
+      "output_tail": "tsc --noEmit passed."
+    },
+    {
+      "cmd": "cd packages/eventstream-ts && npm run test",
+      "exit_code": 1,
+      "output_tail": "The contract test found definitions without a nested $id; alias creation is now conditional."
+    },
+    {
+      "cmd": "cd packages/eventstream-ts && npm run build",
+      "exit_code": 0,
+      "output_tail": "TypeScript build passed."
+    },
+    {
+      "cmd": "cd packages/eventstream-ts && npm run lint",
+      "exit_code": 0,
+      "output_tail": "ESLint passed."
+    },
+    {
+      "cmd": "cd packages/eventstream-ts && npm run typecheck",
+      "exit_code": 0,
+      "output_tail": "tsc --noEmit passed."
+    },
+    {
+      "cmd": "cd packages/eventstream-ts && npm run test",
+      "exit_code": 0,
+      "output_tail": "7 test files passed; 48 tests passed, including the schema contract gate."
+    },
+    {
+      "cmd": "cd packages/eventstream-ts && npm run build",
+      "exit_code": 0,
+      "output_tail": "TypeScript build and declaration generation passed."
+    },
+    {
+      "cmd": "polyglot-check --no-daemon packages/eventstream-ts/eslint.config.js packages/eventstream-ts/src/envelope.ts packages/eventstream-ts/src/index.ts packages/eventstream-ts/src/memory.ts packages/eventstream-ts/src/outbox.ts packages/eventstream-ts/src/ports.ts packages/eventstream-ts/src/pulsar.ts packages/eventstream-ts/test/envelope.test.ts packages/eventstream-ts/test/outbox.test.ts packages/eventstream-ts/test/pulsar.test.ts packages/eventstream-ts/test/retry.test.ts packages/eventstream-ts/test/schema-contract.test.ts packages/eventstream-ts/README.md",
+      "exit_code": 0,
+      "output_tail": "0 errors, 0 warnings in 12/13 files; README skipped because no LSP is configured for Markdown."
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Final ESLint gate passes.",
+      "evidence_command_index": 8
+    },
+    {
+      "claim": "Strict TypeScript typecheck passes.",
+      "evidence_command_index": 9
+    },
+    {
+      "claim": "All package tests pass: 48 tests across 7 files, including the mandatory schema contract gate.",
+      "evidence_command_index": 10
+    },
+    {
+      "claim": "Package build and declaration generation pass.",
+      "evidence_command_index": 11
+    },
+    {
+      "claim": "Polyglot check reports zero diagnostics in all checked TypeScript/JavaScript files.",
+      "evidence_command_index": 12
+    }
+  ],
+  "unverified": [
+    "Exact start timestamp was not captured for this resumed execution; started_at is null.",
+    "No real pulsar-client@1.18.0 installation or live Pulsar broker/registry/Reader/auth roundtrip was exercised; adapter behavior was tested with native-shaped broker-free fakes.",
+    "The Python tree has no retry.py, backoff.py, or outbox.py; those runtime parity checks could not be executed. No Python source changed, so Ruff, mypy, and Python pytest were not run.",
+    "Python envelope traceparent validation is syntax-only; TypeScript additionally rejects W3C version ff and all-zero trace/span IDs.",
+    "No independent security review or signed quality gate was run.",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    "packages/eventstream-ts/eslint.config.js",
+    "packages/eventstream-ts/src/envelope.ts",
+    "packages/eventstream-ts/src/index.ts",
+    "packages/eventstream-ts/src/memory.ts",
+    "packages/eventstream-ts/src/outbox.ts",
+    "packages/eventstream-ts/src/ports.ts",
+    "packages/eventstream-ts/src/pulsar.ts",
+    "packages/eventstream-ts/test/envelope.test.ts",
+    "packages/eventstream-ts/test/outbox.test.ts",
+    "packages/eventstream-ts/test/pulsar.test.ts",
+    "packages/eventstream-ts/test/retry.test.ts",
+    "packages/eventstream-ts/test/schema-contract.test.ts",
+    "packages/eventstream-ts/README.md",
+    ".planning/phases/105-event-stream-core-library/105-03-SUMMARY.md"
+  ],
+  "contract_changes": [
+    "The public TypeScript API exports PulsarMessageId and PulsarMessageHandle for typed native acknowledgement identifiers."
+  ],
+  "rollback_plan": null,
+  "approvals": [],
+  "approved_by": "pending independent review"
+}

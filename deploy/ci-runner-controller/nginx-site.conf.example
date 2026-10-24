@@ -1,0 +1,72 @@
+# omega-ci controller ingress for nginx. TEMPLATE: replace ci.example.com.
+#
+# nginx equivalent of Caddyfile.snippet, for VPSes that already run nginx
+# (the production VPS does: Caddy is not installed there). Install as
+# /etc/nginx/sites-available/<host>, symlink into sites-enabled, then
+#   nginx -t && systemctl reload nginx
+# Issue the certificate first with the HTTP block alone, for example
+#   certbot certonly --webroot -w /var/www/letsencrypt -d ci.example.com
+# then add the HTTPS block and run nginx -t again before reloading.
+#
+# The controller listens on loopback 8798 on the production VPS, because 8788
+# (the CLI default) is already taken there. Keep this port and the unit's
+# --port in step. Only the two POST endpoints and the non-secret health check
+# are exposed; everything else is 404. The 1 MiB body cap matches the
+# controller's own limit.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ci.example.com;
+
+    client_max_body_size 1m;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ci.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/ci.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/ci.example.com/privkey.pem;
+
+    client_max_body_size 1m;
+
+    location = /github/webhook {
+        limit_except POST { deny all; }
+        proxy_pass http://127.0.0.1:8798;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /agent/events {
+        limit_except POST { deny all; }
+        proxy_pass http://127.0.0.1:8798;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /healthz {
+        limit_except GET { deny all; }
+        proxy_pass http://127.0.0.1:8798;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+    }
+
+    location / {
+        return 404;
+    }
+}

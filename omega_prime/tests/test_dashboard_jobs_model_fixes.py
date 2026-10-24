@@ -174,5 +174,7 @@ def test_only_unmatched_omp_process_becomes_a_task() -> None:
     snapshot = normalize_tasks(sources, now=NOW)
     proc_tasks = [task for task in snapshot.active if task.source == "omp_proc"]
     assert [(task.id, task.title, task.state) for task in proc_tasks] == [
-        ("proc:202", "omp process 202", "working")
+        ("proc:202", "omp agent session (unmatched)", "working")
     ]
+    # Never the bare process name (00051): a human title plus a description.
+    assert proc_tasks[0].detail == "omp agent; in /unmatched; pid 202"

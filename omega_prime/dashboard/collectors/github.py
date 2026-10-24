@@ -40,10 +40,12 @@ from omega_prime.dashboard.github_data import (
 from omega_prime.dashboard.model import SourceResult
 from omega_prime.dashboard.redact import redact_value
 
-_SCORE = re.compile(r"Confidence score:\s*([0-5])\s*/\s*5", re.IGNORECASE)
-_BODY_SCORE = re.compile(
-    r"<!--\s*greptile_confidence_score:\s*([0-5])\s*-->", re.IGNORECASE
-)
+# Shared with omega_prime.eventstream.functions.greptile_score so both
+# surfaces accept the same Greptile score shapes.
+from omega_prime.greptile.score import BODY_SCORE as _BODY_SCORE
+from omega_prime.greptile.score import CONFIDENCE_SCORE as _SCORE
+from omega_prime.greptile.score import GREPTILE_BOT_LOGIN as _GREPTILE_BOT
+
 API = "https://api.github.com"
 ORG = "swcstudiospace"
 TARGETS = (
@@ -914,7 +916,7 @@ def _greptile(
             if (
                 isinstance(item, dict)
                 and isinstance(item.get("user"), dict)
-                and item["user"].get("login") == "greptile-apps[bot]"
+                and item["user"].get("login") == _GREPTILE_BOT
                 and item.get("commit_id") == sha
                 and isinstance(item.get("body"), str)
             ):
@@ -932,7 +934,7 @@ def _greptile(
             if (
                 isinstance(item, dict)
                 and isinstance(item.get("user"), dict)
-                and item["user"].get("login") == "greptile-apps[bot]"
+                and item["user"].get("login") == _GREPTILE_BOT
                 and isinstance(item.get("body"), str)
             ):
                 candidates.append(

@@ -98,6 +98,20 @@ def _is_archive_checksum(value: str) -> bool:
     return _SHA256_HEX_RE.match(value) is not None
 
 
+def normalize_podman_image_id(raw: str) -> str:
+    """Normalize a local image id before it enters the image-id domain.
+
+    Docker's ``inspect`` ``Id`` is ``sha256:`` plus 64 hex digits. Podman's
+    ``.Id`` is the same 64 hex digits with no prefix. A bare id gains the
+    prefix. A value that already has a prefix, or that is not 64 lowercase
+    hex digits, is returned unchanged so the existing check still refuses it.
+    """
+    text = raw.strip()
+    if _SHA256_HEX_RE.fullmatch(text):
+        return "sha256:" + text
+    return text
+
+
 def _is_image_id(value: str) -> bool:
     return _IMAGE_ID_RE.match(value) is not None
 
@@ -477,5 +491,6 @@ __all__ = [
     "image_id_matches",
     "load_evidence_json",
     "manifest_digest_matches",
+    "normalize_podman_image_id",
     "write_decision_json",
 ]

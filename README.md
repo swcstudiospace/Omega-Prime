@@ -12,6 +12,20 @@ ships an MCP tool host and a Grok Bot template, not proof of a connected
 Grok account or a whole upstream-runtime port. Provider/service operations
 need their actual credentials, authorization and runtime prerequisites.
 
+## What it is
+
+Omega Prime is the Autonomous Event-Driven ADLC Programming Bot (ADLC: Agentic
+Development Life Cycle). The operator provides the start of a task, as a
+`/gsd-autonomous` prompt; Omega Prime provides the end: uplift, tracker
+kickoff, build, pull request, a Greptile 5/5 plus green-CI merge gate, its
+own merge, and a report back. Work is triggered by events (pull request,
+review, CI, intake, message), never by timers. The only stop is new paid
+spend, which it presents with a projected cost. The standing rules live in
+the prime directives (`omega_prime/prompts/_shared/core-directives.xml`) so
+every exported copy carries them. See
+[Autonomous Event-Driven ADLC Programming Bot](docs/adlc.md) for the loop and for what is
+implemented here versus provided by the host.
+
 ## Architecture
 
 One conversation loop: Hermes and Omp behavior ports, with selected Prime

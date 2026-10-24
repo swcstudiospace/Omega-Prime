@@ -1,0 +1,113 @@
+{
+  "task_id": "00050-phase-120-plans",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-23T01:02:43.456220Z",
+  "completed_at": "2026-10-23T01:24:03.026694Z",
+  "commands": [
+    {
+      "cmd": "node /home/box/.claude/gsd-core/bin/gsd-tools.cjs query frontmatter.validate .planning/phases/120-ci-runner-fleet/120-01-PLAN.md --schema plan",
+      "exit_code": 0,
+      "duration_s": 0.156,
+      "output_tail": "{\n  \"valid\": true,\n  \"missing\": [],\n  \"present\": [\n    \"phase\",\n    \"plan\",\n    \"type\",\n    \"wave\",\n    \"depends_on\",\n    \"files_modified\",\n    \"autonomous\",\n    \"must_haves\"\n  ],\n  \"invalidValue\": [],\n  \"schema\": \"plan\"\n}"
+    },
+    {
+      "cmd": "node /home/box/.claude/gsd-core/bin/gsd-tools.cjs query verify.plan-structure .planning/phases/120-ci-runner-fleet/120-01-PLAN.md",
+      "exit_code": 0,
+      "duration_s": 0.128
+    },
+    {
+      "cmd": "node /home/box/.claude/gsd-core/bin/gsd-tools.cjs query frontmatter.validate .planning/phases/120-ci-runner-fleet/120-02-PLAN.md --schema plan",
+      "exit_code": 0,
+      "duration_s": 0.12,
+      "output_tail": "{\n  \"valid\": true,\n  \"missing\": [],\n  \"present\": [\n    \"phase\",\n    \"plan\",\n    \"type\",\n    \"wave\",\n    \"depends_on\",\n    \"files_modified\",\n    \"autonomous\",\n    \"must_haves\"\n  ],\n  \"invalidValue\": [],\n  \"schema\": \"plan\"\n}"
+    },
+    {
+      "cmd": "node /home/box/.claude/gsd-core/bin/gsd-tools.cjs query verify.plan-structure .planning/phases/120-ci-runner-fleet/120-02-PLAN.md",
+      "exit_code": 0,
+      "duration_s": 0.119
+    },
+    {
+      "cmd": "node /home/box/.claude/gsd-core/bin/gsd-tools.cjs query frontmatter.validate .planning/phases/120-ci-runner-fleet/120-03-PLAN.md --schema plan",
+      "exit_code": 0,
+      "duration_s": 0.114,
+      "output_tail": "{\n  \"valid\": true,\n  \"missing\": [],\n  \"present\": [\n    \"phase\",\n    \"plan\",\n    \"type\",\n    \"wave\",\n    \"depends_on\",\n    \"files_modified\",\n    \"autonomous\",\n    \"must_haves\"\n  ],\n  \"invalidValue\": [],\n  \"schema\": \"plan\"\n}"
+    },
+    {
+      "cmd": "node /home/box/.claude/gsd-core/bin/gsd-tools.cjs query verify.plan-structure .planning/phases/120-ci-runner-fleet/120-03-PLAN.md",
+      "exit_code": 0,
+      "duration_s": 0.121
+    },
+    {
+      "cmd": "node /home/box/.claude/gsd-core/bin/gsd-tools.cjs query frontmatter.validate .planning/phases/120-ci-runner-fleet/120-04-PLAN.md --schema plan",
+      "exit_code": 0,
+      "duration_s": 0.116,
+      "output_tail": "{\n  \"valid\": true,\n  \"missing\": [],\n  \"present\": [\n    \"phase\",\n    \"plan\",\n    \"type\",\n    \"wave\",\n    \"depends_on\",\n    \"files_modified\",\n    \"autonomous\",\n    \"must_haves\"\n  ],\n  \"invalidValue\": [],\n  \"schema\": \"plan\"\n}"
+    },
+    {
+      "cmd": "node /home/box/.claude/gsd-core/bin/gsd-tools.cjs query verify.plan-structure .planning/phases/120-ci-runner-fleet/120-04-PLAN.md",
+      "exit_code": 0,
+      "duration_s": 0.126
+    },
+    {
+      "cmd": "python3 -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q",
+      "exit_code": 0,
+      "duration_s": 0.859,
+      "output_tail": ".................................                                        [100%]\n33 passed in 0.67s\n"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "120-01 frontmatter passes the native GSD plan schema.",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "120-01 passes the native GSD task-structure check with three tasks.",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "120-02 frontmatter passes the native GSD plan schema.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "120-02 passes the native GSD task-structure check with four tasks.",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "120-03 frontmatter passes the native GSD plan schema.",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "120-03 passes the native GSD task-structure check with three tasks.",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "120-04 frontmatter passes the native GSD plan schema.",
+      "evidence_command_index": 6
+    },
+    {
+      "claim": "120-04 passes the native GSD task-structure check with four tasks.",
+      "evidence_command_index": 7
+    },
+    {
+      "claim": "The existing documentation and public-repository regression suite passes: 33 tests.",
+      "evidence_command_index": 8
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "CI Runner Fleet runtime behavior and the four future implementation gates were not executed: this task authors plans, not implementation code.",
+    "Upstream Desktop image, entrypoint, and actions/runner checksums remain implementation-time verification requirements; no artifact hashes were invented.",
+    "Live GitHub App/webhook setup, Railway cutover, VPS installation, Caddy configuration, and production runner behavior remain operator-held and were not exercised."
+  ],
+  "files_changed": [
+    ".planning/phases/120-ci-runner-fleet/120-01-PLAN.md",
+    ".planning/phases/120-ci-runner-fleet/120-02-PLAN.md",
+    ".planning/phases/120-ci-runner-fleet/120-03-PLAN.md",
+    ".planning/phases/120-ci-runner-fleet/120-04-PLAN.md",
+    ".receipts/bot-00-omega-prime/00050-phase-120-plans.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "Remove only the four new phase plans and this receipt; no runtime implementation or deployment was changed.",
+  "approvals": [],
+  "approved_by": null
+}

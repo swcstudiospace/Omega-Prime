@@ -32,6 +32,12 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Current focus:** v21 Task Dashboard (Phases 104–106). Phase 104 is complete. Phase 105 local implementation is recorded on `feat/command-center`; Phase 106 local implementation and offline verification are recorded on `feat/command-center-polish`, with broad Python collection and host evidence pending. v20 Phase 97 remains separately deferred pending upstream MCP contract evidence; Phase 77.1 UAT remains user-owned.
 
+## Parallel milestone — v21 Event Stream (00046)
+
+Phase 105 complete on `gsd/00046-event-stream` (PR #86). Plans 105-01..04 shipped; coverage ≥90%; next 106–108, stop before paid Railway cutover.
+
+Started 2026-10-23 (AEDT) on branch `gsd/00046-event-stream`, in parallel with v20. Phase 104 (broker decision + spec) discuss complete: Apache Pulsar 5.0 LTS standalone behind a broker-agnostic EventBus port. Standing rule: no timer/schedule routines in Omega Prime — event-driven only. Next: phase 105 plan.
+
 ## Current Position
 
 Phase: 106 (Command Center polish) — LOCAL IMPLEMENTATION COMPLETE; ACCEPTANCE GATES PENDING
@@ -163,6 +169,7 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Operator Next Steps
 
+- Phase 121 (00064 CI runner swarm): code is on `gsd/00064-runner-swarm` and backward compatible with one agent. Go-live is held for Ove: the Railway services `ubuntu-desktop-2/3` (paid spend; billing is PAST_DUE), the Hostinger CNAMEs for runner2/runner3.ego.engineer, and the controller env `OMEGA_CI_DESKTOP_2/3_*`. See `.planning/phases/121-ci-runner-swarm/121-01-SUMMARY.md`.
 - Phase 105 outer-driver work remains: compare live GitHub PR/check/Greptile evidence and organization inventory (a2/a3); inspect fonts, contrast, motion and reduced motion in a browser (a4); produce the signed openshell-podman/Anda receipt (a6); capture all four views with real data (a7); then perform the separately authorized export/publication flow. No local fixtures prove these outcomes.
 - Phase 97 remains deferred pending authoritative upstream MCP path/schema evidence; phase 77.1 live UAT remains user-owned (`/gsd:verify-work 77.1`).
 - Phase 99 is integrated onto main after Phases 97 and 98; it does not mark the milestone complete.

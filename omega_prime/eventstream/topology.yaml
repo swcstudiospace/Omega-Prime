@@ -1,0 +1,370 @@
+apiVersion: omega.eventstream/v1
+kind: Topology
+metadata:
+  name: omega-eventstream
+  version: 1
+  stage: 1
+  provisioning: false
+  description: Declarative desired state only; no broker connection or provisioning occurs in phase 105-02.
+  source: .planning/phases/104-event-stream-broker-decision-and-railway-spec/DESIGN.md
+  brokerImage: apachepulsar/pulsar:5.0.0@sha256:7222f3199a0b2418abde9ce0906862598415b19b494ae185db189938cfc43fd3
+  rollbackImage: apachepulsar/pulsar:4.0.14@sha256:d404b4db9b809cd4e8b65fc2120a97dbc024c222fc2d53041d900c7d5a5f1f2d
+broker:
+  settings:
+    allowAutoTopicCreation: false
+    brokerDeleteInactiveTopicsEnabled: false
+    brokerDeduplicationEnabled: true
+    delayedDeliveryEnabled: true
+    delayedDeliveryTracker: bucket
+    functionsWorkerEnabled: true
+    functionsWorkerRuntime: process
+    authenticationEnabled: true
+    authorizationEnabled: true
+    authenticationProviders:
+      - AuthenticationProviderToken
+    tokenAlgorithm: RS256
+    brokerPublicKeyOnly: true
+    superUserRoles: [omega-admin, omega-broker-internal]
+    brokerServicePortTls: 6651
+    webServicePortTls: 8443
+    managedLedgerDefaultEnsembleSize: 1
+    managedLedgerDefaultWriteQuorum: 1
+    managedLedgerDefaultAckQuorum: 1
+    backlogQuotaDefaultRetentionPolicy: producer_request_hold
+  bookkeeper:
+    journalSyncData: true
+    durableLedgers: every-topic
+    bookies: 1
+  jvm:
+    minimumHeap: 1g
+    maximumHeap: 1g
+    maximumDirectMemory: 1g
+    tunable: true
+  network:
+    tlsRequiredForNonLoopback: true
+    adminApiPublic: false
+    stage3ExternalPortsOnly: true
+  security:
+    tokenFilesMode: '0600'
+    secretsInTopology: false
+    privateSigningKeyInBroker: false
+  transactionSupport: not-used-python-and-node-clients
+  scalableTopics: not-used-v4-api-clients
+identity:
+  administrator: omega-admin
+  aclGranularity:
+    default: namespace-level
+    explicitTopicExceptions:
+      omega-vps-leaf: [sdlc/ci]
+    readerOnlyIsClientIntentNotAuthorizationCapability: true
+  applicationRoles:
+    - name: omega-box
+      produces:
+        namespaces: [sdlc, auth, job, sandbox, task, memory, control, system]
+        excludes: [audit]
+      consumes:
+        namespaces: [sdlc, auth, job, sandbox, task, memory, control, audit, system]
+      usedBy: box-services-and-handlers
+    - name: omega-audit
+      produces:
+        namespaces: [audit]
+      consumes:
+        namespaces: [control]
+      usedBy: audit-projector
+    - name: omega-vps-leaf
+      produces:
+        namespaces: [auth, job, memory]
+        topics: [sdlc/ci]
+      consumes: {namespaces: [], topics: []}
+      usedBy: vps-publisher
+    - name: omega-ingress
+      produces:
+        namespaces: [sdlc]
+      consumes: {namespaces: [], topics: []}
+      usedBy: railway-github-ingress-stage-3
+    - name: omega-dashboard
+      produces: {namespaces: [], topics: []}
+      consumes:
+        namespaces: [sdlc, auth, job, sandbox, task, memory, control, audit, system]
+      clientIntent: reader-only
+      usedBy: command-center-bridge
+    - name: omega-functions
+      produces:
+        namespaces: [sdlc, control]
+      consumes:
+        namespaces: [sdlc]
+      usedBy: pulsar-functions
+  privilegedInfrastructureIdentity:
+    name: omega-broker-internal
+    category: infrastructure-bootstrap-not-application
+    purpose: broker and Functions worker bootstrap/internal operations
+    applicationGrant: false
+    superuser: true
+    credentialSource: operator-managed-0600-file
+    separateFromApplicationRoles: true
+    rationale: Internal worker/bootstrap authority is privileged and is not a seventh application role or grant.
+tenant:
+  name: omega
+  adminRole: omega-admin
+  namespaces:
+    sdlc:
+      retention: {time: 7d, size: 5GB}
+      deduplication: true
+      schemaCompatibility: BACKWARD_TRANSITIVE
+      keyRule: repo#pr
+      topics: [pr, review, ci, pr-state]
+    auth:
+      retention: {time: 30d}
+      deduplication: true
+      schemaCompatibility: BACKWARD_TRANSITIVE
+      encryption: end-to-end
+      encryptionMechanism: Pulsar-CryptoKeyReader
+      topics: [session]
+    job:
+      retention: {time: 7d}
+      deduplication: true
+      schemaCompatibility: BACKWARD_TRANSITIVE
+      keyRule: job_id
+      topics: [lifecycle]
+    sandbox:
+      retention: {time: 48h}
+      deduplication: true
+      schemaCompatibility: BACKWARD_TRANSITIVE
+      keyRule: sandbox_id
+      topics: [lifecycle]
+    task:
+      retention: {time: 48h, compactedState: indefinite}
+      deduplication: true
+      schemaCompatibility: BACKWARD_TRANSITIVE
+      keyRule: task_id
+      topics: [state, heartbeat]
+    memory:
+      retention: {time: 30d}
+      deduplication: true
+      schemaCompatibility: BACKWARD_TRANSITIVE
+      keyRule: bank
+      topics: [hindsight]
+    control:
+      retention: {time: 30d}
+      deduplication: true
+      schemaCompatibility: BACKWARD_TRANSITIVE
+      topics: [signal, action, hitl, deadline]
+      delayedTopic: deadline
+    audit:
+      retention: {time: 400d}
+      deduplication: true
+      schemaCompatibility: FULL_TRANSITIVE
+      appendOnly: true
+      topics: [log]
+      offload:
+        enabled: true
+        threshold: 1GB
+        target: Railway-Bucket
+        stage: 3
+        intentOnly: true
+        provisioning: false
+    system:
+      retention: {time: 30d}
+      deduplication: true
+      schemaCompatibility: none-envelope-bytes
+      topics: [retry.<subscription>, dlq.<subscription>]
+      perDurableSubscription: true
+topics:
+  partitioning:
+    default: non-partitioned
+    keyedOrdering: per-key-per-topic
+    crossTopicOrdering: not-guaranteed
+  definitions:
+    - {name: sdlc/pr, partitions: 4, compacted: false, keyRule: repo#pr}
+    - {name: sdlc/review, partitions: 0, compacted: false, keyRule: repo#pr}
+    - {name: sdlc/ci, partitions: 0, compacted: false, keyRule: repo#pr-or-repo@branch}
+    - {name: sdlc/pr-state, partitions: 0, compacted: true, keyRule: repo#pr}
+    - {name: auth/session, partitions: 0, compacted: false, keyRule: host:tool, encrypted: true}
+    - {name: job/lifecycle, partitions: 0, compacted: false, keyRule: job_id}
+    - {name: sandbox/lifecycle, partitions: 0, compacted: false, keyRule: sandbox_id}
+    - {name: task/state, partitions: 4, compacted: true, compactedRetention: indefinite, keyRule: task_id}
+    - {name: task/heartbeat, partitions: 0, compacted: false, keyRule: task_id}
+    - {name: memory/hindsight, partitions: 0, compacted: false, keyRule: bank}
+    - {name: control/signal, partitions: 0, compacted: false, keyRule: repo#pr-or-blocked_branch}
+    - {name: control/action, partitions: 0, compacted: false, keyRule: repo#pr}
+    - {name: control/hitl, partitions: 0, compacted: false, keyRule: task_id}
+    - {name: control/deadline, partitions: 0, compacted: false, keyRule: aggregate, delayedDelivery: true}
+    - {name: audit/log, partitions: 0, compacted: false, keyRule: aggregate, appendOnly: true}
+  schemas:
+    sourceOfTruth:
+      format: JSON-Schema
+      draft: 2020-12
+      path: omega_prime/eventstream/schemas/{family}.v1.json
+      families: [envelope, sdlc.pr, sdlc.review, ci, auth, job, sandbox, task, mem, control, hitl, audit]
+      payloadReference: urn:omega:schema:{type}:1
+      definitionPointer: '#/$defs/{type}'
+      auditRegistration: explicit-open-family-omega.audit.*
+    nativeRegistry:
+      format: Avro-format-metadata-with-custom-JSON-codec
+      pulsarSchemaType: JSON
+      derivedFrom: 105-01-JSON-Schema-bundles-and-CloudEvent-envelope
+      owner: 105-04-existing-adapter-module-shared-with-admin
+      registryReference: persistent-topic-envelope-schema-plus-typed-payload-branches
+      encoding: CloudEvents-1.0-structured-JSON
+      fixedEnvelopeFields: [specversion, id, source, type, subject, time, datacontenttype, dataschema, data]
+      extensionFields: [traceparent, omegakey, omegatask, omegagraph, omegaheadsha]
+      typedTopicPayloadBranches: true
+      stableRecordNames: type-family-derived
+      messageProperties: [ce_id, ce_type, ce_source, ce_subject, ce_time, traceparent]
+      conversionIsDistinctFromSdkSourceOfTruth: true
+  eventTypes:
+    - {type: omega.sdlc.pr.opened, topic: sdlc/pr, keyRule: repo#pr, family: sdlc.pr}
+    - {type: omega.sdlc.pr.pushed, topic: sdlc/pr, keyRule: repo#pr, family: sdlc.pr}
+    - {type: omega.sdlc.pr.ready, topic: sdlc/pr, keyRule: repo#pr, family: sdlc.pr}
+    - {type: omega.sdlc.pr.converted_to_draft, topic: sdlc/pr, keyRule: repo#pr, family: sdlc.pr}
+    - {type: omega.sdlc.pr.merged, topic: sdlc/pr, keyRule: repo#pr, family: sdlc.pr}
+    - {type: omega.sdlc.pr.closed, topic: sdlc/pr, keyRule: repo#pr, family: sdlc.pr}
+    - {type: omega.sdlc.review.greptile_scored, topic: sdlc/review, keyRule: repo#pr, family: sdlc.review}
+    - {type: omega.sdlc.review.approved, topic: sdlc/review, keyRule: repo#pr, family: sdlc.review}
+    - {type: omega.sdlc.review.changes_requested, topic: sdlc/review, keyRule: repo#pr, family: sdlc.review}
+    - {type: omega.sdlc.review.commented, topic: sdlc/review, keyRule: repo#pr, family: sdlc.review}
+    - {type: omega.ci.run.started, topic: sdlc/ci, keyRule: repo#pr, family: ci}
+    - {type: omega.ci.run.passed, topic: sdlc/ci, keyRule: repo#pr, family: ci}
+    - {type: omega.ci.run.failed, topic: sdlc/ci, keyRule: repo#pr, family: ci}
+    - {type: omega.ci.branch.passed, topic: sdlc/ci, keyRule: repo@branch, family: ci}
+    - {type: omega.ci.branch.failed, topic: sdlc/ci, keyRule: repo@branch, family: ci}
+    - {type: omega.auth.session.login_started, topic: auth/session, keyRule: host:tool, family: auth}
+    - {type: omega.auth.session.login_succeeded, topic: auth/session, keyRule: host:tool, family: auth}
+    - {type: omega.auth.session.login_failed, topic: auth/session, keyRule: host:tool, family: auth}
+    - {type: omega.auth.session.expired, topic: auth/session, keyRule: host:tool, family: auth}
+    - {type: omega.auth.session.logout, topic: auth/session, keyRule: host:tool, family: auth}
+    - {type: omega.job.queued, topic: job/lifecycle, keyRule: job_id, family: job}
+    - {type: omega.job.started, topic: job/lifecycle, keyRule: job_id, family: job}
+    - {type: omega.job.succeeded, topic: job/lifecycle, keyRule: job_id, family: job}
+    - {type: omega.job.failed, topic: job/lifecycle, keyRule: job_id, family: job}
+    - {type: omega.job.cancelled, topic: job/lifecycle, keyRule: job_id, family: job}
+    - {type: omega.sandbox.created, topic: sandbox/lifecycle, keyRule: sandbox_id, family: sandbox}
+    - {type: omega.sandbox.started, topic: sandbox/lifecycle, keyRule: sandbox_id, family: sandbox}
+    - {type: omega.sandbox.ready, topic: sandbox/lifecycle, keyRule: sandbox_id, family: sandbox}
+    - {type: omega.sandbox.unhealthy, topic: sandbox/lifecycle, keyRule: sandbox_id, family: sandbox}
+    - {type: omega.sandbox.oom, topic: sandbox/lifecycle, keyRule: sandbox_id, family: sandbox}
+    - {type: omega.sandbox.exited, topic: sandbox/lifecycle, keyRule: sandbox_id, family: sandbox}
+    - {type: omega.sandbox.removed, topic: sandbox/lifecycle, keyRule: sandbox_id, family: sandbox}
+    - {type: omega.task.state_changed, topic: task/state, keyRule: task_id, family: task}
+    - {type: omega.task.heartbeat, topic: task/heartbeat, keyRule: task_id, family: task}
+    - {type: omega.mem.hindsight.retained, topic: memory/hindsight, keyRule: bank, family: mem}
+    - {type: omega.mem.hindsight.teach_failed, topic: memory/hindsight, keyRule: bank, family: mem}
+    - {type: omega.control.signal.gate, topic: control/signal, keyRule: repo#pr, family: control}
+    - {type: omega.control.signal.blocked, topic: control/signal, keyRule: blocked_branch, family: control}
+    - {type: omega.control.signal.review, topic: control/signal, keyRule: repo#pr, family: control}
+    - {type: omega.control.action.merge_requested, topic: control/action, keyRule: repo#pr, family: control}
+    - {type: omega.control.action.merged, topic: control/action, keyRule: repo#pr, family: control}
+    - {type: omega.control.action.merge_refused, topic: control/action, keyRule: repo#pr, family: control}
+    - {type: omega.control.action.fix_requested, topic: control/action, keyRule: repo#pr, family: control}
+    - {type: omega.control.deadline.greptile_review_due, topic: control/deadline, keyRule: aggregate, family: control}
+    - {type: omega.control.deadline.heartbeat_due, topic: control/deadline, keyRule: aggregate, family: control}
+    - {type: omega.control.deadline.hitl_followup_due, topic: control/deadline, keyRule: aggregate, family: control}
+    - {type: omega.hitl.asked, topic: control/hitl, keyRule: task_id, family: hitl}
+    - {type: omega.hitl.answered, topic: control/hitl, keyRule: task_id, family: hitl}
+    - {type: omega.audit.*, topic: audit/log, keyRule: aggregate, family: audit, openFamily: true}
+subscriptions:
+  defaults:
+    durable: true
+    initialPosition: Earliest
+    acknowledgement: individual
+    batchIndexAcknowledgements: true
+    maxInFlight: 16
+    receiverQueueSize: bounded
+    perKeyInFlight: 1
+    retryTargetFilter: omega_retry_target
+    delayedRetryMode: durable-publish-before-source-ack
+    crossTopicOrdering: not-guaranteed
+  handlers:
+    - {name: gate, mode: Key_Shared, inputs: [sdlc/pr, sdlc/review, sdlc/ci, system/retry.gate]}
+    - {name: blocked, mode: Key_Shared, inputs: [job/lifecycle, sandbox/lifecycle, sdlc/ci, system/retry.blocked]}
+    - {name: review, mode: Key_Shared, inputs: [sdlc/review, system/retry.review]}
+    - {name: escalator, mode: Key_Shared, inputs: [auth/session, task/state, memory/hindsight, control/signal, system/retry.escalator]}
+    - {name: merge-executor, mode: Failover, inputs: [control/action]}
+    - {name: audit-projector, mode: Exclusive, inputs: [control/action]}
+    - {name: dlq-triage, mode: Shared, inputs: [system/dlq.gate, system/dlq.blocked, system/dlq.review, system/dlq.escalator, system/dlq.merge-executor, system/dlq.audit-projector]}
+  reader:
+    name: cc-bridge
+    durable: false
+    mode: Reader
+    seek: time
+    inputs: [sdlc/pr, sdlc/review, sdlc/ci, sdlc/pr-state, auth/session, job/lifecycle, sandbox/lifecycle, task/state, task/heartbeat, memory/hindsight, control/signal, control/action, control/hitl, control/deadline, audit/log]
+    acknowledgementObligation: none
+    authorizationNote: Reader-only is client intent; it is not an ACL capability and does not constrain durable consumers.
+retryAndDlq:
+  perDurableSubscriptionResources:
+    retryTopic: persistent://omega/system/retry.<subscription>
+    deadLetterTopic: persistent://omega/system/dlq.<subscription>
+    provisioning: declared-only
+  maxAttempts: 5
+  backoff: {algorithm: decorrelated-jitter, base: 1s, cap: 600s}
+  transientNegativeAckRedeliveryDelay: 1000ms
+  retryTopic: persistent://omega/system/retry.<subscription>
+  deadLetterTopic: persistent://omega/system/dlq.<subscription>
+  properties: [omega_attempt, omega_origin_topic, omega_last_error]
+  propertySanitization: required
+  attemptPreservedWithOriginalEnvelope: true
+  dlq:
+    durableSubscription: dlq-triage
+    blockedSignalTopic: persistent://omega/control/signal
+    blockedSignalType: omega.control.signal.blocked
+    acknowledgeOnlyAfterDurablePublish: true
+  singletonHandoff:
+    requiredForModes: [Failover, Exclusive]
+    receiverMode: Shared
+    inputs: [system/retry.merge-executor, system/retry.audit-projector]
+    targetProperty: omega_retry_target
+    eligibleTargetRepublishedToOriginalTopic: true
+    removeDeliverAfter: true
+    preserve: [ce_id, key, attempt, origin_topic, failure_history]
+    publishBeforeSourceAck: true
+    publishIdentity: omega-box-authorized-runtime-publisher
+    nonTargetHandlerBehavior: ack-no-op-before-idempotency-claim
+  coordinator:
+    coordinationNamespace: control
+    permissionSource: omega-box-existing-runtime-publisher
+    noAdditionalApplicationGrant: true
+    functionsAndAuditDoNotReceiveSystemTopicGrant: true
+functions:
+  runtime: process
+  language: Python
+  sideEffects: pure-transforms-only
+  deploymentTrigger: omega.deploy.succeeded
+  supportedProcessingGuarantees: [ATLEAST_ONCE, EFFECTIVELY_ONCE]
+  definitions:
+    - name: greptile-score
+      mode: EFFECTIVELY_ONCE
+      source: sdlc/review
+      sourceFilter: comment-events-only
+      sink: sdlc/review
+      sinkType: omega.sdlc.review.greptile_scored
+      selfLoopFilter: reject-own-output
+      sourceAndSinkMustBeSingleNonPartitionedTopic: true
+      transform: dashboard-greptile-confidence-score
+    - name: ci-rollup
+      mode: EFFECTIVELY_ONCE
+      source: sdlc/ci
+      sourceFilter: check-suite-results-only
+      sink: sdlc/ci
+      sinkTypes: [omega.ci.run.passed, omega.ci.run.failed]
+      selfLoopFilter: reject-own-output
+      sourceAndSinkMustBeSingleNonPartitionedTopic: true
+      transform: check-suite-result-rollup
+    - name: pr-state-projector
+      mode: ATLEAST_ONCE
+      parallelism: 1
+      durableState: true
+      sources: [sdlc/pr, sdlc/review, sdlc/ci]
+      sourcePosition: monotonic
+      reducer: head-aware-monotonic
+      sink: sdlc/pr-state
+      sinkCompacted: true
+      duplicateAndStaleInputs: deterministic-safe-output
+      duplicateInputReemitsCurrentProjection: true
+      crashGap: state-before-output-is-closed-by-duplicate-reemission
+      exactlyOnceMechanism: idempotent-state-projection-not-stale-delivery-guarantee
+restrictions:
+  noBrokerProvisioning: true
+  noBrokerConnection: true
+  noTimers: true
+  noExtraEventTypes: true
+  noTransactions: true
