@@ -13,13 +13,24 @@ Failover (00064):
 
 * ``429`` marks the agent full until one of our runners on it is released
   (or ``FULL_HOLD_S`` passes) and the next agent is tried.
-* A definitive failure (wake probe not ready, ``409``, other ``4xx``/``5xx``,
-  or an ambiguous launch that ``find`` proves never started) marks the agent
-  unhealthy for ``DOWN_BASE_S`` doubling to ``DOWN_MAX_S``; unhealthy agents
-  are still tried, last. No timer runs: health is compared to the clock.
-* An ambiguous launch the agent may have started is never retried elsewhere
-  (that could run the same JIT twice); it goes back to the controller's
-  normal ``find`` path.
+* A definitive failure (wake probe not ready, ``409``, other ``4xx``/``5xx``)
+  marks the agent unhealthy for ``DOWN_BASE_S`` doubling to ``DOWN_MAX_S``;
+  unhealthy agents are still tried, last. No timer runs: health is compared
+  to the clock.
+* An ambiguous launch (``WAKE_FAILED``) stays on its agent: the timed-out
+  request may still arrive there, so the same name, generation and
+  single-use JIT are never sent to a second agent. The controller's normal
+  ``find`` path settles it, and the agent is marked unhealthy so the retry
+  (a fresh JIT) prefers another agent.
+* Capacity is re-checked right before each reservation, because other
+  launches may fill an agent while this one waits on a wake probe.
+
+Unknown is never treated as gone: a startup inventory fails as a whole if
+any agent does not answer (the controller's conservative fallback then
+runs), and the ghost-slot check keeps every runner on a silent agent, plus
+every tracked runner whose agent is unknown. Only agents holding our
+runners are asked during the ghost-slot check, so unused agents stay
+asleep.
 
 With one agent the pool is a pass-through, so single-agent behaviour and call
 counts are exactly the pre-swarm ones.
@@ -34,7 +45,6 @@ from dataclasses import dataclass, field
 
 from .desktop import (
     AgentRunner,
-    DesktopError,
     LaunchOutcome,
     RunnerAgent,
     WakeProbe,
@@ -81,6 +91,8 @@ class DesktopPool:
         self.notify = notify
         # runner name -> member index (set when placed, i.e. a reservation).
         self._owners: dict[str, int] = {}
+        # Runners the scaler tracks (last ``retain``); owner may be unknown.
+        self._tracked: frozenset[str] = frozenset()
 
     @classmethod
     def single(cls, client: RunnerAgent, capacity: int) -> DesktopPool:
@@ -111,6 +123,7 @@ class DesktopPool:
 
     def retain(self, live: Collection[str]) -> None:
         """Forget placements of runners the scaler no longer tracks."""
+        self._tracked = frozenset(live)
         for name in [n for n in self._owners if n not in live]:
             del self._owners[name]
         for i, member in enumerate(self.members):
@@ -180,6 +193,9 @@ class DesktopPool:
         elapsed = 0.0
         for index in self._order():
             member = self.members[index]
+            if not self._has_room(index):
+                saw_capacity = True  # filled by other launches while we waited
+                continue
             # Reserve before any await so concurrent launches spread out.
             self._owners[name] = index
             if self.load(index) == 1:  # nothing else of ours there: may be asleep
@@ -218,14 +234,10 @@ class DesktopPool:
                 last = result
                 continue
             if outcome is LaunchOutcome.WAKE_FAILED:
-                present = await member.client.find(name, generation)
-                if present is not False:
-                    # Maybe started: never place the same JIT anywhere else.
-                    return self._total(result, attempts, elapsed)
-                del self._owners[name]
-                self._mark_down(index, "wake_failed", result.status)
-                last = result
-                continue
+                # The request may still land on this agent: keep the owner and
+                # never send this JIT elsewhere; the controller's find settles it.
+                self._mark_down(index, "launch_ambiguous", result.status)
+                return self._total(result, attempts, elapsed)
             # CONFLICT / REJECTED: this agent refused; try the next one.
             del self._owners[name]
             self._mark_down(index, "rejected", result.status)
@@ -236,7 +248,9 @@ class DesktopPool:
 
     @staticmethod
     def _total(result: WakeResult, attempts: int, elapsed: float) -> WakeResult:
-        return WakeResult(result.outcome, result.status, attempts, elapsed)
+        return WakeResult(
+            result.outcome, result.status, attempts, elapsed, result.exit_code
+        )
 
     async def _wake(self, member: PoolMember) -> WakeProbe | None:
         wake = getattr(member.client, "wake", None)
@@ -246,60 +260,73 @@ class DesktopPool:
         return probe
 
     async def _inventories(
-        self,
+        self, indexes: Sequence[int]
     ) -> list[list[AgentRunner] | BaseException]:
         return list(
             await asyncio.gather(
-                *(m.client.inventory() for m in self.members),
+                *(self.members[i].client.inventory() for i in indexes),
                 return_exceptions=True,
             )
         )
 
     async def inventory(self) -> list[AgentRunner]:
-        """Every agent's children. Raises only if no agent answered."""
+        """Every agent's children (startup reconcile).
+
+        Raises if any agent does not answer: a partial list would make the
+        silent agent's runners look like orphans, so the controller's
+        conservative "unknown children" fallback runs instead.
+        """
         if len(self.members) == 1:
             only = await self.members[0].client.inventory()
             for row in only:
                 self._owners.setdefault(row.name, 0)
             return only
-        results = await self._inventories()
-        rows: list[AgentRunner] = []
-        failed: DesktopError | None = None
-        answered = False
-        for index, got in enumerate(results):
+        results = await self._inventories(range(len(self.members)))
+        for got in results:
             if isinstance(got, BaseException):
-                if not isinstance(got, DesktopError):
-                    raise got
-                failed = got
-                continue
-            answered = True
+                raise got
+        rows: list[AgentRunner] = []
+        for index, got in enumerate(results):
+            assert not isinstance(got, BaseException)
             for row in got:
                 self._owners[row.name] = index
                 rows.append(row)
-        if not answered:
-            assert failed is not None
-            raise failed
         return rows
 
     async def present_names(self) -> frozenset[str]:
         """Names that may still be running, for the ghost-slot check.
 
-        An agent that does not answer keeps every runner placed on it
-        (unknown is never treated as gone). Raises only if no agent answered.
+        Asks only the agents holding our tracked runners, so unused agents
+        stay asleep, or every agent when a tracked runner's owner is unknown
+        (e.g. after a startup inventory fallback). An agent that does not
+        answer keeps every runner placed on it, and every tracked runner
+        with an unknown owner (unknown is never treated as gone). Raises
+        only if no asked agent answered.
         """
         if len(self.members) == 1:
             return frozenset(r.name for r in await self.members[0].client.inventory())
-        results = await self._inventories()
+        unowned = {n for n in self._tracked if n not in self._owners}
+        if unowned:
+            indexes = list(range(len(self.members)))
+        else:
+            indexes = sorted({self._owners[n] for n in self._tracked})
+        if not indexes:
+            return frozenset()
+        results = await self._inventories(indexes)
         names: set[str] = set()
         failure: BaseException | None = None
         answered = False
-        for index, got in enumerate(results):
+        for index, got in zip(indexes, results, strict=True):
             if isinstance(got, BaseException):
                 failure = got
                 names.update(n for n, i in self._owners.items() if i == index)
+                names.update(unowned)
                 continue
             answered = True
-            names.update(r.name for r in got)
+            for row in got:
+                names.add(row.name)
+                if row.name in self._tracked:
+                    self._owners[row.name] = index
         if not answered:
             assert failure is not None
             raise failure

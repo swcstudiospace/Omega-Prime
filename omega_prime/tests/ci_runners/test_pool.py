@@ -271,12 +271,53 @@ def test_ambiguous_launch_that_may_have_started_is_never_placed_twice() -> None:
     assert s.calls(1) == [] and s.calls(2) == []
 
 
-def test_ambiguous_launch_proven_absent_fails_over() -> None:
+def test_ambiguous_launch_stays_on_its_agent_even_if_absent_right_now() -> None:
+    # The timed-out POST may still arrive at agent1 after an empty inventory,
+    # so the same single-use JIT must never be sent to a second agent.
     s = Swarm(budget_s=10.0)
     s.http[0].on("POST", "/v1/runners", TransportError("reset"))
-    s.http[0].on("GET", "/v1/runners", resp(200, []))  # find: not there
-    assert s.launch("omega-ci-1-oooo").outcome is LaunchOutcome.ACCEPTED
-    assert s.pool.owner("omega-ci-1-oooo") == "agent2"
+    s.http[0].on("GET", "/v1/runners", resp(200, []))
+    result = s.launch("omega-ci-1-oooo")
+    assert result.outcome is LaunchOutcome.WAKE_FAILED
+    assert s.pool.owner("omega-ci-1-oooo") == "agent1"
+    assert ("POST", "/v1/runners") not in s.calls(1) + s.calls(2)
+    # The agent is marked unhealthy, so the controller's retry (a fresh JIT)
+    # prefers another agent.
+    assert not s.pool.healthy(0)
+    s.pool.retain(set())
+    s.http[0].on("POST", "/v1/runners", resp(201))
+    s.launch("omega-ci-1-oooo2")
+    assert s.pool.owner("omega-ci-1-oooo2") == "agent2"
+
+
+def test_finished_replay_keeps_its_exit_code_through_the_pool() -> None:
+    s = Swarm()
+    s.http[0].on(
+        "POST", "/v1/runners", resp(200, {"status": "finished", "exit_code": 3})
+    )
+    result = s.launch("omega-ci-1-oooo3")
+    assert result.outcome is LaunchOutcome.FINISHED
+    assert result.exit_code == 3
+
+
+def test_fallback_rechecks_capacity_filled_while_waiting_on_a_wake() -> None:
+    s = Swarm(capacity=1)
+    real_wake = s.pool._wake
+
+    async def wake_while_others_fill(member: Any) -> Any:
+        if member.label == "agent1":
+            # Meanwhile two other launches take agents 2 and 3.
+            s.pool._owners["omega-ci-8-other"] = 1
+            s.pool._owners["omega-ci-9-other"] = 2
+            s.http[0].on("GET", "/healthz", resp(503))
+        return await real_wake(member)
+
+    s.pool._wake = wake_while_others_fill  # type: ignore[method-assign]
+    result = s.launch("omega-ci-1-oooo4")
+    assert result.outcome is LaunchOutcome.CAPACITY
+    assert s.pool.owner("omega-ci-1-oooo4") is None
+    assert s.pool.load(1) == 1 and s.pool.load(2) == 1
+    assert ("POST", "/v1/runners") not in s.calls(1) + s.calls(2)
 
 
 # -- reconcile / find / stop ------------------------------------------------------------
@@ -295,20 +336,22 @@ def test_inventory_is_the_union_and_records_owners() -> None:
     assert s.pool.owner("omega-ci-8-pppp") == "agent3"
 
 
-def test_inventory_raises_only_when_every_agent_fails() -> None:
+def test_startup_inventory_fails_whole_when_any_agent_is_silent() -> None:
+    # A partial list would make the silent agent's live runners look like
+    # orphans; failing lets the controller's conservative fallback run.
     s = Swarm(budget_s=5.0)
+    s.http[1].on("GET", "/v1/runners", resp(200, rows("omega-ci-7-pppp")))
     s.http[0].on("GET", "/v1/runners", resp(500))
-    assert run(s.pool.inventory()) == []
-    for h in s.http:
-        h.on("GET", "/v1/runners", resp(500))
     with pytest.raises(DesktopError):
         run(s.pool.inventory())
+    assert s.pool.owner("omega-ci-7-pppp") is None
 
 
 def test_present_names_keeps_runners_of_an_unreachable_agent() -> None:
     s = Swarm(budget_s=5.0)
     s.launch("omega-ci-1-qqqq")  # agent1
     s.launch("omega-ci-2-qqqq")  # agent2
+    s.pool.retain({"omega-ci-1-qqqq", "omega-ci-2-qqqq"})
     s.http[0].on("GET", "/v1/runners", resp(500))
     s.http[1].on("GET", "/v1/runners", resp(200, []))  # agent2 lost its child
     names = run(s.pool.present_names())
@@ -483,3 +526,30 @@ def test_controller_reaps_on_the_agent_that_owns_the_runner() -> None:
     scenario(rig, body)
     assert hosts(rig, "DELETE", f"/v1/runners/{target[0]}") == ["runner2.example.test"]
     assert target[0] not in rig.scaler.runners
+
+
+def test_ghost_check_asks_only_agents_holding_our_runners() -> None:
+    s = Swarm()
+    s.launch("omega-ci-1-tttt")  # agent1 only
+    s.pool.retain({"omega-ci-1-tttt"})
+    s.http[0].on("GET", "/v1/runners", resp(200, rows("omega-ci-1-tttt")))
+    assert run(s.pool.present_names()) == frozenset({"omega-ci-1-tttt"})
+    assert s.calls(1) == [] and s.calls(2) == []  # unused agents stay asleep
+    s.pool.retain(set())
+    assert run(s.pool.present_names()) == frozenset()
+    assert s.calls(1) == [] and s.calls(2) == []
+
+
+def test_ghost_check_with_unknown_owner_asks_all_and_keeps_it_if_any_is_silent() -> (
+    None
+):
+    # e.g. after the startup fallback: tracked runners with no recorded owner.
+    s = Swarm(budget_s=5.0)
+    s.pool.retain({"omega-ci-5-uuuu"})
+    s.http[0].on("GET", "/v1/runners", resp(500))
+    assert run(s.pool.present_names()) == frozenset({"omega-ci-5-uuuu"})
+    assert s.calls(1) and s.calls(2)
+    s.http[0].on("GET", "/v1/runners", resp(200, []))
+    s.http[2].on("GET", "/v1/runners", resp(200, rows("omega-ci-5-uuuu")))
+    assert run(s.pool.present_names()) == frozenset({"omega-ci-5-uuuu"})
+    assert s.pool.owner("omega-ci-5-uuuu") == "agent3"  # learned; later checks narrow

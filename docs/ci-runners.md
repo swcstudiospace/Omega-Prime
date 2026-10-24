@@ -91,15 +91,24 @@ target Railway shows when the custom domain is added (agent 1:
   launch. Unhealthy agents are tried last, not skipped forever, and one
   success clears the record. A `429` marks the agent full until one of the
   controller's runners on it is released, or 60 s pass. If every agent is
-  full, the scaler's normal capacity hold applies. A launch that may have
-  started (no answer, and `find` cannot prove it absent) is never sent to
-  another agent, because that could run the same job twice. It goes through
-  the single-agent `find` path instead.
-- **Health is event-driven.** Health only changes on a launch result. Ghost-slot
-  reconciles ask every agent (`GET /v1/runners`) only while runners are live.
-  An agent that does not answer keeps all of its runners (unknown is never
-  treated as gone). Reaps go to the agent that owns the runner. If the owner
-  is unknown, every agent is asked.
+  full, the scaler's normal capacity hold applies. Capacity is checked again
+  right before each fallback, so a launch that waited on a wake never
+  overfills an agent that other launches filled in the meantime. A launch
+  that got no answer (the wake budget ran out) stays on its agent even if
+  that agent's inventory is empty right now. The timed-out request may
+  still arrive, so the same single-use JIT config is never sent to a second
+  agent. The single-agent `find` path settles it, and the agent is marked
+  unhealthy, so the retry (a fresh JIT) prefers another agent.
+- **Health is event-driven.** Health only changes on a launch result.
+  Ghost-slot reconciles (`GET /v1/runners`) ask only the agents that hold
+  the controller's runners, so unused agents stay asleep. They ask every
+  agent only when a tracked runner's agent is unknown. An agent that does
+  not answer keeps all of its runners, plus every tracked runner whose
+  agent is unknown (unknown is never treated as gone). The startup
+  reconcile needs every agent to answer: if one is silent, the controller
+  uses its "unknown children" fallback rather than treating that agent's
+  live runners as orphans. Reaps go to the agent that owns the runner. If
+  the owner is unknown, every agent is asked.
 - **Callbacks.** Each agent has its own token, and `/agent/events` accepts any
   configured one.
 - **Events.** `omega.ci.desktop.agent_woke`, `agent_unhealthy` and
