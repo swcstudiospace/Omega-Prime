@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import math
@@ -1249,6 +1250,42 @@ def test_attachment_preserves_replaced_nested_user_artifact(tmp_path: Path) -> N
     assert artifact.resolve() == user_target
     assert (work / ".omp" / "mcp.json").is_file()
     assert user_target.read_text(encoding="utf-8") == "user"
+
+
+def test_attachment_pins_artifacts_so_replacements_never_share_an_inode(
+    tmp_path: Path,
+) -> None:
+    # ext4 and tmpfs hand a freed inode number straight to the next entry, so a
+    # bare (st_dev, st_ino) check would mistake a user's replacement for the
+    # owned artifact. The lease keeps every registered inode allocated.
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    attachment = mcp_bridge.try_acquire_attachment(work, tmp_path / "state", "job-pin")
+    attachment.create_directory_artifact(".omp/skills")
+    link = work / ".omp" / "skills" / "python"
+    owned = attachment.create_symlink_artifact(".omp/skills/python", "owned")
+    skills = str(work / ".omp" / "skills")
+
+    def held_under_skills() -> int:
+        held = 0
+        for fd in os.listdir("/proc/self/fd"):
+            with contextlib.suppress(OSError):
+                held += os.readlink(f"/proc/self/fd/{fd}").startswith(skills)
+        return held
+
+    assert held_under_skills() == 2
+
+    for _ in range(50):
+        link.unlink()
+        link.symlink_to("user")
+        replaced = link.stat(follow_symlinks=False)
+        assert (replaced.st_dev, replaced.st_ino) != owned
+
+    assert attachment.release() == [".omp/skills/python artifact identity changed"]
+    assert os.readlink(link) == "user"
+    assert held_under_skills() == 0
 
 
 def test_sandbox_refuses_without_bwrap_and_wraps_when_present(tmp_path: Path) -> None:

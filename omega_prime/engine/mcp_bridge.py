@@ -146,6 +146,21 @@ def _artifact_stat(omp_fd: int, relative_path: str) -> os.stat_result:
         os.close(parent_fd)
 
 
+def _pin_artifact(omp_fd: int, relative_path: str) -> int:
+    """Hold an ``O_PATH`` reference to an artifact entry without following links.
+
+    While the reference is open the inode cannot be freed, so its number cannot
+    be handed to a replacement entry. Filesystems such as ext4 reuse a freed
+    inode number at once, which makes a bare ``(st_dev, st_ino)`` comparison
+    unable to tell an owned artifact from a user's replacement.
+    """
+    parent_fd, name = _artifact_parent(omp_fd, relative_path)
+    try:
+        return os.open(name, os.O_PATH | os.O_NOFOLLOW, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def _remove_artifact(
     omp_fd: int, relative_path: str, identity: tuple[int, int]
 ) -> None:
@@ -192,6 +207,9 @@ class AcquiredAttachment:
         self._child_identity: dict[str, Any] | None = None
         self._released = False
         self._artifacts: dict[str, tuple[int, int]] = {}
+        # Open O_PATH references that keep each registered inode allocated
+        # until release, so a replacement entry never shares its number.
+        self._artifact_pins: dict[str, int] = {}
         self.cleanup_conflicts: list[str] = []
 
     def register_artifact(
@@ -201,20 +219,30 @@ class AcquiredAttachment:
 
         For example, ``.omp/skills`` and ``.omp/skills/python``. Parent
         directories are opened descriptor-relatively without following links;
-        identity is the prepared entry's ``(st_dev, st_ino)``.
+        identity is the prepared entry's ``(st_dev, st_ino)``. The entry stays
+        pinned open until release, so that identity cannot be reused by a
+        replacement entry while the lease is held.
         """
         if self._released:
             raise RuntimeError("attachment lease is already released")
         if not isinstance(prepared_identity, tuple) or len(prepared_identity) != 2:
             raise ValueError("artifact identity must be a (device, inode) tuple")
-        current = _artifact_stat(self._omp_fd, relative_path)
-        if (current.st_dev, current.st_ino) != prepared_identity:
-            raise ValueError("prepared artifact identity does not match")
-        previous = self._artifacts.get(relative_path)
-        if previous is not None and previous != prepared_identity:
-            raise ValueError("artifact identity is already owned")
-        self._artifacts[relative_path] = prepared_identity
-        self._write_journal()
+        pin = _pin_artifact(self._omp_fd, relative_path)
+        try:
+            current = os.fstat(pin)
+            if (current.st_dev, current.st_ino) != prepared_identity:
+                raise ValueError("prepared artifact identity does not match")
+            previous = self._artifacts.get(relative_path)
+            if previous is not None and previous != prepared_identity:
+                raise ValueError("artifact identity is already owned")
+            self._artifacts[relative_path] = prepared_identity
+            if relative_path not in self._artifact_pins:
+                self._artifact_pins[relative_path] = pin
+                pin = -1
+            self._write_journal()
+        finally:
+            if pin >= 0:
+                os.close(pin)
 
     @property
     def active(self) -> bool:
@@ -390,6 +418,9 @@ class AcquiredAttachment:
                 conflicts.append(f"journal cleanup failed: {type(exc).__name__}")
         self._released = True
         self.cleanup_conflicts = conflicts
+        for pin in self._artifact_pins.values():
+            os.close(pin)
+        self._artifact_pins.clear()
         os.close(self._omp_fd)
         os.close(self._parent_fd)
         return conflicts
