@@ -58,7 +58,7 @@ from omega_prime.ci_runners.jobs import (
     WorkflowJob,
     wants_pool,
 )
-from omega_prime.ci_runners.pool import DesktopPool
+from omega_prime.ci_runners.pool import DesktopPool, PartialInventory
 from omega_prime.ci_runners.publisher import (
     CloudEvent,
     EventPublisher,
@@ -545,6 +545,7 @@ class Controller:
         """The one startup reconcile. A failed side never causes a reap."""
         github: tuple[ObservedRunner, ...] | None
         agent: tuple[AgentRunner, ...] | None
+        known: tuple[AgentRunner, ...] = ()  # answering agents when some are silent
         try:
             github = tuple(
                 ObservedRunner(r.name, r.runner_id, r.busy, r.online)
@@ -555,9 +556,29 @@ class Controller:
             github = None
         try:
             agent = tuple(await self.agents.inventory())
+        except PartialInventory as exc:
+            self._publish(
+                "error",
+                {"reason": "reconcile_agent", "status": exc.status, "partial": True},
+            )
+            agent = None
+            known = exc.rows
         except DesktopError as exc:
             self._publish("error", {"reason": "reconcile_agent", "status": exc.status})
             agent = None
+        if agent is None and known:
+            if github is None:
+                agent = known  # the answering agents' children, kept busy below
+            else:
+                # Some agents silent: keep the answering agents' rows (their
+                # real generations, and children GitHub's listing missed) and
+                # mirror every other registration as an unknown child.
+                listed = {r.name for r in known}
+                agent = known + tuple(
+                    AgentRunner(o.name, "", "unknown", None)
+                    for o in github
+                    if o.name not in listed
+                )
         if github is None and agent is None:
             return ControllerStarted()
         if github is None:

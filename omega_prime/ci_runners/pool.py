@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 
 from .desktop import (
     AgentRunner,
+    DesktopError,
     LaunchOutcome,
     RunnerAgent,
     WakeProbe,
@@ -58,6 +59,18 @@ FULL_HOLD_S = 60.0
 WAKE_UNREADY_STATUS = 503
 
 _SUCCESS = frozenset({LaunchOutcome.ACCEPTED, LaunchOutcome.REPLAYED})
+
+
+class PartialInventory(DesktopError):
+    """Some agents answered the startup inventory and some did not.
+
+    ``rows`` are the answering agents' children, with their real generations.
+    The silent agents' children are unknown and must not be treated as orphans.
+    """
+
+    def __init__(self, status: int | None, rows: Sequence[AgentRunner]) -> None:
+        super().__init__("inventory", status)
+        self.rows = tuple(rows)
 
 
 @dataclass
@@ -272,9 +285,11 @@ class DesktopPool:
     async def inventory(self) -> list[AgentRunner]:
         """Every agent's children (startup reconcile).
 
-        Raises if any agent does not answer: a partial list would make the
-        silent agent's runners look like orphans, so the controller's
-        conservative "unknown children" fallback runs instead.
+        If some agents do not answer it raises :class:`PartialInventory`
+        with the answering agents' rows. A plain partial list would make the
+        silent agents' runners look like orphans; the controller keeps the
+        known rows and mirrors the rest conservatively. Raises the agent's
+        error if no agent answered.
         """
         if len(self.members) == 1:
             only = await self.members[0].client.inventory()
@@ -282,15 +297,24 @@ class DesktopPool:
                 self._owners.setdefault(row.name, 0)
             return only
         results = await self._inventories(range(len(self.members)))
-        for got in results:
-            if isinstance(got, BaseException):
-                raise got
         rows: list[AgentRunner] = []
+        failure: BaseException | None = None
+        answered = False
         for index, got in enumerate(results):
-            assert not isinstance(got, BaseException)
+            if isinstance(got, BaseException):
+                if not isinstance(got, DesktopError):
+                    raise got
+                failure = got
+                continue
+            answered = True
             for row in got:
                 self._owners[row.name] = index
                 rows.append(row)
+        if failure is not None:
+            if not answered:
+                raise failure
+            assert isinstance(failure, DesktopError)
+            raise PartialInventory(failure.status, rows)
         return rows
 
     async def present_names(self) -> frozenset[str]:
@@ -367,5 +391,6 @@ __all__ = [
     "DOWN_MAX_S",
     "FULL_HOLD_S",
     "DesktopPool",
+    "PartialInventory",
     "PoolMember",
 ]

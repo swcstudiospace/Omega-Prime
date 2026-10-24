@@ -21,7 +21,12 @@ from omega_prime.ci_runners.desktop import (
 )
 from omega_prime.ci_runners.http import HttpRequest, HttpResponse, TransportError
 from omega_prime.ci_runners.jobs import IdleDeadline
-from omega_prime.ci_runners.pool import DOWN_BASE_S, DOWN_MAX_S, DesktopPool
+from omega_prime.ci_runners.pool import (
+    DOWN_BASE_S,
+    DOWN_MAX_S,
+    DesktopPool,
+    PartialInventory,
+)
 from omega_prime.ci_runners.scaler import RunnerState
 from omega_prime.tests.ci_runners._secrets import placeholder
 
@@ -342,9 +347,18 @@ def test_startup_inventory_fails_whole_when_any_agent_is_silent() -> None:
     s = Swarm(budget_s=5.0)
     s.http[1].on("GET", "/v1/runners", resp(200, rows("omega-ci-7-pppp")))
     s.http[0].on("GET", "/v1/runners", resp(500))
-    with pytest.raises(DesktopError):
+    with pytest.raises(PartialInventory) as caught:
         run(s.pool.inventory())
-    assert s.pool.owner("omega-ci-7-pppp") is None
+    # The answering agent's rows are kept (real generation) for the fallback.
+    assert [(r.name, r.generation) for r in caught.value.rows] == [
+        ("omega-ci-7-pppp", "gen-1")
+    ]
+    assert s.pool.owner("omega-ci-7-pppp") == "agent2"
+    for h in s.http:
+        h.on("GET", "/v1/runners", resp(500))
+    with pytest.raises(DesktopError) as whole:
+        run(s.pool.inventory())
+    assert not isinstance(whole.value, PartialInventory)
 
 
 def test_present_names_keeps_runners_of_an_unreachable_agent() -> None:
@@ -553,3 +567,31 @@ def test_ghost_check_with_unknown_owner_asks_all_and_keeps_it_if_any_is_silent()
     s.http[2].on("GET", "/v1/runners", resp(200, rows("omega-ci-5-uuuu")))
     assert run(s.pool.present_names()) == frozenset({"omega-ci-5-uuuu"})
     assert s.pool.owner("omega-ci-5-uuuu") == "agent3"  # learned; later checks narrow
+
+
+def test_startup_with_a_silent_agent_keeps_the_answering_agents_children() -> None:
+    rig = swarm_rig(n=2)
+
+    def listing(request: HttpRequest) -> HttpResponse:
+        if urlsplit(request.url).hostname == "runner1.example.test":
+            return resp(500)
+        return resp(
+            200,
+            [
+                {
+                    "name": "omega-ci-1-live",
+                    "generation": "gen-live",
+                    "status": "running",
+                }
+            ],
+        )
+
+    rig.http.on("GET", "/v1/runners", listing)
+    started = asyncio.run(rig.ctrl._snapshot())
+    # The child GitHub's listing missed is kept with its real generation, so
+    # its exit callback is accepted and it still counts against the limit.
+    assert [(a.name, a.generation) for a in started.agent] == [
+        ("omega-ci-1-live", "gen-live")
+    ]
+    assert rig.ctrl.agents.owner("omega-ci-1-live") == "agent2"
+    assert '"partial": true' in rig.publisher.text()

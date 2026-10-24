@@ -104,10 +104,11 @@ target Railway shows when the custom domain is added (agent 1:
   the controller's runners, so unused agents stay asleep. They ask every
   agent only when a tracked runner's agent is unknown. An agent that does
   not answer keeps all of its runners, plus every tracked runner whose
-  agent is unknown (unknown is never treated as gone). The startup
-  reconcile needs every agent to answer: if one is silent, the controller
-  uses its "unknown children" fallback rather than treating that agent's
-  live runners as orphans. Reaps go to the agent that owns the runner. If
+  agent is unknown (unknown is never treated as gone). At startup, if some
+  agents are silent, the controller keeps the answering agents' children
+  (with their real generations, so exit callbacks still match) and mirrors
+  every other GitHub registration as an unknown child. A silent agent's
+  live runners are never treated as orphans. Reaps go to the agent that owns the runner. If
   the owner is unknown, every agent is asked.
 - **Callbacks.** Each agent has its own token, and `/agent/events` accepts any
   configured one.
