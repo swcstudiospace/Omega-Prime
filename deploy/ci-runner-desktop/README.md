@@ -113,7 +113,9 @@ ports with data under `RUNNER_TEMP`, 00058; its port primitives are
 | CodeQL bundle 2.27.3 (00057) | `codeql-bundle-linux64.tar.gz` sha256 `64518dc4…4c5c` | `codeql-bundle-linux64.tar.gz.checksum.txt` on `codeql-bundle-v2.27.3`; the bundle `github/codeql-action@6f2ac81` (v4) resolves |
 | cargo-deny 0.20.2 (00057) | `cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz` sha256 `9f12ed4c…8d5f` | the release's `.sha256` file and the GitHub asset digest |
 | ripgrep, ffmpeg (00057) | apt, same snapshot | asserted by `toolchain-check.sh` (`rg`, `ffmpeg`, `ffprobe`) |
+| fonts-liberation (00065) | apt, same snapshot | asserted by `toolchain-check.sh` (`LiberationSans-Regular.ttf`) |
 | Node.js 22.23.4 / 24.22.1 | `node-v*-linux-x64.tar.xz` sha256 `1805bcd3…e9ce` / `6c172a9a…95e6` | `nodejs.org/dist/v*/SHASUMS256.txt` |
+| System Node 22 (00065) | links in `/usr/local/bin` to the Node 22.23.4 tool-cache build above (no extra download) | asserted by `toolchain-check.sh` (`node --version` = `v22.23.4`) |
 | .NET SDK 10.0.402 | `dotnet-sdk-10.0.402-linux-x64.tar.gz` sha512 `1904a98d…29c2` | `release-metadata/10.0/releases.json` (runtime 10.0.13); version from OmpOS `global.json` |
 | `maui-android` workload | workload set `10.0.402.1` | NuGet `Microsoft.NET.Workloads.10.0.400` (packages are signed and verified by the SDK) |
 | Android cmdline-tools 23.0 | `commandlinetools-linux-16111833_latest.zip` sha256 `0877a1d0…cfa8` | matches Google's published sha1 `e025545c…5f60` in `repository2-3.xml`; used only to record licence acceptance |
