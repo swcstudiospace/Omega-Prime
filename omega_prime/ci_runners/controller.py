@@ -5,8 +5,9 @@ input to the scaler and interprets the returned decisions; slow effects
 (JIT + wake/launch, reaps) run as tracked tasks whose outcomes come back as
 new input events, so scaler transitions never interleave. Startup performs
 exactly one reconcile (one paginated GitHub listing + one agent inventory)
-before any queued event is processed. No timers beyond the one-shot idle
-deadlines in :mod:`delayed`, no polling.
+before any queued event is processed. After that the agent inventory is only
+read when the scaler asks (``ReconcileAgent``: jobs wait behind a full pool).
+No timers beyond the one-shot deadlines in :mod:`delayed`, no polling.
 
 Every Reap reports its outcome back (``ReapFinished``) so the scaler keeps a
 runner tracked until cleanup really happened, and the queue is mirrored to a
@@ -34,6 +35,7 @@ from omega_prime.ci_runners.forkguard import (
 )
 from omega_prime.ci_runners.github import GitHubClient, GitHubError
 from omega_prime.ci_runners.jobs import (
+    AgentInventory,
     AgentRunner,
     CancelIdle,
     ControllerStarted,
@@ -48,6 +50,7 @@ from omega_prime.ci_runners.jobs import (
     Reap,
     ReapFinished,
     ReapOutcome,
+    ReconcileAgent,
     RetryDeadline,
     RunnerExited,
     ScheduleIdle,
@@ -588,6 +591,8 @@ class Controller:
             elif isinstance(decision, CancelIdle):
                 assert self._delayed is not None
                 self._delayed.cancel(decision.name, decision.generation)
+            elif isinstance(decision, ReconcileAgent):
+                self._spawn(self._reconcile_agent(decision))
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> None:
         task = asyncio.create_task(coro)
@@ -669,6 +674,16 @@ class Controller:
             )
         finally:
             self._jits.pop(key, None)
+
+    async def _reconcile_agent(self, d: ReconcileAgent) -> None:
+        """One agent inventory for the scaler's ghost-slot check (00063)."""
+        names: frozenset[str] | None
+        try:
+            names = frozenset(r.name for r in await self.desktop.inventory())
+        except Exception as exc:  # never strand the in-flight check
+            log.warning("ci-runners: agent reconcile failed (%s)", type(exc).__name__)
+            names = None
+        self.submit(AgentInventory(d.token, names))
 
     async def _reap(self, d: Reap) -> None:
         self.submit(ReapFinished(d.name, d.generation, await self._reap_outcome(d)))

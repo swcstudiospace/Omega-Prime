@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from omega_prime.ci_runners.jobs import (
+    AgentInventory,
     AgentRunner,
     CancelIdle,
     ControllerStarted,
@@ -20,6 +21,7 @@ from omega_prime.ci_runners.jobs import (
     Reap,
     ReapFinished,
     ReapOutcome,
+    ReconcileAgent,
     RetryDeadline,
     RunnerExited,
     RunnerState,
@@ -30,8 +32,13 @@ from omega_prime.ci_runners.jobs import (
 )
 from omega_prime.ci_runners.publisher import CloudEvent, JsonlPublisher
 from omega_prime.ci_runners.scaler import (
+    CLEANUP_KEY_PREFIX,
+    CLEANUP_MAX_ATTEMPTS,
+    CLEANUP_RETRY_S,
     JOB_MEMORY,
     MAX_CONSECUTIVE_FAILURES,
+    RECONCILE_COOLDOWN_S,
+    RECONCILE_KEY,
     RETRY_BASE_S,
     RETRY_CAP_S,
     RETRY_KEY,
@@ -281,7 +288,8 @@ def test_reconcile_on_start(ids: Ids) -> None:
     )
     step = scaler.handle(started)
     reaps = {d.name: d for d in step.decisions if isinstance(d, Reap)}
-    assert reaps["omega-ci-9-zzzz"].delete_github is False  # orphan process
+    assert "omega-ci-9-zzzz" not in reaps  # unlisted child: adopted, not killed
+    assert scaler.runners["omega-ci-9-zzzz"].state is RunnerState.BUSY
     assert reaps["omega-ci-3-cccc"].stop_agent is False  # orphan registration
     assert "vps-runner" not in reaps and "not-ours" not in reaps
     assert scaler.runners["omega-ci-1-aaaa"].state is RunnerState.BUSY
@@ -604,3 +612,206 @@ def test_restart_ignores_non_queued_persisted_jobs(ids: Ids) -> None:
     scaler = make(ids, started=False)
     scaler.handle(ControllerStarted(queued=(stale,)))
     assert not scaler.queued
+
+
+# --- ghost slots: a full pool is checked against the agent (00063) -----------
+
+
+def _reconcile(step: Step) -> ReconcileAgent:
+    [check] = [d for d in step.decisions if isinstance(d, ReconcileAgent)]
+    return check
+
+
+def _full_pool_with_ghosts(scaler: Scaler) -> tuple[Launch, Launch, ReconcileAgent]:
+    """One IDLE and one BUSY runner, then a job waits behind the full pool.
+
+    The check is requested as soon as the pool fills while demand waits."""
+    [a] = launches(scaler.handle(job(job_id=1)))
+    [b] = launches(scaler.handle(job(job_id=2)))
+    scaler.handle(LaunchSucceeded(a.name, a.generation, 11))
+    full = scaler.handle(LaunchSucceeded(b.name, b.generation, 12))
+    check = _reconcile(full)
+    scaler.handle(job("in_progress", job_id=2, runner_name=b.name))
+    waiting = scaler.handle(job(job_id=3))
+    assert launches(waiting) == [] and len(scaler.runners) == scaler.max_runners
+    assert not any(isinstance(d, ReconcileAgent) for d in waiting.decisions)
+    return a, b, check
+
+
+def test_full_pool_releases_runners_the_agent_no_longer_runs(ids: Ids) -> None:
+    """The 00063 stall: an agent redeploy SIGKILLed the children, so no exit
+    callback came; GitHub's completed webhook took ~10 minutes, and an IDLE
+    ghost was never reaped at all while jobs kept waiting."""
+    scaler = make(ids, max_runners=2)
+    a, b, check = _full_pool_with_ghosts(scaler)
+    step = scaler.handle(AgentInventory(check.token, frozenset()))
+    assert a.name not in scaler.runners and b.name not in scaler.runners
+    gone = [e.data for e in step.events if e.kind == "exited"]
+    assert {(d["name"], d["state"]) for d in gone} == {
+        (a.name, "idle"),
+        (b.name, "busy"),
+    }
+    assert all(d["reason"] == "agent_missing" for d in gone)
+    # The IDLE one never took a job: its registration is rolled back.
+    assert [d for d in step.decisions if isinstance(d, Reap)] == [
+        Reap(a.name, a.generation, 11, delete_github=True, stop_agent=False)
+    ]
+    assert any(
+        isinstance(d, ScheduleRetry)
+        and d.name == RECONCILE_KEY
+        and d.delay_s == RECONCILE_COOLDOWN_S
+        for d in step.decisions
+    )
+    # Losing a runner before it took a job is a failed launch (one per check):
+    # one backoff step, then both slots serve the waiting demand.
+    assert launches(step) == [] and scaler.failures == 1
+    assert "launch_backoff" in kinds(step)
+    [backoff] = [
+        d
+        for d in step.decisions
+        if isinstance(d, ScheduleRetry) and d.name == RETRY_KEY
+    ]
+    assert (
+        len(launches(scaler.handle(RetryDeadline(RETRY_KEY, backoff.generation)))) == 2
+    )
+    # Their late exit callback / completed webhook are no-ops now.
+    assert kinds(scaler.handle(RunnerExited(b.name, b.generation, 137))) == []
+    scaler.handle(job("completed", job_id=2, runner_name=b.name))
+    assert len(scaler.runners) == 2
+
+
+def test_runners_the_agent_still_runs_are_kept(ids: Ids) -> None:
+    scaler = make(ids, max_runners=2)
+    a, b, check = _full_pool_with_ghosts(scaler)
+    step = scaler.handle(AgentInventory(check.token, frozenset({a.name, b.name})))
+    assert set(scaler.runners) == {a.name, b.name}
+    assert launches(step) == [] and "exited" not in kinds(step)
+
+
+def test_one_check_in_flight_then_a_cooldown_then_one_more(ids: Ids) -> None:
+    scaler = make(ids, max_runners=2)
+    a, b, check = _full_pool_with_ghosts(scaler)  # job 3 asked for no 2nd check
+    failed = scaler.handle(AgentInventory(check.token, None))  # agent unreachable
+    assert set(scaler.runners) == {a.name, b.name}  # unknown never releases
+    assert "error" in kinds(failed)
+    [cool] = [d for d in failed.decisions if isinstance(d, ScheduleRetry)]
+    quiet = scaler.handle(job(job_id=5))
+    assert not any(isinstance(d, ReconcileAgent) for d in quiet.decisions)
+    again = scaler.handle(RetryDeadline(RECONCILE_KEY, cool.generation))
+    assert _reconcile(again).token != check.token  # still full and waiting
+    # A stale answer to the old check changes nothing.
+    scaler.handle(AgentInventory(check.token, frozenset()))
+    assert set(scaler.runners) == {a.name, b.name}
+
+
+def test_no_check_while_the_pool_has_room_or_nothing_waits(ids: Ids) -> None:
+    scaler = make(ids, max_runners=3)
+    _idle(scaler, 1)
+    step = scaler.handle(job(job_id=2))
+    assert len(launches(step)) == 1
+    assert not any(isinstance(d, ReconcileAgent) for d in step.decisions)
+    full = make(Ids(), max_runners=1)
+    a = _idle(full, 1)
+    busy = full.handle(job("in_progress", job_id=1, runner_name=a.name))
+    assert not any(isinstance(d, ReconcileAgent) for d in busy.decisions)
+
+
+def test_no_check_while_a_launch_is_in_flight(ids: Ids) -> None:
+    scaler = make(ids, max_runners=2)
+    a = _idle(scaler, 1)
+    step = scaler.handle(job(job_id=2))  # second slot: launch in flight
+    [b] = launches(step)
+    assert not any(isinstance(d, ReconcileAgent) for d in step.decisions)
+    settled = scaler.handle(LaunchSucceeded(b.name, b.generation, 6))
+    check = _reconcile(settled)  # now full of settled runners, demand waits
+    scaler.handle(AgentInventory(check.token, frozenset({b.name})))
+    assert a.name not in scaler.runners and b.name in scaler.runners
+
+
+def test_losing_only_busy_runners_is_not_a_launch_failure(ids: Ids) -> None:
+    scaler = make(ids, max_runners=2)
+    a, b, check = _full_pool_with_ghosts(scaler)
+    step = scaler.handle(AgentInventory(check.token, frozenset({a.name})))
+    assert b.name not in scaler.runners and scaler.failures == 0
+    assert len(launches(step)) == 1
+
+
+def test_broken_runners_lost_before_a_job_open_the_circuit(ids: Ids) -> None:
+    """Greptile on #98: runners that die before taking a job and whose exit
+    callbacks never arrive must still count as failed launches."""
+    scaler = make(ids, max_runners=1)
+    [a] = launches(scaler.handle(job(job_id=1)))
+    scaler.handle(job(job_id=2))  # demand keeps waiting behind the full pool
+    for n in range(MAX_CONSECUTIVE_FAILURES):
+        check = _reconcile(scaler.handle(LaunchSucceeded(a.name, a.generation, n + 1)))
+        step = scaler.handle(AgentInventory(check.token, frozenset()))
+        assert scaler.failures == n + 1 and a.name not in scaler.runners
+        if n + 1 == MAX_CONSECUTIVE_FAILURES:
+            assert "launch_circuit_open" in kinds(step)
+            assert launches(step) == [] and scaler.hold == "circuit"
+            return
+        [cool] = [
+            d
+            for d in step.decisions
+            if isinstance(d, ScheduleRetry) and d.name == RECONCILE_KEY
+        ]
+        [backoff] = [
+            d
+            for d in step.decisions
+            if isinstance(d, ScheduleRetry) and d.name == RETRY_KEY
+        ]
+        scaler.handle(RetryDeadline(RECONCILE_KEY, cool.generation))
+        [a] = launches(scaler.handle(RetryDeadline(RETRY_KEY, backoff.generation)))
+    raise AssertionError("the circuit never opened")
+
+
+def test_failed_registration_rollback_is_retried_without_a_slot(ids: Ids) -> None:
+    scaler = make(ids, max_runners=2)
+    a, b, check = _full_pool_with_ghosts(scaler)
+    step = scaler.handle(AgentInventory(check.token, frozenset({b.name})))
+    [rollback] = [d for d in step.decisions if isinstance(d, Reap)]
+    assert a.name not in scaler.runners  # the slot is free already
+    failed = scaler.handle(
+        ReapFinished(a.name, a.generation, ReapOutcome.GITHUB_FAILED)
+    )
+    [retry] = [
+        d
+        for d in failed.decisions
+        if isinstance(d, ScheduleRetry) and d.name == CLEANUP_KEY_PREFIX + a.name
+    ]
+    assert retry.delay_s == CLEANUP_RETRY_S
+    again = scaler.handle(RetryDeadline(retry.name, retry.generation))
+    assert [d for d in again.decisions if isinstance(d, Reap)] == [rollback]
+    done = scaler.handle(ReapFinished(a.name, a.generation, ReapOutcome.DONE))
+    assert not any(
+        isinstance(d, (Reap, ScheduleRetry)) and a.name in d.name
+        for d in done.decisions
+    )
+    # A stale retry after success does nothing.
+    stale = scaler.handle(RetryDeadline(retry.name, retry.generation))
+    assert not any(isinstance(d, Reap) for d in stale.decisions)
+
+
+def test_registration_rollback_gives_up_after_bounded_attempts(ids: Ids) -> None:
+    scaler = make(ids, max_runners=2)
+    a, b, check = _full_pool_with_ghosts(scaler)
+    scaler.handle(AgentInventory(check.token, frozenset({b.name})))
+    key = CLEANUP_KEY_PREFIX + a.name
+    for _ in range(CLEANUP_MAX_ATTEMPTS - 1):
+        failed = scaler.handle(
+            ReapFinished(a.name, a.generation, ReapOutcome.GITHUB_FAILED)
+        )
+        [retry] = [
+            d
+            for d in failed.decisions
+            if isinstance(d, ScheduleRetry) and d.name == key
+        ]
+        scaler.handle(RetryDeadline(key, retry.generation))
+    last = scaler.handle(ReapFinished(a.name, a.generation, ReapOutcome.GITHUB_FAILED))
+    assert not any(
+        isinstance(d, ScheduleRetry) and d.name == key for d in last.decisions
+    )
+    assert any(
+        e.kind == "error" and e.data.get("reason") == "cleanup_abandoned"
+        for e in last.events
+    )

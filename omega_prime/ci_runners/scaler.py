@@ -22,6 +22,16 @@ an unreadable work directory) back off: ``hold="failure"`` plus one ScheduleRetr
 clear that hold; the retry deadline or a runner taking a job does. After
 ``MAX_CONSECUTIVE_FAILURES`` the circuit opens (``hold="circuit"``, no more
 automatic retries) until a pool runner takes a job or the controller restarts.
+
+Ghost slots (00063): a runner whose agent child died without an exit callback
+(an agent redeploy SIGKILLs everything; a lost callback) would hold its slot
+until GitHub times the job out, and an IDLE one forever while demand waits,
+because the idle deadline only reaps when the queue is empty. So whenever jobs
+wait behind a pool the ledger says is full, the scaler asks for one agent
+inventory (``ReconcileAgent``) and releases every IDLE / BUSY / FINISHING
+runner the agent no longer runs. One check is in flight at a time, followed by
+a ``RECONCILE_COOLDOWN_S`` one-shot cooldown; if jobs still wait behind a full
+pool when it ends, the pool is checked once more.
 """
 
 from __future__ import annotations
@@ -34,6 +44,7 @@ from typing import Literal
 
 from omega_prime.ci_runners.agent.jobhook import parse_repo_patterns, patterns_cover
 from omega_prime.ci_runners.jobs import (
+    AgentInventory,
     CancelIdle,
     ControllerStarted,
     Decision,
@@ -48,6 +59,7 @@ from omega_prime.ci_runners.jobs import (
     Reap,
     ReapFinished,
     ReapOutcome,
+    ReconcileAgent,
     RetryDeadline,
     Runner,
     RunnerExited,
@@ -65,6 +77,16 @@ RETRY_BASE_S = 15.0
 RETRY_CAP_S = 240.0
 MAX_CONSECUTIVE_FAILURES = 5
 RETRY_KEY = "omega-ci-launch-retry"  # DelayedEvents key for the backoff arm
+# DelayedEvents key prefix for retrying the registration rollback of a runner the
+# agent lost before it took a job (the runner itself is already released).
+CLEANUP_KEY_PREFIX = "omega-ci-cleanup:"
+CLEANUP_RETRY_S = 60.0
+CLEANUP_MAX_ATTEMPTS = 5
+RECONCILE_KEY = "omega-ci-agent-reconcile"  # DelayedEvents key for the cooldown
+RECONCILE_COOLDOWN_S = 30.0
+# Ledger states the agent must still be running. STARTING (launch in flight)
+# and REAPING (stop in flight) settle through their own outcome events.
+_RECONCILABLE = (RunnerState.IDLE, RunnerState.BUSY, RunnerState.FINISHING)
 _SUFFIX_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 
@@ -130,6 +152,14 @@ class Scaler:
         self.hold: Literal["failure", "capacity", "circuit"] | None = None
         self.failures = 0  # consecutive launch failures (reset by a busy runner)
         self._retry_arm: str | None = None
+        # Agent reconcile: the (name -> generation) snapshot of the check in
+        # flight, its token, and the cooldown arm that follows each answer.
+        self._reconcile_token: str | None = None
+        self._reconcile_snapshot: dict[str, str] = {}
+        self._reconcile_cool: str | None = None
+        # Registration rollbacks for released runners: name -> (generation,
+        # runner_id, attempts). Retried on GitHub errors without holding a slot.
+        self._cleanup: dict[str, tuple[str, int, int]] = {}
         self.started = False
 
     # -- queries -------------------------------------------------------------
@@ -179,6 +209,8 @@ class Scaler:
             self._on_retry(event, out)
         elif isinstance(event, ReapFinished):
             self._on_reap_finished(event, out)
+        elif isinstance(event, AgentInventory):
+            self._on_inventory(event, out)
         elif isinstance(event, ControllerStarted):
             self._on_started(event, out)
         else:
@@ -364,6 +396,8 @@ class Scaler:
         out.event("reaped", name=runner.name, reason="idle_deadline")
 
     def _on_reap_finished(self, event: ReapFinished, out: _Out) -> None:
+        if self._on_cleanup_finished(event, out):
+            return
         runner = self.runners.get(event.name)
         if (
             runner is None
@@ -384,13 +418,98 @@ class Scaler:
         if event.outcome is not ReapOutcome.DONE:
             out.event("error", name=event.name, reason=f"reap_{event.outcome.value}")
 
+    def _on_cleanup_finished(self, event: ReapFinished, out: _Out) -> bool:
+        entry = self._cleanup.get(event.name)
+        if entry is None or entry[0] != event.generation:
+            return False
+        generation, runner_id, attempts = entry
+        if event.outcome is not ReapOutcome.GITHUB_FAILED:
+            del self._cleanup[event.name]  # gone, or busy on GitHub: not ours now
+            return True
+        if attempts >= CLEANUP_MAX_ATTEMPTS:
+            del self._cleanup[event.name]
+            out.event(
+                "error",
+                name=event.name,
+                reason="cleanup_abandoned",
+                runner_id=runner_id,
+                attempts=attempts,
+            )
+            return True
+        out.decisions.append(
+            ScheduleRetry(CLEANUP_KEY_PREFIX + event.name, generation, CLEANUP_RETRY_S)
+        )
+        return True
+
+    def _rollback(self, name: str, generation: str, runner_id: int, out: _Out) -> None:
+        attempts = self._cleanup.get(name, (generation, runner_id, 0))[2] + 1
+        self._cleanup[name] = (generation, runner_id, attempts)
+        out.decisions.append(Reap(name, generation, runner_id, stop_agent=False))
+
     def _on_retry(self, event: RetryDeadline, out: _Out) -> None:
+        if event.name.startswith(CLEANUP_KEY_PREFIX):
+            name = event.name.removeprefix(CLEANUP_KEY_PREFIX)
+            entry = self._cleanup.get(name)
+            if entry is not None and entry[0] == event.generation:
+                self._rollback(name, entry[0], entry[1], out)
+            return
+        if event.name == RECONCILE_KEY:
+            if event.generation == self._reconcile_cool:
+                self._reconcile_cool = None  # _settle may check again
+            return
         if event.name != RETRY_KEY or event.generation != self._retry_arm:
             return
         self._retry_arm = None
         if self.hold in ("failure", "capacity"):
             self.hold = None
             out.event("launch_retry", failures=self.failures)
+
+    def _on_inventory(self, event: AgentInventory, out: _Out) -> None:
+        if event.token != self._reconcile_token:
+            return  # stale answer
+        snapshot, self._reconcile_snapshot = self._reconcile_snapshot, {}
+        self._reconcile_token = None
+        arm = self._new_generation()
+        self._reconcile_cool = arm
+        out.decisions.append(ScheduleRetry(RECONCILE_KEY, arm, RECONCILE_COOLDOWN_S))
+        if event.names is None:
+            out.event("error", reason="reconcile_agent")
+            return
+        released = early = 0
+        for name, generation in snapshot.items():
+            runner = self.runners.get(name)
+            if (
+                runner is None
+                or runner.generation != generation
+                or runner.state not in _RECONCILABLE
+                or name in event.names
+            ):
+                continue
+            # It was running on the agent before the inventory was requested
+            # and is gone now: its slot is free, whatever its exit callback
+            # or GitHub's job-completed webhook still says (they no-op later).
+            state, runner_id = runner.state, runner.runner_id
+            self._release(name, out)
+            released += 1
+            out.event("exited", name=name, reason="agent_missing", state=state.value)
+            if state is RunnerState.IDLE:
+                early += 1
+                if runner_id is not None:
+                    # Never took a job: roll back its registration (GitHub
+                    # confirms it idle first; a 404 means already gone),
+                    # retried on GitHub errors without holding the slot.
+                    self._rollback(name, generation, runner_id, out)
+        if early:
+            # Lost before it took a job: a failed launch, as in _on_exited, so
+            # a broken image whose exit callbacks go missing still backs off
+            # and opens the circuit. One failure per check, not per runner, so
+            # a redeploy that kills a whole idle pool costs one backoff step.
+            out.event("error", reason="exited_before_job", agent_missing=early)
+            self._failed(out)
+        if released:
+            out.event(
+                "idle", reconciled=True, released=released, runners=len(self.runners)
+            )
 
     def _on_started(self, event: ControllerStarted, out: _Out) -> None:
         if self.started:
@@ -404,10 +523,16 @@ class Scaler:
             agent_names.add(row.name)
             observed = github.get(row.name)
             if observed is None:
-                out.decisions.append(
-                    Reap(row.name, row.generation, None, delete_github=False)
+                # Running on the agent but missing from GitHub's (offset-
+                # paginated, so not atomic) listing: it may well be running a
+                # job (00063: a restart killed a live one here). Keep it as
+                # BUSY; its exit callback releases the slot.
+                self.runners[row.name] = Runner(
+                    row.name, row.generation, RunnerState.BUSY
                 )
-                out.event("reaped", name=row.name, reason="orphan_process")
+                out.event(
+                    "busy", name=row.name, adopted=True, reason="unlisted_process"
+                )
                 continue
             state = RunnerState.BUSY if observed.busy else RunnerState.IDLE
             self.runners[row.name] = Runner(
@@ -499,11 +624,32 @@ class Scaler:
         if self.queued:
             if self.hold is None:
                 self._scale_up(out)
+            self._maybe_reconcile(out)
             return
         for runner in self.runners.values():
             if runner.state is RunnerState.IDLE and runner.name not in self._armed:
                 self._arm(runner, out)
                 out.event("idle", name=runner.name, grace_s=self.idle_grace_s)
+
+    def _maybe_reconcile(self, out: _Out) -> None:
+        """Demand waits behind a full ledger: check it against the agent."""
+        if (
+            self._reconcile_token is not None
+            or self._reconcile_cool is not None
+            or len(self.runners) < self.max_runners
+            or self.count(RunnerState.STARTING)  # wait for launches to settle
+        ):
+            return
+        snapshot = {
+            r.name: r.generation
+            for r in self.runners.values()
+            if r.state in _RECONCILABLE
+        }
+        if not snapshot:
+            return
+        self._reconcile_token = self._new_generation()
+        self._reconcile_snapshot = snapshot
+        out.decisions.append(ReconcileAgent(self._reconcile_token))
 
     def _scale_up(self, out: _Out) -> None:
         for _ in range(self.wanted()):
@@ -526,8 +672,13 @@ class Scaler:
 
 
 __all__ = [
+    "CLEANUP_KEY_PREFIX",
+    "CLEANUP_MAX_ATTEMPTS",
+    "CLEANUP_RETRY_S",
     "JOB_MEMORY",
     "MAX_CONSECUTIVE_FAILURES",
+    "RECONCILE_COOLDOWN_S",
+    "RECONCILE_KEY",
     "RETRY_BASE_S",
     "RETRY_CAP_S",
     "RETRY_KEY",
