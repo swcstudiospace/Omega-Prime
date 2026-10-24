@@ -98,19 +98,19 @@ def test_name_collision_rolls_back_only_created_view(tmp_path, monkeypatch):
     work.mkdir()
     lease = _lease(work, tmp_path / "state")
     view = work / ".omp" / "skills"
-    original_symlink = skills_attach.os.symlink
+    original = mcp_bridge._rename_noreplace
 
-    def collide(_source, destination, *, dir_fd=None):
-        (view / destination).write_text("user-owned", encoding="utf-8")
-        raise FileExistsError(destination)
+    def plant_user_file(src_dir, src, dst_dir, dst):
+        original(src_dir, src, dst_dir, dst)
+        if dst == "skills":
+            (view / "python").write_text("user-owned", encoding="utf-8")
 
-    monkeypatch.setattr(skills_attach.os, "symlink", collide)
+    monkeypatch.setattr(mcp_bridge, "_rename_noreplace", plant_user_file)
     result = skills_attach.attach_skills(work, lease)
 
     assert result["status"] == "attach_failed"
     assert (view / "python").read_text(encoding="utf-8") == "user-owned"
     assert view.is_dir()
-    monkeypatch.setattr(skills_attach.os, "symlink", original_symlink)
     conflicts = lease.release()
     assert conflicts
     assert (view / "python").read_text(encoding="utf-8") == "user-owned"
