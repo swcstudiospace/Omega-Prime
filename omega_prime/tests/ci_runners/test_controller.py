@@ -757,7 +757,13 @@ def test_full_pool_frees_slots_the_agent_lost_and_relaunches() -> None:
         r.ctrl.submit(RetryDeadline(*cool))
         await r.ctrl.settle()
         assert first.name not in r.scaler.runners
-        assert r.only().name != first.name  # its slot went to the waiting job
+        # Lost before it took a job: one failed-launch backoff step, then its
+        # slot goes to the waiting job.
+        [backoff] = [k for k in r.delayed.armed if k[0] == RETRY_KEY]
+        r.delayed.armed.pop(backoff)
+        r.ctrl.submit(RetryDeadline(*backoff))
+        await r.ctrl.settle()
+        assert r.only().name != first.name
 
     scenario(rig, body)
     gone = [
