@@ -100,12 +100,12 @@ def _registry(client: RedteamClient) -> ToolRegistry:
     return registry
 
 
-def test_registration_returns_exactly_the_fourteen_names_with_approval_flags():
+def test_registration_returns_exactly_the_twenty_three_names_with_approval_flags():
     client, _ = _client()
     registry = ToolRegistry(approval_log=ApprovalLog())
     names = register_redteam_tools(registry, client)
     assert names == list(REDTEAM_TOOL_NAMES)
-    assert len(names) == 14
+    assert len(names) == 23
     for name in REDTEAM_TOOL_NAMES:
         assert registry.approval_required(name) == (name in APPROVALS)
 

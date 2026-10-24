@@ -82,11 +82,11 @@ the link through `prime_crates`. "Probe only" means the sole caller is
 ## T3MP3ST red team pack
 
 - Remote: https://github.com/swcstudiospace/purple-team.git
-- Commit: `6679b82203a56f03f6de0ca299e420dee51a4d33` (tag `omega-pin-f6d2fc2-zod467`, branch `omega-pin/f6d2fc2-zod-4.6.7`: upstream **v1.4** `f6d2fc2` plus a lockfile-only zod 4.2.1 → 4.6.7 bump for GHSA-mrhx-c7xc-m3w5. Not on upstream main; the tag keeps it reachable.)
+- Commit: `c7b9ae47c27f940060bd834f2be4a6992505bd64` (**v1.7** — adds the expanded black/blue/white hat skill packs plus the login-first War Room UI redesign; the TypeScript runtime and UI remain unported, reached through the gitlink)
 - Root `redteam/` submodule: tracked gitlink at the same pin, alongside the preserved `prime-agent/` gitlink. An ordinary `git clone` leaves it empty; populate with `git clone --recurse-submodules` or `git submodule update --init redteam`.
 - License: MIT
 - Copyright: 2026 SWC Studio Space
-- What is vendored: the declarative Grok Bot pack — the seat templates, the roster, and the 14 saved skills — copied verbatim under `omega_prime/redteam/pack/`, plus a registry tool family (`omega_prime/tools/redteam.py`) that mirrors the upstream MCP gateway proxy surface against the upstream loopback HTTP API. The Python package, the adapter, and the vendored pack are ordinary parent content.
+- What is vendored: the declarative Grok Bot pack — the seat templates, the roster, and the 47 saved skills — copied verbatim under `omega_prime/redteam/pack/`, plus a registry tool family (`omega_prime/tools/redteam.py`) that mirrors the upstream MCP gateway proxy surface against the upstream loopback HTTP API. The Python package, the adapter, and the vendored pack are ordinary parent content.
 - What is not adapted: the TypeScript runtime (agent loop, arsenal execution, server), the War Room UI, and the `bench/` benchmark corpora. The backend is separately versioned upstream source (its own `t3mp3st` package contract), reached through the `redteam/` gitlink and started separately — never ported, never auto-launched. The corpora carry upstream and per-challenge licenses (upstream `THIRD-PARTY.md`) and are excluded from the vendored pack; nothing here implies benchmark content becomes Omega-licensed (AGPL-3.0-only). A later phase may pull a piece in only if that phase cannot pass its own tests without it.
 - Authorized use only: the pack and its tools exist for engagements against systems you own or have explicit written permission to test; nothing here authorizes testing anyone else's systems.
 

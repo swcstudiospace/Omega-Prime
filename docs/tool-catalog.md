@@ -1379,6 +1379,46 @@ Purple posture synthesis from red findings + blue detection gaps (POST /api/team
 
 Blue detection-coverage gaps for the whole findings ledger (GET /api/teams/blue/gaps). Read-only.
 
+## tempest_blue_rules
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Blue experimental Sigma pack from uncovered gaps (GET /api/teams/blue/rules). Reads the stored findings ledger. Read-only.
+
+## tempest_blue_hardening
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Blue severity-tiered hardening plan (GET /api/teams/blue/hardening). Reads the stored findings ledger. Read-only.
+
+## tempest_blue_coverage
+
+- Family: Red Team
+- Approval: not required
+- Required params: runId, missionId, family, artifactIds, artifactBytes, findings, telemetry
+
+Blue artifact-bound detection coverage (POST /api/teams/blue/coverage). Missing artifacts fail closed. Read-only (no mission effects).
+
+## tempest_black_workflow
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Black staged plan review (POST /api/teams/black/workflow). An empty plan is insufficient, not a clean bill; refusals have zero effects. Read-only review.
+
+## tempest_white_stage
+
+- Family: Red Team
+- Approval: not required
+- Required params: roeText, actions
+
+White staged ROE audit (POST /api/teams/white/stage). An empty allow-list is out of scope; approved without an evidence id is not a receipt. Read-only audit.
+
 ## tempest_black_cover
 
 - Family: Red Team
@@ -1386,6 +1426,38 @@ Blue detection-coverage gaps for the whole findings ledger (GET /api/teams/blue/
 - Required params: none
 
 Black opsec cover review of the active red plan (GET /api/teams/black/cover). Read-only.
+
+## tempest_black_noise
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Black noise budget of the latest mission draft (GET /api/teams/black/noise). Read-only.
+
+## tempest_black_exfil
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+Black exfil cost of the stored exfil report (GET /api/teams/black/exfil). Read-only.
+
+## tempest_white_evidence
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+White evidence-chain audit of the stored evidence ledger (GET /api/teams/white/evidence). Read-only.
+
+## tempest_white_report
+
+- Family: Red Team
+- Approval: not required
+- Required params: none
+
+White findings-to-evidence report-readiness audit (GET /api/teams/white/report-audit). Read-only.
 
 ## tempest_white_roe
 

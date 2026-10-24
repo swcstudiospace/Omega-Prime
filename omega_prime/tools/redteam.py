@@ -35,7 +35,16 @@ REDTEAM_TOOL_NAMES = (
     "tempest_providers",
     "tempest_purple_synthesize",
     "tempest_blue_gaps",
+    "tempest_blue_rules",
+    "tempest_blue_hardening",
+    "tempest_blue_coverage",
+    "tempest_black_workflow",
+    "tempest_white_stage",
     "tempest_black_cover",
+    "tempest_black_noise",
+    "tempest_black_exfil",
+    "tempest_white_evidence",
+    "tempest_white_report",
     "tempest_white_roe",
     "tempest_hats_list",
     "tempest_hat_dispatch",
@@ -643,6 +652,87 @@ class RedteamClient:
         """White ROE adjudication state on record."""
         return self._get("/api/teams/white/roe", tool="tempest_white_roe")
 
+    def blue_rules(self) -> dict[str, Any]:
+        """Blue experimental Sigma pack from uncovered gaps. Read-only."""
+        return self._get("/api/teams/blue/rules", tool="tempest_blue_rules")
+
+    def blue_hardening(self) -> dict[str, Any]:
+        """Blue severity-tiered hardening plan from the ledger. Read-only."""
+        return self._get("/api/teams/blue/hardening", tool="tempest_blue_hardening")
+
+    def blue_coverage(
+        self,
+        runId: Any = None,
+        missionId: Any = None,
+        family: Any = None,
+        artifactIds: Any = None,
+        artifactBytes: Any = None,
+        findings: Any = None,
+        telemetry: Any = None,
+    ) -> dict[str, Any]:
+        """Blue artifact-bound coverage; missing artifacts fail closed upstream."""
+        payload = {
+            "runId": runId,
+            "missionId": missionId,
+            "family": family,
+            "artifactIds": artifactIds,
+            "artifactBytes": artifactBytes,
+            "findings": findings,
+            "telemetry": telemetry,
+        }
+        return self._post(
+            "/api/teams/blue/coverage",
+            {key: value for key, value in payload.items() if value is not None},
+            tool="tempest_blue_coverage",
+        )
+
+    def black_workflow(
+        self,
+        actions: Any = None,
+        paths: Any = None,
+        egress: Any = None,
+        requestKind: Any = None,
+    ) -> dict[str, Any]:
+        """Black staged plan review; an empty plan is insufficient, not a pass."""
+        payload = {
+            "actions": actions,
+            "paths": paths,
+            "egress": egress,
+            "requestKind": requestKind,
+        }
+        return self._post(
+            "/api/teams/black/workflow",
+            {key: value for key, value in payload.items() if value is not None},
+            tool="tempest_black_workflow",
+        )
+
+    def white_stage(
+        self, roeText: Any = None, actions: Any = None, meta: Any = None
+    ) -> dict[str, Any]:
+        """White staged ROE audit; an empty allow-list is out of scope upstream."""
+        payload = {"roeText": roeText, "actions": actions, "meta": meta}
+        return self._post(
+            "/api/teams/white/stage",
+            {key: value for key, value in payload.items() if value is not None},
+            tool="tempest_white_stage",
+        )
+
+    def black_noise(self) -> dict[str, Any]:
+        """Black noise budget of the latest mission draft. Read-only."""
+        return self._get("/api/teams/black/noise", tool="tempest_black_noise")
+
+    def black_exfil(self) -> dict[str, Any]:
+        """Black exfil cost of the stored exfil report. Read-only."""
+        return self._get("/api/teams/black/exfil", tool="tempest_black_exfil")
+
+    def white_evidence(self) -> dict[str, Any]:
+        """White evidence-chain audit of the stored evidence ledger. Read-only."""
+        return self._get("/api/teams/white/evidence", tool="tempest_white_evidence")
+
+    def white_report(self) -> dict[str, Any]:
+        """White findings-to-evidence report-readiness audit. Read-only."""
+        return self._get("/api/teams/white/report-audit", tool="tempest_white_report")
+
     def hats_list(self) -> dict[str, Any]:
         """Specialist hats and parent teams, projected live from tool grants."""
         refusal = self._refusal("tempest_hats_list")
@@ -775,8 +865,8 @@ def register_redteam_tools(
     """Register the red team tools. Start/stop/task/dispatch need approval.
 
     ``allowed`` is the signed grant's tool allowlist (``None`` means the
-    full fourteen): a grant limited to a subset registers only that subset,
-    so a limited grant never enables tools outside the signed scope.
+    full twenty-three): a grant limited to a subset registers only that
+    subset, so a limited grant never enables tools outside the signed scope.
     """
 
     def _wrap(fn, *args, **kwargs):
@@ -802,7 +892,37 @@ def register_redteam_tools(
             client.purple_synthesize, findings, detections
         ),
         "tempest_blue_gaps": lambda: _wrap(client.blue_gaps),
+        "tempest_blue_rules": lambda: _wrap(client.blue_rules),
+        "tempest_blue_hardening": lambda: _wrap(client.blue_hardening),
+        "tempest_blue_coverage": lambda runId=None, missionId=None, family=None, artifactIds=None, artifactBytes=None, findings=None, telemetry=None: (
+            _wrap(
+                client.blue_coverage,
+                runId=runId,
+                missionId=missionId,
+                family=family,
+                artifactIds=artifactIds,
+                artifactBytes=artifactBytes,
+                findings=findings,
+                telemetry=telemetry,
+            )
+        ),
+        "tempest_black_workflow": lambda actions=None, paths=None, egress=None, requestKind=None: (
+            _wrap(
+                client.black_workflow,
+                actions=actions,
+                paths=paths,
+                egress=egress,
+                requestKind=requestKind,
+            )
+        ),
+        "tempest_white_stage": lambda roeText=None, actions=None, meta=None: _wrap(
+            client.white_stage, roeText=roeText, actions=actions, meta=meta
+        ),
         "tempest_black_cover": lambda: _wrap(client.black_cover),
+        "tempest_black_noise": lambda: _wrap(client.black_noise),
+        "tempest_black_exfil": lambda: _wrap(client.black_exfil),
+        "tempest_white_evidence": lambda: _wrap(client.white_evidence),
+        "tempest_white_report": lambda: _wrap(client.white_report),
         "tempest_white_roe": lambda: _wrap(client.white_roe),
         "tempest_hats_list": lambda: _wrap(client.hats_list),
         "tempest_hat_dispatch": lambda hat=None, task=None, missionId=None: _wrap(
@@ -918,8 +1038,102 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
         "Blue detection-coverage gaps for the whole findings ledger (GET /api/teams/blue/gaps). Read-only.",
         _object({}, []),
     ),
+    "tempest_blue_rules": (
+        "Blue experimental Sigma pack from uncovered gaps (GET /api/teams/blue/rules). Reads the stored findings ledger. Read-only.",
+        _object({}, []),
+    ),
+    "tempest_blue_hardening": (
+        "Blue severity-tiered hardening plan (GET /api/teams/blue/hardening). Reads the stored findings ledger. Read-only.",
+        _object({}, []),
+    ),
+    "tempest_blue_coverage": (
+        "Blue artifact-bound detection coverage (POST /api/teams/blue/coverage). Missing artifacts fail closed. Read-only (no mission effects).",
+        _object(
+            {
+                "runId": _string("Run id the coverage is bound to."),
+                "missionId": _string("Mission id the coverage is bound to."),
+                "family": _string("Artifact family being scored."),
+                "artifactIds": {
+                    "type": "array",
+                    "description": "Artifact ids to bind coverage to.",
+                },
+                "artifactBytes": _string("Inline artifact bytes, when no ids."),
+                "findings": {
+                    "type": "array",
+                    "description": "Findings to score for coverage.",
+                },
+                "telemetry": {
+                    "type": "array",
+                    "description": "Telemetry the findings are scored against.",
+                },
+            },
+            [
+                "runId",
+                "missionId",
+                "family",
+                "artifactIds",
+                "artifactBytes",
+                "findings",
+                "telemetry",
+            ],
+        ),
+    ),
+    "tempest_black_workflow": (
+        "Black staged plan review (POST /api/teams/black/workflow). An empty plan is insufficient, not a clean bill; refusals have zero effects. Read-only review.",
+        _object(
+            {
+                "actions": {
+                    "type": "array",
+                    "description": "Planned actions to review.",
+                },
+                "paths": {
+                    "type": "array",
+                    "description": "Paths the plan touches.",
+                },
+                "egress": {
+                    "type": "array",
+                    "description": "Planned egress paths.",
+                },
+                "requestKind": _string("Request kind for the staged review."),
+            },
+            [],
+        ),
+    ),
+    "tempest_white_stage": (
+        "White staged ROE audit (POST /api/teams/white/stage). An empty allow-list is out of scope; approved without an evidence id is not a receipt. Read-only audit.",
+        _object(
+            {
+                "roeText": _string("ROE text to adjudicate."),
+                "actions": {
+                    "type": "array",
+                    "description": "Action objects staged against the ROE.",
+                },
+                "meta": {
+                    "type": "object",
+                    "description": "Optional staging metadata.",
+                },
+            },
+            ["roeText", "actions"],
+        ),
+    ),
     "tempest_black_cover": (
         "Black opsec cover review of the active red plan (GET /api/teams/black/cover). Read-only.",
+        _object({}, []),
+    ),
+    "tempest_black_noise": (
+        "Black noise budget of the latest mission draft (GET /api/teams/black/noise). Read-only.",
+        _object({}, []),
+    ),
+    "tempest_black_exfil": (
+        "Black exfil cost of the stored exfil report (GET /api/teams/black/exfil). Read-only.",
+        _object({}, []),
+    ),
+    "tempest_white_evidence": (
+        "White evidence-chain audit of the stored evidence ledger (GET /api/teams/white/evidence). Read-only.",
+        _object({}, []),
+    ),
+    "tempest_white_report": (
+        "White findings-to-evidence report-readiness audit (GET /api/teams/white/report-audit). Read-only.",
         _object({}, []),
     ),
     "tempest_white_roe": (

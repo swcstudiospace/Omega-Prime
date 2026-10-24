@@ -2,10 +2,10 @@
 
 Provenance
     Upstream remote: https://github.com/swcstudiospace/purple-team.git
-    Upstream commit: 6679b82203a56f03f6de0ca299e420dee51a4d33
+    Upstream commit: c7b9ae47c27f940060bd834f2be4a6992505bd64
     License: MIT (see ``pack/LICENSE``)
     Copyright: 2026 SWC Studio Space
-    Vendored: 2026-10-10
+    Vendored: 2026-10-23
 
 This package vendors the declarative pack only: markdown and JSON artifacts
 under ``pack/`` (skills, seat templates, roster, plugin manifest, LICENSE).
