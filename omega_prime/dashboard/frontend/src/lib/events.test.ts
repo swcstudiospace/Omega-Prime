@@ -53,6 +53,23 @@ describe('deriveEvents', () => {
     expect(deriveEvents(fixture, degraded)[0]).toMatchObject({ type: 'source.degraded', severity: 'error' })
     expect(types(deriveEvents(degraded, fixture))).toEqual(['source.recovered'])
   })
+  it('announces a degraded source that then fails outright', () => {
+    const github = fixture.sources!.github!
+    const degraded = { ...fixture, sources: { ...fixture.sources, github: { ...github, status: 'degraded' } } }
+    const failed = { ...fixture, sources: { ...fixture.sources, github: { ...github, status: 'error', error: 'collector timed out' } } }
+    const [event] = deriveEvents(degraded, failed)
+    expect(event).toMatchObject({ type: 'source.degraded', severity: 'error', payload: { source: 'github', from: 'degraded', to: 'error' } })
+    expect(shouldToast(makeEvent(event!, { at, source: 'ws' }))).toBe(true)
+    expect(deriveEvents(failed, { ...failed, sources: { ...failed.sources, github: { ...github, status: 'unavailable', error: 'still down' } } })).toEqual([])
+  })
+  it('keeps stopped runs distinct from successful ones', () => {
+    const first = fixture.finished![0]!
+    const stopped = { ...first, id: 'omp:s1', result: 'stopped', state: null, receipt: null, finished_at: '2026-01-03T00:00:00Z' }
+    const [event] = deriveEvents(fixture, { ...fixture, finished: [first, stopped] })
+    expect(event).toMatchObject({ type: 'task.finished', severity: 'warning', title: 'Task stopped', taskId: 'omp:s1' })
+    const ok = { ...stopped, id: 'omp:s2', result: 'ok' }
+    expect(deriveEvents(fixture, { ...fixture, finished: [first, ok] })[0]).toMatchObject({ severity: 'success', title: 'Task finished' })
+  })
 })
 
 const github = fixture.sources!.github!
