@@ -5,17 +5,53 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import json
 import os
 import secrets
 import stat
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from omega_prime.agent_state import AGENT_STATE_ENV, AGENT_SUBDIR
 
 _INSTALL = Path(__file__).resolve().parents[2]
+_AT_EMPTY_PATH = 0x1000
+_RENAME_NOREPLACE = 1
+_HANDLE_BYTES = 128
+# Device, inode, and the filesystem generation handle from the pinned descriptor.
+_ArtifactIdentity = tuple[int, int, int, bytes]
+
+
+class _FileHandle(ctypes.Structure):
+    _fields_ = (
+        ("handle_bytes", ctypes.c_uint),
+        ("handle_type", ctypes.c_int),
+        ("f_handle", ctypes.c_ubyte * _HANDLE_BYTES),
+    )
+
+
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_renameat2 = _LIBC.renameat2
+_renameat2.argtypes = [
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_uint,
+]
+_renameat2.restype = ctypes.c_int
+_name_to_handle_at = _LIBC.name_to_handle_at
+_name_to_handle_at.argtypes = [
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.POINTER(_FileHandle),
+    ctypes.POINTER(ctypes.c_int),
+    ctypes.c_int,
+]
+_name_to_handle_at.restype = ctypes.c_int
 
 ENGINE_SYSTEM_PROMPT = (
     "You are Omega Prime's coding loop running on omp. "
@@ -138,43 +174,205 @@ def _artifact_parent(omp_fd: int, relative_path: str) -> tuple[int, str]:
         raise
 
 
-def _artifact_stat(omp_fd: int, relative_path: str) -> os.stat_result:
+def _rename_noreplace(src_dir: int, src: str, dst_dir: int, dst: str) -> None:
+    """Publish ``src`` as ``dst`` without replacing an existing entry."""
+    rc = _renameat2(
+        src_dir,
+        os.fsencode(src),
+        dst_dir,
+        os.fsencode(dst),
+        _RENAME_NOREPLACE,
+    )
+    if rc != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err), dst)
+
+
+def _handle_of(fd: int, name: bytes, flags: int) -> tuple[int, bytes]:
+    """Return the file-handle generation of an open descriptor or path."""
+    handle = _FileHandle()
+    handle.handle_bytes = _HANDLE_BYTES
+    mount_id = ctypes.c_int()
+    rc = _name_to_handle_at(
+        fd, name, ctypes.byref(handle), ctypes.byref(mount_id), flags
+    )
+    if rc != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    size = int(handle.handle_bytes)
+    if size <= 0 or size > _HANDLE_BYTES:
+        raise OSError("artifact file handle has an unexpected size")
+    return int(handle.handle_type), bytes(handle.f_handle[:size])
+
+
+def _identity_from_pin(pin: int) -> _ArtifactIdentity:
+    """Identity of the inode a pin holds, not of whatever path it once named."""
+    current = os.fstat(pin)
+    handle_type, handle = _handle_of(pin, b"", _AT_EMPTY_PATH)
+    return (current.st_dev, current.st_ino, handle_type, handle)
+
+
+def _identity_matches(
+    artifact_fd: int, identity: _ArtifactIdentity | tuple[int, int]
+) -> bool:
+    current = os.fstat(artifact_fd)
+    if (current.st_dev, current.st_ino) != (identity[0], identity[1]):
+        return False
+    if len(identity) == 2:
+        return True
+    handle_type, handle = _handle_of(artifact_fd, b"", _AT_EMPTY_PATH)
+    return handle_type == identity[2] and handle == identity[3]
+
+
+def _open_artifact(omp_fd: int, relative_path: str) -> tuple[int, int, str]:
+    """Open the artifact without following links. Caller closes both fds."""
     parent_fd, name = _artifact_parent(omp_fd, relative_path)
     try:
-        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    finally:
+        artifact_fd = os.open(name, os.O_PATH | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except BaseException:
         os.close(parent_fd)
+        raise
+    return parent_fd, artifact_fd, name
 
 
-def _pin_artifact(omp_fd: int, relative_path: str) -> int:
-    """Hold an ``O_PATH`` reference to an artifact entry without following links.
-
-    While the reference is open the inode cannot be freed, so its number cannot
-    be handed to a replacement entry. Filesystems such as ext4 reuse a freed
-    inode number at once, which makes a bare ``(st_dev, st_ino)`` comparison
-    unable to tell an owned artifact from a user's replacement.
-    """
-    parent_fd, name = _artifact_parent(omp_fd, relative_path)
+def _artifact_matches(
+    omp_fd: int,
+    relative_path: str,
+    identity: _ArtifactIdentity | tuple[int, int],
+) -> bool:
+    parent_fd, artifact_fd, _name = _open_artifact(omp_fd, relative_path)
     try:
-        return os.open(name, os.O_PATH | os.O_NOFOLLOW, dir_fd=parent_fd)
+        return _identity_matches(artifact_fd, identity)
     finally:
+        os.close(artifact_fd)
         os.close(parent_fd)
 
 
 def _remove_artifact(
-    omp_fd: int, relative_path: str, identity: tuple[int, int]
+    omp_fd: int,
+    relative_path: str,
+    identity: _ArtifactIdentity | tuple[int, int],
 ) -> None:
-    parent_fd, name = _artifact_parent(omp_fd, relative_path)
+    parent_fd, artifact_fd, name = _open_artifact(omp_fd, relative_path)
     try:
-        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != identity:
+        if not _identity_matches(artifact_fd, identity):
             raise OSError("artifact identity changed")
-        if stat.S_ISDIR(current.st_mode):
+        if stat.S_ISDIR(os.fstat(artifact_fd).st_mode):
             os.rmdir(name, dir_fd=parent_fd)
         else:
             os.unlink(name, dir_fd=parent_fd)
     finally:
+        os.close(artifact_fd)
         os.close(parent_fd)
+
+
+def _discard_pinned_staging(parent_fd: int, staging: str, pin: int) -> None:
+    """Unlink a private staging entry only when it is still the pinned inode."""
+    try:
+        current = os.stat(staging, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    pinned = os.fstat(pin)
+    if (current.st_dev, current.st_ino) != (pinned.st_dev, pinned.st_ino):
+        return
+    identity = _identity_from_pin(pin)
+    try:
+        fresh = os.open(staging, os.O_PATH | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return
+    try:
+        if not _identity_matches(fresh, identity):
+            return
+        directory = stat.S_ISDIR(os.fstat(fresh).st_mode)
+    finally:
+        os.close(fresh)
+    if directory:
+        os.rmdir(staging, dir_fd=parent_fd)
+    else:
+        os.unlink(staging, dir_fd=parent_fd)
+
+
+def _publish_pinned_artifact(
+    omp_fd: int,
+    relative_path: str,
+    create: Callable[[int, str], None],
+    validate: Callable[[int], None],
+) -> int:
+    """Create under a private name, pin that inode, then publish it.
+
+    The public name does not exist until the ``O_PATH|O_NOFOLLOW`` pin is
+    open, so a replacement cannot be handed the prepared inode number. The
+    caller owns the returned descriptor and reads identity from it.
+    """
+    parent_fd, name = _artifact_parent(omp_fd, relative_path)
+    pin = -1
+    published = False
+    staging = ""
+    try:
+        created = False
+        for _attempt in range(3):
+            staging = ".prep-" + secrets.token_hex(16)
+            try:
+                create(parent_fd, staging)
+            except FileExistsError:
+                continue
+            created = True
+            break
+        if not created:
+            raise FileExistsError(relative_path)
+        pin = os.open(staging, os.O_PATH | os.O_NOFOLLOW, dir_fd=parent_fd)
+        validate(pin)
+        _rename_noreplace(parent_fd, staging, parent_fd, name)
+        published = True
+        owned = pin
+        pin = -1
+        return owned
+    except BaseException:
+        if pin >= 0:
+            with contextlib.suppress(OSError):
+                _discard_pinned_staging(parent_fd, staging, pin)
+            os.close(pin)
+        elif staging and not published:
+            with contextlib.suppress(OSError):
+                os.unlink(staging, dir_fd=parent_fd)
+            with contextlib.suppress(OSError):
+                os.rmdir(staging, dir_fd=parent_fd)
+        raise
+    finally:
+        os.close(parent_fd)
+
+
+def _pin_matches_path(pin: int, relative_path: str) -> bool:
+    path = os.readlink(f"/proc/self/fd/{pin}")
+    deleted = " (deleted)"
+    if path.endswith(deleted):
+        path = path[: -len(deleted)]
+    return path.endswith("/" + relative_path)
+
+
+def _parse_artifact_identity(
+    raw: Any,
+) -> _ArtifactIdentity | tuple[int, int] | None:
+    if not isinstance(raw, list) or any(isinstance(item, bool) for item in raw):
+        return None
+    if len(raw) == 2 and all(isinstance(item, int) for item in raw):
+        return (raw[0], raw[1])
+    if (
+        len(raw) == 4
+        and isinstance(raw[0], int)
+        and isinstance(raw[1], int)
+        and isinstance(raw[2], int)
+        and isinstance(raw[3], str)
+        and raw[3]
+    ):
+        try:
+            handle = bytes.fromhex(raw[3])
+        except ValueError:
+            return None
+        if not handle:
+            return None
+        return (raw[0], raw[1], raw[2], handle)
+    return None
 
 
 class AcquiredAttachment:
@@ -206,40 +404,45 @@ class AcquiredAttachment:
         self._owner_identity = owner_identity
         self._child_identity: dict[str, Any] | None = None
         self._released = False
-        self._artifacts: dict[str, tuple[int, int]] = {}
+        self._artifacts: dict[str, _ArtifactIdentity] = {}
         # Open O_PATH references that keep each registered inode allocated
         # until release, so a replacement entry never shares its number.
         self._artifact_pins: dict[str, int] = {}
         self.cleanup_conflicts: list[str] = []
 
-    def register_artifact(
-        self, relative_path: str, prepared_identity: tuple[int, int]
-    ) -> None:
-        """Register a prepared nested artifact beneath work-root ``.omp``.
+    def register_artifact(self, relative_path: str, pin: int) -> _ArtifactIdentity:
+        """Register a prepared artifact from the descriptor that already pins it.
 
-        For example, ``.omp/skills`` and ``.omp/skills/python``. Parent
-        directories are opened descriptor-relatively without following links;
-        identity is the prepared entry's ``(st_dev, st_ino)``. The entry stays
-        pinned open until release, so that identity cannot be reused by a
-        replacement entry while the lease is held.
+        ``pin`` is an ``O_PATH|O_NOFOLLOW`` descriptor opened before the inode
+        was published at ``relative_path``. Identity comes from that descriptor
+        (device, inode, and file handle). The public path is not opened to
+        discover identity: a replacement may already stand there, and ext4 can
+        give it a previously saved inode number. The lease keeps ``pin`` until
+        release so the prepared inode number cannot be reused while it is held.
         """
         if self._released:
+            os.close(pin)
             raise RuntimeError("attachment lease is already released")
-        if not isinstance(prepared_identity, tuple) or len(prepared_identity) != 2:
-            raise ValueError("artifact identity must be a (device, inode) tuple")
-        pin = _pin_artifact(self._omp_fd, relative_path)
+        if isinstance(pin, bool) or not isinstance(pin, int) or pin < 0:
+            raise ValueError("artifact pin must be an open descriptor")
         try:
+            parent_fd, _name = _artifact_parent(self._omp_fd, relative_path)
+            os.close(parent_fd)
+            if not _pin_matches_path(pin, relative_path):
+                raise ValueError("prepared artifact pin does not match the path")
             current = os.fstat(pin)
-            if (current.st_dev, current.st_ino) != prepared_identity:
-                raise ValueError("prepared artifact identity does not match")
+            if not (stat.S_ISDIR(current.st_mode) or stat.S_ISLNK(current.st_mode)):
+                raise ValueError("artifact must be a directory or a symlink")
+            identity = _identity_from_pin(pin)
             previous = self._artifacts.get(relative_path)
-            if previous is not None and previous != prepared_identity:
+            if previous is not None and previous != identity:
                 raise ValueError("artifact identity is already owned")
-            self._artifacts[relative_path] = prepared_identity
+            self._artifacts[relative_path] = identity
             if relative_path not in self._artifact_pins:
                 self._artifact_pins[relative_path] = pin
                 pin = -1
             self._write_journal()
+            return identity
         finally:
             if pin >= 0:
                 os.close(pin)
@@ -254,23 +457,15 @@ class AcquiredAttachment:
         """Create and journal a directory beneath the owned ``.omp`` root."""
         if self._released:
             raise RuntimeError("attachment lease is already released")
-        parent_fd, name = _artifact_parent(self._omp_fd, relative_path)
-        identity: tuple[int, int] | None = None
-        try:
-            os.mkdir(name, mode, dir_fd=parent_fd)
-            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            identity = (current.st_dev, current.st_ino)
-        finally:
-            os.close(parent_fd)
-        if identity is None:
-            raise RuntimeError("created artifact identity is unavailable")
-        try:
-            self.register_artifact(relative_path, identity)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                _remove_artifact(self._omp_fd, relative_path, identity)
-            raise
-        return identity
+
+        def create_at(parent_fd: int, staging: str) -> None:
+            os.mkdir(staging, mode, dir_fd=parent_fd)
+
+        def validate(pin: int) -> None:
+            if not stat.S_ISDIR(os.fstat(pin).st_mode):
+                raise OSError("prepared artifact is not a directory")
+
+        return self._register_published(relative_path, create_at, validate)
 
     def create_symlink_artifact(
         self, relative_path: str, target: str | Path
@@ -278,28 +473,53 @@ class AcquiredAttachment:
         """Create and journal a symlink beneath the owned ``.omp`` root."""
         if self._released:
             raise RuntimeError("attachment lease is already released")
-        parent_fd, name = _artifact_parent(self._omp_fd, relative_path)
-        identity: tuple[int, int] | None = None
+        target_text = os.fspath(target)
+
+        def create_at(parent_fd: int, staging: str) -> None:
+            os.symlink(target_text, staging, dir_fd=parent_fd)
+
+        def validate(pin: int) -> None:
+            if os.readlink("", dir_fd=pin) != target_text:
+                raise OSError("prepared symlink target does not match")
+            if not stat.S_ISLNK(os.fstat(pin).st_mode):
+                raise OSError("prepared artifact is not a symlink")
+
+        return self._register_published(relative_path, create_at, validate)
+
+    def _register_published(
+        self,
+        relative_path: str,
+        create: Callable[[int, str], None],
+        validate: Callable[[int], None],
+    ) -> tuple[int, int]:
+        pin = _publish_pinned_artifact(self._omp_fd, relative_path, create, validate)
         try:
-            os.symlink(os.fspath(target), name, dir_fd=parent_fd)
-            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            identity = (current.st_dev, current.st_ino)
-        finally:
-            os.close(parent_fd)
-        if identity is None:
-            raise RuntimeError("created artifact identity is unavailable")
+            identity = _identity_from_pin(pin)
+        except BaseException:
+            fallback = os.fstat(pin)
+            os.close(pin)
+            with contextlib.suppress(OSError):
+                _remove_artifact(
+                    self._omp_fd, relative_path, (fallback.st_dev, fallback.st_ino)
+                )
+            raise
         try:
-            self.register_artifact(relative_path, identity)
+            registered = self.register_artifact(relative_path, pin)
         except BaseException:
             with contextlib.suppress(OSError):
                 _remove_artifact(self._omp_fd, relative_path, identity)
             raise
-        return identity
+        return (registered[0], registered[1])
 
     def remove_artifact(self, relative_path: str, identity: tuple[int, int]) -> None:
-        if self._released or self._artifacts.get(relative_path) != identity:
+        owned = self._artifacts.get(relative_path)
+        if (
+            self._released
+            or owned is None
+            or (owned[0], owned[1]) != (identity[0], identity[1])
+        ):
             raise ValueError("artifact is not owned by this attachment")
-        _remove_artifact(self._omp_fd, relative_path, identity)
+        _remove_artifact(self._omp_fd, relative_path, owned)
 
     def record_child(self, pid: int) -> None:
         self._child_identity = _process_identity(pid)
@@ -315,7 +535,8 @@ class AcquiredAttachment:
             "config_content": self._config_content.decode("utf-8"),
             "child": child if child is not None else self._child_identity,
             "artifacts": {
-                name: list(identity) for name, identity in self._artifacts.items()
+                name: [identity[0], identity[1], identity[2], identity[3].hex()]
+                for name, identity in self._artifacts.items()
             },
         }
         temp_name = self._journal_path.name + "." + secrets.token_hex(8)
@@ -376,13 +597,13 @@ class AcquiredAttachment:
                 conflicts.append("mcp.json content or identity changed")
             for name, identity in self._artifacts.items():
                 try:
-                    artifact = _artifact_stat(self._omp_fd, name)
+                    matches = _artifact_matches(self._omp_fd, name, identity)
                 except FileNotFoundError:
                     continue
-                if (artifact.st_dev, artifact.st_ino) != identity:
-                    conflicts.append(f"{name} artifact identity changed")
-                else:
+                if matches:
                     artifact_entries.append(name)
+                else:
+                    conflicts.append(f"{name} artifact identity changed")
             if not conflicts:
                 for name in sorted(
                     artifact_entries, key=lambda path: path.count("/"), reverse=True
@@ -506,28 +727,28 @@ def recover_attachments(state_root: Path, work_root: Path) -> list[str]:
                         artifacts = record.get("artifacts", {})
                         if not isinstance(artifacts, dict):
                             continue
-                        owned_artifacts: list[tuple[str, tuple[int, int]]] = []
+                        owned_artifacts: list[
+                            tuple[str, _ArtifactIdentity | tuple[int, int]]
+                        ] = []
                         artifacts_valid = True
-                        for artifact_name, identity in artifacts.items():
-                            if (
-                                not isinstance(artifact_name, str)
-                                or not isinstance(identity, list)
-                                or len(identity) != 2
-                                or any(not isinstance(value, int) for value in identity)
-                            ):
+                        for artifact_name, raw_identity in artifacts.items():
+                            parsed = _parse_artifact_identity(raw_identity)
+                            if not isinstance(artifact_name, str) or parsed is None:
                                 artifacts_valid = False
                                 break
                             try:
-                                artifact_stat = _artifact_stat(omp_fd, artifact_name)
+                                matches = _artifact_matches(
+                                    omp_fd, artifact_name, parsed
+                                )
                             except FileNotFoundError:
                                 continue
                             except ValueError:
                                 artifacts_valid = False
                                 break
-                            if [artifact_stat.st_dev, artifact_stat.st_ino] != identity:
+                            if not matches:
                                 artifacts_valid = False
                                 break
-                            owned_artifacts.append((artifact_name, tuple(identity)))
+                            owned_artifacts.append((artifact_name, parsed))
                         if not artifacts_valid:
                             continue
                         config_stat = None

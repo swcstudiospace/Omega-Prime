@@ -1072,6 +1072,26 @@ def test_existing_project_mcp_config_is_preserved_and_attachment_backs_off(
     assert commands.count("prompt") == 1
 
 
+def _dead_owner() -> dict[str, Any]:
+    boot_id = (
+        Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    )
+    return {"pid": 999999999, "start_time": "1", "boot_id": boot_id}
+
+
+def _close_owner_descriptors(attachment: Any) -> list[int]:
+    """Close every descriptor a dead owner would drop, including artifact pins."""
+    fds = [
+        *attachment._artifact_pins.values(),
+        attachment._omp_fd,
+        attachment._parent_fd,
+    ]
+    attachment._artifact_pins.clear()
+    for fd in fds:
+        os.close(fd)
+    return fds
+
+
 def test_attachment_crash_before_spawn_recovers_only_dead_owner(tmp_path: Path) -> None:
     from omega_prime.engine import mcp_bridge
 
@@ -1079,30 +1099,18 @@ def test_attachment_crash_before_spawn_recovers_only_dead_owner(tmp_path: Path) 
     work.mkdir()
     state = tmp_path / "state"
     attachment = mcp_bridge.try_acquire_attachment(work, state, "job-crash")
-    skills_dir = work / ".omp" / "skills"
-    skills_dir.mkdir()
     target = work / "python-target"
     target.write_text("target", encoding="utf-8")
-    link = skills_dir / "python"
-    link.symlink_to(target)
-    dir_stat = skills_dir.stat(follow_symlinks=False)
-    link_stat = link.stat(follow_symlinks=False)
-    attachment.register_artifact(".omp/skills", (dir_stat.st_dev, dir_stat.st_ino))
-    attachment.register_artifact(
-        ".omp/skills/python", (link_stat.st_dev, link_stat.st_ino)
-    )
-    boot_id = (
-        Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-    )
-    attachment._owner_identity = {
-        "pid": 999999999,
-        "start_time": "1",
-        "boot_id": boot_id,
-    }
+    attachment.create_directory_artifact(".omp/skills")
+    attachment.create_symlink_artifact(".omp/skills/python", target)
+    assert len(attachment._artifact_pins) == 2
+    attachment._owner_identity = _dead_owner()
     attachment._write_journal(None)
-    os.close(attachment._omp_fd)
-    os.close(attachment._parent_fd)
+    closed = _close_owner_descriptors(attachment)
 
+    for fd in closed:
+        with pytest.raises(OSError):
+            os.fstat(fd)
     assert mcp_bridge.recover_attachments(state, work) == []
     assert not (work / ".omp").exists()
     assert not list((state / "mcp-attachments").glob("*.json"))
@@ -1146,21 +1154,14 @@ def test_attachment_registers_and_cleans_owned_artifact(tmp_path: Path) -> None:
         work, tmp_path / "state", "job-artifact"
     )
     skills_dir = work / ".omp" / "skills"
-    skills_dir.mkdir()
     artifact = skills_dir / "python"
-    artifact.symlink_to(target)
-    directory = skills_dir.stat(follow_symlinks=False)
-    prepared = artifact.stat(follow_symlinks=False)
-    attachment.register_artifact(".omp/skills", (directory.st_dev, directory.st_ino))
-    attachment.register_artifact(
-        ".omp/skills/python", (prepared.st_dev, prepared.st_ino)
-    )
+    directory = attachment.create_directory_artifact(".omp/skills")
+    prepared = attachment.create_symlink_artifact(".omp/skills/python", target)
     journal = json.loads(attachment._journal_path.read_text(encoding="utf-8"))
-    assert journal["artifacts"][".omp/skills"] == [directory.st_dev, directory.st_ino]
-    assert journal["artifacts"][".omp/skills/python"] == [
-        prepared.st_dev,
-        prepared.st_ino,
-    ]
+    assert journal["artifacts"][".omp/skills"][:2] == [directory[0], directory[1]]
+    assert journal["artifacts"][".omp/skills/python"][:2] == [prepared[0], prepared[1]]
+    assert bytes.fromhex(journal["artifacts"][".omp/skills"][3])
+    assert bytes.fromhex(journal["artifacts"][".omp/skills/python"][3])
 
     assert attachment.release() == []
     assert not artifact.exists()
@@ -1238,11 +1239,7 @@ def test_attachment_preserves_replaced_nested_user_artifact(tmp_path: Path) -> N
     skills_dir = work / ".omp" / "skills"
     skills_dir.mkdir()
     artifact = skills_dir / "python"
-    artifact.symlink_to(first_target)
-    identity = artifact.stat(follow_symlinks=False)
-    attachment.register_artifact(
-        ".omp/skills/python", (identity.st_dev, identity.st_ino)
-    )
+    attachment.create_symlink_artifact(".omp/skills/python", first_target)
 
     artifact.unlink()
     artifact.symlink_to(user_target)
@@ -1286,6 +1283,109 @@ def test_attachment_pins_artifacts_so_replacements_never_share_an_inode(
     assert attachment.release() == [".omp/skills/python artifact identity changed"]
     assert os.readlink(link) == "user"
     assert held_under_skills() == 0
+
+
+def test_replacement_during_registration_is_not_adopted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Identity has to come from the pin opened before the public name exists.
+    # Swapping the published name before register() returns must not make
+    # release() treat the replacement as the owned artifact.
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    user = work / "user"
+    user.write_text("user", encoding="utf-8")
+    attachment = mcp_bridge.try_acquire_attachment(
+        work, tmp_path / "state", "job-register-race"
+    )
+    attachment.create_directory_artifact(".omp/skills")
+    link = work / ".omp" / "skills" / "python"
+    real = mcp_bridge.AcquiredAttachment.register_artifact
+
+    def swap_then_register(self, relative_path, pin):
+        if relative_path == ".omp/skills/python":
+            pinned = os.fstat(pin).st_ino
+            os.unlink(link)
+            os.symlink(user, link)
+            assert link.stat(follow_symlinks=False).st_ino != pinned
+        return real(self, relative_path, pin)
+
+    monkeypatch.setattr(
+        mcp_bridge.AcquiredAttachment, "register_artifact", swap_then_register
+    )
+    attachment.create_symlink_artifact(".omp/skills/python", work / "owned")
+    journal = json.loads(attachment._journal_path.read_text(encoding="utf-8"))
+    stored = journal["artifacts"][".omp/skills/python"]
+    assert stored[1] != link.stat(follow_symlinks=False).st_ino
+
+    assert attachment.release() == [".omp/skills/python artifact identity changed"]
+    assert os.readlink(link) == str(user)
+    assert user.read_text(encoding="utf-8") == "user"
+    assert not list((work / ".omp").rglob(".prep-*"))
+
+
+def test_create_symlink_artifact_refuses_to_replace_an_existing_entry(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    attachment = mcp_bridge.try_acquire_attachment(
+        work, tmp_path / "state", "job-exists"
+    )
+    attachment.create_directory_artifact(".omp/skills")
+    link = work / ".omp" / "skills" / "python"
+    link.write_text("user-owned", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        attachment.create_symlink_artifact(".omp/skills/python", "owned")
+
+    assert link.read_text(encoding="utf-8") == "user-owned"
+    assert not list((work / ".omp").rglob(".prep-*"))
+    assert attachment.release()
+    assert link.read_text(encoding="utf-8") == "user-owned"
+
+
+def test_recovery_keeps_replacement_that_reuses_the_freed_inode(
+    tmp_path: Path,
+) -> None:
+    # After the owner exits, nothing pins the prepared inode. ext4 reuses that
+    # number for the user's replacement. Recovery must still leave it in place.
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    user = work / "user"
+    user.write_text("user", encoding="utf-8")
+    attachment = mcp_bridge.try_acquire_attachment(work, state, "job-reuse")
+    attachment.create_directory_artifact(".omp/skills")
+    owned = attachment.create_symlink_artifact(".omp/skills/python", work / "owned")
+    attachment._owner_identity = _dead_owner()
+    attachment._write_journal(None)
+    closed = _close_owner_descriptors(attachment)
+    for fd in closed:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+    link = work / ".omp" / "skills" / "python"
+    reused = False
+    for _ in range(50):
+        link.unlink()
+        link.symlink_to(user)
+        if link.stat(follow_symlinks=False).st_ino == owned[1]:
+            reused = True
+            break
+    assert reused
+
+    mcp_bridge.recover_attachments(state, work)
+
+    assert os.readlink(link) == str(user)
+    assert user.read_text(encoding="utf-8") == "user"
+    assert (work / ".omp" / "mcp.json").is_file()
 
 
 def test_sandbox_refuses_without_bwrap_and_wraps_when_present(tmp_path: Path) -> None:
