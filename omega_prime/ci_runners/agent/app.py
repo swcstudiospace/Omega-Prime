@@ -216,6 +216,7 @@ def build_agent_app(
         job_hook=settings.job_hook,
         job_policy=settings.job_policy,
         job_repos=settings.job_repos,
+        drain_budget_s=settings.drain_budget_s,
     )
     return create_agent_app(supervisor, token=token)
 

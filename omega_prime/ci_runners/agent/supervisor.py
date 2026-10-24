@@ -357,6 +357,7 @@ class Supervisor:
         job_hook: Path | None = None,
         job_policy: Path | None = None,
         job_repos: frozenset[str] = frozenset(),
+        drain_budget_s: float = 0.0,
     ) -> None:
         if max_runners < 1:
             raise ValueError("max_runners must be ≥ 1")
@@ -375,6 +376,9 @@ class Supervisor:
         self._base_env = dict(os.environ if base_env is None else base_env)
         self._spawn: Spawn = spawn or asyncio.create_subprocess_exec
         self._grace = term_grace_s
+        if drain_budget_s < 0:
+            raise ValueError("drain_budget_s must be ≥ 0")
+        self._drain_budget = drain_budget_s
         if job_hook is not None and job_policy is None:
             raise ValueError("job_hook needs job_policy")
         self.job_hook = job_hook
@@ -464,9 +468,36 @@ class Supervisor:
                 shutil.rmtree(entry, ignore_errors=True)
 
     async def shutdown(self) -> None:
-        """Drain, terminate every child, await their cleanup + callbacks."""
+        """Drain: let running jobs finish within the budget, then stop the rest.
+
+        Admission closes first. Runners that have not taken a job are stopped
+        at once, so no new job lands here. Runners already running a job keep
+        running for up to ``drain_budget_s`` (derived from the platform's
+        SIGTERM→SIGKILL window, see ``AgentSettings.drain_budget_s``). Whatever
+        is still running when the budget runs out is stopped like before.
+        Every child's cleanup and exit callback is awaited.
+        """
         self.draining = True
         tasks = [c.task for c in self.children.values() if c.task is not None]
+        busy = [
+            c.task
+            for c in self.children.values()
+            if c.took_job and not c.stop_requested and c.task is not None
+        ]
+        for name, child in list(self.children.items()):
+            if not child.took_job:
+                self.stop(name)
+        if busy and self._drain_budget > 0:
+            log.info(
+                "draining: waiting up to %.0fs for %d running job(s)",
+                self._drain_budget,
+                len(busy),
+            )
+            _done, pending = await asyncio.wait(busy, timeout=self._drain_budget)
+            if pending:
+                log.warning(
+                    "drain budget spent: stopping %d running job(s)", len(pending)
+                )
         for name in list(self.children):
             self.stop(name)
         if tasks:
