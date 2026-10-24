@@ -2,54 +2,70 @@
  "task_id": "00065-redteam-npm-audit",
  "bot": "bot-00-omega-prime",
  "started_at": "2026-10-24T17:05:00+11:00",
- "completed_at": "2026-10-24T17:25:00+11:00",
+ "completed_at": "2026-10-24T17:35:00+11:00",
  "base_commit": "0d6da2c",
  "pr": "(this PR)",
  "commands": [
   {
    "cmd": "python3 sidecar/provenance.py check",
    "exit_code": 0,
-   "output_tail": "check OK: pin 1a1a4b0 agrees (gitlink, VENDOR.md, docstrings)"
+   "output_tail": "check OK: pin 1a1a4b0 agrees (gitlink, VENDOR.md, docstrings)",
+   "cwd": "repo root"
   },
   {
    "cmd": "python3 sidecar/provenance.py pack-diff",
    "exit_code": 0,
-   "output_tail": "pack-diff OK: 25 markdown/JSON files byte-identical"
+   "output_tail": "pack-diff OK: 25 markdown/JSON files byte-identical",
+   "cwd": "repo root"
   },
   {
    "cmd": "python3 sidecar/provenance.py surface",
    "exit_code": 0,
-   "output_tail": "surface OK: 14 tool names agree (upstream, adapter, contract)"
+   "output_tail": "surface OK: 14 tool names agree (upstream, adapter, contract)",
+   "cwd": "repo root"
   },
   {
-   "cmd": "(cd redteam && npm ci --ignore-scripts && npm audit --omit=dev --audit-level=high --json > /tmp/a65.json)  # node 24",
+   "cmd": "cd redteam && npm ci --ignore-scripts && npm audit --omit=dev --audit-level=high --json > /tmp/a65.json",
    "exit_code": 0,
-   "output_tail": ""
+   "output_tail": "",
+   "cwd": "repo root",
+   "note": "node 24; exit 0 at the new pin"
   },
   {
-   "cmd": "(cd redteam && AUDIT_JSON=/tmp/a65.json python3 ../scripts/redteam-audit-triage.py)",
+   "cmd": "cd redteam && AUDIT_JSON=/tmp/a65.json python3 ../scripts/redteam-audit-triage.py",
    "exit_code": 0,
-   "output_tail": "redteam-node-audit OK: 0 high+ findings, 0 untriaged"
+   "output_tail": "redteam-node-audit OK: 0 high+ findings, 0 untriaged",
+   "cwd": "repo root"
   },
   {
-   "cmd": "npm audit --omit=dev --audit-level=high --json at 6679b82 (scratch clone) > /tmp/old65.json; python3 scripts/redteam-audit-delta.py --old /tmp/old65.json --new /tmp/a65.json --out /tmp/delta65.md",
-   "exit_code": 0,
-   "output_tail": "improved (Fixed: body-parser high, undici high, fast-uri moderate; Advisories new: none)"
-  },
-  {
-   "cmd": "pytest -q omega_prime/tests/test_sidecar_provenance.py test_redteam.py test_redteam_audit_triage.py test_redteam_audit_delta.py test_pin_bump.py test_redteam_remediation.py test_docs.py test_public_repo.py test_sidecar_packaging.py",
-   "exit_code": 0,
-   "output_tail": "390 passed, 2 skipped, 1 warning in 9.76s"
-  },
-  {
-   "cmd": "purple-team 1a1a4b0: npm run typecheck; npx vitest run src",
+   "cwd": "purple-team clone checked out at 6679b82 (old pin)",
+   "cmd": "npm ci --ignore-scripts && npm audit --omit=dev --audit-level=high --json > /tmp/old65.json",
    "exit_code": 1,
-   "output_tail": "typecheck exit 0; Tests 1124 passed (1124); 3 bench files need `npm run build` first and fail identically at 6679b82 (baseline)"
+   "output_tail": "exit 1 expected: high findings at the old pin (body-parser, undici)"
+  },
+  {
+   "cwd": "repo root",
+   "cmd": "python3 scripts/redteam-audit-delta.py --old /tmp/old65.json --new /tmp/a65.json --out /tmp/delta65.md",
+   "exit_code": 0,
+   "output_tail": "improved (Fixed: body-parser high, fast-uri moderate, undici high; Advisories new: none)"
+  },
+  {
+   "cmd": "python3 -m pytest -q omega_prime/tests/test_sidecar_provenance.py omega_prime/tests/test_redteam.py omega_prime/tests/test_redteam_audit_triage.py omega_prime/tests/test_redteam_audit_delta.py omega_prime/tests/test_pin_bump.py omega_prime/tests/test_redteam_remediation.py omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_sidecar_packaging.py",
+   "exit_code": 0,
+   "output_tail": "390 passed, 2 skipped, 1 warning in 8.89s",
+   "cwd": "repo root"
+  },
+  {
+   "cmd": "npm run typecheck && npx vitest run src",
+   "exit_code": 1,
+   "output_tail": "typecheck exit 0; Tests 1124 passed (1124); 3 bench files need `npm run build` first and fail identically at 6679b82 (baseline)",
+   "cwd": "purple-team clone checked out at 1a1a4b0 (new pin)"
   },
   {
    "cmd": "git diff --stat origin/main -- scripts/redteam-audit-triage.py | wc -l",
    "exit_code": 0,
-   "output_tail": "0"
+   "output_tail": "0",
+   "cwd": "repo root"
   }
  ],
  "claims": [
@@ -71,11 +87,11 @@
   },
   {
    "claim": "body-parser, undici (high) and fast-uri (moderate) are fixed relative to 6679b82 and no advisory is new (delta verdict improved)",
-   "evidence_command_index": 5
+   "evidence_command_index": 6
   },
   {
    "claim": "No triage exception added: scripts/redteam-audit-triage.py is unchanged",
-   "evidence_command_index": 8
+   "evidence_command_index": 9
   }
  ],
  "unverified": [
