@@ -18,7 +18,7 @@ from omega_prime.ci_runners.jobs import (
     RunnerState,
 )
 from omega_prime.ci_runners.publisher import UnsafeEventError
-from omega_prime.ci_runners.scaler import RETRY_BASE_S, RETRY_KEY
+from omega_prime.ci_runners.scaler import RECONCILE_KEY, RETRY_BASE_S, RETRY_KEY
 from omega_prime.ci_runners.settings import GITHUB_AUDIENCE, AppAuth, SecretFile
 
 from ._fakes import ListPublisher, resp
@@ -247,7 +247,7 @@ def test_exit_callback_requires_registered_generation() -> None:
     assert 101 in rig.scaler.queued
 
 
-def test_startup_reconcile_reaps_orphans_and_keeps_busy() -> None:
+def test_startup_reconcile_adopts_unlisted_children_and_keeps_busy() -> None:
     http = routes()
     http.on(
         "GET",
@@ -273,7 +273,6 @@ def test_startup_reconcile_reaps_orphans_and_keeps_busy() -> None:
             ],
         ),
     )
-    http.on("DELETE", "/v1/runners/omega-ci-9-z", resp(202))
     rig = Rig(http)
 
     async def body(r: Rig) -> None:
@@ -281,8 +280,12 @@ def test_startup_reconcile_reaps_orphans_and_keeps_busy() -> None:
 
     scenario(rig, body)
     assert rig.scaler.runners["omega-ci-1-a"].state is RunnerState.BUSY
+    # Running on the agent but missing from GitHub's listing: kept (00063: a
+    # restart once killed a live job here), held until its exit callback.
+    assert rig.scaler.runners["omega-ci-9-z"].state is RunnerState.BUSY
+    assert rig.scaler.registered("omega-ci-9-z", "g9")
     deletes = [c.url for c in http.calls if c.method == "DELETE"]
-    assert any(u.endswith("/v1/runners/omega-ci-9-z") for u in deletes)
+    assert not any(u.endswith("/v1/runners/omega-ci-9-z") for u in deletes)
     assert any(u.endswith(f"{ORG}/42") for u in deletes)
     assert http.paths("GET").count(ORG) == 1
 
@@ -322,15 +325,32 @@ def test_failed_snapshot_side_never_reaps(side: str) -> None:
 
 def test_reap_errors_are_published_not_raised() -> None:
     http = routes()
-    http.on("GET", ORG, resp(200, {"runners": [{"id": 42, "name": "omega-ci-2-b"}]}))
-    http.on("GET", f"{ORG}/42", resp(500))
     http.on(
-        "GET", "/v1/runners", resp(200, [{"name": "omega-ci-9-z", "generation": "g"}])
+        "GET",
+        ORG,
+        resp(
+            200,
+            {
+                "runners": [
+                    {"id": 42, "name": "omega-ci-2-b"},
+                    {"id": 43, "name": "omega-ci-3-c"},
+                ]
+            },
+        ),
     )
-    http.on("DELETE", "/v1/runners/omega-ci-9-z", resp(500))
+    http.on("GET", f"{ORG}/43", resp(500))  # orphan registration: GitHub fails
+    http.on("GET", f"{ORG}/42", resp(404))  # idle reap: registration gone ...
+    http.on(
+        "GET", "/v1/runners", resp(200, [{"name": "omega-ci-2-b", "generation": "g"}])
+    )
+    http.on("DELETE", "/v1/runners/omega-ci-2-b", resp(500))  # ... agent fails
     rig = Rig(http)
 
     async def body(r: Rig) -> None:
+        await r.ctrl.settle()
+        arm = r.scaler.armed("omega-ci-2-b")
+        assert arm is not None
+        r.ctrl.submit(IdleDeadline("omega-ci-2-b", arm))
         await r.ctrl.settle()
 
     scenario(rig, body)
@@ -428,6 +448,13 @@ def test_token_connection_failure_keeps_worker_and_releases_launch(
     assert "error" in rig.publisher.types()
 
 
+def _accepted(http: Any) -> list[dict[str, str]]:
+    return [
+        {"name": b["name"], "generation": b["generation"], "status": "running"}
+        for b in http.bodies("/v1/runners")
+    ]
+
+
 def test_restart_replays_persisted_demand(tmp_path: Path) -> None:
     from omega_prime.ci_runners.demand import DemandStore
 
@@ -446,6 +473,8 @@ def test_restart_replays_persisted_demand(tmp_path: Path) -> None:
     http = routes()
     for n in (1, 2, 3):
         http.on("GET", f"{JOBS}/{n}", resp(200, {"status": "queued"}))
+    # The agent lists what it accepted (a full pool is checked against it).
+    http.on("GET", "/v1/runners", lambda _req: resp(200, _accepted(http)))
     second = Rig(http, max_runners=2, demand=DemandStore(path))
     scenario(second, lambda r: r.ctrl.settle())
     assert list(second.scaler.queued) == [1, 2, 3]
@@ -701,3 +730,46 @@ def test_launch_failures_schedule_a_backoff_retry() -> None:
 
     scenario(rig, body)
     assert "launch_backoff" in rig.publisher.types()
+
+
+def test_full_pool_frees_slots_the_agent_lost_and_relaunches() -> None:
+    """00063: a Desktop redeploy SIGKILLed the runners (no exit callbacks), so
+    the controller kept counting them while jobs queued behind a full pool.
+    The agent inventory is the truth for whether a slot is taken."""
+    http = routes()
+    lost: set[str] = set()
+
+    def inventory(_req: Any) -> Any:
+        return resp(200, [r for r in _accepted(http) if r["name"] not in lost])
+
+    http.on("GET", "/v1/runners", inventory)
+    rig = Rig(http, max_runners=1)
+
+    async def body(r: Rig) -> None:
+        assert r.ctrl.offer_job(job(job_id=1))
+        assert r.ctrl.offer_job(job(job_id=2))
+        await r.ctrl.settle()
+        first = r.only()
+        assert first.state is RunnerState.IDLE  # live: the check kept it
+        lost.add(first.name)  # the redeploy
+        [cool] = [k for k in r.delayed.armed if k[0] == RECONCILE_KEY]
+        r.delayed.armed.pop(cool)
+        r.ctrl.submit(RetryDeadline(*cool))
+        await r.ctrl.settle()
+        assert first.name not in r.scaler.runners
+        assert r.only().name != first.name  # its slot went to the waiting job
+
+    scenario(rig, body)
+    gone = [
+        e["data"]
+        for e in rig.publisher.events
+        if e["type"].endswith(".exited") and e["data"].get("reason") == "agent_missing"
+    ]
+    assert len(gone) == 1 and gone[0]["state"] == "idle"
+    assert rig.publisher.types().count("launch_requested") == 2
+    # The lost runner never took a job: its registration was rolled back
+    # after GitHub confirmed it idle.
+    assert [c.method for c in http.calls if c.url.endswith(f"{ORG}/42")][-2:] == [
+        "GET",
+        "DELETE",
+    ]

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from omega_prime.ci_runners.jobs import (
+    AgentInventory,
     AgentRunner,
     CancelIdle,
     ControllerStarted,
@@ -20,6 +21,7 @@ from omega_prime.ci_runners.jobs import (
     Reap,
     ReapFinished,
     ReapOutcome,
+    ReconcileAgent,
     RetryDeadline,
     RunnerExited,
     RunnerState,
@@ -32,6 +34,8 @@ from omega_prime.ci_runners.publisher import CloudEvent, JsonlPublisher
 from omega_prime.ci_runners.scaler import (
     JOB_MEMORY,
     MAX_CONSECUTIVE_FAILURES,
+    RECONCILE_COOLDOWN_S,
+    RECONCILE_KEY,
     RETRY_BASE_S,
     RETRY_CAP_S,
     RETRY_KEY,
@@ -281,7 +285,8 @@ def test_reconcile_on_start(ids: Ids) -> None:
     )
     step = scaler.handle(started)
     reaps = {d.name: d for d in step.decisions if isinstance(d, Reap)}
-    assert reaps["omega-ci-9-zzzz"].delete_github is False  # orphan process
+    assert "omega-ci-9-zzzz" not in reaps  # unlisted child: adopted, not killed
+    assert scaler.runners["omega-ci-9-zzzz"].state is RunnerState.BUSY
     assert reaps["omega-ci-3-cccc"].stop_agent is False  # orphan registration
     assert "vps-runner" not in reaps and "not-ours" not in reaps
     assert scaler.runners["omega-ci-1-aaaa"].state is RunnerState.BUSY
@@ -604,3 +609,106 @@ def test_restart_ignores_non_queued_persisted_jobs(ids: Ids) -> None:
     scaler = make(ids, started=False)
     scaler.handle(ControllerStarted(queued=(stale,)))
     assert not scaler.queued
+
+
+# --- ghost slots: a full pool is checked against the agent (00063) -----------
+
+
+def _reconcile(step: Step) -> ReconcileAgent:
+    [check] = [d for d in step.decisions if isinstance(d, ReconcileAgent)]
+    return check
+
+
+def _full_pool_with_ghosts(scaler: Scaler) -> tuple[Launch, Launch, ReconcileAgent]:
+    """One IDLE and one BUSY runner, then a job waits behind the full pool.
+
+    The check is requested as soon as the pool fills while demand waits."""
+    [a] = launches(scaler.handle(job(job_id=1)))
+    [b] = launches(scaler.handle(job(job_id=2)))
+    scaler.handle(LaunchSucceeded(a.name, a.generation, 11))
+    full = scaler.handle(LaunchSucceeded(b.name, b.generation, 12))
+    check = _reconcile(full)
+    scaler.handle(job("in_progress", job_id=2, runner_name=b.name))
+    waiting = scaler.handle(job(job_id=3))
+    assert launches(waiting) == [] and len(scaler.runners) == scaler.max_runners
+    assert not any(isinstance(d, ReconcileAgent) for d in waiting.decisions)
+    return a, b, check
+
+
+def test_full_pool_releases_runners_the_agent_no_longer_runs(ids: Ids) -> None:
+    """The 00063 stall: an agent redeploy SIGKILLed the children, so no exit
+    callback came; GitHub's completed webhook took ~10 minutes, and an IDLE
+    ghost was never reaped at all while jobs kept waiting."""
+    scaler = make(ids, max_runners=2)
+    a, b, check = _full_pool_with_ghosts(scaler)
+    step = scaler.handle(AgentInventory(check.token, frozenset()))
+    assert a.name not in scaler.runners and b.name not in scaler.runners
+    gone = [e.data for e in step.events if e.kind == "exited"]
+    assert {(d["name"], d["state"]) for d in gone} == {
+        (a.name, "idle"),
+        (b.name, "busy"),
+    }
+    assert all(d["reason"] == "agent_missing" for d in gone)
+    # The IDLE one never took a job: its registration is rolled back.
+    assert [d for d in step.decisions if isinstance(d, Reap)] == [
+        Reap(a.name, a.generation, 11, delete_github=True, stop_agent=False)
+    ]
+    assert len(launches(step)) == 2  # both slots serve the waiting demand
+    assert any(
+        isinstance(d, ScheduleRetry)
+        and d.name == RECONCILE_KEY
+        and d.delay_s == RECONCILE_COOLDOWN_S
+        for d in step.decisions
+    )
+    # Their late exit callback / completed webhook are no-ops now.
+    assert kinds(scaler.handle(RunnerExited(b.name, b.generation, 137))) == []
+    scaler.handle(job("completed", job_id=2, runner_name=b.name))
+    assert len(scaler.runners) == 2
+
+
+def test_runners_the_agent_still_runs_are_kept(ids: Ids) -> None:
+    scaler = make(ids, max_runners=2)
+    a, b, check = _full_pool_with_ghosts(scaler)
+    step = scaler.handle(AgentInventory(check.token, frozenset({a.name, b.name})))
+    assert set(scaler.runners) == {a.name, b.name}
+    assert launches(step) == [] and "exited" not in kinds(step)
+
+
+def test_one_check_in_flight_then_a_cooldown_then_one_more(ids: Ids) -> None:
+    scaler = make(ids, max_runners=2)
+    a, b, check = _full_pool_with_ghosts(scaler)  # job 3 asked for no 2nd check
+    failed = scaler.handle(AgentInventory(check.token, None))  # agent unreachable
+    assert set(scaler.runners) == {a.name, b.name}  # unknown never releases
+    assert "error" in kinds(failed)
+    [cool] = [d for d in failed.decisions if isinstance(d, ScheduleRetry)]
+    quiet = scaler.handle(job(job_id=5))
+    assert not any(isinstance(d, ReconcileAgent) for d in quiet.decisions)
+    again = scaler.handle(RetryDeadline(RECONCILE_KEY, cool.generation))
+    assert _reconcile(again).token != check.token  # still full and waiting
+    # A stale answer to the old check changes nothing.
+    scaler.handle(AgentInventory(check.token, frozenset()))
+    assert set(scaler.runners) == {a.name, b.name}
+
+
+def test_no_check_while_the_pool_has_room_or_nothing_waits(ids: Ids) -> None:
+    scaler = make(ids, max_runners=3)
+    _idle(scaler, 1)
+    step = scaler.handle(job(job_id=2))
+    assert len(launches(step)) == 1
+    assert not any(isinstance(d, ReconcileAgent) for d in step.decisions)
+    full = make(Ids(), max_runners=1)
+    a = _idle(full, 1)
+    busy = full.handle(job("in_progress", job_id=1, runner_name=a.name))
+    assert not any(isinstance(d, ReconcileAgent) for d in busy.decisions)
+
+
+def test_no_check_while_a_launch_is_in_flight(ids: Ids) -> None:
+    scaler = make(ids, max_runners=2)
+    a = _idle(scaler, 1)
+    step = scaler.handle(job(job_id=2))  # second slot: launch in flight
+    [b] = launches(step)
+    assert not any(isinstance(d, ReconcileAgent) for d in step.decisions)
+    settled = scaler.handle(LaunchSucceeded(b.name, b.generation, 6))
+    check = _reconcile(settled)  # now full of settled runners, demand waits
+    scaler.handle(AgentInventory(check.token, frozenset({b.name})))
+    assert a.name not in scaler.runners and b.name in scaler.runners

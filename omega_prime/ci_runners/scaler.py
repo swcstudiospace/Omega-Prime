@@ -22,6 +22,16 @@ an unreadable work directory) back off: ``hold="failure"`` plus one ScheduleRetr
 clear that hold; the retry deadline or a runner taking a job does. After
 ``MAX_CONSECUTIVE_FAILURES`` the circuit opens (``hold="circuit"``, no more
 automatic retries) until a pool runner takes a job or the controller restarts.
+
+Ghost slots (00063): a runner whose agent child died without an exit callback
+(an agent redeploy SIGKILLs everything; a lost callback) would hold its slot
+until GitHub times the job out, and an IDLE one forever while demand waits,
+because the idle deadline only reaps when the queue is empty. So whenever jobs
+wait behind a pool the ledger says is full, the scaler asks for one agent
+inventory (``ReconcileAgent``) and releases every IDLE / BUSY / FINISHING
+runner the agent no longer runs. One check is in flight at a time, followed by
+a ``RECONCILE_COOLDOWN_S`` one-shot cooldown; if jobs still wait behind a full
+pool when it ends, the pool is checked once more.
 """
 
 from __future__ import annotations
@@ -34,6 +44,7 @@ from typing import Literal
 
 from omega_prime.ci_runners.agent.jobhook import parse_repo_patterns, patterns_cover
 from omega_prime.ci_runners.jobs import (
+    AgentInventory,
     CancelIdle,
     ControllerStarted,
     Decision,
@@ -48,6 +59,7 @@ from omega_prime.ci_runners.jobs import (
     Reap,
     ReapFinished,
     ReapOutcome,
+    ReconcileAgent,
     RetryDeadline,
     Runner,
     RunnerExited,
@@ -65,6 +77,11 @@ RETRY_BASE_S = 15.0
 RETRY_CAP_S = 240.0
 MAX_CONSECUTIVE_FAILURES = 5
 RETRY_KEY = "omega-ci-launch-retry"  # DelayedEvents key for the backoff arm
+RECONCILE_KEY = "omega-ci-agent-reconcile"  # DelayedEvents key for the cooldown
+RECONCILE_COOLDOWN_S = 30.0
+# Ledger states the agent must still be running. STARTING (launch in flight)
+# and REAPING (stop in flight) settle through their own outcome events.
+_RECONCILABLE = (RunnerState.IDLE, RunnerState.BUSY, RunnerState.FINISHING)
 _SUFFIX_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 
@@ -130,6 +147,11 @@ class Scaler:
         self.hold: Literal["failure", "capacity", "circuit"] | None = None
         self.failures = 0  # consecutive launch failures (reset by a busy runner)
         self._retry_arm: str | None = None
+        # Agent reconcile: the (name -> generation) snapshot of the check in
+        # flight, its token, and the cooldown arm that follows each answer.
+        self._reconcile_token: str | None = None
+        self._reconcile_snapshot: dict[str, str] = {}
+        self._reconcile_cool: str | None = None
         self.started = False
 
     # -- queries -------------------------------------------------------------
@@ -179,6 +201,8 @@ class Scaler:
             self._on_retry(event, out)
         elif isinstance(event, ReapFinished):
             self._on_reap_finished(event, out)
+        elif isinstance(event, AgentInventory):
+            self._on_inventory(event, out)
         elif isinstance(event, ControllerStarted):
             self._on_started(event, out)
         else:
@@ -385,12 +409,55 @@ class Scaler:
             out.event("error", name=event.name, reason=f"reap_{event.outcome.value}")
 
     def _on_retry(self, event: RetryDeadline, out: _Out) -> None:
+        if event.name == RECONCILE_KEY:
+            if event.generation == self._reconcile_cool:
+                self._reconcile_cool = None  # _settle may check again
+            return
         if event.name != RETRY_KEY or event.generation != self._retry_arm:
             return
         self._retry_arm = None
         if self.hold in ("failure", "capacity"):
             self.hold = None
             out.event("launch_retry", failures=self.failures)
+
+    def _on_inventory(self, event: AgentInventory, out: _Out) -> None:
+        if event.token != self._reconcile_token:
+            return  # stale answer
+        snapshot, self._reconcile_snapshot = self._reconcile_snapshot, {}
+        self._reconcile_token = None
+        arm = self._new_generation()
+        self._reconcile_cool = arm
+        out.decisions.append(ScheduleRetry(RECONCILE_KEY, arm, RECONCILE_COOLDOWN_S))
+        if event.names is None:
+            out.event("error", reason="reconcile_agent")
+            return
+        released = 0
+        for name, generation in snapshot.items():
+            runner = self.runners.get(name)
+            if (
+                runner is None
+                or runner.generation != generation
+                or runner.state not in _RECONCILABLE
+                or name in event.names
+            ):
+                continue
+            # It was running on the agent before the inventory was requested
+            # and is gone now: its slot is free, whatever its exit callback
+            # or GitHub's job-completed webhook still says (they no-op later).
+            state, runner_id = runner.state, runner.runner_id
+            self._release(name, out)
+            released += 1
+            out.event("exited", name=name, reason="agent_missing", state=state.value)
+            if state is RunnerState.IDLE and runner_id is not None:
+                # Never took a job: roll back its registration (GitHub
+                # confirms it idle first; a 404 means already gone).
+                out.decisions.append(
+                    Reap(name, generation, runner_id, stop_agent=False)
+                )
+        if released:
+            out.event(
+                "idle", reconciled=True, released=released, runners=len(self.runners)
+            )
 
     def _on_started(self, event: ControllerStarted, out: _Out) -> None:
         if self.started:
@@ -404,10 +471,16 @@ class Scaler:
             agent_names.add(row.name)
             observed = github.get(row.name)
             if observed is None:
-                out.decisions.append(
-                    Reap(row.name, row.generation, None, delete_github=False)
+                # Running on the agent but missing from GitHub's (offset-
+                # paginated, so not atomic) listing: it may well be running a
+                # job (00063: a restart killed a live one here). Keep it as
+                # BUSY; its exit callback releases the slot.
+                self.runners[row.name] = Runner(
+                    row.name, row.generation, RunnerState.BUSY
                 )
-                out.event("reaped", name=row.name, reason="orphan_process")
+                out.event(
+                    "busy", name=row.name, adopted=True, reason="unlisted_process"
+                )
                 continue
             state = RunnerState.BUSY if observed.busy else RunnerState.IDLE
             self.runners[row.name] = Runner(
@@ -499,11 +572,32 @@ class Scaler:
         if self.queued:
             if self.hold is None:
                 self._scale_up(out)
+            self._maybe_reconcile(out)
             return
         for runner in self.runners.values():
             if runner.state is RunnerState.IDLE and runner.name not in self._armed:
                 self._arm(runner, out)
                 out.event("idle", name=runner.name, grace_s=self.idle_grace_s)
+
+    def _maybe_reconcile(self, out: _Out) -> None:
+        """Demand waits behind a full ledger: check it against the agent."""
+        if (
+            self._reconcile_token is not None
+            or self._reconcile_cool is not None
+            or len(self.runners) < self.max_runners
+            or self.count(RunnerState.STARTING)  # wait for launches to settle
+        ):
+            return
+        snapshot = {
+            r.name: r.generation
+            for r in self.runners.values()
+            if r.state in _RECONCILABLE
+        }
+        if not snapshot:
+            return
+        self._reconcile_token = self._new_generation()
+        self._reconcile_snapshot = snapshot
+        out.decisions.append(ReconcileAgent(self._reconcile_token))
 
     def _scale_up(self, out: _Out) -> None:
         for _ in range(self.wanted()):
@@ -528,6 +622,8 @@ class Scaler:
 __all__ = [
     "JOB_MEMORY",
     "MAX_CONSECUTIVE_FAILURES",
+    "RECONCILE_COOLDOWN_S",
+    "RECONCILE_KEY",
     "RETRY_BASE_S",
     "RETRY_CAP_S",
     "RETRY_KEY",

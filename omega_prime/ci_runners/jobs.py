@@ -255,6 +255,15 @@ class AgentRunner:
 
 
 @dataclass(frozen=True)
+class AgentInventory:
+    """The answer to one :class:`ReconcileAgent`: the pool runner names the
+    agent says it is running, or ``None`` when the inventory call failed."""
+
+    token: str
+    names: frozenset[str] | None
+
+
+@dataclass(frozen=True)
 class ControllerStarted:
     github: tuple[ObservedRunner, ...] = ()
     agent: tuple[AgentRunner, ...] = ()
@@ -269,6 +278,7 @@ InputEvent = (
     | IdleDeadline
     | RetryDeadline
     | ReapFinished
+    | AgentInventory
     | ControllerStarted
 )
 
@@ -314,7 +324,14 @@ class ScheduleRetry:
     delay_s: float
 
 
-Decision = Launch | Reap | ScheduleIdle | CancelIdle | ScheduleRetry
+@dataclass(frozen=True)
+class ReconcileAgent:
+    """Fetch the agent inventory once and answer with ``AgentInventory``."""
+
+    token: str
+
+
+Decision = Launch | Reap | ScheduleIdle | CancelIdle | ScheduleRetry | ReconcileAgent
 
 
 @dataclass(frozen=True)
@@ -326,6 +343,7 @@ class DomainEvent:
 
 
 __all__ = [
+    "AgentInventory",
     "AgentRunner",
     "CancelIdle",
     "ControllerStarted",
@@ -343,6 +361,7 @@ __all__ = [
     "Reap",
     "ReapFinished",
     "ReapOutcome",
+    "ReconcileAgent",
     "RetryDeadline",
     "Runner",
     "RunnerExited",
