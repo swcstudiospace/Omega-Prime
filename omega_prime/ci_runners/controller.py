@@ -58,6 +58,7 @@ from omega_prime.ci_runners.jobs import (
     WorkflowJob,
     wants_pool,
 )
+from omega_prime.ci_runners.pool import DesktopPool
 from omega_prime.ci_runners.publisher import (
     CloudEvent,
     EventPublisher,
@@ -86,7 +87,7 @@ class Controller:
         *,
         scaler: Scaler,
         github: GitHubClient,
-        desktop: DesktopClient,
+        desktop: DesktopClient | DesktopPool,
         publisher: EventPublisher,
         delayed: DelayedEvents | None = None,
         extra_secrets: Callable[[], tuple[str, ...]] = tuple,
@@ -97,6 +98,14 @@ class Controller:
         self.github = github
         self.desktop = desktop
         self.publisher = publisher
+        # Every agent call goes through the pool (a pass-through for one agent).
+        self.agents = (
+            desktop
+            if isinstance(desktop, DesktopPool)
+            else DesktopPool.single(desktop, scaler.max_runners)
+        )
+        if self.agents.notify is None:
+            self.agents.notify = self._publish
         self._delayed = delayed
         self._extra_secrets = extra_secrets
         self.max_pending = max_pending
@@ -545,7 +554,7 @@ class Controller:
             self._publish("error", {"reason": "reconcile_github", "status": exc.status})
             github = None
         try:
-            agent = tuple(await self.desktop.inventory())
+            agent = tuple(await self.agents.inventory())
         except DesktopError as exc:
             self._publish("error", {"reason": "reconcile_agent", "status": exc.status})
             agent = None
@@ -564,6 +573,7 @@ class Controller:
     # -- interpreting decisions --------------------------------------------------
 
     def _apply(self, step: Step) -> None:
+        self.agents.retain(self.scaler.runners)
         for event in step.events:
             self._publish(event.kind, event.data)
         for decision in step.decisions:
@@ -628,7 +638,7 @@ class Controller:
         self._jits[key] = jit.encoded  # memory-only, dropped below
         try:
             self._publish("wake_requested", {"name": d.name})
-            result = await self.desktop.launch(d.name, d.generation, jit.encoded)
+            result = await self.agents.launch(d.name, d.generation, jit.encoded)
             if result.accepted:
                 self._publish(
                     "woke",
@@ -648,7 +658,7 @@ class Controller:
                 self.submit(RunnerExited(d.name, d.generation, result.exit_code))
                 return
             if result.outcome is LaunchOutcome.WAKE_FAILED:
-                present = await self.desktop.find(d.name, d.generation)
+                present = await self.agents.find(d.name, d.generation)
                 if present:
                     self.submit(LaunchSucceeded(d.name, d.generation, jit.runner_id))
                 else:
@@ -679,7 +689,7 @@ class Controller:
         """One agent inventory for the scaler's ghost-slot check (00063)."""
         names: frozenset[str] | None
         try:
-            names = frozenset(r.name for r in await self.desktop.inventory())
+            names = await self.agents.present_names()
         except Exception as exc:  # never strand the in-flight check
             log.warning("ci-runners: agent reconcile failed (%s)", type(exc).__name__)
             names = None
@@ -705,7 +715,7 @@ class Controller:
                 return ReapOutcome.BUSY
         if d.stop_agent:
             try:
-                await self.desktop.stop(d.name)
+                await self.agents.stop(d.name)
             except DesktopError as exc:
                 self._publish(
                     "error",

@@ -97,7 +97,7 @@ def test_constructor_bounds(ids: Ids) -> None:
     with pytest.raises(ValueError):
         make(ids, max_runners=0)
     with pytest.raises(ValueError):
-        make(ids, max_runners=11)
+        make(ids, max_runners=51)  # HARD_MAX_RUNNERS (5 agents x 10) + 1
 
 
 def test_nothing_happens_before_start(ids: Ids) -> None:

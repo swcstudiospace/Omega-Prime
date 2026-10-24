@@ -212,3 +212,39 @@ def test_stop(clock: FakeClock) -> None:
         asyncio.run(make(http, clock, max_attempts=1, budget_s=0).stop("omega-ci-1-a"))
     with pytest.raises(ValueError):
         asyncio.run(client.stop("../etc"))
+
+
+# -- wake probe (00064 serverless pool) ------------------------------------------
+
+
+def test_wake_waits_through_railway_cold_start(clock: FakeClock) -> None:
+    http = FakeHttp().on(
+        "GET",
+        "/healthz",
+        TransportError("connect"),
+        resp(503),
+        resp(200, {"status": "ok", "draining": False, "runners": 0, "capacity": 8}),
+    )
+    probe = asyncio.run(make(http, clock).wake())
+    assert probe.ready and not probe.draining and probe.attempts == 3
+    assert [c.method for c in http.calls] == ["GET"] * 3
+
+
+@pytest.mark.parametrize(
+    ("reply", "draining"),
+    [
+        (resp(200, {"status": "draining", "draining": True}), True),
+        (resp(200, ["not", "a", "dict"]), False),
+        (resp(404), False),
+    ],
+)
+def test_wake_not_ready(clock: FakeClock, reply: Any, draining: bool) -> None:
+    probe = asyncio.run(make(FakeHttp().on("GET", "/healthz", reply), clock).wake())
+    assert not probe.ready and probe.draining is draining
+
+
+def test_wake_gives_up_inside_the_budget(clock: FakeClock) -> None:
+    http = FakeHttp().on("GET", "/healthz", TransportError("connect"))
+    probe = asyncio.run(make(http, clock, budget_s=12.0).wake())
+    assert not probe.ready and probe.status is None
+    assert probe.elapsed_s <= 12.0 + BACKOFF_CAP_S

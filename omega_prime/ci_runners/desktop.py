@@ -17,6 +17,7 @@ import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Protocol
 from urllib.parse import quote, urlsplit
 
 from omega_prime.ci_runners.http import (
@@ -59,6 +60,31 @@ class WakeResult:
     @property
     def accepted(self) -> bool:
         return self.outcome in (LaunchOutcome.ACCEPTED, LaunchOutcome.REPLAYED)
+
+
+@dataclass(frozen=True)
+class WakeProbe:
+    """Answer of ``GET /healthz`` after waking a (possibly sleeping) agent."""
+
+    ready: bool  # 200 with a JSON body that is not draining
+    draining: bool
+    status: int | None
+    attempts: int
+    elapsed_s: float
+
+
+class RunnerAgent(Protocol):
+    """What the controller needs from one runner agent (or the whole pool)."""
+
+    async def launch(
+        self, name: str, generation: str, jitconfig: str
+    ) -> WakeResult: ...
+
+    async def inventory(self) -> list[AgentRunner]: ...
+
+    async def find(self, name: str, generation: str) -> bool | None: ...
+
+    async def stop(self, name: str) -> bool: ...
 
 
 class DesktopError(Exception):
@@ -187,6 +213,32 @@ class DesktopClient:
                 outcome = LaunchOutcome.FINISHED
         return WakeResult(outcome, response.status, attempts, elapsed, exit_code)
 
+    async def wake(self) -> WakeProbe:
+        """Wake a sleeping agent and wait until it answers ``GET /healthz``.
+
+        Called only on demand (a launch onto an agent that may be asleep),
+        never on a schedule, so an idle agent is never kept awake. Railway
+        holds the first request while the container starts and answers
+        502/503 until it listens; both are retried inside the wake budget.
+        """
+        response, attempts, elapsed = await self._with_wake("GET", "/healthz")
+        if response is None:
+            return WakeProbe(False, False, None, attempts, elapsed)
+        draining = False
+        ok = response.status == 200
+        if ok:
+            try:
+                data = json.loads(response.body or b"null")
+            except (UnicodeDecodeError, ValueError):
+                data = None
+            if isinstance(data, dict):
+                draining = data.get("draining") is True
+            else:
+                ok = False
+        return WakeProbe(
+            ok and not draining, draining, response.status, attempts, elapsed
+        )
+
     async def inventory(self) -> list[AgentRunner]:
         response, _, _ = await self._with_wake("GET", "/v1/runners")
         if response is None or response.status != 200:
@@ -245,5 +297,7 @@ __all__ = [
     "DesktopClient",
     "DesktopError",
     "LaunchOutcome",
+    "RunnerAgent",
+    "WakeProbe",
     "WakeResult",
 ]

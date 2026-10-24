@@ -36,7 +36,14 @@ from omega_prime.ci_runners.agent.jobhook import (
 DEFAULT_LABELS: tuple[str, ...] = ("self-hosted", "linux", "x64", "omega-ci")
 DEFAULT_RUNNER_GROUP = "omega-ci"
 DEFAULT_MAX_RUNNERS = 8
-HARD_MAX_RUNNERS = 10
+# One runner agent (one Desktop container, pids.max 1000 shared by its jobs)
+# never runs more than this many children.
+HARD_MAX_AGENT_RUNNERS = 10
+# Runner agents the controller can schedule across: agent 1 is the legacy
+# ``OMEGA_CI_DESKTOP_*`` block, agents 2..MAX_AGENTS ``OMEGA_CI_DESKTOP_<n>_*``.
+MAX_AGENTS = 5
+# Whole-pool ceiling (every agent at its hard cap).
+HARD_MAX_RUNNERS = HARD_MAX_AGENT_RUNNERS * MAX_AGENTS
 DEFAULT_IDLE_GRACE_S = 180.0
 DEFAULT_WAKE_BUDGET_S = 150.0
 MAX_BODY_BYTES = 1 << 20
@@ -253,6 +260,144 @@ def _repos(raw: str | None, name: str = "OMEGA_CI_REPOS") -> frozenset[str]:
 
 
 @dataclass(frozen=True)
+class AgentEndpoint:
+    """One runner agent (one serverless Desktop container) the controller uses."""
+
+    index: int  # 1-based; 1 is the legacy OMEGA_CI_DESKTOP_* block
+    url: str
+    token_file: SecretFile
+    capacity: int
+
+    @property
+    def label(self) -> str:
+        """Feed-safe agent id (no URL, no secret)."""
+        return f"agent{self.index}"
+
+
+def _agent_vars(env: Mapping[str, str]) -> tuple[tuple[str | None, ...], ...]:
+    """Raw ``(url, token_file, capacity)`` per agent slot, agent 1 first.
+
+    Every name is a literal so the environment inventory stays exhaustive.
+    """
+    return (
+        (
+            _get(env, "OMEGA_CI_DESKTOP_URL"),
+            _get(env, "OMEGA_CI_DESKTOP_TOKEN_FILE"),
+            _get(env, "OMEGA_CI_DESKTOP_CAPACITY"),
+        ),
+        (
+            _get(env, "OMEGA_CI_DESKTOP_2_URL"),
+            _get(env, "OMEGA_CI_DESKTOP_2_TOKEN_FILE"),
+            _get(env, "OMEGA_CI_DESKTOP_2_CAPACITY"),
+        ),
+        (
+            _get(env, "OMEGA_CI_DESKTOP_3_URL"),
+            _get(env, "OMEGA_CI_DESKTOP_3_TOKEN_FILE"),
+            _get(env, "OMEGA_CI_DESKTOP_3_CAPACITY"),
+        ),
+        (
+            _get(env, "OMEGA_CI_DESKTOP_4_URL"),
+            _get(env, "OMEGA_CI_DESKTOP_4_TOKEN_FILE"),
+            _get(env, "OMEGA_CI_DESKTOP_4_CAPACITY"),
+        ),
+        (
+            _get(env, "OMEGA_CI_DESKTOP_5_URL"),
+            _get(env, "OMEGA_CI_DESKTOP_5_TOKEN_FILE"),
+            _get(env, "OMEGA_CI_DESKTOP_5_CAPACITY"),
+        ),
+    )
+
+
+def _agent_prefix(index: int) -> str:
+    return "OMEGA_CI_DESKTOP" if index == 1 else f"OMEGA_CI_DESKTOP_{index}"
+
+
+def _capacity(raw: str | None, name: str, default: int) -> int:
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SettingsError(f"{name}: not an integer") from None
+    if not 1 <= value <= HARD_MAX_AGENT_RUNNERS:
+        raise SettingsError(f"{name}: must be 1..{HARD_MAX_AGENT_RUNNERS}")
+    return value
+
+
+def _agents(
+    env: Mapping[str, str], max_runners: int | None
+) -> tuple[tuple[AgentEndpoint, ...], int]:
+    """Parse agent 1 (legacy) plus agents 2..MAX_AGENTS; return (agents, pool cap).
+
+    One agent: its capacity defaults to ``OMEGA_CI_MAX_RUNNERS`` (8), exactly the
+    pre-swarm behaviour. Several agents: each defaults to 8, the pool cap
+    defaults to the sum, and an explicit ``OMEGA_CI_MAX_RUNNERS`` may only
+    lower it. Agents must be numbered without gaps so a typo cannot silently
+    drop one.
+    """
+    slots = _agent_vars(env)
+    present = [i for i in range(2, MAX_AGENTS + 1) if slots[i - 1][0]]
+    count = 1 + len(present)
+    if present and present != list(range(2, count + 1)):
+        raise SettingsError(
+            "OMEGA_CI_DESKTOP_<n>_URL: agents must be numbered 2, 3, ... without gaps"
+        )
+    for i in range(count + 1, MAX_AGENTS + 1):
+        for suffix, raw in zip(
+            ("TOKEN_FILE", "CAPACITY"), slots[i - 1][1:], strict=True
+        ):
+            if raw:
+                raise SettingsError(
+                    f"{_agent_prefix(i)}_{suffix}: set without {_agent_prefix(i)}_URL"
+                )
+    agents: list[AgentEndpoint] = []
+    seen: set[str] = set()
+    for i in range(1, count + 1):
+        prefix = _agent_prefix(i)
+        raw_url, raw_token, raw_capacity = slots[i - 1]
+        if not raw_url:
+            raise SettingsError(f"{prefix}_URL: required https:// agent URL")
+        url = _url(raw_url, f"{prefix}_URL", https=True)
+        key = url.lower()
+        if key in seen:
+            raise SettingsError(f"{prefix}_URL: duplicates another agent URL")
+        seen.add(key)
+        default_cap = (
+            min(max_runners or DEFAULT_MAX_RUNNERS, HARD_MAX_AGENT_RUNNERS)
+            if count == 1
+            else DEFAULT_MAX_RUNNERS
+        )
+        if not raw_token:
+            raise SettingsError(
+                f"{prefix}_TOKEN_FILE: required (path to a secret file)"
+            )
+        agents.append(
+            AgentEndpoint(
+                index=i,
+                url=url,
+                token_file=SecretFile(
+                    f"{prefix}_TOKEN_FILE", Path(raw_token).expanduser(), url
+                ),
+                capacity=_capacity(raw_capacity, f"{prefix}_CAPACITY", default_cap),
+            )
+        )
+    total = sum(a.capacity for a in agents)
+    if max_runners is None:
+        return tuple(agents), total
+    if count == 1 and max_runners > HARD_MAX_AGENT_RUNNERS:
+        raise SettingsError(
+            f"OMEGA_CI_MAX_RUNNERS: must be 1..{HARD_MAX_AGENT_RUNNERS} with one "
+            "agent (add OMEGA_CI_DESKTOP_2_* agents for a bigger pool)"
+        )
+    if max_runners > total:
+        raise SettingsError(
+            "OMEGA_CI_MAX_RUNNERS: exceeds the sum of agent capacities "
+            "(unset it to use the sum)"
+        )
+    return tuple(agents), max_runners
+
+
+@dataclass(frozen=True)
 class ControllerSettings:
     """Everything the always-on controller consumes."""
 
@@ -278,6 +423,8 @@ class ControllerSettings:
     # Public repositories explicitly opted in (subset of ``repos``). Their jobs
     # still pass the fork guard (see :mod:`omega_prime.ci_runners.forkguard`).
     public_repos: frozenset[str] = frozenset()
+    # Every runner agent, agent 1 first (its url/token are ``desktop_*``).
+    agents: tuple[AgentEndpoint, ...] = ()
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> ControllerSettings:
@@ -316,22 +463,18 @@ class ControllerSettings:
                 "OMEGA_CI_RUNNER_GROUP_ID: numeric runner group id required for "
                 "org scope (it is never inferred from the group name)"
             )
-        max_runners = _int(
+        explicit_max = _int(
             env,
             "OMEGA_CI_MAX_RUNNERS",
-            DEFAULT_MAX_RUNNERS,
+            None,
             low=1,
             high=HARD_MAX_RUNNERS,
         )
-        assert max_runners is not None
         auth_mode, app, pat = _select_auth(env)
         publisher = (_get(env, "OMEGA_CI_PUBLISHER") or "jsonl").lower()
         if publisher not in ("jsonl", "null", "eventstream"):
             raise SettingsError("OMEGA_CI_PUBLISHER: jsonl, null or eventstream")
-        desktop_url = _get(env, "OMEGA_CI_DESKTOP_URL")
-        if not desktop_url:
-            raise SettingsError("OMEGA_CI_DESKTOP_URL: required https:// agent URL")
-        desktop = _url(desktop_url, "OMEGA_CI_DESKTOP_URL", https=True)
+        agents, max_runners = _agents(env, explicit_max)
         events = _get(env, "OMEGA_CI_EVENTS_PATH")
         demand = _get(env, "OMEGA_CI_DEMAND_PATH")
         return cls(
@@ -355,10 +498,8 @@ class ControllerSettings:
             webhook_secret_file=_required_secret_file(
                 env, "OMEGA_CI_WEBHOOK_SECRET_FILE", WEBHOOK_AUDIENCE
             ),
-            desktop_url=desktop,
-            desktop_token_file=_required_secret_file(
-                env, "OMEGA_CI_DESKTOP_TOKEN_FILE", desktop
-            ),
+            desktop_url=agents[0].url,
+            desktop_token_file=agents[0].token_file,
             publisher=publisher,  # type: ignore[arg-type]
             events_path=Path(events).expanduser()
             if events
@@ -367,6 +508,7 @@ class ControllerSettings:
             if demand
             else DEFAULT_DEMAND_PATH.expanduser(),
             public_repos=public_repos,
+            agents=agents,
         )
 
 
@@ -442,7 +584,7 @@ class AgentSettings:
             "OMEGA_CI_AGENT_MAX_RUNNERS",
             DEFAULT_MAX_RUNNERS,
             low=1,
-            high=HARD_MAX_RUNNERS,
+            high=HARD_MAX_AGENT_RUNNERS,
         )
         assert max_runners is not None
         controller = _get(env, "OMEGA_CI_CONTROLLER_URL")
@@ -511,11 +653,14 @@ __all__ = [
     "DEFAULT_MAX_RUNNERS",
     "DEFAULT_WAKE_BUDGET_S",
     "GITHUB_AUDIENCE",
+    "HARD_MAX_AGENT_RUNNERS",
     "HARD_MAX_RUNNERS",
+    "MAX_AGENTS",
     "MAX_BODY_BYTES",
     "RUNNER_NAME_RE",
     "RUNNER_PREFIX",
     "WEBHOOK_AUDIENCE",
+    "AgentEndpoint",
     "AgentSettings",
     "AppAuth",
     "AuthMode",
