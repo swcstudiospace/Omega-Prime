@@ -520,6 +520,7 @@ Everything else is version-pinned and checksum-verified in the Dockerfile.
 | Python | 3.10.22, 3.12.15, 3.13.17, 3.14.9 (each with `bin/pip`) | tool cache | `actions/setup-python` (Omega-Prime matrix 3.12–3.14) |
 | CodeQL bundle | 2.27.3 | tool cache `CodeQL/2.27.3/x64` | `github/codeql-action/init@6f2ac81` (ultrathink); the cache is read-only, so the bundle must match the action pin |
 | Node.js (+ npm) | 22.23.4, 24.22.1 | tool cache | `actions/setup-node` (`22.x`, `24.x`) |
+| System Node.js (+ npm, npx, corepack) | 22.23.4 (links to the tool-cache build) | `/usr/local/bin`, ahead of the base image's Node 20 | jobs that run `node`/`npm` without `actions/setup-node` |
 | Bun | not pre-installed | job `HOME` | `oven-sh/setup-bun` downloads into `~/.bun/bin` (any version) |
 | .NET SDK | 10.0.402 (OmpOS `global.json`) + `maui-android` workload (workload set 10.0.402.1) | `/usr/share/dotnet` | `actions/setup-dotnet` (`global-json-file`) |
 | JDK | OpenJDK 17 (apt) | `JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64` | Android builds |
@@ -537,6 +538,7 @@ Everything else is version-pinned and checksum-verified in the Dockerfile.
 | cargo-deny | 0.20.2 | `/usr/local/bin` | Omega-Prime license gates (replaces `cargo-deny-action`, a Docker action) |
 | ripgrep | 14.x (apt) | `/usr/bin/rg` | autonogrammer branding gate |
 | ffmpeg / ffprobe | 6.1 (apt) | `/usr/bin` | faceless-desk CLI integration tests |
+| fonts-liberation | 1:2.1.5-3 (apt, same snapshot) | `/usr/share/fonts/truetype/liberation` | faceless-desk `cli_analytics` render tests (`LiberationSans-Regular.ttf`) |
 
 The authoritative list is `deploy/ci-runner-desktop/Dockerfile` (the `ARG`
 block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.

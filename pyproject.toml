@@ -85,6 +85,9 @@ omega_prime = [
 [tool.pytest.ini_options]
 testpaths = ["omega_prime/tests"]
 pythonpath = ["."]
+# A test stuck this long dumps every thread's stack (it is not failed or
+# killed), so a CI hang shows where it stopped instead of only a job timeout.
+faulthandler_timeout = 600
 markers = [
   "native: requires the optional locally built omega_prime_prime extension",
   "eventstream_integration: requires OMEGA_EVENTSTREAM_IT_URL and the pinned broker service",
