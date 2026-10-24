@@ -174,7 +174,13 @@ def test_shutdown_lets_running_job_finish_within_budget(tmp_path: Path) -> None:
     busy, idle = "omega-ci-1-busy", "omega-ci-2-idle"
 
     async def main() -> None:
-        s = supervisor(tmp_path, _sleeping(tmp_path), exits, drain_budget_s=30.0)
+        s = supervisor(
+            tmp_path,
+            _sleeping(tmp_path),
+            exits,
+            drain_budget_s=30.0,
+            drain_settle_s=0.2,
+        )
         s.admit(idle, "g2", JIT)
         await _until_running(s, idle)
         busy_root = tmp_path / "busy"
@@ -201,6 +207,47 @@ def test_shutdown_lets_running_job_finish_within_budget(tmp_path: Path) -> None:
     assert codes == {idle: -15, busy: 0}
 
 
+def test_shutdown_spares_job_started_as_drain_begins(tmp_path: Path) -> None:
+    """A job start the relay has not read yet is not cancelled by the drain.
+
+    Shutdown begins while the runner's job-start line is still unwritten or
+    unread; the settle window lets the relay see it, so the runner counts as
+    busy and finishes instead of being sent SIGTERM.
+    """
+    exits = Exits()
+
+    async def main() -> None:
+        s = supervisor(
+            tmp_path,
+            _sleeping(
+                tmp_path, tail="sleep 0.3\necho 'Running job: build'\nsleep 1\nexit 0"
+            ),
+            exits,
+            drain_budget_s=30.0,
+            drain_settle_s=2.0,
+        )
+        s.admit(NAME, "g", JIT)
+        await _until_running(s, NAME)
+        assert not s.children[NAME].took_job
+        await asyncio.wait_for(s.shutdown(), 15)
+
+    asyncio.run(main())
+    assert [p["exit_code"] for p in exits.payloads] == [0]
+
+
+def test_shutdown_without_budget_skips_settle(tmp_path: Path) -> None:
+    exits = Exits()
+
+    async def main() -> None:
+        s = supervisor(tmp_path, _sleeping(tmp_path), exits, drain_settle_s=30.0)
+        s.admit(NAME, "g", JIT)
+        await _until_running(s, NAME)
+        await asyncio.wait_for(s.shutdown(), 10)
+
+    asyncio.run(main())
+    assert [p["exit_code"] for p in exits.payloads] == [-15]
+
+
 def test_shutdown_stops_running_job_when_budget_spent(tmp_path: Path) -> None:
     exits = Exits()
 
@@ -225,6 +272,10 @@ def test_shutdown_stops_running_job_when_budget_spent(tmp_path: Path) -> None:
 def test_negative_drain_budget_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="drain_budget_s"):
         supervisor(tmp_path, runner_root(tmp_path), Exits(), drain_budget_s=-1.0)
+    other = tmp_path / "settle"
+    other.mkdir()
+    with pytest.raises(ValueError, match="drain_settle_s"):
+        supervisor(other, runner_root(other), Exits(), drain_settle_s=-1.0)
 
 
 def test_cancellation_terminates_and_still_notifies(tmp_path: Path) -> None:

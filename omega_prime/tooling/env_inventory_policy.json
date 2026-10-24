@@ -281,6 +281,7 @@
     "OMEGA_CI_AGENT_REPOS": "Lists the owner/repo names or owner/* entries the Desktop runner pre-job guard lets run; empty refuses every job.",
     "OMEGA_CI_AGENT_JOB_HOOK": "Points the Desktop runner agent at the pre-job guard script it installs as ACTIONS_RUNNER_HOOK_JOB_STARTED.",
     "OMEGA_CI_AGENT_JOB_POLICY": "Names the Desktop runner agent's pre-job guard allowlist file; only /var/lib/omega-ci/job-policy.json (the path the shipped hook reads) is accepted.",
+    "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": "Set by Railway (railway.toml drainingSeconds): the SIGTERM-to-SIGKILL window on redeploy; the Desktop runner agent lets running jobs finish within it minus a 30 s stop margin (0 or unset stops them at once).",
     "GITHUB_EVENT_NAME": "Set by the GitHub runner; the Desktop pre-job guard refuses pull_request_target and, for non-private repositories, events other than push, workflow_dispatch and pull_request.",
     "GITHUB_REPOSITORY": "Set by the GitHub runner; the Desktop pre-job guard checks it against its repository allowlist and the event payload.",
     "GITHUB_EVENT_PATH": "Set by the GitHub runner; the Desktop pre-job guard reads the event payload there to refuse fork pull requests.",

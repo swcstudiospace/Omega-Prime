@@ -273,6 +273,7 @@ The table records names and purposes only.
 | `PYTHONHOME_FILE` | Forwarded file-name counterpart for the child-process Python home. |
 | `PYTHONPATH` | Sets import search paths inherited by child processes. |
 | `PYTHONPATH_FILE` | Forwarded file-name counterpart for the child-process Python import path. |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | Set by Railway (railway.toml drainingSeconds): the SIGTERM-to-SIGKILL window on redeploy; the Desktop runner agent lets running jobs finish within it minus a 30 s stop margin (0 or unset stops them at once). |
 | `RAILWAY_TOKEN` | Authenticates Railway project status and log operations. |
 | `RAILWAY_TOKEN_FILE` | Names a protected file containing the Railway credential. |
 | `RUNNER_TEMP` | Directory for ephemeral eventstream IT ownership and TLS material. |
