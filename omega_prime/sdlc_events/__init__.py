@@ -11,6 +11,7 @@ from omega_prime.sdlc_events.handlers import (
     on_blocked_signal,
     on_gate_signal,
     on_review_signal,
+    on_review_then_gate,
 )
 from omega_prime.sdlc_events.types import (
     DeliveryId,
@@ -33,4 +34,5 @@ __all__ = [
     "on_blocked_signal",
     "on_gate_signal",
     "on_review_signal",
+    "on_review_then_gate",
 ]

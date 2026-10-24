@@ -2,6 +2,7 @@ from omega_prime.sdlc_events.handlers import (
     on_blocked_signal,
     on_gate_signal,
     on_review_signal,
+    on_review_then_gate,
 )
 from omega_prime.sdlc_events.idempotency import IdempotencyStore
 from omega_prime.sdlc_events.task_store import MemoryTaskStore
@@ -63,3 +64,53 @@ def test_blocked_signal() -> None:
     )
     assert r.action == "blocked"
     assert store.rows["gb:pr-Omega-Prime-74"]["state"] == "blocked"
+
+
+def test_review_wakes_gate_under_one_claim() -> None:
+    store = MemoryTaskStore()
+    idem = IdempotencyStore()
+
+    def wake() -> tuple:
+        return on_review_then_gate(
+            _ev(EventKind.REVIEW_SIGNAL),
+            store=store,
+            idem=idem,
+            greptile_score=5,
+            greptile_on_head=True,
+            ci_green=True,
+            mergeable=True,
+        )
+
+    assert [r.action for r in wake()] == ["review_noted", "gate_open_dry_run"]
+    again = wake()
+    assert len(again) == 1 and again[0].skipped_duplicate
+
+
+def test_replay_runs_the_gate_for_a_review(tmp_path, capsys) -> None:
+    import json
+
+    from omega_prime.sdlc_events.replay import main
+
+    fixture = tmp_path / "review.json"
+    fixture.write_text(
+        json.dumps(
+            [
+                {
+                    "kind": "review_signal",
+                    "delivery_id": "deliv-r1",
+                    "owner": "swcstudiospace",
+                    "repo": "Omega-Prime",
+                    "pr": 74,
+                    "head_sha": "f21a888cd2f1c320324591b296a17fd1ec0c18ec",
+                    "greptile_score": 5,
+                    "greptile_on_head": True,
+                    "ci_green": True,
+                    "mergeable": True,
+                }
+            ]
+        )
+    )
+    assert main(["--fixture", str(fixture)]) == 0
+    out = capsys.readouterr().out
+    assert "deliv-r1: review_noted" in out
+    assert "deliv-r1: gate_open_dry_run" in out
