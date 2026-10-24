@@ -24,7 +24,10 @@ controller (VPS) ──HTTPS POST /v1/runners──▶ agent :8787 (this image)
 ```
 
 - **Wake.** The controller's first launch request wakes the sleeping service. It
-  retries 502/503 and connection failures for up to 150 s.
+  retries 502/503 and connection failures for up to 150 s. In a multi-agent
+  swarm, the controller sends `GET /healthz` first to an agent with none of
+  its runners and waits for it to be ready. It moves to the next agent if
+  that one does not wake. See [Serverless runner swarm](../../docs/ci-runners.md#serverless-runner-swarm-multi-agent-pool-00064).
 - **Sleep.** When the jobs finish, the children exit and the agent sends one exit
   callback per child. Nothing then generates outbound traffic, so Railway can
   sleep the service. There are no timers or keep-alives.
@@ -221,6 +224,19 @@ On container stop, upstream's supervisor (PID 1) signals only its own desktop
 processes, so the agent and any in-flight runner end with the container. That
 is fine for sleep, which only happens once no job traffic remains. A redeploy
 while jobs run fails those jobs; drain first with `POST /v1/drain`.
+
+## Adding swarm agents 2 and 3 (operator only, HELD on spend)
+
+Each extra agent is a copy of this service: same source repo, config as code,
+`RAILWAY_DOCKERFILE_PATH` and variables, except for **its own**
+`OMEGA_CI_AGENT_TOKEN`. Keep `sleepApplication = true` (from `railway.toml`)
+and no static outbound IP, so it scales to zero. Add a `/config` volume like
+agent 1's and a custom domain `runnerN.ego.engineer` on port 8787, then add
+the Hostinger `CNAME` Railway shows. On the VPS, write the token to
+`/etc/omega-ci/secrets/desktop-N-token` (0600), add
+`OMEGA_CI_DESKTOP_N_URL` / `_TOKEN_FILE` to `controller.env`, leave
+`OMEGA_CI_MAX_RUNNERS` unset (sum = 24), and restart the controller. The full
+variable table is in [docs/ci-runners.md](../../docs/ci-runners.md#every-variable-and-value-3-agent-go-live).
 
 ## Cutover checklist (operator only, HELD)
 

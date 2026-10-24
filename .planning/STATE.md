@@ -169,6 +169,7 @@ Live 77.1 UAT (tests 1–6) is the user's next action, on `main`, using the cano
 
 ## Operator Next Steps
 
+- Phase 121 (00064 CI runner swarm): code is on `gsd/00064-runner-swarm` and backward compatible with one agent. Go-live is held for Ove: the Railway services `ubuntu-desktop-2/3` (paid spend; billing is PAST_DUE), the Hostinger CNAMEs for runner2/runner3.ego.engineer, and the controller env `OMEGA_CI_DESKTOP_2/3_*`. See `.planning/phases/121-ci-runner-swarm/121-01-SUMMARY.md`.
 - Phase 105 outer-driver work remains: compare live GitHub PR/check/Greptile evidence and organization inventory (a2/a3); inspect fonts, contrast, motion and reduced motion in a browser (a4); produce the signed openshell-podman/Anda receipt (a6); capture all four views with real data (a7); then perform the separately authorized export/publication flow. No local fixtures prove these outcomes.
 - Phase 97 remains deferred pending authoritative upstream MCP path/schema evidence; phase 77.1 live UAT remains user-owned (`/gsd:verify-work 77.1`).
 - Phase 99 is integrated onto main after Phases 97 and 98; it does not mark the milestone complete.

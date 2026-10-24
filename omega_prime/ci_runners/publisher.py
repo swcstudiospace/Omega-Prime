@@ -38,7 +38,16 @@ RUNNER_KINDS = frozenset(
         "refused",  # public-repo fork guard said no (reason only, no payload)
     }
 )
-DESKTOP_KINDS = frozenset({"wake_requested", "woke"})
+DESKTOP_KINDS = frozenset(
+    {
+        "wake_requested",
+        "woke",
+        # multi-agent pool (00064): agent label + reason/status only
+        "agent_woke",
+        "agent_unhealthy",
+        "agent_healthy",
+    }
+)
 
 
 class UnsafeEventError(RuntimeError):

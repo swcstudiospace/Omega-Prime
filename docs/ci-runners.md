@@ -18,6 +18,104 @@ work is done the runners exit, and Railway puts the idle Desktop to sleep.
 > performs them. Per-repository onboarding is in
 > [CI runner repository setup](ci-runners-repo-setup.md).
 
+## Serverless runner swarm (multi-agent pool, 00064)
+
+One controller can schedule across up to 5 runner agents. Each agent is its
+own Railway "Ubuntu Desktop" service with app sleeping on. The target layout is
+**3 agents × 8 slots = 24 concurrent jobs**. Every job still runs on
+`[self-hosted, linux, x64, omega-ci]`, and the labels and runner group are
+unchanged. With only the legacy `OMEGA_CI_DESKTOP_*` block set, the controller
+behaves exactly as before (one agent, same requests).
+
+### Every variable and value (3-agent go-live)
+
+Controller (`/etc/omega-ci/controller.env` on the VPS; secrets are **files**
+(mode 0600), never values):
+
+| Variable | Value | Notes |
+|---|---|---|
+| `OMEGA_CI_DESKTOP_URL` | `https://runner.ego.engineer` | Agent 1 (existing service). Unchanged. |
+| `OMEGA_CI_DESKTOP_TOKEN_FILE` | `/etc/omega-ci/secrets/desktop-token` | Agent 1 token. Unchanged. |
+| `OMEGA_CI_DESKTOP_CAPACITY` | `8` (optional) | Agent 1 slots, 1–10. Default 8 in a swarm. With one agent it defaults to `OMEGA_CI_MAX_RUNNERS`. |
+| `OMEGA_CI_DESKTOP_2_URL` | `https://runner2.ego.engineer` | Agent 2's 8787 custom domain. |
+| `OMEGA_CI_DESKTOP_2_TOKEN_FILE` | `/etc/omega-ci/secrets/desktop-2-token` | Must equal agent 2's `OMEGA_CI_AGENT_TOKEN`. |
+| `OMEGA_CI_DESKTOP_2_CAPACITY` | `8` (optional) | 1–10, default 8. |
+| `OMEGA_CI_DESKTOP_3_URL` | `https://runner3.ego.engineer` | Agent 3's 8787 custom domain. |
+| `OMEGA_CI_DESKTOP_3_TOKEN_FILE` | `/etc/omega-ci/secrets/desktop-3-token` | Must equal agent 3's `OMEGA_CI_AGENT_TOKEN`. |
+| `OMEGA_CI_DESKTOP_3_CAPACITY` | `8` (optional) | 1–10, default 8. |
+| `OMEGA_CI_MAX_RUNNERS` | **unset** (→ 24) | Pool cap. Defaults to the sum of the capacities and can only lower it. A value above the sum is refused. With one agent it is still 1–10. |
+
+Agents are numbered 2, 3, … with no gaps. A `_TOKEN_FILE` or `_CAPACITY` set
+without its `_URL` is refused, and so is a duplicate URL, so a typo cannot
+silently drop an agent.
+
+Each new agent service (Railway variables; same image, source and config as
+agent 1):
+
+| Variable / setting | Value |
+|---|---|
+| `OMEGA_CI_AGENT_TOKEN` | A fresh random value (≥32 chars) **per agent**; never reuse agent 1's |
+| `OMEGA_CI_AGENT_MAX_RUNNERS` | `8` (hard ceiling 10 per container) |
+| `OMEGA_CI_AGENT_REPOS` | `swcstudiospace/*` |
+| `OMEGA_CI_CONTROLLER_URL` | `https://ci.ego.engineer` |
+| `SERVERLESS_FRIENDLY` | `1` |
+| `PASSWORD` | ≥16 characters (desktop login; the health check fails without it) |
+| `RAILWAY_DOCKERFILE_PATH` | `deploy/ci-runner-desktop/Dockerfile` |
+| Config as code | `/deploy/ci-runner-desktop/railway.toml` (`sleepApplication = true`, health check `/healthz` on 3000) |
+| Domains | the generated 3000 domain plus a custom domain `runnerN.ego.engineer` → port **8787** |
+| Static outbound IP | **off** (Railway says it can keep a service awake) |
+
+DNS: `ego.engineer` is on Hostinger DNS. Each `runnerN` needs a `CNAME` to the
+target Railway shows when the custom domain is added (agent 1:
+`runner.ego.engineer CNAME jjqne2yw.up.railway.app`).
+
+### Scale-up and scale-down
+
+- **Scale to zero.** With no jobs, nothing contacts an agent. The controller
+  has no health loop and no timer per agent, and the agent makes no outbound
+  call except one exit callback per finished runner. Railway sleeps each
+  service after about 10 minutes without outbound traffic. Idle cost is then
+  about $0 (volume storage only).
+- **Wake on demand.** When a queued job needs a slot, the controller picks
+  the least-loaded agent: lowest `load / capacity`, healthy first, ties to
+  the lowest number. Load counts runners already placed, so a burst spreads
+  1, 2, 3, 1, 2, 3 instead of filling agent 1. If none of the controller's
+  runners are on that agent, it may be asleep. The controller first sends
+  `GET /healthz`, which wakes it, and retries connection errors and 502/503
+  within `OMEGA_CI_WAKE_BUDGET_S` (150 s) until the agent answers ready. Only
+  then does the controller send the JIT config. An agent that already runs
+  one of the controller's runners is awake, so it is not probed.
+- **Fallback.** An agent that does not become ready in the budget, reports
+  `draining`, or refuses the launch (409/4xx/5xx) is marked unhealthy for
+  60 s, doubling to at most 600 s. The next agent is tried in the same
+  launch. Unhealthy agents are tried last, not skipped forever, and one
+  success clears the record. A `429` marks the agent full until one of the
+  controller's runners on it is released, or 60 s pass. If every agent is
+  full, the scaler's normal capacity hold applies. Capacity is checked again
+  right before each fallback, so a launch that waited on a wake never
+  overfills an agent that other launches filled in the meantime. A launch
+  that got no answer (the wake budget ran out) stays on its agent even if
+  that agent's inventory is empty right now. The timed-out request may
+  still arrive, so the same single-use JIT config is never sent to a second
+  agent. The single-agent `find` path settles it, and the agent is marked
+  unhealthy, so the retry (a fresh JIT) prefers another agent.
+- **Health is event-driven.** Health only changes on a launch result.
+  Ghost-slot reconciles (`GET /v1/runners`) ask only the agents that hold
+  the controller's runners, so unused agents stay asleep. They ask every
+  agent only when a tracked runner's agent is unknown. An agent that does
+  not answer keeps all of its runners, plus every tracked runner whose
+  agent is unknown (unknown is never treated as gone). At startup, if some
+  agents are silent, the controller keeps the answering agents' children
+  (with their real generations, so exit callbacks still match) and mirrors
+  every other GitHub registration as an unknown child. A silent agent's
+  live runners are never treated as orphans. Reaps go to the agent that owns the runner. If
+  the owner is unknown, every agent is asked.
+- **Callbacks.** Each agent has its own token, and `/agent/events` accepts any
+  configured one.
+- **Events.** `omega.ci.desktop.agent_woke`, `agent_unhealthy` and
+  `agent_healthy` carry only the agent label (`agent1`…), a reason and a
+  status.
+
 ## How it works
 
 ```text
@@ -106,7 +204,7 @@ the agent. Secret values are never logged, put in a repr, or placed on argv.
 | `OMEGA_CI_LABELS` | `self-hosted,linux,x64,omega-ci` | Pool labels. |
 | `OMEGA_CI_RUNNER_GROUP` | `omega-ci` | Runner group display name. |
 | `OMEGA_CI_RUNNER_GROUP_ID` | — (org), `1` (repo) | Numeric group id; required in org scope and never inferred from the name. |
-| `OMEGA_CI_MAX_RUNNERS` | `8` | Concurrent runner cap, 1–10. |
+| `OMEGA_CI_MAX_RUNNERS` | `8` (one agent); sum of capacities (swarm) | Concurrent runner cap: 1–10 with one agent; with several, at most the sum of `OMEGA_CI_DESKTOP*_CAPACITY` (pool hard ceiling 50). |
 | `OMEGA_CI_IDLE_GRACE_S` | `180` | Idle grace before reaping, 0–3600 s. |
 | `OMEGA_CI_WAKE_BUDGET_S` | `150` | Wake retry budget, 1–900 s. |
 | `OMEGA_CI_GITHUB_APP_ID` | — | GitHub App id (App mode). |
@@ -116,6 +214,10 @@ the agent. Secret values are never logged, put in a repr, or placed on argv.
 | `OMEGA_CI_WEBHOOK_SECRET_FILE` | — | Path to the webhook HMAC secret. Required. |
 | `OMEGA_CI_DESKTOP_URL` | — | `https://` URL of the agent's 8787 domain. Required. |
 | `OMEGA_CI_DESKTOP_TOKEN_FILE` | — | Path to the agent bearer token. Required. |
+| `OMEGA_CI_DESKTOP_CAPACITY` | `OMEGA_CI_MAX_RUNNERS` (one agent), `8` (swarm) | Agent 1 slots, 1–10. |
+| `OMEGA_CI_DESKTOP_<n>_URL` | — | `https://` 8787 domain of agent *n* (2–5, no gaps). Optional; see [Serverless runner swarm](#serverless-runner-swarm-multi-agent-pool-00064). |
+| `OMEGA_CI_DESKTOP_<n>_TOKEN_FILE` | — | Path to agent *n*'s own bearer token. Required with its `_URL`. |
+| `OMEGA_CI_DESKTOP_<n>_CAPACITY` | `8` | Agent *n* slots, 1–10. |
 | `OMEGA_CI_PUBLISHER` | `jsonl` | `jsonl`, `null` or `eventstream`. |
 | `OMEGA_CI_EVENTS_PATH` | `~/.omega/ci-runners/events.jsonl` | JSONL event log. |
 | `OMEGA_CI_DEMAND_PATH` | `~/.omega/ci-runners/demand.json` | Queued-job backlog replayed after a restart (non-secret fields, mode 0600, entries older than 24 h dropped, each entry re-checked against GitHub before replay). |
@@ -683,18 +785,32 @@ verified, apt uses the snapshot, the Python CLIs are hash-locked, and
 
 ## Capacity and cost
 
-The Railway Desktop has 24 vCPU / 24 GB. Each runner is budgeted
+Each Railway Desktop has 24 vCPU / 24 GB. Each runner is budgeted
 2 vCPU / 2.5 GB, and 2 vCPU / 3 GB is reserved for the desktop and agent, so
-the default cap is 8 (hard ceiling 10). Railway usage pricing:
+each agent's cap is 8 (hard ceiling 10).
 
-| Situation | Estimate |
+Railway Pro pricing (docs.railway.com, checked 2026-10-24): $20 per
+vCPU-month, $10 per GB-month of RAM, $0.05 per GB egress, $0.15 per GB-month
+of volume. The $20/month Pro seat includes $20 of usage. The figures below come
+from agent 1's own Railway metrics on 2026-10-24 (AEDT). A busy agent averaged
+about 5 vCPU, 14.6 GB RAM and 2.3 GB/h egress, which is about $0.46 per busy
+hour (CPU $0.14, RAM $0.20, egress $0.12).
+
+| Per agent container | Estimate |
 |---|---|
-| Full pool (8 busy runners) | ≈ $0.71 / hour |
-| 3 h/day of full-pool CI | ≈ $65 / month |
-| 6 h/day of full-pool CI | ≈ $130 / month |
-| Idle but awake (e.g. a static outbound IP prevents sleep) | ≈ $22 / month extra |
-| Asleep | ≈ $0 compute (volume storage only) |
-| Controller on the existing VPS | $0 incremental |
+| Asleep (idle, scaled to zero) | ≈ $0 compute (volume storage only) |
+| Idle but awake (≈0.16 GB, e.g. sleep blocked) | ≈ $1.6 / month |
+| Busy 6 h/day | ≈ $83 / month |
+| Busy 12 h/day | ≈ $165 / month |
+| Busy 24/7 at the measured load | ≈ $335 / month |
+| Hard ceiling (24 vCPU + 24 GB pinned 24/7) | $720 / month + egress |
+
+Two extra agents (the 3-agent swarm) cost about $0 extra while idle and
+asleep. Busy, they cost up to twice the per-agent figure, for example ≈ $166/month
+for both at 6 h/day each. Spreading the *same* CI work over three agents
+mostly adds the per-container memory baseline, because total CPU-seconds are
+unchanged. Spend grows when the extra slots let more work run at once. The
+controller on the existing VPS adds $0.
 
 ## Failure handling
 

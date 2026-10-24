@@ -333,3 +333,81 @@ def test_injected_empty_dedupe_cache_is_used() -> None:
 
     asyncio.run(main())
     assert cache.seen("d-shared")
+
+
+def test_every_agent_token_is_accepted_on_the_exit_callback() -> None:
+    other = placeholder("agent-2-token")
+    rig = Rig(routes())
+    app = create_app(
+        rig.ctrl,
+        webhook_secret=WEBHOOK_SECRET,
+        agent_token=TOKEN,
+        extra_agent_tokens=(other,),
+    )
+    with pytest.raises(ValueError):
+        create_app(
+            rig.ctrl,
+            webhook_secret=WEBHOOK_SECRET,
+            agent_token=TOKEN,
+            extra_agent_tokens=("",),
+        )
+
+    async def main() -> None:
+        await rig.ctrl.start()
+        await rig.ctrl.settle()
+        await hook(app)
+        await rig.ctrl.settle()
+        runner = rig.only()
+        event = {
+            "type": "agent.runner_exited",
+            "name": runner.name,
+            "generation": runner.generation,
+            "exit_code": 0,
+        }
+        wrong = [("Authorization", "Bearer " + placeholder("agent-9-token"))]
+        response = await asgi_call(
+            app, "POST", "/agent/events", body=encode(event), headers=wrong
+        )
+        assert response.status == 401
+        good = [("Authorization", f"Bearer {other}")]
+        response = await asgi_call(
+            app, "POST", "/agent/events", body=encode(event), headers=good
+        )
+        assert response.status == 202
+        await rig.ctrl.settle()
+        assert runner.name not in rig.scaler.runners
+        await rig.ctrl.stop()
+
+    asyncio.run(main())
+
+
+def test_build_controller_app_wires_one_client_per_agent(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    tokens = {i: placeholder(f"agent-{i}-token") for i in (2, 3)}
+    for i in (2, 3):
+        write_secret(tmp_path / f"desk{i}", tokens[i])
+        env[f"OMEGA_CI_DESKTOP_{i}_URL"] = f"https://runner{i}.example.test"
+        env[f"OMEGA_CI_DESKTOP_{i}_TOKEN_FILE"] = str(tmp_path / f"desk{i}")
+    settings = ControllerSettings.from_env(env)
+    assert settings.max_runners == 24
+    app = build_controller_app(settings, transport=routes(), publisher=ListPublisher())
+    body = encode(
+        {
+            "type": "agent.runner_exited",
+            "name": "omega-ci-1-zzzz",
+            "generation": "g",
+            "exit_code": 0,
+        }
+    )
+
+    async def status(token: str) -> int:
+        headers = [("Authorization", f"Bearer {token}")]
+        response = await asgi_call(
+            app, "POST", "/agent/events", body=body, headers=headers
+        )
+        return response.status
+
+    # Agent 3's token is wired (not 401); an unknown token is refused.
+    assert asyncio.run(status(tokens[3])) != 401
+    assert asyncio.run(status(TOKEN)) != 401
+    assert asyncio.run(status(placeholder("agent-9-token"))) == 401

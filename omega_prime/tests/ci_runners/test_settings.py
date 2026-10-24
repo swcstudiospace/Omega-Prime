@@ -271,3 +271,74 @@ def test_agent_rejects(extra: dict[str, str], drop: str | None, match: str) -> N
 def test_parse_labels_dedupes_and_lowercases() -> None:
     assert parse_labels("Self-Hosted, linux,linux") == ("self-hosted", "linux")
     assert parse_labels(None) == DEFAULT_LABELS
+
+
+# -- multi-agent serverless pool (00064) ---------------------------------------
+
+
+def swarm_env(tmp_path: Path, **extra: str) -> dict[str, str]:
+    env = base_env(
+        tmp_path,
+        OMEGA_CI_DESKTOP_URL="https://runner.example.test",
+        OMEGA_CI_DESKTOP_2_URL="https://runner2.example.test",
+        OMEGA_CI_DESKTOP_2_TOKEN_FILE=str(tmp_path / "desk2"),
+        OMEGA_CI_DESKTOP_3_URL="https://runner3.example.test/",
+        OMEGA_CI_DESKTOP_3_TOKEN_FILE=str(tmp_path / "desk3"),
+    )
+    env.update(extra)
+    return {k: v for k, v in env.items() if v}
+
+
+def test_single_agent_is_the_legacy_block(tmp_path: Path) -> None:
+    s = ControllerSettings.from_env(base_env(tmp_path, OMEGA_CI_MAX_RUNNERS="6"))
+    [agent] = s.agents
+    assert (agent.index, agent.label, agent.url) == (1, "agent1", s.desktop_url)
+    assert agent.capacity == 6 and s.max_runners == 6
+    assert agent.token_file is s.desktop_token_file
+
+
+def test_three_agents_default_to_eight_each_and_a_pool_of_24(tmp_path: Path) -> None:
+    s = ControllerSettings.from_env(swarm_env(tmp_path))
+    assert [a.label for a in s.agents] == ["agent1", "agent2", "agent3"]
+    assert [a.capacity for a in s.agents] == [8, 8, 8] and s.max_runners == 24
+    assert s.agents[2].url == "https://runner3.example.test"
+    # Each token is bound to its own agent, so it can only go there.
+    assert [a.token_file.audience for a in s.agents] == [a.url for a in s.agents]
+    assert s.desktop_url == "https://runner.example.test"
+
+
+def test_pool_cap_may_be_lowered_but_not_raised_past_the_sum(tmp_path: Path) -> None:
+    s = ControllerSettings.from_env(
+        swarm_env(tmp_path, OMEGA_CI_MAX_RUNNERS="20", OMEGA_CI_DESKTOP_3_CAPACITY="4")
+    )
+    assert s.max_runners == 20 and [a.capacity for a in s.agents] == [8, 8, 4]
+    with pytest.raises(SettingsError, match="sum of agent capacities"):
+        ControllerSettings.from_env(swarm_env(tmp_path, OMEGA_CI_MAX_RUNNERS="25"))
+
+
+@pytest.mark.parametrize(
+    ("change", "match"),
+    [
+        ({"OMEGA_CI_DESKTOP_3_URL": "https://RUNNER2.example.test"}, "duplicates"),
+        ({"OMEGA_CI_DESKTOP_2_URL": "http://runner2.example.test"}, "https"),
+        ({"OMEGA_CI_DESKTOP_2_CAPACITY": "11"}, "1..10"),
+        ({"OMEGA_CI_DESKTOP_CAPACITY": "0"}, "1..10"),
+        ({"OMEGA_CI_DESKTOP_2_TOKEN_FILE": ""}, "OMEGA_CI_DESKTOP_2_TOKEN_FILE"),
+        ({"OMEGA_CI_DESKTOP_5_URL": "https://runner5.example.test"}, "without gaps"),
+        ({"OMEGA_CI_DESKTOP_4_TOKEN_FILE": "/x"}, "without OMEGA_CI_DESKTOP_4_URL"),
+    ],
+)
+def test_bad_agent_blocks_are_refused(
+    tmp_path: Path, change: dict[str, str], match: str
+) -> None:
+    with pytest.raises(SettingsError, match=match):
+        ControllerSettings.from_env(swarm_env(tmp_path, **change))
+
+
+def test_agent_side_cap_stays_ten_per_container() -> None:
+    assert (
+        AgentSettings.from_env(agent_env(OMEGA_CI_AGENT_MAX_RUNNERS="8")).max_runners
+        == 8
+    )
+    with pytest.raises(SettingsError, match=r"1\.\.10"):
+        AgentSettings.from_env(agent_env(OMEGA_CI_AGENT_MAX_RUNNERS="11"))

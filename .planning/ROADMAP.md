@@ -493,3 +493,11 @@ Plans:
 - [ ] 120-02-PLAN.md — after 120-01: GitHub App/PAT JIT client, Desktop wake client, controller, ASGI app, CLI.
 - [ ] 120-03-PLAN.md — after 120-02: runner-agent + supervisor + Desktop image overlay (not deployed).
 - [ ] 120-04-PLAN.md — after 120-03: docs, per-repo guide, VPS templates, cutover runbook, cost.
+
+### Phase 121: CI runner swarm (serverless multi-agent pool, 00064)
+
+**Goal:** one controller schedules across N serverless Railway Desktop runner agents (target 3 × 8 = 24 slots). It places runners on the least-loaded agent, wakes a sleeping agent with `GET /healthz` before placing on it, fails over (429 means full, a definitive failure means unhealthy with a cooldown), and reconciles ghosts per agent. There is no idle polling, so every agent scales to zero. It stays backward compatible with one agent. Tracking: Notion Agent Task Graph (Linear blocked by the workspace's free issue limit). Branch `gsd/00064-runner-swarm`. Creating the Railway services and domains, setting up DNS and changing the live controller env are held for Ove (spend go).
+**Depends on:** Phase 120.
+
+Plans:
+- [x] 121-01-PLAN.md — settings (agents 1..5), DesktopClient.wake, pool.DesktopPool, controller/app wiring, tests, docs and cost.

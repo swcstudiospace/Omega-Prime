@@ -42,10 +42,13 @@ def create_app(
     *,
     webhook_secret: bytes,
     agent_token: str,
+    extra_agent_tokens: tuple[str, ...] = (),
     dedupe: DeliveryLRU | None = None,
 ) -> ASGIApp:
-    if not webhook_secret or not agent_token:
+    if not webhook_secret or not agent_token or not all(extra_agent_tokens):
         raise ValueError("webhook secret and agent token are required")
+    # Each runner agent has its own token (00064); any of them may report exits.
+    agent_tokens = (agent_token, *extra_agent_tokens)
     seen = dedupe if dedupe is not None else DeliveryLRU()
 
     async def lifespan(receive: Receive, send: Send) -> None:
@@ -85,7 +88,9 @@ def create_app(
 
     async def callback(scope: Scope, receive: Receive, send: Send) -> None:
         headers = header_map(scope)
-        if not bearer_ok(headers.get("authorization"), agent_token):
+        auth = headers.get("authorization")
+        # Compare against every token (no early exit) to keep timing flat.
+        if not any([bearer_ok(auth, token) for token in agent_tokens]):
             raise WebhookRejected(401, "unauthorized")
         body = await read_body(receive, CALLBACK_MAX_BYTES)
         try:
@@ -152,18 +157,44 @@ def create_app(
     return app
 
 
+def _constant(token: str) -> Callable[[], str]:
+    return lambda: token
+
+
 def build_controller_app(settings: Any, **overrides: Any) -> ASGIApp:
     """Wire production adapters from validated :class:`ControllerSettings`."""
     from omega_prime.ci_runners.demand import DemandStore
     from omega_prime.ci_runners.desktop import DesktopClient
     from omega_prime.ci_runners.github import GitHubClient
     from omega_prime.ci_runners.http import urllib_transport
+    from omega_prime.ci_runners.pool import DesktopPool
     from omega_prime.ci_runners.publisher import make_publisher
     from omega_prime.ci_runners.scaler import Scaler
+    from omega_prime.ci_runners.settings import AgentEndpoint
 
     transport = overrides.pop("transport", urllib_transport)
     webhook_secret = settings.webhook_secret_file.read()
-    desktop_token = settings.desktop_token_file.read()
+    agents = tuple(settings.agents) or (
+        AgentEndpoint(
+            1, settings.desktop_url, settings.desktop_token_file, settings.max_runners
+        ),
+    )
+    tokens = tuple(agent.token_file.read() for agent in agents)
+    pool = DesktopPool.of(
+        [
+            (
+                agent.label,
+                DesktopClient(
+                    agent.url,
+                    _constant(token),
+                    transport,
+                    budget_s=settings.wake_budget_s,
+                ),
+                agent.capacity,
+            )
+            for agent, token in zip(agents, tokens, strict=True)
+        ]
+    )
     controller = Controller(
         scaler=Scaler(
             labels=settings.labels,
@@ -173,19 +204,17 @@ def build_controller_app(settings: Any, **overrides: Any) -> ASGIApp:
             idle_grace_s=settings.idle_grace_s,
         ),
         github=GitHubClient.from_settings(settings, transport),
-        desktop=DesktopClient(
-            settings.desktop_url,
-            lambda: desktop_token,
-            transport,
-            budget_s=settings.wake_budget_s,
-        ),
+        desktop=pool,
         publisher=overrides.pop("publisher", None)
         or make_publisher(settings.publisher, settings.events_path),
-        extra_secrets=lambda: (webhook_secret, desktop_token),
+        extra_secrets=lambda: (webhook_secret, *tokens),
         demand=DemandStore(settings.demand_path),
     )
     return create_app(
-        controller, webhook_secret=webhook_secret.encode(), agent_token=desktop_token
+        controller,
+        webhook_secret=webhook_secret.encode(),
+        agent_token=tokens[0],
+        extra_agent_tokens=tokens[1:],
     )
 
 

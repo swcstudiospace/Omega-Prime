@@ -115,6 +115,19 @@ The table records names and purposes only.
 | `OMEGA_CI_AGENT_WORK_ROOT` | Sets where the Desktop runner agent creates per-runner private work directories. |
 | `OMEGA_CI_CONTROLLER_URL` | Selects the CI autoscaler URL the Desktop runner agent reports runner exits to. |
 | `OMEGA_CI_DEMAND_PATH` | Overrides the JSON file where the CI autoscaler persists queued jobs so a restart replays them. |
+| `OMEGA_CI_DESKTOP_2_CAPACITY` | Sets how many concurrent runners serverless runner swarm agent 2 takes (1-10, default 8). |
+| `OMEGA_CI_DESKTOP_2_TOKEN_FILE` | Names a protected file containing the bearer token of serverless runner swarm agent 2. |
+| `OMEGA_CI_DESKTOP_2_URL` | Selects the https base URL of serverless runner swarm agent 2 (agents are numbered without gaps). |
+| `OMEGA_CI_DESKTOP_3_CAPACITY` | Sets how many concurrent runners serverless runner swarm agent 3 takes (1-10, default 8). |
+| `OMEGA_CI_DESKTOP_3_TOKEN_FILE` | Names a protected file containing the bearer token of serverless runner swarm agent 3. |
+| `OMEGA_CI_DESKTOP_3_URL` | Selects the https base URL of serverless runner swarm agent 3 (agents are numbered without gaps). |
+| `OMEGA_CI_DESKTOP_4_CAPACITY` | Sets how many concurrent runners serverless runner swarm agent 4 takes (1-10, default 8). |
+| `OMEGA_CI_DESKTOP_4_TOKEN_FILE` | Names a protected file containing the bearer token of serverless runner swarm agent 4. |
+| `OMEGA_CI_DESKTOP_4_URL` | Selects the https base URL of serverless runner swarm agent 4 (agents are numbered without gaps). |
+| `OMEGA_CI_DESKTOP_5_CAPACITY` | Sets how many concurrent runners serverless runner swarm agent 5 takes (1-10, default 8). |
+| `OMEGA_CI_DESKTOP_5_TOKEN_FILE` | Names a protected file containing the bearer token of serverless runner swarm agent 5. |
+| `OMEGA_CI_DESKTOP_5_URL` | Selects the https base URL of serverless runner swarm agent 5 (agents are numbered without gaps). |
+| `OMEGA_CI_DESKTOP_CAPACITY` | Sets how many concurrent runners the first Desktop runner agent takes (1-10). |
 | `OMEGA_CI_DESKTOP_TOKEN_FILE` | Names a protected file containing the bearer token shared with the Desktop runner agent. |
 | `OMEGA_CI_DESKTOP_URL` | Selects the https base URL of the Desktop runner agent. |
 | `OMEGA_CI_EVENTS_PATH` | Overrides the JSONL file the CI autoscaler appends redacted events to. |
@@ -124,7 +137,7 @@ The table records names and purposes only.
 | `OMEGA_CI_GITHUB_PAT_FILE` | Names a protected file containing a fallback-free PAT used only when no GitHub App is configured. |
 | `OMEGA_CI_IDLE_GRACE_S` | Sets how long an idle CI runner waits for work before it is reaped. |
 | `OMEGA_CI_LABELS` | Sets the runner labels the CI autoscaler pool carries and matches jobs against. |
-| `OMEGA_CI_MAX_RUNNERS` | Caps concurrent CI autoscaler runners (hard ceiling 10). |
+| `OMEGA_CI_MAX_RUNNERS` | Caps concurrent CI autoscaler runners (1-10 with one agent; at most the sum of agent capacities in a swarm). |
 | `OMEGA_CI_ORG` | Names the GitHub organisation whose self-hosted runner group the CI autoscaler serves. |
 | `OMEGA_CI_PUBLIC_REPOS` | Opts listed public repositories or owner/* (covered by OMEGA_CI_REPOS) into the CI autoscaler; each workflow run is verified same-repository and not a fork before a runner is launched. |
 | `OMEGA_CI_PUBLISHER` | Selects the CI autoscaler event publisher (jsonl, null or eventstream). |
