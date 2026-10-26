@@ -5,5 +5,5 @@ Looks for `last-plan.json` under `OMEGA_PRIME_STATE_DIR/ultrathink` first, then 
 Grok Bot routine a new install can create:
 - name: Omega Prime ultrathink
 - prompt: Call the omega_command tool with command `/omega-ultrathink-routine`. If a plan is found, work that plan. If none is found, say so and stop.
-- schedule: weekdays at 09:30 local (`30 9 * * 1-5`)
+- trigger: when an operator message contains `ultrathink`. Event-driven only; no timer or cron schedule.
 </routine>

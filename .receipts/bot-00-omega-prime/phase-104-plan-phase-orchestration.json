@@ -1,0 +1,106 @@
+{
+  "task_id": "phase-104-plan-phase-orchestration",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T15:00:00Z",
+  "completed_at": "2026-10-20T15:45:00Z",
+  "commands": [
+    {
+      "cmd": "node ~/.claude/gsd-core/bin/gsd-tools.cjs query init.plan-phase 104",
+      "exit_code": 0,
+      "output_tail": "phase_found: true; phase_status: Pending; phase_req_ids: TD-01..TD-08; plan_checker_enabled: true; research_enabled: false"
+    },
+    {
+      "cmd": "node ~/.claude/gsd-core/bin/gsd-tools.cjs query roadmap.get-phase 104",
+      "exit_code": 0,
+      "output_tail": "found: true; goal extracted from '### Phase 104: Task Dashboard'"
+    },
+    {
+      "cmd": "node ~/.claude/gsd-core/bin/gsd-tools.cjs check ui-plan-gate 104 --raw",
+      "exit_code": 0,
+      "output_tail": "frontend: true; block: false; hasUiSpec: false (matchedToken: dashboard)"
+    },
+    {
+      "cmd": "node ~/.claude/gsd-core/bin/lib/edge-probe.cjs <(TD-01..TD-08 from milestones/v21-REQUIREMENTS.md)",
+      "exit_code": 0,
+      "output_tail": "coverage.applicable=20, resolved=0, unresolved=20, unclassified=2 (handed to planner for D-06 resolution)"
+    },
+    {
+      "cmd": "node ~/.claude/gsd-core/bin/gsd-tools.cjs check verify-command-paths 104 --raw",
+      "exit_code": 0,
+      "output_tail": "status: not_applicable (all targets are not-yet-created omega_prime/dashboard files); no blocker/warning findings"
+    },
+    {
+      "cmd": "node ~/.claude/gsd-core/bin/gsd-tools.cjs check verify-failure-directions 104 --raw",
+      "exit_code": 0,
+      "output_tail": "status: ok; every runnable <automated> command carries a <fails_when> statement; nonok=0"
+    },
+    {
+      "cmd": "grep -h 'requirements' .planning/phases/104-task-dashboard/104-0*-PLAN.md",
+      "exit_code": 0,
+      "output_tail": "union across plans 01-07 = TD-01,TD-02,TD-03,TD-04,TD-05,TD-06,TD-07,TD-08 (8/8 covered)"
+    },
+    {
+      "cmd": "grep -h '^wave:\\|^depends_on:\\|^plan:' .planning/phases/104-task-dashboard/104-0*-PLAN.md",
+      "exit_code": 0,
+      "output_tail": "plan01 wave1 []; plans02-05 wave2 [104-01]; plan06 wave3 [104-05]; plan07 wave4 [104-02,104-03,104-04,104-06] — U4 -> (U1|U2|U3|U5) -> U6 -> U7"
+    },
+    {
+      "cmd": "node ~/.claude/gsd-core/bin/gsd-tools.cjs query check.decision-coverage-plan .planning/phases/104-task-dashboard .planning/phases/104-task-dashboard/CONTEXT.md",
+      "exit_code": 0,
+      "output_tail": "passed: true; skipped: true; reason: no trackable decisions (prose CONTEXT.md per repo convention)"
+    },
+    {
+      "cmd": "node ~/.claude/gsd-core/bin/gsd-tools.cjs query state.planned-phase --phase 104 --name 'Task Dashboard' --plans 7",
+      "exit_code": 0,
+      "output_tail": "updated: [Status, Current Position, progress.total_plans, state_head, gsd_state_version, Current Phase Name]; plan_count: 7"
+    },
+    {
+      "cmd": "node ~/.claude/gsd-core/bin/gsd-tools.cjs query roadmap.annotate-dependencies 104",
+      "exit_code": 0,
+      "output_tail": "waves: 4; cross_cutting_constraints: 0; updated: false (idempotent — plan list already carries wave annotations)"
+    },
+    {
+      "cmd": "node ~/.claude/gsd-core/bin/gsd-tools.cjs check gap-analysis.plan-post .planning/phases/104-task-dashboard 'TD-01, TD-02, TD-03, TD-04, TD-05, TD-06, TD-07, TD-08' --raw",
+      "exit_code": 0,
+      "output_tail": "block: false (advisory). Table flags TD-01..08 'Missing from REQUIREMENTS.md' because it reads the project-root file; this repo's v16+ convention keeps milestone requirements in milestones/vNN-REQUIREMENTS.md — coverage proven by the grep command above."
+    }
+  ],
+  "claims": [
+    { "claim": "Phase 104 'Task Dashboard' is registered under milestone v21 in ROADMAP.md and STATE.md points at it (phase_found=true, status Pending before planning).", "evidence_command_index": 0 },
+    { "claim": "UI gate ran and did not block (frontend detected, block=false); no UI-SPEC required this run — the uplift's PAGE_TASK_DASHBOARD section is the UI contract.", "evidence_command_index": 2 },
+    { "claim": "Deterministic plan probes found no findings: every runnable verify command states a failure signal and no probe reported blocker/warning severity.", "evidence_command_index": 5 },
+    { "claim": "All eight phase requirement IDs TD-01..TD-08 are covered by the seven plans' frontmatter requirements fields.", "evidence_command_index": 6 },
+    { "claim": "Plan waves/dependencies encode the operator-fixed unit order U4 -> (U1 parallel U2 parallel U3 parallel U5) -> U6 -> U7.", "evidence_command_index": 7 },
+    { "claim": "Decision coverage gate passed (skipped: prose CONTEXT.md, matching the v18/v19 convention).", "evidence_command_index": 8 },
+    { "claim": "Planning completion recorded in STATE.md with plan_count 7.", "evidence_command_index": 9 },
+    { "claim": "Post-planning gap-analysis gate is advisory-only (block=false) and its warning is explained by the repo's milestone-requirements convention.", "evidence_command_index": 11 }
+  ],
+  "unverified": [
+    "Checker and planner verdicts are subagent transcript evidence (history://PlanPhase104, history://RevisePhase104, history://CheckPhase104, history://CheckPhase104b: ISSUES FOUND iteration 1 with 4 blockers + 1 warning, revised, VERIFICATION PASSED iteration 2), not commands a gate can re-run.",
+    "Named gsd-planner/gsd-plan-checker subagent types are unavailable on this runtime (real dispatch attempt returned 'Unknown agent'); roles ran as persona-bootstrapped general subagents reading the canonical agent definition files — independent contexts were preserved, but this is a runtime gap, not the named-agent path.",
+    "No product code was written or run this session (planning only): ruff/mypy/pytest outcomes for the dashboard package are unknown until /gsd-execute-phase 104 runs.",
+    "The edge probe's 2 unclassified rows (TD-05, TD-06) are carried as flagged assumptions in 104-07 for human review at verification time.",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/state.json",
+    ".planning/milestones/v21-REQUIREMENTS.md",
+    ".planning/phases/104-task-dashboard/CONTEXT.md",
+    ".planning/phases/104-task-dashboard/104-UPLIFT.xml",
+    ".planning/phases/104-task-dashboard/104-01-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-02-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-03-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-04-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-05-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-06-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-07-PLAN.md",
+    ".receipts/bot-00-omega-prime/phase-104-task-dashboard-planning.json",
+    ".receipts/bot-00-omega-prime/phase-104-plan-phase-orchestration.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "git revert of the planning commit restores ROADMAP/STATE/state.json to v19-complete and removes the phase directory; nothing else touches the tree.",
+  "approvals": [],
+  "approved_by": ""
+}

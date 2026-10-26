@@ -5,9 +5,16 @@ on:
   pull_request:
 
 # Shared receipt logic lives in omega_prime/scripts/ci_receipt.py (stdlib only).
+#
+# Runner: every job runs on the omega-ci pool ([self-hosted, linux, x64,
+# omega-ci], docs/ci-runners.md), never on GitHub-hosted runners. Interpreters
+# and Node come from the runner image's read-only tool cache (setup-python /
+# setup-node cache hits); installs land in the job's own HOME.
+# Fork pull requests never reach the pool (job-level same-repository guard).
 
 # Least privilege: checkout reads content; artifact upload uses the Actions
 # runtime credential, so contents read is enough (no actions write claim).
+
 permissions:
   contents: read
 
@@ -20,7 +27,8 @@ concurrency:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -29,6 +37,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         id: checkout
+      - name: writable tool cache when the image lacks this Python
+        run: |
+          set -euo pipefail
+          ver="${{ matrix.python-version }}"
+          if compgen -G "/opt/hostedtoolcache/Python/${ver}."*/x64.complete > /dev/null; then
+            echo "image cache has Python ${ver}"
+            exit 0
+          fi
+          # The image's tool cache is read-only and currently ships 3.10 and
+          # 3.12. A missing interpreter is downloaded into this job's temp
+          # dir (setup-python's normal cache miss) instead of failing the
+          # mkdir on /opt/hostedtoolcache. Shipping 3.13 and 3.14 in
+          # deploy/ci-runner-desktop/Dockerfile remains the follow-up so the
+          # pool does not download them.
+          cache="$RUNNER_TEMP/hostedtoolcache"
+          mkdir -p "$cache"
+          echo "RUNNER_TOOL_CACHE=$cache" >> "$GITHUB_ENV"
+          echo "AGENT_TOOLSDIRECTORY=$cache" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v7
         id: setup_python
         with:
@@ -64,7 +90,7 @@ jobs:
         # from this interpreter. Every shipping install carries it: the Bot
         # launcher and the image install requirements-lock.txt, and the
         # documented manual install is .[dev].
-        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev]'
+        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev,eventstream]'
       - name: resolved distributions
         id: resolved_distributions
         run: python3 omega_prime/scripts/ci_receipt.py run resolved_distributions -- python3 -m pip list --format=json
@@ -118,7 +144,8 @@ jobs:
             ${{ runner.temp }}/phase48-suite.xml
           if-no-files-found: warn
   lint:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -127,6 +154,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         id: checkout
+      - name: writable tool cache when the image lacks this Python
+        run: |
+          set -euo pipefail
+          ver="${{ matrix.python-version }}"
+          if compgen -G "/opt/hostedtoolcache/Python/${ver}."*/x64.complete > /dev/null; then
+            echo "image cache has Python ${ver}"
+            exit 0
+          fi
+          # The image's tool cache is read-only and currently ships 3.10 and
+          # 3.12. A missing interpreter is downloaded into this job's temp
+          # dir (setup-python's normal cache miss) instead of failing the
+          # mkdir on /opt/hostedtoolcache. Shipping 3.13 and 3.14 in
+          # deploy/ci-runner-desktop/Dockerfile remains the follow-up so the
+          # pool does not download them.
+          cache="$RUNNER_TEMP/hostedtoolcache"
+          mkdir -p "$cache"
+          echo "RUNNER_TOOL_CACHE=$cache" >> "$GITHUB_ENV"
+          echo "AGENT_TOOLSDIRECTORY=$cache" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v7
         id: setup_python
         with:
@@ -143,7 +188,7 @@ jobs:
         run: python3 omega_prime/scripts/ci_receipt.py run pip_identity -- python3 -m pip --version
       - name: install
         id: install
-        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev]'
+        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev,eventstream]'
       - name: resolved distributions
         id: resolved_distributions
         run: python3 omega_prime/scripts/ci_receipt.py run resolved_distributions -- python3 -m pip list --format=json
@@ -165,7 +210,8 @@ jobs:
           STAGES: checkout setup_python interpreter_identity pip_identity install resolved_distributions pip_check ruff ruff_format
         run: python3 omega_prime/scripts/ci_receipt.py summary
   types:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -174,6 +220,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         id: checkout
+      - name: writable tool cache when the image lacks this Python
+        run: |
+          set -euo pipefail
+          ver="${{ matrix.python-version }}"
+          if compgen -G "/opt/hostedtoolcache/Python/${ver}."*/x64.complete > /dev/null; then
+            echo "image cache has Python ${ver}"
+            exit 0
+          fi
+          # The image's tool cache is read-only and currently ships 3.10 and
+          # 3.12. A missing interpreter is downloaded into this job's temp
+          # dir (setup-python's normal cache miss) instead of failing the
+          # mkdir on /opt/hostedtoolcache. Shipping 3.13 and 3.14 in
+          # deploy/ci-runner-desktop/Dockerfile remains the follow-up so the
+          # pool does not download them.
+          cache="$RUNNER_TEMP/hostedtoolcache"
+          mkdir -p "$cache"
+          echo "RUNNER_TOOL_CACHE=$cache" >> "$GITHUB_ENV"
+          echo "AGENT_TOOLSDIRECTORY=$cache" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v7
         id: setup_python
         with:
@@ -190,7 +254,7 @@ jobs:
         run: python3 omega_prime/scripts/ci_receipt.py run pip_identity -- python3 -m pip --version
       - name: install
         id: install
-        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev]'
+        run: python3 omega_prime/scripts/ci_receipt.py run install -- python3 -m pip install -e '.[dev,eventstream]'
       - name: resolved distributions
         id: resolved_distributions
         run: python3 omega_prime/scripts/ci_receipt.py run resolved_distributions -- python3 -m pip list --format=json
@@ -209,7 +273,8 @@ jobs:
           STAGES: checkout setup_python interpreter_identity pip_identity install resolved_distributions pip_check mypy
         run: python3 omega_prime/scripts/ci_receipt.py summary
   docs:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -217,7 +282,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: install
-        run: pip install -e . pytest
+        run: python -m pip install -e . pytest
       - name: docs link tests
         run: python3 -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q
       - name: tool catalog currency
@@ -233,7 +298,8 @@ jobs:
   # surface all agree with upstream at the pin. Fail-closed: any mismatch
   # fails the job naming the disagreeing pair (see sidecar/provenance.py).
   redteam-provenance:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 15
     permissions:
       contents: read
@@ -256,7 +322,8 @@ jobs:
   # the job with the diff attached. Hermetic: stdlib only, no openshell
   # binary, no network.
   sandbox-policy-drift:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 15
     permissions:
       contents: read
@@ -266,12 +333,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: regenerate sandbox policy
-        run: python3 -m omega_prime.sandbox.policy_gen --seat omega_prime/contracts/policies/omega-prime.json --out /tmp/sandbox-policy.regen.yaml
+        run: python3 -m omega_prime.sandbox.policy_gen --seat omega_prime/contracts/policies/omega-prime.json --out "$RUNNER_TEMP/sandbox-policy.regen.yaml"
       - name: diff against committed policy
         run: |
           set -o pipefail
-          diff -u omega_prime/hosting/openshell/sandbox-policy.yaml /tmp/sandbox-policy.regen.yaml \
-            | tee /tmp/sandbox-policy.diff || {
+          diff -u omega_prime/hosting/openshell/sandbox-policy.yaml "$RUNNER_TEMP/sandbox-policy.regen.yaml" \
+            | tee "$RUNNER_TEMP/sandbox-policy.diff" || {
             echo "::error::sandbox-policy.yaml drifted from the generator output (see diff above). Regenerate with: python3 -m omega_prime.sandbox.policy_gen --seat omega_prime/contracts/policies/omega-prime.json --out omega_prime/hosting/openshell/sandbox-policy.yaml"
             exit 1
           }
@@ -281,6 +348,96 @@ jobs:
         with:
           name: sandbox-policy-drift-${{ github.sha }}
           path: |
-            /tmp/sandbox-policy.regen.yaml
-            /tmp/sandbox-policy.diff
+            ${{ runner.temp }}/sandbox-policy.regen.yaml
+            ${{ runner.temp }}/sandbox-policy.diff
           if-no-files-found: warn
+
+  eventstream-ts:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: packages/eventstream-ts/package-lock.json
+      - name: install
+        working-directory: packages/eventstream-ts
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: typecheck
+        working-directory: packages/eventstream-ts
+        run: npm run typecheck
+      # vitest sizes its pool from the visible CPUs (48 on a pool host); the
+      # Desktop's pid cgroup (pids.max 1000) is shared by every concurrent job,
+      # so cap it at the runner's 2 vCPU budget.
+      - name: unit tests
+        working-directory: packages/eventstream-ts
+        run: npm run test:unit -- --minWorkers=1 --maxWorkers=2
+      - name: schema contract
+        working-directory: packages/eventstream-ts
+        run: npm run test:contract -- --minWorkers=1 --maxWorkers=2
+  # Not runnable on the pool yet: `services:` needs a Docker daemon, which
+  # the omega-ci runners do not have, and omega_prime/scripts/eventstream_it.py
+  # drives that service container through `docker inspect/exec/cp` with fixed
+  # host ports 6651/8443. A pool-native harness (rootless podman with per-job
+  # ports, or a Pulsar binary in the runner image) is the follow-up; until it
+  # lands this job fails at container initialisation rather than being
+  # skipped or moved off the pool.
+  eventstream-it:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    services:
+      pulsar:
+        image: apachepulsar/pulsar:5.0.0@sha256:7222f3199a0b2418abde9ce0906862598415b19b494ae185db189938cfc43fd3
+        options: --entrypoint /bin/bash --interactive --tty --publish 127.0.0.1:6651:6651 --publish 127.0.0.1:8443:8443
+    steps:
+      - uses: actions/checkout@v7
+        id: checkout
+      - uses: actions/setup-python@v7
+        id: setup_python
+        with:
+          python-version: "3.13"
+      - name: install eventstream dependencies
+        run: python -m pip install -e '.[dev,eventstream]'
+      - name: prepare owned secure service
+        env:
+          EVENTSTREAM_CONTAINER_ID: ${{ job.services.pulsar.id }}
+          EVENTSTREAM_OWNERSHIP_FILE: ${{ runner.temp }}/eventstream-it/ownership.json
+        run: python omega_prime/scripts/eventstream_it.py prepare --container-id "$EVENTSTREAM_CONTAINER_ID" --mode owned-secure --ownership-file "$EVENTSTREAM_OWNERSHIP_FILE"
+      - name: start owned secure service
+        env:
+          EVENTSTREAM_CONTAINER_ID: ${{ job.services.pulsar.id }}
+          EVENTSTREAM_OWNERSHIP_FILE: ${{ runner.temp }}/eventstream-it/ownership.json
+        run: python omega_prime/scripts/eventstream_it.py start --container-id "$EVENTSTREAM_CONTAINER_ID" --mode owned-secure --ownership-file "$EVENTSTREAM_OWNERSHIP_FILE"
+      - name: wait for owned secure service
+        env:
+          EVENTSTREAM_CONTAINER_ID: ${{ job.services.pulsar.id }}
+          EVENTSTREAM_OWNERSHIP_FILE: ${{ runner.temp }}/eventstream-it/ownership.json
+        run: |
+          python omega_prime/scripts/eventstream_it.py wait --container-id "$EVENTSTREAM_CONTAINER_ID" --mode owned-secure --ownership-file "$EVENTSTREAM_OWNERSHIP_FILE"
+          set -a
+          source "$RUNNER_TEMP/eventstream-it/client.env"
+          set +a
+          printf 'OMEGA_EVENTSTREAM_IT_URL=%s\nOMEGA_EVENTSTREAM_IT_ADMIN_URL=%s\nOMEGA_EVENTSTREAM_IT_OWNERSHIP_FILE=%s\n' "$OMEGA_EVENTSTREAM_IT_URL" "$OMEGA_EVENTSTREAM_IT_ADMIN_URL" "$OMEGA_EVENTSTREAM_IT_OWNERSHIP_FILE" >> "$GITHUB_ENV"
+          printf 'OMEGA_EVENTSTREAM_TOKEN_FILE=%s\nOMEGA_EVENTSTREAM_ADMIN_TOKEN_FILE=%s\nOMEGA_EVENTSTREAM_TLS_CA_FILE=%s\nOMEGA_EVENTSTREAM_AUTH_KEY_FILE=%s\nOMEGA_EVENTSTREAM_ENCRYPTION_KEY_FILE=%s\nOMEGA_EVENTSTREAM_ENCRYPTION_PUBLIC_KEY_FILE=%s\nOMEGA_EVENTSTREAM_JWT_PUBLIC_KEY_FILE=%s\nOMEGA_EVENTSTREAM_PRIVATE_KEY_FILE=%s\n' "$OMEGA_EVENTSTREAM_TOKEN_FILE" "$OMEGA_EVENTSTREAM_ADMIN_TOKEN_FILE" "$OMEGA_EVENTSTREAM_TLS_CA_FILE" "$OMEGA_EVENTSTREAM_AUTH_KEY_FILE" "$OMEGA_EVENTSTREAM_ENCRYPTION_KEY_FILE" "$OMEGA_EVENTSTREAM_ENCRYPTION_PUBLIC_KEY_FILE" "$OMEGA_EVENTSTREAM_JWT_PUBLIC_KEY_FILE" "$OMEGA_EVENTSTREAM_PRIVATE_KEY_FILE" >> "$GITHUB_ENV"
+      - name: owned secure broker integration matrix
+        env:
+          OMEGA_EVENTSTREAM_IT_MODE: owned-secure
+        run: python -m pytest deploy/pulsar/integration/test_pulsar_integration.py -m eventstream_integration -q
+      - name: stop owned secure service and remove credentials
+        if: always()
+        env:
+          EVENTSTREAM_CONTAINER_ID: ${{ job.services.pulsar.id }}
+          EVENTSTREAM_OWNERSHIP_FILE: ${{ runner.temp }}/eventstream-it/ownership.json
+        run: |
+          if [ -f "$EVENTSTREAM_OWNERSHIP_FILE" ]; then
+            python omega_prime/scripts/eventstream_it.py stop --container-id "$EVENTSTREAM_CONTAINER_ID" --mode owned-secure --ownership-file "$EVENTSTREAM_OWNERSHIP_FILE"
+          fi

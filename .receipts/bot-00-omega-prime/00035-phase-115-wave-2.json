@@ -1,0 +1,82 @@
+{
+ "task_id": "00035-phase-115-wave-2",
+ "bot": "bot-00-omega-prime",
+ "started_at": "2026-10-21T17:00:00Z",
+ "completed_at": "2026-10-21T18:30:00Z",
+ "commands": [
+  {
+   "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_events_ws.py",
+   "exit_code": 0,
+   "output_tail": "23 passed (stable across four runs; proves compute_deltas semantics, /ws/events wire protocol, 4429 cap, 4403 guard refusals, and the <2s watcher-nudge wake path)"
+  },
+  {
+   "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_events_ws.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_app_fixes.py omega_prime/tests/test_dashboard_poller_fixes.py omega_prime/tests/test_dashboard_terminal_api.py omega_prime/tests/test_dashboard_terminal_ws.py",
+   "exit_code": 0,
+   "output_tail": "96 passed, 1 skipped, 1 warning (proves /api/snapshot, /api/stream, the HTTP guard 405/403 and the CSP are unchanged from post-115-02)"
+  },
+  {
+   "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_*.py",
+   "exit_code": 0,
+   "output_tail": "275 passed, 1 skipped, 1 warning (full dashboard suite incl. 115-01/02/03/04 tests)"
+  },
+  {
+   "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k dashboard",
+   "exit_code": 2,
+   "output_tail": "3801 deselected, 1 warning, 49 errors in 2.52s (ModuleNotFoundError: apscheduler/mcp/... during collection in files outside this phase; identical 49 errors recorded on the pre-phase base b8c8b6f in the wave-1 receipt - pre-existing sandbox module limits, not caused by this work)",
+   "expects_failure": true
+  },
+  {
+   "cmd": "cd omega_prime/dashboard/frontend && npm ci --no-audit --no-fund && npx vitest run && npm run build",
+   "exit_code": 0,
+   "output_tail": "added 129 packages in 2s; Test Files 17 passed, 1 skipped; Tests 50 passed, 1 skipped; built in 247ms (proves hook backoff/fallback tests, terminal-panel tests, STALE badge tests, and that vite writes omega_prime/dashboard/static/cc)"
+  },
+  {
+   "cmd": "cd omega_prime/dashboard/frontend && CC_CHECK_BUILD=1 npx vitest run src/test/build-assets.test.ts",
+   "exit_code": 0,
+   "output_tail": "1 passed (proves the committed bundle: hashed local assets, exactly 4 woff2 fonts, licenses, no source maps, no external runtime references)"
+  },
+  {
+   "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_command_center_static.py",
+   "exit_code": 0,
+   "output_tail": "5 passed (proves the served rebuilt bundle keeps the static-bundle contract)"
+  },
+  {
+   "cmd": "cd omega_prime/dashboard/frontend && npx tsc -b",
+   "exit_code": 0,
+   "output_tail": "clean (proves the Task.stale field and all new frontend code type-check)"
+  },
+  {
+   "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py",
+   "exit_code": 0,
+   "output_tail": "31 passed (proves root/docs markdown links, anchors and documented commands remain valid after the ROADMAP and SUMMARY edits)"
+  },
+  {
+   "cmd": "python3 -m omega_prime.tooling.prompt_format --check",
+   "exit_code": 0,
+   "output_tail": "prompt_format --check: all prompts conform to the XML standard"
+  },
+  {
+   "cmd": "python3 -m omega_prime.tooling.catalog --check && python3 -m omega_prime.tooling.plugin --check && bash omega_prime/scripts/assemble-prompts.sh --check",
+   "exit_code": 1,
+   "output_tail": "ModuleNotFoundError: No module named 'mcp' (identical exit 1 recorded in the wave-1 receipt on the same tree - pre-existing sandbox module limits, not caused by this work; no generator inputs were edited)",
+   "expects_failure": true
+  },
+  {
+   "cmd": "git status --porcelain",
+   "exit_code": 0,
+   "output_tail": "empty after removing the untracked regenerated node_modules/ and tsconfig.tsbuildinfo (verified at the end of the run; all work committed on feat/herdr-ws)"
+  }
+ ],
+ "claims": [
+  "a1/a2/a3 covered by wave-1 terminal-ws suites plus the new frontend auth/read-only/input-forwarding tests; all green (command 2, 5)",
+  "a4 proven twice in test_dashboard_events_ws.py with elapsed < 2.0s asserted, including the 30s-collector discrimination test where only the watcher-nudge path can deliver (command 1)",
+  "a5/a6 were proven by wave 1 and remain green in the full dashboard suite (command 3)",
+  "a7 proven by the 50-test frontend suite, the CC_CHECK_BUILD bundle test, the static-bundle python test, and the unchanged python dashboard suites (commands 3, 5, 6, 7)",
+  "only plan-declared files changed; commits are atomic per task titled '00035 - ...' with Refs trailers; nothing was pushed or merged (git log inspection during the run)"
+ ],
+ "unverified": [
+  "rule adherence by future agents",
+  "live-host behavior against a real herdr daemon (typing into a real pane, pane_output_changed delivery, the 7421 production server swap) - herdr is unavailable inside the sandbox by design; fakes prove the contracts only",
+  "real-browser rendering of the rebuilt bundle (xterm visual output) - verified via jsdom mocks and the served-bundle contract tests, not screenshots"
+ ]
+}

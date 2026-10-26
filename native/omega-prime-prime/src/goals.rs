@@ -102,7 +102,8 @@ pub fn create_goal_context_message(
 ) -> PyResult<PyObject> {
     let goal = goal_state(py, &goal)?;
     let message =
-        pa_core::goals::create_goal_context_message(&goal, context_kind(kind)?).map_err(py_err)?;
+        pa_core::goals::create_goal_context_message(&goal, context_kind(kind)?, &[])
+            .map_err(py_err)?;
     to_py(py, &message)
 }
 
@@ -250,6 +251,7 @@ impl Goal {
                     pa_core::goals::create_goal_context_message(
                         &self.state,
                         GoalContextKind::Continuation,
+                        &[],
                     )
                     .map_err(py_err)?,
                 );
@@ -313,6 +315,7 @@ impl Goal {
                 pa_core::goals::create_goal_context_message(
                     &self.state,
                     GoalContextKind::Continuation,
+                    &[],
                 )
                 .map_err(py_err)?,
             ));

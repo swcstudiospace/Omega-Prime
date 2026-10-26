@@ -1,0 +1,130 @@
+{
+  "task_id": "105-command-center-planning",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T21:33:09Z",
+  "completed_at": "2026-10-20T21:58:22.976427+00:00",
+  "commands": [
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k dashboard",
+      "exit_code": 2,
+      "duration_s": 9.85,
+      "output_tail": "Collection interrupted by unrelated missing staged dependencies including mcp and apscheduler; dashboard selection not reached."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard*.py",
+      "exit_code": 0,
+      "duration_s": 3.32,
+      "output_tail": "90 passed, 1 warning in 2.98s (Starlette TestClient deprecation)."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py",
+      "exit_code": 0,
+      "duration_s": 0.95,
+      "output_tail": "31 passed in 0.68s."
+    },
+    {
+      "cmd": "python3 -c 'from pathlib import Path\nimport re,yaml\nbase=Path('\"'\"'.planning/phases/105-command-center'\"'\"')\nplans=sorted(base.glob('\"'\"'*-PLAN.md'\"'\"')); seen={}; requirements=set(); tasks=0; threats=set()\nassert len(plans)==5\nfor i,p in enumerate(plans,1):\n text=p.read_text(); fm=yaml.safe_load(text.split('\"'\"'---'\"'\"',2)[1])\n assert fm['\"'\"'wave'\"'\"']==i,(p.name,fm['\"'\"'wave'\"'\"'])\n assert fm['\"'\"'depends_on'\"'\"']==([] if i==1 else [f'\"'\"'105-{i-1:02d}'\"'\"']),(p.name,fm['\"'\"'depends_on'\"'\"'])\n requirements.update(fm['\"'\"'requirements'\"'\"'])\n for path in fm['\"'\"'files_modified'\"'\"']:\n  assert path not in seen,(path,seen.get(path),p.name)\n  seen[path]=p.name\n assert '\"'\"'Artifacts this phase produces'\"'\"' in text,p.name\n for t in re.findall(r'\"'\"'<task\\b[^>]*>(.*?)</task>'\"'\"',text,re.S):\n  tasks+=1\n  for tag in ['\"'\"'read_first'\"'\"','\"'\"'action'\"'\"','\"'\"'acceptance_criteria'\"'\"','\"'\"'verify'\"'\"']:\n   assert re.search(fr'\"'\"'<{tag}>.+?</{tag}>'\"'\"',t,re.S),(p.name,tag)\n for threat in set(re.findall(r'\"'\"'T-105-\\d+'\"'\"',text)):\n  assert threat not in threats,(p.name,threat)\n  threats.add(threat)\nassert tasks==13,tasks\nassert requirements=={'\"'\"'a'\"'\"'+str(n) for n in range(1,8)},requirements\nassert (base/'\"'\"'105-UPLIFT.xml'\"'\"').read_bytes()==Path('\"'\"'/sandbox/home/refs/105-UPLIFT.xml'\"'\"').read_bytes()\nprint(f'\"'\"'PASS: {len(plans)} plans; {tasks} structured tasks; {len(seen)} disjoint path entries; waves 1-5; a1-a7; artifact inventories; unique threat IDs; verbatim uplift'\"'\"')\n'",
+      "exit_code": 0,
+      "output_tail": "PASS: 5 plans; 13 structured tasks; 80 disjoint path entries; waves 1-5; a1-a7; artifact inventories; unique threat IDs; verbatim uplift"
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs check verify-command-paths 105 --raw",
+      "exit_code": 0,
+      "output_tail": "status=broken; 30 commands; 4 missing_dir blockers only for W5 npm frontend commands. Independent checker classified dependency-created W3 targets as tool false positives; reported to xd://report_issue. No scaffold created."
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs check verify-failure-directions 105 --raw",
+      "exit_code": 0,
+      "output_tail": "status=ok; 30 commands; 0 blockers; 0 warnings."
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query check.decision-coverage-plan .planning/phases/105-command-center .planning/phases/105-command-center/105-CONTEXT.md",
+      "exit_code": 0,
+      "output_tail": "passed=true; total=11; covered=11; uncovered=[]."
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs check gap-analysis.plan-post .planning/phases/105-command-center 'a1, a2, a3, a4, a5, a6, a7' --raw",
+      "exit_code": 0,
+      "output_tail": "block=false; passed=true; all 11 context items covered. Structural check separately verifies requirement union a1-a7."
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query state.planned-phase --phase 105 --name 'Omega Prime Command Center' --plans 5",
+      "exit_code": 0,
+      "output_tail": "Recorded phase 105 and plan_count 5; planning state updated."
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query roadmap.annotate-dependencies 105",
+      "exit_code": 0,
+      "output_tail": "updated=true; waves=5; cross_cutting_constraints=0."
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Requested broad Python gate is blocked by unrelated dependency collection, not a dashboard failure or a passing gate.",
+      "evidence_command_index": 0,
+      "expects_failure": true
+    },
+    {
+      "claim": "Existing isolated dashboard baseline passes 90 tests.",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "Docs/public-repository checks pass 31 tests.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Five plans have 13 structured tasks, disjoint planned files, sequential wave dependencies, a1-a7 coverage, artifact inventories, unique numbered threat IDs, and a verbatim uplift copy.",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "All 30 automated acceptance commands state failure directions.",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "All 11 locked context decisions are covered by the plans.",
+      "evidence_command_index": 6
+    }
+  ],
+  "reviews": [
+    {
+      "reviewer": "CheckPlans105",
+      "iteration": 1,
+      "result": "1 blocker and 1 warning: missing CLI preview and explicit artifact inventories"
+    },
+    {
+      "reviewer": "Recheck105",
+      "iteration": 2,
+      "result": "passed; 0 blockers; 0 warnings; 5 plans and 13 tasks reviewed"
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Product behavior/new tests/npm ci/test/build are not executed: this session is planning only and the frontend does not yet exist.",
+    "Broad mandated pytest collection requires unrelated staged dependencies absent from this sandbox; no installs or unrelated fixes made.",
+    "Path probe cannot resolve W5 dependency-created frontend targets; four tool false positives remain recorded, not a clean path-probe pass.",
+    "a2/a3 live authenticated GitHub parity and a4 visual AA/fonts/motion inspection belong to the outer driver; fake transports do not establish live parity.",
+    "a6 signed openshell-podman tier and Anda-access attestation belongs to the outer driver.",
+    "a7 four real-data screenshots belong to the outer driver.",
+    "Export/push/draft PR/Greptile loop and verified-head runtime restart belong to the outer driver; no remote operations or merge performed.",
+    "Catalog/plugin/prompt generator checks do not apply: only planning/state/receipt files changed, not their generator inputs."
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/phases/105-command-center/105-01-PLAN.md",
+    ".planning/phases/105-command-center/105-02-PLAN.md",
+    ".planning/phases/105-command-center/105-03-PLAN.md",
+    ".planning/phases/105-command-center/105-04-PLAN.md",
+    ".planning/phases/105-command-center/105-05-PLAN.md",
+    ".planning/phases/105-command-center/105-CONTEXT.md",
+    ".planning/phases/105-command-center/105-PATTERNS.md",
+    ".planning/phases/105-command-center/105-PR-BODY.md",
+    ".planning/phases/105-command-center/105-UPLIFT.xml",
+    ".receipts/bot-00-omega-prime/105-command-center-planning.json"
+  ],
+  "contract_changes": [
+    "Planning contract only: five file-disjoint W1-W5 execution prompts and frozen additive metadata/numbering interfaces. No product implementation in this stage."
+  ],
+  "rollback_plan": "Revert the local planning commit; no product runtime or user task data was modified.",
+  "approvals": []
+}

@@ -1,0 +1,36 @@
+{"graphId":"ut-mvi8h35-5d2a91c7","task":"00035 - Herdr live terminals + websocket Command Center","nodes":[
+{"id":"n1","kind":"understand","depends_on":[],"title":"Map today's Command Center terminal, stream and task-state surfaces","steps":[
+"Trace /api/tasks/{id}/terminal: SSE of `herdr pane read --source recent` text, sanitized, read-only, 4-stream cap.",
+"Trace /api/stream: SSE snapshots driven by DashboardPoller.wait_for_update with 15 s heartbeats; the frontend polls through useDashboard.",
+"Trace _DashboardGuards: GET-only, exact loopback Host, CSP connect-src 'self'; any websocket must pass an equivalent guard.",
+"Trace tasks.json writers: locked_tasks + _write_locked in status_file.py; herdr_launch records herdr_pane; drive rows.py imports the herdr-default worktree.",
+"Record the herdr 0.9.5 socket API surface we can use: pane.read (ansi, visible), pane.send_input/send_text/send_keys, events.subscribe with pane_output_changed/pane_exited."]},
+{"id":"n2","kind":"generate","depends_on":["n1"],"title":"Interactive per-task terminal over a token-gated localhost websocket","steps":[
+"Add /ws/tasks/{id}/terminal: resolves the task's herdr_pane, streams `visible` ANSI frames on pane_output_changed (poll fallback) to the client.",
+"Client input (xterm.js onData) is sent as pane.send_input text/keys; resize is advisory only (Herdr owns geometry).",
+"Gate attach with a per-server-session token minted at startup, delivered only to same-origin pages, checked on the websocket handshake with Origin + Host loopback checks.",
+"Read-only switch: server flag --terminal-readonly and a per-connection mode; read-only connections never forward input.",
+"Embed xterm.js (@xterm/xterm, bundled, no CDN) in TaskDetail's TerminalPanel with attach/detach, read-only toggle and status badges."]},
+{"id":"n3","kind":"generate","depends_on":["n1"],"title":"Live event websocket replacing snapshot polling","steps":[
+"Add /ws/events: on connect send the full snapshot, then typed deltas: task_changed, task_finished, waiting_added, waiting_cleared, stale_changed, heartbeat.",
+"Diff successive poller snapshots server-side to derive the deltas; a tasks.json mtime watcher wakes the poller immediately instead of waiting the poll interval.",
+"Frontend useDashboard switches to the websocket with exponential backoff reconnect (1 s to 30 s, jitter) and falls back to /api/stream SSE after repeated failures.",
+"Keep /api/snapshot and /api/stream working unchanged for the legacy page and as the fallback path."]},
+{"id":"n4","kind":"generate","depends_on":["n1"],"title":"Dashboard as source of truth: heartbeats, stale detector, reconciler","steps":[
+"Add heartbeat(path, task_id, state=None, note=None, pid=None) helper writing last_heartbeat_at through locked_tasks + _write_locked.",
+"Stale detector: a working task is stale when its pid is dead, its herdr pane is gone or has exited, or no heartbeat/activity for N minutes (default 20, configurable).",
+"Surface stale (reason + since) in the snapshot and UI badges without silently rewriting state.",
+"Reconciler CLI (python -m omega_prime.dashboard.reconcile) rebuilds herdr_pane/pid liveness from `herdr pane list` + process-info and /proc, marks rows stale or attaches orphan panes by workspace label; dry-run by default, --apply writes through the locked helpers.",
+"Make status_file validation tolerant of the new optional fields (last_heartbeat_at, pid, stale) so older writers keep working."]},
+{"id":"n5","kind":"critique","depends_on":["n2","n3","n4"],"title":"Security, redaction and migration risks","steps":[
+"Interactive input means remote code execution on the box: never bind beyond loopback, reject non-loopback Origin/Host, require the token, cap connections.",
+"Output redaction: interactive frames are raw ANSI; apply the token/secret redaction to frames before sending while keeping escape sequences intact.",
+"Cross-site websocket hijacking: browsers do not apply CORS to websockets, so Origin must be checked explicitly and the token must not live in a cookie readable cross-site.",
+"Stale detection must not flip tasks owned by other workers; the reconciler is dry-run unless --apply and never deletes rows.",
+"Open questions: none (defaults: token in a same-origin meta/bootstrap endpoint, read-only default off for Ove, stale N=20 min)."]},
+{"id":"n6","kind":"synthesize","depends_on":["n2","n3","n4","n5"],"title":"Build plan, migration and verification","steps":[
+"Wave 1 (file-disjoint): 115-01 heartbeat+stale+reconciler (status_file, new stale.py/reconcile.py, model fields); 115-02 herdr websocket bridge + token + /ws routes (new terminal_ws.py, app.py).",
+"Wave 2: 115-03 /ws/events delta bus + poller wake; 115-04 frontend xterm.js TerminalPanel + websocket useDashboard with backoff + SSE fallback, rebuild static/cc.",
+"Tests: websocket events, attach + token/Origin auth, read-only mode, stale detector, reconciler, redaction of frames; served checks on 127.0.0.1:7441 only.",
+"Migration: inventory working tasks/processes, move non-Herdr runners into Herdr panes (sandbox via drive pattern when they build code), record herdr_pane.",
+"Ship: push feat/herdr-ws, draft PR on top of #59, Greptile loop to 5/5; 7421 swap stays an ask for Ove."]}]}

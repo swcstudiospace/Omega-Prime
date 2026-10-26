@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:omega:schema:task:1",
+  "$defs": {
+    "omega.task.state_changed": {
+      "$id": "urn:omega:schema:omega.task.state_changed:1",
+      "title": "Task state changed",
+      "description": "A task transitioned state; the event topic is task/state.",
+      "type": "object",
+      "properties": {
+        "task_id": {"type": "string", "minLength": 1},
+        "previous_state": {"type": "string", "minLength": 1},
+        "state": {"enum": ["queued", "running", "blocked", "completed", "failed", "cancelled"]},
+        "sequence": {"type": "integer", "minimum": 0},
+        "actor": {"type": "string", "minLength": 1}
+      },
+      "required": ["task_id", "previous_state", "state", "sequence", "actor"],
+      "additionalProperties": false,
+      "examples": [{"task_id": "task-7", "previous_state": "queued", "state": "running", "sequence": 2, "actor": "scheduler"}],
+      "x-omega-invalid-examples": [{"task_id": "task-7", "previous_state": "queued", "state": "running", "sequence": -1, "actor": "scheduler"}, {"task_id": "task-7", "previous_state": "queued", "state": "waiting", "sequence": 2, "actor": "scheduler"}]
+    },
+    "omega.task.heartbeat": {
+      "$id": "urn:omega:schema:omega.task.heartbeat:1",
+      "title": "Task heartbeat",
+      "description": "A task emitted a heartbeat; the event topic is task/heartbeat.",
+      "type": "object",
+      "properties": {
+        "task_id": {"type": "string", "minLength": 1},
+        "sequence": {"type": "integer", "minimum": 0},
+        "occurred_at": {"type": "string", "format": "date-time"}
+      },
+      "required": ["task_id", "sequence", "occurred_at"],
+      "additionalProperties": false,
+      "examples": [{"task_id": "task-7", "sequence": 3, "occurred_at": "2026-10-23T12:00:00Z"}],
+      "x-omega-invalid-examples": [{"task_id": "task-7", "sequence": -1, "occurred_at": "2026-10-23T12:00:00Z"}, {"task_id": "task-7", "sequence": 3}, {"task_id": "task-7", "sequence": 3, "occurred_at": "2026-10-23T12:00:00"}]
+    }
+  }
+}

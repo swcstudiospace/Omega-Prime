@@ -5,6 +5,11 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
+# Runner: every job runs on the omega-ci pool ([self-hosted, linux, x64,
+# omega-ci], docs/ci-runners.md), never on GitHub-hosted runners. Interpreters
+# and Node come from the runner image's read-only tool cache (setup-python /
+# setup-node cache hits); installs land in the job's own HOME.
+
 permissions:
   contents: read
 
@@ -14,7 +19,7 @@ concurrency:
 
 jobs:
   readiness:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -25,7 +30,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: install
-        run: pip install -e .
+        run: python -m pip install -e .
       - name: run readiness profile
         id: readiness
         run: python -m omega_prime.grokbot.readiness --root . --json --output readiness-report.json
