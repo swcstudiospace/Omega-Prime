@@ -168,6 +168,116 @@ def test_shutdown_stops_every_child_once(tmp_path: Path) -> None:
     assert sorted(p["name"] for p in exits.payloads) == ["omega-ci-1-a", "omega-ci-2-b"]
 
 
+def test_shutdown_lets_running_job_finish_within_budget(tmp_path: Path) -> None:
+    """Idle runners stop at once; a runner mid-job finishes on its own."""
+    exits = Exits()
+    busy, idle = "omega-ci-1-busy", "omega-ci-2-idle"
+
+    async def main() -> None:
+        s = supervisor(
+            tmp_path,
+            _sleeping(tmp_path),
+            exits,
+            drain_budget_s=30.0,
+            drain_settle_s=0.2,
+        )
+        s.admit(idle, "g2", JIT)
+        await _until_running(s, idle)
+        busy_root = tmp_path / "busy"
+        busy_root.mkdir()
+        s.runner_root = _sleeping(
+            busy_root, tail="echo 'Running job: build'\nsleep 3\nexit 0"
+        )
+        s.admit(busy, "g1", JIT)
+        await _until_running(s, busy)
+        while not s.children[busy].took_job:
+            await asyncio.sleep(0.01)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        shutdown = loop.create_task(s.shutdown())
+        await asyncio.sleep(0)
+        assert s.admit("omega-ci-3-c", "g3", JIT) is Admission.DRAINING
+        await exits.wait(1)
+        assert exits.payloads[0]["name"] == idle  # stopped before the job ends
+        await shutdown
+        assert loop.time() - started < 15  # finished, not held for the budget
+
+    asyncio.run(main())
+    codes = {p["name"]: p["exit_code"] for p in exits.payloads}
+    assert codes == {idle: -15, busy: 0}
+
+
+def test_shutdown_spares_job_started_as_drain_begins(tmp_path: Path) -> None:
+    """A job start the relay has not read yet is not cancelled by the drain.
+
+    Shutdown begins while the runner's job-start line is still unwritten or
+    unread; the settle window lets the relay see it, so the runner counts as
+    busy and finishes instead of being sent SIGTERM.
+    """
+    exits = Exits()
+
+    async def main() -> None:
+        s = supervisor(
+            tmp_path,
+            _sleeping(
+                tmp_path, tail="sleep 0.3\necho 'Running job: build'\nsleep 1\nexit 0"
+            ),
+            exits,
+            drain_budget_s=30.0,
+            drain_settle_s=2.0,
+        )
+        s.admit(NAME, "g", JIT)
+        await _until_running(s, NAME)
+        assert not s.children[NAME].took_job
+        await asyncio.wait_for(s.shutdown(), 15)
+
+    asyncio.run(main())
+    assert [p["exit_code"] for p in exits.payloads] == [0]
+
+
+def test_shutdown_without_budget_skips_settle(tmp_path: Path) -> None:
+    exits = Exits()
+
+    async def main() -> None:
+        s = supervisor(tmp_path, _sleeping(tmp_path), exits, drain_settle_s=30.0)
+        s.admit(NAME, "g", JIT)
+        await _until_running(s, NAME)
+        await asyncio.wait_for(s.shutdown(), 10)
+
+    asyncio.run(main())
+    assert [p["exit_code"] for p in exits.payloads] == [-15]
+
+
+def test_shutdown_stops_running_job_when_budget_spent(tmp_path: Path) -> None:
+    exits = Exits()
+
+    async def main() -> None:
+        s = supervisor(
+            tmp_path,
+            _sleeping(tmp_path, tail="echo 'Running job: build'\nexec sleep 30"),
+            exits,
+            drain_budget_s=0.5,
+        )
+        s.admit(NAME, "g", JIT)
+        await _until_running(s, NAME)
+        while not s.children[NAME].took_job:
+            await asyncio.sleep(0.01)
+        await asyncio.wait_for(s.shutdown(), 10)
+        assert s.children == {}
+
+    asyncio.run(main())
+    assert [p["exit_code"] for p in exits.payloads] == [-15]
+
+
+def test_negative_drain_budget_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="drain_budget_s"):
+        supervisor(tmp_path, runner_root(tmp_path), Exits(), drain_budget_s=-1.0)
+    other = tmp_path / "settle"
+    other.mkdir()
+    with pytest.raises(ValueError, match="drain_settle_s"):
+        supervisor(other, runner_root(other), Exits(), drain_settle_s=-1.0)
+
+
 def test_cancellation_terminates_and_still_notifies(tmp_path: Path) -> None:
     exits = Exits()
 
