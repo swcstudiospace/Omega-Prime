@@ -82,7 +82,7 @@ the link through `prime_crates`. "Probe only" means the sole caller is
 ## T3MP3ST red team pack
 
 - Remote: https://github.com/swcstudiospace/purple-team.git
-- Commit: `6679b82203a56f03f6de0ca299e420dee51a4d33` (tag `omega-pin-f6d2fc2-zod467`, branch `omega-pin/f6d2fc2-zod-4.6.7`: upstream **v1.4** `f6d2fc2` plus a lockfile-only zod 4.2.1 → 4.6.7 bump for GHSA-mrhx-c7xc-m3w5. Not on upstream main; the tag keeps it reachable.)
+- Commit: `1a1a4b012c2cf3a46d1899c9968ba440eb8bfda8` (branch `omega-pin/f6d2fc2-audit-20261024`: upstream **v1.4** `f6d2fc2` plus two lockfile-only bumps. `6679b82` (tag `omega-pin-f6d2fc2-zod467`) moved zod 4.2.1 → 4.6.7 for GHSA-mrhx-c7xc-m3w5. `1a1a4b0` moved body-parser 1.20.8 → 1.20.9 and 2.3.0 → 2.4.0 (GHSA-27r3-jxmh-p828), undici 8.11.2 → 8.12.3 (GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472, GHSA-xjj6-f33q-929c) and fast-uri 3.1.8 → 3.1.9. Lockfile-only is checked against upstream: `gh api repos/swcstudiospace/purple-team/compare/6679b82...1a1a4b0` (exit 0) lists only `package-lock.json`, and `compare/f6d2fc2...1a1a4b0` (exit 0) is 2 ahead, 0 behind, also only `package-lock.json`; receipt `.receipts/bot-00-omega-prime/00065-redteam-npm-audit.json` commands 10 and 11. Not on upstream main; the branch keeps it reachable.)
 - Root `redteam/` submodule: tracked gitlink at the same pin, alongside the preserved `prime-agent/` gitlink. An ordinary `git clone` leaves it empty; populate with `git clone --recurse-submodules` or `git submodule update --init redteam`.
 - License: MIT
 - Copyright: 2026 SWC Studio Space
