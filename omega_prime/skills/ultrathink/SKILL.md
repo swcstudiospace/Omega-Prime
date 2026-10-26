@@ -1,14 +1,15 @@
 ---
 name: ultrathink
-description: Use when a turn may carry an ultrathink plan (Graph of Thought + tracked issues + Greptile-gated ship). Resolve the plan, work the waves, track and ship through the bridge tools.
+description: Use when a turn may carry an ultrathink plan (Graph of Thought + tracked issues + reviewed ship actions). Resolve the plan, work the waves, track progress, and use the bridge tools.
 bots: [bot-00-omega-prime]
 ---
 <skill name="ultrathink" version="1">
 # Ultrathink
 
-Run a turn the ultrathink way: a written plan exists (or gets
-written), work follows the plan's waves, progress is tracked, and
-finished work ships through a reviewed PR.
+Use a written plan when the request warrants one. Follow its waves,
+track progress, and treat shipping as a separately enabled and approved
+operation; plan readiness alone does not imply that a plan is available
+or that shipping is permitted.
 
 ## When to use
 
@@ -18,13 +19,12 @@ Single lookups and one-file edits go direct.
 
 ## The flow
 
-1. **Resolve.** Call `omega_prime/routines/ultrathink_turn.py`
-   `resolve_turn_plan()`. When it finds `last-plan.json`, read the
-   spec it points at: the ORIGINAL element is the user's verbatim
-   words, the Graph of Thought is the work breakdown, WORKFLOW is
-   the wave order. When nothing is found — or the plan is flagged
-   stale — there is no plan for this turn: work the ask directly
-   and never reuse an older spec.
+1. **Resolve.** Call `resolve_turn_plan()`. If a valid plan is found,
+   read its spec: ORIGINAL contains the user's verbatim words, Graph of
+   Thought is the work breakdown, and WORKFLOW gives the wave order. If
+   no plan is found, work the ask directly. If the first valid candidate
+   is stale, discovery stops and reports no plan for this turn; do not
+   fall through to an older candidate or reuse an older spec.
 2. **Track.** Use `ult_track_complete` with the session state file
    to finish *creating* the plan's tracker rows before engineering
    starts (the command completes the tracking setup, not the
@@ -34,10 +34,14 @@ Single lookups and one-file edits go direct.
    Parallel units in the same wave go out as one `delegate_task`
    batch with explicit files, changes, and acceptance criteria.
    Verify each wave before starting the next.
-4. **Ship.** When the work is done, `ult_ship_assess`, then
-   `ult_ship_pr`, then `ult_ship_review` until it passes, then
-   `ult_ship_merge` only when the repo's ship policy allows it.
-   Never merge any other way.
+4. **Assess and ship.** `ult_ship_assess` is read-only: it assesses the
+   proposed ship action but does not approve it or perform a PR, review,
+   or merge. Ship writes are disabled unless `ULTRATHINK_SHIP` is exactly
+   `1` or `true`; unset, empty, `0`, and all other values are off.
+   Enablement is not approval. Keep the existing independent approval
+   requirement for each protected action, then use `ult_ship_pr`,
+   `ult_ship_review`, and `ult_ship_merge` as authorized by repository
+   policy. Never merge any other way.
 
 ## Rules
 
@@ -49,4 +53,11 @@ Single lookups and one-file edits go direct.
   AGPL-3.0; Omega Prime is MIT).
 - A blocked wave stops the run: report the blocker, do not route
   around it with scope cuts.
+- Readiness (`not_configured`, `root_invalid`, `ready_ship_off`, or
+  `ready_ship_on`) reports configured root and executable metadata; it
+  does not inspect whether a plan exists or is fresh. Readiness does not
+  replace turn-plan discovery or authorize a ship action.
+- See [setup guidance](../../../docs/setup.md#ultrathink-environment-and-readiness)
+  for environment variables, candidate precedence, optional test lanes,
+  and operator-only configuration boundaries.
 </skill>

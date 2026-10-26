@@ -835,10 +835,11 @@ def default_registry(
     intake/roster/event stores under `OMEGA_PRIME_STATE_DIR` (default the
     work root's `omega_prime/state`), and the substrate client. Connector credentials come
     from `env` (`X_API_TOKEN`, `TELEGRAM_BOT_TOKEN`,
-    `DISCORD_BOT_TOKEN`, `ULTRATHINK_ROOT`, `OMEGA_PRIME_PACKS_JSON`,
-    `OMEGA_PRIME_PACK_API_BASES_JSON`, `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`,
-    `SUBSTRATE_TOKEN_GROK_BOT`); missing values stay unconfigured
-    and fail safe at call time. Desk service clients are built from
+    `DISCORD_BOT_TOKEN`, `ULTRATHINK_ROOT`, `ULTRATHINK_SHIP`,
+    `OMEGA_PRIME_PACKS_JSON`, `OMEGA_PRIME_PACK_API_BASES_JSON`,
+    `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, `SUBSTRATE_TOKEN_GROK_BOT`);
+    `ULTRATHINK_SHIP` enables ship writes only for the exact values `1` and
+    `true`. Missing values stay unconfigured and fail safe at call time.
     `RAILWAY_TOKEN` (optional `OMEGA_PRIME_RAILWAY_PROJECTS`),
     `GREPTILE_API_KEY` (optional `GREPTILE_GITHUB_TOKEN`), `VERCEL_TOKEN`,
     `PLAY_CONSOLE_TOKEN`, and `ASC_KEY_ID` + `ASC_ISSUER_ID` +
@@ -1088,7 +1089,9 @@ def default_registry(
                 SubstrateClient(
                     docs_url or substrate_env_url or None,
                     token=substrate_token or None,
-                    honor_binding=True,
+                    # An explicit Desk docs endpoint stands on its own; a saved
+                    # (or blocked) Substrate binding only steers the fallback.
+                    honor_binding=not docs_url,
                     binding_env=env,
                     policy=policy,
                 )
@@ -1214,7 +1217,9 @@ def default_registry(
     )
     register_ultrathink_tools(
         registry,
-        UltrathinkClient(UltrathinkContext(root=env.get("ULTRATHINK_ROOT", ""))),
+        UltrathinkClient(
+            UltrathinkContext(root=env.get("ULTRATHINK_ROOT", ""), env=env)
+        ),
     )
     register_substrate_tools(registry, substrate_client)
     from omega_prime.tools.cron_admin import register_cron_admin_tools

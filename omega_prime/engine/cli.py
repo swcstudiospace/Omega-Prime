@@ -82,6 +82,12 @@ def _emit(payload: Any) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "eventstream":
+        from omega_prime.eventstream.cli import main as eventstream_main
+
+        return eventstream_main(arguments[1:])
+
     parser = argparse.ArgumentParser(prog="omega")
     sub = parser.add_subparsers(dest="command", required=True)
     watch = sub.add_parser("watch", help="Tail one job's omp event feed")

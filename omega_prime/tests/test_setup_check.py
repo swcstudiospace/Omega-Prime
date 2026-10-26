@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from omega_prime import setup_check
+from omega_prime.integrations.ultrathink import ULTRATHINK_REQUIRED_BINS
 from omega_prime.setup_check import (
     CHECKS,
     check_plugin,
@@ -180,9 +181,12 @@ def test_run_checks_uses_settings_file_for_ultrathink_and_substrate(
 ) -> None:
     fixture = _mirror(tmp_path / "configured")
     checkout = tmp_path / "ultrathink"
-    executable = checkout / "bin" / "ultrathink-ship"
-    executable.parent.mkdir(parents=True)
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    (checkout / "bin").mkdir(parents=True)
+    # Phase 103 readiness needs every Ultrathink entry point, executable.
+    for name in ULTRATHINK_REQUIRED_BINS:
+        executable = checkout / "bin" / name
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o755)
     settings_file = tmp_path / "settings.json"
     settings_file.write_text(
         json.dumps(

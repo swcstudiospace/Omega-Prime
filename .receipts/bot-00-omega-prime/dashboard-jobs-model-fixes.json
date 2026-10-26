@@ -1,0 +1,33 @@
+{
+  "task_id": "dashboard-jobs-model-fixes",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T00:00:00Z",
+  "completed_at": "2026-10-21T00:00:00Z",
+  "commands": [
+    {
+      "cmd": "PYTHONPATH=/workspace/omes-bot-wt/dash /workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_dashboard_jobs_model_fixes.py -q",
+      "exit_code": 0,
+      "duration_s": 0,
+      "output_tail": "4 passed in 0.05s"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Focused regression tests pass for collector cache invalidation, terminal event outcome, summary preservation, fleet task rows, and unmatched process rows",
+      "evidence_command_index": 0
+    }
+  ],
+  "unverified": [
+    "Full dashboard model test suite not run",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    "omega_prime/dashboard/collectors/omega_jobs.py",
+    "omega_prime/dashboard/model.py",
+    "omega_prime/tests/test_dashboard_jobs_model_fixes.py"
+  ],
+  "contract_changes": [],
+  "rollback_plan": null,
+  "approvals": [],
+  "approved_by": "bot-00-omega-prime"
+}

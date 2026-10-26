@@ -1,0 +1,101 @@
+{
+  "task_id": "00046-105-01-eventstream-contract",
+  "bot": "bot-00-omega-prime",
+  "started_at": null,
+  "completed_at": "2026-10-22T21:15:05Z",
+  "commands": [
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m ruff check omega_prime/eventstream omega_prime/tests/eventstream",
+      "exit_code": 0,
+      "output_tail": "All checks passed!"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m ruff format --check omega_prime/eventstream omega_prime/tests/eventstream",
+      "exit_code": 0,
+      "output_tail": "11 files already formatted"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m mypy --strict omega_prime/eventstream",
+      "exit_code": 0,
+      "output_tail": "Success: no issues found in 5 source files"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m pytest omega_prime/tests/eventstream -q",
+      "exit_code": 0,
+      "output_tail": "81 passed in 0.99s"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m ruff format omega_prime/eventstream omega_prime/tests/eventstream",
+      "exit_code": 0,
+      "output_tail": "11 files left unchanged"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m pip install 'jsonschema[format]'",
+      "exit_code": 1,
+      "output_tail": "Installation failed with OSError: read-only file system under /workspace/.venv-00046/lib/python3.13/site-packages"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Ruff lint passes for the eventstream package and tests",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "Ruff formatting check passes for the eventstream package and tests",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "mypy --strict passes for omega_prime/eventstream",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "All eventstream tests pass: 81 passed",
+      "evidence_command_index": 3
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "No live Pulsar, Railway, or Dragonfly integration was exercised; this wave implements only the broker-free contract layer.",
+    "The pinned optional pulsar-client dependency was not installed, and dependency provenance/license/SBOM review remains for security gates.",
+    "A package build or wheel-install test was not run; the verification venv is read-only for package installation.",
+    "No independent code-review/security-gate verdict was run in this execution.",
+    "The session did not expose an execution start timestamp; started_at is null."
+  ],
+  "files_changed": [
+    "omega_prime/eventstream/__init__.py",
+    "omega_prime/eventstream/errors.py",
+    "omega_prime/eventstream/envelope.py",
+    "omega_prime/eventstream/taxonomy.py",
+    "omega_prime/eventstream/config.py",
+    "omega_prime/eventstream/schemas/envelope.v1.json",
+    "omega_prime/eventstream/schemas/sdlc.pr.v1.json",
+    "omega_prime/eventstream/schemas/sdlc.review.v1.json",
+    "omega_prime/eventstream/schemas/ci.v1.json",
+    "omega_prime/eventstream/schemas/auth.v1.json",
+    "omega_prime/eventstream/schemas/job.v1.json",
+    "omega_prime/eventstream/schemas/sandbox.v1.json",
+    "omega_prime/eventstream/schemas/task.v1.json",
+    "omega_prime/eventstream/schemas/mem.v1.json",
+    "omega_prime/eventstream/schemas/control.v1.json",
+    "omega_prime/eventstream/schemas/hitl.v1.json",
+    "omega_prime/eventstream/schemas/audit.v1.json",
+    "omega_prime/tests/eventstream/__init__.py",
+    "omega_prime/tests/eventstream/conftest.py",
+    "omega_prime/tests/eventstream/test_envelope.py",
+    "omega_prime/tests/eventstream/test_taxonomy.py",
+    "omega_prime/tests/eventstream/test_schemas.py",
+    "omega_prime/tests/eventstream/test_config.py",
+    "pyproject.toml",
+    ".planning/phases/105-event-stream-core-library/105-01-SUMMARY.md",
+    ".receipts/bot-00-omega-prime/00046-105-01-eventstream-contract.json"
+  ],
+  "contract_changes": [
+    "CloudEvents 1.0 envelope and broker-neutral publish, receipt, and delivery contracts",
+    "Exact 48 concrete event types plus the open omega.audit.* family",
+    "Twelve Draft 2020-12 schema bundles with semantic model parity fixtures",
+    "Secure event-stream configuration and optional dependency metadata"
+  ],
+  "rollback_plan": "Remove the wave-1 eventstream package, schemas, tests, and pyproject additions before downstream phases consume this contract; no commit was created.",
+  "approvals": [],
+  "approved_by": null
+}

@@ -216,11 +216,13 @@ def _run_ultrathink_family_case(
 
     Approval flags come from production ``register_ultrathink_tools`` (which
     reads ``APPROVAL_TOOLS``), never from the case's ``requires_approval``.
-    The injected CLI runner records argv, returns deterministic JSON echoing
-    the dispatched state/mark, and never spawns a subprocess or network call.
-    ``calls`` maps one entry per runner invocation so ``tool_called`` proves
-    the handler ran and ``tool_not_called`` proves zero runner calls on
-    refusal.
+    A case's explicit ``env`` controls the same literal ``ULTRATHINK_SHIP``
+    setting as production; omitted env means shipping is off, and approval
+    remains independent. The injected CLI runner records argv, returns
+    deterministic JSON echoing the dispatched state/mark, and never spawns a
+    subprocess or network call. ``calls`` maps one entry per runner invocation
+    so ``tool_called`` proves the handler ran and ``tool_not_called`` proves
+    zero runner calls on refusal.
     """
     from omega_prime.tools.ultrathink import (
         UltrathinkClient,
@@ -246,7 +248,11 @@ def _run_ultrathink_family_case(
             "stderr": "",
         }
 
-    client = UltrathinkClient(UltrathinkContext(root="eval-hermetic", run=_fake_run))
+    client = UltrathinkClient(
+        UltrathinkContext(
+            root="eval-hermetic", run=_fake_run, env=dict(case.get("env") or {})
+        )
+    )
     register_ultrathink_tools(registry, client)
     payload = json.loads(registry.dispatch(case["tool"], case.get("arguments", {})))
     calls = [case["tool"] for _ in runner_argv]

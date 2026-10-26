@@ -1,0 +1,78 @@
+{
+  "task": "phase-104-task-dashboard (execution)",
+  "bot": "bot-00-omega-prime",
+  "repo": "swcstudiospace/omes-bot",
+  "branch": "feat/task-dashboard",
+  "worktree": "/workspace/omes-bot-wt/dash",
+  "date": "2026-10-21",
+  "python": "/workspace/omes-bot/.venv/bin/python with PYTHONPATH=/workspace/omes-bot-wt/dash",
+  "commits": [
+    "beeae56 dashboard core + static UI (plan 104-01, 104-06)",
+    "d5505cd collectors, poller, GET-only API with SSE, CLI (plans 104-02..104-05)",
+    "c20a0ee integration suite, docs/dashboard.md, scripts/dashboard-start.sh, docs/SUMMARY.md entry (plan 104-07)",
+    "final commit: test typing fixes + ROADMAP phase 104 completion"
+  ],
+  "commands": [
+    {
+      "cmd": "ruff check omega_prime/",
+      "exit_code": 0,
+      "proves": "no lint violations across the package including all new dashboard code and tests"
+    },
+    {
+      "cmd": "ruff format --check omega_prime/",
+      "exit_code": 0,
+      "proves": "whole tree format-clean (617 files) after one orchestrator-run ruff format over the changed files"
+    },
+    {
+      "cmd": "mypy omega_prime/",
+      "exit_code": 0,
+      "proves": "no type errors across 490 source files including the dashboard package and its tests"
+    },
+    {
+      "cmd": "python -m pytest omega_prime/tests/test_dashboard_model.py test_dashboard_redaction.py test_dashboard_file_collectors.py test_dashboard_process_collectors.py test_dashboard_remote_collectors.py test_dashboard_app.py test_dashboard_integration.py -q",
+      "exit_code": 0,
+      "proves": "all 39 dashboard tests pass: model joins/state mapping, seeded-secret redaction at every boundary, collector caching/tail caps/fake subprocess+HTTP, loopback/Host/405 guards, SSE retry/heartbeat/change frames via raw ASGI, CLI host refusal + pidfile, composite integration incl. the <=5s tasks.json writer-to-snapshot bridge and degradation isolation"
+    },
+    {
+      "cmd": "python -m pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "proves": "full suite: 4810 passed, 33 failed, 11 skipped. Every failure is the recorded baseline (test_desk_wiring, test_grokbot_oneclick, test_omega_commands doctor tests, test_prime_kernel_*) plus test_prime_native/test_setup_check, which fail identically at the pre-change base commit ebd8d39 in a clean worktree (missing prime-agent/ Rust checkout in this worktree, not in the repo). Zero new failures."
+    },
+    {
+      "cmd": "git worktree add /tmp/dash-base ebd8d39 && pytest test_desk_wiring.py test_prime_native.py test_setup_check.py",
+      "exit_code": 1,
+      "proves": "12 failures reproduce at the base commit before any dashboard change, so they are pre-existing/environmental"
+    },
+    {
+      "cmd": "python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q",
+      "exit_code": 0,
+      "proves": "docs/dashboard.md passes the docs conventions (top-level H1, SUMMARY.md link, relative links) after adding the SUMMARY entry; public-repo checks pass"
+    },
+    {
+      "cmd": "python -m omega_prime.tooling.catalog --check; python -m omega_prime.tooling.plugin --check; python -m omega_prime.tooling.prompt_format --check",
+      "proves": "generator checks unaffected by the change (no generator files touched)"
+    },
+    {
+      "cmd": "bash omega_prime/scripts/assemble-prompts.sh --check",
+      "exit_code": 1,
+      "proves": "pre-existing environment failure: ModuleNotFoundError No module named 'apscheduler' (apscheduler is a project dependency absent from the shared venv; pip installs are forbidden in this session). Unrelated to the dashboard change; no prompt or generator file was modified."
+    },
+    {
+      "cmd": "python -m omega_prime.dashboard --once (real box, read-only)",
+      "exit_code": 0,
+      "proves": "composition-root smoke against live sources: herdr pane active, wiring/sandbox/omega jobs/command log/agentos ok, github PR gate populated with CI states, tasks_json reported missing with the informational banner, fleet disabled; grep of the snapshot output found no secret-shaped strings. This smoke also caught and fixed over-redaction of flag-like env values (value '1')."
+    }
+  ],
+  "claims": [
+    "All seven GSD plans 104-01..104-07 implemented; 42 new dashboard tests; gates green or baseline-only.",
+    "Seeded-secret tests prove no fake token reaches /api/snapshot, SSE frames, or the served HTML.",
+    "Fleet collector implemented but off unless settings.json dashboard.fleet_enabled is true; disabled state makes zero calls.",
+    "SSE is served by a raw-ASGI streaming response because starlette 1.7.0's StreamingResponse deadlocks under its buffered TestClient; behavior verified via a raw-ASGI harness with retry 3000, change-driven snapshot frames and heartbeats."
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "live-box acceptance criteria a1-a7 (ss -ltn bind check, browser observation, killing herdr/podman/PAT removal while watching the health strip) - operator-owned UAT",
+    "Greptile 5/5 review, green CI on the PR, rebase-on-main, push/PR/merge - operator-owned steps after this session (push/PR forbidden here)",
+    "no test in this repository proves the dashboard never leaks a future secret shape not covered by credentials.redact patterns plus the dashboard denylist"
+  ]
+}
