@@ -73,6 +73,9 @@ from omega_prime.engine.sandbox import SandboxUnavailable, sandbox_ready, wrap
 from omega_prime.engine.skills_attach import attach_skills
 from omega_prime.engine.ui_control import UIControlError, UIControlStore
 
+#: Env var naming the delegate depth of a child started through the engine.
+DELEGATE_DEPTH_ENV = "OMEGA_PRIME_DELEGATE_DEPTH"
+DELEGATE_MAX_DEPTH_ENV = "OMEGA_PRIME_DELEGATE_MAX_DEPTH"
 _READY_TIMEOUT = 15.0
 _COMMAND_TIMEOUT = 15.0
 
@@ -332,11 +335,18 @@ def run(
     ui_control: UIControlStore | None = None,
     cancel_event: _CancelEvent | None = None,
     interrupt: _CancelEvent | None = None,
+    delegate_depth: int | None = None,
+    delegate_max_depth: int | None = None,
 ) -> EngineResult:
     """Run one prompt on omp and return the assistant text, usage, and cost.
 
     ``stage`` (``plan`` or ``execute``) picks that stage's model and lets the
     router fall back from ChatGPT to Z.ai; see ``plan_router.select``.
+    ``delegate_depth`` is the delegate depth of a child started by
+    ``delegate_task``; omp's MCP server starts its delegate parent there, so
+    nested delegates keep the parent's ``max_depth``. ``delegate_max_depth``
+    is that parent's ``max_depth``, handed over the same way so a custom
+    limit is not reset to the server default.
     """
     mapping = dict(env if env is not None else {})
     if env is None:
@@ -374,6 +384,8 @@ def run(
             ui_control=ui_control,
             cancel_event=cancel_event if cancel_event is not None else interrupt,
             metadata=metadata,
+            delegate_depth=delegate_depth,
+            delegate_max_depth=delegate_max_depth,
         )
     except (EngineError, PlanNotAllowed, SandboxUnavailable, OSError) as exc:
         if isinstance(exc, OSError):
@@ -454,6 +466,8 @@ def _run(
     ui_control: UIControlStore | None = None,
     cancel_event: _CancelEvent | None = None,
     metadata: dict[str, Any] | None = None,
+    delegate_depth: int | None = None,
+    delegate_max_depth: int | None = None,
 ) -> EngineResult:
     run_metadata = metadata if metadata is not None else {}
     if mode not in MODES:
@@ -630,6 +644,18 @@ def _run(
         if mode == "rpc-ui"
         else "not_used"
     )
+    process_env = sandboxed_child_env(env, hidden)
+    if choice.stage is not None:
+        # omp hands its env to the omega-prime MCP server it starts, so a
+        # delegate_task from a staged turn knows to build on execute.
+        process_env["OMEGA_PRIME_ENGINE_STAGE"] = choice.stage
+    if delegate_depth is not None:
+        # The MCP server's delegate parent starts at this depth, so a child
+        # run through the engine cannot reset the delegate depth limit.
+        process_env[DELEGATE_DEPTH_ENV] = str(max(0, int(delegate_depth)))
+    if delegate_max_depth is not None:
+        # ...and stops at the parent's own limit, not the server default.
+        process_env[DELEGATE_MAX_DEPTH_ENV] = str(max(0, int(delegate_max_depth)))
     gate_read = gate_write = -1
     try:
         launch = wrapped
@@ -652,7 +678,7 @@ def _run(
             cwd=str(work),
             # Credential files under the hidden secrets/ folder are read on
             # the host and passed by env, so the MCP child can still start.
-            env=sandboxed_child_env(env, hidden),
+            env=process_env,
             bufsize=1,
             pass_fds=pass_fds,
         )
@@ -1514,14 +1540,24 @@ def session_abort(session: OmpSession) -> dict[str, Any]:
 
 
 def probe(
-    env: Mapping[str, str], *, unsandboxed: bool | None = None
+    env: Mapping[str, str],
+    *,
+    unsandboxed: bool | None = None,
+    stage: str | None = None,
+    plan: str | None = None,
 ) -> tuple[bool, str]:
-    """Whether a turn can run on omp. Does not call a model API."""
+    """Whether a turn can run on omp. Does not call a model API.
+
+    With ``stage``, the stage's plan order (``plan`` first, else ChatGPT,
+    then Z.ai) must have an allowlisted plan. ``plan`` is the caller's
+    requested plan, so the check matches what ``run(plan=..., stage=...)``
+    will select.
+    """
     binary = resolve_omp(env)
     if binary is None:
         return False, "not_configured"
     try:
-        select(env, requested=None)
+        select(env, requested=plan, stage=stage)
     except PlanNotAllowed:
         return False, "plan_not_allowed"
     if not sandbox_ready(env, unsandboxed_override=unsandboxed):
