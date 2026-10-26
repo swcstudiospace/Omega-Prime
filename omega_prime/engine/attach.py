@@ -118,6 +118,31 @@ def _mapping(env: Mapping[str, str] | None) -> Mapping[str, str]:
     return env
 
 
+def engine_stage(env: Mapping[str, str], explicit: str | None = None) -> str | None:
+    """Stage for one engine run: ``plan``, ``execute``, or None for no stage.
+
+    An explicit value wins, then ``OMEGA_PRIME_ENGINE_STAGE``. Blank means no
+    stage. Any other value is passed through so ``plan_router`` refuses it
+    with a clear reason instead of silently running unstaged.
+    """
+    raw = explicit if explicit is not None else env.get("OMEGA_PRIME_ENGINE_STAGE")
+    text = str(raw or "").strip().lower()
+    return text or None
+
+
+def _unknown_stage(staged: str | None) -> str | None:
+    """Refusal detail for a stage the router does not know, else None.
+
+    Checked before the readiness fallback: a typo such as ``ship`` must be
+    reported, not quietly run on the Python loop without a stage.
+    """
+    from omega_prime.engine.plan_router import STAGES
+
+    if staged is None or staged in STAGES:
+        return None
+    return f"unknown stage {staged!r}; expected one of {STAGES}"
+
+
 def route_turn(
     agent: Any,
     user_message: Any,
@@ -127,6 +152,7 @@ def route_turn(
     env: Mapping[str, str] | None = None,
     task_id: str | None = None,
     interrupt: Any | None = None,
+    stage: str | None = None,
 ) -> dict[str, Any] | None:
     """Run one turn on omp, or return None so the caller keeps the Python loop.
 
@@ -136,18 +162,38 @@ def route_turn(
     Python loop unless ``agent.force_engine`` is set. Plan mode and a narrowed
     tool map always stay on the Python loop. Once the prompt has been sent,
     a later failure is returned instead of falling back to Python.
+
+    ``stage`` (or ``agent.engine_stage``, then ``OMEGA_PRIME_ENGINE_STAGE``)
+    selects the plan-router stage: ``plan`` runs the planning model and
+    ``execute`` the build model, with the router's stage fallback.
     """
     mapping = _mapping(env)
     mode = engine_mode(mapping)
     forced = bool(getattr(agent, "force_engine", False))
+    staged = engine_stage(
+        mapping, stage if stage is not None else getattr(agent, "engine_stage", None)
+    )
     if _restricted(agent):
         return None
     if mode == "off" and not forced:
         return None
     if not forced and not _live_model(getattr(agent, "model", None)):
         return None
+    bad_stage = _unknown_stage(staged)
+    if bad_stage is not None:
+        refused = EngineResult(
+            False,
+            getattr(agent, "engine_job_id", None) or "job-" + uuid.uuid4().hex[:8],
+            reason="plan_not_allowed",
+            detail=bad_stage,
+        )
+        return _refused(
+            agent, user_message, conversation_history, refused, task_id=task_id
+        )
     if mode == "auto" and not forced:
-        ready, _reason = probe(mapping)
+        ready, _reason = probe(
+            mapping, stage=staged, plan=getattr(agent, "engine_plan", None)
+        )
         if not ready:
             return None
     job_id = getattr(agent, "engine_job_id", None) or "job-" + uuid.uuid4().hex[:8]
@@ -187,6 +233,7 @@ def route_turn(
             job_id=job_id,
             mode="rpc-ui",
             ui_control=ui_control,
+            stage=staged,
             cancel_event=(
                 interrupt
                 if interrupt is not None
@@ -220,6 +267,8 @@ def _engine_body(result: EngineResult) -> dict[str, Any]:
         "plan": result.plan,
         "provider": result.provider,
         "model": result.model,
+        "stage": result.stage,
+        "fallback_from": result.fallback_from,
         "events": result.events_path,
         "usage": result.usage,
         "cost": result.cost,
@@ -295,18 +344,51 @@ def delegate_via_engine(
     env: Mapping[str, str] | None = None,
     cwd: str | None = None,
     interrupt: Any | None = None,
+    stage: str | None = None,
+    delegate_depth: int | None = None,
+    plan: str | None = None,
+    delegate_max_depth: int | None = None,
 ) -> str | None:
-    """JSON summary from omp, or None when the Python child path should run."""
+    """JSON summary from omp, or None when the Python child path should run.
+
+    ``stage`` falls back to ``OMEGA_PRIME_ENGINE_STAGE``; see ``engine_stage``.
+    An unknown stage is an error, never a quiet fall back to the Python child.
+    ``plan`` is the requested primary plan (for example ``zai``), checked by
+    ``probe`` and used by ``run`` the same way ``route_turn`` uses
+    ``agent.engine_plan``.
+    ``delegate_depth`` is the child's depth, handed to omp's MCP server so
+    the child's own delegates still stop at the parent's ``max_depth``;
+    ``delegate_max_depth`` is that ``max_depth`` (a custom limit carries over).
+    """
     mapping = _mapping(env)
     mode = engine_mode(mapping)
     if mode == "off":
         return None
-    ready, reason = probe(mapping)
+    staged = engine_stage(mapping, stage)
+    bad_stage = _unknown_stage(staged)
+    if bad_stage is not None:
+        return json.dumps(
+            {"error": "plan_not_allowed", "detail": bad_stage}, ensure_ascii=False
+        )
+    ready, reason = probe(mapping, stage=staged, plan=plan)
     if not ready and mode != "required":
         return None
     if not ready and mode == "required":
         return json.dumps({"error": reason}, ensure_ascii=False)
-    result = run(goal, env=mapping, cwd=cwd, interrupt=interrupt)
+    extra: dict[str, Any] = {}
+    if delegate_depth is not None:
+        extra["delegate_depth"] = delegate_depth
+    if delegate_max_depth is not None:
+        extra["delegate_max_depth"] = delegate_max_depth
+    result = run(
+        goal,
+        env=mapping,
+        cwd=cwd,
+        interrupt=interrupt,
+        stage=staged,
+        plan=plan,
+        **extra,
+    )
     if not result.ok:
         if mode == "required" or result.started:
             return json.dumps(
@@ -314,10 +396,15 @@ def delegate_via_engine(
                 ensure_ascii=False,
             )
         return None
-    return json.dumps(
-        {"summary": result.final_text, "engine": "omp", "job_id": result.job_id},
-        ensure_ascii=False,
-    )
+    body: dict[str, Any] = {
+        "summary": result.final_text,
+        "engine": "omp",
+        "job_id": result.job_id,
+    }
+    if result.stage is not None:
+        body["stage"] = result.stage
+        body["model"] = result.model
+    return json.dumps(body, ensure_ascii=False)
 
 
 def desk_engine_dispatch(
@@ -325,9 +412,11 @@ def desk_engine_dispatch(
     env: Mapping[str, str],
     *,
     cwd: str | None = None,
+    stage: str | None = None,
+    plan: str | None = None,
 ) -> dict[str, Any] | None:
     """One desk ticket on omp. None means keep the existing blocked path."""
-    raw = delegate_via_engine(goal, env=env, cwd=cwd)
+    raw = delegate_via_engine(goal, env=env, cwd=cwd, stage=stage, plan=plan)
     if raw is None:
         return None
     try:
@@ -381,13 +470,34 @@ def _required_miss(env: Mapping[str, str], reason: str) -> dict[str, Any]:
 
 
 def ultrathink_engine(
-    plan: Mapping[str, Any], env: Mapping[str, str]
+    plan: Mapping[str, Any],
+    env: Mapping[str, str],
+    *,
+    stage: str | None = None,
+    requested_plan: str | None = None,
 ) -> dict[str, Any]:
-    """Run a resolved ultrathink spec on omp when the engine is ready."""
+    """Run a resolved ultrathink spec on omp when the engine is ready.
+
+    ``stage`` wins, then the plan's ``stage`` field, then
+    ``OMEGA_PRIME_ENGINE_STAGE``. An unknown stage fails instead of being
+    skipped. ``requested_plan`` is the primary plan to ask the router for
+    (for example ``zai``); ``plan`` here is the ultrathink spec record.
+    """
     mode = engine_mode(env)
     if mode == "off":
         return {"used": False, "reason": "off"}
-    ready, reason = probe(env)
+    requested = stage if stage is not None else plan.get("stage")
+    staged = engine_stage(env, requested if isinstance(requested, str) else None)
+    bad_stage = _unknown_stage(staged)
+    if bad_stage is not None:
+        return {
+            "used": False,
+            "failed": True,
+            "reason": "plan_not_allowed",
+            "error": "plan_not_allowed",
+            "detail": bad_stage,
+        }
+    ready, reason = probe(env, stage=staged, plan=requested_plan)
     if not ready:
         return _required_miss(env, reason)
     if not plan.get("found"):
@@ -406,6 +516,8 @@ def ultrathink_engine(
         "Carry out this ultrathink spec.\n\n" + text,
         env=env,
         system_prompt="Ultrathink turn. Stay inside the spec.",
+        stage=staged,
+        plan=requested_plan,
     )
     if not result.ok:
         body = {
@@ -421,6 +533,8 @@ def ultrathink_engine(
         "used": True,
         "job_id": result.job_id,
         "plan": result.plan,
+        "stage": result.stage,
+        "model": result.model,
         "final_text": result.final_text[:2000],
     }
 

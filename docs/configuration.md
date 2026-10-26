@@ -170,6 +170,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_DISPATCH_CONFIRM` | Confirms dispatch operations requiring the Fleet credential helper. |
 | `OMEGA_PRIME_DISPATCH_CONFIRM_FILE` | Names a protected file containing the dispatch confirmation token. |
 | `OMEGA_PRIME_ENGINE` | Controls whether engine execution is enabled or required. |
+| `OMEGA_PRIME_ENGINE_STAGE` | Names the GSD stage (plan or execute) an engine run is on, so staged turns and their delegates pick the stage model. |
 | `OMEGA_PRIME_ENGINE_TMUX` | Controls tmux session attachment for engine jobs. |
 | `OMEGA_PRIME_ENGINE_UNSANDBOXED` | Opts engine execution out of the sandbox. |
 | `OMEGA_PRIME_EVALS_JUDGE_API_KEY` | Authenticates requests to the live evaluation judge. |

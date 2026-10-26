@@ -41,18 +41,33 @@ def delegate_task(
         return _error(
             f"batch of {len(goals)} tasks exceeds max_children {max_children}"
         )
-    if getattr(parent, "child_model", None) is None:
-        if len(goals) == 1 and not background:
-            from omega_prime.engine.attach import _restricted, delegate_via_engine
+    child_stage = _child_stage(parent)
+    no_child_model = getattr(parent, "child_model", None) is None
+    # An unconfigured parent tries the engine. A staged parent (for example the
+    # MCP server's parent during a Sol planning turn) also tries it first, so
+    # its delegated build runs on the execute-stage model; when the engine is
+    # not ready it falls through to the configured Python child.
+    engine_first = no_child_model or child_stage is not None
+    if engine_first and len(goals) == 1 and not background:
+        from omega_prime.engine.attach import _restricted, delegate_via_engine
 
-            # A plan-mode parent, a child_tool_hook, or a narrowed tool map
-            # must not receive the full MCP registry.
-            if not _restricted(parent):
-                routed = delegate_via_engine(
-                    goals[0], interrupt=getattr(parent, "interrupt", None)
-                )
-                if routed is not None:
-                    return routed
+        # A plan-mode parent, a child_tool_hook, or a narrowed tool map
+        # must not receive the full MCP registry.
+        if not _restricted(parent):
+            # The engine child counts as one level deeper, like _run_child,
+            # and works in the parent's checkout rather than the process cwd.
+            engine_cwd = getattr(parent, "engine_cwd", None)
+            routed = delegate_via_engine(
+                goals[0],
+                interrupt=getattr(parent, "interrupt", None),
+                stage=child_stage,
+                cwd=None if engine_cwd is None else str(engine_cwd),
+                delegate_depth=depth + 1,
+                delegate_max_depth=max_depth,
+            )
+            if routed is not None:
+                return routed
+    if no_child_model:
         return _error("parent.child_model is required")
     if background:
         handle = uuid.uuid4().hex
@@ -67,6 +82,25 @@ def delegate_task(
         return json.dumps({"pending": True, "handle": handle}, ensure_ascii=False)
     summaries = _run_goals(parent, goals, max_depth, max_children)
     return _foreground(summaries)
+
+
+def _child_stage(parent: Any) -> str | None:
+    """A staged parent hands its children the ``execute`` stage.
+
+    Delegated goals are build work: a Sol-planning parent delegates to the
+    Luna execute model. An unstaged parent leaves the choice to
+    ``OMEGA_PRIME_ENGINE_STAGE``.
+    """
+    from omega_prime.engine.attach import engine_stage
+    from omega_prime.engine.plan_router import STAGES
+
+    raw = getattr(parent, "engine_stage", None)
+    staged = engine_stage({}, raw) if isinstance(raw, str) else None
+    if staged is None:
+        return None
+    # A known stage builds on execute. An unknown value is passed through so
+    # the router refuses it by name instead of quietly building.
+    return "execute" if staged in STAGES else staged
 
 
 def join_delegate(handle: str) -> str:
