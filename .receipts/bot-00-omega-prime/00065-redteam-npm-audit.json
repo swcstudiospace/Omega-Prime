@@ -66,6 +66,18 @@
    "exit_code": 0,
    "output_tail": "0",
    "cwd": "repo root"
+  },
+  {
+   "cwd": "repo root",
+   "cmd": "gh api repos/swcstudiospace/purple-team/compare/6679b82...1a1a4b0 --jq '[.status,.ahead_by,.behind_by,(.files|map(.filename))]'",
+   "exit_code": 0,
+   "output_tail": "[\"ahead\",1,0,[\"package-lock.json\"]] (package-lock.json +18/-18)"
+  },
+  {
+   "cwd": "repo root",
+   "cmd": "gh api repos/swcstudiospace/purple-team/compare/f6d2fc2...1a1a4b0 --jq '[.status,.ahead_by,.behind_by,(.files|map(.filename))]'",
+   "exit_code": 0,
+   "output_tail": "[\"ahead\",2,0,[\"package-lock.json\"]] (package-lock.json +21/-21)"
   }
  ],
  "claims": [
@@ -92,6 +104,14 @@
   {
    "claim": "No triage exception added: scripts/redteam-audit-triage.py is unchanged",
    "evidence_command_index": 9
+  },
+  {
+   "claim": "1a1a4b0 is one commit ahead of 6679b82 and changes only package-lock.json (lockfile-only bump)",
+   "evidence_command_index": 10
+  },
+  {
+   "claim": "1a1a4b0 is two commits ahead of upstream v1.4 f6d2fc2 and the only upstream file changed is package-lock.json",
+   "evidence_command_index": 11
   }
  ],
  "unverified": [
