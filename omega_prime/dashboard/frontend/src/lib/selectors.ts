@@ -1,6 +1,7 @@
 import type { CiRow, FinishedItem, PrRow, Repository, Snapshot, Task, WaitingItem } from '../types'
 export type TaskSelection = { key: string; item: Task | WaitingItem | FinishedItem }
-export function isTask(item: Task | WaitingItem | FinishedItem): item is Task { return !('result' in item) && 'source' in item && typeof item.source === 'string' }
+// Waiting requests from the task file carry a `source` too; `ask` marks them.
+export function isTask(item: Task | WaitingItem | FinishedItem): item is Task { return !('result' in item) && !('ask' in item) && 'source' in item && typeof item.source === 'string' }
 export function isWaiting(item: Task | WaitingItem | FinishedItem): item is WaitingItem { return 'ask' in item }
 export function taskSelection(snapshot: Snapshot): TaskSelection[] {
   const found = new Map<string, TaskSelection>()

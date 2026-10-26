@@ -11,19 +11,7 @@ const NUMBERED_PREFIX = /^\s*(\d{5})\s+-(?:\s+|$)(.*)$/s
 const RESULT_CODES = new Set(['ok', 'done', 'success', 'succeeded', 'complete', 'completed', 'finished', 'fail', 'failed', 'failure', 'error', 'stopped', 'cancelled', 'canceled', 'timeout', 'timed_out', 'skipped'])
 const isResultCode = (value: string | null): boolean => value !== null && RESULT_CODES.has(value.toLowerCase())
 
-/** Board/badge state for a finished row: the recorded state, else its result
- *  (`ok`-style codes read as `done`), keeping failed and stopped distinct. */
-export function finishedState(item: { state?: string | null; result?: string | null }): string {
-  const state = text(item.state)
-  if (state) return state
-  const result = text(item.result)
-  if (!result) return 'done'
-  const code = result.toLowerCase()
-  if (['ok', 'done', 'success', 'succeeded', 'complete', 'completed', 'finished'].includes(code)) return 'done'
-  if (['fail', 'failed', 'failure', 'error', 'timeout', 'timed_out'].includes(code)) return 'failed'
-  if (['stopped', 'cancelled', 'canceled'].includes(code)) return 'stopped'
-  return result
-}
+export { finishedState } from './outcome'
 
 export type CardModel = {
   /** Server sequence number from the display id ("00374"). */

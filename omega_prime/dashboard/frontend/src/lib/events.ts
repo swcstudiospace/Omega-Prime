@@ -1,5 +1,6 @@
 import type { CiRow, CommandCenter, FinishedItem, PrRow, Snapshot, Source, Task, WaitingItem } from '../types'
 import { samePullRequestUrl, taskSelection, tasksForPr } from './selectors'
+import { finishedState } from './outcome'
 
 /** Where an event was observed: a websocket delta/snapshot, the SSE
  *  fallback stream, an HTTP snapshot fetch (poll/repair/refresh), the task
@@ -139,8 +140,11 @@ function taskEvents(prev: Snapshot, next: Snapshot): EventDraft[] {
   for (const [id, row] of finishedAfter) {
     const old = finishedBefore.get(id)
     if (old && completionKey(old) === completionKey(row)) continue
-    const failed = (row.state ?? row.result ?? '').toString().toLowerCase().includes('fail')
-    out.push({ type: 'task.finished', severity: failed ? 'error' : 'success', taskId: id, title: failed ? 'Task failed' : 'Task finished', summary: label(row, row.title), payload: { result: row.result ?? null, state: row.state ?? null, receipt: row.receipt ?? null } })
+    // Same outcome the board badge shows: a stopped (aborted or cancelled)
+    // run is neither a failure nor a success.
+    const outcome = finishedState(row).toLowerCase()
+    const failed = outcome.includes('fail'), stopped = outcome === 'stopped'
+    out.push({ type: 'task.finished', severity: failed ? 'error' : stopped ? 'warning' : 'success', taskId: id, title: failed ? 'Task failed' : stopped ? 'Task stopped' : 'Task finished', summary: label(row, row.title), payload: { result: row.result ?? null, state: row.state ?? null, receipt: row.receipt ?? null } })
   }
   for (const [id, row] of after) {
     const old = before.get(id)
@@ -276,7 +280,10 @@ function sourceEvents(prev: Snapshot, next: Snapshot): EventDraft[] {
     const old = before[name]
     if (!old) continue
     const was = HEALTHY.has(old.status ?? ''), now = HEALTHY.has(source.status ?? '')
-    if (was && !now) out.push({ type: 'source.degraded', severity: sourceFailed(source) ? 'error' : 'warning', taskId: null, title: `Source ${source.status ?? 'degraded'}`, summary: `${name.replaceAll('_', ' ')}${source.error ? ` · ${truncate(source.error, 120)}` : ''}`, payload: { source: name, from: old.status ?? null, to: source.status ?? null } })
+    // A degraded source that then fails outright (degraded → error) is news
+    // too, even though neither status is healthy.
+    const newlyFailed = !now && !sourceFailed(old) && sourceFailed(source)
+    if ((was && !now) || (!was && newlyFailed)) out.push({ type: 'source.degraded', severity: sourceFailed(source) ? 'error' : 'warning', taskId: null, title: `Source ${source.status ?? 'degraded'}`, summary: `${name.replaceAll('_', ' ')}${source.error ? ` · ${truncate(source.error, 120)}` : ''}`, payload: { source: name, from: old.status ?? null, to: source.status ?? null } })
     if (!was && now) out.push({ type: 'source.recovered', severity: 'success', taskId: null, title: 'Source recovered', summary: name.replaceAll('_', ' '), payload: { source: name, from: old.status ?? null, to: source.status ?? null } })
   }
   return out
