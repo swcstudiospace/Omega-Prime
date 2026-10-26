@@ -429,10 +429,13 @@ class SubstrateClient:
         if not self._honor_binding:
             if self._base_invalid:
                 return None, "configured substrate URL is unsafe"
-            return (
-                self._base_url,
-                None if self._base_url else "substrate gateway is not configured",
-            )
+            if not self._base_url:
+                return None, "substrate gateway is not configured"
+            # An explicit endpoint that bypasses the saved binding still sends
+            # credentials only to a host the seat policy allows.
+            if not self._saved_host_allowed(self._base_url):
+                return None, "configured substrate URL is not allowed by seat policy"
+            return self._base_url, None
         from omega_prime.integrations.gateways import gateway_block, ready_gateway_url
 
         blocked = gateway_block("substrate", self._binding_env)

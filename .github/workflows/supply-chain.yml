@@ -9,6 +9,12 @@ on:
 # Python dependency audit. Pinned upstream and the product's native bridge
 # license gates run independently in rust-parity.yml.
 
+# Runner: every job runs on the omega-ci pool ([self-hosted, linux, x64,
+# omega-ci], docs/ci-runners.md), never on GitHub-hosted runners. Interpreters
+# and Node come from the runner image's read-only tool cache (setup-python /
+# setup-node cache hits); installs land in the job's own HOME.
+# Fork pull requests never reach the pool (job-level same-repository guard).
+
 permissions:
   contents: read
 
@@ -21,7 +27,8 @@ concurrency:
 
 jobs:
   pip-audit:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -41,7 +48,8 @@ jobs:
   # this job checks out the redteam submodule path only, installs with
   # --ignore-scripts, and fails on any untriaged high-or-above advisory.
   redteam-node-audit:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 15
     permissions:
       contents: read

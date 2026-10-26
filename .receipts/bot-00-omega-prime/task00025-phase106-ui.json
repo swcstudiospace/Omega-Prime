@@ -1,0 +1,55 @@
+{
+  "task_id": "task00025-phase106-ui",
+  "bot": "bot-00-omega-prime",
+  "completed_at": "2026-10-21T07:49:02Z",
+  "scope": "Planning-only UI contract; no product modifications or checks authorized",
+  "ownership_resolution": {
+    ".planning/phases/106-command-center-polish/106-UI-SPEC.md": "omega_prime/ownership.yaml last matching pattern ** -> bot-00-omega-prime",
+    ".receipts/bot-00-omega-prime/task00025-phase106-ui.json": "omega_prime/ownership.yaml last matching pattern ** -> bot-00-omega-prime"
+  },
+  "commands": [
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query agent-skills gsd-ui-researcher --skills-only",
+      "exit_code": 0,
+      "duration_s": 0.21,
+      "output_tail": "No output; no configured skills emitted"
+    },
+    {
+      "cmd": "date -u +%Y-%m-%dT%H:%M:%SZ",
+      "exit_code": 0,
+      "duration_s": 0.03,
+      "output_tail": "2026-10-21T07:49:02Z"
+    }
+  ],
+  "claims": [],
+  "artifact_evidence": [
+    {
+      "path": ".planning/phases/106-command-center-polish/106-UI-SPEC.md",
+      "tool": "functions.write",
+      "result": "Successfully wrote 30480 bytes",
+      "scope": "File creation only, not an implementation or verification claim"
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Independent seven-dimension UI checker approval; spec remains draft",
+    "Product implementation and behavioral regressions; this assignment forbids product edits and checks",
+    "Fail-before/pass-after on ad3942b, frontend/Python suites, builds, lint and types; execution and outer driver own these checks",
+    "Real GitHub clean-banner and single-card acceptance on isolated host 127.0.0.1:7441 with throwaway HOME",
+    "Real Herdr live terminal and five host screenshots; Herdr is absent in the sandbox reference inputs",
+    "Rendered accessibility, focus, contrast, screen-reader behavior and narrow-screen overflow; no browser checks authorized",
+    "Git commits and draft PR; parent orchestrator owns local planning commit, authenticated host action owns later draft PR"
+  ],
+  "files_changed": [
+    ".planning/phases/106-command-center-polish/106-UI-SPEC.md",
+    ".receipts/bot-00-omega-prime/task00025-phase106-ui.json"
+  ],
+  "contract_changes": [
+    "Draft UI contract retaining manual white/purple system and fixed five-plan/two-wave shape, covering bucket routing, task details/density, Idle separation, source notices, Greptile states and read-only terminal interaction"
+  ],
+  "rollback_plan": "Remove only these newly created planning artifacts if the parent rejects the contract; no product state was changed",
+  "approvals": [
+    "User approved defaults and existing white/purple styling; no new questions or UI dependencies"
+  ],
+  "approved_by": null
+}

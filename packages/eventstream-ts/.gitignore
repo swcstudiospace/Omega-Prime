@@ -1,0 +1,8 @@
+# Build and dependency output for the TypeScript event stream SDK; never commit these.
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+.vitest/
+*.log

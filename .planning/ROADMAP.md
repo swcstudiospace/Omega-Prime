@@ -22,6 +22,7 @@
 - ✅ **v18 Operator posture** - Phases 89-95 (shipped 2026-10-14). Seven upgrades accepted when the operator said to continue.
 - ✅ **v19 Installer bindings** - Phase 96 (shipped 2026-10-15). A fresh install binds its own Linear and Notion, treats the existing gateways as optional, and fails setup when `prime-agent` is empty.
 - **v20 Wiring** — Phases 97–103 (in progress 2026-10-21). Staged from the 2026-10-21 read-only wiring audit (`/workspace/omes-bot-wiring-audit/AUDIT.md`): explicit substrate configuration with a safe settings loader, streamable-HTTP/SSE transport and argument/lease/memory contracts, shared memory, solo mode, engine wiring with no time caps, a real local executor, schedulers and dead modules, and Ultrathink integration. Phase 98 implementation was executed on its phase-specific branch; phase 97 remains authoritative for transport, endpoint resolution, source-aware search failures, and integration order.
+- 🔵 **v21 Task Dashboard** — Phase 104 (started 2026-10-21)
 
 Phase 98 requirements MEM-98-01..MEM-98-10 and four executable plans are in `.planning/phases/98-shared-memory-substrate-hindsight/`. Branch execution and verification are recorded in that phase directory's `SUMMARY.md`.
 
@@ -30,6 +31,8 @@ Phase 99 (solo mode, Desk optional) is implemented on its own branch and integra
 Phase 100 (omp engine wiring) is complete and integrated after Phase 99 (PR #50); see `.planning/phases/100-omp-engine-wiring/`.
 
 Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.
+- **v21 Event Stream** — Phases 104–108 (started 2026-10-23, task 00046). Apache Pulsar event backbone for the Autonomous Event-Driven ADLC; timer routines banned (event-driven only). Runs in parallel with v20; see `phases/104-event-stream-broker-decision-and-railway-spec/DESIGN.md`.
+
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
 `milestones/v16-phases/`.
@@ -170,7 +173,7 @@ Phase 98 implementation was executed on its phase-specific parallel branch under
 - [x] Phase 100: omp engine wiring — six reviewed plans (6/6) — completed 2026-10-20; integrated after Phase 99
 - [ ] Phase 101: Real U2 LocalExecutor
 - [x] Phase 102: Schedulers, dead modules, env docs — executed and verified; integrated in wiring order (PR #52)
-- [ ] Phase 103: Ultrathink integration and cleanup
+- [x] Phase 103: Ultrathink integration and cleanup — executed and verified; integrated in wiring order (PR #46)
 Phase 98 plan: [CONTEXT](phases/98-shared-memory-substrate-hindsight/CONTEXT.md),
 [research](phases/98-shared-memory-substrate-hindsight/RESEARCH.md), and
 executable plans [98-01](phases/98-shared-memory-substrate-hindsight/98-01-PLAN.md),
@@ -321,3 +324,191 @@ Acceptance criteria:
 4. Doctor reports disabled families and scheduled work whose runner was not observed without executing schedules; the exact requested gates are green, or each baseline failure is explicitly named.
 
 Additional safety constraints: exec-job operations remain approval-gated; plugins require exact `OMEGA_PRIME_PLUGINS=1` opt-in and remain off otherwise; `x_tweepy` is removed while urllib X behavior is retained. Preserve approval gates for sends, posts, merges, deploys, and pin-bump mutation. Do not activate live providers or integrations.
+
+## v21 Task Dashboard
+
+Phase 104 was staged from the 2026-10-21 task-dashboard uplift (operator-approved
+01:51 AEDT); Phase 105 plans its Command Center upgrade. The Phase 104 uplift is
+`.planning/phases/104-task-dashboard/104-UPLIFT.xml`. Locked decisions: the
+dashboard lives in the omes-bot package `omega_prime/dashboard/` on
+`feat/task-dashboard`; the fleet collector is implemented but OFF by default
+(enabled only via a non-secret setting); the omega-job `final_text` first line
+is shown redacted with a 120-character cap; the dashboard runs in a Herdr
+workspace "dashboard" on 127.0.0.1:7421 and the operator starts it. This
+session plans only. U7 covers docs/dashboard.md + scripts/dashboard-start.sh +
+tests; the live box run, the PR and the merge yes are operator steps.
+
+### Phase 104: Task Dashboard
+
+**Goal:** A local, read-only view of what Omega Prime is actually working on: a new `omega_prime/dashboard/` package with one collector per live work source on the box, a normaliser joining them into one Task model with redaction at every boundary, a starlette app exposing a GET-only JSON API plus an SSE stream, and one static HTML/CSS/JS page (no build step) with four sections — Active work, PR / Greptile / CI gate, Waiting on Ove, Recently finished — bound to 127.0.0.1 only, plus the `~/.omega-prime/dashboard/tasks.json` writer helper, tests, docs and a start script.
+**Requirements**: TD-01, TD-02, TD-03, TD-04, TD-05, TD-06, TD-07, TD-08
+**Success Criteria:**
+1. (a1/TD-01) `ss -ltn` shows the dashboard only on `127.0.0.1:<port>`; `--host 0.0.0.0` or any non-loopback host exits non-zero with a clear message.
+2. (a2/TD-02) With the box as observed, `/api/snapshot` lists the Herdr pane w2:p1 "swarm-smoke", the live wiring phases p1/p2/p3/p4/p6/p7 with branch and stage, the omp-sandbox e2e run with its two podman containers, and recent omega jobs, each with started and last-activity times.
+3. (a3/TD-03) The PR gate lists open omes-bot PRs with CI and Greptile columns, and later shows `fix/wiring-*` PRs once they open, without a restart.
+4. (a4/TD-04) Writing a sample `tasks.json` via the writer helper makes its tasks, `waiting_on_ove` and `finished` items appear in the page within 5s with no reload.
+5. (a5/TD-05) The seeded-secret test passes: no fake token appears in any response; `rg` over the served HTML/JS finds no innerHTML with data.
+6. (a6/TD-06) Killing herdr, stopping podman, or removing the PAT turns that source amber or red in the health strip while the other sections keep updating.
+7. (a7/TD-07) Every non-GET method returns 405, and the Host-header guard rejects a foreign Host.
+8. (a8/TD-08) ruff, mypy and pytest are green or baseline-only (recorded baseline: `test_desk_wiring`, `test_grokbot_oneclick`, `test_omega_commands` doctor tests, `test_prime_kernel_*`); all new dashboard tests pass. Greptile 5/5 + green CI + the operator's merge yes follow the phase.
+
+**Plans:** 7 plans
+
+Plans:
+- [x] Plan 104-01 (wave 1): U4 — Task model, joins, redaction wrapper, atomic tasks.json writer + model/redaction tests (tracer) — completed 2026-10-21
+- [x] Plan 104-02 (wave 2, after 104-01): U1 — file collectors (omp_sessions, wiring, sandbox_files, omega_jobs, command_log, tasks_json, agentos) — completed 2026-10-21
+- [x] Plan 104-03 (wave 2, after 104-01): U2 — process collectors (procs, herdr, podman) — completed 2026-10-21
+- [x] Plan 104-04 (wave 2, after 104-01): U3 — GitHub and opt-in fleet collectors — completed 2026-10-21
+- [x] Plan 104-05 (wave 2, after 104-01): U5 — starlette app, GET-only API + SSE, poller, CLI, loopback guard — completed 2026-10-21
+- [x] Plan 104-06 (wave 3, after 104-05): U6 — static four-section UI with health strip and SSE/polling fallback — completed 2026-10-21
+- [x] Plan 104-07 (wave 4, after 104-02, 104-03, 104-04, 104-06): U7 — integration tests, docs/dashboard.md, scripts/dashboard-start.sh (live run and PR are operator steps) — completed 2026-10-21
+
+Phase 104 implemented on `feat/task-dashboard` (commits beeae56, d5505cd,
+c20a0ee): dashboard tests green, ruff/mypy/format green, full suite at the
+recorded baseline. The live box run (a1-a7 observation), rebase, push, PR,
+Greptile 5/5 and the merge yes remain operator steps.
+
+### Phase 105: Omega Prime Command Center
+
+**Goal:** Upgrade the Phase 104 read-only dashboard to a white-and-purple Command Center with persistent numbered tasks, cached organisation repositories and PR checks, and a self-hosted React static app, preserving every PR #47 security guarantee.
+**Depends on:** Phase 104 (unmerged PR #47; branch `feat/command-center` stays stacked).
+**Requirements:** a1, a2, a3, a4, a5, a6, a7
+**Contract:** `.planning/phases/105-command-center/105-UPLIFT.xml`
+**Plans:** 5 execution waves; implementation is complete on `feat/command-center`. Offline tests/build passed with recorded limits; live a2/a3 parity, visual review, signed sandbox receipt and screenshots remain outer-driver evidence.
+**Wave 1**
+- [x] 105-01-PLAN.md — W1: stable task sequence allocation, CLI and snapshot fields — completed and committed.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 105-02-PLAN.md — W2 (after W1): cached read-only GitHub organisation repositories, PR checks and reviewed-commit scores — completed and committed.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 105-03-PLAN.md — W3 (after W2): React/TypeScript/Vite/Tailwind shell, four views, local fonts, adapted motion, tests and committed build — completed; final frontend payload path uses the published `sources.github.command_center`.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 105-04-PLAN.md — W4 (after W3): default static app, legacy fallback, MIME/cache/CSP and security regression coverage — completed; setuptools package collection test skipped because setuptools is unavailable.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 105-05-PLAN.md — W5 (after W4): Command Center documentation, attributions and final offline verification — completed; broad dashboard selection remains blocked by missing `mcp` and `apscheduler` dependencies.
+
+Cross-cutting constraints: no product implementation during planning; no runtime Node or external-origin CSP; no network in Python tests; no write actions in the server/UI. Outer driver owns signed sandbox evidence (a6), live GitHub parity (a2/a3), screenshots (a7), export/push/draft PR and Greptile loop. No merge.
+
+### Phase 106: Command Center polish
+
+**Goal:** Fix bounded recent-merges fetching, duplicate default-branch cards and branch Greptile states; add deep-linkable bucket/task views, denser rows, correct Active/Finished/Idle session grouping and a redacted, read-only live Herdr terminal.
+**Depends on:** Phase 105 (`feat/command-center` at `ad3942b`); local work stays on `feat/command-center-polish`.
+**Contract:** `.planning/phases/106-command-center-polish/106-UPLIFT.xml`; approved defaults and the model-bucket addendum are locked in `106-CONTEXT.md`.
+**Plans:** Exactly five plans in two waves. Files are disjoint within each wave; cross-wave extensions are explicitly ordered.
+
+**Wave 1**
+- [x] 106-01-PLAN.md — bounded recent-merges fetch and honest oversize degradation; terminal task/idle session model fixes and regression tests.
+- [x] 106-02-PLAN.md — backend-first CI/CD branch de-duplication with live-shaped Vitest fixtures; no generated assets.
+- [x] 106-04-PLAN.md — hash routes, bucket/task detail views, density and Idle sessions UI; sole wave-1 `static/cc` rebuild after 106-02.
+
+**Wave 2**
+- [x] 106-03-PLAN.md — after 106-01/02: merged-PR Greptile enrichment and explicit card wording.
+- [x] 106-05-PLAN.md — after 106-04: validated task/pane mapping and bounded read-only terminal SSE; sole wave-2 `static/cc` rebuild after 106-03.
+
+Local implementation and offline verification are recorded in `106-SUMMARY.md`. Live GitHub/Herdr checks, five screenshots on isolated `127.0.0.1:7441`, signed sandbox evidence, and the real-terminal check remain outer-driver work. Local commits only; no push, merge, or deploy. AC9 remains pending.
+
+### Phase 115: Herdr live terminals + websocket Command Center (task 00035)
+
+**Goal:** Interactive per-task Herdr terminal (xterm.js over a token-gated loopback websocket, read-only switch), live /ws/events deltas replacing polling with backoff + SSE fallback, and tasks.json kept current through heartbeats, a stale detector and a reconciler.
+**Depends on:** Phase 106 + herdr_launch (#59, 4016ef8). Branch `feat/herdr-ws`.
+**Contract:** `.planning/phases/115-herdr-live-terminals/115-UPLIFT.xml`; tracking in `115-TRACKING.md`.
+**Plans:** Four plans in two waves. Files are disjoint within each wave; cross-wave extensions to `app.py`/`poller.py`/`__main__.py` are ordered by dependency.
+
+**Wave 1**
+- [x] 115-01-PLAN.md — heartbeats, stale detector, reconciler CLI: status_file liveness fields, `stale.py`, poller-applied `stale` inside task rows, dry-run-by-default `reconcile.py`.
+- [x] 115-02-PLAN.md — token-gated `/ws/tasks/{id}/terminal` websocket: `terminal_ws.py` ANSI-preserving redaction, `/api/session` token, `/ws/` guard admission, `--terminal-readonly`.
+
+**Wave 2**
+- [x] 115-03-PLAN.md — after 115-01: `/ws/events` typed deltas with heartbeat and 16-connection cap (`events.py`), poller `nudge` + tasks.json stat watcher, `__main__` wiring.
+- [x] 115-04-PLAN.md — after 115-02/03: `/ws/events` tier in useDashboard with jittered backoff and SSE fallback, interactive xterm TerminalPanel, STALE badges, sole `static/cc` rebuild.
+
+Local implementation and offline verification are recorded in `115-SUMMARY.md` (ACs a1–a7 mapped to evidence). Live-Herdr checks and the 7421 server swap remain outer-driver work. Local commits only; no push, merge, or deploy.
+
+### v21 Event Stream (Phases 104–108) — in progress 2026-10-23
+
+> Note (00046 rebase, 2026-10-23): the v21 Event Stream phase numbers 104–108 overlap the v21 Task Dashboard / Command Center phase numbers above; phase directories are disambiguated by slug (`104-event-stream-broker-decision-and-railway-spec`, `105-event-stream-core-library`, …).
+
+Source: Ove's `/gsd-autonomous` prompt (00046), 2026-10-23 AEDT. Standing rule: Omega Prime may not create timer/schedule routines; everything is event-triggered (deadlines are delayed events). Decision and spec: `phases/104-event-stream-broker-decision-and-railway-spec/{CONTEXT,DESIGN,RESEARCH,UPLIFT}.md`.
+
+- [x] Phase 104: Event stream broker decision + Railway deploy spec
+- [x] Phase 105: Event stream core library (Python + TypeScript)
+- [ ] Phase 106: Box hub + VPS leaf live feed
+- [ ] Phase 107: ADLC taxonomy wiring + timer retirement
+- [ ] Phase 108: Event stream ops + verification
+
+### Phase 104: Event stream broker decision + Railway deploy spec
+
+**Goal:** Decide the broker (Pulsar vs NATS vs other) with verified SDK/Railway evidence and write the enterprise-grade spec: topology, CloudEvents contract, tenancy/topics/schemas, delivery semantics, security, FMEA, test strategy, Railway deploy spec.
+
+**Requirements:** ES-104-01 decision with evidence; ES-104-02 DESIGN.md complete; ES-104-03 topology-as-code draft (`topology.yaml` shape); ES-104-04 HITL list with defaults.
+
+**Success criteria:** CONTEXT.md records the decision and auto-accepted answers; DESIGN.md covers §1–§18; RESEARCH.md verifies every pasted claim.
+
+### Phase 105: Event stream core library (Python + TypeScript)
+
+**Depends on:** Phase 104
+
+**Goal:** `omega_prime/eventstream/` (envelope, taxonomy, schemas, ports, memory + Pulsar adapters, SQLite outbox with broker dedup, consumer runtime with Key_Shared/Failover/Exclusive/Reader, retry topics + DLQ, idempotency ledger, reconnect/backoff/circuit, graceful shutdown, admin REST reconcile, CLI) and `packages/eventstream-ts/` with the same semantics; Pulsar Functions scaffold.
+
+**Success criteria:** Integration tests against pinned `apachepulsar/pulsar:5.0.0` prove no loss across broker restart, dedup of resends, per-key ordering, delayed delivery, retry→DLQ, schema-compat rejection and ACL denial; ruff/format/mypy --strict/pytest/vitest/polyglot-check green.
+
+### Phase 106: Box hub + VPS leaf live feed
+
+**Depends on:** Phase 105
+
+**Goal:** Pulsar standalone on the box (podman, loopback, JWT, persistent volume, topology applied) and the VPS leaf publisher (systemd unit, outbox, box-initiated reverse SSH tunnel) emitting auth/login, job, CI and Hindsight events as a live feed.
+
+**Success criteria:** VPS events reach the box hub within seconds; a tunnel outage loses nothing (outbox drains on reconnect); all sources are push streams (no polling).
+
+### Phase 107: ADLC taxonomy wiring + timer retirement
+
+**Depends on:** Phase 105 (106 for VPS-sourced types)
+
+**Goal:** Wire 00043's handlers and listeners L1–L23 onto the bus; express deadlines as delayed events; retire every timer routine (`omega_prime/cron`, routine schedules, heartbeats, collector loops); Command Center bridge via Reader → `poller.nudge`.
+
+**Success criteria:** Every former timer is event-triggered, on-demand, or removed; Command Center updates from events; gate/blocked/review flows pass end-to-end against the hub.
+
+### Phase 108: Event stream ops + verification
+
+**Depends on:** Phases 106, 107
+
+**Goal:** OTel metrics/traces, structured logs, `/healthz` + `/readyz`, `omega eventstream {status,tail,replay,dlq}`, chaos tests, no-timer CI gate, Railway Dockerfile + cutover runbook + tiered storage config.
+
+**Success criteria:** Chaos suite shows zero loss and zero duplicate effects; no-timer gate in CI; runbook reviewed; Railway artefacts ready for cutover.
+
+## v23 CI Runner Fleet (task 00050)
+
+Autoscaling ephemeral GitHub Actions runners on the serverless Railway "Ubuntu Desktop" (Linux Containers project), driven only by `workflow_job` webhook events (timer ban). Spec: `phases/120-ci-runner-fleet/DESIGN.md`. Tracking: SPE-19875. Branch `gsd/00050-ci-runners`. Paid Railway cutover and VPS install are held for the operator.
+
+### Phase 120: CI runner fleet
+
+**Goal:** webhook → pure scaler → GitHub App JIT config → ephemeral runner on the Desktop runner-agent; Railway Serverless sleep as teardown; `omega.ci.runner.*` events; per-repo configuration guide.
+**Depends on:** none (00046 EventBus is an optional adapter).
+
+Plans:
+- [ ] 120-01-PLAN.md — core: settings, webhook verify/dedupe, WorkflowJob, pure Scaler, delayed-event + publisher ports.
+- [ ] 120-02-PLAN.md — after 120-01: GitHub App/PAT JIT client, Desktop wake client, controller, ASGI app, CLI.
+- [ ] 120-03-PLAN.md — after 120-02: runner-agent + supervisor + Desktop image overlay (not deployed).
+- [ ] 120-04-PLAN.md — after 120-03: docs, per-repo guide, VPS templates, cutover runbook, cost.
+
+### Phase 121: CI runner swarm (serverless multi-agent pool, 00064)
+
+**Goal:** one controller schedules across N serverless Railway Desktop runner agents (target 3 × 8 = 24 slots). It places runners on the least-loaded agent, wakes a sleeping agent with `GET /healthz` before placing on it, fails over (429 means full, a definitive failure means unhealthy with a cooldown), and reconciles ghosts per agent. There is no idle polling, so every agent scales to zero. It stays backward compatible with one agent. Tracking: Notion Agent Task Graph (Linear blocked by the workspace's free issue limit). Branch `gsd/00064-runner-swarm`. Creating the Railway services and domains, setting up DNS and changing the live controller env are held for Ove (spend go).
+**Depends on:** Phase 120.
+
+Plans:
+- [x] 121-01-PLAN.md — settings (agents 1..5), DesktopClient.wake, pool.DesktopPool, controller/app wiring, tests, docs and cost.
+
+### Phase 122: Omega-Prime main green on the omega-ci pool (00065)
+
+**Goal:** every workflow on main is green on `[self-hosted, linux, x64, omega-ci]`, with each failure fixed at its root cause and no test weakened. Tracking: Notion Agent Task Graph (Linear is blocked by the free issue limit). Context and root causes: `phases/122-main-green/CONTEXT.md`.
+**Depends on:** Phase 121.
+
+Plans:
+- [x] 122-01-PLAN.md — CI venv in every pip job, GITHUB_REF purpose, readiness tmp tests (PR #100).
+- [x] 122-02-PLAN.md — redteam pin 1a1a4b0 for the npm audit highs (PR #101).
+- [x] 122-03-PLAN.md — runner agent budgeted drain (PR #102).
+- [ ] 122-04 — container-capable pool member for grokbot-image and eventstream-it (held for Ove: spend/security).

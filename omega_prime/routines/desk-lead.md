@@ -5,5 +5,5 @@ Claims intake from `$OMEGA_PRIME_STATE_DIR/agent/intake.json` (the agent data fo
 Grok Bot routine a new install can create:
 - name: Omega Prime desk-lead
 - prompt: Call the omega_command tool with command `/omega-desk-lead`. Report tickets, blocked reasons, and receipts. Do not mark blocked work done.
-- schedule: weekdays at 09:15 local (`15 9 * * 1-5`)
+- trigger: when a new intake item or ticket arrives (Linear issue created, or a lead intake event), and when a blocked ticket changes state (unblocked, reopened, or its blocker resolved) so open work is picked up again. Event-driven only; no timer or cron schedule.
 </routine>

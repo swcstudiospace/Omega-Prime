@@ -1,6 +1,6 @@
 {
   "remote": "https://github.com/PrimeIntellect-ai/prime-agent.git",
-  "commit": "967eb13fd488507af5f590e9c6ea8b2672f1fc05",
+  "commit": "72f790babc3befe23b1ff12d3f0049be3977e335",
   "toolchain": "1.98.1",
   "known_failing_tests": [
     "acp_prompt_settles_after_rlm_quiescence",

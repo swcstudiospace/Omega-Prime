@@ -1,0 +1,47 @@
+{
+  "task_id": "phase-104-task-dashboard-planning",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T15:14:39Z",
+  "completed_at": "2026-10-20T15:17:43Z",
+  "commands": [
+    {
+      "cmd": "git ls-files -- omega_prime/engine/fleet_client.py omega_prime/engine/omp_driver.py omega_prime/engine/jobs.py omega_prime/credentials/redact.py omega_prime/grokbot/approvals_api.py omega_prime/tests/conftest.py",
+      "exit_code": 0,
+      "output_tail": "Tracked: omega_prime/credentials/redact.py; omega_prime/engine/fleet_client.py; omega_prime/engine/jobs.py; omega_prime/engine/omp_driver.py; omega_prime/grokbot/approvals_api.py; omega_prime/tests/conftest.py"
+    },
+    {
+      "cmd": "git ls-files -- .planning/PROJECT.md",
+      "exit_code": 0,
+      "output_tail": ".planning/PROJECT.md"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Existing code analogs and project guidance referenced by the plans are tracked source paths.",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "The project overview referenced in plan context is tracked.",
+      "evidence_command_index": 1
+    }
+  ],
+  "unverified": [
+    "PLAN.md structure and automated acceptance-command coverage were not run; the orchestrator must validate the seven plans before execution.",
+    "No product tests, lint, type checks, formatters, live services or long-running server were run, per the planning-only assignment.",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    ".planning/phases/104-task-dashboard/104-01-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-02-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-03-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-04-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-05-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-06-PLAN.md",
+    ".planning/phases/104-task-dashboard/104-07-PLAN.md",
+    ".receipts/bot-00-omega-prime/phase-104-task-dashboard-planning.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": null,
+  "approvals": [],
+  "approved_by": ""
+}

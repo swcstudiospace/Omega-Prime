@@ -9,6 +9,9 @@ still require their actual prerequisites and authorization.
 
 ## Start by audience
 
+- **Understand what Omega Prime is:** [Autonomous Event-Driven ADLC Programming Bot](adlc.md) —
+  the operator starts a task, Omega Prime builds, gates, merges and reports, driven by
+  events rather than timers, under the standing rules in the prime directives.
 - **Install and check locally:** [Setup](setup.md), [local validation](local-validation.md),
   and the [configuration inventory](configuration.md) for environment names and purposes.
 - **Use the agent and workflows:** [User guide](user-guide.md), [driving the bot](driving-the-bot.md)

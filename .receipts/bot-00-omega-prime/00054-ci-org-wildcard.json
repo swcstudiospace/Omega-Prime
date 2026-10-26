@@ -1,0 +1,126 @@
+{
+ "task_id": "00054-ci-org-wildcard",
+ "bot": "bot-00-omega-prime",
+ "started_at": "2026-10-24T03:58:00+11:00",
+ "completed_at": "2026-10-24T04:07:22+11:00",
+ "base_commit": "f208345",
+ "commands": [
+  {
+   "cmd": "cd /tmp/r54/pre (detached f208345) && PYTHONPATH=. python /tmp/r54/pre_probe.py  # base: wildcard rejected",
+   "exit_code": 1,
+   "duration_s": 0.1,
+   "output_tail": "hook refusal: repo_not_allowed\nsettings: OMEGA_CI_AGENT_REPOS: comma-separated owner/repo names"
+  },
+  {
+   "cmd": "cd /workspace/omes-bot-00054 && PYTHONPATH=. python /tmp/r54/pre_probe.py  # this branch",
+   "exit_code": 0,
+   "duration_s": 0.1,
+   "output_tail": "hook refusal: None\nsettings: accepted"
+  },
+  {
+   "cmd": "python -m pytest omega_prime/tests/ci_runners -q -p no:cacheprovider",
+   "exit_code": 0,
+   "duration_s": 4.6,
+   "output_tail": "........................................................................ [ 15%]\n........................................................................ [ 30%]\n........................................................................ [ 45%]\n........................................................................ [ 60%]\n........................................................................ [ 76%]\n........................................................................ [ 91%]\n...............s.........................                                [100%]\n472 passed, 1 skipped in 4.23s\n"
+  },
+  {
+   "cmd": "python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_env_inventory.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_prompt_format.py -q -p no:cacheprovider",
+   "exit_code": 0,
+   "duration_s": 15.5,
+   "output_tail": "........................................................................ [ 93%]\n.....                                                                    [100%]\n77 passed in 15.17s\n"
+  },
+  {
+   "cmd": "ruff check omega_prime/",
+   "exit_code": 0,
+   "duration_s": 0.1,
+   "output_tail": "\u001b[1;32mAll checks passed!\u001b[0m\n"
+  },
+  {
+   "cmd": "ruff format --check omega_prime/",
+   "exit_code": 0,
+   "duration_s": 0.1,
+   "output_tail": "773 files already formatted\n"
+  },
+  {
+   "cmd": "mypy omega_prime/",
+   "exit_code": 0,
+   "duration_s": 2.3,
+   "output_tail": "Success: no issues found in 646 source files\n"
+  },
+  {
+   "cmd": "polyglot-check --no-daemon --changed HEAD",
+   "exit_code": 0,
+   "duration_s": 7.1,
+   "output_tail": "polyglot-check: 0 error(s), 0 warning(s) in 10/10 file(s) checked [pyright] 6976ms\n"
+  },
+  {
+   "cmd": "python -m omega_prime.tooling.env_inventory --check",
+   "exit_code": 0,
+   "duration_s": 7.6,
+   "output_tail": ""
+  },
+  {
+   "cmd": "bash omega_prime/scripts/assemble-prompts.sh --check",
+   "exit_code": 0,
+   "duration_s": 0.2,
+   "output_tail": "assemble-prompts --check: OMEGA_PRIME up to date\n"
+  },
+  {
+   "cmd": "git diff --check HEAD",
+   "exit_code": 0,
+   "duration_s": 0.0,
+   "output_tail": ""
+  },
+  {
+   "cmd": "/tmp/r54/al/bin/actionlint .github/workflows/omega-ci-smoke.yml",
+   "exit_code": 0,
+   "duration_s": 0.0,
+   "output_tail": ""
+  }
+ ],
+ "claims": [
+  "OMEGA_CI_REPOS, OMEGA_CI_PUBLIC_REPOS and OMEGA_CI_AGENT_REPOS accept owner/* (case-insensitive); bare *, */repo, owner/foo*, owner/** rejected (test_repo_wildcard.py).",
+  "One shared matcher (jobhook.parse_repo_patterns/repo_allowed/patterns_cover) used by settings, jobs.wants_pool/matches, scaler, controller fork-guard opt-in and the runner hook.",
+  "Empty allowlist still matches nothing; empty OMEGA_CI_AGENT_REPOS refuses all jobs; a bad entry voids the hook policy.",
+  "PUBLIC subset check understands wildcards: owner/* covered only by owner/*.",
+  "owner/* never admits a repo with repository.fork true or unknown; exact entry required; hook reason fork_repo_not_listed; demand file persists fork.",
+  "Fork-guard rules unchanged under the wildcard (fork PR, pull_request_target, unknown head, other events refused) - controller tests over the fake transport.",
+  "omega-ci-smoke.yml: workflow_dispatch only, contents: read, pool labels, 10 min, no checkout/secrets; actionlint clean with .github/actionlint.yaml.",
+  "Prompt core directives gain ci_runner_scope; OMEGA_PRIME.xml reassembled."
+ ],
+ "unverified": [
+  "No live GitHub/Railway/VPS run; the smoke workflow has not been dispatched (it lands with the merge).",
+  "Full omega_prime/tests suite not run locally; CI covers it.",
+  "Actual GitHub webhook payloads carrying repository.fork are assumed per GitHub's documented repository object; a missing field fails closed (owner/* will not match)."
+ ],
+ "files_changed": [
+  ".github/actionlint.yaml",
+  ".github/workflows/omega-ci-smoke.yml",
+  ".receipts/bot-00-omega-prime/00054-ci-org-wildcard.json",
+  "CHANGELOG.md",
+  "deploy/ci-runner-controller/env.example",
+  "deploy/ci-runner-desktop/README.md",
+  "docs/ci-runners-repo-setup.md",
+  "docs/ci-runners.md",
+  "docs/configuration.md",
+  "omega_prime/ci_runners/agent/jobhook.py",
+  "omega_prime/ci_runners/controller.py",
+  "omega_prime/ci_runners/demand.py",
+  "omega_prime/ci_runners/jobs.py",
+  "omega_prime/ci_runners/scaler.py",
+  "omega_prime/ci_runners/settings.py",
+  "omega_prime/prompts-assembled/OMEGA_PRIME.xml",
+  "omega_prime/prompts/_shared/core-directives.xml",
+  "omega_prime/tests/ci_runners/_support.py",
+  "omega_prime/tests/ci_runners/test_demand.py",
+  "omega_prime/tests/ci_runners/test_repo_wildcard.py",
+  "omega_prime/tests/ci_runners/test_smoke_workflow.py",
+  "omega_prime/tooling/env_inventory_policy.json"
+ ],
+ "contract_changes": [
+  "WorkflowJob.fork field; demand.json rows gain fork; job-policy.json repos may hold owner/*"
+ ],
+ "rollback_plan": "Revert the PR; explicit owner/repo lists keep working unchanged. Set allowlists back to explicit names before reverting, since the old parser rejects owner/*.",
+ "approvals": [],
+ "approved_by": null
+}
