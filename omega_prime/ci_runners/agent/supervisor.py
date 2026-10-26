@@ -76,6 +76,10 @@ LOG_LINE_CAP = 500
 DIAG_TAIL_BYTES = 8 * 1024
 DIAG_TAIL_LINES = 60
 JOB_STARTED_MARKER = "Running job:"
+# On shutdown with a drain budget, idle runners keep running this long before
+# being stopped, so a job start printed just before (or during) the drain is
+# read by the relay and that runner is treated as busy, not cancelled.
+DRAIN_SETTLE_S = 2.0
 _BLOB_RE = re.compile(r"[A-Za-z0-9+/=_.-]{64,}")
 _PATH_SEGMENT_MAX = 32
 
@@ -357,6 +361,8 @@ class Supervisor:
         job_hook: Path | None = None,
         job_policy: Path | None = None,
         job_repos: frozenset[str] = frozenset(),
+        drain_budget_s: float = 0.0,
+        drain_settle_s: float = DRAIN_SETTLE_S,
     ) -> None:
         if max_runners < 1:
             raise ValueError("max_runners must be ≥ 1")
@@ -375,6 +381,12 @@ class Supervisor:
         self._base_env = dict(os.environ if base_env is None else base_env)
         self._spawn: Spawn = spawn or asyncio.create_subprocess_exec
         self._grace = term_grace_s
+        if drain_budget_s < 0:
+            raise ValueError("drain_budget_s must be ≥ 0")
+        self._drain_budget = drain_budget_s
+        if drain_settle_s < 0:
+            raise ValueError("drain_settle_s must be ≥ 0")
+        self._drain_settle = drain_settle_s
         if job_hook is not None and job_policy is None:
             raise ValueError("job_hook needs job_policy")
         self.job_hook = job_hook
@@ -464,9 +476,49 @@ class Supervisor:
                 shutil.rmtree(entry, ignore_errors=True)
 
     async def shutdown(self) -> None:
-        """Drain, terminate every child, await their cleanup + callbacks."""
+        """Drain: let running jobs finish within the budget, then stop the rest.
+
+        Admission closes first. With a drain budget, every runner first gets a
+        short settle window (``drain_settle_s``, within the budget) before any
+        is signalled: a runner that printed its job-start line just before the
+        drain, or takes a job during it, has that line read by its relay and
+        counts as busy instead of being cancelled. Then, in one step with no
+        await between the check and the signal, runners that have not taken a
+        job are stopped, so no new job lands here. Runners running a job keep
+        running for the rest of ``drain_budget_s`` (derived from the
+        platform's SIGTERM→SIGKILL window, see ``AgentSettings.drain_budget_s``).
+        Whatever is still running when the budget runs out is stopped like
+        before. Every child's cleanup and exit callback is awaited.
+        """
         self.draining = True
         tasks = [c.task for c in self.children.values() if c.task is not None]
+        budget = self._drain_budget
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        if budget > 0 and any(not c.took_job for c in self.children.values()):
+            settle = min(self._drain_settle, budget)
+            if settle > 0 and tasks:
+                # Children that exit during the settle are simply done.
+                await asyncio.wait(tasks, timeout=settle)
+        busy: list[asyncio.Task[None]] = []
+        for name, child in list(self.children.items()):
+            if budget > 0 and child.took_job and not child.stop_requested:
+                if child.task is not None:
+                    busy.append(child.task)
+            else:
+                self.stop(name)
+        remaining = budget - (loop.time() - started)
+        if busy and remaining > 0:
+            log.info(
+                "draining: waiting up to %.0fs for %d running job(s)",
+                remaining,
+                len(busy),
+            )
+            _done, pending = await asyncio.wait(busy, timeout=remaining)
+            if pending:
+                log.warning(
+                    "drain budget spent: stopping %d running job(s)", len(pending)
+                )
         for name in list(self.children):
             self.stop(name)
         if tasks:

@@ -342,3 +342,20 @@ def test_agent_side_cap_stays_ten_per_container() -> None:
     )
     with pytest.raises(SettingsError, match=r"1\.\.10"):
         AgentSettings.from_env(agent_env(OMEGA_CI_AGENT_MAX_RUNNERS="11"))
+
+
+@pytest.mark.parametrize(
+    ("window", "budget"),
+    [(None, 0.0), ("0", 0.0), ("30", 0.0), ("31", 1.0), ("3900", 3870.0)],
+)
+def test_agent_drain_budget_follows_railway_window(
+    window: str | None, budget: float
+) -> None:
+    extra = {} if window is None else {"RAILWAY_DEPLOYMENT_DRAINING_SECONDS": window}
+    assert AgentSettings.from_env(agent_env(**extra)).drain_budget_s == budget
+
+
+@pytest.mark.parametrize("window", ["-1", "soon", str(6 * 3600 + 1)])
+def test_agent_drain_window_rejects_bad_values(window: str) -> None:
+    with pytest.raises(SettingsError, match="RAILWAY_DEPLOYMENT_DRAINING_SECONDS"):
+        AgentSettings.from_env(agent_env(RAILWAY_DEPLOYMENT_DRAINING_SECONDS=window))

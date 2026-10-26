@@ -22,3 +22,8 @@ restartPolicyMaxRetries = 3
 # request wakes it. This is the teardown mechanism (D-120-05).
 sleepApplication = true
 requiredMountPath = "/config"
+# SIGTERM→SIGKILL window on redeploy (same as the service variable
+# RAILWAY_DEPLOYMENT_DRAINING_SECONDS). It covers the longest job timeout
+# (60 min) plus the agent's 30 s stop margin, so a redeploy lets running jobs
+# finish instead of cancelling them (00065). Idle runners stop at once.
+drainingSeconds = 3900

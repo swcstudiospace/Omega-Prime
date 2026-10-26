@@ -153,6 +153,8 @@ RUN check=/var/lib/omega-ci/work/omega-ci-build-check \
 
 # (a) apt: build tools, CLIs, JDK 17, PostgreSQL 16 server, podman. No cluster
 #     is created and no service starts; jobs run initdb/pg_ctl themselves.
+#     fonts-liberation: faceless-desk's renderer loads
+#     /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf.
 RUN mkdir -p /etc/postgresql-common/createcluster.d \
     && echo 'create_main_cluster = false' > /etc/postgresql-common/createcluster.d/00-omega-ci.conf \
     && apt-get update --snapshot "${APT_SNAPSHOT}" \
@@ -161,7 +163,7 @@ RUN mkdir -p /etc/postgresql-common/createcluster.d \
        zip unzip xz-utils rsync jq age pipx python3-venv python3-pip \
        openjdk-17-jdk-headless postgresql-16 postgresql-client-16 \
        podman uidmap slirp4netns fuse-overlayfs \
-       ripgrep ffmpeg \
+       ripgrep ffmpeg fonts-liberation \
     && rm -rf /var/lib/apt/lists/* \
     && echo "omega-ci-job:100000:65536" >> /etc/subuid \
     && echo "omega-ci-job:100000:65536" >> /etc/subgid
@@ -197,6 +199,9 @@ RUN mkdir -p /tmp/bin && cd /tmp/bin \
 #     the system /usr/bin/pip and fails with externally-managed-environment.
 #     CodeQL: the bundle github/codeql-action pins (2.27.3 for action
 #     6f2ac81), so init finds it here instead of trying to write the cache.
+#     System Node: /usr/local/bin/{node,npm,npx,corepack} point at the cached
+#     Node 22 (same pinned, checksum-verified tarball), ahead of the base
+#     image's Node 20 on PATH. Jobs using setup-node still get their version.
 RUN mkdir -p "${RUNNER_TOOL_CACHE}/Python" "${RUNNER_TOOL_CACHE}/node" /tmp/tc && cd /tmp/tc \
     && curl -fsSL -o py310.tgz "https://github.com/actions/python-versions/releases/download/${PY310_VERSION}-${PY310_BUILD}/python-${PY310_VERSION}-linux-24.04-x64.tar.gz" \
     && curl -fsSL -o py312.tgz "https://github.com/actions/python-versions/releases/download/${PY312_VERSION}-${PY312_BUILD}/python-${PY312_VERSION}-linux-24.04-x64.tar.gz" \
@@ -225,6 +230,9 @@ RUN mkdir -p "${RUNNER_TOOL_CACHE}/Python" "${RUNNER_TOOL_CACHE}/node" /tmp/tc &
          ver="${spec%%:*}"; dest="${RUNNER_TOOL_CACHE}/node/${ver}/x64"; \
          mkdir -p "$dest" && tar -xJf "${spec#*:}" --strip-components=1 -C "$dest" \
          && touch "${RUNNER_TOOL_CACHE}/node/${ver}/x64.complete" || exit 1; \
+       done \
+    && for tool in node npm npx corepack; do \
+         ln -sfn "${RUNNER_TOOL_CACHE}/node/${NODE22_VERSION}/x64/bin/${tool}" "/usr/local/bin/${tool}" || exit 1; \
        done \
     && mkdir -p "${RUNNER_TOOL_CACHE}/CodeQL/${CODEQL_VERSION}/x64" \
     && tar -xzf codeql.tgz -C "${RUNNER_TOOL_CACHE}/CodeQL/${CODEQL_VERSION}/x64" \

@@ -55,6 +55,14 @@ DEFAULT_AGENT_RUNNER_ROOT = Path("/opt/actions-runner")
 DEFAULT_AGENT_WORK_ROOT = Path("/config/ci-runners")
 # Root-owned allowlist the pre-job hook reads (deploy/ci-runner-desktop/job-started.sh).
 DEFAULT_AGENT_JOB_POLICY = Path("/var/lib/omega-ci/job-policy.json")
+# Railway SIGKILLs a stopping deployment RAILWAY_DEPLOYMENT_DRAINING_SECONDS
+# after SIGTERM. The agent lets running jobs finish within that window minus
+# this margin, which covers each runner's SIGTERM grace, its output drain
+# (the same grace), work-tree removal and the exit callback.
+AGENT_DRAIN_MARGIN_S = 30
+# Upper bound on the window the agent honours (a mistyped value must not keep
+# a stopping agent alive for days).
+HARD_MAX_DRAINING_S = 6 * 3600
 
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9._-]{1,100}$")
@@ -557,6 +565,8 @@ class AgentSettings:
     job_repos: frozenset[str] = frozenset()
     job_hook: Path | None = None
     job_policy: Path = DEFAULT_AGENT_JOB_POLICY
+    # Seconds a SIGTERMed agent waits for runners already running a job.
+    drain_budget_s: float = 0.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> AgentSettings:
@@ -613,7 +623,21 @@ class AgentSettings:
                 _get(env, "OMEGA_CI_AGENT_JOB_HOOK"), "OMEGA_CI_AGENT_JOB_HOOK"
             ),
             job_policy=_job_policy(_get(env, "OMEGA_CI_AGENT_JOB_POLICY")),
+            drain_budget_s=_drain_budget(env),
         )
+
+
+def _drain_budget(env: Mapping[str, str]) -> float:
+    """Running-job drain budget from Railway's SIGTERM→SIGKILL window.
+
+    Unset (Railway's default is 0) or a window no longer than the margin
+    gives 0: running jobs are stopped at once, as before.
+    """
+    window = _int(
+        env, "RAILWAY_DEPLOYMENT_DRAINING_SECONDS", 0, low=0, high=HARD_MAX_DRAINING_S
+    )
+    assert window is not None
+    return float(max(0, window - AGENT_DRAIN_MARGIN_S))
 
 
 def _job_policy(raw: str | None) -> Path:

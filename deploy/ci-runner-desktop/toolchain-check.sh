@@ -118,6 +118,10 @@ echo "ok  jq make gcc g++ zip unzip xz rsync age pipx curl file pkg-config"
 check ripgrep "ripgrep " rg --version
 check ffmpeg "ffmpeg version" ffmpeg -hide_banner -version
 check ffprobe "ffprobe version" ffprobe -hide_banner -version
+check fonts-liberation "LiberationSans-Regular.ttf" ls /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf
+# System Node (no setup-node step) is the cached, pinned Node 22.
+check "system node" "v$(want NODE22)" node --version
+check "system npm" "." npm --version
 check python3-venv "venv-ok" sh -c "python3 -m venv '$scratch/venv' && '$scratch/venv/bin/python' -m pip --version >/dev/null && echo venv-ok"
 command -v "$db_helper" >/dev/null || fail "$db_helper (per-job database helper) not on PATH"
 echo "ok  omega-ci-db  $(command -v "$db_helper")"
