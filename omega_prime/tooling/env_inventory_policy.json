@@ -84,7 +84,10 @@
     "OMEGA_PRIME_DESK_NOTIFY_URL_FILE": "Names a protected file containing the desk notification endpoint.",
     "OMEGA_PRIME_DISPATCH_CONFIRM": "Confirms dispatch operations requiring the Fleet credential helper.",
     "OMEGA_PRIME_DISPATCH_CONFIRM_FILE": "Names a protected file containing the dispatch confirmation token.",
+    "OMEGA_PRIME_DELEGATE_DEPTH": "Set by the engine for a child omp run: how many delegate hops deep this MCP server is. An unreadable value fails closed (no further delegates).",
+    "OMEGA_PRIME_DELEGATE_MAX_DEPTH": "Set by the engine for a child omp run: the parent's delegate depth cap (default 2), so a child never widens it. An unreadable value fails closed.",
     "OMEGA_PRIME_ENGINE": "Controls whether engine execution is enabled or required.",
+    "OMEGA_PRIME_ENGINE_STAGE": "Names the GSD stage (plan or execute) an engine run is on, so staged turns and their delegates pick the stage model.",
     "OMEGA_PRIME_ENGINE_TMUX": "Controls tmux session attachment for engine jobs.",
     "OMEGA_PRIME_ENGINE_UNSANDBOXED": "Opts engine execution out of the sandbox.",
     "OMEGA_PRIME_IMAGE_ROLLOUT": "Selects the staged or direct image rollout mode for deployments.",
@@ -281,10 +284,12 @@
     "OMEGA_CI_AGENT_REPOS": "Lists the owner/repo names or owner/* entries the Desktop runner pre-job guard lets run; empty refuses every job.",
     "OMEGA_CI_AGENT_JOB_HOOK": "Points the Desktop runner agent at the pre-job guard script it installs as ACTIONS_RUNNER_HOOK_JOB_STARTED.",
     "OMEGA_CI_AGENT_JOB_POLICY": "Names the Desktop runner agent's pre-job guard allowlist file; only /var/lib/omega-ci/job-policy.json (the path the shipped hook reads) is accepted.",
-    "GITHUB_EVENT_NAME": "Set by the GitHub runner; the Desktop pre-job guard refuses pull_request_target and, for non-private repositories, events other than push, workflow_dispatch and pull_request.",
+    "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": "Set by Railway (railway.toml drainingSeconds): the SIGTERM-to-SIGKILL window on redeploy; the Desktop runner agent lets running jobs finish within it minus a 30 s stop margin (0 or unset stops them at once).",
+    "GITHUB_EVENT_NAME": "Set by the GitHub runner; the Desktop pre-job guard refuses pull_request_target and, for non-private repositories, events other than push, workflow_dispatch, pull_request, and a schedule whose ref is the default branch.",
     "GITHUB_REPOSITORY": "Set by the GitHub runner; the Desktop pre-job guard checks it against its repository allowlist and the event payload.",
     "GITHUB_EVENT_PATH": "Set by the GitHub runner; the Desktop pre-job guard reads the event payload there to refuse fork pull requests.",
-    "GITHUB_PATH": "Set by the GitHub runner; after allowing a job, the Desktop pre-job guard appends the job's ~/.local/bin and ~/.cargo/bin there."
+    "GITHUB_PATH": "Set by the GitHub runner; after allowing a job, the Desktop pre-job guard appends the job's ~/.local/bin and ~/.cargo/bin there.",
+    "GITHUB_REF": "Set by the GitHub runner; the Desktop pre-job guard admits a public schedule only when this is refs/heads and the repository default branch."
   },
   "helpers": {
     "omega_prime/commands/redteam_readiness.py:_first": {
@@ -443,7 +448,7 @@
       "reason": "Decodes only explicit Prime family, redteam, telemetry, rotation, quota, sandbox, and evals configuration branches."
     },
     {
-      "site": "omega_prime/engine/plan_router.py:108:mapping.get",
+      "site": "omega_prime/engine/plan_router.py:111:mapping.get",
       "symbol": "model_id",
       "source_sha256": "8e752ab8c2102d4f24c6e0b10a29fa4c9064eb630c8454f0511415972cb5059e",
       "names": [
@@ -460,7 +465,7 @@
       "reason": "Reads plan-only and plan-stage model override names from the exact finite plans and stages."
     },
     {
-      "site": "omega_prime/engine/plan_router.py:111:mapping.get",
+      "site": "omega_prime/engine/plan_router.py:114:mapping.get",
       "symbol": "model_id",
       "source_sha256": "8e752ab8c2102d4f24c6e0b10a29fa4c9064eb630c8454f0511415972cb5059e",
       "names": [
@@ -511,7 +516,7 @@
       "reason": "Resolves the finite connector credential names declared in _CONNECTORS, including file selectors."
     },
     {
-      "site": "omega_prime/mcp_server.py:354:helper:omega_prime/mcp_server.py:_secret_present",
+      "site": "omega_prime/mcp_server.py:399:helper:omega_prime/mcp_server.py:_secret_present",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -524,7 +529,7 @@
       "reason": "Resolves only the finite provider credential names from the desk child provider declarations."
     },
     {
-      "site": "omega_prime/mcp_server.py:367:helper:omega_prime/integrations/binding.py:secret_value",
+      "site": "omega_prime/mcp_server.py:412:helper:omega_prime/integrations/binding.py:secret_value",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -801,7 +806,7 @@
   "metadata": {
     "token_selectors": [
       {
-        "site": "omega_prime/mcp_server.py:2137:args.token_env",
+        "site": "omega_prime/mcp_server.py:2186:args.token_env",
         "symbol": "_resolve_token",
         "source_sha256": "e04ec502c56de9c37869762a3519cac3470f599f455c9ec1b3343026091652d7",
         "reason": "The caller-selected environment key is an arbitrary MCP bearer-token selector, not a concrete setting name."

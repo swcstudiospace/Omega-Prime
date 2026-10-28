@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { fixture } from '../test/fixtures'
-import { bucketRows, correlateWiring, idleTasks, selectedTask, sortRepositories, taskSelection, tasksForPr, workingTasks } from './selectors'
+import { bucketRows, correlateWiring, idleTasks, isTask, isWaiting, selectedTask, sortRepositories, taskSelection, tasksForPr, workingTasks } from './selectors'
 describe('dashboard selectors', () => {
+  it('never treats a file-backed waiting request as a task', () => { const wait = { id: 'tasks:w1', ask: 'Approve merge', source: 'tasks_json' }; expect(isTask(wait)).toBe(false); expect(isWaiting(wait)).toBe(true); expect(isTask(fixture.active![0]!)).toBe(true) })
   it('deduplicates active and finished identities and preserves server numbering', () => { const rows = taskSelection(fixture); expect(rows.filter(row => row.key === 'task:worker/1')).toHaveLength(1); expect(rows[0]?.item.display_id).toBe('00007 - Compile release'); expect(selectedTask(fixture, 'task:worker/1')?.id).toBe('worker/1') })
   it('excludes idle sessions from Working and the main All queue while retaining detail identity', () => { expect(idleTasks(fixture)).toHaveLength(1); expect(workingTasks(fixture).map(task => task.id)).toEqual(['worker/1']); expect(bucketRows(fixture, 'all').some(row => row.key === 'task:idle/2')).toBe(false); expect(selectedTask(fixture, 'task:idle/2')?.id).toBe('idle/2') })
   it('keeps waiting identities separate and resolves only a uniquely associated PR task', () => { expect(bucketRows(fixture, 'waiting').map(row => row.key)).toEqual(['wait:wait-1']); const prs = bucketRows(fixture, 'pr-gate'); expect(prs).toHaveLength(1); if (prs[0] && 'number' in prs[0].item) expect(tasksForPr(fixture, prs[0].item).map(row => row.item.id)).toEqual(['worker/1']) })

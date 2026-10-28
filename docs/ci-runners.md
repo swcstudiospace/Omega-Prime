@@ -240,6 +240,7 @@ read. A sanitized template is in `deploy/ci-runner-controller/env.example`.
 | `OMEGA_CI_AGENT_REPOS` | empty | **Required for jobs to run on the image.** Comma-separated `owner/repo` or `owner/*` list the runner-side pre-job guard lets run; set it to the controller's `OMEGA_CI_REPOS` (org-wide: `swcstudiospace/*`). Empty → the guard refuses every job (fails closed). Repository names only, no secret. |
 | `OMEGA_CI_AGENT_JOB_HOOK` | unset (image: `/opt/omega-ci/job-started.sh`) | Pre-job guard the agent sets as `ACTIONS_RUNNER_HOOK_JOB_STARTED` for every runner. Must be a regular file the job identity cannot modify, or the agent refuses to start. |
 | `OMEGA_CI_AGENT_JOB_POLICY` | `/var/lib/omega-ci/job-policy.json` | Root-owned allowlist file the agent writes at startup from `OMEGA_CI_AGENT_REPOS`; the guard reads it. Only this path is accepted: the shipped `job-started.sh` hard-codes it (a runner hook takes no arguments, and the job's environment is not agent-controlled), so any other value stops the agent at startup with a `SettingsError` instead of failing every job. |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | unset (Railway: 0; pool: `3900`) | Railway's SIGTERM→SIGKILL window for a stopping deployment. The agent reads it to size its drain: after a 2 s settle (so a job start printed as the drain begins is still seen), runners that have not taken a job stop, and runners mid-job may finish for up to this window minus 30 s (the stop margin: SIGTERM grace, output drain, work-tree removal, exit callback). After that they are stopped. `3900` covers the longest job timeout (60 min), so a redeploy no longer cancels running jobs. Unset or ≤ 30 keeps the old stop-at-once behaviour. Values above 21600 (6 h) or malformed values stop the agent at startup with a `SettingsError`. |
 | `OMEGA_CI_CONTROLLER_URL` | — | **Required: the agent will not start without it.** Controller base URL for the exit callback. Set it at deploy time, even before the controller exists: the agent only calls it after a job ends. Without it, the agent exits with `OMEGA_CI_CONTROLLER_URL: required callback base URL`, so nothing listens on 8787 and Railway answers 502 Bad Gateway. |
 
 ## Interfaces
@@ -520,6 +521,7 @@ Everything else is version-pinned and checksum-verified in the Dockerfile.
 | Python | 3.10.22, 3.12.15, 3.13.17, 3.14.9 (each with `bin/pip`) | tool cache | `actions/setup-python` (Omega-Prime matrix 3.12–3.14) |
 | CodeQL bundle | 2.27.3 | tool cache `CodeQL/2.27.3/x64` | `github/codeql-action/init@6f2ac81` (ultrathink); the cache is read-only, so the bundle must match the action pin |
 | Node.js (+ npm) | 22.23.4, 24.22.1 | tool cache | `actions/setup-node` (`22.x`, `24.x`) |
+| System Node.js (+ npm, npx, corepack) | 22.23.4 (links to the tool-cache build) | `/usr/local/bin`, ahead of the base image's Node 20 | jobs that run `node`/`npm` without `actions/setup-node` |
 | Bun | not pre-installed | job `HOME` | `oven-sh/setup-bun` downloads into `~/.bun/bin` (any version) |
 | .NET SDK | 10.0.402 (OmpOS `global.json`) + `maui-android` workload (workload set 10.0.402.1) | `/usr/share/dotnet` | `actions/setup-dotnet` (`global-json-file`) |
 | JDK | OpenJDK 17 (apt) | `JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64` | Android builds |
@@ -537,6 +539,7 @@ Everything else is version-pinned and checksum-verified in the Dockerfile.
 | cargo-deny | 0.20.2 | `/usr/local/bin` | Omega-Prime license gates (replaces `cargo-deny-action`, a Docker action) |
 | ripgrep | 14.x (apt) | `/usr/bin/rg` | autonogrammer branding gate |
 | ffmpeg / ffprobe | 6.1 (apt) | `/usr/bin` | faceless-desk CLI integration tests |
+| fonts-liberation | 1:2.1.5-3 (apt, same snapshot) | `/usr/share/fonts/truetype/liberation` | faceless-desk `cli_analytics` render tests (`LiberationSans-Regular.ttf`) |
 
 The authoritative list is `deploy/ci-runner-desktop/Dockerfile` (the `ARG`
 block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
@@ -548,9 +551,10 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   `setup-*` actions look up: `<Tool>/<version>/x64/` plus an
   `<version>/x64.complete` marker. A cache hit writes nothing, so the
   root-owned, read-only tree works for uid 1500. **Ask for a version the
-  image has** (`3.12`, `3.10`, `22.x`, `24.x`): any other version makes the
-  action try to download into the read-only cache, and the job fails. Add
-  the version to the image instead.
+  image has** (`3.10`, `3.12`, `3.13`, `3.14`, `22.x`, `24.x`). Another
+  version makes `setup-python` download into that cache. The CI workflow,
+  when the `x64.complete` marker is missing, points `RUNNER_TOOL_CACHE` at
+  `$RUNNER_TEMP/hostedtoolcache` so such a version can still download.
 - **The job environment.** The agent gives each runner only an allowlisted
   environment (`PATH`, locale, `HOME`). The toolchain variables
   (`RUNNER_TOOL_CACHE`, `AGENT_TOOLSDIRECTORY`, `DOTNET_ROOT`,
@@ -565,6 +569,10 @@ block and section 3b) and `deploy/ci-runner-desktop/requirements/*.txt`.
   registry in `~/.cargo` (`CARGO_HOME` is unset on purpose). The pre-job
   guard, after allowing a job, appends `~/.local/bin` and `~/.cargo/bin` to
   `GITHUB_PATH`, so `pip install uv && uv ...` works as on hosted runners.
+  Every workflow job that `pip install`s the project first creates a venv
+  under `$RUNNER_TEMP` and puts it on `PATH` (the "writable prefix for pip"
+  step). Tests set `HOME` or `PYTHONNOUSERSITE`, which hides `~/.local`, so
+  those installs have to live on the interpreter prefix.
 - **pip is the one each Python build bundles** (3.10.22: pip 23.0.1,
   3.12.15: pip 25.0.1). The image does not run the builds' unpinned
   `pip install --upgrade pip`. A job that needs a newer pip can upgrade it

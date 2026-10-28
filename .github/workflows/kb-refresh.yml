@@ -29,6 +29,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: writable prefix for pip
+        # The image tool cache is shared and read-only, so pip would fall back
+        # to ~/.local, which tests that set HOME or PYTHONNOUSERSITE cannot
+        # see. A per-job venv keeps installs on the interpreter prefix.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
       - name: install
         run: python -m pip install -e .
       - name: check for API key
