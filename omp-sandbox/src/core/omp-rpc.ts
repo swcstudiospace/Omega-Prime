@@ -122,10 +122,26 @@ export class OmpRpcClient extends EventEmitter {
     });
   }
 
+  /** Resolve a still-registered waiter as closed (which clears its timer and rejects its promise). */
+  #settleWaiter(key: string, reason: string) {
+    const w = this.#waiters.get(key);
+    if (!w) return;
+    this.#waiters.delete(key);
+    w({ type: "closed", code: null, reason });
+  }
+
   async command(type: string, extra: Record<string, unknown> = {}, timeoutMs = 30_000) {
     const id = `c-${randomBytes(4).toString("hex")}`;
-    const p = this.#wait(`response:${id}`, timeoutMs);
-    this.send({ id, type, ...extra });
+    const key = `response:${id}`;
+    const p = this.#wait(key, timeoutMs);
+    try { this.send({ id, type, ...extra }); }
+    catch (e) {
+      // Nothing will ever answer: settle the waiter now (clearing its timer) so its later timeout cannot surface as
+      // an unhandled rejection after the caller has already handled this send error.
+      this.#settleWaiter(key, (e as Error)?.message ?? String(e));
+      p.catch(() => {});
+      throw e;
+    }
     const r = await p;
     if (r.success === false) throw new Error(`${this.label}: ${type} failed: ${r.error ?? JSON.stringify(r).slice(0, 300)}`);
     return r;
@@ -144,7 +160,8 @@ export class OmpRpcClient extends EventEmitter {
       const acc = await accepted;
       if (acc.success === false) throw new Error(`${this.label}: prompt rejected: ${acc.error ?? ""}`);
     } catch (e) {
-      this.#waiters.delete(`prompt_result:${id}`); this.#waiters.delete(`response:${id}`);
+      const why = (e as Error)?.message ?? String(e);
+      this.#settleWaiter(`prompt_result:${id}`, why); this.#settleWaiter(`response:${id}`, why);
       accepted.catch(() => {});
       throw e;
     }

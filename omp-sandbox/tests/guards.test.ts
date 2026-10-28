@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, statSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -283,4 +283,65 @@ test("the last lease holder stops shared services another tier started; reused p
   assert.equal(utilMod.pidAlive(other.pid), true, "unrelated process with a reused pid untouched");
   assert.equal(existsSync(file), false, "ownership record cleared");
   other.kill("SIGKILL");
+});
+
+test("a late abort after omp exited rejects once and leaves no timer to crash the core", async () => {
+  const unhandled: unknown[] = [];
+  const onU = (e: unknown) => unhandled.push(e);
+  process.on("unhandledRejection", onU);
+  const c = new OmpRpcClient(fakeProc({ FAKE_OMP_EXIT_ON_PROMPT: "1" }), "fake");
+  await assert.rejects(c.prompt("hi"));
+  await assert.rejects(c.command("abort", {}, 150), /closed/);
+  await c.abort();   // the public path swallows the send error
+  await new Promise((r) => setTimeout(r, 400));
+  process.off("unhandledRejection", onU);
+  assert.deepEqual(unhandled, []);
+});
+
+test("agentos-local settles a session only after the tools it left behind are stopped", { skip: process.platform !== "linux" }, async () => {
+  const { LocalTier } = await import("../src/core/providers/local.ts");
+  const t = new LocalTier();
+  mkdirSync(t.workdir, { recursive: true });
+  const p = t.spawnStdio(["sh", "-c", "sleep 60 & echo $!; exit 0"]);
+  let out = ""; p.stdout.on("data", (d) => { out += d; });
+  await t.settled(p);
+  const bg = Number(out.trim());
+  assert.ok(bg > 0, "background tool pid reported");
+  assert.equal(utilMod.ownsGroup(p.pid!, `OMP_SANDBOX_TIER_ID=${t.id}`), false, "no process of the session's group is left");
+  assert.equal(existsSync(`/proc/${bg}/environ`) && readFileSync(`/proc/${bg}/environ`, "utf8").includes(t.id), false, "the leftover tool was stopped");
+  assert.deepEqual((t.owned() as any).processGroups, []);
+  await t.dispose();
+});
+
+test("parallel wrappers recording shared services never erase each other's entry", { skip: process.platform !== "linux" }, async () => {
+  const file = join(STATE, "services-race.json");
+  const a = spawn("sleep", ["60"], { stdio: "ignore", detached: true });
+  const b = spawn("sleep", ["60"], { stdio: "ignore", detached: true });
+  await new Promise((r) => setTimeout(r, 100));
+  const mod = new URL("../src/core/providers/openshell-podman.ts", import.meta.url).href;
+  const writer = (which: string, pid: number) => new Promise<number | null>((res) => {
+    const src = `const m = await import(${JSON.stringify(mod)}); for (let i = 0; i < 40; i++) { m.recordService(${JSON.stringify(which)}, ${pid}, ${JSON.stringify(file)}); }`;
+    const w = spawn(process.execPath, ["--experimental-transform-types", "--no-warnings", "--input-type=module", "-e", src], { env: { ...process.env, OMP_SANDBOX_STATE: STATE }, stdio: "inherit" });
+    w.once("exit", res);
+  });
+  for (let round = 0; round < 3; round++) {
+    writeFileSync(file, "{}");
+    assert.deepEqual(await Promise.all([writer("gateway", a.pid!), writer("podmanService", b.pid!)]), [0, 0]);
+    const rec = podmanMod.readServices(file);
+    assert.equal(rec.gateway?.pid, a.pid); assert.equal(rec.podmanService?.pid, b.pid);
+  }
+  assert.equal(existsSync(`${file}.lock`), false, "lock released");
+  // While another live wrapper holds the lock, an update waits for it instead of writing over that wrapper's read.
+  writeFileSync(file, "{}"); writeFileSync(`${file}.lock`, String(process.pid));
+  const waiting = writer("gateway", a.pid!);
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(podmanMod.readServices(file).gateway, undefined, "no write while the lock is held");
+  rmSync(`${file}.lock`);
+  assert.equal(await waiting, 0);
+  assert.equal(podmanMod.readServices(file).gateway?.pid, a.pid);
+  // A lock left by a dead holder is broken instead of blocking forever.
+  writeFileSync(`${file}.lock`, "999999999");
+  podmanMod.recordService("gateway", a.pid, file);
+  assert.equal(podmanMod.readServices(file).gateway?.pid, a.pid);
+  a.kill("SIGKILL"); b.kill("SIGKILL");
 });

@@ -12,7 +12,7 @@
 // (`podman system service`), the gateway (`openshell-gateway --compute-driver podman`), the
 // workload image (built from sandbox/image/Containerfile if absent), then one sandbox per `up`.
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, renameSync, statSync, writeFileSync, writeSync, readFileSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -57,11 +57,42 @@ export function sameService(r: ServiceRec | undefined, proc = "/proc"): r is Ser
 export function readServices(file = SERVICES): SharedServices {
   try { return JSON.parse(readFileSync(file, "utf8")); } catch { return {}; }
 }
+/**
+ * Run `fn` holding an exclusive cross-process lock on `file` (a sibling `.lock` created with O_EXCL holding the
+ * holder's pid). Parallel wrappers each read-modify-write the shared record, so without it one wrapper's write can
+ * erase the other's entry. A lock left by a dead process is broken; a live holder is waited for.
+ */
+export function withServicesLock<T>(file: string, fn: () => T, timeoutMs = 10_000): T {
+  const lock = `${file}.lock`; const tick = new Int32Array(new SharedArrayBuffer(4));
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  for (const until = Date.now() + timeoutMs; ;) {
+    try {
+      const fd = openSync(lock, "wx", 0o600);
+      try { writeSync(fd, String(process.pid)); } finally { closeSync(fd); }
+      break;
+    } catch (e: any) {
+      if (e?.code !== "EEXIST") throw e;
+      let holder = NaN; try { holder = Number(readFileSync(lock, "utf8").trim()); } catch { continue; /* released meanwhile */ }
+      // An empty file is a holder between create and write; one that stays empty for seconds belongs to a crashed holder.
+      let ageMs = 0; try { ageMs = Date.now() - statSync(lock).mtimeMs; } catch { continue; }
+      if ((holder > 0 && !pidAlive(holder)) || (!(holder > 0) && ageMs > 2000)) { rmSync(lock, { force: true }); continue; }
+      if (Date.now() > until) throw new Error(`timed out waiting for ${lock} (held by pid ${holder || "?"})`);
+      Atomics.wait(tick, 0, 0, 25);
+    }
+  }
+  try { return fn(); } finally { rmSync(lock, { force: true }); }
+}
+/** Publish the record atomically (temp file + rename), so a reader never sees a partial write. */
+function writeServices(rec: SharedServices, file: string) {
+  if (!rec.gateway && !rec.podmanService) { rmSync(file, { force: true }); return; }
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(rec), { mode: 0o600 });
+  renameSync(tmp, file);
+}
 export function recordService(which: keyof SharedServices, pid: number | undefined, file = SERVICES) {
   const startTicks = pid ? procStartTicks(pid) : null;
   if (!pid || startTicks === null) return;
-  const cur = readServices(file);
-  writeFileSync(file, JSON.stringify({ ...cur, [which]: { pid, startTicks } }), { mode: 0o600 });
+  withServicesLock(file, () => writeServices({ ...readServices(file), [which]: { pid, startTicks } }, file));
 }
 async function stopPid(pid: number, graceMs = 10_000) {
   try { process.kill(pid, "SIGTERM"); } catch { return; }
@@ -80,7 +111,16 @@ export async function stopSharedServices(file = SERVICES, proc = "/proc"): Promi
     await stopPid(r.pid);
     if (sameService(r, proc)) left.push(`${what} pid ${r.pid}`);
   }
-  if (!left.length) rmSync(file, { force: true });
+  // Clear only the entries this call stopped (or found gone) and that are still the ones recorded, so a service
+  // another wrapper recorded meanwhile keeps its owner record.
+  withServicesLock(file, () => {
+    const now = readServices(file);
+    for (const k of ["gateway", "podmanService"] as const) {
+      const r = rec[k], n = now[k];
+      if (r && n && n.pid === r.pid && n.startTicks === r.startTicks && !sameService(n, proc)) delete now[k];
+    }
+    writeServices(now, file);
+  });
   return left;
 }
 
