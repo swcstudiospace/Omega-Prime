@@ -43,9 +43,10 @@ The table records names and purposes only.
 | `GEMINI_API_KEY_FILE` | Names a protected file containing the Gemini API credential. |
 | `GH_TOKEN` | Authenticates GitHub CLI and GitHub integrations. |
 | `GH_TOKEN_FILE` | Names a protected file supplying GH_TOKEN: Authenticates GitHub CLI and GitHub integrations. |
-| `GITHUB_EVENT_NAME` | Set by the GitHub runner; the Desktop pre-job guard refuses pull_request_target and, for non-private repositories, events other than push, workflow_dispatch and pull_request. |
+| `GITHUB_EVENT_NAME` | Set by the GitHub runner; the Desktop pre-job guard refuses pull_request_target and, for non-private repositories, events other than push, workflow_dispatch, pull_request, and a schedule whose ref is the default branch. |
 | `GITHUB_EVENT_PATH` | Set by the GitHub runner; the Desktop pre-job guard reads the event payload there to refuse fork pull requests. |
 | `GITHUB_PATH` | Set by the GitHub runner; after allowing a job, the Desktop pre-job guard appends the job's ~/.local/bin and ~/.cargo/bin there. |
+| `GITHUB_REF` | Set by the GitHub runner; the Desktop pre-job guard admits a public schedule only when this is refs/heads and the repository default branch. |
 | `GITHUB_REPOSITORY` | Set by the GitHub runner; the Desktop pre-job guard checks it against its repository allowlist and the event payload. |
 | `GITHUB_RUN_ID` | Binds the eventstream IT ownership record to one GitHub Actions run. |
 | `GITHUB_SHA` | Records the source commit identifier as evaluation-history provenance. |
@@ -157,6 +158,8 @@ The table records names and purposes only.
 | `OMEGA_PRIME_COMMAND_LOG` | Selects the command history log destination. |
 | `OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS` | Sets the maximum accepted lateness for scheduled actions. |
 | `OMEGA_PRIME_DASHBOARD_PORT` | Sets the default loopback port for the local Command Center dashboard (default 7421). |
+| `OMEGA_PRIME_DELEGATE_DEPTH` | Set by the engine for a child omp run: how many delegate hops deep this MCP server is. An unreadable value fails closed (no further delegates). |
+| `OMEGA_PRIME_DELEGATE_MAX_DEPTH` | Set by the engine for a child omp run: the parent's delegate depth cap (default 2), so a child never widens it. An unreadable value fails closed. |
 | `OMEGA_PRIME_DESK_BUS_URL` | Selects the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_BUS_URL_FILE` | Names a protected file containing the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_CHILD_MODEL` | Selects the model used for the managed desk child process. |

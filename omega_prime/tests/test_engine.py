@@ -350,8 +350,15 @@ def _ui_store(tmp_path: Path) -> UIControlStore:
     )
 
 
+# Startup (spawn, MCP discovery, attachment) runs before omp receives the prompt
+# or publishes a UI request. It takes about 2 s here and a loaded CI runner can
+# take well over 5 s, so tests wait up to a minute for it. This bounds only the
+# wait for startup; the behaviour under test keeps its own tight limits.
+_OMP_STARTUP_TIMEOUT = 60.0
+
+
 def _wait_for_ui_pending(store: UIControlStore, job_id: str) -> dict[str, Any]:
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + _OMP_STARTUP_TIMEOUT
     while time.monotonic() < deadline:
         pending = store.list_pending(job=job_id)
         if pending:
@@ -646,6 +653,7 @@ def test_rpc_ui_dispatches_one_original_id_response_through_control_store(
     job_id = "job-ui-answer"
     with _ui_store(tmp_path) as store:
         failures: list[BaseException] = []
+        give_up = threading.Event()
 
         def queue_answer() -> None:
             try:
@@ -659,6 +667,7 @@ def test_rpc_ui_dispatches_one_original_id_response_through_control_store(
                 store.answer(identity, "select", "safe")
             except BaseException as exc:
                 failures.append(exc)
+                give_up.set()
 
         operator = threading.Thread(target=queue_answer, daemon=True)
         operator.start()
@@ -670,6 +679,7 @@ def test_rpc_ui_dispatches_one_original_id_response_through_control_store(
             mode="rpc-ui",
             thinking="max",
             ui_control=store,
+            cancel_event=give_up,
         )
         operator.join(5)
         assert not operator.is_alive()
@@ -783,6 +793,7 @@ def test_rpc_ui_dispatches_confirm_and_ask_answers(
     job_id = f"job-ui-{method}"
     with _ui_store(tmp_path) as store:
         failures: list[BaseException] = []
+        give_up = threading.Event()
 
         def queue_answer() -> None:
             try:
@@ -790,6 +801,7 @@ def test_rpc_ui_dispatches_confirm_and_ask_answers(
                 store.answer(pending["identity"], answer_kind, answer_value)
             except BaseException as exc:
                 failures.append(exc)
+                give_up.set()
 
         operator = threading.Thread(target=queue_answer, daemon=True)
         operator.start()
@@ -800,6 +812,7 @@ def test_rpc_ui_dispatches_confirm_and_ask_answers(
             job_id=job_id,
             mode="rpc-ui",
             ui_control=store,
+            cancel_event=give_up,
         )
         operator.join(5)
         assert not operator.is_alive()
@@ -828,6 +841,7 @@ def test_rpc_ui_queued_abort_invalidates_pending_request_and_aborts_once(
     with _ui_store(tmp_path) as store:
         failures: list[BaseException] = []
         identities: list[dict[str, object]] = []
+        give_up = threading.Event()
 
         def queue_abort() -> None:
             try:
@@ -837,6 +851,7 @@ def test_rpc_ui_queued_abort_invalidates_pending_request_and_aborts_once(
                 store.abort(job_id, identity["session_generation"])
             except BaseException as exc:
                 failures.append(exc)
+                give_up.set()
 
         operator = threading.Thread(target=queue_abort, daemon=True)
         operator.start()
@@ -847,6 +862,7 @@ def test_rpc_ui_queued_abort_invalidates_pending_request_and_aborts_once(
             job_id=job_id,
             mode="rpc-ui",
             ui_control=store,
+            cancel_event=give_up,
         )
         operator.join(5)
         assert not operator.is_alive()
@@ -890,6 +906,7 @@ def test_rpc_ui_cancel_sends_one_abort_and_marks_request_aborted(
                 cancel_event.set()
             except BaseException as exc:
                 failures.append(exc)
+                cancel_event.set()
 
         operator = threading.Thread(target=cancel_after_pending, daemon=True)
         operator.start()
@@ -969,6 +986,7 @@ def test_rpc_ui_writer_failure_does_not_retry_response(
     monkeypatch.setattr(OmpSession, "send_frame", fail_ui_response)
     with _ui_store(tmp_path) as store:
         failures: list[BaseException] = []
+        give_up = threading.Event()
 
         def queue_answer() -> None:
             try:
@@ -976,6 +994,7 @@ def test_rpc_ui_writer_failure_does_not_retry_response(
                 store.answer(pending["identity"], "select", "safe")
             except BaseException as exc:
                 failures.append(exc)
+                give_up.set()
 
         operator = threading.Thread(target=queue_answer, daemon=True)
         operator.start()
@@ -986,6 +1005,7 @@ def test_rpc_ui_writer_failure_does_not_retry_response(
             job_id=job_id,
             mode="rpc-ui",
             ui_control=store,
+            cancel_event=give_up,
         )
         operator.join(5)
         assert not operator.is_alive()
@@ -1392,6 +1412,267 @@ def test_recovery_keeps_replacement_that_reuses_the_freed_inode(
     assert (work / ".omp" / "mcp.json").is_file()
 
 
+def _refuse_file_handles(monkeypatch, mcp_bridge) -> None:
+    """Make name_to_handle_at answer EOPNOTSUPP, as overlay runner roots do."""
+    import errno
+
+    def unsupported(fd: int, name: bytes, flags: int) -> tuple[int, bytes]:
+        raise OSError(errno.EOPNOTSUPP, os.strerror(errno.EOPNOTSUPP))
+
+    monkeypatch.setattr(mcp_bridge, "_handle_of", unsupported)
+
+
+def test_generation_falls_back_to_birth_time_without_file_handles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    _refuse_file_handles(monkeypatch, mcp_bridge)
+    monkeypatch.setattr(mcp_bridge, "_birth_time_of", lambda fd: b"\x00" * 15 + b"\x07")
+    target = tmp_path / "entry"
+    target.mkdir()
+    fd = os.open(target, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        identity = mcp_bridge._identity_from_pin(fd)
+    finally:
+        os.close(fd)
+    assert identity[2] == mcp_bridge._HANDLE_TYPE_BIRTH_TIME
+    assert identity[3] == b"\x00" * 15 + b"\x07"
+    parsed = mcp_bridge._parse_artifact_identity(
+        [identity[0], identity[1], identity[2], identity[3].hex()]
+    )
+    assert parsed == identity
+
+
+def test_statx_buffer_holds_everything_the_kernel_writes(tmp_path: Path) -> None:
+    import ctypes
+
+    from omega_prime.engine import mcp_bridge
+
+    # Linux writes a fixed 256-byte struct statx (0x100 in uapi/linux/stat.h).
+    assert ctypes.sizeof(mcp_bridge._Statx) == 256
+    if mcp_bridge._statx is None:
+        pytest.skip("libc has no statx")
+
+    class _Guarded(ctypes.Structure):
+        _fields_ = (
+            ("buf", mcp_bridge._Statx),
+            ("canary", ctypes.c_uint8 * 64),
+        )
+
+    guarded = _Guarded()
+    ctypes.memset(ctypes.addressof(guarded.canary), 0xA5, 64)
+    fd = os.open(tmp_path, os.O_PATH)
+    try:
+        rc = mcp_bridge._statx(
+            fd,
+            b"",
+            mcp_bridge._AT_EMPTY_PATH,
+            0xFFF,  # every basic field plus btime
+            ctypes.byref(guarded.buf),
+        )
+    finally:
+        os.close(fd)
+    if rc != 0:
+        pytest.skip("statx is not permitted here")
+    assert bytes(guarded.canary) == b"\xa5" * 64
+    assert guarded.buf.stx_ino == os.stat(tmp_path).st_ino
+
+
+def test_unsettled_birth_time_keeps_pinned_only_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    _refuse_file_handles(monkeypatch, mcp_bridge)
+    birth = (10**18).to_bytes(16, "big", signed=True)
+    monkeypatch.setattr(mcp_bridge, "_birth_time_of", lambda fd: birth)
+    # The coarse clock never passes the birth time, so a reuse in the same
+    # tick could share it.
+    monkeypatch.setattr(mcp_bridge.time, "clock_gettime_ns", lambda clock: 10**18)
+    monkeypatch.setattr(mcp_bridge, "_BIRTH_SETTLE_SECONDS", 0.0)
+    target = tmp_path / "entry"
+    target.mkdir()
+    fd = os.open(target, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        identity = mcp_bridge._identity_from_pin(fd)
+        assert identity[2:] == (mcp_bridge._HANDLE_TYPE_NONE, b"")
+        # Still usable while pinned, even though the inode reports a birth time.
+        assert mcp_bridge._identity_matches(fd, identity)
+    finally:
+        os.close(fd)
+    monkeypatch.setattr(mcp_bridge.time, "clock_gettime_ns", lambda clock: 10**18 + 1)
+    fd = os.open(target, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        settled = mcp_bridge._identity_from_pin(fd)
+    finally:
+        os.close(fd)
+    assert settled[2:] == (mcp_bridge._HANDLE_TYPE_BIRTH_TIME, birth)
+
+
+def test_failed_registration_rollback_keeps_a_replacement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    user = work / "user"
+    user.write_text("user", encoding="utf-8")
+    attachment = mcp_bridge.try_acquire_attachment(work, tmp_path / "state", "job-rb")
+    attachment.create_directory_artifact(".omp/skills")
+    link = work / ".omp" / "skills" / "python"
+    # Pinned-only identity, as when no generation evidence is available.
+    monkeypatch.setattr(
+        mcp_bridge,
+        "_generation_of",
+        lambda fd: (mcp_bridge._HANDLE_TYPE_NONE, b""),
+    )
+
+    def replace_then_fail(relative_path: str, pin: int) -> None:
+        # Registration fails after another process swapped the entry; the
+        # failing register_artifact has closed the only lease pin.
+        published = os.fstat(pin).st_ino
+        os.close(pin)
+        for _ in range(50):
+            link.unlink()
+            link.symlink_to(user)
+            if link.stat(follow_symlinks=False).st_ino == published:
+                break
+        raise ValueError("prepared artifact pin does not match the path")
+
+    monkeypatch.setattr(attachment, "register_artifact", replace_then_fail)
+    try:
+        with pytest.raises(ValueError):
+            attachment.create_symlink_artifact(".omp/skills/python", work / "owned")
+        assert os.readlink(link) == str(user)
+    finally:
+        monkeypatch.undo()
+        attachment.release()
+
+
+def test_birth_time_generation_rejects_a_different_birth(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    _refuse_file_handles(monkeypatch, mcp_bridge)
+    target = tmp_path / "entry"
+    target.symlink_to("first")
+    fd = os.open(target, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        birth = mcp_bridge._birth_time_of(fd)
+        if birth is None:
+            pytest.skip("this filesystem does not report a statx birth time")
+        st = os.fstat(fd)
+        recorded = mcp_bridge._identity_from_pin(fd)
+        assert recorded == (
+            st.st_dev,
+            st.st_ino,
+            mcp_bridge._HANDLE_TYPE_BIRTH_TIME,
+            birth,
+        )
+        assert mcp_bridge._identity_matches(fd, recorded)
+        earlier = int.from_bytes(birth, "big", signed=True) - 1
+        stale = (*recorded[:3], earlier.to_bytes(16, "big", signed=True))
+        assert not mcp_bridge._identity_matches(fd, stale)
+    finally:
+        os.close(fd)
+
+
+def test_recovery_without_file_handles_keeps_inode_reuse_replacement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    _refuse_file_handles(monkeypatch, mcp_bridge)
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    probe_fd = os.open(probe, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        if mcp_bridge._birth_time_of(probe_fd) is None:
+            pytest.skip("this filesystem does not report a statx birth time")
+    finally:
+        os.close(probe_fd)
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    user = work / "user"
+    user.write_text("user", encoding="utf-8")
+    attachment = mcp_bridge.try_acquire_attachment(work, state, "job-btime")
+    attachment.create_directory_artifact(".omp/skills")
+    owned = attachment.create_symlink_artifact(".omp/skills/python", work / "owned")
+    attachment._owner_identity = _dead_owner()
+    attachment._write_journal(None)
+    _close_owner_descriptors(attachment)
+
+    link = work / ".omp" / "skills" / "python"
+    reused = False
+    for _ in range(50):
+        link.unlink()
+        link.symlink_to(user)
+        if link.stat(follow_symlinks=False).st_ino == owned[1]:
+            reused = True
+            break
+    if not reused:
+        pytest.skip("this filesystem did not reuse the freed inode number")
+
+    mcp_bridge.recover_attachments(state, work)
+
+    assert os.readlink(link) == str(user)
+    assert (work / ".omp" / "mcp.json").is_file()
+
+
+def test_attachment_without_file_handles_cleans_while_pinned(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    _refuse_file_handles(monkeypatch, mcp_bridge)
+    monkeypatch.setattr(mcp_bridge, "_birth_time_of", lambda fd: None)
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    target = work / "python-target"
+    target.write_text("target", encoding="utf-8")
+    attachment = mcp_bridge.try_acquire_attachment(work, state, "job-nohandle")
+    attachment.create_directory_artifact(".omp/skills")
+    attachment.create_symlink_artifact(".omp/skills/python", target)
+    assert all(
+        identity[2] == mcp_bridge._HANDLE_TYPE_NONE
+        for identity in attachment._artifacts.values()
+    )
+    assert attachment.release() == []
+    assert not (work / ".omp").exists()
+    assert target.read_text(encoding="utf-8") == "target"
+
+
+def test_recovery_without_generation_evidence_preserves_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # With neither a file handle nor a birth time, a journaled (dev, ino) cannot
+    # tell the owned inode from a replacement that reused its number once the
+    # pins are gone, so recovery must leave the tree for the user.
+    from omega_prime.engine import mcp_bridge
+
+    _refuse_file_handles(monkeypatch, mcp_bridge)
+    monkeypatch.setattr(mcp_bridge, "_birth_time_of", lambda fd: None)
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    attachment = mcp_bridge.try_acquire_attachment(work, state, "job-nogen")
+    attachment.create_directory_artifact(".omp/skills")
+    attachment.create_symlink_artifact(".omp/skills/python", work / "owned")
+    attachment._owner_identity = _dead_owner()
+    attachment._write_journal(None)
+    _close_owner_descriptors(attachment)
+
+    mcp_bridge.recover_attachments(state, work)
+
+    assert (work / ".omp" / "skills" / "python").is_symlink()
+    assert (work / ".omp" / "mcp.json").is_file()
+
+
 def test_sandbox_refuses_without_bwrap_and_wraps_when_present(tmp_path: Path) -> None:
     binary = _install_fake(tmp_path)
     # Point the bwrap lookup at a path that does not exist, so the refusal
@@ -1605,7 +1886,7 @@ def test_interrupt_reaches_attach_and_delegate_engine_paths_once(
         worker = threading.Thread(target=lambda: result.append(call()), daemon=True)
         worker.start()
         log = Path(env["OMEGA_FAKE_OMP_LOG"])
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + _OMP_STARTUP_TIMEOUT
         while time.monotonic() < deadline and "prompt" not in _omp_commands(log):
             time.sleep(0.01)
         assert "prompt" in _omp_commands(log)
@@ -1669,7 +1950,7 @@ def test_cancelled_engine_turn_consumes_interrupt_before_next_message(
     )
     worker.start()
     log = Path(env["OMEGA_FAKE_OMP_LOG"])
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + _OMP_STARTUP_TIMEOUT
     while time.monotonic() < deadline and "prompt" not in _omp_commands(log):
         time.sleep(0.01)
     assert "prompt" in _omp_commands(log)
