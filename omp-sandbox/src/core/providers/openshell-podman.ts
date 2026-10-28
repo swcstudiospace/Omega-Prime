@@ -12,7 +12,7 @@
 // (`podman system service`), the gateway (`openshell-gateway --compute-driver podman`), the
 // workload image (built from sandbox/image/Containerfile if absent), then one sandbox per `up`.
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, renameSync, statSync, writeFileSync, writeSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, copyFileSync, cpSync, existsSync, fstatSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, renameSync, statSync, writeFileSync, writeSync, readFileSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -58,29 +58,59 @@ export function readServices(file = SERVICES): SharedServices {
   try { return JSON.parse(readFileSync(file, "utf8")); } catch { return {}; }
 }
 /**
- * Run `fn` holding an exclusive cross-process lock on `file` (a sibling `.lock` created with O_EXCL holding the
- * holder's pid). Parallel wrappers each read-modify-write the shared record, so without it one wrapper's write can
- * erase the other's entry. A lock left by a dead process is broken; a live holder is waited for.
+ * Whether a lock record (`pid startTicks nonce`) still names a running holder. The kernel start time guards against
+ * pid reuse: an abandoned lock whose pid now belongs to an unrelated process is not mistaken for a live holder. A
+ * record with no start time (another platform, or an older writer) falls back to the pid alone; one with no pid at all
+ * is only trusted while it is fresh.
+ */
+export function lockHolderAlive(rec: string, ageMs: number, proc = "/proc"): boolean {
+  const [pid, ticks] = rec.trim().split(/\s+/).map(Number);
+  if (!(pid > 0)) return ageMs <= 2000;
+  if (ticks === undefined || !Number.isFinite(ticks) || ticks <= 0) return pidAlive(pid);
+  return procStartTicks(pid, proc) === ticks;
+}
+/**
+ * Break an abandoned lock without ever deleting a live one. The lock is moved aside atomically, so of several waiters
+ * that judged the same lock abandoned only one moves it; the rest find it gone and retry. If what was moved is not the
+ * record that was judged (it was broken and re-taken by a live holder in between), it is linked straight back.
+ */
+function breakAbandonedLock(lock: string, judged: string) {
+  const grave = `${lock}.abandoned.${process.pid}.${randomBytes(6).toString("hex")}`;
+  try { renameSync(lock, grave); } catch { return; }
+  try {
+    if (readFileSync(grave, "utf8") !== judged) { try { linkSync(grave, lock); } catch { /* a new holder already re-took it */ } }
+  } finally { rmSync(grave, { force: true }); }
+}
+/**
+ * Run `fn` holding an exclusive cross-process lock on `file`. Parallel wrappers each read-modify-write the shared
+ * record, so without it one wrapper's write can erase the other's entry. The lock is a sibling `.lock` file that is
+ * published complete (written to a private temp file, then hard-linked into place, which fails if it exists), so it is
+ * never seen empty. It names its holder by pid, kernel start time and a nonce: a live holder is waited for, an
+ * abandoned one (holder gone, or its pid reused) is broken safely, and a holder only ever removes its own lock.
  */
 export function withServicesLock<T>(file: string, fn: () => T, timeoutMs = 10_000): T {
   const lock = `${file}.lock`; const tick = new Int32Array(new SharedArrayBuffer(4));
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  for (const until = Date.now() + timeoutMs; ;) {
-    try {
-      const fd = openSync(lock, "wx", 0o600);
-      try { writeSync(fd, String(process.pid)); } finally { closeSync(fd); }
-      break;
-    } catch (e: any) {
-      if (e?.code !== "EEXIST") throw e;
-      let holder = NaN; try { holder = Number(readFileSync(lock, "utf8").trim()); } catch { continue; /* released meanwhile */ }
-      // An empty file is a holder between create and write; one that stays empty for seconds belongs to a crashed holder.
-      let ageMs = 0; try { ageMs = Date.now() - statSync(lock).mtimeMs; } catch { continue; }
-      if ((holder > 0 && !pidAlive(holder)) || (!(holder > 0) && ageMs > 2000)) { rmSync(lock, { force: true }); continue; }
-      if (Date.now() > until) throw new Error(`timed out waiting for ${lock} (held by pid ${holder || "?"})`);
+  const nonce = randomBytes(6).toString("hex");
+  const token = `${process.pid} ${procStartTicks(process.pid) ?? 0} ${nonce}`;
+  const tmp = `${lock}.${process.pid}.${nonce}.tmp`;
+  writeFileSync(tmp, token, { mode: 0o600 });
+  try {
+    for (const until = Date.now() + timeoutMs; ;) {
+      try { linkSync(tmp, lock); break; } catch (e: any) { if (e?.code !== "EEXIST") throw e; }
+      let seen: string; let ageMs: number;
+      try {
+        const fd = openSync(lock, "r");
+        try { seen = readFileSync(fd, "utf8"); ageMs = Date.now() - fstatSync(fd).mtimeMs; } finally { closeSync(fd); }
+      } catch { continue; /* released meanwhile */ }
+      if (!lockHolderAlive(seen, ageMs)) { breakAbandonedLock(lock, seen); continue; }
+      if (Date.now() > until) throw new Error(`timed out waiting for ${lock} (held by pid ${seen.trim().split(/\s+/)[0] || "?"})`);
       Atomics.wait(tick, 0, 0, 25);
     }
+  } finally { rmSync(tmp, { force: true }); }
+  try { return fn(); } finally {
+    try { if (readFileSync(lock, "utf8") === token) rmSync(lock, { force: true }); } catch { /* already gone */ }
   }
-  try { return fn(); } finally { rmSync(lock, { force: true }); }
 }
 /** Publish the record atomically (temp file + rename), so a reader never sees a partial write. */
 function writeServices(rec: SharedServices, file: string) {

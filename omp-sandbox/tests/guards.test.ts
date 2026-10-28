@@ -343,5 +343,16 @@ test("parallel wrappers recording shared services never erase each other's entry
   writeFileSync(`${file}.lock`, "999999999");
   podmanMod.recordService("gateway", a.pid, file);
   assert.equal(podmanMod.readServices(file).gateway?.pid, a.pid);
+  // A lock whose pid was reused by an unrelated live process (start time differs) is abandoned too.
+  writeFileSync(`${file}.lock`, `${process.pid} 1 stale`);
+  podmanMod.recordService("podmanService", b.pid, file);
+  assert.equal(podmanMod.readServices(file).podmanService?.pid, b.pid);
+  assert.equal(existsSync(`${file}.lock`), false, "reused-pid lock broken and released");
+  // A holder removes only its own lock: if its lock was replaced while it ran, the replacement survives the release.
+  podmanMod.withServicesLock(file, () => writeFileSync(`${file}.lock`, `${process.pid} 0 other`));
+  assert.equal(readFileSync(`${file}.lock`, "utf8"), `${process.pid} 0 other`);
+  rmSync(`${file}.lock`);
+  assert.equal(podmanMod.lockHolderAlive(`${process.pid} ${podmanMod.procStartTicks(process.pid)} n`, 0), true);
+  assert.equal(podmanMod.lockHolderAlive("", 5000), false, "an empty lock that stays empty is abandoned");
   a.kill("SIGKILL"); b.kill("SIGKILL");
 });
