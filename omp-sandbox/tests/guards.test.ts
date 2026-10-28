@@ -205,3 +205,82 @@ test("launched rejects (instead of crashing) when a launcher cannot execute", as
   const p = spawn(join(STATE, "no-such-gateway"), [], { stdio: ["ignore", "pipe", "pipe"] });
   await assert.rejects(utilMod.launched(p, "openshell-gateway", new Promise(() => {})), /openshell-gateway could not start/);
 });
+
+// Greptile round-N guards: broken input pipe, remote cleanup before stage_done, shared-service ownership.
+
+test("a closed omp stdin fails the request instead of crashing the core (EPIPE)", async () => {
+  // The child closes its stdin at once and keeps running, so our next write hits a broken pipe.
+  const proc = spawn("sh", ["-c", "exec 0<&-; sleep 30"], { stdio: ["pipe", "pipe", "pipe"] });
+  const c = new OmpRpcClient(proc as any, "fake");
+  await new Promise((r) => setTimeout(r, 200));
+  await assert.rejects(c.command("get_state", {}, 10_000), /input pipe failed/);
+  assert.ok(c.inputError, "input error recorded");
+  assert.throws(() => c.send({ type: "abort" }), /input pipe failed/);
+  await c.close(1000);
+  assert.equal(c.closed, true, "child stopped after the pipe broke");
+});
+
+test("stage_done waits for the tier's remote cleanup, and a failed cleanup refuses new work", async () => {
+  // Cleanup that takes a while: stage_done must not fire before it finishes.
+  let release!: () => void;
+  const slow = new Promise<void>((r) => { release = r; });
+  let settledAt = 0;
+  const core: any = new Core();
+  core.attachTierForTests({ name: "fake", id: "fake", isolation: "none (test)", owned: () => ({}), dispose: async () => ({ leftovers: [] }),
+    spawnStdio: () => fakeProc(), settled: () => slow.then(() => { settledAt = Date.now(); }) } as any);
+  let doneAt = 0; core.on("event", (e: any) => { if (e.event === "stage_done") doneAt = Date.now(); });
+  const a = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" });
+  for (let i = 0; i < 100 && core.status(a.stageId).status !== "waiting"; i++) await new Promise((r) => setTimeout(r, 50));
+  core.answer(a.stageId, "q1", {});
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(doneAt, 0, "stage_done held while remote cleanup runs");
+  assert.throws(() => core.runStage({ stage: "execute", gsdCommand: "gsd-execute-phase", task: "t2" }), /one stage at a time/);
+  release();
+  await core.stages.get(a.stageId).done;
+  assert.ok(doneAt >= settledAt && settledAt > 0, "stage_done after cleanup");
+
+  // Cleanup that fails: the stage fails and the core takes no further stages on this workdir.
+  const bad: any = new Core();
+  bad.attachTierForTests({ name: "fake", id: "fake", isolation: "none (test)", owned: () => ({}), dispose: async () => ({ leftovers: [] }),
+    spawnStdio: () => fakeProc(), settled: () => Promise.reject(new Error("remote session still running")) } as any);
+  const b = bad.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" });
+  for (let i = 0; i < 100 && bad.status(b.stageId).status !== "waiting"; i++) await new Promise((r) => setTimeout(r, 50));
+  bad.answer(b.stageId, "q1", {});
+  await bad.stages.get(b.stageId).done;
+  assert.equal(bad.status(b.stageId).status, "failed");
+  assert.match(bad.status(b.stageId).error, /still running/);
+  assert.throws(() => bad.runStage({ stage: "execute", gsdCommand: "gsd-execute-phase", task: "t2" }), /refusing new work/);
+});
+
+test("the remote session kill script confirms the whole session is gone", { skip: process.platform !== "linux" }, async () => {
+  const tag = `t${process.pid}${Date.now().toString(36)}`;
+  // A session leader with a background descendant, like omp plus a tool it started.
+  const s = spawn("setsid", ["-w", "sh", "-c", `echo $$ > /tmp/.ompsbx-${tag}.sid; sleep 60 & sleep 60`], { stdio: "ignore" });
+  for (let i = 0; i < 50 && !existsSync(`/tmp/.ompsbx-${tag}.sid`); i++) await new Promise((r) => setTimeout(r, 50));
+  const sid = readFileSync(`/tmp/.ompsbx-${tag}.sid`, "utf8").trim();
+  const r = await utilMod.execCapture("sh", ["-c", podmanMod.killSessionScript(tag)], { timeoutMs: 20_000 });
+  assert.equal(r.code, 0, r.stderr);
+  const left = await utilMod.execCapture("pgrep", ["-s", sid]);
+  assert.equal(left.code, 1, `session ${sid} still has: ${left.stdout}`);
+  assert.equal(existsSync(`/tmp/.ompsbx-${tag}.sid`), false);
+  s.kill("SIGKILL");
+  // No session file means nothing was started: settled.
+  assert.equal((await utilMod.execCapture("sh", ["-c", podmanMod.killSessionScript(`${tag}-none`)])).code, 0);
+});
+
+test("the last lease holder stops shared services another tier started; reused pids are left alone", { skip: process.platform !== "linux" }, async () => {
+  const file = join(STATE, "services.json");
+  const gw = spawn("sleep", ["60"], { stdio: "ignore", detached: true });
+  const other = spawn("sleep", ["60"], { stdio: "ignore", detached: true });
+  await new Promise((r) => setTimeout(r, 100));
+  podmanMod.recordService("gateway", gw.pid, file);
+  // Same pid as a live process but a different start time: a reused pid, not our service.
+  writeFileSync(file, JSON.stringify({ ...podmanMod.readServices(file), podmanService: { pid: other.pid, startTicks: podmanMod.procStartTicks(other.pid!)! - 1 } }));
+  assert.equal(podmanMod.sameService(podmanMod.readServices(file).gateway), true);
+  const left = await podmanMod.stopSharedServices(file);
+  assert.deepEqual(left, []);
+  assert.equal(utilMod.pidAlive(gw.pid), false, "recorded gateway stopped by a tier that never held its handle");
+  assert.equal(utilMod.pidAlive(other.pid), true, "unrelated process with a reused pid untouched");
+  assert.equal(existsSync(file), false, "ownership record cleared");
+  other.kill("SIGKILL");
+});

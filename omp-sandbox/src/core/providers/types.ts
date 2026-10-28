@@ -17,6 +17,12 @@ export interface SandboxTier {
   sandboxAgent(): { baseUrl: string; token: string };
   /** Long-lived process with piped stdio (omp --mode rpc). */
   spawnStdio(argv: string[], opts?: { cwd?: string; env?: Record<string, string> }): ChildProcessWithoutNullStreams;
+  /**
+   * Resolves once everything `proc` started inside the sandbox is gone, not just the local process.
+   * Rejects if that cleanup failed, in which case the workdir may still be changing. Tiers whose
+   * process tree ends with the local process may omit it.
+   */
+  settled?(proc: ChildProcessWithoutNullStreams): Promise<void>;
   exec(argv: string[], opts?: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; input?: string }): Promise<{ code: number | null; stdout: string; stderr: string }>;
   /** Resources this tier owns that must be gone after dispose (pids, sandbox names, dirs). */
   owned(): Record<string, unknown>;

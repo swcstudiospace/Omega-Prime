@@ -37,11 +37,70 @@ export function otherLeases(self: string, dir = LEASES): string[] {
     try { return pidAlive(Number(readFileSync(join(dir, n), "utf8").trim())); } catch { return false; }
   });
 }
+// The shared gateway and Podman service outlive the tier that started them whenever another tier still holds a lease,
+// so ownership lives here, not in that tier's memory: whichever tier releases the last lease stops them.
+const SERVICES = join(GW_STATE, "services.json");
+type ServiceRec = { pid: number; startTicks: number };
+export type SharedServices = { gateway?: ServiceRec; podmanService?: ServiceRec };
+
+/** Kernel start time of `pid` (clock ticks since boot, /proc/<pid>/stat field 22); null if the process is gone. */
+export function procStartTicks(pid: number, proc = "/proc"): number | null {
+  try {
+    const stat = readFileSync(`${proc}/${pid}/stat`, "utf8");
+    return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]);
+  } catch { return null; }
+}
+/** A recorded service is still the process we started only if its pid is alive with the same start time (no pid reuse). */
+export function sameService(r: ServiceRec | undefined, proc = "/proc"): r is ServiceRec {
+  return !!r && r.pid > 0 && procStartTicks(r.pid, proc) === r.startTicks;
+}
+export function readServices(file = SERVICES): SharedServices {
+  try { return JSON.parse(readFileSync(file, "utf8")); } catch { return {}; }
+}
+export function recordService(which: keyof SharedServices, pid: number | undefined, file = SERVICES) {
+  const startTicks = pid ? procStartTicks(pid) : null;
+  if (!pid || startTicks === null) return;
+  const cur = readServices(file);
+  writeFileSync(file, JSON.stringify({ ...cur, [which]: { pid, startTicks } }), { mode: 0o600 });
+}
+async function stopPid(pid: number, graceMs = 10_000) {
+  try { process.kill(pid, "SIGTERM"); } catch { return; }
+  for (let waited = 0; waited < graceMs && pidAlive(pid); waited += 200) await sleep(200);
+  if (pidAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} }
+  for (let i = 0; i < 25 && pidAlive(pid); i++) await sleep(200);
+}
+/**
+ * Stop the shared services recorded in `file` (started by this or any earlier tier) and clear the record. Called only
+ * by the tier that released the last lease. Returns the services still alive afterwards.
+ */
+export async function stopSharedServices(file = SERVICES, proc = "/proc"): Promise<string[]> {
+  const rec = readServices(file); const left: string[] = [];
+  for (const [what, r] of [["gateway", rec.gateway], ["podman service", rec.podmanService]] as const) {
+    if (!sameService(r, proc)) continue;          // gone, or the pid now belongs to an unrelated process
+    await stopPid(r.pid);
+    if (sameService(r, proc)) left.push(`${what} pid ${r.pid}`);
+  }
+  if (!left.length) rmSync(file, { force: true });
+  return left;
+}
+
 const ENV_FILE = "/sandbox/home/.omp-sandbox.env";
 const RELAY_PORT = 18990;           // sandbox-local loopback only
 const AGENT_PORT = 2468;            // sandbox-local loopback only, reached via `forward service`
 const SECRET = /TOKEN|KEY|SECRET|PASSWORD/i;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Sandbox-side script that kills the `setsid` session recorded for `tag` and exits 0 only once no member of
+ * that session is left (or it never started). Exit 1 means processes survived the kill.
+ */
+export function killSessionScript(tag: string) {
+  const f = `/tmp/.ompsbx-${tag}.sid`;
+  // pgrep exits 1 for "no match" and 2+ for errors; only a clean "no match" counts as settled.
+  return `[ -f ${f} ] || exit 0; sid=$(cat ${f}); [ -n "$sid" ] || { echo "empty session file" >&2; exit 1; }; `
+    + `for i in $(seq 1 50); do pkill -KILL -s "$sid"; pgrep -s "$sid" >/dev/null; [ $? -eq 1 ] && { rm -f ${f}; exit 0; }; sleep 0.1; done; `
+    + `echo "session $sid still has processes" >&2; exit 1`;
+}
 
 function ping(socketPath: string) {
   return new Promise<boolean>((res) => {
@@ -142,6 +201,7 @@ export class OpenShellPodmanTier implements SandboxTier {
     const log = openSync(join(GW_STATE, "podman-service.log"), "a");
     this.#svc = spawn(PODMAN_BIN, ["system", "service", "--time=0", `unix://${sock}`], { stdio: ["ignore", log, log] });
     const svc = this.#svc;
+    recordService("podmanService", svc.pid);
     await launched(svc, "podman system service", (async () => {
       for (let i = 0; i < 60; i++) { if (await ping(sock)) { this.info.podmanSocket = { path: sock, startedByTier: true, pid: svc.pid }; return; } await sleep(500); }
       throw new TierUnavailable("openshell-podman", `podman API socket did not answer at ${sock}`);
@@ -180,6 +240,7 @@ export class OpenShellPodmanTier implements SandboxTier {
     const logPath = join(GW_STATE, "gateway.log"); const log = openSync(logPath, "w");
     this.#gw = spawn(OPENSHELL_GATEWAY_BIN, ["--config", cfg, "--compute-driver", "podman", "--tls-cert", `${OPENSHELL_TLS}/server/tls.crt`, "--tls-key", `${OPENSHELL_TLS}/server/tls.key`, "--tls-client-ca", `${OPENSHELL_TLS}/ca.crt`, "--db-url", `sqlite:${join(GW_STATE, "gateway.db")}?mode=rwc`, "--bind-address", "127.0.0.1", "--port", String(OPENSHELL_GATEWAY_PORT), "--health-port", "0", "--metrics-port", "0"], { env: OS_ENV, stdio: ["ignore", log, log] });
     const gw = this.#gw;
+    recordService("gateway", gw.pid);
     await launched(gw, "openshell-gateway", this.#gatewayReady(gw, logPath));
   }
 
@@ -199,7 +260,7 @@ export class OpenShellPodmanTier implements SandboxTier {
   /** Sandboxes on this gateway other than ours. Unknown (gateway unreachable) counts as "none" only if the gateway is gone. */
   async #otherSandboxes(): Promise<string[]> {
     const l = await os(["sandbox", "list"], { timeoutMs: 30_000 });
-    if (l.code !== 0) return this.#gw && this.#gw.exitCode === null ? ["<unknown: sandbox list failed>"] : [];
+    if (l.code !== 0) return (this.#gw && this.#gw.exitCode === null) || sameService(readServices().gateway) ? ["<unknown: sandbox list failed>"] : [];
     return l.stdout.split("\n").map((x) => x.trim().split(/\s+/)[0] ?? "").filter((n) => n && n !== this.id && !/^(NAME|No)$/i.test(n));
   }
 
@@ -245,13 +306,23 @@ export class OpenShellPodmanTier implements SandboxTier {
     const p = spawn(OPENSHELL_BIN, this.#execArgs(argv, opts, tag), { env: OS_ENV, stdio: ["pipe", "pipe", "pipe"] });
     this.#children.add(p);
     // Killing the local exec client does not kill the remote process tree, so on exit we kill the
-    // whole remote session (omp + anything its tools started).
-    p.once("exit", () => { this.#children.delete(p); if (this.#created) void this.#killSession(tag); });
+    // whole remote session (omp + anything its tools started). `settled(p)` waits for that cleanup,
+    // so a cancelled stage's tools cannot still be editing the workdir when the next stage starts.
+    const done = new Promise<void>((resolve, reject) => p.once("exit", () => {
+      this.#children.delete(p);
+      if (!this.#created) return resolve();
+      this.#killSession(tag).then((r) => r.code === 0 ? resolve()
+        : reject(new Error(`remote session ${tag} still running after omp exited: ${(r.stderr || r.stdout).slice(-300) || `exit ${r.code}`}`)), reject);
+    }));
+    done.catch(() => {});   // observed by settled(); an unawaited failure must not crash the core
+    this.#settles.set(p, done);
     return p;
   }
+  settled(p: ChildProcessWithoutNullStreams) { return this.#settles.get(p) ?? Promise.resolve(); }
+  #settles = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>();
+  /** Kill the remote session and confirm it is empty. Exit 0 only when no process of the session is left. */
   #killSession(tag: string) {
-    const f = `/tmp/.ompsbx-${tag}.sid`;
-    return execCapture(OPENSHELL_BIN, this.#raw(["sh", "-c", `[ -f ${f} ] && pkill -KILL -s "$(cat ${f})"; rm -f ${f}; true`], "/sandbox"), { env: OS_ENV, timeoutMs: 60_000 });
+    return execCapture(OPENSHELL_BIN, this.#raw(["sh", "-c", killSessionScript(tag)], "/sandbox"), { env: OS_ENV, timeoutMs: 60_000 });
   }
 
   exec(argv: string[], opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; input?: string } = {}) {
@@ -290,13 +361,18 @@ export class OpenShellPodmanTier implements SandboxTier {
     // (`#ensureGateway` adopts a running one). Stop them only when no other tier holds a lease (that covers a
     // wrapper still starting up, before its sandbox exists) and no other sandbox is still registered.
     rmSync(join(LEASES, this.id), { force: true });
-    const leased = this.#gw || this.#svc ? otherLeases(this.id) : [];
-    const others = leased.length ? leased : this.#gw || this.#svc ? await this.#otherSandboxes() : [];
+    // A tier that only adopted the services still decides for them when a recorded owner left them to the last lease.
+    const rec = readServices();
+    const shared = !!(this.#gw || this.#svc || sameService(rec.gateway) || sameService(rec.podmanService));
+    const leased = shared ? otherLeases(this.id) : [];
+    const others = leased.length ? leased : shared ? await this.#otherSandboxes() : [];
     if (others.length) {
-      this.info.sharedServicesLeftRunning = { reason: leased.length ? `${leased.length} other tier(s) still hold a lease on the shared services` : `${others.length} other sandbox(es) still use the gateway`, gatewayPid: this.#gw?.pid ?? null, podmanServicePid: this.#svc?.pid ?? null };
+      this.info.sharedServicesLeftRunning = { reason: leased.length ? `${leased.length} other tier(s) still hold a lease on the shared services` : `${others.length} other sandbox(es) still use the gateway`, gatewayPid: this.#gw?.pid ?? rec.gateway?.pid ?? null, podmanServicePid: this.#svc?.pid ?? rec.podmanService?.pid ?? null };
     } else {
+      // Our own handles first (clean exit + reap), then anything another tier started and left to the last lease holder.
       await stopProc(this.#gw); await stopProc(this.#svc);
       for (const [what, p] of [["gateway", this.#gw], ["podman service", this.#svc]] as const) if (p?.pid && pidAlive(p.pid)) leftovers.push(`${what} pid ${p.pid}`);
+      leftovers.push(...(await stopSharedServices()).filter((l) => !leftovers.includes(l)));
     }
     leftovers.push(...pids.filter(pidAlive).map((p) => `pid ${p}`));
     return { leftovers };
