@@ -119,7 +119,7 @@ def test_legacy_advisories_shape_supported(tmp_path, monkeypatch, capsys):
 
 # --- Scoped triage: advisory AND dependency path (real d1a2209 shape) ---
 
-_ZOD_GHSA = "https://github.com/advisories/GHSA-mrhx-c7xc-m3w5"
+_ZOD_GHSA = "http://127.0.0.1/advisories/GHSA-mrhx-c7xc-m3w5"
 _NESTED_ZOD = "node_modules/@ag-ui/core/node_modules/zod"
 
 
@@ -164,7 +164,7 @@ def _reviewed_doc() -> dict:
                 "via": [
                     {
                         "source": 1241206,
-                        "url": "https://github.com/advisories/GHSA-238p-pmpm-9mq7",
+                        "url": "http://127.0.0.1/advisories/GHSA-238p-pmpm-9mq7",
                         "severity": "low",
                     }
                 ],
@@ -202,7 +202,7 @@ def test_different_critical_advisory_on_top_level_zod_is_rejected(
     zod = doc["vulnerabilities"]["zod"]
     zod["severity"] = "critical"
     zod["via"].append(
-        _zod_advisory("https://github.com/advisories/GHSA-zzzz-yyyy-xxxx", "critical")
+        _zod_advisory("http://127.0.0.1/advisories/GHSA-zzzz-yyyy-xxxx", "critical")
     )
     zod["nodes"].append("node_modules/zod")
     monkeypatch.setenv("AUDIT_JSON", str(_write_audit(tmp_path, doc)))
@@ -216,7 +216,7 @@ def test_different_advisory_on_reviewed_path_is_rejected(tmp_path, monkeypatch, 
     """A new advisory on the reviewed nested copy is not covered by the entry."""
     doc = _reviewed_doc()
     doc["vulnerabilities"]["zod"]["via"] = [
-        _zod_advisory("https://github.com/advisories/GHSA-zzzz-yyyy-xxxx", "critical")
+        _zod_advisory("http://127.0.0.1/advisories/GHSA-zzzz-yyyy-xxxx", "critical")
     ]
     monkeypatch.setenv("AUDIT_JSON", str(_write_audit(tmp_path, doc)))
     assert _TRIAGE.main() == 1
@@ -263,7 +263,7 @@ def test_legacy_advisory_binds_paths():
             "1": {
                 "severity": "high",
                 "module_name": "old-dep",
-                "url": "https://github.com/advisories/GHSA-aaaa-bbbb-cccc",
+                "url": "http://127.0.0.1/advisories/GHSA-aaaa-bbbb-cccc",
                 "findings": [{"paths": ["app>old-dep"]}],
             }
         }
