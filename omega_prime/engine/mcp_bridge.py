@@ -12,6 +12,7 @@ import os
 import secrets
 import stat
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,11 @@ class _Statx(ctypes.Structure):
         ("stx_btime", _StatxTimestamp),
         ("stx_ctime", _StatxTimestamp),
         ("stx_mtime", _StatxTimestamp),
+        ("stx_rdev_major", ctypes.c_uint32),
+        ("stx_rdev_minor", ctypes.c_uint32),
+        ("stx_dev_major", ctypes.c_uint32),
+        ("stx_dev_minor", ctypes.c_uint32),
+        # stx_mnt_id, the dio alignments and the kernel's reserved tail.
         ("_spare", ctypes.c_uint64 * 14),
     )
 
@@ -314,10 +320,42 @@ def _generation_of(fd: int) -> tuple[int, bytes]:
     return _HANDLE_TYPE_NONE, b""
 
 
+# Linux CLOCK_REALTIME_COARSE: the clock the kernel stamps new inodes from.
+_CLOCK_REALTIME_COARSE = getattr(time, "CLOCK_REALTIME_COARSE", 5)
+# Coarse clock ticks are a jiffy (at most 10 ms); give the clock a few of them.
+_BIRTH_SETTLE_SECONDS = 0.05
+
+
+def _birth_is_settled(birth: bytes) -> bool:
+    """True once the inode-stamping clock has moved past ``birth``.
+
+    Birth times come from the coarse clock, so an inode freed and reused within
+    the same tick reports the same birth time. The pin keeps the inode alive
+    until after its identity is recorded, so any reuse is born later; once the
+    coarse clock is past ``birth`` that reuse cannot share it.
+    """
+    born = int.from_bytes(birth, "big", signed=True)
+    deadline = time.monotonic() + _BIRTH_SETTLE_SECONDS
+    while True:
+        try:
+            now = time.clock_gettime_ns(_CLOCK_REALTIME_COARSE)
+        except OSError:
+            return False
+        if now > born:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.001)
+
+
 def _identity_from_pin(pin: int) -> _ArtifactIdentity:
     """Identity of the inode a pin holds, not of whatever path it once named."""
     current = os.fstat(pin)
     handle_type, handle = _generation_of(pin)
+    if handle_type == _HANDLE_TYPE_BIRTH_TIME and not _birth_is_settled(handle):
+        # The clock did not move past the birth time (or ran backwards), so a
+        # reuse could share it: keep pinned-only identity instead.
+        handle_type, handle = _HANDLE_TYPE_NONE, b""
     return (current.st_dev, current.st_ino, handle_type, handle)
 
 
@@ -328,6 +366,10 @@ def _identity_matches(
     if (current.st_dev, current.st_ino) != (identity[0], identity[1]):
         return False
     if len(identity) == 2:
+        return True
+    if identity[2] == _HANDLE_TYPE_NONE:
+        # Pinned-only identity: the caller still holds the pin, so the inode
+        # number cannot have been reused. Never parsed back from a journal.
         return True
     handle_type, handle = _generation_of(artifact_fd)
     return handle_type == identity[2] and handle == identity[3]
