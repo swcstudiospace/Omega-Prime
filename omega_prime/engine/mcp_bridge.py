@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import errno
 import json
 import os
 import secrets
 import stat
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -21,7 +23,20 @@ _INSTALL = Path(__file__).resolve().parents[2]
 _AT_EMPTY_PATH = 0x1000
 _RENAME_NOREPLACE = 1
 _HANDLE_BYTES = 128
+_AT_STATX_SYNC_AS_STAT = 0x0000
+_AT_SYMLINK_NOFOLLOW = 0x100
+_AT_HANDLE_FID = 0x200
+_STATX_BTIME = 0x800
+# Pseudo handle types for filesystems that cannot encode a file handle (for
+# example an overlay or sandboxed rootfs that answers EOPNOTSUPP). Kernel
+# handle types are never negative, so these cannot collide with a real one.
+_HANDLE_TYPE_BIRTH_TIME = -2
+_HANDLE_TYPE_NONE = -1
+_HANDLE_UNSUPPORTED = frozenset({errno.EOPNOTSUPP, errno.ENOTSUP, errno.ENOSYS})
 # Device, inode, and the filesystem generation handle from the pinned descriptor.
+# The generation is a kernel file handle, else a statx birth time, else empty
+# (``_HANDLE_TYPE_NONE``): an empty generation is only trusted while this
+# process still pins the inode, and is never written as recoverable identity.
 _ArtifactIdentity = tuple[int, int, int, bytes]
 
 
@@ -52,6 +67,53 @@ _name_to_handle_at.argtypes = [
     ctypes.c_int,
 ]
 _name_to_handle_at.restype = ctypes.c_int
+
+
+class _StatxTimestamp(ctypes.Structure):
+    _fields_ = (
+        ("tv_sec", ctypes.c_int64),
+        ("tv_nsec", ctypes.c_uint32),
+        ("_reserved", ctypes.c_int32),
+    )
+
+
+class _Statx(ctypes.Structure):
+    _fields_ = (
+        ("stx_mask", ctypes.c_uint32),
+        ("stx_blksize", ctypes.c_uint32),
+        ("stx_attributes", ctypes.c_uint64),
+        ("stx_nlink", ctypes.c_uint32),
+        ("stx_uid", ctypes.c_uint32),
+        ("stx_gid", ctypes.c_uint32),
+        ("stx_mode", ctypes.c_uint16),
+        ("_spare0", ctypes.c_uint16),
+        ("stx_ino", ctypes.c_uint64),
+        ("stx_size", ctypes.c_uint64),
+        ("stx_blocks", ctypes.c_uint64),
+        ("stx_attributes_mask", ctypes.c_uint64),
+        ("stx_atime", _StatxTimestamp),
+        ("stx_btime", _StatxTimestamp),
+        ("stx_ctime", _StatxTimestamp),
+        ("stx_mtime", _StatxTimestamp),
+        ("stx_rdev_major", ctypes.c_uint32),
+        ("stx_rdev_minor", ctypes.c_uint32),
+        ("stx_dev_major", ctypes.c_uint32),
+        ("stx_dev_minor", ctypes.c_uint32),
+        # stx_mnt_id, the dio alignments and the kernel's reserved tail.
+        ("_spare", ctypes.c_uint64 * 14),
+    )
+
+
+_statx = getattr(_LIBC, "statx", None)
+if _statx is not None:
+    _statx.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.POINTER(_Statx),
+    ]
+    _statx.restype = ctypes.c_int
 
 ENGINE_SYSTEM_PROMPT = (
     "You are Omega Prime's coding loop running on omp. "
@@ -205,10 +267,95 @@ def _handle_of(fd: int, name: bytes, flags: int) -> tuple[int, bytes]:
     return int(handle.handle_type), bytes(handle.f_handle[:size])
 
 
+def _birth_time_of(fd: int) -> bytes | None:
+    """statx birth time of ``fd`` in nanoseconds, or None when not reported."""
+    if _statx is None:
+        return None
+    buf = _Statx()
+    rc = _statx(
+        fd,
+        b"",
+        _AT_EMPTY_PATH | _AT_SYMLINK_NOFOLLOW | _AT_STATX_SYNC_AS_STAT,
+        _STATX_BTIME,
+        ctypes.byref(buf),
+    )
+    if rc != 0:
+        err = ctypes.get_errno()
+        if err in _HANDLE_UNSUPPORTED:
+            return None
+        raise OSError(err, os.strerror(err))
+    if not buf.stx_mask & _STATX_BTIME:
+        return None
+    stamp = buf.stx_btime
+    if stamp.tv_sec == 0 and stamp.tv_nsec == 0:
+        return None
+    nanoseconds = int(stamp.tv_sec) * 1_000_000_000 + int(stamp.tv_nsec)
+    return nanoseconds.to_bytes(16, "big", signed=True)
+
+
+def _generation_of(fd: int) -> tuple[int, bytes]:
+    """Generation evidence for the inode ``fd`` holds, strongest first.
+
+    A kernel file handle carries the inode generation, so a reused inode
+    number never matches. Some filesystems refuse to encode one: an
+    exportable handle first, then an identifier-only handle
+    (``AT_HANDLE_FID``), then the statx birth time, which a reused inode
+    number also cannot share. When none is available the generation is
+    empty; such identity is only sound while the owner still pins the inode.
+    """
+    try:
+        return _handle_of(fd, b"", _AT_EMPTY_PATH)
+    except OSError as exc:
+        if exc.errno not in _HANDLE_UNSUPPORTED:
+            raise
+    try:
+        return _handle_of(fd, b"", _AT_EMPTY_PATH | _AT_HANDLE_FID)
+    except OSError as exc:
+        # Kernels before 6.5 reject the unknown AT_HANDLE_FID flag with EINVAL.
+        if exc.errno not in _HANDLE_UNSUPPORTED and exc.errno != errno.EINVAL:
+            raise
+    birth = _birth_time_of(fd)
+    if birth is not None:
+        return _HANDLE_TYPE_BIRTH_TIME, birth
+    return _HANDLE_TYPE_NONE, b""
+
+
+# Linux CLOCK_REALTIME_COARSE: the clock the kernel stamps new inodes from.
+_CLOCK_REALTIME_COARSE = getattr(time, "CLOCK_REALTIME_COARSE", 5)
+# Coarse clock ticks are a jiffy (at most 10 ms); give the clock a few of them.
+_BIRTH_SETTLE_SECONDS = 0.05
+
+
+def _birth_is_settled(birth: bytes) -> bool:
+    """True once the inode-stamping clock has moved past ``birth``.
+
+    Birth times come from the coarse clock, so an inode freed and reused within
+    the same tick reports the same birth time. The pin keeps the inode alive
+    until after its identity is recorded, so any reuse is born later; once the
+    coarse clock is past ``birth`` that reuse cannot share it.
+    """
+    born = int.from_bytes(birth, "big", signed=True)
+    deadline = time.monotonic() + _BIRTH_SETTLE_SECONDS
+    while True:
+        try:
+            now = time.clock_gettime_ns(_CLOCK_REALTIME_COARSE)
+        except OSError:
+            return False
+        if now > born:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.001)
+
+
 def _identity_from_pin(pin: int) -> _ArtifactIdentity:
     """Identity of the inode a pin holds, not of whatever path it once named."""
     current = os.fstat(pin)
-    handle_type, handle = _handle_of(pin, b"", _AT_EMPTY_PATH)
+    handle_type, handle = _generation_of(pin)
+    if handle_type == _HANDLE_TYPE_BIRTH_TIME and not _birth_is_settled(handle):
+        # The clock did not move past the birth time (or ran backwards), so a
+        # reuse could share it: keep pinned-only identity instead.
+        handle_type, handle = _HANDLE_TYPE_NONE, b""
     return (current.st_dev, current.st_ino, handle_type, handle)
 
 
@@ -220,7 +367,12 @@ def _identity_matches(
         return False
     if len(identity) == 2:
         return True
-    handle_type, handle = _handle_of(artifact_fd, b"", _AT_EMPTY_PATH)
+    if identity[2] == _HANDLE_TYPE_NONE:
+        # Pinned-only identity: callers hold a reference to the inode (the
+        # lease pin, or the rollback guard), so its number cannot have been
+        # reused. Never parsed back from a journal.
+        return True
+    handle_type, handle = _generation_of(artifact_fd)
     return handle_type == identity[2] and handle == identity[3]
 
 
@@ -493,23 +645,40 @@ class AcquiredAttachment:
         validate: Callable[[int], None],
     ) -> tuple[int, int]:
         pin = _publish_pinned_artifact(self._omp_fd, relative_path, create, validate)
+        published = os.fstat(pin)
+        # register_artifact closes ``pin`` when it fails. A second reference
+        # keeps the inode allocated through any rollback, so a replacement at
+        # the path can never reuse its number and match a dev/ino identity.
         try:
-            identity = _identity_from_pin(pin)
+            guard = os.dup(pin)
         except BaseException:
-            fallback = os.fstat(pin)
-            os.close(pin)
             with contextlib.suppress(OSError):
                 _remove_artifact(
-                    self._omp_fd, relative_path, (fallback.st_dev, fallback.st_ino)
+                    self._omp_fd, relative_path, (published.st_dev, published.st_ino)
                 )
+            os.close(pin)
             raise
         try:
-            registered = self.register_artifact(relative_path, pin)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                _remove_artifact(self._omp_fd, relative_path, identity)
-            raise
-        return (registered[0], registered[1])
+            try:
+                identity = _identity_from_pin(pin)
+            except BaseException:
+                os.close(pin)
+                with contextlib.suppress(OSError):
+                    _remove_artifact(
+                        self._omp_fd,
+                        relative_path,
+                        (published.st_dev, published.st_ino),
+                    )
+                raise
+            try:
+                registered = self.register_artifact(relative_path, pin)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    _remove_artifact(self._omp_fd, relative_path, identity)
+                raise
+            return (registered[0], registered[1])
+        finally:
+            os.close(guard)
 
     def remove_artifact(self, relative_path: str, identity: tuple[int, int]) -> None:
         owned = self._artifacts.get(relative_path)

@@ -61,6 +61,8 @@ CALLER = "caller-token-0123456789abcdef"
 BOT_ID = "bot-00-omega-prime"
 _TRACEPARENT = re.compile(r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}")
 _ACCEPT = {"Accept": "application/json, text/event-stream"}
+# Bound for a subprocess MCP host to answer /readyz (cold import under CI load).
+_SUBPROCESS_STARTUP_TIMEOUT = 60.0
 
 
 class _Clock:
@@ -780,7 +782,9 @@ def test_json_log_subprocess_emits_only_ndjson(tmp_path: Path) -> None:
     anonymous_status = 0
     authed_status = 0
     try:
-        deadline = time.monotonic() + 8
+        # A cold interpreter importing the 125-tool host can take well over 8 s
+        # on a loaded CI runner; the loop still exits at once if the process dies.
+        deadline = time.monotonic() + _SUBPROCESS_STARTUP_TIMEOUT
         with httpx2.Client(trust_env=False, timeout=0.5) as client:
             while time.monotonic() < deadline:
                 if proc.poll() is not None:
