@@ -1392,6 +1392,160 @@ def test_recovery_keeps_replacement_that_reuses_the_freed_inode(
     assert (work / ".omp" / "mcp.json").is_file()
 
 
+def _refuse_file_handles(monkeypatch, mcp_bridge) -> None:
+    """Make name_to_handle_at answer EOPNOTSUPP, as overlay runner roots do."""
+    import errno
+
+    def unsupported(fd: int, name: bytes, flags: int) -> tuple[int, bytes]:
+        raise OSError(errno.EOPNOTSUPP, os.strerror(errno.EOPNOTSUPP))
+
+    monkeypatch.setattr(mcp_bridge, "_handle_of", unsupported)
+
+
+def test_generation_falls_back_to_birth_time_without_file_handles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    _refuse_file_handles(monkeypatch, mcp_bridge)
+    monkeypatch.setattr(mcp_bridge, "_birth_time_of", lambda fd: b"\x00" * 15 + b"\x07")
+    target = tmp_path / "entry"
+    target.mkdir()
+    fd = os.open(target, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        identity = mcp_bridge._identity_from_pin(fd)
+    finally:
+        os.close(fd)
+    assert identity[2] == mcp_bridge._HANDLE_TYPE_BIRTH_TIME
+    assert identity[3] == b"\x00" * 15 + b"\x07"
+    parsed = mcp_bridge._parse_artifact_identity(
+        [identity[0], identity[1], identity[2], identity[3].hex()]
+    )
+    assert parsed == identity
+
+
+def test_birth_time_generation_rejects_a_different_birth(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    _refuse_file_handles(monkeypatch, mcp_bridge)
+    target = tmp_path / "entry"
+    target.symlink_to("first")
+    fd = os.open(target, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        birth = mcp_bridge._birth_time_of(fd)
+        if birth is None:
+            pytest.skip("this filesystem does not report a statx birth time")
+        st = os.fstat(fd)
+        recorded = mcp_bridge._identity_from_pin(fd)
+        assert recorded == (
+            st.st_dev,
+            st.st_ino,
+            mcp_bridge._HANDLE_TYPE_BIRTH_TIME,
+            birth,
+        )
+        assert mcp_bridge._identity_matches(fd, recorded)
+        earlier = int.from_bytes(birth, "big", signed=True) - 1
+        stale = (*recorded[:3], earlier.to_bytes(16, "big", signed=True))
+        assert not mcp_bridge._identity_matches(fd, stale)
+    finally:
+        os.close(fd)
+
+
+def test_recovery_without_file_handles_keeps_inode_reuse_replacement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    _refuse_file_handles(monkeypatch, mcp_bridge)
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    probe_fd = os.open(probe, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        if mcp_bridge._birth_time_of(probe_fd) is None:
+            pytest.skip("this filesystem does not report a statx birth time")
+    finally:
+        os.close(probe_fd)
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    user = work / "user"
+    user.write_text("user", encoding="utf-8")
+    attachment = mcp_bridge.try_acquire_attachment(work, state, "job-btime")
+    attachment.create_directory_artifact(".omp/skills")
+    owned = attachment.create_symlink_artifact(".omp/skills/python", work / "owned")
+    attachment._owner_identity = _dead_owner()
+    attachment._write_journal(None)
+    _close_owner_descriptors(attachment)
+
+    link = work / ".omp" / "skills" / "python"
+    reused = False
+    for _ in range(50):
+        link.unlink()
+        link.symlink_to(user)
+        if link.stat(follow_symlinks=False).st_ino == owned[1]:
+            reused = True
+            break
+    if not reused:
+        pytest.skip("this filesystem did not reuse the freed inode number")
+
+    mcp_bridge.recover_attachments(state, work)
+
+    assert os.readlink(link) == str(user)
+    assert (work / ".omp" / "mcp.json").is_file()
+
+
+def test_attachment_without_file_handles_cleans_while_pinned(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    _refuse_file_handles(monkeypatch, mcp_bridge)
+    monkeypatch.setattr(mcp_bridge, "_birth_time_of", lambda fd: None)
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    target = work / "python-target"
+    target.write_text("target", encoding="utf-8")
+    attachment = mcp_bridge.try_acquire_attachment(work, state, "job-nohandle")
+    attachment.create_directory_artifact(".omp/skills")
+    attachment.create_symlink_artifact(".omp/skills/python", target)
+    assert all(
+        identity[2] == mcp_bridge._HANDLE_TYPE_NONE
+        for identity in attachment._artifacts.values()
+    )
+    assert attachment.release() == []
+    assert not (work / ".omp").exists()
+    assert target.read_text(encoding="utf-8") == "target"
+
+
+def test_recovery_without_generation_evidence_preserves_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # With neither a file handle nor a birth time, a journaled (dev, ino) cannot
+    # tell the owned inode from a replacement that reused its number once the
+    # pins are gone, so recovery must leave the tree for the user.
+    from omega_prime.engine import mcp_bridge
+
+    _refuse_file_handles(monkeypatch, mcp_bridge)
+    monkeypatch.setattr(mcp_bridge, "_birth_time_of", lambda fd: None)
+    work = tmp_path / "work"
+    work.mkdir()
+    state = tmp_path / "state"
+    attachment = mcp_bridge.try_acquire_attachment(work, state, "job-nogen")
+    attachment.create_directory_artifact(".omp/skills")
+    attachment.create_symlink_artifact(".omp/skills/python", work / "owned")
+    attachment._owner_identity = _dead_owner()
+    attachment._write_journal(None)
+    _close_owner_descriptors(attachment)
+
+    mcp_bridge.recover_attachments(state, work)
+
+    assert (work / ".omp" / "skills" / "python").is_symlink()
+    assert (work / ".omp" / "mcp.json").is_file()
+
+
 def test_sandbox_refuses_without_bwrap_and_wraps_when_present(tmp_path: Path) -> None:
     binary = _install_fake(tmp_path)
     # Point the bwrap lookup at a path that does not exist, so the refusal

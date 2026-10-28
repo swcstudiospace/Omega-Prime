@@ -84,6 +84,8 @@
     "OMEGA_PRIME_DESK_NOTIFY_URL_FILE": "Names a protected file containing the desk notification endpoint.",
     "OMEGA_PRIME_DISPATCH_CONFIRM": "Confirms dispatch operations requiring the Fleet credential helper.",
     "OMEGA_PRIME_DISPATCH_CONFIRM_FILE": "Names a protected file containing the dispatch confirmation token.",
+    "OMEGA_PRIME_DELEGATE_DEPTH": "Set by the engine for a child omp run: how many delegate hops deep this MCP server is. An unreadable value fails closed (no further delegates).",
+    "OMEGA_PRIME_DELEGATE_MAX_DEPTH": "Set by the engine for a child omp run: the parent's delegate depth cap (default 2), so a child never widens it. An unreadable value fails closed.",
     "OMEGA_PRIME_ENGINE": "Controls whether engine execution is enabled or required.",
     "OMEGA_PRIME_ENGINE_STAGE": "Names the GSD stage (plan or execute) an engine run is on, so staged turns and their delegates pick the stage model.",
     "OMEGA_PRIME_ENGINE_TMUX": "Controls tmux session attachment for engine jobs.",
@@ -804,7 +806,7 @@
   "metadata": {
     "token_selectors": [
       {
-        "site": "omega_prime/mcp_server.py:2137:args.token_env",
+        "site": "omega_prime/mcp_server.py:2186:args.token_env",
         "symbol": "_resolve_token",
         "source_sha256": "e04ec502c56de9c37869762a3519cac3470f599f455c9ec1b3343026091652d7",
         "reason": "The caller-selected environment key is an arbitrary MCP bearer-token selector, not a concrete setting name."
