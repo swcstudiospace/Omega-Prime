@@ -350,14 +350,15 @@ def _ui_store(tmp_path: Path) -> UIControlStore:
     )
 
 
-# Startup (spawn, MCP discovery, attachment) runs before omp publishes its UI
-# request. A loaded CI runner can take well over 5 s for it, so the operator
-# waits up to a minute.
-_UI_PUBLISH_TIMEOUT = 60.0
+# Startup (spawn, MCP discovery, attachment) runs before omp receives the prompt
+# or publishes a UI request. It takes about 2 s here and a loaded CI runner can
+# take well over 5 s, so tests wait up to a minute for it. This bounds only the
+# wait for startup; the behaviour under test keeps its own tight limits.
+_OMP_STARTUP_TIMEOUT = 60.0
 
 
 def _wait_for_ui_pending(store: UIControlStore, job_id: str) -> dict[str, Any]:
-    deadline = time.monotonic() + _UI_PUBLISH_TIMEOUT
+    deadline = time.monotonic() + _OMP_STARTUP_TIMEOUT
     while time.monotonic() < deadline:
         pending = store.list_pending(job=job_id)
         if pending:
@@ -1541,9 +1542,13 @@ def test_failed_registration_rollback_keeps_a_replacement(
         raise ValueError("prepared artifact pin does not match the path")
 
     monkeypatch.setattr(attachment, "register_artifact", replace_then_fail)
-    with pytest.raises(ValueError):
-        attachment.create_symlink_artifact(".omp/skills/python", work / "owned")
-    assert os.readlink(link) == str(user)
+    try:
+        with pytest.raises(ValueError):
+            attachment.create_symlink_artifact(".omp/skills/python", work / "owned")
+        assert os.readlink(link) == str(user)
+    finally:
+        monkeypatch.undo()
+        attachment.release()
 
 
 def test_birth_time_generation_rejects_a_different_birth(
@@ -1881,7 +1886,7 @@ def test_interrupt_reaches_attach_and_delegate_engine_paths_once(
         worker = threading.Thread(target=lambda: result.append(call()), daemon=True)
         worker.start()
         log = Path(env["OMEGA_FAKE_OMP_LOG"])
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + _OMP_STARTUP_TIMEOUT
         while time.monotonic() < deadline and "prompt" not in _omp_commands(log):
             time.sleep(0.01)
         assert "prompt" in _omp_commands(log)
@@ -1945,7 +1950,7 @@ def test_cancelled_engine_turn_consumes_interrupt_before_next_message(
     )
     worker.start()
     log = Path(env["OMEGA_FAKE_OMP_LOG"])
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + _OMP_STARTUP_TIMEOUT
     while time.monotonic() < deadline and "prompt" not in _omp_commands(log):
         time.sleep(0.01)
     assert "prompt" in _omp_commands(log)
