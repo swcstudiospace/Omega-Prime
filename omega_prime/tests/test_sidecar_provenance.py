@@ -314,7 +314,7 @@ def test_provenance_module_is_stdlib_only():
 def test_adapter_parsed_without_import():
     source = Path("omega_prime/tools/redteam.py").read_text(encoding="utf-8")
     names = provenance.parse_adapter_tool_names(source)
-    assert len(names) == 14
+    assert len(names) == 23
     assert names[0] == "tempest_status"
     assert names[-1] == "tempest_hat_dispatch"
 
