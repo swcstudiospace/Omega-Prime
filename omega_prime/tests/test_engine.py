@@ -1509,6 +1509,43 @@ def test_unsettled_birth_time_keeps_pinned_only_identity(
     assert settled[2:] == (mcp_bridge._HANDLE_TYPE_BIRTH_TIME, birth)
 
 
+def test_failed_registration_rollback_keeps_a_replacement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from omega_prime.engine import mcp_bridge
+
+    work = tmp_path / "work"
+    work.mkdir()
+    user = work / "user"
+    user.write_text("user", encoding="utf-8")
+    attachment = mcp_bridge.try_acquire_attachment(work, tmp_path / "state", "job-rb")
+    attachment.create_directory_artifact(".omp/skills")
+    link = work / ".omp" / "skills" / "python"
+    # Pinned-only identity, as when no generation evidence is available.
+    monkeypatch.setattr(
+        mcp_bridge,
+        "_generation_of",
+        lambda fd: (mcp_bridge._HANDLE_TYPE_NONE, b""),
+    )
+
+    def replace_then_fail(relative_path: str, pin: int) -> None:
+        # Registration fails after another process swapped the entry; the
+        # failing register_artifact has closed the only lease pin.
+        published = os.fstat(pin).st_ino
+        os.close(pin)
+        for _ in range(50):
+            link.unlink()
+            link.symlink_to(user)
+            if link.stat(follow_symlinks=False).st_ino == published:
+                break
+        raise ValueError("prepared artifact pin does not match the path")
+
+    monkeypatch.setattr(attachment, "register_artifact", replace_then_fail)
+    with pytest.raises(ValueError):
+        attachment.create_symlink_artifact(".omp/skills/python", work / "owned")
+    assert os.readlink(link) == str(user)
+
+
 def test_birth_time_generation_rejects_a_different_birth(
     tmp_path: Path, monkeypatch
 ) -> None:

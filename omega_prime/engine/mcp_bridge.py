@@ -368,8 +368,9 @@ def _identity_matches(
     if len(identity) == 2:
         return True
     if identity[2] == _HANDLE_TYPE_NONE:
-        # Pinned-only identity: the caller still holds the pin, so the inode
-        # number cannot have been reused. Never parsed back from a journal.
+        # Pinned-only identity: callers hold a reference to the inode (the
+        # lease pin, or the rollback guard), so its number cannot have been
+        # reused. Never parsed back from a journal.
         return True
     handle_type, handle = _generation_of(artifact_fd)
     return handle_type == identity[2] and handle == identity[3]
@@ -644,23 +645,40 @@ class AcquiredAttachment:
         validate: Callable[[int], None],
     ) -> tuple[int, int]:
         pin = _publish_pinned_artifact(self._omp_fd, relative_path, create, validate)
+        published = os.fstat(pin)
+        # register_artifact closes ``pin`` when it fails. A second reference
+        # keeps the inode allocated through any rollback, so a replacement at
+        # the path can never reuse its number and match a dev/ino identity.
         try:
-            identity = _identity_from_pin(pin)
+            guard = os.dup(pin)
         except BaseException:
-            fallback = os.fstat(pin)
-            os.close(pin)
             with contextlib.suppress(OSError):
                 _remove_artifact(
-                    self._omp_fd, relative_path, (fallback.st_dev, fallback.st_ino)
+                    self._omp_fd, relative_path, (published.st_dev, published.st_ino)
                 )
+            os.close(pin)
             raise
         try:
-            registered = self.register_artifact(relative_path, pin)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                _remove_artifact(self._omp_fd, relative_path, identity)
-            raise
-        return (registered[0], registered[1])
+            try:
+                identity = _identity_from_pin(pin)
+            except BaseException:
+                os.close(pin)
+                with contextlib.suppress(OSError):
+                    _remove_artifact(
+                        self._omp_fd,
+                        relative_path,
+                        (published.st_dev, published.st_ino),
+                    )
+                raise
+            try:
+                registered = self.register_artifact(relative_path, pin)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    _remove_artifact(self._omp_fd, relative_path, identity)
+                raise
+            return (registered[0], registered[1])
+        finally:
+            os.close(guard)
 
     def remove_artifact(self, relative_path: str, identity: tuple[int, int]) -> None:
         owned = self._artifacts.get(relative_path)
