@@ -69,47 +69,81 @@ export function lockHolderAlive(rec: string, ageMs: number, proc = "/proc"): boo
   if (ticks === undefined || !Number.isFinite(ticks) || ticks <= 0) return pidAlive(pid);
   return procStartTicks(pid, proc) === ticks;
 }
+const GEN = /^\d{16}$/;
+const genName = (n: number) => String(n).padStart(16, "0");
+/** Highest generation in a lock directory, 0 if there is none. */
+function topGeneration(dir: string): number {
+  let top = 0;
+  for (const e of readdirSync(dir)) if (GEN.test(e)) top = Math.max(top, Number(e));
+  return top;
+}
+/** Lock directory used by `withServicesLock` for `file`. */
+export const servicesLockDir = (file: string) => `${file}.lock.d`;
 /**
- * Break an abandoned lock without ever deleting a live one. The lock is moved aside atomically, so of several waiters
- * that judged the same lock abandoned only one moves it; the rest find it gone and retry. If what was moved is not the
- * record that was judged (it was broken and re-taken by a live holder in between), it is linked straight back.
+ * The token of whoever holds the services lock for `file` right now, or null when it is free (released, or its holder
+ * is gone).
  */
-function breakAbandonedLock(lock: string, judged: string) {
-  const grave = `${lock}.abandoned.${process.pid}.${randomBytes(6).toString("hex")}`;
-  try { renameSync(lock, grave); } catch { return; }
+export function servicesLockHolder(file: string, proc = "/proc"): string | null {
+  const dir = servicesLockDir(file);
+  let top: number; try { top = topGeneration(dir); } catch { return null; }
+  if (top === 0 || existsSync(join(dir, `${genName(top)}.done`))) return null;
   try {
-    if (readFileSync(grave, "utf8") !== judged) { try { linkSync(grave, lock); } catch { /* a new holder already re-took it */ } }
-  } finally { rmSync(grave, { force: true }); }
+    const fd = openSync(join(dir, genName(top)), "r");
+    try {
+      const rec = readFileSync(fd, "utf8");
+      return lockHolderAlive(rec, Date.now() - fstatSync(fd).mtimeMs, proc) ? rec : null;
+    } finally { closeSync(fd); }
+  } catch { return null; }
 }
 /**
  * Run `fn` holding an exclusive cross-process lock on `file`. Parallel wrappers each read-modify-write the shared
- * record, so without it one wrapper's write can erase the other's entry. The lock is a sibling `.lock` file that is
- * published complete (written to a private temp file, then hard-linked into place, which fails if it exists), so it is
- * never seen empty. It names its holder by pid, kernel start time and a nonce: a live holder is waited for, an
- * abandoned one (holder gone, or its pid reused) is broken safely, and a holder only ever removes its own lock.
+ * record, so without it one wrapper's write can erase the other's entry.
+ *
+ * The lock is a sequence of generations in a sibling directory, and nothing is ever deleted to take it over. Each
+ * holder creates the next generation file, published complete (written to a private temp file, then hard-linked into
+ * place, which fails if it already exists), naming itself by pid, kernel start time and a nonce. Generation n+1 may be
+ * created only once generation n is released (its `.done` marker exists) or abandoned (its holder is gone, or its pid
+ * was reused). Because creating n+1 is exclusive, of several waiters that judge the same generation released or
+ * abandoned exactly one gets the lock; there is no break step that could remove a lock someone else just took. A
+ * holder releases only its own generation, and a new holder prunes older generations. If pruning let a slow waiter
+ * re-create an old generation below the current top, that waiter sees the higher generation, gives its stale one up
+ * and retries, so it never runs `fn`.
  */
 export function withServicesLock<T>(file: string, fn: () => T, timeoutMs = 10_000): T {
-  const lock = `${file}.lock`; const tick = new Int32Array(new SharedArrayBuffer(4));
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  const dir = servicesLockDir(file); const tick = new Int32Array(new SharedArrayBuffer(4));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   const nonce = randomBytes(6).toString("hex");
   const token = `${process.pid} ${procStartTicks(process.pid) ?? 0} ${nonce}`;
-  const tmp = `${lock}.${process.pid}.${nonce}.tmp`;
+  const tmp = join(dir, `${process.pid}.${nonce}.tmp`);
   writeFileSync(tmp, token, { mode: 0o600 });
+  let mine = 0;
   try {
     for (const until = Date.now() + timeoutMs; ;) {
-      try { linkSync(tmp, lock); break; } catch (e: any) { if (e?.code !== "EEXIST") throw e; }
-      let seen: string; let ageMs: number;
-      try {
-        const fd = openSync(lock, "r");
-        try { seen = readFileSync(fd, "utf8"); ageMs = Date.now() - fstatSync(fd).mtimeMs; } finally { closeSync(fd); }
-      } catch { continue; /* released meanwhile */ }
-      if (!lockHolderAlive(seen, ageMs)) { breakAbandonedLock(lock, seen); continue; }
-      if (Date.now() > until) throw new Error(`timed out waiting for ${lock} (held by pid ${seen.trim().split(/\s+/)[0] || "?"})`);
-      Atomics.wait(tick, 0, 0, 25);
+      const top = topGeneration(dir);
+      if (top > 0 && !existsSync(join(dir, `${genName(top)}.done`))) {
+        let seen: string; let ageMs: number;
+        try {
+          const fd = openSync(join(dir, genName(top)), "r");
+          try { seen = readFileSync(fd, "utf8"); ageMs = Date.now() - fstatSync(fd).mtimeMs; } finally { closeSync(fd); }
+        } catch { continue; /* pruned by a newer holder meanwhile */ }
+        if (lockHolderAlive(seen, ageMs)) {
+          if (Date.now() > until) throw new Error(`timed out waiting for ${dir} (held by pid ${seen.trim().split(/\s+/)[0] || "?"})`);
+          Atomics.wait(tick, 0, 0, 25);
+          continue;
+        }
+      }
+      const next = top + 1;
+      try { linkSync(tmp, join(dir, genName(next))); } catch (e: any) { if (e?.code !== "EEXIST") throw e; continue; }
+      if (topGeneration(dir) === next) { mine = next; break; }
+      writeFileSync(join(dir, `${genName(next)}.done`), ""); // stale re-creation below the top: give it up
     }
   } finally { rmSync(tmp, { force: true }); }
+  for (const e of readdirSync(dir)) {
+    const g = /^(\d{16})(\.done)?$/.exec(e);
+    if (g && Number(g[1]) < mine) rmSync(join(dir, e), { force: true });
+  }
   try { return fn(); } finally {
-    try { if (readFileSync(lock, "utf8") === token) rmSync(lock, { force: true }); } catch { /* already gone */ }
+    writeFileSync(join(dir, `${genName(mine)}.done`), "");
   }
 }
 /** Publish the record atomically (temp file + rename), so a reader never sees a partial write. */

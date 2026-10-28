@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, existsSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -330,29 +330,52 @@ test("parallel wrappers recording shared services never erase each other's entry
     const rec = podmanMod.readServices(file);
     assert.equal(rec.gateway?.pid, a.pid); assert.equal(rec.podmanService?.pid, b.pid);
   }
-  assert.equal(existsSync(`${file}.lock`), false, "lock released");
+  assert.equal(podmanMod.servicesLockHolder(file), null, "lock released");
+  const lockDir = podmanMod.servicesLockDir(file);
+  const gens = () => readdirSync(lockDir).filter((e) => /^\d{16}$/.test(e)).sort();
+  const nextGen = () => String(Number(gens().at(-1) ?? 0) + 1).padStart(16, "0");
   // While another live wrapper holds the lock, an update waits for it instead of writing over that wrapper's read.
-  writeFileSync(file, "{}"); writeFileSync(`${file}.lock`, String(process.pid));
+  writeFileSync(file, "{}");
+  const held = nextGen(); writeFileSync(join(lockDir, held), String(process.pid));
   const waiting = writer("gateway", a.pid!);
   await new Promise((r) => setTimeout(r, 400));
   assert.equal(podmanMod.readServices(file).gateway, undefined, "no write while the lock is held");
-  rmSync(`${file}.lock`);
+  writeFileSync(join(lockDir, `${held}.done`), "");
   assert.equal(await waiting, 0);
   assert.equal(podmanMod.readServices(file).gateway?.pid, a.pid);
-  // A lock left by a dead holder is broken instead of blocking forever.
-  writeFileSync(`${file}.lock`, "999999999");
+  // A lock left by a dead holder is taken over instead of blocking forever.
+  writeFileSync(join(lockDir, nextGen()), "999999999");
   podmanMod.recordService("gateway", a.pid, file);
   assert.equal(podmanMod.readServices(file).gateway?.pid, a.pid);
   // A lock whose pid was reused by an unrelated live process (start time differs) is abandoned too.
-  writeFileSync(`${file}.lock`, `${process.pid} 1 stale`);
+  writeFileSync(join(lockDir, nextGen()), `${process.pid} 1 stale`);
   podmanMod.recordService("podmanService", b.pid, file);
   assert.equal(podmanMod.readServices(file).podmanService?.pid, b.pid);
-  assert.equal(existsSync(`${file}.lock`), false, "reused-pid lock broken and released");
-  // A holder removes only its own lock: if its lock was replaced while it ran, the replacement survives the release.
-  podmanMod.withServicesLock(file, () => writeFileSync(`${file}.lock`, `${process.pid} 0 other`));
-  assert.equal(readFileSync(`${file}.lock`, "utf8"), `${process.pid} 0 other`);
-  rmSync(`${file}.lock`);
+  assert.equal(podmanMod.servicesLockHolder(file), null, "reused-pid lock taken over and released");
+  // A holder releases only its own generation: a newer holder that appeared while it ran keeps the lock.
+  let other = "";
+  podmanMod.withServicesLock(file, () => { other = nextGen(); writeFileSync(join(lockDir, other), `${process.pid} 0 other`); });
+  assert.equal(podmanMod.servicesLockHolder(file), `${process.pid} 0 other`);
+  writeFileSync(join(lockDir, `${other}.done`), "");
   assert.equal(podmanMod.lockHolderAlive(`${process.pid} ${podmanMod.procStartTicks(process.pid)} n`, 0), true);
   assert.equal(podmanMod.lockHolderAlive("", 5000), false, "an empty lock that stays empty is abandoned");
+  // Several waiters that all judge the same abandoned lock: exactly one holds it at a time, none runs alongside another.
+  const inside = join(STATE, "services-race.inside");
+  const contender = () => new Promise<number | null>((res) => {
+    const src = `const m = await import(${JSON.stringify(mod)}); const fs = await import("node:fs");
+      for (let i = 0; i < 15; i++) m.withServicesLock(${JSON.stringify(file)}, () => {
+        fs.writeFileSync(${JSON.stringify(inside)}, String(process.pid), { flag: "wx" });
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3);
+        fs.rmSync(${JSON.stringify(inside)});
+      }, 30000);`;
+    const w = spawn(process.execPath, ["--experimental-transform-types", "--no-warnings", "--input-type=module", "-e", src], { env: { ...process.env, OMP_SANDBOX_STATE: STATE }, stdio: "inherit" });
+    w.once("exit", res);
+  });
+  for (let round = 0; round < 3; round++) {
+    rmSync(inside, { force: true });
+    writeFileSync(join(lockDir, nextGen()), "999999999");
+    assert.deepEqual(await Promise.all([contender(), contender(), contender(), contender()]), [0, 0, 0, 0], "no two holders overlapped");
+  }
+  assert.equal(podmanMod.servicesLockHolder(file), null);
   a.kill("SIGKILL"); b.kill("SIGKILL");
 });
