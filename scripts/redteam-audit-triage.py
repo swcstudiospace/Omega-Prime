@@ -34,6 +34,26 @@ import sys
 TRIAGED: dict[str, tuple[str, str]] = {
     # Example shape:
     # "GHSA-xxxx-yyyy-zzzz": ("2026-10-13", "dev-only transitive; loopback sidecar never loads it."),
+    # Nested zod 3 under @ag-ui/core (GHSA-mrhx-c7xc-m3w5). No fix on the zod 3 line; top-level
+    # zod is already 4.6.7. These packages are the War Room UI GenUI stack — TypeScript runtime
+    # and UI are not adapted into Omega Prime (VENDOR.md) and are never loaded by the loopback
+    # sidecar the redteam adapter talks to.
+    "@ag-ui/core": (
+        "2026-10-29",
+        "High GHSA-mrhx-c7xc-m3w5 via nested zod 3; no fix on the zod 3 line. @ag-ui/core is pulled by @openuidev/react-headless (War Room GenUI). Not adapted into Omega Prime; never loaded by the loopback sidecar.",
+    ),
+    "@openuidev/react-headless": (
+        "2026-10-29",
+        "High via @ag-ui/core nested zod 3 (GHSA-mrhx-c7xc-m3w5). War Room GenUI headless kit; not adapted into Omega Prime; never loaded by the loopback sidecar.",
+    ),
+    "@openuidev/react-ui": (
+        "2026-10-29",
+        "High via @openuidev/react-headless → @ag-ui/core nested zod 3 (GHSA-mrhx-c7xc-m3w5). War Room GenUI; not adapted into Omega Prime; never loaded by the loopback sidecar.",
+    ),
+    "zod": (
+        "2026-10-29",
+        "High GHSA-mrhx-c7xc-m3w5 on the nested zod 3 copy under @ag-ui/core only; top-level zod is 4.6.7 (patched). No fix available on the zod 3 line. Nested copy is War Room GenUI only; never loaded by the loopback sidecar.",
+    ),
     "@vitest/coverage-v8": (
         "2026-10-14",
         "Moderate GHSA-82fw-gwwq-j7x9 (vitest @vitest/mocker path traversal, CVSS 5.9); dev-only test coverage transitive, never loaded by the loopback sidecar; default-off family, never in the runtime image.",

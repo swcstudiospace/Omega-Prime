@@ -82,7 +82,7 @@ the link through `prime_crates`. "Probe only" means the sole caller is
 ## T3MP3ST red team pack
 
 - Remote: https://github.com/swcstudiospace/purple-team.git
-- Commit: `c7b9ae47c27f940060bd834f2be4a6992505bd64` (**v1.7** — adds the expanded black/blue/white hat skill packs plus the login-first War Room UI redesign; the TypeScript runtime and UI remain unported, reached through the gitlink)
+- Commit: `d1a22097a1402976621ed6affa632981fb105ca7` (branch `omega-pin/c7b9ae4-audit-20261029`: upstream **v1.7** `c7b9ae4` plus a lockfile-only audit bump. `d1a2209` moved body-parser 1.20.8 → 1.20.9 and 2.3.0 → 2.4.0 (GHSA-27r3-jxmh-p828), undici 8.11.2 → 8.12.3 (GHSA-4qv8-2p9j-2685 et al.), fast-uri 3.1.8 → 3.1.9, and overrides.qs ^6.15.2 → ^6.16.1 (GHSA-6pq8-jhm2-2vcw). Nested zod under `@ag-ui/core` (War Room UI only; no fix on the zod 3 line) is triaged in `scripts/redteam-audit-triage.py`. Lockfile-only is checked against upstream: `gh api repos/swcstudiospace/purple-team/compare/c7b9ae4...d1a2209` lists only `package.json` and `package-lock.json`. Not on upstream main; the branch keeps it reachable.)
 - Root `redteam/` submodule: tracked gitlink at the same pin, alongside the preserved `prime-agent/` gitlink. An ordinary `git clone` leaves it empty; populate with `git clone --recurse-submodules` or `git submodule update --init redteam`.
 - License: MIT
 - Copyright: 2026 SWC Studio Space

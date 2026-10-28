@@ -1399,9 +1399,9 @@ Blue severity-tiered hardening plan (GET /api/teams/blue/hardening). Reads the s
 
 - Family: Red Team
 - Approval: not required
-- Required params: runId, missionId, family, artifactIds, artifactBytes, findings, telemetry
+- Required params: runId, missionId, family, findings, telemetry
 
-Blue artifact-bound detection coverage (POST /api/teams/blue/coverage). Missing artifacts fail closed. Read-only (no mission effects).
+Blue artifact-bound detection coverage (POST /api/teams/blue/coverage). Missing artifacts fail closed. Read-only (no mission effects). Supply artifactIds or artifactBytes (either/or), not both required.
 
 ## tempest_black_workflow
 

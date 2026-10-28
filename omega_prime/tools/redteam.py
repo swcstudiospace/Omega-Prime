@@ -1047,7 +1047,7 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
         _object({}, []),
     ),
     "tempest_blue_coverage": (
-        "Blue artifact-bound detection coverage (POST /api/teams/blue/coverage). Missing artifacts fail closed. Read-only (no mission effects).",
+        "Blue artifact-bound detection coverage (POST /api/teams/blue/coverage). Missing artifacts fail closed. Read-only (no mission effects). Supply artifactIds or artifactBytes (either/or), not both required.",
         _object(
             {
                 "runId": _string("Run id the coverage is bound to."),
@@ -1055,27 +1055,23 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
                 "family": _string("Artifact family being scored."),
                 "artifactIds": {
                     "type": "array",
-                    "description": "Artifact ids to bind coverage to.",
+                    "items": {"type": "string"},
+                    "description": "Artifact ids to bind coverage to (alternative to artifactBytes).",
                 },
-                "artifactBytes": _string("Inline artifact bytes, when no ids."),
+                "artifactBytes": _string("Inline artifact bytes when no ids (alternative to artifactIds)."),
                 "findings": {
                     "type": "array",
+                    "items": {"type": "object"},
                     "description": "Findings to score for coverage.",
                 },
                 "telemetry": {
                     "type": "array",
+                    "items": {"type": "object"},
                     "description": "Telemetry the findings are scored against.",
                 },
             },
-            [
-                "runId",
-                "missionId",
-                "family",
-                "artifactIds",
-                "artifactBytes",
-                "findings",
-                "telemetry",
-            ],
+            # artifactIds and artifactBytes are alternatives; callers supply one. Upstream fails closed if neither is present.
+            ["runId", "missionId", "family", "findings", "telemetry"],
         ),
     ),
     "tempest_black_workflow": (
@@ -1084,14 +1080,17 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
             {
                 "actions": {
                     "type": "array",
+                    "items": {"type": "object"},
                     "description": "Planned actions to review.",
                 },
                 "paths": {
                     "type": "array",
+                    "items": {"type": "string"},
                     "description": "Paths the plan touches.",
                 },
                 "egress": {
                     "type": "array",
+                    "items": {"type": "object"},
                     "description": "Planned egress paths.",
                 },
                 "requestKind": _string("Request kind for the staged review."),
@@ -1106,6 +1105,7 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
                 "roeText": _string("ROE text to adjudicate."),
                 "actions": {
                     "type": "array",
+                    "items": {"type": "object"},
                     "description": "Action objects staged against the ROE.",
                 },
                 "meta": {

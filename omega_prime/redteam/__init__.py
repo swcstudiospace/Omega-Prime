@@ -2,7 +2,7 @@
 
 Provenance
     Upstream remote: https://github.com/swcstudiospace/purple-team.git
-    Upstream commit: c7b9ae47c27f940060bd834f2be4a6992505bd64
+    Upstream commit: d1a22097a1402976621ed6affa632981fb105ca7
     License: MIT (see ``pack/LICENSE``)
     Copyright: 2026 SWC Studio Space
     Vendored: 2026-10-23

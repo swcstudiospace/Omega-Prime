@@ -69,6 +69,15 @@ def _routes(**overrides) -> dict:
         ("GET", "/api/teams/blue/gaps"): (200, {"gaps": []}),
         ("GET", "/api/teams/black/cover"): (200, {"cover": "holds"}),
         ("GET", "/api/teams/white/roe"): (200, {"revision": 3}),
+        ("GET", "/api/teams/blue/rules"): (200, {"rules": []}),
+        ("GET", "/api/teams/blue/hardening"): (200, {"plan": []}),
+        ("GET", "/api/teams/black/noise"): (200, {"budget": 0}),
+        ("GET", "/api/teams/black/exfil"): (200, {"cost": 0}),
+        ("GET", "/api/teams/white/evidence"): (200, {"chain": []}),
+        ("GET", "/api/teams/white/report-audit"): (200, {"report": {}}),
+        ("POST", "/api/teams/blue/coverage"): (200, {"coverage": 0.5}),
+        ("POST", "/api/teams/black/workflow"): (200, {"verdict": "insufficient"}),
+        ("POST", "/api/teams/white/stage"): (200, {"verdict": "out-of-scope"}),
         ("GET", "/api/teams/tool-grants"): (
             200,
             {"grants": {"black": ["gate"], "blue": ["detect"], "recon": ["scan"]}},
@@ -224,6 +233,138 @@ def test_dispatch_routes_posts_per_the_contract_table():
     assert transport.calls == [
         ("POST", "/api/teams/purple/synthesize", {"findings": [], "detections": []})
     ]
+
+
+
+def test_dispatch_routes_the_nine_added_v17_tools():
+    """Each of the nine v1.7 tools hits its gateway path; POST bodies omit None fields."""
+    client, transport = _client()
+    registry = _registry(client)
+
+    for name, path, data_key in (
+        ("tempest_blue_rules", "/api/teams/blue/rules", "rules"),
+        ("tempest_blue_hardening", "/api/teams/blue/hardening", "plan"),
+        ("tempest_black_noise", "/api/teams/black/noise", "budget"),
+        ("tempest_black_exfil", "/api/teams/black/exfil", "cost"),
+        ("tempest_white_evidence", "/api/teams/white/evidence", "chain"),
+        ("tempest_white_report", "/api/teams/white/report-audit", "report"),
+    ):
+        transport.calls.clear()
+        row = json.loads(registry.dispatch(name, {}))
+        assert row["ok"] is True, name
+        assert data_key in row["data"], name
+        assert transport.calls == [("GET", path, None)], name
+
+    transport.calls.clear()
+    cov = json.loads(
+        registry.dispatch(
+            "tempest_blue_coverage",
+            {
+                "runId": "r1",
+                "missionId": "m1",
+                "family": "sigma",
+                "artifactIds": ["a1"],
+                "findings": [{"id": "f1"}],
+                "telemetry": [{"src": "sysmon"}],
+            },
+        )
+    )
+    assert cov["data"]["coverage"] == 0.5
+    assert transport.calls == [
+        (
+            "POST",
+            "/api/teams/blue/coverage",
+            {
+                "runId": "r1",
+                "missionId": "m1",
+                "family": "sigma",
+                "artifactIds": ["a1"],
+                "findings": [{"id": "f1"}],
+                "telemetry": [{"src": "sysmon"}],
+            },
+        )
+    ]
+    # Either/or: artifactBytes alone is enough; omitted fields stay out of the body.
+    transport.calls.clear()
+    cov_bytes = json.loads(
+        registry.dispatch(
+            "tempest_blue_coverage",
+            {"runId": "r1", "missionId": "m1", "family": "sigma", "artifactBytes": "abc"},
+        )
+    )
+    assert cov_bytes["ok"] is True
+    assert transport.calls == [
+        (
+            "POST",
+            "/api/teams/blue/coverage",
+            {"runId": "r1", "missionId": "m1", "family": "sigma", "artifactBytes": "abc"},
+        )
+    ]
+
+    transport.calls.clear()
+    black = json.loads(
+        registry.dispatch(
+            "tempest_black_workflow",
+            {"actions": [{"step": 1}], "paths": ["/tmp"], "requestKind": "review"},
+        )
+    )
+    assert black["data"]["verdict"] == "insufficient"
+    assert transport.calls == [
+        (
+            "POST",
+            "/api/teams/black/workflow",
+            {"actions": [{"step": 1}], "paths": ["/tmp"], "requestKind": "review"},
+        )
+    ]
+    transport.calls.clear()
+    black_empty = json.loads(registry.dispatch("tempest_black_workflow", {}))
+    assert black_empty["ok"] is True
+    assert transport.calls == [("POST", "/api/teams/black/workflow", {})]
+
+    transport.calls.clear()
+    white = json.loads(
+        registry.dispatch(
+            "tempest_white_stage",
+            {"roeText": "scope: lab", "actions": [{"tool": "scan"}], "meta": {"n": 1}},
+        )
+    )
+    assert white["data"]["verdict"] == "out-of-scope"
+    assert transport.calls == [
+        (
+            "POST",
+            "/api/teams/white/stage",
+            {"roeText": "scope: lab", "actions": [{"tool": "scan"}], "meta": {"n": 1}},
+        )
+    ]
+    transport.calls.clear()
+    white_min = json.loads(
+        registry.dispatch("tempest_white_stage", {"roeText": "scope: lab", "actions": []})
+    )
+    assert white_min["ok"] is True
+    assert transport.calls == [
+        ("POST", "/api/teams/white/stage", {"roeText": "scope: lab", "actions": []})
+    ]
+
+
+def test_v17_post_schemas_declare_array_items_and_optional_artifact_alts():
+    """OpenAI chat completions reject array params without items; coverage alts are not both required."""
+    from omega_prime.tools.redteam import _SCHEMAS
+
+    cov = _SCHEMAS["tempest_blue_coverage"][1]
+    assert "artifactIds" not in cov["required"]
+    assert "artifactBytes" not in cov["required"]
+    assert set(cov["required"]) == {"runId", "missionId", "family", "findings", "telemetry"}
+    assert cov["properties"]["artifactIds"]["items"] == {"type": "string"}
+    assert cov["properties"]["findings"]["items"] == {"type": "object"}
+    assert cov["properties"]["telemetry"]["items"] == {"type": "object"}
+
+    black = _SCHEMAS["tempest_black_workflow"][1]
+    assert black["properties"]["actions"]["items"] == {"type": "object"}
+    assert black["properties"]["paths"]["items"] == {"type": "string"}
+    assert black["properties"]["egress"]["items"] == {"type": "object"}
+
+    white = _SCHEMAS["tempest_white_stage"][1]
+    assert white["properties"]["actions"]["items"] == {"type": "object"}
 
 
 def test_providers_composes_llm_and_oauth_gets():
