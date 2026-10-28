@@ -1058,7 +1058,9 @@ _SCHEMAS: dict[str, tuple[str, dict]] = {
                     "items": {"type": "string"},
                     "description": "Artifact ids to bind coverage to (alternative to artifactBytes).",
                 },
-                "artifactBytes": _string("Inline artifact bytes when no ids (alternative to artifactIds)."),
+                "artifactBytes": _string(
+                    "Inline artifact bytes when no ids (alternative to artifactIds)."
+                ),
                 "findings": {
                     "type": "array",
                     "items": {"type": "object"},

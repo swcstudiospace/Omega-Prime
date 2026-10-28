@@ -235,7 +235,6 @@ def test_dispatch_routes_posts_per_the_contract_table():
     ]
 
 
-
 def test_dispatch_routes_the_nine_added_v17_tools():
     """Each of the nine v1.7 tools hits its gateway path; POST bodies omit None fields."""
     client, transport = _client()
@@ -289,7 +288,12 @@ def test_dispatch_routes_the_nine_added_v17_tools():
     cov_bytes = json.loads(
         registry.dispatch(
             "tempest_blue_coverage",
-            {"runId": "r1", "missionId": "m1", "family": "sigma", "artifactBytes": "abc"},
+            {
+                "runId": "r1",
+                "missionId": "m1",
+                "family": "sigma",
+                "artifactBytes": "abc",
+            },
         )
     )
     assert cov_bytes["ok"] is True
@@ -297,7 +301,12 @@ def test_dispatch_routes_the_nine_added_v17_tools():
         (
             "POST",
             "/api/teams/blue/coverage",
-            {"runId": "r1", "missionId": "m1", "family": "sigma", "artifactBytes": "abc"},
+            {
+                "runId": "r1",
+                "missionId": "m1",
+                "family": "sigma",
+                "artifactBytes": "abc",
+            },
         )
     ]
 
@@ -338,7 +347,9 @@ def test_dispatch_routes_the_nine_added_v17_tools():
     ]
     transport.calls.clear()
     white_min = json.loads(
-        registry.dispatch("tempest_white_stage", {"roeText": "scope: lab", "actions": []})
+        registry.dispatch(
+            "tempest_white_stage", {"roeText": "scope: lab", "actions": []}
+        )
     )
     assert white_min["ok"] is True
     assert transport.calls == [
@@ -353,7 +364,13 @@ def test_v17_post_schemas_declare_array_items_and_optional_artifact_alts():
     cov = _SCHEMAS["tempest_blue_coverage"][1]
     assert "artifactIds" not in cov["required"]
     assert "artifactBytes" not in cov["required"]
-    assert set(cov["required"]) == {"runId", "missionId", "family", "findings", "telemetry"}
+    assert set(cov["required"]) == {
+        "runId",
+        "missionId",
+        "family",
+        "findings",
+        "telemetry",
+    }
     assert cov["properties"]["artifactIds"]["items"] == {"type": "string"}
     assert cov["properties"]["findings"]["items"] == {"type": "object"}
     assert cov["properties"]["telemetry"]["items"] == {"type": "object"}
