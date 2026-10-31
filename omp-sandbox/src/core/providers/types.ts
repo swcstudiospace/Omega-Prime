@@ -15,6 +15,12 @@ export interface SandboxTier {
   start(env: Record<string, string>): Promise<void>;
   /** Host directory bind-mounted read-write at `workdir`, when the job brought its own worktree. */
   readonly workspaceHostPath?: string | null;
+  /**
+   * Host path for writing into the mounted worktree, tied to the directory checked at start (a
+   * `/proc/self/fd/<n>` path of the pinned descriptor), so renaming the worktree's name or swapping it
+   * for a symlink after the check cannot redirect host-side writes. Null when the tier has no pin yet.
+   */
+  workspaceHostDir?(): string | null;
   /** Base URL + token of the Sandbox Agent server inside the sandbox (agentOS external-sandbox contract). */
   sandboxAgent(): { baseUrl: string; token: string };
   /** Long-lived process with piped stdio (omp --mode rpc). */

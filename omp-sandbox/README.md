@@ -42,6 +42,8 @@ The tier starts the Podman API socket, the gateway (podman driver) and builds `l
 npm ci
 cargo build --release
 cargo test --release                              # unit tests + in-process Anda auth test
+npm test                                          # hermetic node tests (fakes only)
+OMP_SANDBOX_REAL_MOUNT_TESTS=1 npm test           # opt-in: also drives the host bwrap for the pinned-mount check
 ./target/release/omp-sandbox-anda keygen          # once: identities (0600) in ~/.local/state/omp-sandbox-anda; prints principals only
 ./target/release/omp-sandbox-anda --list-tools
 python3 tests/e2e.py          # full real run: Sol plan, Luna execute, ask/stale, abort, down

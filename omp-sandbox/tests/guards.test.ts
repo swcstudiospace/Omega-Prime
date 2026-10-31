@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, existsSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, existsSync, symlinkSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxTier } from "../src/core/providers/types.ts";
@@ -21,6 +21,7 @@ const podmanMod = await import("../src/core/providers/openshell-podman.ts");
 // after the env override above, which a hoisted static import would precede.
 const { Core } = await import("../src/core/core.ts");
 const { ensureGsd, gsdCommandsOnHost } = await import("../src/core/gsd.ts");
+const MARKER_REL = join(".claude", "commands", "gsd-plan-phase.md");
 const { STATE: CORE_STATE, VERSIONS } = await import("../src/core/config.ts");
 const GSD_CACHE = join(CORE_STATE, "cache", `gsd-core-${VERSIONS.gsdCore}`);
 const { AuthBroker } = await import("../src/core/auth.ts");
@@ -160,10 +161,10 @@ test("errorReply maps path_refused distinctly from stale_answer and generic erro
 });
 
 /** Minimal SandboxTier for gsd.ts: only exec and the two host-path fields are read. No spawn. */
-function gsdTier(workspaceHostPath: string | null, hostRoot: string, exec: SandboxTier["exec"]): SandboxTier & { hostRoot: string } {
+function gsdTier(workspaceHostPath: string | null, hostRoot: string, exec: SandboxTier["exec"], hostDir: () => string | null = () => workspaceHostPath): SandboxTier & { hostRoot: string } {
   return {
     name: "bwrap", id: "fake-gsd", workdir: "/sbx/work", sandboxRoot: "/sbx", isolation: "none (test)",
-    workspaceHostPath, hostRoot, exec,
+    workspaceHostPath, hostRoot, exec, workspaceHostDir: hostDir,
     start: async () => {},
     sandboxAgent: () => ({ baseUrl: "", token: "" }),
     spawnStdio: () => { throw new Error("gsd tests must not spawn"); },
@@ -226,9 +227,31 @@ test("ensureGsd and gsdCommandsOnHost target the mounted workspace, never the hi
   writeFileSync(join(ws, ".claude", "commands", "gsd-execute-phase.md"), "x");
   mkdirSync(join(hostRoot, "work", ".claude", "commands"), { recursive: true });
   writeFileSync(join(hostRoot, "work", ".claude", "commands", "gsd-stale.md"), "stale");
-  assert.equal(gsdCommandsOnHost({ workspaceHostPath: ws, hostRoot }), 2, "counts gsd-*.md in the mounted workspace");
+  assert.equal(gsdCommandsOnHost({ workspaceHostPath: ws, workspaceHostDir: () => ws, hostRoot }), 2, "counts gsd-*.md in the mounted workspace");
   assert.equal(gsdCommandsOnHost({ hostRoot }), 1, "without a mount the hostRoot/work location still counts");
   assert.equal(gsdCommandsOnHost({}), null);
+});
+
+test("host-side GSD writes follow the pinned worktree, not a name swapped for a symlink", { skip: process.platform !== "linux" }, async () => {
+  const { pinDir, pinnedPath, unpinDir } = await import("../src/core/paths.ts");
+  const noExec: SandboxTier["exec"] = async () => { throw new Error("warm path must not exec"); };
+  assert.equal(existsSync(join(GSD_CACHE, MARKER_REL)), true, "the earlier GSD test filled the cache");
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "omp-sbx-gsd-pin-")));
+  const ws = join(base, "job"); const outside = join(base, "host-home"); mkdirSync(ws); mkdirSync(outside);
+  const pin = pinDir(ws, "ws");
+  try {
+    renameSync(ws, join(base, "job-orig")); symlinkSync(outside, ws);   // another job swaps the name after the check
+    const r = await ensureGsd(gsdTier(ws, join(base, "hr"), noExec, () => pinnedPath(pin)));
+    assert.equal(r.source, "cache");
+    assert.equal(existsSync(join(base, "job-orig", MARKER_REL)), true, "the copy lands in the checked directory");
+    assert.equal(existsSync(join(outside, ".claude")), false, "never through the swapped name");
+  } finally { unpinDir(pin); }
+  // A mounted tier that cannot name its pinned directory refuses rather than write by name.
+  await assert.rejects(ensureGsd(gsdTier(join(base, "job-orig"), join(base, "hr"), noExec, () => null)), /not pinned/);
+  // A `.claude` the job replaced with a symlink is refused, so the copy cannot be steered out of the worktree.
+  const ws2 = join(base, "job2"); mkdirSync(ws2); symlinkSync(outside, join(ws2, ".claude"));
+  await assert.rejects(ensureGsd(gsdTier(ws2, join(base, "hr"), noExec)), /is a symlink/);
+  assert.deepEqual(readdirSync(outside), [], "nothing written through the planted link");
 });
 
 test("down() refuses new stages and startups for its whole duration", async () => {

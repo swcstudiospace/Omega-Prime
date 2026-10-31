@@ -22,7 +22,7 @@ import { OPENSHELL_BIN, OPENSHELL_GATEWAY_BIN, OPENSHELL_TLS, OPENSHELL_GATEWAY_
 import { execCapture, launched, pidAlive, rid, waitHttp } from "./util.ts";
 import { BrokerRelay, SANDBOX_RELAY_JS } from "./broker-relay.ts";
 import { TierUnavailable, type SandboxTier } from "./types.ts";
-import { pinDir, pinStillNamed, unpinDir, PathRefused, type PinnedDir } from "../paths.ts";
+import { pinDir, pinStillNamed, unpinDir, PathRefused, type PinnedDir, pinnedPath } from "../paths.ts";
 
 const OS_ENV = { ...process.env, OPENSHELL_TELEMETRY_ENABLED: "false" } as Record<string, string>;
 /** Default-gateway CLI env, or the mount gateway's (selected by endpoint, never by changing the active gateway). */
@@ -425,6 +425,8 @@ export class OpenShellPodmanTier implements SandboxTier {
     await launched(agent, "in-sandbox sandbox-agent", launched(fwd, "openshell forward service", healthy));
   }
 
+  /** Host path of the pinned worktree for host-side writes (see SandboxTier.workspaceHostDir). */
+  workspaceHostDir() { return this.#pin ? pinnedPath(this.#pin) : null; }
   /** The directory mounted at `workdir` must be the pinned one (same device and inode), not what the name later pointed to. */
   async #verifyMount(pin: PinnedDir) {
     const r = await execCapture(OPENSHELL_BIN, this.#raw(["stat", "-c", "%d:%i", this.workdir], "/sandbox"), { env: this.#osEnv, timeoutMs: 60_000 });

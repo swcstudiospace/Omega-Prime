@@ -3,7 +3,7 @@
 // staging folder. Only a tier whose work folder is private (no mounted job worktree) fills the shared
 // host-side cache: a mounted worktree is shared with the host and other jobs, so whatever they write
 // into it during the install must never reach later workspaces. Later workspaces get a copy of the cache.
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { STATE, VERSIONS } from "./config.ts";
 import type { SandboxTier } from "./providers/types.ts";
@@ -21,12 +21,34 @@ function fillCache(claudeDir: string) {
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 }
 
+/**
+ * Host-side folder that is the sandbox workdir. On a mounted tier that is the mounted worktree, reached through the
+ * tier's pinned descriptor (never the replaceable name). Throws if a mounted tier cannot name its pinned directory.
+ */
+export function hostWorkDir(tier: Pick<SandboxTier, "workspaceHostPath" | "workspaceHostDir"> & { hostRoot?: string }): string | null {
+  if (tier.workspaceHostPath) {
+    const pinned = tier.workspaceHostDir?.() ?? null;
+    if (!pinned) throw new Error("mounted workspace is not pinned; refusing host-side writes by name");
+    return pinned;
+  }
+  return tier.hostRoot ? join(tier.hostRoot, "work") : null;
+}
+
+/** Copy a `.claude` tree into `work`, refusing a `.claude` (or its `commands`) the job replaced with a symlink. */
+function copyClaude(from: string, work: string) {
+  for (const d of [join(work, ".claude"), join(work, ".claude", "commands")]) {
+    try { if (lstatSync(d).isSymbolicLink()) throw new Error(`${d} is a symlink; refusing to write GSD commands through it`); }
+    catch (e: any) { if (e?.code !== "ENOENT") throw e; }
+  }
+  cpSync(from, join(work, ".claude"), { recursive: true });
+}
+
 export async function ensureGsd(tier: SandboxTier & { hostRoot?: string }) {
   // On a mounted tier the workdir IS the mounted host tree (the workspace bind hides hostRoot/work inside
-  // the sandbox), so every host-side GSD path keys off the workspace when the tier has one.
-  const hostWork = tier.workspaceHostPath ?? (tier.hostRoot ? join(tier.hostRoot, "work") : null);
+  // the sandbox), so every host-side GSD path keys off the pinned workspace when the tier has one.
+  const hostWork = hostWorkDir(tier);
   if (hostWork && existsSync(join(CACHE, MARKER))) {
-    cpSync(join(CACHE, ".claude"), join(hostWork, ".claude"), { recursive: true });
+    copyClaude(join(CACHE, ".claude"), hostWork);
     return { source: "cache", cache: CACHE };
   }
   const argv = ["npx", "-y", `@opengsd/gsd-core@${VERSIONS.gsdCore}`, "--claude", "--local", "--no-legacy-cleanup"];
@@ -46,13 +68,13 @@ export async function ensureGsd(tier: SandboxTier & { hostRoot?: string }) {
     if (r.code !== 0) throw new Error(`GSD-Core install failed in sandbox (exit ${r.code}): ${r.stderr.slice(-600)}`);
     if (!existsSync(join(stage, MARKER))) throw new Error("GSD-Core install produced no .claude/commands/gsd-plan-phase.md");
     if (!shared) fillCache(join(stage, ".claude"));
-    cpSync(join(stage, ".claude"), join(hostWork, ".claude"), { recursive: true });
+    copyClaude(join(stage, ".claude"), hostWork);
   } finally { rmSync(stage, { recursive: true, force: true }); }
   return { source: "installed-in-sandbox", cache: shared ? null : CACHE };
 }
 
-export function gsdCommandsOnHost(tier: { hostRoot?: string; workspaceHostPath?: string | null }) {
-  const work = tier.workspaceHostPath ?? (tier.hostRoot ? join(tier.hostRoot, "work") : null);
+export function gsdCommandsOnHost(tier: Pick<SandboxTier, "workspaceHostPath" | "workspaceHostDir"> & { hostRoot?: string }) {
+  const work = hostWorkDir(tier);
   if (!work) return null;
   const d = join(work, ".claude", "commands");
   return existsSync(d) ? readdirSync(d).filter((f) => f.startsWith("gsd-")).length : 0;

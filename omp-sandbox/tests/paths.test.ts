@@ -200,7 +200,30 @@ test("pinDir holds the checked directory and refuses a name swapped for a symlin
   } finally { unpinDir(pin); }
 });
 
-const bwrapReady = existsSync("/usr/bin/bwrap") && existsSync(NODE24_BIN) && existsSync(dirname(SANDBOX_AGENT_BIN));
+test("bwrap hands the launcher the pinned descriptor as fd 3, so a later symlink swap does not move the mount (fake launcher)", { skip: process.platform !== "linux" }, async () => {
+  const { BwrapTier } = await import("../src/core/providers/bwrap.ts");
+  const parent = join(root, "pin-fake"); const ws = join(parent, "job"); mkdirSync(ws, { recursive: true });
+  const hostRoot = join(box, "fake-host"); for (const d of ["work", "home", "bin"]) mkdirSync(join(hostRoot, d), { recursive: true });
+  const record = join(box, "fake-bwrap.out");
+  const fake = join(box, "fake-bwrap.sh");
+  writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$@" > '${record}'\nstat -L -c '%d:%i' /proc/self/fd/3 >> '${record}'\n`, { mode: 0o755 });
+  const t = new BwrapTier(hostRoot, allowedDir(ws, [root], "ws"), { bwrapBin: fake });
+  const want = `${statSync(ws).dev}:${statSync(ws).ino}`;
+  t.pinWorkspace();
+  try {
+    renameSync(ws, join(parent, "job-orig")); symlinkSync(outside, ws);
+    const r = await t.exec(["true"], { cwd: "/sbx" });
+    assert.equal(r.code, 0, r.stderr);
+    const lines = readFileSync(record, "utf8").trim().split("\n");
+    const i = lines.indexOf("--bind-fd");
+    assert.deepEqual(lines.slice(i, i + 3), ["--bind-fd", "3", "/sbx/work"], "the workdir is bound from fd 3, never by name");
+    assert.equal(lines.at(-1), want, "fd 3 is the checked directory, not the symlink's target");
+  } finally { await t.dispose(); }
+});
+
+// Drives the host's real bwrap (user namespaces, bind mounts), so it is opt-in: the default suite stays hermetic.
+const bwrapReady = process.env.OMP_SANDBOX_REAL_MOUNT_TESTS === "1"
+  && existsSync("/usr/bin/bwrap") && existsSync(NODE24_BIN) && existsSync(dirname(SANDBOX_AGENT_BIN));
 test("bwrap binds the pinned descriptor, so a later symlink swap does not move the mount", { skip: !bwrapReady }, async () => {
   const { BwrapTier } = await import("../src/core/providers/bwrap.ts");
   const parent = join(root, "pin-bwrap"); const ws = join(parent, "job"); mkdirSync(ws, { recursive: true });
