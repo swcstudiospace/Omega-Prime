@@ -32,11 +32,13 @@ import os
 import subprocess
 import sys
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from omega_prime.dashboard.status_file import write_tasks  # noqa: E402
 from omega_prime.engine import sandbox_omp  # noqa: E402
 from omega_prime.engine.plan_router import model_id  # noqa: E402
 from omega_prime.routines.ultrathink_turn import execute_ultrathink  # noqa: E402
@@ -83,10 +85,27 @@ def main() -> int:
         work = _project(roots)
         state = base / "state"
         store = base / "tasks.json"
-        store.write_text(
-            json.dumps({"tasks": [{"id": t, "state": "working"} for _, t in STAGES]})
-            + "\n",
-            encoding="utf-8",
+        # The validated dashboard store (version 1, all three row lists,
+        # titled and owned rows): locked_tasks() rejects anything less, and
+        # the engine swallows store errors, so a partial file would leave
+        # the rows unfinished and the receipts unsaved.
+        write_tasks(
+            {
+                "version": 1,
+                "updated_at": datetime.now(UTC).isoformat(),
+                "tasks": [
+                    {
+                        "id": t,
+                        "title": t,
+                        "owner": {"kind": "engine", "ref": t},
+                        "state": "working",
+                    }
+                    for _, t in STAGES
+                ],
+                "waiting_on_ove": [],
+                "finished": [],
+            },
+            path=store,
         )
         env = dict(os.environ)
         env.setdefault(sandbox_omp.ROOT_ENV, str((REPO / "omp-sandbox").resolve()))
@@ -139,8 +158,14 @@ def main() -> int:
             # Visibility is part of the proof: a pane failure never fails the
             # backend, so a run nobody could watch (no herdr pane and no tmux
             # fallback recorded on the row) is a FAIL here.
-            pane = row.get("herdr_pane")
-            visible = isinstance(pane, str) and bool(pane.strip())
+            # herdr_pane is the store's {"pane_id": ...} mapping; a tmux
+            # fallback is recorded in the separate "pane" field.
+            herdr = row.get("herdr_pane")
+            pane_id = herdr.get("pane_id") if isinstance(herdr, dict) else None
+            tmux = row.get("pane")
+            visible = any(
+                isinstance(v, str) and bool(v.strip()) for v in (pane_id, tmux)
+            )
             print(
                 f"{task_id}: state={row.get('state')} exported_commits={len(commits)}"
                 f" pane={'yes' if visible else 'MISSING'}"
