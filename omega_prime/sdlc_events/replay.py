@@ -62,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
                 greptile_score=raw.get("greptile_score"),
                 greptile_on_head=bool(raw.get("greptile_on_head", False)),
                 ci_green=bool(raw.get("ci_green", False)),
+                ci_pending=bool(raw.get("ci_pending", False)),
                 mergeable=bool(raw.get("mergeable", False)),
                 dry_run=True,
             )
@@ -75,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
                 greptile_score=raw.get("greptile_score"),
                 greptile_on_head=bool(raw.get("greptile_on_head", False)),
                 ci_green=bool(raw.get("ci_green", False)),
+                ci_pending=bool(raw.get("ci_pending", False)),
                 mergeable=bool(raw.get("mergeable", False)),
                 dry_run=True,
             )

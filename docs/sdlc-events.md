@@ -32,9 +32,12 @@ Replaces paused Grok Bot **cron/polling routines** with **event wakes** that upd
 - `idempotency.py` — delivery-keyed store
 - `handlers.py` — `on_gate_signal`, `on_review_signal`, `on_blocked_signal`
   (`on_review_then_gate` runs the review note and the gate under one
-  delivery claim). A closed gate writes `blocked` when a fix is needed (red
-  CI, or a Greptile score below 5) and `working` while it only waits (no
-  review yet, review on an older head, draft, not yet mergeable).
+  delivery claim). A closed gate writes `blocked` when a fix is needed
+  (failed CI, or a Greptile score below 5 on the current head) and `working`
+  while it only waits (CI still queued or running, no review yet, a score
+  from an older head, draft, not yet mergeable). Pass `ci_pending=True` with
+  `ci_green=False` while required checks are unfinished: the gate reports
+  `ci_pending` instead of `ci_not_green` and stays shut.
 - `task_store.py` — adapter over locked `tasks.json` helpers
 - `replay.py` — CLI dry-run from fixtures
 

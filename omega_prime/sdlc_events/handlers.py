@@ -82,6 +82,7 @@ def on_gate_signal(
     greptile_on_head: bool,
     ci_green: bool,
     mergeable: bool,
+    ci_pending: bool = False,
     merge: MergePort | None = None,
     allowlist: frozenset[str] = DEFAULT_ALLOWLIST,
     dry_run: bool = True,
@@ -101,6 +102,7 @@ def on_gate_signal(
             greptile_on_head=greptile_on_head,
             ci_green=ci_green,
             mergeable=mergeable,
+            ci_pending=ci_pending,
             merge=merge,
             allowlist=allowlist,
             dry_run=dry_run,
@@ -110,18 +112,22 @@ def on_gate_signal(
 
 
 def _blocked_or_working(reasons: tuple[str, ...]) -> str:
-    """``blocked`` when a fix is needed (red CI or a Greptile score below 5).
+    """``blocked`` when a fix is needed: CI failed, or a Greptile score below 5
+    on the current head.
 
-    Waiting reasons (no review yet, review on an older head, draft, not yet
-    mergeable) stay ``working``. A review below 5 must stay ``blocked`` after
-    the gate runs, or ``on_review_then_gate`` would overwrite the review's
-    ``blocked`` row and hide the cue to start fixes.
+    Waiting reasons stay ``working``: CI still queued or running
+    (``ci_pending``), no review yet, a score that belongs to an older head,
+    draft, not yet mergeable. ``blocked`` is the cue to start fix work, so it
+    must not fire before the new head's checks and review have reported. A
+    current-head review below 5 stays ``blocked`` after the gate runs, or
+    ``on_review_then_gate`` would overwrite the review's ``blocked`` row.
     """
-    needs_fix = "ci_not_green" in reasons or any(
+    score_on_head = "greptile_not_on_head" not in reasons
+    low_score = score_on_head and any(
         r.startswith("greptile_score_") and r != "greptile_score_missing"
         for r in reasons
     )
-    return "blocked" if needs_fix else "working"
+    return "blocked" if "ci_not_green" in reasons or low_score else "working"
 
 
 def _gate_work(
@@ -132,6 +138,7 @@ def _gate_work(
     greptile_on_head: bool,
     ci_green: bool,
     mergeable: bool,
+    ci_pending: bool,
     merge: MergePort | None,
     allowlist: frozenset[str],
     dry_run: bool,
@@ -143,6 +150,7 @@ def _gate_work(
             ci_green=ci_green,
             mergeable=mergeable,
             draft=event.pr.draft,
+            ci_pending=ci_pending,
             auto_deploy=event.pr.auto_deploy,
             repo_allowed=event.pr.repo.allowed(allowlist),
         )
@@ -196,6 +204,7 @@ def on_review_then_gate(
     greptile_on_head: bool,
     ci_green: bool,
     mergeable: bool,
+    ci_pending: bool = False,
     merge: MergePort | None = None,
     allowlist: frozenset[str] = DEFAULT_ALLOWLIST,
     dry_run: bool = True,
@@ -218,6 +227,7 @@ def on_review_then_gate(
                 greptile_on_head=greptile_on_head,
                 ci_green=ci_green,
                 mergeable=mergeable,
+                ci_pending=ci_pending,
                 merge=merge,
                 allowlist=allowlist,
                 dry_run=dry_run,
