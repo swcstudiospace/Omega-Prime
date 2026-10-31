@@ -189,7 +189,7 @@ class Scaler:
 
     @staticmethod
     def backoff(failures: int) -> float:
-        return min(RETRY_CAP_S, RETRY_BASE_S * 2 ** max(0, failures - 1))
+        return min(RETRY_CAP_S, RETRY_BASE_S * 2.0 ** max(0, failures - 1))
 
     # -- the fold ------------------------------------------------------------
 

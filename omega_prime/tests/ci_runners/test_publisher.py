@@ -62,6 +62,18 @@ def test_non_json_is_unsafe() -> None:
         redact_event(CloudEvent.of("error", {"x": float("nan")}))
 
 
+def test_redaction_that_is_not_an_object_is_unsafe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The publisher only ever emits a JSON object; a redactor that returned
+    # anything else must stop the event, not publish it.
+    import omega_prime.ci_runners.publisher as publisher
+
+    monkeypatch.setattr(publisher, "redact_value", lambda value, extra=(): [value])
+    with pytest.raises(UnsafeEventError, match="not return an object"):
+        redact_event(CloudEvent.of("busy", {"name": "omega-ci-1-a"}))
+
+
 def test_null_publisher_still_checks() -> None:
     pub = NullPublisher()
     pub.publish(CloudEvent.of("idle", {}))

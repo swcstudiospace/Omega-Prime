@@ -146,7 +146,7 @@ class DesktopClient:
 
     def backoff(self, attempt: int) -> float:
         """Full-range jitter in [50%, 100%] of min(cap, base * 2^(n-1))."""
-        ceiling = min(BACKOFF_CAP_S, BACKOFF_BASE_S * (2 ** (attempt - 1)))
+        ceiling = min(BACKOFF_CAP_S, BACKOFF_BASE_S * (2.0 ** (attempt - 1)))
         return ceiling * (0.5 + 0.5 * self._jitter())
 
     def _request(

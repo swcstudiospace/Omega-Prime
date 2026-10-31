@@ -4,7 +4,7 @@ Omega Prime raises its lint and type bar one small, reviewable step at a time.
 Each step only **adds** a rule family or a strict package. Nothing is ever
 removed to make a check pass. A ratchet test
 (`omega_prime/tests/test_quality_ratchet.py`) fails if anyone drops a selected
-family from `pyproject.toml`.
+family, a strict package or a strict flag from `pyproject.toml`.
 
 ## Where it runs
 
@@ -48,13 +48,47 @@ The next steps (timezone-aware datetimes, boundary error handling, dead code,
 `pathlib` and typing-only imports) are tracked as nodes N3 to N6 of the
 00073 uplift plan.
 
+## Strict typing
+
+`mypy` cannot switch on `strict` for one module, so `pyproject.toml` has one
+override that sets the strict flags (`disallow_untyped_defs`,
+`disallow_any_generics`, `warn_return_any`, `warn_unused_ignores`,
+`strict_equality`, `extra_checks` and the rest; `ignore_missing_imports =
+false`) for these packages:
+
+| Package | Since |
+|---|---|
+| `omega_prime.eventstream` | eventstream contracts |
+| `omega_prime.audit` | 00073 N2 |
+| `omega_prime.ci_runners` | 00073 N2 |
+| `omega_prime.commands` | 00073 N2 |
+| `omega_prime.contracts` | 00073 N2 |
+| `omega_prime.credentials` | 00073 N2 |
+| `omega_prime.hosting` | 00073 N2 |
+| `omega_prime.integrations` | 00073 N2 |
+| `omega_prime.quotas` | 00073 N2 |
+| `omega_prime.redteam` | 00073 N2 |
+| `omega_prime.sandbox` | 00073 N2 |
+| `omega_prime.skills` | 00073 N2 |
+| `omega_prime.skills_runtime` | 00073 N2 |
+| `omega_prime.telemetry` | 00073 N2 |
+| `omega_prime.tooling` | 00073 N2 |
+
+The rest of the codebase runs with `check_untyped_defs`. To find the next
+package to promote, run `python -m mypy --strict omega_prime/ | grep -oE
+"^omega_prime/[a-z_]+" | sort | uniq -c | sort -n`. Pick one with few
+errors, fix them (types, not `# type: ignore`), and add it to the override,
+to `STRICT_PACKAGES` in the ratchet test and to this table.
+
 ## Adding a family
 
 1. Measure it: `ruff check --select <FAMILY> --statistics omega_prime/`.
 2. Fix every hit, or use a targeted `# noqa: CODE - reason` where the rule is
    wrong for that line. Never use a broad per-file ignore: the ratchet test
-   rejects any `ignore` or `per-file-ignores` entry that is a prefix of a
-   ratcheted family (`"C"` covers `C4`, `"ALL"` covers everything).
+   rejects any `ignore`, `extend-ignore`, `per-file-ignores` or
+   `extend-per-file-ignores` entry (under `[tool.ruff.lint]` or the legacy
+   `[tool.ruff]` table) that is a prefix of a ratcheted family (`"C"` covers
+   `C4`, `"ALL"` covers everything).
    Review autofixes in security code by hand. A `C4` fix once turned a
    deliberate all-tokens comparison into a short-circuiting `any()`; the
    callback in `omega_prime/ci_runners/app.py` now uses an explicit loop and

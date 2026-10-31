@@ -107,6 +107,8 @@ def redact_event(
     """Return the safe dict form or raise :class:`UnsafeEventError`."""
     secrets = tuple(s for s in known_secrets if isinstance(s, str) and s)
     safe = redact_value(event.to_dict(), extra=secrets)
+    if not isinstance(safe, dict):
+        raise UnsafeEventError(f"{event.type}: redaction did not return an object")
     try:
         line = json.dumps(safe, sort_keys=True, allow_nan=False)
     except (TypeError, ValueError):

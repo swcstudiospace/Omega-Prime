@@ -27,7 +27,9 @@ class AuditLog:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self._seq = self._last_seq()
 
-    def append(self, tool: str, verdict: str, reason: str | None = None) -> dict:
+    def append(
+        self, tool: str, verdict: str, reason: str | None = None
+    ) -> dict[str, Any]:
         """Append one record. The reason is stored redacted."""
         if verdict not in VERDICTS:
             raise ValueError(f"verdict must be one of {', '.join(VERDICTS)}")

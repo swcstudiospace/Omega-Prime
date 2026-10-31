@@ -10,6 +10,7 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -50,7 +51,7 @@ def _cmd_rollup(args: argparse.Namespace) -> int:
         if not engine.is_active:
             print("quotas disabled (no quota document); skipping rollup")
             return 0
-        counts: dict = {}
+        counts: dict[str, dict[str, Any]] = {}
         counters_source = args.counters
         if not counters_source:
             # The serve host dumps per-day counters here on its maintenance

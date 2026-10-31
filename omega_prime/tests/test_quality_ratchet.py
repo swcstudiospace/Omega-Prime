@@ -33,6 +33,43 @@ RUFF_FAMILIES = frozenset(
 )
 
 
+STRICT_PACKAGES = frozenset(
+    {
+        "omega_prime.eventstream.*",
+        "omega_prime.audit.*",
+        "omega_prime.ci_runners.*",
+        "omega_prime.commands.*",
+        "omega_prime.contracts.*",
+        "omega_prime.credentials.*",
+        "omega_prime.hosting.*",
+        "omega_prime.integrations.*",
+        "omega_prime.quotas.*",
+        "omega_prime.redteam.*",
+        "omega_prime.sandbox.*",
+        "omega_prime.skills.*",
+        "omega_prime.skills_runtime.*",
+        "omega_prime.telemetry.*",
+        "omega_prime.tooling.*",
+    }
+)
+
+# The flags that make a mypy override "strict" here (mypy cannot set
+# ``strict`` per module). Each must stay switched on for STRICT_PACKAGES.
+STRICT_FLAGS = (
+    "disallow_any_generics",
+    "disallow_subclassing_any",
+    "disallow_untyped_calls",
+    "disallow_untyped_defs",
+    "disallow_incomplete_defs",
+    "check_untyped_defs",
+    "disallow_untyped_decorators",
+    "warn_return_any",
+    "warn_unused_ignores",
+    "strict_equality",
+    "extra_checks",
+)
+
+
 def _pyproject() -> dict[str, Any]:
     return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
@@ -50,9 +87,12 @@ def _wholesale_ignored(lint: dict[str, Any]) -> list[tuple[str, str]]:
     broader prefix ("C", or "ALL") is caught as well as the exact family.
     Narrower codes such as "C401" stay allowed: they switch off one rule.
     """
-    codes = set(lint.get("ignore", []))
-    for per_file in lint.get("per-file-ignores", {}).values():
-        codes.update(per_file)
+    codes: set[str] = set()
+    for key in ("ignore", "extend-ignore"):
+        codes.update(lint.get(key, []))
+    for key in ("per-file-ignores", "extend-per-file-ignores"):
+        for per_file in lint.get(key, {}).values():
+            codes.update(per_file)
     return sorted(
         (code, family)
         for code in codes
@@ -62,7 +102,9 @@ def _wholesale_ignored(lint: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def test_ruff_does_not_ignore_a_ratcheted_family_wholesale() -> None:
-    hits = _wholesale_ignored(_pyproject()["tool"]["ruff"]["lint"])
+    ruff = _pyproject()["tool"]["ruff"]
+    # Ruff still honours the legacy top-level keys, so check both tables.
+    hits = _wholesale_ignored(ruff.get("lint", {})) + _wholesale_ignored(ruff)
     assert not hits, hits
 
 
@@ -72,6 +114,9 @@ def test_wholesale_guard_catches_broader_prefixes() -> None:
     assert _wholesale_ignored({"ignore": ["ALL"]})
     assert _wholesale_ignored({"ignore": ["PG"]}) == [("PG", "PGH")]
     assert not _wholesale_ignored({"ignore": ["E501", "C401", "B008"]})
+    assert ("C4", "C4") in _wholesale_ignored({"extend-ignore": ["C4"]})
+    extended = {"extend-per-file-ignores": {"tests/*": ["B"]}}
+    assert ("B", "B") in _wholesale_ignored(extended)
 
 
 def _documented_families() -> set[str]:
@@ -88,3 +133,31 @@ def _documented_families() -> set[str]:
 def test_every_ratcheted_family_is_documented() -> None:
     missing = RUFF_FAMILIES - _documented_families()
     assert not missing, sorted(missing)
+
+
+def _strict_override() -> dict[str, Any]:
+    overrides = _pyproject()["tool"]["mypy"].get("overrides", [])
+    for override in overrides:
+        if "omega_prime.eventstream.*" in override.get("module", []):
+            return dict(override)
+    raise AssertionError("the strict mypy override is gone from pyproject.toml")
+
+
+def test_mypy_strict_override_keeps_every_ratcheted_package() -> None:
+    missing = STRICT_PACKAGES - set(_strict_override()["module"])
+    assert not missing, f"packages dropped from the strict override: {sorted(missing)}"
+
+
+def test_mypy_strict_override_keeps_every_strict_flag() -> None:
+    override = _strict_override()
+    off = [flag for flag in STRICT_FLAGS if override.get(flag) is not True]
+    assert not off, f"strict flags switched off: {off}"
+    assert override.get("ignore_missing_imports") is False
+
+
+def test_every_strict_package_is_documented() -> None:
+    doc = (ROOT / "docs" / "code-quality.md").read_text(encoding="utf-8")
+    missing = [
+        p for p in sorted(STRICT_PACKAGES) if f"`{p.removesuffix('.*')}`" not in doc
+    ]
+    assert not missing, missing
