@@ -148,7 +148,11 @@ python3 scripts/sandbox-e2e-real.py
 
 It drives the same plan and execute stages through the routine in a
 throwaway project and prints pass/fail per stage, never an environment
-value.
+value. The script sets `OMEGA_PRIME_OMP_SANDBOX_WITHOUT_TOOLS=1` for its
+own run, because the omp-sandbox backend refuses to start without that
+explicit opt-in (the sandbox has no Omega Prime MCP tools or skills);
+starting the script is that opt-in. Any other caller that selects
+`OMEGA_PRIME_OMP_BACKEND=omp-sandbox` must set it too.
 
 The routine entrypoint a reader can run and inspect:
 

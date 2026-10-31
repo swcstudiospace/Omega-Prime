@@ -16,7 +16,10 @@ its fakes. The host environment is used as-is, so the wrapper finds its
 Node (``OMP_SANDBOX_NODE`` or ``$HOME/tools/node24``), its logins and its
 binary (``OMEGA_PRIME_OMP_SANDBOX_ANDA`` or PATH); ``OMP_SANDBOX_ROOT``
 defaults to this checkout's ``omp-sandbox`` as an absolute path. Only the
-state dir, tasks store, backend and workspace root are overridden. No
+state dir, tasks store, backend and workspace root are overridden, and the
+script sets ``OMEGA_PRIME_OMP_SANDBOX_WITHOUT_TOOLS=1``: running this check
+is the explicit opt-in to a backend that has no Omega Prime MCP tools or
+skills (the routine refuses the omp-sandbox backend without it). No
 environment value is ever printed; the output names stages, job ids and
 pass/fail only. Exit 0 when both stages ran and exported, 1 otherwise, 2
 when the host is not set up (no wrapper found).
@@ -93,6 +96,8 @@ def main() -> int:
                 "OMEGA_PRIME_OMP_BACKEND": "omp-sandbox",
                 "OMP_SANDBOX_WORKSPACE_ROOTS": str(roots),
                 "OMEGA_PRIME_TASKS_PATH": str(store),
+                # Explicit opt-in: the sandbox runs without Omega's tools.
+                "OMEGA_PRIME_OMP_SANDBOX_WITHOUT_TOOLS": "1",
             }
         )
         os.chdir(work)  # the routine runs on the process cwd
