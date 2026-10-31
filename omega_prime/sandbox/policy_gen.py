@@ -87,7 +87,7 @@ def digest_file(path: str | Path) -> str:
     return digest_bytes(Path(path).read_bytes())
 
 
-def load_seat_document(seat_path: str | Path) -> tuple[SeatPolicy, dict]:
+def load_seat_document(seat_path: str | Path) -> tuple[SeatPolicy, dict[str, Any]]:
     """Load via ``SeatPolicy.load``; reject unknown top-level keys loudly."""
     policy = SeatPolicy.load(seat_path)
     document = policy._document
@@ -101,7 +101,7 @@ def load_seat_document(seat_path: str | Path) -> tuple[SeatPolicy, dict]:
     return policy, document
 
 
-def _seat_hosts(policy: SeatPolicy, document: dict) -> list[str]:
+def _seat_hosts(policy: SeatPolicy, document: dict[str, Any]) -> list[str]:
     """Seat network hosts in file order, via ``allows_host`` semantics."""
     network = document.get("network") or {}
     hosts = network.get("hosts") or ()
@@ -109,7 +109,7 @@ def _seat_hosts(policy: SeatPolicy, document: dict) -> list[str]:
     return [host for host in hosts if policy.allows_host(host)]
 
 
-def _seat_read_only_globs(document: dict) -> list[str]:
+def _seat_read_only_globs(document: dict[str, Any]) -> list[str]:
     """Seat ``paths.read_only`` globs in file order, deduplicated."""
     paths = document.get("paths") or {}
     seen: set[str] = set()
@@ -147,7 +147,7 @@ def _slug(host: str) -> str:
 
 def build_policy_doc(
     policy: SeatPolicy,
-    document: dict,
+    document: dict[str, Any],
     seat_path: str | Path,
     *,
     home: str | Path | None = None,

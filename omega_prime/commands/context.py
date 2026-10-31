@@ -14,8 +14,9 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Any
 
-NestedDispatch = Callable[[str, dict], str]
+NestedDispatch = Callable[[str, dict[str, Any]], str]
 
 _dispatch: ContextVar[NestedDispatch | None] = ContextVar(
     "omega_nested_dispatch", default=None

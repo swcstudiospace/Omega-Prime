@@ -33,6 +33,43 @@ RUFF_FAMILIES = frozenset(
 )
 
 
+STRICT_PACKAGES = frozenset(
+    {
+        "omega_prime.eventstream.*",
+        "omega_prime.audit.*",
+        "omega_prime.ci_runners.*",
+        "omega_prime.commands.*",
+        "omega_prime.contracts.*",
+        "omega_prime.credentials.*",
+        "omega_prime.hosting.*",
+        "omega_prime.integrations.*",
+        "omega_prime.quotas.*",
+        "omega_prime.redteam.*",
+        "omega_prime.sandbox.*",
+        "omega_prime.skills.*",
+        "omega_prime.skills_runtime.*",
+        "omega_prime.telemetry.*",
+        "omega_prime.tooling.*",
+    }
+)
+
+# The flags that make a mypy override "strict" here (mypy cannot set
+# ``strict`` per module). Each must stay switched on for STRICT_PACKAGES.
+STRICT_FLAGS = (
+    "disallow_any_generics",
+    "disallow_subclassing_any",
+    "disallow_untyped_calls",
+    "disallow_untyped_defs",
+    "disallow_incomplete_defs",
+    "check_untyped_defs",
+    "disallow_untyped_decorators",
+    "warn_return_any",
+    "warn_unused_ignores",
+    "strict_equality",
+    "extra_checks",
+)
+
+
 def _pyproject() -> dict[str, Any]:
     return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
@@ -65,3 +102,31 @@ def _documented_families() -> set[str]:
 def test_every_ratcheted_family_is_documented() -> None:
     missing = RUFF_FAMILIES - _documented_families()
     assert not missing, sorted(missing)
+
+
+def _strict_override() -> dict[str, Any]:
+    overrides = _pyproject()["tool"]["mypy"].get("overrides", [])
+    for override in overrides:
+        if "omega_prime.eventstream.*" in override.get("module", []):
+            return dict(override)
+    raise AssertionError("the strict mypy override is gone from pyproject.toml")
+
+
+def test_mypy_strict_override_keeps_every_ratcheted_package() -> None:
+    missing = STRICT_PACKAGES - set(_strict_override()["module"])
+    assert not missing, f"packages dropped from the strict override: {sorted(missing)}"
+
+
+def test_mypy_strict_override_keeps_every_strict_flag() -> None:
+    override = _strict_override()
+    off = [flag for flag in STRICT_FLAGS if override.get(flag) is not True]
+    assert not off, f"strict flags switched off: {off}"
+    assert override.get("ignore_missing_imports") is False
+
+
+def test_every_strict_package_is_documented() -> None:
+    doc = (ROOT / "docs" / "code-quality.md").read_text(encoding="utf-8")
+    missing = [
+        p for p in sorted(STRICT_PACKAGES) if f"`{p.removesuffix('.*')}`" not in doc
+    ]
+    assert not missing, missing

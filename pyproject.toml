@@ -109,7 +109,24 @@ check_untyped_defs = true
 ignore_missing_imports = true
 show_error_codes = true
 [[tool.mypy.overrides]]
-module = ["omega_prime.eventstream.*"]
+# Strict packages (docs/code-quality.md). Ratchet: only ever add to this list.
+module = [
+    "omega_prime.eventstream.*",
+    "omega_prime.audit.*",
+    "omega_prime.ci_runners.*",
+    "omega_prime.commands.*",
+    "omega_prime.contracts.*",
+    "omega_prime.credentials.*",
+    "omega_prime.hosting.*",
+    "omega_prime.integrations.*",
+    "omega_prime.quotas.*",
+    "omega_prime.redteam.*",
+    "omega_prime.sandbox.*",
+    "omega_prime.skills.*",
+    "omega_prime.skills_runtime.*",
+    "omega_prime.telemetry.*",
+    "omega_prime.tooling.*",
+]
 disallow_any_generics = true
 disallow_subclassing_any = true
 disallow_untyped_calls = true
