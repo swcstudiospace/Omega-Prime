@@ -53,7 +53,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: init redteam submodule only
         run: git submodule update --init redteam
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "22"
       - name: npm ci (no scripts)
@@ -94,7 +94,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: init redteam submodule only
         run: git submodule update --init redteam
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "22"
       - name: npm ci (no scripts)
