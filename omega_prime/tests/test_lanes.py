@@ -548,7 +548,11 @@ def test_status_and_cancel_tools_use_the_client(monkeypatch) -> None:
 def test_job_spec_stage_is_validated_and_kept_local() -> None:
     from omega_prime.engine.lanes import _spec_from
 
-    payload = {"repo": "swcstudiospace/omes-bot", "prompt": "plan it", "stage": "plan"}
+    payload = {
+        "repo": "swcstudiospace/Omega-Prime",
+        "prompt": "plan it",
+        "stage": "plan",
+    }
     spec = _spec_from(payload)
     assert spec.stage == "plan"
     assert "stage" not in spec.to_json()

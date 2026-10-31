@@ -11,7 +11,7 @@ RUN /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements-lock.txt
 FROM python:3.12-slim-bookworm AS runtime
 LABEL org.opencontainers.image.title="omega-prime-mcp" \
       org.opencontainers.image.description="Omega Prime Grok Bot tool host (MCP over SSE)" \
-      org.opencontainers.image.source="https://github.com/swcstudiospace/omes-bot" \
+      org.opencontainers.image.source="https://github.com/swcstudiospace/Omega-Prime" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 RUN groupadd --system --gid 10001 omega-prime \
  && useradd --system --uid 10001 --gid 10001 --no-create-home \

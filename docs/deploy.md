@@ -251,7 +251,7 @@ source/ref/event/run, immutable upload artifact ID and actual validation/SBOM/sc
 job is default-off and requires explicit `workflow_dispatch` opt-in plus exact `confirm_ref`, a protected ref and the
 `grokbot-image-publish` environment's approval gate. Declaring an environment name alone is insufficient: the workflow
 reads actual required-reviewer protection and refuses missing/unreadable/ambiguous configuration. Before any publish
-attempt, an operator confirms the environment with `gh api repos/swcstudiospace/omes-bot/environments/grokbot-image-publish`:
+attempt, an operator confirms the environment with `gh api repos/swcstudiospace/Omega-Prime/environments/grokbot-image-publish`:
 it exits 0 only when the environment exists (a missing one returns HTTP 404 and a nonzero exit), and its
 `protection_rules` must name the required reviewers. Configuring it and prohibiting self-review/admin bypass is a
 separately authorized operator prerequisite; this page records no observed approval.

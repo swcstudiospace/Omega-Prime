@@ -238,7 +238,7 @@ def test_greptile_maps_canned_body():
     comments = client.greptile_review("comments", pr_number=3)
     assert comments["result"] == [{"id": "c-1", "addressed": False}]
     assert requests[0]["url"] == "https://api.greptile.com/v2/reviews"
-    assert requests[0]["body"]["repository"] == "swcstudiospace/omega-prime"
+    assert requests[0]["body"]["repository"] == "swcstudiospace/Omega-Prime"
     assert requests[0]["body"]["prNumber"] == 3
     assert requests[0]["headers"]["X-Github-Token"] == "github-token"
     assert requests[1]["url"] == "https://api.greptile.com/v2/reviews/r-1"

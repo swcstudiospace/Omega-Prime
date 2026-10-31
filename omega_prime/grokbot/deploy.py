@@ -44,7 +44,7 @@ DEFAULT_IMAGE = "ghcr.io/swcstudiospace/omega-prime-mcp:0.1.0"
 DEFAULT_PORT = 8000
 DEFAULT_UID = 10001
 
-SOURCE_URL = "https://github.com/swcstudiospace/omes-bot"
+SOURCE_URL = "https://github.com/swcstudiospace/Omega-Prime"
 DOCS_URL = f"{SOURCE_URL}/blob/main/docs/deploy.md"
 BASE_IMAGE = "python:3.12-slim-bookworm"
 LOCKFILE = "requirements-lock.txt"

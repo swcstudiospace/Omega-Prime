@@ -53,7 +53,7 @@ jobs:
         if: steps.gate.outputs.has_key == 'true'
         env:
           GREPTILE_API_KEY: ${{ secrets.GREPTILE_API_KEY }}
-        run: python3 -m omega_prime.greptile.kb_sync --repo swcstudiospace/omes-bot --out kb
+        run: python3 -m omega_prime.greptile.kb_sync --repo swcstudiospace/Omega-Prime --out kb
       - name: open update PR
         if: steps.gate.outputs.has_key == 'true' && success()
         env:

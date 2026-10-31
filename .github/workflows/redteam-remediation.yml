@@ -87,7 +87,7 @@ jobs:
       issues: write
     env:
       UPSTREAM_REPO: swcstudiospace/purple-team
-      TRACKING_REPO: swcstudiospace/omes-bot
+      TRACKING_REPO: swcstudiospace/Omega-Prime
       # Empty when the secret is unset; the report step selects degrade.
       REMEDIATION_TOKEN: ${{ secrets.REMEDIATION_TOKEN }}
     steps:
@@ -245,7 +245,7 @@ jobs:
       contents: read
       issues: write
     env:
-      TRACKING_REPO: swcstudiospace/omes-bot
+      TRACKING_REPO: swcstudiospace/Omega-Prime
     steps:
       - uses: actions/checkout@v7
       - name: comment pin-green proof

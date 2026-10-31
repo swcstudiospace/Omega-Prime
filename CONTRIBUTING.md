@@ -7,13 +7,13 @@ or an operator's authorization.
 
 ## Setup
 
-The repository is `swcstudiospace/omes-bot`. Use Python 3.12 for the documented
+The repository is `swcstudiospace/Omega-Prime`. Use Python 3.12 for the documented
 local route; package metadata declares `>=3.11` and retained CI matrices
 cover 3.12–3.14. Do not report an interpreter/dependency combination as
 exercised merely because it appears in metadata or a workflow.
 
 ```bash
-git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git omega-prime
+git clone --recurse-submodules https://github.com/swcstudiospace/Omega-Prime.git omega-prime
 cd omega-prime
 python3.12 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
