@@ -3,7 +3,8 @@
 // staging folder. Only a tier whose work folder is private (no mounted job worktree) fills the shared
 // host-side cache: a mounted worktree is shared with the host and other jobs, so whatever they write
 // into it during the install must never reach later workspaces. Later workspaces get a copy of the cache.
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { cpSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { STATE, VERSIONS } from "./config.ts";
 import type { SandboxTier } from "./providers/types.ts";
@@ -15,19 +16,47 @@ const LOCK = `${CACHE}.lock`;
 /** A fill lock older than this is a crashed filler's leftover; it is cleared so the next install can fill. */
 export const STALE_LOCK_MS = 15 * 60_000;
 
+function readToken(path: string): string | null {
+  try { return readFileSync(path, "utf8"); } catch { return null; }
+}
+
 /**
- * Fill CACHE from a trusted install tree, best effort. Wrappers finishing their first installs together
- * serialise on a cross-process lock (an atomic `mkdir`): the check-and-publish runs under it, so a complete
- * cache another wrapper published wins and is never replaced. A wrapper that finds the lock held skips the
- * fill; its own job already has the install, so `up` never fails because of the shared cache.
+ * Clear a crashed filler's lock without ever removing a live one. The stale lock is moved aside with an atomic
+ * rename (only one clearer wins) and its token compared with the one read before the move. If a newer, live lock
+ * was moved instead (it replaced the stale one in between), it is linked back without replacing any other lock.
+ * `beforeMove` is a test seam for that race. Returns true when a stale lock was cleared.
+ */
+export function clearStaleLock(now = Date.now(), beforeMove: () => void = () => {}): boolean {
+  let seen: string | null;
+  try {
+    if (now - statSync(LOCK).mtimeMs <= STALE_LOCK_MS) return false;
+    seen = readToken(LOCK);
+  } catch { return false; }
+  beforeMove();
+  const aside = `${LOCK}.stale-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try { renameSync(LOCK, aside); } catch { return false; }       // another clearer won
+  if (readToken(aside) === seen) { rmSync(aside, { recursive: true, force: true }); return true; }
+  try { linkSync(aside, LOCK); } catch { /* yet another filler holds the name; never replace it */ }
+  rmSync(aside, { force: true });
+  return false;
+}
+
+/**
+ * Fill CACHE from a trusted install tree, best effort: it never throws, so `up` never fails because of the
+ * shared cache. Wrappers finishing their first installs together serialise on a cross-process lock file
+ * (`<cache>.lock`, created with O_EXCL and holding a random token). The check-and-publish runs under it, so a
+ * complete cache another wrapper published wins and is never replaced. A wrapper that finds the lock held skips
+ * the fill (its own job already has the install) and clears the lock only if it is stale (see `clearStaleLock`).
+ * A lock is released only by the holder whose token it still carries.
  * Returns true when this call published the cache.
  */
 export function fillCache(claudeDir: string, now = Date.now()): boolean {
-  mkdirSync(join(STATE, "cache"), { recursive: true });
-  try { mkdirSync(LOCK); }
-  catch (e: any) {
-    if (e?.code !== "EEXIST") throw e;
-    try { if (now - statSync(LOCK).mtimeMs > STALE_LOCK_MS) rmSync(LOCK, { recursive: true, force: true }); } catch { /* raced with its owner */ }
+  const token = `${process.pid}-${randomBytes(8).toString("hex")}`;
+  try {
+    mkdirSync(join(STATE, "cache"), { recursive: true });
+    writeFileSync(LOCK, token, { flag: "wx", mode: 0o600 });
+  } catch (e: any) {
+    if (e?.code === "EEXIST") clearStaleLock(now);
     return false;
   }
   try {
@@ -35,11 +64,16 @@ export function fillCache(claudeDir: string, now = Date.now()): boolean {
     const tmp = mkdtempSync(`${CACHE}.tmp-`);
     try {
       cpSync(claudeDir, join(tmp, ".claude"), { recursive: true });
-      rmSync(CACHE, { recursive: true, force: true });   // an incomplete leftover; a complete one returned above
+      if (existsSync(join(CACHE, MARKER))) return false;          // published meanwhile: it wins
+      rmSync(CACHE, { recursive: true, force: true });           // an incomplete leftover
       renameSync(tmp, CACHE);
       return true;
     } finally { rmSync(tmp, { recursive: true, force: true }); }
-  } finally { rmSync(LOCK, { recursive: true, force: true }); }
+  } catch {
+    return false;
+  } finally {
+    if (readToken(LOCK) === token) rmSync(LOCK, { force: true });
+  }
 }
 
 /**

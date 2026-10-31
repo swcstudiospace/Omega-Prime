@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, existsSync, symlinkSync, utimesSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { SandboxTier } from "../src/core/providers/types.ts";
 
 const STATE = mkdtempSync(join(tmpdir(), "omp-sbx-guards-"));
@@ -20,7 +20,7 @@ const podmanMod = await import("../src/core/providers/openshell-podman.ts");
 // STATE at module-evaluation time, and gsd.ts derives its CACHE from it — so they must load only
 // after the env override above, which a hoisted static import would precede.
 const { Core } = await import("../src/core/core.ts");
-const { ensureGsd, gsdCommandsOnHost, fillCache, IN_SANDBOX_COPY, STALE_LOCK_MS } = await import("../src/core/gsd.ts");
+const { ensureGsd, gsdCommandsOnHost, fillCache, clearStaleLock, IN_SANDBOX_COPY, STALE_LOCK_MS } = await import("../src/core/gsd.ts");
 const MARKER_REL = join(".claude", "commands", "gsd-plan-phase.md");
 const { STATE: CORE_STATE, VERSIONS } = await import("../src/core/config.ts");
 const GSD_CACHE = join(CORE_STATE, "cache", `gsd-core-${VERSIONS.gsdCore}`);
@@ -293,7 +293,7 @@ test("parallel first installs: a held fill lock skips the shared cache without f
   mkdirSync(join(claude, "commands"), { recursive: true }); writeFileSync(join(claude, "commands", "gsd-plan-phase.md"), "plan");
   rmSync(GSD_CACHE, { recursive: true, force: true });
   const lock = `${GSD_CACHE}.lock`;
-  mkdirSync(lock);                                   // another wrapper is mid-publish
+  writeFileSync(lock, "other-wrapper-token");      // another wrapper is mid-publish
   try {
     const hr = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-lockhr-"));
     const r = await ensureGsd(gsdTier(null, hr, async (_argv, opts) => {
@@ -315,6 +315,34 @@ test("parallel first installs: a held fill lock skips the shared cache without f
   writeFileSync(join(GSD_CACHE, ".claude", "winner"), "first");
   assert.equal(fillCache(claude), false, "a complete cache another wrapper published wins");
   assert.equal(existsSync(join(GSD_CACHE, ".claude", "winner")), true, "and is never replaced");
+});
+
+test("clearing a stale fill lock never removes a live lock that replaced it", () => {
+  const lock = `${GSD_CACHE}.lock`;
+  mkdirSync(dirname(lock), { recursive: true });
+  const old = (Date.now() - STALE_LOCK_MS - 60_000) / 1000;
+  try {
+    writeFileSync(lock, "crashed-token"); utimesSync(lock, old, old);
+    // Between the stale check and the move, another clearer removed it and a new filler took the lock.
+    const cleared = clearStaleLock(Date.now(), () => { rmSync(lock, { force: true }); writeFileSync(lock, "live-token"); });
+    assert.equal(cleared, false, "the live lock is not reported as cleared");
+    assert.equal(readFileSync(lock, "utf8"), "live-token", "and it is back under its name");
+    assert.deepEqual(readdirSync(dirname(lock)).filter((f) => f.includes(".lock.stale-")), [], "no lock left aside");
+    utimesSync(lock, old, old);
+    assert.equal(clearStaleLock(), true, "a genuinely stale lock is cleared");
+    assert.equal(existsSync(lock), false);
+    writeFileSync(lock, "fresh-token");
+    assert.equal(clearStaleLock(), false, "a fresh lock is never touched");
+    assert.equal(readFileSync(lock, "utf8"), "fresh-token");
+  } finally { rmSync(lock, { force: true }); }
+});
+
+test("a fill only releases the lock it still holds, and never throws", () => {
+  const claude = join(mkdtempSync(join(tmpdir(), "omp-sbx-gsd-own-")), ".claude");
+  mkdirSync(join(claude, "commands"), { recursive: true }); writeFileSync(join(claude, "commands", "gsd-plan-phase.md"), "plan");
+  rmSync(GSD_CACHE, { recursive: true, force: true });
+  assert.equal(fillCache(join(claude, "missing")), false, "a broken source tree returns false instead of failing up");
+  assert.equal(existsSync(`${GSD_CACHE}.lock`), false, "its own lock is released");
 });
 
 test("down() refuses new stages and startups for its whole duration", async () => {
