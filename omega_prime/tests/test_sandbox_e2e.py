@@ -365,7 +365,7 @@ def test_routine_drives_plan_then_execute_end_to_end(
             if e["argv"][:2] == ["workspace", "create"]
             and f"{task_id} {stage}" in e["argv"]
         )
-        assert row["herdr_pane"] == create["pane"]
+        assert row["herdr_pane"] == {"pane_id": create["pane"]}
         started = datetime.fromisoformat(
             row.get("started_at") or row["last_activity_at"]
         )
@@ -456,7 +456,14 @@ def test_forced_plan_gate_blocks_the_row_in_the_same_call(
     assert [item["id"] for item in items] == ["gb:sbx5-gate:plan_not_allowed"]
     assert items[0]["blocks"] == "engine plan gate (plan_not_allowed)"
     assert "OMEGA_PRIME_OMP_ALLOW_ZAI" in items[0]["ask"]
-    assert data["tasks"][0] == {"id": "gb:sbx5-gate", "state": "blocked"}
+    row = data["tasks"][0]
+    # The store now normalises rows with schema defaults; what matters is the
+    # row is blocked and nothing ran: no pane, no receipt, no activity stamp.
+    assert row["id"] == "gb:sbx5-gate"
+    assert row["state"] == "blocked"
+    assert row["herdr_pane"] is None
+    assert row.get("receipt") is None
+    assert row["last_activity_at"] is None
 
     # No wrapper spawn happened: the canary left no log.
     assert not canary_log.exists()
