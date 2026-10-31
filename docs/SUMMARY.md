@@ -7,6 +7,7 @@
 
 - [Setup](setup.md)
 - [Local validation](local-validation.md)
+- [Code quality ratchet](code-quality.md)
 - [Configuration inventory](configuration.md)
 
 ## Use

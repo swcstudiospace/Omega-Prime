@@ -147,10 +147,8 @@ def _event(event_type: str = "omega.sdlc.pr.pushed") -> CloudEvent:
 
 def _event_for_topic(topic: str) -> CloudEvent:
     """Build a catalog-valid event whose type belongs on ``topic``."""
-    if (
-        topic == "persistent://omega/sdlc/pr"
-        or topic.startswith("persistent://omega/system/retry.")
-        or topic.startswith("persistent://omega/system/dlq.")
+    if topic == "persistent://omega/sdlc/pr" or topic.startswith(
+        ("persistent://omega/system/retry.", "persistent://omega/system/dlq.")
     ):
         return _event()
     if topic == "persistent://omega/sdlc/review":
@@ -917,7 +915,7 @@ async def test_mixed_encryption_producers_get_distinct_broker_names(
         ("persistent://omega/system/dlq.escalator", "shared-encrypted"),
         ("persistent://omega/system/dlq.escalator", "shared"),
     ]
-    assert len({name for name in names}) == len(names)
+    assert len(set(names)) == len(names)
     await bus.close()
 
 

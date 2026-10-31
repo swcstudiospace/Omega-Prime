@@ -99,7 +99,7 @@ def _run_factory(outputs):
 
 
 def _ctx(**overrides):
-    base: dict[str, Any] = dict(railway=FakeRailway(), projects=["acme"])
+    base: dict[str, Any] = {"railway": FakeRailway(), "projects": ["acme"]}
     base.update(overrides)
     return InfraContext(**base)
 

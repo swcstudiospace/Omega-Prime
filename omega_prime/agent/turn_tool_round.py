@@ -140,7 +140,7 @@ def _call_without_args(fn: Any) -> Any:
     try:
         return fn()
     except TypeError:
-        return fn(**{})
+        return fn()
 
 
 def _drain_pending_steer(agent: Any) -> str | None:

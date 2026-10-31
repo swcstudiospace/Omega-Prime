@@ -102,13 +102,13 @@ def _ctx(tmp_path: Path, **overrides) -> LeadContext:
     (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
     script.write_text(ASSEMBLE_STUB, encoding="utf-8")
     script.chmod(0o755)
-    base: dict[str, Any] = dict(
-        root=root,
-        memory=MemoryStore(tmp_path / "memory"),
-        intake=IntakeStore(tmp_path / "intake.json"),
-        roster=RosterStore(tmp_path / "roster.json"),
-        events=EventStore(tmp_path / "events.ndjson"),
-    )
+    base: dict[str, Any] = {
+        "root": root,
+        "memory": MemoryStore(tmp_path / "memory"),
+        "intake": IntakeStore(tmp_path / "intake.json"),
+        "roster": RosterStore(tmp_path / "roster.json"),
+        "events": EventStore(tmp_path / "events.ndjson"),
+    }
     base.update(overrides)
     return LeadContext(**base)
 
