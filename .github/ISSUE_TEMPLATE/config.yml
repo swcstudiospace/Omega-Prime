@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Documentation
-    url: https://github.com/swcstudiospace/omes-bot/tree/main/docs
+    url: https://github.com/swcstudiospace/Omega-Prime/tree/main/docs
     about: Setup, user guide, and build docs live here.
   - name: Security reports
-    url: https://github.com/swcstudiospace/omes-bot/security/advisories/new
+    url: https://github.com/swcstudiospace/Omega-Prime/security/advisories/new
     about: Private vulnerability reporting only — never file secrets as issues.

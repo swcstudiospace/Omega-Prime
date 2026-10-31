@@ -148,7 +148,7 @@ nothing here measures it.
    ([README.md](../README.md), Quickstart; [Setup](setup.md), section 2):
 
    ```bash
-   git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/omes-bot.git /workspace/omes-bot
+   git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/Omega-Prime.git /workspace/omes-bot
    cd /workspace/omes-bot
    ```
 
@@ -245,7 +245,7 @@ canonical; replace the URL if you pushed your own copy):
 <task name="setup-omega-prime" version="1">
 <goal>Set up Omega Prime on your own computer.</goal>
 <steps>
-<step n="1">In your shell: git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/omes-bot.git /workspace/omes-bot
+<step n="1">In your shell: git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/Omega-Prime.git /workspace/omes-bot
 No release tag is published yet, so <release-tag> is the placeholder. Do not clone main. Substitute the tag when one exists.</step>
 <step n="2">bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --bootstrap-only
 Then bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --verify --json
@@ -326,7 +326,7 @@ credentials, [Local validation](local-validation.md); commands,
 [grokbot/SETUP.md](../omega_prime/grokbot/SETUP.md); exit codes, the
 [demo](#reproducible-local-demo); Bot route, [user UAT](grok-bot-native.md#user-uat).
 
-![Omega Prime social card: a teal-to-violet hexagonal node mark beside the words OMEGA PRIME, the tagline "One Grok programming bot.", the line "Repeatable local readiness, no live credentials." and the repository path github.com/swcstudiospace/omes-bot.](../assets/social-card.svg)
+![Omega Prime social card: a teal-to-violet hexagonal node mark beside the words OMEGA PRIME, the tagline "One Grok programming bot.", the line "Repeatable local readiness, no live credentials." and the repository path github.com/swcstudiospace/Omega-Prime.](../assets/social-card.svg)
 
 Visual assets, all repository brand art rather than screenshots:
 
