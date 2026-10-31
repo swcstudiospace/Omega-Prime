@@ -1,0 +1,53 @@
+<BUILD_PROMPT>
+  <ORIGINAL>We're basically trying to wire in herdr into our Omega Prime Dashboard. What i mean by this is we're suppose to see for each task an interactive terminal session from herdr so if we need to manually unblock something for example, we can. Not just the last terminal command like we have now. Also our connection to our Dashboard should realistically be a websocket so we can see live updates for tasks finished etc. We're also basically relying on our Dashboard as the source of truth so if it's stale it's very hard for us to keep track of our work.
+
+For any currently running tasks. Stop them and restart them in herdr inside of our sandbox and drive them using our Omega Prime agent files if that's been wired up</ORIGINAL>
+  <SYSTEM_ROLE>Senior Python (Starlette/uvicorn) and React/TypeScript engineer extending the Omega Prime Command Center (omega_prime/dashboard) on branch feat/herdr-ws, which sits on feat/herdr-default-launch (#59, 4016ef8) on top of feat/command-center-polish (#58).</SYSTEM_ROLE>
+  <APP_CONTEXT>
+    <SERVER>omega_prime/dashboard/app.py builds a Starlette app guarded by _DashboardGuards (GET-only, exact loopback Host, strict CSP connect-src 'self'). /api/stream is an SSE stream of whole snapshots driven by DashboardPoller.wait_for_update; /api/tasks/{id}/terminal is an SSE stream of sanitized `herdr pane read --source recent` text (read-only, 4 streams max) from terminal.py. The server is started by omega_prime/dashboard/__main__.py (uvicorn, loopback only).</SERVER>
+    <STATE>tasks.json (~/.omega-prime/dashboard/tasks.json) is the source of truth, written only through status_file.locked_tasks(path, write=True) + _write_locked. Rows carry id, title, owner, state (queued|working|blocked|waiting_on_ove|done|failed), started_at, last_activity_at, progress, note, links, herdr_pane {pane_id wN:pN (hex allowed), workspace}. herdr_launch.py creates a Herdr workspace/pane per task and records herdr_pane.</STATE>
+    <HERDR>herdr 0.9.5 on the box (not inside the sandbox): CLI `herdr pane read|send-text|send-keys|list|process-info`, socket API methods pane.read (source visible|recent, format ansi|text), pane.send_input {pane_id,text,keys}, pane.send_keys, events.subscribe (pane_output_changed with revision, pane_exited, pane_closed). Inside the sandbox herdr is NOT available: everything that touches Herdr goes behind an injectable runner with fakes in tests.</HERDR>
+    <FRONTEND>omega_prime/dashboard/frontend (React 19, Vite 8, Vitest 5, TypeScript 7). TaskDetail.tsx + TerminalPanel.tsx render the read-only terminal; hooks/useDashboard.ts consumes /api/stream. The built bundle is committed under omega_prime/dashboard/static/cc.</FRONTEND>
+  </APP_CONTEXT>
+  <SCOPE>
+    <INTERACTIVE_TERMINAL>Each task detail page embeds an interactive terminal (bundled @xterm/xterm, no CDN) attached to the task's Herdr pane over WebSocket /ws/tasks/{task_id}/terminal. Server streams ANSI frames of the pane's visible screen whenever Herdr reports pane_output_changed (or on a bounded poll fallback), and forwards client keystrokes to pane.send_input (text) / send_keys (named keys). Read-only mode: server flag --terminal-readonly forces every connection read-only; a client can also attach read-only; read-only connections never forward input.</INTERACTIVE_TERMINAL>
+    <ATTACH_AUTH>Per-server-session random token (secrets.token_urlsafe(32)) minted at startup, held in memory only, served to the same-origin page through GET /api/session (no-store, guarded by the loopback Host check and Sec-Fetch-Site same-origin/none when present). WebSocket handshakes must carry the token (first message or subprotocol), an Origin of http://127.0.0.1:PORT or http://localhost:PORT, and a loopback Host; otherwise close 4401/4403. Never log the token.</ATTACH_AUTH>
+    <LIVE_EVENTS>WebSocket /ws/events: on connect send {type:"snapshot"}; then typed deltas computed by diffing successive snapshots: task_changed, task_finished, waiting_added, waiting_cleared, stale_changed, plus heartbeat every 15 s. A tasks.json mtime/inotify-free watcher (stat poll at 0.5 s) wakes the poller so updates land in under ~1 s. Frontend useDashboard prefers /ws/events with exponential backoff reconnect (1 s doubling to 30 s, full jitter) and falls back to /api/stream SSE after 3 consecutive failures, retrying the websocket later. /api/snapshot, /api/stream and the SSE terminal stay working.</LIVE_EVENTS>
+    <SOURCE_OF_TRUTH>status_file gains heartbeat(path, task_id, *, state=None, note=None, pid=None) writing last_heartbeat_at (+ optional pid) through the locked helpers; validation accepts optional last_heartbeat_at (ISO string) and pid (int) and keeps rejecting junk. stale.py computes per-task staleness for working/blocked rows: pid_dead, pane_gone, pane_exited, no_heartbeat (no heartbeat or activity for N minutes, default 20, --stale-minutes). The snapshot carries stale {reason, since} per task; the UI shows a STALE badge with the reason. reconcile.py CLI rebuilds liveness from `herdr pane list` + `pane process-info` and /proc: reports rows whose pane/pid is dead, attaches orphan panes whose workspace label matches a task id, dry-run by default, --apply writes through locked_tasks + _write_locked, never deletes rows and never touches rows updated in the last 15 minutes by another writer unless --force.</SOURCE_OF_TRUTH>
+  </SCOPE>
+  <CONSTRAINTS>
+    <ITEM>Do not invent repository facts: read the code before changing it.</ITEM>
+    <ITEM>Server binds loopback only; websocket routes must enforce the same Host allow-list as _DashboardGuards plus an explicit Origin allow-list (browsers do not apply CORS to websockets).</ITEM>
+    <ITEM>Keep _DashboardGuards GET-only for HTTP; websockets are the only write path and only with the token.</ITEM>
+    <ITEM>Redact frames with the existing terminal/redact rules adapted for ANSI (redact visible text, keep escape sequences intact).</ITEM>
+    <ITEM>No network in tests; Herdr, gh, podman are faked. Tests use Starlette TestClient websocket support; served checks only on 127.0.0.1:7441, never 7421.</ITEM>
+    <ITEM>Never weaken, skip or delete existing tests. Never print or commit secrets or credentialed argv.</ITEM>
+    <ITEM>Commit titles "00035 - ...", atomic per task. No push, no PR from inside the sandbox.</ITEM>
+  </CONSTRAINTS>
+  <SECURITY_AND_VALIDATION>Token compare with secrets.compare_digest; cap terminal websockets (4) and event websockets (16); input frames max 4 KiB, rate-limited; task ids validated like the SSE route; pane ids must match ^w[0-9A-Za-z]+:p[0-9A-Za-z]+$ and must come from the task row, never from the client.</SECURITY_AND_VALIDATION>
+  <GRACEFUL_DEGRADATION>No herdr_pane → terminal shows "no session" with the task's last note; pane closed → status pane_closed and stop; herdr unavailable → status unavailable with retry; websocket blocked → SSE fallback; tasks.json invalid → existing source-health error path.</GRACEFUL_DEGRADATION>
+  <ACCEPTANCE_CRITERIA>
+    <AC id="a1">Typing into a task's terminal on 127.0.0.1:7441 reaches the Herdr pane (fake in tests: send_input called with exact text/keys).</AC>
+    <AC id="a2">Without the token, with a foreign Origin, or with a non-loopback Host the websocket is refused (tests).</AC>
+    <AC id="a3">Read-only flag/mode never forwards input (tests).</AC>
+    <AC id="a4">/ws/events delivers snapshot then a task_finished delta within 2 s of a tasks.json write (test with temp file and fast poll).</AC>
+    <AC id="a5">Stale detector flags dead pid, gone pane and no-heartbeat cases and leaves fresh rows alone (tests).</AC>
+    <AC id="a6">Reconciler dry-run reports, --apply writes via locked helpers, never deletes rows (tests).</AC>
+    <AC id="a7">Frontend tests cover backoff/fallback and the terminal panel; static/cc rebuilt; existing dashboard tests still pass.</AC>
+  </ACCEPTANCE_CRITERIA>
+  <OUT_OF_SCOPE>Swapping the live 7421 server (needs Ove), deploys, VPS/Railway changes, merging, wiring the engine to omp-sandbox (task 00030).</OUT_OF_SCOPE>
+  <ASSUMPTIONS>Defaults auto-accepted: token via same-origin /api/session; read-only default off; stale N=20 min; poll fallback 1 s; event wake stat-poll 0.5 s.</ASSUMPTIONS>
+  <CLARIFICATIONS>
+    <ITEM id="c1" blocking="false">Assumed default: interactive mirror via pane.read visible ANSI + send_input (Herdr has no raw PTY attach over its API); xterm.js renders full-screen frames.</ITEM>
+    <ITEM id="c2" blocking="false">Assumed default: the engine does not drive omp-sandbox yet (sbx-2..5 unmerged), so migrated code-building tasks use the drive.py pattern.</ITEM>
+  </CLARIFICATIONS>
+  <ISSUES>
+    <TASK graphId="ut-mvi8h35-5d2a91c7" notionUrl="https://www.notion.so/400bc1a0c7ae81919484d2057452d58d">00035 - Herdr live terminals + websocket Command Center</TASK>
+    <ISSUE nodeId="n1" linearId="SPE-18415" linearUrl="https://linear.app/swcstudio/issue/SPE-18415" notionUrl="https://www.notion.so/400bc1a0c7ae81d4a023c6ebcf19e0f2">[n1] Map today's surfaces (sub-issues SPE-18421..18425)</ISSUE>
+    <ISSUE nodeId="n2" linearId="SPE-18416" linearUrl="https://linear.app/swcstudio/issue/SPE-18416" notionUrl="https://www.notion.so/400bc1a0c7ae811cb205f1a48b91ed59">[n2] Interactive terminal websocket (SPE-18426..18430)</ISSUE>
+    <ISSUE nodeId="n3" linearId="SPE-18417" linearUrl="https://linear.app/swcstudio/issue/SPE-18417" notionUrl="https://www.notion.so/400bc1a0c7ae81e9b12fffe7f374fed3">[n3] Live events websocket (SPE-18431..18434)</ISSUE>
+    <ISSUE nodeId="n4" linearId="SPE-18418" linearUrl="https://linear.app/swcstudio/issue/SPE-18418" notionUrl="https://www.notion.so/400bc1a0c7ae8197b3acdb9f0fc4cd2c">[n4] Heartbeats, stale detector, reconciler (SPE-18435..18439)</ISSUE>
+    <ISSUE nodeId="n5" linearId="SPE-18419" linearUrl="https://linear.app/swcstudio/issue/SPE-18419" notionUrl="https://www.notion.so/400bc1a0c7ae81b1bf24d9105f36a23b">[n5] Security critique (SPE-18440..18444)</ISSUE>
+    <ISSUE nodeId="n6" linearId="SPE-18420" linearUrl="https://linear.app/swcstudio/issue/SPE-18420" notionUrl="https://www.notion.so/400bc1a0c7ae81458e91c228ffbb7800">[n6] Build plan, migration, verification (SPE-18445..18449)</ISSUE>
+  </ISSUES>
+</BUILD_PROMPT>

@@ -418,18 +418,34 @@ def _backend_env(
 
 
 def _row(task_id: str, state: str = "working", **extra: object) -> dict:
-    row: dict = {"id": task_id, "state": state}
+    row: dict = {
+        "id": task_id,
+        "title": task_id,
+        "owner": {"kind": "engine", "ref": task_id},
+        "state": state,
+    }
     row.update(extra)
     return row
 
 
 def _seed(path: Path, rows: list[dict]) -> Path:
+    """A dashboard tasks.json v1 (the validated store on main)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"tasks": rows, "waiting_on_ove": []}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    payload = {
+        "version": 1,
+        "updated_at": "2026-10-31T00:00:00+00:00",
+        "tasks": rows,
+        "waiting_on_ove": [],
+        "finished": [],
+        "next_seq": 1,
+        "identity_registry": {},
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def _id_state(row: dict) -> dict:
+    return {"id": row["id"], "state": row["state"]}
 
 
 # --- W112-05: the run contract through the real engine -----------------------
@@ -589,7 +605,7 @@ def test_tier_unavailable_raises_exactly_one_sandbox_item(tmp_path: Path) -> Non
     items = data["waiting_on_ove"]
     assert [item["id"] for item in items] == ["gb:tier:sandbox_unavailable"]
     assert items[0]["blocks"] == "engine sandbox gate (sandbox_unavailable)"
-    assert data["tasks"][0] == {"id": "gb:tier", "state": "blocked"}
+    assert _id_state(data["tasks"][0]) == {"id": "gb:tier", "state": "blocked"}
     # The run stopped at the up refusal: only up and the shutdown ran.
     assert _wrapper_tools(log) == ["up", "down"]
     # A retried run upserts instead of duplicating (one item, stable id).
@@ -637,7 +653,7 @@ def test_plan_not_allowed_raises_one_item_without_spawning(tmp_path: Path) -> No
     items = data["waiting_on_ove"]
     assert [item["id"] for item in items] == ["gb:gate:plan_not_allowed"]
     assert items[0]["blocks"] == "engine plan gate (plan_not_allowed)"
-    assert data["tasks"][0] == {"id": "gb:gate", "state": "blocked"}
+    assert _id_state(data["tasks"][0]) == {"id": "gb:gate", "state": "blocked"}
     # The gate refused before any wrapper spawn: the canary left no log.
     assert not log.exists()
     assert _wrapper_log(log) == []
@@ -888,7 +904,7 @@ def test_question_surfaces_as_event_only(tmp_path: Path) -> None:
     # No waiting_on_ove item, no answer_question round-trip (node n4).
     data = _read_tasks(store)
     assert data["waiting_on_ove"] == []
-    assert data["tasks"][0] == {"id": "gb:q", "state": "working"}
+    assert _id_state(data["tasks"][0]) == {"id": "gb:q", "state": "working"}
     assert "answer_question" not in _wrapper_tools(log)
 
 

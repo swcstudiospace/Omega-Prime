@@ -1,0 +1,72 @@
+{
+ "task_id": "00056-ci-runner-image",
+ "bot": "bot-00-omega-prime",
+ "started_at": "2026-10-24T05:00:00+11:00",
+ "completed_at": "2026-10-24T05:59:28+11:00",
+ "base_commit": "09cbfe7",
+ "pr": "https://github.com/swcstudiospace/Omega-Prime/pull/92",
+ "commands": [
+  {
+   "cmd": "podman build -f deploy/ci-runner-desktop/Dockerfile -t localhost/omega-ci-desktop:00056 .  # build 3, log /tmp/56dl/build3.log",
+   "exit_code": 0,
+   "output_tail": "ok  podman-compose config  app\nok  gitleaks  8.30.1\nok  trivy  Version: 0.76.1\nok  semgrep  1.182.1\nok  bandit  bandit 1.9.4\nok  rustc  rustc 1.99.1 (58cf8f9c3 2026-10-13)\nok  cargo  cargo 1.99.1 (5f94df478 2026-08-27)\nok  rustfmt  rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)\nok  clippy  clippy 0.1.99 (58cf8f9c35 2026-10-13)\nok  read-only  /opt/rust/rustup\nok  cargo run  Hello, world!\ntoolchain-check: all tools present and usable as uid 1500\nSuccessfully tagged localhost/omega-ci-desktop:00056 (f133e1688926)"
+  },
+  {
+   "cmd": "podman image inspect localhost/omega-ci-desktop:00056 --format '{{.Size}}'",
+   "exit_code": 0,
+   "output_tail": "9624667105"
+  },
+  {
+   "cmd": ".venv/bin/python -m pytest -q -p no:cacheprovider omega_prime/tests/test_env_inventory.py omega_prime/tests/ci_runners",
+   "exit_code": 0,
+   "output_tail": "516 passed, 1 skipped in 19.83s"
+  },
+  {
+   "cmd": "uvx ruff@0.17.1 check + format --check (jobhook.py, tests/ci_runners); .venv/bin/mypy jobhook.py",
+   "exit_code": 0,
+   "output_tail": "All checks passed! / 30 files already formatted / Success: no issues found"
+  },
+  {
+   "cmd": "full suite on branch vs origin/main 09cbfe7 (stash) for the 37 branch failures",
+   "exit_code": 1,
+   "output_tail": "main: 35 failed, 2 passed (the 2 = test_env_inventory, fixed by adding GITHUB_PATH purpose); remaining 35 eventstream admin/pulsar/retry failures already fail on main"
+  }
+ ],
+ "claims": [
+  "Every tool in the brief except a preinstalled Bun is in the image and passed as uid 1500 at build time",
+  "Image 9.6 GB uncompressed"
+ ],
+ "unverified": [
+  "Registry-compressed size (estimated 3-4 GB)",
+  "Behaviour on Railway (not deployed)",
+  "Containers under podman on Railway (user namespaces untested)"
+ ],
+ "files_changed": [
+  "CHANGELOG.md",
+  "deploy/ci-runner-desktop/Dockerfile",
+  "deploy/ci-runner-desktop/README.md",
+  "deploy/ci-runner-desktop/requirements/bandit.txt",
+  "deploy/ci-runner-desktop/requirements/oom",
+  "deploy/ci-runner-desktop/requirements/podman-compose.txt",
+  "deploy/ci-runner-desktop/requirements/semgrep.txt",
+  "deploy/ci-runner-desktop/runner-env",
+  "deploy/ci-runner-desktop/toolchain-check.sh",
+  "docs/ci-runners-repo-setup.md",
+  "docs/ci-runners.md",
+  "docs/configuration.md",
+  "omega_prime/ci_runners/agent/jobhook.py",
+  "omega_prime/tests/ci_runners/test_desktop_toolchain.py",
+  "omega_prime/tests/ci_runners/test_jobhook.py",
+  "omega_prime/tooling/env_inventory_policy.json"
+ ],
+ "contract_changes": [
+  "/opt/actions-runner/.env now sets the toolchain env for jobs",
+  "jobhook appends $HOME/.local/bin and $HOME/.cargo/bin to GITHUB_PATH"
+ ],
+ "rollback_plan": "Revert PR #92; the image goes back to the 00054 toolchain-free image.",
+ "approvals": [
+  "pt229u",
+  "pt230u"
+ ],
+ "approved_by": "Ove Govender (rule: all CI on omega-ci pool)"
+}

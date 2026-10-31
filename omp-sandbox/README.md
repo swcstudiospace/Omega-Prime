@@ -42,6 +42,8 @@ The tier starts the Podman API socket, the gateway (podman driver) and builds `l
 npm ci
 cargo build --release
 cargo test --release                              # unit tests + in-process Anda auth test
+npm test                                          # hermetic node tests (fakes only)
+OMP_SANDBOX_REAL_MOUNT_TESTS=1 npm test           # opt-in: also drives the host bwrap for the pinned-mount check
 ./target/release/omp-sandbox-anda keygen          # once: identities (0600) in ~/.local/state/omp-sandbox-anda; prints principals only
 ./target/release/omp-sandbox-anda --list-tools
 python3 tests/e2e.py          # full real run: Sol plan, Luna execute, ask/stale, abort, down
@@ -79,6 +81,8 @@ Each plan login has its own plan/build pair:
 Every stage prompt is `/<gsd-command> orchestrate workflowz ultrathink\n\n<task>`.
 
 GSD commands are omp **file slash commands** (`/gsd-plan-phase`, `/gsd-execute-phase`, ...). They come from the project-local install `npx -y @opengsd/gsd-core@1.18.0 --claude --local`. They are not `/skill:` commands.
+
+The first install runs inside the sandbox in a fresh staging folder under the workdir. On a mounted job worktree (shared with the host and other jobs) the marker check and the copy into `.claude` also run inside the sandbox, so the host never reads the staging folder by name, and the install never fills the shared cache. A private work folder is checked on the host and fills the shared cache under a cross-process lock file (`<cache>.lock`, created exclusively and holding a random token). A complete cache another wrapper already published wins, a wrapper that finds the lock held skips the fill without failing `up`, and the fill never throws. A lock older than 15 minutes is treated as a crashed filler's leftover: it is moved aside with an atomic rename and its token re-checked, so a live lock that replaced it in the meantime is put back instead of removed. A filler releases the lock only while it still carries its own token.
 
 Env:
 

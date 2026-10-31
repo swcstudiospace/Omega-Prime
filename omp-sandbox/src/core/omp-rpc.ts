@@ -32,6 +32,7 @@ export class OmpRpcClient extends EventEmitter {
   #pending = new Map<string, PendingQuestion>();
   #answered = new Set<string>();
   #closed = false;
+  #inputError: Error | null = null;
   readonly models = new Set<string>();          // provider/model seen on assistant messages
   readonly transcript: RpcFrame[] = [];          // bounded copy of interesting frames
   exitCode: number | null = null;
@@ -42,9 +43,12 @@ export class OmpRpcClient extends EventEmitter {
     proc.stdout.on("data", (chunk: string) => this.#onData(chunk));
     proc.stderr.setEncoding("utf8");
     proc.stderr.on("data", (c: string) => this.emit("stderr", c));
+    // omp or its exec channel can close stdin mid-session; the next write then emits EPIPE on the pipe. Without a
+    // listener Node treats that as an uncaught error and kills the core, skipping sandbox and broker cleanup.
+    proc.stdin.on("error", (e: NodeJS.ErrnoException) => this.#inputFailed(e));
     proc.on("exit", (code) => {
       this.exitCode = code; this.#closed = true;
-      for (const [, w] of this.#waiters) w({ type: "closed", code });
+      for (const [, w] of this.#waiters) w({ type: "closed", code, reason: `rpc exited (${code})` });
       this.#waiters.clear();
       this.#pending.clear();
       this.emit("exit", code);
@@ -52,6 +56,19 @@ export class OmpRpcClient extends EventEmitter {
   }
 
   get closed() { return this.#closed; }
+  /** Set once writing to omp failed (e.g. EPIPE); the session can no longer be driven. */
+  get inputError() { return this.#inputError; }
+
+  #inputFailed(e: NodeJS.ErrnoException) {
+    if (this.#inputError || this.#closed) return;
+    this.#inputError = new Error(`${this.label}: rpc input pipe failed (${e.code ?? e.message})`);
+    // Fail every request through the normal path, then stop the child so its exit drives the usual cleanup.
+    for (const [, w] of this.#waiters) w({ type: "closed", code: null, reason: this.#inputError.message });
+    this.#waiters.clear();
+    this.#pending.clear();
+    this.emit("input_error", this.#inputError);
+    try { this.proc.kill("SIGTERM"); } catch { /* already gone */ }
+  }
   get pendingQuestions(): PendingQuestion[] { return [...this.#pending.values()]; }
 
   #onData(chunk: string) {
@@ -94,20 +111,37 @@ export class OmpRpcClient extends EventEmitter {
 
   send(obj: Record<string, unknown>) {
     if (this.#closed) throw new Error(`${this.label}: rpc process is closed`);
+    if (this.#inputError) throw this.#inputError;
     this.proc.stdin.write(JSON.stringify(obj) + "\n");
   }
 
   #wait(key: string, timeoutMs: number): Promise<RpcFrame> {
     return new Promise((resolve, reject) => {
       const t = timeoutMs > 0 ? setTimeout(() => { this.#waiters.delete(key); reject(new Error(`${this.label}: timeout waiting for ${key}`)); }, timeoutMs) : null;
-      this.#waiters.set(key, (f) => { if (t) clearTimeout(t); f.type === "closed" ? reject(new Error(`${this.label}: rpc exited (${f.code}) while waiting for ${key}`)) : resolve(f); });
+      this.#waiters.set(key, (f) => { if (t) clearTimeout(t); f.type === "closed" ? reject(new Error(`${this.label}: ${f.reason} while waiting for ${key}`)) : resolve(f); });
     });
+  }
+
+  /** Resolve a still-registered waiter as closed (which clears its timer and rejects its promise). */
+  #settleWaiter(key: string, reason: string) {
+    const w = this.#waiters.get(key);
+    if (!w) return;
+    this.#waiters.delete(key);
+    w({ type: "closed", code: null, reason });
   }
 
   async command(type: string, extra: Record<string, unknown> = {}, timeoutMs = 30_000) {
     const id = `c-${randomBytes(4).toString("hex")}`;
-    const p = this.#wait(`response:${id}`, timeoutMs);
-    this.send({ id, type, ...extra });
+    const key = `response:${id}`;
+    const p = this.#wait(key, timeoutMs);
+    try { this.send({ id, type, ...extra }); }
+    catch (e) {
+      // Nothing will ever answer: settle the waiter now (clearing its timer) so its later timeout cannot surface as
+      // an unhandled rejection after the caller has already handled this send error.
+      this.#settleWaiter(key, (e as Error)?.message ?? String(e));
+      p.catch(() => {});
+      throw e;
+    }
     const r = await p;
     if (r.success === false) throw new Error(`${this.label}: ${type} failed: ${r.error ?? JSON.stringify(r).slice(0, 300)}`);
     return r;
@@ -126,7 +160,8 @@ export class OmpRpcClient extends EventEmitter {
       const acc = await accepted;
       if (acc.success === false) throw new Error(`${this.label}: prompt rejected: ${acc.error ?? ""}`);
     } catch (e) {
-      this.#waiters.delete(`prompt_result:${id}`); this.#waiters.delete(`response:${id}`);
+      const why = (e as Error)?.message ?? String(e);
+      this.#settleWaiter(`prompt_result:${id}`, why); this.#settleWaiter(`response:${id}`, why);
       accepted.catch(() => {});
       throw e;
     }

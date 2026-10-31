@@ -4,6 +4,11 @@ name: omp-sandbox
 # Rust Anda wrapper. Separate from ci.yml so the Python jobs stay unchanged.
 # Hermetic: no Podman, no OpenShell gateway, no model logins. The live e2e
 # (tests/e2e.py) needs those and runs locally only.
+#
+# Both jobs run on the omega-ci pool (docs/ci-runners.md), never on
+# GitHub-hosted runners. Fork pull requests never reach the pool. Rust comes
+# from the runner image's read-only toolchains (no rustup install), the same
+# way rust-parity.yml selects it.
 
 on:
   push:
@@ -19,6 +24,12 @@ on:
 permissions:
   contents: read
 
+# Pool runners are budgeted 2 vCPU but see every host CPU: cap parallelism.
+env:
+  CARGO_BUILD_JOBS: "2"
+  TOKIO_WORKER_THREADS: "2"
+  RAYON_NUM_THREADS: "2"
+
 concurrency:
   group: omp-sandbox-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -26,7 +37,8 @@ concurrency:
 jobs:
   node:
     name: omp-sandbox node (tsc + node --test)
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 15
     defaults:
       run:
@@ -46,7 +58,8 @@ jobs:
         run: npm test
   rust:
     name: omp-sandbox rust (cargo build + test)
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 45
     defaults:
       run:
@@ -64,8 +77,19 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: point the Anda test at Node
         run: echo "OMP_SANDBOX_NODE=$(command -v node)" >> "$GITHUB_ENV"
-      - name: toolchain from rust-toolchain.toml
-        run: rustup show active-toolchain || rustup toolchain install
+      - name: rust toolchain (runner image, from rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          # The rustup proxies write into the read-only RUSTUP_HOME; call the image's toolchain binaries directly.
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          bin="/opt/rust/rustup/toolchains/${want}-x86_64-unknown-linux-gnu/bin"
+          if [ ! -x "$bin/rustc" ] || [ ! -x "$bin/cargo" ]; then
+            echo "::error::Rust $want (omp-sandbox/rust-toolchain.toml) is not in the omega-ci runner image"
+            exit 1
+          fi
+          echo "$bin" >> "$GITHUB_PATH"
+          echo "RUSTUP_TOOLCHAIN=$want" >> "$GITHUB_ENV"
+          "$bin/rustc" --version
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: omp-sandbox

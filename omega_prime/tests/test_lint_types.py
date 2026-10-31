@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -43,7 +44,13 @@ def test_ci_runs_lint_format_and_types() -> None:
     assert "python3 -m ruff check omega_prime/" in workflow
     assert "python3 -m ruff format --check omega_prime/" in workflow
     assert "python3 -m mypy omega_prime/" in workflow
-    assert "pip install -e '.[dev]'" in workflow or "pip install -e .[dev]" in workflow
+    # The gates must come from the pinned ``dev`` extra via an editable install;
+    # jobs may add further extras (e.g. ``.[dev,eventstream]``) alongside it.
+    extras = [
+        {item.strip() for item in match.group(1).split(",")}
+        for match in re.finditer(r"pip install -e '?\.\[([^\]]+)\]'?", workflow)
+    ]
+    assert extras and all("dev" in group for group in extras)
 
 
 def test_canonical_mcp_spellings_in_server() -> None:

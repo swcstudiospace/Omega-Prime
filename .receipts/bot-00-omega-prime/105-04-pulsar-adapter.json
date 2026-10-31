@@ -1,0 +1,24 @@
+{
+  "task_id": "105-04",
+  "bot": "bot-00-omega-prime",
+  "completed_at": "2026-10-23T02:42:40Z",
+  "claims": [
+    "Pulsar adapter + admin + CLI + Functions + IT delivered",
+    "Coverage total 90.12%; outbox 91%; idempotency 91%",
+    "306 passed, 2 skipped (owned-secure)",
+    "ruff/mypy/polyglot-check green"
+  ],
+  "unverified": [
+    "Owned-secure CI job not executed on this box (requires helper-owned container in GHA)",
+    "Effective broker journalSyncData not proven loaded \u2014 static config only"
+  ],
+  "files_changed": [
+    "omega_prime/eventstream/adapters/pulsar.py",
+    "omega_prime/eventstream/admin.py",
+    "omega_prime/eventstream/cli.py",
+    "omega_prime/eventstream/functions/",
+    "deploy/pulsar/",
+    "omega_prime/scripts/eventstream_it.py",
+    ".github/workflows/ci.yml"
+  ]
+}
