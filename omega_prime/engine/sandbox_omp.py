@@ -654,6 +654,8 @@ def run_backend(
     session.json/events parity.
     """
     run_metadata = metadata if metadata is not None else {}
+    # Callers pass the env's string path; every store writer below wants a Path.
+    tasks_path = Path(tasks_path) if tasks_path is not None else None
     tracked = tasks_path is not None and task_id is not None
     # The receipt in the finally must be buildable on every path, and only a
     # row that run_rows.start actually created (after the up reply) is ever
