@@ -102,6 +102,21 @@ def on_gate_signal(
     return _run_claimed(event, idem, work)
 
 
+def _blocked_or_working(reasons: tuple[str, ...]) -> str:
+    """``blocked`` when a fix is needed (red CI or a Greptile score below 5).
+
+    Waiting reasons (no review yet, review on an older head, draft, not yet
+    mergeable) stay ``working``. A review below 5 must stay ``blocked`` after
+    the gate runs, or ``on_review_then_gate`` would overwrite the review's
+    ``blocked`` row and hide the cue to start fixes.
+    """
+    needs_fix = "ci_not_green" in reasons or any(
+        r.startswith("greptile_score_") and r != "greptile_score_missing"
+        for r in reasons
+    )
+    return "blocked" if needs_fix else "working"
+
+
 def _gate_work(
     event: SdlcEvent,
     *,
@@ -128,9 +143,7 @@ def _gate_work(
     tid = _task_id_for(event)
     if not gate.ok:
         note = f"gate blocked on {event.pr.head_sha[:7]}: {', '.join(gate.reasons)}"
-        store.upsert_note(
-            tid, "blocked" if "ci_not_green" in gate.reasons else "working", note
-        )
+        store.upsert_note(tid, _blocked_or_working(gate.reasons), note)
         return HandlerResult(action="gate_blocked", detail=note)
     note = f"gate open on {event.pr.head_sha[:7]} (Greptile 5/5, CI green, mergeable)"
     if dry_run or merge is None:

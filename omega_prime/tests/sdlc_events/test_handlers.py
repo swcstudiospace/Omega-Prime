@@ -86,6 +86,35 @@ def test_review_wakes_gate_under_one_claim() -> None:
     assert len(again) == 1 and again[0].skipped_duplicate
 
 
+def test_low_review_score_stays_blocked_after_the_gate() -> None:
+    store = MemoryTaskStore()
+    results = on_review_then_gate(
+        _ev(EventKind.REVIEW_SIGNAL),
+        store=store,
+        idem=IdempotencyStore(),
+        greptile_score=3,
+        greptile_on_head=True,
+        ci_green=True,
+        mergeable=True,
+    )
+    assert [r.action for r in results] == ["review_noted", "gate_blocked"]
+    assert store.rows["gb:pr-Omega-Prime-74"]["state"] == "blocked"
+
+
+def test_missing_review_waits_as_working() -> None:
+    store = MemoryTaskStore()
+    on_gate_signal(
+        _ev(EventKind.CHECK_COMPLETED),
+        store=store,
+        idem=IdempotencyStore(),
+        greptile_score=None,
+        greptile_on_head=False,
+        ci_green=True,
+        mergeable=True,
+    )
+    assert store.rows["gb:pr-Omega-Prime-74"]["state"] == "working"
+
+
 def test_replay_runs_the_gate_for_a_review(tmp_path, capsys) -> None:
     import json
 
