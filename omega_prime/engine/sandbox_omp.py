@@ -76,6 +76,11 @@ ROOT_ENV = "OMP_SANDBOX_ROOT"
 # plain engine turn (route_turn, delegate, ultrathink) is execution work.
 DEFAULT_STAGE = "execute"
 WORKSPACE_ROOTS_ENV = "OMP_SANDBOX_WORKSPACE_ROOTS"
+# The sandbox runs plain omp with only the GSD setup: Omega Prime's MCP
+# server and skills are not attached inside it. Until they are, the backend
+# is ready only when the operator states that its stages run without them
+# (exactly "1"), so selecting it can never silently drop the tools.
+TOOLS_WAIVER_ENV = "OMEGA_PRIME_OMP_SANDBOX_WITHOUT_TOOLS"
 # Same default as omp-sandbox/src/core/paths.ts WORKSPACE_ROOTS.
 DEFAULT_WORKSPACE_ROOTS = "/workspace/omes-bot-wt"
 
@@ -183,6 +188,17 @@ def selected(env: Mapping[str, str]) -> bool:
     sandbox is not an escape hatch.
     """
     return str(env.get(BACKEND_ENV, "")).strip() == BACKEND_NAME
+
+
+def tools_waived(env: Mapping[str, str]) -> bool:
+    """Whether the operator accepted stages without Omega Prime's tools.
+
+    The wrapper starts plain omp inside the sandbox, so the host MCP server
+    and skills the bwrap path attaches are absent there. Readiness and the
+    run refuse unless ``OMEGA_PRIME_OMP_SANDBOX_WITHOUT_TOOLS`` is exactly
+    ``1``.
+    """
+    return str(env.get(TOOLS_WAIVER_ENV, "")).strip() == "1"
 
 
 def workspace_roots(env: Mapping[str, str]) -> list[str]:
@@ -608,6 +624,11 @@ def run_backend(
     check_backend_plan(choice.decision.plan)
     fallback_plan = stage_fallback(env, usage, choice)
     fallback_model_id = fallback_model(env, stage, fallback_plan)
+    if not tools_waived(env):
+        raise SandboxUnavailable(
+            "the omp-sandbox backend runs without Omega Prime's MCP tools and "
+            f"skills; set {TOOLS_WAIVER_ENV}=1 to accept that"
+        )
     anda = anda_binary(env)
     if anda is None:
         raise SandboxUnavailable(
@@ -648,6 +669,8 @@ def run_backend(
     commands: list[str] = []
     started = False
     outcome: dict[str, Any] | None = None
+    done_status = ""
+    export: dict[str, Any] | None = None
     try:
         client.start(cwd=root)
         client.wait_ready()
@@ -689,7 +712,6 @@ def run_backend(
         status_record = _tool(
             client, "sandbox_status", {"stage_id": stage_id}, commands, events_path
         )
-        export: dict[str, Any] | None = None
         applied: dict[str, Any] | None = None
         if done_status == "completed":
             # include_dirty: edits the stage left uncommitted ride one extra
@@ -734,6 +756,14 @@ def run_backend(
             # Submitted means started, on every later failure path too, so
             # no caller re-runs the same task elsewhere.
             setattr(exc, "started", True)  # noqa: B010 - SandboxUnavailable has no field
+        if done_status == "completed" and export is None:
+            # The stage finished but its commits never left the sandbox, and
+            # down() below deletes the private checkout: save a bundle first.
+            bundle = _recovery_export(client, commands, events_path)
+            if bundle:
+                run_metadata["recovery_bundle"] = bundle
+                exc.detail = f"{exc.detail} (completed work saved in bundle {bundle})"
+                exc.args = (exc.detail,)
         raise
     finally:
         down_summary = client.down()
@@ -905,6 +935,39 @@ def _tool(
         append_event(events_path, event)
     commands.append(tool)
     return reply
+
+
+def _recovery_export(
+    client: AndaClient, commands: list[str], events_path: Path
+) -> str | None:
+    """Best-effort export of a completed stage before teardown.
+
+    Returns the bundle path the wrapper wrote, or None when the export
+    failed too. Never raises, so the original failure stays the result.
+    """
+    try:
+        export = _tool(
+            client,
+            "export_commits",
+            {"include_dirty": True},
+            commands,
+            events_path,
+            _EXPORT_TIMEOUT,
+        )
+    except Exception:  # recovery must not replace the original failure
+        bundle = None
+    else:
+        bundle = str(export.get("bundle") or "") or None
+    with contextlib.suppress(OSError):
+        append_event(
+            events_path,
+            {
+                "type": "recovery_export",
+                "saved": bundle is not None,
+                "bundle": bundle or "",
+            },
+        )
+    return bundle
 
 
 def _wait_stage_done(

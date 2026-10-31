@@ -470,7 +470,7 @@ def run(
                 from omega_prime.dashboard.blocks import raise_block
 
                 raise_block(
-                    tasks_path,
+                    Path(tasks_path),
                     f"{task_id}:{reason}",
                     ask=_ENGINE_ASK[str(reason)],
                     blocks=_ENGINE_BLOCKS[str(reason)],
@@ -1654,6 +1654,8 @@ def probe(
         if sandbox_omp.anda_binary(env) is None:
             return False, "sandbox_unavailable"
         if sandbox_omp.sandbox_root(env) is None:
+            return False, "sandbox_unavailable"
+        if not sandbox_omp.tools_waived(env):
             return False, "sandbox_unavailable"
         return True, "ok"
     if not sandbox_ready(env, unsandboxed_override=unsandboxed):

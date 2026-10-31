@@ -99,6 +99,7 @@
     "OMEGA_PRIME_OMP_BIN": "Selects the omp executable used by the engine.",
     "OMEGA_PRIME_OMP_HOME": "Selects the omp configuration home directory.",
     "OMEGA_PRIME_OMP_SANDBOX_ANDA": "Selects the omp-sandbox-anda wrapper executable used by the omp-sandbox engine backend.",
+    "OMEGA_PRIME_OMP_SANDBOX_WITHOUT_TOOLS": "Accepts, when set exactly to 1, that omp-sandbox engine stages run without Omega Prime's MCP tools and skills; the backend refuses readiness and runs otherwise.",
     "OMEGA_PRIME_PACKS_JSON": "Selects the configured tool-pack description file.",
     "OMEGA_PRIME_PACKS_JSON_FILE": "Names a protected file containing the tool-pack description setting.",
     "OMEGA_PRIME_PACK_API_BASES_JSON": "Selects the tool-pack API base configuration.",
@@ -619,7 +620,7 @@
       "reason": "Forwards arbitrary OMEGA_FAKE_OMP_ values exclusively to isolated fake-engine child processes; not operator configuration."
     },
     {
-      "site": "omega_prime/engine/sandbox_omp.py:255:environment.items",
+      "site": "omega_prime/engine/sandbox_omp.py:271:environment.items",
       "symbol": "wrapper_env",
       "source_sha256": "b3b52fa4e1a47f6476a3ecff7fa79965b216806c767e7c65690a923396f3ca94",
       "classification": "excluded",
