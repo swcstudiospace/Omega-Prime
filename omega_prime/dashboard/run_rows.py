@@ -5,9 +5,13 @@
 ``start``/``touch``/``finish`` maintain one additive-field row per run in
 the dashboard tasks.json. Every mutation is a single locked
 read-modify-write — ``locked_tasks(path, write=True)`` plus
-``_write_locked`` inside the block — so no second writer, no partial JSON,
-no key reordering; unknown fields on other rows survive byte-for-byte
-(the store's documented additive-field design).
+``_write_locked`` inside the block — so no second writer and no partial
+JSON. Rows follow the validated tasks.json v1 schema: a created row carries
+``title`` and an ``engine`` owner; the run's own fields (``job_id``,
+``stage``, ``last_event``, ``pane``, ``receipt``) are the store's optional
+engine-run fields. ``pane`` is whatever the launcher returned (a Herdr pane
+id or ``tmux:<session>``); a Herdr id also fills ``herdr_pane`` so the
+Command Center can attach to it.
 
 Rows are one run's record: ``start`` pins ``started_at`` at first creation
 and never resets it; ``touch`` is a no-op for missing or terminal rows, so
@@ -27,7 +31,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from omega_prime.credentials.redact import redact_text
-from omega_prime.dashboard.status_file import _write_locked, locked_tasks
+from omega_prime.dashboard.status_file import _PANE_ID, _write_locked, locked_tasks
 
 _TERMINAL_STATES = ("done", "failed")
 
@@ -55,6 +59,30 @@ def _run_of(row: Mapping[str, Any]) -> str | None:
         if isinstance(job, str) and job:
             return job
     return None
+
+
+def _new_row(
+    task_id: str, state: str, job_id: str | None, stamp: str
+) -> dict[str, Any]:
+    """A v1 tasks row for a run the store did not know yet."""
+    return {
+        "id": task_id,
+        "title": task_id,
+        "owner": {"kind": "engine", "ref": job_id or task_id},
+        "state": state,
+        "started_at": stamp,
+        "last_activity_at": stamp,
+    }
+
+
+def _set_pane(row: dict[str, Any], pane: str) -> None:
+    row["pane"] = pane
+    row["herdr_pane"] = {"pane_id": pane} if _PANE_ID.fullmatch(pane) else None
+
+
+def _drop_pane(row: dict[str, Any]) -> None:
+    row.pop("pane", None)
+    row["herdr_pane"] = None
 
 
 def _redact(value: Any) -> Any:
@@ -95,16 +123,11 @@ def start(
     with locked_tasks(path, write=True) as data:
         row = _row_by_id(data, task_id)
         if row is None:
-            row = {
-                "id": task_id,
-                "state": "working",
-                "job_id": job_id,
-                "stage": stage,
-                "started_at": _now(),
-                "last_activity_at": _now(),
-            }
+            row = _new_row(task_id, "working", job_id, _now())
+            row["job_id"] = job_id
+            row["stage"] = stage
             if pane is not None:
-                row["herdr_pane"] = pane
+                _set_pane(row, pane)
             data.setdefault("tasks", []).append(row)
             _write_locked(data, path)
             return True
@@ -112,15 +135,16 @@ def start(
             if _run_of(row) in (None, job_id):
                 return False
             row.pop("receipt", None)
-            row.pop("herdr_pane", None)
+            _drop_pane(row)
             row["started_at"] = _now()
         row["state"] = "working"
         row["job_id"] = job_id
         row["stage"] = stage
-        row.setdefault("started_at", _now())
+        if not row.get("started_at"):
+            row["started_at"] = _now()
         row["last_activity_at"] = _now()
         if pane is not None:
-            row["herdr_pane"] = pane
+            _set_pane(row, pane)
         _write_locked(data, path)
         return True
 
@@ -186,13 +210,8 @@ def finish(
         redacted = _redact(dict(receipt))
         stamp = _now()
         if row is None:
-            created: dict[str, Any] = {
-                "id": task_id,
-                "state": state,
-                "started_at": stamp,
-                "last_activity_at": stamp,
-                "receipt": redacted,
-            }
+            created = _new_row(task_id, state, job_id, stamp)
+            created["receipt"] = redacted
             if job_id is not None:
                 created["job_id"] = job_id
             data.setdefault("tasks", []).append(created)

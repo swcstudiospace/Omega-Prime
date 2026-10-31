@@ -244,9 +244,8 @@ def test_json_formatter_extras_context_and_exceptions() -> None:
         try:
             raise ValueError(f"failed with Bearer abcdef1234567890xyz and {omk}")
         except ValueError:
-            logger.error(
+            logger.exception(
                 "boom\nsecond line",
-                exc_info=True,
                 extra={
                     "tool": "echo",
                     "count": 3,

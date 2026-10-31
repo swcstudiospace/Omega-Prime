@@ -19,7 +19,7 @@ Do not clone `main`. When a release tag exists, substitute that tag and
 keep the same path.
 
 ```bash
-git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/omes-bot.git /workspace/omes-bot
+git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/Omega-Prime.git /workspace/omes-bot
 ```
 
 ## 2. Bootstrap, then verify

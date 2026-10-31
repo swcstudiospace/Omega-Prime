@@ -9,7 +9,6 @@ model calls.
 
 from __future__ import annotations
 
-import fcntl
 import json
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +21,7 @@ from omega_prime.dashboard.run_rows import finish, start, touch
 from omega_prime.dashboard.status_file import (
     ITEM_FIELDS,
     TASK_STATES,
+    _validated,
     _write_locked,
     locked_tasks,
 )
@@ -30,7 +30,12 @@ from omega_prime.tests.test_engine import _env, _install_fake
 
 
 def _row(task_id: str, state: str = "working", **extra: object) -> dict:
-    row: dict = {"id": task_id, "state": state}
+    row: dict = {
+        "id": task_id,
+        "title": task_id,
+        "owner": {"kind": "engine", "ref": task_id},
+        "state": state,
+    }
     row.update(extra)
     return row
 
@@ -40,8 +45,17 @@ def _seed(
     rows: list[dict] | None = None,
     items: list[dict] | None = None,
 ) -> Path:
+    """A dashboard tasks.json v1 (the validated store on main)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"tasks": rows or [], "waiting_on_ove": items or []}
+    payload = {
+        "version": 1,
+        "updated_at": "2026-10-31T00:00:00+00:00",
+        "tasks": rows or [],
+        "waiting_on_ove": items or [],
+        "finished": [],
+        "next_seq": 1,
+        "identity_registry": {},
+    }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
 
@@ -61,82 +75,19 @@ def test_schema_constants_match_the_box_contract() -> None:
     assert ITEM_FIELDS == ("id", "seq", "ask", "blocks", "since")
 
 
-def test_locked_tasks_seeds_a_missing_file_without_creating_it(tmp_path: Path) -> None:
-    store = tmp_path / "tasks.json"
-    with locked_tasks(store) as data:
-        assert data == {"tasks": [], "waiting_on_ove": []}
-    assert not store.exists()
-
-
-def test_write_roundtrip_persists_and_leaves_no_residue(tmp_path: Path) -> None:
-    store = tmp_path / "nested" / "tasks.json"
-    with locked_tasks(store, write=True) as data:
-        data["tasks"].append(_row("gb:t1", "queued"))
-        _write_locked(data, store)
-    with locked_tasks(store) as data:
-        assert data == {
-            "tasks": [{"id": "gb:t1", "state": "queued"}],
-            "waiting_on_ove": [],
-        }
-    raw = store.read_text(encoding="utf-8")
-    assert raw.endswith("\n")
-    assert sorted(p.name for p in store.parent.iterdir()) == [
-        "tasks.json",
-        "tasks.json.lock",
-    ]
-
-
-def test_write_lock_is_exclusive_against_a_second_writer(tmp_path: Path) -> None:
-    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:t1")])
-    with locked_tasks(store, write=True) as data:
-        second = (tmp_path / "tasks.json.lock").open("a+")
-        try:
-            with pytest.raises(BlockingIOError):
-                fcntl.flock(second.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        finally:
-            second.close()
-        data["tasks"][0]["state"] = "blocked"
-        _write_locked(data, store)
-    assert (
-        json.loads(store.read_text(encoding="utf-8"))["tasks"][0]["state"] == "blocked"
-    )
-
-
-def test_unknown_fields_survive_a_roundtrip_untouched(tmp_path: Path) -> None:
-    store = tmp_path / "tasks.json"
-    row = _row(
-        "gb:t1",
-        "working",
-        owner="desk",
-        last_activity_at="2026-10-21T00:00:00Z",
-        nested={"a": [1, 2]},
-    )
-    item = {
-        "id": "gb:t1:push",
-        "seq": 7,
-        "ask": "ask",
-        "blocks": "gate",
-        "since": "2026-10-21T01:00:00Z",
-        "extra": True,
-    }
-    _seed(store, rows=[row], items=[item])
-    with locked_tasks(store, write=True) as data:
-        data["tasks"][0]["state"] = "blocked"
-        _write_locked(data, store)
-    with locked_tasks(store) as data:
-        assert data["tasks"][0] == {**row, "state": "blocked"}
-        assert data["waiting_on_ove"][0] == item
-        assert list(data["waiting_on_ove"][0]) == [
-            "id",
-            "seq",
-            "ask",
-            "blocks",
-            "since",
-            "extra",
-        ]
-
-
-# --- W111-02: raise/clear upsert lifecycle ----------------------------------
+def test_blocks_write_through_the_validated_store(tmp_path: Path) -> None:
+    # The store on main validates every write and owns row sequences: a block
+    # takes the next free seq and keeps its owning task id.
+    store = _seed(tmp_path / "tasks.json", [_row("gb:t1", seq=1)])
+    raw = json.loads(store.read_text(encoding="utf-8"))
+    raw["next_seq"] = 2
+    store.write_text(json.dumps(raw), encoding="utf-8")
+    raise_block(store, "gb:t1:plan", ask="a", blocks="b", task_id="gb:t1")
+    with locked_tasks(store, write=False) as data:
+        (item,) = data["waiting_on_ove"]
+        assert (item["seq"], item["task_id"]) == (2, "gb:t1")
+        assert data["next_seq"] == 3
+        assert data["tasks"][0]["state"] == "blocked"
 
 
 def test_raise_block_upserts_by_stable_id_and_blocks_the_row(tmp_path: Path) -> None:
@@ -370,7 +321,7 @@ def test_engine_gated_failure_raises_one_block_in_the_same_call(tmp_path: Path) 
     assert [item["id"] for item in items] == ["gb:t1:plan_not_allowed"]
     assert items[0]["blocks"] == "engine plan gate (plan_not_allowed)"
     assert "OMEGA_PRIME_OMP_ALLOW_ZAI" in items[0]["ask"]
-    assert data["tasks"][0] == {"id": "gb:t1", "state": "blocked"}
+    assert (data["tasks"][0]["id"], data["tasks"][0]["state"]) == ("gb:t1", "blocked")
     first = dict(items[0])
     # A retried run upserts instead of duplicating.
     run(
@@ -476,12 +427,17 @@ def test_run_rows_start_creates_the_working_row_and_pins_started_at(
     tmp_path: Path,
 ) -> None:
     store = _seed(tmp_path / "tasks.json", rows=[_row("gb:t1")])
-    start(store, "gb:new", job_id="job-1", stage="plan", pane="pane-7")
+    start(store, "gb:new", job_id="job-1", stage="plan", pane="w1:p7")
     row = _row_by_id(store, "gb:new")
     assert row["state"] == "working"
     assert row["job_id"] == "job-1"
     assert row["stage"] == "plan"
-    assert row["herdr_pane"] == "pane-7"
+    # A created row is a valid v1 row: title and an engine owner.
+    assert row["title"] == "gb:new"
+    assert row["owner"] == {"kind": "engine", "ref": "job-1"}
+    # A Herdr pane id is the run's pane and the attachable herdr_pane.
+    assert row["pane"] == "w1:p7"
+    assert row["herdr_pane"] == {"pane_id": "w1:p7"}
     started = datetime.fromisoformat(row["started_at"])
     activity = datetime.fromisoformat(row["last_activity_at"])
     assert started <= activity
@@ -492,7 +448,13 @@ def test_run_rows_start_creates_the_working_row_and_pins_started_at(
     assert again["state"] == "working"
     assert again["started_at"] == row["started_at"]
     assert again["stage"] == "execute"
-    assert again["herdr_pane"] == "pane-7"
+    assert again["pane"] == "w1:p7"
+    assert again["herdr_pane"] == {"pane_id": "w1:p7"}
+    # The tmux fallback is recorded as the run's pane, never as a herdr_pane.
+    start(store, "gb:new", job_id="job-2", stage="execute", pane="tmux:omega-job-2")
+    tmux = _row_by_id(store, "gb:new")
+    assert tmux["pane"] == "tmux:omega-job-2"
+    assert tmux["herdr_pane"] is None
 
 
 def test_run_rows_start_never_resurrects_terminal_rows(tmp_path: Path) -> None:
@@ -521,7 +483,8 @@ def test_run_rows_a_new_run_gets_its_own_record(tmp_path: Path) -> None:
                 "gb:again",
                 "done",
                 job_id="job-0",
-                herdr_pane="pane-old",
+                pane="w1:pold",
+                herdr_pane={"pane_id": "w1:pold"},
                 started_at="2026-01-01T00:00:00+00:00",
                 receipt={"job_id": "job-0", "ok": True},
             )
@@ -532,7 +495,8 @@ def test_run_rows_a_new_run_gets_its_own_record(tmp_path: Path) -> None:
     assert row["state"] == "working"
     assert row["job_id"] == "job-1"
     assert row["started_at"] != "2026-01-01T00:00:00+00:00"
-    assert "receipt" not in row and "herdr_pane" not in row
+    assert "receipt" not in row and "pane" not in row
+    assert row["herdr_pane"] is None
     # A late finish from the earlier run leaves the new run's record alone.
     before = store.read_bytes()
     finish(store, "gb:again", ok=False, receipt={"job_id": "job-0"}, job_id="job-0")
@@ -600,21 +564,25 @@ def test_run_rows_touch_is_a_noop_for_missing_and_terminal_rows(
     assert store.read_bytes() == before
 
 
-def test_run_rows_writes_leave_other_rows_byte_identical(tmp_path: Path) -> None:
+def test_run_rows_writes_leave_other_rows_unchanged(tmp_path: Path) -> None:
     other = _row(
         "gb:other",
         "working",
-        owner="sol",
-        nested={"keep": [1, 2]},
-        herdr_pane="pane-9",
+        owner={"kind": "agent", "ref": "sol"},
+        herdr_pane={"pane_id": "w9:p9"},
         last_activity_at="2026-01-01T00:00:00+00:00",
     )
     store = _seed(tmp_path / "tasks.json", rows=[_row("gb:t1"), other])
     touch(store, "gb:t1", {"event": "question"})
-    start(store, "gb:t1", job_id="job-1", stage="plan", pane="pane-1")
+    # The first write normalises the seed into the v1 shape; later run writes
+    # never change the other row again.
+    normalised = json.loads(store.read_text(encoding="utf-8"))["tasks"][1]
+    assert normalised["owner"] == {"kind": "agent", "ref": "sol"}
+    assert normalised["herdr_pane"] == {"pane_id": "w9:p9"}
+    start(store, "gb:t1", job_id="job-1", stage="plan", pane="w1:p1")
     finish(store, "gb:t1", ok=True, receipt={"job_id": "job-1"})
     data = json.loads(store.read_text(encoding="utf-8"))
-    assert data["tasks"][1] == other
+    assert data["tasks"][1] == normalised
 
 
 def test_run_rows_finish_upserts_terminal_states(tmp_path: Path) -> None:
@@ -656,3 +624,42 @@ def test_run_rows_finish_redacts_secret_shaped_receipt_strings(
     assert token not in raw
     row = _row_by_id(store, "gb:t1")
     assert row["receipt"]["detail"] == f"handler saw {REDACTED}"
+
+
+def test_store_keeps_engine_run_and_question_fields(tmp_path: Path) -> None:
+    """The validated store keeps the optional fields run_rows and questions use."""
+    store = _seed(
+        tmp_path / "tasks.json",
+        rows=[_row("gb:q", job_id="job-1", stage="plan", receipt={"ok": True})],
+        items=[
+            {
+                "id": "gb:q:question:req-1",
+                "ask": "which shape?",
+                "blocks": "sandbox GSD question (stage plan)",
+                "task_id": "gb:q",
+                "question_ids": ["q1", "q2"],
+                "answer": {"per_question": {"q1": "square", "q2": {"selected": ["a"]}}},
+            }
+        ],
+    )
+    with locked_tasks(store, write=True) as data:
+        _write_locked(data, store)
+    data = json.loads(store.read_text(encoding="utf-8"))
+    row = data["tasks"][0]
+    assert (row["job_id"], row["stage"], row["receipt"]) == (
+        "job-1",
+        "plan",
+        {"ok": True},
+    )
+    item = data["waiting_on_ove"][0]
+    assert item["question_ids"] == ["q1", "q2"]
+    assert item["answer"] == {
+        "per_question": {"q1": "square", "q2": {"selected": ["a"]}}
+    }
+    # Wrong shapes are refused, never silently kept.
+    for bad in ({"question_ids": "q1"}, {"answer": 3}, {"answer": {"x": object()}}):
+        broken = dict(data["waiting_on_ove"][0], **bad)
+        with pytest.raises(ValueError):
+            _validated(dict(data, waiting_on_ove=[broken]))
+    with pytest.raises(ValueError):
+        _validated(dict(data, tasks=[dict(row, receipt="not a mapping")]))

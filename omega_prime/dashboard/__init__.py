@@ -1,30 +1,34 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Spectrum Web Co
-"""Dashboard status store: the locked tasks.json and its waiting_on_ove blocks."""
+"""Local read-only task dashboard core."""
 
-from omega_prime.dashboard import herdr_launch, run_rows
-from omega_prime.dashboard.blocks import (
-    PUSH_REASONS,
-    clear_block,
-    push_block,
-    raise_block,
+from __future__ import annotations
+
+from omega_prime.dashboard.config import DashboardConfig, load_dashboard_config
+from omega_prime.dashboard.model import (
+    Owner,
+    Snapshot,
+    SourceResult,
+    Task,
+    normalize_tasks,
 )
-from omega_prime.dashboard.status_file import (
-    ITEM_FIELDS,
-    TASK_STATES,
-    _write_locked,
-    locked_tasks,
-)
+from omega_prime.dashboard.redact import redact_line, redact_value
+from omega_prime.dashboard.status_file import TasksFileResult, read_tasks, write_tasks
+
+__version__ = "1"
 
 __all__ = [
-    "ITEM_FIELDS",
-    "PUSH_REASONS",
-    "TASK_STATES",
-    "_write_locked",
-    "clear_block",
-    "herdr_launch",
-    "locked_tasks",
-    "push_block",
-    "raise_block",
-    "run_rows",
+    "DashboardConfig",
+    "Owner",
+    "Snapshot",
+    "SourceResult",
+    "Task",
+    "TasksFileResult",
+    "__version__",
+    "load_dashboard_config",
+    "normalize_tasks",
+    "read_tasks",
+    "redact_line",
+    "redact_value",
+    "write_tasks",
 ]

@@ -1,0 +1,96 @@
+{
+ "task_id": "00059-redteam-zod-pin",
+ "bot": "bot-00-omega-prime",
+ "started_at": "2026-10-24T08:20:00+11:00",
+ "completed_at": "2026-10-24T08:34:58+11:00",
+ "base_commit": "982382b",
+ "pr": "https://github.com/swcstudiospace/Omega-Prime/pull/96",
+ "commands": [
+  {
+   "cmd": "python3 sidecar/provenance.py check",
+   "exit_code": 0,
+   "output_tail": "check OK: pin 6679b82 agrees (gitlink, VENDOR.md, docstrings)"
+  },
+  {
+   "cmd": "python3 sidecar/provenance.py pack-diff",
+   "exit_code": 0,
+   "output_tail": "pack-diff OK: 25 markdown/JSON files byte-identical"
+  },
+  {
+   "cmd": "python3 sidecar/provenance.py surface",
+   "exit_code": 0,
+   "output_tail": "surface OK: 14 tool names agree (upstream, adapter, contract)"
+  },
+  {
+   "cmd": "npm ci --ignore-scripts on a scratch copy of redteam package.json + package-lock.json at 6679b82; node -e 'require(\"zod/package.json\").version'",
+   "exit_code": 0,
+   "output_tail": "added 514 packages in 5s\n4.6.7  (run 2026-10-24 ~08:25 +11:00, before the rebase; lock unchanged since)"
+  },
+  {
+   "cmd": "(cd redteam && npm audit --omit=dev --audit-level=high --json > /tmp/a59.json)",
+   "exit_code": 0,
+   "output_tail": ""
+  },
+  {
+   "cmd": "(cd redteam && AUDIT_JSON=/tmp/a59.json python3 ../scripts/redteam-audit-triage.py)",
+   "exit_code": 0,
+   "output_tail": "redteam-node-audit OK: 0 high+ findings, 0 untriaged"
+  },
+  {
+   "cmd": "npm audit --omit=dev --audit-level=high --json on the f6d2fc2 lock (scratch dir) > /tmp/old59-audit.json; python3 scripts/redteam-audit-delta.py --old /tmp/old59-audit.json --new /tmp/a59.json --out /tmp/delta59.md",
+   "exit_code": 0,
+   "output_tail": "improved (Fixed: zod high; Advisories new: none)"
+  },
+  {
+   "cmd": ".venv/bin/python -m pytest -q -p no:cacheprovider omega_prime/tests/test_sidecar_provenance.py omega_prime/tests/test_redteam.py omega_prime/tests/test_redteam_audit_triage.py omega_prime/tests/test_redteam_audit_delta.py omega_prime/tests/test_pin_bump.py omega_prime/tests/test_redteam_remediation.py omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_sidecar_packaging.py",
+   "exit_code": 0,
+   "output_tail": "\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n390 passed, 2 skipped, 1 warning in 7.04s"
+  },
+  {
+   "cmd": ".venv/bin/python -m ruff check omega_prime/ && .venv/bin/python -m ruff format --check omega_prime/",
+   "exit_code": 0,
+   "output_tail": "\u001b[1;32mAll checks passed!\u001b[0m\n776 files already formatted"
+  },
+  {
+   "cmd": "git diff --stat origin/ci/00057-omega-ci-runners -- scripts/redteam-audit-triage.py | wc -l",
+   "exit_code": 0,
+   "output_tail": "0"
+  }
+ ],
+ "claims": [
+  {
+   "claim": "redteam gitlink, VENDOR.md and the omega_prime/redteam/__init__.py docstring agree at purple-team 6679b82 (f6d2fc2 + zod 4.2.1 -> 4.6.7 lock bump)",
+   "evidence_command_index": 0
+  },
+  {
+   "claim": "Vendored pack is byte-identical to upstream at the new pin (unchanged from f6d2fc2)",
+   "evidence_command_index": 1
+  },
+  {
+   "claim": "Tool surface agrees across upstream, adapter and contract (14 names, unchanged)",
+   "evidence_command_index": 2
+  },
+  {
+   "claim": "npm audit --omit=dev --audit-level=high on the new pin has 0 untriaged high/critical findings",
+   "evidence_command_index": 5
+  },
+  {
+   "claim": "GHSA-mrhx-c7xc-m3w5 (zod) is fixed relative to f6d2fc2 and no advisory is new (delta verdict improved)",
+   "evidence_command_index": 6
+  },
+  {
+   "claim": "No triage exception added: scripts/redteam-audit-triage.py is unchanged",
+   "evidence_command_index": 9
+  }
+ ],
+ "unverified": [
+  "CI results on the omega-ci pool (see the PR checks)"
+ ],
+ "files_changed": [
+  "CHANGELOG.md",
+  "VENDOR.md",
+  "omega_prime/redteam/__init__.py",
+  "redteam",
+  ".receipts/bot-00-omega-prime/00059-redteam-zod-pin.json"
+ ]
+}

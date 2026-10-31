@@ -1,6 +1,6 @@
 # GitBook sync
 
-This repository includes a [GitBook Git Sync configuration](https://github.com/swcstudiospace/omes-bot/blob/main/.gitbook.yaml).
+This repository includes a [GitBook Git Sync configuration](https://github.com/swcstudiospace/Omega-Prime/blob/main/.gitbook.yaml).
 It selects `docs/` as the content root, `docs/README.md` as the landing page,
 and `docs/SUMMARY.md` as navigation. The file is preparation, not evidence that
 a GitBook space is connected or published.
@@ -9,7 +9,7 @@ a GitBook space is connected or published.
 
 1. An authorized space owner enables Git Sync and grants GitBook access to the
    GitHub repository.
-2. Select `swcstudiospace/omes-bot` and the intended published branch. `main`
+2. Select `swcstudiospace/Omega-Prime` and the intended published branch. `main`
    is the canonical branch; an unmerged development branch is not the published
    edition.
 3. Select the repository root so GitBook can read `.gitbook.yaml`; that file

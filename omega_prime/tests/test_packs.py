@@ -48,11 +48,11 @@ def _http_factory(routes):
 
 
 def _ctx(**overrides):
-    base = dict(
-        packs=dict(PACKS),
-        api_bases={"desklanes": "https://api.example.test"},
-        http=_http_factory([]),
-    )
+    base = {
+        "packs": dict(PACKS),
+        "api_bases": {"desklanes": "https://api.example.test"},
+        "http": _http_factory([]),
+    }
     base.update(overrides)
     return PacksContext(**base)
 

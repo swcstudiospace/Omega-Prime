@@ -244,7 +244,7 @@ class QualityContext:
     greptile: Any = None
     acks: AckStore | None = None
     vcs: Any = None
-    repo_slug: str = "swcstudiospace/omega-prime"
+    repo_slug: str = "swcstudiospace/Omega-Prime"
     bot_id: str = "bot-00-omega-prime"
     # Sandbox routing (Phase 83, SAND-02). None/empty means disabled: gates
     # run exactly as today. Enable with {"enabled": True, "policy": <path>,

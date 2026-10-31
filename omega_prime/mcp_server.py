@@ -1150,7 +1150,9 @@ def default_registry(
                 SubstrateClient(
                     docs_url or substrate_env_url or None,
                     token=substrate_token or None,
-                    honor_binding=True,
+                    # An explicit Desk docs endpoint stands on its own; a saved
+                    # (or blocked) Substrate binding only steers the fallback.
+                    honor_binding=not docs_url,
                     binding_env=env,
                     policy=policy,
                 )

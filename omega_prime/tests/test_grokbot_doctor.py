@@ -182,7 +182,7 @@ def test_unknown_prefix_like_roster_tool_is_not_flag_gated(
 
     def make_registry(*_args, **kwargs):
         observed_env.update(kwargs["env"])
-        return SimpleNamespace(schemas=lambda: [], runtime_bindings={})
+        return SimpleNamespace(schemas=list, runtime_bindings={})
 
     monkeypatch.setattr(mcp_server, "default_registry", make_registry)
     doctor = GrokBotDoctor(
@@ -271,7 +271,7 @@ def test_registry_bindings_refresh_each_collection_unless_caller_supplied(
         mcp_server,
         "default_registry",
         lambda *_args, **_kwargs: SimpleNamespace(
-            schemas=lambda: [], runtime_bindings=next(bindings)
+            schemas=list, runtime_bindings=next(bindings)
         ),
     )
     doctor = GrokBotDoctor(tmp_path, env={})

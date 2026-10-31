@@ -49,12 +49,12 @@ class FakeGreptile:
 
 def _ctx(tmp_path, **overrides):
     (tmp_path / "omega_prime" / "tests").mkdir(parents=True, exist_ok=True)
-    base: dict[str, Any] = dict(
-        root=str(tmp_path),
-        run=FakeRunner(),
-        greptile=FakeGreptile(),
-        acks=AckStore(tmp_path / "acks.json"),
-    )
+    base: dict[str, Any] = {
+        "root": str(tmp_path),
+        "run": FakeRunner(),
+        "greptile": FakeGreptile(),
+        "acks": AckStore(tmp_path / "acks.json"),
+    }
     base.update(overrides)
     return QualityContext(**base)
 
@@ -92,7 +92,7 @@ def test_greptile_actions(tmp_path):
     triggered = client.greptile_review("trigger", pr_number=3)
     assert triggered["ok"] is True
     assert "queued" in triggered["note"]
-    assert greptile.calls[0] == ("trigger", "swcstudiospace/omega-prime", 3)
+    assert greptile.calls[0] == ("trigger", "swcstudiospace/Omega-Prime", 3)
     got = client.greptile_review("get", review_id="r-1")
     assert got["result"]["conclusion"] == "pass"
     comments = client.greptile_review("comments", pr_number=3)

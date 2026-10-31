@@ -1,7 +1,7 @@
 <!-- Raster derivative assets/social-card.png is generated from this file, run from the repository root with system CairoSVG 2.9.0 on PATH: python3 omega_prime/scripts/render_raster.py assets/social-card.svg (it records this file's SHA-256 in the PNG) -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Omega Prime social card" aria-labelledby="card-title card-desc">
   <title id="card-title">Omega Prime social card</title>
-  <desc id="card-desc">Teal-to-violet hexagonal node mark beside the words OMEGA PRIME, the tagline One Grok programming bot., the line Repeatable local readiness, no live credentials., and the repository path github.com/swcstudiospace/omes-bot.</desc>
+  <desc id="card-desc">Teal-to-violet hexagonal node mark beside the words OMEGA PRIME, the tagline One Grok programming bot., the line Repeatable local readiness, no live credentials., and the repository path github.com/swcstudiospace/Omega-Prime.</desc>
   <defs>
     <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#2dd4bf"/>
@@ -39,5 +39,5 @@
   <rect x="500" y="312" width="200" height="8" rx="4" fill="url(#edge)"/>
   <text x="496" y="384" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="40" font-weight="400" fill="#9aa4b2">One Grok programming bot.</text>
   <text x="496" y="440" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="28" font-weight="400" fill="#9aa4b2">Repeatable local readiness, no live credentials.</text>
-  <text x="496" y="548" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="26" font-weight="600" fill="#2dd4bf">github.com/swcstudiospace/omes-bot</text>
+  <text x="496" y="548" font-family="Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="26" font-weight="600" fill="#2dd4bf">github.com/swcstudiospace/Omega-Prime</text>
 </svg>

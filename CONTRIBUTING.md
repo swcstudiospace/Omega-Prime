@@ -7,13 +7,13 @@ or an operator's authorization.
 
 ## Setup
 
-The repository is `swcstudiospace/omes-bot`. Use Python 3.12 for the documented
+The repository is `swcstudiospace/Omega-Prime`. Use Python 3.12 for the documented
 local route; package metadata declares `>=3.11` and retained CI matrices
 cover 3.12–3.14. Do not report an interpreter/dependency combination as
 exercised merely because it appears in metadata or a workflow.
 
 ```bash
-git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git omega-prime
+git clone --recurse-submodules https://github.com/swcstudiospace/Omega-Prime.git omega-prime
 cd omega-prime
 python3.12 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
@@ -73,6 +73,18 @@ publication/approval and rollback; a contribution does not authorize deployment.
   doubles. Real owned local CLI/filesystem effects are valid proof. Never
   mutate a live account/provider/device/service in the suite; separately
   authorized live probes are not silently run as local verification.
+  The Pulsar owned-secure integration lane lives under
+  `deploy/pulsar/integration/` and is invoked only by the dedicated
+  eventstream CI job (never by default `pytest` / hermetic verify).
+  `omega_prime/scripts/eventstream_it.py` stages secrets and configs as root
+  inside the service container, hands them to the image's runtime user
+  (`pulsar`, verified readable as that uid), and layers the repo's Pulsar
+  settings key-by-key over the image's stock config files (no duplicate keys,
+  which the embedded bookie would read as lists). Pulsar token parameters use
+  `file:///path`, not `token:file:///path`. That lane reconciles the broker
+  topology with `functions=False`, because the standalone broker runs without
+  a Functions worker. Failed `docker` steps report the argv and bounded stderr
+  with secrets redacted.
 - **Credential safety.** Use the broker/private host environment or a mode-0600
   token file where the interface supports it. Never commit, print, paste or
   place values in argv/tracing/saved examples. See [SECURITY.md](SECURITY.md).

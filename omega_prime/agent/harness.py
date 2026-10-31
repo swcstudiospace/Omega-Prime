@@ -407,7 +407,7 @@ def prepare_speculative(agent: Any, tools: dict, calls: list) -> SpeculativeCach
                 try:
                     result = fn()
                 except TypeError:
-                    result = fn(**{})
+                    result = fn()
         except Exception:
             return fp, None
         if _looks_structured(result):

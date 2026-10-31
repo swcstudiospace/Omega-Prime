@@ -56,7 +56,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from omega_prime.dashboard import herdr_launch, run_rows
+from omega_prime.dashboard import run_rows, sandbox_pane
 from omega_prime.dashboard.blocks import clear_block, raise_block
 from omega_prime.dashboard.status_file import locked_tasks
 from omega_prime.engine.jobs import append_event, child_env, state_dir, write_json
@@ -80,6 +80,11 @@ ROOT_ENV = "OMP_SANDBOX_ROOT"
 # plain engine turn (route_turn, delegate, ultrathink) is execution work.
 DEFAULT_STAGE = "execute"
 WORKSPACE_ROOTS_ENV = "OMP_SANDBOX_WORKSPACE_ROOTS"
+# The sandbox runs plain omp with only the GSD setup: Omega Prime's MCP
+# server and skills are not attached inside it. Until they are, the backend
+# is ready only when the operator states that its stages run without them
+# (exactly "1"), so selecting it can never silently drop the tools.
+TOOLS_WAIVER_ENV = "OMEGA_PRIME_OMP_SANDBOX_WITHOUT_TOOLS"
 # Same default as omp-sandbox/src/core/paths.ts WORKSPACE_ROOTS.
 DEFAULT_WORKSPACE_ROOTS = "/workspace/omes-bot-wt"
 
@@ -105,6 +110,30 @@ _POLL_TICK = 0.2
 # snapshot per second at most, riding these same event-loop ticks. The
 # question/stage wait itself has NO deadline (phase-112 lock).
 _ANSWER_POLL = 1.0
+
+# The folder that holds the ``omega_prime`` package this process imported.
+# The watcher pane runs under herdr's or tmux's own environment (no
+# PYTHONPATH from here), so its argv names this import root explicitly.
+_IMPORT_ROOT = str(Path(__file__).resolve().parents[2])
+
+
+def watch_command(job_id: str, state: Path) -> list[str]:
+    """The pane argv that follows one run's feed, importable from anywhere."""
+    env_bin = shutil.which("env") or "/usr/bin/env"
+    return [
+        env_bin,
+        f"PYTHONPATH={_IMPORT_ROOT}",
+        sys.executable,
+        "-m",
+        "omega_prime.engine.watch",
+        job_id,
+        "--follow",
+        "--state-dir",
+        # Absolute: the pane runs in the worktree, so a relative state dir
+        # would name another feed.
+        str(state.resolve()),
+    ]
+
 
 _EOF = object()
 
@@ -191,6 +220,17 @@ def selected(env: Mapping[str, str]) -> bool:
     sandbox is not an escape hatch.
     """
     return str(env.get(BACKEND_ENV, "")).strip() == BACKEND_NAME
+
+
+def tools_waived(env: Mapping[str, str]) -> bool:
+    """Whether the operator accepted stages without Omega Prime's tools.
+
+    The wrapper starts plain omp inside the sandbox, so the host MCP server
+    and skills the bwrap path attaches are absent there. Readiness and the
+    run refuse unless ``OMEGA_PRIME_OMP_SANDBOX_WITHOUT_TOOLS`` is exactly
+    ``1``.
+    """
+    return str(env.get(TOOLS_WAIVER_ENV, "")).strip() == "1"
 
 
 def workspace_roots(env: Mapping[str, str]) -> list[str]:
@@ -630,6 +670,11 @@ def run_backend(
     check_backend_plan(choice.decision.plan)
     fallback_plan = stage_fallback(env, usage, choice)
     fallback_model_id = fallback_model(env, stage, fallback_plan)
+    if not tools_waived(env):
+        raise SandboxUnavailable(
+            "the omp-sandbox backend runs without Omega Prime's MCP tools and "
+            f"skills; set {TOOLS_WAIVER_ENV}=1 to accept that"
+        )
     anda = anda_binary(env)
     if anda is None:
         raise SandboxUnavailable(
@@ -674,6 +719,8 @@ def run_backend(
     # sends events and replies from separate tasks): the wait loop still
     # acts on them, a question among them included.
     early_events: list[dict[str, Any]] = []
+    done_status = ""
+    export: dict[str, Any] | None = None
     try:
         client.start(cwd=root)
         client.wait_ready()
@@ -702,21 +749,11 @@ def run_backend(
             # healthy stage.
             pane: str | None = None
             with contextlib.suppress(Exception):
-                pane = herdr_launch.open_pane(
+                pane = sandbox_pane.open_pane(
                     env,
                     cwd=work,
                     label=f"{task_id} {stage}",
-                    command=[
-                        sys.executable,
-                        "-m",
-                        "omega_prime.engine.watch",
-                        job_id,
-                        "--follow",
-                        "--state-dir",
-                        # Absolute: the pane runs in the worktree, so a
-                        # relative state dir would name another feed.
-                        str(state_dir(env).resolve()),
-                    ],
+                    command=watch_command(job_id, state_dir(env)),
                     session=f"omega-{job_id}",
                 )
             with contextlib.suppress(Exception):
@@ -728,6 +765,11 @@ def run_backend(
                 row_started = run_rows.start(
                     tasks_path, task_id, job_id=job_id, stage=stage, pane=pane
                 )
+            if interrupt is not None and interrupt.is_set():
+                # Pane and row setup can take a while (each herdr call may
+                # wait its full timeout): a stop that landed meanwhile still
+                # submits nothing. The finally block finishes a started row.
+                raise _cancelled("cancelled before the stage was submitted")
         stage_result = _tool(
             client,
             "run_gsd_stage",
@@ -775,7 +817,6 @@ def run_backend(
             task_id=task_id,
             row_started=row_started,
         )
-        export: dict[str, Any] | None = None
         applied: dict[str, Any] | None = None
         if done_status == "completed":
             # include_dirty: edits the stage left uncommitted ride one extra
@@ -823,6 +864,14 @@ def run_backend(
             # Submitted means started, on every later failure path too, so
             # no caller re-runs the same task elsewhere.
             setattr(exc, "started", True)  # noqa: B010 - SandboxUnavailable has no field
+        if done_status == "completed" and export is None:
+            # The stage finished but its commits never left the sandbox, and
+            # down() below deletes the private checkout: save a bundle first.
+            bundle = _recovery_export(client, commands, events_path)
+            if bundle:
+                run_metadata["recovery_bundle"] = bundle
+                exc.detail = f"{exc.detail} (completed work saved in bundle {bundle})"
+                exc.args = (exc.detail,)
         raise
     finally:
         # Terminal row before the shutdown: it lands even if `down` is slow.
@@ -1158,7 +1207,7 @@ def _answer_from_store(
     """
     if tasks_path is None:
         return None
-    with locked_tasks(tasks_path) as data:
+    with locked_tasks(Path(tasks_path), write=False) as data:
         item = next(
             (row for row in data.get("waiting_on_ove", []) if row.get("id") == item_id),
             None,
@@ -1211,6 +1260,39 @@ def _clear_question(
     """Clear the question item (idempotent; the blocked row returns to
     ``working`` through clear_block's own semantics)."""
     clear_block(tasks_path, item_id, task_id=str(task_id))
+
+
+def _recovery_export(
+    client: AndaClient, commands: list[str], events_path: Path
+) -> str | None:
+    """Best-effort export of a completed stage before teardown.
+
+    Returns the bundle path the wrapper wrote, or None when the export
+    failed too. Never raises, so the original failure stays the result.
+    """
+    try:
+        export = _tool(
+            client,
+            "export_commits",
+            {"include_dirty": True},
+            commands,
+            events_path,
+            timeout=_EXPORT_TIMEOUT,
+        )
+    except Exception:  # recovery must not replace the original failure
+        bundle = None
+    else:
+        bundle = str(export.get("bundle") or "") or None
+    with contextlib.suppress(OSError):
+        append_event(
+            events_path,
+            {
+                "type": "recovery_export",
+                "saved": bundle is not None,
+                "bundle": bundle or "",
+            },
+        )
+    return bundle
 
 
 def _wait_stage_done(
@@ -1297,6 +1379,10 @@ def _wait_loop(
     clear what is left on any exit."""
     aborted = False
     last_answer_check = 0.0
+    # Questions whose block write failed (e.g. a full disk): retried every
+    # loop until the store takes them, so a brief write failure never
+    # leaves the wrapper waiting on a question nobody can see.
+    unraised: dict[str, dict[str, Any]] = {}
     # Events a tool call already logged and touched, still to be acted on.
     unhandled: list[dict[str, Any]] = list(early_events or [])
     while True:
@@ -1323,20 +1409,28 @@ def _wait_loop(
                 # A GSD follow-up question: raise it under its own stable id
                 # beside any other open one. A requestId-less question is
                 # informational only — append/touch already happened above.
-                rid = str(buffered.get("requestId"))
-                with contextlib.suppress(Exception):
-                    pending[rid] = _raise_question(
-                        tasks_path,
-                        task_id,
-                        stage,
-                        rid,
-                        _question_text(buffered),
-                        _question_ids(buffered),
-                    )
-                    last_answer_check = time.monotonic()
+                unraised[str(buffered.get("requestId"))] = buffered
+        for rid, question in list(unraised.items()):
+            if rid in pending:
+                unraised.pop(rid, None)
+                continue
+            try:
+                pending[rid] = _raise_question(
+                    tasks_path,
+                    task_id,
+                    stage,
+                    rid,
+                    _question_text(question),
+                    _question_ids(question),
+                )
+            except Exception:  # retried next loop; never fatal
+                continue
+            unraised.pop(rid, None)
+            last_answer_check = time.monotonic()
         if (
             done is None
             and pending
+            and not (interrupt is not None and interrupt.is_set())
             and time.monotonic() - last_answer_check >= _ANSWER_POLL
         ):
             last_answer_check = time.monotonic()
@@ -1346,6 +1440,8 @@ def _wait_loop(
                     answer = _answer_from_store(tasks_path, item_id)
                 if answer is None:
                     continue
+                if interrupt is not None and interrupt.is_set():
+                    break  # the abort below takes over
                 try:
                     client.call(
                         "answer_question",
@@ -1354,7 +1450,15 @@ def _wait_loop(
                             "request_id": rid,
                             **_answer_args(answer),
                         },
+                        None,
+                        interrupt,
                     )
+                except EngineError as exc:
+                    if exc.reason != "cancelled":
+                        raise
+                    # Stopped mid-reply: leave the item open (the answer
+                    # never landed) and let the abort below run now.
+                    break
                 except SandboxUnavailable as exc:
                     if "stale_answer" not in str(exc):
                         # Wrapper-level failure: propagate per the

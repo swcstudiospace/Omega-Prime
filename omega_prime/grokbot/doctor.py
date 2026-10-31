@@ -903,7 +903,7 @@ class GrokBotDoctor:
         counts: dict[str, int] = {}
         overdue = 0
         family_by_kind = {
-            **{kind: "heartbeat" for kind in _HEARTBEAT_JOB_KINDS},
+            **dict.fromkeys(_HEARTBEAT_JOB_KINDS, "heartbeat"),
             "purple_cycle": "redteam",
         }
         off_families: dict[str, int] = {}
@@ -955,8 +955,8 @@ class GrokBotDoctor:
             )
             messages.append(f"Scheduled family disabled by configuration ({disabled}).")
         required_bindings = {
-            **{kind: ("prime_heartbeat",) for kind in _HEARTBEAT_JOB_KINDS},
-            **{kind: ("desk_driver",) for kind in _DESK_DRIVER_JOB_KINDS},
+            **dict.fromkeys(_HEARTBEAT_JOB_KINDS, ("prime_heartbeat",)),
+            **dict.fromkeys(_DESK_DRIVER_JOB_KINDS, ("desk_driver",)),
             "prompt": ("desk_driver", "delegate_parent"),
         }
         unobserved = [

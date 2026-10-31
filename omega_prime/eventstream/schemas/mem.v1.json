@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:omega:schema:mem:1",
+  "$defs": {
+    "omega.mem.hindsight.retained": {
+      "$id": "urn:omega:schema:omega.mem.hindsight.retained:1",
+      "title": "Hindsight memory retained",
+      "description": "A memory record was retained in the named bank.",
+      "type": "object",
+      "properties": {
+        "bank": {"type": "string", "minLength": 1},
+        "record_id": {"type": "string", "minLength": 1},
+        "text": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1}
+      },
+      "required": ["bank", "record_id", "text", "source"],
+      "additionalProperties": false,
+      "examples": [{"bank": "engineering", "record_id": "mem-204", "text": "Use exponential backoff for transient broker errors.", "source": "incident-882"}],
+      "x-omega-invalid-examples": [{"bank": "engineering", "record_id": "mem-204", "text": "Use exponential backoff.", "source": ""}, {"bank": "engineering", "record_id": "mem-204", "text": "", "source": "incident-882"}]
+    },
+    "omega.mem.hindsight.teach_failed": {
+      "$id": "urn:omega:schema:omega.mem.hindsight.teach_failed:1",
+      "title": "Hindsight teaching failed",
+      "description": "A memory teaching attempt failed with a sanitized reason.",
+      "type": "object",
+      "properties": {
+        "bank": {"type": "string", "minLength": 1},
+        "record_id": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "required": ["bank", "record_id", "reason"],
+      "additionalProperties": false,
+      "examples": [{"bank": "engineering", "record_id": "mem-204", "reason": "embedding service unavailable"}],
+      "x-omega-invalid-examples": [{"bank": "engineering", "record_id": "mem-204", "reason": ""}, {"bank": "engineering", "reason": "embedding service unavailable"}]
+    }
+  }
+}

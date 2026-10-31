@@ -1,0 +1,254 @@
+{
+  "task_id": "00050-pr87-greptile-r1",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-23T03:36:00Z",
+  "completed_at": "2026-10-23T04:10:17Z",
+  "commands": [
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; cd /tmp/repro && PYTHONPATH=/tmp/repro timeout 600 python -m pytest omega_prime/tests/ci_runners -q -p no:cacheprovider --continue-on-collection-errors",
+      "exit_code": 1,
+      "duration_s": 3.3,
+      "output_tail": "ERROR omega_prime/tests/ci_runners/test_github.py | ERROR omega_prime/tests/ci_runners/test_scaler.py | 26 failed, 103 passed, 1 skipped, 9 errors in 2.96s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; ruff check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": "\u001b[1;32mAll checks passed!\u001b[0m"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; ruff format --check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": "713 files already formatted"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; mypy omega_prime/",
+      "exit_code": 0,
+      "duration_s": 1.5,
+      "output_tail": "Success: no issues found in 586 source files"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; polyglot-check --changed HEAD",
+      "exit_code": 0,
+      "duration_s": 18.2,
+      "output_tail": "polyglot-check: 0 error(s), 0 warning(s) in 31/31 file(s) checked [pyright] 18121ms (daemon)"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m pytest omega_prime/tests/ci_runners -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 2.7,
+      "output_tail": "........................................................................ [ 77%] | ....................................s.........................           [100%] | 277 passed, 1 skipped in 2.36s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; PYTHONPATH=/tmp/covlib python -m coverage run --branch --source=omega_prime.ci_runners -m pytest omega_prime/tests/ci_runners -q -p no:cacheprovider && PYTHONPATH=/tmp/covlib python -m coverage report --include='*/ci_runners/scaler.py,*/ci_runners/jobs.py,*/ci_runners/demand.py,*/ci_runners/delayed.py,*/ci_runners/controller.py,*/ci_runners/settings.py,*/ci_runners/webhook.py,*/ci_runners/github.py,*/ci_runners/desktop.py,*/ci_runners/http.py,*/ci_runners/agent/supervisor.py' && PYTHONPATH=/tmp/covlib python -m coverage report --include='*/ci_runners/scaler.py' --fail-under=90",
+      "exit_code": 0,
+      "duration_s": 4.6,
+      "output_tail": "TOTAL                                311      1    122      4    99% | /tmp/covlib/coverage/core.py:108: CoverageWarning: Couldn't import C tracer: No module named 'coverage.tracer' (no-ctracer); see https://coverage.readthedocs.io/en/7.17.0/messages.html#warning-no-ctracer |   warn(f\"Couldn't import C tracer: {IMPORT_ERROR}\", slug=\"no-ctracer\", once=True)"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_env_inventory.py omega_prime/tests/test_tool_catalog.py omega_prime/tests/test_prompt_format.py omega_prime/tests/test_grokbot_plugin.py -q -p no:cacheprovider",
+      "exit_code": 1,
+      "duration_s": 22.6,
+      "output_tail": "FAILED omega_prime/tests/test_env_inventory.py::test_production_checkout_is_collectable | FAILED omega_prime/tests/test_env_inventory.py::test_committed_inventory_check_contract | 2 failed, 133 passed, 1 warning in 21.17s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m pip check",
+      "exit_code": 0,
+      "duration_s": 0.4,
+      "output_tail": "No broken requirements found."
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m omega_prime.evals.runner omega_prime/evals/cases",
+      "exit_code": 0,
+      "duration_s": 0.1,
+      "output_tail": "PASS redteam-ultrathink-mark-unapproved | PASS redteam-policy-empty-deny | 26 passed, 0 failed"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; bash omega_prime/scripts/assemble-prompts.sh --check",
+      "exit_code": 0,
+      "duration_s": 0.1,
+      "output_tail": "assemble-prompts --check: OMEGA_PRIME up to date"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m omega_prime.tooling.env_inventory --root . --check",
+      "exit_code": 1,
+      "duration_s": 6.5,
+      "output_tail": "env_inventory: omega_prime/tooling/env_inventory_policy.json:1: omega_prime/ci_runners/settings.py:_secret_file: InvalidHelperDefinition"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_env_inventory.py omega_prime/tests/test_tool_catalog.py omega_prime/tests/test_prompt_format.py omega_prime/tests/test_grokbot_plugin.py -q -p no:cacheprovider",
+      "exit_code": 1,
+      "duration_s": 23.3,
+      "output_tail": "FAILED omega_prime/tests/test_env_inventory.py::test_production_checkout_is_collectable | FAILED omega_prime/tests/test_env_inventory.py::test_committed_inventory_check_contract | 2 failed, 133 passed, 1 warning in 21.72s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m omega_prime.grokbot.readiness --root . --json --output /tmp/readiness-00050.json",
+      "exit_code": 0,
+      "duration_s": 9.6,
+      "output_tail": "ame\": \"tempest_white_roe\", \"prerequisites\": [], \"status\": \"feature_disabled\"}, {\"evidence\": [\"redteam.enabled=false verified absent\"], \"family\": \"Red Team\", \"name\": \"tempest_hats_list\", \"prerequisites\": [], \"status\": \"feature_disabled\"}, {\"evidence\": [\"redteam.enabled=false verified absent\"], \"family\": \"Red Team\", \"name\": \"tempest_hat_dispatch\", \"prerequisites\": [], \"status\": \"feature_disabled\"}]}"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m omega_prime.tooling.env_inventory --root . --check",
+      "exit_code": 1,
+      "duration_s": 6.0,
+      "output_tail": "env_inventory: /workspace/omes-bot-00050/docs/configuration.md:1: <output>: OutputDrift"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_env_inventory.py omega_prime/tests/test_tool_catalog.py omega_prime/tests/test_prompt_format.py omega_prime/tests/test_grokbot_plugin.py -q -p no:cacheprovider",
+      "exit_code": 1,
+      "duration_s": 22.3,
+      "output_tail": "=========================== short test summary info ============================ | FAILED omega_prime/tests/test_env_inventory.py::test_committed_inventory_check_contract | 1 failed, 134 passed, 1 warning in 21.53s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m omega_prime.tooling.env_inventory --root . --check",
+      "exit_code": 0,
+      "duration_s": 6.2,
+      "output_tail": ""
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_env_inventory.py omega_prime/tests/test_tool_catalog.py omega_prime/tests/test_prompt_format.py omega_prime/tests/test_grokbot_plugin.py -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 22.1,
+      "output_tail": "    import audioop | -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html | 135 passed, 1 warning in 21.19s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m pytest omega_prime/tests -q -p no:cacheprovider",
+      "exit_code": 1,
+      "duration_s": 300.9,
+      "output_tail": "FAILED omega_prime/tests/test_prime_kernel_skills.py::test_load_skill_edit_replaces_a_unique_string | FAILED omega_prime/tests/test_prime_kernel_skills.py::test_list_skills_does_not_import_attach_image | 17 failed, 5972 passed, 22 skipped, 16 warnings in 299.05s (0:04:59)"
+    },
+    {
+      "cmd": "comm -13 <(grep ^FAILED /tmp/head-suite.txt | cut -d' ' -f2 | sort) <(grep ^FAILED /tmp/wt-suite.txt | cut -d' ' -f2 | sort) | grep -c . ; test $? -eq 1",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": "0"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_env_inventory.py -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 13.5,
+      "output_tail": ".......................................................                  [100%] | 55 passed in 13.15s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m omega_prime.tooling.env_inventory --root . --check",
+      "exit_code": 0,
+      "duration_s": 6.2,
+      "output_tail": ""
+    }
+  ],
+  "claims": [
+    {
+      "claim": "The new regression tests reproduce the Greptile findings: run against the pre-fix ci_runners source they fail (26 failed, 9 errors).",
+      "evidence_command_index": 0,
+      "expects_failure": true
+    },
+    {
+      "claim": "Ruff lint passes for omega_prime/.",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "Ruff format check passes for omega_prime/.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Mypy passes for omega_prime/.",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "polyglot-check reports 0 errors on all changed files.",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "The ci_runners package suite passes (277 passed, 1 skipped).",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "Scaler-core branch coverage is 99%, above the 90% gate (--fail-under=90).",
+      "evidence_command_index": 6
+    },
+    {
+      "claim": "pip check, evals and prompt assembly check pass.",
+      "evidence_command_index": 8
+    },
+    {
+      "claim": "Readiness report generates successfully.",
+      "evidence_command_index": 13
+    },
+    {
+      "claim": "Env inventory policy and generated configuration doc are current after re-pinning the two changed settings helpers.",
+      "evidence_command_index": 21
+    },
+    {
+      "claim": "Docs, public-repo and env-inventory tests pass with the final docs.",
+      "evidence_command_index": 20
+    },
+    {
+      "claim": "Full omega_prime/tests suite fails only on pre-existing environmental tests (17 failed; prime-kernel/oneclick).",
+      "evidence_command_index": 18,
+      "expects_failure": true
+    },
+    {
+      "claim": "Every full-suite failure on this change also fails on the base commit bd8bb17 (no new failures).",
+      "evidence_command_index": 19
+    }
+  ],
+  "unverified": [
+    "No live GitHub webhook, JIT runner registration or App installation-token exchange; GitHub is faked in tests.",
+    "No Railway desktop wake or real agent HTTP round trip over the network; the desktop client is driven by scripted transports.",
+    "Pulsar delayed delivery of RetryDeadline is tested with a fake producer/consumer, not a live broker.",
+    "Controller restart demand replay tested with an on-disk JSON file in tmp, not under systemd on the VPS.",
+    "0600 secret-file enforcement not exercised on the VPS filesystem; the operator docs were updated but no host was changed (held).",
+    "17 full-suite failures (test_prime_kernel_* and test_grokbot_oneclick) are environmental on this box (uninitialised prime-agent submodule); they were compared against the base commit rather than fixed.",
+    "Greptile re-review and GitHub Actions results are recorded after push, not in this receipt."
+  ],
+  "files_changed": [
+    "deploy/ci-runner-controller/env.example",
+    "deploy/ci-runner-controller/omega-ci-autoscaler.service",
+    "docs/ci-runners-repo-setup.md",
+    "docs/ci-runners.md",
+    "docs/configuration.md",
+    "omega_prime/ci_runners/agent/supervisor.py",
+    "omega_prime/ci_runners/app.py",
+    "omega_prime/ci_runners/controller.py",
+    "omega_prime/ci_runners/delayed.py",
+    "omega_prime/ci_runners/demand.py",
+    "omega_prime/ci_runners/desktop.py",
+    "omega_prime/ci_runners/github.py",
+    "omega_prime/ci_runners/http.py",
+    "omega_prime/ci_runners/jobs.py",
+    "omega_prime/ci_runners/publisher.py",
+    "omega_prime/ci_runners/scaler.py",
+    "omega_prime/ci_runners/settings.py",
+    "omega_prime/ci_runners/webhook.py",
+    "omega_prime/tests/ci_runners/_fakes.py",
+    "omega_prime/tests/ci_runners/_rig.py",
+    "omega_prime/tests/ci_runners/_runner.py",
+    "omega_prime/tests/ci_runners/_secrets.py",
+    "omega_prime/tests/ci_runners/_support.py",
+    "omega_prime/tests/ci_runners/test_app.py",
+    "omega_prime/tests/ci_runners/test_controller.py",
+    "omega_prime/tests/ci_runners/test_delayed.py",
+    "omega_prime/tests/ci_runners/test_demand.py",
+    "omega_prime/tests/ci_runners/test_desktop.py",
+    "omega_prime/tests/ci_runners/test_desktop_entrypoint.py",
+    "omega_prime/tests/ci_runners/test_github.py",
+    "omega_prime/tests/ci_runners/test_http.py",
+    "omega_prime/tests/ci_runners/test_publisher.py",
+    "omega_prime/tests/ci_runners/test_scaler.py",
+    "omega_prime/tests/ci_runners/test_settings.py",
+    "omega_prime/tests/ci_runners/test_supervisor.py",
+    "omega_prime/tests/ci_runners/test_webhook.py",
+    "omega_prime/tooling/env_inventory_policy.json",
+    ".receipts/bot-00-omega-prime/00050-pr87-greptile-r1.json"
+  ],
+  "contract_changes": [
+    "SecretFile/SecretValue now require an audience and read through omega_prime.credentials.CredentialBroker; secret files must be mode 0600 (was tolerated at 0640).",
+    "New setting OMEGA_CI_DEMAND_PATH (default ~/.omega/ci-runners/demand.json).",
+    "New runner event kinds: finished, launch_backoff, launch_retry, launch_circuit_open, launch_circuit_closed.",
+    "New delayed event type omega.ci.runner.retry_deadline."
+  ],
+  "rollback_plan": "Revert the PR #87 round-1 commit; no deploy or host change was made.",
+  "approvals": [],
+  "approved_by": null
+}

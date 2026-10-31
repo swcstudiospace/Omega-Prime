@@ -66,7 +66,7 @@ class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
         current = req.full_url if isinstance(req.full_url, str) else ""
         if not _same_origin(current, newurl):
             _drain(fp)
-            raise _CrossOriginRedirect()
+            raise _CrossOriginRedirect
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         return redirected if isinstance(redirected, urllib.request.Request) else None
 

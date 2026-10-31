@@ -1,0 +1,222 @@
+{
+  "task_id": "00053-ci-public-fork-guard",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-23T15:08:00Z",
+  "completed_at": "2026-10-23T16:25:00Z",
+  "base_commit": "7b1dd74",
+  "commands": [
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; cd /tmp/r53/pre && PYTHONPATH=/tmp/r53/pre timeout 120 python -m pytest omega_prime/tests/ci_runners/test_forkguard.py -q -p no:cacheprovider -k 'finished_during or queued_after or restart_during'",
+      "exit_code": 1,
+      "duration_s": 0.6,
+      "output_tail": "\nomega_prime/tests/ci_runners/test_forkguard.py:387: AssertionError\n=========================== short test summary info ============================\nFAILED omega_prime/tests/ci_runners/test_forkguard.py::test_job_finished_during_lookup_leaves_no_demand[in_progress]\nFAILED omega_prime/tests/ci_runners/test_forkguard.py::test_job_finished_during_lookup_leaves_no_demand[completed]\nFAILED omega_prime/tests/ci_runners/test_forkguard.py::test_queued_after_completed_is_dropped[False]\nFAILED omega_prime/tests/ci_runners/test_forkguard.py::test_restart_during_lookup_replays_and_reverifies\n4 failed, 1 passed, 35 deselected in 0.24s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m pytest omega_prime/tests/ci_runners -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 4.2,
+      "output_tail": "........................................................................ [ 18%]\n........................................................................ [ 37%]\n........................................................................ [ 55%]\n........................................................................ [ 74%]\n........................................................................ [ 93%]\ns.........................                                               [100%]\n385 passed, 1 skipped in 3.86s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m pytest omega_prime/tests/ci_runners/test_forkguard.py omega_prime/tests/ci_runners/test_jobhook.py omega_prime/tests/ci_runners/test_desktop_image.py -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 1.7,
+      "output_tail": "........................................................................ [ 93%]\n.....                                                                    [100%]\n77 passed in 1.39s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; ruff check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": "\u001b[1;32mAll checks passed!\u001b[0m"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; ruff format --check omega_prime/",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": "771 files already formatted"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; mypy omega_prime/",
+      "exit_code": 0,
+      "duration_s": 1.3,
+      "output_tail": "Success: no issues found in 644 source files"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; polyglot-check --no-daemon --changed HEAD",
+      "exit_code": 0,
+      "duration_s": 5.6,
+      "output_tail": "polyglot-check: 0 error(s), 0 warning(s) in 7/7 file(s) checked [pyright] 5572ms"
+    },
+    {
+      "cmd": "sh -n deploy/ci-runner-desktop/job-started.sh && test -x deploy/ci-runner-desktop/job-started.sh",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": ""
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_env_inventory.py -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 16.2,
+      "output_tail": ".......................................................                  [100%]\n55 passed in 15.80s"
+    },
+    {
+      "cmd": "export PATH=/workspace/omes-bot/.venv/bin:$PATH; python -m omega_prime.tooling.env_inventory --root . --check",
+      "exit_code": 0,
+      "duration_s": 7.3,
+      "output_tail": ""
+    },
+    {
+      "cmd": "git status --porcelain --ignored | grep -E '\\.venv|\\.coverage|coverage\\.data' ; test $? -eq 1",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": ""
+    },
+    {
+      "cmd": "cd /tmp/r53b/pre (git archive 13b2946 + round-2 tests) && PYTHONPATH=/tmp/r53b/pre python -m pytest omega_prime/tests/ci_runners/test_forkguard.py omega_prime/tests/ci_runners/test_jobhook.py -q -p no:cacheprovider",
+      "exit_code": 1,
+      "duration_s": 0.6,
+      "output_tail": "FAILED test_forkguard.py::test_job_accepted_during_startup_is_durable_with_saved_demand\nFAILED test_forkguard.py::test_private_job_queued_but_unprocessed_survives_restart\nFAILED test_forkguard.py::test_unpersistable_job_is_not_acknowledged[True]\nFAILED test_forkguard.py::test_unpersistable_job_is_not_acknowledged[False]\nFAILED test_jobhook.py::test_agent_settings\nFAILED test_jobhook.py::test_custom_policy_path_cannot_strand_the_guard\n6 failed, 72 passed in 0.61s"
+    },
+    {
+      "cmd": "/workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/ci_runners -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 6.8,
+      "output_tail": "390 passed, 1 skipped in 6.76s"
+    },
+    {
+      "cmd": "/workspace/omes-bot/.venv/bin/python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py omega_prime/tests/test_env_inventory.py -q -p no:cacheprovider",
+      "exit_code": 0,
+      "duration_s": 17.2,
+      "output_tail": "55 passed in 17.23s"
+    },
+    {
+      "cmd": "ruff check omega_prime/ && ruff format --check omega_prime/ && mypy omega_prime/",
+      "exit_code": 0,
+      "duration_s": 3.0,
+      "output_tail": "All checks passed!\n771 files already formatted\nSuccess: no issues found in 644 source files"
+    },
+    {
+      "cmd": "polyglot-check --no-daemon --changed HEAD",
+      "exit_code": 0,
+      "duration_s": 5.0,
+      "output_tail": "polyglot-check: 0 error(s), 0 warning(s) in 6/6 file(s) checked [pyright]"
+    },
+    {
+      "cmd": "python -m omega_prime.tooling.env_inventory --check",
+      "exit_code": 0,
+      "duration_s": 8.0,
+      "output_tail": ""
+    },
+    {
+      "cmd": "/workspace/omes-bot-00046/.venv/bin/python -m pytest omega_prime/tests -q -p no:cacheprovider -rf (Python 3.13.5)",
+      "exit_code": 1,
+      "duration_s": 354.2,
+      "output_tail": "17 failed, 6469 passed, 22 skipped, 15 warnings in 354.15s. All 17 are outside ci_runners (test_prime_kernel_* ModuleNotFoundError in this venv, test_grokbot_oneclick::test_oneclick_dry_run_sse) and also fail on a clean archive of 13b2946 run the same way (29 failed there); none are new."
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Default OMEGA_CI_PUBLIC_REPOS is empty: public-repository jobs are refused (reason public_not_opted_in) with no GitHub call, and private-repository behaviour is unchanged.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "For an opted-in public repository, a same-repo push run launches exactly one runner, and the run lookup precedes the JIT config call.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Fork pull_request, pull_request_target, other events, run 404, lookup errors (500, 401, transport, non-object body) are refused fail-closed and emit omega.ci.runner.refused with a reason; errors are not cached.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "One run lookup per workflow run (concurrent jobs share the in-flight lookup; later jobs use the cached verdict); restart replay re-verifies saved public jobs.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Whole ci_runners suite, ruff, format, mypy, pyright (polyglot), docs/env-inventory tests pass.",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "Greptile round 1 P2: head_repository.fork must be an explicit false; missing, null or non-boolean fork is refused as head_unknown.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Pre-fix controller (HEAD 79b857d controller.py): the new tests fail. A job finishing during its run lookup leaves demand and launches; a public queued event after completed launches; a restart mid-lookup loses the accepted job.",
+      "evidence_command_index": 0,
+      "expects_failure": true
+    },
+    {
+      "claim": "Greptile P1 (stale demand): a queued event after in_progress/completed, or one whose job advanced during the lookup, is ignored; no runner is launched and the queue stays empty.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Greptile P1 (restart): an accepted public job is on disk before its lookup, replays after a restart mid-lookup, is re-verified (run lookup before JIT) and served; a refused one is removed.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Greptile P1 (refused forks get runners): the runner-side pre-job hook refuses non-allowlisted repos, pull_request_target, fork/other-repo/unknown-head pull requests, and non-allowlisted events for non-private repos, failing closed on missing or unparseable data; the shipped script refuses under a hostile PYTHONPATH (-I); the agent sets ACTIONS_RUNNER_HOOK_JOB_STARTED itself in the child env and writes the root-owned policy; Dockerfile pins are asserted intact.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Greptile r2 P1: OMEGA_CI_AGENT_JOB_POLICY accepts only /var/lib/omega-ci/job-policy.json (the path job-started.sh hard-codes); any other value is a SettingsError at agent startup, so the agent can no longer write an allowlist the shipped guard never reads. Covered end to end (settings -> Supervisor.prepare write -> shipped script).",
+      "evidence_command_index": 12
+    },
+    {
+      "claim": "A 202 means the job is on disk: every accepted queued pool job (public or private) is written to the demand file before offer_job returns True, including during startup (merged with the not-yet-reconciled saved demand) and while waiting in the worker queue; a restart replays it and re-verifies public ones. If the write fails, offer_job returns False (503, delivery not committed) and demand_persist is published.",
+      "evidence_command_index": 12
+    },
+    {
+      "claim": "The new restart / persistence / policy-path tests fail on the round-1 head 13b2946 and pass with the fix.",
+      "evidence_command_index": 11
+    }
+  ],
+  "unverified": [
+    "No live public-repo webhook against GitHub: behaviour is exercised in-process with fake transports (no sockets).",
+    "Full omega_prime/tests suite not re-run; only ci_runners, docs, public-repo and env-inventory tests.",
+    "Controller not started on the VPS (held: runner group omega-ci missing, github-pat file not written).",
+    "The pre-job hook has not run inside a real actions/runner on the built image (no image build here: heavy, and the Railway deploy is an operator step). The shipped script runs in tests with only its interpreter, module and policy paths rewritten; the Dockerfile runs it once at build and requires a refusal.",
+    "OMEGA_CI_AGENT_REPOS is not yet set on the Railway Desktop service. Until it is, a redeployed image fails every job closed (operator step).",
+    "Round 2: full omega_prime/tests suite run locally with 17 pre-existing environment failures outside ci_runners (same tests fail on a clean archive of 13b2946); CI on the pushed head is the authority."
+  ],
+  "files_changed": [
+    ".receipts/bot-00-omega-prime/00053-ci-public-fork-guard.json",
+    "CHANGELOG.md",
+    "deploy/ci-runner-controller/Caddyfile.snippet",
+    "deploy/ci-runner-controller/env.example",
+    "deploy/ci-runner-controller/nginx-site.conf.example",
+    "deploy/ci-runner-controller/omega-ci-autoscaler.service",
+    "deploy/ci-runner-desktop/Dockerfile",
+    "deploy/ci-runner-desktop/README.md",
+    "deploy/ci-runner-desktop/job-started.sh",
+    "docs/ci-runners-repo-setup.md",
+    "docs/ci-runners.md",
+    "docs/configuration.md",
+    "omega_prime/ci_runners/agent/app.py",
+    "omega_prime/ci_runners/agent/jobhook.py",
+    "omega_prime/ci_runners/agent/supervisor.py",
+    "omega_prime/ci_runners/app.py",
+    "omega_prime/ci_runners/controller.py",
+    "omega_prime/ci_runners/demand.py",
+    "omega_prime/ci_runners/forkguard.py",
+    "omega_prime/ci_runners/github.py",
+    "omega_prime/ci_runners/jobs.py",
+    "omega_prime/ci_runners/publisher.py",
+    "omega_prime/ci_runners/scaler.py",
+    "omega_prime/ci_runners/settings.py",
+    "omega_prime/tests/ci_runners/_rig.py",
+    "omega_prime/tests/ci_runners/test_demand.py",
+    "omega_prime/tests/ci_runners/test_forkguard.py",
+    "omega_prime/tests/ci_runners/test_jobhook.py",
+    "omega_prime/tooling/env_inventory_policy.json"
+  ],
+  "contract_changes": [
+    "New optional env OMEGA_CI_PUBLIC_REPOS (subset of OMEGA_CI_REPOS, default empty).",
+    "New event omega.ci.runner.refused {job_id, run_id, repo, reason}.",
+    "demand.json entries gain a 'public' boolean; older files load as non-public unless private is false and visibility public.",
+    "Desktop agent: new OMEGA_CI_AGENT_REPOS (required for jobs to run), OMEGA_CI_AGENT_JOB_HOOK, OMEGA_CI_AGENT_JOB_POLICY; the image sets the latter two and every runner gets ACTIONS_RUNNER_HOOK_JOB_STARTED.",
+    "Controller: queued after in_progress/completed for the same job id is acknowledged and ignored (bounded memory 4096); pending-lookup public jobs are included in demand.json.",
+    "OMEGA_CI_AGENT_JOB_POLICY: only /var/lib/omega-ci/job-policy.json is accepted (other values are a SettingsError). POST /github/webhook answers 503 (not committed) when the demand file cannot be written for a queued pool job."
+  ],
+  "rollback_plan": "Revert the PR. With OMEGA_CI_PUBLIC_REPOS unset the controller matches main except that stale queued redeliveries are ignored. Reverting also removes the Desktop pre-job hook; no host or Railway change was made by this PR.",
+  "approvals": [],
+  "approved_by": null
+}

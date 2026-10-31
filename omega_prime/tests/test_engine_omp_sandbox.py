@@ -22,6 +22,8 @@ are asserted (T-112-10).
 from __future__ import annotations
 
 import json
+import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -39,6 +41,7 @@ from omega_prime.engine.omp_driver import probe, run
 from omega_prime.engine.sandbox_omp import (
     ANDA_BIN_ENV,
     BACKEND_ENV,
+    TOOLS_WAIVER_ENV,
     WORKSPACE_ROOTS_ENV,
 )
 from omega_prime.tests.test_engine import _env, _install_fake
@@ -282,7 +285,7 @@ for line in sys.stdin:
             emit({"event": "question", "stageId": stage_id, "requestId": "req-1", **QUESTION})
             emit({"event": "question", "stageId": stage_id, "requestId": "req-2", **MULTI})
             continue
-        if behavior in ("question", "question_reask"):
+        if behavior in ("question", "question_reask", "answer_hangs"):
             # The real wrapper holds stage_done until answer_question:
             # one question at a time, a requestId per ask (e2e.py).
             pending = {"stage": stage_id, "request": "req-1", "answered": False}
@@ -316,6 +319,9 @@ for line in sys.stdin:
                     emit({"event": "stage_done", "stageId": stage_id, "status": "completed"})
                 continue
             emit(stale)
+            continue
+        if behavior == "answer_hangs":
+            # The wrapper stays alive but never replies to the answer.
             continue
         if behavior == "question_reask" and pending is not None and not reasked:
             # The first answer ALWAYS arrives stale: the ask was already
@@ -357,7 +363,7 @@ for line in sys.stdin:
             hanging = False
         continue
     if tool == "sandbox_status":
-        if behavior == "status_fail":
+        if behavior in ("status_fail", "status_and_export_fail"):
             emit({"id": rid, "ok": False, "error": "status broke", "code": "error"})
             continue
         final = LONG_TEXT if behavior == "long" else "fake final text"
@@ -381,6 +387,9 @@ for line in sys.stdin:
         })
         continue
     if tool == "export_commits":
+        if behavior == "status_and_export_fail":
+            emit({"id": rid, "ok": False, "error": "export broke", "code": "error"})
+            continue
         exports += 1
         emit({
             "id": rid,
@@ -427,8 +436,8 @@ def _install_fake_anda(tmp_path: Path, behavior: str) -> tuple[Path, Path]:
 _HERDR_FAKE = r'''#!/usr/bin/env python3
 """Fake herdr runner: argv receipts beside itself, mode-baked output.
 
-``ok`` mode prints a workspace line whose last whitespace token is the
-pane id (the pinned parse contract) and exits 0 for create/run;
+``ok`` mode prints the JSON create reply ``herdr_launch`` parses
+(``result.root_pane.pane_id``) and exits 0 for create/run;
 ``fail`` mode exits 1 on every call, receipts still written. The create
 receipt carries the exact pane id it printed so tests can compare the
 row's ``herdr_pane`` against what the launcher parsed. Stdlib only, no
@@ -445,16 +454,36 @@ argv = sys.argv[1:]
 row = {"argv": argv}
 created = MODE == "ok" and argv[:2] == ["workspace", "create"]
 if created:
-    row["pane"] = "pane-%d" % os.getpid()
+    row["pane"] = "w1:p%d" % os.getpid()
 with open(LOG, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(row) + "\n")
 if created:
-    sys.stdout.write("workspace created %s\n" % row["pane"])
+    sys.stdout.write(
+        json.dumps({"result": {"root_pane": {"pane_id": row["pane"]}}}) + "\n"
+    )
     sys.exit(0)
 if MODE == "ok" and argv[:2] == ["pane", "run"]:
     sys.exit(0)
 sys.exit(1)
 '''
+
+
+def _watch_argv(job_id: str, state: Path) -> list[str]:
+    """The pinned watcher argv: explicit import root, then the module run."""
+    import omega_prime
+
+    root = str(Path(omega_prime.__file__).resolve().parent.parent)
+    return [
+        shutil.which("env") or "/usr/bin/env",
+        f"PYTHONPATH={root}",
+        sys.executable,
+        "-m",
+        "omega_prime.engine.watch",
+        job_id,
+        "--follow",
+        "--state-dir",
+        str(state.resolve()),
+    ]
 
 
 def _install_fake_herdr(tmp_path: Path, mode: str = "ok") -> tuple[Path, Path]:
@@ -599,24 +628,41 @@ def _backend_env(
             BACKEND_ENV: "omp-sandbox",
             ANDA_BIN_ENV: str(anda),
             WORKSPACE_ROOTS_ENV: str(roots),
+            TOOLS_WAIVER_ENV: "1",
             **extra,
         },
     )
 
 
 def _row(task_id: str, state: str = "working", **extra: object) -> dict:
-    row: dict = {"id": task_id, "state": state}
+    row: dict = {
+        "id": task_id,
+        "title": task_id,
+        "owner": {"kind": "engine", "ref": task_id},
+        "state": state,
+    }
     row.update(extra)
     return row
 
 
 def _seed(path: Path, rows: list[dict]) -> Path:
+    """A dashboard tasks.json v1 (the validated store on main)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"tasks": rows, "waiting_on_ove": []}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    payload = {
+        "version": 1,
+        "updated_at": "2026-10-31T00:00:00+00:00",
+        "tasks": rows,
+        "waiting_on_ove": [],
+        "finished": [],
+        "next_seq": 1,
+        "identity_registry": {},
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def _id_state(row: dict) -> dict:
+    return {"id": row["id"], "state": row["state"]}
 
 
 # --- W112-05: the run contract through the real engine -----------------------
@@ -776,7 +822,7 @@ def test_tier_unavailable_raises_exactly_one_sandbox_item(tmp_path: Path) -> Non
     items = data["waiting_on_ove"]
     assert [item["id"] for item in items] == ["gb:tier:sandbox_unavailable"]
     assert items[0]["blocks"] == "engine sandbox gate (sandbox_unavailable)"
-    assert data["tasks"][0] == {"id": "gb:tier", "state": "blocked"}
+    assert _id_state(data["tasks"][0]) == {"id": "gb:tier", "state": "blocked"}
     # The run stopped at the up refusal: only up and the shutdown ran.
     assert _wrapper_tools(log) == ["up", "down"]
     # A retried run upserts instead of duplicating (one item, stable id).
@@ -824,7 +870,7 @@ def test_plan_not_allowed_raises_one_item_without_spawning(tmp_path: Path) -> No
     items = data["waiting_on_ove"]
     assert [item["id"] for item in items] == ["gb:gate:plan_not_allowed"]
     assert items[0]["blocks"] == "engine plan gate (plan_not_allowed)"
-    assert data["tasks"][0] == {"id": "gb:gate", "state": "blocked"}
+    assert _id_state(data["tasks"][0]) == {"id": "gb:gate", "state": "blocked"}
     # The gate refused before any wrapper spawn: the canary left no log.
     assert not log.exists()
     assert _wrapper_log(log) == []
@@ -1059,7 +1105,7 @@ def test_tracked_run_lands_a_row_working_to_done(tmp_path: Path) -> None:
     roots = tmp_path / "roots"
     work = _git_worktree(roots)
     env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
-    other = _row("gb:other", "queued", owner="sol", nested={"keep": [1, 2, 3]})
+    other = _row("gb:other", "queued", owner={"kind": "agent", "ref": "sol"})
     store = _seed(tmp_path / "tasks.json", rows=[other])
     result = run(
         "plan the thing",
@@ -1077,7 +1123,8 @@ def test_tracked_run_lands_a_row_working_to_done(tmp_path: Path) -> None:
     assert row["state"] == "done"
     receipts = _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
     create = next(e for e in receipts if e["argv"][:2] == ["workspace", "create"])
-    assert row["herdr_pane"] == create["pane"]
+    assert row["pane"] == create["pane"]
+    assert row["herdr_pane"] == {"pane_id": create["pane"]}
     started = datetime.fromisoformat(row["started_at"])
     activity = datetime.fromisoformat(row["last_activity_at"])
     assert started <= activity
@@ -1098,8 +1145,11 @@ def test_tracked_run_lands_a_row_working_to_done(tmp_path: Path) -> None:
         "via",
     }
     assert row["receipt"]["export"]["via"] == "fake"
-    # An unrelated row's unknown fields survive the run byte-for-byte.
-    assert next(r for r in data["tasks"] if r["id"] == "gb:other") == other
+    # An unrelated row keeps its identity, owner and state through the run.
+    kept = next(r for r in data["tasks"] if r["id"] == "gb:other")
+    assert {k: kept[k] for k in ("id", "title", "owner", "state")} == {
+        k: other[k] for k in ("id", "title", "owner", "state")
+    }
 
 
 def test_pane_label_and_watch_argv_are_pinned(tmp_path: Path) -> None:
@@ -1133,17 +1183,12 @@ def test_pane_label_and_watch_argv_are_pinned(tmp_path: Path) -> None:
         "gb:argv plan",
         "--no-focus",
     ]
+    # One shell string, as herdr_launch.launch sends it.
     assert pane_run["argv"] == [
         "pane",
         "run",
         create["pane"],
-        sys.executable,
-        "-m",
-        "omega_prime.engine.watch",
-        "job-argv",
-        "--follow",
-        "--state-dir",
-        str((tmp_path / "state").resolve()),
+        shlex.join(_watch_argv("job-argv", tmp_path / "state")),
     ]
 
 
@@ -1177,7 +1222,8 @@ def test_tmux_fallback_records_the_session(tmp_path: Path) -> None:
     data = _read_tasks(store)
     row = next(r for r in data["tasks"] if r["id"] == "gb:tmux")
     assert row["state"] == "done"
-    assert row["herdr_pane"] == "tmux:omega-job-tmux"
+    assert row["pane"] == "tmux:omega-job-tmux"
+    assert row["herdr_pane"] is None, "a tmux session is not an attachable herdr pane"
     receipts = _jsonl(tmp_path / "bin" / "tmux-log.jsonl")
     assert receipts[0]["argv"] == ["has-session", "-t", "omega-job-tmux"]
     assert receipts[1]["argv"] == [
@@ -1186,13 +1232,7 @@ def test_tmux_fallback_records_the_session(tmp_path: Path) -> None:
         "-s",
         "omega-job-tmux",
         "--",
-        sys.executable,
-        "-m",
-        "omega_prime.engine.watch",
-        "job-tmux",
-        "--follow",
-        "--state-dir",
-        str((tmp_path / "state").resolve()),
+        *_watch_argv("job-tmux", tmp_path / "state"),
     ]
     # The failed herdr create was receipted; pane run never happened.
     assert [e["argv"][:2] for e in _jsonl(herdr_log)] == [["workspace", "create"]]
@@ -1221,7 +1261,8 @@ def test_no_pane_leaves_the_key_absent_and_the_run_healthy(tmp_path: Path) -> No
     data = _read_tasks(store)
     row = next(r for r in data["tasks"] if r["id"] == "gb:nopane")
     assert row["state"] == "done"
-    assert "herdr_pane" not in row
+    assert "pane" not in row
+    assert row["herdr_pane"] is None
     # The failing create was attempted exactly once — never fatal.
     assert [e["argv"][:2] for e in _jsonl(tmp_path / "bin" / "herdr-log.jsonl")] == [
         ["workspace", "create"]
@@ -1271,7 +1312,7 @@ def _answer_when_raised(
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        with locked_tasks(store) as data:
+        with locked_tasks(store, write=False) as data:
             raised = any(item.get("id") == item_id for item in data["waiting_on_ove"])
         if raised:
             with locked_tasks(store, write=True) as data:
@@ -1346,7 +1387,7 @@ def test_question_round_trip_resumes_the_run(tmp_path: Path) -> None:
             deadline = time.monotonic() + 10.0
             item = None
             while time.monotonic() < deadline:
-                with locked_tasks(store) as data:
+                with locked_tasks(store, write=False) as data:
                     raised = [
                         row
                         for row in data["waiting_on_ove"]
@@ -1361,7 +1402,7 @@ def test_question_round_trip_resumes_the_run(tmp_path: Path) -> None:
             # Mid-run: exactly one live item, and the row is blocked.
             assert item["ask"] == "Which shape do you want? (options: French / Round)"
             assert item["blocks"] == "sandbox GSD question (stage plan)"
-            with locked_tasks(store) as data:
+            with locked_tasks(store, write=False) as data:
                 assert [row["id"] for row in data["waiting_on_ove"]] == [
                     "gb:q:question:req-1"
                 ]
@@ -1436,7 +1477,7 @@ def test_stale_answer_reasks_under_a_new_item(tmp_path: Path) -> None:
             # The stale reply killed req-1: exactly the re-asked item remains.
             deadline = time.monotonic() + 10.0
             while time.monotonic() < deadline:
-                with locked_tasks(store) as data:
+                with locked_tasks(store, write=False) as data:
                     ids = [row["id"] for row in data["waiting_on_ove"]]
                 if ids == ["gb:q:question:req-2"]:
                     break
@@ -1475,13 +1516,12 @@ def test_stale_answer_reasks_under_a_new_item(tmp_path: Path) -> None:
 def test_answer_text_never_lands_in_durable_dashboard_artifacts(
     tmp_path: Path,
 ) -> None:
-    """The answer travels only into the answer_question call.
+    """A credential-shaped answer never lands on disk, not even in transit.
 
-    Byte-scan of every product artifact the run writes: tasks.json,
-    events.jsonl, the herdr receipts. The fake wrapper's own
-    wrapper-log.jsonl is excluded — it receipts the call the test itself
-    made (that call IS the product behavior under test), and no
-    production surface logs answers.
+    main's validated tasks.json store redacts every value it writes, so the
+    responder's answer is redacted at rest before the engine reads it: the
+    answer_question call carries the redacted text and the raw token never
+    reaches tasks.json, events.jsonl, the herdr receipts or the wrapper.
     """
     token = _shaped_answer_token()
     answer = f"paste {token} to unblock"
@@ -1508,11 +1548,17 @@ def test_answer_text_never_lands_in_durable_dashboard_artifacts(
     _check_round_trip(box, failures, thread, "the answer")
     result = box["run"]
     assert result.ok is True, result.detail
-    # The call itself carried the answer (the product behavior).
-    assert any(
-        row.get("tool") == "answer_question" and row["args"].get("text") == answer
+    # The call carried the answer as the store holds it: token redacted.
+    from omega_prime.dashboard.redact import redact_value
+
+    expected = redact_value(answer)
+    assert expected != answer, "the shaped token is one the store redacts"
+    assert [
+        row["args"].get("text")
         for row in _wrapper_log(log)
-    )
+        if row.get("tool") == "answer_question"
+    ] == [expected]
+    assert token.encode("utf-8") not in log.read_bytes()
     # The durable product surfaces never saw it — byte-scan, paths only.
     assert token.encode("utf-8") not in store.read_bytes()
     assert token.encode("utf-8") not in Path(result.events_path).read_bytes()
@@ -1936,13 +1982,14 @@ def test_a_relative_state_dir_reaches_the_pane_absolute(
     assert result.ok is True, result.detail
     receipts = _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
     pane_run = next(e for e in receipts if e["argv"][:2] == ["pane", "run"])
-    state = pane_run["argv"][pane_run["argv"].index("--state-dir") + 1]
+    watch = shlex.split(pane_run["argv"][3])
+    state = watch[watch.index("--state-dir") + 1]
     assert state == str((tmp_path / "rel-state").resolve())
     assert (Path(state) / "jobs").is_dir()
 
 
 def test_a_hung_herdr_still_falls_back_to_tmux(monkeypatch: Any) -> None:
-    from omega_prime.dashboard import herdr_launch
+    from omega_prime.dashboard import sandbox_pane
 
     def hung(*_args: Any, **_kwargs: Any) -> str | None:
         raise subprocess.TimeoutExpired(["herdr"], 1)
@@ -1953,9 +2000,9 @@ def test_a_hung_herdr_still_falls_back_to_tmux(monkeypatch: Any) -> None:
         calls.append(session)
         return f"tmux:{session}"
 
-    monkeypatch.setattr(herdr_launch, "_herdr_pane", hung)
-    monkeypatch.setattr(herdr_launch, "_tmux_pane", tmux)
-    pane = herdr_launch.open_pane(
+    monkeypatch.setattr(sandbox_pane, "_herdr_pane", hung)
+    monkeypatch.setattr(sandbox_pane, "_tmux_pane", tmux)
+    pane = sandbox_pane.open_pane(
         {}, cwd="/tmp", label="x", command=["true"], session="omega-job"
     )
     assert pane == "tmux:omega-job"
@@ -2077,7 +2124,7 @@ def test_two_live_questions_each_keep_their_item_and_their_own_answers(
         deadline = time.monotonic() + 10.0
         items: dict[str, dict[str, Any]] = {}
         while time.monotonic() < deadline and len(items) < 2:
-            with locked_tasks(store) as data:
+            with locked_tasks(store, write=False) as data:
                 items = {row["id"]: row for row in data["waiting_on_ove"]}
             time.sleep(0.05)
         # Both requests stay answerable side by side.
@@ -2233,4 +2280,193 @@ def test_a_run_without_its_row_still_gets_answerable_questions(
     ] == ["Round"]
     data = _read_tasks(store)
     assert data["waiting_on_ove"] == []
-    assert data["tasks"] == [{"id": "gb:q", "state": "failed"}]
+    assert [_id_state(r) for r in data["tasks"]] == [{"id": "gb:q", "state": "failed"}]
+
+
+def test_without_the_tools_waiver_the_backend_refuses_before_any_spawn(
+    tmp_path: Path,
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    for value in ("", "0", "yes"):
+        env[TOOLS_WAIVER_ENV] = value
+        assert probe(env, stage="plan", plan="zai") == (False, "sandbox_unavailable")
+        result = run(
+            "plan", cwd=work, env=env, job_id="job-notools", stage="plan", plan="zai"
+        )
+        assert result.ok is False and result.reason == "sandbox_unavailable"
+        assert TOOLS_WAIVER_ENV in result.detail
+        assert result.started is False
+    assert not log.exists()
+
+
+def test_a_completed_stage_is_exported_before_teardown_when_status_fails(
+    tmp_path: Path,
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "status_fail")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run("plan", cwd=work, env=env, job_id="job-save", stage="plan", plan="zai")
+    assert result.ok is False and result.reason == "sandbox_unavailable"
+    assert result.started is True
+    tools = _wrapper_tools(log)
+    assert tools[-2:] == ["export_commits", "down"]
+    assert "completed work saved in bundle" in result.detail
+    bundle = result.detail.rsplit("bundle ", 1)[1].rstrip(")")
+    assert Path(bundle).is_file()
+    events = _jsonl(Path(result.events_path))
+    saved = [e for e in events if e.get("type") == "recovery_export"]
+    assert saved == [{"type": "recovery_export", "saved": True, "bundle": bundle}]
+
+
+def test_a_failed_recovery_export_keeps_the_original_failure(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "status_and_export_fail")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run("plan", cwd=work, env=env, job_id="job-lost", stage="plan", plan="zai")
+    assert result.ok is False and result.reason == "sandbox_unavailable"
+    assert "status broke" in result.detail
+    assert "saved in bundle" not in result.detail
+    assert _wrapper_log(log)[-1]["tool"] == "down"
+    events = _jsonl(Path(result.events_path))
+    assert [e["saved"] for e in events if e.get("type") == "recovery_export"] == [False]
+
+
+def test_a_string_tasks_path_still_raises_the_block_item(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "tier_error")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:str")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-str",
+        stage="plan",
+        plan="zai",
+        tasks_path=str(store),
+        task_id="gb:str",
+    )
+    assert result.ok is False and result.reason == "sandbox_unavailable"
+    items = _read_tasks(store)["waiting_on_ove"]
+    assert [item["id"] for item in items] == ["gb:str:sandbox_unavailable"]
+
+
+def test_a_stop_during_pane_setup_still_submits_nothing(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Cancellation that lands while the pane opens is honoured pre-submit."""
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:pane-stop")])
+    interrupt = InterruptFlag()
+
+    def slow_pane(*_args: Any, **_kwargs: Any) -> None:
+        interrupt.set()  # the user stops the run while herdr is busy
+        return None
+
+    monkeypatch.setattr(sandbox_omp.sandbox_pane, "open_pane", slow_pane)
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-pane-stop",
+        stage="plan",
+        plan="zai",
+        tasks_path=store,
+        task_id="gb:pane-stop",
+        interrupt=interrupt,
+    )
+    assert result.ok is False
+    assert result.reason == "cancelled"
+    tools = _wrapper_tools(log)
+    assert "run_gsd_stage" not in tools
+    assert "down" in tools
+    row = next(r for r in _read_tasks(store)["tasks"] if r["id"] == "gb:pane-stop")
+    assert row["state"] != "working", "a stopped run must not stay working"
+
+
+def test_a_failed_question_write_is_retried_not_lost(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A transient block-write failure keeps the question scheduled."""
+    env, store, _log, work = _question_fixture(tmp_path, "question")
+    real = sandbox_omp._raise_question
+    calls: list[str] = []
+
+    def flaky(*args: Any, **kwargs: Any) -> str:
+        calls.append(str(args[3]))
+        if len(calls) == 1:
+            raise OSError("No space left on device")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox_omp, "_raise_question", flaky)
+    box: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["run"] = _run_tracked(env, work, store, "job-q-retry")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    try:
+        _answer_when_raised(store, "gb:q:question:req-1", "the square one")
+    except BaseException as exc:
+        failures.append(exc)
+    thread.join(timeout=30.0)
+    _check_round_trip(box, failures, thread, "a retried question write")
+    assert box["run"].ok is True, box["run"].detail
+    assert calls[:2] == ["req-1", "req-1"]
+    assert _read_tasks(store)["waiting_on_ove"] == []
+
+
+def test_a_stop_while_an_answer_reply_hangs_aborts_promptly(tmp_path: Path) -> None:
+    """The answer_question wait honours the interrupt, then abort runs."""
+    env, store, log, work = _question_fixture(tmp_path, "answer_hangs")
+    interrupt = InterruptFlag()
+    outcome: dict[str, Any] = {}
+    worker = threading.Thread(
+        target=lambda: outcome.update(
+            result=run(
+                "plan the thing",
+                cwd=work,
+                env=env,
+                job_id="job-q-hang",
+                stage="plan",
+                plan="zai",
+                tasks_path=store,
+                task_id="gb:q",
+                interrupt=interrupt,
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    _answer_when_raised(store, "gb:q:question:req-1", "the square one")
+    deadline = time.monotonic() + 10.0
+    while "answer_question" not in _wrapper_tools(log):
+        if time.monotonic() > deadline:
+            raise AssertionError("the answer was never sent")
+        time.sleep(0.05)
+    began = time.monotonic()
+    interrupt.set()
+    worker.join(timeout=30.0)
+    assert not worker.is_alive(), "cancellation waited on the answer reply"
+    assert time.monotonic() - began < 30.0
+    assert outcome["result"].reason == "cancelled"
+    assert "abort" in _wrapper_tools(log)

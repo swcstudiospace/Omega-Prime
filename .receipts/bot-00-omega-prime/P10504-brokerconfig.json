@@ -1,0 +1,23 @@
+{
+  "task_id": "P10504-brokerconfig",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-23T01:25:14Z",
+  "completed_at": "2026-10-23T01:33:37Z",
+  "commands": [],
+  "claims": [],
+  "unverified": [
+    "No tests, gates, builds, formatters, lint, coverage, smoke, or runtime/container checks were run per task instructions.",
+    "Effective BookKeeper and broker configuration values were not verified; static configuration text is not proof of loaded values.",
+    "Per-function FunctionAuthenticationSpec/provider wiring for omega-functions is outside the three authorized config paths and remains for the admin/function deployment lane.",
+    "rule adherence by future agents"
+  ],
+  "files_changed": [
+    "deploy/pulsar/standalone.conf",
+    "deploy/pulsar/functions_worker.yml",
+    "deploy/pulsar/bookkeeper.conf"
+  ],
+  "contract_changes": [],
+  "rollback_plan": null,
+  "approvals": [],
+  "approved_by": ""
+}
