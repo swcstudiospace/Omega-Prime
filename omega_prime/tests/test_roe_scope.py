@@ -13,15 +13,15 @@ from omega_prime.tools.redteam import REDTEAM_TOOL_NAMES
 ALLOWLIST = set(REDTEAM_TOOL_NAMES)
 
 
-def test_allowlist_fixture_is_the_fourteen_registered_tools():
-    assert len(ALLOWLIST) == 14
+def test_allowlist_fixture_is_the_twenty_three_registered_tools():
+    assert len(ALLOWLIST) == 23
 
 
 def test_scope_coverage_keeps_only_cover_tools():
     assert (
         grant_scope_filter(ALLOWLIST, "coverage")
         == {tool for tool in ALLOWLIST if "cover" in tool}
-        == {"tempest_black_cover"}
+        == {"tempest_black_cover", "tempest_blue_coverage"}
     )
 
 
@@ -46,4 +46,7 @@ def test_blank_scope_fails_closed_to_empty():
 
 
 def test_matching_is_case_insensitive():
-    assert grant_scope_filter(ALLOWLIST, "Coverage") == {"tempest_black_cover"}
+    assert grant_scope_filter(ALLOWLIST, "Coverage") == {
+        "tempest_black_cover",
+        "tempest_blue_coverage",
+    }

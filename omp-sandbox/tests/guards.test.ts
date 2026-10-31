@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, statSync, existsSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, existsSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxTier } from "../src/core/providers/types.ts";
@@ -306,4 +306,195 @@ test("bwrap binds the configured omp and Bun folders read-only, deduplicated and
 test("launched rejects (instead of crashing) when a launcher cannot execute", async () => {
   const p = spawn(join(STATE, "no-such-gateway"), [], { stdio: ["ignore", "pipe", "pipe"] });
   await assert.rejects(utilMod.launched(p, "openshell-gateway", new Promise(() => {})), /openshell-gateway could not start/);
+});
+
+// Greptile round-N guards: broken input pipe, remote cleanup before stage_done, shared-service ownership.
+
+test("a closed omp stdin fails the request instead of crashing the core (EPIPE)", async () => {
+  // The child closes its stdin at once and keeps running, so our next write hits a broken pipe.
+  const proc = spawn("sh", ["-c", "exec 0<&-; sleep 30"], { stdio: ["pipe", "pipe", "pipe"] });
+  const c = new OmpRpcClient(proc as any, "fake");
+  await new Promise((r) => setTimeout(r, 200));
+  await assert.rejects(c.command("get_state", {}, 10_000), /input pipe failed/);
+  assert.ok(c.inputError, "input error recorded");
+  assert.throws(() => c.send({ type: "abort" }), /input pipe failed/);
+  await c.close(1000);
+  assert.equal(c.closed, true, "child stopped after the pipe broke");
+});
+
+test("stage_done waits for the tier's remote cleanup, and a failed cleanup refuses new work", async () => {
+  // Cleanup that takes a while: stage_done must not fire before it finishes.
+  let release!: () => void;
+  const slow = new Promise<void>((r) => { release = r; });
+  let settledAt = 0;
+  const core: any = new Core();
+  core.attachTierForTests({ name: "fake", id: "fake", isolation: "none (test)", owned: () => ({}), dispose: async () => ({ leftovers: [] }),
+    spawnStdio: () => fakeProc(), settled: () => slow.then(() => { settledAt = Date.now(); }) } as any);
+  let doneAt = 0; core.on("event", (e: any) => { if (e.event === "stage_done") doneAt = Date.now(); });
+  const a = core.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" });
+  for (let i = 0; i < 100 && core.status(a.stageId).status !== "waiting"; i++) await new Promise((r) => setTimeout(r, 50));
+  core.answer(a.stageId, "q1", {});
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(doneAt, 0, "stage_done held while remote cleanup runs");
+  assert.throws(() => core.runStage({ stage: "execute", gsdCommand: "gsd-execute-phase", task: "t2" }), /one stage at a time/);
+  release();
+  await core.stages.get(a.stageId).done;
+  assert.ok(doneAt >= settledAt && settledAt > 0, "stage_done after cleanup");
+
+  // Cleanup that fails: the stage fails and the core takes no further stages on this workdir.
+  const bad: any = new Core();
+  bad.attachTierForTests({ name: "fake", id: "fake", isolation: "none (test)", owned: () => ({}), dispose: async () => ({ leftovers: [] }),
+    spawnStdio: () => fakeProc(), settled: () => Promise.reject(new Error("remote session still running")) } as any);
+  const b = bad.runStage({ stage: "plan", gsdCommand: "gsd-plan-phase", task: "t" });
+  for (let i = 0; i < 100 && bad.status(b.stageId).status !== "waiting"; i++) await new Promise((r) => setTimeout(r, 50));
+  bad.answer(b.stageId, "q1", {});
+  await bad.stages.get(b.stageId).done;
+  assert.equal(bad.status(b.stageId).status, "failed");
+  assert.match(bad.status(b.stageId).error, /still running/);
+  assert.throws(() => bad.runStage({ stage: "execute", gsdCommand: "gsd-execute-phase", task: "t2" }), /refusing new work/);
+});
+
+test("the remote session kill script confirms the whole session is gone", { skip: process.platform !== "linux" }, async () => {
+  const tag = `t${process.pid}${Date.now().toString(36)}`;
+  // A session leader with a background descendant, like omp plus a tool it started.
+  const s = spawn("setsid", ["-w", "sh", "-c", `echo $$ > /tmp/.ompsbx-${tag}.sid; sleep 60 & sleep 60`], { stdio: "ignore" });
+  for (let i = 0; i < 50 && !existsSync(`/tmp/.ompsbx-${tag}.sid`); i++) await new Promise((r) => setTimeout(r, 50));
+  const sid = readFileSync(`/tmp/.ompsbx-${tag}.sid`, "utf8").trim();
+  const r = await utilMod.execCapture("sh", ["-c", podmanMod.killSessionScript(tag)], { timeoutMs: 20_000 });
+  assert.equal(r.code, 0, r.stderr);
+  const left = await utilMod.execCapture("pgrep", ["-s", sid]);
+  assert.equal(left.code, 1, `session ${sid} still has: ${left.stdout}`);
+  assert.equal(existsSync(`/tmp/.ompsbx-${tag}.sid`), false);
+  s.kill("SIGKILL");
+  // No session file means nothing was started: settled.
+  assert.equal((await utilMod.execCapture("sh", ["-c", podmanMod.killSessionScript(`${tag}-none`)])).code, 0);
+});
+
+test("the last lease holder stops shared services another tier started; reused pids are left alone", { skip: process.platform !== "linux" }, async () => {
+  const file = join(STATE, "services.json");
+  const gw = spawn("sleep", ["60"], { stdio: "ignore", detached: true });
+  const other = spawn("sleep", ["60"], { stdio: "ignore", detached: true });
+  await new Promise((r) => setTimeout(r, 100));
+  podmanMod.recordService("gateway", gw.pid, file);
+  // Same pid as a live process but a different start time: a reused pid, not our service.
+  writeFileSync(file, JSON.stringify({ ...podmanMod.readServices(file), podmanService: { pid: other.pid, startTicks: podmanMod.procStartTicks(other.pid!)! - 1 } }));
+  assert.equal(podmanMod.sameService(podmanMod.readServices(file).gateway), true);
+  const left = await podmanMod.stopSharedServices(file);
+  assert.deepEqual(left, []);
+  assert.equal(utilMod.pidAlive(gw.pid), false, "recorded gateway stopped by a tier that never held its handle");
+  assert.equal(utilMod.pidAlive(other.pid), true, "unrelated process with a reused pid untouched");
+  assert.equal(existsSync(file), false, "ownership record cleared");
+  other.kill("SIGKILL");
+});
+
+test("the mount gateway's last tier stops only that gateway; the shared Podman service record survives", { skip: process.platform !== "linux" }, async () => {
+  const file = join(STATE, "services-only.json");
+  const gw = spawn("sleep", ["60"], { stdio: "ignore", detached: true });
+  const svc = spawn("sleep", ["60"], { stdio: "ignore", detached: true });
+  await new Promise((r) => setTimeout(r, 100));
+  podmanMod.recordService("gateway", gw.pid, file);
+  podmanMod.recordService("podmanService", svc.pid, file);
+  const left = await podmanMod.stopSharedServices(file, "/proc", ["gateway"]);
+  assert.deepEqual(left, []);
+  assert.equal(utilMod.pidAlive(gw.pid), false, "the gateway asked for is stopped");
+  assert.equal(utilMod.pidAlive(svc.pid), true, "the Podman service another variant still shares keeps running");
+  const rec = podmanMod.readServices(file);
+  assert.equal(rec.gateway, undefined, "stopped gateway's record cleared");
+  assert.equal(rec.podmanService?.pid, svc.pid, "the Podman service keeps its owner record");
+  svc.kill("SIGKILL"); rmSync(file, { force: true });
+});
+
+test("a late abort after omp exited rejects once and leaves no timer to crash the core", async () => {
+  const unhandled: unknown[] = [];
+  const onU = (e: unknown) => unhandled.push(e);
+  process.on("unhandledRejection", onU);
+  const c = new OmpRpcClient(fakeProc({ FAKE_OMP_EXIT_ON_PROMPT: "1" }), "fake");
+  await assert.rejects(c.prompt("hi"));
+  await assert.rejects(c.command("abort", {}, 150), /closed/);
+  await c.abort();   // the public path swallows the send error
+  await new Promise((r) => setTimeout(r, 400));
+  process.off("unhandledRejection", onU);
+  assert.deepEqual(unhandled, []);
+});
+
+test("agentos-local settles a session only after the tools it left behind are stopped", { skip: process.platform !== "linux" }, async () => {
+  const { LocalTier } = await import("../src/core/providers/local.ts");
+  const t = new LocalTier();
+  mkdirSync(t.workdir, { recursive: true });
+  const p = t.spawnStdio(["sh", "-c", "sleep 60 & echo $!; exit 0"]);
+  let out = ""; p.stdout.on("data", (d) => { out += d; });
+  await t.settled(p);
+  const bg = Number(out.trim());
+  assert.ok(bg > 0, "background tool pid reported");
+  assert.equal(utilMod.ownsGroup(p.pid!, `OMP_SANDBOX_TIER_ID=${t.id}`), false, "no process of the session's group is left");
+  assert.equal(existsSync(`/proc/${bg}/environ`) && readFileSync(`/proc/${bg}/environ`, "utf8").includes(t.id), false, "the leftover tool was stopped");
+  assert.deepEqual((t.owned() as any).processGroups, []);
+  await t.dispose();
+});
+
+test("parallel wrappers recording shared services never erase each other's entry", { skip: process.platform !== "linux" }, async () => {
+  const file = join(STATE, "services-race.json");
+  const a = spawn("sleep", ["60"], { stdio: "ignore", detached: true });
+  const b = spawn("sleep", ["60"], { stdio: "ignore", detached: true });
+  await new Promise((r) => setTimeout(r, 100));
+  const mod = new URL("../src/core/providers/openshell-podman.ts", import.meta.url).href;
+  const writer = (which: string, pid: number) => new Promise<number | null>((res) => {
+    const src = `const m = await import(${JSON.stringify(mod)}); for (let i = 0; i < 40; i++) { m.recordService(${JSON.stringify(which)}, ${pid}, ${JSON.stringify(file)}); }`;
+    const w = spawn(process.execPath, ["--experimental-transform-types", "--no-warnings", "--input-type=module", "-e", src], { env: { ...process.env, OMP_SANDBOX_STATE: STATE }, stdio: "inherit" });
+    w.once("exit", res);
+  });
+  for (let round = 0; round < 3; round++) {
+    writeFileSync(file, "{}");
+    assert.deepEqual(await Promise.all([writer("gateway", a.pid!), writer("podmanService", b.pid!)]), [0, 0]);
+    const rec = podmanMod.readServices(file);
+    assert.equal(rec.gateway?.pid, a.pid); assert.equal(rec.podmanService?.pid, b.pid);
+  }
+  assert.equal(podmanMod.servicesLockHolder(file), null, "lock released");
+  const lockDir = podmanMod.servicesLockDir(file);
+  const gens = () => readdirSync(lockDir).filter((e) => /^\d{16}$/.test(e)).sort();
+  const nextGen = () => String(Number(gens().at(-1) ?? 0) + 1).padStart(16, "0");
+  // While another live wrapper holds the lock, an update waits for it instead of writing over that wrapper's read.
+  writeFileSync(file, "{}");
+  const held = nextGen(); writeFileSync(join(lockDir, held), String(process.pid));
+  const waiting = writer("gateway", a.pid!);
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(podmanMod.readServices(file).gateway, undefined, "no write while the lock is held");
+  writeFileSync(join(lockDir, `${held}.done`), "");
+  assert.equal(await waiting, 0);
+  assert.equal(podmanMod.readServices(file).gateway?.pid, a.pid);
+  // A lock left by a dead holder is taken over instead of blocking forever.
+  writeFileSync(join(lockDir, nextGen()), "999999999");
+  podmanMod.recordService("gateway", a.pid, file);
+  assert.equal(podmanMod.readServices(file).gateway?.pid, a.pid);
+  // A lock whose pid was reused by an unrelated live process (start time differs) is abandoned too.
+  writeFileSync(join(lockDir, nextGen()), `${process.pid} 1 stale`);
+  podmanMod.recordService("podmanService", b.pid, file);
+  assert.equal(podmanMod.readServices(file).podmanService?.pid, b.pid);
+  assert.equal(podmanMod.servicesLockHolder(file), null, "reused-pid lock taken over and released");
+  // A holder releases only its own generation: a newer holder that appeared while it ran keeps the lock.
+  let other = "";
+  podmanMod.withServicesLock(file, () => { other = nextGen(); writeFileSync(join(lockDir, other), `${process.pid} 0 other`); });
+  assert.equal(podmanMod.servicesLockHolder(file), `${process.pid} 0 other`);
+  writeFileSync(join(lockDir, `${other}.done`), "");
+  assert.equal(podmanMod.lockHolderAlive(`${process.pid} ${podmanMod.procStartTicks(process.pid)} n`, 0), true);
+  assert.equal(podmanMod.lockHolderAlive("", 5000), false, "an empty lock that stays empty is abandoned");
+  // Several waiters that all judge the same abandoned lock: exactly one holds it at a time, none runs alongside another.
+  const inside = join(STATE, "services-race.inside");
+  const contender = () => new Promise<number | null>((res) => {
+    const src = `const m = await import(${JSON.stringify(mod)}); const fs = await import("node:fs");
+      for (let i = 0; i < 15; i++) m.withServicesLock(${JSON.stringify(file)}, () => {
+        fs.writeFileSync(${JSON.stringify(inside)}, String(process.pid), { flag: "wx" });
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3);
+        fs.rmSync(${JSON.stringify(inside)});
+      }, 30000);`;
+    const w = spawn(process.execPath, ["--experimental-transform-types", "--no-warnings", "--input-type=module", "-e", src], { env: { ...process.env, OMP_SANDBOX_STATE: STATE }, stdio: "inherit" });
+    w.once("exit", res);
+  });
+  for (let round = 0; round < 3; round++) {
+    rmSync(inside, { force: true });
+    writeFileSync(join(lockDir, nextGen()), "999999999");
+    assert.deepEqual(await Promise.all([contender(), contender(), contender(), contender()]), [0, 0, 0, 0], "no two holders overlapped");
+  }
+  assert.equal(podmanMod.servicesLockHolder(file), null);
+  a.kill("SIGKILL"); b.kill("SIGKILL");
 });

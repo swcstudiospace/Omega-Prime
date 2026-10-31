@@ -47,8 +47,25 @@ export class LocalTier implements SandboxTier {
     const p = spawn(argv[0], argv.slice(1), { cwd: opts.cwd ?? this.workdir, env: this.#fullEnv(opts.env), stdio: ["pipe", "pipe", "pipe"], detached: true });
     this.#prune();
     if (p.pid) this.#groups.add(p.pid);
-    // The group stays tracked after the leader exits while background descendants of ours still hold it.
-    this.#children.add(p); p.once("exit", () => { this.#children.delete(p); this.#prune(); }); return p;
+    this.#children.add(p); p.once("exit", () => { this.#children.delete(p); this.#prune(); });
+    // A session owns its whole process group: tools it started may outlive the omp parent, so once the parent exits
+    // the group is stopped and confirmed empty before `settled(p)` resolves (no old tool can touch the next stage).
+    const g = p.pid;
+    const done = new Promise<void>((r) => { if (p.exitCode !== null || p.signalCode !== null) r(); else p.once("exit", () => r()); })
+      .then(() => (g ? this.#stopGroup(g) : undefined));
+    done.catch(() => {});   // observed by settled(); an unawaited failure must not crash the core
+    this.#settles.set(p, done);
+    return p;
+  }
+  settled(p: ChildProcessWithoutNullStreams) { return this.#settles.get(p) ?? Promise.resolve(); }
+  #settles = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>();
+  /** Stop every process left in group `g` (ownership re-checked before each signal) and confirm none remains. */
+  async #stopGroup(g: number, graceMs = 3000) {
+    const gone = async (ms: number) => { for (let w = 0; w < ms && this.#owns(g); w += 100) await new Promise((r) => setTimeout(r, 100)); return !this.#owns(g); };
+    if (this.#owns(g)) killTree(g, "SIGTERM");
+    if (!(await gone(graceMs))) { if (this.#owns(g)) killTree(g, "SIGKILL"); }
+    if (!(await gone(graceMs))) throw new Error(`process group ${g} still has processes after SIGKILL`);
+    this.#groups.delete(g);
   }
   exec(argv: string[], opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; input?: string } = {}) {
     return execCapture(argv[0], argv.slice(1), { cwd: opts.cwd ?? this.workdir, env: this.#fullEnv(opts.env), timeoutMs: opts.timeoutMs ?? 600_000, input: opts.input, killGroup: true });

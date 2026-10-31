@@ -42,6 +42,8 @@ export class Core extends EventEmitter {
   #ready = false;
   /** Set for the whole of `down()`: no new startup or stage is accepted while shutdown is tearing things down. */
   #stopping: Promise<DownReport> | null = null;
+  /** Set when a finished stage's sandbox processes could not be confirmed gone: the workdir may still change. */
+  #unsettled: string | null = null;
 
   /**
    * Bring the sandbox up once. Concurrent callers share one startup; a failed startup tears down everything it
@@ -108,7 +110,19 @@ export class Core extends EventEmitter {
       const gsd = names.filter((n) => n.startsWith("gsd-"));
       if (!gsd.includes("gsd-plan-phase") || !gsd.includes("gsd-execute-phase")) throw new Error(`GSD commands not visible to sandboxed omp (saw ${gsd.length})`);
       return { version: VERSIONS.omp, gsdCommands: gsd.length, sample: gsd.filter((n) => ["gsd-plan-phase", "gsd-execute-phase", "gsd-autonomous", "gsd-new-project"].includes(n)), model: state.data?.model ? `${state.data.model.provider}/${state.data.model.id}` : null };
-    } finally { await c.close(); }
+    } finally { await c.close(); await this.#settle(c); }
+  }
+
+  /**
+   * Wait until the session's sandbox-side processes are gone, not just the local client. If the tier cannot confirm
+   * that, the workdir may still be edited, so the core refuses new stages until it is torn down.
+   */
+  async #settle(c: OmpRpcClient, rec?: StageRec) {
+    try { await this.tier?.settled?.(c.proc); }
+    catch (e: any) {
+      this.#unsettled = `${rec ? `stage ${rec.id}` : "omp session"}: ${e?.message ?? e}`;
+      throw e;
+    }
   }
 
   #spawnOmp(model: string, thinking = "high") {
@@ -121,6 +135,7 @@ export class Core extends EventEmitter {
   runStage(a: { stage: Stage; gsdCommand: string; task: string; thinking?: string; model?: string; plan?: string }) {
     if (this.#stopping) throw new Error("shutting down; no new stages");
     if (!this.tier || !this.#ready) throw new Error("not up");
+    if (this.#unsettled) throw new Error(`refusing new work until down/up: ${this.#unsettled}`);
     // Every stage runs in the same workdir, so overlapping stages would edit and commit each other's files.
     // An aborted stage is terminal at once but its omp session can still be writing until it settles.
     const active = [...this.stages.values()].find((r) => !r.settled);
@@ -139,7 +154,7 @@ export class Core extends EventEmitter {
     const c = this.#spawnOmp(model, thinking); rec.client = c;
     try { return await this.#driveWith(c, rec, message, model, thinking); }
     // Close on every path (rejected prompt, setup timeout, fallback) so no failed stage keeps a live session.
-    finally { await c.close().catch(() => {}); }
+    finally { await c.close().catch(() => {}); await this.#settle(c, rec); }
   }
 
   async #driveWith(c: OmpRpcClient, rec: StageRec, message: string, model: string, thinking: string): Promise<void> {
@@ -163,7 +178,7 @@ export class Core extends EventEmitter {
     const failedEarly = r.status !== "completed" && c.models.size === 0;
     if (failedEarly && !rec.fallbackFrom && rec.fallbackModel && st() !== "aborted") {
       const fb = rec.fallbackModel;
-      rec.fallbackFrom = model; rec.modelRequested = fb; await c.close();
+      rec.fallbackFrom = model; rec.modelRequested = fb; await c.close(); await this.#settle(c, rec);
       this.emit("event", { event: "fallback", stageId: rec.id, from: model, to: fb, reason: r.error?.message ?? r.status });
       return this.#drive(rec, message, fb, thinking);
     }
@@ -221,7 +236,7 @@ export class Core extends EventEmitter {
     this.vm = null;
     const ownedBefore = this.tier?.owned() ?? null;
     if (this.tier) { try { const d = await this.tier.dispose(); leftovers.push(...d.leftovers); } catch (e) { leftovers.push(`tier dispose: ${e}`); } }
-    this.tier = null; this.#ready = false; this.up_ = {};
+    this.tier = null; this.#ready = false; this.up_ = {}; this.#unsettled = null;
     try { await this.broker.stop(); } catch (e) { leftovers.push(`broker stop: ${e}`); }
     return { leftovers, ownedBefore };
   }
