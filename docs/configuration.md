@@ -210,6 +210,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_OMP_MODEL_ZAI_EXECUTE` | Overrides the execution-stage Z.ai model. |
 | `OMEGA_PRIME_OMP_MODEL_ZAI_PLAN` | Overrides the planning-stage Z.ai model. |
 | `OMEGA_PRIME_OMP_SANDBOX_ANDA` | Selects the omp-sandbox-anda wrapper executable used by the omp-sandbox engine backend. |
+| `OMEGA_PRIME_OMP_SANDBOX_WITHOUT_TOOLS` | Accepts, when set exactly to 1, that omp-sandbox engine stages run without Omega Prime's MCP tools and skills; the backend refuses readiness and runs otherwise. |
 | `OMEGA_PRIME_PACKS_JSON` | Selects the configured tool-pack description file. |
 | `OMEGA_PRIME_PACKS_JSON_FILE` | Names a protected file containing the tool-pack description setting. |
 | `OMEGA_PRIME_PACK_API_BASES_JSON` | Selects the tool-pack API base configuration. |

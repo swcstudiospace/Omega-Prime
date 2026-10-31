@@ -39,6 +39,7 @@ from omega_prime.engine.omp_driver import probe, run
 from omega_prime.engine.sandbox_omp import (
     ANDA_BIN_ENV,
     BACKEND_ENV,
+    TOOLS_WAIVER_ENV,
     WORKSPACE_ROOTS_ENV,
 )
 from omega_prime.tests.test_engine import _env, _install_fake
@@ -357,7 +358,7 @@ for line in sys.stdin:
             hanging = False
         continue
     if tool == "sandbox_status":
-        if behavior == "status_fail":
+        if behavior in ("status_fail", "status_and_export_fail"):
             emit({"id": rid, "ok": False, "error": "status broke", "code": "error"})
             continue
         final = LONG_TEXT if behavior == "long" else "fake final text"
@@ -381,6 +382,9 @@ for line in sys.stdin:
         })
         continue
     if tool == "export_commits":
+        if behavior == "status_and_export_fail":
+            emit({"id": rid, "ok": False, "error": "export broke", "code": "error"})
+            continue
         exports += 1
         emit({
             "id": rid,
@@ -599,6 +603,7 @@ def _backend_env(
             BACKEND_ENV: "omp-sandbox",
             ANDA_BIN_ENV: str(anda),
             WORKSPACE_ROOTS_ENV: str(roots),
+            TOOLS_WAIVER_ENV: "1",
             **extra,
         },
     )
@@ -2261,3 +2266,81 @@ def test_a_run_without_its_row_still_gets_answerable_questions(
     data = _read_tasks(store)
     assert data["waiting_on_ove"] == []
     assert [_id_state(r) for r in data["tasks"]] == [{"id": "gb:q", "state": "failed"}]
+
+
+def test_without_the_tools_waiver_the_backend_refuses_before_any_spawn(
+    tmp_path: Path,
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "happy")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    for value in ("", "0", "yes"):
+        env[TOOLS_WAIVER_ENV] = value
+        assert probe(env, stage="plan", plan="zai") == (False, "sandbox_unavailable")
+        result = run(
+            "plan", cwd=work, env=env, job_id="job-notools", stage="plan", plan="zai"
+        )
+        assert result.ok is False and result.reason == "sandbox_unavailable"
+        assert TOOLS_WAIVER_ENV in result.detail
+        assert result.started is False
+    assert not log.exists()
+
+
+def test_a_completed_stage_is_exported_before_teardown_when_status_fails(
+    tmp_path: Path,
+) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "status_fail")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run("plan", cwd=work, env=env, job_id="job-save", stage="plan", plan="zai")
+    assert result.ok is False and result.reason == "sandbox_unavailable"
+    assert result.started is True
+    tools = _wrapper_tools(log)
+    assert tools[-2:] == ["export_commits", "down"]
+    assert "completed work saved in bundle" in result.detail
+    bundle = result.detail.rsplit("bundle ", 1)[1].rstrip(")")
+    assert Path(bundle).is_file()
+    events = _jsonl(Path(result.events_path))
+    saved = [e for e in events if e.get("type") == "recovery_export"]
+    assert saved == [{"type": "recovery_export", "saved": True, "bundle": bundle}]
+
+
+def test_a_failed_recovery_export_keeps_the_original_failure(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, log = _install_fake_anda(tmp_path, "status_and_export_fail")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    result = run("plan", cwd=work, env=env, job_id="job-lost", stage="plan", plan="zai")
+    assert result.ok is False and result.reason == "sandbox_unavailable"
+    assert "status broke" in result.detail
+    assert "saved in bundle" not in result.detail
+    assert _wrapper_log(log)[-1]["tool"] == "down"
+    events = _jsonl(Path(result.events_path))
+    assert [e["saved"] for e in events if e.get("type") == "recovery_export"] == [False]
+
+
+def test_a_string_tasks_path_still_raises_the_block_item(tmp_path: Path) -> None:
+    omp = _install_fake(tmp_path)
+    script, _log = _install_fake_anda(tmp_path, "tier_error")
+    roots = tmp_path / "roots"
+    work = _git_worktree(roots)
+    env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
+    store = _seed(tmp_path / "tasks.json", rows=[_row("gb:str")])
+    result = run(
+        "plan the thing",
+        cwd=work,
+        env=env,
+        job_id="job-str",
+        stage="plan",
+        plan="zai",
+        tasks_path=str(store),
+        task_id="gb:str",
+    )
+    assert result.ok is False and result.reason == "sandbox_unavailable"
+    items = _read_tasks(store)["waiting_on_ove"]
+    assert [item["id"] for item in items] == ["gb:str:sandbox_unavailable"]
