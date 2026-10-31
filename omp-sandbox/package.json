@@ -7,7 +7,7 @@
   },
   "scripts": {
     "check": "tsc --noEmit -p .",
-    "test": "node --test --experimental-transform-types --no-warnings tests/core.test.ts tests/guards.test.ts",
+    "test": "node --test --experimental-transform-types --no-warnings tests/core.test.ts tests/paths.test.ts tests/guards.test.ts",
     "e2e": "cargo build --release && python3 tests/e2e.py",
     "build": "cargo build --release"
   },

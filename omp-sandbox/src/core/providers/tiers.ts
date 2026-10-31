@@ -5,7 +5,10 @@ import { OpenShellTier } from "./openshell.ts";
 import { OpenShellPodmanTier } from "./openshell-podman.ts";
 import { BwrapTier } from "./bwrap.ts";
 import { LocalTier } from "./local.ts";
-import { TierUnavailable, type SandboxTier, type TierName } from "./types.ts";
+import { TierUnavailable, type SandboxTier, type TierName, type TierOptions } from "./types.ts";
+
+/** Tiers that can bind-mount a job's worktree. The others are skipped (with a reason) when one is requested. */
+export const MOUNT_TIERS: ReadonlySet<TierName> = new Set(["openshell-podman", "bwrap"]);
 
 export const TIER_NAMES: readonly TierName[] = ["openshell-podman", "openshell", "bwrap", "agentos-local"];
 
@@ -17,20 +20,22 @@ export function validateTiers(order: readonly string[]): TierName[] {
   return order as TierName[];
 }
 
-function makeTier(name: TierName): SandboxTier {
+function makeTier(name: TierName, ws: string | null): SandboxTier {
   switch (name) {
-    case "openshell-podman": return new OpenShellPodmanTier();
+    case "openshell-podman": return new OpenShellPodmanTier(ws);
     case "openshell": return new OpenShellTier();
-    case "bwrap": return new BwrapTier();
+    case "bwrap": return new BwrapTier(undefined, ws);
     case "agentos-local": return new LocalTier();
   }
 }
 
-export async function startTier(env: Record<string, string>, order: TierName[] = (process.env.OMP_SANDBOX_TIERS?.split(",") as TierName[]) ?? ["openshell-podman", "openshell", "bwrap", "agentos-local"]) {
+export async function startTier(env: Record<string, string>, order: TierName[] = (process.env.OMP_SANDBOX_TIERS?.split(",") as TierName[]) ?? ["openshell-podman", "openshell", "bwrap", "agentos-local"], opts: TierOptions = {}) {
   order = validateTiers(order);
   const skipped: Array<{ tier: TierName; reason: string }> = [];
+  const ws = opts.workspaceHostPath ?? null;
   for (const name of order) {
-    const t = makeTier(name);
+    if (ws && !MOUNT_TIERS.has(name)) { skipped.push({ tier: name, reason: "cannot bind-mount workspace_host_path" }); continue; }
+    const t = makeTier(name, ws);
     try { await t.start(env); return { tier: t, skipped }; }
     catch (e) {
       skipped.push({ tier: name, reason: e instanceof TierUnavailable ? e.detail : String(e) });

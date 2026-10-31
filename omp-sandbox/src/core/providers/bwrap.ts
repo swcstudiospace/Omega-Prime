@@ -10,8 +10,11 @@ import { STATE, NODE24_BIN, BUN_EXE, OMP_BIN, SANDBOX_AGENT_BIN, HOME, realBin, 
 import { freePort } from "../auth.ts";
 import { execCapture, pidAlive, rid, waitHttp, launched } from "./util.ts";
 import { TierUnavailable, type SandboxTier } from "./types.ts";
+import { pinDir, unpinDir, PathRefused, type PinnedDir, pinnedPath } from "../paths.ts";
 
 const BWRAP = "/usr/bin/bwrap";
+/** Child fd that carries the pinned worktree into bwrap (stdin/out/err are 0-2). */
+const PIN_FD = 3;
 
 /** Read-only binds for the omp and Bun the host broker uses, wherever they are installed (deduplicated, nested ones dropped). */
 export function toolchainBinds(bins: string[] = [OMP_BIN, BUN_EXE]): string[] {
@@ -27,12 +30,19 @@ export class BwrapTier implements SandboxTier {
   readonly workdir = "/sbx/work";
   readonly isolation = "bubblewrap: ro /usr,/etc; tmpfs /home + ro toolchains; private /sbx and /tmp; unshared pid/ipc/uts; shared network and kernel";
   readonly hostRoot: string;
+  readonly workspaceHostPath: string | null;
   #env: Record<string, string> = {};
   #agent: ChildProcessWithoutNullStreams | null = null;
   #agentUrl = ""; #agentToken = randomBytes(18).toString("hex");
   #children = new Set<ChildProcessWithoutNullStreams>();
+  /** The checked worktree, held open: every bwrap binds this descriptor (fd 3), never the path name again. */
+  #pin: PinnedDir | null = null;
 
-  constructor(hostRoot?: string) { this.hostRoot = hostRoot ?? join(STATE, "ws", this.id); }
+  /** Launcher; only hermetic tests pass a fake that records what it was handed. */
+  readonly #bwrap: string;
+  constructor(hostRoot?: string, workspaceHostPath?: string | null, opts: { bwrapBin?: string } = {}) {
+    this.hostRoot = hostRoot ?? join(STATE, "ws", this.id); this.workspaceHostPath = workspaceHostPath ?? null; this.#bwrap = opts.bwrapBin ?? BWRAP;
+  }
 
   #argv(cmd: string[], env: Record<string, string>, cwd = this.workdir) {
     const a = [
@@ -43,6 +53,9 @@ export class BwrapTier implements SandboxTier {
       "--ro-bind", dirname(NODE24_BIN), dirname(NODE24_BIN),
       "--ro-bind", dirname(SANDBOX_AGENT_BIN), "/opt/sandbox-agent",
       "--bind", this.hostRoot, this.sandboxRoot,
+      // A job worktree replaces the private work dir (later binds win); the rest of /sbx stays private.
+      // Bound from the pinned descriptor, so a worktree swapped for a symlink after the check cannot redirect the mount.
+      ...(this.workspaceHostPath ? ["--bind-fd", String(PIN_FD), this.workdir] : []),
       "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev",
       "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--hostname", "omp-sandbox", "--die-with-parent",
       "--clearenv",
@@ -59,32 +72,49 @@ export class BwrapTier implements SandboxTier {
   }
 
   async start(env: Record<string, string>) {
-    if (!existsSync(BWRAP)) throw new TierUnavailable("bwrap", "bubblewrap not installed");
+    if (!existsSync(this.#bwrap)) throw new TierUnavailable("bwrap", "bubblewrap not installed");
     if (!existsSync(SANDBOX_AGENT_BIN)) throw new TierUnavailable("bwrap", `sandbox-agent binary missing at ${SANDBOX_AGENT_BIN}`);
     this.#env = env;
+    this.pinWorkspace();
     for (const d of ["work", "home", "bin"]) mkdirSync(join(this.hostRoot, d), { recursive: true });
     const link = (target: string, name: string) => { const p = join(this.hostRoot, "bin", name); if (!existsSync(p)) symlinkSync(target, p); };
     // Link the real launchers (the configured omp and the Bun that runs it); their folders are bound read-only above.
     link(realBin(BUN_EXE), "bun"); link(realBin(OMP_BIN), "omp");
-    const probe = await execCapture(BWRAP, this.#argv(["sh", "-c", "omp --version && node -v && test ! -e " + join(HOME, ".omp") + " && echo NO_HOST_OMP_STORE"], {}), { timeoutMs: 60_000 });
+    const probe = await execCapture(this.#bwrap, this.#argv(["sh", "-c", "omp --version && node -v && test ! -e " + join(HOME, ".omp") + " && echo NO_HOST_OMP_STORE"], {}), { timeoutMs: 60_000, extraFds: this.#fds() });
     if (probe.code !== 0 || !probe.stdout.includes("NO_HOST_OMP_STORE")) throw new TierUnavailable("bwrap", `probe failed: ${probe.stderr.slice(-400)}`);
     const port = await freePort();
     this.#agentUrl = `http://127.0.0.1:${port}`;
-    this.#agent = spawn(BWRAP, this.#argv(["sandbox-agent", "server", "--host", "127.0.0.1", "--port", String(port), "--token", this.#agentToken, "--no-telemetry"], {}, "/sbx"), { stdio: ["pipe", "pipe", "pipe"] });
+    this.#agent = spawn(this.#bwrap, this.#argv(["sandbox-agent", "server", "--host", "127.0.0.1", "--port", String(port), "--token", this.#agentToken, "--no-telemetry"], {}, "/sbx"), { stdio: ["pipe", "pipe", "pipe", ...this.#fds()] }) as ChildProcessWithoutNullStreams;
     this.#agent.stdout.resume(); this.#agent.stderr.resume();
     await launched(this.#agent, "bwrap sandbox-agent", waitHttp(`${this.#agentUrl}/v1/health`, this.#agentToken, 30_000));
+  }
+
+  /** Host path of the pinned worktree for host-side writes (see SandboxTier.workspaceHostDir). */
+  workspaceHostDir() { return this.#pin ? pinnedPath(this.#pin) : null; }
+  /** Hold the checked worktree open (done by start()); from here on every bwrap binds this descriptor. */
+  pinWorkspace() {
+    if (!this.workspaceHostPath || this.#pin) return;
+    try { this.#pin = pinDir(this.workspaceHostPath, "workspace_host_path"); }
+    catch (e) { throw e instanceof PathRefused ? new TierUnavailable("bwrap", e.message) : e; }
   }
 
   sandboxAgent() { return { baseUrl: this.#agentUrl, token: this.#agentToken }; }
 
   spawnStdio(argv: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
-    const p = spawn(BWRAP, this.#argv(argv, opts.env ?? {}, opts.cwd), { stdio: ["pipe", "pipe", "pipe"] });
+    const p = spawn(this.#bwrap, this.#argv(argv, opts.env ?? {}, opts.cwd), { stdio: ["pipe", "pipe", "pipe", ...this.#fds()] }) as ChildProcessWithoutNullStreams;
     this.#children.add(p); p.once("exit", () => this.#children.delete(p));
     return p;
   }
 
   exec(argv: string[], opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; input?: string } = {}) {
-    return execCapture(BWRAP, this.#argv(argv, opts.env ?? {}, opts.cwd), { timeoutMs: opts.timeoutMs ?? 600_000, input: opts.input });
+    return execCapture(this.#bwrap, this.#argv(argv, opts.env ?? {}, opts.cwd), { timeoutMs: opts.timeoutMs ?? 600_000, input: opts.input, extraFds: this.#fds() });
+  }
+
+  /** The pinned worktree descriptor for the child's fd 3 (bwrap closes it after binding, so the job never holds it). */
+  #fds(): number[] {
+    if (!this.workspaceHostPath) return [];
+    if (!this.#pin) throw new Error("bwrap workspace is not pinned (start() not run or already disposed)");
+    return [this.#pin.fd];
   }
 
   owned() { return { hostRoot: this.hostRoot, sandboxAgentPid: this.#agent?.pid ?? null, children: [...this.#children].map((c) => c.pid) }; }
@@ -99,6 +129,7 @@ export class BwrapTier implements SandboxTier {
     const leftovers = pids.filter(pidAlive).map((p) => `pid ${p}`);
     if (!process.env.OMP_SANDBOX_KEEP_WS) rmSync(this.hostRoot, { recursive: true, force: true });
     if (existsSync(this.hostRoot) && !process.env.OMP_SANDBOX_KEEP_WS) leftovers.push(this.hostRoot);
+    unpinDir(this.#pin); this.#pin = null;
     return { leftovers };
   }
 }
