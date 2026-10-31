@@ -81,3 +81,71 @@ def test_approved_create_exec_down_roundtrip(
     assert refused["error"] == "secret_env_refused"
     down = json.loads(registry.dispatch("sandbox_down", {"name": name}))
     assert down["removed"] is True
+
+
+def test_dashboard_store_creates_valid_rows_with_the_real_helpers(
+    tmp_path: Path,
+) -> None:
+    from omega_prime.dashboard.status_file import read_tasks, write_tasks
+    from omega_prime.sandbox_control.events import OWNER_KIND, dashboard_task_store
+
+    path = tmp_path / "tasks.json"
+    write_tasks(
+        {
+            "version": 1,
+            "updated_at": "2026-10-31T09:00:00+11:00",
+            "tasks": [],
+            "waiting_on_ove": [],
+            "finished": [],
+        },
+        path=path,
+    )
+    store = dashboard_task_store(path)
+    assert store is not None
+    store.upsert_note("gb:sbx-ompsbx-demo-abc123", "working", "created")
+    store.upsert_note("gb:00045", "blocked", "exit=2")
+    result = read_tasks(path)
+    rows = {row["id"]: row for row in json.loads(path.read_text())["tasks"]}
+    assert result.status == "ok", result.error  # the dashboard validator accepts it
+    assert rows["gb:00045"]["state"] == "blocked"
+    assert rows["gb:00045"]["owner"] == {"kind": OWNER_KIND, "ref": "gb:00045"}
+
+
+def test_missing_task_store_is_reported_on_every_result(
+    tmp_path: Path, fake: FakeOpenShell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import omega_prime.tools.sandbox_control as tools
+
+    monkeypatch.setattr(tools, "dashboard_task_store", lambda _path: None)
+    built = tools.default_provider({"HOME": str(tmp_path), "PATH": "/usr/bin"})
+    assert built.task_store_available is False
+    provider = make_provider(make_config(tmp_path), fake)
+    provider.task_store_available = False
+    registry = ToolRegistry()
+    register_sandbox_control_tools(registry, lambda: provider)
+    out = json.loads(registry.dispatch("sandbox_list", {}))
+    assert out["task_store"] == "unavailable"
+
+
+def test_tools_use_the_resolved_env_not_os_environ(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import omega_prime.tools.sandbox_control as tools
+
+    seen: list[dict[str, str] | None] = []
+    real = tools.default_provider
+
+    def spy(env: dict[str, str] | None = None) -> OpenShellSandboxProvider:
+        seen.append(env)
+        return real(env)
+
+    monkeypatch.setattr(tools, "default_provider", spy)
+    monkeypatch.setenv("OMEGA_PRIME_STATE_DIR", str(tmp_path / "wrong"))
+    state = tmp_path / "configured"
+    registry = ToolRegistry()
+    register_sandbox_control_tools(
+        registry, env={"HOME": str(tmp_path), "OMEGA_PRIME_STATE_DIR": str(state)}
+    )
+    registry.dispatch("sandbox_list", {})
+    assert seen and seen[0] is not None
+    assert real(seen[0]).config.state_dir == state

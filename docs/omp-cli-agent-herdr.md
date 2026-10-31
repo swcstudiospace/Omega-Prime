@@ -39,7 +39,8 @@ openshell sandbox exec -n <sbx> --tty --no-login-shell --timeout 0 --workdir /sa
 4. `herdr pane report-agent <pane> --source omega-prime --agent omp --state working -- <resume argv>`. Herdr's `agent start --kind omp` detects omp by executable, but the pane's foreground process is `openshell`, so Omega Prime *reports* the agent lifecycle and gives Herdr a resume command (the same argv with `--continue`).
 5. Record `herdr_pane {pane_id, workspace}` on the task row via the locked helpers. The Command Center then shows the live terminal.
 
-### Verified live on the box (2026-10-23 AEDT, OpenShell 0.1.4, Podman driver, omp 18.8.4)
+### Operator observations (2026-10-23 AEDT, OpenShell 0.1.4, Podman driver, omp 18.8.4)
+These were interactive checks on the box. Their full commands and exit codes were not recorded, so they are **observations, not completion claims**: re-run them before relying on them. The receipted evidence for this PR is the unit-test run in §8.
 - `sandbox exec --tty` gives the remote process a real PTY (`/dev/pts/N`, 80x24 default, `TERM` forwarded), and exec exit codes pass through (`exit 7` → 7).
 - `herdr pane run <pane> "<shlex-joined agent_pane_argv>"` in a fresh Herdr workspace rendered the **interactive omp TUI** (first-run provider setup, then the main prompt `π > GLM-4.6 > /sandbox`). omp ran as `Ssl+` on `pts/N` (foreground, with a controlling TTY).
 - `send-keys C-c` left setup; `send-keys C-c C-c` exited omp back to the host shell, with no omp left in the sandbox. `stop_session_argv` (`pkill -s` on the sid) also killed it.
@@ -95,7 +96,10 @@ Mutations only touch sandboxes this family owns (`ompsbx-` prefix). `osp-*` sand
 - **L15:** `exited` with code ≠ 0 → blocked on the owning task.
 - **Rows:** each sandbox gets its own row `gb:sbx-<name>` (working → done on `removed`). Blocking lifecycles (not_ready, unhealthy, oom, exit≠0) also mark the **owning** task blocked. An owner row is never marked done by a sandbox event.
 - **L13 source:** `omega_prime/sdlc_events/sources/podman_events.py` parses `podman events --format json --filter type=container`. The format was verified on this box: `Status` create/init/start/attach/died/cleanup/remove, `ContainerExitCode` on died/remove, and workload names `openshell-<ws>--<sandbox>-<uuid>` with supervisor `openshell-supervisor-<uuid>`. It maps workload events to lifecycle and supervisor deaths to `unhealthy`, and dedupes with `podman:<ID>:<Status>:<timeNano>` delivery ids.
-- **Sinks:** the CloudEvents JSONL outbox (`$OMEGA_PRIME_STATE_DIR/events/outbox.jsonl`, 0600, for the future NATS bridge) + `on_sandbox_event` → task store. The live tasks.json store uses the dashboard's locked helpers when the dashboard package is importable. Otherwise it degrades to outbox-only and says so (`task_store: unavailable`); it never writes tasks.json by hand.
+- **Teardown vs crash:** a death is held for a 10 s grace. A removal inside the grace drops only deaths with a delete's signal code (137/143); exit 1 or an unknown code is still emitted before `removed`. Every line advances time, including ignored events. For a live pipe, `with_heartbeats(stdout)` plus `clock=time.time` flushes held deaths on a quiet stream; replays stay on event time.
+- **Ownership records:** per-sandbox `flock` and a unique temp file per write, so a background RLM child and a host call can both run `sandbox_down` safely. A failed delete clears the teardown mark (later deaths are real again), and a mark expires after 10 minutes regardless. The sandbox uuid stays on the record until cleanup passes, so a retry still finds `openshell-supervisor-<uuid>` leftovers.
+- **Failure results:** a failed Podman leftover probe is `leftover_check_failed`, never an empty result. Create errors carry the allocated `name`. A `report_exit` exec whose exit is unknown (timeout, missing CLI) emits a blocking `exited` with `exit_unknown:<code>`. The runner keeps only the last 64 KiB of each stream while the command runs. `OMP_SANDBOX_OPENSHELL` may be a bare command name, resolved on `PATH`.
+- **Sinks:** the CloudEvents JSONL outbox (`$OMEGA_PRIME_STATE_DIR/events/outbox.jsonl`, 0600, for the future NATS bridge) + `on_sandbox_event` → task store. The live tasks.json store uses the dashboard's locked helpers when the dashboard package is importable. Otherwise it degrades to outbox-only and every tool result says so (`task_store: unavailable`); it never writes tasks.json by hand. Rows it creates carry `owner {kind: sandbox-control, ref: <task id>}`, which the dashboard validator requires. The family reads the resolved env from `default_registry` (so `OMEGA_PRIME_STATE_DIR` from `settings.json` applies), not `os.environ`.
 
 ## 7. Changes in omp-sandbox (TS), spec-only in this PR
 1. `src/core/interactive.ts`: `InteractiveSession {launch(stage), sendPrompt, interrupt, stop, state(), answer()}` on top of the Herdr CLI + `agent_pane_argv` semantics. It reads the session JSONL for status and models.
@@ -109,12 +113,14 @@ Mutations only touch sandboxes this family owns (`ompsbx-` prefix). `osp-*` sand
 ## 8. Built vs spec-only (this PR)
 | Item | State |
 |---|---|
-| `sandbox_create/exec/down/status/list` tools + registry/roster/policy/catalog | **Built + unit tests** (fake runner) + live smoke (list/status/exec/down) |
+| `sandbox_create/exec/down/status/list` tools + registry/roster/policy/catalog | **Built + unit tests** (fake runner); live smoke observed, unreceipted (§2) |
 | `on_sandbox_event`, `evaluate_sandbox_ready` (L14), L15 mapping, CloudEvents envelope | **Built + unit tests** |
 | podman events parser/source (L13) | **Built + unit tests** on real captured event lines |
-| `agent_pane_argv`, `stop_session_argv`, `HerdrAgentPane` (launch/report/prompt/interrupt/stop) | **Built + unit tests + live-verified** TUI launch and stop (§2). Not yet exposed as an MCP tool |
+| `agent_pane_argv`, `stop_session_argv`, `HerdrAgentPane` (launch/report/prompt/interrupt/stop) | **Built + unit tests**; TUI launch and stop observed live, unreceipted (§2). Not yet exposed as an MCP tool |
 | Interactive TS harness, ask-bridge extension, e2e parity | **Spec only** (§7) |
 | Live podman-events daemon wiring into the dashboard lifespan | **Spec only.** The dashboard lives in the herdr-ws tree; it's a one-line lifespan hook once the dashboard lands on main |
+
+**Receipt (00073 review round):** `python -m pytest -q -p no:cacheprovider omega_prime/tests/sandbox_control omega_prime/tests/sdlc_events` → `86 passed`, exit 0. `ruff check omega_prime/` → exit 0. `mypy` on the changed modules → exit 0.
 
 ## 9. Needs Ove's yes
 - **Nothing for this PR** beyond the normal merge (Ming merges). No deploy, no Railway, no VPS, no installs: `herdr`, `openshell` 0.1.4 and rootless Podman are already on the box.

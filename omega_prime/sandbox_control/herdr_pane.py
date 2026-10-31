@@ -16,6 +16,7 @@ broker relay URL) before it ``exec``s omp.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import secrets
@@ -129,17 +130,61 @@ class HerdrAgentPane:
         label: str,
         host_cwd: str,
         resume_argv: Sequence[str] | None = None,
+        stop_session: Callable[[], object] | None = None,
     ) -> PaneHandle:
+        """Open a workspace, start the agent in it and report it working.
+
+        A failure after the workspace exists rolls the launch back before the
+        error is raised: once the command ran, the pane gets ``C-c C-c`` and
+        ``stop_session`` (e.g. a runner over :func:`stop_session_argv`) kills
+        the remote session; the workspace is then closed. Rollback steps are
+        best effort and never replace the original error.
+        """
         created = self._run(
             "workspace", "create", "--cwd", host_cwd, "--label", label, "--no-focus"
         )
         pane_id, workspace_id = _ids(created.stdout)
-        self._run(
-            "pane", "wait-output", "--regex", PROMPT_RE, "--timeout", "15000", pane_id
-        )
-        self._run("pane", "run", pane_id, shlex.join(pane_argv))
-        self.report(pane_id, "working", resume_argv=resume_argv)
+        started = False
+        try:
+            self._run(
+                "pane",
+                "wait-output",
+                "--regex",
+                PROMPT_RE,
+                "--timeout",
+                "15000",
+                pane_id,
+            )
+            started = True
+            self._run("pane", "run", pane_id, shlex.join(pane_argv))
+            self.report(pane_id, "working", resume_argv=resume_argv)
+        except BaseException:
+            self._rollback(pane_id, workspace_id, started, stop_session)
+            raise
         return PaneHandle(pane_id, workspace_id, session_tag)
+
+    def _rollback(
+        self,
+        pane_id: str,
+        workspace_id: str,
+        started: bool,
+        stop_session: Callable[[], object] | None,
+    ) -> None:
+        steps: list[Callable[[], object]] = []
+        if started:
+            steps.append(
+                lambda: self.runner(
+                    [self.herdr, "pane", "send-keys", pane_id, "C-c", "C-c"]
+                )
+            )
+            if stop_session is not None:
+                steps.append(stop_session)
+        steps.append(
+            lambda: self.runner([self.herdr, "workspace", "close", workspace_id])
+        )
+        for step in steps:
+            with contextlib.suppress(Exception):
+                step()
 
     def report(
         self,

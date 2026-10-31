@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import select
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -45,6 +46,10 @@ _WORKLOAD_STATUS = {
     "remove": SandboxLifecycle.REMOVED,
 }
 _HELD = frozenset({SandboxLifecycle.EXITED, SandboxLifecycle.UNHEALTHY})
+# ``openshell sandbox delete`` stops containers with SIGTERM/SIGKILL. Only a
+# held death with one of these codes can be teardown; anything else (exit 1,
+# an unknown code) is a real failure even if removal follows it.
+TEARDOWN_EXIT_CODES = frozenset({137, 143})
 
 
 @dataclass
@@ -158,33 +163,76 @@ def podman_events_argv(podman: str, *, since: str | None = None) -> list[str]:
     return argv
 
 
+def _line_time(line: str) -> float:
+    """Event time of any Podman JSON line, mapped or not (0.0 if none)."""
+    try:
+        raw = json.loads(line)
+    except ValueError:
+        return 0.0
+    return _seconds(raw) if isinstance(raw, dict) else 0.0
+
+
+def _teardown_death(event: SandboxEvent) -> bool:
+    return event.exit_code in TEARDOWN_EXIT_CODES
+
+
 def iter_sandbox_events(
     lines: Iterable[str],
     parser: PodmanEventParser,
     *,
     teardown_grace_s: float = DEFAULT_TEARDOWN_GRACE_S,
+    clock: Callable[[], float] | None = None,
 ) -> Iterator[SandboxEvent]:
     """Map an injected line stream (a live ``podman events`` pipe or a replay).
 
-    A death (``exited``/``unhealthy``) is held until ``teardown_grace_s`` of
-    *event time* has passed. If the sandbox's workload is removed inside that
-    window, the death was a teardown (``openshell sandbox delete`` kills with
-    137) and is dropped; otherwise it is emitted. Event time keeps this
-    deterministic for replays. Held deaths are flushed when the stream ends.
+    A death (``exited``/``unhealthy``) is held until ``teardown_grace_s`` has
+    passed. If the sandbox's workload is removed inside that window and the
+    death's exit code is a delete's signal (137/143), it was a teardown and is
+    dropped; any other held death is a real failure and is emitted before the
+    ``removed`` event.
+
+    Time advances on every line, including events the parser ignores, by the
+    line's own event time, so replays stay deterministic. For a live stream,
+    pass ``clock`` (wall seconds, e.g. ``time.time``) and feed it through
+    :func:`with_heartbeats`: empty heartbeat lines then flush held deaths on a
+    quiet stream instead of leaving them pending forever. Held deaths are also
+    flushed when the stream ends.
     """
     pending: list[SandboxEvent] = []
     for line in lines:
+        now = max(_line_time(line), clock() if clock else 0.0)
         event = parser.parse_line(line)
-        if event is None:
-            continue
-        ready = [p for p in pending if event.at - p.at >= teardown_grace_s]
+        if event is not None:
+            now = max(now, event.at)
+        ready = [p for p in pending if now - p.at >= teardown_grace_s]
         pending = [p for p in pending if p not in ready]
         yield from ready
+        if event is None:
+            continue
         if event.lifecycle is SandboxLifecycle.REMOVED:
+            same = [p for p in pending if p.sandbox == event.sandbox]
             pending = [p for p in pending if p.sandbox != event.sandbox]
+            yield from (p for p in same if not _teardown_death(p))
             yield event
         elif event.lifecycle in _HELD:
             pending.append(event)
         else:
             yield event
     yield from pending
+
+
+def with_heartbeats(stream: Any, interval_s: float = 1.0) -> Iterator[str]:
+    """Lines from a live pipe, with ``""`` whenever it is quiet for ``interval_s``.
+
+    ``stream`` is a readable file object with ``fileno()`` (the ``podman
+    events`` stdout). Ends at EOF.
+    """
+    while True:
+        readable, _, _ = select.select([stream], [], [], interval_s)
+        if not readable:
+            yield ""
+            continue
+        line = stream.readline()
+        if not line:
+            return
+        yield line

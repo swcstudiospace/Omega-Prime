@@ -1284,7 +1284,9 @@ def default_registry(
 
     register_capacity_tools(registry)
     register_dispatch_tools(registry)
-    register_sandbox_control_tools(registry)
+    # The resolved env (settings.json included); an empty mapping means the
+    # caller passed none, so the family falls back to os.environ as before.
+    register_sandbox_control_tools(registry, env=env or None)
     # Prime capability families are config-gated (default off): a disabled
     # family is not registered and is absent from the offered roster (LOOP-05).
     # RLM registers on the desk parent when its flag is on. Without a child

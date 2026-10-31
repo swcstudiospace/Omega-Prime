@@ -13,7 +13,7 @@ call a model HTTP API.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +44,17 @@ SANDBOX_TOOL_NAMES = (
 ProviderFactory = Callable[[], OpenShellSandboxProvider]
 
 
-def default_provider() -> OpenShellSandboxProvider:
-    env = dict(os.environ)
+TASK_STORE_UNAVAILABLE = "unavailable"
+
+
+def default_provider(env: Mapping[str, str] | None = None) -> OpenShellSandboxProvider:
+    """Provider over the resolved env (``settings.json`` values included).
+
+    ``env=None`` reads ``os.environ``. When the dashboard package is missing,
+    lifecycle events reach only the outbox and every tool result says
+    ``task_store: unavailable`` so callers know task rows were not updated.
+    """
+    env = dict(env if env is not None else os.environ)
     config = SandboxConfig.from_env(env)
     sinks: list[EventSink] = [OutboxSink(config.outbox)]
     store = dashboard_task_store(
@@ -61,7 +70,10 @@ def default_provider() -> OpenShellSandboxProvider:
             )
         )
     return OpenShellSandboxProvider(
-        config=config, runner=subprocess_runner(env), sink=FanoutSink(sinks)
+        config=config,
+        runner=subprocess_runner(env),
+        sink=FanoutSink(sinks),
+        task_store_available=store is not None,
     )
 
 
@@ -76,14 +88,24 @@ def _guard(
         out = exc.to_dict()
     if isinstance(sink, FanoutSink) and len(sink.errors) > before:
         out["event_sink_errors"] = sink.errors[before:]
+    if not provider.task_store_available:
+        out["task_store"] = TASK_STORE_UNAVAILABLE
     return out
 
 
 def register_sandbox_control_tools(
-    registry: ToolRegistry, provider_factory: ProviderFactory | None = None
+    registry: ToolRegistry,
+    provider_factory: ProviderFactory | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> list[str]:
-    """Register the Sandbox family. The provider is built per call (cheap, no I/O)."""
-    factory = provider_factory or default_provider
+    """Register the Sandbox family. The provider is built per call (cheap, no I/O).
+
+    Pass the resolved ``env`` from ``default_registry`` so state paths such as
+    ``OMEGA_PRIME_STATE_DIR`` from ``settings.json`` are honoured.
+    """
+    resolved = dict(env) if env is not None else None
+    factory = provider_factory or (lambda: default_provider(resolved))
 
     def sandbox_create(
         slug: str, task_id: str | None = None, ready_timeout_s: int | None = None

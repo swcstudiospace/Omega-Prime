@@ -264,3 +264,58 @@ def test_podman_events_argv() -> None:
         "--since",
         "5m",
     ]
+
+
+def test_removal_in_grace_keeps_real_failures_and_drops_only_teardown() -> None:
+    name = f"openshell-default--ompsbx-demo-abc123-{UUID}"
+    base = 1_800_000_000 * 10**9
+    crash = [_line(name, "died", base, 1), _line(name, "remove", base + 10**9, 1)]
+    kinds = [
+        (e.lifecycle, e.exit_code)
+        for e in iter_sandbox_events(crash, PodmanEventParser())
+    ]
+    assert kinds == [(SandboxLifecycle.EXITED, 1), (SandboxLifecycle.REMOVED, None)]
+    kill = [_line(name, "died", base, 137), _line(name, "remove", base + 10**9, 137)]
+    kept = [e.lifecycle for e in iter_sandbox_events(kill, PodmanEventParser())]
+    assert kept == [SandboxLifecycle.REMOVED]
+
+
+def test_ignored_events_advance_the_grace_window() -> None:
+    name = f"openshell-default--ompsbx-demo-abc123-{UUID}"
+    base = 1_800_000_000 * 10**9
+    lines = [_line(name, "died", base, 1), _line(name, "attach", base + 11 * 10**9)]
+    stream = iter_sandbox_events(lines, PodmanEventParser())
+    first = next(stream)  # released by the ignored line, not by stream end
+    assert first.lifecycle is SandboxLifecycle.EXITED and first.exit_code == 1
+
+
+def test_live_stream_flushes_held_death_on_quiet_heartbeat() -> None:
+    name = f"openshell-default--ompsbx-demo-abc123-{UUID}"
+    now = [1_800_000_000.0]
+
+    def lines():  # a live pipe: one death, then quiet heartbeats forever
+        yield _line(name, "died", int(now[0] * 10**9), 2)
+        while True:
+            now[0] += 5
+            yield ""
+
+    stream = iter_sandbox_events(lines(), PodmanEventParser(), clock=lambda: now[0])
+    event = next(stream)
+    assert event.lifecycle is SandboxLifecycle.EXITED and event.exit_code == 2
+    assert now[0] - 1_800_000_000.0 >= 10  # held for the grace, not forever
+
+
+def test_with_heartbeats_yields_blank_lines_when_quiet() -> None:
+    import os
+
+    from omega_prime.sdlc_events.sources.podman_events import with_heartbeats
+
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd) as reader, os.fdopen(write_fd, "w") as writer:
+        beats = with_heartbeats(reader, interval_s=0.01)
+        assert next(beats) == ""
+        writer.write('{"a": 1}\n')
+        writer.flush()
+        assert next(beats) == '{"a": 1}\n'
+        writer.close()
+        assert list(beats) == []

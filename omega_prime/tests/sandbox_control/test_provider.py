@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import json
 import stat
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-from sbx_fakes import FakeOpenShell, make_config, make_provider
+from sbx_fakes import (
+    GH_TOKEN,
+    OPENAI_KEY,
+    UUID,
+    FakeOpenShell,
+    make_config,
+    make_provider,
+)
 
 from omega_prime.sandbox_control.events import FanoutSink, OutboxSink
 from omega_prime.sandbox_control.provider import (
     OpenShellSandboxProvider,
+    RunResult,
     SandboxControlError,
     exec_argv,
     host_env,
@@ -100,8 +109,30 @@ def test_create_failure_is_redacted_and_reported(
     fake.create_rc = 1
     with pytest.raises(SandboxControlError) as err:
         provider.create("demo", task_id="gb:00045")
-    assert "ghp_" not in err.value.reason and "[REDACTED]" in err.value.reason
+    assert GH_TOKEN not in err.value.reason and "[REDACTED]" in err.value.reason
     assert _lifecycles(provider) == [SandboxLifecycle.NOT_READY]
+    # The allocated name survives in the structured error so callers can
+    # check or delete it instead of retrying under a new name.
+    name = err.value.to_dict()["name"]
+    assert name.startswith("ompsbx-demo-")
+    assert provider.ownership is not None and provider.ownership.get(name)
+
+
+def test_create_timeout_keeps_the_allocated_name(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    real = provider.runner
+
+    def runner(argv: Sequence[str], stdin: str | None, seconds: float) -> RunResult:
+        if "create" in argv:
+            raise SandboxControlError("timeout", f"{seconds:.0f}s")
+        return real(argv, stdin, seconds)
+
+    provider.runner = runner
+    with pytest.raises(SandboxControlError) as err:
+        provider.create("demo")
+    out = err.value.to_dict()
+    assert out["error"] == "timeout" and out["name"].startswith("ompsbx-demo-")
 
 
 def test_exec_refuses_unowned_secret_env_and_escaping_cwd(
@@ -122,10 +153,10 @@ def test_exec_bounds_and_redacts_output(
 ) -> None:
     from omega_prime.sandbox_control.provider import RunResult
 
-    fake.exec_result = RunResult(3, "x" * 20000 + " sk-abcdefghijklmnop", "boom")
+    fake.exec_result = RunResult(3, "x" * 20000 + " " + OPENAI_KEY, "boom")
     out = provider.exec("ompsbx-demo-abc123", ["make", "test"], cwd="/sandbox/work")
     assert out["exit_code"] == 3 and out["truncated"] is True
-    assert len(out["stdout"]) == 8000 and "sk-abcdef" not in out["stdout"]
+    assert len(out["stdout"]) == 8000 and OPENAI_KEY not in out["stdout"]
     argv, _ = fake.calls[-1]
     assert argv[-3:] == ["--", "make", "test"]
     assert "--workdir" in argv and argv[argv.index("--workdir") + 1] == "/sandbox/work"
@@ -146,6 +177,27 @@ def test_exec_report_exit_nonzero_emits_blocking_exit(
     assert event.task_id == "gb:00045" and event.blocking
 
 
+def test_exec_report_exit_timeout_blocks_with_unknown_exit(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    assert provider.ownership is not None
+    provider.ownership.record("ompsbx-demo-abc123", "gb:00045")
+
+    def timeout(argv: Sequence[str], stdin: str | None, seconds: float) -> RunResult:
+        raise SandboxControlError("timeout", f"{seconds:.0f}s")
+
+    provider.runner = timeout
+    with pytest.raises(SandboxControlError, match="timeout"):
+        provider.exec("ompsbx-demo-abc123", ["omp"], report_exit=True)
+    event = provider.sink.events[-1]  # type: ignore[attr-defined]
+    assert event.lifecycle is SandboxLifecycle.EXITED and event.exit_code is None
+    assert event.blocking and event.task_id == "gb:00045"
+    assert "exit_unknown:timeout" in event.reasons
+    with pytest.raises(SandboxControlError):
+        provider.exec("ompsbx-demo-abc123", ["ls"])  # untracked: no event
+    assert len(provider.sink.events) == 1  # type: ignore[attr-defined]
+
+
 def test_down_deletes_marks_teardown_and_verifies_leftovers(
     provider: OpenShellSandboxProvider, fake: FakeOpenShell
 ) -> None:
@@ -164,7 +216,42 @@ def test_down_reports_leftovers(
     fake.leftover_containers = [f"openshell-default--{name}-d8eca4fc"]
     with pytest.raises(SandboxControlError, match="leftovers"):
         provider.down(name)
-    assert provider.ownership is not None and provider.ownership.teardown(name)
+    # A failed delete clears the teardown mark (later deaths are real again)
+    # but keeps the uuid so a retry still finds the supervisor container.
+    assert provider.ownership is not None and not provider.ownership.teardown(name)
+    assert provider.ownership.uuid_for(name) == UUID
+    fake.leftover_containers = [f"openshell-supervisor-{UUID}"]
+    with pytest.raises(SandboxControlError, match="supervisor"):
+        provider.down(name)  # status row is gone; uuid comes from the record
+    fake.leftover_containers = []
+    assert provider.down(name)["removed"] is True
+    assert provider.ownership.get(name) is None
+
+
+def test_down_fails_closed_when_podman_checks_fail(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    name = provider.create("demo", task_id="gb:00045")["name"]
+    fake.podman_rc = 125
+    with pytest.raises(SandboxControlError, match="leftover_check_failed"):
+        provider.down(name)
+    assert SandboxLifecycle.REMOVED not in _lifecycles(provider)
+    assert provider.ownership is not None and provider.ownership.get(name)
+
+
+def test_preflight_resolves_bare_command_names_on_path(
+    tmp_path: Path, fake: FakeOpenShell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import dataclasses
+
+    config = make_config(tmp_path)
+    monkeypatch.setenv("PATH", str(Path(config.openshell).parent))
+    bare = dataclasses.replace(config, openshell="openshell")
+    assert make_provider(bare, fake).preflight() == []
+    missing = dataclasses.replace(config, openshell="no-such-openshell")
+    assert make_provider(missing, fake).preflight() == ["openshell_missing"]
+    explicit = dataclasses.replace(config, openshell=str(tmp_path / "nope"))
+    assert make_provider(explicit, fake).preflight() == ["openshell_missing"]
 
 
 def test_down_refuses_unowned(provider: OpenShellSandboxProvider) -> None:

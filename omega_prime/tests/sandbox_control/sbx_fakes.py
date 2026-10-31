@@ -17,6 +17,10 @@ from omega_prime.sandbox_control.provider import (
 OPENSHELL = "/fake/openshell"
 PODMAN = "/fake/podman"
 UUID = "d8eca4fc-95f0-4bec-8c2f-9bd266b012a9"
+# Token-shaped values are assembled at runtime so no complete credential-shaped
+# literal sits in the repo (the no-secrets rule); redaction still sees them.
+GH_TOKEN = "_".join(("ghp", "a" * 16))
+OPENAI_KEY = "-".join(("sk", "b" * 16))
 
 
 def sandbox_row(name: str, phase: str = "Ready") -> dict[str, object]:
@@ -50,6 +54,7 @@ class FakeOpenShell:
     exec_result: RunResult = field(default_factory=lambda: RunResult(0, "ok\n", ""))
     phase_on_create: str = "Ready"
     leftover_containers: list[str] = field(default_factory=list)
+    podman_rc: int = 0
     calls: list[tuple[list[str], str | None]] = field(default_factory=list)
 
     def __call__(
@@ -58,6 +63,8 @@ class FakeOpenShell:
         args = list(argv)
         self.calls.append((args, stdin))
         if args[0] == PODMAN:
+            if self.podman_rc:
+                return RunResult(self.podman_rc, "", "cannot connect to Podman socket")
             if args[1] == "ps":
                 return RunResult(0, "\n".join(self.leftover_containers), "")
             return RunResult(0, "", "")
@@ -79,9 +86,7 @@ class FakeOpenShell:
             return RunResult(0, json.dumps(self.sandboxes[name]), "")
         if sub[:2] == ["sandbox", "create"]:
             if self.create_rc:
-                return RunResult(
-                    self.create_rc, "", "create exploded ghp_abcdefghijklmnop"
-                )
+                return RunResult(self.create_rc, "", "create exploded " + GH_TOKEN)
             name = sub[sub.index("--name") + 1]
             self.sandboxes[name] = sandbox_row(name, self.phase_on_create)
             return RunResult(0, f"Created sandbox: {name}\n", "")

@@ -105,3 +105,56 @@ def test_herdr_failure_raises() -> None:
     pane = HerdrAgentPane("/herdr", lambda _argv: RunResult(1, "", "nope"))
     with pytest.raises(SandboxControlError, match="herdr_failed"):
         pane.report("wX:p1", "idle")
+
+
+class FailingHerdr(FakeHerdr):
+    def __init__(self, fail: tuple[str, str]) -> None:
+        super().__init__()
+        self.fail = fail
+
+    def __call__(self, argv: Sequence[str]) -> RunResult:
+        result = super().__call__(argv)
+        if tuple(argv[1:3]) == self.fail:
+            return RunResult(1, "", "boom")
+        return result
+
+
+@pytest.mark.parametrize(
+    ("fail", "stopped"),
+    [
+        (("pane", "wait-output"), False),
+        (("pane", "run"), True),
+        (("pane", "report-agent"), True),
+    ],
+)
+def test_failed_launch_rolls_back_process_and_workspace(
+    fail: tuple[str, str], stopped: bool
+) -> None:
+    herdr = FailingHerdr(fail)
+    stops: list[str] = []
+    pane = HerdrAgentPane("/herdr", herdr)
+    argv, tag = agent_pane_argv("/os", "ompsbx-a-1", model="m", tag="ab12cd34")
+    with pytest.raises(SandboxControlError, match="herdr_failed"):
+        pane.launch(
+            argv,
+            session_tag=tag,
+            label="00045 demo",
+            host_cwd="/w",
+            stop_session=lambda: stops.append(tag),
+        )
+    assert herdr.calls[-1] == ["/herdr", "workspace", "close", "wX"]
+    keys = [c[4:] for c in herdr.calls if c[1:3] == ["pane", "send-keys"]]
+    assert (keys == [["C-c", "C-c"]]) is stopped
+    assert (stops == [tag]) is stopped
+
+
+def test_rollback_errors_never_replace_the_launch_error() -> None:
+    class Exploding(FailingHerdr):
+        def __call__(self, argv: Sequence[str]) -> RunResult:
+            if argv[1:3] == ["workspace", "close"]:
+                raise OSError("socket gone")
+            return super().__call__(argv)
+
+    pane = HerdrAgentPane("/herdr", Exploding(("pane", "run")))
+    with pytest.raises(SandboxControlError, match="herdr_failed"):
+        pane.launch(["x"], session_tag="t", label="l", host_cwd="/w")

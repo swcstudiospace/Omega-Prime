@@ -82,6 +82,9 @@ class FanoutSink:
                 self.errors.append(f"{type(sink).__name__}: {type(exc).__name__}")
 
 
+OWNER_KIND = "sandbox-control"
+
+
 class _DashboardTaskStore:
     """``TaskStorePort`` over the dashboard's locked tasks.json helpers."""
 
@@ -98,9 +101,12 @@ class _DashboardTaskStore:
             row = next((t for t in data["tasks"] if t.get("id") == task_id), None)
             if row is None:
                 title = f"Sandbox {task_id.removeprefix('gb:sbx-')}"
+                # The dashboard rejects task rows without owner.kind/ref.
                 row = {
                     "id": task_id,
                     "title": title,
+                    "owner": {"kind": OWNER_KIND, "ref": task_id},
+                    "state": state,
                     "started_at": stamp,
                     "links": [],
                     "pid": None,

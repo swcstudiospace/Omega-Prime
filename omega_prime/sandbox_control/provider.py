@@ -12,18 +12,23 @@ the same sandboxes. The rules, all fail closed:
   read-only here);
 * exec takes an argv (no shell string), a cwd under ``/sandbox``, and an env
   with no secret-shaped names; secrets never go on argv;
-* outputs are tail-bounded and redacted before they leave this module;
-* ``down`` checks that no containers, volumes or list rows are left.
+* outputs are tail-bounded while the command runs (host memory stays
+  bounded) and redacted before they leave this module;
+* ``down`` checks that no containers, volumes or list rows are left, and a
+  failed Podman check is an error, never an empty result.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import posixpath
 import re
 import secrets
+import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -47,6 +52,9 @@ SECRET_ENV_RE = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH", re.IGNO
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SLUG_RE = re.compile(r"[^a-z0-9]+")
 TAIL_CHARS = 8000
+# Bytes kept per stream while a command runs; the rest is dropped as it arrives.
+CAPTURE_BYTES = 64 * 1024
+_READ_CHUNK = 8192
 MAX_ARGV = 256
 MAX_ARG_CHARS = 16_384
 MAX_STDIN_BYTES = 1_000_000
@@ -63,13 +71,18 @@ BASE_ENV = {
 class SandboxControlError(Exception):
     """A refused or failed sandbox operation; ``code`` is machine-readable."""
 
-    def __init__(self, code: str, reason: str) -> None:
+    def __init__(
+        self, code: str, reason: str, *, details: Mapping[str, Any] | None = None
+    ) -> None:
         super().__init__(f"{code}: {reason}")
         self.code = code
         self.reason = reason
+        # Structured context the caller needs to recover, e.g. the allocated
+        # sandbox ``name`` when create fails after the gateway saw it.
+        self.details: dict[str, Any] = dict(details or {})
 
-    def to_dict(self) -> dict[str, str]:
-        return {"error": self.code, "reason": self.reason}
+    def to_dict(self) -> dict[str, Any]:
+        return {**self.details, "error": self.code, "reason": self.reason}
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +90,8 @@ class RunResult:
     returncode: int
     stdout: str
     stderr: str
+    # True when the runner dropped output beyond its capture bound.
+    truncated: bool = False
 
 
 Runner = Callable[[Sequence[str], str | None, float], RunResult]
@@ -100,28 +115,93 @@ def host_env(env: Mapping[str, str]) -> dict[str, str]:
     return out
 
 
-def subprocess_runner(env: Mapping[str, str] | None = None) -> Runner:
-    """Real runner: no shell, minimal host env, hard timeout."""
+class _TailBuffer:
+    """Keeps only the last ``limit`` bytes of a stream as it is read."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._data = bytearray()
+        self.dropped = False
+
+    def feed(self, chunk: bytes) -> None:
+        self._data += chunk
+        extra = len(self._data) - self._limit
+        if extra > 0:
+            del self._data[:extra]
+            self.dropped = True
+
+    def text(self) -> str:
+        return self._data.decode("utf-8", errors="replace")
+
+
+def _drain(stream: Any, buffer: _TailBuffer) -> None:
+    with stream:
+        while chunk := stream.read(_READ_CHUNK):
+            buffer.feed(chunk)
+
+
+def _feed_stdin(stream: Any, data: bytes) -> None:
+    with contextlib.suppress(BrokenPipeError, OSError), stream:
+        stream.write(data)
+
+
+def subprocess_runner(
+    env: Mapping[str, str] | None = None, *, capture_bytes: int = CAPTURE_BYTES
+) -> Runner:
+    """Real runner: no shell, minimal host env, hard timeout, bounded capture.
+
+    Output is read while the process runs and only the last ``capture_bytes``
+    of each stream are kept, so a noisy hour-long command cannot grow host
+    memory without limit.
+    """
     child_env = host_env(env if env is not None else os.environ)
 
     def run(argv: Sequence[str], stdin: str | None, timeout: float) -> RunResult:
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 list(argv),
-                input=stdin,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
+                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 env=child_env,
-                check=False,
             )
         except FileNotFoundError as exc:
             raise SandboxControlError("binary_missing", str(argv[0])) from exc
+        out, err = _TailBuffer(capture_bytes), _TailBuffer(capture_bytes)
+        workers = [
+            threading.Thread(target=_drain, args=(proc.stdout, out), daemon=True),
+            threading.Thread(target=_drain, args=(proc.stderr, err), daemon=True),
+        ]
+        if stdin is not None:
+            workers.append(
+                threading.Thread(
+                    target=_feed_stdin, args=(proc.stdin, stdin.encode()), daemon=True
+                )
+            )
+        for worker in workers:
+            worker.start()
+        try:
+            returncode = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            proc.wait()
             raise SandboxControlError("timeout", f"{timeout:.0f}s") from exc
-        return RunResult(proc.returncode, proc.stdout or "", proc.stderr or "")
+        finally:
+            for worker in workers:
+                worker.join(timeout=5)
+        return RunResult(
+            returncode, out.text(), err.text(), truncated=out.dropped or err.dropped
+        )
 
     return run
+
+
+def resolve_binary(command: str, env: Mapping[str, str] | None = None) -> str | None:
+    """Executable path for ``command``: explicit paths as-is, bare names via PATH."""
+    if "/" in command:
+        return command if os.access(command, os.X_OK) else None
+    path = (env if env is not None else os.environ).get("PATH")
+    return shutil.which(command, path=path)
 
 
 @dataclass(frozen=True)
@@ -262,6 +342,8 @@ class OpenShellSandboxProvider:
     readiness_probe: Callable[[str], ReadinessInput] | None = None
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
+    # False when lifecycle events reach only the outbox (no dashboard).
+    task_store_available: bool = True
 
     def __post_init__(self) -> None:
         if self.ownership is None:
@@ -310,7 +392,7 @@ class OpenShellSandboxProvider:
     def preflight(self) -> list[str]:
         """Reasons the provider cannot create sandboxes right now (empty = ok)."""
         reasons: list[str] = []
-        if not os.access(self.config.openshell, os.X_OK):
+        if resolve_binary(self.config.openshell) is None:
             reasons.append("openshell_missing")
             return reasons
         if not self.config.policy.is_file():
@@ -367,6 +449,18 @@ class OpenShellSandboxProvider:
         if reasons:
             raise SandboxControlError("preflight_failed", ",".join(reasons))
         name = owned_name(slug)
+        try:
+            return self._create(name, task_id, ready_timeout_s)
+        except SandboxControlError as exc:
+            # Once a name is allocated the gateway may already hold it (a CLI
+            # timeout after the request landed), so callers need it to check
+            # or delete instead of retrying under a new name.
+            exc.details.setdefault("name", name)
+            raise
+
+    def _create(
+        self, name: str, task_id: str | None, ready_timeout_s: float | None
+    ) -> dict[str, Any]:
         assert self.ownership is not None
         self.ownership.record(name, task_id)
         result = self._os(
@@ -456,44 +550,65 @@ class OpenShellSandboxProvider:
         argv_full = exec_argv(
             self.config.openshell, name, argv, cwd=cwd, env=env, timeout_s=timeout_s
         )
-        result = self.runner(argv_full, stdin, timeout_s + 30)
+        label = f"exec:{posixpath.basename(argv[0])[:40]}"
+        try:
+            result = self.runner(argv_full, stdin, timeout_s + 30)
+        except SandboxControlError as exc:
+            if report_exit:
+                # The tracked process's exit is unknown (timeout, missing
+                # CLI): block the owning task rather than leave it working.
+                self._emit_exit(name, None, (label, f"exit_unknown:{exc.code}"))
+            raise
         stdout, out_cut = _tail(result.stdout)
         stderr, err_cut = _tail(result.stderr)
         if report_exit:
-            assert self.ownership is not None
-            self._emit(
-                self._event(
-                    name,
-                    SandboxLifecycle.EXITED,
-                    task_id=self.ownership.task_for(name),
-                    exit_code=result.returncode,
-                    reasons=(f"exec:{posixpath.basename(argv[0])[:40]}",),
-                )
-            )
+            self._emit_exit(name, result.returncode, (label,))
         return {
             "name": name,
             "exit_code": result.returncode,
             "stdout": stdout,
             "stderr": stderr,
-            "truncated": out_cut or err_cut,
+            "truncated": out_cut or err_cut or result.truncated,
         }
+
+    def _emit_exit(
+        self, name: str, exit_code: int | None, reasons: tuple[str, ...]
+    ) -> None:
+        assert self.ownership is not None
+        self._emit(
+            self._event(
+                name,
+                SandboxLifecycle.EXITED,
+                task_id=self.ownership.task_for(name),
+                exit_code=exit_code,
+                reasons=reasons,
+            )
+        )
 
     def down(self, name: str) -> dict[str, Any]:
         self._require_owned(name)
         assert self.ownership is not None
         task_id = self.ownership.task_for(name)
         before = self.status(name)
-        uuid = str(before.get("id") or "")
-        self.ownership.mark_teardown(name)
-        if before.get("exists"):
-            result = self._os("sandbox", "delete", name, timeout=180)
-            if result.returncode != 0:
-                raise SandboxControlError(
-                    "delete_failed", _tail(result.stderr)[0][-500:]
-                )
-        leftovers = self._leftovers(name, uuid)
-        if leftovers:
-            raise SandboxControlError("leftovers", ",".join(leftovers)[:500])
+        # The status row disappears once the gateway forgets the sandbox, so
+        # the uuid is kept on the ownership record until cleanup passes; a
+        # retry can still match ``openshell-supervisor-<uuid>`` leftovers.
+        uuid = str(before.get("id") or "") or self.ownership.uuid_for(name) or ""
+        self.ownership.mark_teardown(name, uuid=uuid or None)
+        try:
+            if before.get("exists"):
+                result = self._os("sandbox", "delete", name, timeout=180)
+                if result.returncode != 0:
+                    raise SandboxControlError(
+                        "delete_failed", _tail(result.stderr)[0][-500:]
+                    )
+            leftovers = self._leftovers(name, uuid)
+            if leftovers:
+                raise SandboxControlError("leftovers", ",".join(leftovers)[:500])
+        except SandboxControlError:
+            # The sandbox may still be running: later deaths are real again.
+            self.ownership.clear_teardown(name)
+            raise
         self._emit(self._event(name, SandboxLifecycle.REMOVED, task_id=task_id))
         self.ownership.forget(name)
         return {"name": name, "removed": True, "existed": bool(before.get("exists"))}
@@ -505,15 +620,11 @@ class OpenShellSandboxProvider:
             found = []
             if any(row.get("name") == name for row in self.list_sandboxes()):
                 found.append(f"list:{name}")
-            ps = self.runner(
-                [self.config.podman, "ps", "-a", "--format", "{{.Names}}"], None, 30
-            )
+            ps = self._podman_check("ps", "-a", "--format", "{{.Names}}")
             for line in ps.stdout.splitlines():
                 if key in line or (uuid and line.endswith(uuid)):
                     found.append(f"container:{line}")
-            vols = self.runner(
-                [self.config.podman, "volume", "ls", "--format", "{{.Name}}"], None, 30
-            )
+            vols = self._podman_check("volume", "ls", "--format", "{{.Name}}")
             for line in vols.stdout.splitlines():
                 if name in line or (uuid and uuid in line):
                     found.append(f"volume:{line}")
@@ -521,6 +632,17 @@ class OpenShellSandboxProvider:
                 return []
             self.sleep(1.0)
         return found
+
+    def _podman_check(self, *args: str) -> RunResult:
+        """A leftover probe; a failed probe proves nothing, so it is an error."""
+        result = self.runner([self.config.podman, *args], None, 30)
+        if result.returncode != 0:
+            raise SandboxControlError(
+                "leftover_check_failed",
+                f"podman {args[0]} exit {result.returncode}: "
+                + _tail(result.stderr)[0][-300:],
+            )
+        return result
 
 
 def _summary(row: Mapping[str, Any]) -> dict[str, Any]:
