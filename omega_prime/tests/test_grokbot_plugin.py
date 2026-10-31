@@ -223,7 +223,7 @@ def test_plugin_manifest_has_required_fields_and_existing_relative_paths() -> No
     assert KEBAB.fullmatch(manifest["name"])
     assert manifest["version"] == pyproject["project"]["version"]
     assert manifest["repository"] == pyproject["project"]["urls"]["Repository"]
-    assert manifest["repository"] == "https://github.com/swcstudiospace/omes-bot"
+    assert manifest["repository"] == "https://github.com/swcstudiospace/Omega-Prime"
     assert manifest["skills"] == "omega_prime/skills"
     assert manifest["commands"] == COMMANDS_DIR
     assert manifest["mcpServers"] == "mcp.json"

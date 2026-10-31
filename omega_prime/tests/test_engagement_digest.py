@@ -308,7 +308,7 @@ def _section(stdout: str, heading: str) -> list[str]:
     start = lines.index(heading) + 1
     body: list[str] = []
     for line in lines[start:]:
-        if line.startswith("## ") or line.startswith("# "):
+        if line.startswith(("## ", "# ")):
             break
         body.append(line)
     return body

@@ -61,6 +61,17 @@ export function pinStillNamed(pin: PinnedDir): boolean {
   catch { return false; }
 }
 
+/**
+ * A host path that reaches the pinned directory itself, not whatever its name points to now. On Linux this is the
+ * descriptor's `/proc/self/fd/<n>` link; elsewhere the name is used only while it still leads to the same directory.
+ */
+export function pinnedPath(pin: PinnedDir): string {
+  const viaFd = `/proc/self/fd/${pin.fd}`;
+  try { const st = statSync(viaFd); if (st.ino === pin.ino && st.dev === pin.dev) return viaFd; } catch { /* no procfs */ }
+  if (pinStillNamed(pin)) return pin.path;
+  throw new PathRefused("workspace_host_path changed since it was checked");
+}
+
 export function unpinDir(pin: PinnedDir | null) { if (pin) try { closeSync(pin.fd); } catch { /* already closed */ } }
 
 /** Files to seed from `src`. Path-only entries: bytes are read at copy time (core.ts #seed), never buffered here.

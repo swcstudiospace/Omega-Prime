@@ -56,7 +56,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from omega_prime.dashboard import herdr_launch, run_rows
+from omega_prime.dashboard import run_rows, sandbox_pane
 from omega_prime.dashboard.blocks import clear_block, raise_block
 from omega_prime.dashboard.status_file import locked_tasks
 from omega_prime.engine.jobs import append_event, child_env, state_dir, write_json
@@ -702,7 +702,7 @@ def run_backend(
             # healthy stage.
             pane: str | None = None
             with contextlib.suppress(Exception):
-                pane = herdr_launch.open_pane(
+                pane = sandbox_pane.open_pane(
                     env,
                     cwd=work,
                     label=f"{task_id} {stage}",
@@ -1158,7 +1158,7 @@ def _answer_from_store(
     """
     if tasks_path is None:
         return None
-    with locked_tasks(tasks_path) as data:
+    with locked_tasks(Path(tasks_path), write=False) as data:
         item = next(
             (row for row in data.get("waiting_on_ove", []) if row.get("id") == item_id),
             None,

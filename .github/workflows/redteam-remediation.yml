@@ -28,6 +28,12 @@ on:
         default: false
 
 # Least privilege at the top level; jobs escalate only where needed.
+
+# Runner: every job runs on the omega-ci pool ([self-hosted, linux, x64,
+# omega-ci], docs/ci-runners.md), never on GitHub-hosted runners. Interpreters
+# and Node come from the runner image's read-only tool cache (setup-python /
+# setup-node cache hits); installs land in the job's own HOME.
+
 permissions:
   contents: read
 
@@ -39,7 +45,7 @@ jobs:
   # Reuses the supply-chain.yml audit chain verbatim — never a second
   # audit convention. Fails while untriaged high+ advisories remain.
   audit:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 15
     permissions:
       contents: read
@@ -73,7 +79,7 @@ jobs:
   remediate:
     needs: audit
     if: failure()
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 20
     permissions:
       contents: read
@@ -81,7 +87,7 @@ jobs:
       issues: write
     env:
       UPSTREAM_REPO: swcstudiospace/purple-team
-      TRACKING_REPO: swcstudiospace/omes-bot
+      TRACKING_REPO: swcstudiospace/Omega-Prime
       # Empty when the secret is unset; the report step selects degrade.
       REMEDIATION_TOKEN: ${{ secrets.REMEDIATION_TOKEN }}
     steps:
@@ -233,13 +239,13 @@ jobs:
   notify-green:
     needs: audit
     if: success()
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 10
     permissions:
       contents: read
       issues: write
     env:
-      TRACKING_REPO: swcstudiospace/omes-bot
+      TRACKING_REPO: swcstudiospace/Omega-Prime
     steps:
       - uses: actions/checkout@v7
       - name: comment pin-green proof

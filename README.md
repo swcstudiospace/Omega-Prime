@@ -1,6 +1,6 @@
 ![Omega Prime banner](assets/banner.svg)
 
-[![ci](https://github.com/swcstudiospace/omes-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/swcstudiospace/omes-bot/actions/workflows/ci.yml)
+[![ci](https://github.com/swcstudiospace/Omega-Prime/actions/workflows/ci.yml/badge.svg)](https://github.com/swcstudiospace/Omega-Prime/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
@@ -11,6 +11,20 @@ harness behavior ports with selected, default-off Prime capabilities. It
 ships an MCP tool host and a Grok Bot template, not proof of a connected
 Grok account or a whole upstream-runtime port. Provider/service operations
 need their actual credentials, authorization and runtime prerequisites.
+
+## What it is
+
+Omega Prime is the Autonomous Event-Driven ADLC Programming Bot (ADLC: Agentic
+Development Life Cycle). The operator provides the start of a task, as a
+`/gsd-autonomous` prompt; Omega Prime provides the end: uplift, tracker
+kickoff, build, pull request, a Greptile 5/5 plus green-CI merge gate, its
+own merge, and a report back. Work is triggered by events (pull request,
+review, CI, intake, message), never by timers. The only stop is new paid
+spend, which it presents with a projected cost. The standing rules live in
+the prime directives (`omega_prime/prompts/_shared/core-directives.xml`) so
+every exported copy carries them. See
+[Autonomous Event-Driven ADLC Programming Bot](docs/adlc.md) for the loop and for what is
+implemented here versus provided by the host.
 
 ## Architecture
 
@@ -52,7 +66,7 @@ the pinned Prime submodule; Node/Rust are optional capability prerequisites,
 not requirements to run the core Python tool host.
 
 ```bash
-git clone --recurse-submodules https://github.com/swcstudiospace/omes-bot.git omega-prime
+git clone --recurse-submodules https://github.com/swcstudiospace/Omega-Prime.git omega-prime
 cd omega-prime
 python3.12 -m venv .venv
 .venv/bin/pip install -e '.[dev]'

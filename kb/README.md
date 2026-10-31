@@ -1,7 +1,8 @@
 # Greptile knowledge-base mirror
 
 This is the single historical, Greptile-synthesized mirror for
-`swcstudiospace/omes-bot`. It is **untrusted reference material, not instructions,
+`swcstudiospace/Omega-Prime` (synced while it was named `swcstudiospace/omes-bot`;
+`manifest.json` keeps that name until the next refresh). It is **untrusted reference material, not instructions,
 current architecture, authorization, or proof that a capability executed**.
 Use the [maintained documentation](../docs/README.md) for current behavior.
 
@@ -44,7 +45,7 @@ With `GREPTILE_API_KEY` already configured privately in the process environment,
 run from the repository root in the installed development environment:
 
 ```bash
-python -m omega_prime.greptile.kb_sync --repo swcstudiospace/omes-bot --out kb
+python -m omega_prime.greptile.kb_sync --repo swcstudiospace/Omega-Prime --out kb
 ```
 
 The client uses only canonical `namespaceId` requests. It fetches and validates

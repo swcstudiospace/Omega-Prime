@@ -64,12 +64,12 @@ while True:
 
 
 def _ctx(tmp_path, **overrides):
-    base = dict(
-        root=tmp_path,
-        timescale=lambda sql, limit: {"rows": [{"sql": sql, "limit": limit}]},
-        greptime=lambda sql, limit: {"rows": []},
-        vcs_show=lambda ref, path: f"{ref}:{path}:content",
-    )
+    base = {
+        "root": tmp_path,
+        "timescale": lambda sql, limit: {"rows": [{"sql": sql, "limit": limit}]},
+        "greptime": lambda sql, limit: {"rows": []},
+        "vcs_show": lambda ref, path: f"{ref}:{path}:content",
+    }
     base.update(overrides)
     return SystemsContext(**base)
 

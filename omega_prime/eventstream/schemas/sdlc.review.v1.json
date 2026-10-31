@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:omega:schema:sdlc.review:1",
+  "title": "Omega sdlc.review payload contracts",
+  "$defs": {
+    "omega.sdlc.review.greptile_scored": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "head_sha",
+        "actor",
+        "score"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "bot",
+          "score": 92
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "bot",
+          "score": 92
+        }
+      ]
+    },
+    "omega.sdlc.review.approved": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewer": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "head_sha",
+        "actor",
+        "reviewer"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "bot",
+          "reviewer": "octocat"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "bot",
+          "reviewer": "octocat"
+        }
+      ]
+    },
+    "omega.sdlc.review.changes_requested": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "head_sha",
+        "actor",
+        "reviewer",
+        "summary"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "bot",
+          "reviewer": "octocat",
+          "summary": "Please adjust this"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "bot",
+          "reviewer": "octocat",
+          "summary": "Please adjust this"
+        }
+      ]
+    },
+    "omega.sdlc.review.commented": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "comment_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "head_sha",
+        "actor",
+        "reviewer",
+        "comment_id"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "bot",
+          "reviewer": "octocat",
+          "comment_id": "c-1"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "bot",
+          "reviewer": "octocat",
+          "comment_id": "c-1"
+        }
+      ]
+    }
+  }
+}

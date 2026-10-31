@@ -31,6 +31,8 @@ Phase 99 (solo mode, Desk optional) is implemented on its own branch and integra
 Phase 100 (omp engine wiring) is complete and integrated after Phase 99 (PR #50); see `.planning/phases/100-omp-engine-wiring/`.
 
 Phase 102 (Schedulers, dead modules, env docs) is integrated in wiring order (PR #52); see `.planning/phases/` for its summary.
+- **v21 Event Stream** — Phases 104–108 (started 2026-10-23, task 00046). Apache Pulsar event backbone for the Autonomous Event-Driven ADLC; timer routines banned (event-driven only). Runs in parallel with v20; see `phases/104-event-stream-broker-decision-and-railway-spec/DESIGN.md`.
+
 Archives: `milestones/v1-ROADMAP.md` through `milestones/v16-ROADMAP.md`
 with phase directories under `milestones/v1-phases/` through
 `milestones/v16-phases/`.

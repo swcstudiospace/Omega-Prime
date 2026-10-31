@@ -445,7 +445,7 @@ argv = sys.argv[1:]
 row = {"argv": argv}
 created = MODE == "ok" and argv[:2] == ["workspace", "create"]
 if created:
-    row["pane"] = "pane-%d" % os.getpid()
+    row["pane"] = "w1:p%d" % os.getpid()
 with open(LOG, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(row) + "\n")
 if created:
@@ -605,18 +605,34 @@ def _backend_env(
 
 
 def _row(task_id: str, state: str = "working", **extra: object) -> dict:
-    row: dict = {"id": task_id, "state": state}
+    row: dict = {
+        "id": task_id,
+        "title": task_id,
+        "owner": {"kind": "engine", "ref": task_id},
+        "state": state,
+    }
     row.update(extra)
     return row
 
 
 def _seed(path: Path, rows: list[dict]) -> Path:
+    """A dashboard tasks.json v1 (the validated store on main)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"tasks": rows, "waiting_on_ove": []}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    payload = {
+        "version": 1,
+        "updated_at": "2026-10-31T00:00:00+00:00",
+        "tasks": rows,
+        "waiting_on_ove": [],
+        "finished": [],
+        "next_seq": 1,
+        "identity_registry": {},
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def _id_state(row: dict) -> dict:
+    return {"id": row["id"], "state": row["state"]}
 
 
 # --- W112-05: the run contract through the real engine -----------------------
@@ -776,7 +792,7 @@ def test_tier_unavailable_raises_exactly_one_sandbox_item(tmp_path: Path) -> Non
     items = data["waiting_on_ove"]
     assert [item["id"] for item in items] == ["gb:tier:sandbox_unavailable"]
     assert items[0]["blocks"] == "engine sandbox gate (sandbox_unavailable)"
-    assert data["tasks"][0] == {"id": "gb:tier", "state": "blocked"}
+    assert _id_state(data["tasks"][0]) == {"id": "gb:tier", "state": "blocked"}
     # The run stopped at the up refusal: only up and the shutdown ran.
     assert _wrapper_tools(log) == ["up", "down"]
     # A retried run upserts instead of duplicating (one item, stable id).
@@ -824,7 +840,7 @@ def test_plan_not_allowed_raises_one_item_without_spawning(tmp_path: Path) -> No
     items = data["waiting_on_ove"]
     assert [item["id"] for item in items] == ["gb:gate:plan_not_allowed"]
     assert items[0]["blocks"] == "engine plan gate (plan_not_allowed)"
-    assert data["tasks"][0] == {"id": "gb:gate", "state": "blocked"}
+    assert _id_state(data["tasks"][0]) == {"id": "gb:gate", "state": "blocked"}
     # The gate refused before any wrapper spawn: the canary left no log.
     assert not log.exists()
     assert _wrapper_log(log) == []
@@ -1059,7 +1075,7 @@ def test_tracked_run_lands_a_row_working_to_done(tmp_path: Path) -> None:
     roots = tmp_path / "roots"
     work = _git_worktree(roots)
     env = _backend_env(tmp_path, omp, script, roots, OMEGA_PRIME_OMP_ALLOW_ZAI="1")
-    other = _row("gb:other", "queued", owner="sol", nested={"keep": [1, 2, 3]})
+    other = _row("gb:other", "queued", owner={"kind": "agent", "ref": "sol"})
     store = _seed(tmp_path / "tasks.json", rows=[other])
     result = run(
         "plan the thing",
@@ -1077,7 +1093,8 @@ def test_tracked_run_lands_a_row_working_to_done(tmp_path: Path) -> None:
     assert row["state"] == "done"
     receipts = _jsonl(tmp_path / "bin" / "herdr-log.jsonl")
     create = next(e for e in receipts if e["argv"][:2] == ["workspace", "create"])
-    assert row["herdr_pane"] == create["pane"]
+    assert row["pane"] == create["pane"]
+    assert row["herdr_pane"] == {"pane_id": create["pane"]}
     started = datetime.fromisoformat(row["started_at"])
     activity = datetime.fromisoformat(row["last_activity_at"])
     assert started <= activity
@@ -1098,8 +1115,11 @@ def test_tracked_run_lands_a_row_working_to_done(tmp_path: Path) -> None:
         "via",
     }
     assert row["receipt"]["export"]["via"] == "fake"
-    # An unrelated row's unknown fields survive the run byte-for-byte.
-    assert next(r for r in data["tasks"] if r["id"] == "gb:other") == other
+    # An unrelated row keeps its identity, owner and state through the run.
+    kept = next(r for r in data["tasks"] if r["id"] == "gb:other")
+    assert {k: kept[k] for k in ("id", "title", "owner", "state")} == {
+        k: other[k] for k in ("id", "title", "owner", "state")
+    }
 
 
 def test_pane_label_and_watch_argv_are_pinned(tmp_path: Path) -> None:
@@ -1177,7 +1197,8 @@ def test_tmux_fallback_records_the_session(tmp_path: Path) -> None:
     data = _read_tasks(store)
     row = next(r for r in data["tasks"] if r["id"] == "gb:tmux")
     assert row["state"] == "done"
-    assert row["herdr_pane"] == "tmux:omega-job-tmux"
+    assert row["pane"] == "tmux:omega-job-tmux"
+    assert row["herdr_pane"] is None, "a tmux session is not an attachable herdr pane"
     receipts = _jsonl(tmp_path / "bin" / "tmux-log.jsonl")
     assert receipts[0]["argv"] == ["has-session", "-t", "omega-job-tmux"]
     assert receipts[1]["argv"] == [
@@ -1221,7 +1242,8 @@ def test_no_pane_leaves_the_key_absent_and_the_run_healthy(tmp_path: Path) -> No
     data = _read_tasks(store)
     row = next(r for r in data["tasks"] if r["id"] == "gb:nopane")
     assert row["state"] == "done"
-    assert "herdr_pane" not in row
+    assert "pane" not in row
+    assert row["herdr_pane"] is None
     # The failing create was attempted exactly once — never fatal.
     assert [e["argv"][:2] for e in _jsonl(tmp_path / "bin" / "herdr-log.jsonl")] == [
         ["workspace", "create"]
@@ -1271,7 +1293,7 @@ def _answer_when_raised(
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        with locked_tasks(store) as data:
+        with locked_tasks(store, write=False) as data:
             raised = any(item.get("id") == item_id for item in data["waiting_on_ove"])
         if raised:
             with locked_tasks(store, write=True) as data:
@@ -1346,7 +1368,7 @@ def test_question_round_trip_resumes_the_run(tmp_path: Path) -> None:
             deadline = time.monotonic() + 10.0
             item = None
             while time.monotonic() < deadline:
-                with locked_tasks(store) as data:
+                with locked_tasks(store, write=False) as data:
                     raised = [
                         row
                         for row in data["waiting_on_ove"]
@@ -1361,7 +1383,7 @@ def test_question_round_trip_resumes_the_run(tmp_path: Path) -> None:
             # Mid-run: exactly one live item, and the row is blocked.
             assert item["ask"] == "Which shape do you want? (options: French / Round)"
             assert item["blocks"] == "sandbox GSD question (stage plan)"
-            with locked_tasks(store) as data:
+            with locked_tasks(store, write=False) as data:
                 assert [row["id"] for row in data["waiting_on_ove"]] == [
                     "gb:q:question:req-1"
                 ]
@@ -1436,7 +1458,7 @@ def test_stale_answer_reasks_under_a_new_item(tmp_path: Path) -> None:
             # The stale reply killed req-1: exactly the re-asked item remains.
             deadline = time.monotonic() + 10.0
             while time.monotonic() < deadline:
-                with locked_tasks(store) as data:
+                with locked_tasks(store, write=False) as data:
                     ids = [row["id"] for row in data["waiting_on_ove"]]
                 if ids == ["gb:q:question:req-2"]:
                     break
@@ -1475,13 +1497,12 @@ def test_stale_answer_reasks_under_a_new_item(tmp_path: Path) -> None:
 def test_answer_text_never_lands_in_durable_dashboard_artifacts(
     tmp_path: Path,
 ) -> None:
-    """The answer travels only into the answer_question call.
+    """A credential-shaped answer never lands on disk, not even in transit.
 
-    Byte-scan of every product artifact the run writes: tasks.json,
-    events.jsonl, the herdr receipts. The fake wrapper's own
-    wrapper-log.jsonl is excluded — it receipts the call the test itself
-    made (that call IS the product behavior under test), and no
-    production surface logs answers.
+    main's validated tasks.json store redacts every value it writes, so the
+    responder's answer is redacted at rest before the engine reads it: the
+    answer_question call carries the redacted text and the raw token never
+    reaches tasks.json, events.jsonl, the herdr receipts or the wrapper.
     """
     token = _shaped_answer_token()
     answer = f"paste {token} to unblock"
@@ -1508,11 +1529,17 @@ def test_answer_text_never_lands_in_durable_dashboard_artifacts(
     _check_round_trip(box, failures, thread, "the answer")
     result = box["run"]
     assert result.ok is True, result.detail
-    # The call itself carried the answer (the product behavior).
-    assert any(
-        row.get("tool") == "answer_question" and row["args"].get("text") == answer
+    # The call carried the answer as the store holds it: token redacted.
+    from omega_prime.dashboard.redact import redact_value
+
+    expected = redact_value(answer)
+    assert expected != answer, "the shaped token is one the store redacts"
+    assert [
+        row["args"].get("text")
         for row in _wrapper_log(log)
-    )
+        if row.get("tool") == "answer_question"
+    ] == [expected]
+    assert token.encode("utf-8") not in log.read_bytes()
     # The durable product surfaces never saw it — byte-scan, paths only.
     assert token.encode("utf-8") not in store.read_bytes()
     assert token.encode("utf-8") not in Path(result.events_path).read_bytes()
@@ -1942,7 +1969,7 @@ def test_a_relative_state_dir_reaches_the_pane_absolute(
 
 
 def test_a_hung_herdr_still_falls_back_to_tmux(monkeypatch: Any) -> None:
-    from omega_prime.dashboard import herdr_launch
+    from omega_prime.dashboard import sandbox_pane
 
     def hung(*_args: Any, **_kwargs: Any) -> str | None:
         raise subprocess.TimeoutExpired(["herdr"], 1)
@@ -1953,9 +1980,9 @@ def test_a_hung_herdr_still_falls_back_to_tmux(monkeypatch: Any) -> None:
         calls.append(session)
         return f"tmux:{session}"
 
-    monkeypatch.setattr(herdr_launch, "_herdr_pane", hung)
-    monkeypatch.setattr(herdr_launch, "_tmux_pane", tmux)
-    pane = herdr_launch.open_pane(
+    monkeypatch.setattr(sandbox_pane, "_herdr_pane", hung)
+    monkeypatch.setattr(sandbox_pane, "_tmux_pane", tmux)
+    pane = sandbox_pane.open_pane(
         {}, cwd="/tmp", label="x", command=["true"], session="omega-job"
     )
     assert pane == "tmux:omega-job"
@@ -2077,7 +2104,7 @@ def test_two_live_questions_each_keep_their_item_and_their_own_answers(
         deadline = time.monotonic() + 10.0
         items: dict[str, dict[str, Any]] = {}
         while time.monotonic() < deadline and len(items) < 2:
-            with locked_tasks(store) as data:
+            with locked_tasks(store, write=False) as data:
                 items = {row["id"]: row for row in data["waiting_on_ove"]}
             time.sleep(0.05)
         # Both requests stay answerable side by side.
@@ -2233,4 +2260,4 @@ def test_a_run_without_its_row_still_gets_answerable_questions(
     ] == ["Round"]
     data = _read_tasks(store)
     assert data["waiting_on_ove"] == []
-    assert data["tasks"] == [{"id": "gb:q", "state": "failed"}]
+    assert [_id_state(r) for r in data["tasks"]] == [{"id": "gb:q", "state": "failed"}]

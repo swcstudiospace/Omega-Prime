@@ -132,15 +132,15 @@ class FakeVision:
 
 def _ctx(tmp_path, **overrides):
     vcs = FakeVcs()
-    base = dict(
-        root=tmp_path,
-        play=FakePlay(),
-        asc=FakeAsc(),
-        vcs={"show": vcs.show, "diff_names": vcs.diff_names, "diff": vcs.diff},
-        devices=[FakeDevice()],
-        vision=FakeVision(),
-        artifacts_dir=tmp_path / "shots",
-    )
+    base = {
+        "root": tmp_path,
+        "play": FakePlay(),
+        "asc": FakeAsc(),
+        "vcs": {"show": vcs.show, "diff_names": vcs.diff_names, "diff": vcs.diff},
+        "devices": [FakeDevice()],
+        "vision": FakeVision(),
+        "artifacts_dir": tmp_path / "shots",
+    }
     base.update(overrides)
     return MobileContext(**base)
 

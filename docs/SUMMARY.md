@@ -1,11 +1,13 @@
 # Summary
 
 - [Omega Prime](README.md)
+- [Autonomous Event-Driven ADLC Programming Bot](adlc.md)
 
 ## Install
 
 - [Setup](setup.md)
 - [Local validation](local-validation.md)
+- [Code quality ratchet](code-quality.md)
 - [Configuration inventory](configuration.md)
 
 ## Use
@@ -15,11 +17,14 @@
 - [Agent loop](agent-loop.md)
 - [Connectors](connectors.md)
 - [Notion task dashboard](notion-task-dashboard.md)
+- [Task dashboard](dashboard.md)
 - [Compatibility and migration](migration.md)
 - [Tool host](tool-host.md)
 - [Remote MCP host for Grok Bot](grok-bot-native.md)
 - [Red team module](red-team.md)
 - [Deploying the tool host](deploy.md)
+- [CI runner fleet](ci-runners.md)
+- [CI runner repository setup](ci-runners-repo-setup.md)
 - [Substrate surface](substrate.md)
 - [FAQ](faq.md)
 - [Marketing](marketing.md)
@@ -28,6 +33,7 @@
 
 - [Build aesthetics](build-aesthetics.md)
 - [Architecture](architecture.md)
+- [Event-driven SDLC](sdlc-events.md)
 - [ADR 0001: Prime merge architecture](adr/0001-prime-merge-architecture.md)
 - [ADR 0002: Prime runtime integration](adr/0002-prime-runtime-integration.md)
 - [Tool catalog](tool-catalog.md)

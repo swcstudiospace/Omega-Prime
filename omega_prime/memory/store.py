@@ -59,6 +59,7 @@ class MemoryStore:
             return {
                 "success": False,
                 "target": target,
+                "reason": "full",
                 "error": (
                     f"Adding this entry would exceed the {_LIMITS[target]} character limit."
                 ),

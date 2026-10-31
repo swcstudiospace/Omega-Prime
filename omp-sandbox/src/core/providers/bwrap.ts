@@ -10,7 +10,7 @@ import { STATE, NODE24_BIN, BUN_EXE, OMP_BIN, SANDBOX_AGENT_BIN, HOME, realBin, 
 import { freePort } from "../auth.ts";
 import { execCapture, pidAlive, rid, waitHttp, launched } from "./util.ts";
 import { TierUnavailable, type SandboxTier } from "./types.ts";
-import { pinDir, unpinDir, PathRefused, type PinnedDir } from "../paths.ts";
+import { pinDir, unpinDir, PathRefused, type PinnedDir, pinnedPath } from "../paths.ts";
 
 const BWRAP = "/usr/bin/bwrap";
 /** Sandbox-side env file: the tier env (broker URL/token, opted-in API keys) is sourced from here, never put on argv. */
@@ -50,7 +50,11 @@ export class BwrapTier implements SandboxTier {
   /** The checked worktree, held open: every bwrap binds this descriptor (fd 3), never the path name again. */
   #pin: PinnedDir | null = null;
 
-  constructor(hostRoot?: string, workspaceHostPath?: string | null) { this.hostRoot = hostRoot ?? join(STATE, "ws", this.id); this.workspaceHostPath = workspaceHostPath ?? null; }
+  /** Launcher; only hermetic tests pass a fake that records what it was handed. */
+  readonly #bwrap: string;
+  constructor(hostRoot?: string, workspaceHostPath?: string | null, opts: { bwrapBin?: string } = {}) {
+    this.hostRoot = hostRoot ?? join(STATE, "ws", this.id); this.workspaceHostPath = workspaceHostPath ?? null; this.#bwrap = opts.bwrapBin ?? BWRAP;
+  }
 
   /** bwrap argv for one command. Only the fixed base env and the per-call `env` (non-secret: CI, PYTHONPATH) ride
    *  as --setenv; the tier env is sourced inside the sandbox from BWRAP_ENV_FILE so no secret reaches a host
@@ -83,7 +87,7 @@ export class BwrapTier implements SandboxTier {
   }
 
   async start(env: Record<string, string>) {
-    if (!existsSync(BWRAP)) throw new TierUnavailable("bwrap", "bubblewrap not installed");
+    if (!existsSync(this.#bwrap)) throw new TierUnavailable("bwrap", "bubblewrap not installed");
     if (!existsSync(SANDBOX_AGENT_BIN)) throw new TierUnavailable("bwrap", `sandbox-agent binary missing at ${SANDBOX_AGENT_BIN}`);
     this.pinWorkspace();
     for (const d of ["work", "home", "bin"]) mkdirSync(join(this.hostRoot, d), { recursive: true });
@@ -91,11 +95,11 @@ export class BwrapTier implements SandboxTier {
     const link = (target: string, name: string) => { const p = join(this.hostRoot, "bin", name); if (!existsSync(p)) symlinkSync(target, p); };
     // Link the real launchers (the configured omp and the Bun that runs it); their folders are bound read-only above.
     link(realBin(BUN_EXE), "bun"); link(realBin(OMP_BIN), "omp");
-    const probe = await execCapture(BWRAP, this.argv(["sh", "-c", "omp --version && node -v && test ! -e " + join(HOME, ".omp") + " && echo NO_HOST_OMP_STORE"], {}), { timeoutMs: 60_000, extraFds: this.#fds() });
+    const probe = await execCapture(this.#bwrap, this.argv(["sh", "-c", "omp --version && node -v && test ! -e " + join(HOME, ".omp") + " && echo NO_HOST_OMP_STORE"], {}), { timeoutMs: 60_000, extraFds: this.#fds() });
     if (probe.code !== 0 || !probe.stdout.includes("NO_HOST_OMP_STORE")) throw new TierUnavailable("bwrap", `probe failed: ${probe.stderr.slice(-400)}`);
     const port = await freePort();
     this.#agentUrl = `http://127.0.0.1:${port}`;
-    this.#agent = spawn(BWRAP, this.argv(["sandbox-agent", "server", "--host", "127.0.0.1", "--port", String(port), "--token", this.#agentToken, "--no-telemetry"], {}, "/sbx"), { stdio: ["pipe", "pipe", "pipe", ...this.#fds()] }) as ChildProcessWithoutNullStreams;
+    this.#agent = spawn(this.#bwrap, this.argv(["sandbox-agent", "server", "--host", "127.0.0.1", "--port", String(port), "--token", this.#agentToken, "--no-telemetry"], {}, "/sbx"), { stdio: ["pipe", "pipe", "pipe", ...this.#fds()] }) as ChildProcessWithoutNullStreams;
     this.#agent.stdout.resume(); this.#agent.stderr.resume();
     await launched(this.#agent, "bwrap sandbox-agent", waitHttp(`${this.#agentUrl}/v1/health`, this.#agentToken, 30_000));
   }
@@ -107,6 +111,8 @@ export class BwrapTier implements SandboxTier {
     writeFileSync(p, envFileText(env), { mode: 0o600 }); chmodSync(p, 0o600);
   }
 
+  /** Host path of the pinned worktree for host-side writes (see SandboxTier.workspaceHostDir). */
+  workspaceHostDir() { return this.#pin ? pinnedPath(this.#pin) : null; }
   /** Hold the checked worktree open (done by start()); from here on every bwrap binds this descriptor. */
   pinWorkspace() {
     if (!this.workspaceHostPath || this.#pin) return;
@@ -126,13 +132,13 @@ export class BwrapTier implements SandboxTier {
   async download(path: string, destDir: string) { copyFileSync(this.#host(path), join(destDir, basename(path))); return { code: 0, stdout: "", stderr: "" }; }
 
   spawnStdio(argv: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
-    const p = spawn(BWRAP, this.argv(argv, opts.env ?? {}, opts.cwd), { stdio: ["pipe", "pipe", "pipe", ...this.#fds()] }) as ChildProcessWithoutNullStreams;
+    const p = spawn(this.#bwrap, this.argv(argv, opts.env ?? {}, opts.cwd), { stdio: ["pipe", "pipe", "pipe", ...this.#fds()] }) as ChildProcessWithoutNullStreams;
     this.#children.add(p); p.once("exit", () => this.#children.delete(p));
     return p;
   }
 
   exec(argv: string[], opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; input?: string } = {}) {
-    return execCapture(BWRAP, this.argv(argv, opts.env ?? {}, opts.cwd), { timeoutMs: opts.timeoutMs ?? 600_000, input: opts.input, extraFds: this.#fds(), onSpawn: (pid) => this.#execPids.add(pid) })
+    return execCapture(this.#bwrap, this.argv(argv, opts.env ?? {}, opts.cwd), { timeoutMs: opts.timeoutMs ?? 600_000, input: opts.input, extraFds: this.#fds(), onSpawn: (pid) => this.#execPids.add(pid) })
       .finally(() => { for (const pid of [...this.#execPids]) if (!pidAlive(pid)) this.#execPids.delete(pid); });
   }
 

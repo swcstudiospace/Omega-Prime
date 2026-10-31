@@ -38,6 +38,13 @@ PUSH_REASONS: dict[str, tuple[str, str]] = {
 _TERMINAL = ("done", "failed")
 
 
+def _next_seq(data: dict[str, Any]) -> int:
+    """Allocate the store's next row sequence (shared by every category)."""
+    seq = int(data.get("next_seq") or 1)
+    data["next_seq"] = seq + 1
+    return seq
+
+
 def raise_block(
     path: Any,
     item_id: str,
@@ -68,7 +75,7 @@ def raise_block(
         if item is None:
             item = {
                 "id": item_id,
-                "seq": max([int(row.get("seq") or 0) for row in items] + [0]) + 1,
+                "seq": _next_seq(data),
                 "ask": "",
                 "blocks": "",
                 "since": since,

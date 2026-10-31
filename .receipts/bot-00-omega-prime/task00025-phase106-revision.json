@@ -1,0 +1,41 @@
+{
+  "task_id": "task00025-phase106-revision",
+  "bot": "bot-00-omega-prime",
+  "status": "targeted planning artifacts revised; independent main-agent checks pending; no commit",
+  "ownership": "All targeted .planning/phases/106-command-center-polish artifacts and this receipt resolve through ** to bot-00-omega-prime; last match wins.",
+  "revision_plan": [
+    {"node": "understand", "steps": ["Read checker required properties and evidence", "Read ownership and revision rules", "Read locked decisions and targeted plans", "Preserve five plans and two waves"]},
+    {"node": "baseline-contract", "steps": ["Keep real create_app entrypoint on both revisions", "Require HTTP 200 before frame assertions", "Remove substitute wire-emitter guidance", "Separate helper security coverage from baseline claims"]},
+    {"node": "notice-contract", "steps": ["Bind ViewState shared section metadata input", "Assign CiCd caller migration to 03", "Specify genuine failure and distinct timestamps", "Keep 03 disjoint from 05 and build-free"]},
+    {"node": "critique", "steps": ["Reconcile PLAN and VALIDATION instructions", "Reconcile RESEARCH and PATTERNS references", "Retain exact runnable test names", "Preserve all other scope and locked decisions"]},
+    {"node": "synthesize", "steps": ["Record targeted artifact changes", "Record no product verification performed", "Leave validation commands to main", "Return structured PLANNING COMPLETE outcome"]}
+  ],
+  "commands": [
+    {"cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query agent-skills gsd-planner --skills-only", "exit_code": 0, "duration_s": 0.25, "output_tail": "No configured skills block returned"}
+  ],
+  "claims": [
+    {"claim": "Configured planner skills query completed without a skills block", "evidence_command_index": 0}
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Plan structure/frontmatter and coverage checks are reserved for main; no check commands run by this revision agent",
+    "Baseline transplant, product behavior, tests, builds, lint, types and live host/screenshots are not exercised by this planning-only revision"
+  ],
+  "files_changed": [
+    ".planning/phases/106-command-center-polish/106-03-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-04-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-05-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-VALIDATION.md",
+    ".planning/phases/106-command-center-polish/106-RESEARCH.md",
+    ".planning/phases/106-command-center-polish/106-PATTERNS.md",
+    ".receipts/bot-00-omega-prime/task00025-phase106-revision.json"
+  ],
+  "contract_changes": [
+    "Planning directive: terminal API regressions use identical real create_app route-to-wire behavior on both revisions, assert HTTP200 first, and record actual baseline404 as missing feature only; no substitute implementation.",
+    "Planning directive: helper/security tests target actual polish implementation as additional coverage, not fabricated baseline sanitization evidence.",
+    "Planning directive: 04 supplies optional ViewState githubMeta prop; 03 migrates CiCd caller/tests with genuine recent_merges failure and distinct original-success/aggregate/received timestamps.",
+    "03 explicitly depends on completed 04 contract within the existing second wave; five plans/two waves and 03/05 disjoint ownership remain prescribed."
+  ],
+  "rollback_plan": "Reverse only this scoped planning revision; preserve unrelated user and peer changes.",
+  "approvals": []
+}

@@ -1,167 +1,200 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Spectrum Web Co
-"""Never-raising pane launcher for visible sandbox runs (W113-01).
+"""Launch a task's work inside a Herdr pane and record the pane on the task row.
 
-One Herdr pane per sandbox run: ``herdr workspace create --cwd <cwd>
---label <label> --no-focus`` yields a pane id, then ``herdr pane run
-<pane> <command...>`` points the pane at the run. The pane id parse is
-pinned (the herdr CLI is absent everywhere testable, so the fake runner
-follows the same contract): the LAST whitespace-separated token of the
-LAST non-empty stdout line of ``workspace create``.
+Every long-running task (GSD drive, omp session, sandbox run) should start here so the
+Command Center can show its live terminal. Usage:
 
-Any failure — missing binary, non-zero exit, timeout, unparseable output,
-OSError — falls back to the engine's tmux session-spawn shape, re-implemented
-locally (``omega_prime/engine/jobs.py`` ``maybe_tmux``; no engine import —
-the layer direction engine→dashboard is locked and the pane command and
-session name arrive from the caller). ``open_pane`` never raises: every
-path ends in a pane id, ``"tmux:<session>"`` or ``None``.
-
-Children run with a minimal env (``PATH``/``HOME`` only) so no
-credential-bearing value from the engine env can reach pane argv or
-receipts.
+    python -m omega_prime.dashboard.herdr_launch --id gb:00031 --title "00031 - ..." \
+        --cwd /workspace/x -- bash drive.sh
+    python -m omega_prime.dashboard.herdr_launch --id gb:00031 --title "..." --attach w6:p1
 """
 
 from __future__ import annotations
 
-import os
-import shutil
+import argparse
+import json
+import re
+import shlex
 import subprocess
-from collections.abc import Mapping, Sequence
+import sys
+from collections.abc import Callable, Sequence
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-_FALSY = frozenset({"0", "false", "no", "off"})
+from omega_prime.dashboard.status_file import (
+    _canonical_identity,
+    _write_locked,
+    locked_tasks,
+)
 
-_HERDR_TIMEOUT = 10.0
-
-__all__ = ["open_pane"]
-
-
-def _child_env(env: Mapping[str, str]) -> dict[str, str]:
-    """Two keys, nothing else — never the full engine env."""
-    return {
-        "PATH": env.get("PATH") or os.environ.get("PATH", os.defpath),
-        "HOME": env.get("HOME") or os.environ.get("HOME", ""),
-    }
+Runner = Callable[[list[str]], str]
+_PANE = re.compile(r"^w[0-9A-Za-z]+:p[0-9A-Za-z]+$")
+_LABEL = re.compile(r"[^a-z0-9_-]+")
 
 
-def _parse_pane_id(stdout: str) -> str | None:
-    """Last whitespace-separated token of the last non-empty stdout line."""
-    for line in reversed(stdout.splitlines()):
-        tokens = line.split()
-        if tokens:
-            return tokens[-1]
-    return None
-
-
-def _herdr_pane(
-    env: Mapping[str, str], *, cwd: str, label: str, command: list[str]
-) -> str | None:
-    """Open the herdr pane; ``None`` on any failure (the fallback takes over)."""
-    herdr = shutil.which("herdr", path=env.get("PATH") or None)
-    if not herdr:
-        return None
-    created = subprocess.run(
-        [
-            herdr,
-            "workspace",
-            "create",
-            "--cwd",
-            cwd,
-            "--label",
-            label,
-            "--no-focus",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=_HERDR_TIMEOUT,
-        env=_child_env(env),
+def _run(argv: list[str]) -> str:
+    result = subprocess.run(
+        argv, capture_output=True, text=True, timeout=15, check=False
     )
-    if created.returncode != 0:
-        return None
-    pane = _parse_pane_id(created.stdout)
-    if pane is None:
-        return None
-    run = subprocess.run(
-        [herdr, "pane", "run", pane, *command],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=_HERDR_TIMEOUT,
-        env=_child_env(env),
-    )
-    if run.returncode != 0:
-        return None
-    return pane
+    if result.returncode != 0:
+        raise OSError(f"herdr {argv[1:3]} failed")
+    return result.stdout
 
 
-def _tmux_pane(
-    env: Mapping[str, str], *, command: list[str], session: str | None
-) -> str | None:
-    """Session-spawn fallback, the local shape of engine ``maybe_tmux``.
+class PaneNotRecordedError(RuntimeError):
+    """Work started in a pane, but the pane could not be saved on the task."""
 
-    Skips when ``OMEGA_PRIME_ENGINE_TMUX`` is falsy, tmux is missing, or no
-    session name was passed; an existing session is reused.
-    """
-    if session is None:
-        return None
-    if str(env.get("OMEGA_PRIME_ENGINE_TMUX", "")).strip().lower() in _FALSY:
-        return None
-    tmux = shutil.which("tmux", path=env.get("PATH") or None)
-    if not tmux:
-        return None
-    try:
-        probe = subprocess.run(
-            [tmux, "has-session", "-t", session],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_HERDR_TIMEOUT,
-            env=_child_env(env),
+    def __init__(self, pane_id: str) -> None:
+        super().__init__(
+            f"work is running in Herdr pane {pane_id} but the task row was not"
+            f" updated; record it with --attach {pane_id} instead of relaunching"
         )
-        if probe.returncode == 0:
-            return f"tmux:{session}"
-        spawned = subprocess.run(
-            [tmux, "new-session", "-d", "-s", session, "--", *command],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_HERDR_TIMEOUT,
-            env=_child_env(env),
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return None
-    if spawned.returncode != 0:
-        return None
-    return f"tmux:{session}"
+        self.pane_id = pane_id
 
 
-def open_pane(
-    env: Mapping[str, str],
+def workspace_label(identity: str) -> str:
+    return _LABEL.sub("-", identity.split(":")[-1].lower()).strip("-")[:32] or "task"
+
+
+def record_pane(
     *,
-    cwd: Any,
-    label: str,
-    command: Sequence[str],
-    session: str | None = None,
-) -> str | None:
-    """Open one visible pane for a run and return its id, or ``None``.
+    path: Path,
+    identity: str,
+    title: str,
+    pane_id: str,
+    workspace: str | None,
+    owner_ref: str,
+    now: datetime | None = None,
+    restart: bool = False,
+) -> dict[str, Any]:
+    """Link ``pane_id`` to the task row, creating the row if needed.
 
-    Returns the herdr pane id, ``"tmux:<session>"`` from the fallback, or
-    ``None`` — never raises, so a visibility failure cannot kill a run.
-    ``session=None`` disables the tmux fallback. The keyword-only
-    ``session`` is a documented deviation from the literal W113-01
-    signature: the session name is an engine convention the dashboard
-    layer must not derive, so the caller passes it in.
+    Rows match by canonical identity, so ``tasks:a`` and a stored ``a`` are the
+    same task. ``restart`` marks new work launched for the task: a finished
+    row goes back to ``working``. Attaching an existing pane keeps the state.
     """
-    argv = [str(part) for part in command]
-    pane: str | None = None
+    if not _PANE.fullmatch(pane_id):
+        raise ValueError("pane_id is invalid")
+    stamp = (now or datetime.now().astimezone()).isoformat()
+    pane = {"pane_id": pane_id, **({"workspace": workspace} if workspace else {})}
+    with locked_tasks(path, write=True) as data:
+        wanted = _canonical_identity(identity)
+        row = next(
+            (t for t in data["tasks"] if _canonical_identity(t["id"]) == wanted),
+            None,
+        )
+        if row is None:
+            row = {
+                "id": identity,
+                "title": title,
+                "owner": {"kind": "herdr-pane", "ref": owner_ref},
+                "state": "working",
+                "started_at": stamp,
+                "progress": None,
+                "note": None,
+                "links": [],
+            }
+            data["tasks"].append(row)
+        row["herdr_pane"] = pane
+        row["last_activity_at"] = stamp
+        state = row.get("state")
+        if restart:
+            # Liveness evidence belongs to the run that wrote it; a relaunch
+            # must not be judged by the previous process or heartbeat.
+            for field in ("pid", "last_heartbeat_at", "stale"):
+                row[field] = None
+        if restart and state in {"done", "failed"}:
+            # New work for a finished task is a fresh run, not the old result.
+            row["started_at"] = stamp
+        if (restart and state != "working") or state in {"queued", "blocked"}:
+            row["state"] = "working"
+        data["updated_at"] = stamp
+        _write_locked(data, path)
+        return dict(row)
+
+
+def launch(
+    *,
+    path: Path,
+    identity: str,
+    title: str,
+    cwd: str,
+    command: Sequence[str],
+    herdr: str = "herdr",
+    runner: Runner = _run,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if not command:
+        raise ValueError("command is required")
+    # Check the task file before any work starts, so a bad file cannot leave
+    # a running pane with no task link (and a retry cannot run it twice).
+    with locked_tasks(path, write=False):
+        pass
+    label = workspace_label(identity)
+    created = json.loads(
+        runner(
+            [herdr, "workspace", "create", "--cwd", cwd, "--label", label, "--no-focus"]
+        )
+    )
+    pane_id = created["result"]["root_pane"]["pane_id"]
+    runner([herdr, "pane", "run", pane_id, shlex.join(command)])
     try:
-        pane = _herdr_pane(env, cwd=str(cwd), label=label, command=argv)
-    except Exception:  # a hung or missing herdr still gets the fallback
-        pane = None
-    if pane is not None:
-        return pane
-    try:
-        return _tmux_pane(env, command=argv, session=session)
-    except Exception:  # visibility never kills runs
-        return None
+        return record_pane(
+            path=path,
+            identity=identity,
+            title=title,
+            pane_id=pane_id,
+            workspace=label,
+            owner_ref=cwd,
+            now=now,
+            restart=True,
+        )
+    except Exception as exc:
+        raise PaneNotRecordedError(pane_id) from exc
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="herdr_launch")
+    parser.add_argument("--id", required=True)
+    parser.add_argument("--title", required=True)
+    parser.add_argument("--cwd", default=str(Path.cwd()))
+    parser.add_argument(
+        "--tasks", default=str(Path.home() / ".omega-prime/dashboard/tasks.json")
+    )
+    parser.add_argument(
+        "--attach", help="record an existing pane (wN:pN) instead of creating one"
+    )
+    parser.add_argument("--workspace")
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    path = Path(args.tasks)
+    if args.attach:
+        row = record_pane(
+            path=path,
+            identity=args.id,
+            title=args.title,
+            pane_id=args.attach,
+            workspace=args.workspace,
+            owner_ref=args.cwd,
+        )
+    else:
+        try:
+            row = launch(
+                path=path,
+                identity=args.id,
+                title=args.title,
+                cwd=args.cwd,
+                command=command,
+            )
+        except PaneNotRecordedError as exc:
+            print(f"herdr_launch: {exc}", file=sys.stderr)
+            return 1
+    print(f"{row['id']} -> {row['herdr_pane']['pane_id']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

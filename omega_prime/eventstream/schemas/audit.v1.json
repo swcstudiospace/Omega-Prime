@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:omega:schema:audit:1",
+  "title": "Omega open audit-family payload",
+  "$defs": {
+    "omega.audit.*": {
+      "type":"object",
+      "required":["aggregate","record_id","action","actor","occurred_at"],
+      "properties":{
+        "aggregate":{"type":"string","minLength":1},
+        "record_id":{"type":"string","minLength":1},
+        "action":{"type":"string","minLength":1},
+        "actor":{"type":"string","minLength":1},
+        "occurred_at":{"type":"string","format":"date-time"},
+        "details":{"type":"object","additionalProperties":{"oneOf":[{"type":"string"},{"type":"integer"},{"type":"boolean"}]}}
+      },
+      "additionalProperties":false,
+      "examples":[
+        {"aggregate":"Omega-Prime#75","record_id":"audit-20261023-001","action":"merge.refused","actor":"merge-executor","occurred_at":"2026-10-23T07:42:00Z","details":{"reason":"head moved","attempt":2,"manual_review":true}},
+        {"aggregate":"task-17","record_id":"audit-20261023-002","action":"task.state_changed","actor":"worker-3","occurred_at":"2026-10-23T07:45:00Z"}
+      ],
+      "x-omega-invalid-examples":[
+        {"aggregate":"Omega-Prime#75","record_id":"audit-20261023-001","action":"merge.refused","actor":"merge-executor","occurred_at":"2026-10-23T07:42:00Z","details":{"attempt":[]}},
+        {"aggregate":"task-17","record_id":"audit-20261023-002","action":"task.state_changed","actor":"worker-3","occurred_at":"2026-10-23T07:45:00Z","unexpected":"not allowed"},
+        {"aggregate":"task-17","record_id":"","action":"task.state_changed","actor":"worker-3","occurred_at":"2026-10-23T07:45:00Z"},
+        {"aggregate":"task-17","record_id":"audit-20261023-003","action":"task.state_changed","actor":"worker-3","occurred_at":"2026-10-23T07:45:00"}
+      ]
+    }
+  }
+}

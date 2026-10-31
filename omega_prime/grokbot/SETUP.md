@@ -10,7 +10,7 @@ measured.
 
 ## 1. Set up Omega Prime on a Grok Bot
 
-Push the repository to GitHub (or use `swcstudiospace/omes-bot`), then pick
+Push the repository to GitHub (or use `swcstudiospace/Omega-Prime`), then pick
 one route. The Bot-driven setup is primary; the Cursor team marketplace is
 a secondary route for Cursor Teams/Enterprise plans.
 
@@ -24,7 +24,7 @@ pushed your own copy:
 <task name="setup-omega-prime" version="1">
 <goal>Set up Omega Prime on your own computer.</goal>
 <steps>
-<step n="1">In your shell: git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/omes-bot.git /workspace/omes-bot
+<step n="1">In your shell: git clone --recurse-submodules --branch <release-tag> https://github.com/swcstudiospace/Omega-Prime.git /workspace/omes-bot
 No release tag is published yet, so <release-tag> is the placeholder. Do not clone main. Substitute the tag when one exists.</step>
 <step n="2">bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --bootstrap-only
 Then bash /workspace/omes-bot/omega_prime/scripts/grokbot-1click.sh --verify --json
@@ -157,15 +157,16 @@ values out of git:
 
 Call the person running the install "the operator".
 
-Weekday routines a new install can create, each prompt calling
-`omega_command` (see `grokbot/templates/OMEGA_PRIME.md`):
+Routines a new install can create, each prompt calling `omega_command`
+(see `grokbot/templates/OMEGA_PRIME.md`). Every routine is an event-triggered
+listener; do not give any routine a timer or cron schedule:
 
-| Routine | Command | Suggested cron |
+| Routine | Command | Trigger |
 | --- | --- | --- |
-| desk-lead | `/omega-desk-lead` | `15 9 * * 1-5` |
-| ultrathink | `/omega-ultrathink-routine` | `30 9 * * 1-5` |
-| sweep (drafts only, never publishes) | `/omega-sweep` | `0 16 * * 1-5` |
-| nightly | `/omega-nightly` | `0 18 * * 1-5` |
+| desk-lead | `/omega-desk-lead` | a new intake item or ticket, or a blocked ticket changing state |
+| ultrathink | `/omega-ultrathink-routine` | an operator message containing `ultrathink` |
+| sweep (drafts only, never publishes) | `/omega-sweep` | a new X mention |
+| nightly | `/omega-nightly` | a session ends and appends turns |
 
 The same entry points run in a shell: `python -m omega_prime.routines.desk_lead`,
 `python -m omega_prime.routines.ultrathink_turn`, `python -m omega_prime.routines.sweep`,

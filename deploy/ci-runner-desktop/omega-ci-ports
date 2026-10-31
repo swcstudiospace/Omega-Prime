@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""omega-ci-ports: loopback port primitives for omega-ci-db (00058).
+
+  omega-ci-ports free N         print N distinct free 127.0.0.1 TCP ports
+  omega-ci-ports owns PID PORT  exit 0 if PID itself holds the listening
+                                TCP socket on PORT, else 1
+
+Split out of omega-ci-db so the helper's logic can be tested with a fake
+port tool (no sockets in unit tests); the image self-check runs this real
+one against real PostgreSQL and GreptimeDB.
+"""
+
+import os
+import socket
+import sys
+
+
+def free(n: int) -> None:
+    # All sockets stay bound until every port is chosen, so the N ports
+    # differ; a race with another process is retried by omega-ci-db.
+    socks = []
+    for _ in range(n):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        socks.append(s)
+    print(" ".join(str(s.getsockname()[1]) for s in socks))
+    for s in socks:
+        s.close()
+
+
+def owns(pid: str, port: int) -> int:
+    inodes = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table) as fh:
+                rows = fh.read().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            f = row.split()
+            if f[3] == "0A" and int(f[1].rsplit(":", 1)[1], 16) == port:
+                inodes.add(f[9])
+    try:
+        fds = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return 1
+    for fd in fds:
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith("socket:[") and target[8:-1] in inodes:
+            return 0
+    return 1
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) == 2 and argv[0] == "free" and argv[1].isdigit():
+        free(int(argv[1]))
+        return 0
+    if len(argv) == 3 and argv[0] == "owns" and argv[1].isdigit() and argv[2].isdigit():
+        return owns(argv[1], int(argv[2]))
+    print("usage: omega-ci-ports free N | owns PID PORT", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

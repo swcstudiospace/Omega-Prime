@@ -1,0 +1,331 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:omega:schema:sdlc.pr:1",
+  "title": "Omega sdlc.pr payload contracts",
+  "$defs": {
+    "omega.sdlc.pr.opened": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "head_sha",
+        "actor",
+        "title",
+        "base_ref"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "title": "Add feature",
+          "base_ref": "main"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "title": "Add feature",
+          "base_ref": "main"
+        }
+      ]
+    },
+    "omega.sdlc.pr.pushed": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "before_sha": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "head_sha",
+        "actor",
+        "before_sha"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "before_sha": "a1"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "before_sha": "a1"
+        }
+      ]
+    },
+    "omega.sdlc.pr.ready": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "draft": {
+          "const": false
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "head_sha",
+        "actor",
+        "draft"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "draft": false
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "draft": false
+        }
+      ]
+    },
+    "omega.sdlc.pr.converted_to_draft": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "draft": {
+          "const": true
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "head_sha",
+        "actor",
+        "draft"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "draft": true
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "draft": true
+        }
+      ]
+    },
+    "omega.sdlc.pr.merged": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "merged_by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "merge_sha": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "head_sha",
+        "actor",
+        "merged_by",
+        "merge_sha"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "merged_by": "octocat",
+          "merge_sha": "abc123"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "merged_by": "octocat",
+          "merge_sha": "abc123"
+        }
+      ]
+    },
+    "omega.sdlc.pr.closed": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "merged": {
+          "type": "boolean"
+        },
+        "closed_reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "head_sha",
+        "actor",
+        "merged",
+        "closed_reason"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "repo": "Omega-Prime",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "merged": false,
+          "closed_reason": "not_planned"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "repo": "",
+          "number": 75,
+          "head_sha": "b8eb05f",
+          "actor": "octocat",
+          "merged": false,
+          "closed_reason": "not_planned"
+        }
+      ]
+    }
+  }
+}
