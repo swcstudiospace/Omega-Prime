@@ -183,7 +183,16 @@ def _perform_retain(
     except Exception:
         local = {"success": False}
     if not isinstance(local, Mapping) or local.get("success") is not True:
-        states["local"].update(state="unreachable", error="local memory write failed")
+        # A full store is a normal refusal with a fixed, safe message; keep it
+        # so callers can tell it from an unreadable file or a failed write.
+        message = (
+            local["error"]
+            if isinstance(local, Mapping)
+            and local.get("reason") == "full"
+            and isinstance(local.get("error"), str)
+            else "local memory write failed"
+        )
+        states["local"].update(state="unreachable", error=message)
         return {
             "ok": False,
             "local_saved": False,
@@ -192,7 +201,7 @@ def _perform_retain(
             "scope": record.scope,
             "repo": record.repo,
             "backends": states,
-            "error": "local memory write failed",
+            "error": message,
         }
     states["local"]["state"] = "answered"
 

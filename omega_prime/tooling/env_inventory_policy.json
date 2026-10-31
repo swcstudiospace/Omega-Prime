@@ -71,6 +71,7 @@
     "NOTION_TOKEN_FILE": "Names a protected file containing the Notion integration credential.",
     "OMEGA_PRIME_AUDIT_LOG": "Selects the destination for Omega Prime audit events.",
     "OMEGA_PRIME_BWRAP_BIN": "Selects the bubblewrap executable used for sandboxing.",
+    "OMEGA_PRIME_DASHBOARD_PORT": "Sets the default loopback port for the local Command Center dashboard (default 7421).",
     "OMEGA_PRIME_DESK_BUS_URL": "Selects the desk message-bus endpoint.",
     "OMEGA_PRIME_DESK_BUS_URL_FILE": "Names a protected file containing the desk message-bus endpoint.",
     "OMEGA_PRIME_DESK_CHILD_MODEL": "Selects the model used for the managed desk child process.",
@@ -83,7 +84,10 @@
     "OMEGA_PRIME_DESK_NOTIFY_URL_FILE": "Names a protected file containing the desk notification endpoint.",
     "OMEGA_PRIME_DISPATCH_CONFIRM": "Confirms dispatch operations requiring the Fleet credential helper.",
     "OMEGA_PRIME_DISPATCH_CONFIRM_FILE": "Names a protected file containing the dispatch confirmation token.",
+    "OMEGA_PRIME_DELEGATE_DEPTH": "Set by the engine for a child omp run: how many delegate hops deep this MCP server is. An unreadable value fails closed (no further delegates).",
+    "OMEGA_PRIME_DELEGATE_MAX_DEPTH": "Set by the engine for a child omp run: the parent's delegate depth cap (default 2), so a child never widens it. An unreadable value fails closed.",
     "OMEGA_PRIME_ENGINE": "Controls whether engine execution is enabled or required.",
+    "OMEGA_PRIME_ENGINE_STAGE": "Names the GSD stage (plan or execute) an engine run is on, so staged turns and their delegates pick the stage model.",
     "OMEGA_PRIME_ENGINE_TMUX": "Controls tmux session attachment for engine jobs.",
     "OMEGA_PRIME_ENGINE_UNSANDBOXED": "Opts engine execution out of the sandbox.",
     "OMEGA_PRIME_IMAGE_ROLLOUT": "Selects the staged or direct image rollout mode for deployments.",
@@ -231,7 +235,61 @@
     "OMEGA_PRIME_APPROVALS_SHA256": "Pins the expected digest of the approval grants file.",
     "OMEGA_PRIME_COMMAND_LOG": "Selects the command history log destination.",
     "OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS": "Sets the maximum accepted lateness for scheduled actions.",
-    "FLEET_COORDINATOR_URL": "Selects the approved Fleet coordinator endpoint."
+    "FLEET_COORDINATOR_URL": "Selects the approved Fleet coordinator endpoint.",
+    "GITHUB_WORKFLOW": "Names the GitHub Actions workflow that owns the eventstream IT service container.",
+    "GITHUB_RUN_ID": "Binds the eventstream IT ownership record to one GitHub Actions run.",
+    "RUNNER_TEMP": "Directory for ephemeral eventstream IT ownership and TLS material.",
+    "OMEGA_CI_SCOPE": "Selects org-wide or single-repository scope for the CI runner autoscaler.",
+    "OMEGA_CI_ORG": "Names the GitHub organisation whose self-hosted runner group the CI autoscaler serves.",
+    "OMEGA_CI_REPO": "Names the owner/repo the CI autoscaler serves in repository scope.",
+    "OMEGA_CI_REPOS": "Restricts the CI autoscaler to a comma-separated allowlist of owner/repo names or owner/* (every non-fork repository of that owner).",
+    "OMEGA_CI_LABELS": "Sets the runner labels the CI autoscaler pool carries and matches jobs against.",
+    "OMEGA_CI_RUNNER_GROUP": "Names the GitHub runner group used for CI autoscaler runners.",
+    "OMEGA_CI_RUNNER_GROUP_ID": "Gives the numeric GitHub runner group id used when minting JIT runner configs.",
+    "OMEGA_CI_MAX_RUNNERS": "Caps concurrent CI autoscaler runners (1-10 with one agent; at most the sum of agent capacities in a swarm).",
+    "OMEGA_CI_IDLE_GRACE_S": "Sets how long an idle CI runner waits for work before it is reaped.",
+    "OMEGA_CI_WAKE_BUDGET_S": "Bounds the total time spent waking the Desktop runner agent.",
+    "OMEGA_CI_GITHUB_APP_ID": "Identifies the GitHub App the CI autoscaler authenticates as.",
+    "OMEGA_CI_GITHUB_INSTALLATION_ID": "Identifies the GitHub App installation the CI autoscaler uses.",
+    "OMEGA_CI_GITHUB_APP_KEY_FILE": "Names a protected file containing the CI autoscaler GitHub App private key.",
+    "OMEGA_CI_GITHUB_PAT_FILE": "Names a protected file containing a fallback-free PAT used only when no GitHub App is configured.",
+    "OMEGA_CI_WEBHOOK_SECRET_FILE": "Names a protected file containing the workflow_job webhook HMAC secret.",
+    "OMEGA_CI_DESKTOP_URL": "Selects the https base URL of the Desktop runner agent.",
+    "OMEGA_CI_DESKTOP_TOKEN_FILE": "Names a protected file containing the bearer token shared with the Desktop runner agent.",
+    "OMEGA_CI_DESKTOP_CAPACITY": "Sets how many concurrent runners the first Desktop runner agent takes (1-10).",
+    "OMEGA_CI_DESKTOP_2_URL": "Selects the https base URL of serverless runner swarm agent 2 (agents are numbered without gaps).",
+    "OMEGA_CI_DESKTOP_2_TOKEN_FILE": "Names a protected file containing the bearer token of serverless runner swarm agent 2.",
+    "OMEGA_CI_DESKTOP_2_CAPACITY": "Sets how many concurrent runners serverless runner swarm agent 2 takes (1-10, default 8).",
+    "OMEGA_CI_DESKTOP_3_URL": "Selects the https base URL of serverless runner swarm agent 3 (agents are numbered without gaps).",
+    "OMEGA_CI_DESKTOP_3_TOKEN_FILE": "Names a protected file containing the bearer token of serverless runner swarm agent 3.",
+    "OMEGA_CI_DESKTOP_3_CAPACITY": "Sets how many concurrent runners serverless runner swarm agent 3 takes (1-10, default 8).",
+    "OMEGA_CI_DESKTOP_4_URL": "Selects the https base URL of serverless runner swarm agent 4 (agents are numbered without gaps).",
+    "OMEGA_CI_DESKTOP_4_TOKEN_FILE": "Names a protected file containing the bearer token of serverless runner swarm agent 4.",
+    "OMEGA_CI_DESKTOP_4_CAPACITY": "Sets how many concurrent runners serverless runner swarm agent 4 takes (1-10, default 8).",
+    "OMEGA_CI_DESKTOP_5_URL": "Selects the https base URL of serverless runner swarm agent 5 (agents are numbered without gaps).",
+    "OMEGA_CI_DESKTOP_5_TOKEN_FILE": "Names a protected file containing the bearer token of serverless runner swarm agent 5.",
+    "OMEGA_CI_DESKTOP_5_CAPACITY": "Sets how many concurrent runners serverless runner swarm agent 5 takes (1-10, default 8).",
+    "OMEGA_CI_PUBLISHER": "Selects the CI autoscaler event publisher (jsonl, null or eventstream).",
+    "OMEGA_CI_EVENTS_PATH": "Overrides the JSONL file the CI autoscaler appends redacted events to.",
+    "OMEGA_CI_DEMAND_PATH": "Overrides the JSON file where the CI autoscaler persists queued jobs so a restart replays them.",
+    "OMEGA_CI_PUBLIC_REPOS": "Opts listed public repositories or owner/* (covered by OMEGA_CI_REPOS) into the CI autoscaler; each workflow run is verified same-repository and not a fork before a runner is launched.",
+    "OMEGA_CI_AGENT_TOKEN": "Supplies the Desktop runner agent bearer token as a Railway variable.",
+    "OMEGA_CI_AGENT_TOKEN_FILE": "Names a protected file containing the Desktop runner agent bearer token.",
+    "OMEGA_CI_AGENT_MAX_RUNNERS": "Caps concurrent runner processes on the Desktop runner agent.",
+    "OMEGA_CI_AGENT_RUNNER_ROOT": "Points the Desktop runner agent at the unpacked actions/runner directory.",
+    "OMEGA_CI_AGENT_WORK_ROOT": "Sets where the Desktop runner agent creates per-runner private work directories.",
+    "OMEGA_CI_CONTROLLER_URL": "Selects the CI autoscaler URL the Desktop runner agent reports runner exits to.",
+    "OMEGA_CI_AGENT_JOB_UID": "Sets the unprivileged uid CI job processes run as on the Desktop.",
+    "OMEGA_CI_AGENT_JOB_GID": "Sets the unprivileged gid CI job processes run as on the Desktop.",
+    "OMEGA_CI_AGENT_REPOS": "Lists the owner/repo names or owner/* entries the Desktop runner pre-job guard lets run; empty refuses every job.",
+    "OMEGA_CI_AGENT_JOB_HOOK": "Points the Desktop runner agent at the pre-job guard script it installs as ACTIONS_RUNNER_HOOK_JOB_STARTED.",
+    "OMEGA_CI_AGENT_JOB_POLICY": "Names the Desktop runner agent's pre-job guard allowlist file; only /var/lib/omega-ci/job-policy.json (the path the shipped hook reads) is accepted.",
+    "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": "Set by Railway (railway.toml drainingSeconds): the SIGTERM-to-SIGKILL window on redeploy; the Desktop runner agent lets running jobs finish within it minus a 30 s stop margin (0 or unset stops them at once).",
+    "GITHUB_EVENT_NAME": "Set by the GitHub runner; the Desktop pre-job guard refuses pull_request_target and, for non-private repositories, events other than push, workflow_dispatch, pull_request, and a schedule whose ref is the default branch.",
+    "GITHUB_REPOSITORY": "Set by the GitHub runner; the Desktop pre-job guard checks it against its repository allowlist and the event payload.",
+    "GITHUB_EVENT_PATH": "Set by the GitHub runner; the Desktop pre-job guard reads the event payload there to refuse fork pull requests.",
+    "GITHUB_PATH": "Set by the GitHub runner; after allowing a job, the Desktop pre-job guard appends the job's ~/.local/bin and ~/.cargo/bin there.",
+    "GITHUB_REF": "Set by the GitHub runner; the Desktop pre-job guard admits a public schedule only when this is refs/heads and the repository default branch."
   },
   "helpers": {
     "omega_prime/commands/redteam_readiness.py:_first": {
@@ -329,6 +387,36 @@
       "env_arg": 0,
       "source_sha256": "2048d543a98d7e03d1684665d756ac0bc05bebbe61330a89417d0a44966e832f",
       "suffixes": ["_FILE"]
+    },
+    "omega_prime/ci_runners/settings.py:_get": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "4bfa06068af65748036c22e48c2d9a79a36006a676935059bb5accd3444c9983",
+      "suffixes": []
+    },
+    "omega_prime/ci_runners/settings.py:_int": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "f066813141b56ce34afc783ec10636212406348b25580cc21f8f1399545fc1da",
+      "suffixes": []
+    },
+    "omega_prime/ci_runners/settings.py:_float": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "1cc31715c0b370b24f50353c5b7af861dc6ed264f1e931c2aa8d81db31ec0845",
+      "suffixes": []
+    },
+    "omega_prime/ci_runners/settings.py:_secret_file": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "9992cffd300f20e4da1e69d8d21245f23efeb3d6e489e20ca176d93f69dbfda8",
+      "suffixes": []
+    },
+    "omega_prime/ci_runners/settings.py:_required_secret_file": {
+      "name_arg": 1,
+      "env_arg": 0,
+      "source_sha256": "2965c836c0f6822f6b51a394d0a99563da9ad1aaa3ba4b175bf713c4b1db21ab",
+      "suffixes": []
     }
   },
   "dynamic": [
@@ -360,7 +448,7 @@
       "reason": "Decodes only explicit Prime family, redteam, telemetry, rotation, quota, sandbox, and evals configuration branches."
     },
     {
-      "site": "omega_prime/engine/plan_router.py:108:mapping.get",
+      "site": "omega_prime/engine/plan_router.py:111:mapping.get",
       "symbol": "model_id",
       "source_sha256": "8e752ab8c2102d4f24c6e0b10a29fa4c9064eb630c8454f0511415972cb5059e",
       "names": [
@@ -377,7 +465,7 @@
       "reason": "Reads plan-only and plan-stage model override names from the exact finite plans and stages."
     },
     {
-      "site": "omega_prime/engine/plan_router.py:111:mapping.get",
+      "site": "omega_prime/engine/plan_router.py:114:mapping.get",
       "symbol": "model_id",
       "source_sha256": "8e752ab8c2102d4f24c6e0b10a29fa4c9064eb630c8454f0511415972cb5059e",
       "names": [
@@ -428,7 +516,7 @@
       "reason": "Resolves the finite connector credential names declared in _CONNECTORS, including file selectors."
     },
     {
-      "site": "omega_prime/mcp_server.py:354:helper:omega_prime/mcp_server.py:_secret_present",
+      "site": "omega_prime/mcp_server.py:399:helper:omega_prime/mcp_server.py:_secret_present",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -441,7 +529,7 @@
       "reason": "Resolves only the finite provider credential names from the desk child provider declarations."
     },
     {
-      "site": "omega_prime/mcp_server.py:367:helper:omega_prime/integrations/binding.py:secret_value",
+      "site": "omega_prime/mcp_server.py:412:helper:omega_prime/integrations/binding.py:secret_value",
       "symbol": "_desk_child_model",
       "source_sha256": "b4f51ace92e35a2076320eaa6efa8a06dc345206998bc8a4ed33a94c06afa788",
       "names": [
@@ -525,6 +613,13 @@
       "source_sha256": "66bbaa94289708bd30b8c66db94ad357667826ac001dbec82321331819d5ca59",
       "classification": "excluded",
       "reason": "Forwards arbitrary OMEGA_FAKE_OMP_ values exclusively to isolated fake-engine child processes; not operator configuration."
+    },
+    {
+      "site": "omega_prime/dashboard/redact.py:44:environment.items",
+      "symbol": "_secrets",
+      "source_sha256": "14b6ea2b5c0e014984d5ea26070a07f919c8d3b93192b72f5be9bc6594131694",
+      "classification": "excluded",
+      "reason": "Reads the values of a fixed list of credential names (plus OMP_AUTH_BROKER*) only to scrub them from dashboard output; it configures nothing."
     }
   ],
   "exclusions": [
@@ -711,7 +806,7 @@
   "metadata": {
     "token_selectors": [
       {
-        "site": "omega_prime/mcp_server.py:2135:args.token_env",
+        "site": "omega_prime/mcp_server.py:2186:args.token_env",
         "symbol": "_resolve_token",
         "source_sha256": "e04ec502c56de9c37869762a3519cac3470f599f455c9ec1b3343026091652d7",
         "reason": "The caller-selected environment key is an arbitrary MCP bearer-token selector, not a concrete setting name."

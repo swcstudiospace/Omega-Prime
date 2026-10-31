@@ -483,3 +483,32 @@ def test_intentionally_unconfigured_substrate_does_not_fail_local_retain(
     assert result["ok"] is True
     assert result["backends"]["substrate"]["state"] == "not_configured"
     assert result["backends"]["substrate"]["attempted"] is False
+
+
+def test_full_local_store_keeps_its_capacity_reason(tmp_path: Path) -> None:
+    """A full store is a normal refusal; callers can tell it from a disk failure."""
+    store = MemoryStore(tmp_path / "memory")
+    backends = _backends(tmp_path, [], local=store)
+    filled = 0
+    while store.add("memory", f"{filled} " + "x" * 300).get("success"):
+        filled += 1
+    assert filled > 0
+    result = retain_memory(
+        backends, "one more fact", scope="tenant-a", repo="repo-a", kind="fact"
+    )
+    assert result["ok"] is False and result["local_saved"] is False
+    assert "character limit" in result["error"]
+    assert result["backends"]["local"]["error"] == result["error"]
+
+
+def test_unexpected_local_failure_stays_generic(tmp_path: Path) -> None:
+    class Broken:
+        def add(self, target: str, content: str) -> dict[str, Any]:
+            raise OSError("/secret/path is unwritable")
+
+    backends = _backends(tmp_path, [], local=Broken())
+    result = retain_memory(
+        backends, "fact", scope="tenant-a", repo="repo-a", kind="fact"
+    )
+    assert result["error"] == "local memory write failed"
+    assert "/secret/path" not in str(result)

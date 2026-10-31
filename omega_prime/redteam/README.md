@@ -13,7 +13,7 @@ See `__init__.py` for full provenance and `pack/LICENSE` for the MIT notice.
   engagement.
 - **A 5-seat roster** in `pack/rosters/redteam.json` pointing every seat at the
   T3MP3ST loopback gateway at `http://127.0.0.1:3333`.
-- **14 saved skills** in `pack/skills/` (plus `GRAMMAR.md` and `index.json`)
+- **47 saved skills** in `pack/skills/` (plus `GRAMMAR.md` and `index.json`)
   that drive the roster's slash commands — status, mission lifecycle, reports,
   operators, findings, providers, purple synthesis, and hat dispatch.
 

@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:omega:schema:auth:1",
+  "title": "Omega auth payload contracts",
+  "$defs": {
+    "omega.auth.session.login_started": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "const": "login"
+        }
+      },
+      "required": [
+        "host",
+        "tool",
+        "session_id",
+        "actor",
+        "action"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "host": "github.com",
+          "tool": "gh",
+          "session_id": "s-1",
+          "actor": "octocat",
+          "action": "login"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "host": "",
+          "tool": "gh",
+          "session_id": "s-1",
+          "actor": "octocat",
+          "action": "login"
+        }
+      ]
+    },
+    "omega.auth.session.login_succeeded": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "const": "login"
+        },
+        "method": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "host",
+        "tool",
+        "session_id",
+        "actor",
+        "action",
+        "method"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "host": "github.com",
+          "tool": "gh",
+          "session_id": "s-1",
+          "actor": "octocat",
+          "action": "login",
+          "method": "oauth"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "host": "",
+          "tool": "gh",
+          "session_id": "s-1",
+          "actor": "octocat",
+          "action": "login",
+          "method": "oauth"
+        }
+      ]
+    },
+    "omega.auth.session.login_failed": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "const": "login"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "host",
+        "tool",
+        "session_id",
+        "actor",
+        "action",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "host": "github.com",
+          "tool": "gh",
+          "session_id": "s-1",
+          "actor": "octocat",
+          "action": "login",
+          "reason": "invalid_credentials"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "host": "",
+          "tool": "gh",
+          "session_id": "s-1",
+          "actor": "octocat",
+          "action": "login",
+          "reason": "invalid_credentials"
+        }
+      ]
+    },
+    "omega.auth.session.expired": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "const": "expired"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "host",
+        "tool",
+        "session_id",
+        "actor",
+        "action",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "host": "github.com",
+          "tool": "gh",
+          "session_id": "s-1",
+          "actor": "octocat",
+          "action": "expired",
+          "reason": "token_expired"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "host": "",
+          "tool": "gh",
+          "session_id": "s-1",
+          "actor": "octocat",
+          "action": "expired",
+          "reason": "token_expired"
+        }
+      ]
+    },
+    "omega.auth.session.logout": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "const": "logout"
+        }
+      },
+      "required": [
+        "host",
+        "tool",
+        "session_id",
+        "actor",
+        "action"
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "host": "github.com",
+          "tool": "gh",
+          "session_id": "s-1",
+          "actor": "octocat",
+          "action": "logout"
+        }
+      ],
+      "x-omega-invalid-examples": [
+        {
+          "host": "",
+          "tool": "gh",
+          "session_id": "s-1",
+          "actor": "octocat",
+          "action": "logout"
+        }
+      ]
+    }
+  }
+}

@@ -24,7 +24,7 @@ dependencies = [
   "apscheduler>=3.11",
   "aiogram>=3.31",
   "discord.py>=2.7",
-  "playwright>=1.63",
+  "playwright>=1.64.0",
   "Appium-Python-Client>=6.0",
   "PyYAML>=6.0.3",
 ]
@@ -34,10 +34,24 @@ otel = [
   "opentelemetry-proto",
   "opentelemetry-exporter-otlp-proto-http",
 ]
+eventstream = [
+  # Review dependency provenance, licenses, and the SBOM in security gates.
+  "pulsar-client==3.13.0",
+  "pydantic>=2.13,<3",
+  "httpx>=0.28,<1",
+]
+ci-runners = [
+  "uvicorn>=0.30",
+]
 dev = [
-  "ruff==0.16.10",
+  "ruff==0.17.1",
   "mypy==2.4.0",
   "pytest>=8.0",
+  "pydantic>=2.13,<3",
+  "hypothesis",
+  "jsonschema",
+  "pytest-asyncio",
+  "pytest-cov",
 ]
 
 [project.scripts]
@@ -55,13 +69,28 @@ where = ["."]
 include = ["omega_prime*"]
 
 [tool.setuptools.package-data]
-omega_prime = ["**/*.md", "**/*.yaml", "**/*.yml", "**/*.json", "**/*.xml", "**/*.sh"]
+omega_prime = [
+  "**/*.md",
+  "**/*.yaml",
+  "**/*.yml",
+  "**/*.json",
+  "**/*.xml",
+  "**/*.sh",
+  "dashboard/static/*",
+  "dashboard/static/cc/index.html",
+  "dashboard/static/cc/assets/*",
+  "dashboard/static/cc/licenses/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["omega_prime/tests"]
 pythonpath = ["."]
+# A test stuck this long dumps every thread's stack (it is not failed or
+# killed), so a CI hang shows where it stopped instead of only a job timeout.
+faulthandler_timeout = 600
 markers = [
   "native: requires the optional locally built omega_prime_prime extension",
+  "eventstream_integration: requires OMEGA_EVENTSTREAM_IT_URL and the pinned broker service",
 ]
 [tool.ruff]
 target-version = "py311"
@@ -79,3 +108,22 @@ python_version = "3.11"
 check_untyped_defs = true
 ignore_missing_imports = true
 show_error_codes = true
+[[tool.mypy.overrides]]
+module = ["omega_prime.eventstream.*"]
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_return_any = true
+warn_unused_ignores = true
+strict_equality = true
+extra_checks = true
+ignore_missing_imports = false
+
+[tool.pyright]
+# Resolve third-party imports from the repo-local virtualenv created by the bootstrap (.venv/, gitignored).
+venvPath = "."
+venv = ".venv"

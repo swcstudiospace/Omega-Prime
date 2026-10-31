@@ -5,6 +5,11 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
+# Runner: every job runs on the omega-ci pool ([self-hosted, linux, x64,
+# omega-ci], docs/ci-runners.md), never on GitHub-hosted runners. Interpreters
+# and Node come from the runner image's read-only tool cache (setup-python /
+# setup-node cache hits); installs land in the job's own HOME.
+
 permissions:
   contents: read
 
@@ -14,7 +19,7 @@ concurrency:
 
 jobs:
   readiness:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -24,8 +29,15 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: writable prefix for pip
+        # The image tool cache is shared and read-only, so pip would fall back
+        # to ~/.local, which tests that set HOME or PYTHONNOUSERSITE cannot
+        # see. A per-job venv keeps installs on the interpreter prefix.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
       - name: install
-        run: pip install -e .
+        run: python -m pip install -e .
       - name: run readiness profile
         id: readiness
         run: python -m omega_prime.grokbot.readiness --root . --json --output readiness-report.json

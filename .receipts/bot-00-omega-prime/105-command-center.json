@@ -1,0 +1,130 @@
+{
+  "task_id": "105-command-center",
+  "bot": "bot-00-omega-prime",
+  "started_at": null,
+  "completed_at": null,
+  "commands": [
+    {
+      "cmd": "(cd omega_prime/dashboard/frontend && npm ci --registry=https://registry.npmjs.org)",
+      "exit_code": 0,
+      "output_tail": "128 packages installed from the admitted lockfile."
+    },
+    {
+      "cmd": "(cd omega_prime/dashboard/frontend && npm test -- --run)",
+      "exit_code": 0,
+      "output_tail": "10 test files passed, 1 build-dependent test skipped; 17 passed, 1 skipped."
+    },
+    {
+      "cmd": "(cd omega_prime/dashboard/frontend && npm run build)",
+      "exit_code": 0,
+      "output_tail": "tsc -b and Vite 8.3.4 passed; 445 modules transformed; final static entry uses index-CtUpPsk6.js."
+    },
+    {
+      "cmd": "(cd omega_prime/dashboard/frontend && CC_CHECK_BUILD=1 npm test -- --run src/test/build-assets.test.ts)",
+      "exit_code": 0,
+      "output_tail": "Built entry, hashed JS/CSS, four local WOFF2 files and five notices passed generated-asset checks."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k dashboard",
+      "exit_code": 2,
+      "output_tail": "Collection errors: ModuleNotFoundError for unrelated missing mcp and apscheduler dependencies."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard*.py",
+      "exit_code": 1,
+      "output_tail": "Initial run exposed a nondeterministic 1 ms thread-timeout fixture; no product failure was identified."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard*.py",
+      "exit_code": 0,
+      "output_tail": "133 passed, 1 skipped, 1 Starlette/httpx deprecation warning after making the timeout fixture deterministic."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py",
+      "exit_code": 0,
+      "output_tail": "31 passed after the Command Center guide and changelog changes."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_command_center_static.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_live_fixes.py",
+      "exit_code": 0,
+      "output_tail": "21 passed; W4 route, legacy, path-confinement, MIME/cache, Host, method and security checks passed."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_app_fixes.py omega_prime/tests/test_dashboard_command_center_static.py",
+      "exit_code": 0,
+      "output_tail": "12 passed, 1 skipped; real setuptools package collection test skipped because setuptools is unavailable."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_integration.py omega_prime/tests/test_dashboard_app.py omega_prime/tests/test_dashboard_app_fixes.py omega_prime/tests/test_dashboard_live_fixes.py omega_prime/tests/test_dashboard_command_center_static.py",
+      "exit_code": 0,
+      "output_tail": "34 passed, 1 skipped; JSON/SSE/API integration passed; package-data test skipped because setuptools is unavailable."
+    },
+    {
+      "cmd": "python3 -c 'import setuptools; from setuptools.command.build_py import build_py; print(setuptools.__version__, hasattr(build_py, \"find_data_files\"))'",
+      "exit_code": 1,
+      "output_tail": "ModuleNotFoundError: No module named setuptools; no Python package was installed."
+    },
+    {
+      "cmd": "W4 isolated Python runtime smoke: temporary HOME, next-id preview, assign-id, loopback server on port 51103, GET /, /legacy, /api/snapshot and named /api/stream, stop/restart",
+      "exit_code": 0,
+      "output_tail": "Preview did not mutate bridge bytes/mtime; assignment persisted 00001 - W4 Smoke Task; API/SSE and restart retained the display ID."
+    },
+    {
+      "cmd": "browser.open local Command Center URL with managed Chromium using wait_until=domcontentloaded",
+      "exit_code": 1,
+      "output_tail": "Browser service could not install Chromium because it could not connect to the download endpoint; no page navigation or screenshot occurred."
+    },
+    {
+      "cmd": "JavaScript eval: enumerate omega_prime/dashboard/static/cc distributables and sum each file's gzipSync byte length",
+      "exit_code": 0,
+      "output_tail": "6 distributable JS/CSS/WOFF2 files; 489985 raw bytes and 219137 separately gzip-compressed bytes."
+    }
+  ],
+  "claims": [
+    { "claim": "Clean frontend install succeeded", "evidence_command_index": 0 },
+    { "claim": "Final frontend behavior suite passed", "evidence_command_index": 1 },
+    { "claim": "TypeScript and static production build passed", "evidence_command_index": 2 },
+    { "claim": "Actual generated frontend assets and notices passed validation", "evidence_command_index": 3 },
+    { "claim": "Required broad dashboard selection is blocked during collection by missing unrelated Python dependencies", "evidence_command_index": 4, "expects_failure": true },
+    { "claim": "Dashboard-specific regression suite passes after deterministic timeout-fixture correction", "evidence_command_index": 6 },
+    { "claim": "Documentation and public repository tests pass", "evidence_command_index": 7 },
+    { "claim": "W4 route/security acceptance passed", "evidence_command_index": 8 },
+    { "claim": "W4 API/SSE integration acceptance passed", "evidence_command_index": 10 },
+    { "claim": "The local runtime smoke persisted and served a task ID across restart", "evidence_command_index": 12 },
+    { "claim": "Final static distributable byte totals were measured", "evidence_command_index": 14 }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Required broad pytest selection did not execute because mcp and apscheduler are absent; no Python packages were installed.",
+    "Actual setuptools package-data archive collection and serving from collected output; setuptools is unavailable and the W4 test was skipped.",
+    "Authenticated live GitHub PR/check/Greptile parity and live organization inventory (a2/a3); tests used fixtures/fake transports only.",
+    "Browser font rendering, WCAG contrast, visible animation count, reduced-motion behavior, no-JavaScript rendering and visual task selection; Chromium could not be installed.",
+    "Signed openshell-podman tier and Anda access receipt (a6); outer-driver evidence required.",
+    "Four real-data screenshots (a7); outer-driver evidence required.",
+    "Production dashboard restart/export/publication and any remote PR/Greptile flow; not performed."
+  ],
+  "files_changed": [
+    "omega_prime/dashboard/** task numbering and GitHub collector contracts (W1/W2)",
+    "omega_prime/dashboard/frontend/**",
+    "omega_prime/dashboard/static/cc/**",
+    "omega_prime/dashboard/app.py",
+    "pyproject.toml",
+    "omega_prime/tests/test_dashboard*.py",
+    "docs/dashboard.md",
+    "CHANGELOG.md",
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/phases/105-command-center/105-03-SUMMARY.md",
+    ".planning/phases/105-command-center/105-04-SUMMARY.md",
+    ".planning/phases/105-command-center/105-05-SUMMARY.md",
+    ".planning/phases/105-command-center/105-SUMMARY.md",
+    ".receipts/bot-00-omega-prime/105-03.json",
+    ".receipts/bot-00-omega-prime/105-04.json",
+    ".receipts/bot-00-omega-prime/105-command-center.json"
+  ],
+  "contract_changes": [
+    "Frontend consumer corrected to use the existing published sources.github.command_center source-status field; no backend schema change."
+  ],
+  "rollback_plan": "Revert the phase 105 local implementation and documentation commits on feat/command-center; do not alter the stacked Phase 104 branch or remote state.",
+  "approvals": []
+}
