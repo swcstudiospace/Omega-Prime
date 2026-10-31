@@ -1,0 +1,23 @@
+# End-to-end smoke test for the omega-ci self-hosted runner pool of the
+# Autonomous Event-Driven ADLC Programming Bot (docs/ci-runners.md#end-to-end-smoke-test).
+# Manual only: no schedule (PD-12), no checkout, no secrets. A green run proves
+# webhook -> controller -> JIT runner on the Railway Desktop -> pre-job guard -> job.
+name: omega-ci-smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, linux, x64, omega-ci]
+    timeout-minutes: 10
+    steps:
+      - name: Kernel
+        run: uname -a
+      - name: Job identity
+        run: whoami
+      - name: Done
+        run: echo omega-ci ok

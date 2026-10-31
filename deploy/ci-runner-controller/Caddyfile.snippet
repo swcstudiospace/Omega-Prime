@@ -1,0 +1,40 @@
+# omega-ci controller ingress. TEMPLATE — NOT INSTALLED.
+#
+# Adding this site and reloading Caddy is a VPS change that is HELD for the
+# operator (D-120-10). Replace ci.example.com with the real hostname.
+#
+# Non-installing validation (copy into a throwaway file first):
+#   caddy validate --adapter caddyfile --config /tmp/omega-ci-caddy.Caddyfile
+#
+# Using nginx instead (the production VPS does)? See nginx-site.conf.example.
+# Change 8788 below if the unit uses another --port (production uses 8798).
+#
+# TLS terminates here; the controller listens on loopback only. Only the two
+# POST endpoints and the non-secret health check are exposed; everything else
+# is 404. The 1 MiB body cap matches the controller's own limit.
+
+ci.example.com {
+	request_body {
+		max_size 1MiB
+	}
+
+	@webhook {
+		method POST
+		path /github/webhook /agent/events
+	}
+	handle @webhook {
+		reverse_proxy 127.0.0.1:8788
+	}
+
+	@health {
+		method GET
+		path /healthz
+	}
+	handle @health {
+		reverse_proxy 127.0.0.1:8788
+	}
+
+	handle {
+		respond 404
+	}
+}

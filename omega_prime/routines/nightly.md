@@ -5,5 +5,5 @@ Reads turns from `$OMEGA_PRIME_STATE_DIR/nightly-turns.json` (a JSON list, or an
 Grok Bot routine a new install can create:
 - name: Omega Prime nightly
 - prompt: Call the omega_command tool with command `/omega-nightly`. Report the JSON result. Do not publish anything.
-- schedule: weekdays at 18:00 local (`0 18 * * 1-5`)
+- trigger: when a conversation or session ends and appends turns to `nightly-turns.json`. Event-driven only; no timer or cron schedule.
 </routine>

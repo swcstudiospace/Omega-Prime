@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:omega:schema:job:1",
+  "$defs": {
+    "omega.job.queued": {
+      "$id": "urn:omega:schema:omega.job.queued:1",
+      "title": "Job queued",
+      "description": "A job entered the named queue.",
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1},
+        "actor": {"type": "string", "minLength": 1},
+        "state": {"const": "queued"},
+        "queue": {"type": "string", "minLength": 1}
+      },
+      "required": ["job_id", "actor", "state", "queue"],
+      "additionalProperties": false,
+      "examples": [{"job_id": "job/42", "actor": "scheduler", "state": "queued", "queue": "gpu"}],
+      "x-omega-invalid-examples": [{"job_id": "job/42", "actor": "scheduler", "state": "started", "queue": "gpu"}, {"job_id": "job/42", "actor": "scheduler", "state": "queued", "queue": ""}]
+    },
+    "omega.job.started": {
+      "$id": "urn:omega:schema:omega.job.started:1",
+      "title": "Job started",
+      "description": "A worker began processing the job.",
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1},
+        "actor": {"type": "string", "minLength": 1},
+        "state": {"const": "started"},
+        "worker": {"type": "string", "minLength": 1}
+      },
+      "required": ["job_id", "actor", "state", "worker"],
+      "additionalProperties": false,
+      "examples": [{"job_id": "job/42", "actor": "worker-7", "state": "started", "worker": "worker-7"}],
+      "x-omega-invalid-examples": [{"job_id": "job/42", "actor": "worker-7", "state": "queued", "worker": "worker-7"}, {"job_id": "job/42", "actor": "worker-7", "state": "started", "worker": ""}]
+    },
+    "omega.job.succeeded": {
+      "$id": "urn:omega:schema:omega.job.succeeded:1",
+      "title": "Job succeeded",
+      "description": "A job completed with a durable result reference.",
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1},
+        "actor": {"type": "string", "minLength": 1},
+        "state": {"const": "succeeded"},
+        "result_ref": {"type": "string", "minLength": 1}
+      },
+      "required": ["job_id", "actor", "state", "result_ref"],
+      "additionalProperties": false,
+      "examples": [{"job_id": "job/42", "actor": "worker-7", "state": "succeeded", "result_ref": "s3://results/job-42.json"}],
+      "x-omega-invalid-examples": [{"job_id": "job/42", "actor": "worker-7", "state": "succeeded", "result_ref": ""}, {"job_id": "job/42", "actor": "worker-7", "state": "started", "result_ref": "s3://results/job-42.json"}]
+    },
+    "omega.job.failed": {
+      "$id": "urn:omega:schema:omega.job.failed:1",
+      "title": "Job failed",
+      "description": "A job terminated unsuccessfully with a sanitized reason.",
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1},
+        "actor": {"type": "string", "minLength": 1},
+        "state": {"const": "failed"},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "required": ["job_id", "actor", "state", "reason"],
+      "additionalProperties": false,
+      "examples": [{"job_id": "job/42", "actor": "worker-7", "state": "failed", "reason": "worker exceeded execution deadline"}],
+      "x-omega-invalid-examples": [{"job_id": "job/42", "actor": "worker-7", "state": "failed", "reason": ""}, {"job_id": "job/42", "actor": "worker-7", "state": "succeeded", "reason": "process exited"}]
+    },
+    "omega.job.cancelled": {
+      "$id": "urn:omega:schema:omega.job.cancelled:1",
+      "title": "Job cancelled",
+      "description": "A queued or running job was cancelled with a sanitized reason.",
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1},
+        "actor": {"type": "string", "minLength": 1},
+        "state": {"const": "cancelled"},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "required": ["job_id", "actor", "state", "reason"],
+      "additionalProperties": false,
+      "examples": [{"job_id": "job/42", "actor": "operator-2", "state": "cancelled", "reason": "operator requested cancellation"}],
+      "x-omega-invalid-examples": [{"job_id": "job/42", "actor": "operator-2", "state": "cancelled", "reason": ""}, {"job_id": "job/42", "actor": "operator-2", "state": "failed", "reason": "operator requested cancellation"}]
+    }
+  }
+}

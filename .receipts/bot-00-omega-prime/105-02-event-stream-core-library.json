@@ -1,0 +1,97 @@
+{
+  "task_id": "105-02-event-stream-core-library",
+  "bot": "bot-00-omega-prime",
+  "started_at": null,
+  "completed_at": "2026-10-22T23:16:00Z",
+  "commands": [
+    {
+      "cmd": "/workspace/.venv-00046/bin/ruff check omega_prime/eventstream omega_prime/tests/eventstream",
+      "exit_code": 0,
+      "output_tail": "All checks passed!"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/ruff format --check omega_prime/eventstream omega_prime/tests/eventstream",
+      "exit_code": 0,
+      "output_tail": "31 files already formatted"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m mypy --strict omega_prime/eventstream",
+      "exit_code": 0,
+      "output_tail": "Success: no issues found in 14 source files"
+    },
+    {
+      "cmd": "polyglot-check --no-daemon omega_prime/eventstream/envelope.py omega_prime/eventstream/ports.py omega_prime/eventstream/backoff.py omega_prime/eventstream/retry.py omega_prime/eventstream/idempotency.py omega_prime/eventstream/outbox.py omega_prime/eventstream/consumer.py omega_prime/eventstream/observability.py omega_prime/eventstream/adapters/__init__.py omega_prime/eventstream/adapters/memory.py omega_prime/tests/eventstream/test_ports.py omega_prime/tests/eventstream/test_memory.py omega_prime/tests/eventstream/test_runtime_smoke.py omega_prime/tests/eventstream/test_outbox.py omega_prime/tests/eventstream/test_outbox_crashes.py omega_prime/tests/eventstream/test_idempotency.py omega_prime/tests/eventstream/test_runtime_security.py omega_prime/tests/eventstream/test_retry.py omega_prime/tests/eventstream/test_consumer.py omega_prime/tests/eventstream/test_observability.py omega_prime/tests/eventstream/test_topology.py",
+      "exit_code": 0,
+      "output_tail": "0 errors, 0 warnings in 21/21 files checked"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m pytest omega_prime/tests/eventstream -q",
+      "exit_code": 0,
+      "output_tail": "200 passed in 4.13s"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m pytest omega_prime/tests/eventstream/test_runtime_smoke.py::test_publish_read_ack omega_prime/tests/eventstream/test_runtime_smoke.py::test_transaction_to_effect_once -q",
+      "exit_code": 0,
+      "output_tail": "2 passed in 0.28s"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m trace --count --summary --coverdir /tmp/omegabot-eventstream-trace --ignore-dir /workspace/.venv-00046:/usr/lib/python3.13:/usr/local/lib/python3.13:/workspace/omes-bot-00046/.claude/worktrees/agent-p105-02-1792704534-caf3/omega_prime/tests --module pytest omega_prime/tests/eventstream -q",
+      "exit_code": 0,
+      "output_tail": "200 passed; trace reported 100% statement coverage for backoff, consumer, idempotency, observability, outbox, ports, and retry; adapters.memory was absent from the report"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m coverage --version",
+      "exit_code": 1,
+      "output_tail": "No module named coverage"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m pytest omega_prime/tests/eventstream -m 'not eventstream_integration' --cov=omega_prime.eventstream.ports --cov=omega_prime.eventstream.backoff --cov=omega_prime.eventstream.retry --cov=omega_prime.eventstream.idempotency --cov=omega_prime.eventstream.outbox --cov=omega_prime.eventstream.consumer --cov=omega_prime.eventstream.observability --cov=omega_prime.eventstream.adapters.memory --cov-report=term-missing --cov-fail-under=90 -q",
+      "exit_code": 4,
+      "output_tail": "pytest rejected the --cov options because pytest-cov is unavailable"
+    }
+  ],
+  "claims": [
+    { "claim": "Ruff lint and formatting gates pass", "evidence_command_index": 0 },
+    { "claim": "Strict mypy passes for omega_prime.eventstream", "evidence_command_index": 2 },
+    { "claim": "Pyright reports zero errors on all checked changed Python files", "evidence_command_index": 3 },
+    { "claim": "All eventstream tests pass", "evidence_command_index": 4 },
+    { "claim": "Both required broker-free runtime smoke paths pass", "evidence_command_index": 5 }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "The canonical 90% pytest-cov gate remains unverified: pytest-cov was unavailable, and the standard-library trace report omitted adapters.memory.",
+    "No native Pulsar broker integration or live secure bootstrap was exercised; those belong to downstream phase 105-04.",
+    "The resumed implementation start timestamp was not captured."
+  ],
+  "files_changed": [
+    "omega_prime/eventstream/envelope.py",
+    "omega_prime/eventstream/ports.py",
+    "omega_prime/eventstream/backoff.py",
+    "omega_prime/eventstream/retry.py",
+    "omega_prime/eventstream/idempotency.py",
+    "omega_prime/eventstream/outbox.py",
+    "omega_prime/eventstream/consumer.py",
+    "omega_prime/eventstream/observability.py",
+    "omega_prime/eventstream/adapters/__init__.py",
+    "omega_prime/eventstream/adapters/memory.py",
+    "omega_prime/eventstream/topology.yaml",
+    "omega_prime/tests/eventstream/test_ports.py",
+    "omega_prime/tests/eventstream/test_memory.py",
+    "omega_prime/tests/eventstream/test_runtime_smoke.py",
+    "omega_prime/tests/eventstream/test_outbox.py",
+    "omega_prime/tests/eventstream/test_outbox_crashes.py",
+    "omega_prime/tests/eventstream/test_idempotency.py",
+    "omega_prime/tests/eventstream/test_runtime_security.py",
+    "omega_prime/tests/eventstream/test_retry.py",
+    "omega_prime/tests/eventstream/test_consumer.py",
+    "omega_prime/tests/eventstream/test_observability.py",
+    "omega_prime/tests/eventstream/test_topology.py",
+    ".planning/phases/105-event-stream-core-library/105-02-SUMMARY.md"
+  ],
+  "contract_changes": [
+    "CloudEvent payload and byte-decoding boundaries now normalize Pydantic v2 ValidationError into ContractError where the contract wrapper applies."
+  ],
+  "rollback_plan": null,
+  "approvals": [],
+  "approved_by": null
+}

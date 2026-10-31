@@ -1,0 +1,61 @@
+{
+  "task_id": "00057-omega-ci-runners",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-23T20:32:00Z",
+  "completed_at": "2026-10-23T21:34:34Z",
+  "base_commit": "308b145",
+  "head_commit": "b3645eb",
+  "pr": "https://github.com/swcstudiospace/Omega-Prime/pull/94",
+  "commands": [
+    {
+      "cmd": "PYTHONPATH=/workspace /tmp/op/bin/pytest -q -p no:cacheprovider omega_prime/tests/ci_runners/test_podman_single_id.py omega_prime/tests/ci_runners/test_forkguard.py omega_prime/tests/ci_runners/test_jobhook.py omega_prime/tests/test_grokbot_image_gates.py",
+      "exit_code": 0,
+      "output_tail": "134 passed in 0.68s"
+    },
+    {
+      "cmd": "gh api repos/swcstudiospace/Omega-Prime/actions/jobs/120662745206 --jq '{name,conclusion,runner_name}'",
+      "exit_code": 0,
+      "output_tail": "{\"conclusion\":\"failure\",\"name\":\"image\",\"runner_name\":\"omega-ci-120662861496-8hh0\"}"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Fork-guard, job-hook, image-id, and single-ID shim tests pass",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "Image job 120662745206 on runner omega-ci-120662861496-8hh0 concluded failure after podman info reported rootless=true and the build died on a mount EPERM",
+      "evidence_command_index": 1
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Head b3645eb checks were still queued when this receipt was written; the image failure cited is job 120662745206 on 982382b",
+    "eventstream-it still fails at job setup with docker: command not found; a single-ID namespace cannot also name uid 10000",
+    "verify on 58ef789 failed 38 tests (engine and readiness subprocesses); that run is not head b3645eb",
+    "redteam-node-audit on 982382b failed an untriaged high zod advisory; main's last supply-chain run was green at 20:20Z",
+    "Greptile score on b3645eb was not posted; the last score in the PR body is 2/5 on 982382b",
+    "Python 3.13 and 3.14 are not in the runner image tool cache; the workflow downloads them into RUNNER_TEMP on a cache miss",
+    "A publishable image still needs CAP_SYS_ADMIN and mount --make-rslave / in deploy/ci-runner-desktop; this branch does not change that image"
+  ],
+  "files_changed": [
+    ".github/workflows/ci-podman-single-id.sh",
+    ".github/workflows/ci.yml",
+    ".github/workflows/grokbot-image.yml",
+    ".github/workflows/rust-parity.yml",
+    "docs/ci-runners-repo-setup.md",
+    "docs/ci-runners.md",
+    "omega_prime/ci_runners/agent/jobhook.py",
+    "omega_prime/ci_runners/forkguard.py",
+    "omega_prime/grokbot/image_gates.py",
+    "omega_prime/tests/ci_runners/test_forkguard.py",
+    "omega_prime/tests/ci_runners/test_jobhook.py",
+    "omega_prime/tests/ci_runners/test_podman_single_id.py",
+    "omega_prime/tests/ci_runners/test_repo_wildcard.py",
+    "omega_prime/tests/test_grokbot_image_gates.py"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "Revert the commits on ci/00057-omega-ci-runners from 7b626ed through b3645eb. Jobs stay on the omega-ci pool.",
+  "approvals": [],
+  "approved_by": "Ove Govender"
+}

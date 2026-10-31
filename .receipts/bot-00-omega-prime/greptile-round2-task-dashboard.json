@@ -1,0 +1,57 @@
+{
+  "task": "greptile-round2-task-dashboard",
+  "bot": "bot-00-omega-prime",
+  "head_before": "6e1dd58",
+  "branch": "feat/task-dashboard",
+  "commands": [
+    {
+      "cmd": "ruff check omega_prime/",
+      "exit_code": 0,
+      "claims": [
+        "lint clean across dashboard and test edits, including import ordering"
+      ]
+    },
+    {
+      "cmd": "ruff format --check omega_prime/",
+      "exit_code": 0,
+      "claims": [
+        "all changed files formatted with the pinned ruff formatter"
+      ]
+    },
+    {
+      "cmd": "mypy omega_prime/",
+      "exit_code": 0,
+      "claims": [
+        "no new type errors in model.py, poller.py, collectors, redact.py"
+      ]
+    },
+    {
+      "cmd": "python -m pytest omega_prime/tests -q",
+      "exit_code": 1,
+      "claims": [
+        "4857 passed; 33 failed, byte-identical failure set to the unmodified 6e1dd58 baseline (git stash comparison), so no new failures",
+        "all 85 dashboard tests pass, including every new regression test for the round-2 fixes"
+      ]
+    },
+    {
+      "cmd": "python -m pytest omega_prime/tests/test_dashboard_*.py -q",
+      "exit_code": 0,
+      "claims": [
+        "quiet-work semantics: unknown-cwd sessions and resultless omega jobs stay active",
+        "retried omega jobs ignore previous-run terminal events",
+        "one in-flight collector call per source",
+        "fleet/proc timestamps anchored to measured-at and stable across rebuilds",
+        "session header recovered from file start when the bounded tail misses it",
+        "narrow word-internal sk- shield: digits/uppercase/underscore keys redacted, task-dashboard names survive",
+        "packaging: pyproject package-data ships dashboard/static",
+        "no credential-shaped literals remain in dashboard tests"
+      ]
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "an actual wheel build containing dashboard/static (asserted via pyproject package-data config and source-tree presence)",
+    "behavior against real fleet coordinator and GitHub endpoints (fake transports only)",
+    "baseline failures outside this change (test_prime_native, test_setup_check, test_desk_wiring, test_grokbot_oneclick, test_omega_commands doctor tests, test_prime_kernel_*) remain failing for pre-existing environmental reasons"
+  ]
+}

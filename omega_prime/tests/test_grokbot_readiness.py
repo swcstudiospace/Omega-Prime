@@ -349,18 +349,50 @@ def _minimal_source(root: Path) -> None:
     (roster_dir / "omega-prime.yaml").write_text("tools:\n  - a-tool\n")
 
 
-def _bases() -> set[Path]:
-    return set(Path("/tmp").glob("omega-readiness-*"))
+@pytest.fixture
+def private_system_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Redirect layout bases to a temp root only this test owns.
+
+    Bases normally live under the shared system ``/tmp``, where concurrent
+    tests and other jobs on the same runner create and remove their own
+    ``omega-readiness-*`` bases, so diffing ``/tmp`` races with them. Returns
+    the list of bases created, so a "left nothing behind" check also proves a
+    base was really made (and is not vacuous).
+    """
+    assert lv._SYSTEM_TMP == "/tmp"
+    system_tmp = tmp_path / "system-tmp"
+    system_tmp.mkdir()
+    monkeypatch.setattr(lv, "_SYSTEM_TMP", str(system_tmp))
+    created: list[Path] = []
+    real_mkdtemp = lv.tempfile.mkdtemp
+
+    def recording_mkdtemp(*args: Any, **kwargs: Any) -> str:
+        path = Path(real_mkdtemp(*args, **kwargs))
+        if path.parent == system_tmp:
+            created.append(path)
+        return str(path)
+
+    monkeypatch.setattr(lv.tempfile, "mkdtemp", recording_mkdtemp)
+    return created
 
 
-def test_export_failure_leaves_no_base(tmp_path: Path) -> None:
+def _assert_no_base_left(created: list[Path]) -> None:
+    assert len(created) == 1
+    base = created[0]
+    assert base.name.startswith("omega-readiness-")
+    assert not base.exists()
+    assert list(base.parent.iterdir()) == []
+
+
+def test_export_failure_leaves_no_base(
+    tmp_path: Path, private_system_tmp: list[Path]
+) -> None:
     src = tmp_path / "src"
     _minimal_source(src)
     (src / "omega_prime" / "escape.py").symlink_to("/etc/hostname")
-    before = _bases()
     with pytest.raises(lv.IsolationError), lv.isolated_layout(src):
         pass
-    assert _bases() == before
+    _assert_no_base_left(private_system_tmp)
 
 
 def test_public_export_boundaries_on_real_tree() -> None:
@@ -710,7 +742,9 @@ def test_probe_call_withholds_spanning_secret(tmp_path: Path) -> None:
     assert token[:12] not in str(excinfo.value)
 
 
-def test_alias_to_excluded_state_is_rejected(tmp_path: Path) -> None:
+def test_alias_to_excluded_state_is_rejected(
+    tmp_path: Path, private_system_tmp: list[Path]
+) -> None:
     """An alias to a pruned state target is refused before any copy."""
     src = tmp_path / "src"
     _minimal_source(src)
@@ -720,15 +754,16 @@ def test_alias_to_excluded_state_is_rejected(tmp_path: Path) -> None:
     (src / "omega_prime" / "tools" / "owned-alias.py").symlink_to(
         "../state/owned-canary.py"
     )
-    before = _bases()
     with pytest.raises(lv.IsolationError), lv.isolated_layout(src):
         pass
-    assert _bases() == before
+    _assert_no_base_left(private_system_tmp)
     assert (src / "omega_prime" / "state" / "owned-canary.py").is_file()
     assert (src / "omega_prime" / "tools" / "owned-alias.py").is_symlink()
 
 
-def test_alias_to_learned_helper_is_rejected(tmp_path: Path) -> None:
+def test_alias_to_learned_helper_is_rejected(
+    tmp_path: Path, private_system_tmp: list[Path]
+) -> None:
     """An alias into unvetted learned skill code cannot bypass membership."""
     src = tmp_path / "src"
     _minimal_source(src)
@@ -739,10 +774,9 @@ def test_alias_to_learned_helper_is_rejected(tmp_path: Path) -> None:
     (src / "omega_prime" / "tools" / "owned-helper-alias.py").symlink_to(
         "../skills/owned-learned/helper.py"
     )
-    before = _bases()
     with pytest.raises(lv.IsolationError), lv.isolated_layout(src):
         pass
-    assert _bases() == before
+    _assert_no_base_left(private_system_tmp)
     assert (learned / "helper.py").is_file()
 
 

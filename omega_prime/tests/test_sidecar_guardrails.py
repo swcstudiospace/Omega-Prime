@@ -40,7 +40,16 @@ EXPECTED_TOOL_NAMES = (
     "tempest_providers",
     "tempest_purple_synthesize",
     "tempest_blue_gaps",
+    "tempest_blue_rules",
+    "tempest_blue_hardening",
+    "tempest_blue_coverage",
+    "tempest_black_workflow",
+    "tempest_white_stage",
     "tempest_black_cover",
+    "tempest_black_noise",
+    "tempest_black_exfil",
+    "tempest_white_evidence",
+    "tempest_white_report",
     "tempest_white_roe",
     "tempest_hats_list",
     "tempest_hat_dispatch",
@@ -119,7 +128,7 @@ def _registered_names(registry) -> set[str]:
     return {s["function"]["name"] for s in registry.schemas()}
 
 
-def test_rostered_surface_still_exactly_the_fourteen_names():
+def test_rostered_surface_still_exactly_the_twenty_three_names():
     assert tuple(REDTEAM_TOOL_NAMES) == EXPECTED_TOOL_NAMES
 
 
@@ -158,9 +167,7 @@ def test_enabled_without_roe_is_blocked_with_zero_registrations(
     assert registry.runtime_bindings["sidecar_state"] == "BLOCKED"
 
 
-def test_enabled_with_valid_roe_reaches_idle_with_all_fourteen(
-    monkeypatch, sidecar_env
-):
+def test_enabled_with_valid_roe_reaches_idle_with_all_tools(monkeypatch, sidecar_env):
     artifact = _write_signed_roe(sidecar_env)
     registry = _build(
         monkeypatch,

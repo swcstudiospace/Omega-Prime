@@ -43,9 +43,16 @@ The table records names and purposes only.
 | `GEMINI_API_KEY_FILE` | Names a protected file containing the Gemini API credential. |
 | `GH_TOKEN` | Authenticates GitHub CLI and GitHub integrations. |
 | `GH_TOKEN_FILE` | Names a protected file supplying GH_TOKEN: Authenticates GitHub CLI and GitHub integrations. |
+| `GITHUB_EVENT_NAME` | Set by the GitHub runner; the Desktop pre-job guard refuses pull_request_target and, for non-private repositories, events other than push, workflow_dispatch, pull_request, and a schedule whose ref is the default branch. |
+| `GITHUB_EVENT_PATH` | Set by the GitHub runner; the Desktop pre-job guard reads the event payload there to refuse fork pull requests. |
+| `GITHUB_PATH` | Set by the GitHub runner; after allowing a job, the Desktop pre-job guard appends the job's ~/.local/bin and ~/.cargo/bin there. |
+| `GITHUB_REF` | Set by the GitHub runner; the Desktop pre-job guard admits a public schedule only when this is refs/heads and the repository default branch. |
+| `GITHUB_REPOSITORY` | Set by the GitHub runner; the Desktop pre-job guard checks it against its repository allowlist and the event payload. |
+| `GITHUB_RUN_ID` | Binds the eventstream IT ownership record to one GitHub Actions run. |
 | `GITHUB_SHA` | Records the source commit identifier as evaluation-history provenance. |
 | `GITHUB_TOKEN` | Authenticates GitHub API requests. |
 | `GITHUB_TOKEN_FILE` | Names a protected file supplying GITHUB_TOKEN: Authenticates GitHub API requests. |
+| `GITHUB_WORKFLOW` | Names the GitHub Actions workflow that owns the eventstream IT service container. |
 | `GOOGLE_API_KEY` | Authenticates Google provider requests. |
 | `GOOGLE_API_KEY_FILE` | Names a protected file containing the Google API credential. |
 | `GOOGLE_CLOUD_API_KEY` | Authenticates Google Cloud provider requests. |
@@ -97,6 +104,51 @@ The table records names and purposes only.
 | `MUSE_API_KEY_FILE` | Names a protected file containing the Muse provider credential. |
 | `NOTION_TOKEN` | Authenticates Notion connector API requests. |
 | `NOTION_TOKEN_FILE` | Names a protected file containing the Notion integration credential. |
+| `OMEGA_CI_AGENT_JOB_GID` | Sets the unprivileged gid CI job processes run as on the Desktop. |
+| `OMEGA_CI_AGENT_JOB_HOOK` | Points the Desktop runner agent at the pre-job guard script it installs as ACTIONS_RUNNER_HOOK_JOB_STARTED. |
+| `OMEGA_CI_AGENT_JOB_POLICY` | Names the Desktop runner agent's pre-job guard allowlist file; only /var/lib/omega-ci/job-policy.json (the path the shipped hook reads) is accepted. |
+| `OMEGA_CI_AGENT_JOB_UID` | Sets the unprivileged uid CI job processes run as on the Desktop. |
+| `OMEGA_CI_AGENT_MAX_RUNNERS` | Caps concurrent runner processes on the Desktop runner agent. |
+| `OMEGA_CI_AGENT_REPOS` | Lists the owner/repo names or owner/* entries the Desktop runner pre-job guard lets run; empty refuses every job. |
+| `OMEGA_CI_AGENT_RUNNER_ROOT` | Points the Desktop runner agent at the unpacked actions/runner directory. |
+| `OMEGA_CI_AGENT_TOKEN` | Supplies the Desktop runner agent bearer token as a Railway variable. |
+| `OMEGA_CI_AGENT_TOKEN_FILE` | Names a protected file containing the Desktop runner agent bearer token. |
+| `OMEGA_CI_AGENT_WORK_ROOT` | Sets where the Desktop runner agent creates per-runner private work directories. |
+| `OMEGA_CI_CONTROLLER_URL` | Selects the CI autoscaler URL the Desktop runner agent reports runner exits to. |
+| `OMEGA_CI_DEMAND_PATH` | Overrides the JSON file where the CI autoscaler persists queued jobs so a restart replays them. |
+| `OMEGA_CI_DESKTOP_2_CAPACITY` | Sets how many concurrent runners serverless runner swarm agent 2 takes (1-10, default 8). |
+| `OMEGA_CI_DESKTOP_2_TOKEN_FILE` | Names a protected file containing the bearer token of serverless runner swarm agent 2. |
+| `OMEGA_CI_DESKTOP_2_URL` | Selects the https base URL of serverless runner swarm agent 2 (agents are numbered without gaps). |
+| `OMEGA_CI_DESKTOP_3_CAPACITY` | Sets how many concurrent runners serverless runner swarm agent 3 takes (1-10, default 8). |
+| `OMEGA_CI_DESKTOP_3_TOKEN_FILE` | Names a protected file containing the bearer token of serverless runner swarm agent 3. |
+| `OMEGA_CI_DESKTOP_3_URL` | Selects the https base URL of serverless runner swarm agent 3 (agents are numbered without gaps). |
+| `OMEGA_CI_DESKTOP_4_CAPACITY` | Sets how many concurrent runners serverless runner swarm agent 4 takes (1-10, default 8). |
+| `OMEGA_CI_DESKTOP_4_TOKEN_FILE` | Names a protected file containing the bearer token of serverless runner swarm agent 4. |
+| `OMEGA_CI_DESKTOP_4_URL` | Selects the https base URL of serverless runner swarm agent 4 (agents are numbered without gaps). |
+| `OMEGA_CI_DESKTOP_5_CAPACITY` | Sets how many concurrent runners serverless runner swarm agent 5 takes (1-10, default 8). |
+| `OMEGA_CI_DESKTOP_5_TOKEN_FILE` | Names a protected file containing the bearer token of serverless runner swarm agent 5. |
+| `OMEGA_CI_DESKTOP_5_URL` | Selects the https base URL of serverless runner swarm agent 5 (agents are numbered without gaps). |
+| `OMEGA_CI_DESKTOP_CAPACITY` | Sets how many concurrent runners the first Desktop runner agent takes (1-10). |
+| `OMEGA_CI_DESKTOP_TOKEN_FILE` | Names a protected file containing the bearer token shared with the Desktop runner agent. |
+| `OMEGA_CI_DESKTOP_URL` | Selects the https base URL of the Desktop runner agent. |
+| `OMEGA_CI_EVENTS_PATH` | Overrides the JSONL file the CI autoscaler appends redacted events to. |
+| `OMEGA_CI_GITHUB_APP_ID` | Identifies the GitHub App the CI autoscaler authenticates as. |
+| `OMEGA_CI_GITHUB_APP_KEY_FILE` | Names a protected file containing the CI autoscaler GitHub App private key. |
+| `OMEGA_CI_GITHUB_INSTALLATION_ID` | Identifies the GitHub App installation the CI autoscaler uses. |
+| `OMEGA_CI_GITHUB_PAT_FILE` | Names a protected file containing a fallback-free PAT used only when no GitHub App is configured. |
+| `OMEGA_CI_IDLE_GRACE_S` | Sets how long an idle CI runner waits for work before it is reaped. |
+| `OMEGA_CI_LABELS` | Sets the runner labels the CI autoscaler pool carries and matches jobs against. |
+| `OMEGA_CI_MAX_RUNNERS` | Caps concurrent CI autoscaler runners (1-10 with one agent; at most the sum of agent capacities in a swarm). |
+| `OMEGA_CI_ORG` | Names the GitHub organisation whose self-hosted runner group the CI autoscaler serves. |
+| `OMEGA_CI_PUBLIC_REPOS` | Opts listed public repositories or owner/* (covered by OMEGA_CI_REPOS) into the CI autoscaler; each workflow run is verified same-repository and not a fork before a runner is launched. |
+| `OMEGA_CI_PUBLISHER` | Selects the CI autoscaler event publisher (jsonl, null or eventstream). |
+| `OMEGA_CI_REPO` | Names the owner/repo the CI autoscaler serves in repository scope. |
+| `OMEGA_CI_REPOS` | Restricts the CI autoscaler to a comma-separated allowlist of owner/repo names or owner/* (every non-fork repository of that owner). |
+| `OMEGA_CI_RUNNER_GROUP` | Names the GitHub runner group used for CI autoscaler runners. |
+| `OMEGA_CI_RUNNER_GROUP_ID` | Gives the numeric GitHub runner group id used when minting JIT runner configs. |
+| `OMEGA_CI_SCOPE` | Selects org-wide or single-repository scope for the CI runner autoscaler. |
+| `OMEGA_CI_WAKE_BUDGET_S` | Bounds the total time spent waking the Desktop runner agent. |
+| `OMEGA_CI_WEBHOOK_SECRET_FILE` | Names a protected file containing the workflow_job webhook HMAC secret. |
 | `OMEGA_PRIME_AGENT_STATE_DIR` | Selects the agent data folder for sessions, memory, skills and intake; defaults to the state directory's agent folder. |
 | `OMEGA_PRIME_APPROVALS_FILE` | Selects the external approval grants file. |
 | `OMEGA_PRIME_APPROVALS_SHA256` | Pins the expected digest of the approval grants file. |
@@ -105,6 +157,9 @@ The table records names and purposes only.
 | `OMEGA_PRIME_CLARIFY_SOCKET` | Names the per-run clarify broker socket an engine child uses to ask the operator a question. |
 | `OMEGA_PRIME_COMMAND_LOG` | Selects the command history log destination. |
 | `OMEGA_PRIME_CRON_LATENESS_GRACE_SECONDS` | Sets the maximum accepted lateness for scheduled actions. |
+| `OMEGA_PRIME_DASHBOARD_PORT` | Sets the default loopback port for the local Command Center dashboard (default 7421). |
+| `OMEGA_PRIME_DELEGATE_DEPTH` | Set by the engine for a child omp run: how many delegate hops deep this MCP server is. An unreadable value fails closed (no further delegates). |
+| `OMEGA_PRIME_DELEGATE_MAX_DEPTH` | Set by the engine for a child omp run: the parent's delegate depth cap (default 2), so a child never widens it. An unreadable value fails closed. |
 | `OMEGA_PRIME_DESK_BUS_URL` | Selects the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_BUS_URL_FILE` | Names a protected file containing the desk message-bus endpoint. |
 | `OMEGA_PRIME_DESK_CHILD_MODEL` | Selects the model used for the managed desk child process. |
@@ -118,6 +173,7 @@ The table records names and purposes only.
 | `OMEGA_PRIME_DISPATCH_CONFIRM` | Confirms dispatch operations requiring the Fleet credential helper. |
 | `OMEGA_PRIME_DISPATCH_CONFIRM_FILE` | Names a protected file containing the dispatch confirmation token. |
 | `OMEGA_PRIME_ENGINE` | Controls whether engine execution is enabled or required. |
+| `OMEGA_PRIME_ENGINE_STAGE` | Names the GSD stage (plan or execute) an engine run is on, so staged turns and their delegates pick the stage model. |
 | `OMEGA_PRIME_ENGINE_TMUX` | Controls tmux session attachment for engine jobs. |
 | `OMEGA_PRIME_ENGINE_UNSANDBOXED` | Opts engine execution out of the sandbox. |
 | `OMEGA_PRIME_EVALS_JUDGE_API_KEY` | Authenticates requests to the live evaluation judge. |
@@ -221,8 +277,10 @@ The table records names and purposes only.
 | `PYTHONHOME_FILE` | Forwarded file-name counterpart for the child-process Python home. |
 | `PYTHONPATH` | Sets import search paths inherited by child processes. |
 | `PYTHONPATH_FILE` | Forwarded file-name counterpart for the child-process Python import path. |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | Set by Railway (railway.toml drainingSeconds): the SIGTERM-to-SIGKILL window on redeploy; the Desktop runner agent lets running jobs finish within it minus a 30 s stop margin (0 or unset stops them at once). |
 | `RAILWAY_TOKEN` | Authenticates Railway project status and log operations. |
 | `RAILWAY_TOKEN_FILE` | Names a protected file containing the Railway credential. |
+| `RUNNER_TEMP` | Directory for ephemeral eventstream IT ownership and TLS material. |
 | `SUBSTRATE_TOKEN` | Authenticates requests to the Substrate service. |
 | `SUBSTRATE_TOKEN_FILE` | Names a protected file containing the Substrate credential. |
 | `SUBSTRATE_TOKEN_GROK_BOT` | Authenticates Grokbot requests to the Substrate service. |

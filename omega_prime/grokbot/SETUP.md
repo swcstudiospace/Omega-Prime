@@ -157,15 +157,16 @@ values out of git:
 
 Call the person running the install "the operator".
 
-Weekday routines a new install can create, each prompt calling
-`omega_command` (see `grokbot/templates/OMEGA_PRIME.md`):
+Routines a new install can create, each prompt calling `omega_command`
+(see `grokbot/templates/OMEGA_PRIME.md`). Every routine is an event-triggered
+listener; do not give any routine a timer or cron schedule:
 
-| Routine | Command | Suggested cron |
+| Routine | Command | Trigger |
 | --- | --- | --- |
-| desk-lead | `/omega-desk-lead` | `15 9 * * 1-5` |
-| ultrathink | `/omega-ultrathink-routine` | `30 9 * * 1-5` |
-| sweep (drafts only, never publishes) | `/omega-sweep` | `0 16 * * 1-5` |
-| nightly | `/omega-nightly` | `0 18 * * 1-5` |
+| desk-lead | `/omega-desk-lead` | a new intake item or ticket, or a blocked ticket changing state |
+| ultrathink | `/omega-ultrathink-routine` | an operator message containing `ultrathink` |
+| sweep (drafts only, never publishes) | `/omega-sweep` | a new X mention |
+| nightly | `/omega-nightly` | a session ends and appends turns |
 
 The same entry points run in a shell: `python -m omega_prime.routines.desk_lead`,
 `python -m omega_prime.routines.ultrathink_turn`, `python -m omega_prime.routines.sweep`,

@@ -204,6 +204,15 @@ flowchart LR
 - Vision inspection occurs only after complete session close and verified
   clean drain receipts.
 
+## The operating model
+
+Omega Prime runs as the Autonomous Event-Driven ADLC Programming Bot: the operator
+starts a task and Omega Prime carries it through build, merge gate, merge
+and report, triggered by events rather than timers. The behavioural rules
+are prime directives in `omega_prime/prompts/_shared/core-directives.xml`,
+assembled into the seat prompt, so they ship with an exported template;
+learned memory does not. See [Autonomous Event-Driven ADLC Programming Bot](adlc.md).
+
 ## The Grok Bot shell
 
 The same agent, addressed from Grok: `omega_prime/grokbot/templates/OMEGA_PRIME.md`

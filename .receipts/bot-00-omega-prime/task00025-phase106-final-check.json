@@ -1,0 +1,37 @@
+{
+  "task_id": "task00025-phase106-final-check",
+  "bot": "bot-00-omega-prime",
+  "agent": "Phase106FinalCheck",
+  "scope": "Independent static revision-gate review only; no product edits, execution checks or commit",
+  "ownership": "Report .planning/phases/106-command-center-polish/106-PLAN-CHECK.md and this receipt resolve through omega_prime/ownership.yaml pattern ** to bot-00-omega-prime; no later pattern changes their owner.",
+  "review_plan": [
+    {"node": "understand", "steps": ["Read mandatory gate guidance", "Read ownership and receipt rules", "Read locked phase goal and decisions", "Read prior binding findings"]},
+    {"node": "coverage", "steps": ["Read all five plans", "Map AC1 through AC9", "Trace model addendum consumers", "Compare research patterns and UI contract"]},
+    {"node": "contracts", "steps": ["Trace real route baseline contract", "Separate missing-feature and safety evidence", "Trace shared GitHub notice caller", "Review named failure and clean-rerender regression"]},
+    {"node": "critique", "steps": ["Compare wave manifests and dependencies", "Review narrow prerequisite dispatch", "Review ordered asset builders", "Review cwd and baseline evidence limits"]},
+    {"node": "synthesize", "steps": ["Record static review verdict", "Write requested concise report", "Identify parent probe reruns", "Return verdict without runtime claims"]}
+  ],
+  "commands": [],
+  "claims": [],
+  "review_evidence": [
+    "Read all 106 PLAN files and CONTEXT, UPLIFT, model addendum, RESEARCH, PATTERNS, UI-SPEC and VALIDATION using file tools.",
+    "106-05-PLAN.md lines 120,140,198 and VALIDATION lines 110-123 require the same real create_app GET/raw-ASGI path, HTTP200 before frames, and baseline404 as missing-feature evidence only; substitute emitters/sanitizers are forbidden.",
+    "106-03-PLAN.md lines 6,87,106-113,137 consume 04's optional ViewState githubMeta contract and name the genuine recent_merges failure regression with distinct section-success/aggregate/received timestamps and clean rerender.",
+    "106-04-PLAN.md lines 110-123,155-164 and 106-05-PLAN.md lines 101-111,156-166 preserve source custody, prerequisite scope and build integration barriers."
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "No commands or checkers were run by this agent; parent must rerun deterministic final plan probes and structure checks after this review.",
+    "Prior probe totals were supplied context only: 37 failing directions all ok and 37 path entries not_applicable; not_applicable is not path-resolution proof.",
+    "Product regression tests, baseline transplant, full suites, dependency restoration, build, lint, types and polyglot checks were not executed.",
+    "Live GitHub, real Herdr capture and closed-pane classification, responsive browser behavior, five host7441 screenshots and final local product commits remain execution evidence.",
+    "Supplied lint/type failures and missing runtime/tool prerequisites were not rerun or independently measured."
+  ],
+  "files_changed": [
+    ".receipts/bot-00-omega-prime/task00025-phase106-final-check.json",
+    ".planning/phases/106-command-center-polish/106-PLAN-CHECK.md"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "Remove only this agent's requested review report and independent receipt; preserve all plans and peer changes.",
+  "approvals": []
+}

@@ -1,0 +1,51 @@
+{
+  "task_id": "105-03",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-20T22:38:54Z",
+  "completed_at": "2026-10-20T22:53:31Z",
+  "commands": [
+    { "cmd": "npm --prefix omega_prime/dashboard/frontend test -- --run src/hooks/useDashboard.test.tsx src/lib/links.test.ts src/lib/time.test.ts src/components/motion.test.tsx", "exit_code": 1, "output_tail": "Initial run exposed malformed fixture and Intl.DateTimeFormat option issues, which were corrected before acceptance." },
+    { "cmd": "npm --prefix omega_prime/dashboard/frontend test -- --run src/hooks/useDashboard.test.tsx src/lib/links.test.ts src/lib/time.test.ts src/components/motion.test.tsx", "exit_code": 0, "output_tail": "4 test files passed; 7 tests passed." },
+    { "cmd": "npm --prefix omega_prime/dashboard/frontend test -- --run src/App.test.tsx src/lib/selectors.test.ts src/views/Overview.test.tsx src/views/Tasks.test.tsx src/views/CiCd.test.tsx src/views/Repositories.test.tsx", "exit_code": 1, "output_tail": "Initial assertions exposed duplicate headings/task fixtures and ambiguous default-branch rows; test queries were corrected." },
+    { "cmd": "npm --prefix omega_prime/dashboard/frontend test -- --run src/App.test.tsx src/lib/selectors.test.ts src/views/Overview.test.tsx src/views/Tasks.test.tsx src/views/CiCd.test.tsx src/views/Repositories.test.tsx", "exit_code": 0, "output_tail": "6 test files passed; 10 tests passed." },
+    { "cmd": "npm ci --registry=https://registry.npmjs.org", "exit_code": 0, "output_tail": "Added 128 packages from the lockfile." },
+    { "cmd": "npm test -- --run", "exit_code": 0, "output_tail": "10 test files passed, 1 build-dependent test skipped; 17 passed, 1 skipped." },
+    { "cmd": "npm run build", "exit_code": 1, "output_tail": "TS6310: referenced TypeScript node project may not disable emit." },
+    { "cmd": "npm run build", "exit_code": 1, "output_tail": "TypeScript found a nullable timer argument and missing Node/Vite client type declarations." },
+    { "cmd": "npm run build", "exit_code": 0, "output_tail": "TypeScript build and Vite 8.3.4 production build passed; 445 modules transformed; hashed JS/CSS/WOFF2 emitted." },
+    { "cmd": "CC_CHECK_BUILD=1 npm test -- --run src/test/build-assets.test.ts", "exit_code": 1, "output_tail": "External URL text in bundled React error strings was mistaken for a runtime external request." },
+    { "cmd": "CC_CHECK_BUILD=1 npm test -- --run src/test/build-assets.test.ts", "exit_code": 1, "output_tail": "Asset inspection loop referenced its distributable list before declaration." },
+    { "cmd": "CC_CHECK_BUILD=1 npm test -- --run src/test/build-assets.test.ts", "exit_code": 1, "output_tail": "Root-relative /cc/ font URLs were resolved relative to the CSS directory." },
+    { "cmd": "CC_CHECK_BUILD=1 npm test -- --run src/test/build-assets.test.ts", "exit_code": 0, "output_tail": "Built asset paths, local font references, notices, no source maps, external runtime request patterns, and measured byte totals passed." },
+    { "cmd": "npm ci --registry=https://registry.npmjs.org", "exit_code": 0, "output_tail": "Final clean lockfile install after wiring contract correction; installed 128 packages." },
+    { "cmd": "npm test -- --run", "exit_code": 0, "output_tail": "Final full suite: 10 test files passed, 1 build-dependent test skipped; 17 passed, 1 skipped." },
+    { "cmd": "npm run build", "exit_code": 0, "output_tail": "Final TypeScript/Vite build after W1 head_sha correction passed; 445 modules transformed; emitted index-BOBIBlMD.js and local CSS/fonts." },
+    { "cmd": "CC_CHECK_BUILD=1 npm test -- --run src/test/build-assets.test.ts", "exit_code": 0, "output_tail": "Final generated-asset validation passed, including local asset paths, licensed notices, no source maps, runtime-origin constraints, and byte totals." }
+  ],
+  "claims": [
+    { "claim": "Registry lockfile install completed after final correction", "evidence_command_index": 13 },
+    { "claim": "Full frontend behavior suite passes after final correction", "evidence_command_index": 14 },
+    { "claim": "TypeScript checking and static Vite build passed after final correction", "evidence_command_index": 15 },
+    { "claim": "Final generated asset validation passed", "evidence_command_index": 16 }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "No real-data browser inspection, live screenshot capture, or visual WCAG AA assessment was performed; a7 and visual proof remain outer-driver obligations.",
+    "No live server HTTP/SSE integration or authenticated GitHub parity was exercised; W4 and the outer driver own those checks.",
+    "No security scanner was run; evidence here is limited to the plan's frontend behavior/build checks."
+  ],
+  "files_changed": [
+    "omega_prime/dashboard/frontend/package.json",
+    "omega_prime/dashboard/frontend/package-lock.json",
+    "omega_prime/dashboard/frontend/src/**",
+    "omega_prime/dashboard/frontend/public/**",
+    "omega_prime/dashboard/frontend/index.html",
+    "omega_prime/dashboard/frontend/vite.config.ts",
+    "omega_prime/dashboard/static/cc/index.html",
+    "omega_prime/dashboard/static/cc/assets/**",
+    "omega_prime/dashboard/static/cc/licenses/**"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "Revert W3 task commits on feat/command-center.",
+  "approvals": []
+}

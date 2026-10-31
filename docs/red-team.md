@@ -477,14 +477,14 @@ The tools speak the upstream loopback HTTP API, not MCP:
   `omega-prime.json`.
 - The sidecar is T3MP3ST itself, checked out as the tracked root
   `redteam/` submodule (remote `https://github.com/swcstudiospace/purple-team.git`,
-  commit `831a6b0ee09f12c0f069f51d62b2f0945d505980` per `VENDOR.md`) and
+  commit `d1a22097a1402976621ed6affa632981fb105ca7` per `VENDOR.md`) and
   started separately — Omega Prime does not start, supervise, install, or
   auto-launch it. See [Backend checkout and start](#backend-checkout-and-start).
 ## Backend checkout and start
 
 The TypeScript backend is separate upstream source reached through the
 `redteam/` gitlink. The Python package, the registry adapter
-(`omega_prime/tools/redteam.py`), and the vendored 14-skill / five-seat
+(`omega_prime/tools/redteam.py`), and the vendored 47-skill / five-seat
 pack (`omega_prime/redteam/pack/`) are ordinary parent content; the
 backend is not ported and never starts on its own.
 
@@ -516,25 +516,59 @@ engagement needs it.
 
 `omega_prime/redteam/pack/` holds T3MP3ST's declarative Grok Bot pack
 copied verbatim: the seat templates (COMMANDER, RED, BLACK, BLUE,
-WHITE), the red-team roster, and 14 saved skills. The skills are the
+WHITE), the red-team roster, and 47 saved skills. The skills are the
 upstream descriptions, one line each:
 
 | Skill | Use |
 | --- | --- |
-| `tempest-bootstrap` | `/tempest-help` or `/tempest-config`, or a seat's first session: registers the seat id and checks gateway reachability. |
-| `tempest-run` | `/tempest-run` with an objective: acknowledges with a run id, streams progress, and closes with a completion summary. |
-| `tempest-mission` | Starting, parking, resuming, pausing, or stopping a mission: owns mission ids and the parked/resumable lifecycle. |
-| `tempest-operators` | `/tempest-agents` or tasking a seat: lists operators and dispatches work to one operator id. |
-| `tempest-status` | `/tempest-status` or `/tempest-providers`: reads mission status plus provider and subscription-session state. |
-| `tempest-report` | `/tempest-report`: exports the engagement report for a mission id. |
-| `tempest-memory` | Recalling past work or reviewing learned entries: reads the memory capsule and accepts or rejects proposals. |
-| `black-specter` | `/black-specter` with a red plan: critiques the plan's covert tradecraft, cover, and noise budget from the adversary's eyes. |
-| `black-wraith` | `/black-wraith` with exfil paths: simulates the paths as analysis and checks them against the noise budget. |
-| `blue-sentinel` | `/blue-sentinel` with findings: maps each finding to telemetry and writes one detector recommendation per gap. |
-| `blue-warden` | `/blue-warden` with findings: audits hardening and returns a verification checklist plus misconfiguration call-outs. |
-| `white-arbiter` | `/white-arbiter` with an action: returns the ROE verdict on that action and resolves any red versus blue dispute about it. |
-| `white-auditor` | `/white-auditor` with evidence: scores each entry by provenance and aggregates the evidence-strength verdict. |
-| `dark-purple` | `/dark-purple` with a mission scope: runs the full loop of red findings to black pressure to blue detection to white verdict to report. |
+| `tempest-bootstrap` | Use when the operator types /tempest-help or /tempest-config, or when a seat runs its first session: registers the seat id and checks gateway reachability. |
+| `tempest-memory` | Use when the operator recalls past work or reviews learned entries: reads the memory capsule and accepts or rejects proposals. |
+| `tempest-mission` | Use when the operator starts, parks, resumes, pauses, or stops a mission: owns mission ids and the parked/resumable lifecycle. |
+| `tempest-operators` | Use when the operator types /tempest-agents or tasks a seat: lists operators and dispatches work to one operator id. |
+| `tempest-report` | Use when the operator types /tempest-report: exports the engagement report for a mission id. |
+| `tempest-run` | Use when the operator types /tempest-run with an objective: acknowledges with a run id, streams progress, and closes with a completion summary. |
+| `tempest-status` | Use when the operator types /tempest-status or /tempest-providers: reads mission status plus provider and subscription-session state. |
+| `black-anti-forensics-refusal` | Use when the operator types /black-anti-forensics-refusal with a request to wipe, clean, tamper with, or conceal logs or artifacts: refuses and reports the residue to… |
+| `black-attack-mapper` | Use when the operator types /black-attack-mapper with planned actions: maps each action to vendored ATT&CK technique ids, tactic phases, and detection strategies. |
+| `black-beacon-cadence` | Use when the operator types /black-beacon-cadence with callback or scheduled-transfer plans: reviews beacon timing, jitter, and fallback channels for correlation risk. |
+| `black-channel-costing` | Use when the operator types /black-channel-costing with exfil paths: prices each channel with the disclosed exfil cost table and states feasibility, without moving data. |
+| `black-cover-audit` | Use when the operator types /black-cover-audit with a command or artifact: audits per-action cover residue (user agent, timestamps, DNS, temp files, credentials in arg… |
+| `black-evasion-review` | Use when the operator types /black-evasion-review with concealment steps: checks obfuscation, masquerading, and sandbox-awareness against the stealth checklist. |
+| `black-low-noise-recon` | Use when the operator types /black-low-noise-recon with a recon scope: plans passive-first surface mapping and bounds every active probe. |
+| `black-noise-ledger` | Use when the operator types /black-noise-ledger with a plan: prices each action in budget points and reports the total, tier, and doctrine violations. |
+| `black-phase-gate` | Use when the operator types /black-phase-gate with a plan: issues a per-phase go or no-go from the opsec checklist before each phase starts. |
+| `black-probe-cadence` | Use when the operator types /black-probe-cadence with a plan: flags repeated identical probes and burst timing that burn budget and correlate across runs. |
+| `black-specter` | Use when the operator types /black-specter with a red plan: critiques the plan's covert tradecraft, cover, and noise budget from the adversary's eyes. |
+| `black-stealth-router` | Use when the operator types /black-stealth-router with a plan or route: reviews declared egress, proxies, and resolvers against the command-and-control checklist. |
+| `black-third-party-surface` | Use when the operator types /black-third-party-surface with a plan that touches cloud storage, web services, code repos, or cloud accounts: reviews the external logs e… |
+| `black-wraith` | Use when the operator types /black-wraith with exfil paths: simulates the paths as analysis and checks them against the noise budget. |
+| `blue-coverage-matrix` | Use when the operator types /blue-coverage-matrix with findings: builds a finding-by-countermeasure coverage matrix from the backend gap report. |
+| `blue-deception-plan` | Use when the operator types /blue-deception-plan with findings: designs inert decoy placements for uncovered Deceive countermeasures, each with a test-touch proof. |
+| `blue-evict-plan` | Use when the operator types /blue-evict-plan with findings: writes incident-response eviction recommendations for findings that show an active foothold. |
+| `blue-harden-map` | Use when the operator types /blue-harden-map with findings: maps uncovered preventive countermeasures (Harden and Isolate) to each finding's controls. |
+| `blue-hunt-plan` | Use when the operator types /blue-hunt-plan with findings: writes retrospective hunt cards over partially covered telemetry, labeling each outcome honestly. |
+| `blue-keyless-triage` | Use when the operator types /blue-keyless-triage with findings: lists findings that carry no D3FEND countermeasure keys and names the keys each one needs. |
+| `blue-logsource` | Use when the operator types /blue-logsource with findings: flags Sigma rules still on the placeholder logsource and states that the rule endpoint cannot retarget them. |
+| `blue-ontology-drift` | Use when the operator types /blue-ontology-drift with findings: reports countermeasure ids the vendored D3FEND ontology does not recognize, per finding. |
+| `blue-sentinel` | Use when the operator types /blue-sentinel with findings: maps each finding to telemetry and writes one detector recommendation per gap. |
+| `blue-severity-check` | Use when the operator types /blue-severity-check with findings: flags findings whose severity label is unrecognized and so folds silently into the medium tier. |
+| `blue-sigma-pack` | Use when the operator types /blue-sigma-pack with findings: reviews the experimental Sigma rule pack derived from uncovered gaps and checks each rule's fields. |
+| `blue-telemetry-deploy` | Use when the operator types /blue-telemetry-deploy with findings: names the telemetry source that would close each uncovered countermeasure gap. |
+| `blue-warden` | Use when the operator types /blue-warden with findings: audits hardening and returns a verification checklist plus misconfiguration call-outs. |
+| `white-active-classifier` | Use when the operator types /white-active-classifier with a command or tool id: shows whether the keyword rule classifies it as active, and flags active-capable tools… |
+| `white-approval-receipt` | Use when the operator types /white-approval-receipt with an action: checks that an approved flag is backed by a ledger receipt that names the same command and target… |
+| `white-arbiter` | Use when the operator types /white-arbiter with an action: returns the ROE verdict on that action and resolves any red versus blue dispute about it. |
+| `white-auditor` | Use when the operator types /white-auditor with evidence: scores each entry by provenance and aggregates the evidence-strength verdict. |
+| `white-custody-trail` | Use when the operator types /white-custody-trail with an evidence or finding id: traces each entry's origin, source, observation tool, stage, input hash, run, and miss… |
+| `white-orphan-evidence` | Use when the operator types /white-orphan-evidence: lists ledger entries that no finding claims, with the reason each is unclaimed, and counts them by origin and platf… |
+| `white-report-coverage` | Use when the operator types /white-report-coverage with finding ids or scope: states, per finding, whether it is report-ready, names the exact gap that blocks it, and… |
+| `white-retest-criteria` | Use when the operator types /white-retest-criteria with a finding id: lists the finding's recommended fix and retest acceptance criteria, matches ledger retest entries… |
+| `white-roe-parse` | Use when the operator types /white-roe-parse with ROE text or a scope question: accounts for every line of the on-record ROE text and reports whether the spec is safe… |
+| `white-scope-match` | Use when the operator types /white-scope-match with a target: shows which allowed ROE entry matches it, by which rule, and flags lookalike hosts that the substring rul… |
+| `white-severity-replay` | Use when the operator types /white-severity-replay with finding ids: checks that each high or critical finding rests on a replayable receipt a third party can re-run… |
+| `white-verdict-stamp` | Use when the operator types /white-verdict-stamp with a verdict set or action index: checks the revision, text-hash, and source-line stamps on ROE verdicts against the… |
+| `dark-purple` | Use when the operator types /dark-purple with a mission scope: runs the full loop of red findings to black pressure to blue detection to white verdict to report. |
+
 
 The upstream skills drive Grok Bot seats against the gateway; in Omega
 Prime they are reference material for what the mirrored tools and hats
