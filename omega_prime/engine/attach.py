@@ -347,6 +347,8 @@ def delegate_via_engine(
     stage: str | None = None,
     delegate_depth: int | None = None,
     plan: str | None = None,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
     delegate_max_depth: int | None = None,
 ) -> str | None:
     """JSON summary from omp, or None when the Python child path should run.
@@ -359,6 +361,9 @@ def delegate_via_engine(
     ``delegate_depth`` is the child's depth, handed to omp's MCP server so
     the child's own delegates still stop at the parent's ``max_depth``;
     ``delegate_max_depth`` is that ``max_depth`` (a custom limit carries over).
+    ``tasks_path``/``task_id`` are optional dashboard context threaded into
+    ``run(...)`` unchanged; they switch on the run's visibility wiring when
+    both are set.
     """
     mapping = _mapping(env)
     mode = engine_mode(mapping)
@@ -387,6 +392,8 @@ def delegate_via_engine(
         interrupt=interrupt,
         stage=staged,
         plan=plan,
+        tasks_path=tasks_path,
+        task_id=task_id,
         **extra,
     )
     if not result.ok:
@@ -475,6 +482,8 @@ def ultrathink_engine(
     *,
     stage: str | None = None,
     requested_plan: str | None = None,
+    tasks_path: str | Path | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     """Run a resolved ultrathink spec on omp when the engine is ready.
 
@@ -482,6 +491,9 @@ def ultrathink_engine(
     ``OMEGA_PRIME_ENGINE_STAGE``. An unknown stage fails instead of being
     skipped. ``requested_plan`` is the primary plan to ask the router for
     (for example ``zai``); ``plan`` here is the ultrathink spec record.
+    ``tasks_path``/``task_id`` are optional dashboard context threaded into
+    ``run(...)`` unchanged; they switch on the run's visibility wiring when
+    both are set.
     """
     mode = engine_mode(env)
     if mode == "off":
@@ -518,6 +530,8 @@ def ultrathink_engine(
         system_prompt="Ultrathink turn. Stay inside the spec.",
         stage=staged,
         plan=requested_plan,
+        tasks_path=tasks_path,
+        task_id=task_id,
     )
     if not result.ok:
         body = {

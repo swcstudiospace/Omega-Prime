@@ -147,6 +147,61 @@ def _pane(value: Any, prefix: str) -> dict[str, str] | None:
     return result
 
 
+# Engine-run fields (run_rows.py, blocks.py): kept only when the writer set them.
+_RUN_STRING_KEYS = ("job_id", "stage", "last_event", "pane")
+_JSON_DEPTH = 8
+
+
+def _json_value(value: Any, prefix: str, depth: int = 0) -> Any:
+    """A JSON-safe copy of ``value`` (str keys, bounded depth) or ValueError."""
+    if depth > _JSON_DEPTH:
+        raise ValueError(f"{prefix} is nested too deeply")
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, list):
+        return [
+            _json_value(v, f"{prefix}[{i}]", depth + 1) for i, v in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, v in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{prefix} keys must be strings")
+            out[key] = _json_value(v, f"{prefix}.{key}", depth + 1)
+        return out
+    raise ValueError(f"{prefix} must be JSON data")
+
+
+def _run_fields(row: dict[str, Any], prefix: str) -> dict[str, Any]:
+    """Optional engine-run fields of a tasks row (job, stage, pane, receipt)."""
+    out: dict[str, Any] = {}
+    for key in _RUN_STRING_KEYS:
+        value = _optional_string(row, key, prefix)
+        if value is not None:
+            out[key] = value
+    if row.get("receipt") is not None:
+        if not isinstance(row["receipt"], dict):
+            raise ValueError(f"{prefix}.receipt must be a mapping")
+        out["receipt"] = _json_value(row["receipt"], f"{prefix}.receipt")
+    return out
+
+
+def _question_fields(row: dict[str, Any], prefix: str) -> dict[str, Any]:
+    """Optional question fields of a waiting_on_ove item (ids, operator answer)."""
+    out: dict[str, Any] = {}
+    ids = row.get("question_ids")
+    if ids is not None:
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise ValueError(f"{prefix}.question_ids must be a list of strings")
+        out["question_ids"] = list(ids)
+    answer = row.get("answer")
+    if answer is not None:
+        if not isinstance(answer, (str, dict)):
+            raise ValueError(f"{prefix}.answer must be a string or a mapping")
+        out["answer"] = _json_value(answer, f"{prefix}.answer")
+    return out
+
+
 _WIRING_KEYS = ("phase", "branch", "head_sha", "stage", "repo", "worktree")
 
 
@@ -222,6 +277,7 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
                 wiring = _task_wiring(row.get("wiring"), prefix)
                 if wiring is not None:
                     item["wiring"] = wiring
+                item.update(_run_fields(row, prefix))
             elif category == "waiting_on_ove":
                 item["since"] = _optional_string(row, "since", prefix)
                 item["blocks"] = _string(row, "blocks", prefix)
@@ -229,6 +285,7 @@ def _validated(data: dict[str, Any]) -> dict[str, Any]:
                 task_id = _optional_string(row, "task_id", prefix)
                 if task_id is not None:
                     item["task_id"] = task_id
+                item.update(_question_fields(row, prefix))
             else:
                 item["finished_at"] = _string(row, "finished_at", prefix)
                 result = _string(row, "result", prefix)

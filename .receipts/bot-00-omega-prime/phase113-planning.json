@@ -1,0 +1,96 @@
+{
+  "task_id": "phase113-planning",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T21:05:00Z",
+  "completed_at": "2026-10-21T22:10:00Z",
+  "scope": "Planning only (task 00030 node n4, sbx-4): register Phase 113 'Sandbox runs visible in Herdr and tasks.json' in .planning/ROADMAP.md, write 113-CONTEXT.md and three file-disjoint execution plans 113-01/113-02/113-03 (dashboard herdr_launch + run_rows; engine tracker/question wiring + task-context threading; product callers + fake-visible tests). No product code, no omega_prime/ or omp-sandbox/ source changes, no push/PR/remote.",
+  "plan": {
+    "note": "Fallback lightweight plan (no XML uplift root in this dispatch; no PR per task rules — recorded here instead of a PR body).",
+    "nodes": [
+      {"id": "n1", "kind": "understand", "steps": ["Read uplift2.xml node n4 + VISIBILITY/AC4-AC5, got.json n4, AUDIT.md C8-C10, README-REFS.md", "Read the sbx-3 backend (sandbox_omp.py run_backend/_tool/_wait_stage_done/AndaClient), omp_driver.run task-context wiring, attach entrypoints, delegate.py engine-first branch, ultrathink_turn.execute_ultrathink", "Read dashboard status_file.py (locked_tasks/_write_locked) and blocks.py (raise_block/clear_block, phase-111 single writer); confirm herdr_launch.py does not exist (rg herdr: zero product hits)", "Read ROADMAP v21 tail + 112-CONTEXT.md + 112-02-PLAN.md for house formats"]},
+      {"id": "n2", "kind": "context", "steps": ["Add Phase 113 section (goal, W113-01..W113-05, success criteria, unchecked box) to .planning/ROADMAP.md; widen v21 heading to Phases 110-113", "Write .planning/phases/113-sbx4-visible-runs/113-CONTEXT.md: goal, locked requirements, acceptance, verified source map with file:line refs, environment facts, locked decisions (split/waves/answer convention/pane-id parse/herdr_pane shape/task-context carriers), pitfalls, out-of-scope, tracker (ids kept out per repo rule)"]},
+      {"id": "n3", "kind": "plan", "steps": ["Spawn gsd-planner subagent with the full brief; it authored 113-01 (dashboard/**, wave 1), 113-02 (engine/**, wave 2), 113-03 (agent/delegate.py + routines/ultrathink_turn.py + tests/**, wave 3)", "Planner declared cross-plan interfaces (open_pane, run_rows.start/touch/finish, sandbox_omp question helpers, run_backend/attach keyword threading) and ten documented assumption decisions", "Parent spot-checked frontmatter, file-disjointness, task counts, citation grounding (test_engine.py:154-183 _env PATH/TMUX verified directly)"]},
+      {"id": "n4", "kind": "critique", "steps": ["Spawn gsd-plan-checker; verdict FAIL with one blocker: 113-02 gated the finally's run_rows.finish on 'tracked' (params set), which would upsert failed+receipt onto test-seeded rows before run()'s raise_block flips them, breaking test_tier_unavailable's exact-row assertion", "Fix: row_started flag (set only where run_rows.start runs after the up reply; not the existing 'started' variable) is the sole gate for touch/finish/question-raise; tracked-but-pre-stage failures perform zero tracker writes", "Re-review verdict PASS_WITH_NOTES; the three notes (interrupt-test parenthetical, stale done-prose, T2/T3 _wait_stage_done signature mismatch) fixed by the parent (trio+stage quartet aligned, informational citations corrected)"]},
+      {"id": "n5", "kind": "synthesize", "steps": ["Run docs/public-repo smoke (31 passed, exit 0) proving the planning edit broke nothing", "Write this receipt", "Commit '00014 - plan phase 113 visible sandbox runs' (planning files + receipt, trailers Refs: 00030 / Node: n4) and leave git status --porcelain clean"]}
+    ]
+  },
+  "commands": [
+    {
+      "cmd": "git status --porcelain=v1 -b && git log --oneline -6",
+      "exit_code": 0,
+      "duration_s": 0.2,
+      "output_tail": "branch feat/sbx-4-routines-visible; HEAD 6c88fe2 '00013 - phase 112 summary, roadmap tick, execution receipt'; working tree clean",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "grep -n \"Phase 11[0-3]|## v2|Milestone\" .planning/ROADMAP.md | tail -30 && wc -l .planning/ROADMAP.md",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": "v21 Sandbox wiring (Phases 110-112) section ends at line 188 with the Phase 112 tick — the Phase 113 insertion point",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "grep -rn \"herdr\" omega_prime/ omp-sandbox/ (tool grep, product trees only)",
+      "exit_code": 0,
+      "duration_s": 0.1,
+      "output_tail": "single hit: test_dashboard_blocks.py docstring 'no gh/herdr/podman/openshell' — omega_prime/dashboard/herdr_launch.py does NOT exist; W113-01 creates it",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "sed -n '154,183p' omega_prime/tests/test_engine.py",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": "_env puts the tmp bin dir FIRST on PATH and sets OMEGA_PRIME_ENGINE_TMUX=\"0\" — verifies the plans' fake-herdr shadowing and tmux-opt-in citations",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "cat omega_prime/ownership.yaml (head) ; ls .receipts/bot-00-omega-prime/ ; git ls-files .receipts | grep phase",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": "pattern ** owned by bot-00-omega-prime (all touched paths owned); phaseNN-planning.json receipts are tracked and committed (precedent phase112-planning.json)",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py",
+      "exit_code": 0,
+      "duration_s": 0.8,
+      "output_tail": "31 passed — doc-link/anchor/command scans and public-repo checks green on the planning tree",
+      "phase": "verification"
+    },
+    {
+      "cmd": "git status --porcelain (after writing all planning artifacts)",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": " M .planning/ROADMAP.md ; ?? .planning/phases/113-sbx4-visible-runs/ — exactly the intended planning diff, no product files",
+      "phase": "evidence"
+    }
+  ],
+  "claims": [
+    { "claim": "Planning ran on feat/sbx-4-routines-visible @ 6c88fe2 with a clean tree, and only .planning/ROADMAP.md, the four new files under .planning/phases/113-sbx4-visible-runs/, and this receipt were written; no product code under omega_prime/ or omp-sandbox/", "evidence_command_index": [0, 6] },
+    { "claim": "omega_prime/dashboard/herdr_launch.py does not exist in the tree, so W113-01's CLI contract (herdr workspace create --cwd DIR --label LABEL --no-focus, then herdr pane run PANE CMD; tmux fallback) is net-new, exactly as the task brief's 'if present, else' branch requires", "evidence_command_index": 2 },
+    { "claim": "The engine-side anchors the plans cite were read at HEAD: run_backend :459-640 with no task params, _run :435-450 dropping run()'s tasks_path/task_id, _wait_stage_done :659-698 as the event loop the question round-trip rides, blocks.raise_block/clear_block :38-92 as the single item writer, status_file locked_tasks+_write_locked :46-95, delegate.py's engine-first branch :51-63, execute_ultrathink :130-153, and the fake wrapper's requestId-less question behavior :183-189", "evidence_command_index": [0, 1] },
+    { "claim": "The three plans are file-disjoint (113-01: omega_prime/dashboard/**; 113-02: omega_prime/engine/**; 113-03: omega_prime/agent/delegate.py + omega_prime/routines/ultrathink_turn.py + omega_prime/tests/**), waves 1->2->3 with matching depends_on, cover W113-01..W113-05 with no orphan requirement, and the one flipped test (test_question_surfaces_as_event_only) is replaced by strictly stronger n4 assertions as a documented cutover", "evidence_command_index": [1, 4] },
+    { "claim": "gsd-plan-checker iteration 1 found a real blocker (finish gated on 'tracked' corrupts test-seeded rows on pre-stage failures); the row_started fix was applied to 113-02 truths/T2/assumptions, iteration 2 returned PASS_WITH_NOTES, and all three notes (interrupt-test parenthetical, stale done-prose, T2/T3 signature mismatch) were fixed — verdicts are subagent-reported, the parent re-verified the blocker's code anchors (tier test :462-508 exact-row assertion, status_file :22-24 passthrough) directly", "evidence_command_index": 4 },
+    { "claim": "Docs/public-repo checks are green on the planning tree (31 passed, exit 0); no generator input or root *.md page was modified by this stage", "evidence_command_index": 5 }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Execution-stage acceptance (113-01/02/03 SUMMARY criteria, node n4 acceptance, audit C8/C9/C10 flips) is not verified here — this stage is planning only and wrote no code",
+    "gsd-planner authorship and gsd-plan-checker verdicts (FAIL then PASS_WITH_NOTES) are subagent-reported; the parent verified file-disjointness, frontmatter, interface agreement, the blocker's code anchors, and every citation it spot-checked, but did not re-run the checker as a shell command after the note fixes (wording-level changes implementing the checker's own instruction)",
+    "The pane-id parse contract (last whitespace token of the last non-empty stdout line of 'herdr workspace create') is pinned by fiat — herdr is absent in every testable environment; only the fake runner follows it today, confirmation deferred to sbx-5 (node n7 live e2e)",
+    "Live interoperability with the real herdr CLI, the box dashboard, and the real omp-sandbox-anda binary is untestable from this sandbox; the plans pin the documented contracts (README-REFS.md store shape, client.rs/server.ts wrapper protocol) instead",
+    "omega_prime tooling checks (catalog/plugin/assemble-prompts) were not run here — mcp/apscheduler absent in this sandbox per phase-112's record, and no file in their scope was changed by this stage"
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/phases/113-sbx4-visible-runs/113-CONTEXT.md",
+    ".planning/phases/113-sbx4-visible-runs/113-01-PLAN.md",
+    ".planning/phases/113-sbx4-visible-runs/113-02-PLAN.md",
+    ".planning/phases/113-sbx4-visible-runs/113-03-PLAN.md",
+    ".receipts/bot-00-omega-prime/phase113-planning.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "git revert of the single planning commit restores ROADMAP.md and removes the phase 113 directory and receipt; no product code to roll back",
+  "approvals": [],
+  "approved_by": null
+}

@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 import json
+import os
+import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,6 +23,7 @@ from omega_prime.engine.attach import (
     ultrathink_engine,
 )
 from omega_prime.engine.omp_driver import probe
+from omega_prime.routines.ultrathink_turn import execute_ultrathink
 from omega_prime.tests.test_engine import _env, _install_fake
 
 
@@ -194,6 +198,94 @@ def test_ultrathink_stage_from_argument_plan_or_env(tmp_path: Path) -> None:
         {**env, "OMEGA_PRIME_ENGINE_STAGE": "execute"},
     )
     assert body["stage"] == "execute"
+
+
+def test_delegate_task_threads_parent_task_context(tmp_path: Path, monkeypatch) -> None:
+    """The parent's task context rides the engine-first delegate call.
+
+    A parent without the attributes captures all-None: byte-identical
+    to the phase-112 call shape.
+    """
+    captured: dict[str, Any] = {}
+
+    def _capture(goal: str, **kwargs: Any) -> None:
+        captured["goal"] = goal
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr("omega_prime.engine.attach.delegate_via_engine", _capture)
+    store = tmp_path / "tasks.json"
+    parent = types.SimpleNamespace(
+        delegate_depth=0,
+        child_model=None,
+        engine_stage="plan",
+        engine_plan="zai",
+        engine_cwd=str(tmp_path),
+        engine_tasks_path=str(store),
+        engine_task_id="gb:1",
+        interrupt=None,
+        tools={},
+    )
+    delegate_task(parent, "build the thing")
+    assert captured["goal"] == "build the thing"
+    assert captured["stage"] == "execute"  # staged parent → children execute
+    assert captured["cwd"] == str(tmp_path)
+    assert captured["plan"] == "zai"
+    assert captured["tasks_path"] == str(store)
+    assert captured["task_id"] == "gb:1"
+
+    captured.clear()
+    bare = types.SimpleNamespace(
+        delegate_depth=0,
+        child_model=None,
+        interrupt=None,
+        tools={},
+    )
+    delegate_task(bare, "build the thing")
+    assert captured["stage"] is None
+    assert captured["cwd"] is None
+    assert captured["plan"] is None
+    assert captured["tasks_path"] is None
+    assert captured["task_id"] is None
+
+
+def test_execute_ultrathink_reads_task_context_from_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """OMEGA_PRIME_TASKS_PATH/OMEGA_PRIME_TASK_ID thread into the engine.
+
+    Missing (or empty) values thread None; found-plan resolution is
+    irrelevant to the threading.
+    """
+    captured: dict[str, Any] = {}
+
+    def _capture(plan: Any, env: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"used": False, "reason": "off"}
+
+    monkeypatch.setattr("omega_prime.engine.attach.ultrathink_engine", _capture)
+    store = tmp_path / "tasks.json"
+    body = execute_ultrathink(
+        {
+            "HOME": str(tmp_path),
+            "PATH": os.environ.get("PATH", ""),
+            "OMEGA_PRIME_TASKS_PATH": str(store),
+            "OMEGA_PRIME_TASK_ID": "gb:2",
+        }
+    )
+    assert body["engine"] == {"used": False, "reason": "off"}
+    assert captured["tasks_path"] == str(store)
+    assert captured["task_id"] == "gb:2"
+
+    captured.clear()
+    execute_ultrathink({"HOME": str(tmp_path), "PATH": os.environ.get("PATH", "")})
+    assert captured["tasks_path"] is None
+    assert captured["task_id"] is None
+
+    captured.clear()
+    execute_ultrathink({})
+    assert captured["tasks_path"] is None
+    assert captured["task_id"] is None
 
 
 def test_zai_has_its_own_plan_and_build_pair() -> None:
@@ -660,3 +752,37 @@ def test_staged_entry_points_forward_the_requested_plan(tmp_path: Path) -> None:
         {"found": True, "spec_path": str(spec)}, env, stage="execute"
     )
     assert (body["plan"], body["model"]) == ("chatgpt", "gpt-6-luna")
+
+
+def test_the_desk_parent_hands_its_task_context_to_engine_delegates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The live delegate_task parent (not an injected stub) carries the
+    task store and id from the server's env into delegate_via_engine."""
+    import omega_prime.engine.attach as attach
+    from omega_prime.mcp_server import _DeskParent
+    from omega_prime.tools.delegate import register_delegate_tools
+    from omega_prime.tools.registry import ToolRegistry
+
+    seen: dict[str, Any] = {}
+
+    def capture(goal: str, **kwargs: Any) -> str:
+        seen.update(kwargs)
+        return json.dumps({"summary": "routed"})
+
+    monkeypatch.setattr(attach, "delegate_via_engine", capture)
+    store = tmp_path / "tasks.json"
+    registry = ToolRegistry()
+    parent = _DeskParent(
+        registry,
+        None,
+        {"OMEGA_PRIME_TASKS_PATH": str(store), "OMEGA_PRIME_TASK_ID": "gb:desk"},
+    )
+    assert (parent.engine_tasks_path, parent.engine_task_id) == (str(store), "gb:desk")
+    register_delegate_tools(registry, parent)
+    raw = json.loads(registry.dispatch("delegate_task", {"goal": "build it"}))
+    assert raw == {"summary": "routed"}
+    assert (seen["tasks_path"], seen["task_id"]) == (str(store), "gb:desk")
+    # Without task context the parent passes none.
+    bare = _DeskParent(ToolRegistry(), None, {})
+    assert (bare.engine_tasks_path, bare.engine_task_id) == (None, None)

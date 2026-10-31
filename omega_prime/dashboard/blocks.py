@@ -51,8 +51,13 @@ def raise_block(
     ask: str,
     blocks: str,
     task_id: str,
+    question_ids: list[str] | None = None,
 ) -> None:
     """Upsert one waiting_on_ove item by stable id and block the owning task.
+
+    ``question_ids``, when given, is stored on the item as the additive
+    ``question_ids`` field: the ids an answer's ``per_question`` map keys
+    its separate answers by.
 
     The first raise allocates ``seq`` once (max existing seq, at least 0,
     plus 1) and pins ``since`` (UTC ISO-8601); any later call with the same
@@ -79,6 +84,8 @@ def raise_block(
         item["ask"] = redact_text(ask)
         item["blocks"] = redact_text(blocks)
         item["task_id"] = task_id
+        if question_ids:
+            item["question_ids"] = [redact_text(str(qid)) for qid in question_ids]
         for row in data.get("tasks", []):
             # A finished task stays finished: a late or repeated raise must
             # not reopen a done/failed row (clear_block keeps them too).
