@@ -14,6 +14,8 @@ class GateInput:
     draft: bool
     auto_deploy: bool
     repo_allowed: bool
+    # True while required checks are queued or running (not yet failed).
+    ci_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +43,7 @@ def evaluate_merge_gate(inp: GateInput) -> GateResult:
     if not inp.greptile_on_head:
         reasons.append("greptile_not_on_head")
     if not inp.ci_green:
-        reasons.append("ci_not_green")
+        reasons.append("ci_pending" if inp.ci_pending else "ci_not_green")
     if not inp.mergeable:
         reasons.append("not_mergeable")
     return GateResult(ok=not reasons, reasons=tuple(reasons))

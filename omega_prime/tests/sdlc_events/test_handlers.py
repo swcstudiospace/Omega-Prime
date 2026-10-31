@@ -115,6 +115,56 @@ def test_missing_review_waits_as_working() -> None:
     assert store.rows["gb:pr-Omega-Prime-74"]["state"] == "working"
 
 
+def test_low_score_on_an_older_head_waits_as_working() -> None:
+    # A fix was pushed; the 3/5 belongs to the previous head. Starting more
+    # fix work before the new head is reviewed would be wrong.
+    store = MemoryTaskStore()
+    on_gate_signal(
+        _ev(EventKind.PR_UPDATED),
+        store=store,
+        idem=IdempotencyStore(),
+        greptile_score=3,
+        greptile_on_head=False,
+        ci_green=True,
+        mergeable=True,
+    )
+    row = store.rows["gb:pr-Omega-Prime-74"]
+    assert row["state"] == "working"
+    assert "greptile_not_on_head" in row["note"]
+
+
+def test_running_ci_waits_as_working_and_keeps_the_gate_shut() -> None:
+    store = MemoryTaskStore()
+    r = on_gate_signal(
+        _ev(EventKind.PR_UPDATED),
+        store=store,
+        idem=IdempotencyStore(),
+        greptile_score=5,
+        greptile_on_head=True,
+        ci_green=False,
+        ci_pending=True,
+        mergeable=True,
+    )
+    assert r.action == "gate_blocked"
+    row = store.rows["gb:pr-Omega-Prime-74"]
+    assert row["state"] == "working"
+    assert "ci_pending" in row["note"]
+
+
+def test_failed_ci_is_blocked() -> None:
+    store = MemoryTaskStore()
+    on_gate_signal(
+        _ev(EventKind.CHECK_COMPLETED),
+        store=store,
+        idem=IdempotencyStore(),
+        greptile_score=5,
+        greptile_on_head=True,
+        ci_green=False,
+        mergeable=True,
+    )
+    assert store.rows["gb:pr-Omega-Prime-74"]["state"] == "blocked"
+
+
 def test_replay_runs_the_gate_for_a_review(tmp_path, capsys) -> None:
     import json
 
