@@ -87,9 +87,12 @@ def _wholesale_ignored(lint: dict[str, Any]) -> list[tuple[str, str]]:
     broader prefix ("C", or "ALL") is caught as well as the exact family.
     Narrower codes such as "C401" stay allowed: they switch off one rule.
     """
-    codes = set(lint.get("ignore", []))
-    for per_file in lint.get("per-file-ignores", {}).values():
-        codes.update(per_file)
+    codes: set[str] = set()
+    for key in ("ignore", "extend-ignore"):
+        codes.update(lint.get(key, []))
+    for key in ("per-file-ignores", "extend-per-file-ignores"):
+        for per_file in lint.get(key, {}).values():
+            codes.update(per_file)
     return sorted(
         (code, family)
         for code in codes
@@ -99,7 +102,9 @@ def _wholesale_ignored(lint: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def test_ruff_does_not_ignore_a_ratcheted_family_wholesale() -> None:
-    hits = _wholesale_ignored(_pyproject()["tool"]["ruff"]["lint"])
+    ruff = _pyproject()["tool"]["ruff"]
+    # Ruff still honours the legacy top-level keys, so check both tables.
+    hits = _wholesale_ignored(ruff.get("lint", {})) + _wholesale_ignored(ruff)
     assert not hits, hits
 
 
@@ -109,6 +114,9 @@ def test_wholesale_guard_catches_broader_prefixes() -> None:
     assert _wholesale_ignored({"ignore": ["ALL"]})
     assert _wholesale_ignored({"ignore": ["PG"]}) == [("PG", "PGH")]
     assert not _wholesale_ignored({"ignore": ["E501", "C401", "B008"]})
+    assert ("C4", "C4") in _wholesale_ignored({"extend-ignore": ["C4"]})
+    extended = {"extend-per-file-ignores": {"tests/*": ["B"]}}
+    assert ("B", "B") in _wholesale_ignored(extended)
 
 
 def _documented_families() -> set[str]:
