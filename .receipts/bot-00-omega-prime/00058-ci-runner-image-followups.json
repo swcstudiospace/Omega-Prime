@@ -1,0 +1,82 @@
+{
+ "task_id": "00058-ci-runner-image-followups",
+ "bot": "bot-00-omega-prime",
+ "started_at": "2026-10-24T06:30:00+11:00",
+ "completed_at": "2026-10-24T07:15:42+11:00",
+ "base_commit": "31786ce",
+ "pr": "https://github.com/swcstudiospace/Omega-Prime/pull/95",
+ "addresses": [
+  "https://github.com/swcstudiospace/Omega-Prime/pull/92#discussion_r4363292300",
+  "https://github.com/swcstudiospace/Omega-Prime/pull/92#discussion_r4363292313",
+  "https://github.com/swcstudiospace/Omega-Prime/pull/92#discussion_r4363292324",
+  "https://github.com/swcstudiospace/Omega-Prime/pull/92#discussion_r4363292335"
+ ],
+ "commands": [
+  {
+   "cmd": "podman build -f deploy/ci-runner-desktop/Dockerfile -t localhost/omega-ci-desktop:00058 .  # rootless, log /tmp/58/build.log",
+   "exit_code": 0,
+   "output_tail": "ok  adb  Version 37.0.1-15733141\nok  android  platforms;android-36 r2 build-tools;36.0.0 platform-tools;37.0.1\nok  illink-tasks  10.0.13 (offline, library-packs)\n== android-build\nok  net10.0-android build  com.companyname.OmegaCiCheck-Signed.apk (6524789 bytes, offline, uid 1500)\n== postgres\nok  postgres query (pg-a, port 42971)  omega-ci-pg-ok\nok  postgres query (pg-b, port 52437)  omega-ci-pg-ok\n== greptime\nok  greptime query (gt-a, http://127.0.0.1:39883) ...\nok  greptime query (gt-b, http://127.0.0.1:60859) ...\n...\ntoolchain-check: all tools present and usable as uid 1500\nBUILD_EXIT=0"
+  },
+  {
+   "cmd": "podman image inspect localhost/omega-ci-desktop:00058 --format '{{.Size}}'",
+   "exit_code": 0,
+   "output_tail": "9625765772"
+  },
+  {
+   "cmd": "podman run --rm localhost/omega-ci-desktop:00058: sha256sum /usr/local/bin/omega-ci-db /opt/omega-ci/toolchain-check.sh vs repo",
+   "exit_code": 0,
+   "output_tail": "f09ad319... omega-ci-db (match); 0d2a62b1... toolchain-check.sh (match)"
+  },
+  {
+   "cmd": "podman run --rm --user 1500:1500 localhost/omega-ci-desktop:00058 /t.sh  # --only postgres,greptime pass, then with failing psql stub on PATH",
+   "exit_code": 0,
+   "output_tail": "rc(pass)=0\ntoolchain-check: sections [postgres,greptime] present and usable as uid 1500\nrc(fail)=1\ntoolchain-check: FAIL postgres query (pg-a, port 41173): ... stub psql: simulated failure\nno db processes left after failure\nHOME contents: []"
+  },
+  {
+   "cmd": ".venv/bin/python -m pytest -q -p no:cacheprovider omega_prime/tests/test_store_lock.py omega_prime/tests/test_env_inventory.py omega_prime/tests/ci_runners",
+   "exit_code": 0,
+   "output_tail": "550 passed, 2 skipped in 32.36s"
+  },
+  {
+   "cmd": "uvx ruff@0.17.1 check + format --check omega_prime/tests/ci_runners; uvx --from shellcheck-py shellcheck -s sh omega-ci-db toolchain-check.sh",
+   "exit_code": 0,
+   "output_tail": "All checks passed! / 31 files already formatted / shellcheck clean"
+  },
+  {
+   "cmd": "full suite (--ignore eventstream: hypothesis not installed) on branch vs origin/main 31786ce worktree",
+   "exit_code": 1,
+   "output_tail": "branch: 18 failed, 6233 passed, 23 skipped; failing test ids identical to main (prime_kernel cells/boundary/host/skills, engine, grokbot_oneclick)"
+  }
+ ],
+ "claims": [
+  "Android platform r2, build-tools 36.0.0 and platform-tools 37.0.1 are fixed sha256-pinned archives; the build and the self-check assert their revisions",
+  "toolchain-check stops every PostgreSQL/GreptimeDB it started on any exit, including SIGTERM, before deleting scratch",
+  "omega-ci-db gives each job its own free ports and data dir; docs examples use it instead of 54321/4000",
+  "The image build runs an offline Debug net10.0-android build as uid 1500 and produced a signed apk",
+  "Image 9.63 GB uncompressed (00056: 9.62 GB)"
+ ],
+ "unverified": [
+  "Behaviour on Railway (not deployed)",
+  "Concurrent jobs on a real shared Desktop (proved with two instances per engine side by side in one container)"
+ ],
+ "files_changed": [
+  "CHANGELOG.md",
+  "deploy/ci-runner-desktop/Dockerfile",
+  "deploy/ci-runner-desktop/README.md",
+  "deploy/ci-runner-desktop/omega-ci-db",
+  "deploy/ci-runner-desktop/toolchain-check.sh",
+  "docs/ci-runners-repo-setup.md",
+  "docs/ci-runners.md",
+  "omega_prime/tests/ci_runners/test_desktop_db_helper.py",
+  "omega_prime/tests/ci_runners/test_desktop_toolchain.py",
+  ".receipts/bot-00-omega-prime/00058-ci-runner-image-followups.json"
+ ],
+ "contract_changes": [
+  "New /usr/local/bin/omega-ci-db on the job PATH; writes PGHOST/PGPORT/PGUSER/PGDATABASE/DATABASE_URL and GREPTIME_* to $GITHUB_ENV",
+  "toolchain-check.sh gains --only <sections>",
+  "/opt/omega-ci/toolchain-versions gains ANDROID_PLATFORM_REV, ANDROID_PLATFORM_TOOLS, ILLINK_TASKS"
+ ],
+ "rollback_plan": "Revert PR #95; the image goes back to the #92 (00056) image. Jobs that call omega-ci-db would need the fixed-port example back.",
+ "approvals": [],
+ "approved_by": "Ove Govender (rule: all CI on omega-ci pool); task brief 00058 from parent agent"
+}

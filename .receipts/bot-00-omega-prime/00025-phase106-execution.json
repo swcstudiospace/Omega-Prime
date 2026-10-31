@@ -1,0 +1,144 @@
+{
+  "task_id": "00025-phase106-execution",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T08:50:00Z",
+  "completed_at": "2026-10-21T10:23:43Z",
+  "commands": [
+    {
+      "cmd": "cd omega_prime/dashboard/frontend && npm ci --registry=https://registry.npmjs.org && npm test -- --run && npm run build",
+      "exit_code": 0,
+      "output_tail": "npm ci added 128 packages; Vitest: 17 files passed, 1 skipped; 35 tests passed, 1 skipped; tsc -b and Vite build succeeded with index-D8yHkJLM.js and index-Bb9yS-L5.css."
+    },
+    {
+      "cmd": "CC_CHECK_BUILD=1 npm test -- --run src/test/build-assets.test.ts (frontend cwd)",
+      "exit_code": 0,
+      "output_tail": "1 test passed."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_app_fixes.py omega_prime/tests/test_dashboard_command_center_static.py",
+      "exit_code": 0,
+      "output_tail": "13 passed, 1 skipped."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard*.py",
+      "exit_code": 0,
+      "output_tail": "158 passed, 1 skipped; one Starlette/httpx deprecation warning."
+    },
+    {
+      "cmd": "python3 -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q",
+      "exit_code": 0,
+      "output_tail": "31 passed."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_model_buckets.py omega_prime/tests/test_dashboard_model.py omega_prime/tests/test_dashboard_process_collectors.py",
+      "exit_code": 0,
+      "output_tail": "19 passed."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_terminal.py omega_prime/tests/test_dashboard_terminal_api.py",
+      "exit_code": 0,
+      "output_tail": "13 passed."
+    },
+    {
+      "cmd": "npm test -- --run src/components/TerminalPanel.test.tsx src/components/TaskDetail.routes.test.tsx (frontend cwd)",
+      "exit_code": 0,
+      "output_tail": "2 files and 7 tests passed."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_dashboard_github_greptile_polish.py omega_prime/tests/test_dashboard_github_command_center.py omega_prime/tests/test_dashboard_github_cache.py omega_prime/tests/test_dashboard_github_merges_polish.py",
+      "exit_code": 0,
+      "output_tail": "15 passed."
+    },
+    {
+      "cmd": "npm test -- --run src/views/CiCd.test.tsx src/views/CiCd.dedup.test.tsx src/views/CiCd.greptile.test.tsx (frontend cwd)",
+      "exit_code": 0,
+      "output_tail": "3 files and 5 tests passed."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/ -k dashboard",
+      "exit_code": 2,
+      "output_tail": "Collection failed with missing apscheduler and mcp modules; no deselection or install workaround was used."
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/",
+      "exit_code": 2,
+      "output_tail": "49 collection errors, primarily missing apscheduler and mcp modules."
+    },
+    {
+      "cmd": "python3 -m ruff check omega_prime/dashboard omega_prime/tests/test_dashboard*.py",
+      "exit_code": 1,
+      "output_tail": "/usr/bin/python3: No module named ruff."
+    },
+    {
+      "cmd": "python3 -m mypy omega_prime/dashboard",
+      "exit_code": 1,
+      "output_tail": "No module named mypy."
+    },
+    {
+      "cmd": "polyglot-check --changed",
+      "exit_code": 127,
+      "output_tail": "polyglot-check command not found."
+    },
+    {
+      "cmd": "python3 -c \"import omega_prime.grokbot.secret_guard as s; s.assert_no_secrets(open('.rece'+'ipts/'+'bot-00-'+'omega-'+'prime/'+'00025-'+'phase106-'+'execution.json').read()); print('receipt scan passed')\"",
+      "exit_code": 0,
+      "output_tail": "receipt scan passed."
+    }
+  ],
+  "claims": [
+    { "claim": "The final locked frontend install, full Vitest suite and production build passed.", "evidence_command_index": 0 },
+    { "claim": "The final static bundle passed the build-asset check.", "evidence_command_index": 1 },
+    { "claim": "Final static asset serving/security tests passed.", "evidence_command_index": 2 },
+    { "claim": "The focused dashboard test family passed.", "evidence_command_index": 3 },
+    { "claim": "Dashboard documentation and public-repository checks passed.", "evidence_command_index": 4 },
+    { "claim": "Model bucket and standalone OMP compatibility tests passed.", "evidence_command_index": 5 },
+    { "claim": "Terminal API fake-runner tests passed.", "evidence_command_index": 6 },
+    { "claim": "Terminal panel and task detail route tests passed.", "evidence_command_index": 7 },
+    { "claim": "Greptile backend regressions passed.", "evidence_command_index": 8 },
+    { "claim": "CI/CD branch-deduplication and Greptile UI tests passed.", "evidence_command_index": 9 },
+    { "claim": "The required broad dashboard selector is blocked at collection by unavailable Python dependencies.", "evidence_command_index": 10, "expects_failure": true },
+    { "claim": "The full Python suite is blocked at collection by unavailable Python dependencies.", "evidence_command_index": 11, "expects_failure": true },
+    { "claim": "Ruff could not run because its Python module is unavailable.", "evidence_command_index": 12, "expects_failure": true },
+    { "claim": "Mypy could not run because its Python module is unavailable.", "evidence_command_index": 13, "expects_failure": true },
+    { "claim": "polyglot-check could not run because its executable is unavailable.", "evidence_command_index": 14, "expects_failure": true },
+    { "claim": "Receipt content passed the repository secret guard.", "evidence_command_index": 15 }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Baseline transplant/red-on-base and polish-green paired evidence was not run.",
+    "Live GitHub parity, live Herdr reads, real terminal behavior, and host 7441 verification were not run; only fake transports/runners were used.",
+    "Five requested host screenshots, responsive visual review, signed sandbox evidence, and AC9 remain outer-driver work.",
+    "Ruff/mypy baseline comparison is unverified because those tools are absent; the supplied baseline files were not reproduced here.",
+    "The required broad dashboard selector and full Python suite remain blocked by missing mcp and apscheduler; no Python packages were installed."
+  ],
+  "files_changed": [
+    "omega_prime/dashboard/collectors/github.py",
+    "omega_prime/dashboard/github_data.py",
+    "omega_prime/dashboard/collectors/herdr.py",
+    "omega_prime/dashboard/model.py",
+    "omega_prime/dashboard/task_ids.py",
+    "omega_prime/dashboard/status_file.py",
+    "omega_prime/dashboard/terminal.py",
+    "omega_prime/dashboard/app.py",
+    "omega_prime/dashboard/frontend/src/App.tsx",
+    "omega_prime/dashboard/frontend/src/components/TaskDetail.tsx",
+    "omega_prime/dashboard/frontend/src/components/TerminalPanel.tsx",
+    "omega_prime/dashboard/frontend/src/views/CiCd.tsx",
+    "omega_prime/dashboard/frontend/src/views/Tasks.tsx",
+    "omega_prime/dashboard/frontend/src/views/Overview.tsx",
+    "omega_prime/dashboard/static/cc",
+    "omega_prime/tests",
+    "docs/dashboard.md",
+    "CHANGELOG.md",
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/phases/106-command-center-polish"
+  ],
+  "contract_changes": [
+    "Added the idle_sessions snapshot bucket while retaining the existing active/waiting/finished contracts.",
+    "Added validated optional task-to-Herdr-pane mapping and a bounded, redacted, read-only terminal SSE route.",
+    "Added hash-routed task buckets/detail, backend-first branch card identity, and merged-PR Greptile provenance."
+  ],
+  "rollback_plan": null,
+  "approvals": []
+}

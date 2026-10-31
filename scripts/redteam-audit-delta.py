@@ -58,9 +58,11 @@ SEVERITY_RANK: dict[str, int] = {
 def _finding_key(record: dict, fallback: object) -> str:
     """Derive the stable finding key for one audit/lock advisory record.
 
-    Duplicated from ``scripts/redteam-audit-triage.py::triage`` (kept
-    decoupled so either file runs standalone via ``python3``): a
-    ``vulnerabilities``-shaped record scans ``via`` for a GHSA/CVE/URL
+    This is the coarse, unscoped key (the triage script's former key,
+    kept decoupled so either file runs standalone via ``python3``); it
+    only diffs two audits and never gates on ``TRIAGED``, whose keys are
+    scoped ``<advisory>::<path>`` by ``scripts/redteam-audit-triage.py``.
+    A ``vulnerabilities``-shaped record scans ``via`` for a GHSA/CVE/URL
     entry falling back to the map name; a legacy ``advisories``-shaped
     (or lockfile-embedded) record uses ``url or cves or module_name or
     id``.

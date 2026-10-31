@@ -1,0 +1,7 @@
+node_modules/
+target/
+.state/
+scratch/
+*.log
+sandbox/image/sandbox-agent
+.claude/

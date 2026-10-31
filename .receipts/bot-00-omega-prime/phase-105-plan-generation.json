@@ -1,0 +1,140 @@
+{
+  "task_id": "phase-105-plan-generation",
+  "bot": "bot-00-omega-prime",
+  "status": "blocked",
+  "started_at": "2026-10-22T19:49:23.565732+00:00",
+  "completed_at": "2026-10-22T20:00:51.779296+00:00",
+  "tracking": [
+    "SPE-19588",
+    "SPE-19589"
+  ],
+  "commands": [
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m omega_prime.tooling.catalog --check && /workspace/.venv-00046/bin/python -m omega_prime.tooling.plugin --check && /workspace/.venv-00046/bin/python -m omega_prime.tooling.prompt_format --check && bash omega_prime/scripts/assemble-prompts.sh --check",
+      "exit_code": 1,
+      "duration_s": 7.74,
+      "output_tail": "catalog current; plugin 66 generated files current; prompt_format conforms. Assembly used a different interpreter and failed: ModuleNotFoundError: No module named apscheduler. No product code was changed to suppress this."
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -m pytest omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py -q && /workspace/.venv-00046/bin/python -m omega_prime.tooling.catalog --check && /workspace/.venv-00046/bin/python -m omega_prime.tooling.plugin --check && /workspace/.venv-00046/bin/python -m omega_prime.tooling.prompt_format --check && env VIRTUAL_ENV=/workspace/.venv-00046 bash omega_prime/scripts/assemble-prompts.sh --check",
+      "exit_code": 0,
+      "duration_s": 8.03,
+      "output_tail": "33 passed in 1.06s; catalog current; plugin 66 generated files current; prompt_format conforms; assemble-prompts --check: OMEGA_PRIME up to date. VIRTUAL_ENV selects the requested interpreter."
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -c \"import json,re,xml.etree.ElementTree as ET\nfrom pathlib import Path\nbase=Path('.planning/phases/105-event-stream-core-library'); names=sorted(p.name for p in base.glob('*-PLAN.md'))\nassert '105-04-PLAN.md' in names and len(names)>3, 'four-plan conflict no longer present; reassess scope'\ncontext=(base/'105-CONTEXT.md').read_text();assert '<plan_revision>' in context and '105-04' in context\nerrors={}\nfor name in ['105-01-PLAN.md','105-02-PLAN.md','105-03-PLAN.md']:\n    text=(base/name).read_text()\n    try: ET.fromstring(re.search(r'<tasks>.*?</tasks>',text,re.S).group())\n    except ET.ParseError as e: errors[name]=str(e)\nassert len(errors)==3, 'XML snapshot changed; reassess errors instead of repeating stale claims'\nprint(json.dumps({'scope_conflict_verified':True,'plan_files':names,'xml_errors_at_verification':errors},indent=2))\"",
+      "exit_code": 0,
+      "duration_s": 0.024,
+      "output_tail": "{\n  \"scope_conflict_verified\": true,\n  \"plan_files\": [\n    \"105-01-PLAN.md\",\n    \"105-02-PLAN.md\",\n    \"105-03-PLAN.md\",\n    \"105-04-PLAN.md\"\n  ],\n  \"xml_errors_at_verification\": {\n    \"105-01-PLAN.md\": \"mismatched tag: line 43, column 747\",\n    \"105-02-PLAN.md\": \"mismatched tag: line 80, column 4\",\n    \"105-03-PLAN.md\": \"mismatched tag: line 28, column 2\"\n  }\n}\n"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -c \"families={'pr':6,'review':4,'ci_run':3,'ci_branch':2,'auth':5,'job':5,'sandbox':7,'task':2,'mem':2,'signal':3,'action':4,'deadline':3,'hitl':2}; n=sum(families.values()); assert n==48; print({'finite_types':n,'minimum_original_105_01_paths':n+12+3,'cap':25}); assert n+12+3>25\"",
+      "exit_code": 0,
+      "duration_s": 0.021,
+      "output_tail": "{'finite_types': 48, 'minimum_original_105_01_paths': 63, 'cap': 25}\n"
+    },
+    {
+      "cmd": "/workspace/.venv-00046/bin/python -c \"import hashlib,json,re,xml.etree.ElementTree as ET,yaml\nfrom pathlib import Path\nbase=Path('.planning/phases/105-event-stream-core-library');out=[]\nfor name in ['105-01-PLAN.md','105-02-PLAN.md','105-03-PLAN.md']:\n    text=(base/name).read_text();fm=yaml.safe_load(text.split('---',2)[1]);block=re.search(r'<tasks>.*?</tasks>',text,re.S).group();error=None\n    try: ET.fromstring(block)\n    except ET.ParseError as e: error=str(e)\n    out.append({'file':name,'sha256':hashlib.sha256(text.encode()).hexdigest(),'task_count':len(re.findall(r'<task\\s',block)),'manifest_count':len(fm['files_modified']),'wave':fm['wave'],'depends_on':fm['depends_on'],'xml_error':error})\ncontext=(base/'105-CONTEXT.md').read_text()\nprint(json.dumps({'plans':out,'context_sha256':hashlib.sha256(context.encode()).hexdigest(),'external_revision_present':'<plan_revision>' in context,'external_four_plan_revision':'105-04' in context,'plan_files_present':sorted(p.name for p in base.glob('*-PLAN.md'))},indent=2))\"",
+      "exit_code": 0,
+      "duration_s": 0.053,
+      "output_tail": "{\n  \"plans\": [\n    {\n      \"file\": \"105-01-PLAN.md\",\n      \"sha256\": \"1ee25a4d3aeb21a74b291b31222bd69fc24a7cb76060ac163d06f008a6118448\",\n      \"task_count\": 3,\n      \"manifest_count\": 24,\n      \"wave\": 1,\n      \"depends_on\": [],\n      \"xml_error\": \"mismatched tag: line 43, column 747\"\n    },\n    {\n      \"file\": \"105-02-PLAN.md\",\n      \"sha256\": \"22deeace130bb4d04809d6c315490610de1056ce58cb074526f427286f10c3e5\",\n      \"task_count\": 3,\n      \"manifest_count\": 21,\n      \"wave\": 2,\n      \"depends_on\": [\n        \"105-01\"\n      ],\n      \"xml_error\": \"mismatched tag: line 80, column 4\"\n    },\n    {\n      \"file\": \"105-03-PLAN.md\",\n      \"sha256\": \"0ad1a5f8c0034a98463160232d03bbb7af7a997a4b513c0982b3c6fdf62af4cb\",\n      \"task_count\": 3,\n      \"manifest_count\": 25,\n      \"wave\": 2,\n      \"depends_on\": [\n        \"105-01\"\n      ],\n      \"xml_error\": \"mismatched tag: line 28, column 2\"\n    }\n  ],\n  \"context_sha256\": \"5a968b15a85614325fae17ee2ee60231e20af652684560b8a5360daab2937aa4\",\n  \"external_revision_present\": true,\n  \"external_four_plan_revision\": true,\n  \"plan_files_present\": [\n    \"105-01-PLAN.md\",\n    \"105-02-PLAN.md\",\n    \"105-03-PLAN.md\",\n    \"105-04-PLAN.md\"\n  ]\n}\n"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "The documentation/public-repository tests passed (33 tests), and catalog, plugin, prompt-format and assembly currency checks passed using the required environment.",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "At verification the directory contained four plans, and externally revised CONTEXT explicitly named 105-04, conflicting with the requested exactly-three-plan deliverable.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "Strict task XML parsing reported errors in all three externally revised requested plans at the captured verification point. These were not silently accepted or overwritten.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "The original full-core/per-type-schema 105-01 scope requires at least 63 paths before tests and the envelope schema, exceeding its requested 25-file cap. The concrete catalog expands to 48 types, not 45.",
+      "evidence_command_index": 3
+    }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "The requested three-plan deliverable is not accepted: external concurrent edits replaced all three drafts, added a fourth plan, and changed locked source layout/waves during verification. Exclusive writer and authoritative scope must be established before further edits.",
+    "Original scope cannot satisfy the 25-file cap: 48 per-type schemas plus 12 named core modules plus memory adapter, topology and pyproject already require 63 paths. No waiver was supplied in this conversation.",
+    "The external R-1 revision says 45 types although the DESIGN catalog enumerates 48. Its count-dependent assertions are unresolved; no legitimate catalog members were intentionally omitted by this session.",
+    "Current externally revised task XML is invalid in the captured files; GSD regex-based structure checks alone do not prove XML validity.",
+    "Reviewer findings on development dependency order, mandatory 90-percent coverage enforcement and required non-evicting backlog quota policy remain subject to stable-snapshot re-review after scope resolution.",
+    "The pinned pulsar-client 3.13.0 runtime probe exposed Producer.is_connected but no Client connection-callback registration. A supported event-driven recovery contract, without fabricating SDK callbacks or adding timers, remains to be specified.",
+    "No Python/TypeScript eventstream implementation, broker integration scenario, production behavior, npm build, eventstream pytest suite, ruff or mypy check of future source was run; this request was planning only.",
+    "No signed AgentSwarm approval was obtained: A01 and A03 rejected unsigned assignments. Ordinary GSD planning and read-only reviewer pools were used after their explicit fallback recommendation.",
+    "No draft PR was opened and no commit or push was performed in this session."
+  ],
+  "files_changed": [
+    ".planning/phases/105-event-stream-core-library/105-01-PLAN.md",
+    ".planning/phases/105-event-stream-core-library/105-02-PLAN.md",
+    ".planning/phases/105-event-stream-core-library/105-03-PLAN.md",
+    ".receipts/bot-00-omega-prime/phase-105-plan-generation.json"
+  ],
+  "external_changes_preserved": [
+    ".planning/phases/105-event-stream-core-library/105-CONTEXT.md",
+    ".planning/phases/105-event-stream-core-library/105-01-PLAN.md",
+    ".planning/phases/105-event-stream-core-library/105-02-PLAN.md",
+    ".planning/phases/105-event-stream-core-library/105-03-PLAN.md",
+    ".planning/phases/105-event-stream-core-library/105-04-PLAN.md"
+  ],
+  "artifact_snapshot": {
+    "plans": [
+      {
+        "file": "105-01-PLAN.md",
+        "sha256": "1ee25a4d3aeb21a74b291b31222bd69fc24a7cb76060ac163d06f008a6118448",
+        "task_count": 3,
+        "manifest_count": 24,
+        "wave": 1,
+        "depends_on": [],
+        "xml_error": "mismatched tag: line 43, column 747"
+      },
+      {
+        "file": "105-02-PLAN.md",
+        "sha256": "22deeace130bb4d04809d6c315490610de1056ce58cb074526f427286f10c3e5",
+        "task_count": 3,
+        "manifest_count": 21,
+        "wave": 2,
+        "depends_on": [
+          "105-01"
+        ],
+        "xml_error": "mismatched tag: line 80, column 4"
+      },
+      {
+        "file": "105-03-PLAN.md",
+        "sha256": "0ad1a5f8c0034a98463160232d03bbb7af7a997a4b513c0982b3c6fdf62af4cb",
+        "task_count": 3,
+        "manifest_count": 25,
+        "wave": 2,
+        "depends_on": [
+          "105-01"
+        ],
+        "xml_error": "mismatched tag: line 28, column 2"
+      }
+    ],
+    "context_sha256": "5a968b15a85614325fae17ee2ee60231e20af652684560b8a5360daab2937aa4",
+    "external_revision_present": true,
+    "external_four_plan_revision": true,
+    "plan_files_present": [
+      "105-01-PLAN.md",
+      "105-02-PLAN.md",
+      "105-03-PLAN.md",
+      "105-04-PLAN.md"
+    ]
+  },
+  "review_results": {
+    "python_core": "REQUIRED",
+    "pulsar_admin_ci": "REQUIRED",
+    "typescript_parity": "REQUIRED",
+    "authority": "BLOCKED"
+  },
+  "contract_changes": [],
+  "rollback_plan": "Do not overwrite concurrent user-owned plan/context revisions. Re-establish one authoritative scope and exclusive writer before regenerating plans or applying review corrections.",
+  "approvals": [],
+  "approved_by": null
+}

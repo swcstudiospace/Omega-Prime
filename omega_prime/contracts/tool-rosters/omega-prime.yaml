@@ -216,7 +216,16 @@ tools:
   - tempest_providers
   - tempest_purple_synthesize
   - tempest_blue_gaps
+  - tempest_blue_rules
+  - tempest_blue_hardening
+  - tempest_blue_coverage
+  - tempest_black_workflow
+  - tempest_white_stage
   - tempest_black_cover
+  - tempest_black_noise
+  - tempest_black_exfil
+  - tempest_white_evidence
+  - tempest_white_report
   - tempest_white_roe
   - tempest_hats_list
   - tempest_hat_dispatch

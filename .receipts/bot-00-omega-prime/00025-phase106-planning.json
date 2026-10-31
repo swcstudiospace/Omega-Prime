@@ -1,0 +1,109 @@
+{
+  "task_id": "00025-phase106-planning",
+  "bot": "bot-00-omega-prime",
+  "completed_at": "2026-10-21T08:43:47.729819+00:00",
+  "commands": [
+    {
+      "cmd": "python3 -c 'from pathlib import Path\nimport re\nimport xml.etree.ElementTree as ET\nimport yaml\n\nroot = Path('\"'\"'/sandbox/work'\"'\"')\nphase = root / '\"'\"'.planning/phases/106-command-center-polish'\"'\"'\nplans = sorted(phase.glob('\"'\"'*-PLAN.md'\"'\"'))\nassert [p.name for p in plans] == [f'\"'\"'106-{i:02d}-PLAN.md'\"'\"' for i in range(1, 6)]\nmetadata = {}\nfor p in plans:\n    text = p.read_text()\n    assert text.startswith('\"'\"'---\\n'\"'\"'), p\n    data = yaml.safe_load(text.split('\"'\"'---'\"'\"', 2)[1])\n    number = int(data['\"'\"'plan'\"'\"'])\n    assert int(data['\"'\"'wave'\"'\"']) == (1 if number in (1, 2, 4) else 2), p\n    for key in ('\"'\"'phase'\"'\"', '\"'\"'type'\"'\"', '\"'\"'depends_on'\"'\"', '\"'\"'files_modified'\"'\"', '\"'\"'autonomous'\"'\"', '\"'\"'requirements'\"'\"', '\"'\"'must_haves'\"'\"'):\n        assert key in data, (p, key)\n    assert data['\"'\"'files_modified'\"'\"'], p\n    for tag in ('\"'\"'objective'\"'\"', '\"'\"'tasks'\"'\"', '\"'\"'verification'\"'\"', '\"'\"'success_criteria'\"'\"', '\"'\"'threat_model'\"'\"'):\n        assert f'\"'\"'<{tag}>'\"'\"' in text, (p, tag)\n    tasks = re.findall(r'\"'\"'<task\\b[^>]*>(.*?)</task>'\"'\"', text, re.S)\n    assert tasks, p\n    for task in tasks:\n        for tag in ('\"'\"'read_first'\"'\"', '\"'\"'files'\"'\"', '\"'\"'action'\"'\"', '\"'\"'acceptance_criteria'\"'\"', '\"'\"'verify'\"'\"'):\n            assert f'\"'\"'<{tag}>'\"'\"' in task, (p, tag)\n    commands = re.findall(r'\"'\"'<automated>(.*?)</automated>'\"'\"', text, re.S)\n    failures = re.findall(r'\"'\"'<fails_when>(.*?)</fails_when>'\"'\"', text, re.S)\n    assert commands and len(commands) == len(failures), (p, len(commands), len(failures))\n    assert '\"'\"'ad3942b'\"'\"' in text and '\"'\"'FAIL'\"'\"' in text and '\"'\"'PASS'\"'\"' in text, p\n    assert all(word in text for word in ('\"'\"'orchestrate'\"'\"', '\"'\"'workflowz'\"'\"', '\"'\"'ultrathink'\"'\"')), p\n    if number != 1:\n        assert '\"'\"'registry.npmjs.org'\"'\"' in text, p\n    metadata[number] = data\nfor wave in (1, 2):\n    owners = {}\n    for number, data in metadata.items():\n        if int(data['\"'\"'wave'\"'\"']) != wave:\n            continue\n        for filename in data['\"'\"'files_modified'\"'\"']:\n            assert filename not in owners, (wave, filename, owners.get(filename), number)\n            owners[filename] = number\nterminal = '\"'\"'omega_prime/dashboard/frontend/src/components/TerminalPanel.tsx'\"'\"'\nassert terminal not in metadata[4]['\"'\"'files_modified'\"'\"']\nassert terminal in metadata[5]['\"'\"'files_modified'\"'\"']\nassert (phase/'\"'\"'106-UPLIFT.xml'\"'\"').read_bytes() == Path('\"'\"'/sandbox/home/refs/106-UPLIFT.xml'\"'\"').read_bytes()\nassert (phase/'\"'\"'106-ADDENDUM-model-buckets.md'\"'\"').read_bytes() == Path('\"'\"'/sandbox/home/refs/ADDENDUM-model-buckets.md'\"'\"').read_bytes()\ncontract = ET.parse(phase/'\"'\"'106-UPLIFT.xml'\"'\"').getroot()\nassert len(contract.findall('\"'\"'./ACCEPTANCE_CRITERIA/ITEM'\"'\"')) == 9\nall_text = '\"'\"'\\n'\"'\"'.join(p.read_text() for p in plans)\nfor i in range(1, 10):\n    assert f'\"'\"'AC{i}'\"'\"' in all_text, i\nroadmap = (root/'\"'\"'.planning/ROADMAP.md'\"'\"').read_text()\nassert roadmap.index('\"'\"'### Phase 106: Command Center polish'\"'\"') > roadmap.index('\"'\"'### Phase 105: Omega Prime Command Center'\"'\"')\nfor p in plans:\n    assert p.name in roadmap\nprint('\"'\"'PASS: five plans; wave1 01/02/04, wave2 03/05; file-disjoint wave ownership; task/verify structure; terminal custody; exact references; AC1\u2013AC9; roadmap placement'\"'\"')\n\nassert (phase/'\"'\"'106-PLAN-CHECK.md'\"'\"').is_file()\nprint('\"'\"'PASS: independent checker report present'\"'\"')\n'",
+      "exit_code": 0,
+      "output_tail": "PASS: five plans; wave1 01/02/04, wave2 03/05; file-disjoint wave ownership; task/verify structure; terminal custody; exact references; AC1\u2013AC9; roadmap placement\nPASS: independent checker report present"
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py",
+      "exit_code": 0,
+      "output_tail": "31 passed in 0.87s"
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs check verify-command-paths 106 --raw",
+      "exit_code": 0,
+      "output_tail": "{\"status\": \"not_applicable\", \"counts\": {\"blocker\": 0, \"warning\": 0, \"total\": 37}, \"readError\": null}"
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs check verify-failure-directions 106 --raw",
+      "exit_code": 0,
+      "output_tail": "{\"status\": \"ok\", \"counts\": {\"blocker\": 0, \"warning\": 0, \"total\": 37}, \"readError\": null}"
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs check ui-plan-gate 106 --raw",
+      "exit_code": 0,
+      "output_tail": "frontend=true, hasUiSpec=true, block=false"
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query init.plan-phase 106",
+      "exit_code": 0,
+      "output_tail": "phase_found=true, phase_status=Planned, plan_count=5, threat_id_duplicate_count=0"
+    },
+    {
+      "cmd": "node .claude/gsd-core/bin/gsd-tools.cjs query state.planned-phase --phase 106 --name \"Command Center polish\" --plans 5",
+      "exit_code": 0,
+      "output_tail": "phase=106, plan_count=5; Current Position and progress updated"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Exactly five structured executable plans in two waves, disjoint same-wave file ownership, correct TerminalPanel custody, exact reference copies and roadmap placement",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "Documentation/public repository compatibility tests pass",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "All 37 automated plan commands state failure directions",
+      "evidence_command_index": 3
+    },
+    {
+      "claim": "Phase metadata recognizes five plans and no duplicate threat IDs",
+      "evidence_command_index": 5
+    },
+    {
+      "claim": "UI planning contract gate is unblocked",
+      "evidence_command_index": 4
+    },
+    {
+      "claim": "Planning state records Phase 106 and five plans",
+      "evidence_command_index": 6
+    }
+  ],
+  "review": {
+    "agent": "Phase106FinalCheck",
+    "verdict": "VERIFICATION PASSED",
+    "blockers": 0,
+    "warnings": 0,
+    "report": ".planning/phases/106-command-center-polish/106-PLAN-CHECK.md",
+    "scope": "Independent static plan review, not runtime product verification"
+  },
+  "unverified": [
+    "rule adherence by future agents",
+    "Product implementation, fail-on-ad3942b/pass-after regressions, Python dashboard/full suites, frontend install/test/build and generated assets: planning-only scope; commands specified for execution, not run here",
+    "Live GitHub and Herdr behavior, isolated 7441 visual verification and five screenshots: outer-driver execution gates; Herdr absent in sandbox",
+    "Command path probe reports not_applicable for all 37 forms; no automatic path-resolution proof; source/command cwd reviewed independently",
+    "Supplied existing lint/type and missing dependency/tooling limitations are reference evidence, not newly reproduced or resolved",
+    "Draft PR deferred: local-only repository with no remote; no push, merge or deployment"
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/STATE.md",
+    ".planning/phases/106-command-center-polish/106-01-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-02-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-03-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-04-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-05-PLAN.md",
+    ".planning/phases/106-command-center-polish/106-ADDENDUM-model-buckets.md",
+    ".planning/phases/106-command-center-polish/106-CONTEXT.md",
+    ".planning/phases/106-command-center-polish/106-PATTERNS.md",
+    ".planning/phases/106-command-center-polish/106-PLAN-CHECK.md",
+    ".planning/phases/106-command-center-polish/106-RESEARCH.md",
+    ".planning/phases/106-command-center-polish/106-UI-SPEC.md",
+    ".planning/phases/106-command-center-polish/106-UPLIFT.xml",
+    ".planning/phases/106-command-center-polish/106-VALIDATION.md",
+    ".receipts/bot-00-omega-prime/00025-phase106-planning.json"
+  ],
+  "contract_changes": [
+    "Planning only: five-plan/two-wave phase contract and narrow 106-05 task-1 prerequisite before 106-04 import/build; product untouched"
+  ],
+  "rollback_plan": "Revert the local planning commit; no product data or runtime state migration",
+  "approvals": [
+    "Approved defaults and 18:39 bucket addendum recorded in phase context"
+  ]
+}

@@ -16,6 +16,8 @@ _PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_.-]{8,}"),
     re.compile(r"xai-[A-Za-z0-9]{8,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9_]{8,}"),
+    # Fine-grained GitHub personal access tokens.
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
 ]
 

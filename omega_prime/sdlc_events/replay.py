@@ -9,7 +9,7 @@ from pathlib import Path
 from omega_prime.sdlc_events.handlers import (
     on_blocked_signal,
     on_gate_signal,
-    on_review_signal,
+    on_review_then_gate,
 )
 from omega_prime.sdlc_events.idempotency import IdempotencyStore
 from omega_prime.sdlc_events.task_store import MemoryTaskStore
@@ -54,9 +54,19 @@ def main(argv: list[str] | None = None) -> int:
                 ev, store=store, idem=idem, reason=raw.get("reason", "ci_red")
             )
         elif ev.kind == EventKind.REVIEW_SIGNAL:
-            r = on_review_signal(
-                ev, store=store, idem=idem, greptile_score=raw.get("greptile_score")
+            # A review wakes the review note and the merge gate, under one claim.
+            *earlier, r = on_review_then_gate(
+                ev,
+                store=store,
+                idem=idem,
+                greptile_score=raw.get("greptile_score"),
+                greptile_on_head=bool(raw.get("greptile_on_head", False)),
+                ci_green=bool(raw.get("ci_green", False)),
+                mergeable=bool(raw.get("mergeable", False)),
+                dry_run=True,
             )
+            for prior in earlier:
+                print(f"{ev.delivery.value}: {prior.action} — {prior.detail}")
         else:
             r = on_gate_signal(
                 ev,

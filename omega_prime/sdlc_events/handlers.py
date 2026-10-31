@@ -109,6 +109,21 @@ def on_gate_signal(
     return _run_claimed(event, idem, work)
 
 
+def _blocked_or_working(reasons: tuple[str, ...]) -> str:
+    """``blocked`` when a fix is needed (red CI or a Greptile score below 5).
+
+    Waiting reasons (no review yet, review on an older head, draft, not yet
+    mergeable) stay ``working``. A review below 5 must stay ``blocked`` after
+    the gate runs, or ``on_review_then_gate`` would overwrite the review's
+    ``blocked`` row and hide the cue to start fixes.
+    """
+    needs_fix = "ci_not_green" in reasons or any(
+        r.startswith("greptile_score_") and r != "greptile_score_missing"
+        for r in reasons
+    )
+    return "blocked" if needs_fix else "working"
+
+
 def _gate_work(
     event: SdlcEvent,
     *,
@@ -135,9 +150,7 @@ def _gate_work(
     tid = _task_id_for(event)
     if not gate.ok:
         note = f"gate blocked on {event.pr.head_sha[:7]}: {', '.join(gate.reasons)}"
-        store.upsert_note(
-            tid, "blocked" if "ci_not_green" in gate.reasons else "working", note
-        )
+        store.upsert_note(tid, _blocked_or_working(gate.reasons), note)
         return HandlerResult(action="gate_blocked", detail=note)
     note = f"gate open on {event.pr.head_sha[:7]} (Greptile 5/5, CI green, mergeable)"
     if dry_run or merge is None:
@@ -150,6 +163,16 @@ def _gate_work(
     return HandlerResult(action="merged", detail=sha)
 
 
+def _review_work(
+    event: SdlcEvent, *, store: TaskStorePort, greptile_score: int | None
+) -> HandlerResult:
+    score = greptile_score if greptile_score is not None else -1
+    note = f"Greptile signal score={score} head={event.pr.head_sha[:7]}"
+    state = "working" if score >= 5 else "blocked"
+    store.upsert_note(_task_id_for(event), state, note)
+    return HandlerResult(action="review_noted", detail=note)
+
+
 def on_review_signal(
     event: SdlcEvent,
     *,
@@ -157,14 +180,53 @@ def on_review_signal(
     idem: IdempotencyStore,
     greptile_score: int | None,
 ) -> HandlerResult:
-    def work() -> HandlerResult:
-        score = greptile_score if greptile_score is not None else -1
-        note = f"Greptile signal score={score} head={event.pr.head_sha[:7]}"
-        state = "working" if score >= 5 else "blocked"
-        store.upsert_note(_task_id_for(event), state, note)
-        return HandlerResult(action="review_noted", detail=note)
+    return _run_claimed(
+        event,
+        idem,
+        lambda: _review_work(event, store=store, greptile_score=greptile_score),
+    )
 
-    return _run_claimed(event, idem, work)
+
+def on_review_then_gate(
+    event: SdlcEvent,
+    *,
+    store: TaskStorePort,
+    idem: IdempotencyStore,
+    greptile_score: int | None,
+    greptile_on_head: bool,
+    ci_green: bool,
+    mergeable: bool,
+    merge: MergePort | None = None,
+    allowlist: frozenset[str] = DEFAULT_ALLOWLIST,
+    dry_run: bool = True,
+) -> tuple[HandlerResult, ...]:
+    """A review wakes both the review note and the merge gate (see the
+    routine→event mapping). Both run under one delivery claim: calling the two
+    handlers one after the other would let the first claim the delivery and the
+    second skip it as a duplicate."""
+    if event.kind is not EventKind.REVIEW_SIGNAL:
+        return (HandlerResult(action="ignore", detail=f"kind={event.kind.value}"),)
+    results: list[HandlerResult] = []
+
+    def work() -> HandlerResult:
+        results.append(_review_work(event, store=store, greptile_score=greptile_score))
+        results.append(
+            _gate_work(
+                event,
+                store=store,
+                greptile_score=greptile_score,
+                greptile_on_head=greptile_on_head,
+                ci_green=ci_green,
+                mergeable=mergeable,
+                merge=merge,
+                allowlist=allowlist,
+                dry_run=dry_run,
+            )
+        )
+        return results[-1]
+
+    claimed = _run_claimed(event, idem, work)
+    return tuple(results) if results else (claimed,)
 
 
 def on_blocked_signal(
