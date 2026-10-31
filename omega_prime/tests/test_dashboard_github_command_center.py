@@ -93,7 +93,7 @@ def test_default_scope_projects_org_pr_branch_checks_and_actual_merges():
                 }
             ]
             return 200, json.dumps(rows).encode()
-        if path.endswith("/commits/main") or path.endswith("/commits/trunk"):
+        if path.endswith(("/commits/main", "/commits/trunk")):
             return 200, json.dumps(
                 {"sha": "branch-" + path.rsplit("/", 1)[-1]}
             ).encode()

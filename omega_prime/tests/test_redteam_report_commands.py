@@ -1000,7 +1000,7 @@ def test_cycle_run_flag_runs_the_real_cycle_with_fake_upstream(
     monkeypatch: Any, tmp_path: Path, no_subprocess: None, frozen_day: datetime
 ) -> None:
     env = _env(monkeypatch, tmp_path)
-    monkeypatch.setattr(purple_cycle, "_default_fetch", lambda: [])
+    monkeypatch.setattr(purple_cycle, "_default_fetch", list)
     body = _call(env, "/omega-redteam-cycle --run")
     assert body["ok"] is True, body
     result = body["result"]
@@ -1039,7 +1039,7 @@ def test_cycle_run_result_carries_no_absolute_path(
     monkeypatch: Any, tmp_path: Path, frozen_day: datetime
 ) -> None:
     env = _env(monkeypatch, tmp_path)
-    monkeypatch.setattr(purple_cycle, "_default_fetch", lambda: [])
+    monkeypatch.setattr(purple_cycle, "_default_fetch", list)
     _assert_path_free(_call(env, "/omega-redteam-cycle --run"), tmp_path)
     _assert_path_free(_call(env, "/omega-redteam-cycle"), tmp_path)
 
@@ -1403,7 +1403,7 @@ def test_env_values_are_never_echoed_on_any_path(
 ) -> None:
     env = _env(monkeypatch, tmp_path)
     _seed_history(_reports(env))
-    monkeypatch.setattr(purple_cycle, "_default_fetch", lambda: [])
+    monkeypatch.setattr(purple_cycle, "_default_fetch", list)
     for text in (
         "/omega-redteam-report",
         "/omega-redteam-report --bogus",

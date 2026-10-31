@@ -1559,7 +1559,7 @@ def _analyze(
 def _is_promotion_name(name: str) -> bool:
     """True when a file name marks the set as a production promotion."""
     base = name.lower()
-    return base.startswith("promot") or base.startswith(("prod-", "prod_", "prod."))
+    return base.startswith(("promot", "prod-", "prod_", "prod."))
 
 
 def _is_staging_evidence(name: str) -> bool:

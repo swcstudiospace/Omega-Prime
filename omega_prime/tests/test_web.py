@@ -292,18 +292,18 @@ def _ctx(tmp_path, **overrides) -> WebContext:
     _client, _transport, _fetch, _resolver, _dialer, _tls, _clock = _scripted_client(
         tmp_path, ["acme.test"], port=443, answers={"acme.test": [_v4(port=443)]}
     )
-    base: dict[str, Any] = dict(
-        root=Path(tmp_path),
-        vercel=FakeVercel(),
-        policy=_transport.policy,
-        transport=_transport,
-        fetch=_fetch,
-        browser_factory=lambda: PlaywrightBrowser(
+    base: dict[str, Any] = {
+        "root": Path(tmp_path),
+        "vercel": FakeVercel(),
+        "policy": _transport.policy,
+        "transport": _transport,
+        "fetch": _fetch,
+        "browser_factory": lambda: PlaywrightBrowser(
             launch=lambda: FakeBrowserPeer(tmp_path)
         ),
-        vision=FakeVision(),
-        artifacts_dir=Path(tmp_path) / "shots",
-    )
+        "vision": FakeVision(),
+        "artifacts_dir": Path(tmp_path) / "shots",
+    }
     base.update(overrides)
     return WebContext(**base)
 

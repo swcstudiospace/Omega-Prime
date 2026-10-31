@@ -234,7 +234,7 @@ def test_loopback_spawn_inherits_only_explicit_env(
         lv._run_loopback(probe)
         assert marker.is_file(), "child observer never ran in the owned host"
         payload = json.loads(marker.read_text(encoding="utf-8"))
-        assert payload == {key: False for key in caller_keys}, payload
+        assert payload == dict.fromkeys(caller_keys, False), payload
         names = [check["name"] for check in probe.checks]
         for expected in (
             "loopback:manifest-agrees",

@@ -98,7 +98,7 @@ def test_messaging_flag_registers_on_the_host(tmp_path: Path, monkeypatch) -> No
 
 
 def test_all_prime_flags_serve_the_roster(tmp_path: Path, monkeypatch) -> None:
-    _flags(monkeypatch, **{family: "1" for family in PRIME_FAMILIES})
+    _flags(monkeypatch, **dict.fromkeys(PRIME_FAMILIES, "1"))
     monkeypatch.setenv("OMEGA_PRIME_SIDECAR_REPORTS_DIR", str(tmp_path / "reports"))
     monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ENABLED", "1")
     registry = default_registry(ROOT, tmp_path)
@@ -114,7 +114,7 @@ def test_all_prime_flags_serve_the_roster(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_signed_roe_completes_the_roster(tmp_path: Path, monkeypatch) -> None:
-    _flags(monkeypatch, **{family: "1" for family in PRIME_FAMILIES})
+    _flags(monkeypatch, **dict.fromkeys(PRIME_FAMILIES, "1"))
     monkeypatch.setenv("OMEGA_PRIME_SIDECAR_REPORTS_DIR", str(tmp_path / "reports"))
     monkeypatch.setenv("OMEGA_PRIME_REDTEAM_ENABLED", "1")
     fixture_key = (

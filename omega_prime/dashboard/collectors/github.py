@@ -187,7 +187,7 @@ def make_github_collector(
         errors: list[str] = []
         truncated = {"repositories": False, "ci_cd": False, "recent_merges": False}
         partial = {"repositories": False, "ci_cd": False, "recent_merges": False}
-        reason: dict[str, str | None] = {key: None for key in partial}
+        reason: dict[str, str | None] = dict.fromkeys(partial)
         failed_ci_repos: set[str] = set()
         failed_merge_repos: set[str] = set()
         failed_count_repos: set[str] = set()

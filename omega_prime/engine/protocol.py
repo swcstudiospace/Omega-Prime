@@ -366,11 +366,7 @@ def redact(value: Any) -> Any:
         cleaned: dict[str, Any] = {}
         for key, item in value.items():
             name = str(key).lower().replace("-", "_")
-            if (
-                name in _SECRET_KEYS
-                or name.endswith("_token")
-                or name.endswith("_secret")
-            ):
+            if name in _SECRET_KEYS or name.endswith(("_token", "_secret")):
                 cleaned[str(key)] = "[redacted]"
             else:
                 cleaned[str(key)] = redact(item)

@@ -426,7 +426,7 @@ def test_hung_pane_listing_does_not_delay_snapshot_builds():
 def test_owner_herdr_pane_mapping_gets_pane_checks():
     """Rows mapped through owner.kind herdr-pane get the same pane checks."""
     checker = StaleChecker(
-        clock=lambda: NOW, pid_alive=lambda pid: True, pane_lister=lambda: {}
+        clock=lambda: NOW, pid_alive=lambda pid: True, pane_lister=dict
     )
     row = _row(
         id="gb:owned",

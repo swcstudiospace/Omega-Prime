@@ -92,10 +92,8 @@ def test_branch_uses_merged_pr_score_and_actual_reviewed_sha():
                     }
                 ]
             ).encode()
-        if (
-            path.endswith("/pulls/41/comments")
-            or path.endswith("/pulls/42/reviews")
-            or path.endswith("/pulls/42/comments")
+        if path.endswith(
+            ("/pulls/41/comments", "/pulls/42/reviews", "/pulls/42/comments")
         ):
             return 200, b"[]"
         raise AssertionError(path)

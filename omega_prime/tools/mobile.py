@@ -459,11 +459,7 @@ class MobileClient:
             n
             for n in names
             if n.startswith(target_dir + "/")
-            and (
-                n.endswith(".entitlements")
-                or n.endswith("Info.plist")
-                or n.endswith(".plist")
-            )
+            and (n.endswith((".entitlements", "Info.plist", ".plist")))
         ]
         diff = vcs["diff"](base_ref, head_ref, relevant) if relevant else ""
         return {

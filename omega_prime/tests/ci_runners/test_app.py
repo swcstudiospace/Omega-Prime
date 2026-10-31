@@ -381,6 +381,37 @@ def test_every_agent_token_is_accepted_on_the_exit_callback() -> None:
     asyncio.run(main())
 
 
+def test_exit_callback_checks_every_token_even_after_a_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timing stays flat: the first token matching must not skip the rest."""
+    import omega_prime.ci_runners.app as app_module
+
+    others = (placeholder("agent-2-token"), placeholder("agent-3-token"))
+    calls: list[str] = []
+    real = app_module.bearer_ok
+
+    def counting(header: str | None, token: str) -> bool:
+        calls.append(token)
+        return real(header, token)
+
+    monkeypatch.setattr(app_module, "bearer_ok", counting)
+    rig = Rig(routes())
+    app = create_app(
+        rig.ctrl,
+        webhook_secret=WEBHOOK_SECRET,
+        agent_token=TOKEN,
+        extra_agent_tokens=others,
+    )
+
+    async def main() -> None:
+        good = [("Authorization", f"Bearer {TOKEN}")]
+        await asgi_call(app, "POST", "/agent/events", body=b"{}", headers=good)
+
+    asyncio.run(main())
+    assert sorted(calls) == sorted((TOKEN, *others))
+
+
 def test_build_controller_app_wires_one_client_per_agent(tmp_path: Path) -> None:
     env = _env(tmp_path)
     tokens = {i: placeholder(f"agent-{i}-token") for i in (2, 3)}
