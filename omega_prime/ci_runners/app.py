@@ -89,8 +89,12 @@ def create_app(
     async def callback(scope: Scope, receive: Receive, send: Send) -> None:
         headers = header_map(scope)
         auth = headers.get("authorization")
-        # Compare against every token (no early exit) to keep timing flat.
-        if not any(bearer_ok(auth, token) for token in agent_tokens):
+        # Compare against every token (no early exit) to keep timing flat;
+        # a short-circuiting any() would reveal which token slot matched.
+        authorized = False
+        for token in agent_tokens:
+            authorized |= bearer_ok(auth, token)
+        if not authorized:
             raise WebhookRejected(401, "unauthorized")
         body = await read_body(receive, CALLBACK_MAX_BYTES)
         try:

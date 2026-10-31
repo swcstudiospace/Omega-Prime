@@ -84,6 +84,12 @@ to `STRICT_PACKAGES` in the ratchet test and to this table.
 
 1. Measure it: `ruff check --select <FAMILY> --statistics omega_prime/`.
 2. Fix every hit, or use a targeted `# noqa: CODE - reason` where the rule is
-   wrong for that line. Never use a broad per-file ignore.
+   wrong for that line. Never use a broad per-file ignore: the ratchet test
+   rejects any `ignore` or `per-file-ignores` entry that is a prefix of a
+   ratcheted family (`"C"` covers `C4`, `"ALL"` covers everything).
+   Review autofixes in security code by hand. A `C4` fix once turned a
+   deliberate all-tokens comparison into a short-circuiting `any()`; the
+   callback in `omega_prime/ci_runners/app.py` now uses an explicit loop and
+   a test counts the comparisons.
 3. Add the family to `select` in `pyproject.toml` and to `RUFF_FAMILIES` in
    the ratchet test. Add a row here.

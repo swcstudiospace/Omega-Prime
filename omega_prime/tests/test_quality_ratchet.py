@@ -80,12 +80,35 @@ def test_ruff_selects_every_ratcheted_family() -> None:
     assert not missing, f"ruff families dropped from pyproject.toml: {sorted(missing)}"
 
 
+def _wholesale_ignored(lint: dict[str, Any]) -> list[tuple[str, str]]:
+    """(ignored code, family) pairs where an ignore disables a whole family.
+
+    An ignore covers a family when the family's code starts with it, so a
+    broader prefix ("C", or "ALL") is caught as well as the exact family.
+    Narrower codes such as "C401" stay allowed: they switch off one rule.
+    """
+    codes = set(lint.get("ignore", []))
+    for per_file in lint.get("per-file-ignores", {}).values():
+        codes.update(per_file)
+    return sorted(
+        (code, family)
+        for code in codes
+        for family in RUFF_FAMILIES
+        if code == "ALL" or family.startswith(code)
+    )
+
+
 def test_ruff_does_not_ignore_a_ratcheted_family_wholesale() -> None:
-    lint = _pyproject()["tool"]["ruff"]["lint"]
-    ignored = set(lint.get("ignore", []))
-    for codes in lint.get("per-file-ignores", {}).values():
-        ignored.update(codes)
-    assert not (ignored & RUFF_FAMILIES), sorted(ignored & RUFF_FAMILIES)
+    hits = _wholesale_ignored(_pyproject()["tool"]["ruff"]["lint"])
+    assert not hits, hits
+
+
+def test_wholesale_guard_catches_broader_prefixes() -> None:
+    broad = {"per-file-ignores": {"*.py": ["C"]}, "ignore": ["E501"]}
+    assert ("C", "C4") in _wholesale_ignored(broad)
+    assert _wholesale_ignored({"ignore": ["ALL"]})
+    assert _wholesale_ignored({"ignore": ["PG"]}) == [("PG", "PGH")]
+    assert not _wholesale_ignored({"ignore": ["E501", "C401", "B008"]})
 
 
 def _documented_families() -> set[str]:
