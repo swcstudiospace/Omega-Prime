@@ -1,0 +1,97 @@
+{
+  "task_id": "phase114-planning",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T22:30:00Z",
+  "completed_at": "2026-10-21T23:55:00Z",
+  "scope": "Planning only (task 00030 node n7, sbx-5): register Phase 114 'Sandbox steering end-to-end' in .planning/ROADMAP.md, write 114-CONTEXT.md and two file-disjoint execution plans 114-01 (docs/omp-sandbox-engine.md + docs/SUMMARY.md link + 114-AUDIT-RERUN.md) and 114-02 (omega_prime/tests/test_sandbox_e2e.py e2e: routine-driven plan->execute on zai models, export back, rows/panes, forced PlanNotAllowed block, marker-gated real-binary opt-in). No product code, no omega_prime/ or omp-sandbox/ source changes, no push/PR/remote.",
+  "plan": {
+    "note": "Fallback lightweight plan (no XML uplift root in this dispatch; no PR per task rules — recorded here instead of a PR body).",
+    "nodes": [
+      {"id": "n1", "kind": "understand", "steps": ["Read got.json n7, uplift2.xml (ENGINE_BACKEND/VISIBILITY/AC3-AC6), AUDIT.md C1..C13, README-REFS.md", "Verify HEAD API surface: run_backend tasks threading (:467+), ultrathink_engine probe gate (:416-418), delegate_via_engine, plan_router _STAGE_MODELS/_select_stage/zai flag, fakes (_ANDA_FAKE behaviors, _install_fake_herdr, _backend_env), docs test rules (heading/links/commands/SUMMARY parity)", "Read house formats: ROADMAP v21 tail, 113-CONTEXT.md, 113-03-PLAN.md, phase113-planning receipt convention"]},
+      {"id": "n2", "kind": "context", "steps": ["Append Phase 114 section (goal, W114-01..W114-05, success criteria, unchecked box) to .planning/ROADMAP.md; widen v21 heading to Phases 110-114", "Write 114-CONTEXT.md: goal, locked requirements, acceptance, verified source map (file:line), environment facts, locked decisions (two file-disjoint plans, fixture imports not edits, marker suggestion, audit-table location), pitfalls (synchronous blocking, stage via last-plan.json, probe gating, SUMMARY parity), out of scope, tracker (ids kept out per repo rule)"]},
+      {"id": "n3", "kind": "plan", "steps": ["Spawn gsd-planner subagent with the full brief; it authored 114-01 (docs + audit table, wave 1) and 114-02 (e2e test, wave 2)", "Planner surfaced one material drift: execute_ultrathink cannot raise a waiting_on_ove item for plan_not_allowed (probe short-circuit attach.py:416-418 precedes run()'s raise_block); plan resolves W114-02 as a documented two-layer test + SUMMARY finding", "Parent spot-check: frontmatter parse, file-disjointness, W114-01..05 coverage, and direct verification of the linchpins (probe/select routing, zai flag-only allowlist, all 12 pinned phase-110-113 test ids exist exactly once, docs command-check only validates python -m omega_prime.* fences, SUMMARY '## Use'/[Agent loop] placement anchor)"]},
+      {"id": "n4", "kind": "critique", "steps": ["Spawn gsd-plan-checker (read-only); verdict PASS_WITH_NOTES, zero blockers, one warning + four info notes", "Warning fixed: 114-02-T1's resolver env used dict-unpacking of a generator (TypeError if copied verbatim) — rewritten as a plain conditional", "Info notes fixed: datetime added to T1 imports; 114-01-T3 row ordering (C3..C10 before C11) pinned; 114-01-T4 <files> now lists the two docs files matching its conditional-fix clause; marker=1 skip-reason asymmetry kept deliberate"]},
+      {"id": "n5", "kind": "synthesize", "steps": ["Docs/public-repo smoke on the planning tree: 31 passed, exit 0", "Write this receipt", "Commit '00015 - plan phase 114 sandbox e2e' (planning files + receipt, trailers Refs: 00030 / Node: n7) and leave git status --porcelain clean"]}
+    ]
+  },
+  "commands": [
+    {
+      "cmd": "git branch --show-current && git log --oneline -12 && git status --porcelain",
+      "exit_code": 0,
+      "duration_s": 0.3,
+      "output_tail": "branch feat/sbx-5-e2e; HEAD 19b7bb9 '00014 - phase 113 summary, roadmap tick, execution receipt'; working tree clean before planning edits",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "sed -n '722,762p' omega_prime/engine/omp_driver.py && sed -n '405,425p' omega_prime/engine/attach.py",
+      "exit_code": 0,
+      "duration_s": 0.1,
+      "output_tail": "probe returns (False,'plan_not_allowed') when no stage plan is allowlisted and ultrathink_engine returns _required_miss BEFORE run() — confirms the planner's material W114-02 drift finding (routine path cannot raise the item; engine-call layer does)",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "sed -n '100,160p;440,495p' omega_prime/engine/plan_router.py && sed -n '424,449p' omega_prime/tests/test_engine_omp_sandbox.py",
+      "exit_code": 0,
+      "duration_s": 0.1,
+      "output_tail": "_select_stage skips non-allowlisted plans in preference order (chatgpt then zai); zai allowlists ONLY via the OMEGA_PRIME_OMP_ALLOW_ZAI flag (ZAI_API_KEY alone never); _backend_env auto-installs the fail-mode herdr stub — the plans' happy-path routing (ZAI-only env lands on zai stage models) and hermeticity claims hold",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "for id in <12 pinned test ids>: grep -rn \"def $id\" omega_prime/tests/",
+      "exit_code": 0,
+      "duration_s": 0.4,
+      "output_tail": "all 12 pinned phase-110-113 pytest test ids exist exactly once (test_engine.py x2, test_engine_stage.py x2, test_engine_omp_sandbox.py x7, test_dashboard_blocks.py x1) — the audit table's pinned commands are real",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "sed -n '104,118p' omega_prime/tests/test_docs.py && grep -n '## Use' -A4 docs/SUMMARY.md",
+      "exit_code": 0,
+      "duration_s": 0.1,
+      "output_tail": "docs command check validates only python -m omega_prime.* modules and omega_prime/*.sh scripts in fences (a python3 -m pytest fence is wave-1 safe); SUMMARY.md '## Use' carries the [Agent loop](agent-loop.md) line the plan's placement pins",
+      "phase": "evidence"
+    },
+    {
+      "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py",
+      "exit_code": 0,
+      "duration_s": 0.9,
+      "output_tail": "31 passed — docs link/anchor/command/SUMMARY-parity scans and public-repo checks green on the planning tree (ROADMAP.md and the new phase dir break nothing)",
+      "phase": "verification"
+    },
+    {
+      "cmd": "git status --porcelain (after writing all planning artifacts)",
+      "exit_code": 0,
+      "duration_s": 0.0,
+      "output_tail": " M .planning/ROADMAP.md ; ?? .planning/phases/114-sbx5-e2e/ — exactly the intended planning diff, no product files",
+      "phase": "evidence"
+    }
+  ],
+  "claims": [
+    { "claim": "Planning ran on feat/sbx-5-e2e @ 19b7bb9 with a clean tree, and only .planning/ROADMAP.md, the four new files under .planning/phases/114-sbx5-e2e/, and this receipt were written; no product code under omega_prime/ or omp-sandbox/", "evidence_command_index": [0, 6] },
+    { "claim": "The material W114-02 drift is real, not planner invention: probe (omp_driver.py:735-739) maps an unallowlisted stage to (False,'plan_not_allowed') and ultrathink_engine (attach.py:416-418) returns before run(), whose failure path alone carries the phase-111 raise_block (omp_driver.py:378-396); 114-02-T3 therefore proves both layers (routine refusal; the routine's exact engine call raising exactly one item in the same call) and records the product gap as a SUMMARY finding", "evidence_command_index": [1] },
+    { "claim": "The happy-path routing the e2e asserts is the shipped behaviour: with only OMEGA_PRIME_OMP_ALLOW_ZAI truthy, a staged unrequested select skips chatgpt (off the allowlist) and returns zai with the stage model (plan_router.py _select_stage :476-489, zai gate :133-147); ZAI_API_KEY alone never allows", "evidence_command_index": [2] },
+    { "claim": "Every phase-110-113 pytest id pinned in 114-01's audit table exists exactly once in the tree, so each row's command is runnable as written; the docs fences naming test_sandbox_e2e.py are wave-1 safe because the docs command check only validates python -m omega_prime.* modules and omega_prime/*.sh scripts", "evidence_command_index": [3, 4] },
+    { "claim": "The two plans are file-disjoint (114-01: docs/omp-sandbox-engine.md + docs/SUMMARY.md + 114-AUDIT-RERUN.md; 114-02: omega_prime/tests/test_sandbox_e2e.py only, importing fixtures without editing them), cover W114-01..W114-05 with no orphan requirement, map all five ROADMAP success criteria to task acceptance criteria, and agree on the marker OMEGA_PRIME_SANDBOX_E2E_REAL", "evidence_command_index": [3, 4] },
+    { "claim": "gsd-plan-checker returned PASS_WITH_NOTES with zero blockers; the parent applied its one warning fix (T1 resolver env rewritten as a plain conditional — the generator-unpack form raises TypeError) and three info fixes (datetime import, C-row ordering, T4 files list) directly to the plan files", "evidence_command_index": [5] },
+    { "claim": "Docs/public-repo checks are green on the planning tree (31 passed, exit 0); no generator input or root *.md page was modified by this stage", "evidence_command_index": [5] }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "Execution-stage acceptance (114-01/114-02 SUMMARY criteria, node n7 acceptance, AC3-AC6, audit re-run flips) is not verified here — this stage is planning only and wrote no code or docs",
+    "gsd-planner authorship and the gsd-plan-checker verdict (PASS_WITH_NOTES) are subagent-reported; the parent directly verified the verdict's load-bearing findings (the generator-unpack TypeError is real Python semantics; the row-count gates, selectors and anchors were re-read) and every citation it spot-checked, but did not re-run the checker after applying the note fixes (wording-level changes implementing the checker's own fix hints)",
+    "The hermetic e2e design (execute_ultrathink + chdir worktree + two rows + self-contained two-stage fake) is grounded in verified anchors but has never executed — pytest proves it only when plan 114-02 runs in the executor environment (deps on PYTHONPATH; the pre-existing mcp-import failure stays documented)",
+    "The opt-in real-binary path (OMEGA_PRIME_SANDBOX_E2E_REAL) is host-only by design; its live PASS can never be claimed from this sandbox (herdr/gh/podman absent, marker unset) — the audit table names it host-only evidence",
+    "Live audit rows C1/C2 (box env), C5 (live stage), C6 (mount smoke receipt), C12 (PR health via gh) and C13 (push path, blocked on Ove) name their evidence sites; no host result is asserted or fabricated by this stage",
+    "omega_prime tooling checks (catalog/plugin/prompt-format/assemble-prompts) were not run — no file in their scope changed; the docs/public-repo suites that scan the edited trees were run green instead"
+  ],
+  "files_changed": [
+    ".planning/ROADMAP.md",
+    ".planning/phases/114-sbx5-e2e/114-CONTEXT.md",
+    ".planning/phases/114-sbx5-e2e/114-01-PLAN.md",
+    ".planning/phases/114-sbx5-e2e/114-02-PLAN.md",
+    ".receipts/bot-00-omega-prime/phase114-planning.json"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "git revert of the single planning commit restores ROADMAP.md and removes the phase 114 directory and receipt; no product code to roll back",
+  "approvals": [],
+  "approved_by": null
+}

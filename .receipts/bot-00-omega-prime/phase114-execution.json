@@ -1,0 +1,69 @@
+{
+  "task_id": "phase114-execution",
+  "bot": "bot-00-omega-prime",
+  "started_at": "2026-10-21T20:47:00Z",
+  "completed_at": "2026-10-21T21:12:00Z",
+  "scope": "Execution of both plans in .planning/phases/114-sbx5-e2e/ (task 00030 node n7 / U5, sbx-5 end-to-end): 114-01 engine docs page + docs/SUMMARY.md link + 114-AUDIT-RERUN.md C1..C13 (wave 1), 114-02 omega_prime/tests/test_sandbox_e2e.py hermetic e2e + forced gate + marker-gated real-binary opt-in (wave 2), plus 114-SUMMARY.md, ROADMAP tick, and this receipt. Documentation and test-only phase: no product code under omega_prime/ or omp-sandbox/ changed. No push, no PR, no remotes; no herdr/podman/gh/network/model calls (fakes only).",
+  "plan": {
+    "note": "Sequential waves per the phase plans (114-02 consumes 114-01's published marker name and audit citations); one executor subagent per wave, parent spot-checked artifacts/commits/redaction after each wave.",
+    "waves": [
+      { "wave": 1, "plan": "114-01", "agent": "executor subagent", "commits": ["ae82c58", "3a01dc7", "80e62f5", "ebe284a"], "result": "complete" },
+      { "wave": 2, "plan": "114-02", "agent": "executor subagent", "commits": ["e146209", "63edc58", "48353d5", "9c4c6d9", "91e21c0"], "result": "complete" },
+      { "wave": "closeout", "plan": "parent", "agent": "orchestrator", "commits": ["(this commit)"], "result": "complete" }
+    ]
+  },
+  "commands": [
+    { "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_sandbox_e2e.py", "exit_code": 0, "duration_s": 0.52, "output_tail": "2 passed, 1 skipped", "note": "parent re-run at final tree; the skip names OMEGA_PRIME_SANDBOX_E2E_REAL" },
+    { "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_sandbox_e2e.py -k real", "exit_code": 0, "duration_s": 0.21, "output_tail": "1 skipped, 2 deselected", "note": "audit C5 row: exactly the named marker skip in this sandbox" },
+    { "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_sandbox_e2e.py omega_prime/tests/test_engine.py omega_prime/tests/test_engine_omp_sandbox.py omega_prime/tests/test_dashboard_blocks.py omega_prime/tests/test_engine_stage.py --deselect omega_prime/tests/test_engine_stage.py::test_mcp_desk_parent_reads_the_stage_from_its_env", "exit_code": 0, "duration_s": 11.93, "output_tail": "98 passed, 1 skipped, 1 deselected", "note": "neighbour sweep + audit C11; the deselect is the documented pre-existing mcp-import failure, unchanged since phase 112" },
+    { "cmd": "python3 -m pytest -q -p no:cacheprovider omega_prime/tests/test_docs.py omega_prime/tests/test_public_repo.py", "exit_code": 0, "duration_s": 0.69, "output_tail": "31 passed", "note": "audit C12 repo-side half, at final tree" },
+    { "cmd": "cd omp-sandbox && npx tsc --noEmit", "exit_code": 0, "output_tail": "TSC-0-ERRORS" },
+    { "cmd": "cd omp-sandbox && npm test", "exit_code": 0, "duration_s": 1.72, "output_tail": "pass 27, fail 0", "note": "courtesy acceptance check; no file under omp-sandbox/** changed this phase" },
+    { "cmd": "! grep -nE '(OMEGA_PRIME_OMP_ALLOW_ZAI|ZAI_API_KEY|GITHUB_PAT[A-Z_]*|OPENAI_[A-Z_]+)[A-Za-z_]*[[:space:]]*=' docs/omp-sandbox-engine.md .planning/phases/114-sbx5-e2e/114-AUDIT-RERUN.md omega_prime/tests/test_sandbox_e2e.py .planning/phases/114-sbx5-e2e/114-SUMMARY.md", "exit_code": 0, "output_tail": "REDACTION-OK", "note": "no consent/API NAME=value text in any committed artifact" },
+    { "cmd": "git diff --stat da165f8..HEAD", "exit_code": 0, "output_tail": "6 files changed: docs/omp-sandbox-engine.md, docs/SUMMARY.md, 114-AUDIT-RERUN.md, test_sandbox_e2e.py, 114-01-SUMMARY.md, 114-02-SUMMARY.md (+ closeout files)", "note": "diff scope == the two plans' files_modified union plus closeout; engine/dashboard/routines/omp-sandbox absent" },
+    { "cmd": "git status --porcelain | wc -l", "exit_code": 0, "output_tail": "0", "note": "clean tree at closeout, after the closeout commit" }
+  ],
+  "claims": [
+    { "claim": "One routine entrypoint (execute_ultrathink) drives plan on zai/glm-5.3 then execute on zai/glm-5.3-flash through the omp-sandbox backend end-to-end: wrapper receipts pin order/models/gsd_commands/task text, exported commits land in the job worktree (log grows, GSD-shaped files present, bundles exist), both task rows finish done with receipts and their own herdr pane ids, and per-job session.json reports sandbox omp-sandbox with per-stage models (node n7 acceptance; audit C3/C4/C7/C8/C9; AC1)", "evidence_command_index": [0, 2], "note": "test_routine_drives_plan_then_execute_end_to_end, hermetic: fake omp, self-contained two-stage fake Anda wrapper, fake herdr, temp store/worktrees" },
+    { "claim": "A forced PlanNotAllowed (consent flag absent from the run env, credential-shaped key present) is proven at both layers: the routine returns used=False/reason=plan_not_allowed with zero writes, and the engine call the routine wraps raises exactly one waiting_on_ove item in the same returning call with the owning row blocked; the token-shaped value never lands in store/events/herdr log and the canary wrapper never spawned (audit C10; AC2)", "evidence_command_index": [0, 2, 6], "note": "test_forced_plan_gate_blocks_the_row_in_the_same_call; the routine-layer gap (probe short-circuit attach.py:416-418 never reaching run()'s raise_block) is recorded as a finding in 114-02-SUMMARY.md, not patched" },
+    { "claim": "The real-binary opt-in is gated by OMEGA_PRIME_SANDBOX_E2E_REAL: without it the test skips naming the marker (proved here); with it the same harness runs the real omp-sandbox-anda on the host with a minimal env, presence-only override reads, engine-side assertions only, no test-side deadline (audit C5; AC3)", "evidence_command_index": [1], "note": "host-only PASS is named evidence, never claimed as run in this sandbox" },
+    { "claim": "docs/omp-sandbox-engine.md documents backend selection, every env name the wiring reads (semantics only, no values), stage->model routing, the workspace allowlist, the result/export contract and the visibility contract; docs/SUMMARY.md links it exactly once; both docs suites green (W114-04; audit C12 repo-side; AC4)", "evidence_command_index": [3, 6] },
+    { "claim": "114-AUDIT-RERUN.md covers C1..C13 with one runnable command and an expected result per row (PASS everywhere except C13, blocked on Ove) and every repo-side row ran green at the final tree (W114-05; AC5)", "evidence_command_index": [0, 1, 2, 3], "note": "C1/C2/C4/C6/C7/C8/C9/C10 selections were each run green before being pinned (wave-1 T4: 127 passed, 1 deselected) and the parent re-ran the full set at final state" },
+    { "claim": "No existing test was weakened, skipped or deleted and no product code changed: the phase diff is exactly the two plans' owned files plus closeout artifacts; omp-sandbox tsc 0 errors and npm test 27/27 unchanged", "evidence_command_index": [4, 5, 7] }
+  ],
+  "unverified": [
+    "rule adherence by future agents",
+    "executor subagent verdicts are agent-reported; the parent re-verified every acceptance command, the phase diff scope, redaction greps and git state directly (commands 1-9)",
+    "the real omp-sandbox-anda path never ran here: herdr/gh/podman/openshell are absent per contract and the marker stays unset; its PASS is host-only evidence (AUDIT.md receipt runs/20261021-184023-full remains the stage-level proof)",
+    "C13 push path stays blocked on Ove (gh auth not logged in; push.sh held by auto-review); not retried, not routed around",
+    "the routine-layer waiting_on_ove gap (probe short-circuit) is recorded as a finding; whether the routine should raise the item itself is a product decision outside this phase's no-product-code file set"
+  ],
+  "files_changed": [
+    "docs/omp-sandbox-engine.md",
+    "docs/SUMMARY.md",
+    ".planning/phases/114-sbx5-e2e/114-AUDIT-RERUN.md",
+    "omega_prime/tests/test_sandbox_e2e.py",
+    ".planning/phases/114-sbx5-e2e/114-01-SUMMARY.md",
+    ".planning/phases/114-sbx5-e2e/114-02-SUMMARY.md",
+    ".planning/phases/114-sbx5-e2e/114-SUMMARY.md",
+    ".planning/ROADMAP.md",
+    ".receipts/bot-00-omega-prime/phase114-execution.json"
+  ],
+  "commits": [
+    "da165f8 00015 - plan phase 114 sandbox e2e",
+    "ae82c58 00015 - document the omp-sandbox engine backend (T1)",
+    "3a01dc7 00015 - open the audit re-run table with method and C1/C2/C11 (T2)",
+    "80e62f5 00015 - complete the audit re-run table C3..C13 (T3)",
+    "ebe284a 00015 - record plan 114-01 summary (T4/output)",
+    "e146209 00015 - add sandbox e2e harness: fixtures, two-stage fake, seeding, marker gate",
+    "63edc58 00015 - prove routine-driven plan-then-execute e2e through omp-sandbox",
+    "48353d5 00015 - prove forced plan gate at both layers with redaction",
+    "9c4c6d9 00015 - keep consent and credential env names out of assignment position",
+    "91e21c0 00015 - summarize sandbox e2e plan 114-02 results",
+    "(closeout) 00015 - phase 114 summary, roadmap tick, execution receipt"
+  ],
+  "contract_changes": [],
+  "rollback_plan": "git revert of the commit range da165f8..HEAD restores the planning-commit tree (da165f8); no data migration, no external state touched",
+  "approvals": [],
+  "approved_by": null
+}
