@@ -185,40 +185,59 @@ def iter_sandbox_events(
 ) -> Iterator[SandboxEvent]:
     """Map an injected line stream (a live ``podman events`` pipe or a replay).
 
-    A death (``exited``/``unhealthy``) is held until ``teardown_grace_s`` has
-    passed. If the sandbox's workload is removed inside that window and the
-    death's exit code is a delete's signal (137/143), it was a teardown and is
-    dropped; any other held death is a real failure and is emitted before the
-    ``removed`` event.
+    A death (``exited``/``unhealthy``) is held for ``teardown_grace_s``. If
+    the sandbox's workload is removed within that window of *event time* and
+    the death's exit code is a delete's signal (137/143), it was a teardown
+    and is dropped; any other held death is a real failure and is emitted
+    before the ``removed`` event.
 
-    Time advances on every line, including events the parser ignores, by the
-    line's own event time, so replays stay deterministic. For a live stream,
-    pass ``clock`` (wall seconds, e.g. ``time.time``) and feed it through
-    :func:`with_heartbeats`: empty heartbeat lines then flush held deaths on a
-    quiet stream instead of leaving them pending forever. Held deaths are also
-    flushed when the stream ends.
+    Two timers release a held death, kept apart so a backlog of queued events
+    can still be paired:
+
+    * stream time: the newest event time seen on any line (mapped or not), so
+      replays stay deterministic;
+    * live quiet time: with ``clock`` (wall seconds, e.g. ``time.time``), the
+      wall time since the death *arrived*, never its event timestamp. Feed the
+      pipe through :func:`with_heartbeats` so empty heartbeat lines flush held
+      deaths on a quiet stream instead of leaving them pending forever.
+
+    A removal is paired with held deaths before anything expires on its line.
+    Held deaths are also flushed when the stream ends.
     """
-    pending: list[SandboxEvent] = []
+    pending: list[tuple[SandboxEvent, float | None]] = []
+    stream_now = 0.0
+
+    def expired(held: tuple[SandboxEvent, float | None], wall: float | None) -> bool:
+        death, arrived = held
+        if stream_now - death.at >= teardown_grace_s:
+            return True
+        return (
+            wall is not None
+            and arrived is not None
+            and wall - arrived >= teardown_grace_s
+        )
+
     for line in lines:
-        now = max(_line_time(line), clock() if clock else 0.0)
+        wall = clock() if clock else None
         event = parser.parse_line(line)
-        if event is not None:
-            now = max(now, event.at)
-        ready = [p for p in pending if now - p.at >= teardown_grace_s]
-        pending = [p for p in pending if p not in ready]
-        yield from ready
+        stream_now = max(stream_now, _line_time(line), event.at if event else 0.0)
+        if event is not None and event.lifecycle is SandboxLifecycle.REMOVED:
+            same = [h for h in pending if h[0].sandbox == event.sandbox]
+            pending = [h for h in pending if h[0].sandbox != event.sandbox]
+            for death, _ in same:
+                in_window = event.at - death.at <= teardown_grace_s
+                if not (in_window and _teardown_death(death)):
+                    yield death
+        ready = [h for h in pending if expired(h, wall)]
+        pending = [h for h in pending if h not in ready]
+        yield from (death for death, _ in ready)
         if event is None:
             continue
-        if event.lifecycle is SandboxLifecycle.REMOVED:
-            same = [p for p in pending if p.sandbox == event.sandbox]
-            pending = [p for p in pending if p.sandbox != event.sandbox]
-            yield from (p for p in same if not _teardown_death(p))
-            yield event
-        elif event.lifecycle in _HELD:
-            pending.append(event)
+        if event.lifecycle in _HELD:
+            pending.append((event, wall))
         else:
             yield event
-    yield from pending
+    yield from (death for death, _ in pending)
 
 
 def with_heartbeats(stream: Any, interval_s: float = 1.0) -> Iterator[str]:

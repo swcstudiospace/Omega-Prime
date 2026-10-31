@@ -305,6 +305,28 @@ def test_live_stream_flushes_held_death_on_quiet_heartbeat() -> None:
     assert now[0] - 1_800_000_000.0 >= 10  # held for the grace, not forever
 
 
+def test_late_live_events_still_pair_teardown_deaths() -> None:
+    # Live events queued for a minute: the wall clock is far past their event
+    # times, but the removal one event-second later still pairs the 137 death.
+    name = f"openshell-default--ompsbx-demo-abc123-{UUID}"
+    base = 1_800_000_000 * 10**9
+    late = base / 1e9 + 60
+    kill = [_line(name, "died", base, 137), _line(name, "remove", base + 10**9, 137)]
+    stream = iter_sandbox_events(kill, PodmanEventParser(), clock=lambda: late)
+    assert [e.lifecycle for e in stream] == [SandboxLifecycle.REMOVED]
+
+
+def test_removal_outside_the_event_window_keeps_the_death() -> None:
+    name = f"openshell-default--ompsbx-demo-abc123-{UUID}"
+    base = 1_800_000_000 * 10**9
+    kill = [
+        _line(name, "died", base, 137),
+        _line(name, "remove", base + 30 * 10**9, 137),
+    ]
+    kinds = [e.lifecycle for e in iter_sandbox_events(kill, PodmanEventParser())]
+    assert kinds == [SandboxLifecycle.EXITED, SandboxLifecycle.REMOVED]
+
+
 def test_with_heartbeats_yields_blank_lines_when_quiet() -> None:
     import os
 

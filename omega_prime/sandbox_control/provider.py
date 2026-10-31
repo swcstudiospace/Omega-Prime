@@ -354,7 +354,14 @@ class OpenShellSandboxProvider:
     def _os(
         self, *args: str, stdin: str | None = None, timeout: float = 60.0
     ) -> RunResult:
-        return self.runner([self.config.openshell, *args], stdin, timeout)
+        result = self.runner([self.config.openshell, *args], stdin, timeout)
+        if result.truncated:
+            # A clipped control reply loses its head: JSON will not parse and
+            # a listing may hide a row, so it is never treated as an answer.
+            raise SandboxControlError(
+                "control_output_truncated", f"openshell {' '.join(args[:2])}"
+            )
+        return result
 
     def _emit(self, event: SandboxEvent) -> None:
         self.sink.emit(event)
@@ -620,11 +627,16 @@ class OpenShellSandboxProvider:
             found = []
             if any(row.get("name") == name for row in self.list_sandboxes()):
                 found.append(f"list:{name}")
-            ps = self._podman_check("ps", "-a", "--format", "{{.Names}}")
+            # Filter server-side (repeated name filters are OR'd) so the
+            # listing stays small; a clipped one is refused below.
+            names = ["--filter", f"name={name}"]
+            if uuid:
+                names += ["--filter", f"name={uuid}"]
+            ps = self._podman_check("ps", "-a", *names, "--format", "{{.Names}}")
             for line in ps.stdout.splitlines():
                 if key in line or (uuid and line.endswith(uuid)):
                     found.append(f"container:{line}")
-            vols = self._podman_check("volume", "ls", "--format", "{{.Name}}")
+            vols = self._podman_check("volume", "ls", *names, "--format", "{{.Name}}")
             for line in vols.stdout.splitlines():
                 if name in line or (uuid and uuid in line):
                     found.append(f"volume:{line}")
@@ -641,6 +653,11 @@ class OpenShellSandboxProvider:
                 "leftover_check_failed",
                 f"podman {args[0]} exit {result.returncode}: "
                 + _tail(result.stderr)[0][-300:],
+            )
+        if result.truncated:
+            # A leftover may sit in the dropped part: never report "removed".
+            raise SandboxControlError(
+                "leftover_check_failed", f"podman {args[0]} output truncated"
             )
         return result
 

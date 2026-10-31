@@ -55,6 +55,9 @@ class FakeOpenShell:
     phase_on_create: str = "Ready"
     leftover_containers: list[str] = field(default_factory=list)
     podman_rc: int = 0
+    # Mark replies as clipped by the runner's capture bound.
+    podman_truncated: bool = False
+    openshell_truncated: bool = False
     calls: list[tuple[list[str], str | None]] = field(default_factory=list)
 
     def __call__(
@@ -66,8 +69,15 @@ class FakeOpenShell:
             if self.podman_rc:
                 return RunResult(self.podman_rc, "", "cannot connect to Podman socket")
             if args[1] == "ps":
-                return RunResult(0, "\n".join(self.leftover_containers), "")
-            return RunResult(0, "", "")
+                return RunResult(
+                    0,
+                    "\n".join(self.leftover_containers),
+                    "",
+                    truncated=self.podman_truncated,
+                )
+            return RunResult(0, "", "", truncated=self.podman_truncated)
+        if self.openshell_truncated:
+            return RunResult(0, '{"sandboxes": [', "", truncated=True)
         sub = args[1:]
         if sub == ["status"]:
             status = "Connected" if self.connected else "Disconnected"

@@ -9,6 +9,7 @@ import pytest
 from sbx_fakes import (
     GH_TOKEN,
     OPENAI_KEY,
+    PODMAN,
     UUID,
     FakeOpenShell,
     make_config,
@@ -237,6 +238,37 @@ def test_down_fails_closed_when_podman_checks_fail(
         provider.down(name)
     assert SandboxLifecycle.REMOVED not in _lifecycles(provider)
     assert provider.ownership is not None and provider.ownership.get(name)
+
+
+def test_down_refuses_clipped_leftover_listings(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    name = provider.create("demo", task_id="gb:00045")["name"]
+    fake.podman_truncated = True
+    with pytest.raises(SandboxControlError, match="leftover_check_failed"):
+        provider.down(name)
+    assert SandboxLifecycle.REMOVED not in _lifecycles(provider)
+    assert provider.ownership is not None and provider.ownership.get(name)
+
+
+def test_leftover_listings_are_filtered_by_name_and_uuid(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    name = provider.create("demo", task_id="gb:00045")["name"]
+    provider.down(name)
+    podman = [argv for argv, _ in fake.calls if argv[0] == PODMAN]
+    assert {argv[1] for argv in podman} == {"ps", "volume"}
+    for argv in podman:
+        i = argv.index("--filter")
+        assert argv[i : i + 2] == ["--filter", f"name={name}"]
+
+
+def test_clipped_control_replies_are_errors(
+    provider: OpenShellSandboxProvider, fake: FakeOpenShell
+) -> None:
+    fake.openshell_truncated = True
+    with pytest.raises(SandboxControlError, match="control_output_truncated"):
+        provider.list_sandboxes()
 
 
 def test_preflight_resolves_bare_command_names_on_path(
