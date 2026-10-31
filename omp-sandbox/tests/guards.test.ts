@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, existsSync, symlinkSync, writeFileSync, readdirSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, existsSync, symlinkSync, utimesSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxTier } from "../src/core/providers/types.ts";
@@ -20,7 +20,7 @@ const podmanMod = await import("../src/core/providers/openshell-podman.ts");
 // STATE at module-evaluation time, and gsd.ts derives its CACHE from it — so they must load only
 // after the env override above, which a hoisted static import would precede.
 const { Core } = await import("../src/core/core.ts");
-const { ensureGsd, gsdCommandsOnHost } = await import("../src/core/gsd.ts");
+const { ensureGsd, gsdCommandsOnHost, fillCache, IN_SANDBOX_COPY, STALE_LOCK_MS } = await import("../src/core/gsd.ts");
 const MARKER_REL = join(".claude", "commands", "gsd-plan-phase.md");
 const { STATE: CORE_STATE, VERSIONS } = await import("../src/core/config.ts");
 const GSD_CACHE = join(CORE_STATE, "cache", `gsd-core-${VERSIONS.gsdCore}`);
@@ -173,6 +173,16 @@ function gsdTier(workspaceHostPath: string | null, hostRoot: string, exec: Sandb
   };
 }
 
+/** Stands in for the sandbox running IN_SANDBOX_COPY in /sbx/work, which is `ws` seen through the bind. */
+function inSandboxCopy(ws: string, argv: string[], opts?: { cwd?: string }) {
+  assert.equal(argv[2], IN_SANDBOX_COPY, "runs the in-sandbox check-and-copy script");
+  assert.equal(opts?.cwd, "/sbx/work");
+  const stage = join(ws, argv[4]);
+  if (!existsSync(join(stage, MARKER_REL))) return { code: 1, stdout: "", stderr: "no marker" };
+  cpSync(join(stage, ".claude"), join(ws, ".claude"), { recursive: true });
+  return { code: 0, stdout: "", stderr: "" };
+}
+
 test("ensureGsd and gsdCommandsOnHost target the mounted workspace, never the hidden hostRoot/work", async () => {
   const noExec: SandboxTier["exec"] = async () => { throw new Error("cached/warm path must not exec"); };
 
@@ -196,6 +206,7 @@ test("ensureGsd and gsdCommandsOnHost target the mounted workspace, never the hi
   };
   const mountedInstall = install((rel) => join(coldWs, rel));
   const cold = await ensureGsd(gsdTier(coldWs, coldHr, async (argv, opts) => {
+    if (argv[0] === "sh") return inSandboxCopy(coldWs, argv, opts);
     const r = await mountedInstall(argv, opts);
     // Another writer on the shared worktree drops a file into the staging folder mid-install.
     writeFileSync(join(coldWs, installCwd.slice("/sbx/work/".length), ".claude", "commands", "gsd-injected.md"), "evil");
@@ -252,6 +263,58 @@ test("host-side GSD writes follow the pinned worktree, not a name swapped for a 
   const ws2 = join(base, "job2"); mkdirSync(ws2); symlinkSync(outside, join(ws2, ".claude"));
   await assert.rejects(ensureGsd(gsdTier(ws2, join(base, "hr"), noExec)), /is a symlink/);
   assert.deepEqual(readdirSync(outside), [], "nothing written through the planted link");
+});
+
+test("a mounted install is checked and copied inside the sandbox, never read on the host through the staging name", async () => {
+  rmSync(GSD_CACHE, { recursive: true, force: true });   // cold path
+  const ws = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-swap-"));
+  const other = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-other-"));   // another host checkout with a GSD install
+  mkdirSync(join(other, ".claude", "commands"), { recursive: true });
+  writeFileSync(join(other, MARKER_REL), "plan"); writeFileSync(join(other, ".claude", "secret.json"), "other job");
+  const calls: string[] = [];
+  const r = await ensureGsd(gsdTier(ws, mkdtempSync(join(tmpdir(), "omp-sbx-gsd-swhr-")), async (argv, opts) => {
+    calls.push(argv[0]);
+    if (argv[0] === "sh") return { code: 0, stdout: "", stderr: "" };   // the sandbox did the copy; it cannot see `other`
+    const stage = join(ws, (opts?.cwd ?? "").slice("/sbx/work/".length));
+    rmSync(stage, { recursive: true, force: true }); symlinkSync(other, stage);   // swapped while npx ran
+    return { code: 0, stdout: "", stderr: "" };
+  }));
+  assert.equal(r.cache, null);
+  assert.deepEqual(calls, ["npx", "sh"], "install, then the in-sandbox check-and-copy");
+  assert.equal(existsSync(join(ws, ".claude", "secret.json")), false, "the host never copied from the swapped staging name");
+  assert.equal(existsSync(join(other, ".claude", "secret.json")), true, "cleanup removed only the link, not the other checkout");
+  // A failed in-sandbox check fails the install.
+  await assert.rejects(ensureGsd(gsdTier(ws, join(ws, "hr"), async (argv) =>
+    ({ code: argv[0] === "sh" ? 1 : 0, stdout: "", stderr: "" }))), /in-sandbox copy exit 1/);
+});
+
+test("parallel first installs: a held fill lock skips the shared cache without failing up, and a stale lock clears", async () => {
+  const claude = join(mkdtempSync(join(tmpdir(), "omp-sbx-gsd-fill-")), ".claude");
+  mkdirSync(join(claude, "commands"), { recursive: true }); writeFileSync(join(claude, "commands", "gsd-plan-phase.md"), "plan");
+  rmSync(GSD_CACHE, { recursive: true, force: true });
+  const lock = `${GSD_CACHE}.lock`;
+  mkdirSync(lock);                                   // another wrapper is mid-publish
+  try {
+    const hr = mkdtempSync(join(tmpdir(), "omp-sbx-gsd-lockhr-"));
+    const r = await ensureGsd(gsdTier(null, hr, async (_argv, opts) => {
+      const staged = join(hr, "work", (opts?.cwd ?? "").slice("/sbx/work/".length));
+      mkdirSync(join(staged, ".claude", "commands"), { recursive: true });
+      writeFileSync(join(staged, MARKER_REL), "plan");
+      return { code: 0, stdout: "", stderr: "" };
+    }));
+    assert.equal(r.source, "installed-in-sandbox", "up still succeeds");
+    assert.equal(existsSync(join(hr, "work", MARKER_REL)), true, "the job got its own install");
+    assert.equal(r.cache, null, "it did not publish while the lock was held");
+    assert.equal(existsSync(join(GSD_CACHE, MARKER_REL)), false);
+    const old = (Date.now() - STALE_LOCK_MS - 60_000) / 1000;
+    utimesSync(lock, old, old);
+    assert.equal(fillCache(claude), false, "a stale lock is cleared, not used");
+    assert.equal(existsSync(lock), false);
+  } finally { rmSync(lock, { recursive: true, force: true }); }
+  assert.equal(fillCache(claude), true, "the next fill publishes");
+  writeFileSync(join(GSD_CACHE, ".claude", "winner"), "first");
+  assert.equal(fillCache(claude), false, "a complete cache another wrapper published wins");
+  assert.equal(existsSync(join(GSD_CACHE, ".claude", "winner")), true, "and is never replaced");
 });
 
 test("down() refuses new stages and startups for its whole duration", async () => {
