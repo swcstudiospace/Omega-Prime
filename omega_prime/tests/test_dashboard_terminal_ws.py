@@ -233,7 +233,7 @@ def test_poll_events_pane_switch_reyields_first_frame():
 
 def test_poll_events_pane_closed_ends_generator():
     async def runner(argv):
-        raise PaneClosedError()
+        raise PaneClosedError
 
     bridge = HerdrBridge(
         runner=runner, clock=lambda: NOW, sleep=lambda _s: asyncio.sleep(0)
@@ -541,7 +541,7 @@ def test_row_without_pane_yields_no_session_status():
 
 def test_pane_closed_status_ends_session():
     async def runner(argv):
-        raise PaneClosedError()
+        raise PaneClosedError
 
     poller = _poller([{"id": "task:one", "herdr_pane": {"pane_id": "w2:p4"}}])
     endpoint = make_terminal_ws_endpoint(

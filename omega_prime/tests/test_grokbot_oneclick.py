@@ -1088,7 +1088,7 @@ def test_lock_cancel_during_flock_closes_fd(
     monkeypatch.setattr(os, "close", _track_close)
 
     def _raise_cancel(fd: int, op: int) -> None:
-        raise KeyboardInterrupt()
+        raise KeyboardInterrupt
 
     monkeypatch.setattr(oneclick._fcntl, "flock", _raise_cancel)
     ran: list[bool] = []

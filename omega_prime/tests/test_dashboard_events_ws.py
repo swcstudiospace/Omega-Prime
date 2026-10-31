@@ -499,7 +499,7 @@ def test_tasks_file_watcher_fires_once_per_signature_change(tmp_path):
 
     async def sleep(_interval_s):
         if not sequence:
-            raise _Stop()
+            raise _Stop
         await asyncio.sleep(0)
 
     watcher = TasksFileWatcher(

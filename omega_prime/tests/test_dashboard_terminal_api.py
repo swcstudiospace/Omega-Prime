@@ -301,7 +301,7 @@ def test_terminal_reports_confirmed_closed_pane_and_releases_capacity():
     from omega_prime.dashboard.terminal import PaneClosedError
 
     async def runner(_argv):
-        raise PaneClosedError()
+        raise PaneClosedError
 
     service = _terminal_service(runner=runner)
     status, wire = asyncio.run(

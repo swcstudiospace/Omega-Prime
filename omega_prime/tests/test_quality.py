@@ -49,12 +49,12 @@ class FakeGreptile:
 
 def _ctx(tmp_path, **overrides):
     (tmp_path / "omega_prime" / "tests").mkdir(parents=True, exist_ok=True)
-    base: dict[str, Any] = dict(
-        root=str(tmp_path),
-        run=FakeRunner(),
-        greptile=FakeGreptile(),
-        acks=AckStore(tmp_path / "acks.json"),
-    )
+    base: dict[str, Any] = {
+        "root": str(tmp_path),
+        "run": FakeRunner(),
+        "greptile": FakeGreptile(),
+        "acks": AckStore(tmp_path / "acks.json"),
+    }
     base.update(overrides)
     return QualityContext(**base)
 

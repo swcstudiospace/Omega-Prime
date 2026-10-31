@@ -142,7 +142,7 @@ def section_lines(stdout: str, heading: str) -> list[str]:
     start = lines.index(heading) + 1
     body: list[str] = []
     for line in lines[start:]:
-        if line.startswith("## ") or line.startswith("# "):
+        if line.startswith(("## ", "# ")):
             break
         body.append(line)
     return body
@@ -3867,7 +3867,7 @@ def test_recipient_file_with_recipient_matches_email_block(tmp_path):
         (
             index
             for index, line in enumerate(block_body)
-            if line.startswith("<!--") or line.startswith("Gate:")
+            if line.startswith(("<!--", "Gate:"))
         ),
         len(block_body),
     )

@@ -90,7 +90,7 @@ def create_app(
         headers = header_map(scope)
         auth = headers.get("authorization")
         # Compare against every token (no early exit) to keep timing flat.
-        if not any([bearer_ok(auth, token) for token in agent_tokens]):
+        if not any(bearer_ok(auth, token) for token in agent_tokens):
             raise WebhookRejected(401, "unauthorized")
         body = await read_body(receive, CALLBACK_MAX_BYTES)
         try:

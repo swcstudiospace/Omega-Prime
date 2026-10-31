@@ -85,7 +85,7 @@ def _ctx(**overrides):
             {"exit_code": 0, "stdout": '{"merged": true}', "stderr": ""},
         ),
     ]
-    base = dict(root="/opt/ultrathink", run=_run_factory(routes, calls))
+    base = {"root": "/opt/ultrathink", "run": _run_factory(routes, calls)}
     base.update(overrides)
     return UltrathinkContext(**base)
 
