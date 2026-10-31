@@ -1,4 +1,5 @@
 ## Unreleased
+- Supply chain (00073): `requirements-lock.txt` pins `pypdf` 6.21.4 (was 6.21.2, a transitive dependency of `pyrit`, which needs `pypdf>=6.10.2`). That clears CVE-2026-119203 to CVE-2026-119209, which failed `pip-audit` on main and every PR. Check: `pip-audit --no-deps -r <(grep ^pypdf requirements-lock.txt)` reported "No known vulnerabilities found" (exit 0).
 - Command Center (00066, the three open Greptile P2 threads from PR #76):
   - File-backed waiting requests (`source: "tasks_json"`) no longer pass `isTask`, so their detail page shows "Waiting on Ove" instead of a blank badge and "Unavailable" state.
   - A source that goes from degraded to failed (for example GitHub `degraded` → `error` during a collector timeout) now raises an error `source.degraded` event and toast. Before, neither status was healthy, so nothing was emitted.
